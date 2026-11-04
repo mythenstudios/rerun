@@ -4,6 +4,10 @@
 //! See ADR 0005. From phase 4, typed serde structs take over runtime validation;
 //! these fixtures then run against both.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "reads repository fixtures (schemas, topos, packages), never game folders"
+)]
 #![allow(
     clippy::unwrap_used,
     reason = "test code: a failure should abort the test"

@@ -64,6 +64,20 @@ jobs:
         run: cargo clippy -p rerun-cpu -p rerun-proto -p rerun-launch --target i686-pc-windows-msvc --locked -- -D warnings
       - name: test (incl. schema validation of topos/ and packages/)
         run: cargo test --workspace --all-features --locked
+      - name: rerun-core fake feature never in shipped binaries
+        # ADR 0007: the in-memory fake and its TOCTOU hooks stay out of release builds.
+        # Features do not depend on the profile; -e normal skips dev-dependencies.
+        run: |
+          if ! cargo tree -p rerun-core --features fake -e features -i rerun-core --locked | grep -q 'feature "fake"'; then
+            echo "::error::sanity check failed: the grep pattern no longer matches cargo tree output"
+            exit 1
+          fi
+          for p in rerun-cli; do  # add the Tauri app crate in phase 4
+            if cargo tree -p "$p" -e normal,build,features -i rerun-core --locked | grep -q 'feature "fake"'; then
+              echo "::error::$p enables rerun-core/fake"
+              exit 1
+            fi
+          done
       - name: phase 0 acceptance - rerun --help
         run: cargo run -p rerun-cli --locked -- --help
       - name: rerun-launch - allowed dependencies

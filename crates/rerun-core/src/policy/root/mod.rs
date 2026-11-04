@@ -121,6 +121,10 @@ pub enum RootError {
 }
 
 /// The one absolute open outside `sys` (ADR 0007).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "ADR 0007: policy::root is the only place that opens roots by absolute path"
+)]
 fn open_abs<'s>(sys: &'s dyn System, abs: &Path) -> SysResult<Box<dyn Dir + 's>> {
     sys.fs().open_dir(abs)
 }

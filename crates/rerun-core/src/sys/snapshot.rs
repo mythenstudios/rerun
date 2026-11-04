@@ -239,6 +239,10 @@ impl Snapshot {
 }
 
 /// Captures the state of `scope`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "ADR 0007: the snapshot opens its scope roots by absolute path, read-only"
+)]
 pub fn snapshot(sys: &dyn System, scope: &Scope) -> SysResult<Snapshot> {
     let mut snap = Snapshot::default();
     for dir in &scope.dirs {

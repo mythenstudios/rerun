@@ -1,8 +1,11 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 
-# System access only through rerun_core::sys (ADR 0004). Exceptions via
-# #[allow(clippy::disallowed_methods, reason = "...")] in sys::win and rerun-launch.
+# System access only through rerun_core::sys (ADR 0004); roots only through
+# rerun_core::policy::root (ADR 0007). Exceptions via
+# #[expect(clippy::disallowed_methods, reason = "...")] so a stale exception warns:
+# policy::root::open_abs, sys::snapshot::snapshot, contract and test code, sys::win and
+# rerun-launch.
 disallowed-methods = [
   { path = "std::fs::write", reason = "filesystem access only through sys::Fs" },
   { path = "std::fs::remove_file", reason = "filesystem access only through sys::Fs" },
@@ -25,6 +28,27 @@ disallowed-methods = [
   { path = "std::fs::File::set_permissions", reason = "filesystem access only through sys::Fs" },
   { path = "std::fs::File::set_times", reason = "filesystem access only through sys::Fs" },
   { path = "std::fs::File::set_modified", reason = "filesystem access only through sys::Fs" },
+  # ADR 0007: roots are opened only by policy::root (and sys::snapshot); nothing else reads by absolute path.
+  { path = "rerun_core::sys::fs::Fs::open_dir", reason = "open roots only through policy::root (ADR 0007)", allow-invalid = true },
+  { path = "std::fs::read", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::fs::read_to_string", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::fs::read_dir", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::fs::metadata", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::fs::symlink_metadata", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::fs::canonicalize", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::fs::read_link", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::fs::exists", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::fs::File::open", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::path::Path::exists", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::path::Path::try_exists", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::path::Path::is_file", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::path::Path::is_dir", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::path::Path::is_symlink", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::path::Path::metadata", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::path::Path::symlink_metadata", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::path::Path::read_dir", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::path::Path::read_link", reason = "read files only through a root handle (ADR 0007)" },
+  { path = "std::path::Path::canonicalize", reason = "read files only through a root handle (ADR 0007)" },
   { path = "std::env::set_current_dir", reason = "never resolve relative paths via the working directory" },
   { path = "std::process::Command::new", reason = "processes only through sys::Process" },
 ]

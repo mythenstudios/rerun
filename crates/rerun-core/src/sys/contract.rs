@@ -8,6 +8,11 @@
 //! The file system contracts receive the working directory as an absolute path and open it
 //! with [`Fs::open_dir`](super::fs::Fs::open_dir), the one absolute operation.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "contract tests open their work directory by absolute path"
+)]
+
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 

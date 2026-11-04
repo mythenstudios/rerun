@@ -35,7 +35,7 @@ assert_eq!(snapshot(&sys, &scope), before)   // on mismatch: before.diff(&after)
 - **TOCTOU:** the fake has test hooks that run between two path components of an operation, so a test can swap a directory for a junction mid-operation (ADR 0007). On `sys::win` the swap between two calls is tested. If the fake deviates from the real system, the contract is extended first, then the fake is adjusted. Known, deliberate deviations are listed in `sys/fake/fs.rs`.
 - **`policy::root`** (`policy/root/tests.rs`, fake only): every forbidden-list entry with its exact reason, component-wise matching, relocated and junctioned known folders, fail-closed resolution (each missing folder, files, shares, short names), a junction at `steamapps`, `common` or the game level, a swap to a junction mid-walk (hook on the game segment) with a canary in an admin-only folder, swap after open, and identity mismatch after a folder is replaced.
 
-The fake layer is available to other crates via the `fake` feature of `rerun-core`.
+The fake layer is available to other crates via the `fake` feature of `rerun-core`. CI fails if a shipped crate (`rerun-cli`, later the app) enables it (`cargo tree` feature check). Absolute file access is a `clippy.toml` `disallowed-methods` error outside `policy::root::open_abs` and `sys::snapshot::snapshot`; contract and test code opt out per module with `#![expect(clippy::disallowed_methods, reason = ...)]`, so a stale exception warns.
 
 ## Schema and parity tests
 
