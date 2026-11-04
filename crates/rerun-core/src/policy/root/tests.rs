@@ -863,3 +863,30 @@ fn the_default_forms_follow_every_form_of_the_profile() {
         assert_eq!(check(&fr, p), Err(Forbidden::Inside(microsoft)), "{p}");
     }
 }
+
+#[test]
+fn the_default_forms_follow_a_junctioned_appdata_local() {
+    // LocalAppData redirected to E:\X, and <Profile>\AppData\Local itself a junction to D:\L:
+    // the defaults are forbidden in the junction's canonical form as well.
+    let install = r"E:\X\Programs\Rerun";
+    let sys = FakeSystem::builder()
+        .known_folder(KnownFolder::LocalAppData, r"E:\X")
+        .windows_layout()
+        .dir(install)
+        .dir(r"D:\L")
+        .junction(r"C:\Users\Player\AppData\Local", r"D:\L")
+        .build()
+        .unwrap();
+    let fr = ForbiddenRoots::resolve(&sys, Path::new(install)).unwrap();
+    let packages = Protected::ProfileDefault(r"AppData\Local\Packages");
+    for p in [r"D:\L\Packages", r"C:\Users\Player\AppData\Local\Packages"] {
+        assert_eq!(check(&fr, p), Err(Forbidden::Is(packages)), "{p}");
+    }
+    assert_eq!(
+        check(&fr, r"D:\L\Microsoft\x"),
+        Err(Forbidden::Inside(Protected::ProfileDefault(
+            r"AppData\Local\Microsoft"
+        )))
+    );
+    assert_eq!(check(&fr, r"D:\L\Games"), Ok(()));
+}

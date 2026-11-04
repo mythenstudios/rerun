@@ -206,15 +206,19 @@ impl Registry for FakeRegistry {
             return Err(unsupported(k, "too many values"));
         }
         let mut total = 0_usize;
-        for (_, v) in &values {
+        for (name, v) in &values {
             let len = data_len(v);
             if len > MAX_VALUE_BYTES {
                 return Err(unsupported(k, "value larger than 1 MiB"));
             }
-            total += len;
+            // Names count too (UTF-16 bytes), as in `sys::win`.
+            total += len + 2 * name.encode_utf16().count();
         }
         if total > MAX_VALUES_TOTAL_BYTES {
-            return Err(unsupported(k, "values larger than 16 MiB in total"));
+            return Err(unsupported(
+                k,
+                "names and values larger than 16 MiB in total",
+            ));
         }
         Ok(values)
     }

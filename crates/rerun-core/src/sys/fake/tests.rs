@@ -1675,10 +1675,18 @@ fn reads_refuse_hostile_amounts_of_data() {
     // Other values stay readable one by one.
     assert!(sys.registry().get(&key, "ok").unwrap().is_some());
 
-    // Total: 16 values of 1 MiB are fine, 17 are not.
+    // Total (names as UTF-16 plus data): exactly 16 MiB is fine, one byte more is not.
     let mut b = FakeSystem::builder();
+    let mut used = 0;
     for i in 0..16 {
-        b = b.raw_value(key.clone(), &format!("v{i}"), 3, &mib());
+        let name = format!("v{i}");
+        let len = if i < 15 {
+            mib().len()
+        } else {
+            (16 << 20) - used - 2 * name.len()
+        };
+        used += 2 * name.len() + len;
+        b = b.raw_value(key.clone(), &name, 3, &vec![7; len]);
     }
     let sys = b.build().unwrap();
     assert_eq!(sys.registry().values(&key).unwrap().len(), 16);
@@ -2142,4 +2150,34 @@ fn volume_roots_are_reported() {
         "a mounted volume has its own serial"
     );
     assert_eq!(serial(r"D:\Mounts\Data"), serial(r"D:\Mounts\Data\Games"));
+}
+
+/// The total limit of `values` counts the names (UTF-16 bytes) as well as the data: 16 values
+/// with names of 16,383 units fill exactly 16 MiB; one byte more is refused although the data
+/// alone stays far below the limit.
+#[test]
+fn the_values_total_counts_long_names() {
+    use crate::sys::contract::RegFixture as _;
+    use crate::sys::registry::{MAX_VALUE_NAME_UTF16, MAX_VALUES_TOTAL_BYTES};
+    let root = hkcu(r"Software\Names");
+    let sys = FakeSystem::builder().key(root.clone()).build().unwrap();
+    let fx = sys.fake_registry();
+    let parts = 16;
+    let name = |i: usize| format!("{i:02}{}", "n".repeat(MAX_VALUE_NAME_UTF16 - 2));
+    let data = MAX_VALUES_TOTAL_BYTES / parts - 2 * MAX_VALUE_NAME_UTF16;
+    for i in 0..parts {
+        fx.raw(&root, &name(i), reg_type::REG_BINARY, &vec![1; data])
+            .unwrap();
+    }
+    assert_eq!(sys.registry().values(&root).unwrap().len(), parts);
+    fx.raw(&root, &name(0), reg_type::REG_BINARY, &vec![1; data + 1])
+        .unwrap();
+    assert!(
+        parts * (data + 1) < MAX_VALUES_TOTAL_BYTES,
+        "data alone is below"
+    );
+    assert_eq!(
+        sys.registry().values(&root).unwrap_err().kind,
+        SysErrorKind::Unsupported
+    );
 }

@@ -79,17 +79,31 @@ const DERIVED: [(KnownFolder, &str); 9] = [
     (KnownFolder::LocalAppData, "Rerun"),
 ];
 
-/// The default forms of the [`DERIVED`] entries below `LocalAppData` and `RoamingAppData`,
-/// relative to `Profile` (ADR 0007, ADR 0009): `User Shell Folders` can redirect both folders,
-/// so these entries are also derived from every form of the profile, and a redirection can only
-/// add entries, never remove one. Same rule as [`OVERLAP_KNOWN`]; never opened.
-const PROFILE_DEFAULTS: [&str; 5] = [
-    r"AppData\Local\Microsoft",
-    r"AppData\Local\Packages",
-    r"AppData\Local\VirtualStore",
-    r"AppData\Local\Rerun",
-    r"AppData\Roaming\Microsoft",
+/// The default forms of the [`DERIVED`] entries below `LocalAppData` and `RoamingAppData`
+/// (ADR 0007, ADR 0009): `User Shell Folders` can redirect both folders, so these entries are
+/// also derived from every form (lexical and canonical) of `<Profile>\AppData\Local` and
+/// `<Profile>\AppData\Roaming`, for every form of the profile, and a redirection can only add
+/// entries, never remove one. Same rule as [`OVERLAP_KNOWN`]. The two parents are opened like
+/// a known folder (missing: lexical form only; any other failure: fail closed); the entries
+/// themselves are never opened. `(parent, child, reported name)`.
+const PROFILE_DEFAULTS: [(&str, &str, &str); 5] = [
+    (r"AppData\Local", "Microsoft", r"AppData\Local\Microsoft"),
+    (r"AppData\Local", "Packages", r"AppData\Local\Packages"),
+    (
+        r"AppData\Local",
+        "VirtualStore",
+        r"AppData\Local\VirtualStore",
+    ),
+    (r"AppData\Local", "Rerun", r"AppData\Local\Rerun"),
+    (
+        r"AppData\Roaming",
+        "Microsoft",
+        r"AppData\Roaming\Microsoft",
+    ),
 ];
+
+/// The parents of [`PROFILE_DEFAULTS`].
+const PROFILE_DEFAULT_PARENTS: [&str; 2] = [r"AppData\Local", r"AppData\Roaming"];
 
 /// Folders a root must neither be nor contain; folders inside them stay allowed.
 const UPWARD_KNOWN: [KnownFolder; 5] = [
@@ -167,15 +181,25 @@ impl ForbiddenRoots {
                 overlap.push((Protected::Derived(k, name), child));
             }
         }
-        for rel in PROFILE_DEFAULTS {
+        for parent_rel in PROFILE_DEFAULT_PARENTS {
+            let what = format!("{}\\{parent_rel}", KnownFolder::Profile);
             for profile in get(KnownFolder::Profile) {
-                let mut child = profile.clone();
-                for seg in rel.split('\\') {
-                    child = child.child(seg).map_err(|e| {
-                        incomplete(&format!("{}\\{rel}", KnownFolder::Profile), e.to_string())
-                    })?;
+                let mut parent = profile.clone();
+                for seg in parent_rel.split('\\') {
+                    parent = parent
+                        .child(seg)
+                        .map_err(|e| incomplete(&what, e.to_string()))?;
                 }
-                overlap.push((Protected::ProfileDefault(rel), child));
+                for form in forms_of(sys, parent.path(), &what, true)? {
+                    for (_, name, rel) in
+                        PROFILE_DEFAULTS.iter().filter(|(p, _, _)| *p == parent_rel)
+                    {
+                        let child = form
+                            .child(name)
+                            .map_err(|e| incomplete(&format!("{what}\\{name}"), e.to_string()))?;
+                        overlap.push((Protected::ProfileDefault(rel), child));
+                    }
+                }
             }
         }
         let install = forms_of(sys, install_dir, "install folder", false)?;

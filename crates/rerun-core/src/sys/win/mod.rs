@@ -17,7 +17,8 @@
 //!   `CoTaskMemFree`) and `GetSystemWindowsDirectoryW`.
 //! - `reg`: the only registry calls (`RegOpenCurrentUser`, `RegOpenKeyExW`, `RegEnumKeyExW`,
 //!   `RegQueryInfoKeyW`, `RegCloseKey`; values with `NtQueryValueKey`/`NtEnumerateValueKey`,
-//!   because the Win32 value reads fix up strings), key handles as `OwnedKey`.
+//!   because the Win32 value reads fix up strings; `NtQueryKey` for key names), key handles
+//!   as `OwnedKey`.
 //! - `status`: `NTSTATUS`/Win32 code → `SysErrorKind`, for files and the registry (pure).
 //! - `name`: single-segment check, L1 long-name check, `volume_path`, `open_dir` input rules,
 //!   NT buffer decoding (pure).
@@ -40,6 +41,16 @@
 //! path-based calls, registry writes to that hive and `unsafe` FFI allowed there), `tests`
 //! (smoke tests and the contract runners) and `bans` (every banned `windows-sys` and
 //! `std::env` item of `clippy.toml` must resolve, else clippy fails).
+
+// A 32-bit (WOW64) process gets the x86 folders for `FOLDERID_ProgramFiles` and
+// `FOLDERID_ProgramFilesCommon`, and the file system redirector moves `System32`; the forbidden
+// list and the registry views assume a native 64-bit process. Only `rerun-cpu` (no dependency on
+// `rerun-core`) is built for i686.
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!(
+    "rerun-core's sys::win needs a 64-bit Windows target: a 32-bit process would see the x86 \
+     Program Files folders and redirected system paths"
+);
 
 mod fs;
 mod known_folders;

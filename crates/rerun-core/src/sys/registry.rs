@@ -141,7 +141,8 @@ pub const MAX_VALUE_NAME_UTF16: usize = 16_383;
 pub const MAX_VALUE_BYTES: usize = 1 << 20;
 /// Most values `values` returns for one key.
 pub const MAX_VALUES: usize = 16_384;
-/// Most bytes `values` returns for one key in total.
+/// Most bytes `values` returns for one key in total: the names (UTF-16, without NUL) plus
+/// the data of every value.
 pub const MAX_VALUES_TOTAL_BYTES: usize = 16 << 20;
 /// Most subkey names `subkeys` returns for one key.
 pub const MAX_SUBKEYS: usize = 65_536;

@@ -25,7 +25,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use super::reg::{self, EnumValue, OwnedKey, Read, ReadAccess, Root, View};
+use super::reg::{self, EnumValue, OwnedKey, Read, ReadAccess, Root, UserHiveError, View};
 use super::status::{reg_error, reg_nt_error};
 use crate::sys::registry::{
     Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegValue,
@@ -62,10 +62,27 @@ impl WinRegistry {
     ///
     /// # Errors
     ///
-    /// `RegOpenCurrentUser` fails (with its Win32 code).
+    /// `RegOpenCurrentUser` fails (`Other` with its Win32 code); the calling thread
+    /// impersonates (`Unsupported`: `RegOpenCurrentUser` follows the thread token and would
+    /// open the impersonated user's hive); or the key it returns is not a user hive
+    /// (`Unsupported`, e.g. the fallback to `HKEY_USERS\.DEFAULT` when the user's hive cannot
+    /// be opened).
     pub fn new() -> SysResult<Self> {
-        let current_user =
-            reg::open_current_user().map_err(|code| reg_error(code, "RegOpenCurrentUser"))?;
+        const WHAT: &str = "RegOpenCurrentUser";
+        let current_user = reg::open_current_user().map_err(|e| match e {
+            UserHiveError::Win32(code) => reg_error(code, WHAT),
+            UserHiveError::Impersonating => SysError::new(
+                SysErrorKind::Unsupported,
+                format!(
+                    "{WHAT}: the calling thread impersonates; the registry is opened only for \
+                     the process's own user"
+                ),
+            ),
+            UserHiveError::NotAUserHive(name) => SysError::new(
+                SysErrorKind::Unsupported,
+                format!("{WHAT}: returned {name}, not the user's own hive (profile not loaded?)"),
+            ),
+        })?;
         Ok(Self {
             current_user: Root::Key(current_user),
             local_machine: Root::LocalMachine,
@@ -132,7 +149,8 @@ fn grown(current: usize, needed: usize) -> usize {
 /// Bookkeeping of one enumeration attempt (pure): `Err` for a limit, `Ok(false)` for a
 /// duplicate name (restart).
 struct Tally {
-    seen: HashSet<String>,
+    /// Raw UTF-16 names: two names that differ only in unpaired surrogates are different.
+    seen: HashSet<Vec<u16>>,
     count: usize,
     bytes: usize,
 }
@@ -148,7 +166,7 @@ impl Tally {
 
     fn add(
         &mut self,
-        name: &str,
+        name: &[u16],
         bytes: usize,
         max_count: usize,
         max_bytes: usize,
@@ -162,10 +180,10 @@ impl Tally {
         if self.bytes > max_bytes {
             return Err(too_large(
                 target,
-                &format!("more than {max_bytes} bytes of values"),
+                &format!("more than {max_bytes} bytes of names and values"),
             ));
         }
-        Ok(self.seen.insert(name.to_owned()))
+        Ok(self.seen.insert(name.to_vec()))
     }
 }
 
@@ -199,18 +217,21 @@ fn values_once(
                 Err(status) => return Err(reg_nt_error(status, target)),
             }
         };
-        let value_name = String::from_utf16_lossy(&name);
         check_size(raw.data.len(), target)?;
+        // The total counts the name (UTF-16 bytes) and the data.
         if !tally.add(
-            &value_name,
-            raw.data.len(),
+            &name,
+            raw.data.len().saturating_add(name.len().saturating_mul(2)),
             MAX_VALUES,
             MAX_VALUES_TOTAL_BYTES,
             target,
         )? {
             return Ok(None);
         }
-        out.push((value_name, RegValue::decode(raw.kind, &raw.data)));
+        out.push((
+            String::from_utf16_lossy(&name),
+            RegValue::decode(raw.kind, &raw.data),
+        ));
         index = index.saturating_add(1);
     }
 }
@@ -225,11 +246,11 @@ fn subkeys_once(key: &OwnedKey, target: &str) -> SysResult<Option<Vec<String>>> 
         match reg::enum_key(key, index, &mut name) {
             Ok(None) => return Ok(Some(out)),
             Ok(Some(len)) => {
-                let s = String::from_utf16_lossy(&name[..len.min(name.len())]);
-                if !tally.add(&s, 0, MAX_SUBKEYS, usize::MAX, target)? {
+                let raw = &name[..len.min(name.len())];
+                if !tally.add(raw, 0, MAX_SUBKEYS, usize::MAX, target)? {
                     return Ok(None);
                 }
-                out.push(s);
+                out.push(String::from_utf16_lossy(raw));
             }
             Err(code) => return Err(reg_error(code, target)),
         }
@@ -390,19 +411,30 @@ mod tests {
 
     #[test]
     fn the_tally_refuses_limits_and_reports_duplicates() {
+        const A: [u16; 1] = [0x61];
+        const B: [u16; 1] = [0x62];
         let mut t = Tally::new();
-        assert!(t.add("a", 1, 2, 10, "t").unwrap());
-        assert!(!t.add("a", 1, 3, 10, "t").unwrap(), "duplicate → restart");
+        assert!(t.add(&A, 1, 2, 10, "t").unwrap());
+        assert!(!t.add(&A, 1, 3, 10, "t").unwrap(), "duplicate → restart");
+        // Names that differ only in an unpaired surrogate are different (raw UTF-16), even
+        // though both convert to U+FFFD.
         let mut t = Tally::new();
-        assert!(t.add("a", 1, 1, 10, "t").unwrap());
+        assert!(t.add(&[0xD800], 0, 5, 10, "t").unwrap());
+        assert!(t.add(&[0xD801], 0, 5, 10, "t").unwrap());
         assert_eq!(
-            t.add("b", 1, 1, 10, "t").unwrap_err().kind,
+            String::from_utf16_lossy(&[0xD800]),
+            String::from_utf16_lossy(&[0xD801])
+        );
+        let mut t = Tally::new();
+        assert!(t.add(&A, 1, 1, 10, "t").unwrap());
+        assert_eq!(
+            t.add(&B, 1, 1, 10, "t").unwrap_err().kind,
             SysErrorKind::Unsupported
         );
         let mut t = Tally::new();
-        assert!(t.add("a", 10, 5, 10, "t").unwrap());
+        assert!(t.add(&A, 10, 5, 10, "t").unwrap());
         assert_eq!(
-            t.add("b", 1, 5, 10, "t").unwrap_err().kind,
+            t.add(&B, 1, 5, 10, "t").unwrap_err().kind,
             SysErrorKind::Unsupported
         );
     }

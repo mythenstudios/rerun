@@ -2478,14 +2478,22 @@ pub fn registry_read_contract(
         skip(&mut skips, "value_over_limit");
     }
 
-    // The total: values of half the value limit (which every registry can hold) up to exactly
-    // the limit, then one byte more.
+    // The total counts names (UTF-16) and data: values of half the value limit (which every
+    // registry can hold) and a last one that fills up to exactly the limit, then one byte more.
     let total = root.join("Total");
     ok(fx.key(&total), "fixture: Total")?;
     let parts = MAX_VALUES_TOTAL_BYTES / half;
+    let mut used = 0_usize;
     for i in 0..parts {
+        let name = format!("v{i}");
+        let len = if i + 1 < parts {
+            half
+        } else {
+            MAX_VALUES_TOTAL_BYTES - used - 2 * name.len()
+        };
+        used += 2 * name.len() + len;
         ok(
-            fx.raw(&total, &format!("v{i}"), reg_type::REG_BINARY, &blob(half)),
+            fx.raw(&total, &name, reg_type::REG_BINARY, &blob(len)),
             "fixture: the total limit",
         )?;
     }

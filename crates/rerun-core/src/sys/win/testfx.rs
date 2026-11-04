@@ -50,7 +50,7 @@ use std::{ptr, thread};
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{FILE_OPEN, FILE_OPEN_REPARSE_POINT, NtCreateFile};
-use windows_sys::Wdk::System::Registry::{KeyNameInformation, NtQueryKey, NtSetValueKey};
+use windows_sys::Wdk::System::Registry::NtSetValueKey;
 use windows_sys::Win32::Foundation::{
     ERROR_NOT_ALL_ASSIGNED, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LUID,
 };
@@ -82,16 +82,16 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::{FSCTL_SET_EXTERNAL_BACKING, FSCTL_SET_REPARSE_POINT};
 use windows_sys::Win32::System::Registry::{
-    HKEY, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_READ, KEY_SET_VALUE, REG_BINARY,
-    REG_CREATED_NEW_KEY, REG_LINK, REG_OPTION_CREATE_LINK, REG_OPTION_NON_VOLATILE,
-    REG_PROCESS_APPKEY, RegCreateKeyExW, RegDeleteValueW, RegLoadAppKeyW,
+    HKEY, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, REG_BINARY,
+    REG_CREATED_NEW_KEY, REG_LINK, REG_OPTION_CREATE_LINK, REG_OPTION_OPEN_LINK,
+    REG_PROCESS_APPKEY, RegCreateKeyExW, RegDeleteValueW, RegLoadAppKeyW, RegOpenKeyExW,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetExitCodeProcess, OpenProcess, OpenProcessToken,
     OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-use super::reg::OwnedKey;
+use super::reg::{self, OwnedKey};
 use super::status::kind_of_win32;
 use super::{WinFs, WinKnownFolders, WinRegistry};
 use crate::path::RelPath;
@@ -1198,11 +1198,6 @@ impl FsFixture for WinFixture {
 
 /// NT name prefix of every private app hive (`RegLoadAppKeyW`).
 const APP_HIVE_PREFIX: &str = r"\REGISTRY\A\";
-/// `KEY_NAME_INFORMATION` buffer in `u64`s: the longest key path plus the hive prefix, with
-/// room.
-const KEY_NAME_BUFFER_U64: usize = 9_000;
-/// winerror.h `ERROR_INSUFFICIENT_BUFFER`.
-const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 /// ntstatus.h `STATUS_INSUFFICIENT_RESOURCES`: what `NtSetValueKey` returns for a value over
 /// 1,048,572 bytes (`RegSetValueExW`: `ERROR_NO_SYSTEM_RESOURCES`).
 const STATUS_INSUFFICIENT_RESOURCES: i32 = 0xC000_009A_u32.cast_signed();
@@ -1226,48 +1221,9 @@ pub(super) struct AppHive {
     no_links: Option<String>,
 }
 
-/// Kernel name of an open key (`\REGISTRY\…`).
-fn key_name(key: &OwnedKey) -> Result<String, u32> {
-    let mut buf = vec![0u64; KEY_NAME_BUFFER_U64];
-    let cap = u32::try_from(buf.len() * 8).unwrap_or(u32::MAX);
-    let mut got: u32 = 0;
-    // SAFETY: `key` is an open key handle kept alive by the borrow; `buf` is writable for `cap`
-    // bytes, 8-byte aligned as KEY_NAME_INFORMATION needs, and outlives the call; `got` is valid
-    // for a write.
-    let status = unsafe {
-        NtQueryKey(
-            key.raw(),
-            KeyNameInformation,
-            buf.as_mut_ptr().cast(),
-            cap,
-            &mut got,
-        )
-    };
-    if status != 0 {
-        return Err(status.cast_unsigned());
-    }
-    // Only the words the kernel wrote (`got` bytes).
-    let words = usize::try_from(got).unwrap_or(usize::MAX).div_ceil(8);
-    let bytes: Vec<u8> = buf
-        .iter()
-        .take(words)
-        .flat_map(|w| w.to_le_bytes())
-        .collect();
-    let len = bytes
-        .get(..4)
-        .and_then(|b| <[u8; 4]>::try_from(b).ok())
-        .map_or(0, u32::from_le_bytes);
-    let len = usize::try_from(len).unwrap_or(usize::MAX);
-    let name = bytes
-        .get(4..4_usize.saturating_add(len))
-        .ok_or(ERROR_INSUFFICIENT_BUFFER)?;
-    let units: Vec<u16> = name
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|c| u16::from_le_bytes(*c))
-        .collect();
-    Ok(String::from_utf16_lossy(&units))
+/// Kernel name of an open key, as a fixture error.
+fn key_name(key: &OwnedKey, what: &str) -> SysResult<String> {
+    reg::key_name(key).map_err(|st| SysError::new(SysErrorKind::Other, what).with_ntstatus(st))
 }
 
 impl AppHive {
@@ -1286,7 +1242,7 @@ impl AppHive {
         // SAFETY: `raw` was just returned by a successful RegLoadAppKeyW; nothing else owns or
         // closes it.
         let hive = unsafe { OwnedKey::from_raw(raw) };
-        let name = key_name(&hive).map_err(|c| win32_err(c, &what))?;
+        let name = key_name(&hive, &what)?;
         assert!(
             name.len() > APP_HIVE_PREFIX.len()
                 && name.to_ascii_uppercase().starts_with(APP_HIVE_PREFIX),
@@ -1310,7 +1266,7 @@ impl AppHive {
             .map_err(|e| format!("probe target: {e} ({:?})", e.win32))?;
         self.make_link(r"LinkProbe\Link", target)
             .map_err(|e| format!("create: {e} ({:?})", e.win32))?;
-        self.create(r"LinkProbe\Link", KEY_READ, false)
+        self.open_following(r"LinkProbe\Link")
             .map(drop)
             .map_err(|e| format!("follow: {e} ({:?})", e.win32))
     }
@@ -1348,7 +1304,7 @@ impl AppHive {
 
     /// `key` lies below the hive key (by its kernel name), else an error.
     fn guard(&self, key: &OwnedKey, what: &str) -> SysResult<()> {
-        let name = key_name(key).map_err(|c| win32_err(c, what))?;
+        let name = key_name(key, what)?;
         let inside = name
             .get(..self.name.len())
             .is_some_and(|p| p.eq_ignore_ascii_case(&self.name))
@@ -1366,49 +1322,79 @@ impl AppHive {
         }
     }
 
-    /// `RegCreateKeyExW(hive, path)` (opens an existing key, creates missing ones), guarded.
-    /// `link`: `path` must be new and becomes a symbolic-link key.
+    /// Opens or creates the hive path `path` **segment by segment**, each segment relative to
+    /// the handle of the previous one (the first relative to the hive key) with
+    /// `REG_OPTION_OPEN_LINK`: a symbolic-link key on the way is opened itself, never
+    /// followed, so no key is ever created outside the hive (review, 2026-11-04). The final
+    /// handle is guarded by its kernel name as well. `link`: the last segment must be new and
+    /// becomes a symbolic-link key.
     fn create(&self, path: &str, access: u32, link: bool) -> SysResult<OwnedKey> {
         let what = format!("app hive key {path}");
+        let segs: Vec<&str> = path.split('\\').collect();
+        let mut parent: Option<OwnedKey> = None;
+        for (i, seg) in segs.iter().enumerate() {
+            let last = i + 1 == segs.len();
+            let (options, rights) = match (last, link) {
+                (true, true) => (REG_OPTION_CREATE_LINK, access | KEY_CREATE_LINK),
+                (true, false) => (REG_OPTION_OPEN_LINK, access),
+                (false, _) => (REG_OPTION_OPEN_LINK, KEY_CREATE_SUB_KEY),
+            };
+            let base = parent.as_ref().map_or(self.hive.raw(), OwnedKey::raw);
+            let w = wide(seg);
+            let mut raw: HKEY = ptr::null_mut();
+            let mut disposition: u32 = 0;
+            // SAFETY: `base` is the hive key or the previous segment's key, both kept alive
+            // (`self`, `parent`) until after the call; `w` is NUL-terminated and outlives the
+            // call; class and security attributes are null; `raw` and `disposition` are valid
+            // for writes, and on success `raw` is a new key handle that `OwnedKey` takes over
+            // below.
+            let rc = unsafe {
+                RegCreateKeyExW(
+                    base,
+                    w.as_ptr(),
+                    0,
+                    ptr::null(),
+                    options,
+                    rights,
+                    ptr::null(),
+                    &mut raw,
+                    &mut disposition,
+                )
+            };
+            if rc != 0 || raw.is_null() {
+                return Err(win32_err(rc, &what));
+            }
+            // SAFETY: `raw` was just returned by a successful RegCreateKeyExW; nothing else
+            // owns or closes it.
+            let key = unsafe { OwnedKey::from_raw(raw) };
+            if last && link && disposition != REG_CREATED_NEW_KEY {
+                return Err(SysError::new(
+                    SysErrorKind::AlreadyExists,
+                    format!("{what}: a link must be a new key"),
+                ));
+            }
+            parent = Some(key);
+        }
+        let key = parent.ok_or_else(|| SysError::new(SysErrorKind::InvalidPath, &what))?;
+        self.guard(&key, &what)?;
+        Ok(key)
+    }
+
+    /// Opens `path` (relative to the hive key) **following** links, read-only; only for the
+    /// link probe.
+    fn open_following(&self, path: &str) -> SysResult<OwnedKey> {
         let w = wide(path);
         let mut raw: HKEY = ptr::null_mut();
-        let mut disposition: u32 = 0;
-        let (options, access) = if link {
-            (REG_OPTION_CREATE_LINK, access | KEY_CREATE_LINK)
-        } else {
-            (REG_OPTION_NON_VOLATILE, access)
-        };
         // SAFETY: `self.hive` is the open hive key, kept alive by the borrow; `w` is
-        // NUL-terminated and outlives the call; class and security attributes are null; `raw`
-        // and `disposition` are valid for writes, and on success `raw` is a new key handle that
-        // `OwnedKey` takes over below.
-        let rc = unsafe {
-            RegCreateKeyExW(
-                self.hive.raw(),
-                w.as_ptr(),
-                0,
-                ptr::null(),
-                options,
-                access,
-                ptr::null(),
-                &mut raw,
-                &mut disposition,
-            )
-        };
+        // NUL-terminated and outlives the call; `raw` is valid for a write and on success a new
+        // key handle that `OwnedKey` takes over below.
+        let rc = unsafe { RegOpenKeyExW(self.hive.raw(), w.as_ptr(), 0, KEY_READ, &mut raw) };
         if rc != 0 || raw.is_null() {
-            return Err(win32_err(rc, &what));
+            return Err(win32_err(rc, &format!("app hive key {path}")));
         }
-        // SAFETY: `raw` was just returned by a successful RegCreateKeyExW; nothing else owns or
+        // SAFETY: `raw` was just returned by a successful RegOpenKeyExW; nothing else owns or
         // closes it.
-        let key = unsafe { OwnedKey::from_raw(raw) };
-        self.guard(&key, &what)?;
-        if link && disposition != REG_CREATED_NEW_KEY {
-            return Err(SysError::new(
-                SysErrorKind::AlreadyExists,
-                format!("{what}: a link must be a new key"),
-            ));
-        }
-        Ok(key)
+        Ok(unsafe { OwnedKey::from_raw(raw) })
     }
 
     /// `NtSetValueKey` on a guarded key: stores exactly `kind` and `data`. Not

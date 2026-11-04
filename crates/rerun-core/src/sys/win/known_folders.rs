@@ -460,7 +460,7 @@ mod tests {
         for var in VARS {
             cmd.env(var, decoy(&env, var));
         }
-        let out = cmd.output().unwrap();
+        let out = run_with_deadline(cmd, CHILD_DEADLINE);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
             out.status.success(),
@@ -497,6 +497,53 @@ mod tests {
             "known folders depend on the environment:\n{}",
             differ.join("\n")
         );
+    }
+
+    /// The child test must finish within this time; it is killed otherwise.
+    const CHILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Runs `cmd` with piped output (read on threads, so a full pipe cannot block the child);
+    /// kills it and panics if it is not done within `deadline`.
+    fn run_with_deadline(
+        mut cmd: std::process::Command,
+        deadline: std::time::Duration,
+    ) -> std::process::Output {
+        use std::io::Read as _;
+        use std::process::Stdio;
+        let mut child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let drain = |r: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut r) = r {
+                    let _ = r.read_to_end(&mut buf);
+                }
+                buf
+            })
+        };
+        let out = drain(child.stdout.take().map(|r| Box::new(r) as _));
+        let err = drain(child.stderr.take().map(|r| Box::new(r) as _));
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if started.elapsed() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the child test did not finish within {deadline:?} and was killed");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        std::process::Output {
+            status,
+            stdout: out.join().unwrap(),
+            stderr: err.join().unwrap(),
+        }
     }
 
     /// A fresh directory for `var` below `env`. `HOMEDRIVE` and `HOMEPATH` combine to a

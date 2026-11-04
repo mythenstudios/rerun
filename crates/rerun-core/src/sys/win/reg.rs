@@ -1,6 +1,8 @@
 //! The only registry FFI of `sys::win` (ADR 0009): `RegOpenCurrentUser`, `RegOpenKeyExW`,
-//! `RegEnumKeyExW`, `RegQueryInfoKeyW`, `RegCloseKey`, and for values `NtQueryValueKey` and
-//! `NtEnumerateValueKey`.
+//! `RegEnumKeyExW`, `RegQueryInfoKeyW`, `RegCloseKey`, for values `NtQueryValueKey` and
+//! `NtEnumerateValueKey`, and `NtQueryKey` for the kernel name of a key. `WinRegistry::new`
+//! refuses an impersonating thread (`OpenThreadToken`) and a current-user key that is not a
+//! user hive (the `.DEFAULT` fallback of `RegOpenCurrentUser`).
 //!
 //! - Values are read with the NT calls, not `RegQueryValueExW`/`RegEnumValueW`: for a
 //!   string-typed value stored without a terminating NUL those write a NUL into the caller's
@@ -30,15 +32,23 @@
 
 use std::ptr;
 
+use std::os::windows::io::{FromRawHandle, OwnedHandle};
+
 use windows_sys::Wdk::System::Registry::{
-    KeyValueFullInformation, KeyValuePartialInformation, NtEnumerateValueKey, NtQueryValueKey,
+    KeyNameInformation, KeyValueFullInformation, KeyValuePartialInformation, NtEnumerateValueKey,
+    NtQueryKey, NtQueryValueKey,
 };
+use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::{FILETIME, UNICODE_STRING};
+use windows_sys::Win32::Security::TOKEN_QUERY;
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KEY_READ, KEY_WOW64_32KEY,
-    KEY_WOW64_64KEY, RegCloseKey, RegEnumKeyExW, RegOpenCurrentUser, RegOpenKeyExW,
-    RegQueryInfoKeyW,
+    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_CONFIG, HKEY_CURRENT_USER,
+    HKEY_CURRENT_USER_LOCAL_SETTINGS, HKEY_DYN_DATA, HKEY_LOCAL_MACHINE, HKEY_PERFORMANCE_DATA,
+    HKEY_PERFORMANCE_NLSTEXT, HKEY_PERFORMANCE_TEXT, HKEY_USERS, KEY_ENUMERATE_SUB_KEYS,
+    KEY_QUERY_VALUE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, RegCloseKey, RegEnumKeyExW,
+    RegOpenCurrentUser, RegOpenKeyExW, RegQueryInfoKeyW,
 };
+use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
 use super::status::{
     NtStatus, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH,
@@ -54,7 +64,8 @@ const ERROR_NO_MORE_ITEMS: u32 = 259;
 /// winerror.h `ERROR_INVALID_HANDLE`.
 const ERROR_INVALID_HANDLE: u32 = 6;
 
-/// An open registry key, closed with `RegCloseKey` on drop. Never a predefined key.
+/// An open registry key, closed with `RegCloseKey` on drop. Never a predefined key (`open`
+/// refuses one).
 #[derive(Debug)]
 pub(super) struct OwnedKey(HKEY);
 
@@ -142,9 +153,57 @@ pub(super) fn sam(access: ReadAccess, view: View) -> u32 {
         }
 }
 
+/// Why [`open_current_user`] refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UserHiveError {
+    /// A Win32 error of `OpenThreadToken` or `RegOpenCurrentUser`.
+    Win32(u32),
+    /// The calling thread has an impersonation token: `RegOpenCurrentUser` would open the
+    /// impersonated user's hive, not this process's.
+    Impersonating,
+    /// The returned key is not a user hive `\REGISTRY\USER\S-1-…` (the fallback to
+    /// `HKEY_USERS\.DEFAULT` when the user's hive cannot be opened, or something else): its
+    /// kernel name, or the `NTSTATUS` if the name could not be read.
+    NotAUserHive(String),
+}
+
+/// winerror.h `ERROR_NO_TOKEN`: the thread does not impersonate.
+const ERROR_NO_TOKEN: u32 = 1008;
+/// winerror.h `ERROR_ACCESS_DENIED`.
+const ERROR_ACCESS_DENIED: u32 = 5;
+
+/// Does the calling thread impersonate? `OpenThreadToken` must fail with `ERROR_NO_TOKEN`.
+fn thread_impersonates() -> Result<bool, u32> {
+    let mut raw: HANDLE = ptr::null_mut();
+    // SAFETY: GetCurrentThread returns a pseudo handle that needs no closing and is valid for
+    // the calling thread.
+    let thread = unsafe { GetCurrentThread() };
+    // SAFETY: `thread` is the current-thread pseudo handle; `raw` is valid for a write and on
+    // success receives a token handle that `OwnedHandle` takes over below.
+    let ok = unsafe { OpenThreadToken(thread, TOKEN_QUERY, 1, &mut raw) };
+    if ok != 0 && !raw.is_null() {
+        // SAFETY: `raw` was just returned by a successful OpenThreadToken; nothing else owns
+        // or closes it.
+        drop(unsafe { OwnedHandle::from_raw_handle(raw) });
+        return Ok(true);
+    }
+    match last_error() {
+        ERROR_NO_TOKEN => Ok(false),
+        // A thread token exists but cannot be opened for query: still impersonating.
+        ERROR_ACCESS_DENIED => Ok(true),
+        code => Err(code),
+    }
+}
+
 /// `RegOpenCurrentUser(KEY_READ)`: the hive of the user this process runs as (not the
-/// per-process cached `HKEY_CURRENT_USER`).
-pub(super) fn open_current_user() -> Result<OwnedKey, u32> {
+/// per-process cached `HKEY_CURRENT_USER`). `RegOpenCurrentUser` follows the **thread**
+/// token, so it is refused while the thread impersonates; and it falls back to
+/// `HKEY_USERS\.DEFAULT` when it cannot open the user's hive, so the result must be a user
+/// hive `\REGISTRY\USER\S-1-…` by its kernel name.
+pub(super) fn open_current_user() -> Result<OwnedKey, UserHiveError> {
+    if thread_impersonates().map_err(UserHiveError::Win32)? {
+        return Err(UserHiveError::Impersonating);
+    }
     let mut raw: HKEY = ptr::null_mut();
     #[expect(
         clippy::disallowed_methods,
@@ -153,7 +212,75 @@ pub(super) fn open_current_user() -> Result<OwnedKey, u32> {
     // SAFETY: `raw` is valid for a write; on success it receives a new key handle that is owned
     // by the returned `OwnedKey`.
     let rc = unsafe { RegOpenCurrentUser(KEY_READ, &mut raw) };
-    owned(rc, raw)
+    let key = owned(rc, raw).map_err(UserHiveError::Win32)?;
+    let name = key_name(&key).map_err(|st| UserHiveError::NotAUserHive(format!("{st:#010x}")))?;
+    if is_user_hive(&name) {
+        Ok(key)
+    } else {
+        Err(UserHiveError::NotAUserHive(name))
+    }
+}
+
+/// `\REGISTRY\USER\S-1-…` with exactly one segment after `USER`, not a `_Classes` hive
+/// (pure).
+pub(super) fn is_user_hive(name: &str) -> bool {
+    const PREFIX: &str = r"\REGISTRY\USER\";
+    let (Some(head), Some(sid)) = (name.get(..PREFIX.len()), name.get(PREFIX.len()..)) else {
+        return false;
+    };
+    head.eq_ignore_ascii_case(PREFIX)
+        && sid.len() > 4
+        && sid.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("S-1-"))
+        && !sid.contains('\\')
+        && !sid.to_ascii_uppercase().ends_with("_CLASSES")
+}
+
+/// `KEY_NAME_INFORMATION` buffer in `u64`s: the longest key path plus a hive prefix.
+const KEY_NAME_BUFFER_U64: usize = 9_000;
+
+/// Kernel name of an open key (`\REGISTRY\…`), via `NtQueryKey(KeyNameInformation)`.
+pub(super) fn key_name(key: &OwnedKey) -> Result<String, NtStatus> {
+    let mut buf = vec![0u64; KEY_NAME_BUFFER_U64];
+    let cap = len_u32(buf.len() * 8);
+    let mut got: u32 = 0;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one NtQueryKey call site (ADR 0009)"
+    )]
+    // SAFETY: `key` is an open key handle kept alive by the borrow; `buf` is writable for `cap`
+    // bytes, 8-byte aligned as KEY_NAME_INFORMATION needs, and outlives the call; `got` is valid
+    // for a write.
+    let status = unsafe {
+        NtQueryKey(
+            key.0,
+            KeyNameInformation,
+            buf.as_mut_ptr().cast(),
+            cap,
+            &mut got,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return Err(status);
+    }
+    let len = len_usize(u32_at(&buf, 0).ok_or(STATUS_INFO_LENGTH_MISMATCH)?);
+    if len.saturating_add(4) > len_usize(got) || !len.is_multiple_of(2) {
+        return Err(STATUS_INFO_LENGTH_MISMATCH);
+    }
+    let bytes = bytes_at(&buf, 4, len).ok_or(STATUS_INFO_LENGTH_MISMATCH)?;
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    Ok(String::from_utf16_lossy(&units))
+}
+
+/// The last Win32 error of this thread (read right after a failed call).
+fn last_error() -> u32 {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .map_or(0, i32::cast_unsigned)
 }
 
 /// `RegOpenKeyExW(root, path, 0, sam(access, view))`. `path` is a checked key path (no NUL,
@@ -186,7 +313,31 @@ fn owned(rc: u32, raw: HKEY) -> Result<OwnedKey, u32> {
         // Success without a handle: a failure (nothing to close).
         return Err(ERROR_INVALID_HANDLE);
     }
+    if is_predefined(raw) {
+        // The registry documents that an empty path below a predefined key may hand back that
+        // same predefined key. Closing it would close the process-wide cached key, and the NT
+        // value calls cannot use it: refuse, without closing. (Windows 11 returns a new handle;
+        // `the_hive_root_is_a_new_handle` pins that.)
+        return Err(ERROR_INVALID_HANDLE);
+    }
     Ok(OwnedKey(raw))
+}
+
+/// One of the predefined `HKEY_*` values (pure).
+fn is_predefined(raw: HKEY) -> bool {
+    [
+        HKEY_CLASSES_ROOT,
+        HKEY_CURRENT_USER,
+        HKEY_LOCAL_MACHINE,
+        HKEY_USERS,
+        HKEY_PERFORMANCE_DATA,
+        HKEY_CURRENT_CONFIG,
+        HKEY_DYN_DATA,
+        HKEY_CURRENT_USER_LOCAL_SETTINGS,
+        HKEY_PERFORMANCE_TEXT,
+        HKEY_PERFORMANCE_NLSTEXT,
+    ]
+    .contains(&raw)
 }
 
 fn len_u32(n: usize) -> u32 {
@@ -489,6 +640,66 @@ pub(super) fn info(key: &OwnedKey) -> Result<KeyInfo, u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_hive_names() {
+        for ok in [
+            r"\REGISTRY\USER\S-1-5-21-1-2-3-1001",
+            r"\Registry\User\s-1-5-18",
+        ] {
+            assert!(is_user_hive(ok), "{ok}");
+        }
+        for bad in [
+            r"\REGISTRY\USER\.DEFAULT",
+            r"\REGISTRY\USER\S-1-5-21-1-2-3-1001_Classes",
+            r"\REGISTRY\USER\S-1-5-21-1-2-3-1001\Software",
+            r"\REGISTRY\USER\S-1-",
+            r"\REGISTRY\MACHINE",
+            r"\REGISTRY\A\{x}",
+            "",
+        ] {
+            assert!(!is_user_hive(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn predefined_keys_are_recognised() {
+        assert!(is_predefined(HKEY_LOCAL_MACHINE));
+        assert!(is_predefined(HKEY_CURRENT_USER));
+        assert!(!is_predefined(ptr::null_mut()));
+    }
+
+    /// `RegOpenKeyExW(HKEY_LOCAL_MACHINE, "")` gives a new kernel handle (not the predefined
+    /// key), so dropping it leaves `HKEY_LOCAL_MACHINE` usable and the NT value calls work.
+    #[test]
+    fn the_hive_root_is_a_new_handle() {
+        for _ in 0..3 {
+            let root = open(&Root::LocalMachine, "", ReadAccess::Query, View::Native).unwrap();
+            assert!(!is_predefined(root.0));
+            let mut scratch = Vec::new();
+            assert!(query_value(&root, "rerun-no-such-value", 64, &mut scratch).is_ok());
+            assert!(
+                key_name(&root)
+                    .unwrap()
+                    .eq_ignore_ascii_case(r"\REGISTRY\MACHINE")
+            );
+        }
+        let k = open(
+            &Root::LocalMachine,
+            r"SYSTEM\CurrentControlSet\Control",
+            ReadAccess::Query,
+            View::Native,
+        )
+        .unwrap();
+        assert!(info(&k).is_ok());
+    }
+
+    #[test]
+    fn the_current_user_hive_is_the_users_own() {
+        assert!(!thread_impersonates().unwrap());
+        let k = open_current_user().unwrap();
+        assert!(is_user_hive(&key_name(&k).unwrap()));
+    }
 
     #[test]
     fn every_open_carries_its_view_and_no_write_right() {
