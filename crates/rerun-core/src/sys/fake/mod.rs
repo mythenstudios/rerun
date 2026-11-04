@@ -295,6 +295,13 @@ impl FakeSystemBuilder {
         })
     }
 
+    /// Registry value from a stored type number and bytes, the way a registry hands it out:
+    /// typed if the bytes are canonical, [`RegValue::Raw`] otherwise (see
+    /// [`RegValue::decode`]). The key is created if needed.
+    pub fn raw_value(self, key: RegKey, name: &str, kind: u32, data: &[u8]) -> Self {
+        self.value(key, name, RegValue::decode(kind, data))
+    }
+
     /// CPU topology.
     pub fn topology(mut self, topology: CpuTopology) -> Self {
         self.sys.topology = FakeTopology::new(topology);

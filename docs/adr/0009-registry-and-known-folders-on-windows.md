@@ -1,0 +1,57 @@
+# ADR 0009 · Registry and known folders on Windows (read side)
+
+**Status:** accepted · 2026-11-04 · extends ADR 0004, ADR 0007, ADR 0008
+
+## Context
+Phase 1 needs the registry read side for store detection (Steam: `HKCU\Software\Valve\Steam` `SteamPath`, `HKLM\SOFTWARE\WOW6432Node\Valve\Steam` `InstallPath`; GOG later) and the real known folders for the forbidden-root list (ADR 0007). Nothing writes the registry before the `registry_set` primitive (phase 2). Registry data is untrusted input: any program of the user can store any type number with any bytes, very large values and many subkeys. `docs/09-testing.md` so far runs every registry contract in Windows Sandbox only, so the real implementation would be untested in CI.
+
+## Decision
+
+### Read-only in phase 1
+`sys::win::WinRegistry` implements `Registry`; `create_key`, `set`, `delete_value` and `delete_key` return `Unsupported` ("sys::win is read-only in phase 1") and touch nothing. All registry write APIs are `disallowed-methods` errors until phase 2 gives them one `sys::win::reg` wrapper.
+
+### Values are decoded canonically or kept raw
+`RegValue` gains `Raw(RawValue)` (`RawValue { kind: u32, data: Vec<u8> }`, fields private). `RegValue::decode(kind, data)` returns a typed variant only if its canonical encoding is exactly `data`, otherwise `Raw`. Hence `decode(k, d).encode() == (k, d)` for every input: a snapshot and a later revert see the exact bytes (rule 2), and two different byte strings never decode to the same value.
+- `REG_SZ`/`REG_EXPAND_SZ`: valid UTF-16LE, no NUL inside, exactly one terminating NUL. Missing or extra NULs, odd length, zero length or lone surrogates are `Raw`. `REG_EXPAND_SZ` is never expanded.
+- `REG_MULTI_SZ`: each string NUL-terminated, then one final NUL; the empty list is a single NUL. An empty element (an inner double NUL) or a missing final NUL is `Raw`.
+- `REG_DWORD` exactly 4 bytes, `REG_QWORD` exactly 8 (little endian); any other length is `Raw`. `REG_BINARY` any bytes.
+- `REG_NONE`, `REG_DWORD_BIG_ENDIAN`, `REG_LINK`, the resource-list types and unknown numbers are always `Raw`.
+- Typed values that have no canonical encoding (a string with NUL, a multi-string with an empty element) cannot be written (phase 2 write contract).
+Tolerant reading (a `SteamPath` without its NUL) is a detection concern with an explicit helper, not a `sys` concern.
+
+### Implementation (`sys::win`)
+- `reg` (the only module with `unsafe` registry FFI): owned key handles (`RegCloseKey` on drop), `RegOpenKeyExW` from a hive root with the full path in one call, `RegQueryValueExW`, `RegEnumValueW`, `RegEnumKeyExW`, `RegQueryInfoKeyW`. Not `RegGetValueW` (expands `REG_EXPAND_SZ` by default).
+- `Hive::CurrentUser` is the handle from `RegOpenCurrentUser(KEY_READ)` taken once in `WinRegistry::new`, not the predefined `HKEY_CURRENT_USER` (cached per process, wrong under impersonation). `Hive::LocalMachine` is `HKEY_LOCAL_MACHINE`.
+- Views: `RegView::Wow32` adds `KEY_WOW64_32KEY` to every open. Windows redirects only certain keys (on x64 essentially `HKLM\SOFTWARE` → `HKLM\SOFTWARE\WOW6432Node`, plus `Classes`); `HKCU\Software` is shared. Callers use `Wow32` with the logical path and never spell `WOW6432Node`. The fake models exactly this redirection (`HKLM\SOFTWARE\X` in `Wow32` is `HKLM\SOFTWARE\WOW6432Node\X` in `Native`, every other key is shared across views); the shared and reflected subkeys inside `SOFTWARE` are a listed deviation.
+- Access: `key_exists`, `get`, `values` open with `KEY_QUERY_VALUE`, `subkeys` with `KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE`. A denied open is `AccessDenied` for every method, including `key_exists` (the key exists, but `sys` does not guess).
+- Symbolic-link keys are followed on reads (`REG_OPTION_OPEN_LINK` is not used). System links such as `HKLM\SYSTEM\CurrentControlSet` are legitimate; links in `HKLM` need admin; a link in the user's hive only leads to data the user controls anyway, and read data is untrusted regardless. The write side (phase 2) opens the last segment with `REG_OPTION_OPEN_LINK` and refuses links; `sys::snapshot` caps the depth of a registry walk before it runs against `sys::win` (a link to an ancestor would recurse).
+- Input rules, shared by the fake and `sys::win` (one function in `sys::registry`): no NUL in a key path or value name, no empty segment, a segment at most 255 UTF-16 units, the path at most 32,767 units, a value name at most 16,383 units; otherwise `InvalidPath`.
+- Limits for untrusted data: one value at most 1 MiB (`MAX_VALUE_BYTES`); `values` at most 16,384 values and 16 MiB in total; `subkeys` at most 65,536 names. Beyond a limit: `Unsupported`, never a partial result. The fake applies the same limits on reads.
+- Races: `ERROR_MORE_DATA` grows the buffer to the reported size (capped by the limit) and retries, at most 16 times, then `Busy`; type and data always come from one successful call. `values` and `subkeys` enumerate by index until `ERROR_NO_MORE_ITEMS` and compare the key's last-write time from `RegQueryInfoKeyW` before and after; a change or a duplicate name restarts the enumeration, at most 8 times, then `Busy`.
+- Names from enumerations are converted lossily (U+FFFD), like `read_dir`; such a name cannot be addressed exactly, so phase 2 treats it as an anomaly.
+- Error mapping (pure, in `status`): `ERROR_FILE_NOT_FOUND`, `ERROR_PATH_NOT_FOUND`, `ERROR_KEY_DELETED` → `NotFound`; `ERROR_ACCESS_DENIED` → `AccessDenied`; `ERROR_FILENAME_EXCED_RANGE`, `ERROR_INVALID_PARAMETER` (after the input rules) → `InvalidPath`; everything else `Other` with the Win32 code.
+- Elevated helper: `Hive::CurrentUser` there is the elevated token's hive (the administrator's under over-the-shoulder elevation, the user's own, writable by non-elevated malware, under same-user elevation). The helper never reads or writes `CurrentUser`; when it exists it builds its registry with `CurrentUser` refused (`Unsupported`).
+
+### Known folders (`sys::win`)
+- `KnownFolder::Windows` from `GetSystemWindowsDirectoryW` (not `GetWindowsDirectoryW`, which is per session), every other folder from `SHGetKnownFolderPath(rfid, KF_FLAG_DONT_VERIFY | KF_FLAG_NO_PACKAGE_REDIRECTION, NULL)`, freed with `CoTaskMemFree` whether the call succeeds or not. `DONT_VERIFY`: no existence check, no network access for a redirected `RoamingAppData` (ADR 0007), never created. `NO_PACKAGE_REDIRECTION`: the real folder even if Rerun is ever packaged. Not `KF_FLAG_DEFAULT_PATH`, not `KF_FLAG_CREATE`. `HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)`, `E_INVALIDARG` → `NotFound`; others `Other`. Only module with this FFI: `sys::win::shell`.
+- The per-user folders (`LocalAppData`, `RoamingAppData`) come from `HKCU\…\User Shell Folders`, which the user can change. That cannot escalate: a non-elevated Rerun runs as that user anyway, and the elevated helper writes only into directories that only admins can write (ADR 0007, "Elevation"), which a user folder never is. As defense in depth `policy::root` also forbids the default forms derived from `Profile` (`AppData\Local\{Microsoft, Packages, VirtualStore, Rerun}`, `AppData\Roaming\Microsoft`), so a redirection can only add entries, never remove one. A redirection to a share makes the list fail closed (no roots at all), an accepted denial of service by the same user.
+- Environment independence is a contract on real Windows: a child test process started with `windir`, `SystemRoot`, `SystemDrive`, `ProgramFiles*`, `CommonProgramFiles*`, `ProgramData`, `ALLUSERSPROFILE`, `PUBLIC`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `LOCALAPPDATA` and `APPDATA` pointing into its test root must report the same known folders as the parent. If a folder turns out to depend on the environment, that folder is resolved from its machine source instead (raw `HKLM` value, `%SystemDrive%`/`%SystemRoot%` taken from `GetSystemWindowsDirectoryW`; `Profile` via `GetUserProfileDirectoryW` on the process token) before this step is merged.
+- The environment is never a source of paths: `std::env::{var, var_os, vars, vars_os, home_dir, temp_dir}`, `GetEnvironmentVariable*`, `ExpandEnvironmentStrings*`, `SHGetFolderPath*`, `SHGetSpecialFolderPath*`, `GetWindowsDirectory*` and the known-folder setters are `disallowed-methods` errors; the few test gates that read variables carry an `expect`.
+
+### Testing
+- **Private app hives.** The registry read contract runs against `sys::win` locally and in CI in a hive file inside the `TestRoot` under `target/`, loaded with `RegLoadAppKeyW(…, REG_PROCESS_APPKEY)`: no admin, not visible in the global namespace, unloaded when the last handle closes (also when the process dies). A test-only constructor `WinRegistry::with_roots` maps `CurrentUser` and `LocalMachine` to two keys of that hive; the fixture writes raw types and bytes there with the plain Win32 calls. The real registry is never written by a test; this counts as test-root data under `target/`, not as a system change (user decision, see `docs/09-testing.md`).
+- App hives apply no WOW64 redirection, so the semantics contract runs at roots outside `SOFTWARE`, once per view, and must give identical results in both. Redirection and link following are pinned by a read-only contract on stable system keys (`ProgramFilesDir`/`CommonFilesDir` of `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion` per view against the known folders, the `WOW6432Node` alias, `HKLM\SYSTEM\CurrentControlSet`, `AccessDenied` on `HKLM\SECURITY`), which also runs against a seeded fake.
+- Write contracts against `sys::win` (phase 2) run in app hives as well; Windows Sandbox remains for firewall, IFEO and everything outside `target/`.
+
+## Alternatives
+- **Tolerant decoding** (strip any trailing NULs, keep invalid UTF-16 lossy): convenient for detection, but a snapshot could not tell two different byte strings apart and a revert could not restore them exactly.
+- **Not following registry links on reads** (open each segment with `REG_OPTION_OPEN_LINK`): would break `CurrentControlSet` and buys nothing for reads.
+- **`KF_FLAG_DEFAULT_PATH` instead of the current path:** ignores a legitimate redirection of the user's own folders (then `AppData\Roaming` on a share would not be on the list in its real form); deriving the default forms in policy keeps both.
+- **Registry contracts only in Windows Sandbox:** no CI coverage of the real implementation.
+- **Only the stable system keys:** cannot exercise malformed data, limits or races without writing.
+
+## Consequences
+- `RegValue` changes shape before any journal format exists; no migration needed. Topos keep typed values only.
+- `registry_contract(&dyn System, …)` becomes `registry_write_contract(&dyn Registry, …)` (fake only until phase 2) next to `registry_read_contract(&dyn Registry, &dyn RegFixture, …)` and `registry_system_contract(&dyn Registry, &dyn KnownFolders)`; `known_folders_contract` takes `(&dyn KnownFolders, &dyn Fs)`.
+- New `windows-sys` features: `Win32_System_Registry`, `Win32_UI_Shell`, `Win32_System_Com`, `Win32_System_SystemInformation`. `shell32` and `combase` are KnownDLLs; the helper's DLL hardening (ADR 0008) must run before the first known-folder call.
+- Settled by contract on real Windows, the design does not depend on them: whether an explicit `WOW6432Node` under `Wow32` names the same key, whether links can be created inside an app hive (else that case skips), and the environment independence above.

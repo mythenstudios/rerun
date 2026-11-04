@@ -4,7 +4,10 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::fold::fold;
-use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry};
+use crate::sys::registry::{
+    Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegValue,
+    RegView, Registry, check_key, check_value_name,
+};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
 #[derive(Debug, Clone, Default)]
@@ -24,21 +27,21 @@ pub struct FakeRegistry {
 }
 
 fn map_key(k: &RegKey) -> SysResult<MapKey> {
-    // NUL would truncate the path in Win32 calls; empty segments are invalid.
-    if k.path.contains('\0') || (!k.path.is_empty() && k.path.split('\\').any(str::is_empty)) {
-        return Err(SysError::new(SysErrorKind::InvalidPath, k.to_string()));
-    }
+    check_key(k)?;
     Ok((k.hive, k.view, fold(&k.path)))
 }
 
 fn check_name(k: &RegKey, name: &str) -> SysResult<()> {
-    if name.contains('\0') {
-        return Err(SysError::new(
-            SysErrorKind::InvalidPath,
-            format!("{k} @ {name:?}"),
-        ));
-    }
-    Ok(())
+    check_value_name(k, name)
+}
+
+fn unsupported(k: &RegKey, why: &str) -> SysError {
+    SysError::new(SysErrorKind::Unsupported, format!("{k}: {why}"))
+}
+
+/// Size of a value as stored; a typed value without a canonical encoding has none.
+fn data_len(v: &RegValue) -> usize {
+    v.encode().map_or(0, |(_, d)| d.len())
 }
 
 fn not_found(k: &RegKey) -> SysError {
@@ -95,10 +98,17 @@ impl Registry for FakeRegistry {
         if !Self::exists(&keys, k, &mk) {
             return Err(not_found(k));
         }
-        Ok(keys
+        let value = keys
             .get(&mk)
             .and_then(|n| n.values.get(&fold(name)))
-            .map(|(_, v)| v.clone()))
+            .map(|(_, v)| v.clone());
+        if value
+            .as_ref()
+            .is_some_and(|v| data_len(v) > MAX_VALUE_BYTES)
+        {
+            return Err(unsupported(k, "value larger than 1 MiB"));
+        }
+        Ok(value)
     }
 
     fn values(&self, k: &RegKey) -> SysResult<Vec<(String, RegValue)>> {
@@ -107,10 +117,25 @@ impl Registry for FakeRegistry {
         if !Self::exists(&keys, k, &mk) {
             return Err(not_found(k));
         }
-        Ok(keys
+        let values: Vec<(String, RegValue)> = keys
             .get(&mk)
             .map(|n| n.values.values().cloned().collect())
-            .unwrap_or_default())
+            .unwrap_or_default();
+        if values.len() > MAX_VALUES {
+            return Err(unsupported(k, "too many values"));
+        }
+        let mut total = 0_usize;
+        for (_, v) in &values {
+            let len = data_len(v);
+            if len > MAX_VALUE_BYTES {
+                return Err(unsupported(k, "value larger than 1 MiB"));
+            }
+            total += len;
+        }
+        if total > MAX_VALUES_TOTAL_BYTES {
+            return Err(unsupported(k, "values larger than 16 MiB in total"));
+        }
+        Ok(values)
     }
 
     fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
@@ -119,9 +144,13 @@ impl Registry for FakeRegistry {
         if !Self::exists(&keys, k, &mk) {
             return Err(not_found(k));
         }
-        Ok(Self::child_keys(&keys, &mk)
+        let names: Vec<String> = Self::child_keys(&keys, &mk)
             .map(|n| n.name.clone())
-            .collect())
+            .collect();
+        if names.len() > MAX_SUBKEYS {
+            return Err(unsupported(k, "too many subkeys"));
+        }
+        Ok(names)
     }
 
     fn create_key(&self, k: &RegKey) -> SysResult<bool> {
@@ -151,6 +180,9 @@ impl Registry for FakeRegistry {
     fn set(&self, k: &RegKey, name: &str, v: &RegValue) -> SysResult<()> {
         let mk = map_key(k)?;
         check_name(k, name)?;
+        if v.encode().is_none() {
+            return Err(unsupported(k, "value has no canonical encoding"));
+        }
         let mut keys = self.lock();
         if !Self::exists(&keys, k, &mk) {
             return Err(not_found(k));

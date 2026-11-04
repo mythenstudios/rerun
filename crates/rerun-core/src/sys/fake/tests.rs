@@ -1154,6 +1154,197 @@ fn empty_path_segments_are_rejected() {
     );
 }
 
+#[test]
+fn registry_input_rules_apply_to_every_method() {
+    let sys = FakeSystem::builder().key(hkcu("Software")).build().unwrap();
+    let reg = sys.registry();
+    let key = |p: &str| RegKey {
+        hive: Hive::CurrentUser,
+        view: RegView::Native,
+        path: p.into(),
+    };
+    let seg = "a".repeat(256);
+    let bad_keys = [
+        key("A\0B"),
+        key(&format!("Software\\{seg}")),
+        key(&vec!["a".repeat(255); 129].join("\\")),
+        key("Software\\"),
+    ];
+    for k in &bad_keys {
+        let v = RegValue::Dword(1);
+        let kinds = [
+            reg.key_exists(k).map(drop),
+            reg.get(k, "x").map(drop),
+            reg.values(k).map(drop),
+            reg.subkeys(k).map(drop),
+            reg.create_key(k).map(drop),
+            reg.set(k, "x", &v),
+            reg.delete_value(k, "x"),
+            reg.delete_key(k),
+        ];
+        for r in kinds {
+            assert_eq!(
+                r.unwrap_err().kind,
+                SysErrorKind::InvalidPath,
+                "{}",
+                k.path.len()
+            );
+        }
+    }
+    let k = hkcu("Software");
+    let long_name = "n".repeat(16_384);
+    for name in ["a\0b", long_name.as_str()] {
+        assert_eq!(
+            reg.get(&k, name).unwrap_err().kind,
+            SysErrorKind::InvalidPath
+        );
+        assert_eq!(
+            reg.set(&k, name, &RegValue::Dword(1)).unwrap_err().kind,
+            SysErrorKind::InvalidPath
+        );
+        assert_eq!(
+            reg.delete_value(&k, name).unwrap_err().kind,
+            SysErrorKind::InvalidPath
+        );
+    }
+    // Exactly at the limits works.
+    let ok_name = "n".repeat(16_383);
+    reg.set(&k, &ok_name, &RegValue::Dword(1)).unwrap();
+    assert_eq!(reg.get(&k, &ok_name).unwrap(), Some(RegValue::Dword(1)));
+    reg.create_key(&k.join(&"a".repeat(255))).unwrap();
+}
+
+#[test]
+fn a_typed_value_without_canonical_encoding_is_refused() {
+    let sys = FakeSystem::builder().key(hkcu("Software")).build().unwrap();
+    let k = hkcu("Software");
+    for v in [
+        RegValue::String("a\0b".into()),
+        RegValue::MultiString(vec![String::new()]),
+    ] {
+        assert_eq!(
+            sys.registry().set(&k, "v", &v).unwrap_err().kind,
+            SysErrorKind::Unsupported
+        );
+    }
+    assert!(sys.registry().get(&k, "v").unwrap().is_none());
+}
+
+#[test]
+fn raw_values_are_kept_exactly_and_snapshotted() {
+    let key = hkcu(r"Software\Raw");
+    let sys = FakeSystem::builder()
+        .raw_value(key.clone(), "none", 0, &[1, 2, 3])
+        .raw_value(key.clone(), "bigendian", 5, &[0, 0, 0, 1])
+        .raw_value(key.clone(), "odd_sz", 1, &[b'a', 0, 0])
+        .raw_value(key.clone(), "canonical", 4, &[1, 0, 0, 0])
+        .build()
+        .unwrap();
+    let reg = sys.registry();
+    let get = |n: &str| reg.get(&key, n).unwrap().unwrap().encode().unwrap();
+    assert_eq!(get("none"), (0, vec![1, 2, 3]));
+    assert_eq!(get("bigendian"), (5, vec![0, 0, 0, 1]));
+    assert_eq!(get("odd_sz"), (1, vec![b'a', 0, 0]));
+    assert_eq!(
+        reg.get(&key, "canonical").unwrap(),
+        Some(RegValue::Dword(1))
+    );
+    assert!(matches!(
+        reg.get(&key, "NONE").unwrap(),
+        Some(RegValue::Raw(_))
+    ));
+
+    // A snapshot tells two raw values apart, so a revert can restore the exact bytes.
+    let scope = Scope {
+        dirs: vec![],
+        keys: vec![key.clone()],
+    };
+    let before = snapshot(&sys, &scope).unwrap();
+    reg.set(&key, "none", &RegValue::decode(0, &[1, 2, 4]))
+        .unwrap();
+    assert_eq!(before.diff(&snapshot(&sys, &scope).unwrap()).len(), 1);
+    reg.set(&key, "none", &RegValue::decode(0, &[1, 2, 3]))
+        .unwrap();
+    assert_eq!(before, snapshot(&sys, &scope).unwrap());
+    // Same bytes under another type number differ as well.
+    reg.set(&key, "none", &RegValue::decode(8, &[1, 2, 3]))
+        .unwrap();
+    assert_eq!(before.diff(&snapshot(&sys, &scope).unwrap()).len(), 1);
+}
+
+#[test]
+fn reads_refuse_hostile_amounts_of_data() {
+    let key = hkcu(r"Software\Big");
+    let mib = || vec![7_u8; 1 << 20];
+
+    // One value: 1 MiB is fine, one byte more is not (get and values).
+    let sys = FakeSystem::builder()
+        .raw_value(key.clone(), "ok", 3, &mib())
+        .build()
+        .unwrap();
+    assert!(sys.registry().get(&key, "ok").unwrap().is_some());
+    assert_eq!(sys.registry().values(&key).unwrap().len(), 1);
+    let mut over = mib();
+    over.push(0);
+    sys.registry()
+        .set(&key, "over", &RegValue::decode(3, &over))
+        .unwrap();
+    assert_eq!(
+        sys.registry().get(&key, "over").unwrap_err().kind,
+        SysErrorKind::Unsupported
+    );
+    assert_eq!(
+        sys.registry().values(&key).unwrap_err().kind,
+        SysErrorKind::Unsupported
+    );
+    // Other values stay readable one by one.
+    assert!(sys.registry().get(&key, "ok").unwrap().is_some());
+
+    // Total: 16 values of 1 MiB are fine, 17 are not.
+    let mut b = FakeSystem::builder();
+    for i in 0..16 {
+        b = b.raw_value(key.clone(), &format!("v{i}"), 3, &mib());
+    }
+    let sys = b.build().unwrap();
+    assert_eq!(sys.registry().values(&key).unwrap().len(), 16);
+    sys.registry()
+        .set(&key, "v16", &RegValue::decode(3, &[0]))
+        .unwrap();
+    assert_eq!(
+        sys.registry().values(&key).unwrap_err().kind,
+        SysErrorKind::Unsupported
+    );
+
+    // Count: 16,384 values are fine, one more is not.
+    let mut b = FakeSystem::builder();
+    for i in 0..16_384 {
+        b = b.value(key.clone(), &format!("v{i}"), RegValue::Dword(1));
+    }
+    let sys = b.build().unwrap();
+    assert_eq!(sys.registry().values(&key).unwrap().len(), 16_384);
+    sys.registry()
+        .set(&key, "one more", &RegValue::Dword(1))
+        .unwrap();
+    assert_eq!(
+        sys.registry().values(&key).unwrap_err().kind,
+        SysErrorKind::Unsupported
+    );
+
+    // Subkeys: 65,536 are fine, one more is not.
+    let sys = FakeSystem::builder().key(key.clone()).build().unwrap();
+    for i in 0..65_536 {
+        sys.registry()
+            .create_key(&key.join(&format!("k{i}")))
+            .unwrap();
+    }
+    assert_eq!(sys.registry().subkeys(&key).unwrap().len(), 65_536);
+    sys.registry().create_key(&key.join("one more")).unwrap();
+    assert_eq!(
+        sys.registry().subkeys(&key).unwrap_err().kind,
+        SysErrorKind::Unsupported
+    );
+}
+
 // ---------- Snapshot ----------
 
 fn game_system() -> FakeSystem {
