@@ -1,4 +1,7 @@
-# rerun_
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="brand/social/readme-header-dark.png">
+  <img alt="rerun" src="brand/social/readme-header-light.png">
+</picture>
 
 Old games. New systems.
 
@@ -16,4 +19,4 @@ Rerun by Mythen Studios.
 
 The Rerun source code is licensed under the [GNU General Public License v3.0 or later](LICENSE) (`GPL-3.0-or-later`).
 Game recipes (topos) and package descriptions will be licensed separately.
-"Rerun" and the Mythen Studios name and logo are not covered by the code license.
+The Rerun name, logo and brand assets in `brand/` are not covered by the code license; see `brand/BRAND.md`.
