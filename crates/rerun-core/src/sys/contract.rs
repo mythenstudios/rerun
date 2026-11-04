@@ -12,8 +12,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::fs::{Attrs, Dir, EntryKind, tag};
+use super::gpu::MAX_NAME_UTF16;
 use super::registry::{RegKey, RegValue};
-use super::{SysErrorKind, SysResult, System};
+use super::{KnownFolder, SysErrorKind, SysResult, System};
 use crate::path::{RelPath, RootPath};
 
 /// Failed contract with a description.
@@ -1052,4 +1053,74 @@ pub fn topology_contract(sys: &dyn System) -> ContractResult {
         t.cpus.iter().all(|c| seen.insert((c.group, c.index))),
         "(group, index) unique",
     )
+}
+
+/// Known-folders contract: every folder resolves, stays the same, is a usable absolute path
+/// and opens as a directory; no two folders are the same.
+///
+/// Deliberately **not** part of the contract: that folders nest (`Common Files` inside
+/// `Program Files`, the profile inside `Users`). All of them can be relocated, so policy
+/// must not rely on it.
+pub fn known_folders_contract(sys: &dyn System) -> ContractResult {
+    let kf = sys.known_folders();
+    let mut seen: Vec<(KnownFolder, RootPath)> = Vec::new();
+    for f in KnownFolder::ALL {
+        let what = format!("known folder {f}");
+        let p = ok(kf.get(f), &what)?;
+        ensure(
+            ok(kf.get(f), &what)? == p,
+            &format!("{what} is stable across calls"),
+        )?;
+        let s = p
+            .to_str()
+            .ok_or(format!("contract violated: {what} is not Unicode"))?;
+        // Folder redirection may move Roaming to a share; that is never a game root.
+        if f == KnownFolder::RoamingAppData && s.starts_with(r"\\") {
+            ensure(
+                !s.starts_with(r"\\?\") && !s.starts_with(r"\\.\"),
+                &format!("{what} is a plain UNC path, not a device path"),
+            )?;
+            continue;
+        }
+        let root = RootPath::new(&p)
+            .map_err(|e| format!("contract violated: {what} is a drive-letter path: {e}"))?;
+        if let Some((other, _)) = seen.iter().find(|(_, r)| *r == root) {
+            return Err(format!(
+                "contract violated: {what} differs from known folder {other}"
+            ));
+        }
+        let dir = ok(sys.fs().open_dir(&p), &format!("open {what}"))?;
+        let info = ok(dir.info(), &format!("info {what}"))?;
+        ensure(
+            RootPath::from_final_path(&info.final_path).is_ok(),
+            &format!("{what} has a drive-letter final path"),
+        )?;
+        seen.push((f, root));
+    }
+    Ok(())
+}
+
+/// GPU contract: at least one adapter (Windows always lists the Microsoft Basic Render
+/// Driver), stable across calls, names fit the DXGI field, LUIDs are unique.
+pub fn gpu_contract(sys: &dyn System) -> ContractResult {
+    let adapters = ok(sys.gpu().adapters(), "gpu adapters")?;
+    ensure(!adapters.is_empty(), "at least one adapter")?;
+    ensure(
+        ok(sys.gpu().adapters(), "gpu adapters again")? == adapters,
+        "adapter list is stable across calls",
+    )?;
+    let mut luids = std::collections::BTreeSet::new();
+    for a in &adapters {
+        ensure(!a.name.is_empty(), "adapter name is not empty")?;
+        ensure(
+            a.name.encode_utf16().count() < MAX_NAME_UTF16,
+            "adapter name fits the DXGI field",
+        )?;
+        ensure(
+            !a.name.chars().any(char::is_control),
+            "adapter name has no control characters",
+        )?;
+        ensure(luids.insert(a.luid), "adapter LUIDs are unique")?;
+    }
+    Ok(())
 }

@@ -16,6 +16,8 @@
 //! ```
 
 mod fs;
+mod gpu;
+mod known_folders;
 mod registry;
 mod topology;
 
@@ -24,24 +26,33 @@ use std::path::Path;
 use rerun_proto::cpu::CpuTopology;
 
 pub use fs::{FakeDir, FakeFs, FsOp, StepEvent, StepHook};
+pub use gpu::FakeGpu;
+pub use known_folders::FakeKnownFolders;
 pub use registry::FakeRegistry;
 pub use topology::FakeTopology;
 
 use super::contract::FsFixture;
 use super::fs::{Attrs, tag};
 use super::registry::{RegKey, RegValue};
-use super::{Fs, Registry, SysResult, System, Topology};
+use super::{
+    Fs, Gpu, GpuAdapter, KnownFolder, KnownFolders, Registry, SysErrorKind, SysResult, System,
+    Topology,
+};
 
-/// Fake system made of [`FakeFs`], [`FakeRegistry`] and [`FakeTopology`].
+/// Fake system made of [`FakeFs`], [`FakeRegistry`], [`FakeTopology`],
+/// [`FakeKnownFolders`] and [`FakeGpu`].
 #[derive(Debug, Default)]
 pub struct FakeSystem {
     fs: FakeFs,
     registry: FakeRegistry,
     topology: FakeTopology,
+    known_folders: FakeKnownFolders,
+    gpu: FakeGpu,
 }
 
 impl FakeSystem {
-    /// Empty system (only drive roots and hive roots exist).
+    /// Empty system: only drive roots and hive roots exist, the known folders point to the
+    /// standard layout (without directories), no graphics adapter.
     pub fn new() -> Self {
         Self::default()
     }
@@ -79,6 +90,12 @@ impl System for FakeSystem {
     }
     fn topology(&self) -> &dyn Topology {
         &self.topology
+    }
+    fn known_folders(&self) -> &dyn KnownFolders {
+        &self.known_folders
+    }
+    fn gpu(&self) -> &dyn Gpu {
+        &self.gpu
     }
 }
 
@@ -242,6 +259,48 @@ impl FakeSystemBuilder {
                 }
             }
         }
+        self
+    }
+
+    /// Sets a known folder (default: [`FakeKnownFolders::standard`]).
+    pub fn known_folder(
+        mut self,
+        folder: KnownFolder,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.sys.known_folders.set(folder, path);
+        self
+    }
+
+    /// Removes a known folder; resolving it then fails with `NotFound`.
+    pub fn without_known_folder(mut self, folder: KnownFolder) -> Self {
+        self.sys.known_folders.remove(folder);
+        self
+    }
+
+    /// Creates the directories of all known folders as configured at this point. Call it
+    /// after [`Self::known_folder`]. Network and device paths (`\\…`) are skipped: the
+    /// fake file system only has drive letters.
+    pub fn windows_layout(self) -> Self {
+        let paths: Vec<_> = self
+            .sys
+            .known_folders
+            .paths()
+            .filter(|(_, p)| !p.to_string_lossy().starts_with(r"\\"))
+            .map(|(_, p)| p.clone())
+            .collect();
+        paths.into_iter().fold(self, |b, p| b.dir(p))
+    }
+
+    /// Appends a graphics adapter (DXGI order: the first one drives the primary display).
+    pub fn gpu(mut self, adapter: GpuAdapter) -> Self {
+        self.sys.gpu.push(adapter);
+        self
+    }
+
+    /// Adapter enumeration fails with `kind` (DXGI unavailable).
+    pub fn gpu_error(mut self, kind: SysErrorKind) -> Self {
+        self.sys.gpu.fail_with(kind);
         self
     }
 

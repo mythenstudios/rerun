@@ -30,6 +30,7 @@ assert_eq!(snapshot(&sys, &scope), before)   // on mismatch: before.diff(&after)
   3. Cleanup only after re-checking (1), handle-based and never following links.
   4. Locally the test skips when the process is elevated. On GitHub-hosted runners (admin, ephemeral VM) it runs.
   5. No registry, `%TEMP%` or home-directory paths. The test-only root constructor is gated (`cfg(test)`/`fake` feature) and does not bypass the forbidden-root checks for anything else.
+- **Known folders and GPU contracts** (`known_folders_contract`, `gpu_contract`) only read, so they run against `sys::win` in CI and locally. The fake sets the known folders with `FakeSystemBuilder::known_folder`, creates their directories with `windows_layout()` and adds adapters with `gpu()`; its default has no adapter, which no real machine reports.
 - **Registry, firewall, IFEO and anything outside the temp directory** run only in Windows Sandbox as `#[ignore]` tests.
 - **TOCTOU:** the fake has test hooks that run between two path components of an operation, so a test can swap a directory for a junction mid-operation (ADR 0007). On `sys::win` the swap between two calls is tested. If the fake deviates from the real system, the contract is extended first, then the fake is adjusted. Known, deliberate deviations are listed in `sys/fake/fs.rs`.
 

@@ -11,10 +11,14 @@
 //! - `sys::fake` emulates Win32 semantics (case handling, error kinds, handle identity). The
 //!   contract tests in `sys::contract` check this; they also run against `sys::win`.
 //!
+//! - [`KnownFolders`] never reads environment variables (ADR 0007).
+//!
 //! `Firewall` and `Process` arrive in phase 3, `sys::win` in a later step of phase 1.
 
 mod error;
 pub mod fs;
+pub mod gpu;
+pub mod known_folders;
 pub mod registry;
 pub mod snapshot;
 pub mod topology;
@@ -26,6 +30,8 @@ pub mod fake;
 
 pub use error::{SysError, SysErrorKind, SysResult};
 pub use fs::{Dir, Fs};
+pub use gpu::{DriverVersion, Gpu, GpuAdapter};
+pub use known_folders::{KnownFolder, KnownFolders};
 pub use registry::Registry;
 pub use topology::Topology;
 
@@ -37,6 +43,10 @@ pub trait System: Send + Sync {
     fn registry(&self) -> &dyn Registry;
     /// CPU topology.
     fn topology(&self) -> &dyn Topology;
+    /// Known folders (Windows, Program Files, profile, …).
+    fn known_folders(&self) -> &dyn KnownFolders;
+    /// Graphics adapters.
+    fn gpu(&self) -> &dyn Gpu;
 }
 
 #[cfg(test)]

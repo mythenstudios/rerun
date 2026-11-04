@@ -5,11 +5,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::{FakeFs, FakeSystem, FsOp, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
-    fs_link_contract, fs_read_contract, fs_write_contract, registry_contract, topology_contract,
+    fs_link_contract, fs_read_contract, fs_write_contract, gpu_contract, known_folders_contract,
+    registry_contract, topology_contract,
 };
 use crate::sys::fs::{Attrs, Dir, EntryKind, Fs, FsKind, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView};
 use crate::sys::snapshot::{Scope, snapshot};
+use crate::sys::{DriverVersion, GpuAdapter, KnownFolder};
 use crate::sys::{SysErrorKind, System};
 
 const RYZEN_5950X: &str = include_str!("../../../../../tests/fixtures/cpu/ryzen9-5950x.json");
@@ -79,6 +81,184 @@ fn fixtures_fulfil_topology_contract() {
         let sys = FakeSystem::builder().topology_json(json).build().unwrap();
         topology_contract(&sys).unwrap();
     }
+}
+
+fn adapter(name: &str, luid: u64) -> GpuAdapter {
+    GpuAdapter {
+        name: name.to_owned(),
+        vendor_id: 0x1002,
+        device_id: 0x1234,
+        luid,
+        dedicated_video_memory: 16 << 30,
+        umd_version: Some(DriverVersion([32, 0, 21001, 9])),
+        ..GpuAdapter::default()
+    }
+}
+
+fn basic_render(luid: u64) -> GpuAdapter {
+    GpuAdapter {
+        name: "Microsoft Basic Render Driver".to_owned(),
+        vendor_id: 0x1414,
+        device_id: 0x8c,
+        luid,
+        software: true,
+        ..GpuAdapter::default()
+    }
+}
+
+#[test]
+fn fake_fulfils_known_folders_contract() {
+    let sys = FakeSystem::builder().windows_layout().build().unwrap();
+    known_folders_contract(&sys).unwrap();
+}
+
+#[test]
+fn known_folders_contract_allows_roaming_on_a_share() {
+    let sys = FakeSystem::builder()
+        .known_folder(KnownFolder::RoamingAppData, r"\\server\home\player\Roaming")
+        .windows_layout()
+        .build()
+        .unwrap();
+    known_folders_contract(&sys).unwrap();
+}
+
+#[test]
+fn known_folders_contract_catches_bad_folders() {
+    let cases: [(&str, FakeSystem); 5] = [
+        (
+            "missing folder",
+            FakeSystem::builder()
+                .without_known_folder(KnownFolder::ProgramData)
+                .windows_layout()
+                .build()
+                .unwrap(),
+        ),
+        ("directory missing", FakeSystem::builder().build().unwrap()),
+        (
+            "two folders equal (other case)",
+            FakeSystem::builder()
+                .known_folder(KnownFolder::ProgramFilesX86, r"c:\PROGRAM FILES")
+                .windows_layout()
+                .build()
+                .unwrap(),
+        ),
+        (
+            "share outside Roaming",
+            FakeSystem::builder()
+                .known_folder(KnownFolder::LocalAppData, r"\\server\local")
+                .windows_layout()
+                .build()
+                .unwrap(),
+        ),
+        (
+            "device path for Roaming",
+            FakeSystem::builder()
+                .known_folder(KnownFolder::RoamingAppData, r"\\?\C:\Users\Player\Roaming")
+                .windows_layout()
+                .build()
+                .unwrap(),
+        ),
+    ];
+    for (what, sys) in cases {
+        assert!(known_folders_contract(&sys).is_err(), "{what}");
+    }
+}
+
+#[test]
+fn known_folders_are_configurable() {
+    let sys = FakeSystem::builder()
+        .known_folder(KnownFolder::Profile, r"D:\Profiles\Alice")
+        .without_known_folder(KnownFolder::ProgramFilesX86)
+        .build()
+        .unwrap();
+    let kf = sys.known_folders();
+    assert_eq!(
+        kf.get(KnownFolder::Profile).unwrap(),
+        p(r"D:\Profiles\Alice")
+    );
+    assert_eq!(kf.get(KnownFolder::Windows).unwrap(), p(r"C:\Windows"));
+    assert_eq!(
+        kind(kf.get(KnownFolder::ProgramFilesX86)),
+        SysErrorKind::NotFound
+    );
+}
+
+#[test]
+fn windows_layout_creates_the_configured_directories() {
+    let sys = FakeSystem::builder()
+        .known_folder(KnownFolder::Profile, r"D:\Profiles\Alice")
+        .windows_layout()
+        .build()
+        .unwrap();
+    for f in KnownFolder::ALL {
+        let path = sys.known_folders().get(f).unwrap();
+        assert!(sys.fs().open_dir(&path).is_ok(), "{f}");
+    }
+}
+
+#[test]
+fn fake_fulfils_gpu_contract() {
+    let sys = FakeSystem::builder()
+        .gpu(adapter("Fake Radeon", 1))
+        .gpu(basic_render(2))
+        .build()
+        .unwrap();
+    gpu_contract(&sys).unwrap();
+    let adapters = sys.gpu().adapters().unwrap();
+    assert_eq!(adapters[0].name, "Fake Radeon", "builder keeps DXGI order");
+    assert!(adapters[1].software);
+}
+
+#[test]
+fn gpu_contract_catches_bad_adapters() {
+    let long = "x".repeat(128);
+    let cases: [(&str, FakeSystem); 5] = [
+        ("no adapter", FakeSystem::new()),
+        (
+            "error",
+            FakeSystem::builder()
+                .gpu(basic_render(1))
+                .gpu_error(SysErrorKind::Unsupported)
+                .build()
+                .unwrap(),
+        ),
+        (
+            "duplicate luid",
+            FakeSystem::builder()
+                .gpu(adapter("A", 7))
+                .gpu(adapter("B", 7))
+                .build()
+                .unwrap(),
+        ),
+        (
+            "empty name",
+            FakeSystem::builder().gpu(adapter("", 1)).build().unwrap(),
+        ),
+        (
+            "name too long",
+            FakeSystem::builder()
+                .gpu(adapter(&long, 1))
+                .build()
+                .unwrap(),
+        ),
+    ];
+    for (what, sys) in cases {
+        assert!(gpu_contract(&sys).is_err(), "{what}");
+    }
+    let nul = FakeSystem::builder()
+        .gpu(adapter("A\0B", 1))
+        .build()
+        .unwrap();
+    assert!(gpu_contract(&nul).is_err(), "control character");
+}
+
+#[test]
+fn gpu_error_is_reported() {
+    let sys = FakeSystem::builder()
+        .gpu_error(SysErrorKind::Unsupported)
+        .build()
+        .unwrap();
+    assert_eq!(kind(sys.gpu().adapters()), SysErrorKind::Unsupported);
 }
 
 // ---------- File system ----------
