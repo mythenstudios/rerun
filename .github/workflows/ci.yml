@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+# Actions are pinned by commit SHA (docs/06-security.md). Comment = release tag.
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  deny:
+    name: cargo-deny
+    # The action is a Docker container and only runs on Linux. deny.toml still evaluates
+    # the Windows dependencies via [graph] targets.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
+
+  windows:
+    name: clippy + test (windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows
+      - name: clippy (x64, all features)
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: clippy (i686, without workspace tests)
+        run: cargo clippy -p rerun-cpu -p rerun-proto -p rerun-launch --target i686-pc-windows-msvc --locked -- -D warnings
+      - name: test (incl. schema validation of topos/ and packages/)
+        run: cargo test --workspace --all-features --locked
+      - name: phase 0 acceptance - rerun --help
+        run: cargo run -p rerun-cli --locked -- --help
+      - name: rerun-launch - allowed dependencies
+        run: |
+          deps=$(cargo tree -p rerun-launch -e normal --depth 1 --prefix none --locked \
+            | tail -n +2 | awk '{print $1}' | sort -u | grep -v -x -E 'windows-sys|rerun-proto' || true)
+          if [ -n "$deps" ]; then
+            echo "::error::rerun-launch has disallowed dependencies: $deps"
+            exit 1
+          fi
+      - name: rerun-launch - size < 1 MiB
+        # Built with -p on purpose: feature unification in the workspace would pull in rerun-proto/serde.
+        run: |
+          cargo build -p rerun-launch --release --locked
+          size=$(stat -c %s target/release/rerun-launch.exe)
+          echo "rerun-launch.exe: $size bytes"
+          if [ "$size" -ge 1048576 ]; then
+            echo "::error::rerun-launch.exe is $size bytes (limit 1 MiB)"
+            exit 1
+          fi
+
+  cpu:
+    name: rerun-cpu.asi (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, target: x86_64-pc-windows-msvc }
+          - { arch: x86, target: i686-pc-windows-msvc }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: cpu-${{ matrix.target }}
+      - name: Build
+        run: cargo build -p rerun-cpu --release --target ${{ matrix.target }} --locked
+      - name: Rename to rerun-cpu.asi (ADR 0006)
+        run: |
+          mkdir -p dist/${{ matrix.arch }}
+          cp target/${{ matrix.target }}/release/rerun_cpu.dll dist/${{ matrix.arch }}/rerun-cpu.asi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rerun-cpu-${{ matrix.arch }}
+          path: dist/${{ matrix.arch }}/rerun-cpu.asi
+          if-no-files-found: error
