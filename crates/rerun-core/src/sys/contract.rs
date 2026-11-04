@@ -92,8 +92,9 @@ pub trait FsFixture: Sync {
     /// Creates an empty case-sensitive directory. `Ok(false)` = not available on this
     /// machine.
     fn case_sensitive_dir(&self, p: &Path) -> SysResult<bool>;
-    /// Mounts another, empty volume (own volume serial) in the folder `at`, which is created
-    /// if missing. Files can then be created below it. `Ok(false)` = no second volume.
+    /// Mounts another volume (own volume serial) in the folder `at`, which is created if
+    /// missing. On Windows this is an existing volume of the machine: the contracts never
+    /// create anything below `at` and never list it. `Ok(false)` = no second volume.
     fn mount_volume(&self, at: &Path) -> SysResult<bool>;
     /// Substitutes a drive letter for the existing directory `target` (`subst`) and returns
     /// its root, e.g. `S:\`. `None` = not available.
@@ -634,11 +635,16 @@ fn wof_files(
         "content of a WOF file is unchanged",
     )?;
     let m = ok(root.metadata(&p), "metadata wof")?.ok_or("contract violated: wof file missing")?;
+    // While the wof.sys filter is attached (every Windows 10/11 boot) it hides its own
+    // reparse point: no FILE_ATTRIBUTE_REPARSE_POINT, no tag in FileAttributeTagInformation
+    // or the listing, FSCTL_GET_REPARSE_POINT reports ERROR_NOT_A_REPARSE_POINT. The tag is
+    // only seen without the filter, and then it must be WOF.
     ensure(
         m.kind == EntryKind::File
             && m.len == data.len() as u64
-            && m.reparse.as_ref().is_some_and(|r| r.tag == tag::WOF),
-        "a WOF file is a plain file with the WOF tag",
+            && !m.restricted
+            && m.reparse.as_ref().is_none_or(|r| r.tag == tag::WOF),
+        "a WOF file is a plain file (with the WOF tag only if the filter does not hide it)",
     )
 }
 
@@ -878,15 +884,11 @@ fn link_matrix(
                 skip(skips, skip_name);
                 continue;
             }
+            // Nothing is created below a mount point (another volume): the walk must stop at
+            // the link with `ReparsePoint` whether or not the rest of the path exists there.
             let mut through: Vec<&str> = DIRS[level + 1..].to_vec();
             through.push("game.exe");
             let through_rel = format!("{link_rel}\\{}", through.join("\\"));
-            if kind == Kind::Mount {
-                ok(
-                    fx.file(&store.join(&through_rel), b"inside"),
-                    "fixture below mount",
-                )?;
-            }
             let what = format!("{kind_name} at {}", DIRS[level]);
             let sd = ok(fs.open_dir(&store), "open store")?;
             is_surrogate_with(&*sd, &link_rel, link_tag, &format!("{what}: surrogate"))?;
@@ -914,13 +916,13 @@ pub fn fs_volume_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCon
     let winfo = ok(w.info(), "work info")?;
 
     // I3: a volume mounted in a folder. Opened by absolute path it is a volume root with its
-    // own serial; seen from above it is a name surrogate that is never traversed.
+    // own serial; seen from above it is a name surrogate that is never traversed. Nothing is
+    // created on the mounted volume and its root is not listed (on Windows it is an existing
+    // volume; a volume root holds in-use system files such as `pagefile.sys`). That
+    // `volume_path` counts from the mounted volume's root below it is a fake unit test
+    // (`volume_roots_are_reported`).
     let mnt = work.join("mnt");
     if ok(fx.mount_volume(&mnt), "fixture mount")? {
-        ok(
-            fx.file(&mnt.join("sub").join("x.txt"), b"x"),
-            "fixture file on the mounted volume",
-        )?;
         let m = ok(fs.open_dir(&mnt), "open mount point absolute")?;
         let mi = ok(m.info(), "mount info")?;
         ensure(
@@ -931,14 +933,7 @@ pub fn fs_volume_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCon
             mi.volume_serial != winfo.volume_serial,
             "a mounted volume has its own serial",
         )?;
-        let si = ok(
-            ok(fs.open_dir(&mnt.join("sub")), "open below the mount")?.info(),
-            "sub info",
-        )?;
-        ensure(
-            si.volume_path == "sub" && si.volume_serial == mi.volume_serial,
-            "volume_path counts from the mounted volume's root",
-        )?;
+        drop(m);
         is_surrogate_with(
             &*w,
             "mnt",
@@ -1091,6 +1086,28 @@ pub fn fs_race_contract(
     );
     let name_p = rel(NAME)?;
 
+    // A rename by path, retried while it is refused because of the probe: on Windows a
+    // directory cannot be renamed while a handle below it was opened without
+    // `FILE_SHARE_DELETE` (`open_read` shares read only), which yields `AccessDenied` or
+    // `Busy`. Retrying keeps every flip complete; the probe stops before the flipper, so
+    // the retries end.
+    let flip = |from: &Path, to: &Path, what: &str| -> ContractResult {
+        let since = Instant::now();
+        loop {
+            match fx.rename(from, to) {
+                Ok(()) => return Ok(()),
+                Err(e)
+                    if matches!(e.kind, SysErrorKind::AccessDenied | SysErrorKind::Busy)
+                        && since.elapsed() < Duration::from_secs(10) =>
+                {
+                    thread::yield_now();
+                }
+                Err(e) => {
+                    return Err(format!("contract violated: {what}: unexpected error {e}"));
+                }
+            }
+        }
+    };
     let stop = AtomicBool::new(false);
     let probe: ContractResult = thread::scope(|scope| {
         let flipper = scope.spawn(|| -> Result<u64, String> {
@@ -1104,23 +1121,14 @@ pub fn fs_race_contract(
                     at.join(format!("{}.link", CHAIN[level])),
                 );
                 // Real -> junction: the name now leads outside, with a gap in between.
-                ok(
-                    fx.rename(&real, &aside),
-                    "flip: move the real directory away",
-                )?;
+                flip(&real, &aside, "flip: move the real directory away")?;
                 thread::yield_now();
-                ok(
-                    fx.rename(&link, &real),
-                    "flip: put the junction in its place",
-                )?;
+                flip(&link, &real, "flip: put the junction in its place")?;
                 thread::yield_now();
                 thread::yield_now();
                 // And back.
-                ok(fx.rename(&real, &link), "flip: take the junction away")?;
-                ok(
-                    fx.rename(&aside, &real),
-                    "flip: put the real directory back",
-                )?;
+                flip(&real, &link, "flip: take the junction away")?;
+                flip(&aside, &real, "flip: put the real directory back")?;
                 flips += 1;
                 level = (level + 1) % CHAIN.len();
             }
@@ -1165,7 +1173,12 @@ pub fn fs_race_contract(
                     }
                 }
                 if let Some(h) = racing(root.open_dir(&dir_p), "open_dir")? {
-                    forbidden.id(ok(h.info(), "info through the handle")?.file_id, "open_dir")?;
+                    // `info` resolves the current path of the handle; while an ancestor is
+                    // renamed that can fail with `NotFound` (sys::win retries a bounded number
+                    // of times). Never a wrong identity.
+                    if let Some(i) = racing(h.info(), "info through the handle")? {
+                        forbidden.id(i.file_id, "open_dir")?;
+                    }
                     if let Some(entries) = racing(h.read_dir(None), "read_dir through handle")? {
                         ensure(
                             entries.iter().all(|e| e.name != NAME),

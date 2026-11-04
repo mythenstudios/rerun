@@ -28,7 +28,8 @@
 //! - Link targets are stored strings. `Fs::open_dir` resolves absolute and relative targets
 //!   lexically (at most 32 levels) and follows directory and file links alike.
 //! - Allowlisted data tags (WOF, dedup, cloud) only mark the entry: content is read directly,
-//!   there is no hydration and no reopen without `FILE_OPEN_REPARSE_POINT`.
+//!   there is no hydration and no reopen without `FILE_OPEN_REPARSE_POINT`. A WOF-tagged file
+//!   shows its tag; on Windows `wof.sys` hides it (the contract accepts both).
 //! - A volume mounted in a folder ([`FakeFs::set_volume_root`]) is a mount point seen from
 //!   above, like on Windows: below a root it is a name surrogate (`Dir::metadata` reports
 //!   `Reparse` with the `MOUNT_POINT` tag, operations through it return `ReparsePoint`), and

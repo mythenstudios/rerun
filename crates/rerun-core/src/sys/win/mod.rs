@@ -19,6 +19,10 @@
 //!
 //! `unsafe` lives only in `nt` and `token`. Path-based Win32 file APIs (`CreateFileW`,
 //! `DeleteFileW`, `MoveFileExW`, `GetFileAttributesW`, …) are banned in `clippy.toml`.
+//!
+//! Test only: `testfx` (test root with the `docs/09-testing.md` safeguards, the `FsFixture`
+//! for real Windows, the naive control `Fs`; path-based calls and `unsafe` FFI allowed there)
+//! and `tests` (smoke tests and the contract runners).
 
 mod fs;
 mod name;
@@ -26,6 +30,9 @@ mod nt;
 mod reparse;
 mod status;
 mod token;
+
+#[cfg(test)]
+mod testfx;
 
 #[cfg(test)]
 mod tests;

@@ -1,62 +1,44 @@
-//! Smoke test of the read-only `sys::win` file system on the developer's own volume.
+//! Tests of the read-only `sys::win` file system on the developer's own volume and on GitHub
+//! runners: smoke tests and the `sys::contract` file system contracts against real Windows.
 //!
-//! Everything happens in a fresh directory below the workspace `target/` folder, created and
-//! removed with `std::fs` by the test itself (asserted to be inside `target/`). The full
-//! contract against real Windows (TOCTOU races, junctions, WOF, 8.3 names) is `sys::contract`
-//! in a later step.
+//! Every test works in a fresh [`TestRoot`] below the cargo `target/` directory (safeguards in
+//! `docs/09-testing.md`); a locally elevated process skips them.
 
 #![allow(
     clippy::disallowed_methods,
-    reason = "test fixture under target/: std::fs sets up and removes the directory, \
-              Fs::open_dir opens it"
+    reason = "test fixture under target/: std::fs sets up the tree, Fs::open_dir opens it"
 )]
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use super::WinFs;
+use super::testfx::{NaiveFs, TestRoot, ci, note, workflow_warning};
 use crate::path::RelPath;
 use crate::sys::SysErrorKind;
+use crate::sys::contract::{
+    FsContractResult, FsFixture, fs_link_read_contract, fs_race_contract, fs_read_contract,
+    fs_volume_contract,
+};
 use crate::sys::fs::{EntryKind, Fs};
 
-/// A fresh directory below `<workspace>/target/win-fs-smoke`, removed on drop.
-struct Fixture(PathBuf);
+/// A [`TestRoot`] for the smoke tests; `.0` is its verbatim path (`\\?\X:\…`), as
+/// `final_path` reports it.
+struct Fixture(
+    PathBuf,
+    #[expect(dead_code, reason = "held for its drop, which removes the tree")] TestRoot,
+);
 
 impl Fixture {
-    fn new() -> Self {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let target = manifest.join("../../target");
-        let base = target.join("win-fs-smoke");
-        std::fs::create_dir_all(&base).unwrap();
-        let target = std::fs::canonicalize(target).unwrap();
-        let base = std::fs::canonicalize(base).unwrap();
-        assert!(
-            base.starts_with(&target),
-            "{} not in {}",
-            base.display(),
-            target.display()
-        );
-        let dir = base.join(format!(
-            "{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        assert!(dir.starts_with(&target));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
-        Self(dir)
+    fn new(case: &str) -> Option<Self> {
+        let root = TestRoot::new(case)?;
+        let verbatim = PathBuf::from(format!(r"\\?\{}", root.path().display()));
+        Some(Self(verbatim, root))
     }
 
     fn path(&self, rel: &str) -> PathBuf {
         self.0.join(rel)
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -73,7 +55,9 @@ fn kind_of<T>(r: Result<T, crate::sys::SysError>) -> SysErrorKind {
 
 #[test]
 fn read_only_walk_metadata_and_identity() {
-    let fx = Fixture::new();
+    let Some(fx) = Fixture::new("smoke-walk") else {
+        return;
+    };
     std::fs::write(fx.path("a.txt"), b"hello").unwrap();
     std::fs::hard_link(fx.path("a.txt"), fx.path("link.txt")).unwrap();
     std::fs::create_dir(fx.path("Sub")).unwrap();
@@ -182,7 +166,9 @@ fn read_only_walk_metadata_and_identity() {
 
 #[test]
 fn absolute_open_input_rules() {
-    let fx = Fixture::new();
+    let Some(fx) = Fixture::new("smoke-abs") else {
+        return;
+    };
     std::fs::write(fx.path("f"), b"").unwrap();
     let fs = WinFs::new();
     let s = fx.0.to_str().unwrap().to_owned();
@@ -234,7 +220,9 @@ fn absolute_open_input_rules() {
 
 #[test]
 fn concurrent_writer_is_busy_and_rename_keeps_the_handle() {
-    let fx = Fixture::new();
+    let Some(fx) = Fixture::new("smoke-busy") else {
+        return;
+    };
     std::fs::write(fx.path("w.log"), b"x").unwrap();
     std::fs::create_dir(fx.path("d")).unwrap();
     let fs = WinFs::new();
@@ -274,7 +262,9 @@ fn concurrent_writer_is_busy_and_rename_keeps_the_handle() {
 /// Needs the symlink privilege or developer mode; skipped (with a note) otherwise.
 #[test]
 fn symlinks_are_never_followed_below_a_root() {
-    let fx = Fixture::new();
+    let Some(fx) = Fixture::new("smoke-symlink") else {
+        return;
+    };
     std::fs::create_dir(fx.path("real")).unwrap();
     std::fs::write(fx.path(r"real\x"), b"x").unwrap();
     if let Err(e) = std::os::windows::fs::symlink_dir("real", fx.path("link")) {
@@ -316,4 +306,167 @@ fn symlinks_are_never_followed_below_a_root() {
         .info()
         .unwrap();
     assert_eq!(via.final_path, fx.path("real"));
+}
+
+// ---------- Contracts against real Windows ----------
+
+/// Skips that are acceptable on a GitHub runner (warnings): no second NTFS volume, 8.3 names
+/// disabled, no WOF. Any other skip there fails the test.
+const CI_TOLERATED: [&str; 3] = ["mount_volume", "short_name", "wof_compress"];
+
+/// Reports the skips of a contract run: on GitHub runners a skip outside [`CI_TOLERATED`]
+/// panics and the tolerated ones become `::warning::` lines; locally each skip is a note.
+fn report(case: &str, result: FsContractResult) {
+    let skips = result.unwrap_or_else(|e| panic!("{case}: {e}"));
+    for s in skips {
+        if !ci() {
+            note(&format!(
+                "note: {case}: skipped {s} (not available on this machine)"
+            ));
+        } else if CI_TOLERATED.contains(&s) {
+            workflow_warning(&format!(
+                "fs contract {case}: {s} skipped (not available on this runner)"
+            ));
+        } else {
+            panic!("{case}: {s} skipped on a GitHub runner (every runner must support it)");
+        }
+    }
+}
+
+#[test]
+fn win_fulfils_fs_read_contract() {
+    let Some(root) = TestRoot::new("read") else {
+        return;
+    };
+    let work = root.work("w");
+    report(
+        "fs_read_contract",
+        fs_read_contract(&WinFs::new(), root.fx(), &work),
+    );
+}
+
+#[test]
+fn win_fulfils_fs_link_read_contract() {
+    let Some(root) = TestRoot::new("link-read") else {
+        return;
+    };
+    let work = root.work("w");
+    report(
+        "fs_link_read_contract",
+        fs_link_read_contract(&WinFs::new(), root.fx(), &work),
+    );
+}
+
+#[test]
+fn win_fulfils_fs_volume_contract() {
+    let Some(root) = TestRoot::new("volume") else {
+        return;
+    };
+    let work = root.work("w");
+    report(
+        "fs_volume_contract",
+        fs_volume_contract(&WinFs::new(), root.fx(), &work),
+    );
+}
+
+/// The race harness must catch the naive implementation within this time.
+const TEETH: Duration = Duration::from_secs(30);
+
+/// A race contract failure that is a leak (canary content, file ID or name), not a harness
+/// problem (flipper error, unexpected error kind).
+fn is_leak(e: &str) -> bool {
+    e.contains("race:") && !e.contains("unexpected error") && !e.contains("flip")
+}
+
+#[test]
+fn win_fulfils_fs_race_contract_and_the_harness_has_teeth() {
+    let Some(root) = TestRoot::new("race") else {
+        return;
+    };
+    // Control: the check-then-use-by-path implementation must be caught.
+    let started = Instant::now();
+    let mut attempt = 0u32;
+    let caught = loop {
+        let work = root.work(&format!("naive-{attempt}"));
+        attempt += 1;
+        match fs_race_contract(&NaiveFs, root.fx(), &work, Duration::from_millis(500)) {
+            Err(e) if is_leak(&e) => break started.elapsed(),
+            Err(e) => panic!("race harness broken against NaiveFs: {e}"),
+            Ok(_) => {}
+        }
+        assert!(
+            started.elapsed() < TEETH,
+            "harness lost its teeth: the naive implementation was not caught within {TEETH:?}"
+        );
+    };
+    let budget = (caught * 10).max(Duration::from_secs(5));
+    note(&format!(
+        "note: race: NaiveFs caught after {caught:?} ({attempt} attempts); WinFs runs {budget:?}"
+    ));
+    let work = root.work("win");
+    report(
+        "fs_race_contract",
+        fs_race_contract(&WinFs::new(), root.fx(), &work, budget),
+    );
+}
+
+#[test]
+fn win_dir_write_methods_are_unsupported() {
+    let Some(root) = TestRoot::new("read-only") else {
+        return;
+    };
+    let fx = root.fx();
+    let base = root.path();
+    fx.file(&base.join("a.txt"), b"a").unwrap();
+    fx.dir(&base.join("d")).unwrap();
+    let fs = WinFs::new();
+    let dir = fs.open_dir(base).unwrap();
+    let (a, n) = (rel("a.txt"), rel("new"));
+    for (what, r) in [
+        ("create_new", dir.create_new(&n, b"x")),
+        ("replace", dir.replace(&a, b"x", "a.tmp")),
+        ("create_dir", dir.create_dir(&n)),
+        ("remove_file", dir.remove_file(&a)),
+        ("remove_dir", dir.remove_dir(&rel("d"))),
+        ("rename", dir.rename(&a, &n)),
+        ("set_readonly", dir.set_readonly(&a, true)),
+    ] {
+        let e = r.expect_err(what);
+        assert_eq!(e.kind, SysErrorKind::Unsupported, "{what}");
+        assert!(e.target.contains("read-only in phase 1"), "{what}: {e}");
+    }
+    assert_eq!(dir.read(&a).unwrap(), b"a");
+    assert!(dir.metadata(&n).unwrap().is_none());
+    let names: Vec<String> = dir
+        .read_dir(None)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+}
+
+/// The runner's cleanup (`std::fs::remove_dir_all` in `TestRoot`'s drop) removes a junction
+/// itself and never what it points to, also for a junction to a directory outside the root.
+#[test]
+fn cleanup_never_follows_a_junction() {
+    let Some(keep) = TestRoot::new("cleanup-keep") else {
+        return;
+    };
+    let canary = keep.path().join("canary.txt");
+    keep.fx().file(&canary, b"canary").unwrap();
+    {
+        let doomed = TestRoot::new("cleanup-doomed").unwrap();
+        let fx = doomed.fx();
+        fx.junction(&doomed.path().join("j"), keep.path()).unwrap();
+        fx.junction(&doomed.path().join(r"deep\er\j"), keep.path())
+            .unwrap();
+        // Restricted entries are restored before the removal.
+        fx.file(&doomed.path().join("locked.txt"), b"x").unwrap();
+        assert!(fx.restricted(&doomed.path().join("locked.txt")).unwrap());
+        let gone = doomed.path().to_path_buf();
+        drop(doomed);
+        assert!(!gone.exists(), "{} was not removed", gone.display());
+    }
+    assert_eq!(std::fs::read(&canary).unwrap(), b"canary");
 }

@@ -32,7 +32,8 @@ use super::name::{self, DirLayout, Listed, Seg16};
 use super::nt::{self, Access, RelOpen};
 use super::reparse;
 use super::status::{
-    NtStatus, STATUS_UNSUCCESSFUL, is_unsupported_class, nt_error, win32_error, win32_info_error,
+    NtStatus, STATUS_UNSUCCESSFUL, is_unsupported_class, kind_of_ntstatus, nt_error, win32_error,
+    win32_info_error,
 };
 use super::token;
 use crate::path::RelPath;
@@ -497,7 +498,10 @@ impl Dir for WinDir {
         if standard(h, t)?.delete_pending {
             return Err(err(SysErrorKind::NotFound, t));
         }
-        let final_path = nt::final_path(h).map_err(|c| win32_error(c, t))?;
+        // Name-based queries resolve the current path component by component; a concurrent
+        // rename of an ancestor makes them fail transiently (found by the race contract).
+        let final_path =
+            settle(|| nt::final_path(h), |&c| matches!(c, 2 | 3)).map_err(|c| win32_error(c, t))?;
         let final_path = PathBuf::from(OsString::from_wide(&final_path));
         if !is_drive_final_path(&final_path) {
             return Err(err(SysErrorKind::Other, &final_path.display().to_string()));
@@ -510,7 +514,11 @@ impl Dir for WinDir {
             Err(s) => return Err(nt_error(s, t)),
         };
         // D6: only FileNormalizedNameInformation, no fallback.
-        let normalized = name_info(h, FileNormalizedNameInformation).map_err(|s| nt_error(s, t))?;
+        let normalized = settle(
+            || name_info(h, FileNormalizedNameInformation),
+            |&s| kind_of_ntstatus(s) == SysErrorKind::NotFound,
+        )
+        .map_err(|s| nt_error(s, t))?;
         let volume_path =
             name::volume_path(&normalized).ok_or_else(|| err(SysErrorKind::Other, t))?;
         let (fs_name, flags) = nt::volume_info(h).map_err(|c| win32_info_error(c, t))?;
@@ -631,6 +639,28 @@ impl Dir for WinDir {
 
     fn set_readonly(&self, _: &RelPath, _: bool) -> SysResult<()> {
         Err(err(SysErrorKind::Unsupported, READ_ONLY))
+    }
+}
+
+/// Attempts of [`settle`].
+const SETTLE_ATTEMPTS: u32 = 32;
+
+/// Retries a name-based query of a live handle while it fails with a `transient` error (an
+/// ancestor is being renamed at that moment), at most [`SETTLE_ATTEMPTS`] times, yielding in
+/// between. The last error is returned; a deleted handle is caught before by `info`.
+fn settle<T, E>(
+    mut f: impl FnMut() -> Result<T, E>,
+    transient: impl Fn(&E) -> bool,
+) -> Result<T, E> {
+    let mut attempt = 1;
+    loop {
+        match f() {
+            Err(e) if transient(&e) && attempt < SETTLE_ATTEMPTS => {
+                attempt += 1;
+                std::thread::yield_now();
+            }
+            r => return r,
+        }
     }
 }
 

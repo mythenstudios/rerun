@@ -12,7 +12,10 @@
 //!   `ReparsePoint`. Deleting such an entry itself is allowed.
 //! - Entries with an allowlisted data tag ([`tag::is_allowed_data_tag`]: WOF, dedup, cloud
 //!   files) behave like normal files and directories and carry the tag in
-//!   [`Metadata::reparse`].
+//!   [`Metadata::reparse`] as far as Windows reports it: while the `wof.sys` filter is
+//!   attached (every normal boot) it hides its own reparse point, so a WOF-compressed file
+//!   (CompactGUI, `compact /exe`) looks like a plain file without a tag and reads its
+//!   uncompressed content (contract `fs_read_contract`, WOF case).
 //! - A handle refers to an object, not a name: it stays valid when the directory or one of
 //!   its parents is renamed. [`Dir::info`] computes the path at call time.
 //! - Writes into a case-sensitive directory return `Unsupported`.
@@ -231,6 +234,11 @@ pub trait Fs: Send + Sync {
 /// An opened directory. All paths are relative to it and never follow reparse points.
 pub trait Dir: Send + Sync + std::fmt::Debug {
     /// Identity of this directory, computed at call time. `NotFound` if it was deleted.
+    ///
+    /// `sys::win` resolves `final_path` and `volume_path` component by component; while an
+    /// ancestor is being renamed at that moment the query can fail. It is retried a bounded
+    /// number of times; if the race persists, `info` returns `NotFound` (callers fail closed,
+    /// an identity is never guessed).
     fn info(&self) -> SysResult<RootInfo>;
 
     /// Opens a subdirectory relative to this handle. Never follows reparse points.
