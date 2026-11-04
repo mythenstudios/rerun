@@ -146,6 +146,30 @@ fn the_ryzen_9_5950x_dump_is_2_l3_by_8_cores_by_2_threads() {
     }
 }
 
+/// The dump scrubber zeroes every CPU Set byte the parser does not read (`20..Size`), so a
+/// committed dump carries no per-chip values such as `SchedulingClass` (ADR 0010).
+#[test]
+fn committed_dumps_carry_only_the_cpu_set_bytes_the_parser_reads() {
+    use rerun_proto::cpu::parse::layout::{CPU_SET_MIN_SIZE, CPU_SET_SIZE};
+    for (name, r) in raws() {
+        let mut at = 0;
+        let mut records = 0;
+        while at < r.cpu_sets.len() {
+            let s = &r.cpu_sets[at + CPU_SET_SIZE..at + CPU_SET_SIZE + 4];
+            let size = usize::try_from(u32::from_le_bytes([s[0], s[1], s[2], s[3]])).unwrap();
+            assert!(size >= CPU_SET_MIN_SIZE, "{name}: record at {at}");
+            let unread = &r.cpu_sets[at + CPU_SET_MIN_SIZE..at + size];
+            assert!(
+                unread.iter().all(|&b| b == 0),
+                "{name}: record at {at} has non-zero unread bytes {unread:02x?}"
+            );
+            at += size;
+            records += 1;
+        }
+        assert!(records > 0, "{name}: no cpu set records");
+    }
+}
+
 /// xorshift64*, so the loop is the same on every machine (no proptest dependency).
 struct Rng(u64);
 

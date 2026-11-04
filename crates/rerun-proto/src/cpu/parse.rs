@@ -98,6 +98,10 @@ pub mod layout {
 
 use layout as l;
 
+/// Largest buffer [`CpuTopology::from_windows`] accepts, and the cap of every FFI that
+/// fills one (`rerun-core::sys::win::cpu`): 1 MiB, about 32,000 CPU Set records.
+pub const MAX_BUFFER: usize = 1 << 20;
+
 /// `CPU_SET_INFORMATION_TYPE::CpuSetInformation`.
 pub const CPU_SET_INFORMATION: u32 = 0;
 /// `LOGICAL_PROCESSOR_RELATIONSHIP::RelationProcessorCore`.
@@ -243,8 +247,12 @@ impl Rec<'_> {
 /// A record: its byte offset in the buffer, its type and its bytes (exactly `Size` long).
 type Record<'a> = (usize, u32, &'a [u8]);
 
+/// Smallest record of either buffer: its `Size` and type fields.
+const HEADER: usize = 8;
+
 /// Splits `buf` into records `(offset, type, bytes)`; the size field is at `size_at`, the type
-/// at `type_at`. Checks that every header fits, `Size != 0` and the record fits.
+/// at `type_at`. Checks that every header fits, `Size != 0`, `Size` covers the header and the
+/// record fits; the type is read from the record's own bytes.
 fn records(
     buf: &[u8],
     source: Source,
@@ -255,18 +263,25 @@ fn records(
     let mut offset = 0;
     while offset < buf.len() {
         let rest = &buf[offset..];
-        if rest.len() < 8 {
+        if rest.len() < HEADER {
             return Err(TopologyError::Truncated { source, offset });
         }
-        let head = Rec(rest);
-        let size = usize::try_from(head.u32(size_at)).unwrap_or(usize::MAX);
+        let size = usize::try_from(Rec(rest).u32(size_at)).unwrap_or(usize::MAX);
         if size == 0 {
             return Err(TopologyError::ZeroSize { source, offset });
+        }
+        if size < HEADER {
+            return Err(TopologyError::RecordTooSmall {
+                source,
+                offset,
+                size,
+                min: HEADER,
+            });
         }
         let Some(bytes) = rest.get(..size) else {
             return Err(TopologyError::Truncated { source, offset });
         };
-        out.push((offset, head.u32(type_at), bytes));
+        out.push((offset, Rec(bytes).u32(type_at), bytes));
         offset += size;
     }
     Ok(out)
@@ -476,10 +491,27 @@ fn bijective<A: Ord + Copy, B: Ord + Copy>(pairs: impl Iterator<Item = (A, B)>) 
 
 impl CpuTopology {
     /// Parses the bytes of `GetSystemCpuSetInformation(Process = NULL)` and
-    /// `GetLogicalProcessorInformationEx(RelationAll)` (64-bit layout, only the returned
-    /// length) into a validated topology. See the module documentation for the rules; any
-    /// malformed record, failed [`Check`] or violated invariant is an error.
+    /// `GetLogicalProcessorInformationEx(RelationAll)` (only the returned length) into a
+    /// validated topology. See the module documentation for the rules; any malformed record,
+    /// failed [`Check`] or violated invariant is an error, as is a buffer larger than
+    /// [`MAX_BUFFER`].
+    ///
+    /// The input must be in the **x64 layout** (`KAFFINITY` = 8 bytes), whatever the pointer
+    /// width of the process running the parser: a 32-bit process receives a different layout
+    /// from Windows, so every FFI that feeds this function must refuse to build or run as
+    /// anything but a 64-bit process (ADR 0010). The parser itself is pointer-width neutral.
     pub fn from_windows(cpu_sets: &[u8], processor_info: &[u8]) -> Result<Self, TopologyError> {
+        for (source, buf) in [
+            (Source::CpuSets, cpu_sets),
+            (Source::ProcessorInfo, processor_info),
+        ] {
+            if buf.len() > MAX_BUFFER {
+                return Err(TopologyError::TooLarge {
+                    source,
+                    len: buf.len(),
+                });
+            }
+        }
         let mut sets = parse_cpu_sets(cpu_sets)?;
         let info = parse_info(processor_info)?;
         let inconsistent = |c| Err(TopologyError::Inconsistent(c));

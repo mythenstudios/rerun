@@ -147,6 +147,13 @@ pub enum TopologyError {
         /// Buffer.
         source: Source,
     },
+    /// A buffer is larger than [`parse::MAX_BUFFER`].
+    TooLarge {
+        /// Buffer.
+        source: Source,
+        /// Its length in bytes.
+        len: usize,
+    },
     /// A field has a value Windows never reports (index ≥ 64, no active group, a core
     /// without a group mask, a cache level of 0, …).
     BadField {
@@ -185,6 +192,9 @@ impl fmt::Display for TopologyError {
                 f,
                 "{source}: more than {MAX_LOGICAL_CPUS} logical processors"
             ),
+            Self::TooLarge { source, len } => {
+                write!(f, "{source}: {len} bytes, more than {}", parse::MAX_BUFFER)
+            }
             Self::BadField {
                 source,
                 offset,

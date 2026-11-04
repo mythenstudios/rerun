@@ -13,6 +13,121 @@
 fn banned_windows_sys_items_resolve() {
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: NtSetInformationThread must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Threading::NtSetInformationThread;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwSetInformationThread must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Threading::ZwSetInformationThread;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: UpdateProcThreadAttribute must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::UpdateProcThreadAttribute;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetProcessAffinityUpdateMode must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetProcessAffinityUpdateMode;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ReleaseExclusiveCpuSets must be banned"
+    )]
+    let _ = windows_sys::Win32::Gaming::ReleaseExclusiveCpuSets;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetProcessAffinityMask must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetProcessAffinityMask;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetProcessGroupAffinity must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetProcessGroupAffinity;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetThreadGroupAffinity must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetThreadGroupAffinity;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetProcessDefaultCpuSets must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetProcessDefaultCpuSets;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetProcessDefaultCpuSetMasks must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetProcessDefaultCpuSetMasks;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetThreadSelectedCpuSets must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetThreadSelectedCpuSets;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetThreadSelectedCpuSetMasks must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetThreadSelectedCpuSetMasks;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetNumaNodeProcessorMask must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetNumaNodeProcessorMask;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetNumaNodeProcessorMaskEx must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetNumaNodeProcessorMaskEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetNumaProcessorNode must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetNumaProcessorNode;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetNumaProcessorNodeEx must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetNumaProcessorNodeEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateProcessAsUserA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::CreateProcessAsUserA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateProcessWithLogonW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::CreateProcessWithLogonW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateProcessWithTokenW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::CreateProcessWithTokenW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ShellExecuteA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::ShellExecuteA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ShellExecuteW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::ShellExecuteW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ShellExecuteExA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::ShellExecuteExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ShellExecuteExW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::ShellExecuteExW;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: GetSystemCpuSetInformation must be banned"
     )]
     let _ = windows_sys::Win32::System::SystemInformation::GetSystemCpuSetInformation;

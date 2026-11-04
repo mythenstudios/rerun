@@ -581,6 +581,66 @@ fn a_size_beyond_the_buffer_is_truncated() {
 }
 
 #[test]
+fn a_size_below_the_header_is_too_small() {
+    for size in 1..8u32 {
+        let mut m = smt();
+        put32(&mut m.sets[2], l::CPU_SET_SIZE, size);
+        assert_eq!(
+            m.parse(),
+            Err(TopologyError::RecordTooSmall {
+                source: Source::CpuSets,
+                offset: 64,
+                size: usize::try_from(size).unwrap(),
+                min: 8
+            }),
+            "cpu set size {size}"
+        );
+        let mut m = smt();
+        put32(&mut m.info[1], l::INFO_SIZE, size);
+        assert_eq!(
+            m.parse(),
+            Err(TopologyError::RecordTooSmall {
+                source: Source::ProcessorInfo,
+                offset: m.info[0].len(),
+                size: usize::try_from(size).unwrap(),
+                min: 8
+            }),
+            "processor info size {size}"
+        );
+    }
+}
+
+#[test]
+fn buffers_over_1_mib_are_too_large() {
+    let m = smt();
+    // Valid records up to just over the cap: refused before any parsing.
+    let one = cpu_set_rec(1, 0, 0, 0, 0, 0, 0);
+    let big = one.repeat(MAX_BUFFER / one.len() + 1);
+    assert_eq!(
+        CpuTopology::from_windows(&big, &m.info()),
+        Err(TopologyError::TooLarge {
+            source: Source::CpuSets,
+            len: big.len()
+        })
+    );
+    let mut info = m.info();
+    info.resize(MAX_BUFFER + 1, 0);
+    assert_eq!(
+        CpuTopology::from_windows(&m.sets(), &info),
+        Err(TopologyError::TooLarge {
+            source: Source::ProcessorInfo,
+            len: MAX_BUFFER + 1
+        })
+    );
+    // Exactly the cap is parsed (and fails later for its content, not its length).
+    info.truncate(MAX_BUFFER);
+    assert!(!matches!(
+        CpuTopology::from_windows(&m.sets(), &info),
+        Err(TopologyError::TooLarge { .. })
+    ));
+}
+
+#[test]
 fn size_zero_is_an_error() {
     let mut m = smt();
     put32(&mut m.sets[2], l::CPU_SET_SIZE, 0);

@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "description": "AMD Ryzen 9 5950X (2 CCDs x 8 cores, SMT on), Windows 11 build 26300.9711; SchedulingClass zeroed by the dump",
+  "description": "AMD Ryzen 9 5950X (2 CCDs x 8 cores, SMT on), Windows 11 build 26300.9711; CPU Set bytes the parser does not read (SchedulingClass, AllocationTag) zeroed by the dump",
   "cpu_sets": [
     "2000000000000000000100000000000000000000000000000000000000000000",
     "2000000000000000010100000000010000000000000000000000000000000000",

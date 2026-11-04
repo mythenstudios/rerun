@@ -26,8 +26,8 @@ use windows_sys::Win32::System::SystemInformation::{
     SYSTEM_CPU_SET_INFORMATION, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
 };
 
-/// Largest buffer accepted from either call (about 32,000 CPU Set records).
-pub(super) const MAX_BUFFER: usize = 1 << 20;
+/// Largest buffer accepted from either call: the parser's own cap.
+pub(super) use rerun_proto::cpu::parse::MAX_BUFFER;
 /// Sized calls after the size query.
 pub(super) const RETRIES: usize = 4;
 

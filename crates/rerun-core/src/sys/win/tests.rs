@@ -583,32 +583,28 @@ fn hex_lines(bytes: &[u8]) -> String {
     lines.join(",\n")
 }
 
-/// The CPU Set bytes with `SchedulingClass` zeroed: Windows fills it from the firmware's
-/// preferred-core ranking (CPPC), which differs from one chip sample to the next, so it is a
-/// fingerprint of the machine. The parser ignores it (ADR 0010).
+/// The CPU Set bytes with every byte the parser does not read zeroed (an allowlist: bytes
+/// `CPU_SET_MIN_SIZE..Size` of each record). Found on the 5950X: `SchedulingClass` holds the
+/// firmware's preferred-core ranking (CPPC), which differs from one chip sample to the next, so
+/// it is a fingerprint; `AllocationTag` and future fields could be one too (ADR 0010).
 fn scrub_cpu_sets(sets: &[u8]) -> Vec<u8> {
-    /// `CpuSet.SchedulingClass` (u8), the first byte of the union after `AllFlags`.
-    const SCHEDULING_CLASS: usize = 20;
+    use rerun_proto::cpu::parse::layout::{CPU_SET_MIN_SIZE, CPU_SET_SIZE};
     let mut out = sets.to_vec();
     let mut at = 0;
-    while let Some(head) = out.get(at..at + 8) {
+    while let Some(head) = out.get(at + CPU_SET_SIZE..at + CPU_SET_SIZE + 4) {
         let size = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
         let size = usize::try_from(size).unwrap();
-        if size == 0 {
-            break;
-        }
-        if size > SCHEDULING_CLASS
-            && let Some(b) = out.get_mut(at + SCHEDULING_CLASS)
-        {
-            *b = 0;
-        }
+        // The parser refuses such a buffer anyway; the parse-equality assert catches it.
+        assert!(size >= CPU_SET_MIN_SIZE, "cpu set record of {size} bytes");
+        let end = (at + size).min(out.len());
+        out[at + CPU_SET_MIN_SIZE..end].fill(0);
         at += size;
     }
     out
 }
 
 /// Writes the raw bytes of both topology calls to `target/cpu-dump.json` (fixture format 1,
-/// `tests/fixtures/cpu/README.md`; `SchedulingClass` zeroed, see [`scrub_cpu_sets`]) and the
+/// `tests/fixtures/cpu/README.md`; unread bytes zeroed, see [`scrub_cpu_sets`]) and the
 /// parsed topology to `target/cpu-dump.parsed.json`. Read-only on the system; run by hand on a
 /// machine whose fixture is wanted:
 /// `cargo test -p rerun-core --lib dump_cpu_topology -- --ignored`, then fill in the
