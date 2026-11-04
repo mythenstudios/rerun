@@ -22,7 +22,16 @@ assert_eq!(snapshot(&sys, &scope), before)   // on mismatch: before.diff(&after)
 
 ## Contract tests of the system layer
 
-`rerun_core::sys::contract` (`fs_contract`, `registry_contract`, `topology_contract`) checks the semantics of the traits. Today against `sys::fake`, from Phase 1/2 as `#[ignore]` tests in Windows Sandbox against `sys::win`. If the fake deviates from the real system, the contract is extended first, then the fake is adjusted. Known, deliberate deviations are listed in `sys/fake/fs.rs`.
+`rerun_core::sys::contract` checks the semantics of the traits against `sys::fake` and `sys::win`.
+
+- **File system contract on real Windows runs in CI and locally** in a fresh temporary directory under `target/` (decided 2026-11-04). It creates its own junctions there (no admin needed) and touches nothing outside that directory: no registry, no firewall, no game folders. File symlinks need Developer Mode or admin; those cases skip with a message when the privilege is missing. Required safeguards:
+  1. The test root is created new and uniquely named under the canonical `target/` directory. The test canonicalizes it and panics unless it is inside `target/`, on a local fixed drive, not a reparse point and not under a cloud/OneDrive tag.
+  2. Junction targets stay inside the test root. The escape target is a sibling `outside/` folder with a canary file whose content is asserted unchanged.
+  3. Cleanup only after re-checking (1), handle-based and never following links.
+  4. Locally the test skips when the process is elevated. On GitHub-hosted runners (admin, ephemeral VM) it runs.
+  5. No registry, `%TEMP%` or home-directory paths. The test-only root constructor is gated (`cfg(test)`/`fake` feature) and does not bypass the forbidden-root checks for anything else.
+- **Registry, firewall, IFEO and anything outside the temp directory** run only in Windows Sandbox as `#[ignore]` tests.
+- **TOCTOU:** the fake has test hooks that run between two path components of an operation, so a test can swap a directory for a junction mid-operation (ADR 0007). On `sys::win` the swap between two calls is tested. If the fake deviates from the real system, the contract is extended first, then the fake is adjusted. Known, deliberate deviations are listed in `sys/fake/fs.rs`.
 
 The fake layer is available to other crates via the `fake` feature of `rerun-core`.
 
@@ -49,4 +58,4 @@ See `03-cpu-topology.md`. Every rule against every fixture; expected masks as sn
 
 - No test modifies the real system outside the sandbox.
 - Bugs: failing test first, then the fix.
-- Fixtures are data, not code generators.
+- Fixtures are data, not code generators. **Exception:** PE test files are built by a small builder in test code (`tests/support`), because third-party binaries must not be committed and hand-written binary fixtures cannot be reviewed.

@@ -1,24 +1,68 @@
 # ADR 0007 · File operations relative to a root handle
 
-**Status:** proposed · 2026-11-04 · **must be decided before `sys::win` (Phase 1/2)**
+**Status:** accepted · 2026-11-04 · replaces the `Fs` signatures of ADR 0004
 
 ## Context
-The Phase 0 security review (finding 3) shows: `sys::Fs` takes an absolute `&Path` per call. The check ("no reparse point in the path") and the operation resolve the path separately (TOCTOU). If a Steam library is located in a folder writable by the user (`D:\SteamLibrary`), malware in the user context can replace a subfolder with a junction to `C:\Windows\System32` between the check and the elevated helper's `CreateFileW` (also via Object Manager symlinks). Result: elevated arbitrary file write (scenarios 4, 7 in `06-security.md`).
+The Phase 0 security review (finding 3) showed that `sys::Fs` took an absolute `&Path` per call. The check ("no reparse point in the path") and the operation resolve the path separately (TOCTOU). If a game folder is writable by the user, malware in the user context can replace a subfolder with a junction to `C:\Windows\System32` between the check and the write. If the write is done by the elevated helper, that is an elevated arbitrary file write (scenarios 4 and 7 in `06-security.md`).
 
-In addition, the current contract forbids reparse points anywhere in the path. Legitimate roots via junctions (moved library, OneDrive) would fail.
+This is the normal case, not an edge case: Steam grants `Users` full control on `C:\Program Files (x86)\Steam`, so `steamapps\common` is user-writable by default.
 
-## Proposal
-- **Open the root, then work relatively:** `GameRoot` is opened once as a handle and canonicalized via `GetFinalPathNameByHandleW`. All operations go through `NtCreateFile` with `RootDirectory` = handle of the parent folder, component by component with `FILE_OPEN_REPARSE_POINT` or `OBJ_DONT_REPARSE`; afterwards check the final path against the root.
-- **Reparse points above the root allowed, below it never.**
-- **System folders forbidden as root** (`%windir%`, `%ProgramFiles%\WindowsApps`, profile folder roots …), checked on the canonical path.
-- **Writing in the game folder not elevated** if the folder is writable by the user. The helper gets only what really needs admin.
-- **Type `CheckedPath`**, which only `policy` can create (root handle + `RelPath`). `Fs` methods for the game folder take `&CheckedPath`, not `&Path`. Absolute paths remain only for Rerun's own folders (`%LOCALAPPDATA%\Rerun`).
-- `sys::win` works internally with `\\?\` paths. Names from `read_dir` that are not valid `RelPath` segments (`d3d9.dll.`, `CON`, `x `) are reported as an anomaly and never touched silently (review finding 9).
+At the same time, legitimate libraries reached through junctions (a moved library) and data-transforming reparse points inside game folders (CompactGUI/WOF compression, dedup, OneDrive placeholders) must keep working.
 
-## Open questions
-- Trait shape: split `Fs` (`GameFs` relative, `AppFs` absolute) or one `Fs` with `CheckedPath`?
-- How does `sys::fake` replicate handles and the replacement of a folder by a junction between two calls (test for the TOCTOU scenario)?
-- Behavior for game folders under `Program Files` (not user-writable, helper required).
+## Decision
+
+### One handle-based file API
+- `Fs` keeps exactly one absolute operation: `open_dir(&Path) -> Box<dyn Dir>`. It follows reparse points in the given path, opens the directory and canonicalizes it.
+- Every other file operation lives on `Dir` and takes a `&RelPath` (never empty, never absolute). `Dir::open_dir(&RelPath)` opens a subdirectory *relative* to the handle without following reparse points. There is no way to address a file in a root by an absolute path.
+- The same API is used for game folders, the Steam folder and Rerun's own folder (`%LOCALAPPDATA%\Rerun`), so there is one set of safe semantics and one contract.
+- `Dir::info()` returns `RootInfo`: canonical path, volume serial, 128-bit file ID, file system flags and whether the current (non-elevated) user can write it.
+- `Dir::open_read` returns `Read + Seek` (needed for PE parsing).
+
+### Only policy hands out roots
+- `policy::root` wraps `Dir` in purpose-specific types (`StoreDir`, `GameDir`, later `AppDir`). Only policy can construct them. Detection and primitives take these types, never `&dyn Dir`. `Fs::open_dir` is listed in `clippy.toml` `disallowed-methods`; exceptions only in `policy::root` and `sys::snapshot`.
+- **Who may follow a reparse point at the root:** only *store roots* (the Steam folder and its libraries, from the registry and `libraryfolders.vdf`) are opened by absolute path and may be reached through a junction (moved library). **A `GameDir` is never opened by absolute path.** It is opened from its `StoreDir` handle-relative (`steamapps\common\<installdir>`), so a junction at the game folder level is reported as an anomaly and never becomes a root. Otherwise same-user malware could turn `common\GameX` into a junction to an admin-only folder of its choice (review finding H1).
+- Before handing out a root, policy validates the **canonical** path again (`RootPath`) and rejects:
+  - network paths (`\\?\UNC\…`) and volumes without a drive letter (v1),
+  - the root equal to or inside: `%windir%`, `%ProgramFiles%\WindowsApps`, `%ProgramFiles%\Common Files` and its x86 counterpart, `%ProgramFiles%\Windows Defender`, `%ProgramData%\Microsoft`, Rerun's own install folder, `%LOCALAPPDATA%\Rerun` (for game roots), other users' profiles, in the own profile `AppData\Roaming\Microsoft`, `AppData\Local\Microsoft`, `AppData\Local\Packages`, `AppData\Local\VirtualStore`, and on every volume `$Recycle.Bin`, `$*`, `System Volume Information`, `Recovery`, `Boot`, `Windows.old`,
+  - the root equal to or an ancestor of: any volume root, `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%ProgramData%`, the profiles folder, the own profile. Folders *inside* those stay allowed unless listed above.
+- **The forbidden folders never come from environment variables** (`windir` and others can be overridden per user and are inherited by the helper). They are resolved with `GetSystemWindowsDirectoryW` and `SHGetKnownFolderPath` (machine-wide known folders) and canonicalized with the same open + final-path routine as the root. Comparison is component-wise and case-insensitive (`C:\Windows` does not match `C:\WindowsApps`) (review finding H3).
+- `GameRoot::join` (absolute path out of a root) is removed.
+- **Root identity:** the plan stores volume serial and file ID of each root. Every apply and revert, elevated or not, reopens the root and aborts on a mismatch (review finding M5). The preview always shows the canonical path.
+
+### Reparse points below a root
+- Each component is opened relative to its parent handle. *Name-surrogate* tags (junction, mount point, symlink, LX symlink) are reported as `EntryKind::Reparse` and never traversed; operations through them fail with `ReparsePoint`. Deleting the link itself is allowed.
+- *Non-surrogate* tags on an allowlist (WOF, dedup, cloud files) are treated as normal files and directories, with the tag in the metadata. Unknown tags are rejected (this also covers AppExecLink and ProjFS).
+- For data access to an allowlisted tagged file, the entry is reopened relative to the same parent **without** `FILE_OPEN_REPARSE_POINT` (disposition `FILE_OPEN` only, `OBJ_DONT_REPARSE`), and volume serial and file ID must equal those of the first open. Such files are only ever replaced, never written in place; cloud placeholders are never touched elevated and are not hashed during a scan if that would trigger a download (review finding M4).
+
+### Other rules
+- **Hard links:** files with more than one link are never changed in place (`SysErrorKind::Linked`); the link count is checked on the write handle. Unlinking and replacing the directory entry are allowed.
+- **Replace:** create a temp file next to the target (`FILE_CREATE`, share mode 0, handle kept open until the rename; name supplied by the journal so it is known before creation), write, flush. Rename the old file by its handle to a journal-named `.old` entry, rename the temp file onto the target without `REPLACE_IF_EXISTS`, delete `.old` by handle. All renames by handle with the parent handle as root and a single-segment name. Hash check and backup of the old file happen on a handle without write sharing (review finding L3).
+- **Revert:** the hash check and the delete happen on the same handle (review finding L4).
+- **Invalid names:** `read_dir` returns raw names. `policy::path::classify` turns each into a valid segment or an anomaly (`d3d9.dll.`, `CON`, `x `, `~1`-style short names, invalid UTF-16, entries in case-sensitive directories). Anomalies are reported and never touched. After every open, the long name (`FileNameInformation`) must equal the requested segment, so 8.3 short names cannot be used to reach another entry (review finding L1). Writes in case-sensitive directories are refused (L2).
+- **Packages copied from Rerun's cache** (user-writable): the source is opened with read sharing only, hashed while it is streamed into the temp file, and compared with the pinned SHA-256 before the rename (review finding M2).
+
+### Elevation
+- User-writable roots are always changed non-elevated. A non-elevated `AccessDenied` (Controlled Folder Access, TrustedInstaller-owned files) never escalates automatically; the step is rolled back and reported.
+- The elevated helper treats the whole plan as untrusted:
+  - It computes "only admins can write" itself from the security descriptor of every directory it writes into (no ACE granting write, delete, `WRITE_DAC` or `WRITE_OWNER` to any SID other than SYSTEM, Administrators or TrustedInstaller; owner one of those) and refuses otherwise. This also settles over-the-shoulder elevation (review finding M1).
+  - It only writes into a root that contains the topo's target exe with the hash from the signed topo, verified by the helper on an open handle. No exe hash, no elevated apply.
+  - It verifies the index signature and package hashes itself, never from bytes in the plan.
+  - It opens its root by volume GUID path plus file ID (`NtCreateFile` with `FILE_OPEN_BY_FILE_ID`, not `CreateFileW`/`OpenFileById`, which need backup semantics for directories) and checks that the object is a directory and not a surrogate.
+- The plan hash only catches accidents; the helper's own re-validation is the security boundary. Hardening of the helper process itself: ADR 0008.
+
+### Implementation (`sys::win`)
+- `NtCreateFile` with `OBJECT_ATTRIBUTES.RootDirectory` = parent handle and a single-segment name, `OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE`, `FILE_OPEN_REPARSE_POINT`, `SYNCHRONIZE` + `FILE_SYNCHRONOUS_IO_NONALERT`. `FILE_DIRECTORY_FILE` for intermediate components, `FILE_NON_DIRECTORY_FILE` for files. Dispositions only `FILE_OPEN` and `FILE_CREATE`.
+- `sys::win` re-asserts at this boundary that a name is a single segment (no `\`, `/`, `:`, NUL, `.`, `..`).
+- After each open the tag is checked via `FileAttributeTagInfo`; this check on the same handle is the primary guard, `OBJ_DONT_REPARSE` the second layer.
+- Rename, delete and attributes by handle (`SetFileInformationByHandle` with `FileRenameInfoEx`, `FileDispositionInfoEx`, `FileBasicInfo`). Path-based APIs (`DeleteFileW`, `MoveFileExW`, `ReplaceFileW`) are not used. Never `FILE_OPEN_FOR_BACKUP_INTENT`.
+
+### Fake
+- `sys::fake` models the file system as a node arena; a handle is a node ID, so a handle stays valid when its parent is renamed, like on NTFS.
+- Test-only hooks run between two path components of an operation, so a test can swap a directory for a junction in the middle of an operation (TOCTOU test). The same scenarios run as contract tests against `sys::win`. The `fake` feature and its hooks never reach release builds (CI check).
 
 ## Consequences
-- Changes the `Fs` signatures from ADR 0004 before primitives build on them. Therefore decide before Phase 1 `sys::win`, with a security review.
+- The Phase 0 `Fs` trait, the fake file system, the contract tests and the snapshot are rewritten before any primitive depends on them.
+- Each operation opens O(depth) handles; fine for game folders, measured before large hashing jobs.
+- Manually added game folders (not from a store) are opened by absolute path like a store root and are therefore never written by the elevated helper unless the exe-hash rule above holds.
+- Some Win32 details (since which build `OBJ_DONT_REPARSE` applies to file system reparse points, how WOF and cloud files behave when opened with `FILE_OPEN_REPARSE_POINT`) are settled by contract tests on real Windows (including "hash of a WOF-compressed file equals the hash of an uncompressed copy"); the design does not depend on them.
+- Open for Phase 2: a `UserData` root kind for INI files under the user profile (must respect the forbidden folders above); `verify` warns about UAC VirtualStore shadow copies of managed files.
