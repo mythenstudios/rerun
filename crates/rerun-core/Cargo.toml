@@ -53,6 +53,7 @@ serde-saphyr.workspace = true
 windows-sys = { workspace = true, features = [
   "Wdk_System_SystemServices",
   "Win32_System_Environment",
+  "Win32_UI_Shell_Common",
 ] }
 
 [lints]

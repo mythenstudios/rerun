@@ -1027,6 +1027,311 @@ fn banned_registry_items_resolve() {
     let _ = windows_sys::Wdk::System::Registry::ZwSaveKeyEx;
 }
 
+/// The bans of the step 8 security review the same way.
+#[test]
+fn banned_review_items_resolve() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHSetValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHSetValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHSetValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHSetValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHDeleteKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHDeleteKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHDeleteKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHDeleteKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHDeleteValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHDeleteValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHDeleteValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHDeleteValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHDeleteEmptyKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHDeleteEmptyKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHDeleteEmptyKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHDeleteEmptyKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHCopyKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHCopyKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHCopyKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHCopyKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegSetUSValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegSetUSValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegSetUSValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegSetUSValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegWriteUSValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegWriteUSValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegWriteUSValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegWriteUSValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegCreateUSKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegCreateUSKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegCreateUSKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegCreateUSKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegDeleteUSValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegDeleteUSValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegDeleteUSValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegDeleteUSValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegDeleteEmptyUSKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegDeleteEmptyUSKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegDeleteEmptyUSKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegDeleteEmptyUSKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegSetPathW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegSetPathW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegSetPathA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegSetPathA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHOpenRegStreamW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHOpenRegStreamW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHOpenRegStreamA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHOpenRegStreamA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHOpenRegStream2W must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHOpenRegStream2W;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHOpenRegStream2A must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHOpenRegStream2A;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHGetValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHGetValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHGetValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHGetValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHQueryValueExW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHQueryValueExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHQueryValueExA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHQueryValueExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegGetValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegGetValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegGetValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegGetValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegGetPathW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegGetPathW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegGetPathA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegGetPathA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegQueryUSValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegQueryUSValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegQueryUSValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegQueryUSValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHEnumValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHEnumValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHEnumValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHEnumValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHRegGetValueFromHKCUHKLM must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHRegGetValueFromHKCUHKLM;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtOpenKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtOpenKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtOpenKeyEx must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtOpenKeyEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwOpenKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwOpenKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwOpenKeyEx must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwOpenKeyEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtEnumerateKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtEnumerateKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtQueryMultipleValueKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtQueryMultipleValueKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtQueryKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtQueryKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtFlushKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtFlushKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtNotifyChangeKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::Storage::FileSystem::NtNotifyChangeKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegOpenUserClassesRoot must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegOpenUserClassesRoot;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetSecurityInfo must be banned"
+    )]
+    let _ = windows_sys::Win32::Security::Authorization::SetSecurityInfo;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetKernelObjectSecurity must be banned"
+    )]
+    let _ = windows_sys::Win32::Security::SetKernelObjectSecurity;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtSetSecurityObject must be banned"
+    )]
+    let _ = windows_sys::Wdk::Storage::FileSystem::NtSetSecurityObject;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetTempPathW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::GetTempPathW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetTempPathA must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::GetTempPathA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetTempPath2W must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::GetTempPath2W;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetTempPath2A must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::GetTempPath2A;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHGetKnownFolderIDList must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHGetKnownFolderIDList;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHGetKnownFolderItem must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHGetKnownFolderItem;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHGetFolderLocation must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHGetFolderLocation;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SHGetSpecialFolderLocation must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::Shell::SHGetSpecialFolderLocation;
+}
+
 /// The `std::env` bans (ADR 0009) the same way: a ban that stops matching (a renamed or
 /// moved item) becomes an unfulfilled expectation.
 #[test]
