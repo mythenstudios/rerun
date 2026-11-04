@@ -1,0 +1,16 @@
+/target/
+**/target/
+node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/
+*.log
+*.pdb
+.env
+.env.*
+/tmp/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+/dist/
+*.profraw
