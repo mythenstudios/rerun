@@ -1,5 +1,7 @@
 //! `rerun` – command-line interface. Each phase brings its own subcommands (phase 1: `scan`).
 
+use std::process::ExitCode;
+
 use clap::Parser;
 
 /// Rerun by Mythen Studios – detects old PC games and applies (and cleanly removes)
@@ -10,12 +12,20 @@ use clap::Parser;
 #[command(name = "rerun", bin_name = "rerun", version)]
 struct Cli {}
 
-fn main() {
+fn main() -> ExitCode {
+    // First statement (ADR 0008, H2): no later DLL load may come from the install folder, the
+    // current directory or `PATH`. Fail closed.
+    #[cfg(windows)]
+    if let Err(e) = rerun_core::sys::win::restrict_dll_search() {
+        eprintln!("rerun: cannot restrict the DLL search path to System32: {e}");
+        return ExitCode::FAILURE;
+    }
     let _cli = Cli::parse();
     println!(
         "rerun {}: no commands yet. See `rerun --help`.",
         rerun_core::VERSION
     );
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]

@@ -9,8 +9,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# Only windows-sys and rerun-proto are allowed (checked by CI). windows-sys arrives in phase 3.
+# Only windows-sys and rerun-proto are allowed (checked by CI, ADR 0006). windows-sys with the
+# features in use only: SetDefaultDllDirectories (Win32_System_LibraryLoader, ADR 0008, H2).
 [dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
 
 [lints]
 workspace = true

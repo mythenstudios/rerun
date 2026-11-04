@@ -1248,6 +1248,66 @@ fn banned_registry_items_resolve() {
     let _ = windows_sys::Wdk::System::Registry::ZwSaveKeyEx;
 }
 
+/// The DLL loading and search path bans (ADR 0008 amendment, 2026-11-05).
+#[test]
+fn banned_loader_items_resolve() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: LoadLibraryA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: LoadLibraryW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: LoadLibraryExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::LoadLibraryExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: LoadLibraryExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::LoadLibraryExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: LoadPackagedLibrary must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::LoadPackagedLibrary;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetProcAddress must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetDefaultDllDirectories must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::SetDefaultDllDirectories;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetDllDirectoryW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetDllDirectoryA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::SetDllDirectoryA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: AddDllDirectory must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::AddDllDirectory;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RemoveDllDirectory must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::RemoveDllDirectory;
+}
+
 /// The bans of the step 8 security review the same way.
 #[test]
 fn banned_review_items_resolve() {

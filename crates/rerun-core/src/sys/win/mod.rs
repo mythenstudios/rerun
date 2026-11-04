@@ -19,6 +19,8 @@
 //!   `RegQueryInfoKeyW`, `RegCloseKey`; values with `NtQueryValueKey`/`NtEnumerateValueKey`,
 //!   because the Win32 value reads fix up strings; `NtQueryKey` for key names), key handles
 //!   as `OwnedKey`.
+//! - `loader`: the only call to `SetDefaultDllDirectories` ([`restrict_dll_search`], ADR 0008,
+//!   H2), the first statement of `rerun.exe`'s `main`.
 //! - `cpu`: the only calls to `GetSystemCpuSetInformation` (system-wide, `Process = NULL`) and
 //!   `GetLogicalProcessorInformationEx(RelationAll)`: size query, `u64`-aligned buffer, at most
 //!   4 retries, 1 MiB cap; the bytes go unchanged to `rerun_proto::cpu::CpuTopology::
@@ -34,7 +36,7 @@
 //! - `registry`: `WinRegistry`, input rules, limits, retries and enumeration restarts; no
 //!   `unsafe`.
 //!
-//! `unsafe` lives only in `nt`, `token`, `reg`, `shell` and `cpu`. Path-based Win32 file APIs
+//! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu` and `loader`. Path-based Win32 file APIs
 //! (`CreateFileW`, `DeleteFileW`, `MoveFileExW`, `GetFileAttributesW`, …) and every
 //! environment-based path source (`std::env::var`, `GetEnvironmentVariableW`,
 //! `ExpandEnvironmentStringsW`, `SHGetFolderPathW`, `GetWindowsDirectoryW`, …) are banned in
@@ -42,7 +44,9 @@
 //! predefined-key overrides, transactions), as are both topology APIs outside `cpu`, every other
 //! processor-count source (`GetSystemInfo`, `GetLogicalProcessorInformation`, the processor
 //! count APIs, `NtQuerySystemInformation`, `std::thread::available_parallelism`) and every
-//! affinity and CPU Set setter until phase 3 (ADR 0010).
+//! affinity and CPU Set setter until phase 3 (ADR 0010), and every DLL search path change and
+//! dynamic load (`SetDefaultDllDirectories`, `SetDllDirectoryW`, `AddDllDirectory`,
+//! `LoadLibrary*`, `GetProcAddress`) outside `loader` (ADR 0008).
 //!
 //! Test only: `testfx` (test root with the `docs/09-testing.md` safeguards, the `FsFixture`
 //! for real Windows, the naive control `Fs`, the private app hive that is the `RegFixture`;
@@ -63,6 +67,7 @@ compile_error!(
 mod cpu;
 mod fs;
 mod known_folders;
+mod loader;
 mod name;
 mod nt;
 mod reg;
@@ -84,5 +89,6 @@ mod tests;
 
 pub use fs::{WinDir, WinFs};
 pub use known_folders::WinKnownFolders;
+pub use loader::restrict_dll_search;
 pub use registry::WinRegistry;
 pub use topology::WinTopology;

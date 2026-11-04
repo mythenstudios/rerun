@@ -70,6 +70,10 @@ Parity: `tests/fixtures/paths.json` runs against `RelPath::parse` **and** `$defs
 
 See `03-cpu-topology.md` and ADR 0010. Every fixture passes `CpuTopology::validate`, and so does every topology the fake hands out (`FakeTopology::new`/`from_json` and the builder refuse invalid ones; a fake without a topology fails `read`). `topology_contract(&dyn Topology)` checks valid, non-empty and stable across two reads; `the_topology_contract_catches_raw_numbering` keeps it honest with the old raw `CoreIndex`/`LastLevelCacheIndex` numbering. The parser (`rerun-proto`, `cpu/parse/tests.rs`) is tested on byte-built records: SMT, no SMT, hybrid with LP E-cores, several groups, an LLC across two groups, `GroupCount == 0`, unknown relationships skipped, truncated / `Size == 0` / `Size` below the 8-byte header / too small / too many records / a buffer over 1 MiB, each bad field, each consistency check, `RealTime`/`Allocated` dropped, and deterministic xorshift byte fuzzing (mutated and random buffers never panic; a parsed result always validates). Phase 3: every rule against every fixture; expected masks as snapshot tests.
 
+## Shipped binaries
+
+`crates/rerun-cli/tests/hardening.rs` and `crates/rerun-launch/tests/hardening.rs` (ADR 0008 amendment 2026-11-05) read the built executable (`CARGO_BIN_EXE_*`) with the minimal PE32+ reader `tests/support/pe_min.rs` (bounds-checked, malformed input is an error; step 13 replaces it with `detect::pe`) and check `IMAGE_LOAD_CONFIG_DIRECTORY64::DependentLoadFlags == 0x800` (`/DEPENDENTLOADFLAG`, System32 only), no static import of `dxgi.dll`, `d3d*`, `dxcore.dll`, `vcruntime*`, `msvcp*`, `ucrtbase*` or `api-ms-win-crt-*`, an empty delay-import table, and that the binary runs past its DLL search path restriction. They print the imported DLLs (`-- --nocapture`); on 2026-11-05 both import only `kernel32.dll`, `ntdll.dll` and `api-ms-win-core-synch-l1-2-0.dll`. CI additionally checks the dependencies (`windows-sys`, `rerun-proto` only) and the release size (< 1 MiB) of `rerun-launch`.
+
 ## Manual test matrix (continuously extended)
 
 | Game | Store | Checks | Hardware | Status |
@@ -95,6 +99,12 @@ Not covered by the automated file system contracts; check by hand on a real mach
 | Elevated process (UAC, admin user) | `user_writable` answers for the linked non-elevated token: `false` for `C:\Program Files`, `true` for a folder in the own profile | open |
 | Over-the-shoulder elevation (standard user, admin credentials) | `user_writable` answers for the administrator's filtered token, not the interactive user: record the value for a folder only the standard user can write; the helper must not use it for any decision (informational only) | open |
 | Hard-linked file | `FileNormalizedNameInformation` on a second link reports that link's name, so L1 accepts both names | passes (`sys::win` smoke test, NTFS) |
+
+DLL hardening (ADR 0008 amendment 2026-11-05): the automated tests check the PE flags and imports, not the loader's behaviour.
+
+| Case | Checks / why manual | Status |
+|---|---|---|
+| Planted DLL next to `rerun.exe` / `rerun-launch.exe` | copy the release binary into a user-writable folder together with a harmless DLL named like a non-KnownDLL import or a later dynamic load (`dxgi.dll`, `version.dll`); run it under Process Monitor: no load from that folder, only from System32 | open |
 
 CPU topology (ADR 0010): the parser runs on real bytes only for machines with a raw dump. For each case: run `dump_cpu_topology`, check the parsed shape by hand, and commit the dump as a fixture (description: CPU model, Windows build).
 

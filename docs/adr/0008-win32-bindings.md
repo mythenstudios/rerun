@@ -1,6 +1,6 @@
 # ADR 0008 · Win32 bindings
 
-**Status:** accepted · 2026-11-04
+**Status:** accepted · 2026-11-04 · amended 2026-11-05 (DLL hardening)
 
 ## Context
 Phase 1 needs NT file APIs (`NtCreateFile`), registry, CPU sets, version info and GPU enumeration. Phase 3 needs Job Objects, IFEO and the firewall COM interface (`INetFwPolicy2`). `rerun-launch` and `rerun-cpu` must stay small (ADR 0006). `windows-sys` 0.61 no longer contains COM interfaces such as DXGI.
@@ -25,3 +25,19 @@ Phase 1 needs NT file APIs (`NtCreateFile`), registry, CPU sets, version info an
 ## Consequences
 - `cargo deny` covers the extra crates; the CI dependency check for `rerun-launch` stays (`windows-sys` and `rerun-proto` only).
 - `windows-core` pulls the proc-macro crates `windows-implement`/`windows-interface` plus `syn`/`quote`, i.e. code that runs at build time. `windows` features are kept minimal; duplicate `windows-sys`/`windows-targets` versions are watched in `cargo deny` (bans: `multiple-versions = "warn"`).
+
+## Amendment 2026-11-05: DLL hardening of the shipped executables (H2, implemented)
+
+H2 is implemented now (phase 1, step 10) instead of with the helper, so that no shipped binary ever loads a DLL from its own folder, before the first DLL that is not a KnownDLL (`dxgi.dll`) is loaded.
+
+- **Link flag.** The `build.rs` of `rerun-cli` and `rerun-launch` emits `cargo::rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800` when `CARGO_CFG_TARGET_ENV == "msvc"`. The linker writes `0x800` (`LOAD_LIBRARY_SEARCH_SYSTEM32`) into `IMAGE_LOAD_CONFIG_DIRECTORY64::DependentLoadFlags` (offset `0x4E`, winnt.h); the loader then resolves the image's static imports from System32 only (KnownDLLs and API sets are unaffected). Not set for `rerun-cpu` (a DLL loaded into a game; its imports are `kernel32` only, and a DLL's flag would only govern its own static imports) and not for `rerun-workbench` (not shipped). The Tauri app gets the same `build.rs` line in phase 5.
+- **Search path.** The first statement of `main` in `rerun` is `rerun_core::sys::win::restrict_dll_search()` (`SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)`); `rerun-launch` has its own copy of the one call (`src/dll.rs`, it does not depend on `rerun-core`; `windows-sys` with `Win32_System_LibraryLoader` only, ADR 0006 already allows the crate). If the call fails, the binary exits non-zero (fail closed). This removes the application directory, the current directory and `PATH` from every later `LoadLibrary*` of the process, including loads Windows makes on Rerun's behalf.
+- **Tests.** `crates/rerun-cli/tests/hardening.rs` and `crates/rerun-launch/tests/hardening.rs` read the built binary (`CARGO_BIN_EXE_*`) with a minimal bounds-checked PE32+ reader (`tests/support/pe_min.rs`, included with `#[path]`; step 13 replaces it with `detect::pe`): `DependentLoadFlags == 0x800`, no static import of `dxgi.dll`, `d3d*`, `dxcore.dll`, `vcruntime*`, `msvcp*`, `ucrtbase*` or `api-ms-win-crt-*`, an empty delay-import table; and the binary runs past the restriction. Found on 2026-11-05 (debug and release, x64): both binaries import only `kernel32.dll`, `ntdll.dll` and `api-ms-win-core-synch-l1-2-0.dll`.
+- **Bans** (`clippy.toml`, checked by `sys/win/bans.rs`): `LoadLibraryA`/`W`, `LoadLibraryExA`/`W`, `LoadPackagedLibrary` and `GetProcAddress` outside `sys::win::loader`; `SetDefaultDllDirectories`, `SetDllDirectoryW`/`A`, `AddDllDirectory` and `RemoveDllDirectory` outside `loader::restrict_dll_search` (and `rerun-launch`'s copy).
+- **Phase 5 (Tauri app).** `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` also removes the application directory for the app. `WebView2Loader.dll`, which Tauri/wry loads from next to the exe by default, would then not be found: the app must link the WebView2 loader statically (wry's static-loader option) or add exactly its own install directory with `AddDllDirectory` after checking that it is not user-writable (per-machine install). Decided in phase 5; the ban on `AddDllDirectory` makes that a reviewed exception.
+
+### Alternatives (hardening)
+- **Delay-load `dxgi.dll`** (`/DELAYLOAD`): keeps the `windows` crate's static style, but the delay-load helper resolves through the same search path and adds a delay-import table the elevated helper must never have; an explicit `LoadLibraryExW(…, LOAD_LIBRARY_SEARCH_SYSTEM32)` is narrower and visible.
+- **Only `SetDefaultDllDirectories`, no link flag:** the static imports are resolved before `main` runs, so a planted DLL that shadows a non-KnownDLL import would load anyway.
+- **Only the link flag:** covers the static imports, not `LoadLibrary*` calls made later by Windows components (COM, shell, drivers' user-mode parts).
+

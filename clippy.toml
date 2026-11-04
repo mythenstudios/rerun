@@ -385,5 +385,19 @@ disallowed-methods = [
   { path = "windows_sys::Win32::UI::Shell::ShellExecuteW", reason = "processes only through sys::Process", allow-invalid = true },
   { path = "windows_sys::Win32::UI::Shell::ShellExecuteExA", reason = "processes only through sys::Process", allow-invalid = true },
   { path = "windows_sys::Win32::UI::Shell::ShellExecuteExW", reason = "processes only through sys::Process", allow-invalid = true },
+  # ADR 0008 amendment (2026-11-05): dynamic loads only through sys::win::loader (System32, by bare
+  # name); the DLL search path only through loader::restrict_dll_search (rerun-launch: its own
+  # copy of the one call).
+  { path = "windows_sys::Win32::System::LibraryLoader::LoadLibraryA", reason = "dynamic loads only via sys::win::loader (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::LoadLibraryW", reason = "dynamic loads only via sys::win::loader (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::LoadLibraryExA", reason = "dynamic loads only via sys::win::loader (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::LoadLibraryExW", reason = "dynamic loads only via sys::win::loader (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::LoadPackagedLibrary", reason = "dynamic loads only via sys::win::loader (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::GetProcAddress", reason = "dynamic loads only via sys::win::loader (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::SetDefaultDllDirectories", reason = "the DLL search path only via sys::win::loader::restrict_dll_search (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW", reason = "the DLL search path only via sys::win::loader::restrict_dll_search (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::SetDllDirectoryA", reason = "the DLL search path only via sys::win::loader::restrict_dll_search (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::AddDllDirectory", reason = "the DLL search path only via sys::win::loader::restrict_dll_search (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::RemoveDllDirectory", reason = "the DLL search path only via sys::win::loader::restrict_dll_search (ADR 0008)", allow-invalid = true },
   { path = "std::thread::available_parallelism", reason = "limited by the process affinity and CPU Sets, not the machine; use sys::Topology (ADR 0010)" },
 ]

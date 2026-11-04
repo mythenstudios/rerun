@@ -25,7 +25,8 @@ serde_json.workspace = true
 # known folders (ADR 0009): SHGetKnownFolderPath, CoTaskMemFree, GetSystemWindowsDirectoryW;
 # registry (ADR 0009): RegOpenCurrentUser, RegOpenKeyExW, RegEnumKeyExW, RegQueryInfoKeyW,
 # NtQueryValueKey, NtEnumerateValueKey; CPU topology (ADR 0010): GetSystemCpuSetInformation,
-# GetLogicalProcessorInformationEx (Win32_System_SystemInformation).
+# GetLogicalProcessorInformationEx (Win32_System_SystemInformation); DLL search path (ADR 0008,
+# H2): SetDefaultDllDirectories (Win32_System_LibraryLoader).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
   "Wdk_Foundation",
@@ -38,6 +39,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_Com",
   "Win32_System_IO",
   "Win32_System_Ioctl",
+  "Win32_System_LibraryLoader",
   "Win32_System_Registry",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",

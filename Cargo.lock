@@ -750,6 +750,9 @@ version = "0.1.0"
 [[package]]
 name = "rerun-launch"
 version = "0.1.0"
+dependencies = [
+ "windows-sys",
+]
 
 [[package]]
 name = "rerun-proto"
