@@ -1,0 +1,264 @@
+{
+  "cpus": [
+    {
+      "group": 0,
+      "index": 0,
+      "core": 0,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 1,
+      "core": 0,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 2,
+      "core": 2,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 3,
+      "core": 2,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 4,
+      "core": 4,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 5,
+      "core": 4,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 6,
+      "core": 6,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 7,
+      "core": 6,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 8,
+      "core": 8,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 9,
+      "core": 8,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 10,
+      "core": 10,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 11,
+      "core": 10,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 12,
+      "core": 12,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 13,
+      "core": 12,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 14,
+      "core": 14,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 15,
+      "core": 14,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 16,
+      "core": 16,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 17,
+      "core": 16,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 18,
+      "core": 18,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 19,
+      "core": 18,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 20,
+      "core": 20,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 21,
+      "core": 20,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 22,
+      "core": 22,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 23,
+      "core": 22,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 24,
+      "core": 24,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 25,
+      "core": 24,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 26,
+      "core": 26,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 27,
+      "core": 26,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 28,
+      "core": 28,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 29,
+      "core": 28,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 30,
+      "core": 30,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 31,
+      "core": 30,
+      "efficiency_class": 0,
+      "llc": 16,
+      "numa": 0
+    }
+  ],
+  "llc_sizes": {
+    "0": 33554432,
+    "16": 33554432
+  }
+}

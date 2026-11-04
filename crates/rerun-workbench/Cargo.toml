@@ -1,0 +1,15 @@
+[package]
+name = "rerun-workbench"
+description = "Curator tool (queries PCGamingWiki, generates topo drafts). Not shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

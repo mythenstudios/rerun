@@ -1,0 +1,53 @@
+# cargo-deny: licenses, advisories, sources, bans. Runs in CI (see docs/06-security.md).
+# A new license or exception needs a short justification in the commit.
+
+[graph]
+# Evaluate the Windows dependencies even on Linux (CI job deny).
+targets = ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc"]
+all-features = true
+
+[advisories]
+# Vulnerabilities are always errors; additionally:
+yanked = "deny"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# All compatible with GPL-3.0-or-later (project license).
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "0BSD",
+]
+confidence-threshold = 0.8
+# The allowlist is prepared for later phases (Tauri, rustls ...).
+unused-allowed-license = "allow"
+exceptions = []
+
+[licenses.private]
+# Do not check our own crates (publish = false).
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+deny = [
+  # Phase 4 uses rustls for downloads; no OpenSSL dependency.
+  { crate = "openssl-sys", reason = "rustls instead of OpenSSL" },
+  { crate = "openssl", reason = "rustls instead of OpenSSL" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

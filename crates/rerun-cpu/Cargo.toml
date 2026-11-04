@@ -1,0 +1,19 @@
+[package]
+name = "rerun-cpu"
+description = "ASI plugin rerun-cpu.asi (inproc CPU fix) for x86 and x64."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+# The artifact is named rerun_cpu.dll; CI renames it to rerun-cpu.asi (ADR 0006).
+crate-type = ["cdylib"]
+
+[dependencies]
+
+[lints]
+workspace = true

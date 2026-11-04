@@ -1,0 +1,20 @@
+[package]
+name = "rerun-proto"
+description = "Small shared types for Rerun (CPU topology, later launch profile), without heavy dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Only rerun-core enables serde. rerun-launch and rerun-cpu stay without serde.
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[lints]
+workspace = true

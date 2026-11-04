@@ -1,0 +1,21 @@
+[package]
+name = "rerun-cli"
+description = "Command-line interface `rerun`."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rerun"
+path = "src/main.rs"
+
+[dependencies]
+rerun-core.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

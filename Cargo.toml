@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# The Tauri app joins the workspace in phase 5 (see docs/01-architecture.md).
+exclude = ["app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+authors = ["Mythen Studios"]
+# Code: GPL-3.0-or-later. Topos/packages (data) will be licensed separately.
+license = "GPL-3.0-or-later"
+repository = "https://github.com/mythenstudios/rerun"
+publish = false
+
+[workspace.dependencies]
+rerun-core = { path = "crates/rerun-core" }
+rerun-proto = { path = "crates/rerun-proto" }
+
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+clap = { version = "4.6.7", features = ["derive"] }
+
+# Dev dependencies only (schema validation in tests), see ADR 0005.
+jsonschema = { version = "0.60.2", default-features = false }
+serde-saphyr = "2.1.0"
+
+[workspace.lints.rust]
+# Exceptions only via #![allow(unsafe_code)] with a reason: sys::win, rerun-launch, rerun-cpu.
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+unwrap_used = "deny"
+expect_used = "warn"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+cast_possible_truncation = "warn"
+disallowed_methods = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"
+
+[profile.release.package.rerun-launch]
+opt-level = "s"
+
+[profile.release.package.rerun-cpu]
+opt-level = "s"

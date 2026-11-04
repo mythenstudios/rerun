@@ -1,0 +1,30 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# System access only through rerun_core::sys (ADR 0004). Exceptions via
+# #[allow(clippy::disallowed_methods, reason = "...")] in sys::win and rerun-launch.
+disallowed-methods = [
+  { path = "std::fs::write", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::remove_file", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::remove_dir", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::remove_dir_all", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::rename", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::copy", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::create_dir", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::create_dir_all", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::set_permissions", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::File::create", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::OpenOptions::open", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::hard_link", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::soft_link", reason = "filesystem access only through sys::Fs" },
+  { path = "std::os::windows::fs::symlink_file", reason = "filesystem access only through sys::Fs" },
+  { path = "std::os::windows::fs::symlink_dir", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::File::create_new", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::DirBuilder::create", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::File::set_len", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::File::set_permissions", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::File::set_times", reason = "filesystem access only through sys::Fs" },
+  { path = "std::fs::File::set_modified", reason = "filesystem access only through sys::Fs" },
+  { path = "std::env::set_current_dir", reason = "never resolve relative paths via the working directory" },
+  { path = "std::process::Command::new", reason = "processes only through sys::Process" },
+]

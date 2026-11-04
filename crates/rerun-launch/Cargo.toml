@@ -1,0 +1,16 @@
+[package]
+name = "rerun-launch"
+description = "Launch shim rerun-launch.exe. Allowed dependencies: windows-sys and rerun-proto."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Only windows-sys and rerun-proto are allowed (checked by CI). windows-sys arrives in phase 3.
+[dependencies]
+
+[lints]
+workspace = true

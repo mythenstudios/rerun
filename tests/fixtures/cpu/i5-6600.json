@@ -1,0 +1,39 @@
+{
+  "cpus": [
+    {
+      "group": 0,
+      "index": 0,
+      "core": 0,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 1,
+      "core": 1,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 2,
+      "core": 2,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    },
+    {
+      "group": 0,
+      "index": 3,
+      "core": 3,
+      "efficiency_class": 0,
+      "llc": 0,
+      "numa": 0
+    }
+  ],
+  "llc_sizes": {
+    "0": 6291456
+  }
+}
