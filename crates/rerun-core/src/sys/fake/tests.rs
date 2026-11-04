@@ -4,20 +4,22 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::{FakeFs, FakeSystem, FsOp, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
-    fs_link_contract, fs_read_contract, fs_write_contract, gpu_contract, known_folders_contract,
-    registry_contract, topology_contract,
+    FsFixture, fs_link_read_contract, fs_link_write_contract, fs_race_contract, fs_read_contract,
+    fs_volume_contract, fs_write_contract, gpu_contract, known_folders_contract, registry_contract,
+    topology_contract,
 };
 use crate::sys::fs::{Attrs, Dir, EntryKind, Fs, FsKind, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView};
 use crate::sys::snapshot::{Scope, snapshot};
 use crate::sys::{DriverVersion, GpuAdapter, KnownFolder};
-use crate::sys::{SysErrorKind, System};
+use crate::sys::{SysErrorKind, SysResult, System};
 
 const RYZEN_5950X: &str = include_str!("../../../../../tests/fixtures/cpu/ryzen9-5950x.json");
 const I5_6600: &str = include_str!("../../../../../tests/fixtures/cpu/i5-6600.json");
@@ -44,32 +46,163 @@ fn kind<T: std::fmt::Debug>(res: crate::sys::SysResult<T>) -> SysErrorKind {
 
 // ---------- Contracts ----------
 
+/// System with an existing, empty work directory. Every contract run gets a fresh one: the
+/// contracts do not clean up, the runner does by not reusing a directory.
+fn fresh(work: &str) -> FakeSystem {
+    FakeSystem::builder().dir(work).build().unwrap()
+}
+
+const RACE_BUDGET: Duration = Duration::from_millis(200);
+
 #[test]
 fn fake_fulfils_fs_read_contract() {
-    let sys = FakeSystem::builder().dir(r"C:\Work").build().unwrap();
-    fs_read_contract(&sys, Path::new(r"C:\Work")).unwrap();
+    let sys = fresh(r"C:\Work");
+    let skips = fs_read_contract(sys.fs(), sys.fake_fs(), Path::new(r"C:\Work")).unwrap();
+    // The fake has no 8.3 names and no WOF.
+    assert_eq!(skips, ["short_name", "wof_compress"]);
+}
+
+#[test]
+fn fake_fulfils_fs_link_read_contract() {
+    let sys = fresh(r"D:\Work");
+    let skips = fs_link_read_contract(sys.fs(), sys.fake_fs(), Path::new(r"D:\Work")).unwrap();
+    assert!(skips.is_empty(), "{skips:?}");
+}
+
+#[test]
+fn fake_fulfils_fs_volume_contract() {
+    let sys = fresh(r"D:\Work");
+    let skips = fs_volume_contract(sys.fs(), sys.fake_fs(), Path::new(r"D:\Work")).unwrap();
+    // The fake has no drive substitution.
+    assert_eq!(skips, ["subst"]);
+}
+
+#[test]
+fn fake_fulfils_fs_race_contract() {
+    let sys = fresh(r"D:\Work");
+    let skips =
+        fs_race_contract(sys.fs(), sys.fake_fs(), Path::new(r"D:\Work"), RACE_BUDGET).unwrap();
+    assert!(skips.is_empty(), "{skips:?}");
 }
 
 #[test]
 fn fake_fulfils_fs_write_contract() {
-    let sys = FakeSystem::builder().dir(r"C:\Work").build().unwrap();
-    fs_write_contract(&sys, Path::new(r"C:\Work")).unwrap();
+    let sys = fresh(r"C:\Work");
+    let skips = fs_write_contract(sys.fs(), Path::new(r"C:\Work")).unwrap();
+    assert!(skips.is_empty(), "{skips:?}");
 }
 
 #[test]
-fn fake_fulfils_fs_link_contract() {
-    let sys = FakeSystem::builder().dir(r"D:\Work").build().unwrap();
-    fs_link_contract(&sys, sys.fake_fs(), Path::new(r"D:\Work")).unwrap();
+fn fake_fulfils_fs_link_write_contract() {
+    let sys = fresh(r"D:\Work");
+    let skips = fs_link_write_contract(sys.fs(), sys.fake_fs(), Path::new(r"D:\Work")).unwrap();
+    assert!(skips.is_empty(), "{skips:?}");
 }
 
 #[test]
-fn contracts_can_run_twice_on_the_same_dir() {
-    let sys = FakeSystem::builder().dir(r"C:\Work").build().unwrap();
+fn contracts_can_run_twice_in_fresh_dirs() {
+    let sys = fresh(r"C:\Work");
+    let fx = sys.fake_fs();
+    for run in 1..=2 {
+        let dir = |name: &str| {
+            let p = PathBuf::from(format!(r"C:\Work\{name}{run}"));
+            fx.mkdir_all(&p).unwrap();
+            p
+        };
+        fs_read_contract(sys.fs(), fx, &dir("read")).unwrap();
+        fs_link_read_contract(sys.fs(), fx, &dir("link-read")).unwrap();
+        fs_volume_contract(sys.fs(), fx, &dir("volume")).unwrap();
+        fs_race_contract(sys.fs(), fx, &dir("race"), Duration::from_millis(20)).unwrap();
+        fs_write_contract(sys.fs(), &dir("write")).unwrap();
+        fs_link_write_contract(sys.fs(), fx, &dir("link-write")).unwrap();
+    }
+}
+
+#[test]
+fn a_read_contract_needs_an_empty_work_dir() {
+    let sys = fresh(r"C:\Work");
     let work = Path::new(r"C:\Work");
-    for _ in 0..2 {
-        fs_read_contract(&sys, work).unwrap();
-        fs_write_contract(&sys, work).unwrap();
-        fs_link_contract(&sys, sys.fake_fs(), work).unwrap();
+    fs_read_contract(sys.fs(), sys.fake_fs(), work).unwrap();
+    let e = fs_read_contract(sys.fs(), sys.fake_fs(), work).unwrap_err();
+    assert!(e.contains("empty"), "{e}");
+}
+
+/// Fixture whose "junction" is a plain copy of the target: reading through it exposes the
+/// content, like a naive implementation would. The race contract must notice.
+struct CopyFixture {
+    inner: FakeFs,
+    files: Mutex<Vec<(PathBuf, Vec<u8>)>>,
+}
+
+impl FsFixture for CopyFixture {
+    fn dir(&self, p: &Path) -> SysResult<()> {
+        self.inner.dir(p)
+    }
+    fn file(&self, p: &Path, data: &[u8]) -> SysResult<()> {
+        self.files
+            .lock()
+            .unwrap()
+            .push((p.to_path_buf(), data.to_vec()));
+        self.inner.file(p, data)
+    }
+    fn junction(&self, link: &Path, target: &Path) -> SysResult<()> {
+        self.inner.dir(link)?;
+        let files = self.files.lock().unwrap().clone();
+        for (path, data) in files {
+            if let Ok(rest) = path.strip_prefix(target) {
+                self.inner.file(&link.join(rest), &data)?;
+            }
+        }
+        Ok(())
+    }
+    fn dir_symlink(&self, link: &Path, target: &Path) -> SysResult<bool> {
+        self.inner.dir_symlink(link, target)
+    }
+    fn file_symlink(&self, link: &Path, target: &Path) -> SysResult<bool> {
+        self.inner.file_symlink(link, target)
+    }
+    fn hardlink(&self, existing: &Path, new: &Path) -> SysResult<()> {
+        self.inner.hardlink(existing, new)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> SysResult<()> {
+        self.inner.rename(from, to)
+    }
+    fn case_sensitive_dir(&self, p: &Path) -> SysResult<bool> {
+        self.inner.case_sensitive_dir(p)
+    }
+    fn mount_volume(&self, at: &Path) -> SysResult<bool> {
+        self.inner.mount_volume(at)
+    }
+    fn subst(&self, target: &Path) -> SysResult<Option<PathBuf>> {
+        self.inner.subst(target)
+    }
+    fn short_name(&self, p: &Path, short: &str) -> SysResult<bool> {
+        self.inner.short_name(p, short)
+    }
+    fn wof_compress(&self, p: &Path) -> SysResult<bool> {
+        self.inner.wof_compress(p)
+    }
+}
+
+#[test]
+fn the_race_contract_catches_a_leaking_swap() {
+    let sys = fresh(r"D:\Work");
+    let fx = CopyFixture {
+        inner: sys.fake_fs().clone(),
+        files: Mutex::new(Vec::new()),
+    };
+    let started = Instant::now();
+    for attempt in 0.. {
+        let work = PathBuf::from(format!(r"D:\Work\attempt-{attempt}"));
+        fx.dir(&work).unwrap();
+        if let Err(e) = fs_race_contract(sys.fs(), &fx, &work, Duration::from_millis(100)) {
+            assert!(e.contains("race:"), "{e}");
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "harness lost its teeth: a leaking swap was never caught"
+        );
     }
 }
 
@@ -1282,11 +1415,19 @@ fn volume_roots_are_reported() {
     assert!(is_root(r"D:\Mounts\Data"));
     assert!(!is_root(r"D:\Mounts"));
     assert!(!is_root(r"D:\Mounts\Data\Games"));
+    // Below a root a mounted volume is a mount point: a name surrogate, never traversed.
     let mounts = open(&sys, r"D:\Mounts");
-    let data = mounts.open_dir(&r("data")).unwrap();
-    assert!(
-        data.info().unwrap().is_volume_root(),
-        "also via a relative open"
+    assert_eq!(
+        kind(mounts.open_dir(&r("data"))),
+        SysErrorKind::ReparsePoint,
+        "no relative open into a mounted volume"
+    );
+    let m = mounts.metadata(&r("data")).unwrap().unwrap();
+    assert_eq!(m.kind, EntryKind::Reparse);
+    assert_eq!(m.reparse.unwrap().tag, tag::MOUNT_POINT);
+    assert_eq!(
+        kind(mounts.read(&r(r"data\Games\x"))),
+        SysErrorKind::ReparsePoint
     );
 
     let path_of = |abs: &str| open(&sys, abs).info().unwrap().volume_path;

@@ -6,7 +6,10 @@
 //! optional test hook ([`FakeFs::on_step`]) runs **without** the state lock, so a test can
 //! swap a directory for a junction in the middle of an operation (TOCTOU tests).
 //!
-//! Deliberate deviations from real Windows (not checked by the contract tests):
+//! Deliberate deviations from real Windows (not checked by the contract tests). Setup that
+//! the contracts cannot do themselves goes through the `FsFixture` implementation in
+//! `fake/mod.rs`; the fixture methods the fake cannot model (`subst`, `short_name`,
+//! `wof_compress`) report "not available", so the contracts skip those cases.
 //! - [`Fs::open_dir`] only accepts drive-absolute paths (`C:\…`, `\\?\C:\…`); no UNC, no
 //!   volume GUID paths. `.` and `..` are rejected (`InvalidPath`) instead of resolved.
 //! - Drive roots exist implicitly. The volume serial is derived from the drive letter, file
@@ -26,10 +29,13 @@
 //!   lexically (at most 32 levels) and follows directory and file links alike.
 //! - Allowlisted data tags (WOF, dedup, cloud) only mark the entry: content is read directly,
 //!   there is no hydration and no reopen without `FILE_OPEN_REPARSE_POINT`.
-//! - A volume mounted in a folder ([`FakeFs::set_volume_root`]) is a plain directory, not a
-//!   mount point: it is traversed below a root (Windows reports a name surrogate). It reports
-//!   an empty `volume_path` and its own volume serial; file system and file IDs stay those of
-//!   the drive.
+//! - A volume mounted in a folder ([`FakeFs::set_volume_root`]) is a mount point seen from
+//!   above, like on Windows: below a root it is a name surrogate (`Dir::metadata` reports
+//!   `Reparse` with the `MOUNT_POINT` tag, operations through it return `ReparsePoint`), and
+//!   `Fs::open_dir` by absolute path follows into it. Opened that way it reports an empty
+//!   `volume_path` and its own volume serial. Deviation: the mount point is the volume root
+//!   itself (no separate directory underneath), the file system and file IDs stay those of
+//!   the drive, and the setup helpers walk through it without refusing.
 //! - Volumes: the file system is NTFS unless set with [`FakeFs::set_fs_kind`]; it only
 //!   changes what [`RootInfo`] reports, not the behaviour.
 //! - `remove_file` removes any reparse point (file or directory link, like a handle-based
@@ -330,19 +336,44 @@ impl State {
         }
     }
 
+    /// A volume mounted in a folder, seen from above: below a root it is a name surrogate
+    /// (`IO_REPARSE_TAG_MOUNT_POINT`), like on Windows.
+    fn is_mount(&self, id: NodeId) -> bool {
+        self.nodes
+            .get(&id)
+            .is_some_and(|n| n.parent.is_some() && matches!(&n.body, Body::Dir(d) if d.volume_root))
+    }
+
+    /// Kind as seen by relative operations (a mounted volume is a reparse point).
+    fn rel_kind(&self, id: NodeId) -> EntryKind {
+        if self.is_mount(id) {
+            EntryKind::Reparse
+        } else {
+            self.kind(id)
+        }
+    }
+
     fn meta(&self, id: NodeId, target: &str) -> SysResult<Metadata> {
         Ok(match &self.node(id, target)?.body {
             Body::Dir(d) => Metadata {
-                kind: self.kind(id),
+                kind: self.rel_kind(id),
                 len: 0,
                 attrs: d.attrs,
                 links: 1,
                 file_id: u128::from(id),
-                reparse: d.tag.map(|t| ReparseInfo {
-                    tag: t,
-                    surrogate: tag::is_surrogate(t),
-                    target: None,
-                }),
+                reparse: if self.is_mount(id) {
+                    Some(ReparseInfo {
+                        tag: tag::MOUNT_POINT,
+                        surrogate: true,
+                        target: None,
+                    })
+                } else {
+                    d.tag.map(|t| ReparseInfo {
+                        tag: t,
+                        surrogate: tag::is_surrogate(t),
+                        target: None,
+                    })
+                },
             },
             Body::File(ino) => {
                 let i = self.inode(*ino, target)?;
@@ -385,7 +416,7 @@ impl State {
             .lookup(cur, name, target)?
             .ok_or_else(|| err(SysErrorKind::NotFound, target))?;
         match &self.node(child, target)?.body {
-            Body::Dir(d) if d.plain() => Ok(child),
+            Body::Dir(d) if d.plain() && !d.volume_root => Ok(child),
             Body::Dir(_) => Err(err(SysErrorKind::ReparsePoint, target)),
             Body::File(ino) if self.tag_allowed(*ino) => {
                 Err(err(SysErrorKind::InvalidPath, target))
@@ -1090,7 +1121,7 @@ impl Dir for FakeDir {
         let (parent, name) = self.split(FsOp::OpenRead, p)?;
         let st = self.fs.lock();
         let id = Self::require(&st, parent, name, t)?;
-        match (st.kind(id), st.nodes.get(&id).map(|n| &n.body)) {
+        match (st.rel_kind(id), st.nodes.get(&id).map(|n| &n.body)) {
             (EntryKind::File, Some(Body::File(ino))) => {
                 Ok(Box::new(Cursor::new(st.inode(*ino, t)?.data.clone())))
             }
@@ -1278,7 +1309,7 @@ impl Dir for FakeDir {
         let id = Self::require(&st, parent, name, t)?;
         let kind = st.kind(id);
         let ino = match st.nodes.get_mut(&id).map(|n| &mut n.body) {
-            Some(Body::Dir(d)) if d.plain() => {
+            Some(Body::Dir(d)) if d.plain() && !d.volume_root => {
                 d.attrs.readonly = ro;
                 return Ok(());
             }

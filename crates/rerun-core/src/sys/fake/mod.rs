@@ -21,7 +21,7 @@ mod known_folders;
 mod registry;
 mod topology;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rerun_proto::cpu::CpuTopology;
 
@@ -100,17 +100,30 @@ impl System for FakeSystem {
 }
 
 impl FsFixture for FakeFs {
+    fn dir(&self, p: &Path) -> SysResult<()> {
+        self.mkdir_all(p)
+    }
+
+    fn file(&self, p: &Path, data: &[u8]) -> SysResult<()> {
+        self.put_file(p, data)
+    }
+
     fn junction(&self, link: &Path, target: &Path) -> SysResult<()> {
         self.put_link(link, tag::MOUNT_POINT, &target.display().to_string(), true)
     }
 
-    fn hardlink(&self, existing: &Path, new: &Path) -> SysResult<()> {
-        self.put_hardlink(existing, new)
+    fn dir_symlink(&self, link: &Path, target: &Path) -> SysResult<bool> {
+        self.put_link(link, tag::SYMLINK, &target.display().to_string(), true)?;
+        Ok(true)
     }
 
     fn file_symlink(&self, link: &Path, target: &Path) -> SysResult<bool> {
         self.put_link(link, tag::SYMLINK, &target.display().to_string(), false)?;
         Ok(true)
+    }
+
+    fn hardlink(&self, existing: &Path, new: &Path) -> SysResult<()> {
+        self.put_hardlink(existing, new)
     }
 
     fn rename(&self, from: &Path, to: &Path) -> SysResult<()> {
@@ -121,6 +134,24 @@ impl FsFixture for FakeFs {
         self.mkdir_all(p)?;
         self.set_case_sensitive(p, true)?;
         Ok(true)
+    }
+
+    fn mount_volume(&self, at: &Path) -> SysResult<bool> {
+        self.mkdir_all(at)?;
+        self.set_volume_root(at)?;
+        Ok(true)
+    }
+
+    fn subst(&self, _target: &Path) -> SysResult<Option<PathBuf>> {
+        Ok(None)
+    }
+
+    fn short_name(&self, _p: &Path, _short: &str) -> SysResult<bool> {
+        Ok(false)
+    }
+
+    fn wof_compress(&self, _p: &Path) -> SysResult<bool> {
+        Ok(false)
     }
 }
 

@@ -586,7 +586,11 @@ fn swap_after_open_keeps_the_handle_and_identity_catches_a_replacement() {
 }
 
 #[test]
-fn the_game_folder_is_checked_again() {
+fn a_mounted_volume_at_the_game_folder_is_refused_below_the_store() {
+    // Below a root a mounted volume is a mount point (a name surrogate), so the relative walk
+    // refuses it as a reparse point before the volume-root check could apply. The check on
+    // the opened directory stays for roots opened by absolute path
+    // (`a_folder_mounted_volume_is_not_a_root`).
     let sys = base()
         .dir(r"D:\Lib\steamapps\common")
         .mounted_volume(GAME)
@@ -594,10 +598,10 @@ fn the_game_folder_is_checked_again() {
         .unwrap();
     let fr = fr(&sys);
     let store = StoreDir::open(&sys, &fr, Path::new(LIB)).unwrap();
-    assert_eq!(
-        forbidden_reason(store.game(&fr, "Game")),
-        Forbidden::VolumeRoot
-    );
+    assert!(matches!(
+        store.game(&fr, "Game"),
+        Err(RootError::Reparse { .. })
+    ));
 }
 
 #[test]
