@@ -32,10 +32,10 @@ use super::name::{self, DirLayout, Listed, Seg16};
 use super::nt::{self, Access, RelOpen};
 use super::reparse;
 use super::status::{
-    NtStatus, STATUS_UNSUCCESSFUL, is_unsupported_class, kind_of_ntstatus, nt_error, win32_error,
-    win32_info_error,
+    NtStatus, STATUS_UNSUCCESSFUL, is_unsupported_class, nt_error, win32_error, win32_info_error,
 };
 use super::token;
+use crate::fold::fold;
 use crate::path::RelPath;
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, EntryKind, Fs, FsKind, Metadata, ReadSeek, ReparseInfo, RootInfo, tag,
@@ -157,12 +157,15 @@ fn name_info(h: BorrowedHandle<'_>, class: FILE_INFORMATION_CLASS) -> Result<Vec
 }
 
 /// L1 check (ADR 0007, D5) on a freshly opened handle. `FileNormalizedNameInformation`; only
-/// if the file system does not support that class (FAT), `FileNameInformation`. A mismatch
-/// is `NotFound`: the requested name is not the long name of the entry.
+/// if that class is unsupported **and** the volume is FAT or exFAT (which have no
+/// normalized-name support), `FileNameInformation`. On any other file system an unsupported
+/// class is an error (fail closed): a filter driver failing the query on NTFS must not turn
+/// the check into one that lets `PROGRA~1` through. A mismatch is `NotFound`: the requested
+/// name is not the long name of the entry.
 fn check_long_name(h: BorrowedHandle<'_>, seg: &Seg16, target: &str) -> SysResult<()> {
     let reported = match name_info(h, FileNormalizedNameInformation) {
         Ok(n) => n,
-        Err(s) if is_unsupported_class(s) => {
+        Err(s) if is_unsupported_class(s) && on_fat(h) => {
             name_info(h, FileNameInformation).map_err(|s| nt_error(s, target))?
         }
         Err(s) => return Err(nt_error(s, target)),
@@ -172,6 +175,16 @@ fn check_long_name(h: BorrowedHandle<'_>, seg: &Seg16, target: &str) -> SysResul
     } else {
         Err(err(SysErrorKind::NotFound, target))
     }
+}
+
+/// The volume of `h` is FAT or exFAT (`GetVolumeInformationByHandleW`); `false` if unknown.
+fn on_fat(h: BorrowedHandle<'_>) -> bool {
+    nt::volume_info(h).is_ok_and(|(name, _)| {
+        matches!(
+            fs_kind(&String::from_utf16_lossy(&name)),
+            FsKind::Fat | FsKind::ExFat
+        )
+    })
 }
 
 /// Link target of a name surrogate (print name), read on its `FILE_OPEN_REPARSE_POINT` handle.
@@ -465,12 +478,15 @@ impl WinDir {
     }
 
     /// `metadata` of an entry whose attribute open was denied: the description of the same
-    /// name in the listing of its parent (`parents` below this handle), as `read_dir` reports
-    /// it. `Ok(None)` if the listing has no such long name (e.g. it was an 8.3 short name);
-    /// `denied` if the listing has no file ID (fail closed).
+    /// name in the listing of its parent (`parents` below this handle, `walked` the parent
+    /// handle of the walk that was denied), as `read_dir` reports it. `Ok(None)` if the
+    /// listing has no such long name (e.g. it was an 8.3 short name); `denied` if the listing
+    /// has no file ID (fail closed). The parent is reopened for listing by a second walk; it
+    /// must be the same object as `walked` (volume serial and file ID), else `Busy`.
     fn restricted_lookup(
         &self,
         parents: &[&str],
+        walked: BorrowedHandle<'_>,
         seg: &Seg16,
         denied: SysError,
     ) -> SysResult<Option<Metadata>> {
@@ -482,6 +498,9 @@ impl WinDir {
             let rel = RelPath::parse(&parents.join("\\"))
                 .map_err(|_| err(SysErrorKind::InvalidPath, &t))?;
             let parent = self.open_dir_handle(&rel)?;
+            if file_id(parent.as_handle(), &t)? != file_id(walked, &t)? {
+                return Err(err(SysErrorKind::Busy, &t));
+            }
             Self::list(parent.as_handle(), &t)?
         };
         match find_listed(listed, seg) {
@@ -499,13 +518,11 @@ impl Dir for WinDir {
             return Err(err(SysErrorKind::NotFound, t));
         }
         // Name-based queries resolve the current path component by component; a concurrent
-        // rename of an ancestor makes them fail transiently (found by the race contract).
-        let final_path =
-            settle(|| nt::final_path(h), |&c| matches!(c, 2 | 3)).map_err(|c| win32_error(c, t))?;
-        let final_path = PathBuf::from(OsString::from_wide(&final_path));
-        if !is_drive_final_path(&final_path) {
-            return Err(err(SysErrorKind::Other, &final_path.display().to_string()));
-        }
+        // rename of an ancestor makes them fail transiently (found by the race contract), and
+        // two queries can see two different moments. Both are taken in one attempt that must
+        // agree; otherwise retried, finally `NotFound`.
+        let (final_path, volume_path) =
+            settle(|| names_of(h), |e| e.kind == SysErrorKind::NotFound)?;
         let (volume_serial, file_id) = file_id(h, t)?;
         let user_writable = token::user_writable(h).map_err(|c| win32_error(c, t))?;
         let case_sensitive = match nt::query_info(h, FileCaseSensitiveInformation, 4) {
@@ -513,14 +530,6 @@ impl Dir for WinDir {
             Err(s) if is_unsupported_class(s) => false,
             Err(s) => return Err(nt_error(s, t)),
         };
-        // D6: only FileNormalizedNameInformation, no fallback.
-        let normalized = settle(
-            || name_info(h, FileNormalizedNameInformation),
-            |&s| kind_of_ntstatus(s) == SysErrorKind::NotFound,
-        )
-        .map_err(|s| nt_error(s, t))?;
-        let volume_path =
-            name::volume_path(&normalized).ok_or_else(|| err(SysErrorKind::Other, t))?;
         let (fs_name, flags) = nt::volume_info(h).map_err(|c| win32_info_error(c, t))?;
         Ok(RootInfo {
             final_path,
@@ -558,7 +567,7 @@ impl Dir for WinDir {
             Err(e) if e.kind == SysErrorKind::AccessDenied => {
                 let segs: Vec<&str> = p.segments().collect();
                 let parents = segs.split_last().map_or(&[][..], |(_, rest)| rest);
-                self.restricted_lookup(parents, &s, e)
+                self.restricted_lookup(parents, parent, &s, e)
             }
             Err(e) => Err(e),
         }
@@ -587,6 +596,11 @@ impl Dir for WinDir {
                 nt::open_relative(parent, &s, RelOpen::Data).map_err(|st| nt_error(st, t))?;
             if file_id(data.as_handle(), t)? != file_id(first.handle.as_handle(), t)? {
                 return Err(err(SysErrorKind::Busy, t));
+            }
+            // The attributes seen through the data handle may differ (a cloud placeholder in
+            // compatibility mode, a recall flag set in between): check them again.
+            if tag_info(data.as_handle(), t)?.needs_recall() {
+                return Err(err(SysErrorKind::Unsupported, t));
             }
             data
         } else {
@@ -642,6 +656,36 @@ impl Dir for WinDir {
     }
 }
 
+/// `final_path` and `volume_path` of `h`, taken together. D6: `volume_path` only from
+/// `FileNormalizedNameInformation`, no fallback. The final path must end component-wise with
+/// the volume path (case-insensitively via the crate's fold); if it does not, the two queries
+/// saw different moments of a concurrent rename: `NotFound`, which `info` retries.
+fn names_of(h: BorrowedHandle<'_>) -> SysResult<(PathBuf, String)> {
+    let t = HANDLE_TARGET;
+    let raw = nt::final_path(h).map_err(|c| win32_error(c, t))?;
+    let final_path = PathBuf::from(OsString::from_wide(&raw));
+    if !is_drive_final_path(&final_path) {
+        return Err(err(SysErrorKind::Other, &final_path.display().to_string()));
+    }
+    let normalized = name_info(h, FileNormalizedNameInformation).map_err(|s| nt_error(s, t))?;
+    let volume_path = name::volume_path(&normalized).ok_or_else(|| err(SysErrorKind::Other, t))?;
+    if !ends_with_components(&final_path.to_string_lossy(), &volume_path) {
+        return Err(err(SysErrorKind::NotFound, t));
+    }
+    Ok((final_path, volume_path))
+}
+
+/// `full` (`\\?\X:\a\b\c`) ends with the components of `tail` (`b\c`; `""` always matches).
+fn ends_with_components(full: &str, tail: &str) -> bool {
+    let tail: Vec<&str> = tail.split('\\').filter(|s| !s.is_empty()).collect();
+    let full: Vec<&str> = full.split('\\').filter(|s| !s.is_empty()).collect();
+    full.len() >= tail.len()
+        && full[full.len() - tail.len()..]
+            .iter()
+            .zip(&tail)
+            .all(|(a, b)| a == b || fold(a) == fold(b))
+}
+
 /// Attempts of [`settle`].
 const SETTLE_ATTEMPTS: u32 = 32;
 
@@ -682,5 +726,33 @@ fn fs_kind(name: &str) -> FsKind {
         "FAT" | "FAT32" => FsKind::Fat,
         "exFAT" => FsKind::ExFat,
         _ => FsKind::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ends_with_components;
+
+    #[test]
+    fn final_path_must_end_with_the_volume_path() {
+        let full = r"\\?\D:\Mounts\Data\Steam";
+        for ok in [
+            "",
+            "Steam",
+            r"Data\Steam",
+            r"data\STEAM",
+            r"Mounts\Data\Steam",
+        ] {
+            assert!(ends_with_components(full, ok), "{ok}");
+        }
+        for bad in [
+            "Stea",
+            "team",
+            r"Other\Steam",
+            r"X\Mounts\Data\Steam\Steam",
+            "Data",
+        ] {
+            assert!(!ends_with_components(full, bad), "{bad}");
+        }
     }
 }

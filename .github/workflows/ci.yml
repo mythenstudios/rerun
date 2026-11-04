@@ -63,6 +63,11 @@ jobs:
       - name: clippy (i686, without workspace tests)
         run: cargo clippy -p rerun-cpu -p rerun-proto -p rerun-launch --target i686-pc-windows-msvc --locked -- -D warnings
       - name: test (incl. schema validation of topos/ and packages/)
+        # Opt-in for the machine-wide fs contract fixtures (mount point, subst, 8.3 names) and
+        # the elevated run; only honoured together with RUNNER_ENVIRONMENT=github-hosted
+        # (docs/09-testing.md, safeguard 4).
+        env:
+          RERUN_FS_MACHINE_FIXTURES: "1"
         run: cargo test --workspace --all-features --locked
       - name: rerun-core fake feature never in shipped binaries
         # ADR 0007: the in-memory fake and its TOCTOU hooks stay out of release builds.

@@ -1,10 +1,20 @@
-//! `RootInfo::user_writable`: can the current, non-elevated user add a file to a directory?
+//! `RootInfo::user_writable`: can the current, non-elevated user change the directory itself?
 //!
-//! The answer comes from `AccessCheck` against the directory's own security descriptor
-//! (owner, group, DACL and mandatory label, read with `GetSecurityInfo` on the open handle,
-//! never by path), not from trying a write. The token is the user's non-elevated one:
+//! The answer comes from `AccessCheck(MAXIMUM_ALLOWED)` against the directory's own security
+//! descriptor (owner, group, DACL and mandatory label, read with `GetSecurityInfo` on the open
+//! handle, never by path), not from trying a write. Writable means any right that lets the
+//! user change the directory or its entries, or grant itself such a right, is granted:
+//! `FILE_ADD_FILE`, `FILE_ADD_SUBDIRECTORY`, `FILE_DELETE_CHILD`, `DELETE`, `WRITE_DAC`,
+//! `WRITE_OWNER`, `FILE_WRITE_ATTRIBUTES`, `FILE_WRITE_EA` ([`WRITE_RIGHTS`]). The owner
+//! therefore always counts as able to write (implicit `WRITE_DAC`). It describes the directory
+//! itself only: entries below it may have their own DACLs.
+//!
+//! The token is the user's non-elevated one:
 //! - in a fully elevated process (`TokenElevationTypeFull`) the linked token, i.e. the
-//!   filtered token of the same logon (the elevated helper asks about the user, not itself);
+//!   filtered token of the same logon. Under over-the-shoulder elevation that is the
+//!   **administrator's** filtered token, not the interactive user's. In the elevated helper
+//!   `user_writable` is therefore informational only and never a security decision; the
+//!   helper's own security-descriptor check (ADR 0007, "Elevation") is the boundary;
 //! - otherwise a duplicate of the process token at `SecurityIdentification` level.
 //!
 //! With UAC off or for the built-in Administrator (`TokenElevationTypeDefault` while being an
@@ -31,8 +41,21 @@ use windows_sys::Win32::Security::{
     TokenElevationTypeFull, TokenLinkedToken,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ADD_FILE, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_DELETE_CHILD,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_ATTRIBUTES,
+    FILE_WRITE_EA, WRITE_DAC, WRITE_OWNER,
 };
+
+/// Rights that make a directory count as writable: any of them lets the user change the
+/// directory or its entries, or give itself the right to.
+pub(super) const WRITE_RIGHTS: u32 = FILE_ADD_FILE
+    | FILE_ADD_SUBDIRECTORY
+    | FILE_DELETE_CHILD
+    | DELETE
+    | WRITE_DAC
+    | WRITE_OWNER
+    | FILE_WRITE_ATTRIBUTES
+    | FILE_WRITE_EA;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// winnt.h `MAXIMUM_ALLOWED` (avoids the large `Win32_System_SystemServices` feature).
@@ -183,8 +206,9 @@ fn security_descriptor(dir: BorrowedHandle<'_>) -> Result<LocalSd, u32> {
     Ok(sd)
 }
 
-/// The non-elevated user may create files in the directory `dir` (`FILE_ADD_FILE` granted
-/// by `AccessCheck(MAXIMUM_ALLOWED)`). `dir` needs `READ_CONTROL`. Win32 error on failure.
+/// The non-elevated user may change the directory `dir` itself: any of [`WRITE_RIGHTS`]
+/// granted by `AccessCheck(MAXIMUM_ALLOWED)`. `dir` needs `READ_CONTROL`. Win32 error on
+/// failure.
 pub(super) fn user_writable(dir: BorrowedHandle<'_>) -> Result<bool, u32> {
     let sd = security_descriptor(dir)?;
     let token = user_token()?;
@@ -228,5 +252,5 @@ pub(super) fn user_writable(dir: BorrowedHandle<'_>) -> Result<bool, u32> {
         }
         return Err(err);
     }
-    Ok(status != 0 && granted & FILE_ADD_FILE != 0)
+    Ok(status != 0 && granted & WRITE_RIGHTS != 0)
 }

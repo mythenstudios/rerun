@@ -4,7 +4,7 @@
 //! Every test works in a fresh [`TestRoot`] below the cargo `target/` directory (safeguards in
 //! `docs/09-testing.md`); a locally elevated process skips them.
 
-#![allow(
+#![expect(
     clippy::disallowed_methods,
     reason = "test fixture under target/: std::fs sets up the tree, Fs::open_dir opens it"
 )]
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::WinFs;
-use super::testfx::{NaiveFs, TestRoot, ci, note, workflow_warning};
+use super::testfx::{NaiveFs, TestRoot, hosted_ci, note, workflow_warning};
 use crate::path::RelPath;
 use crate::sys::SysErrorKind;
 use crate::sys::contract::{
@@ -319,7 +319,7 @@ const CI_TOLERATED: [&str; 3] = ["mount_volume", "short_name", "wof_compress"];
 fn report(case: &str, result: FsContractResult) {
     let skips = result.unwrap_or_else(|e| panic!("{case}: {e}"));
     for s in skips {
-        if !ci() {
+        if !hosted_ci() {
             note(&format!(
                 "note: {case}: skipped {s} (not available on this machine)"
             ));

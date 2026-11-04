@@ -22,7 +22,8 @@
 //!
 //! Test only: `testfx` (test root with the `docs/09-testing.md` safeguards, the `FsFixture`
 //! for real Windows, the naive control `Fs`; path-based calls and `unsafe` FFI allowed there)
-//! and `tests` (smoke tests and the contract runners).
+//! `tests` (smoke tests and the contract runners) and `bans` (every banned `windows-sys` item
+//! of `clippy.toml` must resolve, else clippy fails).
 
 mod fs;
 mod name;
@@ -30,6 +31,9 @@ mod nt;
 mod reparse;
 mod status;
 mod token;
+
+#[cfg(test)]
+mod bans;
 
 #[cfg(test)]
 mod testfx;

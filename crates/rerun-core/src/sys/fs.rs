@@ -163,7 +163,16 @@ pub struct RootInfo {
     pub volume_serial: u64,
     /// 128-bit file ID of the directory.
     pub file_id: u128,
-    /// The current (non-elevated) user can write into the directory.
+    /// The current (non-elevated) user can change the directory itself: `AccessCheck` grants
+    /// any of `FILE_ADD_FILE`, `FILE_ADD_SUBDIRECTORY`, `FILE_DELETE_CHILD`, `DELETE`,
+    /// `WRITE_DAC`, `WRITE_OWNER`, `FILE_WRITE_ATTRIBUTES`, `FILE_WRITE_EA` (the owner always
+    /// counts, through its implicit `WRITE_DAC`). Applies to this directory only; entries
+    /// below it may have their own DACLs.
+    ///
+    /// In the elevated helper this is informational only and never a security decision:
+    /// under over-the-shoulder elevation the linked token is the administrator's filtered
+    /// token, not the interactive user's. The helper's own security-descriptor check
+    /// (ADR 0007, "Elevation") is the boundary.
     pub user_writable: bool,
     /// The directory is case-sensitive (`FILE_CASE_SENSITIVE_DIR`); writes are refused.
     pub case_sensitive: bool,
@@ -236,9 +245,11 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     /// Identity of this directory, computed at call time. `NotFound` if it was deleted.
     ///
     /// `sys::win` resolves `final_path` and `volume_path` component by component; while an
-    /// ancestor is being renamed at that moment the query can fail. It is retried a bounded
-    /// number of times; if the race persists, `info` returns `NotFound` (callers fail closed,
-    /// an identity is never guessed).
+    /// ancestor is being renamed at that moment a query can fail, or the two can see
+    /// different moments. Both are taken in one attempt that must agree (`final_path` ends
+    /// with `volume_path`); a failed or disagreeing attempt is retried a bounded number of
+    /// times, and if the race persists `info` returns `NotFound` (callers fail closed, an
+    /// identity is never guessed).
     fn info(&self) -> SysResult<RootInfo>;
 
     /// Opens a subdirectory relative to this handle. Never follows reparse points.

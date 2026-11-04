@@ -39,5 +39,13 @@ windows-sys = { workspace = true, features = [
 jsonschema.workspace = true
 serde-saphyr.workspace = true
 
+# Test only: lets sys::win::bans reference every banned windows-sys item (clippy.toml), so a
+# dead ban entry fails clippy. Features of the existing dependency, no new crate.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = [
+  "Wdk_System_SystemServices",
+  "Win32_System_Environment",
+] }
+
 [lints]
 workspace = true

@@ -5,7 +5,8 @@ allow-expect-in-tests = true
 # rerun_core::policy::root (ADR 0007). Exceptions via
 # #[expect(clippy::disallowed_methods, reason = "...")] so a stale exception warns:
 # policy::root::open_abs, sys::snapshot::snapshot, contract and test code, sys::win and
-# rerun-launch. NtCreateFile has exactly two exceptions, in sys::win::nt.
+# rerun-launch. NtCreateFile has exactly two exceptions in production code, in sys::win::nt
+# (test fixtures in sys::win::testfx also use it).
 disallowed-methods = [
   { path = "std::fs::write", reason = "filesystem access only through sys::Fs" },
   { path = "std::fs::remove_file", reason = "filesystem access only through sys::Fs" },
@@ -87,6 +88,35 @@ disallowed-methods = [
   { path = "windows_sys::Win32::Storage::FileSystem::DeleteVolumeMountPointW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Win32::Storage::FileSystem::DefineDosDeviceW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Environment::SetCurrentDirectoryW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  # Review L4 (2026-11-04): app-container, transacted, legacy and ANSI variants.
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateFileFromAppW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::DeleteFileFromAppW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateFileTransactedW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::OpenFile", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::DeleteFileA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::MoveFileExA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::MoveFileA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CopyFileA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateDirectoryA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::RemoveDirectoryA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::GetFileAttributesA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::FindFirstFileA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateHardLinkA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateSymbolicLinkA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  # NT by-name file APIs and their Zw twins.
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtDeleteFile", reason = "NT path or by-name file API outside sys::win::nt (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::ZwDeleteFile", reason = "NT path or by-name file API outside sys::win::nt (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtQueryFullAttributesFile", reason = "NT path or by-name file API outside sys::win::nt (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::ZwQueryFullAttributesFile", reason = "NT path or by-name file API outside sys::win::nt (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtQueryInformationByName", reason = "NT path or by-name file API outside sys::win::nt (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Wdk::System::SystemServices::ZwCreateFile", reason = "NT path or by-name file API outside sys::win::nt (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Wdk::System::SystemServices::ZwOpenFile", reason = "NT path or by-name file API outside sys::win::nt (ADR 0007)", allow-invalid = true },
+  # Phase 2: by-handle rename/delete/attributes go through one sys::win::nt wrapper; nothing uses it yet.
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtSetInformationFile", reason = "phase 2 by-handle rename/delete only via a sys::win::nt wrapper (ADR 0007)", allow-invalid = true },
+  # Processes only through sys::Process (phase 3).
+  { path = "windows_sys::Win32::System::Threading::CreateProcessW", reason = "processes only through sys::Process", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::CreateProcessA", reason = "processes only through sys::Process", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::CreateProcessAsUserW", reason = "processes only through sys::Process", allow-invalid = true },
   # NtCreateFile only through sys::win::nt::{open_relative, open_absolute_dir}; NtOpenFile never.
   { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", reason = "only via sys::win::nt::{open_relative, open_absolute_dir} (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Wdk::Storage::FileSystem::NtOpenFile", reason = "use sys::win::nt::{open_relative, open_absolute_dir} (ADR 0007)", allow-invalid = true },

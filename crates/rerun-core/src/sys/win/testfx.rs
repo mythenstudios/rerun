@@ -7,8 +7,10 @@
 //!   restricted DACLs), re-checks the safeguards and only then removes the tree.
 //! - [`WinFixture`]: the [`FsFixture`] for `sys::win`, made of `std::fs` and raw Win32 calls
 //!   (junctions via `FSCTL_SET_REPARSE_POINT`, no admin, no `cmd`). Fixtures that change the
-//!   machine beyond the test root (mount point, `subst`, 8.3 short names) run only on GitHub
-//!   runners (`GITHUB_ACTIONS=true`) and report "not available" everywhere else.
+//!   machine beyond the test root (mount point, `subst`, 8.3 short names) run only on
+//!   GitHub-hosted runners with the explicit opt-in ([`hosted_ci`]) and report "not
+//!   available" everywhere else. Every writing method is bound to its [`TestRoot`]: the path
+//!   must lie inside the root, without `.`/`..`, below no reparse point and no mount point.
 //! - [`NaiveFs`]: a deliberately unsafe check-then-use-by-path `Fs` (check each prefix with
 //!   `symlink_metadata`, yield, then act on the full path). The race contract must catch it.
 //!
@@ -34,14 +36,17 @@ use std::io::Write as _;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{ptr, thread};
 
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{FILE_OPEN, FILE_OPEN_REPARSE_POINT, NtCreateFile};
 use windows_sys::Win32::Foundation::{
     ERROR_NOT_ALL_ASSIGNED, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LUID,
 };
+use windows_sys::Win32::Foundation::{OBJ_CASE_INSENSITIVE, UNICODE_STRING};
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAce, AddAccessDeniedAce,
     AdjustTokenPrivileges, DACL_SECURITY_INFORMATION, GetLengthSid, GetTokenInformation,
@@ -66,9 +71,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     SetFileInformationByHandle, SetFileShortNameW, SetVolumeMountPointW, WRITE_DAC,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::{FSCTL_SET_EXTERNAL_BACKING, FSCTL_SET_REPARSE_POINT};
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+    GetCurrentProcess, GetCurrentThread, GetExitCodeProcess, OpenProcess, OpenProcessToken,
+    OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 use super::status::kind_of_win32;
@@ -100,9 +107,19 @@ const UNSAFE_ANCESTOR_ATTRS: u32 = FILE_ATTRIBUTE_REPARSE_POINT
     | FILE_ATTRIBUTE_PINNED
     | FILE_ATTRIBUTE_UNPINNED;
 
-/// Running on a GitHub-hosted runner (ephemeral VM, admin).
-pub(super) fn ci() -> bool {
-    std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")
+/// winbase.h `STILL_ACTIVE` (exit code of a running process).
+const STILL_ACTIVE: u32 = 259;
+
+/// A GitHub-hosted runner (ephemeral VM, admin) **and** the explicit opt-in of the workflow:
+/// `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted` and
+/// `RERUN_FS_MACHINE_FIXTURES=1` (set in `.github/workflows/ci.yml` for the test step only).
+/// Gates the machine-wide fixtures, the elevated run and the strict skip policy. A
+/// self-hosted runner or a developer shell that merely sets `GITHUB_ACTIONS` gets none of it.
+pub(super) fn hosted_ci() -> bool {
+    let is = |k: &str, v: &str| std::env::var(k).is_ok_and(|x| x == v);
+    is("GITHUB_ACTIONS", "true")
+        && is("RUNNER_ENVIRONMENT", "github-hosted")
+        && is("RERUN_FS_MACHINE_FIXTURES", "1")
 }
 
 /// A note that `cargo test` does not capture (written to the real stderr, not via `eprintln!`),
@@ -426,10 +443,11 @@ pub(super) struct TestRoot {
 }
 
 impl TestRoot {
-    /// `None` (with a note) when the process is elevated outside GitHub Actions (safeguard 4).
-    /// Panics if a safeguard fails.
+    /// `None` (with a note) when the process is elevated outside [`hosted_ci`] (safeguard 4).
+    /// Removes stale roots of dead test processes first ([`clean_stale`]). Panics if a
+    /// safeguard fails.
     pub(super) fn new(case: &str) -> Option<Self> {
-        if is_elevated() && !ci() {
+        if is_elevated() && !hosted_ci() {
             note(&format!(
                 "skipped {case}: the process is elevated; the file system contracts run \
                  elevated only on GitHub runners (docs/09-testing.md, safeguard 4)"
@@ -441,6 +459,7 @@ impl TestRoot {
             .unwrap_or_else(|e| panic!("canonicalize {}: {e}", target_raw.display()));
         let base = target.join("rerun-fs-contract");
         std::fs::create_dir_all(&base).unwrap_or_else(|e| panic!("{}: {e}", base.display()));
+        clean_stale(&target, &base);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
@@ -451,10 +470,11 @@ impl TestRoot {
             let _ = std::fs::remove_dir(&dir);
             panic!("unsafe test root: {e}")
         });
+        let path = plain(&canon);
         Some(Self {
-            path: plain(&canon),
+            fx: WinFixture::new(path.clone(), plain(&base)),
+            path,
             target,
-            fx: WinFixture::new(),
         })
     }
 
@@ -499,6 +519,138 @@ impl Drop for TestRoot {
     }
 }
 
+// ---------- Stale roots ----------
+
+/// The process `pid` may still run (running, or not inspectable: assume alive).
+fn pid_alive(pid: u32) -> bool {
+    // SAFETY: no pointers; returns a new handle or null.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if raw.is_null() {
+        // ERROR_INVALID_PARAMETER: no such process. Anything else (access denied): alive.
+        return last_error() != 87;
+    }
+    // SAFETY: OpenProcess succeeded and returned a new handle that nothing else owns.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut code = 0u32;
+    // SAFETY: `process` is a live process handle with PROCESS_QUERY_LIMITED_INFORMATION;
+    // `code` is valid for a write.
+    let ok = unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) };
+    ok == 0 || code == STILL_ACTIVE
+}
+
+/// Opens `p` itself with `WRITE_DAC` only (`NtCreateFile`, no `SYNCHRONIZE`, no
+/// `FILE_READ_ATTRIBUTES`, `FILE_OPEN_REPARSE_POINT`), so the owner can reset a DACL that
+/// denies everything else. `CreateFileW` cannot: it always adds those two rights.
+fn open_write_dac(p: &Path) -> SysResult<File> {
+    let what = p.display().to_string();
+    let mut nt: Vec<u16> = r"\??\".encode_utf16().collect();
+    nt.extend(plain(p).as_os_str().encode_wide());
+    let len =
+        u16::try_from(nt.len() * 2).map_err(|_| SysError::path(SysErrorKind::InvalidPath, p))?;
+    let name = UNICODE_STRING {
+        Length: len,
+        MaximumLength: len,
+        Buffer: nt.as_mut_ptr(),
+    };
+    let oa = OBJECT_ATTRIBUTES {
+        Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).unwrap_or(0),
+        RootDirectory: ptr::null_mut(),
+        ObjectName: &name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: ptr::null(),
+        SecurityQualityOfService: ptr::null(),
+    };
+    let mut iosb = IO_STATUS_BLOCK::default();
+    let mut raw: HANDLE = ptr::null_mut();
+    // SAFETY: `raw` and `iosb` are valid for writes; `oa` points to `name`, whose buffer `nt`
+    // outlives the call; no allocation size and no EA buffer. No I/O is done on the handle,
+    // so it needs no synchronous mode.
+    let status = unsafe {
+        NtCreateFile(
+            &mut raw,
+            WRITE_DAC,
+            &oa,
+            &mut iosb,
+            ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT,
+            ptr::null(),
+            0,
+        )
+    };
+    if status < 0 || raw.is_null() {
+        return Err(SysError::new(SysErrorKind::Other, &what).with_ntstatus(status));
+    }
+    // SAFETY: NtCreateFile succeeded and wrote a new handle that nothing else owns.
+    Ok(File::from(unsafe { OwnedHandle::from_raw_handle(raw) }))
+}
+
+/// Gives every entry of a stale tree a DACL granting the current user full access (the owner
+/// may always do that), entries before their children, never following a link: directory
+/// entries come from the listing (`DirEntry::metadata` uses the find data, no open), and
+/// reparse points are reset but not descended into.
+fn reset_tree(dir: &Path) -> SysResult<()> {
+    let what = dir.display().to_string();
+    set_dacl(&open_write_dac(dir)?, &what, FILE_ALL_ACCESS, false)?;
+    for e in std::fs::read_dir(dir).map_err(|e| io_err(&e, dir))? {
+        let e = e.map_err(|err| io_err(&err, dir))?;
+        let m = e.metadata().map_err(|err| io_err(&err, &e.path()))?;
+        let path = e.path();
+        if m.is_dir() && m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            reset_tree(&path)?;
+        } else {
+            let shown = path.display().to_string();
+            set_dacl(&open_write_dac(&path)?, &shown, FILE_ALL_ACCESS, false)?;
+        }
+    }
+    Ok(())
+}
+
+/// Review L7: removes roots `<pid>-<nanos>-<case>` in `base` whose process is gone (a test
+/// that aborted or was killed before its drop ran). Each one must be a plain directory (not a
+/// reparse point, from the listing) that passes the safeguards; its DACLs are reset through
+/// the owner right ([`reset_tree`]), the safeguards are checked again, then it is removed
+/// with the link-safe `remove_dir_all`. Roots of the current or a possibly live process are
+/// never touched. Failures are notes, never panics.
+fn clean_stale(target: &Path, base: &Path) {
+    let Ok(list) = std::fs::read_dir(base) else {
+        return;
+    };
+    let me = std::process::id();
+    for e in list.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(pid) = name.split('-').next().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == me || pid_alive(pid) {
+            continue;
+        }
+        let path = e.path();
+        let plain_dir = e
+            .metadata()
+            .is_ok_and(|m| m.is_dir() && m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0);
+        if !plain_dir {
+            note(&format!(
+                "kept stale {}: not a plain directory",
+                path.display()
+            ));
+            continue;
+        }
+        let checked = check_safe(target, &path)
+            .and_then(|_| reset_tree(&path).map_err(|e| e.to_string()))
+            .and_then(|()| check_safe(target, &path));
+        match checked {
+            Err(why) => note(&format!("kept stale {}: {why}", path.display())),
+            Ok(_) => match std::fs::remove_dir_all(&path) {
+                Ok(()) => note(&format!("removed stale test root {}", path.display())),
+                Err(err) => note(&format!("could not remove stale {}: {err}", path.display())),
+            },
+        }
+    }
+}
+
 // ---------- WinFixture ----------
 
 /// A machine-wide change the fixture made; undone in reverse order by [`TestRoot`]'s drop.
@@ -514,15 +666,79 @@ enum Undo {
     Dacl(PathBuf, File),
 }
 
-/// [`FsFixture`] for `sys::win`. See the module docs.
-#[derive(Debug, Default)]
+/// [`FsFixture`] for `sys::win`, bound to one [`TestRoot`]. See the module docs.
+#[derive(Debug)]
 pub(super) struct WinFixture {
+    /// The test root (plain, canonical): every written path lies inside it.
+    root: PathBuf,
+    /// `target/rerun-fs-contract` (plain, canonical): link targets lie inside it.
+    base: PathBuf,
     undo: Mutex<Vec<Undo>>,
 }
 
+/// What the last component of a guarded path may be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Last {
+    /// Must not be a reparse point if it exists (data is written to or through it).
+    Plain,
+    /// May be a reparse point (a link renamed as itself).
+    Link,
+}
+
 impl WinFixture {
-    fn new() -> Self {
-        Self::default()
+    fn new(root: PathBuf, base: PathBuf) -> Self {
+        Self {
+            root,
+            base,
+            undo: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Review L5: `p` lies inside the root (component-wise), has no `.` or `..`, is not below
+    /// a mount point of this fixture, and no existing component below the root is a reparse
+    /// point (the last one only if `last` is [`Last::Link`]). An unreadable component refuses
+    /// too (fail closed).
+    fn guard(&self, p: &Path, last: Last) -> SysResult<()> {
+        let refuse = |kind| Err(SysError::path(kind, p));
+        if p.components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
+            return refuse(SysErrorKind::InvalidPath);
+        }
+        let Ok(rel) = p.strip_prefix(&self.root) else {
+            return refuse(SysErrorKind::InvalidPath);
+        };
+        self.refuse_mounted(p)?;
+        let comps: Vec<Component<'_>> = rel.components().collect();
+        let mut cur = self.root.clone();
+        for (i, c) in comps.iter().enumerate() {
+            cur.push(c);
+            match std::fs::symlink_metadata(&cur) {
+                Ok(m) => {
+                    let link = m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+                    if link && !(i + 1 == comps.len() && last == Last::Link) {
+                        return refuse(SysErrorKind::ReparsePoint);
+                    }
+                }
+                // Nothing below a missing component exists either.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) => return refuse(SysErrorKind::AccessDenied),
+            }
+        }
+        Ok(())
+    }
+
+    /// Link targets stay inside `target/rerun-fs-contract` (safeguard 2; the cleanup test
+    /// links one test root to a sibling root).
+    fn guard_target(&self, target: &Path) -> SysResult<()> {
+        let t = plain(target);
+        if t.components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+            || !t.starts_with(&self.base)
+        {
+            return Err(SysError::path(SysErrorKind::InvalidPath, target));
+        }
+        Ok(())
     }
 
     fn push_undo(&self, u: Undo) {
@@ -581,8 +797,8 @@ impl WinFixture {
         Ok(())
     }
 
-    fn parents(&self, p: &Path) -> SysResult<()> {
-        self.refuse_mounted(p)?;
+    fn parents(&self, p: &Path, last: Last) -> SysResult<()> {
+        self.guard(p, last)?;
         match p.parent() {
             Some(parent) => std::fs::create_dir_all(parent).map_err(|e| io_err(&e, parent)),
             None => Ok(()),
@@ -590,7 +806,8 @@ impl WinFixture {
     }
 
     fn symlink(&self, link: &Path, target: &Path, flags: u32) -> SysResult<bool> {
-        self.parents(link)?;
+        self.parents(link, Last::Plain)?;
+        self.guard_target(target)?;
         let flags = flags | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
         // SAFETY: both paths are NUL-terminated wide strings that outlive the call.
         let ok = unsafe { CreateSymbolicLinkW(wide(link).as_ptr(), wide(target).as_ptr(), flags) };
@@ -689,19 +906,20 @@ fn mounted_at_letter(vol: &[u16]) -> bool {
 
 impl FsFixture for WinFixture {
     fn dir(&self, p: &Path) -> SysResult<()> {
-        self.refuse_mounted(p)?;
+        self.guard(p, Last::Plain)?;
         std::fs::create_dir_all(p).map_err(|e| io_err(&e, p))
     }
 
     fn file(&self, p: &Path, data: &[u8]) -> SysResult<()> {
-        self.parents(p)?;
+        self.parents(p, Last::Plain)?;
         std::fs::write(p, data).map_err(|e| io_err(&e, p))
     }
 
     /// `FSCTL_SET_REPARSE_POINT` with a mount point buffer on a new empty directory: no admin
     /// and no `mklink` needed.
     fn junction(&self, link: &Path, target: &Path) -> SysResult<()> {
-        self.parents(link)?;
+        self.parents(link, Last::Plain)?;
+        self.guard_target(target)?;
         std::fs::create_dir(link).map_err(|e| io_err(&e, link))?;
         let target = plain(target);
         let print: Vec<u16> = target.as_os_str().encode_wide().collect();
@@ -762,14 +980,16 @@ impl FsFixture for WinFixture {
     }
 
     fn hardlink(&self, existing: &Path, new: &Path) -> SysResult<()> {
-        self.parents(new)?;
+        self.guard(existing, Last::Plain)?;
+        self.parents(new, Last::Plain)?;
         std::fs::hard_link(existing, new).map_err(|e| io_err(&e, new))
     }
 
     /// `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`: never overwrites; renames a link
     /// itself, never its target.
     fn rename(&self, from: &Path, to: &Path) -> SysResult<()> {
-        self.refuse_mounted(to)?;
+        self.guard(from, Last::Link)?;
+        self.guard(to, Last::Link)?;
         // SAFETY: both paths are NUL-terminated wide strings that outlive the call.
         let ok = unsafe { MoveFileExW(wide(from).as_ptr(), wide(to).as_ptr(), 0) };
         if ok == 0 {
@@ -807,9 +1027,10 @@ impl FsFixture for WinFixture {
     /// `at` (`SetVolumeMountPointW`), undone with `DeleteVolumeMountPointW`. Nothing is ever
     /// written below it.
     fn mount_volume(&self, at: &Path) -> SysResult<bool> {
-        if !ci() {
+        if !hosted_ci() {
             return Ok(false);
         }
+        self.guard(at, Last::Plain)?;
         let Some(vol) = Self::other_volume(at) else {
             return Ok(false);
         };
@@ -832,9 +1053,10 @@ impl FsFixture for WinFixture {
     /// GitHub runners only: `DefineDosDeviceW` on a free drive letter, undone with an exact
     /// removal.
     fn subst(&self, target: &Path) -> SysResult<Option<PathBuf>> {
-        if !ci() {
+        if !hosted_ci() {
             return Ok(None);
         }
+        self.guard(target, Last::Plain)?;
         // SAFETY: no arguments.
         let used = unsafe { GetLogicalDrives() };
         let Some(letter) = (b'G'..=b'Z')
@@ -859,9 +1081,10 @@ impl FsFixture for WinFixture {
     /// impersonation token (never on the process token). The short name lives in the test
     /// tree and goes with it.
     fn short_name(&self, p: &Path, short: &str) -> SysResult<bool> {
-        if !ci() {
+        if !hosted_ci() {
             return Ok(false);
         }
+        self.guard(p, Last::Plain)?;
         let what = p.display().to_string();
         let Some(_privilege) = RestorePrivilege::enable().map_err(|c| win32_err(c, &what))? else {
             return Ok(false);
@@ -883,6 +1106,7 @@ impl FsFixture for WinFixture {
 
     /// `FSCTL_SET_EXTERNAL_BACKING` with the WOF file provider (XPRESS4K), like CompactGUI.
     fn wof_compress(&self, p: &Path) -> SysResult<bool> {
+        self.guard(p, Last::Plain)?;
         let f = OpenOptions::new()
             .read(true)
             .write(true)
@@ -931,7 +1155,7 @@ impl FsFixture for WinFixture {
     /// remove the entry. A new open after the change would fail: `CreateFileW` always adds
     /// `SYNCHRONIZE | FILE_READ_ATTRIBUTES`, which the DACL denies (found on real Windows).
     fn restricted(&self, p: &Path) -> SysResult<bool> {
-        self.refuse_mounted(p)?;
+        self.guard(p, Last::Plain)?;
         let f = open_entry(p, WRITE_DAC | READ_CONTROL)?;
         let what = p.display().to_string();
         let r = set_dacl(
@@ -1119,4 +1343,39 @@ impl Dir for NaiveDir {
     fn set_readonly(&self, p: &RelPath, _: bool) -> SysResult<()> {
         Err(SysError::new(SysErrorKind::Unsupported, p.as_str()))
     }
+}
+
+/// Review L7: a root left behind by a dead process, with a restricted file and a restricted
+/// directory in it, is reset and removed by the next `TestRoot::new`; a root of the current
+/// process is not.
+#[test]
+fn stale_roots_of_dead_processes_are_removed() {
+    // Same gate as every TestRoot (safeguard 4).
+    let Some(own) = TestRoot::new("stale-own") else {
+        return;
+    };
+    let target = std::fs::canonicalize(target_dir()).unwrap();
+    let base = target.join("rerun-fs-contract");
+    // Populate under a name clean_stale ignores, then give it a dead PID.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let building = base.join(format!("building-{nanos}"));
+    std::fs::create_dir(&building).unwrap();
+    let fx = WinFixture::new(plain(&building), plain(&base));
+    fx.file(&plain(&building).join("locked.txt"), b"x").unwrap();
+    fx.file(&plain(&building).join(r"dir\inner.txt"), b"y")
+        .unwrap();
+    fx.junction(&plain(&building).join("j"), own.path())
+        .unwrap();
+    assert!(fx.restricted(&plain(&building).join("locked.txt")).unwrap());
+    assert!(fx.restricted(&plain(&building).join("dir")).unwrap());
+    // Drop the undo records without restoring: the tree stays restricted, like after a crash.
+    std::mem::take(&mut *fx.undo.lock().unwrap());
+    // 0xFFFF_FFF0 is never a valid PID (PIDs are multiples of 4 below that).
+    let stale = base.join(format!("4294967280-{nanos}-stale"));
+    std::fs::rename(&building, &stale).unwrap();
+    clean_stale(&target, &base);
+    assert!(!stale.exists(), "{} was not removed", stale.display());
+    assert!(own.path().exists(), "the own root was removed");
 }
