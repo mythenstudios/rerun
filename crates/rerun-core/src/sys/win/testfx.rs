@@ -13,6 +13,8 @@
 //!   must lie inside the root, without `.`/`..`, below no reparse point and no mount point.
 //! - [`NaiveFs`]: a deliberately unsafe check-then-use-by-path `Fs` (check each prefix with
 //!   `symlink_metadata`, yield, then act on the full path). The race contract must catch it.
+//! - [`HklmRegistry`]: a read-only `Registry` for `HKLM` string values (`RegGetValueW` with
+//!   `RRF_NOEXPAND`), the registry of `WinKnownFolders` in tests until `sys::win` has its own.
 //!
 //! Path-based Win32 and `std::fs` calls are the point of this module (they set the scene the
 //! handle-based `sys::win` has to survive), hence the module-wide `disallowed_methods`
@@ -73,6 +75,10 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::{FSCTL_SET_EXTERNAL_BACKING, FSCTL_SET_REPARSE_POINT};
+use windows_sys::Win32::System::Registry::{
+    HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_ANY,
+    RRF_SUBKEY_WOW6464KEY, RegGetValueW,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetExitCodeProcess, OpenProcess, OpenProcessToken,
     OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -84,6 +90,7 @@ use crate::sys::contract::FsFixture;
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, EntryKind, Fs, FsKind, Metadata, ReadSeek, ReparseInfo, RootInfo, tag,
 };
+use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
 /// winbase.h `DRIVE_FIXED`.
@@ -116,6 +123,10 @@ const STILL_ACTIVE: u32 = 259;
 /// Gates the machine-wide fixtures, the elevated run and the strict skip policy. A
 /// self-hosted runner or a developer shell that merely sets `GITHUB_ACTIONS` gets none of it.
 pub(super) fn hosted_ci() -> bool {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test gate: the CI opt-in is an environment variable by design, not a path"
+    )]
     let is = |k: &str, v: &str| std::env::var(k).is_ok_and(|x| x == v);
     is("GITHUB_ACTIONS", "true")
         && is("RUNNER_ENVIRONMENT", "github-hosted")
@@ -1166,6 +1177,91 @@ impl FsFixture for WinFixture {
         );
         self.push_undo(Undo::Dacl(p.to_path_buf(), f));
         r.map(|()| true)
+    }
+}
+
+// ---------- HklmRegistry ----------
+
+/// Read-only stand-in for the real registry until `sys::win::WinRegistry` exists: `get` of a
+/// string value in `HKLM` (native view) with `RegGetValueW(RRF_NOEXPAND)`, every other method
+/// and hive `Unsupported`. Feeds `WinKnownFolders` its `ProfileList` values in tests.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct HklmRegistry;
+
+/// Largest string value read (the `ProfileList` paths are far shorter).
+const HKLM_MAX_BYTES: usize = 2 * 32_768;
+
+impl Registry for HklmRegistry {
+    fn key_exists(&self, k: &RegKey) -> SysResult<bool> {
+        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
+    }
+
+    fn get(&self, k: &RegKey, name: &str) -> SysResult<Option<RegValue>> {
+        let shown = format!("{k} @ {name}");
+        if k.hive != Hive::LocalMachine || k.view != RegView::Native {
+            return Err(SysError::new(SysErrorKind::Unsupported, shown));
+        }
+        let path = wide(&k.path);
+        let value = wide(name);
+        let mut buf = vec![0u16; HKLM_MAX_BYTES / 2];
+        let mut size = u32::try_from(HKLM_MAX_BYTES).unwrap_or(u32::MAX);
+        let mut ty: REG_VALUE_TYPE = 0;
+        // SAFETY: `path` and `value` are NUL-terminated and outlive the call; `ty` and `size`
+        // are valid for writes; `buf` is writable for `size` bytes. HKEY_LOCAL_MACHINE is a
+        // predefined key that needs no closing.
+        let rc = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                path.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_ANY | RRF_NOEXPAND | RRF_SUBKEY_WOW6464KEY,
+                &mut ty,
+                buf.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        match rc {
+            0 => {}
+            // FILE_NOT_FOUND: the key or the value is missing.
+            2 => return Ok(None),
+            code => return Err(win32_err(code, &shown)),
+        }
+        let units = usize::try_from(size).unwrap_or(0) / 2;
+        let mut s = &buf[..units.min(buf.len())];
+        while let [rest @ .., 0] = s {
+            s = rest;
+        }
+        let text = String::from_utf16(s)
+            .map_err(|_| SysError::new(SysErrorKind::Unsupported, shown.clone()))?;
+        match ty {
+            REG_SZ => Ok(Some(RegValue::String(text))),
+            REG_EXPAND_SZ => Ok(Some(RegValue::ExpandString(text))),
+            _ => Err(SysError::new(SysErrorKind::Unsupported, shown)),
+        }
+    }
+
+    fn values(&self, k: &RegKey) -> SysResult<Vec<(String, RegValue)>> {
+        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
+    }
+
+    fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
+        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
+    }
+
+    fn create_key(&self, k: &RegKey) -> SysResult<bool> {
+        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
+    }
+
+    fn set(&self, k: &RegKey, _name: &str, _v: &RegValue) -> SysResult<()> {
+        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
+    }
+
+    fn delete_value(&self, k: &RegKey, _name: &str) -> SysResult<()> {
+        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
+    }
+
+    fn delete_key(&self, k: &RegKey) -> SysResult<()> {
+        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
     }
 }
 

@@ -1,9 +1,11 @@
 //! Known folders: the machine and user folders that `policy::root` keeps off limits.
 //!
 //! The real implementation (`sys::win`) resolves them with `GetSystemWindowsDirectoryW`
-//! (not `GetWindowsDirectoryW`, which is per session) and `SHGetKnownFolderPath`. **Never
-//! from environment variables**: `windir`, `ProgramFiles` and friends can be overridden per
-//! user and are inherited by the elevated helper (ADR 0007, review finding H3).
+//! (not `GetWindowsDirectoryW`, which is per session), the raw `ProfileList` values in `HKLM`
+//! (`ProgramData`, `UserProfiles`) and `SHGetKnownFolderPath` with the process token (the
+//! rest). **Never from environment variables**: `windir`, `ProgramFiles` and friends can be
+//! overridden per user and are inherited by the elevated helper (ADR 0007, review finding
+//! H3, ADR 0009).
 //!
 //! The paths are raw, as the system reports them. Canonicalizing (open + final path) and
 //! comparing is the job of `policy::root`.

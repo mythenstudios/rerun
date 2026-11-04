@@ -59,6 +59,8 @@ pub struct SysError {
     pub win32: Option<u32>,
     /// Original `NTSTATUS`, if any (from `NtCreateFile` and friends).
     pub ntstatus: Option<i32>,
+    /// Original `HRESULT`, if any (from `SHGetKnownFolderPath`).
+    pub hresult: Option<i32>,
 }
 
 impl SysError {
@@ -69,6 +71,7 @@ impl SysError {
             target: target.into(),
             win32: None,
             ntstatus: None,
+            hresult: None,
         }
     }
 
@@ -88,6 +91,13 @@ impl SysError {
     #[must_use]
     pub fn with_ntstatus(mut self, status: i32) -> Self {
         self.ntstatus = Some(status);
+        self
+    }
+
+    /// Attaches the original `HRESULT`.
+    #[must_use]
+    pub fn with_hresult(mut self, hr: i32) -> Self {
+        self.hresult = Some(hr);
         self
     }
 }

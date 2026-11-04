@@ -292,7 +292,12 @@ fn invalid_fixtures_fail() {
         }
         // To check whether a fixture fails for the right reason:
         // RERUN_SHOW_SCHEMA_ERRORS=1 cargo test --test schema -- --nocapture
-        if std::env::var_os("RERUN_SHOW_SCHEMA_ERRORS").is_some() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "debug switch for fixture authors, not a path source"
+        )]
+        let show = std::env::var_os("RERUN_SHOW_SCHEMA_ERRORS").is_some();
+        if show {
             println!(
                 "{}:\n  {}",
                 f.file_name().unwrap().to_string_lossy(),
