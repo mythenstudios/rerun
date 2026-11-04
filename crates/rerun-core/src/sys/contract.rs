@@ -1,8 +1,9 @@
 //! Contract tests of the system layer: the same checks for `fake` and `win`.
 //!
 //! Today they run against `sys::fake`. From phase 1/2 they also run against `sys::win`:
-//! the file system contracts in a fresh directory under `target/`, registry contracts in
-//! Windows Sandbox (`docs/09-testing.md`). That keeps the fake honest.
+//! the file system contracts in a fresh directory under `target/`, the registry contracts in a
+//! private app hive under `target/` and on stable system keys, the rest in Windows Sandbox
+//! (`docs/09-testing.md`). That keeps the fake honest.
 //!
 //! The file system contracts are split by side:
 //!
@@ -41,8 +42,12 @@ use std::time::{Duration, Instant};
 
 use super::fs::{Attrs, Dir, EntryKind, Fs, tag};
 use super::gpu::MAX_NAME_UTF16;
-use super::registry::{RegKey, RegValue};
-use super::{KnownFolder, SysErrorKind, SysResult, System};
+use super::registry::{
+    Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegValue,
+    RegView, Registry, reg_type,
+};
+use super::{KnownFolder, KnownFolders, SysErrorKind, SysResult, System};
+use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 
 /// Failed contract with a description.
@@ -1939,9 +1944,745 @@ pub fn fs_link_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> F
     Ok(skips)
 }
 
-/// Registry contract. `root` must be an existing key without values and subkeys.
-pub fn registry_contract(sys: &dyn System, root: &RegKey) -> ContractResult {
-    let reg = sys.registry();
+/// Setup that the registry API under test deliberately cannot do while it is read-only: create
+/// keys, write values with any type number and bytes, delete a value, create a symbolic-link
+/// key. For `sys::fake` it is implemented by `FakeRegistry`; for `sys::win` by test code in a
+/// private app hive (ADR 0009).
+///
+/// The fixture writes exactly what it is told: `raw` stores the type number and bytes as given,
+/// without any decoding. Methods that may be unavailable return `Ok(false)` ("not available"):
+/// the contract skips that case and reports it in [`Skipped`].
+pub trait RegFixture: Sync {
+    /// Creates the key `k` including missing parents.
+    fn key(&self, k: &RegKey) -> SysResult<()>;
+    /// Stores the value `name` of the existing key `k` with type number `kind` and `data`
+    /// (overwriting a value of that name).
+    fn raw(&self, k: &RegKey, name: &str, kind: u32, data: &[u8]) -> SysResult<()>;
+    /// Deletes a value of the existing key `k`.
+    fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()>;
+    /// Creates `link` as a symbolic-link key to the existing key `target` (same hive and
+    /// view). `Ok(false)` = not available.
+    fn link(&self, link: &RegKey, target: &RegKey) -> SysResult<bool>;
+}
+
+fn sz_bytes(s: &str) -> Vec<u8> {
+    s.encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+fn units_bytes(units: &[u16]) -> Vec<u8> {
+    units.iter().flat_map(|u| u.to_le_bytes()).collect()
+}
+
+fn multi_bytes(parts: &[&str]) -> Vec<u8> {
+    let mut units: Vec<u16> = Vec::new();
+    for p in parts {
+        units.extend(p.encode_utf16());
+        units.push(0);
+    }
+    units.push(0);
+    units_bytes(&units)
+}
+
+/// Value names of `values` (original case), sorted.
+fn value_names(reg: &dyn Registry, k: &RegKey, what: &str) -> Result<Vec<String>, String> {
+    let mut v: Vec<String> = ok(reg.values(k), what)?
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    v.sort();
+    Ok(v)
+}
+
+fn subkey_names(reg: &dyn Registry, k: &RegKey, what: &str) -> Result<Vec<String>, String> {
+    let mut v = ok(reg.subkeys(k), what)?;
+    v.sort();
+    Ok(v)
+}
+
+fn other_view(k: &RegKey) -> RegKey {
+    RegKey {
+        view: match k.view {
+            RegView::Native => RegView::Wow32,
+            RegView::Wow32 => RegView::Native,
+        },
+        ..k.clone()
+    }
+}
+
+/// The type numbers and bytes of the decoding cases: `(value name, type, bytes, typed value
+/// the registry must hand out, or `None` for [`RegValue::Raw`])`.
+type DecodeCase = (&'static str, u32, Vec<u8>, Option<RegValue>);
+
+fn decode_cases() -> Vec<DecodeCase> {
+    use reg_type::*;
+    let sz = |s: &str| Some(RegValue::String(s.to_owned()));
+    vec![
+        ("sz", REG_SZ, sz_bytes("Steam"), sz("Steam")),
+        ("sz_empty", REG_SZ, sz_bytes(""), sz("")),
+        (
+            "sz_astral",
+            REG_SZ,
+            sz_bytes("a\u{1F3AE}"),
+            sz("a\u{1F3AE}"),
+        ),
+        ("sz_zero_length", REG_SZ, vec![], None),
+        ("sz_odd_length", REG_SZ, vec![b'a', 0, 0], None),
+        ("sz_no_nul", REG_SZ, units_bytes(&[0x61, 0x62]), None),
+        ("sz_two_nuls", REG_SZ, units_bytes(&[0x61, 0, 0]), None),
+        (
+            "sz_nul_inside",
+            REG_SZ,
+            units_bytes(&[0x61, 0, 0x62, 0]),
+            None,
+        ),
+        ("sz_lone_surrogate", REG_SZ, units_bytes(&[0xD800, 0]), None),
+        (
+            "expand",
+            REG_EXPAND_SZ,
+            sz_bytes(r"%SystemRoot%\system32"),
+            Some(RegValue::ExpandString(r"%SystemRoot%\system32".to_owned())),
+        ),
+        (
+            "expand_no_nul",
+            REG_EXPAND_SZ,
+            units_bytes(&[0x25, 0x25]),
+            None,
+        ),
+        (
+            "multi",
+            REG_MULTI_SZ,
+            multi_bytes(&["a", "bc"]),
+            Some(RegValue::MultiString(vec!["a".into(), "bc".into()])),
+        ),
+        (
+            "multi_empty_list",
+            REG_MULTI_SZ,
+            vec![0, 0],
+            Some(RegValue::MultiString(vec![])),
+        ),
+        ("multi_two_nuls", REG_MULTI_SZ, vec![0, 0, 0, 0], None),
+        (
+            "multi_empty_element",
+            REG_MULTI_SZ,
+            units_bytes(&[0x61, 0, 0, 0x62, 0, 0]),
+            None,
+        ),
+        (
+            "multi_no_final_nul",
+            REG_MULTI_SZ,
+            units_bytes(&[0x61, 0]),
+            None,
+        ),
+        (
+            "dword",
+            REG_DWORD,
+            vec![1, 0, 0, 0],
+            Some(RegValue::Dword(1)),
+        ),
+        (
+            "dword_high",
+            REG_DWORD,
+            0xA1B2_C3D4_u32.to_le_bytes().to_vec(),
+            Some(RegValue::Dword(0xA1B2_C3D4)),
+        ),
+        ("dword_3_bytes", REG_DWORD, vec![1, 0, 0], None),
+        (
+            "dword_8_bytes",
+            REG_DWORD,
+            vec![1, 0, 0, 0, 0, 0, 0, 0],
+            None,
+        ),
+        (
+            "qword",
+            REG_QWORD,
+            u64::MAX.to_le_bytes().to_vec(),
+            Some(RegValue::Qword(u64::MAX)),
+        ),
+        ("qword_4_bytes", REG_QWORD, vec![1, 0, 0, 0], None),
+        (
+            "binary_empty",
+            REG_BINARY,
+            vec![],
+            Some(RegValue::Binary(vec![])),
+        ),
+        (
+            "binary",
+            REG_BINARY,
+            vec![0, 1, 2, 0],
+            Some(RegValue::Binary(vec![0, 1, 2, 0])),
+        ),
+        ("none", REG_NONE, vec![1, 2, 3], None),
+        ("none_empty", REG_NONE, vec![], None),
+        (
+            "dword_big_endian",
+            REG_DWORD_BIG_ENDIAN,
+            vec![0, 0, 0, 1],
+            None,
+        ),
+        ("link_type", REG_LINK, units_bytes(&[0x61]), None),
+        ("resource_list", REG_RESOURCE_LIST, vec![9, 9], None),
+        ("unknown_12", 12, vec![1], None),
+        ("unknown_big", 0x1234, vec![1, 2], None),
+    ]
+}
+
+/// Registry read contract: key and value semantics, canonical decoding, input rules, limits
+/// for untrusted data and (where the fixture can make one) symbolic-link keys. Only reads go
+/// through `reg`; every key and value it needs is made by `fx`.
+///
+/// `root` must be an existing key without values and subkeys and **outside**
+/// `HKLM\SOFTWARE`, where the 32-bit view is not redirected: the runner calls the contract
+/// once per view, with different roots (the contract deletes nothing), and the contract checks
+/// that the other view sees the same data. The redirection itself is pinned by
+/// [`registry_system_contract`].
+///
+/// Skipped cases: `"key_link"` (no symbolic-link keys).
+pub fn registry_read_contract(
+    reg: &dyn Registry,
+    fx: &dyn RegFixture,
+    root: &RegKey,
+) -> Result<Skipped, String> {
+    let mut skips = Skipped::new();
+    ensure(ok(reg.key_exists(root), "root exists")?, "root exists")?;
+    ensure(
+        value_names(reg, root, "values of root")?.is_empty()
+            && subkey_names(reg, root, "subkeys of root")?.is_empty(),
+        "root is empty",
+    )?;
+    ensure(
+        ok(
+            reg.key_exists(&RegKey::new(root.hive, root.view, "")),
+            "hive root exists",
+        )?,
+        "the hive root exists",
+    )?;
+
+    // Missing key.
+    let a = root.join("Alpha");
+    ensure(
+        !ok(reg.key_exists(&a), "key_exists missing")?,
+        "missing key does not exist",
+    )?;
+    err_kind(
+        reg.get(&a, "x"),
+        SysErrorKind::NotFound,
+        "get on missing key",
+    )?;
+    err_kind(
+        reg.values(&a),
+        SysErrorKind::NotFound,
+        "values of missing key",
+    )?;
+    err_kind(
+        reg.subkeys(&a),
+        SysErrorKind::NotFound,
+        "subkeys of missing key",
+    )?;
+
+    // An empty key is not a missing key.
+    ok(fx.key(&a), "fixture: key")?;
+    ensure(ok(reg.key_exists(&a), "key_exists")?, "empty key exists")?;
+    ensure(
+        ok(reg.get(&a, "Nope"), "get missing value")?.is_none(),
+        "missing value = None",
+    )?;
+    ensure(
+        value_names(reg, &a, "values of empty key")?.is_empty()
+            && subkey_names(reg, &a, "subkeys of empty key")?.is_empty(),
+        "empty key has no values and no subkeys",
+    )?;
+    ensure(
+        subkey_names(reg, root, "subkeys of root")? == ["Alpha"],
+        "subkeys keep the original case",
+    )?;
+
+    // Names are case-insensitive and keep their case; the default value is "".
+    ok(fx.key(&a.join("Child")), "fixture: child")?;
+    ok(
+        fx.raw(&a, "Flag", reg_type::REG_DWORD, &[1, 0, 0, 0]),
+        "fixture: Flag",
+    )?;
+    ok(
+        fx.raw(&a, "", reg_type::REG_SZ, &sz_bytes("default")),
+        "fixture: default",
+    )?;
+    ensure(
+        ok(reg.get(&root.join("ALPHA"), "FLAG"), "get other case")? == Some(RegValue::Dword(1)),
+        "dword round-trip, case-insensitive key and value name",
+    )?;
+    ensure(
+        ok(reg.get(&a, "Flag"), "get")? != Some(RegValue::String("1".into())),
+        "dword differs from string",
+    )?;
+    ensure(
+        ok(reg.get(&a, ""), "get default")? == Some(RegValue::String("default".into())),
+        "default value",
+    )?;
+    ensure(
+        value_names(reg, &a, "values")? == ["", "Flag"],
+        "value names keep their case, the default value is \"\"",
+    )?;
+    ensure(
+        subkey_names(reg, &root.join("alpha"), "subkeys other case")? == ["Child"],
+        "subkeys of a key found by another case",
+    )?;
+    ensure(
+        ok(
+            reg.key_exists(&root.join("aLpHa").join("CHILD")),
+            "key_exists case",
+        )?,
+        "key_exists is case-insensitive",
+    )?;
+    // Non-ASCII names.
+    let green = root.join("Gr\u{fc}n");
+    ok(fx.key(&green), "fixture: Grün")?;
+    ok(
+        fx.raw(&green, "Ünï\u{1F3AE}", reg_type::REG_DWORD, &[2, 0, 0, 0]),
+        "fixture: unicode value",
+    )?;
+    ensure(
+        ok(reg.key_exists(&root.join("GR\u{dc}N")), "key_exists Ü")?,
+        "non-ASCII key names fold",
+    )?;
+    ensure(
+        ok(reg.get(&green, "Ünï\u{1F3AE}"), "get unicode value")? == Some(RegValue::Dword(2)),
+        "non-ASCII value name",
+    )?;
+    ensure(
+        value_names(reg, &green, "values")? == ["Ünï\u{1F3AE}"],
+        "non-ASCII value name keeps its case",
+    )?;
+    // A value name may contain a backslash.
+    ok(
+        fx.raw(&green, r"a\b", reg_type::REG_DWORD, &[3, 0, 0, 0]),
+        "fixture: a\\b",
+    )?;
+    ensure(
+        ok(reg.get(&green, r"a\b"), "get a\\b")? == Some(RegValue::Dword(3)),
+        "value name with a backslash",
+    )?;
+
+    // The other view sees the same data below a root outside SOFTWARE.
+    let other = other_view(&a);
+    ensure(
+        ok(reg.get(&other, "Flag"), "get through the other view")? == Some(RegValue::Dword(1)),
+        "keys outside HKLM\\SOFTWARE are shared between the views",
+    )?;
+    ensure(
+        subkey_names(reg, &other, "subkeys through the other view")? == ["Child"],
+        "subkeys through the other view",
+    )?;
+
+    // Every decoding case: the exact stored type and bytes come back, typed only when canonical.
+    let types = root.join("Types");
+    ok(fx.key(&types), "fixture: Types")?;
+    let cases = decode_cases();
+    for (name, kind, data, _) in &cases {
+        ok(
+            fx.raw(&types, name, *kind, data),
+            &format!("fixture: {name}"),
+        )?;
+    }
+    for (name, kind, data, typed) in &cases {
+        let what = format!("decoding case {name}");
+        let got = ok(reg.get(&types, name), &what)?
+            .ok_or(format!("contract violated: {what}: missing"))?;
+        ensure(
+            got.encode() == Some((*kind, data.clone())),
+            &format!("{what}: exact type and bytes"),
+        )?;
+        match typed {
+            Some(v) => ensure(got == *v, &format!("{what}: typed value"))?,
+            None => ensure(
+                matches!(got, RegValue::Raw(_)),
+                &format!("{what}: raw value"),
+            )?,
+        }
+        ensure(
+            got == RegValue::decode(*kind, data),
+            &format!("{what}: same as RegValue::decode"),
+        )?;
+    }
+    let all = ok(reg.values(&types), "values of Types")?;
+    ensure(all.len() == cases.len(), "values lists every value")?;
+    for (name, value) in &all {
+        let one = ok(reg.get(&types, name), "get")?;
+        ensure(
+            one.as_ref() == Some(value),
+            &format!("values and get agree on {name}"),
+        )?;
+    }
+
+    // Input rules: InvalidPath before anything touches the registry.
+    let bad_keys = [
+        (
+            "NUL in key",
+            RegKey {
+                path: format!("{}\\Bad\0Name", root.path),
+                ..root.clone()
+            },
+        ),
+        (
+            "empty segment",
+            RegKey {
+                path: format!("{}\\\\Alpha", root.path),
+                ..root.clone()
+            },
+        ),
+        (
+            "leading backslash",
+            RegKey {
+                path: format!("\\{}", root.path),
+                ..root.clone()
+            },
+        ),
+        (
+            "trailing backslash",
+            RegKey {
+                path: format!("{}\\", root.path),
+                ..root.clone()
+            },
+        ),
+        ("segment of 256 units", root.join(&"s".repeat(256))),
+        (
+            "segment of 128 astral characters",
+            root.join(&"\u{1F3AE}".repeat(128)),
+        ),
+        (
+            "path over 32,767 units",
+            RegKey {
+                path: vec!["p".repeat(255); 130].join("\\"),
+                ..root.clone()
+            },
+        ),
+    ];
+    for (what, k) in &bad_keys {
+        err_kind(
+            reg.key_exists(k),
+            SysErrorKind::InvalidPath,
+            &format!("key_exists: {what}"),
+        )?;
+        err_kind(
+            reg.get(k, "x"),
+            SysErrorKind::InvalidPath,
+            &format!("get: {what}"),
+        )?;
+        err_kind(
+            reg.values(k),
+            SysErrorKind::InvalidPath,
+            &format!("values: {what}"),
+        )?;
+        err_kind(
+            reg.subkeys(k),
+            SysErrorKind::InvalidPath,
+            &format!("subkeys: {what}"),
+        )?;
+    }
+    for (what, name) in [
+        ("NUL in value name", "Bad\0Name".to_owned()),
+        ("value name of 16,384 units", "n".repeat(16_384)),
+        (
+            "value name of 8,192 astral characters",
+            "\u{1F3AE}".repeat(8_192),
+        ),
+    ] {
+        err_kind(
+            reg.get(&a, &name),
+            SysErrorKind::InvalidPath,
+            &format!("get: {what}"),
+        )?;
+    }
+    // Exactly at the limits is valid.
+    let long_key = root.join(&"s".repeat(255));
+    ok(fx.key(&long_key), "fixture: segment of 255 units")?;
+    ensure(
+        ok(reg.key_exists(&long_key), "key_exists long segment")?,
+        "a segment of 255 units is valid",
+    )?;
+    let long_name = "n".repeat(16_383);
+    ok(
+        fx.raw(&a, &long_name, reg_type::REG_DWORD, &[4, 0, 0, 0]),
+        "fixture: value name of 16,383 units",
+    )?;
+    ensure(
+        ok(reg.get(&a, &long_name), "get long name")? == Some(RegValue::Dword(4)),
+        "a value name of 16,383 units is valid",
+    )?;
+
+    // Limits for untrusted data: Unsupported, never a partial result.
+    let blob = |n: usize| vec![7_u8; n];
+    let big = root.join("Big");
+    ok(fx.key(&big), "fixture: Big")?;
+    ok(
+        fx.raw(&big, "ok", reg_type::REG_BINARY, &blob(MAX_VALUE_BYTES)),
+        "fixture: 1 MiB",
+    )?;
+    ensure(
+        ok(reg.get(&big, "ok"), "get 1 MiB")?.is_some(),
+        "a value of 1 MiB is returned",
+    )?;
+    ensure(
+        ok(reg.values(&big), "values with 1 MiB")?.len() == 1,
+        "values with a value of 1 MiB",
+    )?;
+    ok(
+        fx.raw(
+            &big,
+            "over",
+            reg_type::REG_BINARY,
+            &blob(MAX_VALUE_BYTES + 1),
+        ),
+        "fixture: 1 MiB + 1",
+    )?;
+    err_kind(
+        reg.get(&big, "over"),
+        SysErrorKind::Unsupported,
+        "get of a value over 1 MiB",
+    )?;
+    err_kind(
+        reg.values(&big),
+        SysErrorKind::Unsupported,
+        "values with a value over 1 MiB",
+    )?;
+    ensure(
+        ok(reg.get(&big, "ok"), "get after refusal")?.is_some(),
+        "other values stay readable",
+    )?;
+    ok(fx.delete_value(&big, "over"), "fixture: delete over")?;
+    ensure(
+        ok(reg.values(&big), "values after the large value is gone")?.len() == 1,
+        "values works again",
+    )?;
+
+    let total = root.join("Total");
+    ok(fx.key(&total), "fixture: Total")?;
+    let sixteen = MAX_VALUES_TOTAL_BYTES / MAX_VALUE_BYTES;
+    for i in 0..sixteen {
+        ok(
+            fx.raw(
+                &total,
+                &format!("v{i}"),
+                reg_type::REG_BINARY,
+                &blob(MAX_VALUE_BYTES),
+            ),
+            "fixture: 16 MiB in total",
+        )?;
+    }
+    ensure(
+        ok(reg.values(&total), "values with 16 MiB")?.len() == sixteen,
+        "values with 16 MiB in total",
+    )?;
+    ok(
+        fx.raw(&total, "one more", reg_type::REG_BINARY, &[1]),
+        "fixture: one byte more",
+    )?;
+    err_kind(
+        reg.values(&total),
+        SysErrorKind::Unsupported,
+        "values over 16 MiB in total",
+    )?;
+
+    let many = root.join("Many");
+    ok(fx.key(&many), "fixture: Many")?;
+    for i in 0..MAX_VALUES {
+        ok(
+            fx.raw(&many, &format!("v{i}"), reg_type::REG_DWORD, &[1, 0, 0, 0]),
+            "fixture: 16,384 values",
+        )?;
+    }
+    ensure(
+        ok(reg.values(&many), "values with 16,384")?.len() == MAX_VALUES,
+        "values with 16,384 values",
+    )?;
+    ok(
+        fx.raw(&many, "one more", reg_type::REG_DWORD, &[1, 0, 0, 0]),
+        "fixture: one value more",
+    )?;
+    err_kind(
+        reg.values(&many),
+        SysErrorKind::Unsupported,
+        "values over 16,384 values",
+    )?;
+
+    let subs = root.join("Subs");
+    ok(fx.key(&subs), "fixture: Subs")?;
+    for i in 0..MAX_SUBKEYS {
+        ok(
+            fx.key(&subs.join(&format!("k{i}"))),
+            "fixture: 65,536 subkeys",
+        )?;
+    }
+    ensure(
+        ok(reg.subkeys(&subs), "subkeys with 65,536")?.len() == MAX_SUBKEYS,
+        "subkeys with 65,536 names",
+    )?;
+    ok(fx.key(&subs.join("one more")), "fixture: one subkey more")?;
+    err_kind(
+        reg.subkeys(&subs),
+        SysErrorKind::Unsupported,
+        "subkeys over 65,536 names",
+    )?;
+
+    // Symbolic-link keys are followed on reads.
+    let link = root.join("Link");
+    if ok(fx.link(&link, &a), "fixture: link")? {
+        ensure(
+            ok(reg.key_exists(&link), "key_exists link")?,
+            "a link key exists",
+        )?;
+        ensure(
+            ok(reg.get(&link, "Flag"), "get through link")? == Some(RegValue::Dword(1)),
+            "a value is read through a link",
+        )?;
+        ensure(
+            subkey_names(reg, &link, "subkeys through link")? == ["Child"],
+            "subkeys are read through a link",
+        )?;
+        ensure(
+            ok(reg.values(&link), "values through link")? == ok(reg.values(&a), "values")?,
+            "values are read through a link",
+        )?;
+        ensure(
+            ok(reg.key_exists(&link.join("Child")), "key_exists below link")?,
+            "a key below a link exists",
+        )?;
+    } else {
+        skip(&mut skips, "key_link");
+    }
+    Ok(skips)
+}
+
+/// Value of `name` of `k` as text (a `REG_SZ`, or a `REG_EXPAND_SZ` that is not expanded).
+fn text_value(reg: &dyn Registry, k: &RegKey, name: &str) -> Result<String, String> {
+    match ok(reg.get(k, name), &format!("get {k} @ {name}"))? {
+        Some(RegValue::String(s) | RegValue::ExpandString(s)) => Ok(s),
+        other => Err(format!(
+            "contract violated: {k} @ {name} is not text: {other:?}"
+        )),
+    }
+}
+
+/// Registry system contract: read-only checks on keys that every Windows has, so that the
+/// WOW64 views, links and access errors are pinned on the real system and on a seeded fake
+/// (the fake must hold `ProgramFilesDir` and `CommonFilesDir` below `HKLM\SOFTWARE` and
+/// `HKLM\SOFTWARE\WOW6432Node`, `HKLM\SYSTEM\CurrentControlSet\Control`, and `HKLM\SECURITY`
+/// denied):
+///
+/// - `ProgramFilesDir` and `CommonFilesDir` of `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion`
+///   in the native view are the known folders `ProgramFiles` and `ProgramFilesCommon`, in the
+///   32-bit view `ProgramFilesX86` and `ProgramFilesCommonX86` (case-insensitive).
+/// - The 32-bit view of `HKLM\SOFTWARE\X` is `HKLM\SOFTWARE\WOW6432Node\X` of the native view
+///   (`WOW6432Node` is the alias; the logical path never names it).
+/// - `HKLM\SYSTEM\CurrentControlSet` (a link on Windows) has a `Control` subkey.
+/// - `HKLM\SECURITY` is `AccessDenied` for `key_exists`, also for an administrator.
+///
+/// Whether an explicit `WOW6432Node` in the 32-bit view names the same key is deliberately
+/// not part of the contract (ADR 0009). Skipped case: `"security_denied"` (the process can
+/// open `HKLM\SECURITY`, e.g. it runs as SYSTEM).
+pub fn registry_system_contract(
+    reg: &dyn Registry,
+    kf: &dyn KnownFolders,
+) -> Result<Skipped, String> {
+    let mut skips = Skipped::new();
+    let cv = r"SOFTWARE\Microsoft\Windows\CurrentVersion";
+    let native = RegKey::new(Hive::LocalMachine, RegView::Native, cv);
+    let wow = RegKey::new(Hive::LocalMachine, RegView::Wow32, cv);
+    let alias = RegKey::new(
+        Hive::LocalMachine,
+        RegView::Native,
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion",
+    );
+
+    let same = |value: String, folder: KnownFolder, what: &str| -> ContractResult {
+        let p = ok(kf.get(folder), &format!("known folder {folder}"))?;
+        ensure(
+            fold(&value) == fold(&p.display().to_string()),
+            &format!(
+                "{what} is the known folder {folder}: {value:?} vs {}",
+                p.display()
+            ),
+        )
+    };
+    same(
+        text_value(reg, &native, "ProgramFilesDir")?,
+        KnownFolder::ProgramFiles,
+        "native ProgramFilesDir",
+    )?;
+    same(
+        text_value(reg, &native, "CommonFilesDir")?,
+        KnownFolder::ProgramFilesCommon,
+        "native CommonFilesDir",
+    )?;
+    same(
+        text_value(reg, &wow, "ProgramFilesDir")?,
+        KnownFolder::ProgramFilesX86,
+        "32-bit ProgramFilesDir",
+    )?;
+    same(
+        text_value(reg, &wow, "CommonFilesDir")?,
+        KnownFolder::ProgramFilesCommonX86,
+        "32-bit CommonFilesDir",
+    )?;
+    for name in ["ProgramFilesDir", "CommonFilesDir"] {
+        ensure(
+            text_value(reg, &wow, name)? == text_value(reg, &alias, name)?,
+            &format!(
+                "the 32-bit view of SOFTWARE\\X is SOFTWARE\\WOW6432Node\\X of the native view ({name})"
+            ),
+        )?;
+    }
+    ensure(
+        ok(
+            reg.key_exists(&RegKey::new(
+                Hive::LocalMachine,
+                RegView::Native,
+                "SOFTWARE",
+            )),
+            "SOFTWARE",
+        )? && ok(
+            reg.key_exists(&RegKey::new(Hive::LocalMachine, RegView::Wow32, "SOFTWARE")),
+            "SOFTWARE (32-bit)",
+        )?,
+        "HKLM\\SOFTWARE itself exists in both views",
+    )?;
+
+    // Links: CurrentControlSet points to a ControlSet00x.
+    ensure(
+        ok(
+            reg.key_exists(&RegKey::new(
+                Hive::LocalMachine,
+                RegView::Native,
+                r"SYSTEM\CurrentControlSet\Control",
+            )),
+            "CurrentControlSet\\Control",
+        )?,
+        "HKLM\\SYSTEM\\CurrentControlSet\\Control exists",
+    )?;
+
+    // Access errors.
+    match reg.key_exists(&RegKey::new(
+        Hive::LocalMachine,
+        RegView::Native,
+        "SECURITY",
+    )) {
+        Err(e) if e.kind == SysErrorKind::AccessDenied => {}
+        Err(e) => {
+            return Err(format!(
+                "contract violated: HKLM\\SECURITY: expected access denied, got error {e}"
+            ));
+        }
+        Ok(_) => skip(&mut skips, "security_denied"),
+    }
+    Ok(skips)
+}
+
+/// Registry write contract. `root` must be an existing key without values and subkeys.
+/// Runs against the fake only until `sys::win` can write (phase 2); then in a private app hive
+/// (ADR 0009).
+pub fn registry_write_contract(reg: &dyn Registry, root: &RegKey) -> ContractResult {
     let a = root.join("Alpha");
 
     ensure(
@@ -1998,6 +2739,24 @@ pub fn registry_contract(sys: &dyn System, root: &RegKey) -> ContractResult {
         .map(|(n, _)| n)
         .collect();
     ensure(names == ["Flag"], "value name keeps original case")?;
+
+    // Raw values are stored exactly; a typed value without a canonical encoding is refused.
+    let raw = RegValue::decode(reg_type::REG_NONE, &[1, 2, 3]);
+    ok(reg.set(&a, "Raw", &raw), "set raw")?;
+    ensure(
+        ok(reg.get(&a, "Raw"), "get raw")? == Some(raw),
+        "raw value round-trip",
+    )?;
+    err_kind(
+        reg.set(&a, "Bad", &RegValue::String("a\0b".into())),
+        SysErrorKind::Unsupported,
+        "set string with NUL",
+    )?;
+    ensure(
+        ok(reg.get(&a, "Bad"), "get refused value")?.is_none(),
+        "a refused value is not stored",
+    )?;
+    ok(reg.delete_value(&a, "Raw"), "delete raw")?;
 
     // Default value.
     ok(
@@ -2063,8 +2822,7 @@ pub fn topology_contract(sys: &dyn System) -> ContractResult {
 /// Deliberately **not** part of the contract: that folders nest (`Common Files` inside
 /// `Program Files`, the profile inside `Users`). All of them can be relocated, so policy
 /// must not rely on it.
-pub fn known_folders_contract(sys: &dyn System) -> ContractResult {
-    let kf = sys.known_folders();
+pub fn known_folders_contract(kf: &dyn KnownFolders, fs: &dyn Fs) -> ContractResult {
     let mut seen: Vec<(KnownFolder, RootPath)> = Vec::new();
     for f in KnownFolder::ALL {
         let what = format!("known folder {f}");
@@ -2091,7 +2849,7 @@ pub fn known_folders_contract(sys: &dyn System) -> ContractResult {
                 "contract violated: {what} differs from known folder {other}"
             ));
         }
-        let dir = ok(sys.fs().open_dir(&p), &format!("open {what}"))?;
+        let dir = ok(fs.open_dir(&p), &format!("open {what}"))?;
         let info = ok(dir.info(), &format!("info {what}"))?;
         ensure(
             RootPath::from_final_path(&info.final_path).is_ok(),

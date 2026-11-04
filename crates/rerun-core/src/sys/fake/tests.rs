@@ -12,11 +12,11 @@ use super::{FakeFs, FakeSystem, FsOp, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
     FsFixture, fs_link_read_contract, fs_link_write_contract, fs_race_contract, fs_read_contract,
-    fs_volume_contract, fs_write_contract, gpu_contract, known_folders_contract, registry_contract,
-    topology_contract,
+    fs_volume_contract, fs_write_contract, gpu_contract, known_folders_contract,
+    registry_read_contract, registry_system_contract, registry_write_contract, topology_contract,
 };
 use crate::sys::fs::{Attrs, Dir, EntryKind, Fs, FsKind, tag};
-use crate::sys::registry::{Hive, RegKey, RegValue, RegView};
+use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
 use crate::sys::snapshot::{Scope, snapshot};
 use crate::sys::{DriverVersion, GpuAdapter, KnownFolder};
 use crate::sys::{SysErrorKind, SysResult, System};
@@ -210,10 +210,206 @@ fn the_race_contract_catches_a_leaking_swap() {
 }
 
 #[test]
-fn fake_fulfils_registry_contract() {
+fn fake_fulfils_registry_write_contract() {
     let root = hkcu(r"Software\RerunContract");
     let sys = FakeSystem::builder().key(root.clone()).build().unwrap();
-    registry_contract(&sys, &root).unwrap();
+    registry_write_contract(sys.registry(), &root).unwrap();
+}
+
+fn key(hive: Hive, view: RegView, path: &str) -> RegKey {
+    RegKey::new(hive, view, path)
+}
+
+#[test]
+fn fake_fulfils_registry_read_contract_in_both_views() {
+    // Roots outside HKLM\SOFTWARE are shared between the views; the contract deletes nothing,
+    // so every run gets its own root.
+    let roots = [
+        key(
+            Hive::CurrentUser,
+            RegView::Native,
+            r"Software\RerunContract\native",
+        ),
+        key(
+            Hive::CurrentUser,
+            RegView::Wow32,
+            r"Software\RerunContract\wow32",
+        ),
+        key(
+            Hive::LocalMachine,
+            RegView::Native,
+            r"SYSTEM\RerunContract\native",
+        ),
+        key(
+            Hive::LocalMachine,
+            RegView::Wow32,
+            r"SYSTEM\RerunContract\wow32",
+        ),
+    ];
+    let mut b = FakeSystem::builder();
+    for r in &roots {
+        b = b.key(r.clone());
+    }
+    let sys = b.build().unwrap();
+    for r in &roots {
+        let skips = registry_read_contract(sys.registry(), sys.fake_registry(), r).unwrap();
+        // The fake has no symbolic-link keys.
+        assert_eq!(skips, ["key_link"], "{r}");
+    }
+}
+
+/// Registry that hands out a raw value as if it were binary: the read contract must notice.
+struct LossyRegistry<'a>(&'a dyn Registry);
+
+impl Registry for LossyRegistry<'_> {
+    fn key_exists(&self, k: &RegKey) -> SysResult<bool> {
+        self.0.key_exists(k)
+    }
+    fn get(&self, k: &RegKey, name: &str) -> SysResult<Option<RegValue>> {
+        Ok(self.0.get(k, name)?.map(|v| match v {
+            RegValue::Raw(r) => RegValue::Binary(r.data().to_vec()),
+            v => v,
+        }))
+    }
+    fn values(&self, k: &RegKey) -> SysResult<Vec<(String, RegValue)>> {
+        self.0.values(k)
+    }
+    fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
+        self.0.subkeys(k)
+    }
+    fn create_key(&self, k: &RegKey) -> SysResult<bool> {
+        self.0.create_key(k)
+    }
+    fn set(&self, k: &RegKey, name: &str, v: &RegValue) -> SysResult<()> {
+        self.0.set(k, name, v)
+    }
+    fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
+        self.0.delete_value(k, name)
+    }
+    fn delete_key(&self, k: &RegKey) -> SysResult<()> {
+        self.0.delete_key(k)
+    }
+}
+
+#[test]
+fn the_registry_read_contract_catches_a_lossy_registry() {
+    let root = hkcu(r"Software\RerunContract");
+    let sys = FakeSystem::builder().key(root.clone()).build().unwrap();
+    let lossy = LossyRegistry(sys.registry());
+    let e = registry_read_contract(&lossy, sys.fake_registry(), &root).unwrap_err();
+    assert!(e.contains("decoding case"), "{e}");
+}
+
+#[test]
+fn the_registry_read_contract_needs_an_empty_root() {
+    let root = hkcu(r"Software\RerunContract");
+    let sys = FakeSystem::builder().key(root.clone()).build().unwrap();
+    registry_read_contract(sys.registry(), sys.fake_registry(), &root).unwrap();
+    let e = registry_read_contract(sys.registry(), sys.fake_registry(), &root).unwrap_err();
+    assert!(e.contains("empty"), "{e}");
+}
+
+/// A fake with the system keys that `registry_system_contract` reads, from the standard layout.
+fn system_keys() -> crate::sys::fake::FakeSystemBuilder {
+    let cv = r"SOFTWARE\Microsoft\Windows\CurrentVersion";
+    let wow = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion";
+    let hklm = |p: &str| key(Hive::LocalMachine, RegView::Native, p);
+    let sz = |s: &str| RegValue::String(s.into());
+    FakeSystem::builder()
+        .value(hklm(cv), "ProgramFilesDir", sz(r"C:\Program Files"))
+        .value(
+            hklm(cv),
+            "CommonFilesDir",
+            sz(r"C:\Program Files\Common Files"),
+        )
+        .value(hklm(wow), "ProgramFilesDir", sz(r"C:\Program Files (x86)"))
+        .value(
+            hklm(wow),
+            "CommonFilesDir",
+            sz(r"C:\Program Files (x86)\Common Files"),
+        )
+        .key(hklm(r"SYSTEM\CurrentControlSet\Control"))
+        .denied_key(hklm("SECURITY"))
+}
+
+#[test]
+fn fake_fulfils_registry_system_contract() {
+    let sys = system_keys().build().unwrap();
+    let skips = registry_system_contract(sys.registry(), sys.known_folders()).unwrap();
+    assert!(skips.is_empty(), "{skips:?}");
+}
+
+#[test]
+fn the_registry_system_contract_catches_wrong_data() {
+    let hklm = |p: &str| key(Hive::LocalMachine, RegView::Native, p);
+    let cv = r"SOFTWARE\Microsoft\Windows\CurrentVersion";
+    let known = FakeSystem::new();
+    // Nothing seeded.
+    let empty = FakeSystem::new();
+    assert!(registry_system_contract(empty.registry(), known.known_folders()).is_err());
+    // The 32-bit value in the native location (no redirection modelled).
+    let swapped = system_keys()
+        .value(
+            hklm(cv),
+            "ProgramFilesDir",
+            RegValue::String(r"C:\Program Files (x86)".into()),
+        )
+        .build()
+        .unwrap();
+    assert!(registry_system_contract(swapped.registry(), known.known_folders()).is_err());
+    // A value of another type.
+    let typed = system_keys()
+        .value(hklm(cv), "CommonFilesDir", RegValue::Dword(1))
+        .build()
+        .unwrap();
+    assert!(registry_system_contract(typed.registry(), known.known_folders()).is_err());
+    // Missing CurrentControlSet.
+    let mut b = FakeSystem::builder();
+    for (name, v) in [
+        ("ProgramFilesDir", r"C:\Program Files"),
+        ("CommonFilesDir", r"C:\Program Files\Common Files"),
+    ] {
+        b = b.value(hklm(cv), name, RegValue::String(v.into()));
+    }
+    for (name, v) in [
+        ("ProgramFilesDir", r"C:\Program Files (x86)"),
+        ("CommonFilesDir", r"C:\Program Files (x86)\Common Files"),
+    ] {
+        b = b.value(
+            hklm(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion"),
+            name,
+            RegValue::String(v.into()),
+        );
+    }
+    let no_control = b.denied_key(hklm("SECURITY")).build().unwrap();
+    assert!(registry_system_contract(no_control.registry(), known.known_folders()).is_err());
+    // SECURITY readable: the case is skipped, not failed.
+    let open = FakeSystem::builder()
+        .value(
+            hklm(cv),
+            "ProgramFilesDir",
+            RegValue::String(r"C:\Program Files".into()),
+        )
+        .value(
+            hklm(cv),
+            "CommonFilesDir",
+            RegValue::String(r"C:\Program Files\Common Files".into()),
+        )
+        .value(
+            hklm(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion"),
+            "ProgramFilesDir",
+            RegValue::String(r"C:\Program Files (x86)".into()),
+        )
+        .value(
+            hklm(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion"),
+            "CommonFilesDir",
+            RegValue::String(r"C:\Program Files (x86)\Common Files".into()),
+        )
+        .key(hklm(r"SYSTEM\CurrentControlSet\Control"))
+        .build()
+        .unwrap();
+    let skips = registry_system_contract(open.registry(), known.known_folders()).unwrap();
+    assert_eq!(skips, ["security_denied"]);
 }
 
 #[test]
@@ -250,7 +446,7 @@ fn basic_render(luid: u64) -> GpuAdapter {
 #[test]
 fn fake_fulfils_known_folders_contract() {
     let sys = FakeSystem::builder().windows_layout().build().unwrap();
-    known_folders_contract(&sys).unwrap();
+    known_folders_contract(sys.known_folders(), sys.fs()).unwrap();
 }
 
 #[test]
@@ -260,7 +456,7 @@ fn known_folders_contract_allows_roaming_on_a_share() {
         .windows_layout()
         .build()
         .unwrap();
-    known_folders_contract(&sys).unwrap();
+    known_folders_contract(sys.known_folders(), sys.fs()).unwrap();
 }
 
 #[test]
@@ -301,7 +497,10 @@ fn known_folders_contract_catches_bad_folders() {
         ),
     ];
     for (what, sys) in cases {
-        assert!(known_folders_contract(&sys).is_err(), "{what}");
+        assert!(
+            known_folders_contract(sys.known_folders(), sys.fs()).is_err(),
+            "{what}"
+        );
     }
 }
 
@@ -1120,15 +1319,191 @@ fn hook_sees_every_component_and_is_not_reentrant() {
 // ---------- Registry ----------
 
 #[test]
-fn views_are_separate() {
+fn hkcu_is_shared_between_the_views() {
     let native = hkcu(r"Software\Game");
     let wow = RegKey::new(Hive::CurrentUser, RegView::Wow32, r"Software\Game");
     let sys = FakeSystem::builder()
         .value(native.clone(), "v", RegValue::Dword(1))
         .build()
         .unwrap();
-    assert!(sys.registry().key_exists(&native).unwrap());
-    assert!(!sys.registry().key_exists(&wow).unwrap());
+    assert!(sys.registry().key_exists(&wow).unwrap());
+    assert_eq!(
+        sys.registry().get(&wow, "v").unwrap(),
+        Some(RegValue::Dword(1))
+    );
+    sys.registry().set(&wow, "w", &RegValue::Dword(2)).unwrap();
+    assert_eq!(
+        sys.registry().get(&native, "w").unwrap(),
+        Some(RegValue::Dword(2))
+    );
+}
+
+#[test]
+fn hklm_outside_software_is_shared_between_the_views() {
+    let native = key(Hive::LocalMachine, RegView::Native, r"SYSTEM\Setup");
+    let wow = key(Hive::LocalMachine, RegView::Wow32, r"SYSTEM\Setup");
+    let sys = FakeSystem::builder()
+        .value(native.clone(), "v", RegValue::Dword(1))
+        .build()
+        .unwrap();
+    assert_eq!(
+        sys.registry().get(&wow, "v").unwrap(),
+        Some(RegValue::Dword(1))
+    );
+    // Names that merely start like SOFTWARE are not redirected.
+    let near = key(Hive::LocalMachine, RegView::Native, r"SOFTWAREX\Y");
+    let near_wow = key(Hive::LocalMachine, RegView::Wow32, r"SOFTWAREX\Y");
+    sys.registry().create_key(&near.parent().unwrap()).unwrap();
+    sys.registry().create_key(&near).unwrap();
+    assert!(sys.registry().key_exists(&near_wow).unwrap());
+}
+
+#[test]
+fn hklm_software_is_redirected_in_the_32_bit_view() {
+    let native = |p: &str| key(Hive::LocalMachine, RegView::Native, p);
+    let wow = |p: &str| key(Hive::LocalMachine, RegView::Wow32, p);
+    let sys = FakeSystem::builder()
+        .value(
+            native(r"SOFTWARE\Valve\Steam"),
+            "Native",
+            RegValue::Dword(64),
+        )
+        .value(
+            native(r"SOFTWARE\WOW6432Node\Valve\Steam"),
+            "Wow",
+            RegValue::Dword(32),
+        )
+        .build()
+        .unwrap();
+    let reg = sys.registry();
+
+    // The 32-bit view of SOFTWARE\X is SOFTWARE\WOW6432Node\X, not SOFTWARE\X.
+    let steam = wow(r"SOFTWARE\Valve\Steam");
+    assert_eq!(reg.get(&steam, "Wow").unwrap(), Some(RegValue::Dword(32)));
+    assert_eq!(reg.get(&steam, "Native").unwrap(), None);
+    assert_eq!(
+        reg.get(&native(r"SOFTWARE\Valve\Steam"), "Wow").unwrap(),
+        None
+    );
+    // Case-insensitive, including the redirected prefix.
+    assert!(reg.key_exists(&wow(r"software\VALVE")).unwrap());
+    // SOFTWARE itself is one key.
+    assert!(reg.key_exists(&wow("SOFTWARE")).unwrap());
+    reg.set(&wow("SOFTWARE"), "Shared", &RegValue::Dword(1))
+        .unwrap();
+    assert_eq!(
+        reg.get(&native("SOFTWARE"), "Shared").unwrap(),
+        Some(RegValue::Dword(1))
+    );
+    // An explicit WOW6432Node is not redirected a second time.
+    assert_eq!(
+        reg.get(&wow(r"SOFTWARE\WOW6432Node\Valve\Steam"), "Wow")
+            .unwrap(),
+        Some(RegValue::Dword(32))
+    );
+    assert_eq!(
+        reg.get(&native(r"SOFTWARE\WOW6432Node\Valve\Steam"), "Wow")
+            .unwrap(),
+        Some(RegValue::Dword(32))
+    );
+
+    // Subkeys come back with their own case.
+    assert_eq!(reg.subkeys(&wow(r"SOFTWARE\Valve")).unwrap(), ["Steam"]);
+
+    // Writing through the 32-bit view lands in WOW6432Node and creates it if needed.
+    let fresh = FakeSystem::builder()
+        .key(native("SOFTWARE"))
+        .build()
+        .unwrap();
+    let k = wow(r"SOFTWARE\Game\Sub");
+    assert!(fresh.registry().create_key(&k.parent().unwrap()).unwrap());
+    assert!(fresh.registry().create_key(&k).unwrap());
+    fresh.registry().set(&k, "v", &RegValue::Dword(7)).unwrap();
+    let physical = native(r"SOFTWARE\WOW6432Node\Game\Sub");
+    assert_eq!(
+        fresh.registry().get(&physical, "v").unwrap(),
+        Some(RegValue::Dword(7))
+    );
+    assert_eq!(
+        fresh.registry().subkeys(&native("SOFTWARE")).unwrap(),
+        ["WOW6432Node"]
+    );
+    // The parent has to exist.
+    assert_eq!(
+        fresh
+            .registry()
+            .create_key(&wow(r"SOFTWARE\No\Parent"))
+            .unwrap_err()
+            .kind,
+        SysErrorKind::NotFound
+    );
+    // Deleting goes to the same place.
+    fresh.registry().delete_value(&k, "v").unwrap();
+    fresh.registry().delete_key(&k).unwrap();
+    assert!(!fresh.registry().key_exists(&physical).unwrap());
+}
+
+#[test]
+fn a_denied_key_refuses_everything_below_it() {
+    let hklm = |p: &str| key(Hive::LocalMachine, RegView::Native, p);
+    let sys = FakeSystem::builder()
+        .value(hklm(r"SECURITY\Policy"), "v", RegValue::Dword(1))
+        .denied_key(hklm("SECURITY"))
+        .key(hklm("SECURITYX"))
+        .build()
+        .unwrap();
+    let reg = sys.registry();
+    for k in [hklm("SECURITY"), hklm(r"security\Policy")] {
+        assert_eq!(
+            reg.key_exists(&k).unwrap_err().kind,
+            SysErrorKind::AccessDenied
+        );
+        assert_eq!(
+            reg.get(&k, "v").unwrap_err().kind,
+            SysErrorKind::AccessDenied
+        );
+        assert_eq!(reg.values(&k).unwrap_err().kind, SysErrorKind::AccessDenied);
+        assert_eq!(
+            reg.subkeys(&k).unwrap_err().kind,
+            SysErrorKind::AccessDenied
+        );
+        assert_eq!(
+            reg.create_key(&k).unwrap_err().kind,
+            SysErrorKind::AccessDenied
+        );
+        assert_eq!(
+            reg.set(&k, "v", &RegValue::Dword(2)).unwrap_err().kind,
+            SysErrorKind::AccessDenied
+        );
+        assert_eq!(
+            reg.delete_key(&k).unwrap_err().kind,
+            SysErrorKind::AccessDenied
+        );
+    }
+    // A sibling with the same prefix is not denied.
+    assert!(reg.key_exists(&hklm("SECURITYX")).unwrap());
+}
+
+#[test]
+fn registry_fixture_stores_exactly_what_it_is_told() {
+    use crate::sys::contract::RegFixture;
+    let root = hkcu(r"Software\Fx");
+    let sys = FakeSystem::builder().key(root.clone()).build().unwrap();
+    let fx = sys.fake_registry();
+    fx.raw(&root, "n", reg_type::REG_NONE, &[9]).unwrap();
+    fx.raw(&root, "d", reg_type::REG_DWORD, &[1, 0, 0, 0])
+        .unwrap();
+    assert_eq!(
+        sys.registry().get(&root, "n").unwrap().unwrap().encode(),
+        Some((0, vec![9]))
+    );
+    assert_eq!(
+        sys.registry().get(&root, "d").unwrap(),
+        Some(RegValue::Dword(1))
+    );
+    RegFixture::delete_value(fx, &root, "n").unwrap();
+    assert_eq!(sys.registry().get(&root, "n").unwrap(), None);
+    assert!(!fx.link(&root.join("l"), &root).unwrap());
 }
 
 #[test]

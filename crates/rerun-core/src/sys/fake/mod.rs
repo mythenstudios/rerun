@@ -70,6 +70,11 @@ impl FakeSystem {
         &self.fs
     }
 
+    /// The fake registry, also the [`RegFixture`](super::contract::RegFixture) of the contracts.
+    pub fn fake_registry(&self) -> &FakeRegistry {
+        &self.registry
+    }
+
     /// Attacker: see [`FakeFs::swap_with_junction`].
     pub fn swap_with_junction(&self, abs: impl AsRef<Path>, target: &str) -> SysResult<String> {
         self.fs.swap_with_junction(abs.as_ref(), target)
@@ -284,6 +289,16 @@ impl FakeSystemBuilder {
     /// Registry key including missing parents.
     pub fn key(self, key: RegKey) -> Self {
         self.step(move |s| s.registry.create_key_all(&key))
+    }
+
+    /// Registry key (created if needed) that refuses every method with `AccessDenied`, like
+    /// `HKLM\SECURITY` for a standard user; everything below it is refused as well. Call it
+    /// after the keys and values below it are set up.
+    pub fn denied_key(self, key: RegKey) -> Self {
+        self.step(move |s| {
+            s.registry.create_key_all(&key)?;
+            s.registry.deny(&key)
+        })
     }
 
     /// Registry value; the key is created if needed.
