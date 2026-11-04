@@ -1,0 +1,165 @@
+# 02 · Topo and package format (v1)
+
+A **Topo** describes a game: how it is detected, which problems it has on which hardware, and which solutions exist. A **package** describes an upstream tool (DXVK, Special K, EaglePatch …) that Topos reference. The name comes from climbing: a topo is the route sketch for exactly one wall.
+
+Both are YAML, are validated against `schema/topo.schema.json` or `schema/package.schema.json` (JSON Schema 2020-12) and are **purely declarative**. Validation and YAML rules: ADR 0005.
+
+## General rules
+
+- **YAML 1.2:** Booleans only `true`/`false`. `off`, `yes`, `on` are strings and therefore errors in bool fields. No merge keys, no duplicate keys; anchors/aliases are rejected entirely from Phase 4.
+- **Unknown fields are errors** (`additionalProperties: false` everywhere).
+- **File name = `id`**, e.g. `topos/assassins-creed-dc.yaml` has `id: assassins-creed-dc`. IDs: lowercase letters, digits, hyphens, at most 64 characters.
+- **Hashes** in uppercase hex (`sha1`: 40, `sha256`: 64 characters).
+- **`TODO`** is only allowed in: hashes (`sha1`, `sha256`), package `version`, `license`, `arch`, `source.release`, `assets[].url`, INI `section`/`key`, option `default`. If a file contains `TODO` anywhere, it must be `status: draft` (test). Unknown values are never invented.
+- **Paths** (`match.exes[].path`, `files[].from/to`, `options.*.ini.file`) are relative to the game folder and must not leave it lexically:
+  - no `..`/`.`, no drive, no leading separator, no UNC, no `:` (so also no Alternate Data Streams)
+  - no characters `< > " | ? *` or control characters
+  - no invisible or confusable Unicode characters (bidi control characters, zero-width, special spaces, fullwidth ASCII such as `．＼`, `¥`/`₩`, slash lookalikes)
+  - no reserved device names (`CON`, `NUL`, `CONIN$`, `CLOCK$`, `COM1` …, also with extension)
+  - no dot/space at the end of a segment, no space at the start of a segment
+  - no `~` followed by a digit (8.3 short names; also blocks names like `Data~2024`)
+  - at most 240 characters; `/` and `\` are both allowed
+
+  Same rules as `rerun_core::policy::path::RelPath`. Comparisons are case-insensitive (`D3D9.dll` = `d3d9.dll`).
+- **URLs:** always `https://`, host only from ASCII lowercase letters, digits and hyphens with a letter TLD. No port, no userinfo (`@` before the host), no IP literals, no backslash.
+
+## Topo
+
+```yaml
+format: 1
+id: assassins-creed-dc
+title: "Assassin's Creed: Director's Cut Edition"
+status: draft            # draft | active | needs-retest | retired
+rev: 1
+tested_on: [x64]         # x64 | arm64
+
+match:
+  steam_appid: 15100
+  exes:                  # at least one; sha1 or sha256 required
+    - { path: "AssassinsCreed_Dx9.exe",  sha1: "A9EA476E70F076709CCA59A802E26EC894432120", api: d3d9 }
+    - { path: "AssassinsCreed_Dx10.exe", sha1: "601475FD5EFA02BBAE80D1C06DFA25A0A1E7FD2F", api: d3d10 }
+
+launch:
+  chain: [steam, upc]    # steam | upc | ea-app | rockstar | battlenet | epic | gog-galaxy
+  method: auto           # auto | direct | watch | hold | ifeo | inproc
+  fallback: inproc       # like method, without auto
+
+issues:
+  - id: controller
+    title: "Modern controllers are not detected, no hotplug"
+    when: {}             # empty = all systems
+    variants:
+      - id: steam-input
+        status: unverified
+        kind: fix
+        steps: [{ steam_input: enable }]
+      - id: eaglepatch
+        status: reported
+        kind: fix
+        steps: [{ package: eaglepatch-ac1 }]
+        tradeoffs: ["Old DInput controllers are no longer supported"]
+        sources:
+          - { type: repo, url: "https://github.com/Sergeanur/EaglePatch" }
+
+tips:
+  launch_options: []
+  notes: []
+
+links:
+  pcgw: "Assassin's_Creed"   # page name, not a URL
+```
+
+### Fields
+
+- `api` (in `match.exes`): `ddraw | d3d8 | d3d9 | d3d10 | d3d11 | opengl`.
+- `variants`: may be empty = "no known fix", a valid answer.
+- `status` per variant: `verified` (tested ourselves, with hardware in the changelog), `reported` (several independent reports), `unverified` (single statement).
+- `kind` (required): `fix` (game runs as intended) or `enhancement`.
+- `when`: conditions against the system profile. Several fields = AND. Only these fields:
+  ```yaml
+  when:
+    gpu.vendor: amd                 # amd | nvidia | intel
+    gpu.arch: [vega, rdna1, rdna2]  # lowercase identifiers; Phase 1 defines the list of values
+    cpu.threads: { gt: 12 }         # gt | gte | lt | lte | eq
+    cpu.hybrid: true
+    os.build: { gte: 22000 }
+  ```
+- `checks`: pure hints about runtimes outside the game folder. Rerun does not install them (game folder boundary), but shows a hint with a link. Values: `{ runtime: vcredist-x86 | vcredist-x64 | directx-jun2010 }`.
+- `steps`: list of primitives. Each step is an object with **exactly one** key. Allowed in v1: `package: <package-id>`, `steam_input: enable`, `cpu: <CPU rule>`. Further primitives from `01-architecture.md` enter the schema only together with their spec and implementation; before that they are a validation error.
+- `sources`: links directly to the guide, thread, repo or section, always `https://`, never just the home page. Types and patterns:
+  - `repo`: `https://github.com|gitlab.com|codeberg.org/<owner>/<repo>[/…]`
+  - `steam-guide`: `https://steamcommunity.com/sharedfiles/filedetails/?id=<n>`
+  - `steam-thread`: `https://steamcommunity.com/app/<n>/discussions/<n>/<n>/` or `…/groups/<name>/discussions/<n>/<n>`
+  - `pcgw`: `https://www.pcgamingwiki.com/wiki/<page>[#section]`
+  - `official`: `https://<host>/<path>` (with path)
+- `tips.launch_options`: individual game arguments that Rerun places **after** `%command%`, e.g. `-nointro`, `-dx9`, `+fps_max=60`. Pattern `^[-+][A-Za-z0-9_.=+-]+$`, at most 64 characters: no commands, no `%`, no quotes, no spaces. The part before `%command%` (e.g. `rerun-launch`) is generated by Rerun itself, never taken from the Topo. Escaping is applied when writing `localconfig.vdf`.
+- `tips.notes`: list of `{ text, source? }`. Free text is never rendered as HTML in the UI.
+
+### CPU rules (in `launch.cpu` or as a step)
+
+```yaml
+cpu:
+  max_threads: 8          # 1–1024
+  prefer: performance     # performance | any
+  single_l3: true         # keep on one CCD/CCX
+  prefer_l3: largest      # prefer the V-Cache CCD
+  smt: false              # false = only one thread per core
+  mode: hard              # hard (affinity) | soft (CPU Sets)
+  report_cores: 8         # only in launch.cpu and only with method: inproc
+```
+
+Never concrete thread numbers in Topos. See `03-cpu-topology.md`. `shim_single` (`04-launch-methods.md`) enters the enum `method` only with Phase 6.
+
+## Package
+
+```yaml
+format: 1
+id: eaglepatch-ac1
+name: EaglePatchAC1
+status: draft             # draft | active | needs-retest | retired
+tier: established         # official | established | community
+source:
+  repo: "https://github.com/Sergeanur/EaglePatch"
+  release: "TODO"         # exact release URL
+version: "TODO"
+sha256: "TODO"            # computed ourselves
+license: "TODO"           # SPDX expression, e.g. MIT, Zlib, "MIT OR Apache-2.0"
+arch: [x86]               # always a list: x86 | x64
+requires: [ultimate-asi-loader]
+slots: []                 # occupied DLL names in the game folder
+supports_exe_sha1:
+  - "A9EA476E70F076709CCA59A802E26EC894432120"
+files:
+  - { from: "EaglePatchAC1.asi", to: "scripts/EaglePatchAC1.asi" }
+  - { from: "EaglePatchAC1.ini", to: "scripts/EaglePatchAC1.ini", config: true }
+options:
+  ps3_controls: { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: false }
+  shadows_4096: { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: true, kind: enhancement }
+```
+
+### Download
+
+Exactly one of the two forms (except for `community`):
+
+- **One download:** `source.release` + `sha256`.
+- **Separate builds per architecture:** `assets: [{ arch, url, sha256 }]`, then without `source.release` and without top-level `sha256` (e.g. Ultimate ASI Loader).
+
+**Provenance:** Every download URL must belong to the original, i.e. start with `<source.repo>/releases/download/` or be located on the host of `source.page`. A test checks this (`download_urls_belong_to_the_source`), and from Phase 4 the loader does too. The SHA256 secures integrity, not provenance.
+
+With `tier: community` (see `05-sources-policy.md`), `source.page` (original page) is required and there is **no** direct download (`source.release` and `assets` forbidden). Rerun opens the page, the user downloads it themselves, Rerun then checks `sha256`.
+
+### Fields
+
+- `version`: `^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`, without `..` (can safely appear in cache paths).
+- `slots`: DLL file names that the package occupies in the game folder (`dinput8.dll`, `d3d9.dll`, `dxgi.dll` …), following the path rules (no `CON.dll`, no `X~1.dll`). Two packages with the same slot = conflict, unless one allows chainloading.
+- `apis` + `slots_by_api`: for wrappers whose slots depend on the game's graphics API (DXVK).
+- `requires`: shared dependencies are reference-counted. A package is removed only when nothing needs it anymore. Every referenced ID must exist as a package (test).
+- `requires_gpu`: GPU prerequisites, v1: `[vulkan]`.
+- `supports_exe_sha1`: exe versions the package is built for.
+- `files[]`: `{ from, to, config?, arch?, api? }`. `arch`/`api` restrict an entry to specific architectures or APIs. Folders are derived from `to`.
+- `options`: INI values that appear as toggles in the UI; `kind` as for variants. `section` and `key`: `^[A-Za-z0-9_. -]+$`. String `default`: no control characters (no CR/LF), no absolute paths, no `..`.
+- `config: true`: the file may be modified by the user; revert then asks instead of deleting it outright.
+
+## Signed index
+
+`index.json` lists all Topos and packages with SHA256. `index.json.sig` = Ed25519 signature. The client checks the signature before parsing anything. The public key is built into the binary.
