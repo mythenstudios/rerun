@@ -268,6 +268,14 @@ fn unusable_folders_fail_closed() {
                 .unwrap(),
         ),
         (
+            // Accepted denial of service by the same user (ADR 0007, ADR 0009): fail closed.
+            "LocalAppData on a share",
+            base()
+                .known_folder(KnownFolder::LocalAppData, r"\\srv\home\Player\Local")
+                .build()
+                .unwrap(),
+        ),
+        (
             "Roaming as a device path",
             base()
                 .known_folder(KnownFolder::RoamingAppData, r"\\?\C:\Roaming")
@@ -757,5 +765,101 @@ fn root_path_child_takes_one_segment_only() {
     assert!(root.child("X").is_ok());
     for bad in [r"a\b", r"C:\Windows", "..", "", "CON"] {
         assert!(root.child(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn redirected_appdata_keeps_the_default_forms_forbidden() {
+    use Forbidden::{Contains, Inside, Is};
+    use KnownFolder as K;
+    use Protected::{Derived, ProfileDefault};
+    let sys = base()
+        .known_folder(K::LocalAppData, r"D:\Redirected\Local")
+        .known_folder(K::RoamingAppData, r"E:\Redirected\Roaming")
+        .dir(r"D:\Redirected\Local")
+        .dir(r"E:\Redirected\Roaming")
+        .build()
+        .unwrap();
+    let fr = fr(&sys);
+    let cases: Vec<(&str, Forbidden)> = vec![
+        // The default forms below the profile stay forbidden.
+        (
+            r"C:\Users\Player\AppData\Local\Microsoft\x",
+            Inside(ProfileDefault(r"AppData\Local\Microsoft")),
+        ),
+        (
+            r"C:\Users\Player\AppData\Local\Packages",
+            Is(ProfileDefault(r"AppData\Local\Packages")),
+        ),
+        (
+            r"C:\Users\Player\AppData\Local\VirtualStore\x",
+            Inside(ProfileDefault(r"AppData\Local\VirtualStore")),
+        ),
+        (
+            r"C:\Users\Player\AppData\Local\Rerun",
+            Is(ProfileDefault(r"AppData\Local\Rerun")),
+        ),
+        (
+            r"C:\Users\Player\AppData\Roaming\Microsoft\x",
+            Inside(ProfileDefault(r"AppData\Roaming\Microsoft")),
+        ),
+        (
+            r"C:\Users\Player\AppData\Local",
+            Contains(ProfileDefault(r"AppData\Local\Microsoft")),
+        ),
+        (
+            r"C:\Users\Player\AppData\Roaming",
+            Contains(ProfileDefault(r"AppData\Roaming\Microsoft")),
+        ),
+        // The redirected forms are forbidden too.
+        (
+            r"D:\Redirected\Local\Microsoft\x",
+            Inside(Derived(K::LocalAppData, "Microsoft")),
+        ),
+        (
+            r"D:\Redirected\Local\Rerun",
+            Is(Derived(K::LocalAppData, "Rerun")),
+        ),
+        (
+            r"E:\Redirected\Roaming\Microsoft",
+            Is(Derived(K::RoamingAppData, "Microsoft")),
+        ),
+        (
+            r"D:\Redirected",
+            Contains(Derived(K::LocalAppData, "Microsoft")),
+        ),
+    ];
+    for (path, expected) in cases {
+        assert_eq!(check(&fr, path), Err(expected), "{path}");
+    }
+    for ok in [
+        r"C:\Users\Player\AppData\Local\Programs\Game",
+        r"D:\Redirected\Local\Programs\Game",
+        r"E:\Redirected\Roaming\Game",
+    ] {
+        assert_eq!(check(&fr, ok), Ok(()), "{ok}");
+    }
+    assert_eq!(
+        ProfileDefault(r"AppData\Local\Microsoft").to_string(),
+        r"Profile\AppData\Local\Microsoft"
+    );
+}
+
+#[test]
+fn the_default_forms_follow_every_form_of_the_profile() {
+    // A profile behind a junction: its lexical and its canonical form both get the defaults.
+    let sys = base()
+        .dir(r"D:\Profiles\Player")
+        .junction(r"C:\Users\Link", r"D:\Profiles\Player")
+        .known_folder(KnownFolder::Profile, r"C:\Users\Link")
+        .build()
+        .unwrap();
+    let fr = fr(&sys);
+    let microsoft = Protected::ProfileDefault(r"AppData\Local\Microsoft");
+    for p in [
+        r"C:\Users\Link\AppData\Local\Microsoft\x",
+        r"D:\Profiles\Player\AppData\Local\Microsoft\x",
+    ] {
+        assert_eq!(check(&fr, p), Err(Forbidden::Inside(microsoft)), "{p}");
     }
 }

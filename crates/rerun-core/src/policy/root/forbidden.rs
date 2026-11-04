@@ -16,6 +16,9 @@ pub enum Protected {
     Known(KnownFolder),
     /// A folder one segment below a known folder (`ProgramFiles\WindowsApps`).
     Derived(KnownFolder, &'static str),
+    /// The default location of a per-user folder below the profile (`AppData\Local\Microsoft`),
+    /// forbidden even when `LocalAppData` or `RoamingAppData` is redirected elsewhere.
+    ProfileDefault(&'static str),
     /// Rerun's own install folder.
     InstallDir,
 }
@@ -25,6 +28,7 @@ impl fmt::Display for Protected {
         match self {
             Self::Known(k) => write!(f, "{k}"),
             Self::Derived(k, name) => write!(f, "{k}\\{name}"),
+            Self::ProfileDefault(rel) => write!(f, "{}\\{rel}", KnownFolder::Profile),
             Self::InstallDir => f.write_str("Rerun's install folder"),
         }
     }
@@ -73,6 +77,18 @@ const DERIVED: [(KnownFolder, &str); 9] = [
     (KnownFolder::LocalAppData, "Packages"),
     (KnownFolder::LocalAppData, "VirtualStore"),
     (KnownFolder::LocalAppData, "Rerun"),
+];
+
+/// The default forms of the [`DERIVED`] entries below `LocalAppData` and `RoamingAppData`,
+/// relative to `Profile` (ADR 0007, ADR 0009): `User Shell Folders` can redirect both folders,
+/// so these entries are also derived from every form of the profile, and a redirection can only
+/// add entries, never remove one. Same rule as [`OVERLAP_KNOWN`]; never opened.
+const PROFILE_DEFAULTS: [&str; 5] = [
+    r"AppData\Local\Microsoft",
+    r"AppData\Local\Packages",
+    r"AppData\Local\VirtualStore",
+    r"AppData\Local\Rerun",
+    r"AppData\Roaming\Microsoft",
 ];
 
 /// Folders a root must neither be nor contain; folders inside them stay allowed.
@@ -149,6 +165,17 @@ impl ForbiddenRoots {
                     .child(name)
                     .map_err(|e| incomplete(&format!("{k}\\{name}"), e.to_string()))?;
                 overlap.push((Protected::Derived(k, name), child));
+            }
+        }
+        for rel in PROFILE_DEFAULTS {
+            for profile in get(KnownFolder::Profile) {
+                let mut child = profile.clone();
+                for seg in rel.split('\\') {
+                    child = child.child(seg).map_err(|e| {
+                        incomplete(&format!("{}\\{rel}", KnownFolder::Profile), e.to_string())
+                    })?;
+                }
+                overlap.push((Protected::ProfileDefault(rel), child));
             }
         }
         let install = forms_of(sys, install_dir, "install folder", false)?;
