@@ -11,13 +11,14 @@
 //! - `sys::fake` emulates Win32 semantics (case handling, error kinds, handle identity). The
 //!   contract tests in `sys::contract` check this; they also run against `sys::win`.
 //! - `sys::win` (Windows only) is the real file system and registry, **read-only in phase 1**:
-//!   every writing `Dir` and `Registry` method returns `Unsupported`; and the real known
-//!   folders. `unsafe` exists only in its modules `nt`, `token`, `reg` and `shell`.
+//!   every writing `Dir` and `Registry` method returns `Unsupported`; the real known folders;
+//!   and the real CPU topology (ADR 0010). `unsafe` exists only in its modules `nt`, `token`,
+//!   `reg`, `shell` and `cpu`.
 //!
 //! - [`KnownFolders`] never reads environment variables (ADR 0007, ADR 0009).
 //!
-//! `Firewall` and `Process` arrive in phase 3. The other `sys::win` parts (topology, GPU) and
-//! the `WinSystem` bundle follow in later steps of phase 1.
+//! `Firewall` and `Process` arrive in phase 3. The GPU part of `sys::win` and the `WinSystem`
+//! bundle follow in later steps of phase 1.
 
 mod error;
 pub mod fs;

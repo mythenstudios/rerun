@@ -43,7 +43,7 @@ pub struct CpuTopology { pub cpus: Vec<LogicalCpu>, pub llcs: Vec<Llc> }
 | `GROUP_RELATIONSHIP` (from record start) | `ActiveGroupCount` 10, `GroupInfo[]` 32 (48 bytes each: `ActiveProcessorCount` 1, `ActiveProcessorMask` 40) |
 | `GROUP_AFFINITY` (16 bytes) | `Mask` 0, `Group` 8 |
 
-The FFI lives in one module per binary: `rerun-core::sys::win::cpu` now, a copy of the same two calls in `rerun-launch` in phase 3. A layout test there compares these offsets with `offset_of!` on the `windows-sys` structures.
+The FFI lives in one module per binary: `rerun-core::sys::win::cpu` now (size query, `u64`-aligned buffer, at most 4 retries on `ERROR_INSUFFICIENT_BUFFER`, 1 MiB cap, only the returned length goes to the parser), a copy of the same two calls in `rerun-launch` in phase 3. `sys::win::WinTopology` reads both on every call. A layout test compares these offsets with `offset_of!` on the `windows-sys` structures (all equal, 2026-11-05). Banned in `clippy.toml`: both calls outside `sys::win::cpu`, every other processor-count source (`GetSystemInfo`, `GetNativeSystemInfo`, `GetLogicalProcessorInformation`, `Get{Active,Maximum}Processor{,Group}Count`, `NtQuerySystemInformation`, `std::thread::available_parallelism`) and every affinity, CPU Set and Job Object limit setter until phase 3.
 
 ## Cases
 
@@ -81,4 +81,4 @@ Thread tiles grouped by topology: one row per L3 group or core type, SMT sibling
 
 `tests/fixtures/cpu/` (see its `README.md`). A real machine is stored **raw**: `<cpu>.raw.json` (format 1) holds the bytes of both calls as hex, next to it `<cpu>.json` is the expected parsed `CpuTopology`; a test parses the raw file and compares. Machines without a dump are parsed-only fixtures (`CpuTopology` JSON, validated). Parser edge cases are byte records built in the `rerun-proto` tests.
 
-Planned: `ryzen9-5950x.json` (2 CCD, 32 T; built from the datasheet, a raw dump replaces it), `ryzen9-7950x3d.json`, `i9-14900k.json`, `core-ultra-9-285k.json`, `core-ultra-7-155h.json` (LP-E), `threadripper-7980x.json` (>64), `i5-6600.json` (4 cores, no SMT).
+Present: `ryzen9-5950x.raw.json` + `ryzen9-5950x.json` (2 CCD, 32 T, real dump, Windows 11 build 26300), `i5-6600.json` (4 cores, no SMT, datasheet). Planned: `ryzen9-7950x3d.json`, `i9-14900k.json`, `core-ultra-9-285k.json`, `core-ultra-7-155h.json` (LP-E), `threadripper-7980x.json` (>64).

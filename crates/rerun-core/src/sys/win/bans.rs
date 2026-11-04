@@ -5,11 +5,117 @@
 //! never called, each under its own `#[expect(clippy::disallowed_methods)]`: a dead entry turns
 //! into an unfulfilled expectation, which `clippy -D warnings` rejects.
 //! [`every_banned_item_is_listed_here`] keeps this list and `clippy.toml` in sync. The
-//! `std::env` bans (ADR 0009) are checked the same way ([`banned_std_env_items_resolve`],
-//! [`every_banned_std_env_item_is_listed_here`]).
+//! `std::env` bans (ADR 0009) and the `std::thread` ban (ADR 0010) are checked the same way
+//! ([`banned_std_env_items_resolve`], [`banned_std_thread_items_resolve`],
+//! [`every_banned_std_env_item_is_listed_here`], [`every_banned_std_thread_item_is_listed_here`]).
 
 #[test]
 fn banned_windows_sys_items_resolve() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetSystemCpuSetInformation must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::GetSystemCpuSetInformation;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetLogicalProcessorInformationEx must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::GetLogicalProcessorInformationEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetLogicalProcessorInformation must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::GetLogicalProcessorInformation;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetSystemInfo must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::GetSystemInfo;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetNativeSystemInfo must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::GetNativeSystemInfo;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetActiveProcessorCount must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetActiveProcessorCount;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetMaximumProcessorCount must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetMaximumProcessorCount;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetActiveProcessorGroupCount must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetActiveProcessorGroupCount;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetMaximumProcessorGroupCount must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::GetMaximumProcessorGroupCount;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtQuerySystemInformation must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::SystemInformation::NtQuerySystemInformation;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwQuerySystemInformation must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::SystemInformation::ZwQuerySystemInformation;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetProcessAffinityMask must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetProcessAffinityMask;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetThreadAffinityMask must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetThreadAffinityMask;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetThreadGroupAffinity must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetThreadGroupAffinity;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetProcessDefaultCpuSets must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetProcessDefaultCpuSets;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetProcessDefaultCpuSetMasks must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetProcessDefaultCpuSetMasks;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetThreadSelectedCpuSets must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetThreadSelectedCpuSets;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetThreadSelectedCpuSetMasks must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetThreadSelectedCpuSetMasks;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetThreadIdealProcessor must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetThreadIdealProcessor;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetThreadIdealProcessorEx must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetThreadIdealProcessorEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetInformationJobObject must be banned"
+    )]
+    let _ = windows_sys::Win32::System::JobObjects::SetInformationJobObject;
     #[expect(
         clippy::disallowed_methods,
         reason = "ban check: CreateFileW must be banned"
@@ -1367,25 +1473,47 @@ fn banned_std_env_items_resolve() {
     let _ = std::env::set_current_dir::<&str>;
 }
 
-/// Every `std::env::` path in `clippy.toml` is referenced by the test above.
+/// The `std::thread` ban (ADR 0010) resolves.
 #[test]
-fn every_banned_std_env_item_is_listed_here() {
+fn banned_std_thread_items_resolve() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: available_parallelism must be banned"
+    )]
+    let _ = std::thread::available_parallelism;
+}
+
+/// Every `std::<module>::` path in `clippy.toml` is referenced by a test above; returns the
+/// number of such bans.
+fn std_bans_listed(module: &str) -> usize {
     let toml = include_str!("../../../../../clippy.toml");
     let this = include_str!("bans.rs");
     let mut n = 0;
     for line in toml.lines() {
-        let Some(rest) = line.split("path = \"std::env::").nth(1) else {
+        let Some(rest) = line.split(&format!("path = \"std::{module}::")).nth(1) else {
             continue;
         };
         let path = rest.split('"').next().unwrap_or_default();
         assert!(
-            this.contains(&format!("let _ = std::env::{path};"))
-                || this.contains(&format!("let _ = std::env::{path}::<")),
-            "clippy.toml bans std::env::{path}, but bans.rs does not check it"
+            this.contains(&format!("let _ = std::{module}::{path};"))
+                || this.contains(&format!("let _ = std::{module}::{path}::<")),
+            "clippy.toml bans std::{module}::{path}, but bans.rs does not check it"
         );
         n += 1;
     }
-    assert_eq!(n, 7, "parsed {n} std::env bans");
+    n
+}
+
+/// Every `std::env::` path in `clippy.toml` is referenced by the test above.
+#[test]
+fn every_banned_std_env_item_is_listed_here() {
+    assert_eq!(std_bans_listed("env"), 7, "std::env bans");
+}
+
+/// Every `std::thread::` path in `clippy.toml` is referenced by the test above.
+#[test]
+fn every_banned_std_thread_item_is_listed_here() {
+    assert_eq!(std_bans_listed("thread"), 1, "std::thread bans");
 }
 
 /// Every `windows_sys::` path in `clippy.toml` is referenced by `banned_windows_sys_items_resolve`.

@@ -16,8 +16,8 @@
 //! - [`AppHive`]: a private registry hive (`RegLoadAppKeyW`) in a file inside a [`TestRoot`],
 //!   the [`RegFixture`] of the registry read contract; [`HiveRoot`] bundles it with its root
 //!   and a [`WinRegistry`] on it. Raw writes go only to that hive, never to `HKCU` or `HKLM`.
-//! - [`TestWinSystem`]: a read-only [`System`] of the real file system, registry and known
-//!   folders (fake topology and GPU), for tests of `policy::root` against real Windows.
+//! - [`TestWinSystem`]: a read-only [`System`] of the real file system, registry, known
+//!   folders and topology (fake GPU), for tests of `policy::root` against real Windows.
 //!
 //! Path-based Win32 and `std::fs` calls are the point of this module (they set the scene the
 //! handle-based `sys::win` has to survive), hence the module-wide `disallowed_methods`
@@ -93,10 +93,10 @@ use windows_sys::Win32::System::Threading::{
 
 use super::reg::{self, OwnedKey};
 use super::status::kind_of_win32;
-use super::{WinFs, WinKnownFolders, WinRegistry};
+use super::{WinFs, WinKnownFolders, WinRegistry, WinTopology};
 use crate::path::RelPath;
 use crate::sys::contract::{FsFixture, RegFixture};
-use crate::sys::fake::{FakeGpu, FakeTopology};
+use crate::sys::fake::FakeGpu;
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, EntryKind, Fs, FsKind, Metadata, ReadSeek, ReparseInfo, RootInfo, tag,
 };
@@ -409,7 +409,7 @@ impl Drop for RestorePrivilege {
 
 /// The cargo target directory: the ancestor of the test executable that contains
 /// `CACHEDIR.TAG`. Panics if there is none (never guess a location).
-fn target_dir() -> PathBuf {
+pub(super) fn target_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_else(|e| panic!("current_exe: {e}"));
     exe.ancestors()
         .find(|a| a.join("CACHEDIR.TAG").is_file())
@@ -1499,13 +1499,13 @@ impl HiveRoot {
 // ---------- TestWinSystem ----------
 
 /// A [`System`] for tests of the layers above `sys` against real Windows: the real, read-only
-/// [`WinFs`], [`WinRegistry`] and [`WinKnownFolders`] (on that registry), with the fake
-/// topology and GPU until `sys::win` has its own. Never writes anything.
+/// [`WinFs`], [`WinRegistry`], [`WinKnownFolders`] (on that registry) and [`WinTopology`],
+/// with the fake GPU until `sys::win` has its own. Never writes anything.
 pub(super) struct TestWinSystem {
     fs: WinFs,
     registry: Arc<WinRegistry>,
     known_folders: WinKnownFolders,
-    topology: FakeTopology,
+    topology: WinTopology,
     gpu: FakeGpu,
 }
 
@@ -1517,7 +1517,7 @@ impl TestWinSystem {
             fs: WinFs::new(),
             known_folders: WinKnownFolders::new(registry.clone()),
             registry,
-            topology: FakeTopology::default(),
+            topology: WinTopology::new(),
             gpu: FakeGpu::default(),
         }
     }

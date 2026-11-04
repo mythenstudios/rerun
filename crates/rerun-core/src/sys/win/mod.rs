@@ -4,9 +4,9 @@
 //! [`Dir`](crate::sys::Dir); every write method returns `Unsupported`
 //! ("sys::win is read-only in phase 1"). [`WinRegistry`] implements
 //! [`Registry`](crate::sys::Registry), equally read-only. [`WinKnownFolders`] implements
-//! [`KnownFolders`](crate::sys::KnownFolders). Topology and GPU follow in later steps of
-//! phase 1; `WinSystem` (the [`System`](crate::sys::System) bundle) arrives once all of them
-//! exist.
+//! [`KnownFolders`](crate::sys::KnownFolders), [`WinTopology`] implements
+//! [`Topology`](crate::sys::Topology) (ADR 0010). The GPU follows in a later step of phase 1;
+//! `WinSystem` (the [`System`](crate::sys::System) bundle) arrives once all of them exist.
 //!
 //! Modules:
 //! - `nt`: the only NT/Win32 file calls (`NtCreateFile` through exactly two wrappers,
@@ -19,6 +19,11 @@
 //!   `RegQueryInfoKeyW`, `RegCloseKey`; values with `NtQueryValueKey`/`NtEnumerateValueKey`,
 //!   because the Win32 value reads fix up strings; `NtQueryKey` for key names), key handles
 //!   as `OwnedKey`.
+//! - `cpu`: the only calls to `GetSystemCpuSetInformation` (system-wide, `Process = NULL`) and
+//!   `GetLogicalProcessorInformationEx(RelationAll)`: size query, `u64`-aligned buffer, at most
+//!   4 retries, 1 MiB cap; the bytes go unchanged to `rerun_proto::cpu::CpuTopology::
+//!   from_windows`.
+//! - `topology`: `WinTopology`, error mapping; no `unsafe`.
 //! - `status`: `NTSTATUS`/Win32 code → `SysErrorKind`, for files and the registry (pure).
 //! - `name`: single-segment check, L1 long-name check, `volume_path`, `open_dir` input rules,
 //!   NT buffer decoding (pure).
@@ -29,12 +34,15 @@
 //! - `registry`: `WinRegistry`, input rules, limits, retries and enumeration restarts; no
 //!   `unsafe`.
 //!
-//! `unsafe` lives only in `nt`, `token`, `reg` and `shell`. Path-based Win32 file APIs
+//! `unsafe` lives only in `nt`, `token`, `reg`, `shell` and `cpu`. Path-based Win32 file APIs
 //! (`CreateFileW`, `DeleteFileW`, `MoveFileExW`, `GetFileAttributesW`, …) and every
 //! environment-based path source (`std::env::var`, `GetEnvironmentVariableW`,
 //! `ExpandEnvironmentStringsW`, `SHGetFolderPathW`, `GetWindowsDirectoryW`, …) are banned in
 //! `clippy.toml`, as is every registry API outside `reg` (legacy, ANSI, writes, hive loading,
-//! predefined-key overrides, transactions).
+//! predefined-key overrides, transactions), as are both topology APIs outside `cpu`, every other
+//! processor-count source (`GetSystemInfo`, `GetLogicalProcessorInformation`, the processor
+//! count APIs, `NtQuerySystemInformation`, `std::thread::available_parallelism`) and every
+//! affinity and CPU Set setter until phase 3 (ADR 0010).
 //!
 //! Test only: `testfx` (test root with the `docs/09-testing.md` safeguards, the `FsFixture`
 //! for real Windows, the naive control `Fs`, the private app hive that is the `RegFixture`;
@@ -52,6 +60,7 @@ compile_error!(
      Program Files folders and redirected system paths"
 );
 
+mod cpu;
 mod fs;
 mod known_folders;
 mod name;
@@ -62,6 +71,7 @@ mod reparse;
 mod shell;
 mod status;
 mod token;
+mod topology;
 
 #[cfg(test)]
 mod bans;
@@ -75,3 +85,4 @@ mod tests;
 pub use fs::{WinDir, WinFs};
 pub use known_folders::WinKnownFolders;
 pub use registry::WinRegistry;
+pub use topology::WinTopology;

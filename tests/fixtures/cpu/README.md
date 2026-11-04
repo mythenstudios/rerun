@@ -18,11 +18,11 @@ A real machine is stored **raw** as `<cpu>.raw.json` next to its expected parsed
 }
 ```
 
-`cpu_sets` are the bytes of `GetSystemCpuSetInformation(Process = NULL)`, `processor_info` those of `GetLogicalProcessorInformationEx(RelationAll)`, 64-bit layout, exactly the returned length. `rerun-core/tests/cpu_fixtures.rs` parses every raw file and compares with the JSON. The raw bytes contain no identifying data (indices, masks, cache geometry, flags).
+`cpu_sets` are the bytes of `GetSystemCpuSetInformation(Process = NULL)`, `processor_info` those of `GetLogicalProcessorInformationEx(RelationAll)`, 64-bit layout, exactly the returned length. `rerun-core/tests/cpu_fixtures.rs` parses every raw file and compares with the JSON. The raw bytes contain no identifying data (indices, masks, cache geometry, flags): the dump test (`dump_cpu_topology`, see `docs/09-testing.md`) zeroes `SchedulingClass`, which Windows fills from the chip's preferred-core ranking (it differs per sample). `AllocationTag` is 0 system-wide. New dump: `cargo test -p rerun-core --lib dump_cpu_topology -- --ignored`, then copy `target/cpu-dump.json` to `<cpu>.raw.json` with a real description and `target/cpu-dump.parsed.json` to `<cpu>.json` after checking the shape by hand.
 
 | File | System | Source |
 |---|---|---|
-| `ryzen9-5950x.json` | 2 CCDs × 8 cores × 2 threads, 32 MiB L3 each | Built from the datasheet. **Phase 1:** replaced by a real dump. |
+| `ryzen9-5950x.raw.json`, `ryzen9-5950x.json` | 2 CCDs × 8 cores × 2 threads, 32 MiB L3 each, CPU Set IDs `0x100`–`0x11F` | Real dump, Windows 11 build 26300.9711 (2026-11-05). |
 | `i5-6600.json` | 4 cores, no SMT, 6 MiB L3 | Built from the datasheet. |
 
 The remaining fixtures listed in `docs/03-cpu-topology.md` arrive in phase 3 together with the selection algorithm.

@@ -20,17 +20,17 @@ use std::time::{Duration, Instant};
 use super::testfx::{
     HiveRoot, NaiveFs, TestRoot, TestWinSystem, hosted_ci, note, workflow_warning,
 };
-use super::{WinFs, WinKnownFolders, WinRegistry};
+use super::{WinFs, WinKnownFolders, WinRegistry, WinTopology};
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{Forbidden, ForbiddenRoots, Protected, RootError, RootId, StoreDir};
 use crate::sys::contract::{
     FsContractResult, FsFixture, RegFixture, fs_link_read_contract, fs_race_contract,
     fs_read_contract, fs_volume_contract, known_folders_contract, registry_read_contract,
-    registry_system_contract,
+    registry_system_contract, topology_contract,
 };
 use crate::sys::fs::{EntryKind, Fs};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
-use crate::sys::{KnownFolder, SysErrorKind, System};
+use crate::sys::{KnownFolder, SysErrorKind, System, Topology};
 
 /// A [`TestRoot`] for the smoke tests; `.0` is its verbatim path (`\\?\X:\…`), as
 /// `final_path` reports it.
@@ -558,6 +558,98 @@ fn win_fulfils_registry_system_contract() {
 fn win_fulfils_known_folders_contract() {
     let kf = WinKnownFolders::new(Arc::new(WinRegistry::new().unwrap()));
     known_folders_contract(&kf, &WinFs::new()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Read-only: the real topology is valid, non-empty and stable across two reads (ADR 0010).
+#[test]
+fn win_fulfils_topology_contract() {
+    topology_contract(&WinTopology::new()).unwrap_or_else(|e| panic!("{e}"));
+    let sys = TestWinSystem::new();
+    assert_eq!(
+        sys.topology().read().unwrap(),
+        WinTopology::new().read().unwrap()
+    );
+}
+
+/// `bytes` as JSON strings of 32 bytes (64 hex digits) each, one per line.
+fn hex_lines(bytes: &[u8]) -> String {
+    let lines: Vec<String> = bytes
+        .chunks(32)
+        .map(|c| {
+            let hex: String = c.iter().map(|b| format!("{b:02x}")).collect();
+            format!("    \"{hex}\"")
+        })
+        .collect();
+    lines.join(",\n")
+}
+
+/// The CPU Set bytes with `SchedulingClass` zeroed: Windows fills it from the firmware's
+/// preferred-core ranking (CPPC), which differs from one chip sample to the next, so it is a
+/// fingerprint of the machine. The parser ignores it (ADR 0010).
+fn scrub_cpu_sets(sets: &[u8]) -> Vec<u8> {
+    /// `CpuSet.SchedulingClass` (u8), the first byte of the union after `AllFlags`.
+    const SCHEDULING_CLASS: usize = 20;
+    let mut out = sets.to_vec();
+    let mut at = 0;
+    while let Some(head) = out.get(at..at + 8) {
+        let size = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
+        let size = usize::try_from(size).unwrap();
+        if size == 0 {
+            break;
+        }
+        if size > SCHEDULING_CLASS
+            && let Some(b) = out.get_mut(at + SCHEDULING_CLASS)
+        {
+            *b = 0;
+        }
+        at += size;
+    }
+    out
+}
+
+/// Writes the raw bytes of both topology calls to `target/cpu-dump.json` (fixture format 1,
+/// `tests/fixtures/cpu/README.md`; `SchedulingClass` zeroed, see [`scrub_cpu_sets`]) and the
+/// parsed topology to `target/cpu-dump.parsed.json`. Read-only on the system; run by hand on a
+/// machine whose fixture is wanted:
+/// `cargo test -p rerun-core --lib dump_cpu_topology -- --ignored`, then fill in the
+/// description.
+#[test]
+#[ignore = "writes target/cpu-dump.json from this machine; run by hand for a new fixture"]
+fn dump_cpu_topology() {
+    let sets = super::cpu::system_cpu_sets().unwrap();
+    let info = super::cpu::processor_information().unwrap();
+    let parsed =
+        rerun_proto::cpu::CpuTopology::from_windows(&sets, &info).unwrap_or_else(|e| panic!("{e}"));
+    let scrubbed = scrub_cpu_sets(&sets);
+    assert_eq!(
+        rerun_proto::cpu::CpuTopology::from_windows(&scrubbed, &info),
+        Ok(parsed.clone())
+    );
+    let raw = [
+        "{".to_owned(),
+        "  \"format\": 1,".to_owned(),
+        "  \"description\": \"TODO: CPU model, Windows build\",".to_owned(),
+        "  \"cpu_sets\": [".to_owned(),
+        hex_lines(&scrubbed),
+        "  ],".to_owned(),
+        "  \"processor_info\": [".to_owned(),
+        hex_lines(&info),
+        "  ]".to_owned(),
+        "}".to_owned(),
+        String::new(),
+    ]
+    .join("\n");
+    let target = super::testfx::target_dir();
+    std::fs::write(target.join("cpu-dump.json"), raw).unwrap();
+    let json = serde_json::to_string_pretty(&parsed).unwrap() + "\n";
+    std::fs::write(target.join("cpu-dump.parsed.json"), json).unwrap();
+    note(&format!(
+        "wrote {} ({} logical processors, {} cores, {} llcs)",
+        target.join("cpu-dump.json").display(),
+        parsed.logical_count(),
+        parsed.core_count(),
+        parsed.llc_count()
+    ));
 }
 
 #[test]
