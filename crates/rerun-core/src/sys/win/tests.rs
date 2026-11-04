@@ -497,8 +497,12 @@ fn registry_read_run(case: &str, root: &RegKey) {
         "note: {case}: registry_read_contract took {:?}",
         started.elapsed()
     ));
+    // Always skipped on Windows: following a link key in an app hive is denied
+    // (`key_link`), and a single value above 1,048,572 bytes is refused by the kernel, so the
+    // 1 MiB limit cases cannot be set up (`value_at_limit`, `value_over_limit`).
+    const WIN_SKIPS: [&str; 3] = ["key_link", "value_at_limit", "value_over_limit"];
     for s in skips {
-        if hosted_ci() && s != "key_link" {
+        if hosted_ci() && !WIN_SKIPS.contains(&s) {
             panic!("{case}: {s} skipped on a GitHub runner");
         }
         note(&format!("note: {case}: skipped {s} (not available)"));
