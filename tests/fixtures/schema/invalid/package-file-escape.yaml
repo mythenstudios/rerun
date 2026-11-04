@@ -1,0 +1,15 @@
+# Invalid: Target path leaves the game folder
+format: 1
+id: schema-fixture
+name: "Fixture"
+status: draft
+tier: established
+source:
+  repo: "https://github.com/owner/repo"
+  release: "https://github.com/owner/repo/releases/download/v1/tool.zip"
+version: "1.0"
+sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+license: "MIT"
+arch: [x86, x64]
+files:
+  - { from: "a.dll", to: "../../Windows/System32/a.dll" }

@@ -1,0 +1,42 @@
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+launch:
+  chain: [steam, upc]
+  method: inproc
+  fallback: watch
+  cpu: { max_threads: 8, prefer: performance, single_l3: true, prefer_l3: largest, smt: false, mode: hard, report_cores: 8 }
+issues:
+  - id: issue
+    title: "Issue"
+    variants:
+      - id: v
+        status: unverified
+        kind: fix
+        steps: [{ cpu: { max_threads: 4 } }, { steam_input: enable }]
+        tradeoffs: ["Side effect"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Far_Cry_2#High_core_count" }
+          - { type: official, url: "https://www.ubisoft.com/en-us/help/article/000000" }
+          - { type: repo, url: "https://github.com/owner/repo/releases/tag/v1" }
+          - { type: steam-guide, url: "https://steamcommunity.com/sharedfiles/filedetails/?id=123" }
+          - { type: steam-thread, url: "https://steamcommunity.com/app/1/discussions/0/2/" }
+    when:
+      gpu.vendor: amd
+      gpu.arch: [rdna2]
+      cpu.threads: { gt: 12 }
+      cpu.hybrid: false
+      os.build: { gte: 22000 }
+    checks:
+      - { runtime: vcredist-x86 }
+tips:
+  launch_options: ["-nointro"]
+  notes:
+    - text: "Note"
+links:
+  pcgw: "Far_Cry_2"

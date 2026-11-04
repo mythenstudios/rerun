@@ -1,0 +1,12 @@
+# Invalid: links.pcgw is a page name, not a URL
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues: []
+links:
+  pcgw: "https://www.pcgamingwiki.com/wiki/X"

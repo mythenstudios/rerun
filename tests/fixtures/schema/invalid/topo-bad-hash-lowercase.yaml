@@ -1,0 +1,10 @@
+# Invalid: Hash in lowercase
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "a9ea476e70f076709cca59a802e26ec894432120", api: d3d9 }
+issues: []

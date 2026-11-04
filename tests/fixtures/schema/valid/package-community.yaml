@@ -1,0 +1,11 @@
+format: 1
+id: schema-fixture
+name: "Fixture"
+status: draft
+tier: community
+source:
+  page: "https://www.nexusmods.com/game/mods/1"
+version: "1.0"
+sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+license: "MIT"
+arch: [x86, x64]

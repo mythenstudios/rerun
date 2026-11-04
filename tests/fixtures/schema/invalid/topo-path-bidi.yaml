@@ -1,0 +1,10 @@
+# Invalid: Bidi override in the path
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "a\u202Egnp.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues: []

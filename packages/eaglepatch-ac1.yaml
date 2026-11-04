@@ -1,0 +1,27 @@
+# DRAFT - add version, hash, license and INI keys when curating.
+format: 1
+id: eaglepatch-ac1
+name: EaglePatchAC1
+status: draft
+tier: established
+source:
+  repo: "https://github.com/Sergeanur/EaglePatch"
+  release: "TODO"
+version: "TODO"
+sha256: "TODO"
+license: "TODO"
+arch: [x86]
+requires: [ultimate-asi-loader]
+slots: []
+supports_exe_sha1:
+  - "A9EA476E70F076709CCA59A802E26EC894432120"   # AssassinsCreed_Dx9.exe (GOG/Steam)
+  - "601475FD5EFA02BBAE80D1C06DFA25A0A1E7FD2F"   # AssassinsCreed_Dx10.exe (GOG/Steam)
+files:
+  - { from: "EaglePatchAC1.asi", to: "scripts/EaglePatchAC1.asi" }
+  - { from: "EaglePatchAC1.ini", to: "scripts/EaglePatchAC1.ini", config: true }
+options:
+  ps3_controls:    { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: false }
+  skip_intros:     { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: false }
+  keyboard_layout: { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: "TODO" }
+  shadows_4096:    { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: true, kind: enhancement }
+  draw_distance:   { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: true, kind: enhancement }

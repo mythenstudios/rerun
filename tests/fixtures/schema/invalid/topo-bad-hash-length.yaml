@@ -1,0 +1,10 @@
+# Invalid: Hash too short
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "A9EA476E", api: d3d9 }
+issues: []

@@ -1,0 +1,10 @@
+# Invalid: Reserved device name
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "NUL.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues: []

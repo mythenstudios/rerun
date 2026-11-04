@@ -1,0 +1,22 @@
+# DRAFT - determine version and hash yourself when curating.
+# The release is a .tar.gz with x32/ and x64/ folders; extraction comes in phase 4.
+# files are still missing: derive the folder x API -> slot mapping from the release when curating.
+format: 1
+id: dxvk
+name: DXVK
+status: draft
+tier: established
+source:
+  repo: "https://github.com/doitsujin/dxvk"
+  release: "TODO"
+version: "TODO"
+sha256: "TODO"
+license: "Zlib"            # TODO: confirm in the repo
+arch: [x86, x64]
+apis: [d3d8, d3d9, d3d10, d3d11]
+slots_by_api:
+  d3d8:  [d3d8.dll, d3d9.dll]
+  d3d9:  [d3d9.dll]
+  d3d10: [d3d10core.dll, d3d11.dll, dxgi.dll]
+  d3d11: [d3d11.dll, dxgi.dll]
+requires_gpu: [vulkan]

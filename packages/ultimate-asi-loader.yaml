@@ -1,0 +1,19 @@
+# DRAFT - determine version and hashes yourself when curating.
+# Separate builds per architecture -> assets instead of source.release + sha256.
+# Shared by several ASI plugins: reference counting via `requires` of the other packages.
+format: 1
+id: ultimate-asi-loader
+name: Ultimate ASI Loader
+status: draft
+tier: established
+source:
+  repo: "https://github.com/ThirteenAG/Ultimate-ASI-Loader"
+version: "TODO"
+assets:
+  - { arch: x86, url: "TODO", sha256: "TODO" }
+  - { arch: x64, url: "TODO", sha256: "TODO" }
+license: "TODO"
+arch: [x86, x64]
+slots: [dinput8.dll]       # default proxy; other names possible depending on the game
+files:
+  - { from: "dinput8.dll", to: "dinput8.dll" }

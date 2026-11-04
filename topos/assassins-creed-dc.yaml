@@ -1,0 +1,49 @@
+# DRAFT - exe hashes are from the EaglePatch README (SHA-1); package data is still missing.
+format: 1
+id: assassins-creed-dc
+title: "Assassin's Creed: Director's Cut Edition"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 15100          # TODO: verify
+  exes:
+    - { path: "AssassinsCreed_Dx9.exe",  sha1: "A9EA476E70F076709CCA59A802E26EC894432120", api: d3d9 }
+    - { path: "AssassinsCreed_Dx10.exe", sha1: "601475FD5EFA02BBAE80D1C06DFA25A0A1E7FD2F", api: d3d10 }
+
+launch:
+  chain: [steam, upc]
+  method: auto
+  fallback: inproc
+
+issues:
+  - id: controller
+    title: "Modern controllers are not detected, no hotplug"
+    when: {}
+    variants:
+      - id: steam-input
+        status: unverified
+        kind: fix
+        steps: [{ steam_input: enable }]
+      - id: eaglepatch
+        status: reported
+        kind: fix
+        steps: [{ package: eaglepatch-ac1 }]
+        tradeoffs:
+          - "Old DInput controllers are no longer supported"
+          - "The control layout in the game menu no longer has any effect; configure it in the INI"
+        sources:
+          - { type: repo, url: "https://github.com/Sergeanur/EaglePatch" }
+
+  - id: online-services
+    title: "Shut-down online services delay startup"
+    when: {}
+    variants: []               # TODO: research whether a firewall rule demonstrably helps here
+
+tips:
+  launch_options: []
+  notes: []
+
+links:
+  pcgw: "Assassin's_Creed"

@@ -1,0 +1,14 @@
+# Invalid: assets and sha256 at the same time
+format: 1
+id: schema-fixture
+name: "Fixture"
+status: draft
+tier: established
+source:
+  repo: "https://github.com/owner/repo"
+version: "1.0"
+sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+license: "MIT"
+arch: [x86, x64]
+assets:
+  - { arch: x86, url: "TODO", sha256: "TODO" }

@@ -1,0 +1,16 @@
+# DRAFT - download location, version, SHA256, license, architecture and DLL slot of the special build are unverified.
+format: 1
+id: special-k-lego-city-recovered
+name: "Special K (special build for LEGO City Undercover)"
+status: draft
+tier: community
+source:
+  # Pinned post in the Steam group "Kaldaien's Mod" (archived, read-only); author per search result: Kaldaien.
+  # According to the post, the install guide points to a GitLab page; its URL is unverified.
+  page: "https://steamcommunity.com/groups/SpecialK_Mods/discussions/15/1369506198755417370"
+version: "TODO"
+sha256: "TODO"
+license: "TODO"
+arch: "TODO"   # not documented
+slots: []    # TODO: not documented (local Special K usually as dxgi.dll/d3d11.dll etc., unconfirmed here)
+files: []

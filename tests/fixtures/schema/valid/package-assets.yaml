@@ -1,0 +1,25 @@
+format: 1
+id: schema-fixture
+name: "Fixture"
+status: draft
+tier: established
+source:
+  repo: "https://github.com/owner/repo"
+version: "1.0"
+assets:
+  - { arch: x86, url: "https://github.com/owner/repo/releases/download/v1/x86.zip", sha256: "0000000000000000000000000000000000000000000000000000000000000000" }
+  - { arch: x64, url: "TODO", sha256: "TODO" }
+license: "MIT OR Apache-2.0"
+arch: [x86, x64]
+apis: [d3d9]
+slots: [dinput8.dll]
+slots_by_api:
+  d3d9: [d3d9.dll]
+requires: [other-package]
+requires_gpu: [vulkan]
+supports_exe_sha1: ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
+files:
+  - { from: "dinput8.dll", to: "dinput8.dll", arch: [x86] }
+  - { from: "tool.ini", to: "scripts/tool.ini", config: true }
+options:
+  skip_intros: { ini: { file: "scripts/tool.ini", section: "Main", key: "SkipIntro" }, default: true, kind: enhancement }

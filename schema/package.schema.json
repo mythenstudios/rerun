@@ -1,0 +1,488 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rerun:schema:package:1",
+  "title": "Rerun package v1",
+  "description": "Upstream tool referenced by topos. See docs/02-topo-format.md and docs/05-sources-policy.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "id",
+    "name",
+    "status",
+    "tier",
+    "source",
+    "version",
+    "license",
+    "arch"
+  ],
+  "properties": {
+    "format": {
+      "const": 1
+    },
+    "id": {
+      "$ref": "#/$defs/id"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "status": {
+      "$ref": "#/$defs/status"
+    },
+    "tier": {
+      "enum": [
+        "official",
+        "established",
+        "community"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/repoUrl"
+        },
+        "page": {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        "release": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/httpsUrl"
+            },
+            {
+              "const": "TODO"
+            }
+          ]
+        }
+      }
+    },
+    "version": {
+      "description": "Only characters that are safe in cache paths.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$",
+      "not": {
+        "pattern": "\\.\\."
+      }
+    },
+    "sha256": {
+      "$ref": "#/$defs/sha256OrTodo"
+    },
+    "assets": {
+      "description": "Separate downloads per architecture (instead of source.release + sha256).",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "arch",
+          "url",
+          "sha256"
+        ],
+        "properties": {
+          "arch": {
+            "$ref": "#/$defs/arch"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/httpsUrl"
+              },
+              {
+                "const": "TODO"
+              }
+            ]
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256OrTodo"
+          }
+        }
+      }
+    },
+    "license": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9.+-]+( (OR|AND|WITH) [A-Za-z0-9.+-]+)*$",
+          "not": {
+            "const": "TODO"
+          }
+        },
+        {
+          "const": "TODO"
+        }
+      ]
+    },
+    "arch": {
+      "anyOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/arch"
+          }
+        },
+        {
+          "const": "TODO"
+        }
+      ]
+    },
+    "apis": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/api"
+      }
+    },
+    "slots": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/dllName"
+      }
+    },
+    "slots_by_api": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/api"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "uniqueItems": true,
+        "items": {
+          "$ref": "#/$defs/dllName"
+        }
+      }
+    },
+    "requires": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/packageId"
+      }
+    },
+    "requires_gpu": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "vulkan"
+        ]
+      }
+    },
+    "supports_exe_sha1": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/sha1"
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "$ref": "#/$defs/relPath"
+          },
+          "to": {
+            "$ref": "#/$defs/relPath"
+          },
+          "config": {
+            "type": "boolean",
+            "description": "May be changed by the user; revert asks first."
+          },
+          "arch": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/arch"
+            }
+          },
+          "api": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/api"
+            }
+          }
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ini",
+          "default"
+        ],
+        "properties": {
+          "ini": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "file",
+              "section",
+              "key"
+            ],
+            "properties": {
+              "file": {
+                "$ref": "#/$defs/relPath"
+              },
+              "section": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_. -]+$"
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_. -]+$"
+              }
+            }
+          },
+          "default": {
+            "description": "Strings without control characters (no CR/LF), absolute paths or ..",
+            "type": [
+              "string",
+              "boolean",
+              "integer"
+            ],
+            "maxLength": 256,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f\\u00A0\\u00AD\\u061C\\u1680\\u180E\\u2000-\\u200F\\u2028-\\u202F\\u205F-\\u206F\\u3000\\uFEFF\\uFFF9-\\uFFFB\\uE000-\\uF8FF\\uFF01-\\uFF5E\\u00A5\\u20A9\\u2215\\u2044\\u29F8]*$",
+            "not": {
+              "type": "string",
+              "anyOf": [
+                {
+                  "pattern": "^[A-Za-z]:"
+                },
+                {
+                  "pattern": "^[\\\\/]"
+                },
+                {
+                  "pattern": "\\.\\."
+                }
+              ]
+            }
+          },
+          "kind": {
+            "enum": [
+              "fix",
+              "enhancement"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "community: original page required, no direct download (the user downloads it).",
+      "if": {
+        "required": [
+          "tier"
+        ],
+        "properties": {
+          "tier": {
+            "const": "community"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "sha256"
+        ],
+        "properties": {
+          "source": {
+            "required": [
+              "page"
+            ],
+            "not": {
+              "required": [
+                "release"
+              ]
+            }
+          }
+        },
+        "not": {
+          "required": [
+            "assets"
+          ]
+        }
+      },
+      "else": {
+        "oneOf": [
+          {
+            "required": [
+              "sha256"
+            ],
+            "properties": {
+              "source": {
+                "required": [
+                  "release"
+                ]
+              }
+            },
+            "not": {
+              "required": [
+                "assets"
+              ]
+            }
+          },
+          {
+            "required": [
+              "assets"
+            ],
+            "not": {
+              "required": [
+                "sha256"
+              ]
+            },
+            "properties": {
+              "source": {
+                "not": {
+                  "required": [
+                    "release"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "description": "Lowercase letters, digits, hyphens.",
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "packageId": {
+      "$ref": "#/$defs/id"
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "active",
+        "needs-retest",
+        "retired"
+      ]
+    },
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9A-F]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9A-F]{64}$"
+    },
+    "sha1OrTodo": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha1"
+        },
+        {
+          "const": "TODO"
+        }
+      ]
+    },
+    "sha256OrTodo": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "const": "TODO"
+        }
+      ]
+    },
+    "httpsUrl": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https://[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\\.[a-z]{2,63}(/[^\\s\\\\]*)?$"
+    },
+    "repoUrl": {
+      "type": "string",
+      "pattern": "^https://(github\\.com|gitlab\\.com|codeberg\\.org)/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$"
+    },
+    "relPath": {
+      "description": "Relative path inside the game folder. Same rules as rerun_core::policy::path::RelPath (parity test: tests/fixtures/paths.json).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "pattern": "^[^\\\\/<>:\"|?*\\x00-\\x1f\\x7f-\\x9f\\u00A0\\u00AD\\u061C\\u1680\\u180E\\u2000-\\u200F\\u2028-\\u202F\\u205F-\\u206F\\u3000\\uFEFF\\uFFF9-\\uFFFB\\uE000-\\uF8FF\\uFF01-\\uFF5E\\u00A5\\u20A9\\u2215\\u2044\\u29F8]+([\\\\/][^\\\\/<>:\"|?*\\x00-\\x1f\\x7f-\\x9f\\u00A0\\u00AD\\u061C\\u1680\\u180E\\u2000-\\u200F\\u2028-\\u202F\\u205F-\\u206F\\u3000\\uFEFF\\uFFF9-\\uFFFB\\uE000-\\uF8FF\\uFF01-\\uFF5E\\u00A5\\u20A9\\u2215\\u2044\\u29F8]+)*$",
+      "not": {
+        "anyOf": [
+          {
+            "description": ". or ..",
+            "pattern": "(^|[\\\\/])\\.\\.?([\\\\/]|$)"
+          },
+          {
+            "description": "dot/space at end of segment",
+            "pattern": "[. ]([\\\\/]|$)"
+          },
+          {
+            "description": "space at start of segment",
+            "pattern": "(^|[\\\\/]) "
+          },
+          {
+            "description": "8.3 short name",
+            "pattern": "~[0-9]"
+          },
+          {
+            "description": "reserved device name",
+            "pattern": "(^|[\\\\/])([Cc][Oo][Nn]|[Cc][Oo][Nn][Ii][Nn]\\$|[Cc][Oo][Nn][Oo][Uu][Tt]\\$|[Cc][Ll][Oo][Cc][Kk]\\$|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][0-9¹²³]|[Ll][Pp][Tt][0-9¹²³]) *(\\.[^\\\\/]*)?([\\\\/]|$)"
+          }
+        ]
+      }
+    },
+    "dllName": {
+      "description": "A DLL file name in the game folder; the relPath rules apply as well.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/relPath"
+        }
+      ],
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+\\.[Dd][Ll][Ll]$"
+    },
+    "api": {
+      "enum": [
+        "ddraw",
+        "d3d8",
+        "d3d9",
+        "d3d10",
+        "d3d11",
+        "opengl"
+      ]
+    },
+    "arch": {
+      "enum": [
+        "x86",
+        "x64"
+      ]
+    }
+  }
+}

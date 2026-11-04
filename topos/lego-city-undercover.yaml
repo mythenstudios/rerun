@@ -1,0 +1,58 @@
+# DRAFT - example from the concept mockup.
+format: 1
+id: lego-city-undercover
+title: "LEGO City Undercover"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 578330
+  exes:
+    - { path: "LEGOLCUR_DX11.exe", sha256: "TODO", api: d3d11 }   # TODO: verify exe name
+
+launch:
+  chain: [steam]
+  method: auto
+
+issues:
+  - id: performance-fullscreen
+    title: "Stutter, frame rate cap, Alt-Tab hangs in fullscreen"
+    when: {}
+    variants:
+      - id: special-k-recovered
+        status: unverified       # so far only the author's post, no independent reports
+        kind: fix
+        steps: [{ package: special-k-lego-city-recovered }]
+        sources:
+          - { type: steam-guide, url: "https://steamcommunity.com/sharedfiles/filedetails/?id=949406574" }
+          - { type: steam-thread, url: "https://steamcommunity.com/groups/SpecialK_Mods/discussions/15/1369506198755417370" }
+
+  - id: cutscene-artifacts
+    title: "Green and red bars in cutscenes"
+    when:
+      gpu.vendor: amd
+    variants:
+      - id: dxvk
+        status: unverified
+        kind: fix
+        steps: [{ package: dxvk }]
+        sources:
+          - { type: steam-thread, url: "https://steamcommunity.com/app/578330/discussions/0/1742229167222096151/" }
+
+  - id: no-start
+    title: "Does not start"
+    when: {}
+    checks:
+      - { runtime: vcredist-x64 }
+      - { runtime: directx-jun2010 }
+    variants: []
+
+tips:
+  launch_options: []
+  notes:
+    - text: "Unplug controllers and wireless dongles before launching if the game does not start."
+      source: { type: steam-thread, url: "https://steamcommunity.com/app/578330/discussions/0/135513549087732063/" }
+
+links:
+  pcgw: "LEGO_City_Undercover"

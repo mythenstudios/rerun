@@ -1,0 +1,13 @@
+# Invalid: version with path components
+format: 1
+id: schema-fixture
+name: "Fixture"
+status: draft
+tier: established
+source:
+  repo: "https://github.com/owner/repo"
+  release: "https://github.com/owner/repo/releases/download/v1/tool.zip"
+version: "..\\..\\Startup\\x"
+sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+license: "MIT"
+arch: [x86, x64]
