@@ -16,6 +16,8 @@
 //! - [`AppHive`]: a private registry hive (`RegLoadAppKeyW`) in a file inside a [`TestRoot`],
 //!   the [`RegFixture`] of the registry read contract; [`HiveRoot`] bundles it with its root
 //!   and a [`WinRegistry`] on it. Raw writes go only to that hive, never to `HKCU` or `HKLM`.
+//! - [`TestWinSystem`]: a read-only [`System`] of the real file system, registry and known
+//!   folders (fake topology and GPU), for tests of `policy::root` against real Windows.
 //!
 //! Path-based Win32 and `std::fs` calls are the point of this module (they set the scene the
 //! handle-based `sys::win` has to survive), hence the module-wide `disallowed_methods`
@@ -42,7 +44,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{ptr, thread};
 
@@ -89,16 +91,17 @@ use windows_sys::Win32::System::Threading::{
     OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-use super::WinRegistry;
 use super::reg::OwnedKey;
 use super::status::kind_of_win32;
+use super::{WinFs, WinKnownFolders, WinRegistry};
 use crate::path::RelPath;
 use crate::sys::contract::{FsFixture, RegFixture};
+use crate::sys::fake::{FakeGpu, FakeTopology};
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, EntryKind, Fs, FsKind, Metadata, ReadSeek, ReparseInfo, RootInfo, tag,
 };
 use crate::sys::registry::{Hive, RegKey};
-use crate::sys::{SysError, SysErrorKind, SysResult};
+use crate::sys::{Gpu, KnownFolders, SysError, SysErrorKind, SysResult, System, Topology};
 
 /// winbase.h `DRIVE_FIXED`.
 const DRIVE_FIXED: u32 = 3;
@@ -1504,6 +1507,55 @@ impl HiveRoot {
             hive,
             root,
         })
+    }
+}
+
+// ---------- TestWinSystem ----------
+
+/// A [`System`] for tests of the layers above `sys` against real Windows: the real, read-only
+/// [`WinFs`], [`WinRegistry`] and [`WinKnownFolders`] (on that registry), with the fake
+/// topology and GPU until `sys::win` has its own. Never writes anything.
+pub(super) struct TestWinSystem {
+    fs: WinFs,
+    registry: Arc<WinRegistry>,
+    known_folders: WinKnownFolders,
+    topology: FakeTopology,
+    gpu: FakeGpu,
+}
+
+impl TestWinSystem {
+    /// Panics if the registry cannot be opened.
+    pub(super) fn new() -> Self {
+        let registry = Arc::new(WinRegistry::new().unwrap_or_else(|e| panic!("{e}")));
+        Self {
+            fs: WinFs::new(),
+            known_folders: WinKnownFolders::new(registry.clone()),
+            registry,
+            topology: FakeTopology::default(),
+            gpu: FakeGpu::default(),
+        }
+    }
+}
+
+impl System for TestWinSystem {
+    fn fs(&self) -> &dyn Fs {
+        &self.fs
+    }
+
+    fn registry(&self) -> &dyn crate::sys::Registry {
+        &*self.registry
+    }
+
+    fn topology(&self) -> &dyn Topology {
+        &self.topology
+    }
+
+    fn known_folders(&self) -> &dyn KnownFolders {
+        &self.known_folders
+    }
+
+    fn gpu(&self) -> &dyn Gpu {
+        &self.gpu
     }
 }
 

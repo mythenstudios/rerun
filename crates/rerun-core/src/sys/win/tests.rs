@@ -17,10 +17,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::testfx::{HiveRoot, NaiveFs, TestRoot, hosted_ci, note, workflow_warning};
+use super::testfx::{
+    HiveRoot, NaiveFs, TestRoot, TestWinSystem, hosted_ci, note, workflow_warning,
+};
 use super::{WinFs, WinKnownFolders, WinRegistry};
-use crate::path::RelPath;
-use crate::sys::SysErrorKind;
+use crate::path::{RelPath, RootPath};
+use crate::policy::root::{Forbidden, ForbiddenRoots, Protected, RootError, RootId, StoreDir};
 use crate::sys::contract::{
     FsContractResult, FsFixture, RegFixture, fs_link_read_contract, fs_race_contract,
     fs_read_contract, fs_volume_contract, known_folders_contract, registry_read_contract,
@@ -28,6 +30,7 @@ use crate::sys::contract::{
 };
 use crate::sys::fs::{EntryKind, Fs};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
+use crate::sys::{KnownFolder, SysErrorKind, System};
 
 /// A [`TestRoot`] for the smoke tests; `.0` is its verbatim path (`\\?\X:\…`), as
 /// `final_path` reports it.
@@ -689,4 +692,161 @@ fn win_registry_enumerations_survive_concurrent_writes() {
     note(&format!(
         "note: registry race: {ok} complete enumerations, {busy} Busy"
     ));
+}
+
+// ---------- policy::root against real Windows ----------
+
+fn known(sys: &TestWinSystem, f: KnownFolder) -> RootPath {
+    RootPath::new(sys.known_folders().get(f).unwrap()).unwrap()
+}
+
+/// `ForbiddenRoots::resolve` against the real known folders (a `TestRoot` directory stands in
+/// for Rerun's install folder) refuses the real protected folders with the right reason and
+/// allows an ordinary folder.
+#[test]
+fn forbidden_roots_resolve_on_real_windows() {
+    use Forbidden::{Inside, Is};
+    use KnownFolder as K;
+    use Protected::{InstallDir, Known};
+    let Some(root) = TestRoot::new("policy-forbidden") else {
+        return;
+    };
+    let install = root.work("Rerun");
+    let games = root.work("Games");
+    let sys = TestWinSystem::new();
+    let fr = ForbiddenRoots::resolve(&sys, &install).unwrap_or_else(|e| panic!("{e}"));
+    let check = |p: &RootPath| fr.check(p);
+    for f in [
+        K::Windows,
+        K::ProgramFiles,
+        K::ProgramFilesX86,
+        K::ProgramData,
+    ] {
+        assert_eq!(check(&known(&sys, f)), Err(Is(Known(f))), "{f}");
+    }
+    assert_eq!(
+        check(&known(&sys, K::Windows).child("System32").unwrap()),
+        Err(Inside(Known(K::Windows)))
+    );
+    assert_eq!(
+        check(&known(&sys, K::UserProfiles)),
+        Err(Is(Known(K::UserProfiles)))
+    );
+    assert_eq!(check(&known(&sys, K::Profile)), Err(Is(Known(K::Profile))));
+    // Below LocalAppData, and the default form below the profile (ADR 0009), whatever the
+    // redirection of this machine.
+    let local = known(&sys, K::LocalAppData);
+    assert!(check(&local.child("Microsoft").unwrap()).is_err());
+    let mut default = known(&sys, K::Profile);
+    for seg in ["AppData", "Local", "Microsoft"] {
+        default = default.child(seg).unwrap();
+    }
+    assert!(check(&default).is_err());
+    assert!(check(&local.child("Programs").unwrap().child("Game").unwrap()).is_ok());
+    let install_rp = RootPath::new(&install).unwrap();
+    assert_eq!(check(&install_rp), Err(Is(InstallDir)));
+    assert_eq!(check(&RootPath::new(&games).unwrap()), Ok(()));
+    // Opening goes through the same list.
+    match StoreDir::open(&sys, &fr, &install) {
+        Err(RootError::Forbidden { reason, .. }) => assert_eq!(reason, Is(InstallDir)),
+        other => panic!("install folder opened as a store: {other:?}"),
+    }
+}
+
+/// A store under a `TestRoot`: a plain game folder opens with the right identity; a junction,
+/// a directory symlink, a file symlink or a mount point at `steamapps`, `common` or the
+/// install folder is refused (`RootError::Reparse`), and the canary outside stays unread.
+#[test]
+fn store_dir_game_refuses_links_on_real_windows() {
+    const LEVELS: [&str; 3] = ["steamapps", "common", "Game"];
+    const CANARY: &[u8] = b"canary";
+    let Some(root) = TestRoot::new("policy-store") else {
+        return;
+    };
+    let fx = root.fx();
+    let sys = TestWinSystem::new();
+    let install = root.work("Rerun");
+    let fr = ForbiddenRoots::resolve(&sys, &install).unwrap_or_else(|e| panic!("{e}"));
+
+    // The plain case.
+    let plain_store = root.path().join("plain");
+    fx.file(&plain_store.join(r"steamapps\common\Game\game.exe"), b"exe")
+        .unwrap();
+    let store = StoreDir::open(&sys, &fr, &plain_store).unwrap_or_else(|e| panic!("{e}"));
+    let game = store.game(&fr, "game").unwrap_or_else(|e| panic!("{e}"));
+    let direct = WinFs::new()
+        .open_dir(&plain_store.join(r"steamapps\common\Game"))
+        .unwrap()
+        .info()
+        .unwrap();
+    assert_eq!(game.id(), RootId::of(&direct));
+    assert_eq!(
+        game.path(),
+        &RootPath::from_final_path(&direct.final_path).unwrap()
+    );
+    assert_eq!(
+        game.path().path().file_name().and_then(|n| n.to_str()),
+        Some("Game"),
+        "the stored case is reported"
+    );
+    assert_eq!(game.dir().read(&rel("game.exe")).unwrap(), b"exe");
+    assert_ne!(game.id(), store.id());
+
+    // Every link kind at every level.
+    let win_fs = WinFs::new();
+    let mut skipped: Vec<&str> = Vec::new();
+    for (ki, kind) in ["junction", "dir_symlink", "file_symlink", "mount_volume"]
+        .into_iter()
+        .enumerate()
+    {
+        for (level, at) in LEVELS.iter().enumerate() {
+            let case = root.path().join(format!("links-{ki}-{level}"));
+            let (store_path, out) = (case.join("store"), case.join("out"));
+            // The target holds the rest of the path, so a followed link would find a game.
+            for p in [r"common\Game\game.exe", r"Game\game.exe", "game.exe"] {
+                fx.file(&out.join(p), CANARY).unwrap();
+            }
+            fx.dir(&store_path).unwrap();
+            if level > 0 {
+                fx.dir(&store_path.join(LEVELS[..level].join("\\")))
+                    .unwrap();
+            }
+            let link = store_path.join(LEVELS[..=level].join("\\"));
+            let made = match kind {
+                "junction" => fx.junction(&link, &out).map(|()| true),
+                "dir_symlink" => fx.dir_symlink(&link, &out),
+                "file_symlink" => fx.file_symlink(&link, &out.join("game.exe")),
+                _ => fx.mount_volume(&link),
+            }
+            .unwrap();
+            if !made {
+                if !skipped.contains(&kind) {
+                    skipped.push(kind);
+                }
+                continue;
+            }
+            let store = StoreDir::open(&sys, &fr, &store_path).unwrap_or_else(|e| panic!("{e}"));
+            match store.game(&fr, "Game") {
+                Err(RootError::Reparse { .. }) => {}
+                other => panic!("{kind} at {at}: expected Reparse, got {other:?}"),
+            }
+            let od = win_fs.open_dir(&out).unwrap();
+            for p in [r"common\Game\game.exe", r"Game\game.exe", "game.exe"] {
+                assert_eq!(od.read(&rel(p)).unwrap(), CANARY, "{kind} at {at}: canary");
+            }
+        }
+    }
+    for s in skipped {
+        if !hosted_ci() {
+            note(&format!(
+                "note: store_dir_game_refuses_links_on_real_windows: skipped {s} (not available)"
+            ));
+        } else if CI_TOLERATED.contains(&s) {
+            workflow_warning(&format!(
+                "policy::root link test: {s} skipped (not available on this runner)"
+            ));
+        } else {
+            panic!("{s} skipped on a GitHub runner");
+        }
+    }
 }
