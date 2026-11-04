@@ -1,31 +1,46 @@
 //! Fake topology from fixtures.
+//!
+//! Every topology the fake hands out has passed [`CpuTopology::validate`], like the output of
+//! the real parser (ADR 0010). A fake without a configured topology fails `read` instead of
+//! returning an empty one, which no real machine reports.
 
 use rerun_proto::cpu::CpuTopology;
 
 use crate::sys::{SysError, SysErrorKind, SysResult, Topology};
 
-/// Returns a fixed topology.
+/// Returns a fixed, validated topology.
 #[derive(Debug, Clone, Default)]
 pub struct FakeTopology {
-    topology: CpuTopology,
+    topology: Option<CpuTopology>,
 }
 
 impl FakeTopology {
-    /// Fixed topology.
-    pub fn new(topology: CpuTopology) -> Self {
-        Self { topology }
+    /// Fixed topology; `Other` if it violates an invariant.
+    pub fn new(topology: CpuTopology) -> SysResult<Self> {
+        topology
+            .validate()
+            .map_err(|e| SysError::new(SysErrorKind::Other, format!("cpu fixture: {e}")))?;
+        Ok(Self {
+            topology: Some(topology),
+        })
     }
 
-    /// From a JSON fixture (serialized [`CpuTopology`]).
+    /// From a JSON fixture (serialized [`CpuTopology`]); `Other` if it does not parse or
+    /// violates an invariant.
     pub fn from_json(json: &str) -> SysResult<Self> {
-        serde_json::from_str(json)
-            .map(Self::new)
-            .map_err(|e| SysError::new(SysErrorKind::Other, format!("cpu fixture: {e}")))
+        let topology = serde_json::from_str(json)
+            .map_err(|e| SysError::new(SysErrorKind::Other, format!("cpu fixture: {e}")))?;
+        Self::new(topology)
     }
 }
 
 impl Topology for FakeTopology {
     fn read(&self) -> SysResult<CpuTopology> {
-        Ok(self.topology.clone())
+        self.topology.clone().ok_or_else(|| {
+            SysError::new(
+                SysErrorKind::Unsupported,
+                "fake topology: none configured (FakeSystemBuilder::topology)",
+            )
+        })
     }
 }

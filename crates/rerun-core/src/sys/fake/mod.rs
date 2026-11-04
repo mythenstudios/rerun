@@ -317,15 +317,8 @@ impl FakeSystemBuilder {
         self.value(key, name, RegValue::decode(kind, data))
     }
 
-    /// CPU topology.
-    pub fn topology(mut self, topology: CpuTopology) -> Self {
-        self.sys.topology = FakeTopology::new(topology);
-        self
-    }
-
-    /// CPU topology from a JSON fixture (`tests/fixtures/cpu/*.json`).
-    pub fn topology_json(mut self, json: &str) -> Self {
-        match FakeTopology::from_json(json) {
+    fn set_topology(mut self, topology: SysResult<FakeTopology>) -> Self {
+        match topology {
             Ok(t) => self.sys.topology = t,
             Err(e) => {
                 if self.error.is_none() {
@@ -334,6 +327,17 @@ impl FakeSystemBuilder {
             }
         }
         self
+    }
+
+    /// CPU topology; must pass [`CpuTopology::validate`]. Without one, reading the
+    /// topology fails.
+    pub fn topology(self, topology: CpuTopology) -> Self {
+        self.set_topology(FakeTopology::new(topology))
+    }
+
+    /// CPU topology from a JSON fixture (`tests/fixtures/cpu/*.json`), validated.
+    pub fn topology_json(self, json: &str) -> Self {
+        self.set_topology(FakeTopology::from_json(json))
     }
 
     /// Sets a known folder (default: [`FakeKnownFolders::standard`]).

@@ -19,7 +19,8 @@ use crate::sys::fs::{Attrs, Dir, EntryKind, Fs, FsKind, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
 use crate::sys::snapshot::{Scope, snapshot};
 use crate::sys::{DriverVersion, GpuAdapter, KnownFolder};
-use crate::sys::{SysErrorKind, SysResult, System};
+use crate::sys::{SysErrorKind, SysResult, System, Topology};
+use rerun_proto::cpu::CpuTopology;
 
 const RYZEN_5950X: &str = include_str!("../../../../../tests/fixtures/cpu/ryzen9-5950x.json");
 const I5_6600: &str = include_str!("../../../../../tests/fixtures/cpu/i5-6600.json");
@@ -416,8 +417,50 @@ fn the_registry_system_contract_catches_wrong_data() {
 fn fixtures_fulfil_topology_contract() {
     for json in [RYZEN_5950X, I5_6600] {
         let sys = FakeSystem::builder().topology_json(json).build().unwrap();
-        topology_contract(&sys).unwrap();
+        topology_contract(sys.topology()).unwrap();
     }
+}
+
+/// A topology source that hands out whatever it holds, unvalidated (the fake refuses that).
+struct RawTopology(CpuTopology);
+
+impl Topology for RawTopology {
+    fn read(&self) -> SysResult<CpuTopology> {
+        Ok(self.0.clone())
+    }
+}
+
+#[test]
+fn the_topology_contract_catches_raw_numbering() {
+    // The pre-ADR-0010 fixture semantics: `core` and `llc` are the raw Windows CoreIndex and
+    // LastLevelCacheIndex (first logical processor of the core or cache).
+    let mut t: CpuTopology = serde_json::from_str(RYZEN_5950X).unwrap();
+    for c in &mut t.cpus {
+        c.core = u32::from(c.index & !1);
+        c.llc = u32::from(c.index & !15);
+    }
+    let err = topology_contract(&RawTopology(t.clone())).unwrap_err();
+    assert!(err.contains("dense core numbering"), "{err}");
+    // The fake itself refuses it.
+    assert!(FakeSystem::builder().topology(t).build().is_err());
+}
+
+/// Differs on every second read.
+struct Flapping(std::sync::atomic::AtomicU32, CpuTopology);
+
+impl Topology for Flapping {
+    fn read(&self) -> SysResult<CpuTopology> {
+        let mut t = self.1.clone();
+        t.cpus[0].cpu_set_id += self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(t)
+    }
+}
+
+#[test]
+fn the_topology_contract_catches_an_unstable_topology() {
+    let t = serde_json::from_str(I5_6600).unwrap();
+    let err = topology_contract(&Flapping(0.into(), t)).unwrap_err();
+    assert!(err.contains("stable across calls"), "{err}");
 }
 
 fn adapter(name: &str, luid: u64) -> GpuAdapter {
@@ -2090,6 +2133,14 @@ fn ryzen_5950x_fixture() {
     assert_eq!(t.llc_count(), 2);
     assert!(t.has_smt());
     assert!(!t.is_hybrid());
+    // 2 L3 × 8 cores × 2 threads, dense, all in group 0.
+    for c in &t.cpus {
+        assert_eq!(
+            (c.group, c.core, c.llc),
+            (0, u32::from(c.index / 2), u32::from(c.index / 16))
+        );
+    }
+    assert!(t.llcs.iter().all(|l| l.level == 3 && l.size == 32 << 20));
 }
 
 #[test]
@@ -2111,6 +2162,38 @@ fn broken_fixture_is_an_error() {
         .topology_json(r#"{"cpus": [], "extra": 1}"#)
         .build();
     assert!(err.is_err());
+}
+
+#[test]
+fn old_shape_fixtures_are_rejected() {
+    // `numa` and `llc_sizes` are gone, `cpu_set_id` is required (ADR 0010).
+    let old = r#"{"cpus": [{"group": 0, "index": 0, "core": 0, "efficiency_class": 0,
+        "llc": 0, "numa": 0}], "llc_sizes": {"0": 6291456}}"#;
+    let err = FakeSystem::builder()
+        .topology_json(old)
+        .build()
+        .unwrap_err();
+    assert!(err.target.contains("cpu fixture"), "{err}");
+}
+
+#[test]
+fn invalid_topologies_are_rejected_by_the_builder() {
+    let empty = r#"{"cpus": [], "llcs": []}"#;
+    let err = FakeSystem::builder()
+        .topology_json(empty)
+        .build()
+        .unwrap_err();
+    assert!(err.target.contains("non-empty"), "{err}");
+    let mut t: CpuTopology = serde_json::from_str(RYZEN_5950X).unwrap();
+    t.llcs.pop();
+    let err = FakeSystem::builder().topology(t).build().unwrap_err();
+    assert!(err.target.contains("one llcs entry per llc"), "{err}");
+}
+
+#[test]
+fn a_fake_without_topology_fails_to_read() {
+    let err = FakeSystem::new().topology().read().unwrap_err();
+    assert_eq!(err.kind, SysErrorKind::Unsupported);
 }
 
 #[test]

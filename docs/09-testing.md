@@ -67,7 +67,7 @@ Parity: `tests/fixtures/paths.json` runs against `RelPath::parse` **and** `$defs
 
 ## CPU fixtures
 
-See `03-cpu-topology.md`. Every rule against every fixture; expected masks as snapshot tests.
+See `03-cpu-topology.md` and ADR 0010. Every fixture passes `CpuTopology::validate`, and so does every topology the fake hands out (`FakeTopology::new`/`from_json` and the builder refuse invalid ones; a fake without a topology fails `read`). `topology_contract(&dyn Topology)` checks valid, non-empty and stable across two reads; `the_topology_contract_catches_raw_numbering` keeps it honest with the old raw `CoreIndex`/`LastLevelCacheIndex` numbering. The parser (`rerun-proto`, `cpu/parse/tests.rs`) is tested on byte-built records: SMT, no SMT, hybrid with LP E-cores, several groups, an LLC across two groups, `GroupCount == 0`, unknown relationships skipped, truncated / `Size == 0` / too small / too many records, each bad field, each consistency check, `RealTime`/`Allocated` dropped, and deterministic xorshift byte fuzzing (mutated and random buffers never panic; a parsed result always validates). Phase 3: every rule against every fixture; expected masks as snapshot tests.
 
 ## Manual test matrix (continuously extended)
 
@@ -99,4 +99,4 @@ Not covered by the automated file system contracts; check by hand on a real mach
 
 - No test modifies the real system outside the sandbox.
 - Bugs: failing test first, then the fix.
-- Fixtures are data, not code generators. **Exception:** PE test files are built by a small builder in test code (`tests/support`), because third-party binaries must not be committed and hand-written binary fixtures cannot be reviewed.
+- Fixtures are data, not code generators. **Exceptions:** PE test files are built by a small builder in test code (`tests/support`), because third-party binaries must not be committed and hand-written binary fixtures cannot be reviewed. Likewise the Windows topology records (`SYSTEM_CPU_SET_INFORMATION`, `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX`) for the parser's edge cases are built by a byte builder in the `rerun-proto` tests (`cpu/parse/tests.rs`, ADR 0010); real machines are raw dumps (`tests/fixtures/cpu/*.raw.json`).

@@ -1,39 +1,42 @@
 {
   "cpus": [
     {
+      "cpu_set_id": 256,
       "group": 0,
       "index": 0,
       "core": 0,
-      "efficiency_class": 0,
       "llc": 0,
-      "numa": 0
+      "efficiency_class": 0
     },
     {
+      "cpu_set_id": 257,
       "group": 0,
       "index": 1,
       "core": 1,
-      "efficiency_class": 0,
       "llc": 0,
-      "numa": 0
+      "efficiency_class": 0
     },
     {
+      "cpu_set_id": 258,
       "group": 0,
       "index": 2,
       "core": 2,
-      "efficiency_class": 0,
       "llc": 0,
-      "numa": 0
+      "efficiency_class": 0
     },
     {
+      "cpu_set_id": 259,
       "group": 0,
       "index": 3,
       "core": 3,
-      "efficiency_class": 0,
       "llc": 0,
-      "numa": 0
+      "efficiency_class": 0
     }
   ],
-  "llc_sizes": {
-    "0": 6291456
-  }
+  "llcs": [
+    {
+      "level": 3,
+      "size": 6291456
+    }
+  ]
 }

@@ -6,7 +6,7 @@
 rerun_/
 ├─ crates/
 │  ├─ rerun-core/      Library: detection, Topo engine, primitives, Journal, system layer
-│  ├─ rerun-proto/     Small shared types (CPU topology; from Phase 3 launch profile, CPU rule), serde only via feature
+│  ├─ rerun-proto/     Small shared types (CPU topology and its pure Windows-record parser; from Phase 3 launch profile, CPU rule), no dependencies, serde only via feature
 │  ├─ rerun-cli/       Binary `rerun` (scan, plan, apply, revert, status, topo validate)
 │  ├─ rerun-launch/    Binary `rerun-launch.exe` – launch shim, only windows-sys + rerun-proto
 │  ├─ rerun-cpu/       cdylib `rerun-cpu.asi` – inproc CPU fix, x86 + x64

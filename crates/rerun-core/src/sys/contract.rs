@@ -46,7 +46,7 @@ use super::registry::{
     Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegValue,
     RegView, Registry, reg_type,
 };
-use super::{KnownFolder, KnownFolders, SysErrorKind, SysResult, System};
+use super::{KnownFolder, KnownFolders, SysErrorKind, SysResult, System, Topology};
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 
@@ -2826,19 +2826,20 @@ pub fn registry_write_contract(reg: &dyn Registry, root: &RegKey) -> ContractRes
     )
 }
 
-/// Topology contract: self-consistent data.
-pub fn topology_contract(sys: &dyn System) -> ContractResult {
-    let t = ok(sys.topology().read(), "topology read")?;
+/// Topology contract: the topology reads, passes [`CpuTopology::validate`] (non-empty, dense
+/// `core`/`llc` numbering, …, ADR 0010) and is the same on a second read. Read-only, so it runs
+/// against the fake and real Windows.
+///
+/// [`CpuTopology::validate`]: rerun_proto::cpu::CpuTopology::validate
+pub fn topology_contract(topology: &dyn Topology) -> ContractResult {
+    let t = ok(topology.read(), "topology read")?;
+    t.validate()
+        .map_err(|e| format!("contract violated: topology is valid: {e}"))?;
     ensure(t.logical_count() > 0, "at least one logical cpu")?;
     ensure(t.core_count() <= t.logical_count(), "cores <= logical cpus")?;
     ensure(
-        t.cpus.iter().all(|c| t.llc_sizes.contains_key(&c.llc)),
-        "every llc has a size",
-    )?;
-    let mut seen = std::collections::BTreeSet::new();
-    ensure(
-        t.cpus.iter().all(|c| seen.insert((c.group, c.index))),
-        "(group, index) unique",
+        ok(topology.read(), "topology read again")? == t,
+        "topology is stable across calls",
     )
 }
 
