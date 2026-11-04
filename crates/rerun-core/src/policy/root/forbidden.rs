@@ -170,10 +170,7 @@ impl ForbiddenRoots {
     /// Does not know whether the path is a volume root; [`super::StoreDir::open`] checks that
     /// on the handle.
     pub fn check(&self, root: &RootPath) -> Result<(), Forbidden> {
-        let first = fold(root.first_segment());
-        if first.starts_with('$') || VOLUME_FOLDERS.contains(&first.as_str()) {
-            return Err(Forbidden::VolumeFolder(root.first_segment().to_owned()));
-        }
+        volume_folder(root.first_segment())?;
         for (p, f) in &self.upward {
             if root == f {
                 return Err(Forbidden::Is(*p));
@@ -200,6 +197,16 @@ impl ForbiddenRoots {
         }
         Ok(())
     }
+}
+
+/// The per-volume folder rule for the first segment below a volume root (`$*`,
+/// `System Volume Information`, `Recovery`, …).
+pub(super) fn volume_folder(first: &str) -> Result<(), Forbidden> {
+    let folded = fold(first);
+    if folded.starts_with('$') || VOLUME_FOLDERS.contains(&folded.as_str()) {
+        return Err(Forbidden::VolumeFolder(first.to_owned()));
+    }
+    Ok(())
 }
 
 /// Like [`RootPath::contains`], but only ASCII letters compare case-insensitively. Used for

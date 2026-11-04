@@ -1277,12 +1277,26 @@ fn volume_roots_are_reported() {
         .dir(r"D:\Mounts\Data\Games")
         .build()
         .unwrap();
-    let is_root = |abs: &str| open(&sys, abs).info().unwrap().volume_root;
+    let is_root = |abs: &str| open(&sys, abs).info().unwrap().is_volume_root();
     assert!(is_root(r"D:\"));
     assert!(is_root(r"D:\Mounts\Data"));
     assert!(!is_root(r"D:\Mounts"));
     assert!(!is_root(r"D:\Mounts\Data\Games"));
     let mounts = open(&sys, r"D:\Mounts");
     let data = mounts.open_dir(&r("data")).unwrap();
-    assert!(data.info().unwrap().volume_root, "also via a relative open");
+    assert!(
+        data.info().unwrap().is_volume_root(),
+        "also via a relative open"
+    );
+
+    let path_of = |abs: &str| open(&sys, abs).info().unwrap().volume_path;
+    assert_eq!(path_of(r"D:\Mounts"), "Mounts");
+    assert_eq!(path_of(r"D:\Mounts\Data\Games"), "Games");
+    let serial = |abs: &str| open(&sys, abs).info().unwrap().volume_serial;
+    assert_ne!(
+        serial(r"D:\Mounts"),
+        serial(r"D:\Mounts\Data"),
+        "a mounted volume has its own serial"
+    );
+    assert_eq!(serial(r"D:\Mounts\Data"), serial(r"D:\Mounts\Data\Games"));
 }

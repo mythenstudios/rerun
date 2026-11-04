@@ -136,14 +136,37 @@ pub struct RootInfo {
     pub user_writable: bool,
     /// The directory is case-sensitive (`FILE_CASE_SENSITIVE_DIR`); writes are refused.
     pub case_sensitive: bool,
-    /// The directory is the root of a volume: a drive root or a volume mounted in a folder
-    /// (`sys::win`: `FileNameInformation` of the handle is `\`). A fact, not a rule:
-    /// `policy::root` refuses such roots.
-    pub volume_root: bool,
+    /// Path of the directory relative to the root of its volume, `\`-separated, without a
+    /// leading or trailing `\`, raw names (unpaired surrogates as U+FFFD). Empty for the root
+    /// of a volume: a drive root or a volume mounted in a folder (`sys::win`:
+    /// `FileNormalizedNameInformation` of the handle). A fact, not a rule: `policy::root`
+    /// refuses volume roots and applies the per-volume folder rule to the first segment.
+    ///
+    /// `sys::win` takes it only from `FileNormalizedNameInformation` on the same handle (long
+    /// names, relative to the handle's own volume) with exactly one leading `\` stripped. If
+    /// that query fails, `info()` fails: never a fallback to `FileNameInformation` (8.3 names
+    /// would slip past `WINDOWSAPPS`), never derived from `final_path` (drive-relative, misses
+    /// folder-mounted volumes), never `""` as a stand-in.
+    pub volume_path: String,
     /// File system of the volume.
     pub fs_kind: FsKind,
     /// The volume supports POSIX rename semantics (`FILE_RENAME_FLAG_POSIX_SEMANTICS`).
     pub supports_posix_rename: bool,
+}
+
+impl RootInfo {
+    /// The directory is the root of a volume (drive root or a volume mounted in a folder).
+    pub fn is_volume_root(&self) -> bool {
+        self.volume_path.is_empty()
+    }
+
+    /// First segment of [`Self::volume_path`]; `None` for a volume root.
+    pub fn volume_first_segment(&self) -> Option<&str> {
+        self.volume_path
+            .split('\\')
+            .next()
+            .filter(|s| !s.is_empty())
+    }
 }
 
 /// File system of a volume (`GetVolumeInformationByHandleW`).

@@ -26,8 +26,10 @@
 //!   lexically (at most 32 levels) and follows directory and file links alike.
 //! - Allowlisted data tags (WOF, dedup, cloud) only mark the entry: content is read directly,
 //!   there is no hydration and no reopen without `FILE_OPEN_REPARSE_POINT`.
-//! - A volume mounted in a folder ([`FakeFs::set_volume_root`]) is a plain directory that
-//!   reports `volume_root`; it has the volume serial of its drive and is not a mount point.
+//! - A volume mounted in a folder ([`FakeFs::set_volume_root`]) is a plain directory, not a
+//!   mount point: it is traversed below a root (Windows reports a name surrogate). It reports
+//!   an empty `volume_path` and its own volume serial; file system and file IDs stay those of
+//!   the drive.
 //! - Volumes: the file system is NTFS unless set with [`FakeFs::set_fs_kind`]; it only
 //!   changes what [`RootInfo`] reports, not the behaviour.
 //! - `remove_file` removes any reparse point (file or directory link, like a handle-based
@@ -193,6 +195,11 @@ fn err(kind: SysErrorKind, target: &str) -> SysError {
 
 fn volume_serial(drive: char) -> u64 {
     0x5EED_0000 + u64::from(u32::from(drive))
+}
+
+/// Serial of a volume mounted in a folder: its own, distinct from every drive serial.
+fn mounted_serial(root: NodeId) -> u64 {
+    0x5EED_0001_0000_0000 + root
 }
 
 /// Parses `X:\a\b` or `\\?\X:\a\b` (also with `/`) into drive and segments.
@@ -503,6 +510,24 @@ impl State {
             .next()
             .ok_or_else(|| err(SysErrorKind::Other, target))?;
         Ok((drive, segs))
+    }
+
+    /// Nearest volume root at or above `id` and the path of `id` below it (segments).
+    fn volume_of(&self, id: NodeId, target: &str) -> SysResult<(NodeId, Vec<String>)> {
+        let mut segs = Vec::new();
+        let mut cur_id = id;
+        loop {
+            let cur = self.node(cur_id, target)?;
+            if matches!(&cur.body, Body::Dir(d) if d.volume_root) {
+                segs.reverse();
+                return Ok((cur_id, segs));
+            }
+            let Some(parent) = cur.parent else {
+                return Err(err(SysErrorKind::Other, target));
+            };
+            segs.push(cur.name.clone());
+            cur_id = parent;
+        }
     }
 
     fn final_path(&self, id: NodeId, target: &str) -> SysResult<PathBuf> {
@@ -876,8 +901,8 @@ impl FakeFs {
         Ok(())
     }
 
-    /// Marks an existing directory as the root of a volume mounted in a folder. The fake
-    /// keeps the volume serial and file system of the drive it lives on.
+    /// Marks an existing directory as the root of a volume mounted in a folder. It gets its
+    /// own volume serial; the file system stays that of the drive.
     pub fn set_volume_root(&self, abs: &Path) -> SysResult<()> {
         let shown = abs.display().to_string();
         let mut st = self.lock();
@@ -1015,13 +1040,19 @@ impl Dir for FakeDir {
         let d = st.dir(self.node, &target)?;
         let (drive, _) = st.path_of(self.node, &target)?;
         let fs_kind = st.fs_kinds.get(&drive).copied().unwrap_or(FsKind::Ntfs);
+        let (vol, vol_segs) = st.volume_of(self.node, &target)?;
+        let serial = if st.drives.get(&drive) == Some(&vol) {
+            volume_serial(drive)
+        } else {
+            mounted_serial(vol)
+        };
         Ok(RootInfo {
             final_path: st.final_path(self.node, &target)?,
-            volume_serial: volume_serial(drive),
+            volume_serial: serial,
             file_id: u128::from(self.node),
             user_writable: d.user_writable,
             case_sensitive: d.case_sensitive,
-            volume_root: d.volume_root,
+            volume_path: vol_segs.join("\\"),
             fs_kind,
             supports_posix_rename: matches!(fs_kind, FsKind::Ntfs | FsKind::Refs),
         })

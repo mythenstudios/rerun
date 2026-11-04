@@ -95,11 +95,22 @@ pub fn fs_read_contract(sys: &dyn System, work: &Path) -> ContractResult {
         "final_path is a drive-letter path",
     )?;
     ensure(!info.case_sensitive, "work dir is case-insensitive")?;
-    ensure(!info.volume_root, "work dir is not a volume root")?;
+    ensure(!info.is_volume_root(), "work dir is not a volume root")?;
+    // The work dir lies on a drive-letter volume (no folder mount above it), so its
+    // volume-relative path is the final path without `\\?\X:\`: long names, no device prefix.
+    let final_str = info.final_path.to_string_lossy();
+    let below_drive = final_str.get(r"\\?\X:\".len()..).unwrap_or_default();
+    ensure(
+        info.volume_path == below_drive
+            && !info.volume_path.starts_with('\\')
+            && !info.volume_path.ends_with('\\')
+            && info.volume_path.split('\\').all(|s| !s.is_empty()),
+        "volume_path is the final path below the drive root",
+    )?;
     if let Some(drive_root) = work.ancestors().last() {
         let d = ok(sys.fs().open_dir(drive_root), "open drive root")?;
         ensure(
-            ok(d.info(), "drive root info")?.volume_root,
+            ok(d.info(), "drive root info")?.is_volume_root(),
             "drive root is a volume root",
         )?;
     }

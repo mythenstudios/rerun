@@ -392,6 +392,33 @@ fn a_folder_mounted_volume_is_not_a_root() {
     );
 }
 
+#[test]
+fn per_volume_folders_apply_on_folder_mounted_volumes() {
+    // ADR 0007 amendment: the per-volume rule also runs on the volume-relative path.
+    let sys = base()
+        .mounted_volume(r"D:\Mounts\Data")
+        .dir(r"D:\Mounts\Data\$Recycle.Bin\G")
+        .dir(r"D:\Mounts\Data\Recovery\G")
+        .dir(r"D:\Mounts\Data\WindowsApps\G")
+        .dir(r"D:\Mounts\Data\Games\G")
+        .build()
+        .unwrap();
+    let fr = fr(&sys);
+    for (abs, first) in [
+        (r"D:\Mounts\Data\$Recycle.Bin\G", "$Recycle.Bin"),
+        (r"D:\Mounts\Data\Recovery\G", "Recovery"),
+        (r"D:\Mounts\Data\WindowsApps\G", "WindowsApps"),
+    ] {
+        assert!(check(&fr, abs).is_ok(), "lexically allowed: {abs}");
+        assert_eq!(
+            forbidden_reason(StoreDir::open(&sys, &fr, Path::new(abs))),
+            Forbidden::VolumeFolder(first.to_owned()),
+            "{abs}"
+        );
+    }
+    StoreDir::open(&sys, &fr, Path::new(r"D:\Mounts\Data\Games\G")).unwrap();
+}
+
 // ---------- GameDir ----------
 
 const LIB: &str = r"D:\Lib";

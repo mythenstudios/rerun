@@ -148,10 +148,11 @@ fn open_checked<'s>(
 }
 
 fn check_canonical(fr: &ForbiddenRoots, path: &RootPath, info: &RootInfo) -> Result<(), RootError> {
-    let verdict = if info.volume_root {
-        Err(Forbidden::VolumeRoot)
-    } else {
-        fr.check(path)
+    // The per-volume rule runs on the volume-relative path as well, so it also applies to a
+    // volume mounted in a folder (`D:\Mounts\Data\$Recycle.Bin`), ADR 0007 amendment.
+    let verdict = match info.volume_first_segment() {
+        None => Err(Forbidden::VolumeRoot),
+        Some(first) => forbidden::volume_folder(first).and_then(|()| fr.check(path)),
     };
     verdict.map_err(|reason| RootError::Forbidden {
         path: path.clone(),
@@ -241,13 +242,15 @@ impl<'s> StoreDir<'s> {
             .child("steamapps")?
             .child("common")?
             .child(seg.as_str())?;
+        // Forbidden first: it names the more specific reason (a volume mounted at the game
+        // folder has its own serial and would otherwise only report `Escaped`).
+        check_canonical(fr, &path, &info)?;
         if path != expected || info.volume_serial != self.info.volume_serial {
             return Err(RootError::Escaped {
                 store: self.path.clone(),
                 child: path,
             });
         }
-        check_canonical(fr, &path, &info)?;
         Ok(GameDir {
             dir,
             path,
