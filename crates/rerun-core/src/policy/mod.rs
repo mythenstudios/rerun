@@ -4,8 +4,10 @@
 //! fake and the real system, and the elevated helper revalidates through the same code.
 //!
 //! - [`path`]: re-export of [`crate::path`] (lexical rules for relative paths and roots).
-//! - `root` (next step): the only way to open a game or store folder.
+//! - [`root`]: the only way to open a store or game folder; forbidden roots, root identity.
 //! - `registry` (phase 3): the registry allowlist.
+
+pub mod root;
 
 /// Lexical path rules; see [`crate::path`].
 pub mod path {

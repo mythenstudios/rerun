@@ -351,6 +351,31 @@ impl RootPath {
         &self.path
     }
 
+    /// The folder one segment below, as a name (`policy::root` derives forbidden folders
+    /// with it). Never used to reach a file: there is deliberately no `join`.
+    pub(crate) fn child(&self, seg: &str) -> Result<Self, PathError> {
+        // `Path::join` would split `a\b` and let an absolute segment replace the path.
+        if seg.contains(['\\', '/']) {
+            return Err(PathError {
+                path: seg.to_owned(),
+                reason: "more than one segment",
+            });
+        }
+        check_segment(seg).map_err(|reason| PathError {
+            path: seg.to_owned(),
+            reason,
+        })?;
+        Self::new(self.path.join(seg))
+    }
+
+    /// The first segment below the drive (`Games` for `D:\Games\X`).
+    pub(crate) fn first_segment(&self) -> &str {
+        let s = self.path.to_str().unwrap_or_default();
+        s.get(3..)
+            .and_then(|rest| rest.split('\\').next())
+            .unwrap_or_default()
+    }
+
     /// `true` if `other` is this folder or lies inside it (segment-wise, case-insensitive).
     pub fn contains(&self, other: &RootPath) -> bool {
         other.folded == self.folded
