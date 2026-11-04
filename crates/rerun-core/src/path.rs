@@ -116,6 +116,44 @@ fn check_segment(seg: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// A raw directory entry name that is not a valid [`RelPath`] segment (ADR 0007).
+///
+/// Anomalies are reported and never touched: `d3d9.dll.`, `CON`, `x `, `PROGRA~1`,
+/// names with invalid UTF-16 (shown with U+FFFD) and entries of case-sensitive directories.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("anomalous name {name:?}: {reason}")]
+pub struct Anomaly {
+    /// The raw name as listed by `read_dir`.
+    pub name: String,
+    /// Reason.
+    pub reason: &'static str,
+}
+
+/// Classifies one raw name from `read_dir`: a valid single segment or an [`Anomaly`].
+/// `case_sensitive` is `RootInfo::case_sensitive` of the listed directory: every entry of a
+/// case-sensitive directory is an anomaly (two names may fold to the same segment).
+///
+/// Stricter than [`RelPath::from_segment`] in one point: U+FFFD (the replacement for invalid
+/// UTF-16) is an anomaly, because such a name cannot be turned back into the name on disk.
+pub fn classify(name: &str, case_sensitive: bool) -> Result<RelPath, Anomaly> {
+    if case_sensitive {
+        return Err(Anomaly {
+            name: name.to_owned(),
+            reason: "entry of a case-sensitive directory",
+        });
+    }
+    if name.contains('\u{FFFD}') {
+        return Err(Anomaly {
+            name: name.to_owned(),
+            reason: "invalid UTF-16 (replacement character)",
+        });
+    }
+    RelPath::from_segment(name).map_err(|e| Anomaly {
+        name: name.to_owned(),
+        reason: e.reason,
+    })
+}
+
 /// Relative, confined path. Internally separated by `\`, case unchanged;
 /// comparisons are case-insensitive.
 #[derive(Debug, Clone)]
@@ -434,6 +472,30 @@ mod tests {
             "C:\\G\\\u{FF0E}\u{FF0E}",
         ] {
             assert!(RootPath::new(bad).is_err(), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn classify_separates_segments_from_anomalies() {
+        assert_eq!(classify("D3D9.dll", false).unwrap().as_str(), "D3D9.dll");
+        assert!(classify("D3D9.dll", true).is_err());
+        for bad in [
+            "d3d9.dll.",
+            "CON",
+            "nul.txt",
+            "x ",
+            " x",
+            "PROGRA~1",
+            "a\u{FFFD}b",
+            r"a\b",
+            "a/b",
+            "",
+            "..",
+            "a\u{202E}b",
+        ] {
+            let a = classify(bad, false).unwrap_err();
+            assert_eq!(a.name, bad);
+            assert!(!a.reason.is_empty());
         }
     }
 

@@ -1,15 +1,17 @@
 //! System layer: the only way Rerun reads or changes the system.
 //!
-//! Principles (ADR 0004):
+//! Principles (ADR 0004, ADR 0007):
 //! - All traits take `&self`, are `Send + Sync` and object-safe: primitives receive
 //!   `&dyn System`.
-//! - `sys` is "dumb and honest": no confinement, no allowlist. That is done by
+//! - `sys` is "dumb and honest": no allowlist, no forbidden roots. That is done by
 //!   [`crate::policy`] one level above, so the fake and the real system behave the same.
-//! - `sys::fake` emulates Win32 semantics (case handling, error kinds). The contract tests
-//!   in `sys::contract` check this; from phase 1/2 they also run against `sys::win` in
-//!   Windows Sandbox.
+//! - File access is handle-based: [`Fs::open_dir`] is the only absolute operation, everything
+//!   else goes through a [`Dir`] handle with a [`crate::path::RelPath`] and never follows
+//!   reparse points below the handle.
+//! - `sys::fake` emulates Win32 semantics (case handling, error kinds, handle identity). The
+//!   contract tests in `sys::contract` check this; they also run against `sys::win`.
 //!
-//! `Firewall` and `Process` arrive in phase 3, `sys::win` from phase 1.
+//! `Firewall` and `Process` arrive in phase 3, `sys::win` in a later step of phase 1.
 
 mod error;
 pub mod fs;
@@ -23,7 +25,7 @@ pub mod contract;
 pub mod fake;
 
 pub use error::{SysError, SysErrorKind, SysResult};
-pub use fs::Fs;
+pub use fs::{Dir, Fs};
 pub use registry::Registry;
 pub use topology::Topology;
 
@@ -48,5 +50,6 @@ mod tests {
     fn system_is_send_and_sync_as_trait_object() {
         fn assert_send_sync<T: ?Sized + Send + Sync>() {}
         assert_send_sync::<dyn System>();
+        assert_send_sync::<dyn super::Dir>();
     }
 }

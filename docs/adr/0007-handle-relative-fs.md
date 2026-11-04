@@ -60,6 +60,11 @@ At the same time, legitimate libraries reached through junctions (a moved librar
 - `sys::fake` models the file system as a node arena; a handle is a node ID, so a handle stays valid when its parent is renamed, like on NTFS.
 - Test-only hooks run between two path components of an operation, so a test can swap a directory for a junction in the middle of an operation (TOCTOU test). The same scenarios run as contract tests against `sys::win`. The `fake` feature and its hooks never reach release builds (CI check).
 
+### Requirements for later steps (from the implementation review)
+- **Before `sys::win` is merged:** the file system contract must be able to tell a safe implementation from a check-then-use-by-path one. Either a deterministic pause point in the Windows fixture (an oplock on an intermediate directory) with the fake's mid-walk swap scenarios ported to it, or a stress race contract (a thread flips a directory between real directory and junction while the operations run; the canary must never change). Path-based Win32 file APIs (`CreateFileW` with a path, `DeleteFileW`, `MoveFileExW`, `ReplaceFileW`, `CopyFile*`, `GetFileAttributesW` …) are listed in `disallowed-methods` for `sys::win`. `replace` re-checks `FileNameInformation` on the held handle before each rename phase. In case-sensitive directories, `sys::win` refuses before looking up the entry.
+- **With `policy::root`:** `Fs::open_dir` and the absolute `std` read APIs (`std::fs::read`, `read_to_string`, `read_dir`, `metadata`, `symlink_metadata`, `canonicalize`, `File::open`, `Path::{exists, is_file, is_dir, metadata, read_dir, canonicalize}`) are listed in `disallowed-methods`; a CI check ensures the `fake` feature of `rerun-core` never reaches release builds.
+- Folding differences between Rust's `to_uppercase` and the NTFS upcase table (`ſ`, `ı`, Georgian) are checked by contract cases against real NTFS; longer term a pinned upcase table.
+
 ## Consequences
 - The Phase 0 `Fs` trait, the fake file system, the contract tests and the snapshot are rewritten before any primitive depends on them.
 - Each operation opens O(depth) handles; fine for game folders, measured before large hashing jobs.

@@ -16,7 +16,7 @@ revert
 assert_eq!(snapshot(&sys, &scope), before)   // on mismatch: before.diff(&after)
 ```
 
-"Identical" means: existence, kind, casing, content (SHA-256), length and read-only flag; for the registry: keys, value names, value type and value. **Timestamps do not count** (restored backups have a new mtime). An empty key is different from a missing one. `snapshot` is generic over `&dyn System` and also runs in the sandbox.
+"Identical" means: existence, kind, casing, content (SHA-256), length, attributes (read-only, hidden, system), hard link count, reparse tag and link target; for the registry: keys, value names, value type and value. Names that fail `policy::path::classify`, entries of case-sensitive directories and names that fold to the same key are recorded as anomalies (metadata only, never opened). Cloud placeholders are recorded without a hash (no hydration), the attributes of a scope root itself are not captured, and nesting deeper than 64 directories is an error. Each scope directory is opened once by absolute path and walked through `Dir` handles (ADR 0007). **Timestamps and file IDs do not count** (restored backups have a new mtime and ID). An empty key is different from a missing one. `snapshot` is generic over `&dyn System` and also runs in the sandbox.
 
 `scope` covers the game folder (hashes), affected registry keys, firewall rules with the Rerun prefix, IFEO keys, Steam launch option.
 

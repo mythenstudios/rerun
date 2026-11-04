@@ -17,12 +17,15 @@ pub enum SysErrorKind {
     NotEmpty,
     /// Invalid path (e.g. relative, `.`/`..`, not a directory).
     InvalidPath,
-    /// Path goes through a reparse point (symlink, junction); it is not followed.
+    /// Path goes through a reparse point (symlink, junction) or an entry with an unknown
+    /// reparse tag; it is not followed.
     ReparsePoint,
     /// File is locked by another process (sharing violation).
     Busy,
-    /// Operation is not supported.
+    /// Operation is not supported (e.g. writes into a case-sensitive directory).
     Unsupported,
+    /// In-place change of a file with more than one hard link (ADR 0007).
+    Linked,
     /// Other error.
     Other,
 }
@@ -38,6 +41,7 @@ impl fmt::Display for SysErrorKind {
             Self::ReparsePoint => "reparse point",
             Self::Busy => "busy",
             Self::Unsupported => "unsupported",
+            Self::Linked => "file has more than one hard link",
             Self::Other => "other error",
         })
     }
@@ -53,6 +57,8 @@ pub struct SysError {
     pub target: String,
     /// Original Win32 error code, if any.
     pub win32: Option<u32>,
+    /// Original `NTSTATUS`, if any (from `NtCreateFile` and friends).
+    pub ntstatus: Option<i32>,
 }
 
 impl SysError {
@@ -62,6 +68,7 @@ impl SysError {
             kind,
             target: target.into(),
             win32: None,
+            ntstatus: None,
         }
     }
 
@@ -74,6 +81,13 @@ impl SysError {
     #[must_use]
     pub fn with_win32(mut self, code: u32) -> Self {
         self.win32 = Some(code);
+        self
+    }
+
+    /// Attaches the original `NTSTATUS`.
+    #[must_use]
+    pub fn with_ntstatus(mut self, status: i32) -> Self {
+        self.ntstatus = Some(status);
         self
     }
 }

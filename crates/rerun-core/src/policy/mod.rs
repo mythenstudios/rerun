@@ -9,5 +9,5 @@
 
 /// Lexical path rules; see [`crate::path`].
 pub mod path {
-    pub use crate::path::{PathError, RelPath, RootPath, is_deceptive};
+    pub use crate::path::{Anomaly, PathError, RelPath, RootPath, classify, is_deceptive};
 }
