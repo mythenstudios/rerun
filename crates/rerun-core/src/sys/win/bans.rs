@@ -1308,6 +1308,66 @@ fn banned_loader_items_resolve() {
     let _ = windows_sys::Win32::System::LibraryLoader::RemoveDllDirectory;
 }
 
+/// The GPU and COM activation bans (ADR 0008 amendment, 2026-11-05).
+#[test]
+fn banned_gpu_and_com_items_resolve() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: D3DKMTEnumAdapters must be banned"
+    )]
+    let _ = windows_sys::Wdk::Graphics::Direct3D::D3DKMTEnumAdapters;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: D3DKMTEnumAdapters2 must be banned"
+    )]
+    let _ = windows_sys::Wdk::Graphics::Direct3D::D3DKMTEnumAdapters2;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: D3DKMTEnumAdapters3 must be banned"
+    )]
+    let _ = windows_sys::Wdk::Graphics::Direct3D::D3DKMTEnumAdapters3;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: D3DKMTQueryAdapterInfo must be banned"
+    )]
+    let _ = windows_sys::Wdk::Graphics::Direct3D::D3DKMTQueryAdapterInfo;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: D3DKMTOpenAdapterFromLuid must be banned"
+    )]
+    let _ = windows_sys::Wdk::Graphics::Direct3D::D3DKMTOpenAdapterFromLuid;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoCreateInstance must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::CoCreateInstance;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoCreateInstanceEx must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::CoCreateInstanceEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoGetClassObject must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::CoGetClassObject;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoInitialize must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::CoInitialize;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoInitializeEx must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::CoInitializeEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoGetObject must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::CoGetObject;
+}
+
 /// The bans of the step 8 security review the same way.
 #[test]
 fn banned_review_items_resolve() {

@@ -20,17 +20,17 @@ use std::time::{Duration, Instant};
 use super::testfx::{
     HiveRoot, NaiveFs, TestRoot, TestWinSystem, hosted_ci, note, workflow_warning,
 };
-use super::{WinFs, WinKnownFolders, WinRegistry, WinTopology};
+use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinTopology};
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{Forbidden, ForbiddenRoots, Protected, RootError, RootId, StoreDir};
 use crate::sys::contract::{
     FsContractResult, FsFixture, RegFixture, fs_link_read_contract, fs_race_contract,
-    fs_read_contract, fs_volume_contract, known_folders_contract, registry_read_contract,
-    registry_system_contract, topology_contract,
+    fs_read_contract, fs_volume_contract, gpu_contract, known_folders_contract,
+    registry_read_contract, registry_system_contract, topology_contract,
 };
 use crate::sys::fs::{EntryKind, Fs};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
-use crate::sys::{KnownFolder, SysErrorKind, System, Topology};
+use crate::sys::{Gpu, KnownFolder, KnownFolders, SysErrorKind, System, Topology};
 
 /// A [`TestRoot`] for the smoke tests; `.0` is its verbatim path (`\\?\X:\…`), as
 /// `final_path` reports it.
@@ -569,6 +569,77 @@ fn win_fulfils_topology_contract() {
         sys.topology().read().unwrap(),
         WinTopology::new().read().unwrap()
     );
+}
+
+// ---------- GPU (DXGI) ----------
+
+/// Read-only: the real adapters fulfil the GPU contract, and the Microsoft Basic Render Driver
+/// (vendor `0x1414`, device `0x8c`) is listed as a software adapter, on every machine and on
+/// GitHub runners without a GPU.
+#[test]
+fn win_fulfils_gpu_contract() {
+    let gpu = WinGpu::new();
+    gpu_contract(&gpu).unwrap_or_else(|e| panic!("{e}"));
+    let adapters = gpu.adapters().unwrap();
+    let basic: Vec<_> = adapters
+        .iter()
+        .filter(|a| a.vendor_id == 0x1414 && a.device_id == 0x8c)
+        .collect();
+    assert_eq!(basic.len(), 1, "{adapters:#?}");
+    assert!(basic[0].software, "{adapters:#?}");
+}
+
+/// `dxgi.dll` is the one in `<Windows>\System32`, never one from the application directory.
+#[test]
+fn dxgi_dll_is_loaded_from_system32() {
+    WinGpu::new().adapters().unwrap();
+    let dxgi = super::loader::load_system32("dxgi.dll").unwrap();
+    let path = super::testfx::module_path(dxgi.handle());
+    let windows = WinKnownFolders::new(Arc::new(WinRegistry::new().unwrap()))
+        .get(KnownFolder::Windows)
+        .unwrap();
+    let expected = windows.join("System32").join("dxgi.dll");
+    assert!(
+        path.to_string_lossy()
+            .eq_ignore_ascii_case(&expected.to_string_lossy()),
+        "{} is not {}",
+        path.display(),
+        expected.display()
+    );
+}
+
+/// Prints the adapters of this machine and the time of a first (loads `dxgi.dll`) and a second
+/// enumeration. Read-only; run by hand:
+/// `cargo test -p rerun-core --lib dump_gpu_adapters -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints this machine's adapters; run by hand"]
+fn dump_gpu_adapters() {
+    let gpu = WinGpu::new();
+    let started = Instant::now();
+    let adapters = gpu.adapters().unwrap();
+    let first = started.elapsed();
+    let started = Instant::now();
+    assert_eq!(gpu.adapters().unwrap(), adapters);
+    let second = started.elapsed();
+    for (i, a) in adapters.iter().enumerate() {
+        let umd = a.umd_version.map_or("none".to_owned(), |v| v.to_string());
+        note(&format!(
+            "adapter {i}: {:?} vendor {:#06x} device {:#06x} subsys {:#010x} rev {:#x} \
+             dedicated {} MiB shared {} MiB software {} umd {umd}",
+            a.name,
+            a.vendor_id,
+            a.device_id,
+            a.subsys_id,
+            a.revision,
+            a.dedicated_video_memory >> 20,
+            a.shared_system_memory >> 20,
+            a.software,
+        ));
+    }
+    note(&format!(
+        "gpu: {} adapters, first enumeration {first:?}, second {second:?}",
+        adapters.len()
+    ));
 }
 
 /// `bytes` as JSON strings of 32 bytes (64 hex digits) each, one per line.

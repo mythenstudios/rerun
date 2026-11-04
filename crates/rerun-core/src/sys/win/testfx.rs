@@ -18,6 +18,7 @@
 //!   and a [`WinRegistry`] on it. Raw writes go only to that hive, never to `HKCU` or `HKLM`.
 //! - [`TestWinSystem`]: a read-only [`System`] of the real file system, registry, known
 //!   folders and topology (fake GPU), for tests of `policy::root` against real Windows.
+//! - [`module_path`]: where Windows loaded a module from (`GetModuleFileNameW`).
 //!
 //! Path-based Win32 and `std::fs` calls are the point of this module (they set the scene the
 //! handle-based `sys::win` has to survive), hence the module-wide `disallowed_methods`
@@ -37,10 +38,11 @@
               file IDs, app hive); every block has a SAFETY comment"
 )]
 
+use std::ffi::OsString;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Component, Path, PathBuf};
@@ -1494,6 +1496,26 @@ impl HiveRoot {
             root,
         })
     }
+}
+
+// ---------- Loaded modules ----------
+
+/// The full path Windows reports for a loaded module (`GetModuleFileNameW`).
+pub(super) fn module_path(module: windows_sys::Win32::Foundation::HMODULE) -> PathBuf {
+    let mut buf = vec![0u16; 32_768];
+    let cap = u32::try_from(buf.len()).unwrap();
+    // SAFETY: `module` is a loaded module that is never freed; `buf` is writable for `cap` UTF-16
+    // units and lives across the call.
+    let n = unsafe {
+        windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW(module, buf.as_mut_ptr(), cap)
+    };
+    let n = usize::try_from(n).unwrap();
+    assert!(
+        n > 0 && n < buf.len(),
+        "GetModuleFileNameW: {}",
+        last_error()
+    );
+    PathBuf::from(OsString::from_wide(&buf[..n]))
 }
 
 // ---------- TestWinSystem ----------

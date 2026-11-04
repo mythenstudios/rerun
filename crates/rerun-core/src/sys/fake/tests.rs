@@ -586,7 +586,7 @@ fn fake_fulfils_gpu_contract() {
         .gpu(basic_render(2))
         .build()
         .unwrap();
-    gpu_contract(&sys).unwrap();
+    gpu_contract(sys.gpu()).unwrap();
     let adapters = sys.gpu().adapters().unwrap();
     assert_eq!(adapters[0].name, "Fake Radeon", "builder keeps DXGI order");
     assert!(adapters[1].software);
@@ -626,13 +626,13 @@ fn gpu_contract_catches_bad_adapters() {
         ),
     ];
     for (what, sys) in cases {
-        assert!(gpu_contract(&sys).is_err(), "{what}");
+        assert!(gpu_contract(sys.gpu()).is_err(), "{what}");
     }
     let nul = FakeSystem::builder()
         .gpu(adapter("A\0B", 1))
         .build()
         .unwrap();
-    assert!(gpu_contract(&nul).is_err(), "control character");
+    assert!(gpu_contract(nul.gpu()).is_err(), "control character");
 }
 
 #[test]

@@ -1,7 +1,8 @@
 //! Graphics adapters.
 //!
-//! The real implementation (`sys::win`) enumerates DXGI adapters (`IDXGIFactory1::
-//! EnumAdapters1`, ADR 0008). It is only reachable from non-elevated code (ADR 0008, H2).
+//! The real implementation (`sys::win::WinGpu`) enumerates DXGI adapters (`IDXGIFactory1::
+//! EnumAdapters1`, a hand-written binding, ADR 0008 amendment 2026-11-05). It is only reachable
+//! from non-elevated code (ADR 0008, H2): the elevated helper builds a `System` without it.
 //! Raw data only: mapping vendor and device IDs to a vendor or architecture is done by `hw`.
 
 use std::fmt;

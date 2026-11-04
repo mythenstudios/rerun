@@ -399,5 +399,19 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::LibraryLoader::SetDllDirectoryA", reason = "the DLL search path only via sys::win::loader::restrict_dll_search (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::LibraryLoader::AddDllDirectory", reason = "the DLL search path only via sys::win::loader::restrict_dll_search (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::LibraryLoader::RemoveDllDirectory", reason = "the DLL search path only via sys::win::loader::restrict_dll_search (ADR 0008)", allow-invalid = true },
+  # ADR 0008 amendment (2026-11-05): GPU data only through sys::win::dxgi (DXGI via loader). The
+  # DXGI and DXCore factories are not in windows-sys 0.61 and cannot be listed; the loader bans
+  # above fence them. COM activation: phase 3 gives it one wrapper (CLSCTX_INPROC_SERVER only).
+  { path = "windows_sys::Wdk::Graphics::Direct3D::D3DKMTEnumAdapters", reason = "GPU data only via sys::win::dxgi (ADR 0008 amendment)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Graphics::Direct3D::D3DKMTEnumAdapters2", reason = "GPU data only via sys::win::dxgi (ADR 0008 amendment)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Graphics::Direct3D::D3DKMTEnumAdapters3", reason = "GPU data only via sys::win::dxgi (ADR 0008 amendment)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Graphics::Direct3D::D3DKMTQueryAdapterInfo", reason = "GPU data only via sys::win::dxgi (ADR 0008 amendment)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Graphics::Direct3D::D3DKMTOpenAdapterFromLuid", reason = "GPU data only via sys::win::dxgi (ADR 0008 amendment)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoCreateInstance", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoCreateInstanceEx", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoGetClassObject", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoInitialize", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoInitializeEx", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoGetObject", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "std::thread::available_parallelism", reason = "limited by the process affinity and CPU Sets, not the machine; use sys::Topology (ADR 0010)" },
 ]

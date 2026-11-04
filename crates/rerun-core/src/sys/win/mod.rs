@@ -5,8 +5,9 @@
 //! ("sys::win is read-only in phase 1"). [`WinRegistry`] implements
 //! [`Registry`](crate::sys::Registry), equally read-only. [`WinKnownFolders`] implements
 //! [`KnownFolders`](crate::sys::KnownFolders), [`WinTopology`] implements
-//! [`Topology`](crate::sys::Topology) (ADR 0010). The GPU follows in a later step of phase 1;
-//! `WinSystem` (the [`System`](crate::sys::System) bundle) arrives once all of them exist.
+//! [`Topology`](crate::sys::Topology) (ADR 0010), [`WinGpu`] implements
+//! [`Gpu`](crate::sys::Gpu) (DXGI, ADR 0008 amendment). `WinSystem` (the
+//! [`System`](crate::sys::System) bundle) follows in the next step.
 //!
 //! Modules:
 //! - `nt`: the only NT/Win32 file calls (`NtCreateFile` through exactly two wrappers,
@@ -20,12 +21,19 @@
 //!   because the Win32 value reads fix up strings; `NtQueryKey` for key names), key handles
 //!   as `OwnedKey`.
 //! - `loader`: the only call to `SetDefaultDllDirectories` ([`restrict_dll_search`], ADR 0008,
-//!   H2), the first statement of `rerun.exe`'s `main`.
+//!   H2), the first statement of `rerun.exe`'s `main`; the only `LoadLibraryExW` (bare name,
+//!   System32 only, never freed) and `GetProcAddress`.
 //! - `cpu`: the only calls to `GetSystemCpuSetInformation` (system-wide, `Process = NULL`) and
 //!   `GetLogicalProcessorInformationEx(RelationAll)`: size query, `u64`-aligned buffer, at most
 //!   4 retries, 1 MiB cap; the bytes go unchanged to `rerun_proto::cpu::CpuTopology::
 //!   from_windows`.
 //! - `topology`: `WinTopology`, error mapping; no `unsafe`.
+//! - `dxgi`: the only DXGI calls, a hand-written binding on `windows-sys` types (`windows-sys`
+//!   has no DXGI): `DXGI_ADAPTER_DESC1`, vtable prefixes of `IDXGIFactory1`/`IDXGIAdapter1`
+//!   (layout and slot tests against `dxgi.h`), a `Com` guard that releases on drop;
+//!   `dxgi.dll` from System32 through `loader`, `CreateDXGIFactory1` cached, a fresh factory
+//!   per enumeration, at most 64 adapters.
+//! - `gpu`: `WinGpu`, name/LUID/driver-version mapping and error mapping; no `unsafe`.
 //! - `status`: `NTSTATUS`/Win32 code → `SysErrorKind`, for files and the registry (pure).
 //! - `name`: single-segment check, L1 long-name check, `volume_path`, `open_dir` input rules,
 //!   NT buffer decoding (pure).
@@ -36,7 +44,7 @@
 //! - `registry`: `WinRegistry`, input rules, limits, retries and enumeration restarts; no
 //!   `unsafe`.
 //!
-//! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu` and `loader`. Path-based Win32 file APIs
+//! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu`, `loader` and `dxgi`. Path-based Win32 file APIs
 //! (`CreateFileW`, `DeleteFileW`, `MoveFileExW`, `GetFileAttributesW`, …) and every
 //! environment-based path source (`std::env::var`, `GetEnvironmentVariableW`,
 //! `ExpandEnvironmentStringsW`, `SHGetFolderPathW`, `GetWindowsDirectoryW`, …) are banned in
@@ -46,7 +54,8 @@
 //! count APIs, `NtQuerySystemInformation`, `std::thread::available_parallelism`) and every
 //! affinity and CPU Set setter until phase 3 (ADR 0010), and every DLL search path change and
 //! dynamic load (`SetDefaultDllDirectories`, `SetDllDirectoryW`, `AddDllDirectory`,
-//! `LoadLibrary*`, `GetProcAddress`) outside `loader` (ADR 0008).
+//! `LoadLibrary*`, `GetProcAddress`) outside `loader`, every DXGI/DXCore/D3DKMT entry point
+//! outside `dxgi` and every COM activation call until phase 3 (ADR 0008).
 //!
 //! Test only: `testfx` (test root with the `docs/09-testing.md` safeguards, the `FsFixture`
 //! for real Windows, the naive control `Fs`, the private app hive that is the `RegFixture`;
@@ -65,7 +74,9 @@ compile_error!(
 );
 
 mod cpu;
+mod dxgi;
 mod fs;
+mod gpu;
 mod known_folders;
 mod loader;
 mod name;
@@ -88,6 +99,7 @@ mod testfx;
 mod tests;
 
 pub use fs::{WinDir, WinFs};
+pub use gpu::WinGpu;
 pub use known_folders::WinKnownFolders;
 pub use loader::restrict_dll_search;
 pub use registry::WinRegistry;

@@ -46,7 +46,7 @@ use super::registry::{
     Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegValue,
     RegView, Registry, reg_type,
 };
-use super::{KnownFolder, KnownFolders, SysErrorKind, SysResult, System, Topology};
+use super::{Gpu, KnownFolder, KnownFolders, SysErrorKind, SysResult, Topology};
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 
@@ -2888,12 +2888,13 @@ pub fn known_folders_contract(kf: &dyn KnownFolders, fs: &dyn Fs) -> ContractRes
 }
 
 /// GPU contract: at least one adapter (Windows always lists the Microsoft Basic Render
-/// Driver), stable across calls, names fit the DXGI field, LUIDs are unique.
-pub fn gpu_contract(sys: &dyn System) -> ContractResult {
-    let adapters = ok(sys.gpu().adapters(), "gpu adapters")?;
+/// Driver), stable across calls, names fit the DXGI field, LUIDs are unique. Read-only, so it
+/// runs against the fake and real Windows.
+pub fn gpu_contract(gpu: &dyn Gpu) -> ContractResult {
+    let adapters = ok(gpu.adapters(), "gpu adapters")?;
     ensure(!adapters.is_empty(), "at least one adapter")?;
     ensure(
-        ok(sys.gpu().adapters(), "gpu adapters again")? == adapters,
+        ok(gpu.adapters(), "gpu adapters again")? == adapters,
         "adapter list is stable across calls",
     )?;
     let mut luids = std::collections::BTreeSet::new();
