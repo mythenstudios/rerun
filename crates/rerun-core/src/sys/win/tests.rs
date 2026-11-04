@@ -107,7 +107,7 @@ fn read_only_walk_metadata_and_identity() {
             entries[1].meta.len,
             entries[1].meta.links
         ),
-        (EntryKind::File, 5, 2)
+        (EntryKind::File, 5, Some(2))
     );
     assert_eq!(entries[1].meta.file_id, entries[2].meta.file_id);
 
@@ -115,7 +115,7 @@ fn read_only_walk_metadata_and_identity() {
     let sub_meta = root.metadata(&rel("SUB")).unwrap().unwrap();
     assert_eq!(
         (sub_meta.kind, sub_meta.len, sub_meta.links),
-        (EntryKind::Dir, 0, 1)
+        (EntryKind::Dir, 0, Some(1))
     );
     assert_eq!(root.metadata(&rel("missing")).unwrap(), None);
     assert_eq!(root.metadata(&rel(r"missing\x")).unwrap(), None);

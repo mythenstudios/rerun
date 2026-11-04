@@ -153,6 +153,11 @@ impl FsFixture for FakeFs {
     fn wof_compress(&self, _p: &Path) -> SysResult<bool> {
         Ok(false)
     }
+
+    fn restricted(&self, p: &Path) -> SysResult<bool> {
+        self.set_restricted(p, true)?;
+        Ok(true)
+    }
 }
 
 /// Builder for [`FakeSystem`]. Parent directories and keys are created automatically.
@@ -258,6 +263,13 @@ impl FakeSystemBuilder {
             s.fs.mkdir_all(p)?;
             s.fs.set_user_writable(p, false)
         })
+    }
+
+    /// Makes the existing file, directory or link at `path` restricted: its DACL denies the
+    /// current user every open (see [`FakeFs::set_restricted`]). Call it after creating the
+    /// entry.
+    pub fn restricted(self, path: impl AsRef<Path>) -> Self {
+        self.step(|s| s.fs.set_restricted(path.as_ref(), true))
     }
 
     /// Directory that is the root of a volume mounted in a folder (no drive letter).

@@ -13,7 +13,10 @@
 //! keys, value names, value type and value. Names that fail `policy::path::classify` (and
 //! all entries of case-sensitive directories, and entries whose names fold to the same key)
 //! are captured as [`SnapEntry::Anomaly`] with metadata only: never hashed, never opened,
-//! never descended into.
+//! never descended into. Restricted entries (their DACL denies the current user every open,
+//! [`Metadata::restricted`](super::fs::Metadata::restricted)) are captured as
+//! [`SnapEntry::Restricted`] from the listing: kind, length, attributes and reparse tag count,
+//! the link count does not (unknown); they are never opened, hashed or descended into.
 //!
 //! Not captured: timestamps and file IDs (restored backups have a new mtime and a new ID),
 //! the attributes of a scope root itself (that would need a second absolute open of its
@@ -89,8 +92,8 @@ pub enum SnapEntry {
         tag: Option<u32>,
         /// Attributes.
         attrs: Attrs,
-        /// Number of hard links.
-        links: u32,
+        /// Number of hard links (`None` = unknown; only for entries `sys` could not open).
+        links: Option<u32>,
     },
     /// Reparse point (not followed).
     Reparse {
@@ -112,6 +115,23 @@ pub enum SnapEntry {
         len: u64,
         /// Attributes.
         attrs: Attrs,
+        /// The entry is also restricted (cannot be opened).
+        restricted: bool,
+    },
+    /// Entry that the current user cannot open at all (its DACL denies even reading its
+    /// attributes). Metadata from the directory listing only; never opened, hashed or
+    /// descended into.
+    Restricted {
+        /// Name.
+        name: String,
+        /// Kind.
+        kind: EntryKind,
+        /// Length in bytes (0 for directories and reparse points).
+        len: u64,
+        /// Attributes.
+        attrs: Attrs,
+        /// Reparse tag, if any (the link target is unknown).
+        tag: Option<u32>,
     },
     /// Registry key.
     Key {
@@ -173,8 +193,10 @@ impl fmt::Display for SnapEntry {
                     write!(f, " tag {t:#010x}")?;
                 }
                 write!(f, "{}", ShowAttrs(attrs))?;
-                if *links > 1 {
-                    write!(f, " [{links} links]")?;
+                match links {
+                    Some(1) => {}
+                    Some(n) => write!(f, " [{n} links]")?,
+                    None => f.write_str(" [links unknown]")?,
                 }
                 Ok(())
             }
@@ -190,11 +212,26 @@ impl fmt::Display for SnapEntry {
                 kind,
                 len,
                 attrs,
+                restricted,
             } => write!(
                 f,
-                "anomaly {name:?} {kind:?} {len} bytes{}",
-                ShowAttrs(attrs)
+                "anomaly {name:?} {kind:?} {len} bytes{}{}",
+                ShowAttrs(attrs),
+                if *restricted { " [restricted]" } else { "" }
             ),
+            Self::Restricted {
+                name,
+                kind,
+                len,
+                attrs,
+                tag,
+            } => {
+                write!(f, "restricted {name:?} {kind:?} {len} bytes")?;
+                if let Some(t) = tag {
+                    write!(f, " tag {t:#010x}")?;
+                }
+                write!(f, "{}", ShowAttrs(attrs))
+            }
             Self::Key { name } => write!(f, "key {name:?}"),
             Self::Value { name, value } => write!(f, "value {name:?} = {value}"),
         }
@@ -320,11 +357,26 @@ fn walk_dir(
                     kind: meta.kind,
                     len: meta.len,
                     attrs: meta.attrs,
+                    restricted: meta.restricted,
                 },
             );
             continue;
         };
         let loc = format!("{prefix}\\{key}");
+        if meta.restricted {
+            // Cannot be opened: metadata only, never hashed or descended into.
+            out.insert(
+                Loc::Fs(loc),
+                SnapEntry::Restricted {
+                    name: entry.name,
+                    kind: meta.kind,
+                    len: meta.len,
+                    attrs: meta.attrs,
+                    tag: meta.reparse.map(|r| r.tag),
+                },
+            );
+            continue;
+        }
         match meta.kind {
             EntryKind::File => {
                 let tag = meta.reparse.map(|r| r.tag);
@@ -465,9 +517,10 @@ mod tests {
                 kind: EntryKind::File,
                 len: 1,
                 attrs: Attrs::default(),
-                links: 1,
+                links: Some(1),
                 file_id: 2,
                 reparse: None,
+                restricted: false,
             };
             Ok(["data.bin", "DATA.BIN", "other.bin"]
                 .into_iter()

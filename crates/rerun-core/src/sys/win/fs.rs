@@ -6,6 +6,11 @@
 //! [`name::long_name_matches`]) and classified on the same handle
 //! (`FileAttributeTagInformation`): surrogates and unknown tags stop the walk with
 //! `ReparsePoint`, a file where a directory is needed with `InvalidPath`.
+//!
+//! Restricted entries: when the attribute-only reopen of a listed entry is denied (its own
+//! DACL denies the user even `FILE_READ_ATTRIBUTES`/`SYNCHRONIZE`), the entry is described
+//! from the listing (`FileIdExtdDirectoryInformation`) with `Metadata::restricted`. `metadata`
+//! of such an entry scans the listing of its parent for the same description, so both agree.
 
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
@@ -23,7 +28,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
 };
 
-use super::name::{self, Seg16};
+use super::name::{self, DirLayout, Listed, Seg16};
 use super::nt::{self, Access, RelOpen};
 use super::reparse;
 use super::status::{
@@ -202,10 +207,55 @@ fn meta_of(h: BorrowedHandle<'_>, t: TagInfo, target: &str) -> SysResult<Metadat
             hidden: t.attrs & FILE_ATTRIBUTE_HIDDEN != 0,
             system: t.attrs & FILE_ATTRIBUTE_SYSTEM != 0,
         },
-        links: if file { std_info.links } else { 1 },
+        links: Some(if file { std_info.links } else { 1 }),
         file_id: id,
         reparse,
+        restricted: false,
     })
+}
+
+/// Metadata of a restricted entry from its listing data alone: kind from the attributes and
+/// the tag (a surrogate or unknown tag is `Reparse`), link count and link target unknown.
+/// `None` without a file ID ([`DirLayout::Full`], FAT): the caller then keeps the
+/// `AccessDenied` error (fail closed).
+fn restricted_meta(l: &Listed) -> Option<Metadata> {
+    let t = TagInfo {
+        attrs: l.attrs,
+        tag: l.tag,
+    };
+    let kind = t.kind();
+    Some(Metadata {
+        kind,
+        len: if kind == EntryKind::File { l.len } else { 0 },
+        attrs: Attrs {
+            readonly: l.attrs & FILE_ATTRIBUTE_READONLY != 0,
+            hidden: l.attrs & FILE_ATTRIBUTE_HIDDEN != 0,
+            system: l.attrs & FILE_ATTRIBUTE_SYSTEM != 0,
+        },
+        links: None,
+        file_id: l.file_id?,
+        reparse: l.tag.map(|rt| ReparseInfo {
+            tag: rt,
+            surrogate: tag::is_surrogate(rt),
+            target: None,
+        }),
+        restricted: true,
+    })
+}
+
+/// The listed entry `seg` names: an exact match, else the only case-insensitive one (L1: the
+/// listing has long names only, so an 8.3 short name never matches). `None` otherwise.
+fn find_listed(listed: Vec<Listed>, seg: &Seg16) -> Option<Listed> {
+    if let Some(i) = listed.iter().position(|l| l.name == seg.units()) {
+        return listed.into_iter().nth(i);
+    }
+    let mut folded = listed
+        .into_iter()
+        .filter(|l| name::long_name_matches(&l.name, seg.units()));
+    match (folded.next(), folded.next()) {
+        (Some(l), None) => Some(l),
+        _ => None,
+    }
 }
 
 /// A freshly opened entry: L1-checked, classified on its own handle.
@@ -354,40 +404,89 @@ impl WinDir {
         }
     }
 
-    /// Lists the names in `dir` (raw UTF-16, without `.` and `..`).
-    fn list(dir: BorrowedHandle<'_>, target: &str) -> SysResult<Vec<Vec<u16>>> {
-        let mut names = Vec::new();
-        let mut restart = true;
-        while let Some(buf) = nt::query_dir(dir, restart).map_err(|s| nt_error(s, target))? {
-            restart = false;
-            let batch =
-                name::parse_dir_names(&buf).ok_or_else(|| err(SysErrorKind::Other, target))?;
-            names.extend(batch.into_iter().filter(|n| !name::is_dot_entry(n)));
+    /// Lists `dir` (raw UTF-16 names, without `.` and `..`). `FileIdExtdDirectoryInformation`;
+    /// only if the file system does not support that class (FAT) on the first call,
+    /// `FileFullDirectoryInformation` (no file IDs).
+    fn list(dir: BorrowedHandle<'_>, target: &str) -> SysResult<Vec<Listed>> {
+        match Self::list_as(dir, DirLayout::IdExtd) {
+            Err(Some(s)) if is_unsupported_class(s) => {}
+            Err(Some(s)) => return Err(nt_error(s, target)),
+            Err(None) => return Err(err(SysErrorKind::Other, target)),
+            Ok(l) => return Ok(l),
         }
-        Ok(names)
+        Self::list_as(dir, DirLayout::Full).map_err(|s| match s {
+            Some(s) => nt_error(s, target),
+            None => err(SysErrorKind::Other, target),
+        })
     }
 
-    /// D8: metadata of every listed entry, reopened by its raw name relative to `dir`.
+    /// One complete listing in `layout`; `Err(None)` for a malformed buffer.
+    fn list_as(
+        dir: BorrowedHandle<'_>,
+        layout: DirLayout,
+    ) -> Result<Vec<Listed>, Option<NtStatus>> {
+        let mut out = Vec::new();
+        let mut restart = true;
+        while let Some(buf) = nt::query_dir(dir, restart, layout).map_err(Some)? {
+            restart = false;
+            let batch = name::parse_dir_entries(&buf, layout).ok_or(None)?;
+            out.extend(batch.into_iter().filter(|l| !name::is_dot_entry(&l.name)));
+        }
+        Ok(out)
+    }
+
+    /// D8: metadata of every listed entry, reopened by its raw name relative to `dir`. An
+    /// entry whose reopen is denied is described from the listing (restricted).
     fn entries(
         dir: BorrowedHandle<'_>,
-        names: Vec<Vec<u16>>,
+        listed: Vec<Listed>,
         target: &str,
     ) -> SysResult<Vec<DirEntry>> {
-        let mut out = Vec::with_capacity(names.len());
-        for raw in names {
-            let shown = String::from_utf16_lossy(&raw);
+        let mut out = Vec::with_capacity(listed.len());
+        for l in listed {
+            let shown = String::from_utf16_lossy(&l.name);
             // A name from disk that is not a single segment cannot be reopened safely.
-            let seg = Seg16::from_units(raw).ok_or_else(|| err(SysErrorKind::Other, target))?;
-            let o = match open_entry(dir, &seg, Access::Attributes, &shown) {
-                Ok(o) => o,
+            let seg = Seg16::from_units(l.name.clone())
+                .ok_or_else(|| err(SysErrorKind::Other, target))?;
+            let meta = match open_entry(dir, &seg, Access::Attributes, &shown) {
+                Ok(o) => meta_of(o.handle.as_handle(), o.tag, &shown)?,
                 // Vanished between listing and reopen (or renamed: L1 mismatch).
                 Err(e) if e.kind == SysErrorKind::NotFound => continue,
+                Err(e) if e.kind == SysErrorKind::AccessDenied => match restricted_meta(&l) {
+                    Some(m) => m,
+                    None => return Err(e),
+                },
                 Err(e) => return Err(e),
             };
-            let meta = meta_of(o.handle.as_handle(), o.tag, &shown)?;
             out.push(DirEntry { name: shown, meta });
         }
         Ok(out)
+    }
+
+    /// `metadata` of an entry whose attribute open was denied: the description of the same
+    /// name in the listing of its parent (`parents` below this handle), as `read_dir` reports
+    /// it. `Ok(None)` if the listing has no such long name (e.g. it was an 8.3 short name);
+    /// `denied` if the listing has no file ID (fail closed).
+    fn restricted_lookup(
+        &self,
+        parents: &[&str],
+        seg: &Seg16,
+        denied: SysError,
+    ) -> SysResult<Option<Metadata>> {
+        let t = denied.target.clone();
+        let listed = if parents.is_empty() {
+            let _guard = self.listing.lock().unwrap_or_else(PoisonError::into_inner);
+            Self::list(self.h(), &t)?
+        } else {
+            let rel = RelPath::parse(&parents.join("\\"))
+                .map_err(|_| err(SysErrorKind::InvalidPath, &t))?;
+            let parent = self.open_dir_handle(&rel)?;
+            Self::list(parent.as_handle(), &t)?
+        };
+        match find_listed(listed, seg) {
+            None => Ok(None),
+            Some(l) => restricted_meta(&l).map(Some).ok_or(denied),
+        }
     }
 }
 
@@ -448,6 +547,11 @@ impl Dir for WinDir {
         match open_entry(parent, &s, Access::Attributes, t) {
             Ok(o) => meta_of(o.handle.as_handle(), o.tag, t).map(Some),
             Err(e) if absent(&e) => Ok(None),
+            Err(e) if e.kind == SysErrorKind::AccessDenied => {
+                let segs: Vec<&str> = p.segments().collect();
+                let parents = segs.split_last().map_or(&[][..], |(_, rest)| rest);
+                self.restricted_lookup(parents, &s, e)
+            }
             Err(e) => Err(e),
         }
     }

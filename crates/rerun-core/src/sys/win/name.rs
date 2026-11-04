@@ -5,7 +5,7 @@
 //! - [`long_name_matches`]: the L1 check (8.3 short names must not reach another entry).
 //! - [`volume_path`]: `RootInfo::volume_path` from `FileNormalizedNameInformation`.
 //! - [`parse_abs`] and [`nt_path`]: input rules of `Fs::open_dir`, same as the fake.
-//! - [`parse_name_info`] and [`parse_dir_names`]: decoding of NT information buffers.
+//! - [`parse_name_info`] and [`parse_dir_entries`]: decoding of NT information buffers.
 
 use crate::fold::fold;
 
@@ -143,23 +143,92 @@ pub(super) fn parse_name_info(buf: &[u8]) -> Option<Vec<u16>> {
     units_at(buf, 4, len)
 }
 
-/// Offset of `FileNameLength` in `FILE_FULL_DIR_INFORMATION` (ntifs.h).
-const FULL_DIR_NAME_LEN: usize = 60;
-/// Offset of `FileName` in `FILE_FULL_DIR_INFORMATION` (ntifs.h).
-const FULL_DIR_NAME: usize = 68;
+/// Layout of a directory listing buffer (`NtQueryDirectoryFile`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DirLayout {
+    /// `FILE_ID_EXTD_DIR_INFORMATION` (`FileIdExtdDirectoryInformation`): explicit reparse
+    /// tag and 128-bit file ID. NTFS and ReFS.
+    IdExtd,
+    /// `FILE_FULL_DIR_INFORMATION` (`FileFullDirectoryInformation`): no file ID; the reparse
+    /// tag is in `EaSize` when `FILE_ATTRIBUTE_REPARSE_POINT` is set. Fallback for file
+    /// systems without the ID class (FAT).
+    Full,
+}
 
-/// Decodes a buffer of `FILE_FULL_DIR_INFORMATION` entries (`NtQueryDirectoryFile`,
-/// `FileFullDirectoryInformation`) into raw names, `.` and `..` included. `None` if an entry
-/// is truncated or the next offset points out of the buffer.
-pub(super) fn parse_dir_names(buf: &[u8]) -> Option<Vec<Vec<u16>>> {
-    let mut names = Vec::new();
+/// Offsets shared by both layouts (ntifs.h): `EndOfFile`, `FileAttributes`, `FileNameLength`
+/// and `EaSize`.
+const DIR_END_OF_FILE: usize = 40;
+const DIR_ATTRIBUTES: usize = 56;
+const DIR_NAME_LEN: usize = 60;
+const DIR_EA_SIZE: usize = 64;
+/// `FILE_FULL_DIR_INFORMATION::FileName`.
+const FULL_DIR_NAME: usize = 68;
+/// `FILE_ID_EXTD_DIR_INFORMATION::{ReparsePointTag, FileId, FileName}`.
+const EXTD_DIR_TAG: usize = 68;
+const EXTD_DIR_ID: usize = 72;
+const EXTD_DIR_NAME: usize = 88;
+
+/// winnt.h `FILE_ATTRIBUTE_REPARSE_POINT`.
+const ATTR_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// One entry of a directory listing, as the file system reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Listed {
+    /// Raw name (long name; never the 8.3 short name).
+    pub name: Vec<u16>,
+    /// `FileAttributes`.
+    pub attrs: u32,
+    /// `EndOfFile`.
+    pub len: u64,
+    /// Reparse tag, only if `FILE_ATTRIBUTE_REPARSE_POINT` is set.
+    pub tag: Option<u32>,
+    /// 128-bit file ID ([`DirLayout::IdExtd`] only).
+    pub file_id: Option<u128>,
+}
+
+fn u64_at(buf: &[u8], off: usize) -> Option<u64> {
+    let b = buf.get(off..off.checked_add(8)?)?;
+    let mut a = [0u8; 8];
+    a.copy_from_slice(b);
+    Some(u64::from_le_bytes(a))
+}
+
+fn u128_at(buf: &[u8], off: usize) -> Option<u128> {
+    let b = buf.get(off..off.checked_add(16)?)?;
+    let mut a = [0u8; 16];
+    a.copy_from_slice(b);
+    Some(u128::from_le_bytes(a))
+}
+
+/// Decodes one listing buffer in `layout` into entries, `.` and `..` included. `None` if an
+/// entry is truncated or the next offset points out of the buffer.
+pub(super) fn parse_dir_entries(buf: &[u8], layout: DirLayout) -> Option<Vec<Listed>> {
+    let mut out = Vec::new();
     let mut off = 0usize;
     loop {
+        let at = |rel: usize| off.checked_add(rel);
         let next = usize::try_from(u32_at(buf, off)?).ok()?;
-        let len = usize::try_from(u32_at(buf, off.checked_add(FULL_DIR_NAME_LEN)?)?).ok()?;
-        names.push(units_at(buf, off.checked_add(FULL_DIR_NAME)?, len)?);
+        let len = usize::try_from(u32_at(buf, at(DIR_NAME_LEN)?)?).ok()?;
+        let attrs = u32_at(buf, at(DIR_ATTRIBUTES)?)?;
+        let end_of_file = u64_at(buf, at(DIR_END_OF_FILE)?)?;
+        let reparse = attrs & ATTR_REPARSE_POINT != 0;
+        let (name_off, raw_tag, file_id) = match layout {
+            DirLayout::IdExtd => (
+                EXTD_DIR_NAME,
+                u32_at(buf, at(EXTD_DIR_TAG)?)?,
+                Some(u128_at(buf, at(EXTD_DIR_ID)?)?),
+            ),
+            DirLayout::Full => (FULL_DIR_NAME, u32_at(buf, at(DIR_EA_SIZE)?)?, None),
+        };
+        out.push(Listed {
+            name: units_at(buf, at(name_off)?, len)?,
+            attrs,
+            len: end_of_file,
+            tag: reparse.then_some(raw_tag),
+            file_id,
+        });
         if next == 0 {
-            return Some(names);
+            return Some(out);
         }
         off = off.checked_add(next)?;
         if off >= buf.len() {
@@ -282,39 +351,124 @@ mod tests {
         assert_eq!(parse_name_info(&[0, 0]), None);
     }
 
-    fn dir_entry(name: &str, last: bool) -> Vec<u8> {
-        let u = w(name);
-        let len = FULL_DIR_NAME + u.len() * 2;
-        let padded = len.div_ceil(8) * 8;
+    struct Raw<'a> {
+        name: &'a str,
+        attrs: u32,
+        len: u64,
+        tag: u32,
+        id: u128,
+    }
+
+    fn raw(name: &str) -> Raw<'_> {
+        Raw {
+            name,
+            attrs: 0x20,
+            len: 0,
+            tag: 0,
+            id: 0,
+        }
+    }
+
+    fn dir_entry(layout: DirLayout, e: &Raw<'_>, last: bool) -> Vec<u8> {
+        let u = w(e.name);
+        let name_off = match layout {
+            DirLayout::IdExtd => EXTD_DIR_NAME,
+            DirLayout::Full => FULL_DIR_NAME,
+        };
+        let padded = (name_off + u.len() * 2).div_ceil(8) * 8;
         let mut b = vec![0u8; padded];
         let next = if last { 0 } else { padded };
-        b[0..4].copy_from_slice(&u32::try_from(next).unwrap().to_le_bytes());
-        b[FULL_DIR_NAME_LEN..FULL_DIR_NAME_LEN + 4]
-            .copy_from_slice(&u32::try_from(u.len() * 2).unwrap().to_le_bytes());
+        let mut put = |off: usize, bytes: &[u8]| b[off..off + bytes.len()].copy_from_slice(bytes);
+        put(0, &u32::try_from(next).unwrap().to_le_bytes());
+        put(DIR_END_OF_FILE, &e.len.to_le_bytes());
+        put(DIR_ATTRIBUTES, &e.attrs.to_le_bytes());
+        put(
+            DIR_NAME_LEN,
+            &u32::try_from(u.len() * 2).unwrap().to_le_bytes(),
+        );
+        match layout {
+            DirLayout::IdExtd => {
+                put(DIR_EA_SIZE, &0u32.to_le_bytes());
+                put(EXTD_DIR_TAG, &e.tag.to_le_bytes());
+                put(EXTD_DIR_ID, &e.id.to_le_bytes());
+            }
+            DirLayout::Full => put(DIR_EA_SIZE, &e.tag.to_le_bytes()),
+        }
         for (i, c) in u.iter().enumerate() {
-            b[FULL_DIR_NAME + 2 * i..FULL_DIR_NAME + 2 * i + 2].copy_from_slice(&c.to_le_bytes());
+            put(name_off + 2 * i, &c.to_le_bytes());
         }
         b
     }
 
     #[test]
     fn dir_buffer_decoding() {
-        let mut buf = dir_entry(".", false);
-        buf.extend(dir_entry("..", false));
-        buf.extend(dir_entry("d3d9.dll", true));
-        let names = parse_dir_names(&buf).unwrap();
-        assert_eq!(names, vec![w("."), w(".."), w("d3d9.dll")]);
-        assert!(is_dot_entry(&names[0]) && is_dot_entry(&names[1]));
-        assert!(!is_dot_entry(&names[2]));
+        for layout in [DirLayout::IdExtd, DirLayout::Full] {
+            let mut buf = dir_entry(layout, &raw("."), false);
+            buf.extend(dir_entry(layout, &raw(".."), false));
+            buf.extend(dir_entry(layout, &raw("d3d9.dll"), true));
+            let entries = parse_dir_entries(&buf, layout).unwrap();
+            let names: Vec<Vec<u16>> = entries.iter().map(|e| e.name.clone()).collect();
+            assert_eq!(names, vec![w("."), w(".."), w("d3d9.dll")]);
+            assert!(is_dot_entry(&names[0]) && is_dot_entry(&names[1]));
+            assert!(!is_dot_entry(&names[2]));
 
-        // Truncated name.
-        let mut t = dir_entry("abcdef", true);
-        t.truncate(FULL_DIR_NAME + 4);
-        assert_eq!(parse_dir_names(&t), None);
-        // Next offset out of the buffer.
-        let mut o = dir_entry("a", true);
-        o[0..4].copy_from_slice(&4096u32.to_le_bytes());
-        assert_eq!(parse_dir_names(&o), None);
-        assert_eq!(parse_dir_names(&[]), None);
+            // Truncated name.
+            let mut t = dir_entry(layout, &raw("abcdef"), true);
+            t.truncate(FULL_DIR_NAME + 4);
+            assert_eq!(parse_dir_entries(&t, layout), None);
+            // Next offset out of the buffer.
+            let mut o = dir_entry(layout, &raw("a"), true);
+            o[0..4].copy_from_slice(&4096u32.to_le_bytes());
+            assert_eq!(parse_dir_entries(&o, layout), None);
+            assert_eq!(parse_dir_entries(&[], layout), None);
+        }
+    }
+
+    #[test]
+    fn dir_entry_fields() {
+        let junction = Raw {
+            name: "link",
+            attrs: 0x10 | ATTR_REPARSE_POINT,
+            len: 0,
+            tag: 0xA000_0003,
+            id: 0x0011_2233_4455_6677_8899_AABB_CCDD_EEFF,
+        };
+        let file = Raw {
+            name: "secret.bin",
+            attrs: 0x20 | 0x1,
+            len: 6,
+            // Without FILE_ATTRIBUTE_REPARSE_POINT the tag field is ignored (EaSize).
+            tag: 0x1234,
+            id: 7,
+        };
+        let mut buf = dir_entry(DirLayout::IdExtd, &junction, false);
+        buf.extend(dir_entry(DirLayout::IdExtd, &file, true));
+        let e = parse_dir_entries(&buf, DirLayout::IdExtd).unwrap();
+        assert_eq!(
+            e[0],
+            Listed {
+                name: w("link"),
+                attrs: junction.attrs,
+                len: 0,
+                tag: Some(0xA000_0003),
+                file_id: Some(junction.id),
+            }
+        );
+        assert_eq!(
+            e[1],
+            Listed {
+                name: w("secret.bin"),
+                attrs: file.attrs,
+                len: 6,
+                tag: None,
+                file_id: Some(7),
+            }
+        );
+        // The FULL layout has no file ID and keeps the tag in EaSize.
+        let mut buf = dir_entry(DirLayout::Full, &junction, false);
+        buf.extend(dir_entry(DirLayout::Full, &file, true));
+        let e = parse_dir_entries(&buf, DirLayout::Full).unwrap();
+        assert_eq!((e[0].tag, e[0].file_id), (Some(0xA000_0003), None));
+        assert_eq!((e[1].tag, e[1].len, e[1].file_id), (None, 6, None));
     }
 }

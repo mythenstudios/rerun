@@ -50,7 +50,7 @@ pub type ContractResult = Result<(), String>;
 
 /// Names of the cases a file system contract skipped because the fixture reported "not
 /// available" (`"dir_symlink"`, `"file_symlink"`, `"case_sensitive_dir"`, `"mount_volume"`,
-/// `"subst"`, `"short_name"`, `"wof_compress"`). Without duplicates.
+/// `"subst"`, `"short_name"`, `"wof_compress"`, `"restricted"`). Without duplicates.
 pub type Skipped = Vec<&'static str>;
 
 /// Result of a file system contract: the skipped cases on success.
@@ -104,6 +104,12 @@ pub trait FsFixture: Sync {
     /// Compresses the existing file `p` with the Windows Overlay Filter (like CompactGUI), so
     /// it carries the WOF reparse tag. `Ok(false)` = not available.
     fn wof_compress(&self, p: &Path) -> SysResult<bool>;
+    /// Gives the existing file or directory `p` a DACL that denies the current user every
+    /// access, even `FILE_READ_ATTRIBUTES` and `SYNCHRONIZE` (like `ElevatedDiagnostics` or
+    /// `ntuser.pol` for a standard user). The runner must still be able to remove it (e.g.
+    /// owner keeps `WRITE_DAC`, the fixture restores the DACL before cleanup).
+    /// `Ok(false)` = not available.
+    fn restricted(&self, p: &Path) -> SysResult<bool>;
 }
 
 fn ensure(cond: bool, what: &str) -> ContractResult {
@@ -264,7 +270,8 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
         m.kind == EntryKind::File
             && m.len == 5
             && m.attrs == Attrs::default()
-            && m.links == 1
+            && m.links == Some(1)
+            && !m.restricted
             && m.reparse.is_none(),
         "metadata of a plain file",
     )?;
@@ -346,7 +353,142 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
     open_dir_input_rules(fs, work, info.file_id)?;
     long_name_lookups(fx, &*root, work, &mut skips)?;
     wof_files(fx, &*root, work, &mut skips)?;
+    restricted_entries(fs, fx, &*root, work, &mut skips)?;
     Ok(skips)
+}
+
+/// Entries whose own DACL denies the current user every open are neither an error nor
+/// dropped: `read_dir` and `metadata` describe them from the listing (`restricted`, link count
+/// unknown), and nothing opens them or walks through them (`AccessDenied`).
+fn restricted_entries(
+    fs: &dyn Fs,
+    fx: &dyn FsFixture,
+    root: &dyn Dir,
+    work: &Path,
+    skips: &mut Skipped,
+) -> ContractResult {
+    let base = work.join("rs");
+    let (file_abs, dir_abs) = (base.join("secret.bin"), base.join("locked"));
+    ok(fx.file(&file_abs, b"secret"), "fixture secret file")?;
+    ok(
+        fx.file(&dir_abs.join("inner.txt"), b"inner"),
+        "fixture locked dir",
+    )?;
+    ok(fx.file(&base.join("plain.txt"), b"plain"), "fixture plain")?;
+    let both = ok(fx.restricted(&file_abs), "fixture restrict file")?
+        && ok(fx.restricted(&dir_abs), "fixture restrict dir")?;
+    if !both {
+        skip(skips, "restricted");
+        return Ok(());
+    }
+    let ad = SysErrorKind::AccessDenied;
+    let listed = ok(root.read_dir(Some(&rel("rs")?)), "read_dir rs")?;
+    let entry = |name: &str| {
+        listed
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.meta.clone())
+            .ok_or(format!(
+                "contract violated: read_dir lists a restricted entry ({name} missing)"
+            ))
+    };
+    ensure(listed.len() == 3, "read_dir lists restricted entries")?;
+    let (secret, locked, plain) = (entry("secret.bin")?, entry("locked")?, entry("plain.txt")?);
+    ensure(
+        secret.restricted
+            && secret.kind == EntryKind::File
+            && secret.len == 6
+            && secret.attrs == Attrs::default()
+            && secret.links.is_none()
+            && !secret.is_single_link()
+            && secret.reparse.is_none(),
+        "a restricted file: kind, length and attributes from the listing, link count unknown",
+    )?;
+    ensure(
+        locked.restricted && locked.kind == EntryKind::Dir && locked.links.is_none(),
+        "a restricted directory is listed as a restricted directory",
+    )?;
+    ensure(
+        !plain.restricted && plain.links == Some(1),
+        "a plain sibling is not restricted",
+    )?;
+    ensure(
+        secret.file_id != 0
+            && locked.file_id != 0
+            && secret.file_id != locked.file_id
+            && secret.file_id != plain.file_id
+            && locked.file_id != plain.file_id,
+        "restricted entries carry their own file IDs",
+    )?;
+    for (p, listed_meta) in [
+        (r"rs\secret.bin", &secret),
+        (r"RS\SECRET.BIN", &secret),
+        (r"rs\locked", &locked),
+    ] {
+        ensure(
+            ok(root.metadata(&rel(p)?), "metadata restricted")?.as_ref() == Some(listed_meta),
+            "metadata of a restricted entry equals its listing entry",
+        )?;
+    }
+    let sub = ok(root.open_dir(&rel("rs")?), "open rs")?;
+    ensure(
+        ok(sub.metadata(&rel("secret.bin")?), "metadata via sub")?.as_ref() == Some(&secret)
+            && ok(sub.read_dir(None), "read_dir via sub")?
+                .iter()
+                .any(|e| e.name == "locked" && e.meta == locked),
+        "a sub handle reports restricted entries the same way",
+    )?;
+    drop(sub);
+    err_kind(
+        root.open_read(&rel(r"rs\secret.bin")?),
+        ad,
+        "open_read restricted",
+    )?;
+    err_kind(root.read(&rel(r"rs\secret.bin")?), ad, "read restricted")?;
+    err_kind(
+        root.open_dir(&rel(r"rs\secret.bin")?),
+        ad,
+        "open_dir on a restricted file",
+    )?;
+    err_kind(
+        root.open_dir(&rel(r"rs\locked")?),
+        ad,
+        "open_dir restricted",
+    )?;
+    err_kind(
+        root.read_dir(Some(&rel(r"rs\locked")?)),
+        ad,
+        "read_dir restricted",
+    )?;
+    err_kind(
+        root.open_read(&rel(r"rs\locked")?),
+        ad,
+        "open_read on a restricted directory",
+    )?;
+    err_kind(
+        root.metadata(&rel(r"rs\locked\inner.txt")?),
+        ad,
+        "metadata through a restricted directory",
+    )?;
+    err_kind(
+        root.read(&rel(r"rs\locked\inner.txt")?),
+        ad,
+        "read through a restricted directory",
+    )?;
+    err_kind(
+        fs.open_dir(&dir_abs),
+        ad,
+        "Fs::open_dir of a restricted directory",
+    )?;
+    ensure(
+        ok(
+            root.metadata(&rel(r"rs\nothing")?),
+            "metadata missing sibling",
+        )?
+        .is_none(),
+        "a missing sibling of restricted entries is still None",
+    )?;
+    read_is(root, r"rs\plain.txt", b"plain", "a plain sibling reads")
 }
 
 /// `Fs::open_dir` accepts only drive-absolute input (`X:\…`, `\\?\X:\…`; `/` counts as `\`).
@@ -635,7 +777,7 @@ pub fn fs_link_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> Fs
     let mb =
         ok(root.metadata(&rel("b.bin")?), "metadata b")?.ok_or("contract violated: b missing")?;
     ensure(
-        ma.links == 2 && mb.links == 2 && ma.file_id == mb.file_id,
+        ma.links == Some(2) && mb.links == Some(2) && ma.file_id == mb.file_id,
         "both links report two links and the same file id",
     )?;
     read_is(&*root, "b.bin", b"shared", "read through the second link")?;
@@ -1656,7 +1798,7 @@ pub fn fs_link_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> F
     let ma = ok(root.metadata(&a), "metadata a")?.ok_or("contract violated: a missing")?;
     let mb = ok(root.metadata(&b), "metadata b")?.ok_or("contract violated: b missing")?;
     ensure(
-        ma.links == 2 && mb.links == 2 && ma.file_id == mb.file_id,
+        ma.links == Some(2) && mb.links == Some(2) && ma.file_id == mb.file_id,
         "both links report two links and the same file id",
     )?;
     err_kind(
@@ -1671,8 +1813,8 @@ pub fn fs_link_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> F
     read_is(&*root, "a.bin", b"new", "replaced link has new content")?;
     read_is(&*root, "b.bin", b"shared", "other link keeps old content")?;
     ensure(
-        ok(root.metadata(&a), "metadata a after")?.is_some_and(|m| m.links == 1)
-            && ok(root.metadata(&b), "metadata b after")?.is_some_and(|m| m.links == 1),
+        ok(root.metadata(&a), "metadata a after")?.is_some_and(|m| m.is_single_link())
+            && ok(root.metadata(&b), "metadata b after")?.is_some_and(|m| m.is_single_link()),
         "replace splits the links",
     )?;
     ok(
@@ -1682,7 +1824,7 @@ pub fn fs_link_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> F
     ok(root.remove_file(&rel("c.bin")?), "remove one of two links")?;
     read_is(&*root, "b.bin", b"shared", "remaining link intact")?;
     ensure(
-        ok(root.metadata(&b), "metadata b last")?.is_some_and(|m| m.links == 1),
+        ok(root.metadata(&b), "metadata b last")?.is_some_and(|m| m.is_single_link()),
         "link count drops",
     )?;
     ok(root.set_readonly(&b, true), "set_readonly single link")?;

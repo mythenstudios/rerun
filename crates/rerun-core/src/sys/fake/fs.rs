@@ -36,6 +36,11 @@
 //!   `volume_path` and its own volume serial. Deviation: the mount point is the volume root
 //!   itself (no separate directory underneath), the file system and file IDs stay those of
 //!   the drive, and the setup helpers walk through it without refusing.
+//! - Restricted entries ([`FakeFs::set_restricted`]) are a flag, not an ACL: every open of
+//!   one, every walk through it and every write to it (`replace`, `remove_*`, `rename`,
+//!   `set_readonly`) is `AccessDenied`, including `Fs::open_dir`. On Windows, deleting such an
+//!   entry can still succeed through the parent's `FILE_DELETE_CHILD`; the fake refuses
+//!   (only stricter). The setup helpers ignore the flag (they act like an administrator).
 //! - Volumes: the file system is NTFS unless set with [`FakeFs::set_fs_kind`]; it only
 //!   changes what [`RootInfo`] reports, not the behaviour.
 //! - `remove_file` removes any reparse point (file or directory link, like a handle-based
@@ -125,6 +130,8 @@ struct DirData {
     volume_root: bool,
     /// Non-surrogate reparse tag (e.g. a cloud files folder).
     tag: Option<u32>,
+    /// Its DACL denies the current user every open ([`FakeFs::set_restricted`]).
+    restricted: bool,
 }
 
 impl DirData {
@@ -136,6 +143,7 @@ impl DirData {
             user_writable,
             volume_root: false,
             tag: None,
+            restricted: false,
         }
     }
 
@@ -160,6 +168,9 @@ struct Inode {
     attrs: Attrs,
     tag: Option<u32>,
     links: u32,
+    /// Its DACL denies the current user every open (shared by all hard links, like the
+    /// security descriptor on NTFS).
+    restricted: bool,
 }
 
 #[derive(Debug)]
@@ -167,6 +178,7 @@ struct LinkData {
     tag: u32,
     target: String,
     is_dir: bool,
+    restricted: bool,
 }
 
 #[derive(Debug)]
@@ -353,13 +365,46 @@ impl State {
         }
     }
 
+    /// The current user cannot open the entry at all (see [`FakeFs::set_restricted`]).
+    fn is_restricted(&self, id: NodeId) -> bool {
+        match self.nodes.get(&id).map(|n| &n.body) {
+            Some(Body::Dir(d)) => d.restricted,
+            Some(Body::File(ino)) => self.inodes.get(ino).is_some_and(|i| i.restricted),
+            Some(Body::Link(l)) => l.restricted,
+            None => false,
+        }
+    }
+
+    /// `AccessDenied` for a restricted entry: every open of it fails, like on Windows.
+    fn openable(&self, id: NodeId, target: &str) -> SysResult<()> {
+        if self.is_restricted(id) {
+            Err(err(SysErrorKind::AccessDenied, target))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Metadata of an entry. A restricted entry is described the way `sys::win` describes it
+    /// from the directory listing: link count and link target unknown.
     fn meta(&self, id: NodeId, target: &str) -> SysResult<Metadata> {
+        let mut m = self.full_meta(id, target)?;
+        if self.is_restricted(id) {
+            m.restricted = true;
+            m.links = None;
+            if let Some(r) = m.reparse.as_mut() {
+                r.target = None;
+            }
+        }
+        Ok(m)
+    }
+
+    fn full_meta(&self, id: NodeId, target: &str) -> SysResult<Metadata> {
         Ok(match &self.node(id, target)?.body {
             Body::Dir(d) => Metadata {
                 kind: self.rel_kind(id),
                 len: 0,
                 attrs: d.attrs,
-                links: 1,
+                links: Some(1),
                 file_id: u128::from(id),
                 reparse: if self.is_mount(id) {
                     Some(ReparseInfo {
@@ -374,6 +419,7 @@ impl State {
                         target: None,
                     })
                 },
+                restricted: false,
             },
             Body::File(ino) => {
                 let i = self.inode(*ino, target)?;
@@ -386,26 +432,28 @@ impl State {
                         0
                     },
                     attrs: i.attrs,
-                    links: i.links,
+                    links: Some(i.links),
                     file_id: u128::from(*ino),
                     reparse: i.tag.map(|t| ReparseInfo {
                         tag: t,
                         surrogate: tag::is_surrogate(t),
                         target: None,
                     }),
+                    restricted: false,
                 }
             }
             Body::Link(l) => Metadata {
                 kind: EntryKind::Reparse,
                 len: 0,
                 attrs: Attrs::default(),
-                links: 1,
+                links: Some(1),
                 file_id: u128::from(id),
                 reparse: Some(ReparseInfo {
                     tag: l.tag,
                     surrogate: tag::is_surrogate(l.tag),
                     target: Some(l.target.clone()),
                 }),
+                restricted: false,
             },
         })
     }
@@ -415,6 +463,7 @@ impl State {
         let child = self
             .lookup(cur, name, target)?
             .ok_or_else(|| err(SysErrorKind::NotFound, target))?;
+        self.openable(child, target)?;
         match &self.node(child, target)?.body {
             Body::Dir(d) if d.plain() && !d.volume_root => Ok(child),
             Body::Dir(_) => Err(err(SysErrorKind::ReparsePoint, target)),
@@ -467,6 +516,7 @@ impl State {
                 attrs: Attrs::default(),
                 tag: None,
                 links: 1,
+                restricted: false,
             },
         );
         self.insert(parent, name, Body::File(ino), target)
@@ -625,6 +675,7 @@ impl State {
             let child = self
                 .lookup(cur, seg, target)?
                 .ok_or_else(|| err(SysErrorKind::NotFound, target))?;
+            self.openable(child, target)?;
             cur = match &self.node(child, target)?.body {
                 Body::Dir(d) if d.plain() => child,
                 Body::Dir(_) => return Err(err(SysErrorKind::ReparsePoint, target)),
@@ -846,6 +897,7 @@ impl FakeFs {
             tag: reparse_tag,
             target: target.to_owned(),
             is_dir,
+            restricted: false,
         });
         st.insert(parent, &name, body, &shown).map(|_| ())
     }
@@ -932,6 +984,31 @@ impl FakeFs {
         Ok(())
     }
 
+    /// Makes an existing entry restricted (or not): its DACL denies the current user every
+    /// open, even for attributes (`ElevatedDiagnostics`, `ntuser.pol`). `read_dir` and
+    /// `metadata` still describe it ([`Metadata::restricted`]); every open of it and every
+    /// walk through it is `AccessDenied`. For a file the flag is shared by its hard links.
+    pub fn set_restricted(&self, abs: &Path, on: bool) -> SysResult<()> {
+        let mut st = self.lock();
+        let id = st.require_abs(abs)?;
+        let ino = match st.nodes.get_mut(&id).map(|n| &mut n.body) {
+            Some(Body::Dir(d)) => {
+                d.restricted = on;
+                return Ok(());
+            }
+            Some(Body::Link(l)) => {
+                l.restricted = on;
+                return Ok(());
+            }
+            Some(Body::File(ino)) => *ino,
+            None => return Err(SysError::path(SysErrorKind::NotFound, abs)),
+        };
+        if let Some(i) = st.inodes.get_mut(&ino) {
+            i.restricted = on;
+        }
+        Ok(())
+    }
+
     /// Marks an existing directory as the root of a volume mounted in a folder. It gets its
     /// own volume serial; the file system stays that of the drive.
     pub fn set_volume_root(&self, abs: &Path) -> SysResult<()> {
@@ -962,6 +1039,7 @@ impl FakeFs {
             tag: tag::MOUNT_POINT,
             target: target.to_owned(),
             is_dir: true,
+            restricted: false,
         });
         st.insert(parent, &name, body, &shown)?;
         Ok(hidden)
@@ -1121,6 +1199,7 @@ impl Dir for FakeDir {
         let (parent, name) = self.split(FsOp::OpenRead, p)?;
         let st = self.fs.lock();
         let id = Self::require(&st, parent, name, t)?;
+        st.openable(id, t)?;
         match (st.rel_kind(id), st.nodes.get(&id).map(|n| &n.body)) {
             (EntryKind::File, Some(Body::File(ino))) => {
                 Ok(Box::new(Cursor::new(st.inode(*ino, t)?.data.clone())))
@@ -1176,6 +1255,7 @@ impl Dir for FakeDir {
             let mut st = self.fs.lock();
             st.writable_dir(parent, t)?;
             let target = Self::require(&st, parent, name, t)?;
+            st.openable(target, t)?;
             match st.nodes.get(&target).map(|n| &n.body) {
                 Some(Body::Dir(_)) => return Err(err(SysErrorKind::AccessDenied, t)),
                 Some(Body::File(ino)) if st.tag_allowed(*ino) => {
@@ -1250,6 +1330,7 @@ impl Dir for FakeDir {
         let mut st = self.fs.lock();
         st.writable_dir(parent, t)?;
         let id = Self::require(&st, parent, name, t)?;
+        st.openable(id, t)?;
         match (st.kind(id), st.nodes.get(&id).map(|n| &n.body)) {
             (_, Some(Body::Dir(_))) => return Err(err(SysErrorKind::AccessDenied, t)),
             (EntryKind::File, Some(Body::File(ino))) if st.inode(*ino, t)?.attrs.readonly => {
@@ -1267,6 +1348,7 @@ impl Dir for FakeDir {
         let mut st = self.fs.lock();
         st.writable_dir(parent, t)?;
         let id = Self::require(&st, parent, name, t)?;
+        st.openable(id, t)?;
         match st.nodes.get(&id).map(|n| &n.body) {
             Some(Body::Dir(d)) if !d.children.is_empty() => {
                 return Err(err(SysErrorKind::NotEmpty, t));
@@ -1289,6 +1371,7 @@ impl Dir for FakeDir {
         st.writable_dir(fp, tf)?;
         st.writable_dir(tp, tt)?;
         let src = Self::require(&st, fp, fname, tf)?;
+        st.openable(src, tf)?;
         if let Some(existing) = st.lookup(tp, tname, tt)? {
             if existing != src {
                 return Err(err(SysErrorKind::AlreadyExists, tt));
@@ -1307,6 +1390,7 @@ impl Dir for FakeDir {
         let mut st = self.fs.lock();
         st.writable_dir(parent, t)?;
         let id = Self::require(&st, parent, name, t)?;
+        st.openable(id, t)?;
         let kind = st.kind(id);
         let ino = match st.nodes.get_mut(&id).map(|n| &mut n.body) {
             Some(Body::Dir(d)) if d.plain() && !d.volume_root => {

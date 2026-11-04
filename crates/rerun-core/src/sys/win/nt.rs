@@ -22,7 +22,7 @@ use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_DIRECTORY_FILE, FILE_INFORMATION_CLASS, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
     FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, FileFullDirectoryInformation,
-    NtCreateFile, NtQueryDirectoryFile, NtQueryInformationFile,
+    FileIdExtdDirectoryInformation, NtCreateFile, NtQueryDirectoryFile, NtQueryInformationFile,
 };
 use windows_sys::Win32::Foundation::{
     HANDLE, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, OBJECT_ATTRIBUTE_FLAGS, UNICODE_STRING,
@@ -36,6 +36,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
 
+use super::name::DirLayout;
 use super::status::{
     NtStatus, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH,
     STATUS_INVALID_PARAMETER, STATUS_NO_MORE_FILES, STATUS_NO_SUCH_FILE, STATUS_SUCCESS,
@@ -272,9 +273,18 @@ pub(super) fn query_info(
     }
 }
 
-/// One `NtQueryDirectoryFile` call (`FileFullDirectoryInformation`, [`DIR_BUF`] bytes, all
-/// entries that fit, no filter). `Ok(None)` at the end of the listing.
-pub(super) fn query_dir(h: BorrowedHandle<'_>, restart: bool) -> Result<Option<Vec<u8>>, NtStatus> {
+/// One `NtQueryDirectoryFile` call in `layout` (`FileIdExtdDirectoryInformation` or
+/// `FileFullDirectoryInformation`), [`DIR_BUF`] bytes, all entries that fit, no filter.
+/// `Ok(None)` at the end of the listing.
+pub(super) fn query_dir(
+    h: BorrowedHandle<'_>,
+    restart: bool,
+    layout: DirLayout,
+) -> Result<Option<Vec<u8>>, NtStatus> {
+    let class = match layout {
+        DirLayout::IdExtd => FileIdExtdDirectoryInformation,
+        DirLayout::Full => FileFullDirectoryInformation,
+    };
     let mut buf = vec![0u64; DIR_BUF / 8];
     let len = u32::try_from(DIR_BUF).map_err(|_| STATUS_BUFFER_TOO_SMALL)?;
     let mut iosb = IO_STATUS_BLOCK::default();
@@ -290,7 +300,7 @@ pub(super) fn query_dir(h: BorrowedHandle<'_>, restart: bool) -> Result<Option<V
             &mut iosb,
             buf.as_mut_ptr().cast(),
             len,
-            FileFullDirectoryInformation,
+            class,
             false,
             ptr::null(),
             restart,

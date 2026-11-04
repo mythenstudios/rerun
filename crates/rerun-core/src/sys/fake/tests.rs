@@ -182,6 +182,9 @@ impl FsFixture for CopyFixture {
     fn wof_compress(&self, p: &Path) -> SysResult<bool> {
         self.inner.wof_compress(p)
     }
+    fn restricted(&self, p: &Path) -> SysResult<bool> {
+        self.inner.restricted(p)
+    }
 }
 
 #[test]
@@ -817,12 +820,76 @@ fn hard_links_share_content_and_attributes() {
     sys.fake_fs().set_attrs(&p(r"C:\Other\b.bin"), ro).unwrap();
     let g = open(&sys, r"C:\G");
     let m = g.metadata(&r("a.bin")).unwrap().unwrap();
-    assert_eq!((m.links, m.attrs), (2, ro));
+    assert_eq!((m.links, m.attrs), (Some(2), ro));
     assert_eq!(kind(g.remove_file(&r("a.bin"))), SysErrorKind::AccessDenied);
     assert_eq!(
         kind(FakeSystem::builder().hardlink(r"C:\G\x", r"D:\y").build()),
         SysErrorKind::NotFound
     );
+}
+
+#[test]
+fn restricted_entries_are_described_but_never_opened() {
+    let sys = FakeSystem::builder()
+        .file(r"C:\G\secret.bin", "secret")
+        .hardlink(r"C:\G\secret.bin", r"C:\G\alias.bin")
+        .file(r"C:\G\locked\inner.txt", "inner")
+        .junction(r"C:\G\jlink", r"C:\Elsewhere")
+        .file(r"C:\G\plain.txt", "plain")
+        .restricted(r"C:\G\secret.bin")
+        .restricted(r"C:\G\locked")
+        .restricted(r"C:\G\jlink")
+        .build()
+        .unwrap();
+    let g = open(&sys, r"C:\G");
+    let listed = g.read_dir(None).unwrap();
+    assert_eq!(listed.len(), 5, "restricted entries are never dropped");
+    for e in &listed {
+        let expected = e.name != "plain.txt";
+        assert_eq!(e.meta.restricted, expected, "{}", e.name);
+        assert_eq!(e.meta.is_single_link(), !expected, "{}", e.name);
+        assert_eq!(g.metadata(&r(&e.name)).unwrap().as_ref(), Some(&e.meta));
+    }
+    // The flag belongs to the file, so the second hard link is restricted too.
+    let alias = g.metadata(&r("ALIAS.BIN")).unwrap().unwrap();
+    assert!(alias.restricted && alias.links.is_none() && alias.len == 6);
+    // A restricted link keeps its tag, not its target.
+    let j = g.metadata(&r("jlink")).unwrap().unwrap();
+    let rp = j.reparse.unwrap();
+    assert_eq!(
+        (j.kind, rp.tag, rp.target),
+        (EntryKind::Reparse, tag::MOUNT_POINT, None)
+    );
+
+    let ad = SysErrorKind::AccessDenied;
+    assert_eq!(
+        g.open_read(&r("secret.bin")).err().map(|e| e.kind),
+        Some(ad)
+    );
+    assert_eq!(kind(g.open_dir(&r("locked"))), ad);
+    assert_eq!(kind(g.open_dir(&r("jlink"))), ad);
+    assert_eq!(kind(g.read_dir(Some(&r("locked")))), ad);
+    assert_eq!(kind(g.metadata(&r(r"locked\inner.txt"))), ad);
+    assert_eq!(kind(sys.fs().open_dir(&p(r"C:\G\locked"))), ad);
+    // Writes refuse too (Windows might delete through FILE_DELETE_CHILD; the fake is stricter).
+    assert_eq!(kind(g.replace(&r("secret.bin"), b"x", "s.tmp")), ad);
+    assert_eq!(kind(g.remove_file(&r("secret.bin"))), ad);
+    assert_eq!(kind(g.remove_dir(&r("locked"))), ad);
+    assert_eq!(kind(g.rename(&r("secret.bin"), &r("moved.bin"))), ad);
+    assert_eq!(kind(g.set_readonly(&r("secret.bin"), true)), ad);
+    assert_eq!(
+        kind(g.create_new(&r("secret.bin"), b"x")),
+        SysErrorKind::AlreadyExists
+    );
+    assert_eq!(g.read(&r("plain.txt")).unwrap(), b"plain");
+
+    // Lifting the restriction restores normal access.
+    sys.fake_fs()
+        .set_restricted(&p(r"C:\G\secret.bin"), false)
+        .unwrap();
+    let m = g.metadata(&r("secret.bin")).unwrap().unwrap();
+    assert!(!m.restricted && m.links == Some(2));
+    assert_eq!(g.read(&r("alias.bin")).unwrap(), b"secret");
 }
 
 // ---------- TOCTOU (hooks) ----------
@@ -1159,7 +1226,7 @@ fn snapshot_is_identical_after_replace_and_restore() {
 #[test]
 fn snapshot_detects_every_kind_of_change() {
     type Mutation = fn(&FakeSystem);
-    let cases: [(&str, Mutation); 11] = [
+    let cases: [(&str, Mutation); 12] = [
         ("content", |s| {
             open(s, r"C:\Games\AC")
                 .replace(&r(r"Data\a.forge"), b"FORGE", "a.tmp")
@@ -1218,6 +1285,11 @@ fn snapshot_detects_every_kind_of_change() {
                 .put_tagged_file(&p(r"C:\Games\AC\Data\a.forge"), b"forge", tag::WOF)
                 .unwrap();
         }),
+        ("restricted", |s| {
+            s.fake_fs()
+                .set_restricted(&p(r"C:\Games\AC\Data\a.forge"), true)
+                .unwrap();
+        }),
     ];
     for (name, mutate) in cases {
         let sys = game_system();
@@ -1269,6 +1341,70 @@ fn snapshot_captures_anomalies_without_opening_them() {
         4,
         "{lines:#?}"
     );
+}
+
+#[test]
+fn snapshot_records_restricted_entries_without_opening_them() {
+    let build = || {
+        FakeSystem::builder()
+            .file(r"C:\G\secret.bin", "secret")
+            .file(r"C:\G\locked\inner.txt", "inner")
+            .file(r"C:\G\plain.txt", "plain")
+            .restricted(r"C:\G\secret.bin")
+            .restricted(r"C:\G\locked")
+            .build()
+            .unwrap()
+    };
+    let sys = build();
+    let scope = Scope {
+        dirs: vec![p(r"C:\G")],
+        keys: vec![],
+    };
+    // Any open of a restricted entry (data, descent) would hit this hook.
+    sys.fake_fs().on_step(|_: &FakeFs, ev: &StepEvent| {
+        assert!(
+            ev.name != "secret.bin" && ev.name != "locked",
+            "opened a restricted entry {ev:?}"
+        );
+    });
+    let snap = snapshot(&sys, &scope);
+    sys.fake_fs().clear_on_step();
+    let snap = snap.unwrap();
+    // Root, secret.bin, locked (not descended into), plain.txt.
+    assert_eq!(snap.len(), 4);
+    let lines = snap.diff(&Default::default());
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("restricted \"secret.bin\" File 6 bytes")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("restricted \"locked\" Dir")),
+        "{lines:#?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("inner.txt")), "{lines:#?}");
+
+    // Identity: the same state is identical; attributes and the flag itself count.
+    let again = build();
+    assert_eq!(snapshot(&again, &scope).unwrap(), snap);
+    let hidden = Attrs {
+        hidden: true,
+        ..Attrs::default()
+    };
+    again
+        .fake_fs()
+        .set_attrs(&p(r"C:\G\secret.bin"), hidden)
+        .unwrap();
+    assert_eq!(snap.diff(&snapshot(&again, &scope).unwrap()).len(), 1);
+    let lifted = build();
+    lifted
+        .fake_fs()
+        .set_restricted(&p(r"C:\G\secret.bin"), false)
+        .unwrap();
+    assert_eq!(snap.diff(&snapshot(&lifted, &scope).unwrap()).len(), 1);
 }
 
 #[test]

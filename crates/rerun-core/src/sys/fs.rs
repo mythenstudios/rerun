@@ -19,6 +19,17 @@
 //! - If a parent directory is missing, writing operations return `NotFound`.
 //! - `read_dir` returns raw names as on disk; they may be invalid as a [`RelPath`]
 //!   (`d3d9.dll.`, `CON`). `policy::path::classify` separates them.
+//! - **Restricted entries.** An entry whose own security descriptor denies the current user
+//!   even an attribute-only open (e.g. `%LOCALAPPDATA%\ElevatedDiagnostics`,
+//!   `C:\ProgramData\ntuser.pol`) is neither an error nor dropped: `read_dir` and `metadata`
+//!   describe it from the directory listing with [`Metadata::restricted`] set. Kind, length,
+//!   attributes, file ID and reparse tag come from the listing; the link count is unknown
+//!   (`links: None`, never "single-link") and so is a link target (`None`). `open_read`,
+//!   `read`, `open_dir`, `read_dir(Some(_))` on it and any walk through it stay
+//!   `AccessDenied`; nothing ever opens it (snapshot and policy record it as metadata only).
+//!   `sys::win`: listing with `FileIdExtdDirectoryInformation`; on a file system without that
+//!   class (FAT) the listing has no file ID and a denied entry stays an `AccessDenied` error
+//!   (fail closed; FAT has no ACLs, so this does not happen in practice).
 //! - `sys::win` implements only the reading methods in phase 1; the writing ones return
 //!   `Unsupported`.
 
@@ -108,12 +119,27 @@ pub struct Metadata {
     pub len: u64,
     /// Attributes.
     pub attrs: Attrs,
-    /// Number of hard links (1 for directories and reparse points).
-    pub links: u32,
+    /// Number of hard links: `Some(1)` for directories and reparse points, `None` = unknown
+    /// ([`Self::restricted`] entries). Unknown never counts as a single link: ask
+    /// [`Self::is_single_link`] (or compare with `== Some(1)`), never `links > Some(1)`
+    /// (`None` orders below `Some`, so that comparison would treat unknown as single-link).
+    pub links: Option<u32>,
     /// 128-bit file ID (`FILE_ID_INFO`), unique per volume.
     pub file_id: u128,
     /// Reparse data: `Some` for [`EntryKind::Reparse`] and for allowlisted data tags.
     pub reparse: Option<ReparseInfo>,
+    /// The entry cannot be opened by the current user, not even for its attributes (its own
+    /// DACL denies it). Described from the directory listing only: `links` is `None`, a link
+    /// target is `None`. Never opened, hashed or traversed (see the module docs).
+    pub restricted: bool,
+}
+
+impl Metadata {
+    /// Exactly one hard link is known. `false` for an unknown link count (restricted entry),
+    /// so the hard-link rule (ADR 0007: never change a linked file in place) fails closed.
+    pub fn is_single_link(&self) -> bool {
+        self.links == Some(1)
+    }
 }
 
 /// Entry of a directory.
@@ -211,10 +237,12 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     fn open_dir(&self, p: &RelPath) -> SysResult<Box<dyn Dir + '_>>;
 
     /// Metadata without following reparse points (lstat-like). `Ok(None)` = does not exist
-    /// (also: a parent is missing or is a file). A reparse point in the parents is an error.
+    /// (also: a parent is missing or is a file). A reparse point in the parents is an error,
+    /// a restricted parent `AccessDenied`. A restricted entry itself is described from the
+    /// listing of its parent ([`Metadata::restricted`]), exactly as `read_dir` reports it.
     fn metadata(&self, p: &RelPath) -> SysResult<Option<Metadata>>;
 
-    /// Opens a file for reading. A directory yields `AccessDenied`.
+    /// Opens a file for reading. A directory or a restricted entry yields `AccessDenied`.
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>>;
 
     /// Reads a whole file.
@@ -230,6 +258,7 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     /// Lists a directory (`None` = this one). Raw names, order unspecified. Names with
     /// unpaired UTF-16 surrogates are converted with U+FFFD and such entries are never
     /// dropped (`policy::path::classify` turns them into anomalies).
+    /// Restricted entries are listed with [`Metadata::restricted`], never dropped.
     fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>>;
 
     /// Creates a new file (`FILE_CREATE`): an existing entry of any kind yields
