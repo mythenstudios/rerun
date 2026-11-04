@@ -5,8 +5,8 @@
 //! contract runs and later for the folder comparison after a revert.
 //!
 //! Each scope directory is opened by absolute path (one of the two allowed callers of
-//! [`Fs::open_dir`], ADR 0007) and then walked through [`Dir`] handles, never following
-//! reparse points.
+//! [`Fs::open_dir`](super::Fs::open_dir), ADR 0007) and then walked through [`Dir`] handles,
+//! never following reparse points.
 //!
 //! "Identical" means: existence, kind, case, content (SHA-256), length, attributes
 //! (read-only, hidden, system), link count, reparse tag and link target; for the registry:

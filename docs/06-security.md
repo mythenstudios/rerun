@@ -28,6 +28,7 @@ The user's system (files outside the game folder, registry, firewall, autostart)
 - Dependencies checked with `cargo deny` (licenses, advisories, crates.io only, no OpenSSL) in CI.
 - **Policy boundary (ADR 0004):** `sys` executes, `policy` decides. Confinement (`policy::path::RelPath`) and the registry allowlist (from Phase 3 `policy::registry`) sit above `sys` and apply equally to the fake, the real system and the elevated helper.
 - **No system access bypassing `sys`:** `clippy.toml` blocks `std::fs` write operations and `std::process::Command::new` (`disallowed_methods = deny`). Exceptions only with `#[allow(…, reason = "…")]` in `sys::win` and `rerun-launch`.
+- **No path-based Win32 file APIs:** `clippy.toml` also blocks `CreateFileW`, `DeleteFileW`, `MoveFileExW`, `ReplaceFileW`, `CopyFile*`, `GetFileAttributesW`, `GetNamedSecurityInfoW`, `DefineDosDeviceW` and the other path-based file APIs of `windows-sys`, plus `NtOpenFile`. `NtCreateFile` is fenced to the two wrappers `sys::win::nt::{open_relative, open_absolute_dir}`, which fix the flags (`OBJ_DONT_REPARSE` and `FILE_OPEN_REPARSE_POINT` for every relative open, `FILE_OPEN` only, never `FILE_OPEN_FOR_BACKUP_INTENT`); ADR 0007, amendment "sys::win read side".
 - **CI supply chain:** GitHub Actions pinned by commit SHA, `permissions: contents: read`, toolchain pinned in `rust-toolchain.toml`, `Cargo.lock` committed and `--locked`.
 
 ## Allowed registry areas (initial list)

@@ -10,10 +10,13 @@
 //!   reparse points below the handle.
 //! - `sys::fake` emulates Win32 semantics (case handling, error kinds, handle identity). The
 //!   contract tests in `sys::contract` check this; they also run against `sys::win`.
+//! - `sys::win` (Windows only) is the real file system, **read-only in phase 1**: every
+//!   writing `Dir` method returns `Unsupported`.
 //!
 //! - [`KnownFolders`] never reads environment variables (ADR 0007).
 //!
-//! `Firewall` and `Process` arrive in phase 3, `sys::win` in a later step of phase 1.
+//! `Firewall` and `Process` arrive in phase 3. The other `sys::win` parts (registry, known
+//! folders, topology, GPU) and the `WinSystem` bundle follow in later steps of phase 1.
 
 mod error;
 pub mod fs;
@@ -27,6 +30,8 @@ pub mod topology;
 pub mod contract;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+#[cfg(windows)]
+pub mod win;
 
 pub use error::{SysError, SysErrorKind, SysResult};
 pub use fs::{Dir, Fs};

@@ -21,6 +21,20 @@ sha2.workspace = true
 # Topology fixtures; from phase 1 also profile and topo.
 serde_json.workspace = true
 
+# sys::win (ADR 0008): NT file APIs, final path, volume info, reparse data, AccessCheck.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Wdk_Foundation",
+  "Wdk_Storage_FileSystem",
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 jsonschema.workspace = true
 serde-saphyr.workspace = true

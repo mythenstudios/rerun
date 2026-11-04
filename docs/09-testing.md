@@ -63,11 +63,16 @@ See `03-cpu-topology.md`. Every rule against every fixture; expected masks as sn
 
 Not covered by the automated file system contracts; check by hand on a real machine until a fixture exists:
 
-| Case | Why manual | Status |
+| Case | Checks / why manual | Status |
 |---|---|---|
 | Mount point, `subst` and 8.3 short-name fixtures locally | run only on GitHub runners by decision (they change the machine); locally their cases skip | by design |
 | Junction, symlink and mount point on a network share or ReFS/exFAT volume | no fixture for these volumes | open |
-| WOF reopen with a real CompactGUI-compressed game folder | the fake has no WOF; the fixture compresses a synthetic file only | open |
+| Game folder compressed with CompactGUI (WOF) | `metadata` reports tag `0x80000017`, `open_read` returns the uncompressed bytes (hash equals an uncompressed copy); the fixture compresses a synthetic file only | open |
+| OneDrive folder with online-only and locally available files | online-only file: `open_read` is `Unsupported` and no download starts; available file reads normally; folder tag allowlisted | open |
+| Volume mounted in a folder without a drive letter | `info().volume_path` is empty for the mount folder, `final_path` behaviour of `GetFinalPathNameByHandleW` recorded | open |
+| FAT32 / exFAT USB drive | `fs_kind`, L1 check via `FileNameInformation` fallback, `info()` fails if `FileNormalizedNameInformation` is unsupported (documented, fail closed) | open |
+| Elevated process (UAC, admin user) | `user_writable` answers for the linked non-elevated token: `false` for `C:\Program Files`, `true` for a folder in the own profile | open |
+| Hard-linked file | `FileNormalizedNameInformation` on a second link reports that link's name, so L1 accepts both names | passes (`sys::win` smoke test, NTFS) |
 
 ## Rules
 

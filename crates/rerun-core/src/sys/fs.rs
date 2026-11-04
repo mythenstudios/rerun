@@ -19,6 +19,8 @@
 //! - If a parent directory is missing, writing operations return `NotFound`.
 //! - `read_dir` returns raw names as on disk; they may be invalid as a [`RelPath`]
 //!   (`d3d9.dll.`, `CON`). `policy::path::classify` separates them.
+//! - `sys::win` implements only the reading methods in phase 1; the writing ones return
+//!   `Unsupported`.
 
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -189,6 +191,12 @@ pub enum FsKind {
 pub trait Fs: Send + Sync {
     /// Opens a directory by absolute path. Follows reparse points in `abs` (they lie above
     /// the root). Missing yields `NotFound`, a file `InvalidPath`.
+    ///
+    /// Input: drive-absolute only, `X:\…` or `\\?\X:\…` (`/` is treated as `\`, empty
+    /// segments are ignored). Relative paths, `.` and `..`, UNC and volume GUID paths and
+    /// segments with control characters or `<>:"|?*` yield `InvalidPath` (same in `win` and
+    /// `fake`). A non-allowlisted reparse tag on the opened directory itself yields
+    /// `ReparsePoint`.
     ///
     /// Only `policy::root` and `sys::snapshot` call this (ADR 0007).
     fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn Dir + '_>>;

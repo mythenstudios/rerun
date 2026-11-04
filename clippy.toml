@@ -5,7 +5,7 @@ allow-expect-in-tests = true
 # rerun_core::policy::root (ADR 0007). Exceptions via
 # #[expect(clippy::disallowed_methods, reason = "...")] so a stale exception warns:
 # policy::root::open_abs, sys::snapshot::snapshot, contract and test code, sys::win and
-# rerun-launch.
+# rerun-launch. NtCreateFile has exactly two exceptions, in sys::win::nt.
 disallowed-methods = [
   { path = "std::fs::write", reason = "filesystem access only through sys::Fs" },
   { path = "std::fs::remove_file", reason = "filesystem access only through sys::Fs" },
@@ -50,5 +50,45 @@ disallowed-methods = [
   { path = "std::path::Path::read_link", reason = "read files only through a root handle (ADR 0007)" },
   { path = "std::path::Path::canonicalize", reason = "read files only through a root handle (ADR 0007)" },
   { path = "std::env::set_current_dir", reason = "never resolve relative paths via the working directory" },
+  # ADR 0007: path-based Win32 file APIs resolve the path at call time (TOCTOU); sys::win is
+  # handle-relative only. allow-invalid: windows-sys is a Windows-only dependency.
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateFileW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateFileA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateFile2", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::OpenFileById", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::FindFirstFileW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::FindFirstFileExW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::GetFileAttributesW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::GetFileAttributesExW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::SetFileAttributesW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::DeleteFileW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::RemoveDirectoryW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateDirectoryW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateDirectoryExW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::MoveFileW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::MoveFileExW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::MoveFileWithProgressW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::ReplaceFileW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CopyFileW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CopyFileExW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CopyFile2", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateHardLinkW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateSymbolicLinkW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::GetFullPathNameW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::GetLongPathNameW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::GetShortPathNameW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::GetCompressedFileSizeW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Security::GetFileSecurityW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Security::SetFileSecurityW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::SetVolumeMountPointW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::DeleteVolumeMountPointW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::DefineDosDeviceW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Environment::SetCurrentDirectoryW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  # NtCreateFile only through sys::win::nt::{open_relative, open_absolute_dir}; NtOpenFile never.
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", reason = "only via sys::win::nt::{open_relative, open_absolute_dir} (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtOpenFile", reason = "use sys::win::nt::{open_relative, open_absolute_dir} (ADR 0007)", allow-invalid = true },
   { path = "std::process::Command::new", reason = "processes only through sys::Process" },
 ]
