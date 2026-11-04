@@ -90,6 +90,14 @@ pub fn fs_read_contract(sys: &dyn System, work: &Path) -> ContractResult {
         "final_path is a drive-letter path",
     )?;
     ensure(!info.case_sensitive, "work dir is case-insensitive")?;
+    ensure(!info.volume_root, "work dir is not a volume root")?;
+    if let Some(drive_root) = work.ancestors().last() {
+        let d = ok(sys.fs().open_dir(drive_root), "open drive root")?;
+        ensure(
+            ok(d.info(), "drive root info")?.volume_root,
+            "drive root is a volume root",
+        )?;
+    }
     let again = ok(
         ok(sys.fs().open_dir(work), "open work dir again")?.info(),
         "info again",

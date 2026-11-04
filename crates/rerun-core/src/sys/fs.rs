@@ -136,6 +136,10 @@ pub struct RootInfo {
     pub user_writable: bool,
     /// The directory is case-sensitive (`FILE_CASE_SENSITIVE_DIR`); writes are refused.
     pub case_sensitive: bool,
+    /// The directory is the root of a volume: a drive root or a volume mounted in a folder
+    /// (`sys::win`: `FileNameInformation` of the handle is `\`). A fact, not a rule:
+    /// `policy::root` refuses such roots.
+    pub volume_root: bool,
     /// File system of the volume.
     pub fs_kind: FsKind,
     /// The volume supports POSIX rename semantics (`FILE_RENAME_FLAG_POSIX_SEMANTICS`).

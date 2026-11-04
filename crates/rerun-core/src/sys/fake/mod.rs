@@ -229,6 +229,15 @@ impl FakeSystemBuilder {
         })
     }
 
+    /// Directory that is the root of a volume mounted in a folder (no drive letter).
+    pub fn mounted_volume(self, path: impl AsRef<Path>) -> Self {
+        let p = path.as_ref();
+        self.step(|s| {
+            s.fs.mkdir_all(p)?;
+            s.fs.set_volume_root(p)
+        })
+    }
+
     /// Registry key including missing parents.
     pub fn key(self, key: RegKey) -> Self {
         self.step(move |s| s.registry.create_key_all(&key))

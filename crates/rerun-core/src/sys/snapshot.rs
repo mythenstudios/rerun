@@ -441,6 +441,7 @@ mod tests {
                 file_id: 1,
                 user_writable: true,
                 case_sensitive: false,
+                volume_root: false,
                 fs_kind: crate::sys::fs::FsKind::Ntfs,
                 supports_posix_rename: true,
             })

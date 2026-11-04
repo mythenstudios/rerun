@@ -26,6 +26,8 @@
 //!   lexically (at most 32 levels) and follows directory and file links alike.
 //! - Allowlisted data tags (WOF, dedup, cloud) only mark the entry: content is read directly,
 //!   there is no hydration and no reopen without `FILE_OPEN_REPARSE_POINT`.
+//! - A volume mounted in a folder ([`FakeFs::set_volume_root`]) is a plain directory that
+//!   reports `volume_root`; it has the volume serial of its drive and is not a mount point.
 //! - Volumes: the file system is NTFS unless set with [`FakeFs::set_fs_kind`]; it only
 //!   changes what [`RootInfo`] reports, not the behaviour.
 //! - `remove_file` removes any reparse point (file or directory link, like a handle-based
@@ -111,6 +113,8 @@ struct DirData {
     attrs: Attrs,
     case_sensitive: bool,
     user_writable: bool,
+    /// Root directory of a volume (drive root or a volume mounted in a folder).
+    volume_root: bool,
     /// Non-surrogate reparse tag (e.g. a cloud files folder).
     tag: Option<u32>,
 }
@@ -122,6 +126,7 @@ impl DirData {
             attrs: Attrs::default(),
             case_sensitive: false,
             user_writable,
+            volume_root: false,
             tag: None,
         }
     }
@@ -249,12 +254,14 @@ impl State {
             return id;
         }
         let id = self.alloc();
+        let mut root = DirData::new(true);
+        root.volume_root = true;
         self.nodes.insert(
             id,
             Node {
                 parent: None,
                 name: format!("{drive}:"),
-                body: Body::Dir(DirData::new(true)),
+                body: Body::Dir(root),
             },
         );
         self.drives.insert(drive, id);
@@ -869,6 +876,16 @@ impl FakeFs {
         Ok(())
     }
 
+    /// Marks an existing directory as the root of a volume mounted in a folder. The fake
+    /// keeps the volume serial and file system of the drive it lives on.
+    pub fn set_volume_root(&self, abs: &Path) -> SysResult<()> {
+        let shown = abs.display().to_string();
+        let mut st = self.lock();
+        let id = st.require_abs(abs)?;
+        st.dir_mut(id, &shown)?.volume_root = true;
+        Ok(())
+    }
+
     /// Attacker: atomically renames the entry at `abs` to a hidden sibling name and puts a
     /// junction to `target` in its place. Returns the hidden name.
     pub fn swap_with_junction(&self, abs: &Path, target: &str) -> SysResult<String> {
@@ -1004,6 +1021,7 @@ impl Dir for FakeDir {
             file_id: u128::from(self.node),
             user_writable: d.user_writable,
             case_sensitive: d.case_sensitive,
+            volume_root: d.volume_root,
             fs_kind,
             supports_posix_rename: matches!(fs_kind, FsKind::Ntfs | FsKind::Refs),
         })

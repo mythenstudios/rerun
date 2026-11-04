@@ -1264,3 +1264,20 @@ fn broken_fixture_is_an_error() {
         .build();
     assert!(err.is_err());
 }
+
+#[test]
+fn volume_roots_are_reported() {
+    let sys = FakeSystem::builder()
+        .mounted_volume(r"D:\Mounts\Data")
+        .dir(r"D:\Mounts\Data\Games")
+        .build()
+        .unwrap();
+    let is_root = |abs: &str| open(&sys, abs).info().unwrap().volume_root;
+    assert!(is_root(r"D:\"));
+    assert!(is_root(r"D:\Mounts\Data"));
+    assert!(!is_root(r"D:\Mounts"));
+    assert!(!is_root(r"D:\Mounts\Data\Games"));
+    let mounts = open(&sys, r"D:\Mounts");
+    let data = mounts.open_dir(&r("data")).unwrap();
+    assert!(data.info().unwrap().volume_root, "also via a relative open");
+}
