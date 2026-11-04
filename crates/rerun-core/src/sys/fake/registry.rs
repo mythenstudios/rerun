@@ -343,4 +343,9 @@ impl RegFixture for FakeRegistry {
     fn link(&self, _link: &RegKey, _target: &RegKey) -> SysResult<bool> {
         Ok(false)
     }
+
+    fn large(&self, k: &RegKey, name: &str, len: usize) -> SysResult<bool> {
+        self.set(k, name, &RegValue::Binary(vec![7; len]))?;
+        Ok(true)
+    }
 }

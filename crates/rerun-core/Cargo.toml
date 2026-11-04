@@ -22,11 +22,14 @@ sha2.workspace = true
 serde_json.workspace = true
 
 # sys::win (ADR 0008): NT file APIs, final path, volume info, reparse data, AccessCheck;
-# known folders (ADR 0009): SHGetKnownFolderPath, CoTaskMemFree, GetSystemWindowsDirectoryW.
+# known folders (ADR 0009): SHGetKnownFolderPath, CoTaskMemFree, GetSystemWindowsDirectoryW;
+# registry (ADR 0009): RegOpenCurrentUser, RegOpenKeyExW, RegEnumKeyExW, RegQueryInfoKeyW,
+# NtQueryValueKey, NtEnumerateValueKey.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
   "Wdk_Foundation",
   "Wdk_Storage_FileSystem",
+  "Wdk_System_Registry",
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Security_Authorization",
@@ -34,6 +37,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_Com",
   "Win32_System_IO",
   "Win32_System_Ioctl",
+  "Win32_System_Registry",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_UI_Shell",
@@ -44,14 +48,11 @@ jsonschema.workspace = true
 serde-saphyr.workspace = true
 
 # Test only: lets sys::win::bans reference every banned windows-sys item (clippy.toml), so a
-# dead ban entry fails clippy; Win32_System_Registry for the test-only HKLM reader in
-# sys::win::testfx (until sys::win has its registry). Features of the existing dependency,
-# no new crate.
+# dead ban entry fails clippy. Features of the existing dependency, no new crate.
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { workspace = true, features = [
   "Wdk_System_SystemServices",
   "Win32_System_Environment",
-  "Win32_System_Registry",
 ] }
 
 [lints]

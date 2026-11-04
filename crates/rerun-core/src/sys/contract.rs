@@ -1963,6 +1963,10 @@ pub trait RegFixture: Sync {
     /// Creates `link` as a symbolic-link key to the existing key `target` (same hive and
     /// view). `Ok(false)` = not available.
     fn link(&self, link: &RegKey, target: &RegKey) -> SysResult<bool>;
+    /// Stores the value `name` of the existing key `k` as `REG_BINARY` of `len` bytes (each
+    /// `7`). `Ok(false)` = the registry cannot hold one value that large (Windows refuses more
+    /// than 1,048,572 bytes, below [`MAX_VALUE_BYTES`]).
+    fn large(&self, k: &RegKey, name: &str, len: usize) -> SysResult<bool>;
 }
 
 fn sz_bytes(s: &str) -> Vec<u8> {
@@ -2030,6 +2034,8 @@ fn decode_cases() -> Vec<DecodeCase> {
         ),
         ("sz_zero_length", REG_SZ, vec![], None),
         ("sz_odd_length", REG_SZ, vec![b'a', 0, 0], None),
+        // RegQueryValueExW zeroes the last byte of this one (ADR 0009).
+        ("sz_odd_tail", REG_SZ, vec![b'a', 0, b'b'], None),
         ("sz_no_nul", REG_SZ, units_bytes(&[0x61, 0x62]), None),
         ("sz_two_nuls", REG_SZ, units_bytes(&[0x61, 0, 0]), None),
         (
@@ -2139,7 +2145,9 @@ fn decode_cases() -> Vec<DecodeCase> {
 /// that the other view sees the same data. The redirection itself is pinned by
 /// [`registry_system_contract`].
 ///
-/// Skipped cases: `"key_link"` (no symbolic-link keys).
+/// Skipped cases: `"key_link"` (no symbolic-link keys), `"value_at_limit"` and
+/// `"value_over_limit"` (the registry cannot hold one value of [`MAX_VALUE_BYTES`] or more;
+/// Windows stops at 1,048,572 bytes).
 pub fn registry_read_contract(
     reg: &dyn Registry,
     fx: &dyn RegFixture,
@@ -2416,64 +2424,74 @@ pub fn registry_read_contract(
     let blob = |n: usize| vec![7_u8; n];
     let big = root.join("Big");
     ok(fx.key(&big), "fixture: Big")?;
+    // Half the limit: far above any first buffer, so reads must grow theirs.
+    let half = MAX_VALUE_BYTES / 2;
     ok(
-        fx.raw(&big, "ok", reg_type::REG_BINARY, &blob(MAX_VALUE_BYTES)),
-        "fixture: 1 MiB",
+        fx.raw(&big, "half", reg_type::REG_BINARY, &blob(half)),
+        "fixture: half of the value limit",
     )?;
     ensure(
-        ok(reg.get(&big, "ok"), "get 1 MiB")?.is_some(),
-        "a value of 1 MiB is returned",
+        ok(reg.get(&big, "half"), "get half")? == Some(RegValue::Binary(blob(half))),
+        "a value of half the limit is returned exactly",
     )?;
-    ensure(
-        ok(reg.values(&big), "values with 1 MiB")?.len() == 1,
-        "values with a value of 1 MiB",
-    )?;
-    ok(
-        fx.raw(
-            &big,
-            "over",
-            reg_type::REG_BINARY,
-            &blob(MAX_VALUE_BYTES + 1),
-        ),
-        "fixture: 1 MiB + 1",
-    )?;
-    err_kind(
-        reg.get(&big, "over"),
-        SysErrorKind::Unsupported,
-        "get of a value over 1 MiB",
-    )?;
-    err_kind(
-        reg.values(&big),
-        SysErrorKind::Unsupported,
-        "values with a value over 1 MiB",
-    )?;
-    ensure(
-        ok(reg.get(&big, "ok"), "get after refusal")?.is_some(),
-        "other values stay readable",
-    )?;
-    ok(fx.delete_value(&big, "over"), "fixture: delete over")?;
-    ensure(
-        ok(reg.values(&big), "values after the large value is gone")?.len() == 1,
-        "values works again",
-    )?;
+    if ok(
+        fx.large(&big, "at", MAX_VALUE_BYTES),
+        "fixture: value at the limit",
+    )? {
+        ensure(
+            ok(reg.get(&big, "at"), "get at the limit")?.is_some(),
+            "a value at the limit is returned",
+        )?;
+        ensure(
+            ok(reg.values(&big), "values with a value at the limit")?.len() == 2,
+            "values with a value at the limit",
+        )?;
+    } else {
+        skip(&mut skips, "value_at_limit");
+    }
+    if ok(
+        fx.large(&big, "over", MAX_VALUE_BYTES + 1),
+        "fixture: value over the limit",
+    )? {
+        err_kind(
+            reg.get(&big, "over"),
+            SysErrorKind::Unsupported,
+            "get of a value over the limit",
+        )?;
+        err_kind(
+            reg.values(&big),
+            SysErrorKind::Unsupported,
+            "values with a value over the limit",
+        )?;
+        ensure(
+            ok(reg.get(&big, "half"), "get after refusal")?.is_some(),
+            "other values stay readable",
+        )?;
+        ok(fx.delete_value(&big, "over"), "fixture: delete over")?;
+        ensure(
+            ok(reg.values(&big), "values after the large value is gone")?
+                .iter()
+                .all(|(n, _)| n != "over"),
+            "values works again",
+        )?;
+    } else {
+        skip(&mut skips, "value_over_limit");
+    }
 
+    // The total: values of half the value limit (which every registry can hold) up to exactly
+    // the limit, then one byte more.
     let total = root.join("Total");
     ok(fx.key(&total), "fixture: Total")?;
-    let sixteen = MAX_VALUES_TOTAL_BYTES / MAX_VALUE_BYTES;
-    for i in 0..sixteen {
+    let parts = MAX_VALUES_TOTAL_BYTES / half;
+    for i in 0..parts {
         ok(
-            fx.raw(
-                &total,
-                &format!("v{i}"),
-                reg_type::REG_BINARY,
-                &blob(MAX_VALUE_BYTES),
-            ),
-            "fixture: 16 MiB in total",
+            fx.raw(&total, &format!("v{i}"), reg_type::REG_BINARY, &blob(half)),
+            "fixture: the total limit",
         )?;
     }
     ensure(
-        ok(reg.values(&total), "values with 16 MiB")?.len() == sixteen,
-        "values with 16 MiB in total",
+        ok(reg.values(&total), "values at the total limit")?.len() == parts,
+        "values with exactly the total limit",
     )?;
     ok(
         fx.raw(&total, "one more", reg_type::REG_BINARY, &[1]),
@@ -2482,7 +2500,7 @@ pub fn registry_read_contract(
     err_kind(
         reg.values(&total),
         SysErrorKind::Unsupported,
-        "values over 16 MiB in total",
+        "values over the total limit",
     )?;
 
     let many = root.join("Many");

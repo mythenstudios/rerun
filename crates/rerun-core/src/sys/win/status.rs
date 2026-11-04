@@ -1,4 +1,5 @@
-//! Mapping of `NTSTATUS` and Win32 error codes to [`SysErrorKind`]. Pure, no I/O.
+//! Mapping of `NTSTATUS` and Win32 error codes (file and registry calls) to [`SysErrorKind`].
+//! Pure, no I/O.
 //!
 //! Every error carries its original code (`SysError::ntstatus` or `SysError::win32`), so the
 //! kind is a classification for callers, never a loss of information.
@@ -16,6 +17,8 @@ const fn st(v: u32) -> NtStatus {
 pub(super) const STATUS_SUCCESS: NtStatus = 0;
 pub(super) const STATUS_BUFFER_OVERFLOW: NtStatus = st(0x8000_0005);
 pub(super) const STATUS_NO_MORE_FILES: NtStatus = st(0x8000_0006);
+pub(super) const STATUS_NO_MORE_ENTRIES: NtStatus = st(0x8000_001A);
+pub(super) const STATUS_OBJECT_NAME_NOT_FOUND: NtStatus = st(0xC000_0034);
 pub(super) const STATUS_UNSUCCESSFUL: NtStatus = st(0xC000_0001);
 pub(super) const STATUS_INFO_LENGTH_MISMATCH: NtStatus = st(0xC000_0004);
 pub(super) const STATUS_INVALID_PARAMETER: NtStatus = st(0xC000_000D);
@@ -107,6 +110,44 @@ pub(super) fn win32_error(code: u32, target: &str) -> SysError {
     SysError::new(kind_of_win32(code), target).with_win32(code)
 }
 
+/// Classifies a Win32 error code of a registry call (ADR 0009). Narrower than
+/// [`kind_of_win32`]: the input rules run first, so `ERROR_INVALID_PARAMETER` is an invalid
+/// path, and everything not listed is `Other` (with the code attached).
+pub(super) fn kind_of_reg(code: u32) -> SysErrorKind {
+    match code {
+        // FILE_NOT_FOUND, PATH_NOT_FOUND, KEY_DELETED
+        2 | 3 | 1018 => SysErrorKind::NotFound,
+        // ACCESS_DENIED
+        5 => SysErrorKind::AccessDenied,
+        // FILENAME_EXCED_RANGE, INVALID_PARAMETER
+        206 | 87 => SysErrorKind::InvalidPath,
+        _ => SysErrorKind::Other,
+    }
+}
+
+/// Classifies an `NTSTATUS` of a registry value call (ADR 0009), like [`kind_of_reg`].
+pub(super) fn kind_of_reg_ntstatus(status: NtStatus) -> SysErrorKind {
+    match status.cast_unsigned() {
+        // OBJECT_NAME_NOT_FOUND, OBJECT_PATH_NOT_FOUND, KEY_DELETED
+        0xC000_0034 | 0xC000_003A | 0xC000_017C => SysErrorKind::NotFound,
+        // ACCESS_DENIED
+        0xC000_0022 => SysErrorKind::AccessDenied,
+        // INVALID_PARAMETER, OBJECT_NAME_INVALID
+        0xC000_000D | 0xC000_0033 => SysErrorKind::InvalidPath,
+        _ => SysErrorKind::Other,
+    }
+}
+
+/// `SysError` from the `NTSTATUS` of a registry value call, with the status attached.
+pub(super) fn reg_nt_error(status: NtStatus, target: &str) -> SysError {
+    SysError::new(kind_of_reg_ntstatus(status), target).with_ntstatus(status)
+}
+
+/// `SysError` from the Win32 error code of a registry call, with the code attached.
+pub(super) fn reg_error(code: u32, target: &str) -> SysError {
+    SysError::new(kind_of_reg(code), target).with_win32(code)
+}
+
 /// `SysError` from a Win32 error code of an information-class query.
 pub(super) fn win32_info_error(code: u32, target: &str) -> SysError {
     SysError::new(kind_of_win32_info(code), target).with_win32(code)
@@ -184,6 +225,47 @@ mod tests {
         }
         assert_eq!(kind_of_win32_info(87), SysErrorKind::Unsupported);
         assert_eq!(kind_of_win32_info(5), SysErrorKind::AccessDenied);
+    }
+
+    #[test]
+    fn registry_table() {
+        let cases: &[(u32, SysErrorKind)] = &[
+            (2, SysErrorKind::NotFound),
+            (3, SysErrorKind::NotFound),
+            (1018, SysErrorKind::NotFound),
+            (5, SysErrorKind::AccessDenied),
+            (206, SysErrorKind::InvalidPath),
+            (87, SysErrorKind::InvalidPath),
+            // Not mapped for the registry, unlike files: Other with the code.
+            (32, SysErrorKind::Other),
+            (123, SysErrorKind::Other),
+            (234, SysErrorKind::Other),
+            (1, SysErrorKind::Other),
+            (6, SysErrorKind::Other),
+        ];
+        for &(code, kind) in cases {
+            assert_eq!(kind_of_reg(code), kind, "{code}");
+        }
+        let e = reg_error(1018, "k");
+        assert_eq!((e.kind, e.win32), (SysErrorKind::NotFound, Some(1018)));
+        let nt: &[(u32, SysErrorKind)] = &[
+            (0xC000_0034, SysErrorKind::NotFound),
+            (0xC000_003A, SysErrorKind::NotFound),
+            (0xC000_017C, SysErrorKind::NotFound),
+            (0xC000_0022, SysErrorKind::AccessDenied),
+            (0xC000_000D, SysErrorKind::InvalidPath),
+            (0xC000_0033, SysErrorKind::InvalidPath),
+            (0xC000_0004, SysErrorKind::Other),
+            (0xC000_0043, SysErrorKind::Other),
+        ];
+        for &(code, kind) in nt {
+            assert_eq!(kind_of_reg_ntstatus(st(code)), kind, "{code:#010x}");
+        }
+        let e = reg_nt_error(st(0xC000_017C), "k");
+        assert_eq!(
+            (e.kind, e.ntstatus, e.win32),
+            (SysErrorKind::NotFound, Some(st(0xC000_017C)), None)
+        );
     }
 
     #[test]

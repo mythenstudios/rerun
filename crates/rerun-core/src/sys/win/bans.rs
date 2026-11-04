@@ -462,6 +462,571 @@ fn banned_windows_sys_items_resolve() {
     let _ = windows_sys::Win32::System::Environment::ExpandEnvironmentStringsForUserA;
 }
 
+/// The registry bans (ADR 0009) the same way.
+#[test]
+fn banned_registry_items_resolve() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegOpenCurrentUser must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegOpenCurrentUser;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegOpenKeyExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegOpenKeyExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegEnumKeyExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegEnumKeyExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegQueryInfoKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegQueryInfoKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtQueryValueKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtQueryValueKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtEnumerateValueKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtEnumerateValueKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwQueryValueKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwQueryValueKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwEnumerateValueKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwEnumerateValueKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegQueryValueExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegQueryValueExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegEnumValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegEnumValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegGetValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegGetValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegQueryMultipleValuesW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegQueryMultipleValuesW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegGetValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegGetValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegOpenKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegOpenKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegOpenKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegOpenKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegOpenKeyExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegOpenKeyExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegQueryValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegQueryValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegQueryValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegQueryValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegQueryValueExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegQueryValueExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegEnumKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegEnumKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegEnumKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegEnumKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegEnumKeyExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegEnumKeyExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegEnumValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegEnumValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegQueryInfoKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegQueryInfoKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegQueryMultipleValuesA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegQueryMultipleValuesA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegLoadMUIStringW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegLoadMUIStringW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegLoadMUIStringA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegLoadMUIStringA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegCreateKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegCreateKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegCreateKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegCreateKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegCreateKeyExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegCreateKeyExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegCreateKeyExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegCreateKeyExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSetValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSetValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSetValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSetValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSetValueExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSetValueExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSetValueExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSetValueExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSetKeyValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSetKeyValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSetKeyValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSetKeyValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteKeyExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteKeyExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteKeyExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteKeyExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteKeyValueW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteKeyValueW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteKeyValueA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteKeyValueA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteTreeW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteTreeW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteTreeA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteTreeA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegCopyTreeW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegCopyTreeW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegCopyTreeA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegCopyTreeA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegRenameKey must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegRenameKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSetKeySecurity must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSetKeySecurity;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtCreateKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtCreateKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwCreateKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwCreateKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtSetValueKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtSetValueKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwSetValueKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwSetValueKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtDeleteKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtDeleteKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwDeleteKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwDeleteKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtDeleteValueKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtDeleteValueKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwDeleteValueKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwDeleteValueKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtRenameKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtRenameKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwRenameKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwRenameKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtSetInformationKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtSetInformationKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwSetInformationKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwSetInformationKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegOverridePredefKey must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegOverridePredefKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDisablePredefinedCache must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDisablePredefinedCache;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDisablePredefinedCacheEx must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDisablePredefinedCacheEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegConnectRegistryW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegConnectRegistryW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegConnectRegistryA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegConnectRegistryA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegConnectRegistryExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegConnectRegistryExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegConnectRegistryExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegConnectRegistryExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegLoadKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegLoadKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegLoadKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegLoadKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegUnLoadKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegUnLoadKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegUnLoadKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegUnLoadKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegLoadAppKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegLoadAppKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegLoadAppKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegLoadAppKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSaveKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSaveKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSaveKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSaveKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSaveKeyExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSaveKeyExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegSaveKeyExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegSaveKeyExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegRestoreKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegRestoreKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegRestoreKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegRestoreKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegReplaceKeyW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegReplaceKeyW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegReplaceKeyA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegReplaceKeyA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDisableReflectionKey must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDisableReflectionKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegEnableReflectionKey must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegEnableReflectionKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegCreateKeyTransactedW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegCreateKeyTransactedW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegCreateKeyTransactedA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegCreateKeyTransactedA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegOpenKeyTransactedW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegOpenKeyTransactedW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegOpenKeyTransactedA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegOpenKeyTransactedA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteKeyTransactedW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteKeyTransactedW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegDeleteKeyTransactedA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegDeleteKeyTransactedA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtCreateKeyTransacted must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtCreateKeyTransacted;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwCreateKeyTransacted must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwCreateKeyTransacted;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtOpenKeyTransacted must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtOpenKeyTransacted;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwOpenKeyTransacted must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwOpenKeyTransacted;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtOpenKeyTransactedEx must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtOpenKeyTransactedEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwOpenKeyTransactedEx must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwOpenKeyTransactedEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtCreateRegistryTransaction must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtCreateRegistryTransaction;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwCreateRegistryTransaction must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwCreateRegistryTransaction;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtCommitRegistryTransaction must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtCommitRegistryTransaction;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwCommitRegistryTransaction must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwCommitRegistryTransaction;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtRollbackRegistryTransaction must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtRollbackRegistryTransaction;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwRollbackRegistryTransaction must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwRollbackRegistryTransaction;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtOpenRegistryTransaction must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtOpenRegistryTransaction;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwOpenRegistryTransaction must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwOpenRegistryTransaction;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtRestoreKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtRestoreKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwRestoreKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwRestoreKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtSaveKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtSaveKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwSaveKey must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwSaveKey;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtSaveKeyEx must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::NtSaveKeyEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwSaveKeyEx must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::Registry::ZwSaveKeyEx;
+}
+
 /// The `std::env` bans (ADR 0009) the same way: a ban that stops matching (a renamed or
 /// moved item) becomes an unfulfilled expectation.
 #[test]

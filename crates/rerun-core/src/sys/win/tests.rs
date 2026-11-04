@@ -1,8 +1,11 @@
-//! Tests of the read-only `sys::win` file system on the developer's own volume and on GitHub
-//! runners: smoke tests and the `sys::contract` file system contracts against real Windows.
+//! Tests of the read-only `sys::win` on the developer's own machine and on GitHub runners:
+//! smoke tests and the `sys::contract` file system, registry and known-folder contracts against
+//! real Windows.
 //!
-//! Every test works in a fresh [`TestRoot`] below the cargo `target/` directory (safeguards in
-//! `docs/09-testing.md`); a locally elevated process skips them.
+//! Every test that sets up data works in a fresh [`TestRoot`] below the cargo `target/`
+//! directory (safeguards in `docs/09-testing.md`), registry data in a private app hive inside
+//! one ([`HiveRoot`]); a locally elevated process skips them. The registry system contract and
+//! the known-folder contract only read the real system.
 
 #![expect(
     clippy::disallowed_methods,
@@ -11,17 +14,20 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::WinFs;
-use super::testfx::{NaiveFs, TestRoot, hosted_ci, note, workflow_warning};
+use super::testfx::{HiveRoot, NaiveFs, TestRoot, hosted_ci, note, workflow_warning};
+use super::{WinFs, WinKnownFolders, WinRegistry};
 use crate::path::RelPath;
 use crate::sys::SysErrorKind;
 use crate::sys::contract::{
-    FsContractResult, FsFixture, fs_link_read_contract, fs_race_contract, fs_read_contract,
-    fs_volume_contract,
+    FsContractResult, FsFixture, RegFixture, fs_link_read_contract, fs_race_contract,
+    fs_read_contract, fs_volume_contract, known_folders_contract, registry_read_contract,
+    registry_system_contract,
 };
 use crate::sys::fs::{EntryKind, Fs};
+use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
 
 /// A [`TestRoot`] for the smoke tests; `.0` is its verbatim path (`\\?\X:\…`), as
 /// `final_path` reports it.
@@ -469,4 +475,218 @@ fn cleanup_never_follows_a_junction() {
         assert!(!gone.exists(), "{} was not removed", gone.display());
     }
     assert_eq!(std::fs::read(&canary).unwrap(), b"canary");
+}
+
+// ---------- Registry against real Windows ----------
+
+/// Runs the registry read contract in a fresh app hive (one per run: the contract deletes
+/// nothing and leaves about 17 MiB, 16,385 values and 65,537 subkeys behind) at `root`, which
+/// lies outside `SOFTWARE`, and reports the duration.
+fn registry_read_run(case: &str, root: &RegKey) {
+    let Some(h) = HiveRoot::new(case) else {
+        return;
+    };
+    h.hive.key(root).unwrap();
+    let started = Instant::now();
+    let skips = registry_read_contract(&h.registry, &h.hive, root)
+        .unwrap_or_else(|e| panic!("{case}: {e}"));
+    note(&format!(
+        "note: {case}: registry_read_contract took {:?}",
+        started.elapsed()
+    ));
+    for s in skips {
+        if hosted_ci() && s != "key_link" {
+            panic!("{case}: {s} skipped on a GitHub runner");
+        }
+        note(&format!("note: {case}: skipped {s} (not available)"));
+    }
+    drop(h);
+}
+
+#[test]
+fn win_fulfils_registry_read_contract_hkcu_native() {
+    registry_read_run(
+        "reg-hkcu-native",
+        &RegKey::new(Hive::CurrentUser, RegView::Native, "RerunContract"),
+    );
+}
+
+#[test]
+fn win_fulfils_registry_read_contract_hkcu_wow32() {
+    registry_read_run(
+        "reg-hkcu-wow32",
+        &RegKey::new(Hive::CurrentUser, RegView::Wow32, "RerunContract"),
+    );
+}
+
+#[test]
+fn win_fulfils_registry_read_contract_hklm_native() {
+    registry_read_run(
+        "reg-hklm-native",
+        &RegKey::new(Hive::LocalMachine, RegView::Native, r"SYSTEM\RerunContract"),
+    );
+}
+
+#[test]
+fn win_fulfils_registry_read_contract_hklm_wow32() {
+    registry_read_run(
+        "reg-hklm-wow32",
+        &RegKey::new(Hive::LocalMachine, RegView::Wow32, r"SYSTEM\RerunContract"),
+    );
+}
+
+/// Read-only on the real registry: stable system keys, WOW64 views, a link, access errors.
+#[test]
+fn win_fulfils_registry_system_contract() {
+    let reg = Arc::new(WinRegistry::new().unwrap());
+    let kf = WinKnownFolders::new(reg.clone());
+    let skips = registry_system_contract(&*reg, &kf).unwrap_or_else(|e| panic!("{e}"));
+    for s in skips {
+        assert!(!hosted_ci(), "{s} skipped on a GitHub runner");
+        note(&format!("note: registry_system_contract: skipped {s}"));
+    }
+}
+
+#[test]
+fn win_fulfils_known_folders_contract() {
+    let kf = WinKnownFolders::new(Arc::new(WinRegistry::new().unwrap()));
+    known_folders_contract(&kf, &WinFs::new()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn win_registry_write_methods_are_unsupported() {
+    let Some(h) = HiveRoot::new("reg-read-only") else {
+        return;
+    };
+    let k = RegKey::new(Hive::CurrentUser, RegView::Native, "Existing");
+    h.hive.key(&k).unwrap();
+    h.hive
+        .raw(&k, "v", reg_type::REG_DWORD, &[1, 0, 0, 0])
+        .unwrap();
+    let reg = &h.registry;
+    let new = k.join("New");
+    for (what, r) in [
+        ("create_key", reg.create_key(&new).map(drop)),
+        ("set", reg.set(&k, "v", &RegValue::Dword(2))),
+        ("set new", reg.set(&k, "w", &RegValue::Dword(2))),
+        ("delete_value", reg.delete_value(&k, "v")),
+        ("delete_key", reg.delete_key(&k)),
+    ] {
+        let e = r.expect_err(what);
+        assert_eq!(e.kind, SysErrorKind::Unsupported, "{what}");
+        assert!(e.target.contains("read-only in phase 1"), "{what}: {e}");
+    }
+    assert!(reg.key_exists(&k).unwrap());
+    assert!(!reg.key_exists(&new).unwrap());
+    assert_eq!(
+        reg.values(&k).unwrap(),
+        [("v".to_owned(), RegValue::Dword(1))]
+    );
+    // The input rules come first.
+    assert_eq!(
+        reg.create_key(&k.join("a\0b")).unwrap_err().kind,
+        SysErrorKind::InvalidPath
+    );
+}
+
+/// Pins what ADR 0009 leaves to real Windows (read-only): an explicit `WOW6432Node` in the
+/// 32-bit view is not redirected a second time, so it names the same key as the logical path
+/// (the fake models the same); and the 32-bit view of `HKLM\SOFTWARE` does not list
+/// `WOW6432Node` (a listed deviation of the fake). Callers never spell `WOW6432Node`.
+#[test]
+fn explicit_wow6432node_in_the_32_bit_view_is_the_same_key() {
+    let reg = WinRegistry::new().unwrap();
+    let lm = |v, p: &str| RegKey::new(Hive::LocalMachine, v, p);
+    let cv = r"Microsoft\Windows\CurrentVersion";
+    let logical = lm(RegView::Wow32, &format!(r"SOFTWARE\{cv}"));
+    let explicit = lm(RegView::Wow32, &format!(r"SOFTWARE\WOW6432Node\{cv}"));
+    let native = lm(RegView::Native, &format!(r"SOFTWARE\WOW6432Node\{cv}"));
+    let pf = |k: &RegKey| reg.get(k, "ProgramFilesDir").unwrap();
+    assert!(pf(&logical).is_some());
+    assert_eq!(pf(&explicit), pf(&logical));
+    assert_eq!(pf(&native), pf(&logical));
+    assert!(
+        !reg.key_exists(&lm(RegView::Wow32, r"SOFTWARE\WOW6432Node\WOW6432Node"))
+            .unwrap()
+    );
+    let listed = reg.subkeys(&lm(RegView::Wow32, "SOFTWARE")).unwrap();
+    assert!(
+        !listed.iter().any(|n| n.eq_ignore_ascii_case("WOW6432Node")),
+        "{listed:?}"
+    );
+}
+
+/// Enumerations under concurrent writes: every `values`/`subkeys` result is either complete and
+/// without duplicates, or `Busy` (the key kept changing); never another error, never a value
+/// read half-written.
+#[test]
+fn win_registry_enumerations_survive_concurrent_writes() {
+    let Some(h) = HiveRoot::new("reg-race") else {
+        return;
+    };
+    let k = RegKey::new(Hive::CurrentUser, RegView::Native, "Race");
+    h.hive.key(&k).unwrap();
+    for i in 0..64 {
+        h.hive
+            .raw(&k, &format!("base{i}"), reg_type::REG_BINARY, &[1; 64])
+            .unwrap();
+        h.hive.key(&k.join(&format!("sub{i}"))).unwrap();
+    }
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (mut ok, mut busy) = (0u32, 0u32);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut n = 0u32;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let name = format!("churn{}", n % 8);
+                // Sizes alternate, so a read can race a growing value.
+                let len = if n.is_multiple_of(2) { 16 } else { 4096 };
+                h.hive
+                    .raw(&k, &name, reg_type::REG_BINARY, &vec![2; len])
+                    .unwrap();
+                h.hive.key(&k.join(&format!("churn{n}"))).unwrap();
+                n = n.wrapping_add(1);
+            }
+        });
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(1) {
+            match h.registry.values(&k) {
+                Ok(list) => {
+                    let mut names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
+                    names.sort_unstable();
+                    let all = names.len();
+                    names.dedup();
+                    assert_eq!(names.len(), all, "duplicate value names");
+                    assert!(all >= 64);
+                    for (n, v) in &list {
+                        if n.starts_with("churn") {
+                            let RegValue::Binary(b) = v else {
+                                panic!("{n}: {v:?}")
+                            };
+                            assert!(b.len() == 16 || b.len() == 4096, "{n}: {}", b.len());
+                            assert!(b.iter().all(|x| *x == 2));
+                        }
+                    }
+                    ok += 1;
+                }
+                Err(e) if e.kind == SysErrorKind::Busy => busy += 1,
+                Err(e) => panic!("values: {e:?}"),
+            }
+            match h.registry.subkeys(&k) {
+                Ok(mut list) => {
+                    let all = list.len();
+                    list.sort_unstable();
+                    list.dedup();
+                    assert_eq!(list.len(), all, "duplicate subkey names");
+                    ok += 1;
+                }
+                Err(e) if e.kind == SysErrorKind::Busy => busy += 1,
+                Err(e) => panic!("subkeys: {e:?}"),
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    note(&format!(
+        "note: registry race: {ok} complete enumerations, {busy} Busy"
+    ));
 }

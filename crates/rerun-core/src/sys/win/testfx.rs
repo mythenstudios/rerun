@@ -13,8 +13,9 @@
 //!   must lie inside the root, without `.`/`..`, below no reparse point and no mount point.
 //! - [`NaiveFs`]: a deliberately unsafe check-then-use-by-path `Fs` (check each prefix with
 //!   `symlink_metadata`, yield, then act on the full path). The race contract must catch it.
-//! - [`HklmRegistry`]: a read-only `Registry` for `HKLM` string values (`RegGetValueW` with
-//!   `RRF_NOEXPAND`), the registry of `WinKnownFolders` in tests until `sys::win` has its own.
+//! - [`AppHive`]: a private registry hive (`RegLoadAppKeyW`) in a file inside a [`TestRoot`],
+//!   the [`RegFixture`] of the registry read contract; [`HiveRoot`] bundles it with its root
+//!   and a [`WinRegistry`] on it. Raw writes go only to that hive, never to `HKCU` or `HKLM`.
 //!
 //! Path-based Win32 and `std::fs` calls are the point of this module (they set the scene the
 //! handle-based `sys::win` has to survive), hence the module-wide `disallowed_methods`
@@ -24,12 +25,14 @@
     clippy::disallowed_methods,
     reason = "test fixture: sets up and removes the contract tree under target/ by path \
               (std::fs, MoveFileExW, CreateSymbolicLinkW, SetVolumeMountPointW, \
-              DefineDosDeviceW), and NaiveFs is a path-based control implementation"
+              DefineDosDeviceW), NaiveFs is a path-based control implementation, and the app \
+              hive is loaded (RegLoadAppKeyW) and written (RegCreateKeyExW, NtSetValueKey, \
+              RegDeleteValueW) only here"
 )]
 #![allow(
     unsafe_code,
     reason = "test-only FFI (junction buffer, DACLs, mount points, subst, short names, \
-              file IDs); every block has a SAFETY comment"
+              file IDs, app hive); every block has a SAFETY comment"
 )]
 
 use std::ffi::c_void;
@@ -45,6 +48,7 @@ use std::{ptr, thread};
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{FILE_OPEN, FILE_OPEN_REPARSE_POINT, NtCreateFile};
+use windows_sys::Wdk::System::Registry::{KeyNameInformation, NtQueryKey, NtSetValueKey};
 use windows_sys::Win32::Foundation::{
     ERROR_NOT_ALL_ASSIGNED, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LUID,
 };
@@ -76,21 +80,24 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::{FSCTL_SET_EXTERNAL_BACKING, FSCTL_SET_REPARSE_POINT};
 use windows_sys::Win32::System::Registry::{
-    HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_ANY,
-    RRF_SUBKEY_WOW6464KEY, RegGetValueW,
+    HKEY, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_READ, KEY_SET_VALUE, REG_BINARY,
+    REG_CREATED_NEW_KEY, REG_LINK, REG_OPTION_CREATE_LINK, REG_OPTION_NON_VOLATILE,
+    REG_PROCESS_APPKEY, RegCreateKeyExW, RegDeleteValueW, RegLoadAppKeyW,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetExitCodeProcess, OpenProcess, OpenProcessToken,
     OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
+use super::WinRegistry;
+use super::reg::OwnedKey;
 use super::status::kind_of_win32;
 use crate::path::RelPath;
-use crate::sys::contract::FsFixture;
+use crate::sys::contract::{FsFixture, RegFixture};
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, EntryKind, Fs, FsKind, Metadata, ReadSeek, ReparseInfo, RootInfo, tag,
 };
-use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry};
+use crate::sys::registry::{Hive, RegKey};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
 /// winbase.h `DRIVE_FIXED`.
@@ -624,8 +631,12 @@ fn reset_tree(dir: &Path) -> SysResult<()> {
 /// reparse point, from the listing) that passes the safeguards; its DACLs are reset through
 /// the owner right ([`reset_tree`]), the safeguards are checked again, then it is removed
 /// with the link-safe `remove_dir_all`. Roots of the current or a possibly live process are
-/// never touched. Failures are notes, never panics.
+/// never touched. Failures are notes, never panics. One cleaner at a time per process: tests
+/// create roots in parallel, and two cleaners on the same stale root would race (one sees the
+/// root half removed by the other).
 fn clean_stale(target: &Path, base: &Path) {
+    static CLEANING: Mutex<()> = Mutex::new(());
+    let _one = CLEANING.lock().unwrap_or_else(PoisonError::into_inner);
     let Ok(list) = std::fs::read_dir(base) else {
         return;
     };
@@ -1180,88 +1191,319 @@ impl FsFixture for WinFixture {
     }
 }
 
-// ---------- HklmRegistry ----------
+// ---------- App hive ----------
 
-/// Read-only stand-in for the real registry until `sys::win::WinRegistry` exists: `get` of a
-/// string value in `HKLM` (native view) with `RegGetValueW(RRF_NOEXPAND)`, every other method
-/// and hive `Unsupported`. Feeds `WinKnownFolders` its `ProfileList` values in tests.
-#[derive(Debug, Default, Clone, Copy)]
-pub(super) struct HklmRegistry;
+/// NT name prefix of every private app hive (`RegLoadAppKeyW`).
+const APP_HIVE_PREFIX: &str = r"\REGISTRY\A\";
+/// `KEY_NAME_INFORMATION` buffer in `u64`s: the longest key path plus the hive prefix, with
+/// room.
+const KEY_NAME_BUFFER_U64: usize = 9_000;
+/// winerror.h `ERROR_INSUFFICIENT_BUFFER`.
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+/// ntstatus.h `STATUS_INSUFFICIENT_RESOURCES`: what `NtSetValueKey` returns for a value over
+/// 1,048,572 bytes (`RegSetValueExW`: `ERROR_NO_SYSTEM_RESOURCES`).
+const STATUS_INSUFFICIENT_RESOURCES: i32 = 0xC000_009A_u32.cast_signed();
 
-/// Largest string value read (the `ProfileList` paths are far shorter).
-const HKLM_MAX_BYTES: usize = 2 * 32_768;
+/// A private registry hive in a file inside a [`TestRoot`] (ADR 0009, `docs/09-testing.md`):
+/// `RegLoadAppKeyW(…, REG_PROCESS_APPKEY)` needs no admin, is not visible in the global
+/// namespace and is unloaded when its last handle closes (also when the process dies).
+///
+/// It is the [`RegFixture`] of the registry read contract: every write goes through
+/// `RegCreateKeyExW` **relative to the hive key** (never `HKEY_CURRENT_USER` or
+/// `HKEY_LOCAL_MACHINE`), and every handle a write uses must, by its kernel name
+/// (`NtQueryKey(KeyNameInformation)`), lie below the hive key; otherwise the write is refused
+/// before any value is set. `Hive::CurrentUser` is the hive's key `HKCU`, `Hive::LocalMachine`
+/// its key `HKLM`; app hives apply no WOW64 redirection, so both views name the same key.
+pub(super) struct AppHive {
+    hive: OwnedKey,
+    /// Kernel name of the hive key (`\REGISTRY\A\{…}`).
+    name: String,
+    /// `None` if a symbolic-link key in this hive can be created and followed, else why not
+    /// (probed once at load, outside `HKCU` and `HKLM`).
+    no_links: Option<String>,
+}
 
-impl Registry for HklmRegistry {
-    fn key_exists(&self, k: &RegKey) -> SysResult<bool> {
-        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
+/// Kernel name of an open key (`\REGISTRY\…`).
+fn key_name(key: &OwnedKey) -> Result<String, u32> {
+    let mut buf = vec![0u64; KEY_NAME_BUFFER_U64];
+    let cap = u32::try_from(buf.len() * 8).unwrap_or(u32::MAX);
+    let mut got: u32 = 0;
+    // SAFETY: `key` is an open key handle kept alive by the borrow; `buf` is writable for `cap`
+    // bytes, 8-byte aligned as KEY_NAME_INFORMATION needs, and outlives the call; `got` is valid
+    // for a write.
+    let status = unsafe {
+        NtQueryKey(
+            key.raw(),
+            KeyNameInformation,
+            buf.as_mut_ptr().cast(),
+            cap,
+            &mut got,
+        )
+    };
+    if status != 0 {
+        return Err(status.cast_unsigned());
+    }
+    // Only the words the kernel wrote (`got` bytes).
+    let words = usize::try_from(got).unwrap_or(usize::MAX).div_ceil(8);
+    let bytes: Vec<u8> = buf
+        .iter()
+        .take(words)
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let len = bytes
+        .get(..4)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map_or(0, u32::from_le_bytes);
+    let len = usize::try_from(len).unwrap_or(usize::MAX);
+    let name = bytes
+        .get(4..4_usize.saturating_add(len))
+        .ok_or(ERROR_INSUFFICIENT_BUFFER)?;
+    let units: Vec<u16> = name
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    Ok(String::from_utf16_lossy(&units))
+}
+
+impl AppHive {
+    /// Loads (creating) the hive file `file`, which must lie inside a [`TestRoot`].
+    pub(super) fn load(file: &Path) -> SysResult<Self> {
+        let what = format!("app hive {}", file.display());
+        let w = wide(file);
+        let mut raw: HKEY = ptr::null_mut();
+        // SAFETY: `w` is NUL-terminated and outlives the call; `raw` is valid for a write and on
+        // success receives a new key handle that `OwnedKey` takes over below.
+        let rc =
+            unsafe { RegLoadAppKeyW(w.as_ptr(), &mut raw, KEY_ALL_ACCESS, REG_PROCESS_APPKEY, 0) };
+        if rc != 0 || raw.is_null() {
+            return Err(win32_err(rc, &what));
+        }
+        // SAFETY: `raw` was just returned by a successful RegLoadAppKeyW; nothing else owns or
+        // closes it.
+        let hive = unsafe { OwnedKey::from_raw(raw) };
+        let name = key_name(&hive).map_err(|c| win32_err(c, &what))?;
+        assert!(
+            name.len() > APP_HIVE_PREFIX.len()
+                && name.to_ascii_uppercase().starts_with(APP_HIVE_PREFIX),
+            "{what}: not an app hive: {name}"
+        );
+        let mut hive = Self {
+            hive,
+            name,
+            no_links: None,
+        };
+        hive.create("HKCU", KEY_READ, false)?;
+        hive.create("HKLM", KEY_READ, false)?;
+        hive.no_links = hive.probe_links().err();
+        Ok(hive)
     }
 
-    fn get(&self, k: &RegKey, name: &str) -> SysResult<Option<RegValue>> {
-        let shown = format!("{k} @ {name}");
-        if k.hive != Hive::LocalMachine || k.view != RegView::Native {
-            return Err(SysError::new(SysErrorKind::Unsupported, shown));
+    /// Creates the link `LinkProbe\Link` → `LinkProbe\Target` and opens it (which follows it).
+    fn probe_links(&self) -> Result<(), String> {
+        let target = r"LinkProbe\Target";
+        self.create(target, KEY_READ, false)
+            .map_err(|e| format!("probe target: {e} ({:?})", e.win32))?;
+        self.make_link(r"LinkProbe\Link", target)
+            .map_err(|e| format!("create: {e} ({:?})", e.win32))?;
+        self.create(r"LinkProbe\Link", KEY_READ, false)
+            .map(drop)
+            .map_err(|e| format!("follow: {e} ({:?})", e.win32))
+    }
+
+    /// Creates `link` (a new key) as a symbolic link to the hive path `target`.
+    fn make_link(&self, link: &str, target: &str) -> SysResult<()> {
+        let what = format!("app hive link {link} -> {target}");
+        let key = self.create(link, KEY_SET_VALUE, true)?;
+        // REG_LINK: the target's kernel name, UTF-16 without a terminating NUL.
+        let dest = format!(r"{}\{target}", self.name);
+        let data: Vec<u8> = dest.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        Self::set_raw(&key, "SymbolicLinkValue", REG_LINK, &data, &what)
+    }
+
+    /// A [`WinRegistry`] whose hives are this hive's keys `HKCU` and `HKLM` (read handles).
+    pub(super) fn registry(&self) -> SysResult<WinRegistry> {
+        Ok(WinRegistry::with_roots(
+            self.create("HKCU", KEY_READ, false)?,
+            self.create("HKLM", KEY_READ, false)?,
+        ))
+    }
+
+    /// Path of `k` inside the hive.
+    fn path_of(k: &RegKey) -> String {
+        let hive = match k.hive {
+            Hive::CurrentUser => "HKCU",
+            Hive::LocalMachine => "HKLM",
+        };
+        if k.path.is_empty() {
+            hive.to_owned()
+        } else {
+            format!(r"{hive}\{}", k.path)
         }
-        let path = wide(&k.path);
-        let value = wide(name);
-        let mut buf = vec![0u16; HKLM_MAX_BYTES / 2];
-        let mut size = u32::try_from(HKLM_MAX_BYTES).unwrap_or(u32::MAX);
-        let mut ty: REG_VALUE_TYPE = 0;
-        // SAFETY: `path` and `value` are NUL-terminated and outlive the call; `ty` and `size`
-        // are valid for writes; `buf` is writable for `size` bytes. HKEY_LOCAL_MACHINE is a
-        // predefined key that needs no closing.
+    }
+
+    /// `key` lies below the hive key (by its kernel name), else an error.
+    fn guard(&self, key: &OwnedKey, what: &str) -> SysResult<()> {
+        let name = key_name(key).map_err(|c| win32_err(c, what))?;
+        let inside = name
+            .get(..self.name.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(&self.name))
+            && name[self.name.len()..].starts_with('\\');
+        if inside {
+            Ok(())
+        } else {
+            Err(SysError::new(
+                SysErrorKind::Other,
+                format!(
+                    "{what}: handle {name} is outside the app hive {}",
+                    self.name
+                ),
+            ))
+        }
+    }
+
+    /// `RegCreateKeyExW(hive, path)` (opens an existing key, creates missing ones), guarded.
+    /// `link`: `path` must be new and becomes a symbolic-link key.
+    fn create(&self, path: &str, access: u32, link: bool) -> SysResult<OwnedKey> {
+        let what = format!("app hive key {path}");
+        let w = wide(path);
+        let mut raw: HKEY = ptr::null_mut();
+        let mut disposition: u32 = 0;
+        let (options, access) = if link {
+            (REG_OPTION_CREATE_LINK, access | KEY_CREATE_LINK)
+        } else {
+            (REG_OPTION_NON_VOLATILE, access)
+        };
+        // SAFETY: `self.hive` is the open hive key, kept alive by the borrow; `w` is
+        // NUL-terminated and outlives the call; class and security attributes are null; `raw`
+        // and `disposition` are valid for writes, and on success `raw` is a new key handle that
+        // `OwnedKey` takes over below.
         let rc = unsafe {
-            RegGetValueW(
-                HKEY_LOCAL_MACHINE,
-                path.as_ptr(),
-                value.as_ptr(),
-                RRF_RT_ANY | RRF_NOEXPAND | RRF_SUBKEY_WOW6464KEY,
-                &mut ty,
-                buf.as_mut_ptr().cast(),
-                &mut size,
+            RegCreateKeyExW(
+                self.hive.raw(),
+                w.as_ptr(),
+                0,
+                ptr::null(),
+                options,
+                access,
+                ptr::null(),
+                &mut raw,
+                &mut disposition,
             )
         };
-        match rc {
-            0 => {}
-            // FILE_NOT_FOUND: the key or the value is missing.
-            2 => return Ok(None),
-            code => return Err(win32_err(code, &shown)),
+        if rc != 0 || raw.is_null() {
+            return Err(win32_err(rc, &what));
         }
-        let units = usize::try_from(size).unwrap_or(0) / 2;
-        let mut s = &buf[..units.min(buf.len())];
-        while let [rest @ .., 0] = s {
-            s = rest;
+        // SAFETY: `raw` was just returned by a successful RegCreateKeyExW; nothing else owns or
+        // closes it.
+        let key = unsafe { OwnedKey::from_raw(raw) };
+        self.guard(&key, &what)?;
+        if link && disposition != REG_CREATED_NEW_KEY {
+            return Err(SysError::new(
+                SysErrorKind::AlreadyExists,
+                format!("{what}: a link must be a new key"),
+            ));
         }
-        let text = String::from_utf16(s)
-            .map_err(|_| SysError::new(SysErrorKind::Unsupported, shown.clone()))?;
-        match ty {
-            REG_SZ => Ok(Some(RegValue::String(text))),
-            REG_EXPAND_SZ => Ok(Some(RegValue::ExpandString(text))),
-            _ => Err(SysError::new(SysErrorKind::Unsupported, shown)),
+        Ok(key)
+    }
+
+    /// `NtSetValueKey` on a guarded key: stores exactly `kind` and `data`. Not
+    /// `RegSetValueExW`, which may extend a string-typed value by a NUL that follows the
+    /// caller's buffer in memory (found on Windows 11, 2026-11-04).
+    fn set_raw(key: &OwnedKey, name: &str, kind: u32, data: &[u8], what: &str) -> SysResult<()> {
+        let units: Vec<u16> = name.encode_utf16().collect();
+        let bytes = u16::try_from(units.len() * 2)
+            .map_err(|_| SysError::new(SysErrorKind::InvalidPath, what))?;
+        let us = UNICODE_STRING {
+            Length: bytes,
+            MaximumLength: bytes,
+            Buffer: units.as_ptr().cast_mut(),
+        };
+        let len = u32::try_from(data.len())
+            .map_err(|_| SysError::new(SysErrorKind::Unsupported, what))?;
+        // SAFETY: `key` is an open key with KEY_SET_VALUE, kept alive by the borrow; `us`
+        // describes `units` (exactly `bytes` bytes, read only) and `data` is readable for `len`
+        // bytes, both outlive the call.
+        let status = unsafe { NtSetValueKey(key.raw(), &us, 0, kind, data.as_ptr().cast(), len) };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(SysError::new(SysErrorKind::Other, what).with_ntstatus(status))
+        }
+    }
+}
+
+impl RegFixture for AppHive {
+    fn key(&self, k: &RegKey) -> SysResult<()> {
+        self.create(&Self::path_of(k), KEY_READ, false).map(drop)
+    }
+
+    fn raw(&self, k: &RegKey, name: &str, kind: u32, data: &[u8]) -> SysResult<()> {
+        let what = format!("app hive {k} @ {name:?}");
+        let key = self.create(&Self::path_of(k), KEY_SET_VALUE, false)?;
+        Self::set_raw(&key, name, kind, data, &what)
+    }
+
+    fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
+        let what = format!("app hive {k} @ {name:?}");
+        let key = self.create(&Self::path_of(k), KEY_SET_VALUE, false)?;
+        let w = wide(name);
+        // SAFETY: `key` is an open key with KEY_SET_VALUE, kept alive by the borrow; `w` is
+        // NUL-terminated and outlives the call.
+        let rc = unsafe { RegDeleteValueW(key.raw(), w.as_ptr()) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(win32_err(rc, &what))
         }
     }
 
-    fn values(&self, k: &RegKey) -> SysResult<Vec<(String, RegValue)>> {
-        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
+    fn link(&self, link: &RegKey, target: &RegKey) -> SysResult<bool> {
+        if let Some(why) = &self.no_links {
+            note(&format!(
+                "note: app hive link {link} -> {target}: not available ({why})"
+            ));
+            return Ok(false);
+        }
+        self.make_link(&Self::path_of(link), &Self::path_of(target))?;
+        Ok(true)
     }
 
-    fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
-        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
+    fn large(&self, k: &RegKey, name: &str, len: usize) -> SysResult<bool> {
+        let what = format!("app hive {k} @ {name:?} ({len} bytes)");
+        let key = self.create(&Self::path_of(k), KEY_SET_VALUE, false)?;
+        match Self::set_raw(&key, name, REG_BINARY, &vec![7; len], &what) {
+            Ok(()) => Ok(true),
+            // Windows refuses a value over 1,048,572 bytes (found 2026-11-04).
+            Err(e) if e.ntstatus == Some(STATUS_INSUFFICIENT_RESOURCES) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
+}
 
-    fn create_key(&self, k: &RegKey) -> SysResult<bool> {
-        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
-    }
+/// A [`TestRoot`] with an [`AppHive`] in it and a [`WinRegistry`] on that hive. Fields drop in
+/// declaration order: the registry's and the fixture's handles close (the hive unloads) before
+/// the test root removes the hive file.
+pub(super) struct HiveRoot {
+    pub(super) registry: WinRegistry,
+    pub(super) hive: AppHive,
+    #[expect(dead_code, reason = "held for its drop, which removes the hive file")]
+    root: TestRoot,
+}
 
-    fn set(&self, k: &RegKey, _name: &str, _v: &RegValue) -> SysResult<()> {
-        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
-    }
-
-    fn delete_value(&self, k: &RegKey, _name: &str) -> SysResult<()> {
-        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
-    }
-
-    fn delete_key(&self, k: &RegKey) -> SysResult<()> {
-        Err(SysError::new(SysErrorKind::Unsupported, k.to_string()))
+impl HiveRoot {
+    /// `None` when [`TestRoot::new`] skips. Panics if the hive cannot be loaded.
+    pub(super) fn new(case: &str) -> Option<Self> {
+        let root = TestRoot::new(case)?;
+        let file = root.path().join("hive.dat");
+        let hive = AppHive::load(&file).unwrap_or_else(|e| panic!("{e}"));
+        let registry = hive.registry().unwrap_or_else(|e| panic!("{e}"));
+        Some(Self {
+            registry,
+            hive,
+            root,
+        })
     }
 }
 

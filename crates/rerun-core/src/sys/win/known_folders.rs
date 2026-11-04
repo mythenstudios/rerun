@@ -192,7 +192,8 @@ mod tests {
     use crate::sys::fs::Fs;
     use crate::sys::registry::{Hive, RegKey, RegValue, RegView};
     use crate::sys::win::WinFs;
-    use crate::sys::win::testfx::{HklmRegistry, TestRoot, note};
+    use crate::sys::win::WinRegistry;
+    use crate::sys::win::testfx::{TestRoot, note};
     use crate::sys::{KnownFolder, KnownFolders, Registry, SysErrorKind};
 
     /// Set (to `1`) only in the child process of `known_folders_ignore_the_environment`.
@@ -226,7 +227,7 @@ mod tests {
     ];
 
     fn real() -> WinKnownFolders {
-        WinKnownFolders::new(Arc::new(HklmRegistry))
+        WinKnownFolders::new(Arc::new(WinRegistry::new().unwrap()))
     }
 
     /// One line per folder: `<prefix><folder>\t<path or error, Debug-formatted>`. Debug keeps
