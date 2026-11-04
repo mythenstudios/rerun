@@ -35,7 +35,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1012,13 +1012,18 @@ fn racing<T>(r: SysResult<T>, what: &str) -> Result<Option<T>, String> {
     }
 }
 
+/// Upper bound the race contract waits beyond its budget for the first completed flip.
+pub const RACE_FIRST_FLIP_GRACE: Duration = Duration::from_secs(30);
+
 /// File system contract, stress race (M-b): while a flipper thread swaps directories for
 /// junctions to an outside folder by path (first, middle and last directory level of a three
 /// level path), the main thread probes through the root handle. No result that comes back `Ok`
 /// may ever contain the outside canary's content, file ID or name. Allowed: `ReparsePoint`,
 /// `NotFound` (gap between two renames) and the content of the real file.
 ///
-/// Runs for `budget`. `work` must be an existing, empty directory. Against `sys::win` the
+/// Probes for at least `budget` and until the flipper has completed one flip (at most
+/// [`RACE_FIRST_FLIP_GRACE`] longer, so a slow, loaded machine still gets a real race).
+/// `work` must be an existing, empty directory. Against `sys::win` the
 /// runner also runs a naive implementation (check, then open by full path) which this harness
 /// must catch, so a passing run means something.
 pub fn fs_race_contract(
@@ -1109,6 +1114,7 @@ pub fn fs_race_contract(
         }
     };
     let stop = AtomicBool::new(false);
+    let flips_done = AtomicU64::new(0);
     let probe: ContractResult = thread::scope(|scope| {
         let flipper = scope.spawn(|| -> Result<u64, String> {
             let mut flips = 0u64;
@@ -1130,6 +1136,7 @@ pub fn fs_race_contract(
                 flip(&real, &link, "flip: take the junction away")?;
                 flip(&aside, &real, "flip: put the real directory back")?;
                 flips += 1;
+                flips_done.store(flips, Ordering::Relaxed);
                 level = (level + 1) % CHAIN.len();
             }
             Ok(flips)
@@ -1138,7 +1145,14 @@ pub fn fs_race_contract(
         let started = Instant::now();
         let mut probes = 0u64;
         let result = (|| -> ContractResult {
-            while probes == 0 || started.elapsed() < budget {
+            let more = |probes: u64| {
+                let t = started.elapsed();
+                probes == 0
+                    || t < budget
+                    || (flips_done.load(Ordering::Relaxed) == 0
+                        && t < budget + RACE_FIRST_FLIP_GRACE)
+            };
+            while more(probes) {
                 probes += 1;
                 if let Some(bytes) = racing(root.read(&data_p), "read data")? {
                     ensure(
