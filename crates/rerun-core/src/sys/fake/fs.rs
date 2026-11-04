@@ -18,7 +18,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::sys::fold::fold;
+use crate::fold::fold;
 use crate::sys::fs::{DirEntry, EntryKind, Fs, Metadata};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 

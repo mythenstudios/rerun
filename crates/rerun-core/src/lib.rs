@@ -1,13 +1,15 @@
 //! Rerun core.
 //!
-//! Phase 0 contains only the foundation:
+//! - [`path`]: [`path::RelPath`] (relative, confined) and [`path::RootPath`] (absolute root),
+//!   pure and without I/O.
 //! - [`sys`]: the system layer (traits for file system, registry, CPU topology), plus
 //!   `sys::fake` (in-memory) and the generic [`sys::snapshot`].
-//! - [`policy`]: pure rules above `sys`, e.g. the confinement of paths to the
-//!   game folder ([`policy::path::RelPath`]).
+//! - [`policy`]: rules above `sys`, e.g. which roots may be opened.
 //!
-//! See `docs/01-architecture.md` and ADR 0004.
+//! See `docs/01-architecture.md`, ADR 0004 and ADR 0007.
 
+mod fold;
+pub mod path;
 pub mod policy;
 pub mod sys;
 

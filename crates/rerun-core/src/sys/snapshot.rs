@@ -15,10 +15,10 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::fold::fold;
 use super::fs::{EntryKind, Fs};
 use super::registry::{RegKey, RegValue, Registry};
 use super::{SysError, SysErrorKind, SysResult, System};
+use crate::fold::fold;
 
 /// What a snapshot captures. Directories and keys, each recursively.
 #[derive(Debug, Clone, Default)]

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::sys::fold::fold;
+use crate::fold::fold;
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 

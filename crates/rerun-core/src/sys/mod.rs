@@ -12,7 +12,6 @@
 //! `Firewall` and `Process` arrive in phase 3, `sys::win` from phase 1.
 
 mod error;
-pub(crate) mod fold;
 pub mod fs;
 pub mod registry;
 pub mod snapshot;

@@ -1,4 +1,4 @@
-//! Paths in the game folder: [`RelPath`] (relative, confined) and [`GameRoot`] (root).
+//! Paths: [`RelPath`] (relative, confined to a root) and [`RootPath`] (absolute root).
 //!
 //! A `RelPath` can never leave the game folder lexically. The rules are the same as
 //! `$defs/relPath` in `schema/topo.schema.json` and `schema/package.schema.json`; the
@@ -22,15 +22,15 @@
 //! Comparisons ([`PartialEq`], [`Hash`], [`Ord`]) are case-insensitive like NTFS:
 //! `D3D9.dll` and `d3d9.dll` are the same path.
 //!
-//! The check for reparse points (symlinks, junctions) in the real folder arrives in phase 2
-//! (see ADR 0007).
+//! Files inside a root are only reached through a handle opened by `policy::root`
+//! (ADR 0007).
 
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use crate::sys::fold::fold;
+use crate::fold::fold;
 
 /// Error while checking a path.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -157,9 +157,41 @@ impl RelPath {
         &self.raw
     }
 
+    /// A path of exactly one segment (e.g. Steam's `installdir` or a name from `read_dir`).
+    /// Separators are rejected.
+    pub fn from_segment(seg: &str) -> Result<Self, PathError> {
+        if seg.contains(['\\', '/']) {
+            return Err(PathError {
+                path: seg.to_owned(),
+                reason: "must be a single path segment",
+            });
+        }
+        Self::parse(seg)
+    }
+
+    /// This path with one more segment appended.
+    pub fn child(&self, seg: &str) -> Result<Self, PathError> {
+        let child = Self::from_segment(seg)?;
+        Self::parse(&format!("{}\\{}", self.raw, child.raw))
+    }
+
     /// The segments.
     pub fn segments(&self) -> impl Iterator<Item = &str> {
         self.raw.split('\\')
+    }
+
+    /// The last segment.
+    pub fn file_name(&self) -> &str {
+        self.raw.rsplit('\\').next().unwrap_or(&self.raw)
+    }
+
+    /// The parent path; `None` for a single segment.
+    pub fn parent(&self) -> Option<Self> {
+        let (parent, _) = self.raw.rsplit_once('\\')?;
+        Some(Self {
+            raw: parent.to_owned(),
+            folded: fold(parent),
+        })
     }
 }
 
@@ -195,20 +227,25 @@ impl fmt::Display for RelPath {
     }
 }
 
-/// Absolute game folder (comes from `detect`, i.e. from user-writable files such as
-/// `libraryfolders.vdf` – hence strictly checked).
+/// Absolute root folder (game folder, Steam folder, Rerun's own folder). Game roots come from
+/// `detect`, i.e. from user-writable files such as `libraryfolders.vdf`, hence the strict
+/// lexical check.
 ///
 /// Only `<drive>:\<segment>\…` with at least one segment is allowed, each segment under
 /// the same rules as in [`RelPath`]. Not allowed: `.`/`..`, UNC, `\\?\`, `\\.\`
 /// (devices, `GLOBALROOT`), a bare drive root, ADS, reserved names.
 ///
-/// Phase 2 adds canonicalization via a handle and a ban on system folders
-/// (ADR 0007).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GameRoot(PathBuf);
+/// A `RootPath` is only a name. Files inside a root are reached exclusively through a
+/// handle opened by `policy::root` (ADR 0007); there is deliberately no `join`.
+/// Comparisons are case-insensitive like NTFS.
+#[derive(Debug, Clone)]
+pub struct RootPath {
+    path: PathBuf,
+    folded: String,
+}
 
-impl GameRoot {
-    /// Checks and normalizes (`/` → `\`, trailing separator removed).
+impl RootPath {
+    /// Checks and normalizes (`/` → `\`, drive letter uppercase, trailing separator removed).
     pub fn new(path: impl AsRef<Path>) -> Result<Self, PathError> {
         let path = path.as_ref();
         let shown = path.display().to_string();
@@ -240,22 +277,63 @@ impl GameRoot {
             }
             normalized.push(seg);
         }
-        Ok(Self(normalized))
+        let folded = fold(&normalized.display().to_string());
+        Ok(Self {
+            path: normalized,
+            folded,
+        })
+    }
+
+    /// From the result of `GetFinalPathNameByHandleW` (`\\?\X:\…`). Network paths
+    /// (`\\?\UNC\…`) and volumes without a drive letter (`\\?\Volume{…}`) are rejected (v1).
+    pub fn from_final_path(path: impl AsRef<Path>) -> Result<Self, PathError> {
+        let path = path.as_ref();
+        let shown = path.display().to_string();
+        let fail = |reason| {
+            Err(PathError {
+                path: shown.clone(),
+                reason,
+            })
+        };
+        let Some(s) = path.to_str() else {
+            return fail("not valid Unicode");
+        };
+        let rest = s.strip_prefix(r"\\?\").unwrap_or(s);
+        if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(r"UNC\") {
+            return fail("network paths are not supported");
+        }
+        if rest.len() >= 7 && rest[..7].eq_ignore_ascii_case("Volume{") {
+            return fail("volume without a drive letter is not supported");
+        }
+        Self::new(rest)
     }
 
     /// The folder.
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 
-    /// Appends a checked relative path. Always stays lexically inside the game folder, because
-    /// neither the root nor the segments can contain `..`, prefixes or separators.
-    pub fn join(&self, rel: &RelPath) -> PathBuf {
-        let mut p = self.0.clone();
-        for seg in rel.segments() {
-            p.push(seg);
-        }
-        p
+    /// `true` if `other` is this folder or lies inside it (segment-wise, case-insensitive).
+    pub fn contains(&self, other: &RootPath) -> bool {
+        other.folded == self.folded
+            || other
+                .folded
+                .strip_prefix(&self.folded)
+                .is_some_and(|rest| rest.starts_with('\\'))
+    }
+}
+
+impl PartialEq for RootPath {
+    fn eq(&self, other: &Self) -> bool {
+        self.folded == other.folded
+    }
+}
+
+impl Eq for RootPath {}
+
+impl fmt::Display for RootPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.path.display())
     }
 }
 
@@ -284,12 +362,42 @@ mod tests {
     }
 
     #[test]
-    fn join_stays_inside_root() {
-        let root = GameRoot::new(r"C:\Games\AC").unwrap();
+    fn segments_children_and_parents() {
         let rel = RelPath::parse("scripts/a.asi").unwrap();
-        let joined = root.join(&rel);
-        assert!(joined.starts_with(root.path()));
-        assert_eq!(joined, PathBuf::from(r"C:\Games\AC\scripts\a.asi"));
+        assert_eq!(rel.file_name(), "a.asi");
+        assert_eq!(rel.parent().unwrap().as_str(), "scripts");
+        assert!(RelPath::parse("a").unwrap().parent().is_none());
+        let child = RelPath::parse("scripts").unwrap().child("b.ini").unwrap();
+        assert_eq!(child.as_str(), r"scripts\b.ini");
+        for bad in [r"..\x", "a/b", "", "CON", ".."] {
+            assert!(RelPath::from_segment(bad).is_err(), "{bad:?}");
+            assert!(
+                RelPath::parse("scripts").unwrap().child(bad).is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_contains_is_segment_wise_and_case_insensitive() {
+        let pf = RootPath::new(r"C:\Program Files").unwrap();
+        assert!(pf.contains(&RootPath::new(r"c:\program files\Steam").unwrap()));
+        assert!(pf.contains(&RootPath::new(r"C:\PROGRAM FILES").unwrap()));
+        assert!(!pf.contains(&RootPath::new(r"C:\Program Files (x86)\Steam").unwrap()));
+        assert!(!pf.contains(&RootPath::new(r"C:\Program").unwrap()));
+        assert_eq!(pf, RootPath::new(r"c:/program files/").unwrap());
+    }
+
+    #[test]
+    fn root_from_final_path() {
+        let r = RootPath::from_final_path(r"\\?\D:\SteamLibrary\steamapps\common\Game").unwrap();
+        assert_eq!(
+            r.path(),
+            Path::new(r"D:\SteamLibrary\steamapps\common\Game")
+        );
+        assert!(RootPath::from_final_path(r"\\?\UNC\server\share\g").is_err());
+        assert!(RootPath::from_final_path(r"\\?\Volume{1234}\g").is_err());
+        assert!(RootPath::from_final_path(r"\\?\C:\").is_err());
     }
 
     #[test]
@@ -299,9 +407,9 @@ mod tests {
             r"d:/SteamLibrary/steamapps/common/Far Cry 2/",
             r"E:\Spiele\Über",
         ] {
-            assert!(GameRoot::new(ok).is_ok(), "{ok}");
+            assert!(RootPath::new(ok).is_ok(), "{ok}");
         }
-        assert_eq!(GameRoot::new(r"d:/x/").unwrap().path(), Path::new(r"D:\x"));
+        assert_eq!(RootPath::new(r"d:/x/").unwrap().path(), Path::new(r"D:\x"));
     }
 
     /// Cases from the security review (phase 0).
@@ -325,7 +433,7 @@ mod tests {
             "C:\\G\\a\u{202E}gnp",
             "C:\\G\\\u{FF0E}\u{FF0E}",
         ] {
-            assert!(GameRoot::new(bad).is_err(), "{bad:?} accepted");
+            assert!(RootPath::new(bad).is_err(), "{bad:?} accepted");
         }
     }
 
