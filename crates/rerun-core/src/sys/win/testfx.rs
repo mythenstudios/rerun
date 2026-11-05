@@ -1495,6 +1495,28 @@ impl HiveRoot {
     }
 }
 
+// ---------- OS version ----------
+
+/// The build number `RtlGetVersion` reports: the cross-check of `hw::os`, which reads
+/// `CurrentBuildNumber` from the registry (ADR 0015). Banned everywhere else.
+pub(super) fn rtl_build_number() -> u32 {
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: u32::try_from(size_of::<OSVERSIONINFOW>()).unwrap(),
+        ..OSVERSIONINFOW::default()
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only cross-check of hw::os against RtlGetVersion (ADR 0015)"
+    )]
+    // SAFETY: `info` is a writable, initialised `OSVERSIONINFOW` that lives across the call, and
+    // its `dwOSVersionInfoSize` is its own size, so `RtlGetVersion` fills the plain
+    // `OSVERSIONINFOW` layout and writes nothing beyond it.
+    let status = unsafe { windows_sys::Wdk::System::SystemServices::RtlGetVersion(&raw mut info) };
+    assert_eq!(status, 0, "RtlGetVersion: {status:#x}");
+    info.dwBuildNumber
+}
+
 // ---------- Loaded modules ----------
 
 /// The full path Windows reports for a loaded module (`GetModuleFileNameW`).

@@ -329,6 +329,26 @@ impl FakeSystemBuilder {
         self
     }
 
+    /// Windows build as `hw::os` reads it: `CurrentBuildNumber` (`REG_SZ`) and, if given,
+    /// `UBR` (`REG_DWORD`) in `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`, native
+    /// view. Malformed forms are set up with [`Self::value`] or [`Self::raw_value`].
+    pub fn os_build(self, build: u32, ubr: Option<u32>) -> Self {
+        let key = RegKey::new(
+            super::registry::Hive::LocalMachine,
+            super::registry::RegView::Native,
+            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+        );
+        let b = self.value(
+            key.clone(),
+            "CurrentBuildNumber",
+            RegValue::String(build.to_string()),
+        );
+        match ubr {
+            Some(ubr) => b.value(key, "UBR", RegValue::Dword(ubr)),
+            None => b,
+        }
+    }
+
     /// CPU topology; must pass [`CpuTopology::validate`]. Without one, reading the
     /// topology fails.
     pub fn topology(self, topology: CpuTopology) -> Self {

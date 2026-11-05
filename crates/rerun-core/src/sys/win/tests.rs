@@ -596,6 +596,19 @@ fn win_system_bundles_the_real_parts() {
     assert_eq!(sys.registry().key_exists(&k), Ok(true));
 }
 
+// ---------- OS build (ADR 0015) ----------
+
+/// Read-only: `hw::os` reads the build from the real registry (`CurrentBuildNumber`, native
+/// view), and it equals the build `RtlGetVersion` reports. No assumption about the version
+/// itself: Windows 10 and Server 2022 (20348) are below 22000.
+#[test]
+fn os_build_matches_rtl_get_version() {
+    let reg = WinRegistry::new().unwrap();
+    let os = crate::hw::os::read(&reg).unwrap();
+    assert_eq!(os.build, super::testfx::rtl_build_number());
+    assert!(os.build > 0);
+}
+
 // ---------- GPU (DXGI) ----------
 
 /// Read-only: the real adapters fulfil the GPU contract, and the Microsoft Basic Render Driver

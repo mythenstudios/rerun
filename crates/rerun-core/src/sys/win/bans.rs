@@ -1423,6 +1423,51 @@ fn banned_step10_review_items_resolve() {
     let _ = windows_sys::Win32::System::Ole::OleInitialize;
 }
 
+/// The version API bans of ADR 0015: the OS build comes from the registry only (`hw::os`).
+#[test]
+fn banned_version_items_resolve() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetVersion must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::GetVersion;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetVersionExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::GetVersionExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: GetVersionExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::GetVersionExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: VerifyVersionInfoA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::VerifyVersionInfoA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: VerifyVersionInfoW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::VerifyVersionInfoW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: VerSetConditionMask must be banned"
+    )]
+    let _ = windows_sys::Win32::System::SystemInformation::VerSetConditionMask;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RtlGetVersion must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RtlVerifyVersionInfo must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::SystemServices::RtlVerifyVersionInfo;
+}
+
 /// The bans of the step 8 security review the same way.
 #[test]
 fn banned_review_items_resolve() {

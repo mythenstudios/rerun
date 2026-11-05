@@ -60,7 +60,7 @@
 //!
 //! Test only: `testfx` (test root with the `docs/09-testing.md` safeguards, the `FsFixture`
 //! for real Windows, the naive control `Fs`, the private app hive that is the `RegFixture`,
-//! where a module was loaded from;
+//! where a module was loaded from, the `RtlGetVersion` cross-check of `hw::os` (ADR 0015);
 //! path-based calls, registry writes to that hive and `unsafe` FFI allowed there), `tests`
 //! (smoke tests and the contract runners) and `bans` (every banned `windows-sys` and
 //! `std::env` item of `clippy.toml` must resolve, else clippy fails).

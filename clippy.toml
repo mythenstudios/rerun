@@ -427,5 +427,17 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Com::StructuredStorage::CoGetInstanceFromFile", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::Urlmon::CoGetClassObjectFromURL", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Ole::OleInitialize", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  # ADR 0015: the OS build only through hw::os (CurrentBuildNumber via sys::Registry). The version
+  # APIs answer what compatibility shims and manifests make them answer. RtlGetVersion and
+  # RtlVerifyVersionInfo need the test-only feature Wdk_System_SystemServices to resolve in bans.rs;
+  # sys::win::testfx cross-checks the registry build against RtlGetVersion under its own expect.
+  { path = "windows_sys::Win32::System::SystemInformation::GetVersion", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::SystemInformation::GetVersionExA", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::SystemInformation::GetVersionExW", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::SystemInformation::VerifyVersionInfoA", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::SystemInformation::VerifyVersionInfoW", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::SystemInformation::VerSetConditionMask", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
+  { path = "windows_sys::Wdk::System::SystemServices::RtlGetVersion", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
+  { path = "windows_sys::Wdk::System::SystemServices::RtlVerifyVersionInfo", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
   { path = "std::thread::available_parallelism", reason = "limited by the process affinity and CPU Sets, not the machine; use sys::Topology (ADR 0010)" },
 ]
