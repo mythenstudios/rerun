@@ -88,7 +88,7 @@ fn gpu<'a>(
     }
     for (i, a) in g.adapters.iter().enumerate() {
         m.push(Message::Adapter {
-            number: i + 1,
+            number: i,
             conditions: g.primary().is_some_and(|p| std::ptr::eq(p, a)),
             name: escape::text(&a.adapter.name),
         });

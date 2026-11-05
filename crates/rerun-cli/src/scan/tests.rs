@@ -401,6 +401,28 @@ fn no_walk_line_when_a_main_executable_was_found() {
 }
 
 #[test]
+fn an_empty_or_blank_label_is_no_line() {
+    let lib = rerun_core::path::RootPath::new(r"D:\SteamLibrary").unwrap();
+    let head = "library 1: D:\\SteamLibrary\n";
+    for label in ["", "   "] {
+        let label = RawText::new(label);
+        assert_eq!(shown(&super::render_library(1, &lib, Some(&label))), head);
+    }
+    assert_eq!(shown(&super::render_library(1, &lib, None)), head);
+    // A tab is escaped, so the label is quoted and shown.
+    let tab = RawText::new("\t");
+    assert_eq!(
+        shown(&super::render_library(1, &lib, Some(&tab))),
+        format!("{head}  label: \"\\t\"\n")
+    );
+    let games = RawText::new("Games");
+    assert_eq!(
+        shown(&super::render_library(1, &lib, Some(&games))),
+        format!("{head}  label: Games\n")
+    );
+}
+
+#[test]
 fn apps_that_are_not_opened_show_their_state() {
     assert_eq!(
         shown(&render_app(&app(

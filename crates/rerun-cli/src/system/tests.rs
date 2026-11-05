@@ -83,7 +83,7 @@ fn the_developer_machine() {
     let expected = format!(
         "\
 GPU
-  adapter 1 (conditions adapter): AMD Radeon RX 9070 XT
+  adapter 0 (conditions adapter): AMD Radeon RX 9070 XT
     AMD, PCI 0x1002:0x7550, 16384 MiB VRAM, integrated: no, architecture: rdna4
 
 {DEV_CPU}
@@ -131,7 +131,7 @@ fn system_on_a_closed_pipe_exits_0_and_on_a_write_error_1() {
         assert_eq!(String::from_utf8(err.into_inner()).unwrap(), stderr);
         assert_eq!(
             String::from_utf8(out.into_inner().written).unwrap(),
-            "GPU\n  adapter 1 (conditions adapter): AMD Radeon RX 9070 XT\n"
+            "GPU\n  adapter 0 (conditions adapter): AMD Radeon RX 9070 XT\n"
         );
     }
 }
@@ -174,10 +174,10 @@ fn two_hardware_adapters_mark_the_conditions_adapter_and_add_the_note() {
         gpu,
         "\
 GPU
-  adapter 1 (conditions adapter): Synthetic iGPU
+  adapter 0 (conditions adapter): Synthetic iGPU
     Intel, PCI 0x8086:0x0f01, 128 MiB VRAM, integrated: unknown, architecture: unknown \
 (0x8086:0x0f01 not in the table)
-  adapter 2: AMD Radeon RX 9070 XT
+  adapter 1: AMD Radeon RX 9070 XT
     AMD, PCI 0x1002:0x7550, 16384 MiB VRAM, integrated: no, architecture: rdna4
   note: conditions use the first hardware adapter in DXGI order; a game's GPU preference \
 may choose another"
@@ -203,7 +203,7 @@ fn an_integrated_adapter_from_the_table_and_another_vendor() {
         gpu,
         "\
 GPU
-  adapter 1 (conditions adapter): Synthetic Adreno
+  adapter 0 (conditions adapter): Synthetic Adreno
     vendor 0x5143, PCI 0x5143:0x0001, 0 MiB VRAM, integrated: yes, architecture: xe2"
     );
     assert_eq!(
@@ -276,7 +276,7 @@ fn an_invalid_table_makes_every_architecture_unavailable() {
 GPU
   the built-in GPU architecture table is invalid, no architecture is available: gpu arch \
 table: entries[0]: a device is also covered by entries[0]
-  adapter 1 (conditions adapter): AMD Radeon RX 9070 XT
+  adapter 0 (conditions adapter): AMD Radeon RX 9070 XT
     AMD, PCI 0x1002:0x7550, 16384 MiB VRAM, integrated: unknown, architecture: unavailable \
 (no valid architecture table)"
     );
@@ -300,7 +300,7 @@ fn a_hostile_adapter_name_is_escaped() {
     let (gpu, _) = gpu_part(&p, None);
     assert_eq!(
         gpu.lines().nth(1).unwrap(),
-        r#"  adapter 1 (conditions adapter): "Evil\u{1b}]0;title\u{7}\u{202e}GPU\u{e0041}\u{2028}x""#
+        r#"  adapter 0 (conditions adapter): "Evil\u{1b}]0;title\u{7}\u{202e}GPU\u{e0041}\u{2028}x""#
     );
     // A full-width or right-to-left name is legitimate and stays readable.
     p.gpu = Ok(GpuProfile {
@@ -313,7 +313,7 @@ fn a_hostile_adapter_name_is_escaped() {
     let (gpu, _) = gpu_part(&p, None);
     assert_eq!(
         gpu.lines().nth(1).unwrap(),
-        "  adapter 1 (conditions adapter): Ｒａｄｅｏｎ שלום"
+        "  adapter 0 (conditions adapter): Ｒａｄｅｏｎ שלום"
     );
 }
 

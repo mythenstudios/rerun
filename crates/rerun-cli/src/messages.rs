@@ -146,9 +146,9 @@ pub enum Message<'a> {
         /// The error (position and kind).
         error: Shown<'a>,
     },
-    /// A hardware adapter, numbered from 1 in DXGI order.
+    /// A hardware adapter, numbered from 0 in DXGI order.
     Adapter {
-        /// Position in DXGI order, from 1.
+        /// Position in DXGI order, from 0.
         number: usize,
         /// The conditions adapter.
         conditions: bool,

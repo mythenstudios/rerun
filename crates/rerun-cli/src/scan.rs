@@ -169,10 +169,12 @@ pub fn render_library<'a>(
         index,
         path: root_path(path),
     }];
-    if let Some(label) = label {
-        m.push(Message::LibraryLabel {
-            label: label.escaped(),
-        });
+    // Steam writes an empty label for unlabelled libraries; an empty or whitespace-only label
+    // is no line (a label with a tab or another escapable character is quoted, so it shows).
+    if let Some(label) = label.map(steam::RawText::escaped)
+        && !label.as_str().trim().is_empty()
+    {
+        m.push(Message::LibraryLabel { label });
     }
     m
 }
