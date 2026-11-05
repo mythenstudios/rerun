@@ -1,5 +1,6 @@
 //! Schema v1: metaschema, inventory (`topos/`, `packages/`), valid and invalid fixtures,
-//! package references, TODO rule and parity `RelPath` ↔ `$defs/relPath`.
+//! package references, TODO rule, parity `RelPath` ↔ `$defs/relPath` and `GraphicsApi` ↔
+//! `$defs/api` (ADR 0014).
 //!
 //! See ADR 0005. From phase 4, typed serde structs take over runtime validation;
 //! these fixtures then run against both.
@@ -349,4 +350,35 @@ fn rel_path_parity_with_schema() {
         }
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+// ---------- Parity GraphicsApi ↔ schema ----------
+
+/// `GraphicsApi::topo_name` gives exactly the values of `$defs/api` in both schemas, in order;
+/// the other APIs (`d3d12`, `vulkan`, `glide`) are reserved, not in the schemas yet (ADR 0014,
+/// user decision 1).
+#[test]
+fn graphics_api_parity_with_schema() {
+    use rerun_core::detect::exe::GraphicsApi;
+
+    let topo: Vec<String> = GraphicsApi::ALL
+        .iter()
+        .filter_map(|a| a.topo_name())
+        .map(str::to_owned)
+        .collect();
+    for (name, schema) in [("topo", topo_schema()), ("package", package_schema())] {
+        let listed: Vec<String> = schema["$defs"]["api"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(listed, topo, "$defs/api of the {name} schema");
+        for reserved in GraphicsApi::ALL.iter().filter(|a| a.topo_name().is_none()) {
+            assert!(
+                !listed.iter().any(|l| l == reserved.as_str()),
+                "{reserved} is in the {name} schema: give it a topo_name"
+            );
+        }
+    }
 }

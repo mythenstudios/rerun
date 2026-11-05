@@ -32,6 +32,12 @@ impl DllName {
         std::str::from_utf8(bytes).ok().map(|s| Self(s.to_owned()))
     }
 
+    /// A name for the tests of other modules (`detect::exe`), checked by the same rules.
+    #[cfg(test)]
+    pub(crate) fn for_test(name: &str) -> Self {
+        Self::new(name.as_bytes(), 255).unwrap_or_else(|| panic!("invalid DLL name {name:?}"))
+    }
+
     /// The name as spelled in the file.
     pub fn as_str(&self) -> &str {
         &self.0

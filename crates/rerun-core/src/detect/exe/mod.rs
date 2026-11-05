@@ -7,12 +7,16 @@
 //!   directory opened relative to the game handle, every listing sorted by folded name, every
 //!   name through `policy::path::classify`, reparse points and restricted entries reported
 //!   and never followed. A limit keeps a partial result ([`WalkStats::complete`]).
+//! - `api`: the graphics API from the imported DLL names ([`classify`] to an
+//!   [`ApiReport`]); [`GraphicsApi::topo_name`] maps to the Topo `api` values.
 //! - Problems of the walk are [`ExeIssue`]s; they never carry file content, raw names only
 //!   escaped.
 
+mod api;
 mod issue;
 mod walk;
 
+pub use api::{ApiEvidence, ApiReport, ApiVerdict, Basis, Engine, GraphicsApi, classify};
 pub use issue::{ExeIssue, ExeIssueKind, LimitKind};
 pub use walk::{SKIP_DIRS, Walk, WalkStats, WalkedExe, walk};
 
