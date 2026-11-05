@@ -1,0 +1,6 @@
+# Invalid (GpuArchTable::new only): the same identifier declared twice
+format: 1
+archs:
+  - { id: rdna4, vendor: 0x1002 }
+  - { id: rdna4, vendor: 0x1002 }
+entries: []

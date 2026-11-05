@@ -1,0 +1,13 @@
+# Invalid (GpuArchTable::new only): entry vendor differs from the declared vendor of its arch
+format: 1
+archs:
+  - { id: rdna4, vendor: 0x1002 }
+  - { id: kepler, vendor: 0x10DE }
+entries:
+  - vendor: 0x10DE
+    arch: rdna4
+    integrated: false
+    vulkan: "1.3"
+    dx9: native
+    device_ids: [0x7550]
+    source: "Fixture"

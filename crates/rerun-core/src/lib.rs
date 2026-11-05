@@ -8,11 +8,13 @@
 //! - [`policy`]: rules above `sys`, e.g. which roots may be opened.
 //! - [`detect`]: detection of installed games (Steam files through the bounded VDF parser,
 //!   ADR 0011).
+//! - [`hw`]: hardware facts above `sys` (GPU architecture table, ADR 0015).
 //!
 //! See `docs/01-architecture.md`, ADR 0004, ADR 0007 and ADR 0011.
 
 pub mod detect;
 mod fold;
+pub mod hw;
 pub mod path;
 pub mod policy;
 pub mod sys;

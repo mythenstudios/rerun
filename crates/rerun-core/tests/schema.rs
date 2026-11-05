@@ -22,6 +22,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rerun_core::hw::arch::{
+    ArchDecl, ArchEntry, ArchId, DeviceRange, Dx9Path, GpuArchTable, TableErrorKind, VkVersion,
+};
 use rerun_core::policy::path::RelPath;
 use serde_json::Value;
 
@@ -512,6 +515,10 @@ fn valid_fixtures_pass() {
 fn invalid_fixtures_fail() {
     let mut accepted = Vec::new();
     for f in yaml_files("tests/fixtures/schema/invalid") {
+        let name = f.file_name().unwrap().to_string_lossy().into_owned();
+        if GPU_ARCH_NEW_ONLY.iter().any(|(n, _)| *n == name) {
+            continue; // schema-valid by design, see gpu_arch_fixture_parity
+        }
         let v = validator(&schema_for(&f));
         let errs = errors(&v, &load_doc(&f));
         if errs.is_empty() {
@@ -607,4 +614,272 @@ fn graphics_api_parity_with_schema() {
             );
         }
     }
+}
+
+// ---------- GPU architecture table ↔ GpuArchTable::new (ADR 0015) ----------
+
+/// Does `new` report the expected kind?
+type KindCheck = fn(TableErrorKind) -> bool;
+
+/// Invalid fixtures that only `GpuArchTable::new` can refuse (the schema cannot express the
+/// rule), with the kind `new` must report. They must be schema-valid, so this list cannot
+/// hide a schema gap.
+const GPU_ARCH_NEW_ONLY: &[(&str, KindCheck)] = &[
+    ("gpu-arch-overlap.yaml", |k| {
+        matches!(k, TableErrorKind::Overlap { .. })
+    }),
+    ("gpu-arch-undeclared-arch.yaml", |k| {
+        k == TableErrorKind::UndeclaredArch
+    }),
+    ("gpu-arch-vendor-conflict.yaml", |k| {
+        matches!(k, TableErrorKind::ArchVendorMismatch { .. })
+    }),
+    ("gpu-arch-range-reversed.yaml", |k| {
+        k == TableErrorKind::RangeReversed
+    }),
+    ("gpu-arch-duplicate-arch.yaml", |k| {
+        matches!(k, TableErrorKind::DuplicateArch { .. })
+    }),
+];
+
+/// A strict test-only conversion of a parsed table document into the input of
+/// `GpuArchTable::new`, standing in for the phase 4 loader: exactly the keys of the schema,
+/// typed values only. `Err` names what failed.
+fn table_input(doc: &Value) -> Result<(Vec<ArchDecl>, Vec<ArchEntry>), String> {
+    fn object<'a>(
+        v: &'a Value,
+        required: &[&str],
+        optional: &[&str],
+    ) -> Result<&'a serde_json::Map<String, Value>, String> {
+        let o = v.as_object().ok_or("not an object")?;
+        if let Some(k) = o
+            .keys()
+            .find(|k| !required.contains(&k.as_str()) && !optional.contains(&k.as_str()))
+        {
+            return Err(format!("unknown key {k}"));
+        }
+        if let Some(k) = required.iter().find(|k| !o.contains_key(**k)) {
+            return Err(format!("missing key {k}"));
+        }
+        Ok(o)
+    }
+    fn int(v: &Value) -> Result<u32, String> {
+        let n = v.as_u64().ok_or("not an unsigned integer")?;
+        u32::try_from(n).map_err(|e| e.to_string())
+    }
+    fn arch_id(v: &Value) -> Result<ArchId, String> {
+        ArchId::new(v.as_str().ok_or("arch id not a string")?).map_err(|e| e.to_string())
+    }
+    fn list(v: Option<&Value>) -> Result<&[Value], String> {
+        v.map_or(Ok(&[][..]), |v| {
+            v.as_array().map(Vec::as_slice).ok_or("not a list".into())
+        })
+    }
+
+    let top = object(doc, &["format", "archs", "entries"], &[])?;
+    if top["format"] != 1 {
+        return Err("format is not 1".into());
+    }
+    let archs = list(top.get("archs"))?
+        .iter()
+        .map(|a| {
+            let a = object(a, &["id", "vendor"], &[])?;
+            Ok(ArchDecl {
+                id: arch_id(&a["id"])?,
+                vendor: int(&a["vendor"])?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let entries = list(top.get("entries"))?
+        .iter()
+        .map(|e| {
+            let e = object(
+                e,
+                &["vendor", "arch", "integrated", "vulkan", "dx9", "source"],
+                &["device_ids", "device_ranges"],
+            )?;
+            let vulkan = match e["vulkan"].as_str().ok_or("vulkan not a string")? {
+                "none" => None,
+                v => {
+                    let minor = v.strip_prefix("1.").ok_or("vulkan not 1.<minor>")?;
+                    if minor.len() > 1 && minor.starts_with('0') {
+                        return Err("vulkan minor with a leading zero".into());
+                    }
+                    let minor: u8 = minor.parse().map_err(|_| "vulkan minor")?;
+                    if minor > 99 {
+                        return Err("vulkan minor above 99".into());
+                    }
+                    Some(VkVersion { minor })
+                }
+            };
+            let dx9 = match e["dx9"].as_str() {
+                Some("native") => Dx9Path::Native,
+                Some("d3d9on12") => Dx9Path::D3d9On12,
+                _ => return Err("dx9".into()),
+            };
+            let device_ranges = list(e.get("device_ranges"))?
+                .iter()
+                .map(|r| {
+                    let r = object(r, &["from", "to"], &[])?;
+                    Ok(DeviceRange {
+                        from: int(&r["from"])?,
+                        to: int(&r["to"])?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(ArchEntry {
+                vendor: int(&e["vendor"])?,
+                arch: arch_id(&e["arch"])?,
+                integrated: e["integrated"].as_bool().ok_or("integrated not a bool")?,
+                vulkan,
+                dx9,
+                device_ids: list(e.get("device_ids"))?
+                    .iter()
+                    .map(int)
+                    .collect::<Result<_, _>>()?,
+                device_ranges,
+                source: e["source"]
+                    .as_str()
+                    .ok_or("source not a string")?
+                    .to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((archs, entries))
+}
+
+/// `GpuArchTable::new` on a parsed document; `Err` from the conversion or from `new`.
+fn rust_table(doc: &Value) -> Result<GpuArchTable, String> {
+    let (archs, entries) = table_input(doc)?;
+    GpuArchTable::new(archs, entries).map_err(|e| e.to_string())
+}
+
+/// The YAML is the single source (ADR 0015): it is schema-valid, passes `GpuArchTable::new`
+/// and equals the built-in mirror field by field.
+#[test]
+fn gpu_arch_data_equals_builtin() {
+    let doc = gpu_arch_data();
+    let errs = errors(&validator(&gpu_arch_schema()), &doc);
+    assert!(errs.is_empty(), "{}", errs.join("\n"));
+    let from_yaml = rust_table(&doc).unwrap();
+    let builtin = GpuArchTable::builtin().unwrap();
+    assert_eq!(from_yaml.archs(), builtin.archs(), "archs differ");
+    assert_eq!(from_yaml.entries(), builtin.entries(), "entries differ");
+    assert_eq!(&from_yaml, builtin);
+}
+
+/// Two stages, like the phase 4 loader: what the schema accepts, `new` accepts too, except the
+/// named `GPU_ARCH_NEW_ONLY` fixtures, which `new` refuses with their kind; what the schema
+/// refuses, the conversion or `new` refuses as well.
+#[test]
+fn gpu_arch_fixture_parity() {
+    let schema = validator(&gpu_arch_schema());
+    let gpu_arch = |dir: &str| {
+        yaml_files(dir)
+            .into_iter()
+            .filter(|f| is_gpu_arch(f))
+            .collect::<Vec<_>>()
+    };
+    let mut wrong = Vec::new();
+    let valid = gpu_arch("tests/fixtures/schema/valid");
+    assert!(valid.len() >= 2);
+    for f in valid {
+        if let Err(e) = rust_table(&load_doc(&f)) {
+            wrong.push(format!("{}: valid fixture refused: {e}", f.display()));
+        }
+    }
+    let mut new_only_seen = 0;
+    for f in gpu_arch("tests/fixtures/schema/invalid") {
+        let name = f.file_name().unwrap().to_string_lossy().into_owned();
+        let doc = load_doc(&f);
+        let schema_ok = schema.is_valid(&doc);
+        let rust = table_input(&doc)
+            .map_err(|_| None)
+            .and_then(|(a, e)| GpuArchTable::new(a, e).map_err(|e| Some(e.kind)));
+        match GPU_ARCH_NEW_ONLY.iter().find(|(n, _)| *n == name) {
+            Some((_, expected)) => {
+                new_only_seen += 1;
+                if !schema_ok {
+                    wrong.push(format!("{name}: on the new-only list but schema-invalid"));
+                }
+                match rust {
+                    Err(Some(kind)) if expected(kind) => {}
+                    other => wrong.push(format!("{name}: new gave {other:?}")),
+                }
+            }
+            None => {
+                if schema_ok {
+                    wrong.push(format!("{name}: schema accepts an invalid fixture"));
+                }
+                if rust.is_ok() {
+                    wrong.push(format!("{name}: refused by the schema, accepted by new"));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        new_only_seen,
+        GPU_ARCH_NEW_ONLY.len(),
+        "new-only fixture missing"
+    );
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// `ArchId::new` and `$defs/archId` decide every case the same way.
+#[test]
+fn arch_id_parity_with_schema() {
+    let v = validator(&gpu_arch_schema()["$defs"]["archId"]);
+    let valid = [
+        "a",
+        "rdna4",
+        "rdna3_5",
+        "xe_lp",
+        "xe_hpg",
+        "gen11",
+        "unknown_",
+        "unknownx",
+        "a_",
+        "a234567890123456789012345678901_",
+    ];
+    let invalid = [
+        "",
+        "unknown",
+        "Unknown",
+        "UNKNOWN",
+        "Rdna4",
+        "rDna4",
+        "4rdna",
+        "_rdna",
+        "rdna-4",
+        "rdna.4",
+        "rdna 4",
+        " rdna4",
+        "rdna4 ",
+        "rdna4\n",
+        "\nrdna4",
+        "ärdna",
+        "rdnä",
+        "rdna\u{0130}",
+        "rdna\u{212A}",
+        "rdna\u{202E}",
+        "rdna\u{FF41}",
+        "a2345678901234567890123456789012x",
+    ];
+    let mut mismatches = Vec::new();
+    for (expected, list) in [(true, &valid[..]), (false, &invalid[..])] {
+        for s in list {
+            let rust = ArchId::new(s).is_ok();
+            let schema = v.is_valid(&Value::String((*s).to_owned()));
+            if rust != expected || schema != expected {
+                mismatches.push(format!(
+                    "{s:?}: expected valid={expected}, ArchId={rust}, schema={schema}"
+                ));
+            }
+        }
+    }
+    assert!(
+        !v.is_valid(&serde_json::json!(4)),
+        "a number is no identifier"
+    );
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
