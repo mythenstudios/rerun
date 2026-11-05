@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use super::{FakeFs, FakeSystem, FsOp, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
-    FsFixture, fs_link_read_contract, fs_race_contract, fs_read_contract, fs_volume_contract,
-    gpu_contract, known_folders_contract, registry_read_contract, registry_system_contract,
-    registry_write_contract, topology_contract,
+    Access, FsFixture, Held, Share, fs_link_read_contract, fs_race_contract, fs_read_contract,
+    fs_volume_contract, gpu_contract, known_folders_contract, registry_read_contract,
+    registry_system_contract, registry_write_contract, topology_contract,
 };
 use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, WriteCap, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
@@ -171,6 +171,9 @@ impl FsFixture for CopyFixture {
     }
     fn restricted(&self, p: &Path) -> SysResult<bool> {
         self.inner.restricted(p)
+    }
+    fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>> {
+        self.inner.hold_open(p, access, share)
     }
 }
 
@@ -962,6 +965,55 @@ fn hard_links_share_content_and_attributes() {
         kind(FakeSystem::builder().hardlink(r"C:\G\x", r"D:\y").build()),
         SysErrorKind::NotFound
     );
+}
+
+#[test]
+fn share_model_records_handles_by_process_and_checks_fixture_moves() {
+    let sys = FakeSystem::builder()
+        .file(r"C:\G\sub\a.bin", "a")
+        .hardlink(r"C:\G\sub\a.bin", r"C:\G\b.bin")
+        .build()
+        .unwrap();
+    let fx = sys.fake_fs();
+    let g = open(&sys, r"C:\G");
+    let me = std::process::id();
+    // Another process's hold and our own reader, also through the second hard link.
+    let other = fx
+        .hold_open_as(4242, &p(r"C:\G\sub\a.bin"), Access::READ, Share::RWD)
+        .unwrap();
+    let reader = g.open_read(&r(r"sub\a.bin")).unwrap();
+    let mut expected = vec![me, 4242];
+    expected.sort_unstable();
+    assert_eq!(g.users(&r("b.bin")).unwrap(), expected);
+    // The reader shares read only: an overwrite, a rename and a remove are `Busy`.
+    assert_eq!(
+        kind(fx.put_file(&p(r"C:\G\b.bin"), b"x")),
+        SysErrorKind::Busy
+    );
+    assert_eq!(
+        kind(fx.rename_abs(&p(r"C:\G\b.bin"), &p(r"C:\G\c.bin"))),
+        SysErrorKind::Busy
+    );
+    assert_eq!(kind(fx.remove_abs(&p(r"C:\G\b.bin"))), SysErrorKind::Busy);
+    // A handle below `sub`: renaming `sub` is refused, the fake-only rename is not.
+    assert_eq!(
+        kind(fx.rename_abs(&p(r"C:\G\sub"), &p(r"C:\G\sub2"))),
+        SysErrorKind::AccessDenied
+    );
+    drop(reader);
+    assert_eq!(g.users(&r("b.bin")).unwrap(), [4242]);
+    fx.rename_ignoring_shares(&p(r"C:\G\sub"), &p(r"C:\G\sub2"))
+        .unwrap();
+    drop(other);
+    assert!(g.users(&r("b.bin")).unwrap().is_empty());
+    // A handle opened and dropped inside a hook (during another operation) is closed.
+    fx.on_step(|fs, _| {
+        let h = fs.open_dir(Path::new(r"C:\G\sub2")).unwrap();
+        drop(h);
+    });
+    assert!(g.metadata(&r(r"sub2\a.bin")).unwrap().is_some());
+    fx.clear_on_step();
+    fx.rename_abs(&p(r"C:\G\sub2"), &p(r"C:\G\sub3")).unwrap();
 }
 
 #[test]

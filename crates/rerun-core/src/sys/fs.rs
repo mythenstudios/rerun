@@ -19,9 +19,14 @@
 //!   (CompactGUI, `compact /exe`) looks like a plain file without a tag and reads its
 //!   uncompressed content (contract `fs_read_contract`, WOF case).
 //! - A handle refers to an object, not a name: it stays valid when the directory or one of
-//!   its parents is renamed. [`Dir::info`] computes the path at call time. (Windows refuses
-//!   to rename a parent while a handle below it is open, `AccessDenied`; the fake allows it.
-//!   The contract accepts both and checks the handle either way.)
+//!   its parents is renamed. [`Dir::info`] computes the path at call time. Renaming a parent
+//!   while any handle below it is open is refused (`AccessDenied`, observed on Windows for
+//!   every kind of handle, modelled by the fake, ADR 0017 A5); renaming the directory itself
+//!   is allowed.
+//! - **Share modes.** A handle that reads data shares read only (`open_read`), a [`Dir`]
+//!   handle shares everything; an open that conflicts with another program's handle is
+//!   `Busy`. Attribute-only opens (`metadata`, `users`, the components of a walk) are never
+//!   blocked, so a walk passes through a folder held exclusively by someone else.
 //! - Writes into a case-sensitive directory return `Unsupported`.
 //! - `read_dir` returns raw names as on disk; they may be invalid as a [`RelPath`]
 //!   (`d3d9.dll.`, `CON`). `policy::path::classify` separates them.
@@ -49,7 +54,7 @@
 //! - Implementation status: both `sys::fake` and `sys::win` implement the read side and
 //!   [`DirWrite::open_dir_write`]; every writing method of [`DirWrite`] returns `Unsupported`
 //!   until the fake write side (share model, faults) and then the real one follow
-//!   (ADR 0017). [`Dir::users`] is real in `sys::win`; the fake reports no users.
+//!   (ADR 0017). [`Dir::users`] is real in both (the fake from its share model).
 
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -362,7 +367,8 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     /// restricted entry yields `AccessDenied`, a reparse point `ReparsePoint`, a missing
     /// entry `NotFound`. `sys::win` queries `FileProcessIdsUsingFileInformation` on an
     /// attribute-only handle opened relative to the parent (never following a reparse point),
-    /// which no share mode blocks. `sys::fake` has no holders yet and always reports none.
+    /// which no share mode blocks. `sys::fake` reports every handle its share model records
+    /// on the file (`Dir::open_read` readers, fixture holds), with their process IDs.
     fn users(&self, p: &RelPath) -> SysResult<Vec<u32>>;
 }
 

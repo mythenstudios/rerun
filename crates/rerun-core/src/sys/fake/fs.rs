@@ -16,10 +16,25 @@
 //!   IDs come from a counter and are never reused.
 //! - No 8.3 short names, no stripping of trailing dots or spaces: raw names (see
 //!   [`FakeFs::put_raw_file`]) are stored exactly as given.
-//! - No share modes and no sharing violations (`Busy`): open handles never block a rename
-//!   or delete (Windows refuses to rename an ancestor of an open handle), and [`Dir::users`]
-//!   always reports no users. A handle to a deleted directory
-//!   returns `NotFound`.
+//! - **Share model** (ADR 0017, contract `fs_read_contract`): every handle that stays open is
+//!   recorded with its access, share mode, process ID and origin (Rerun or a fixture): a
+//!   [`Dir`] handle (list, shares read, write and delete), an `open_read` reader (read, shares
+//!   read), a fixture hold ([`FakeFs::hold_open_as`]). A new open with data access is checked
+//!   against the open handles of the same object (a file's inode, shared by its hard links; a
+//!   directory's node) with [`share_conflict`], like `IoCheckShareAccess`; a conflict is
+//!   `Busy`. Attribute-only opens (`metadata`, `users`, every component of a walk, which
+//!   `sys::win` opens with `FILE_READ_ATTRIBUTES` only) are neither checked nor recorded.
+//!   Fixture moves are checked the same way: overwriting a file asks for write, renaming or
+//!   removing an entry for delete, renaming into a directory for write on that directory;
+//!   renaming a directory while any recorded handle (of any kind, also an attribute-only
+//!   hold) is open strictly below it is `AccessDenied`, as observed on Windows (ADR 0017, A5).
+//!   Adding a hard link and changing attributes are never checked (observed allowed while a
+//!   guard is held). [`FakeFs::rename_ignoring_shares`] renames without any of these checks,
+//!   which Windows cannot do; it exists for defence-in-depth tests only. [`Dir::users`]
+//!   reports the process ID of every recorded handle on the file. A handle closes when its
+//!   owner drops: the drop queues the close and the next access to the state applies it (never
+//!   re-entrant, also when a handle drops while the state is locked). A handle to a deleted
+//!   directory returns `NotFound`.
 //! - The write side ([`DirWrite`]) is not modelled yet: [`DirWrite::open_dir_write`] opens a
 //!   handle like [`Dir::open_dir`], every writing method returns `Unsupported` (ADR 0017).
 //!   Tests change the tree through the setup and attacker helpers of [`FakeFs`].
@@ -59,6 +74,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::fold::fold;
 use crate::path::RelPath;
+use crate::sys::contract::{Access, Share, share_conflict};
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, Fs, FsKind, Metadata, NewFile, ReadSeek,
     ReparseInfo, RootInfo, WriteCap, Written, tag,
@@ -181,6 +197,56 @@ struct Node {
     body: Body,
 }
 
+/// Identifier of a recorded open handle; never reused.
+type OpenId = u64;
+
+/// The object an open handle refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Obj {
+    /// A file, opened through the directory entry `node`; share state is per inode.
+    File { node: NodeId, ino: NodeId },
+    /// A directory or another non-file entry.
+    Node(NodeId),
+}
+
+impl Obj {
+    fn node(self) -> NodeId {
+        match self {
+            Self::File { node, .. } | Self::Node(node) => node,
+        }
+    }
+
+    /// Both refer to the same object for the share check (hard links share an inode).
+    fn same(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::File { ino: a, .. }, Self::File { ino: b, .. }) => a == b,
+            (Self::Node(a), Self::Node(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Who opened a handle: a restart closes Rerun's handles only (ADR 0019 amendment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Rerun,
+    Fixture,
+}
+
+/// An open handle.
+#[derive(Debug)]
+struct OpenRec {
+    obj: Obj,
+    access: Access,
+    share: Share,
+    pid: u32,
+    #[expect(
+        dead_code,
+        reason = "read by the crash model's restart, which closes Rerun's handles only"
+    )]
+    origin: Origin,
+}
+
 #[derive(Debug, Default)]
 struct State {
     next_id: NodeId,
@@ -188,6 +254,8 @@ struct State {
     inodes: BTreeMap<NodeId, Inode>,
     drives: BTreeMap<char, NodeId>,
     fs_kinds: BTreeMap<char, FsKind>,
+    next_open: OpenId,
+    opens: BTreeMap<OpenId, OpenRec>,
 }
 
 fn err(kind: SysErrorKind, target: &str) -> SysError {
@@ -538,10 +606,118 @@ impl State {
             && let Some(i) = self.inodes.get_mut(&ino)
         {
             i.links = i.links.saturating_sub(1);
-            if i.links == 0 {
-                self.inodes.remove(&ino);
-            }
+            self.drop_orphan(ino);
         }
+    }
+
+    /// Frees an inode without links once no handle holds it open.
+    fn drop_orphan(&mut self, ino: NodeId) {
+        let open = self
+            .opens
+            .values()
+            .any(|o| matches!(o.obj, Obj::File { ino: i, .. } if i == ino));
+        if !open && self.inodes.get(&ino).is_some_and(|i| i.links == 0) {
+            self.inodes.remove(&ino);
+        }
+    }
+
+    // ---------- Share model ----------
+
+    fn obj_of(&self, id: NodeId) -> Obj {
+        match self.nodes.get(&id).map(|n| &n.body) {
+            Some(Body::File(ino)) => Obj::File {
+                node: id,
+                ino: *ino,
+            },
+            _ => Obj::Node(id),
+        }
+    }
+
+    /// `Busy` if an open of `obj` with `access` and `share` conflicts with an open handle.
+    fn check_share(&self, obj: Obj, access: Access, share: Share, target: &str) -> SysResult<()> {
+        let conflict = self
+            .opens
+            .values()
+            .any(|o| o.obj.same(obj) && share_conflict(access, share, o.access, o.share));
+        if conflict {
+            return Err(err(SysErrorKind::Busy, target));
+        }
+        Ok(())
+    }
+
+    fn register(
+        &mut self,
+        obj: Obj,
+        access: Access,
+        share: Share,
+        pid: u32,
+        origin: Origin,
+    ) -> OpenId {
+        self.next_open += 1;
+        self.opens.insert(
+            self.next_open,
+            OpenRec {
+                obj,
+                access,
+                share,
+                pid,
+                origin,
+            },
+        );
+        self.next_open
+    }
+
+    /// Closes a handle (applied from the close queue, see [`FakeFs::lock`]).
+    fn close(&mut self, id: OpenId) {
+        if let Some(OpenRec {
+            obj: Obj::File { ino, .. },
+            ..
+        }) = self.opens.remove(&id)
+        {
+            self.drop_orphan(ino);
+        }
+    }
+
+    /// A recorded handle (of any kind) is open on an entry strictly below `anc`: Windows
+    /// refuses to rename `anc` (`ACCESS_DENIED`, observed, ADR 0017 A5).
+    fn open_below(&self, anc: NodeId) -> bool {
+        self.opens.values().any(|o| {
+            let n = o.obj.node();
+            n != anc && self.nodes.contains_key(&n) && self.is_ancestor_or_self(anc, n)
+        })
+    }
+
+    /// Process IDs of the handles open on the inode `ino`, without `except`; sorted, unique.
+    fn users_of(&self, ino: NodeId, except: Option<OpenId>) -> Vec<u32> {
+        let mut pids: Vec<u32> = self
+            .opens
+            .iter()
+            .filter(|(id, o)| {
+                Some(**id) != except && matches!(o.obj, Obj::File { ino: i, .. } if i == ino)
+            })
+            .map(|(_, o)| o.pid)
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+
+    /// A rename by another program (`MoveFileExW`): the source is opened for delete, the
+    /// target directory for write (both share-checked, `Busy`), and a directory with a handle
+    /// open below it is not renamed (`AccessDenied`). Never overwrites.
+    fn checked_move(
+        &mut self,
+        src: NodeId,
+        parent: NodeId,
+        name: &str,
+        target: &str,
+    ) -> SysResult<()> {
+        self.check_share(self.obj_of(src), Access::DELETE, Share::RWD, target)?;
+        self.check_share(Obj::Node(parent), Access::WRITE, Share::RWD, target)?;
+        if self.open_below(src) {
+            return Err(err(SysErrorKind::AccessDenied, target));
+        }
+        self.move_node(src, parent, name, target)
     }
 
     /// Drive and segments of a node, computed from the parent chain.
@@ -715,15 +891,48 @@ impl State {
 #[derive(Default)]
 struct Shared {
     state: Mutex<State>,
+    /// Handles closed by a drop, applied at the next [`FakeFs::lock`].
+    closed: Mutex<Vec<OpenId>>,
     hook: Mutex<Option<StepHook>>,
     /// Bytes served by every reader `open_read` handed out ([`FakeFs::bytes_served`]).
     served: Arc<AtomicU64>,
 }
 
-/// A reader over a copy of a file that counts the bytes it serves into its [`FakeFs`].
+/// A recorded open handle; dropping it closes the handle. The drop only queues the close (it
+/// may happen while the state is locked); the next [`FakeFs::lock`] applies it.
+struct OpenToken {
+    shared: Arc<Shared>,
+    id: OpenId,
+}
+
+impl fmt::Debug for OpenToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<open {}>", self.id)
+    }
+}
+
+impl Drop for OpenToken {
+    fn drop(&mut self) {
+        self.shared
+            .closed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(self.id);
+    }
+}
+
+/// A handle held by a fixture ([`FakeFs::hold_open_as`]); dropping it closes the handle.
+#[derive(Debug)]
+pub struct FakeHold {
+    _open: OpenToken,
+}
+
+/// A reader over a copy of a file that counts the bytes it serves into its [`FakeFs`]. It
+/// holds its handle open (read, shares read) until it drops.
 struct Counted {
     data: Cursor<Vec<u8>>,
     served: Arc<AtomicU64>,
+    _open: OpenToken,
 }
 
 impl Read for Counted {
@@ -758,11 +967,31 @@ impl fmt::Debug for FakeFs {
 }
 
 impl FakeFs {
+    /// The state, after applying the closes that drops have queued since the last call.
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.shared
+        let mut st = self
+            .shared
             .state
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner);
+        let closed = std::mem::take(
+            &mut *self
+                .shared
+                .closed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for id in closed {
+            st.close(id);
+        }
+        st
+    }
+
+    fn token(&self, id: OpenId) -> OpenToken {
+        OpenToken {
+            shared: Arc::clone(&self.shared),
+            id,
+        }
     }
 
     fn hook_slot(&self) -> MutexGuard<'_, Option<StepHook>> {
@@ -819,7 +1048,8 @@ impl FakeFs {
     }
 
     /// Creates or overwrites a file including missing parents (overwrite keeps the inode,
-    /// i.e. all hard links see the new content).
+    /// i.e. all hard links see the new content). Overwriting opens the file for write
+    /// (share-checked, `Busy`).
     pub fn put_file(&self, abs: &Path, data: &[u8]) -> SysResult<()> {
         let shown = abs.display().to_string();
         let (drive, segs, name) = parse_abs_child(abs)?;
@@ -830,6 +1060,7 @@ impl FakeFs {
             Some(id) => match st.nodes.get(&id).map(|n| &n.body) {
                 Some(Body::File(ino)) => {
                     let ino = *ino;
+                    st.check_share(st.obj_of(id), Access::WRITE, Share::RWD, &shown)?;
                     if let Some(i) = st.inodes.get_mut(&ino) {
                         i.data = data.to_vec();
                     }
@@ -1011,7 +1242,8 @@ impl FakeFs {
     }
 
     /// Attacker: atomically renames the entry at `abs` to a hidden sibling name and puts a
-    /// junction to `target` in its place. Returns the hidden name.
+    /// junction to `target` in its place. Returns the hidden name. The rename is checked like
+    /// [`Self::rename_abs`].
     pub fn swap_with_junction(&self, abs: &Path, target: &str) -> SysResult<String> {
         let shown = abs.display().to_string();
         let mut st = self.lock();
@@ -1025,7 +1257,7 @@ impl FakeFs {
             _ => return Err(err(SysErrorKind::AccessDenied, &shown)),
         };
         let hidden = format!("{name}.swapped-{id}");
-        st.move_node(id, parent, &hidden, &shown)?;
+        st.checked_move(id, parent, &hidden, &shown)?;
         let body = Body::Link(LinkData {
             tag: tag::MOUNT_POINT,
             target: target.to_owned(),
@@ -1035,8 +1267,21 @@ impl FakeFs {
         Ok(hidden)
     }
 
-    /// Attacker: renames or moves an entry by absolute path (same drive, never overwrites).
+    /// Attacker: renames or moves an entry by absolute path (same drive, never overwrites),
+    /// like `MoveFileExW`: checked against the share model (`Busy`) and refused for a
+    /// directory with a handle open below it (`AccessDenied`), see the module docs.
     pub fn rename_abs(&self, from: &Path, to: &Path) -> SysResult<()> {
+        self.rename_impl(from, to, true)
+    }
+
+    /// Renames like [`Self::rename_abs`] but ignores every share mode and the open-handle
+    /// rule for ancestors. Windows cannot do this; it exists only for defence-in-depth tests
+    /// (a handle's name re-check, a swap below an open handle).
+    pub fn rename_ignoring_shares(&self, from: &Path, to: &Path) -> SysResult<()> {
+        self.rename_impl(from, to, false)
+    }
+
+    fn rename_impl(&self, from: &Path, to: &Path, checked: bool) -> SysResult<()> {
         let shown = to.display().to_string();
         let (drive, segs, name) = parse_abs_child(to)?;
         let mut st = self.lock();
@@ -1053,16 +1298,22 @@ impl FakeFs {
         if st.is_ancestor_or_self(src, parent) {
             return Err(err(SysErrorKind::InvalidPath, &shown));
         }
-        st.move_node(src, parent, &name, &shown)
+        if checked {
+            st.checked_move(src, parent, &name, &shown)
+        } else {
+            st.move_node(src, parent, &name, &shown)
+        }
     }
 
     /// Attacker or setup: deletes the entry at `abs` by absolute path: a file (one hard link
     /// of it), a link itself (never its target) or an empty directory. A directory with
-    /// entries is `NotEmpty`, a drive root `AccessDenied`. Handles to a deleted directory
-    /// return `NotFound` afterwards.
+    /// entries is `NotEmpty`, a drive root `AccessDenied`, an entry held open without
+    /// share-delete `Busy`. Handles to a deleted directory return `NotFound` afterwards.
     pub fn remove_abs(&self, abs: &Path) -> SysResult<()> {
+        let shown = abs.display().to_string();
         let mut st = self.lock();
         let id = st.require_abs(abs)?;
+        st.check_share(st.obj_of(id), Access::DELETE, Share::RWD, &shown)?;
         match st.nodes.get(&id) {
             Some(Node { parent: None, .. }) => {
                 return Err(SysError::path(SysErrorKind::AccessDenied, abs));
@@ -1091,6 +1342,33 @@ impl FakeFs {
         }
     }
 
+    /// Fixture: opens the existing file or directory `abs` itself (not a link) as process
+    /// `pid` with `access` and `share`, share-checked like every open (`Busy`), and keeps it
+    /// open until the returned [`FakeHold`] drops. `FsFixture::hold_open` uses the ID of this
+    /// process, like a handle of the test itself on Windows.
+    pub fn hold_open_as(
+        &self,
+        pid: u32,
+        abs: &Path,
+        access: Access,
+        share: Share,
+    ) -> SysResult<FakeHold> {
+        let shown = abs.display().to_string();
+        let id = {
+            let mut st = self.lock();
+            let node = st.require_abs(abs)?;
+            if matches!(st.nodes.get(&node).map(|n| &n.body), Some(Body::Link(_))) {
+                return Err(err(SysErrorKind::ReparsePoint, &shown));
+            }
+            let obj = st.obj_of(node);
+            st.check_share(obj, access, share, &shown)?;
+            st.register(obj, access, share, pid, Origin::Fixture)
+        };
+        Ok(FakeHold {
+            _open: self.token(id),
+        })
+    }
+
     /// Target of a link (only for checks in tests; `Dir` never follows links).
     pub fn reparse_target(&self, abs: &Path) -> SysResult<Option<String>> {
         let mut st = self.lock();
@@ -1108,9 +1386,28 @@ impl FakeFs {
         let shown = abs.display().to_string();
         let (drive, segs) = parse_abs(abs)?;
         let node = self.lock().resolve_follow(drive, &segs, 0, &shown)?;
+        self.dir_handle(node, &shown)
+    }
+
+    /// Opens a [`Dir`] handle on `node`: list access, shares read, write and delete,
+    /// share-checked (`Busy`) and recorded until the handle drops.
+    fn dir_handle(&self, node: NodeId, target: &str) -> SysResult<FakeDir> {
+        let id = {
+            let mut st = self.lock();
+            st.dir(node, target)?;
+            st.check_share(Obj::Node(node), Access::READ, Share::RWD, target)?;
+            st.register(
+                Obj::Node(node),
+                Access::READ,
+                Share::RWD,
+                std::process::id(),
+                Origin::Rerun,
+            )
+        };
         Ok(FakeDir {
             fs: self.clone(),
             node,
+            _open: self.token(id),
         })
     }
 }
@@ -1130,6 +1427,7 @@ impl Fs for FakeFs {
 pub struct FakeDir {
     fs: FakeFs,
     node: NodeId,
+    _open: OpenToken,
 }
 
 impl FakeDir {
@@ -1193,10 +1491,7 @@ impl Dir for FakeDir {
     fn open_dir(&self, p: &RelPath) -> SysResult<Box<dyn Dir + '_>> {
         let segs: Vec<&str> = p.segments().collect();
         let node = self.walk(FsOp::OpenDir, &segs, p.as_str())?;
-        Ok(Box::new(FakeDir {
-            fs: self.fs.clone(),
-            node,
-        }))
+        Ok(Box::new(self.fs.dir_handle(node, p.as_str())?))
     }
 
     fn metadata(&self, p: &RelPath) -> SysResult<Option<Metadata>> {
@@ -1220,14 +1515,28 @@ impl Dir for FakeDir {
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>> {
         let t = p.as_str();
         let (parent, name) = self.split(FsOp::OpenRead, p)?;
-        let st = self.fs.lock();
+        let mut st = self.fs.lock();
         let id = Self::require(&st, parent, name, t)?;
         st.openable(id, t)?;
         match (st.rel_kind(id), st.nodes.get(&id).map(|n| &n.body)) {
-            (EntryKind::File, Some(Body::File(ino))) => Ok(Box::new(Counted {
-                data: Cursor::new(st.inode(*ino, t)?.data.clone()),
-                served: Arc::clone(&self.fs.shared.served),
-            })),
+            (EntryKind::File, Some(Body::File(ino))) => {
+                let data = st.inode(*ino, t)?.data.clone();
+                let obj = st.obj_of(id);
+                st.check_share(obj, Access::READ, Share::R, t)?;
+                let open = st.register(
+                    obj,
+                    Access::READ,
+                    Share::R,
+                    std::process::id(),
+                    Origin::Rerun,
+                );
+                drop(st);
+                Ok(Box::new(Counted {
+                    data: Cursor::new(data),
+                    served: Arc::clone(&self.fs.shared.served),
+                    _open: self.fs.token(open),
+                }))
+            }
             (EntryKind::Dir, _) => Err(err(SysErrorKind::AccessDenied, t)),
             _ => Err(err(SysErrorKind::ReparsePoint, t)),
         }
@@ -1246,6 +1555,11 @@ impl Dir for FakeDir {
             }
         };
         let st = self.fs.lock();
+        st.dir(node, &t)?;
+        if p.is_some() {
+            // Listing another directory opens it like a `Dir` handle (list access).
+            st.check_share(Obj::Node(node), Access::READ, Share::RWD, &t)?;
+        }
         let children = &st.dir(node, &t)?.children;
         if children.len() > max_entries {
             return Err(SysError::too_large(
@@ -1270,11 +1584,10 @@ impl Dir for FakeDir {
         let st = self.fs.lock();
         let id = Self::require(&st, parent, name, t)?;
         st.openable(id, t)?;
-        match st.rel_kind(id) {
-            // No share model yet: nobody ever holds a file.
-            EntryKind::File => Ok(Vec::new()),
-            EntryKind::Dir => Err(err(SysErrorKind::AccessDenied, t)),
-            EntryKind::Reparse => Err(err(SysErrorKind::ReparsePoint, t)),
+        match (st.rel_kind(id), st.nodes.get(&id).map(|n| &n.body)) {
+            (EntryKind::File, Some(Body::File(ino))) => Ok(st.users_of(*ino, None)),
+            (EntryKind::File | EntryKind::Reparse, _) => Err(err(SysErrorKind::ReparsePoint, t)),
+            (EntryKind::Dir, _) => Err(err(SysErrorKind::AccessDenied, t)),
         }
     }
 }
@@ -1291,10 +1604,7 @@ impl DirWrite for FakeDir {
     fn open_dir_write(&self, p: &RelPath) -> SysResult<Box<dyn DirWrite + '_>> {
         let segs: Vec<&str> = p.segments().collect();
         let node = self.walk(FsOp::OpenDirWrite, &segs, p.as_str())?;
-        Ok(Box::new(FakeDir {
-            fs: self.fs.clone(),
-            node,
-        }))
+        Ok(Box::new(self.fs.dir_handle(node, p.as_str())?))
     }
 
     fn guard(&self, name: &RelPath) -> SysResult<Box<dyn FileGuard + '_>> {

@@ -456,37 +456,6 @@ fn win_dir_write_methods_are_unsupported() {
     assert_eq!(names.len(), 2, "{names:?}");
 }
 
-/// `Dir::users` sees a handle this process holds on the file (another handle than the one it
-/// queries on), also one opened without `FILE_SHARE_*` that blocks every other open, and
-/// no longer sees it once it is closed.
-#[test]
-fn users_reports_a_held_handle_of_this_process() {
-    let Some(root) = TestRoot::new("users") else {
-        return;
-    };
-    let file = root.path().join("held.bin");
-    root.fx().file(&file, b"held").unwrap();
-    let fs = WinFs::new();
-    let dir = fs.open_dir(root.path()).unwrap();
-    let me = std::process::id();
-    let held = rel("held.bin");
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        let _exclusive = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0)
-            .open(&file)
-            .unwrap();
-        // The attribute-only open of the query is not blocked by a share mode of 0 ...
-        let users = dir.users(&held).unwrap();
-        assert!(users.contains(&me), "{users:?} lacks {me}");
-        // ... while a data read is.
-        assert_eq!(kind_of(dir.read(&held)), SysErrorKind::Busy);
-    }
-    let after = dir.users(&held).unwrap();
-    assert!(!after.contains(&me), "{after:?} still holds {me}");
-}
-
 /// The runner's cleanup (`std::fs::remove_dir_all` in `TestRoot`'s drop) removes a junction
 /// itself and never what it points to, also for a junction to a directory outside the root.
 #[test]

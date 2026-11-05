@@ -703,7 +703,11 @@ fn a_renamed_parent_is_not_found_by_the_old_path() {
     let fr = fr(&sys);
     let store = StoreDir::open(&sys, &fr, Path::new(r"D:\Parent\Lib")).unwrap();
     let old = store.path().clone();
-    sys.rename_abs(r"D:\Parent", r"D:\P2").unwrap();
+    // Windows refuses to rename an ancestor of the open store handle (ADR 0017, A5); the
+    // fake-only rename that ignores it keeps this as a defence-in-depth test.
+    sys.fake_fs()
+        .rename_ignoring_shares(Path::new(r"D:\Parent"), Path::new(r"D:\P2"))
+        .unwrap();
     assert_eq!(
         sys_kind(StoreDir::open(&sys, &fr, old.path())),
         SysErrorKind::NotFound
@@ -778,7 +782,9 @@ fn game_whose_common_was_swapped_during_the_open_is_refused() {
     sys.fake_fs().on_step(move |fs, e| {
         let walk = matches!(e.op, FsOp::OpenDir | FsOp::OpenDirWrite);
         if walk && seen.fetch_add(1, Ordering::SeqCst) == 3 {
-            fs.rename_abs(
+            // The game handle below `common` is open, so Windows refuses this rename
+            // (ADR 0017, A5); the fake-only rename keeps the swap as defence in depth.
+            fs.rename_ignoring_shares(
                 Path::new(r"D:\Lib\steamapps\common"),
                 Path::new(r"D:\Lib\steamapps\common.old"),
             )

@@ -25,13 +25,13 @@ use std::path::{Path, PathBuf};
 
 use rerun_proto::cpu::CpuTopology;
 
-pub use fs::{FakeDir, FakeFs, FsOp, StepEvent, StepHook};
+pub use fs::{FakeDir, FakeFs, FakeHold, FsOp, StepEvent, StepHook};
 pub use gpu::FakeGpu;
 pub use known_folders::FakeKnownFolders;
 pub use registry::FakeRegistry;
 pub use topology::FakeTopology;
 
-use super::contract::FsFixture;
+use super::contract::{Access, FsFixture, Held, Share};
 use super::fs::{Attrs, tag};
 use super::registry::{RegKey, RegValue};
 use super::{
@@ -162,6 +162,15 @@ impl FsFixture for FakeFs {
     fn restricted(&self, p: &Path) -> SysResult<bool> {
         self.set_restricted(p, true)?;
         Ok(true)
+    }
+
+    fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>> {
+        Ok(Box::new(self.hold_open_as(
+            std::process::id(),
+            p,
+            access,
+            share,
+        )?))
     }
 }
 

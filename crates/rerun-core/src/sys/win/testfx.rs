@@ -71,12 +71,13 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_PINNED, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_UNPINNED, FILE_CASE_SENSITIVE_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
-    FileCaseSensitiveInfo, FileIdInfo, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose,
-    GetDriveTypeW, GetFileInformationByHandleEx, GetLogicalDrives, GetVolumeInformationW,
-    GetVolumeNameForVolumeMountPointW, GetVolumePathNamesForVolumeNameW, MoveFileExW, READ_CONTROL,
-    SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, SYMBOLIC_LINK_FLAG_DIRECTORY,
-    SetFileInformationByHandle, SetFileShortNameW, SetVolumeMountPointW, WRITE_DAC,
+    FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    FILE_WRITE_DATA, FileCaseSensitiveInfo, FileIdInfo, FindFirstVolumeW, FindNextVolumeW,
+    FindVolumeClose, GetDriveTypeW, GetFileInformationByHandleEx, GetLogicalDrives,
+    GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, GetVolumePathNamesForVolumeNameW,
+    MoveFileExW, READ_CONTROL, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
+    SYMBOLIC_LINK_FLAG_DIRECTORY, SYNCHRONIZE, SetFileInformationByHandle, SetFileShortNameW,
+    SetVolumeMountPointW, WRITE_DAC,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
@@ -95,7 +96,7 @@ use super::WinRegistry;
 use super::reg::{self, OwnedKey};
 use super::status::kind_of_win32;
 use crate::path::RelPath;
-use crate::sys::contract::{FsFixture, RegFixture};
+use crate::sys::contract::{Access, FsFixture, Held, RegFixture, Share};
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, DirWrite, EntryKind, Fs, FsKind, Metadata, ReadSeek, ReparseInfo,
     RootInfo, WriteCap, tag,
@@ -1191,6 +1192,43 @@ impl FsFixture for WinFixture {
         );
         self.push_undo(Undo::Dacl(p.to_path_buf(), f));
         r.map(|()| true)
+    }
+
+    /// `CreateFileW` with `FILE_READ_DATA`/`FILE_WRITE_DATA`/`DELETE` (or
+    /// `FILE_READ_ATTRIBUTES` alone), `SYNCHRONIZE` and the share mode, opening `p` itself
+    /// (`FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`, so directories too).
+    fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>> {
+        self.guard(p, Last::Plain)?;
+        let mut mask = SYNCHRONIZE;
+        for (on, bit) in [
+            (access.read, FILE_READ_DATA),
+            (access.write, FILE_WRITE_DATA),
+            (access.delete, DELETE),
+        ] {
+            if on {
+                mask |= bit;
+            }
+        }
+        if !access.any() {
+            mask |= FILE_READ_ATTRIBUTES;
+        }
+        let mut sh = 0;
+        for (on, bit) in [
+            (share.read, FILE_SHARE_READ),
+            (share.write, FILE_SHARE_WRITE),
+            (share.delete, FILE_SHARE_DELETE),
+        ] {
+            if on {
+                sh |= bit;
+            }
+        }
+        let f = OpenOptions::new()
+            .access_mode(mask)
+            .share_mode(sh)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(p)
+            .map_err(|e| io_err(&e, p))?;
+        Ok(Box::new(f))
     }
 }
 

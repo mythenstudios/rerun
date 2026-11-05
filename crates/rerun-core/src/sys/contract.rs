@@ -118,6 +118,119 @@ pub trait FsFixture: Sync {
     /// owner keeps `WRITE_DAC`, the fixture restores the DACL before cleanup).
     /// `Ok(false)` = not available.
     fn restricted(&self, p: &Path) -> SysResult<bool>;
+    /// Opens the existing file or directory `p` itself (never following a final reparse
+    /// point) with `access` and `share` and keeps the handle until the returned value drops,
+    /// like another program of this process would. A sharing conflict with a handle that is
+    /// already open is `Busy`. All of `access` false is an attribute-only open, which no share
+    /// mode blocks and which blocks nobody.
+    fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>>;
+}
+
+/// Data access of a fixture handle ([`FsFixture::hold_open`]): `FILE_READ_DATA`,
+/// `FILE_WRITE_DATA`, `DELETE`. All false is attribute-only (`FILE_READ_ATTRIBUTES`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Access {
+    /// Read data (for a directory: list it).
+    pub read: bool,
+    /// Write data (for a directory: add a file).
+    pub write: bool,
+    /// Delete or rename it.
+    pub delete: bool,
+}
+
+impl Access {
+    /// Attribute-only.
+    pub const ATTRS: Self = Self {
+        read: false,
+        write: false,
+        delete: false,
+    };
+    /// Read data.
+    pub const READ: Self = Self {
+        read: true,
+        write: false,
+        delete: false,
+    };
+    /// Write data.
+    pub const WRITE: Self = Self {
+        read: false,
+        write: true,
+        delete: false,
+    };
+    /// Delete or rename.
+    pub const DELETE: Self = Self {
+        read: false,
+        write: false,
+        delete: true,
+    };
+
+    /// Any data access (attribute-only opens are neither share-checked nor block anyone).
+    pub fn any(self) -> bool {
+        self.read || self.write || self.delete
+    }
+}
+
+/// Share mode of a fixture handle ([`FsFixture::hold_open`]): `FILE_SHARE_READ`,
+/// `FILE_SHARE_WRITE`, `FILE_SHARE_DELETE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Share {
+    /// Others may read.
+    pub read: bool,
+    /// Others may write.
+    pub write: bool,
+    /// Others may delete or rename.
+    pub delete: bool,
+}
+
+impl Share {
+    /// Share nothing (exclusive).
+    pub const NONE: Self = Self {
+        read: false,
+        write: false,
+        delete: false,
+    };
+    /// Share read.
+    pub const R: Self = Self {
+        read: true,
+        write: false,
+        delete: false,
+    };
+    /// Share read and delete.
+    pub const RD: Self = Self {
+        read: true,
+        write: false,
+        delete: true,
+    };
+    /// Share read and write.
+    pub const RW: Self = Self {
+        read: true,
+        write: true,
+        delete: false,
+    };
+    /// Share everything.
+    pub const RWD: Self = Self {
+        read: true,
+        write: true,
+        delete: true,
+    };
+}
+
+/// A handle kept open by a fixture; dropping it closes the handle.
+pub type Held<'a> = Box<dyn Send + 'a>;
+
+/// `IoCheckShareAccess` for two opens of the same object: they conflict if either asks for an
+/// access the other does not share. Attribute-only opens never conflict. The fake's share
+/// model uses exactly this function (pinned against the observed matrix of ADR 0017).
+pub fn share_conflict(a: Access, a_share: Share, b: Access, b_share: Share) -> bool {
+    if !a.any() || !b.any() {
+        return false;
+    }
+    (a.read && !b_share.read)
+        || (a.write && !b_share.write)
+        || (a.delete && !b_share.delete)
+        || (b.read && !a_share.read)
+        || (b.write && !a_share.write)
+        || (b.delete && !a_share.delete)
 }
 
 fn ensure(cond: bool, what: &str) -> ContractResult {
@@ -356,7 +469,8 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
     )?;
 
     // Users: a check at a moment, on plain files only. Who else holds the file is not
-    // asserted here (a scanner may hold a fresh file); the contract pins the error kinds.
+    // asserted here (a scanner may hold a fresh file); the contract pins the error kinds and
+    // (`holds`) that a handle of this process is reported.
     ok(root.users(&file), "users of a plain file")?;
     ok(
         root.users(&rel(r"GAME\DATA.BIN")?),
@@ -448,6 +562,8 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
     restricted_entries(fs, fx, &*root, work, &mut skips)?;
     bounded_reads(fx, &*root, work)?;
     names_and_ancestor_renames(fx, &*root, work, &info.final_path)?;
+    holds(fx, &*root, work)?;
+    ancestor_renames(fx, &*root, work)?;
     Ok(skips)
 }
 
@@ -516,34 +632,24 @@ fn names_and_ancestor_renames(
         )?;
     }
 
-    // A handle refers to an object, not a name. Renaming an ancestor of an open handle is
-    // refused by Windows (`AccessDenied`, observed, ADR 0017) and allowed by the fake; either
-    // way the handle keeps its directory, and its `final_path` is the current one.
+    // A handle refers to an object, not a name. While it is open, renaming an ancestor is
+    // refused (`AccessDenied`, observed on Windows for every kind of handle below a folder,
+    // ADR 0017 A5; `ancestor_renames` covers the kinds); renaming the handle's own directory
+    // is allowed and `final_path` follows. Once it is closed, the ancestor renames.
     ok(
         fx.file(&work.join(r"anc\mid\leaf\f.txt"), b"f"),
         "fixture anc",
     )?;
     let leaf = ok(root.open_dir(&rel(r"anc\mid\leaf")?), "open leaf")?;
     let id = ok(leaf.info(), "leaf info")?.file_id;
-    let (anc, leaf_name) = match fx.rename(&work.join("anc"), &work.join("anc-moved")) {
-        Ok(()) => {
-            ensure(
-                ok(root.metadata(&rel("anc")?), "metadata old name")?.is_none(),
-                "the old ancestor name is gone",
-            )?;
-            ("anc-moved", "leaf")
-        }
-        Err(e) if e.kind == SysErrorKind::AccessDenied => ("anc", "leaf"),
-        Err(e) => return Err(format!("contract violated: rename of an ancestor: {e}")),
-    };
-    let check = |anc: &str, leaf_name: &str, what: &str| -> ContractResult {
+    let check = |leaf_name: &str, what: &str| -> ContractResult {
         let now = ok(leaf.info(), what)?;
         ensure(
             now.file_id == id,
             &format!("{what}: the handle keeps its directory"),
         )?;
         ensure(
-            now.final_path == work_final.join(anc).join("mid").join(leaf_name),
+            now.final_path == work_final.join(r"anc\mid").join(leaf_name),
             &format!("{what}: final_path is the current path"),
         )?;
         read_is(
@@ -557,16 +663,218 @@ fn names_and_ancestor_renames(
             &format!("{what}: listing through the handle"),
         )
     };
-    check(anc, leaf_name, "after renaming an ancestor")?;
-    // Renaming the handle's own directory is allowed on both: `final_path` follows.
+    err_kind(
+        fx.rename(&work.join("anc"), &work.join("anc-moved")),
+        SysErrorKind::AccessDenied,
+        "renaming an ancestor of an open handle",
+    )?;
+    check("leaf", "after the refused ancestor rename")?;
     ok(
         fx.rename(
-            &work.join(anc).join(r"mid\leaf"),
-            &work.join(anc).join(r"mid\leaf-moved"),
+            &work.join(r"anc\mid\leaf"),
+            &work.join(r"anc\mid\leaf-moved"),
         ),
         "fixture rename leaf",
     )?;
-    check(anc, "leaf-moved", "after renaming the directory itself")
+    check("leaf-moved", "after renaming the directory itself")?;
+    drop(leaf);
+    ok(
+        fx.rename(&work.join("anc"), &work.join("anc-moved")),
+        "renaming the ancestor once the handle is closed",
+    )?;
+    ensure(
+        ok(root.metadata(&rel("anc")?), "metadata old name")?.is_none(),
+        "the old ancestor name is gone",
+    )?;
+    read_is(
+        root,
+        r"anc-moved\mid\leaf-moved\f.txt",
+        b"f",
+        "the tree is under the new ancestor name",
+    )
+}
+
+/// R1, R2, R4 (ADR 0017): handles held by another program. `users` reports a handle this
+/// process holds and forgets it once closed; a hold that shares nothing blocks data reads
+/// (`Busy`) but never `metadata` or `users` (attribute-only); a writer blocks `open_read`
+/// (which shares read only). A folder held without share-read cannot be opened or listed
+/// (`Busy`), but a walk through it to an entry below works: `sys::win` opens the components
+/// of a walk attribute-only, which no share mode blocks.
+fn holds(fx: &dyn FsFixture, root: &dyn Dir, work: &Path) -> ContractResult {
+    let me = std::process::id();
+    let base = work.join("holds");
+    let file_abs = base.join("u.bin");
+    ok(fx.file(&file_abs, b"held"), "fixture holds")?;
+    let file = rel(r"holds\u.bin")?;
+    let hold = |p: &Path, a: Access, s: Share, what: &str| ok(fx.hold_open(p, a, s), what);
+    {
+        let _h = hold(&file_abs, Access::READ, Share::RWD, "hold read, share all")?;
+        ensure(
+            ok(root.users(&file), "users while held")?.contains(&me),
+            "users reports a handle this process holds",
+        )?;
+        read_is(
+            root,
+            r"holds\u.bin",
+            b"held",
+            "a hold that shares read does not block a read",
+        )?;
+    }
+    ensure(
+        !ok(root.users(&file), "users after closing")?.contains(&me),
+        "users no longer reports a closed handle",
+    )?;
+    {
+        let _h = hold(
+            &file_abs,
+            Access::READ,
+            Share::NONE,
+            "hold read, share nothing",
+        )?;
+        err_kind(
+            root.read(&file),
+            SysErrorKind::Busy,
+            "read of a file held with share nothing",
+        )?;
+        err_kind(
+            root.open_read(&file),
+            SysErrorKind::Busy,
+            "open_read of a file held with share nothing",
+        )?;
+        ensure(
+            ok(root.metadata(&file), "metadata while held")?.is_some_and(|m| m.len == 4),
+            "metadata (attribute-only) is never blocked",
+        )?;
+        ensure(
+            ok(root.users(&file), "users while held exclusively")?.contains(&me),
+            "users (attribute-only) is never blocked",
+        )?;
+    }
+    {
+        let _h = hold(
+            &file_abs,
+            Access::WRITE,
+            Share::RWD,
+            "hold write, share all",
+        )?;
+        err_kind(
+            root.read(&file),
+            SysErrorKind::Busy,
+            "read while another handle may write (open_read shares read only)",
+        )?;
+    }
+    read_is(
+        root,
+        r"holds\u.bin",
+        b"held",
+        "read once the holds are closed",
+    )?;
+
+    let held_abs = base.join("held");
+    ok(fx.file(&held_abs.join(r"sub\f.txt"), b"f"), "fixture held")?;
+    let held = rel(r"holds\held")?;
+    {
+        let _h = hold(&held_abs, Access::READ, Share::NONE, "hold folder")?;
+        err_kind(
+            root.open_dir(&held),
+            SysErrorKind::Busy,
+            "open_dir of a folder held with share nothing",
+        )?;
+        err_kind(
+            root.read_dir(Some(&held)),
+            SysErrorKind::Busy,
+            "read_dir of a folder held with share nothing",
+        )?;
+        ensure(
+            ok(root.metadata(&held), "metadata of a held folder")?
+                .is_some_and(|m| m.kind == EntryKind::Dir),
+            "metadata of a held folder",
+        )?;
+        read_is(
+            root,
+            r"holds\held\sub\f.txt",
+            b"f",
+            "a walk through a held folder (attribute-only components)",
+        )?;
+        let sub = ok(
+            root.open_dir(&rel(r"holds\held\sub")?),
+            "open_dir below a held folder",
+        )?;
+        read_is(
+            &*sub,
+            "f.txt",
+            b"f",
+            "read through a handle below a held folder",
+        )?;
+    }
+    ok(
+        root.open_dir(&held),
+        "open_dir once the folder hold is closed",
+    )
+    .map(|_| ())
+}
+
+/// R3 (ADR 0017, A5): while any handle is open below a folder (a `Dir` handle, an `open_read`
+/// reader, a fixture hold of a file or a folder with or without share-delete, also an
+/// attribute-only one), renaming that folder or any of its ancestors is refused with
+/// `AccessDenied` (observed on Windows 11 build 26300, legacy and POSIX rename alike). Once
+/// the handle is closed, the rename works.
+fn ancestor_renames(fx: &dyn FsFixture, root: &dyn Dir, work: &Path) -> ContractResult {
+    const KINDS: [&str; 7] = [
+        "a Dir handle",
+        "an open_read reader",
+        "a file hold (read, shares read and delete)",
+        "a file hold (read, shares nothing)",
+        "an attribute-only file hold",
+        "a folder hold (read, shares read and delete)",
+        "an attribute-only folder hold (shares all)",
+    ];
+    for (i, kind) in KINDS.into_iter().enumerate() {
+        let case = format!("r3-{i}");
+        let base = work.join(&case);
+        ok(
+            fx.file(&base.join(r"anc\mid\leaf\f.txt"), b"f"),
+            "fixture r3",
+        )?;
+        let dir_rel = format!(r"{case}\anc\mid\leaf");
+        let file_rel = format!(r"{dir_rel}\f.txt");
+        let (dir_abs, file_abs) = (work.join(&dir_rel), work.join(&file_rel));
+        let on_dir = matches!(i, 0 | 5 | 6);
+        let held: Held<'_> = match i {
+            0 => Box::new(ok(root.open_dir(&rel(&dir_rel)?), kind)?),
+            1 => Box::new(ok(root.open_read(&rel(&file_rel)?), kind)?),
+            2 => ok(fx.hold_open(&file_abs, Access::READ, Share::RD), kind)?,
+            3 => ok(fx.hold_open(&file_abs, Access::READ, Share::NONE), kind)?,
+            4 => ok(fx.hold_open(&file_abs, Access::ATTRS, Share::NONE), kind)?,
+            5 => ok(fx.hold_open(&dir_abs, Access::READ, Share::RD), kind)?,
+            _ => ok(fx.hold_open(&dir_abs, Access::ATTRS, Share::RWD), kind)?,
+        };
+        let mut ancestors = vec![r"anc\mid", "anc"];
+        if !on_dir {
+            ancestors.insert(0, r"anc\mid\leaf");
+        }
+        for a in ancestors {
+            let from = base.join(a);
+            let to = base.join(format!("{a}-moved"));
+            err_kind(
+                fx.rename(&from, &to),
+                SysErrorKind::AccessDenied,
+                &format!("renaming {a} while {kind} is open below it"),
+            )?;
+        }
+        drop(held);
+        ok(
+            fx.rename(&base.join("anc"), &base.join("anc-moved")),
+            &format!("renaming the ancestor once {kind} is closed"),
+        )?;
+        read_is(
+            root,
+            &format!(r"{case}\anc-moved\mid\leaf\f.txt"),
+            b"f",
+            "the tree is under the new name",
+        )?;
+    }
+    Ok(())
 }
 
 /// Entries of the large directory in [`bounded_reads`]: with names of 60 characters the
@@ -1416,11 +1724,10 @@ pub fn fs_race_contract(
     );
     let name_p = rel(NAME)?;
 
-    // A rename by path, retried while it is refused because of the probe: on Windows a
-    // directory cannot be renamed while a handle below it was opened without
-    // `FILE_SHARE_DELETE` (`open_read` shares read only), which yields `AccessDenied` or
-    // `Busy`. Retrying keeps every flip complete; the probe stops before the flipper, so
-    // the retries end.
+    // A rename by path, retried while it is refused because of the probe: a directory cannot
+    // be renamed while any handle is open below it (`AccessDenied`, ADR 0017 A5), and a
+    // sharing conflict is `Busy`. Retrying keeps every flip complete; the probe stops before
+    // the flipper, so the retries end.
     let flip = |from: &Path, to: &Path, what: &str| -> ContractResult {
         let since = Instant::now();
         loop {
