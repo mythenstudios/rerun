@@ -1,4 +1,5 @@
 use super::{AppManifest, Expected, Library, LibraryFolders, ViewError};
+use crate::detect::steam::text::RawText;
 use crate::detect::vdf::{Document, Limits, parse};
 
 const LIB_CURRENT: &[u8] =
@@ -25,8 +26,8 @@ fn manifest(input: &str) -> Result<AppManifest, ViewError> {
 
 fn lib(path: &str, label: Option<&str>) -> Library {
     Library {
-        path: path.to_owned(),
-        label: label.map(str::to_owned),
+        path: RawText::new(path),
+        label: label.map(RawText::new),
     }
 }
 
@@ -220,8 +221,8 @@ fn the_manifest_fixtures_yield_their_fields() {
         m,
         AppManifest {
             app_id: 1_000_001,
-            name: "Fixture Game".into(),
-            install_dir: "Fixture Game".into(),
+            name: RawText::new("Fixture Game"),
+            install_dir: RawText::new("Fixture Game"),
             state_flags: 4,
         }
     );
@@ -230,8 +231,8 @@ fn the_manifest_fixtures_yield_their_fields() {
         m,
         AppManifest {
             app_id: 1_000_003,
-            name: "Fixture: The \"Quoted\" Edition".into(),
-            install_dir: "Fixture Quoted Edition".into(),
+            name: RawText::new("Fixture: The \"Quoted\" Edition"),
+            install_dir: RawText::new("Fixture Quoted Edition"),
             state_flags: 1026,
         }
     );
@@ -380,13 +381,13 @@ fn name_and_installdir_stay_raw() {
         "\"AppState\" { \"appid\" \"5\" \"name\" \"a\\nb\\t\u{1b}[31m\" \"installdir\" \"..\\\\..\\\\Windows\" \"StateFlags\" \"4\" }",
     )
     .unwrap();
-    assert_eq!(m.name, "a\nb\t\u{1b}[31m");
-    assert_eq!(m.install_dir, r"..\..\Windows");
+    assert_eq!(m.name.as_raw_str(), "a\nb\t\u{1b}[31m");
+    assert_eq!(m.install_dir.as_raw_str(), r"..\..\Windows");
     let m = manifest(
         "\"AppState\" { \"appid\" \"5\" \"name\" \"\" \"installdir\" \"\" \"StateFlags\" \"4\" }",
     )
     .unwrap();
-    assert_eq!((m.name.as_str(), m.install_dir.as_str()), ("", ""));
+    assert_eq!((m.name.as_raw_str(), m.install_dir.as_raw_str()), ("", ""));
 }
 
 #[test]
@@ -473,4 +474,25 @@ fn views_on_mutated_fixtures_never_panic() {
         ok.iter().chain(&refused).all(|&n| n > 0),
         "ok {ok:?}, refused {refused:?}"
     );
+}
+
+#[test]
+fn debug_of_the_views_never_shows_values() {
+    const MARK: &str = "SECRETMARKER";
+    let lf = libs(&format!(
+        r#""libraryfolders" {{ "0" {{ "path" "C:\\{MARK}" "label" "{MARK}" }} "1" "D:\\{MARK}" }}"#
+    ))
+    .unwrap();
+    let m = manifest(&format!(
+        "\"AppState\" {{ \"appid\" \"5\" \"name\" \"{MARK}\" \"installdir\" \"{MARK}\" \"StateFlags\" \"4\" }}"
+    ))
+    .unwrap();
+    assert_eq!(
+        lf.libraries[0].label.as_ref().map(RawText::as_raw_str),
+        Some(MARK)
+    );
+    assert_eq!(m.name.as_raw_str(), MARK);
+    let shown = format!("{lf:?} {lf:#?} {m:?} {m:#?}");
+    assert!(!shown.contains(MARK), "{shown}");
+    assert!(shown.contains("RawText(15 bytes)"), "{shown}");
 }

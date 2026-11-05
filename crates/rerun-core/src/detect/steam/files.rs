@@ -10,10 +10,12 @@
 //!   `appid`, `installdir`, `name` and `StateFlags`, all strings; the numbers strict (see
 //!   [`AppManifest`]).
 //!
-//! Key lookups are ASCII case-insensitive (Valve's `stricmp`). Paths and install folder names
-//! stay raw strings: `policy::root` (`StoreDir::open`, `StoreDir::game`) decides about them in
-//! step 12. Errors name fields and byte offsets only, never values.
+//! Key lookups are ASCII case-insensitive (Valve's `stricmp`). Paths, labels, names and install
+//! folder names stay raw ([`RawText`], ADR 0012): `policy::root` (`StoreDir::open`,
+//! `StoreDir::game`) decides about paths, output layers sanitize names. Errors name fields and
+//! byte offsets only, never values.
 
+use super::text::RawText;
 use crate::detect::vdf::{Document, Entry, Object, Value};
 
 /// The libraries listed in `libraryfolders.vdf`.
@@ -27,9 +29,9 @@ pub struct LibraryFolders {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Library {
     /// Path as written (decoded), unchecked. Not a root until `policy::root` accepts it.
-    pub path: String,
+    pub path: RawText,
     /// Label as written, if present (Steam writes `""` for none).
-    pub label: Option<String>,
+    pub label: Option<RawText>,
 }
 
 /// The fields Rerun uses from `appmanifest_<appid>.acf`.
@@ -39,10 +41,10 @@ pub struct AppManifest {
     /// `u32`.
     pub app_id: u32,
     /// `name` as written. May contain any character; output layers sanitize it.
-    pub name: String,
-    /// `installdir` as written, unchecked; `StoreDir::game` classifies it.
-    pub install_dir: String,
-    /// `StateFlags`: like `appid`, but `0` is allowed. Its meaning is step 12's business.
+    pub name: RawText,
+    /// `installdir` as written, unchecked; `detect::steam` classifies it.
+    pub install_dir: RawText,
+    /// `StateFlags`: like `appid`, but `0` is allowed. Its meaning: `detect::steam::state`.
     pub state_flags: u32,
 }
 
@@ -166,7 +168,7 @@ fn required_str<'o>(
 
 /// A strict decimal `u32`: 1 to 10 ASCII digits, no sign or whitespace, no leading zero
 /// (`0` itself only if `zero_ok`).
-fn decimal_u32(s: &str, zero_ok: bool) -> Option<u32> {
+pub(super) fn decimal_u32(s: &str, zero_ok: bool) -> Option<u32> {
     let digits = s.as_bytes();
     if digits.is_empty() || digits.len() > 10 || !digits.iter().all(u8::is_ascii_digit) {
         return None;
@@ -197,12 +199,12 @@ impl LibraryFolders {
             libraries.push(match &entry.value {
                 // Before 2021: `"1" "D:\\Lib"`.
                 Value::Str(path) => Library {
-                    path: path.clone(),
+                    path: RawText::new(path.as_str()),
                     label: None,
                 },
                 Value::Obj(lib) => Library {
-                    path: required_str(lib, "path", entry.offset)?.0.to_owned(),
-                    label: unique_str(lib, "label")?.map(|(s, _)| s.to_owned()),
+                    path: RawText::new(required_str(lib, "path", entry.offset)?.0),
+                    label: unique_str(lib, "label")?.map(|(s, _)| RawText::new(s)),
                 },
             });
         }
@@ -216,8 +218,8 @@ impl AppManifest {
         let (st, at) = root(doc, APP_STATE)?;
         Ok(Self {
             app_id: number(st, "appid", at, false)?,
-            name: required_str(st, "name", at)?.0.to_owned(),
-            install_dir: required_str(st, "installdir", at)?.0.to_owned(),
+            name: RawText::new(required_str(st, "name", at)?.0),
+            install_dir: RawText::new(required_str(st, "installdir", at)?.0),
             state_flags: number(st, "StateFlags", at, true)?,
         })
     }
