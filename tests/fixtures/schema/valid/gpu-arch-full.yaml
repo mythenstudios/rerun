@@ -1,0 +1,39 @@
+format: 1
+archs:
+  - { id: rdna4, vendor: 0x1002 }
+  - { id: rdna3_5, vendor: 0x1002 }
+  - { id: kepler, vendor: 0x10DE }
+  - { id: xe_lp, vendor: 0x8086 }
+  - { id: x, vendor: 0x8086 }
+  - { id: a234567890123456789012345678901_, vendor: 0x8086 }
+entries:
+  - vendor: 0x1002
+    arch: rdna4
+    integrated: false
+    vulkan: "1.4"
+    dx9: native
+    device_ids: [0x0000, 0xFFFF]
+    source: "Fixture, synthetic IDs"
+  - vendor: 0x1002
+    arch: rdna3_5
+    integrated: true
+    vulkan: "1.10"
+    dx9: native
+    device_ranges: [{ from: 0x1000, to: 0x1000 }, { from: 0x1001, to: 0x10FF }]
+    source: "Fixture: ranges only, ä é ü and a long dash —"
+  - vendor: 0x10DE
+    arch: kepler
+    integrated: false
+    vulkan: "1.0"
+    dx9: native
+    device_ids: [0x1000]
+    device_ranges: [{ from: 0x2000, to: 0x2FFF }]
+    source: "Fixture: same device ID as AMD, another vendor"
+  - vendor: 0x8086
+    arch: xe_lp
+    integrated: true
+    vulkan: none
+    dx9: d3d9on12
+    device_ids: [0x1234]
+    device_ranges: []
+    source: "Fixture: empty range list next to IDs"

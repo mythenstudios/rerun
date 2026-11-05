@@ -1,0 +1,14 @@
+# Invalid: both device lists empty
+format: 1
+archs:
+  - { id: rdna4, vendor: 0x1002 }
+  - { id: xe_lp, vendor: 0x8086 }
+entries:
+  - vendor: 0x1002
+    arch: rdna4
+    integrated: false
+    vulkan: "1.4"
+    dx9: native
+    device_ids: []
+    device_ranges: []
+    source: "Fixture"

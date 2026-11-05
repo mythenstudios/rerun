@@ -1,0 +1,13 @@
+# Invalid: dx9 value outside native and d3d9on12
+format: 1
+archs:
+  - { id: rdna4, vendor: 0x1002 }
+  - { id: xe_lp, vendor: 0x8086 }
+entries:
+  - vendor: 0x1002
+    arch: rdna4
+    integrated: false
+    vulkan: "1.4"
+    dx9: unknown
+    device_ids: [0x7550]
+    source: "Fixture"

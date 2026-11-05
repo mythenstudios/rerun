@@ -1,0 +1,12 @@
+# Invalid: entry without device_ids and device_ranges
+format: 1
+archs:
+  - { id: rdna4, vendor: 0x1002 }
+  - { id: xe_lp, vendor: 0x8086 }
+entries:
+  - vendor: 0x1002
+    arch: rdna4
+    integrated: false
+    vulkan: "1.4"
+    dx9: native
+    source: "Fixture"

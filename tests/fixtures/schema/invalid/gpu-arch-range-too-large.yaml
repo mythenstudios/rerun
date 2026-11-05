@@ -1,0 +1,13 @@
+# Invalid: range bound above 0xFFFF
+format: 1
+archs:
+  - { id: rdna4, vendor: 0x1002 }
+  - { id: xe_lp, vendor: 0x8086 }
+entries:
+  - vendor: 0x1002
+    arch: rdna4
+    integrated: false
+    vulkan: "1.4"
+    dx9: native
+    device_ranges: [{ from: 0xFF00, to: 0x10000 }]
+    source: "Fixture"

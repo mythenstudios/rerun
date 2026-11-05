@@ -1,0 +1,5 @@
+# Invalid: declared arch of vendor 0x1414
+format: 1
+archs:
+  - { id: basic, vendor: 0x1414 }
+entries: []

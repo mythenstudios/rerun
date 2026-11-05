@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rerun:schema:gpu-arch:1",
+  "title": "Rerun GPU architecture table v1",
+  "description": "Maps PCI vendor and device IDs to a GPU architecture. See docs/03b-gpu-display.md and ADR 0015. Overlaps, undeclared architectures and vendor conflicts are checked by GpuArchTable::new, not here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "archs",
+    "entries"
+  ],
+  "properties": {
+    "format": {
+      "const": 1
+    },
+    "archs": {
+      "description": "Every identifier a Topo may name in when.gpu.arch, unreleased ones included. Ids unique.",
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/archDecl"
+      }
+    },
+    "entries": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    }
+  },
+  "$defs": {
+    "archId": {
+      "description": "GPU architecture identifier (ADR 0015): a lowercase letter, then up to 31 lowercase letters, digits or underscores; never \"unknown\" (a profile state, not a value).",
+      "type": "string",
+      "allOf": [
+        {
+          "pattern": "^[a-z][a-z0-9_]{0,31}$"
+        },
+        {
+          "not": {
+            "const": "unknown"
+          }
+        }
+      ]
+    },
+    "vendor": {
+      "description": "PCI vendor ID: 0x1002 (AMD), 0x10DE (NVIDIA), 0x8086 (Intel).",
+      "enum": [
+        4098,
+        4318,
+        32902
+      ]
+    },
+    "deviceId": {
+      "description": "PCI device ID.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "archDecl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "vendor"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/archId"
+        },
+        "vendor": {
+          "$ref": "#/$defs/vendor"
+        }
+      }
+    },
+    "entry": {
+      "description": "One group of devices of one architecture. Revision and subsystem IDs are deliberately not keys. At most 1,024 IDs and ranges together (checked by GpuArchTable::new).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vendor",
+        "arch",
+        "integrated",
+        "vulkan",
+        "dx9",
+        "source"
+      ],
+      "properties": {
+        "vendor": {
+          "$ref": "#/$defs/vendor"
+        },
+        "arch": {
+          "$ref": "#/$defs/archId"
+        },
+        "integrated": {
+          "type": "boolean"
+        },
+        "vulkan": {
+          "description": "Highest Vulkan version the vendor states for these devices, \"1.<minor>\", or none.",
+          "type": "string",
+          "pattern": "^(none|1\\.(0|[1-9][0-9]?))$"
+        },
+        "dx9": {
+          "enum": [
+            "native",
+            "d3d9on12"
+          ]
+        },
+        "device_ids": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/deviceId"
+          }
+        },
+        "device_ranges": {
+          "description": "Inclusive ranges, only as a source states them.",
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/deviceRange"
+          }
+        },
+        "source": {
+          "description": "Where the IDs come from (docs/05-sources-policy.md, Reference data). No control or bidi characters.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]+$"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "device_ids"
+          ],
+          "properties": {
+            "device_ids": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "device_ranges"
+          ],
+          "properties": {
+            "device_ranges": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "deviceRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ],
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/deviceId"
+        },
+        "to": {
+          "$ref": "#/$defs/deviceId"
+        }
+      }
+    }
+  }
+}

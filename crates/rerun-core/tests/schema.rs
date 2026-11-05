@@ -1,6 +1,6 @@
-//! Schema v1: metaschema, inventory (`topos/`, `packages/`), valid and invalid fixtures,
-//! package references, TODO rule, parity `RelPath` ↔ `$defs/relPath` and `GraphicsApi` ↔
-//! `$defs/api` (ADR 0014).
+//! Schema v1: metaschema, inventory (`topos/`, `packages/`, `data/gpu-arch.yaml`), valid and
+//! invalid fixtures, package references, TODO rule, parity `RelPath` ↔ `$defs/relPath` and
+//! `GraphicsApi` ↔ `$defs/api` (ADR 0014), GPU architecture identifiers (ADR 0015).
 //!
 //! See ADR 0005. From phase 4, typed serde structs take over runtime validation;
 //! these fixtures then run against both.
@@ -48,6 +48,35 @@ fn load_yaml(p: &Path) -> Value {
         .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
+/// The GPU architecture table and its fixtures (ADR 0015): the strict options of [`load_yaml`]
+/// plus a budget without anchors and aliases.
+fn try_load_gpu_arch_yaml(text: &str) -> Result<Value, String> {
+    let options = serde_saphyr::options! {
+        strict_booleans: true,
+        merge_keys: serde_saphyr::MergeKeyPolicy::Error,
+        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+        budget: serde_saphyr::budget! { max_anchors: 0, max_aliases: 0 },
+    };
+    serde_saphyr::from_str_with_options(text, options).map_err(|e| e.to_string())
+}
+
+/// Loads a fixture or data file with the loader that belongs to it.
+fn load_doc(p: &Path) -> Value {
+    if is_gpu_arch(p) {
+        try_load_gpu_arch_yaml(&fs::read_to_string(p).unwrap())
+            .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+    } else {
+        load_yaml(p)
+    }
+}
+
+fn is_gpu_arch(p: &Path) -> bool {
+    p.file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("gpu-arch")
+}
+
 fn yaml_files(rel: &str) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(repo().join(rel))
         .unwrap()
@@ -77,6 +106,14 @@ fn package_schema() -> Value {
     load_json("schema/package.schema.json")
 }
 
+fn gpu_arch_schema() -> Value {
+    load_json("schema/gpu-arch.schema.json")
+}
+
+fn gpu_arch_data() -> Value {
+    load_doc(&repo().join("data/gpu-arch.yaml"))
+}
+
 /// Which schema applies to a fixture? By file name prefix.
 fn schema_for(p: &Path) -> Value {
     let name = p.file_name().unwrap().to_string_lossy();
@@ -84,8 +121,10 @@ fn schema_for(p: &Path) -> Value {
         topo_schema()
     } else if name.starts_with("package-") {
         package_schema()
+    } else if name.starts_with("gpu-arch-") {
+        gpu_arch_schema()
     } else {
-        panic!("fixture name must start with topo- or package-: {name}")
+        panic!("fixture name must start with topo-, package- or gpu-arch-: {name}")
     }
 }
 
@@ -103,7 +142,7 @@ fn strings(v: &Value, out: &mut Vec<String>) {
 
 #[test]
 fn schemas_are_valid_against_metaschema() {
-    for s in [topo_schema(), package_schema()] {
+    for s in [topo_schema(), package_schema(), gpu_arch_schema()] {
         jsonschema::meta::validate(&s).unwrap();
         assert_eq!(s["$schema"], "https://json-schema.org/draft/2020-12/schema");
     }
@@ -133,6 +172,23 @@ fn shared_definitions_are_identical() {
         );
         assert!(!t["$defs"][def].is_null(), "$defs/{def} missing");
     }
+    // ADR 0015: one identifier rule for `when.gpu.arch` and the table.
+    let g = gpu_arch_schema();
+    assert_eq!(
+        t["$defs"]["archId"], g["$defs"]["archId"],
+        "$defs/archId differs between the topo and gpu-arch schemas"
+    );
+    assert!(!t["$defs"]["archId"].is_null(), "$defs/archId missing");
+    assert_eq!(
+        t["$defs"]["when"]["properties"]["gpu.arch"]["items"]["$ref"],
+        "#/$defs/archId"
+    );
+    for at in [
+        "/$defs/archDecl/properties/id",
+        "/$defs/entry/properties/arch",
+    ] {
+        assert_eq!(g.pointer(at).unwrap()["$ref"], "#/$defs/archId", "{at}");
+    }
 }
 
 // ---------- Inventory ----------
@@ -155,6 +211,175 @@ fn all_packages_are_valid() {
         let errs = errors(&v, &doc);
         assert!(errs.is_empty(), "{}:\n{}", f.display(), errs.join("\n"));
     }
+}
+
+#[test]
+fn gpu_arch_table_is_valid() {
+    let v = validator(&gpu_arch_schema());
+    let doc = gpu_arch_data();
+    let errs = errors(&v, &doc);
+    assert!(errs.is_empty(), "data/gpu-arch.yaml:\n{}", errs.join("\n"));
+}
+
+/// The declared identifiers of `data/gpu-arch.yaml`.
+fn declared_archs() -> BTreeSet<String> {
+    gpu_arch_data()["archs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Every `when.gpu.arch` of the topos and the valid topo fixtures names a declared identifier
+/// (from phase 4 the loader refuses an undeclared one, ADR 0015).
+#[test]
+fn topo_gpu_archs_are_declared() {
+    let declared = declared_archs();
+    let mut seen = 0;
+    let mut undeclared = Vec::new();
+    let topo_fixtures = yaml_files("tests/fixtures/schema/valid")
+        .into_iter()
+        .filter(|f| {
+            f.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("topo-")
+        });
+    for f in yaml_files("topos").into_iter().chain(topo_fixtures) {
+        let doc = load_yaml(&f);
+        for issue in doc["issues"].as_array().unwrap() {
+            for id in issue["when"]["gpu.arch"].as_array().into_iter().flatten() {
+                seen += 1;
+                let id = id.as_str().unwrap();
+                if !declared.contains(id) {
+                    undeclared.push(format!("{}: {id}", f.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        seen > 0,
+        "no when.gpu.arch found: the check has nothing to bite on"
+    );
+    assert!(
+        undeclared.is_empty(),
+        "undeclared gpu.arch:\n{}",
+        undeclared.join("\n")
+    );
+}
+
+/// The shipped table declares the identifiers of `docs/03b-gpu-display.md` with their vendor,
+/// and the one shipped entry of step 15.
+#[test]
+fn gpu_arch_table_declares_the_documented_identifiers() {
+    let doc = gpu_arch_data();
+    let declared: Vec<(String, u64)> = doc["archs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["id"].as_str().unwrap().to_owned(),
+                a["vendor"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let amd = [
+        "terascale",
+        "gcn1",
+        "gcn2",
+        "gcn3",
+        "gcn4",
+        "vega",
+        "rdna1",
+        "rdna2",
+        "rdna3",
+        "rdna3_5",
+        "rdna4",
+        "rdna5",
+    ];
+    let nvidia = [
+        "tesla",
+        "fermi",
+        "kepler",
+        "maxwell",
+        "pascal",
+        "volta",
+        "turing",
+        "ampere",
+        "ada",
+        "blackwell",
+        "rubin",
+    ];
+    let intel = [
+        "gen9", "gen11", "xe_lp", "xe_hpg", "xe2", "xe3", "xe3p", "xe4",
+    ];
+    let expected: Vec<(String, u64)> = [(0x1002, &amd[..]), (0x10DE, &nvidia), (0x8086, &intel)]
+        .into_iter()
+        .flat_map(|(v, ids)| ids.iter().map(move |id| ((*id).to_owned(), v)))
+        .collect();
+    assert_eq!(declared, expected);
+
+    let entries = doc["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "step 15 ships one entry");
+    let e = &entries[0];
+    assert_eq!(e["vendor"], 0x1002);
+    assert_eq!(e["arch"], "rdna4");
+    assert_eq!(e["integrated"], false);
+    assert_eq!(e["vulkan"], "1.4");
+    assert_eq!(e["dx9"], "native");
+    assert_eq!(e["device_ids"], serde_json::json!([0x7550]));
+    assert!(e.get("device_ranges").is_none());
+    assert_eq!(e["source"], "developer machine dump, 2026-11-05 (ADR 0008)");
+}
+
+/// The identifier rule in a topo: `_` and a leading letter (03b), never `unknown`.
+#[test]
+fn topo_gpu_arch_identifier_rule() {
+    let v = validator(&topo_schema());
+    let base = load_yaml(&repo().join("tests/fixtures/schema/valid/topo-full.yaml"));
+    let with = |archs: &Value| {
+        let mut doc = base.clone();
+        doc["issues"][0]["when"]["gpu.arch"] = archs.clone();
+        v.is_valid(&doc)
+    };
+    for good in [
+        serde_json::json!(["rdna2"]),
+        serde_json::json!(["rdna3_5"]),
+        serde_json::json!(["rdna3_5", "xe_lp", "xe_hpg"]),
+        serde_json::json!(["a234567890123456789012345678901_"]),
+    ] {
+        assert!(with(&good), "{good} refused");
+    }
+    for bad in [
+        serde_json::json!(["unknown"]),
+        serde_json::json!(["rdna4", "unknown"]),
+        serde_json::json!(["Rdna4"]),
+        serde_json::json!(["4rdna"]),
+        serde_json::json!(["_rdna"]),
+        serde_json::json!(["rdna-4"]),
+        serde_json::json!(["a2345678901234567890123456789012x"]),
+        serde_json::json!([""]),
+        serde_json::json!([4]),
+        serde_json::json!([]),
+        serde_json::json!(["rdna4", "rdna4"]),
+    ] {
+        assert!(!with(&bad), "{bad} accepted");
+    }
+}
+
+/// No anchors or aliases in the table (ADR 0015): the budget refuses them. Hex IDs are
+/// integers (YAML 1.2 core schema).
+#[test]
+fn gpu_arch_loader_refuses_anchors_and_aliases() {
+    assert!(try_load_gpu_arch_yaml("format: 1\narchs: []\nentries: []\n").is_ok());
+    let anchor = "format: 1\narchs: &a []\nentries: []\n";
+    let alias = "format: 1\narchs: &a []\nentries: *a\n";
+    assert!(try_load_gpu_arch_yaml(anchor).is_err(), "anchor accepted");
+    assert!(try_load_gpu_arch_yaml(alias).is_err(), "alias accepted");
+    let hex = try_load_gpu_arch_yaml("v: 0x7550\n").unwrap();
+    assert_eq!(hex["v"], 0x7550);
 }
 
 #[test]
@@ -221,6 +446,7 @@ fn download_urls_belong_to_the_source() {
                 .unwrap()
                 .to_string_lossy()
                 .starts_with("topo-")
+                && !is_gpu_arch(f)
         })
     {
         let doc = load_yaml(&f);
@@ -277,7 +503,7 @@ fn todo_implies_draft() {
 fn valid_fixtures_pass() {
     for f in yaml_files("tests/fixtures/schema/valid") {
         let v = validator(&schema_for(&f));
-        let errs = errors(&v, &load_yaml(&f));
+        let errs = errors(&v, &load_doc(&f));
         assert!(errs.is_empty(), "{}:\n{}", f.display(), errs.join("\n"));
     }
 }
@@ -287,7 +513,7 @@ fn invalid_fixtures_fail() {
     let mut accepted = Vec::new();
     for f in yaml_files("tests/fixtures/schema/invalid") {
         let v = validator(&schema_for(&f));
-        let errs = errors(&v, &load_yaml(&f));
+        let errs = errors(&v, &load_doc(&f));
         if errs.is_empty() {
             accepted.push(f.display().to_string());
         }

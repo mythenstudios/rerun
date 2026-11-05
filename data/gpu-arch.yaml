@@ -1,0 +1,47 @@
+# GPU architecture table (ADR 0015, docs/03b-gpu-display.md). Schema: schema/gpu-arch.schema.json.
+# Step 15 compiles in a mirror of this file (rerun_core::hw::arch); a test requires both to be
+# equal. Every shipped device ID needs its own real source (docs/05-sources-policy.md).
+format: 1
+archs:
+  # AMD
+  - { id: terascale, vendor: 0x1002 }
+  - { id: gcn1, vendor: 0x1002 }
+  - { id: gcn2, vendor: 0x1002 }
+  - { id: gcn3, vendor: 0x1002 }
+  - { id: gcn4, vendor: 0x1002 }
+  - { id: vega, vendor: 0x1002 }
+  - { id: rdna1, vendor: 0x1002 }
+  - { id: rdna2, vendor: 0x1002 }
+  - { id: rdna3, vendor: 0x1002 }
+  - { id: rdna3_5, vendor: 0x1002 }
+  - { id: rdna4, vendor: 0x1002 }
+  - { id: rdna5, vendor: 0x1002 }
+  # NVIDIA
+  - { id: tesla, vendor: 0x10DE }
+  - { id: fermi, vendor: 0x10DE }
+  - { id: kepler, vendor: 0x10DE }
+  - { id: maxwell, vendor: 0x10DE }
+  - { id: pascal, vendor: 0x10DE }
+  - { id: volta, vendor: 0x10DE }
+  - { id: turing, vendor: 0x10DE }
+  - { id: ampere, vendor: 0x10DE }
+  - { id: ada, vendor: 0x10DE }
+  - { id: blackwell, vendor: 0x10DE }
+  - { id: rubin, vendor: 0x10DE }
+  # Intel
+  - { id: gen9, vendor: 0x8086 }
+  - { id: gen11, vendor: 0x8086 }
+  - { id: xe_lp, vendor: 0x8086 }
+  - { id: xe_hpg, vendor: 0x8086 }
+  - { id: xe2, vendor: 0x8086 }
+  - { id: xe3, vendor: 0x8086 }
+  - { id: xe3p, vendor: 0x8086 }
+  - { id: xe4, vendor: 0x8086 }
+entries:
+  - vendor: 0x1002
+    arch: rdna4
+    integrated: false
+    vulkan: "1.4"
+    dx9: native
+    device_ids: [0x7550]
+    source: "developer machine dump, 2026-11-05 (ADR 0008)"

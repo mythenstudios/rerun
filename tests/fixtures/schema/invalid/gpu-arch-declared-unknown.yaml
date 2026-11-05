@@ -1,0 +1,5 @@
+# Invalid: declared identifier "unknown"
+format: 1
+archs:
+  - { id: unknown, vendor: 0x1002 }
+entries: []
