@@ -60,11 +60,11 @@ use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAce, AddAccessDeniedAce,
     AdjustTokenPrivileges, DACL_SECURITY_INFORMATION, GetLengthSid, GetTokenInformation,
     ImpersonateSelf, InitializeAcl, InitializeSecurityDescriptor, LUID_AND_ATTRIBUTES,
-    LookupPrivilegeValueW, PROTECTED_DACL_SECURITY_INFORMATION, RevertToSelf, SE_DACL_PROTECTED,
-    SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME, SECURITY_DESCRIPTOR, SecurityImpersonation,
-    SetKernelObjectSecurity, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
-    TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
-    TokenElevation, TokenUser,
+    LookupPrivilegeValueW, PROTECTED_DACL_SECURITY_INFORMATION, RevertToSelf, SE_BACKUP_NAME,
+    SE_DACL_PROTECTED, SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME, SECURITY_DESCRIPTOR,
+    SecurityImpersonation, SetKernelObjectSecurity, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES,
+    TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenPrivileges, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateSymbolicLinkW, DDD_EXACT_MATCH_ON_REMOVE, DDD_REMOVE_DEFINITION, DELETE,
@@ -1348,9 +1348,18 @@ impl FsFixture for WinFixture {
 
     /// `CreateFileW` with `FILE_READ_DATA`/`FILE_WRITE_DATA`/`DELETE` (or
     /// `FILE_READ_ATTRIBUTES` alone), `SYNCHRONIZE` and the share mode, opening `p` itself
-    /// (`FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`, so directories too).
+    /// (`FILE_FLAG_OPEN_REPARSE_POINT`). `FILE_FLAG_BACKUP_SEMANTICS` (backup intent) only for
+    /// a directory, which cannot be opened without it: an ordinary program opens a file
+    /// without it, and on the elevated GitHub runner a file opened with it passed a share-0
+    /// lock (K1, CI run 42130639073), so the hold would not test the share mode there.
     fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>> {
         self.guard(p, Last::Plain)?;
+        ci_token_note();
+        let dir = std::fs::symlink_metadata(p)
+            .map_err(|e| io_err(&e, p))?
+            .file_attributes()
+            & FILE_ATTRIBUTE_DIRECTORY
+            != 0;
         let mut mask = SYNCHRONIZE;
         for (on, bit) in [
             (access.read, FILE_READ_DATA),
@@ -1377,11 +1386,90 @@ impl FsFixture for WinFixture {
         let f = OpenOptions::new()
             .access_mode(mask)
             .share_mode(sh)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .custom_flags(if dir {
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+            } else {
+                FILE_FLAG_OPEN_REPARSE_POINT
+            })
             .open(p)
             .map_err(|e| io_err(&e, p))?;
         Ok(Box::new(f))
     }
+}
+
+/// Diagnostic on GitHub runners, once per process: whether the token is elevated and whether
+/// `SeBackupPrivilege` and `SeRestorePrivilege` are enabled (they decide what an open with
+/// backup intent may do; K1 failed there with a fixture open by backup semantics).
+fn ci_token_note() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if !hosted_ci() {
+        return;
+    }
+    ONCE.call_once(|| {
+        note(&format!(
+            "note: CI token: elevated {}, SeBackupPrivilege {}, SeRestorePrivilege {}",
+            is_elevated(),
+            privilege_state(SE_BACKUP_NAME),
+            privilege_state(SE_RESTORE_NAME),
+        ));
+    });
+}
+
+/// `enabled`, `disabled` (held, not enabled), `absent` or `unknown` for a privilege of the
+/// process token (`TokenPrivileges`).
+fn privilege_state(name: windows_sys::core::PCWSTR) -> &'static str {
+    let mut luid = LUID {
+        LowPart: 0,
+        HighPart: 0,
+    };
+    // SAFETY: `name` is a static NUL-terminated privilege name; `luid` is valid for a write;
+    // null system name = local system.
+    if unsafe { LookupPrivilegeValueW(ptr::null(), name, &mut luid) } == 0 {
+        return "unknown";
+    }
+    let Ok(token) = process_token(TOKEN_QUERY) else {
+        return "unknown";
+    };
+    let mut buf = vec![0u64; 512];
+    let len = u32::try_from(buf.len() * 8).unwrap_or(0);
+    let mut needed = 0u32;
+    // SAFETY: `token` is a live token with TOKEN_QUERY; `buf` is valid for writes of `len`
+    // bytes and 8-byte aligned; `needed` is valid for a write.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenPrivileges,
+            buf.as_mut_ptr().cast::<c_void>(),
+            len,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return "unknown";
+    }
+    // TOKEN_PRIVILEGES: a u32 count, then LUID_AND_ATTRIBUTES entries of 12 bytes (LUID low
+    // u32, high i32, attributes u32) from offset 4; read as bytes, never through a pointer.
+    let bytes: Vec<u8> = buf.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let word = |at: usize| {
+        bytes
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let count = word(0).unwrap_or(0) as usize;
+    for i in 0..count {
+        let at = 4 + 12 * i;
+        let (Some(low), Some(high), Some(attrs)) = (word(at), word(at + 4), word(at + 8)) else {
+            return "unknown";
+        };
+        if low == luid.LowPart && high.cast_signed() == luid.HighPart {
+            return if attrs & SE_PRIVILEGE_ENABLED != 0 {
+                "enabled"
+            } else {
+                "disabled"
+            };
+        }
+    }
+    "absent"
 }
 
 /// `<Windows>\System32` from the real known folders.
