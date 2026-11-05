@@ -6,8 +6,8 @@
 //!   libraries and their apps, never failing as a whole; typed views of `libraryfolders.vdf`
 //!   and `appmanifest_*.acf` in [`steam::files`].
 //! - [`pe`]: bounded parser for executables (headers, machine, flags), ADR 0013.
-//! - [`exe`]: executable candidates of a game folder (ADR 0014): the bounded walk, the
-//!   graphics API from the imports.
+//! - [`exe`]: executable candidates of a game folder (ADR 0014): the bounded walk, roles,
+//!   ranking and the main executable ([`exe::scan_game`]), the graphics API from the imports.
 //! - [`text`]: [`text::RawText`], untrusted text whose `Debug` shows only its length (ADR 0012;
 //!   shared by every detector since ADR 0013, re-exported as `steam::RawText`).
 

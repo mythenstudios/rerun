@@ -36,7 +36,7 @@ mod resource;
 mod version;
 
 #[cfg(test)]
-mod testfx;
+pub(crate) mod testfx;
 #[cfg(test)]
 mod tests;
 

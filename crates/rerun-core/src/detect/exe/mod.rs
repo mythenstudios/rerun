@@ -9,15 +9,24 @@
 //!   and never followed. A limit keeps a partial result ([`WalkStats::complete`]).
 //! - `api`: the graphics API from the imported DLL names ([`classify`] to an
 //!   [`ApiReport`]); [`GraphicsApi::topo_name`] maps to the Topo `api` values.
+//! - `role`, `rank`: a [`Role`] per candidate from fixed name rules and PE facts (hints,
+//!   nothing is dropped), and the ranking that names the main executable ([`Main`]).
+//! - [`scan_game`]: all of it for one game ([`GameExes`], owns everything);
+//!   [`inspect_exe`]: the per-file pipeline, also for Topo matching.
 //! - Problems of the walk are [`ExeIssue`]s; they never carry file content, raw names only
-//!   escaped.
+//!   escaped. Problems of a file stay on its [`Candidate`].
 
 mod api;
 mod issue;
+mod rank;
+mod role;
+mod scan;
 mod walk;
 
 pub use api::{ApiEvidence, ApiReport, ApiVerdict, Basis, Engine, GraphicsApi, classify};
 pub use issue::{ExeIssue, ExeIssueKind, LimitKind};
+pub use role::{Role, name_role, similarity};
+pub use scan::{Candidate, ExeError, ExeFacts, GameExes, Main, Options, inspect_exe, scan_game};
 pub use walk::{SKIP_DIRS, Walk, WalkStats, WalkedExe, walk};
 
 use crate::detect::pe;

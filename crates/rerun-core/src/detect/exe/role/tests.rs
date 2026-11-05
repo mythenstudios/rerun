@@ -1,0 +1,208 @@
+//! Name rules, the install folder hint and the similarity (ADR 0014, "Roles", "Ranking").
+//! The names are the shapes the developer-machine dump showed, with invented games.
+
+use super::{Role, name_role, similarity, stem};
+use crate::path::RelPath;
+
+fn role(name: &str) -> Role {
+    name_role(name, None)
+}
+
+fn hinted(name: &str, hint: &str) -> Role {
+    name_role(name, Some(&RelPath::parse(hint).unwrap()))
+}
+
+#[test]
+fn crash_reporters() {
+    for name in [
+        "createdump.exe",
+        "crashpad_handler.exe",
+        "CrashReportClient.exe",
+        "UnityCrashHandler32.exe",
+        "UnityCrashHandler64.exe",
+        "BsSndRpt.exe",
+        "BsSndRpt64.exe",
+        "crash_reporter.exe",
+        "GameCrashUploader.EXE",
+    ] {
+        assert_eq!(role(name), Role::CrashReporter, "{name}");
+    }
+    assert_eq!(role("createdumps.exe"), Role::Game);
+    assert_eq!(role("bssndrpt32.exe"), Role::Game);
+}
+
+#[test]
+fn anti_cheat() {
+    for name in [
+        "start_protected_game.exe",
+        "pbsvc.exe",
+        "PnkBstrA.exe",
+        "PnkBstrB.exe",
+        "BEService_x64.exe",
+        "EasyAntiCheat_Setup.exe",
+        "Invented_BE.exe",
+        "Invented_EAC.exe",
+    ] {
+        assert_eq!(role(name), Role::AntiCheat, "{name}");
+    }
+    for name in [
+        "pbsvc2.exe",
+        "Invented_BEx.exe",
+        "Invented-BE.exe",
+        "xbeservice.exe",
+    ] {
+        assert_eq!(role(name), Role::Game, "{name}");
+    }
+}
+
+#[test]
+fn installers() {
+    for name in [
+        "setup.exe",
+        "InventedSetup.exe",
+        "UbisoftConnectInstaller.exe",
+        "uninstall.exe",
+        "redist.exe",
+        "vc_redist.x64.exe",
+        "vcredist_x86.exe",
+        "DXSETUP.exe",
+        "dotNetFx40_Full_setup.exe",
+        "PhysX_9.10.0513_SystemSoftware.exe",
+        "oalinst.exe",
+        "unins000.exe",
+        "unins1.exe",
+    ] {
+        assert_eq!(role(name), Role::Installer, "{name}");
+    }
+    for name in ["unins.exe", "uninsx.exe", "unins00a.exe", "xphysx.exe"] {
+        assert_eq!(role(name), Role::Game, "{name}");
+    }
+}
+
+#[test]
+fn launchers() {
+    for name in [
+        "launcher.exe",
+        "FFLauncher.exe",
+        "REDprelauncher.exe",
+        "InventedLauncher.exe",
+    ] {
+        assert_eq!(role(name), Role::Launcher, "{name}");
+    }
+    // A launcher without the word is the game by name (ranking decides).
+    assert_eq!(role("PlayInvented.exe"), Role::Game);
+}
+
+#[test]
+fn helpers() {
+    for name in [
+        "BF3WebHelper.exe",
+        "steamwebhelper.exe",
+        "CefSharp.BrowserSubprocess.exe",
+        "cefprocess.exe",
+        "QtWebEngineProcess.exe",
+        "Invented_Server.exe",
+        "invented-server.exe",
+        "InventedDedicatedServer.exe",
+        "Config.exe",
+        "InventedSettings.exe",
+        "LevelEditor.exe",
+    ] {
+        assert_eq!(role(name), Role::Helper, "{name}");
+    }
+    assert_eq!(role("Invented_Servers.exe"), Role::Game);
+    assert_eq!(
+        role("server.exe"),
+        Role::Game,
+        "only with a separator in front"
+    );
+}
+
+#[test]
+fn the_first_matching_group_wins() {
+    // Crash before anti-cheat, installer, launcher and helper.
+    assert_eq!(role("CrashLauncher_BE.exe"), Role::CrashReporter);
+    // Anti-cheat before installer ("EasyAntiCheat_Setup").
+    assert_eq!(role("EasyAntiCheat_Setup.exe"), Role::AntiCheat);
+    // Installer before launcher.
+    assert_eq!(role("LauncherSetup.exe"), Role::Installer);
+    // Launcher before helper.
+    assert_eq!(role("LauncherConfig.exe"), Role::Launcher);
+}
+
+#[test]
+fn games_and_odd_names() {
+    for name in [
+        "Invented.exe",
+        "Invented-Win64-Shipping.exe",
+        "game.exe",
+        ".exe",
+        "noextension",
+        "Invented.EXE",
+    ] {
+        assert_eq!(role(name), Role::Game, "{name}");
+    }
+    // A non-ASCII stem never matches a rule.
+    assert_eq!(role("Crash\u{00e9}.exe"), Role::Game);
+    assert_eq!(role("\u{30b2}\u{30fc}\u{30e0}Launcher.exe"), Role::Game);
+}
+
+#[test]
+fn the_install_folder_hint_suspends_the_rules() {
+    assert_eq!(hinted("CrashBandicoot.exe", "Crash Bandicoot"), Role::Game);
+    assert_eq!(hinted("Crash.exe", "Crash Bandicoot"), Role::Game);
+    assert_eq!(
+        hinted("crash_reporter.exe", "Crash Bandicoot"),
+        Role::CrashReporter
+    );
+    assert_eq!(hinted("SetupWorld.exe", "Setup World 2"), Role::Game);
+    assert_eq!(
+        hinted("UnityCrashHandler64.exe", "Invented"),
+        Role::CrashReporter
+    );
+    // Provisional (ADR 0014, to check with the dump): a launcher whose name starts with the
+    // folder name is not a launcher by name.
+    assert_eq!(hinted("Invented4Launcher.exe", "Invented 4"), Role::Game);
+}
+
+#[test]
+fn similarity_of_stem_and_hint() {
+    assert_eq!(similarity("CrashBandicoot", "Crash Bandicoot"), 2);
+    assert_eq!(similarity("invented_game", "Invented-Game"), 2);
+    assert_eq!(similarity("Invented", "Invented Game"), 1);
+    assert_eq!(similarity("Invented Game Deluxe", "Invented Game"), 1);
+    assert_eq!(similarity("Inve", "Invented"), 1, "four characters suffice");
+    assert_eq!(similarity("Inv", "Invented"), 0, "three do not");
+    assert_eq!(
+        similarity("Game", "Invented Game"),
+        0,
+        "only prefixes count"
+    );
+    assert_eq!(similarity("", "Invented"), 0);
+    assert_eq!(similarity("---", "---"), 0, "nothing left after reducing");
+    assert_eq!(
+        similarity("\u{30b2}\u{30fc}\u{30e0}", "\u{30b2}\u{30fc}\u{30e0}"),
+        0
+    );
+}
+
+#[test]
+fn stems() {
+    assert_eq!(stem("Game.exe"), "Game");
+    assert_eq!(stem("Game.EXE"), "Game");
+    assert_eq!(stem("Game.exe.exe"), "Game.exe");
+    assert_eq!(stem("Game"), "Game");
+    assert_eq!(stem(".exe"), "");
+    assert_eq!(stem("\u{30b2}.exe"), "\u{30b2}");
+}
+
+#[test]
+fn roles_display() {
+    use crate::detect::pe::LegacyFormat;
+    assert_eq!(Role::Game.to_string(), "game");
+    assert_eq!(Role::NotAnApp.to_string(), "DLL, not an application");
+    assert_eq!(
+        Role::Legacy(LegacyFormat::Ne).to_string(),
+        "16-bit Windows (NE) executable"
+    );
+}

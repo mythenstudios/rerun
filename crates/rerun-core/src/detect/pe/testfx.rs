@@ -8,23 +8,23 @@
 use super::layout as l;
 
 /// RVA of the data section.
-pub(super) const DATA_RVA: u32 = 0x1000;
+pub(crate) const DATA_RVA: u32 = 0x1000;
 /// File alignment of the built images.
-pub(super) const FILE_ALIGN: usize = 0x200;
+pub(crate) const FILE_ALIGN: usize = 0x200;
 
 /// Writes `v` little-endian at `at`, growing `b` if needed.
-pub(super) fn put(b: &mut Vec<u8>, at: usize, v: &[u8]) {
+pub(crate) fn put(b: &mut Vec<u8>, at: usize, v: &[u8]) {
     if b.len() < at + v.len() {
         b.resize(at + v.len(), 0);
     }
     b[at..at + v.len()].copy_from_slice(v);
 }
 
-pub(super) fn put16(b: &mut Vec<u8>, at: usize, v: u16) {
+pub(crate) fn put16(b: &mut Vec<u8>, at: usize, v: u16) {
     put(b, at, &v.to_le_bytes());
 }
 
-pub(super) fn put32(b: &mut Vec<u8>, at: usize, v: u32) {
+pub(crate) fn put32(b: &mut Vec<u8>, at: usize, v: u32) {
     put(b, at, &v.to_le_bytes());
 }
 
@@ -34,7 +34,7 @@ fn align(v: usize, to: usize) -> usize {
 
 /// A synthetic image to build.
 #[derive(Debug, Clone)]
-pub(super) struct Builder {
+pub(crate) struct Builder {
     pub machine: u16,
     pub magic: u16,
     pub characteristics: u16,
@@ -66,7 +66,7 @@ pub(super) struct Builder {
 
 /// A built image and where its parts are.
 #[derive(Debug, Clone)]
-pub(super) struct Image {
+pub(crate) struct Image {
     pub bytes: Vec<u8>,
     /// File offset of the COFF file header.
     pub coff: usize,
@@ -356,7 +356,7 @@ struct Generated {
 }
 
 /// `n` distinct DLL names of `len` bytes each (`len` at least 8).
-pub(super) fn dll_names(n: usize, len: usize) -> Vec<Vec<u8>> {
+pub(crate) fn dll_names(n: usize, len: usize) -> Vec<Vec<u8>> {
     (0..n)
         .map(|i| {
             let mut v = format!("m{i:06}").into_bytes();
@@ -368,7 +368,7 @@ pub(super) fn dll_names(n: usize, len: usize) -> Vec<Vec<u8>> {
 }
 
 /// A plain DOS executable: `MZ`, a 64-byte header, `e_lfanew` 0, some code.
-pub(super) fn dos_exe() -> Vec<u8> {
+pub(crate) fn dos_exe() -> Vec<u8> {
     let mut b = vec![0u8; 0x80];
     put(&mut b, 0, l::DOS_SIGNATURE);
     put(&mut b, 0x40, b"\xB4\x4C\xCD\x21");
@@ -376,7 +376,7 @@ pub(super) fn dos_exe() -> Vec<u8> {
 }
 
 /// An `MZ` stub with a new-executable signature `sig` at `e_lfanew` 0x80.
-pub(super) fn new_exe(sig: &[u8; 2]) -> Vec<u8> {
+pub(crate) fn new_exe(sig: &[u8; 2]) -> Vec<u8> {
     let mut b = vec![0u8; 0x200];
     put(&mut b, 0, l::DOS_SIGNATURE);
     put32(&mut b, l::DOS_E_LFANEW, 0x80);
@@ -388,7 +388,7 @@ pub(super) fn new_exe(sig: &[u8; 2]) -> Vec<u8> {
 
 /// The name or ID of a resource directory entry.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum ResId {
+pub(crate) enum ResId {
     Id(u16),
     /// A named entry (its string is never read; the name offset is 0).
     Name,
@@ -396,7 +396,7 @@ pub(super) enum ResId {
 
 /// A resource directory node.
 #[derive(Debug, Clone)]
-pub(super) enum Node {
+pub(crate) enum Node {
     Dir(Vec<(ResId, Node)>),
     Data(Vec<u8>),
 }
@@ -404,7 +404,7 @@ pub(super) enum Node {
 /// `RT_VERSION` → ID 1 → language 0x0409 → `blob`. Encoded: root table at 0, the ID table at
 /// [`TREE_NAMES`], the language table at [`TREE_LANGS`], the data entry at [`TREE_ENTRY`], the
 /// blob at [`TREE_BLOB`].
-pub(super) fn version_tree(blob: Vec<u8>) -> Vec<(ResId, Node)> {
+pub(crate) fn version_tree(blob: Vec<u8>) -> Vec<(ResId, Node)> {
     vec![(
         ResId::Id(l::RT_VERSION),
         Node::Dir(vec![(
@@ -415,10 +415,10 @@ pub(super) fn version_tree(blob: Vec<u8>) -> Vec<(ResId, Node)> {
 }
 
 /// Offsets of the parts of [`version_tree`] below the resource directory.
-pub(super) const TREE_NAMES: usize = 24;
-pub(super) const TREE_LANGS: usize = 48;
-pub(super) const TREE_ENTRY: usize = 72;
-pub(super) const TREE_BLOB: usize = 88;
+pub(crate) const TREE_NAMES: usize = 24;
+pub(crate) const TREE_LANGS: usize = 48;
+pub(crate) const TREE_ENTRY: usize = 72;
+pub(crate) const TREE_BLOB: usize = 88;
 
 fn encode_table(entries: &[(ResId, Node)], buf: &mut Vec<u8>, base: u32) -> u32 {
     let at = buf.len();
@@ -455,7 +455,7 @@ fn encode_table(entries: &[(ResId, Node)], buf: &mut Vec<u8>, base: u32) -> u32 
 }
 
 /// Encodes a resource directory whose root table holds `root`, depth first; `base` is its RVA.
-pub(super) fn encode_tree(root: &[(ResId, Node)], base: u32) -> Vec<u8> {
+pub(crate) fn encode_tree(root: &[(ResId, Node)], base: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     encode_table(root, &mut buf, base);
     buf
@@ -465,7 +465,7 @@ pub(super) fn encode_tree(root: &[(ResId, Node)], base: u32) -> Vec<u8> {
 
 /// The value of a version block.
 #[derive(Debug, Clone)]
-pub(super) enum Value {
+pub(crate) enum Value {
     None,
     Bin(Vec<u8>),
     /// UTF-16 text plus its NUL; `wValueLength` in words (the specification).
@@ -476,7 +476,7 @@ pub(super) enum Value {
 
 /// A version block to encode.
 #[derive(Debug, Clone)]
-pub(super) struct Vs {
+pub(crate) struct Vs {
     pub key: String,
     pub value: Value,
     /// `wValueLength` instead of the computed one.
@@ -554,7 +554,7 @@ impl Vs {
 }
 
 /// A `VS_FIXEDFILEINFO` with file version `file` and product version `product`.
-pub(super) fn fixed_info(file: [u16; 4], product: [u16; 4]) -> Vec<u8> {
+pub(crate) fn fixed_info(file: [u16; 4], product: [u16; 4]) -> Vec<u8> {
     let mut b = vec![0u8; l::FIXED_FILE_INFO_SIZE];
     let ms = |v: [u16; 4]| u32::from(v[0]) << 16 | u32::from(v[1]);
     let ls = |v: [u16; 4]| u32::from(v[2]) << 16 | u32::from(v[3]);
@@ -573,7 +573,7 @@ pub(super) fn fixed_info(file: [u16; 4], product: [u16; 4]) -> Vec<u8> {
 }
 
 /// A string table `key` (8 hex digits) with `strings`.
-pub(super) fn string_table(key: &str, strings: &[(&str, &str)]) -> Vs {
+pub(crate) fn string_table(key: &str, strings: &[(&str, &str)]) -> Vs {
     Vs::new(
         key,
         Value::None,
@@ -582,7 +582,7 @@ pub(super) fn string_table(key: &str, strings: &[(&str, &str)]) -> Vs {
 }
 
 /// `VarFileInfo` with one `Translation` pair.
-pub(super) fn var_file_info(language: u16, codepage: u16) -> Vs {
+pub(crate) fn var_file_info(language: u16, codepage: u16) -> Vs {
     let mut pair = language.to_le_bytes().to_vec();
     pair.extend_from_slice(&codepage.to_le_bytes());
     Vs::new(
@@ -594,7 +594,7 @@ pub(super) fn var_file_info(language: u16, codepage: u16) -> Vs {
 
 /// A complete `VS_VERSION_INFO`: fixed part, `StringFileInfo` with `tables`, then
 /// `VarFileInfo` with `translation`.
-pub(super) fn version_info(tables: Vec<Vs>, translation: Option<(u16, u16)>) -> Vs {
+pub(crate) fn version_info(tables: Vec<Vs>, translation: Option<(u16, u16)>) -> Vs {
     let mut children = vec![Vs::new("StringFileInfo", Value::None, tables)];
     if let Some((language, codepage)) = translation {
         children.push(var_file_info(language, codepage));
@@ -607,7 +607,7 @@ pub(super) fn version_info(tables: Vec<Vs>, translation: Option<(u16, u16)>) -> 
 }
 
 /// The usual game executable's strings (invented).
-pub(super) const STRINGS: &[(&str, &str)] = &[
+pub(crate) const STRINGS: &[(&str, &str)] = &[
     ("CompanyName", "Invented Games"),
     ("FileDescription", "Invented Game"),
     ("FileVersion", "1.2.3.4"),
