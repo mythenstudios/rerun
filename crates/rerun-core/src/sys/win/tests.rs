@@ -599,20 +599,22 @@ fn win_system_bundles_the_real_parts() {
 // ---------- GPU (DXGI) ----------
 
 /// Read-only: the real adapters fulfil the GPU contract, and the Microsoft Basic Render Driver
-/// (vendor `0x1414`, device `0x8c`) is listed as a software adapter, on every machine and on
-/// GitHub runners without a GPU.
+/// (vendor `0x1414`, device `0x8c`) is listed exactly once as a software adapter, on every
+/// machine and on GitHub runners without a GPU.
 #[test]
 fn win_fulfils_gpu_contract() {
     super::restrict_dll_search().unwrap();
     let gpu = WinGpu::new();
     gpu_contract(&gpu).unwrap_or_else(|e| panic!("{e}"));
     let adapters = gpu.adapters().unwrap();
-    let basic: Vec<_> = adapters
+    // A VM without a GPU (GitHub runner) lists the Basic Render Driver twice: once as the
+    // display adapter of the VM (no software flag) and once as WARP (software flag). Exactly
+    // one of them is the software adapter.
+    let basic_software = adapters
         .iter()
-        .filter(|a| a.vendor_id == 0x1414 && a.device_id == 0x8c)
-        .collect();
-    assert_eq!(basic.len(), 1, "{adapters:#?}");
-    assert!(basic[0].software, "{adapters:#?}");
+        .filter(|a| a.vendor_id == 0x1414 && a.device_id == 0x8c && a.software)
+        .count();
+    assert_eq!(basic_software, 1, "{adapters:#?}");
 }
 
 /// `dxgi.dll` is the one in `<Windows>\System32`, never one from the application directory.
