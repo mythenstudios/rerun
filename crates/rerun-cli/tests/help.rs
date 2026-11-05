@@ -29,6 +29,15 @@ fn help_exits_zero_and_names_the_tool_and_its_commands() {
 }
 
 #[test]
+fn scan_help_names_the_hashes_flag() {
+    let out = rerun(&["scan", "--help"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("--hashes"), "{stdout}");
+    assert!(stdout.contains("[APP_IDS]..."), "{stdout}");
+}
+
+#[test]
 fn version_matches_package_version() {
     let out = rerun(&["--version"]);
     assert!(out.status.success());
@@ -46,12 +55,24 @@ fn usage_errors_exit_2_without_a_report() {
         &["--no-such-flag"],
         &["no-such-command"],
         &["system", "extra"],
+        &["scan", "not-an-app-id"],
+        &["scan", "-1"],
+        &["scan", "4294967296"],
+        &["scan", "--nope"],
     ] {
         let out = rerun(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
         assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
         let stderr = String::from_utf8(out.stderr).unwrap();
-        assert!(stderr.contains("Usage"), "{args:?}: {stderr}");
+        // Without a command clap shows the help on stderr; otherwise an error line.
+        assert!(
+            stderr.starts_with("error: ")
+                || stderr.contains(
+                    "
+Usage: rerun <COMMAND>"
+                ),
+            "{args:?}: {stderr}"
+        );
         assert!(!stderr.contains('\u{1b}'), "{stderr}");
     }
 }

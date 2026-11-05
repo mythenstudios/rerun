@@ -8,6 +8,9 @@
 use std::fmt;
 use std::io;
 
+use rerun_core::detect::exe::{ApiReport, HashOutcome};
+use rerun_core::detect::pe::Machine;
+use rerun_core::detect::steam::{AppState, RootSource};
 use rerun_core::escape::Shown;
 use rerun_core::hw::GpuVendor;
 
@@ -63,6 +66,46 @@ pub enum FactText<'a> {
 /// of one CPU are of different levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheLevel(pub Option<u8>);
+
+/// Why a game has no main executable, derived from its candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoneReason {
+    /// The walk found no executable.
+    NoExecutable,
+    /// Executables, but none with the role "game".
+    NoGameExecutable {
+        /// Executables found.
+        found: usize,
+    },
+    /// Every game executable failed to open or parse.
+    AllFailed {
+        /// Game executables.
+        games: usize,
+    },
+}
+
+/// The counts at the end of `rerun scan`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanCounts {
+    /// Libraries.
+    pub libraries: usize,
+    /// Apps listed.
+    pub apps: usize,
+    /// Of these installed (scanned).
+    pub installed: usize,
+    /// Update pending (not opened).
+    pub pending: usize,
+    /// Not installed (not opened).
+    pub not_installed: usize,
+    /// Games with one main executable.
+    pub one: usize,
+    /// Games with a tie.
+    pub tied: usize,
+    /// Games without a main executable (or whose folder did not open).
+    pub none: usize,
+    /// Issue lines.
+    pub issues: usize,
+}
 
 /// One line of output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,7 +244,112 @@ pub enum Message<'a> {
         value: FactText<'a>,
     },
 
-    // ---------- errors (stderr) ----------
+    // ---------- rerun scan ----------
+    /// Steam's root came from this registry candidate (library 0 below is the root).
+    SteamFound {
+        /// The candidate.
+        source: RootSource,
+    },
+    /// No usable registry candidate.
+    SteamNotFound,
+    /// An issue of the Steam scan.
+    SteamIssue {
+        /// Location and kind.
+        issue: Shown<'a>,
+    },
+    /// A library.
+    Library {
+        /// Its number (0 is the Steam root).
+        index: usize,
+        /// Its path.
+        path: Shown<'a>,
+    },
+    /// The label of the library above.
+    LibraryLabel {
+        /// The label as written.
+        label: Shown<'a>,
+    },
+    /// An app of the library above.
+    App {
+        /// Steam app ID.
+        app_id: u32,
+        /// Its state; only installed apps are opened.
+        state: AppState,
+        /// Its name as written.
+        name: Shown<'a>,
+    },
+    /// The install folder of the app above.
+    InstallFolder {
+        /// `installdir`.
+        folder: Shown<'a>,
+    },
+    /// The game folder could not be opened.
+    GameNotOpened {
+        /// The error.
+        error: Shown<'a>,
+    },
+    /// Exactly one main executable.
+    MainOne {
+        /// Relative to the game folder.
+        path: Shown<'a>,
+    },
+    /// Several executables share the best rank; none is picked.
+    MainTied {
+        /// How many.
+        count: usize,
+    },
+    /// One executable of a tie.
+    TiedExe {
+        /// Relative to the game folder.
+        path: Shown<'a>,
+    },
+    /// No main executable.
+    MainNone {
+        /// Why.
+        reason: NoneReason,
+    },
+    /// Machine, API and the numeric version of the executable above.
+    ExeFacts {
+        /// Machine.
+        machine: Machine,
+        /// The graphics API with its evidence.
+        api: &'a ApiReport,
+        /// The file version from the fixed part of the version resource.
+        version: Option<[u16; 4]>,
+    },
+    /// The hashes of the executable above (`--hashes`).
+    ExeHashes {
+        /// Done, skipped or failed.
+        outcome: &'a HashOutcome,
+    },
+    /// An issue of the game scan.
+    GameIssue {
+        /// Location and kind.
+        issue: Shown<'a>,
+    },
+    /// A requested app ID that no library holds.
+    AppNotFound {
+        /// The app ID.
+        app_id: u32,
+    },
+    /// The counts.
+    Summary(ScanCounts),
+    /// The closing hint.
+    Hints,
+
+    // ---------- errors and warnings (stderr) ----------
+    /// `--hashes` is slow.
+    HashesWarning,
+    /// The install folder of `rerun.exe` is unknown.
+    CurrentExe {
+        /// The error.
+        error: Shown<'a>,
+    },
+    /// The forbidden roots could not be resolved: no scan.
+    ForbiddenRoots {
+        /// The error.
+        error: Shown<'a>,
+    },
     /// `restrict_dll_search` failed.
     DllSearch {
         /// The error.
@@ -334,6 +482,57 @@ impl fmt::Display for FactText<'_> {
     }
 }
 
+impl fmt::Display for NoneReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoExecutable => f.write_str("no executable found"),
+            Self::NoGameExecutable { found } => write!(
+                f,
+                "no game executable among {}",
+                Count(*found, "executable", "executables")
+            ),
+            Self::AllFailed { games } => write!(
+                f,
+                "{} failed to open or parse",
+                Count(*games, "game executable", "game executables")
+            ),
+        }
+    }
+}
+
+/// A machine as shown.
+struct MachineText(Machine);
+
+impl fmt::Display for MachineText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Machine::X86 => f.write_str("x86"),
+            Machine::X64 => f.write_str("x64"),
+            Machine::Arm64 => f.write_str("arm64"),
+            Machine::Other(m) => write!(f, "machine {m:#06x}"),
+        }
+    }
+}
+
+impl fmt::Display for ScanCounts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Summary: {}, {} ({} installed, {} update pending, {} not installed); main \
+             executable: {} found, {}, {} without; {}",
+            Count(self.libraries, "library", "libraries"),
+            Count(self.apps, "app", "apps"),
+            self.installed,
+            self.pending,
+            self.not_installed,
+            self.one,
+            Count(self.tied, "tie", "ties"),
+            self.none,
+            Count(self.issues, "issue", "issues"),
+        )
+    }
+}
+
 impl fmt::Display for Message<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -463,6 +662,73 @@ impl fmt::Display for Message<'_> {
             }
 
             Self::Condition { key, value } => write!(f, "  {key}: {value}"),
+
+            Self::SteamFound { source } => write!(f, "Steam: found through {source}"),
+            Self::SteamNotFound => f.write_str("Steam: not found"),
+            Self::SteamIssue { issue } => write!(f, "  issue: {issue}"),
+            Self::Library { index, path } => write!(f, "library {index}: {path}"),
+            Self::LibraryLabel { label } => write!(f, "  label: {label}"),
+            Self::App {
+                app_id,
+                state,
+                name,
+            } => match state {
+                AppState::Installed => write!(f, "  app {app_id} (installed): {name}"),
+                AppState::UpdatePending => {
+                    write!(f, "  app {app_id} (update pending; not opened): {name}")
+                }
+                AppState::NotInstalled => {
+                    write!(f, "  app {app_id} (not installed; not opened): {name}")
+                }
+            },
+            Self::InstallFolder { folder } => write!(f, "    install folder: {folder}"),
+            Self::GameNotOpened { error } => {
+                write!(f, "    issue: game folder not opened: {error}")
+            }
+            Self::MainOne { path } => write!(f, "    main executable: {path}"),
+            Self::MainTied { count } => write!(
+                f,
+                "    main executable: a tie between {count} executables, none picked"
+            ),
+            Self::TiedExe { path } => write!(f, "    tied: {path}"),
+            Self::MainNone { reason } => write!(f, "    main executable: none ({reason})"),
+            Self::ExeFacts {
+                machine,
+                api,
+                version,
+            } => {
+                write!(f, "      {}, API {api}, ", MachineText(*machine))?;
+                match version {
+                    Some([a, b, c, d]) => write!(f, "version {a}.{b}.{c}.{d}"),
+                    None => f.write_str("no version"),
+                }
+            }
+            Self::ExeHashes { outcome } => match outcome {
+                HashOutcome::Done(h) => write!(
+                    f,
+                    "      SHA-1 {}, SHA-256 {} ({} bytes)",
+                    h.sha1, h.sha256, h.len
+                ),
+                other => write!(f, "      hashes: {other}"),
+            },
+            Self::GameIssue { issue } => write!(f, "    issue: {issue}"),
+            Self::AppNotFound { app_id } => write!(f, "app {app_id}: not found in any library"),
+            Self::Summary(counts) => write!(f, "{counts}"),
+            Self::Hints => {
+                f.write_str("Roles and APIs are hints from names and imports, not verdicts.")
+            }
+
+            Self::HashesWarning => f.write_str(
+                "warning: --hashes reads every game executable in full; can take minutes on a \
+                 cold cache",
+            ),
+            Self::CurrentExe { error } => {
+                write!(f, "rerun: cannot find its own install folder: {error}")
+            }
+            Self::ForbiddenRoots { error } => write!(
+                f,
+                "rerun: cannot resolve the folders that must never be scanned: {error}"
+            ),
 
             Self::DllSearch { error } => write!(
                 f,

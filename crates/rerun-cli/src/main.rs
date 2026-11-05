@@ -1,4 +1,4 @@
-//! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system`.
+//! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system` and `rerun scan`.
 //!
 //! Order in `main`: `restrict_dll_search` first (ADR 0008), then clap parses (`--help`,
 //! `--version` and usage errors end there, before any registry or file system access), then
@@ -8,12 +8,16 @@
 mod cli;
 mod messages;
 mod out;
+mod scan;
 mod system;
 
 use std::io;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
+
+use rerun_core::escape;
 
 use crate::cli::{Cli, Command, Exit};
 use crate::messages::Message;
@@ -21,7 +25,6 @@ use crate::out::Out;
 
 #[cfg(windows)]
 fn main() -> ExitCode {
-    use rerun_core::escape;
     use rerun_core::sys::win::{WinSystem, restrict_dll_search};
 
     // First statement (ADR 0008, H2): no later DLL load may come from the install folder, the
@@ -82,5 +85,22 @@ fn run<W: io::Write, E: io::Write>(
 ) -> Exit {
     match command {
         Command::System => system::system(sys, out, err),
+        Command::Scan { app_ids, hashes } => match install_dir() {
+            Ok(dir) => scan::scan(sys, &dir, &app_ids, hashes, out, err),
+            Err(error) => {
+                let _ = err.line(&Message::CurrentExe {
+                    error: escape::text(&error),
+                });
+                Exit::Fatal
+            }
+        },
     }
+}
+
+/// Rerun's install folder: the folder of `rerun.exe` (ADR 0016), for the forbidden roots.
+fn install_dir() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    exe.parent()
+        .map(PathBuf::from)
+        .ok_or_else(|| "the executable path has no parent folder".to_owned())
 }

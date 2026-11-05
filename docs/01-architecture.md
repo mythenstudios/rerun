@@ -80,7 +80,7 @@ revert: journal ─► hash check ─► restore backups ─► restore registry
 
 - Phase 1 (ADR 0016): `rerun system` (`hw::read` with the built-in GPU table: GPU, CPU topology, OS build, the five condition facts) and `rerun scan [APP_ID…] [--hashes]` (`ForbiddenRoots` from its own install folder, `steam::scan`, per installed app `open_game` + `scan_game`, streamed per game; apps Steam is updating are listed, never opened).
 - Order in `main`: `restrict_dll_search`, then clap (`--help`/`--version` touch neither registry nor file system), then `WinSystem::new()`. Exit codes: 0 report (also with partial failures), 1 fatal without report, 2 usage.
-- Modules: `messages` (every user-facing string, named parameters), `out` (`Out`: line writer, `BrokenPipe` ends silently, last-resort control-character net), `system`, `scan` (pure render functions over core values). Human-readable English text only, not a stable interface; untrusted fields only as `escape::Shown`. Never changes console state (no `SetConsoleMode`, no `SetConsoleOutputCP`; clap without `color`).
+- Modules: `messages` (every user-facing string, named parameters), `out` (`Out`: line writer, `BrokenPipe` ends silently, last-resort net: every line through `escape::text`, a panic in tests), `system`, `scan` (pure render functions over core values). Human-readable English text only, not a stable interface; untrusted fields only as `escape::Shown` (raw text through `RawText::escaped`, never `as_raw_str`; a source rule test checks it), untrusted text last on its line. Never changes console state (no `SetConsoleMode`, no `SetConsoleOutputCP`; clap without `color`).
 
 ## rerun-launch
 

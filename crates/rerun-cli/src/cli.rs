@@ -20,6 +20,14 @@ pub struct Cli {
 pub enum Command {
     /// The system profile: GPU, CPU topology, OS build and the facts Topo conditions see.
     System,
+    /// Steam games with their main executable, architecture and graphics API.
+    Scan {
+        /// Only these Steam app IDs.
+        app_ids: Vec<u32>,
+        /// Also compute SHA-1 and SHA-256 of the game executables (slow).
+        #[arg(long)]
+        hashes: bool,
+    },
 }
 
 /// Exit codes (ADR 0016).
