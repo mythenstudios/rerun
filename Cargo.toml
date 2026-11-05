@@ -30,7 +30,7 @@ windows-sys = "0.61.2"
 
 # Dev dependencies only (schema validation in tests), see ADR 0005.
 jsonschema = { version = "0.60.2", default-features = false }
-serde-saphyr = "2.1.0"
+serde-saphyr = "2.0.0"
 
 [workspace.lints.rust]
 # Exceptions only via #![allow(unsafe_code)] with a reason: sys::win, rerun-launch, rerun-cpu.
