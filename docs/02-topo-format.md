@@ -71,6 +71,7 @@ links:
 
 ### Fields
 
+- `steam_appid` (in `match`, optional): the Steam app ID as an integer from 1 to 4294967295 (`u32`), the same range `detect::steam::files::AppManifest` accepts for `appid` in `appmanifest_<appid>.acf` (ADR 0011).
 - `api` (in `match.exes`): `ddraw | d3d8 | d3d9 | d3d10 | d3d11 | opengl`.
 - `variants`: may be empty = "no known fix", a valid answer.
 - `status` per variant: `verified` (tested ourselves, with hardware in the changelog), `reported` (several independent reports), `unverified` (single statement).

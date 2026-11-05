@@ -1,0 +1,11 @@
+# Invalid: steam_appid 0 (Steam app IDs start at 1, ADR 0011)
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  steam_appid: 0
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues: []

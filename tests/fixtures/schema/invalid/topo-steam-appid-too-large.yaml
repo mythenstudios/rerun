@@ -1,0 +1,11 @@
+# Invalid: steam_appid above u32::MAX (Steam app IDs are u32, ADR 0011)
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  steam_appid: 4294967296
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues: []
