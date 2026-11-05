@@ -39,7 +39,7 @@ pub mod fake;
 pub mod win;
 
 pub use error::{SysError, SysErrorKind, SysResult, shown_target};
-pub use fs::{Dir, DirWrite, Fs};
+pub use fs::{Dir, DirWrite, Fs, WriteCap};
 pub use gpu::{DriverVersion, Gpu, GpuAdapter};
 pub use known_folders::{KnownFolder, KnownFolders};
 pub use registry::Registry;

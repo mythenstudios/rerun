@@ -61,7 +61,7 @@ impl fmt::Display for SysErrorKind {
 
 /// Error of the system layer.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{kind}: {target}")]
+#[error("{kind}{}: {target}", limit.map(|n| format!(" (limit {n})")).unwrap_or_default())]
 pub struct SysError {
     /// Error kind.
     pub kind: SysErrorKind,
@@ -76,6 +76,9 @@ pub struct SysError {
     pub ntstatus: Option<i32>,
     /// Original `HRESULT`, if any (from `SHGetKnownFolderPath`).
     pub hresult: Option<i32>,
+    /// The caller's bound for [`SysErrorKind::TooLarge`] (bytes of a file, entries of a
+    /// listing); shown after the kind, so `target` stays the path.
+    pub limit: Option<u64>,
 }
 
 impl SysError {
@@ -87,6 +90,15 @@ impl SysError {
             win32: None,
             ntstatus: None,
             hresult: None,
+            limit: None,
+        }
+    }
+
+    /// `TooLarge` for `target` with the caller's bound.
+    pub fn too_large(target: impl Into<String>, limit: u64) -> Self {
+        Self {
+            limit: Some(limit),
+            ..Self::new(SysErrorKind::TooLarge, target)
         }
     }
 
@@ -216,6 +228,20 @@ mod tests {
         assert!(!format!("{e} {e:?}").contains("SECRET"));
         let e = SysError::io(&io::Error::from(io::ErrorKind::PermissionDenied), "f");
         assert_eq!(e.kind, SysErrorKind::AccessDenied);
+    }
+
+    #[test]
+    fn too_large_keeps_the_path_as_target_and_shows_the_limit() {
+        let e = SysError::too_large(r"steamapps\a.acf", 7);
+        assert_eq!(
+            (e.kind, e.target.as_str(), e.limit),
+            (SysErrorKind::TooLarge, r"steamapps\a.acf", Some(7))
+        );
+        assert_eq!(e.to_string(), r"too large (limit 7): steamapps\a.acf");
+        assert_eq!(
+            SysError::new(SysErrorKind::NotFound, "x").to_string(),
+            "not found: x"
+        );
     }
 
     #[test]

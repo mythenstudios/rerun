@@ -63,7 +63,7 @@ pub enum Forbidden {
 /// `UserData` root of phase 4) can then be a root itself without becoming forbidden. Every
 /// folder the rules below name must be listed here; a folder missing here would resolve to
 /// no path and its rule would silently protect nothing (pinned by a test).
-const FORBIDDEN_SOURCES: [KnownFolder; 10] = [
+pub(super) const FORBIDDEN_SOURCES: [KnownFolder; 10] = [
     KnownFolder::Windows,
     KnownFolder::ProgramFiles,
     KnownFolder::ProgramFilesX86,

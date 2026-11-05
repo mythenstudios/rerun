@@ -43,7 +43,7 @@ use crate::fold::fold;
 use crate::path::RelPath;
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, Fs, FsKind, Metadata, NewFile, ReadSeek,
-    ReparseInfo, RootInfo, Written, tag,
+    ReparseInfo, RootInfo, WriteCap, Written, tag,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
@@ -355,7 +355,8 @@ fn dir_handle(o: Opened, target: &str) -> SysResult<OwnedHandle> {
     }
 }
 
-/// The real file system (`Fs`). Read-only in phase 1.
+/// The real file system (`Fs`). Read side so far; the writing `DirWrite` methods return
+/// `Unsupported` (ADR 0017).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WinFs;
 
@@ -371,7 +372,20 @@ impl Fs for WinFs {
     /// GUID paths and segments with control characters or `<>:"|?*` yield `InvalidPath`.
     /// Opened as `\??\X:\…` with `NtCreateFile`, following reparse points (they are above the
     /// root). A non-allowlisted tag on the opened directory yields `ReparsePoint`.
-    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn DirWrite + '_>> {
+    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn Dir + '_>> {
+        Ok(Box::new(Self::open_abs(abs)?))
+    }
+
+    /// Same open as [`Fs::open_dir`]; the handle type is the same, the capability is in the
+    /// returned trait object.
+    fn open_dir_write(&self, abs: &Path, _: &WriteCap) -> SysResult<Box<dyn DirWrite + '_>> {
+        Ok(Box::new(Self::open_abs(abs)?))
+    }
+}
+
+impl WinFs {
+    /// The absolute open behind both [`Fs`] methods.
+    fn open_abs(abs: &Path) -> SysResult<WinDir> {
         let shown = abs.display().to_string();
         let (drive, segs) = abs
             .to_str()
@@ -386,7 +400,7 @@ impl Fs for WinFs {
         if !t.is_dir() {
             return Err(err(SysErrorKind::InvalidPath, &shown));
         }
-        Ok(Box::new(WinDir::new(handle)))
+        Ok(WinDir::new(handle))
     }
 }
 
@@ -476,10 +490,9 @@ impl WinDir {
         let stop = |s: ListStop| match s {
             ListStop::Status(s) => nt_error(s, target),
             ListStop::Malformed => err(SysErrorKind::Other, target),
-            ListStop::TooMany => err(
-                SysErrorKind::TooLarge,
-                &format!("{target}, more than {max} entries"),
-            ),
+            ListStop::TooMany => {
+                SysError::too_large(target, u64::try_from(max).unwrap_or(u64::MAX))
+            }
         };
         match Self::list_as(dir, DirLayout::IdExtd, max) {
             Err(ListStop::Status(s)) if is_unsupported_class(s) => {}

@@ -19,7 +19,9 @@
 //!   (CompactGUI, `compact /exe`) looks like a plain file without a tag and reads its
 //!   uncompressed content (contract `fs_read_contract`, WOF case).
 //! - A handle refers to an object, not a name: it stays valid when the directory or one of
-//!   its parents is renamed. [`Dir::info`] computes the path at call time.
+//!   its parents is renamed. [`Dir::info`] computes the path at call time. (Windows refuses
+//!   to rename a parent while a handle below it is open, `AccessDenied`; the fake allows it.
+//!   The contract accepts both and checks the handle either way.)
 //! - Writes into a case-sensitive directory return `Unsupported`.
 //! - `read_dir` returns raw names as on disk; they may be invalid as a [`RelPath`]
 //!   (`d3d9.dll.`, `CON`). `policy::path::classify` separates them.
@@ -52,7 +54,7 @@
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
-use super::{SysError, SysErrorKind, SysResult};
+use super::{SysError, SysResult};
 use crate::path::RelPath;
 
 /// Reparse tags known to Rerun.
@@ -249,9 +251,29 @@ pub trait Fs: Send + Sync {
     /// `fake`). A non-allowlisted reparse tag on the opened directory itself yields
     /// `ReparsePoint`.
     ///
-    /// The handle carries the write capability ([`DirWrite`]); `policy::root` decides who
-    /// gets it (ADR 0017). Only `policy::root` and `sys::snapshot` call this (ADR 0007).
-    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn DirWrite + '_>>;
+    /// Read side only ([`Dir`]). Only `policy::root` and `sys::snapshot` call this
+    /// (ADR 0007).
+    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn Dir + '_>>;
+
+    /// Opens a directory by absolute path with the write capability ([`DirWrite`]). Same
+    /// input rules, walk and errors as [`Self::open_dir`]. Requires a [`WriteCap`], which only
+    /// this crate can create: outside `rerun-core` (CLI, app) no write handle can be obtained
+    /// at all. Only `policy::root` calls this (`clippy.toml`, ADR 0017).
+    fn open_dir_write(&self, abs: &Path, cap: &WriteCap) -> SysResult<Box<dyn DirWrite + '_>>;
+}
+
+/// Proof of the write capability for [`Fs::open_dir_write`] (ADR 0017). Zero-sized; its
+/// constructor is crate-internal and is only called in `policy::root` (and in tests of this
+/// crate), so the type system keeps write handles inside `rerun-core` and the reviewed
+/// paths. It carries no data and checks nothing itself.
+#[derive(Debug)]
+pub struct WriteCap(());
+
+impl WriteCap {
+    /// The token. Crate-internal; product code calls it only in `policy::root`.
+    pub(crate) fn new() -> Self {
+        Self(())
+    }
 }
 
 /// An opened directory, read side. All paths are relative to it and never follow reparse
@@ -305,10 +327,7 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
             .read_to_end(&mut buf)
             .map_err(|e| SysError::io(&e, p.as_str()))?;
         if u64::try_from(buf.len()).map_or(true, |n| n > max_len) {
-            return Err(SysError::new(
-                SysErrorKind::TooLarge,
-                format!("{p}, more than {max_len} bytes"),
-            ));
+            return Err(SysError::too_large(p.as_str(), max_len));
         }
         Ok(buf)
     }
@@ -462,50 +481,69 @@ const TMP_PREFIX: &str = ".rerun-";
 /// Suffix of every [`TmpName`].
 const TMP_SUFFIX: &str = ".tmp";
 
-/// A temp file name `.rerun-<tag>-<n>.tmp` (ADR 0019): `<tag>` the instance tag in lowercase
-/// hex (1 to 16 digits, a `u64`), `<n>` a decimal counter (a `u64`, no leading zero). Always
-/// a single valid segment; chosen and journaled before any write.
+/// A temp file name `.rerun-<tag>-<n>.tmp` (ADR 0019): `<tag>` the instance tag as exactly 16
+/// lowercase hex digits, `<n>` a decimal counter (a `u64`, no leading zero). Always a single
+/// valid segment; chosen and journaled before any write. [`Self::new`] and [`Self::parse`]
+/// are a bijection: every accepted string is the one `new` writes for its tag and counter.
+///
+/// Recovery (ADR 0019) works from the name in the journal: it compares that name with what
+/// is on disk folded, like every name, and never adopts a temp name it merely finds in a
+/// listing (a `.rerun-…` file planted by someone else is not ours).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TmpName(String);
+pub struct TmpName {
+    name: String,
+    tag: u64,
+}
 
 impl TmpName {
-    /// The temp name for instance `tag` and counter `n`; `tag` as 16 hex digits.
+    /// The temp name for instance `tag` and counter `n`.
     pub fn new(tag: u64, n: u64) -> Self {
-        Self(format!("{TMP_PREFIX}{tag:016x}-{n}{TMP_SUFFIX}"))
+        Self {
+            name: format!("{TMP_PREFIX}{tag:016x}-{n}{TMP_SUFFIX}"),
+            tag,
+        }
     }
 
-    /// Parses a name read back from the journal or from disk; `None` unless it has exactly
-    /// the shape of [`Self`].
+    /// Parses a name read back from the journal; `None` unless it is exactly what
+    /// [`Self::new`] writes.
     pub fn parse(s: &str) -> Option<Self> {
         let body = s.strip_prefix(TMP_PREFIX)?.strip_suffix(TMP_SUFFIX)?;
         let (tag, n) = body.split_once('-')?;
         let hex = |c: char| c.is_ascii_digit() || ('a'..='f').contains(&c);
-        let tag_ok = (1..=16).contains(&tag.len()) && tag.chars().all(hex);
-        let n_ok = n.chars().all(|c| c.is_ascii_digit())
-            && (n == "0" || !n.starts_with('0'))
-            && n.parse::<u64>().is_ok();
-        (tag_ok && n_ok).then(|| Self(s.to_owned()))
+        if tag.len() != 16 || !tag.chars().all(hex) {
+            return None;
+        }
+        if !n.chars().all(|c| c.is_ascii_digit()) || (n != "0" && n.starts_with('0')) {
+            return None;
+        }
+        let made = Self::new(u64::from_str_radix(tag, 16).ok()?, n.parse().ok()?);
+        (made.name == s).then_some(made)
+    }
+
+    /// The instance tag (ADR 0019).
+    pub fn tag(&self) -> u64 {
+        self.tag
     }
 
     /// The name.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.name
     }
 
     /// The name as a single-segment path.
     pub fn to_rel(&self) -> RelPath {
-        segment(&self.0)
+        segment(&self.name)
     }
 
     /// `<tmp>.old`: the name of the old file during a replace (ADR 0017).
     pub fn old(&self) -> RelPath {
-        segment(&format!("{}.old", self.0))
+        segment(&format!("{}.old", self.name))
     }
 }
 
 impl std::fmt::Display for TmpName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.name)
     }
 }
 
@@ -540,14 +578,19 @@ mod tests {
             TmpName::new(0xab, 12).as_str(),
             ".rerun-00000000000000ab-12.tmp"
         );
-        for ok in [
-            ".rerun-a-0.tmp",
-            ".rerun-ffffffffffffffff-18446744073709551615.tmp",
+        for (ok, tag) in [
+            (".rerun-000000000000000a-0.tmp", 0xa),
+            (".rerun-ffffffffffffffff-18446744073709551615.tmp", u64::MAX),
         ] {
-            assert!(TmpName::parse(ok).is_some(), "{ok}");
+            assert_eq!(TmpName::parse(ok).map(|t| t.tag()), Some(tag), "{ok}");
         }
+        assert_eq!(TmpName::new(0x1234, 9).tag(), 0x1234);
         for bad in [
             "",
+            ".rerun-a-0.tmp",
+            ".rerun-000000000000000-1.tmp",
+            ".rerun-00000000000000000-1.tmp",
+            ".rerun-000000000000000A-1.tmp",
             ".rerun--1.tmp",
             ".rerun-a-.tmp",
             ".rerun-A-1.tmp",

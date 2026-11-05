@@ -13,14 +13,23 @@ A throwaway Win32 spike (P2-1, not committed) settled the facts this ADR relies 
 
 ### Capabilities: `Dir` reads, `DirWrite` writes
 ```rust
+pub trait Fs: Send + Sync {
+    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn Dir + '_>>;
+    fn open_dir_write(&self, abs: &Path, cap: &WriteCap) -> SysResult<Box<dyn DirWrite + '_>>;
+}
+pub struct WriteCap(()); // zero-sized; constructor pub(crate), called only in policy::root
+
 pub trait Dir: Send + Sync + fmt::Debug {           // read side, unchanged plus `users`
     fn info(&self) -> SysResult<RootInfo>;
     fn open_dir(&self, p: &RelPath) -> SysResult<Box<dyn Dir + '_>>;
     fn metadata(&self, p: &RelPath) -> SysResult<Option<Metadata>>;
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>>;
-    fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>>;
+    fn read(&self, p: &RelPath) -> SysResult<Vec<u8>>;                     // provided
+    fn read_limited(&self, p: &RelPath, max_len: u64) -> SysResult<Vec<u8>>; // provided, ADR 0011
+    fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>>;   // provided, unbounded
+    fn read_dir_limited(&self, p: Option<&RelPath>, max_entries: usize)
+        -> SysResult<Vec<DirEntry>>;                                        // ADR 0012
     fn users(&self, p: &RelPath) -> SysResult<Vec<u32>>; // attribute-only handle, see "users"
-    // P2-2: read_limited and a bounded read_dir (ADR 0011, ADR 0012)
 }
 
 pub trait DirWrite: Dir {
@@ -49,7 +58,7 @@ pub struct Written { pub sha256: [u8; 32], pub len: u64, pub file_id: u128 }
 pub struct Replaced { pub new: Written, pub old_left: Option<TmpName> } // `.old` still mapped
 pub struct TmpName(String); // `.rerun-<instance tag>-<n>.tmp`, chosen and journaled by ADR 0019
 ```
-- `Fs::open_dir` returns `Box<dyn DirWrite>`; there is one handle type in `sys::win` (a `Dir` handle already shares read, write and delete). The split is a capability in the types: `StoreDir::dir()` and `GameDir::dir()` return `&dyn Dir`; the writable handle of a `GameDir` and of the new `AppDir` (ADR 0019) is `pub(crate)` and reached only by `exec` and `journal` (ADR 0020). `Fs::open_dir` stays a `clippy.toml` ban outside `policy::root` and `sys::snapshot`.
+- `Fs::open_dir` returns `Box<dyn Dir>`; a write handle comes only from `Fs::open_dir_write`, which takes a `WriteCap`: a zero-sized token whose constructor is crate-internal and is called only in `policy::root`, so code outside `rerun-core` (CLI, app) cannot obtain a write handle at all. `Fs::open_dir_write`, `WriteCap::new` and `GameDir::dir_write` are `clippy.toml` bans; their callers (`policy::root`, later `exec` and `journal`) carry an `#[expect]`. There is one handle type in `sys::win` (a `Dir` handle already shares read, write and delete). The split is a capability in the types: `StoreDir::dir()` and `GameDir::dir()` return `&dyn Dir`; the writable handle of a `GameDir` and of the new `AppDir` (ADR 0019) is `pub(crate)` and reached only by `exec` and `journal` (ADR 0020). `Fs::open_dir` stays a `clippy.toml` ban outside `policy::root` and `sys::snapshot`.
 - `Dir::replace`, `Dir::remove_file`, `Dir::rename`, `Dir::set_readonly` and the old `Dir::create_new`/`create_dir`/`remove_dir` leave the trait. Every write names a direct child of a write handle: the parent is the handle that is checked, renamed into and flushed, never a path resolved again.
 
 ### `FileGuard`: check and act on one handle
@@ -119,7 +128,7 @@ A backup is streamed from `FileGuard::reader` into the journal with `create_new`
 
 ## Consequences
 - `sys::fs`: `DirWrite`, `FileGuard`, `NewFile`, `Written`, `Replaced`, `TmpName`; `Dir::users`. `SysErrorKind::Mismatch`; `status.rs` maps `DELETE_PENDING` and `CANNOT_DELETE` to `Busy`, the rename wrapper maps a collision to `Busy`. P2-2 does the trait split, P2-3 the fake, P2-4 `sys::win`.
-  - **P2-2 done (2026-11-05):** the split as sketched above; `Fs::open_dir` returns `Box<dyn DirWrite>`, `StoreDir::dir()`/`GameDir::dir()` return `&dyn Dir`, a `StoreDir` has no write accessor, and `GameDir::dir_write()` (crate-internal) refuses a volume without POSIX delete and rename with `Unsupported` as of opening. `DirWrite::open_dir_write` is an open, not a write: it is implemented in both `sys::fake` and `sys::win` (the same walk as `Dir::open_dir`; `StoreDir::game` needs it), every other `DirWrite` method returns `Unsupported` and no `FileGuard` exists yet. `Dir::users` is implemented in `sys::win` (attribute-only handle relative to the parent, plain files only: a directory is `AccessDenied`, a reparse point `ReparsePoint`); the fake reports no users until its share model. `TmpName::new` writes the instance tag as 16 lowercase hex digits; `TmpName::parse` accepts 1 to 16 and a counter without leading zeros. The phase 1 write contracts and the fake's path-based write methods were removed with the old API.
+  - **P2-2 done (2026-11-05):** the split as sketched above (after review: `Fs::open_dir` read-only, `Fs::open_dir_write` with `WriteCap`; deviation from the first sketch: `read_dir_limited` is the required listing method and `read_dir`, `read`, `read_limited` are provided); the review moved the write capability out of `Fs::open_dir`, which first returned `Box<dyn DirWrite>`). `StoreDir::dir()`/`GameDir::dir()` return `&dyn Dir`, a `StoreDir` has no write accessor (it keeps its write-capable handle only to open its game folders), and `GameDir::dir_write()` (crate-internal) refuses a volume without POSIX delete and rename with `Unsupported` as of opening. `DirWrite::open_dir_write` is an open, not a write: it is implemented in both `sys::fake` and `sys::win` (the same walk as `Dir::open_dir`; `StoreDir::game` needs it), every other `DirWrite` method returns `Unsupported` and no `FileGuard` exists yet. `Dir::users` is implemented in `sys::win` (attribute-only handle relative to the parent, plain files only: a directory is `AccessDenied`, a reparse point `ReparsePoint`); the fake reports no users until its share model. `TmpName::new` writes the instance tag as exactly 16 lowercase hex digits and `TmpName::parse` accepts only that shape (a bijection; `tag()` for the journal); recovery compares the journaled name folded and never adopts a temp name found in a listing. `SysErrorKind::TooLarge` errors keep the path as `target` and carry the bound in `SysError::limit`. The phase 1 write contracts and the fake's path-based write methods were removed with the old API.
 - The fake gets share modes and an image-mapped flag (`FsFixture::hold_open`, `map_image`), `fail_at(op, nth, kind)`, `Fault::CrashAfter(step)` and `Fault::PowerLoss` (ADR 0019); `fs_write_contract` runs against the fake and, under `target/` in a `TestRoot`, against `sys::win`, plus a writing race contract (`docs/09-testing.md`).
 - `sys::snapshot` (P2-5, A1 should-item 5): runs against `sys::win` as well, takes root handles (`GameDir`, `AppDir`) instead of absolute `Scope.dirs`, caps the depth of a registry walk, records lossy registry names as anomalies (ADR 0018). A snapshot meeting `Busy` fails; reverts run only with the game closed (D4), so a game holding its files does not occur in a round trip.
 - ADR 0007's "Replace", "Revert" and hard-link rules are refined here; its "Packages copied from Rerun's cache" rule is the `NewFile::sha256` check in step 3.

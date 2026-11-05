@@ -108,7 +108,7 @@ fn a_file_at_the_limit_is_read_and_one_byte_more_is_too_large() {
     let e = read_with(&sys, FILE, &tiny).unwrap_err();
     assert_eq!(
         e.to_string(),
-        r"steamapps\libraryfolders.vdf: too large: steamapps\libraryfolders.vdf, more than 7 bytes"
+        r"steamapps\libraryfolders.vdf: too large (limit 7): steamapps\libraryfolders.vdf"
     );
     assert_eq!(read_kind(Err(e)), SysErrorKind::TooLarge);
 }

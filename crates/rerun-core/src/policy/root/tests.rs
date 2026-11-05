@@ -238,7 +238,7 @@ fn roaming_on_a_share_is_skipped() {
 
 #[test]
 fn every_missing_known_folder_fails_closed() {
-    for f in KnownFolder::ALL {
+    for f in super::forbidden::FORBIDDEN_SOURCES {
         let sys = FakeSystem::builder()
             .windows_layout()
             .without_known_folder(f)
@@ -593,6 +593,10 @@ fn swap_after_open_keeps_the_handle_and_identity_catches_a_replacement() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test of GameDir::dir_write itself"
+)]
 fn only_a_game_folder_on_a_posix_volume_hands_out_a_write_handle() {
     // `StoreDir` has no write accessor at all (ADR 0017); its `dir()` is `&dyn Dir`.
     let sys = base()

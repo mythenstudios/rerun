@@ -13,7 +13,8 @@
 //!   and abort on a mismatch ([`StoreDir::ensure_id`], [`GameDir::ensure_id`]).
 //!
 //! `open_abs` in this module is the only caller of [`crate::sys::Fs::open_dir`] outside
-//! `sys` (enforced by `clippy.toml`).
+//! `sys`, `open_abs_write` the only caller of [`crate::sys::Fs::open_dir_write`] and the only
+//! place that creates a [`WriteCap`] (enforced by `clippy.toml`).
 //!
 //! Capabilities (ADR 0017): [`StoreDir::dir`] and [`GameDir::dir`] hand out the read side
 //! only ([`Dir`]). A store is never written. The write handle of a game folder
@@ -29,7 +30,7 @@ pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
 
 use crate::path::{Anomaly, PathError, RelPath, RootPath, classify};
 use crate::sys::fs::RootInfo;
-use crate::sys::{Dir, DirWrite, SysError, SysErrorKind, SysResult, System};
+use crate::sys::{Dir, DirWrite, SysError, SysErrorKind, SysResult, System, WriteCap};
 
 /// Identity of a root: volume serial and file ID of the directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -130,8 +131,20 @@ pub enum RootError {
     clippy::disallowed_methods,
     reason = "ADR 0007: policy::root is the only place that opens roots by absolute path"
 )]
-fn open_abs<'s>(sys: &'s dyn System, abs: &Path) -> SysResult<Box<dyn DirWrite + 's>> {
+fn open_abs<'s>(sys: &'s dyn System, abs: &Path) -> SysResult<Box<dyn Dir + 's>> {
     sys.fs().open_dir(abs)
+}
+
+/// The one absolute open with the write capability (ADR 0017): the only place that creates a
+/// [`WriteCap`]. Roots opened here hand the capability out only as
+/// [`GameDir::dir_write`]; a [`StoreDir`] keeps it to open its game folders and never hands
+/// it out.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "ADR 0017: policy::root is the only place that opens roots with the write capability"
+)]
+fn open_abs_write<'s>(sys: &'s dyn System, abs: &Path) -> SysResult<Box<dyn DirWrite + 's>> {
+    sys.fs().open_dir_write(abs, &WriteCap::new())
 }
 
 /// Opens a root by absolute path: lexical check, open, canonical check.
@@ -145,7 +158,7 @@ fn open_checked<'s>(
         path: lexical.clone(),
         reason,
     })?;
-    let dir = open_abs(sys, lexical.path())?;
+    let dir = open_abs_write(sys, lexical.path())?;
     let info = dir.info()?;
     let path = RootPath::from_final_path(&info.final_path)?;
     check_canonical(fr, &path, &info)?;

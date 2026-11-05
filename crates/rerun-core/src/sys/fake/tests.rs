@@ -15,7 +15,7 @@ use crate::sys::contract::{
     gpu_contract, known_folders_contract, registry_read_contract, registry_system_contract,
     registry_write_contract, topology_contract,
 };
-use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, tag};
+use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, WriteCap, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
 use crate::sys::snapshot::{Scope, snapshot};
 use crate::sys::{DriverVersion, GpuAdapter, KnownFolder};
@@ -38,7 +38,9 @@ fn hkcu(path: &str) -> RegKey {
 }
 
 fn open<'a>(sys: &'a FakeSystem, abs: &str) -> Box<dyn DirWrite + 'a> {
-    sys.fs().open_dir(Path::new(abs)).unwrap()
+    sys.fs()
+        .open_dir_write(Path::new(abs), &WriteCap::new())
+        .unwrap()
 }
 
 fn kind<T: std::fmt::Debug>(res: crate::sys::SysResult<T>) -> SysErrorKind {

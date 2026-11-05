@@ -39,7 +39,7 @@
 use std::ffi::OsString;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write as _};
+use std::io::Write as _;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -97,8 +97,8 @@ use super::status::kind_of_win32;
 use crate::path::RelPath;
 use crate::sys::contract::{FsFixture, RegFixture};
 use crate::sys::fs::{
-    Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, Fs, FsKind, Metadata, NewFile, ReadSeek,
-    ReparseInfo, RootInfo, Written, tag,
+    Attrs, Dir, DirEntry, DirWrite, EntryKind, Fs, FsKind, Metadata, ReadSeek, ReparseInfo,
+    RootInfo, WriteCap, tag,
 };
 use crate::sys::registry::{Hive, RegKey};
 use crate::sys::{SysError, SysErrorKind, SysResult};
@@ -1632,7 +1632,7 @@ impl NaiveDir {
 }
 
 impl Fs for NaiveFs {
-    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn DirWrite + '_>> {
+    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn Dir + '_>> {
         if !std::fs::metadata(abs).map_err(|_| naive_err(abs))?.is_dir() {
             return Err(SysError::path(SysErrorKind::InvalidPath, abs));
         }
@@ -1640,6 +1640,10 @@ impl Fs for NaiveFs {
             base: abs.to_path_buf(),
             id: naive_id(abs)?,
         }))
+    }
+    /// The race contract never writes.
+    fn open_dir_write(&self, abs: &Path, _: &WriteCap) -> SysResult<Box<dyn DirWrite + '_>> {
+        Err(SysError::path(SysErrorKind::Unsupported, abs))
     }
 }
 
@@ -1696,28 +1700,6 @@ impl Dir for NaiveDir {
 
     fn users(&self, p: &RelPath) -> SysResult<Vec<u32>> {
         Err(SysError::new(SysErrorKind::Unsupported, p.as_str()))
-    }
-}
-
-/// The race contract never writes; every method is refused.
-impl DirWrite for NaiveDir {
-    fn open_dir_write(&self, p: &RelPath) -> SysResult<Box<dyn DirWrite + '_>> {
-        Err(SysError::new(SysErrorKind::Unsupported, p.as_str()))
-    }
-    fn guard(&self, p: &RelPath) -> SysResult<Box<dyn FileGuard + '_>> {
-        Err(SysError::new(SysErrorKind::Unsupported, p.as_str()))
-    }
-    fn create_new(&self, p: &RelPath, _: &mut dyn Read, _: &NewFile) -> SysResult<Written> {
-        Err(SysError::new(SysErrorKind::Unsupported, p.as_str()))
-    }
-    fn create_dir(&self, p: &RelPath) -> SysResult<u128> {
-        Err(SysError::new(SysErrorKind::Unsupported, p.as_str()))
-    }
-    fn remove_dir(&self, p: &RelPath, _: u128) -> SysResult<()> {
-        Err(SysError::new(SysErrorKind::Unsupported, p.as_str()))
-    }
-    fn flush(&self) -> SysResult<()> {
-        Err(SysError::new(SysErrorKind::Unsupported, "naive"))
     }
 }
 

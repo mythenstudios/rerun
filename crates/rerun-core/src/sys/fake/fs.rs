@@ -17,7 +17,8 @@
 //! - No 8.3 short names, no stripping of trailing dots or spaces: raw names (see
 //!   [`FakeFs::put_raw_file`]) are stored exactly as given.
 //! - No share modes and no sharing violations (`Busy`): open handles never block a rename
-//!   or delete, and [`Dir::users`] always reports no users. A handle to a deleted directory
+//!   or delete (Windows refuses to rename an ancestor of an open handle), and [`Dir::users`]
+//!   always reports no users. A handle to a deleted directory
 //!   returns `NotFound`.
 //! - The write side ([`DirWrite`]) is not modelled yet: [`DirWrite::open_dir_write`] opens a
 //!   handle like [`Dir::open_dir`], every writing method returns `Unsupported` (ADR 0017).
@@ -60,7 +61,7 @@ use crate::fold::fold;
 use crate::path::RelPath;
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, Fs, FsKind, Metadata, NewFile, ReadSeek,
-    ReparseInfo, RootInfo, Written, tag,
+    ReparseInfo, RootInfo, WriteCap, Written, tag,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
@@ -1101,15 +1102,26 @@ impl FakeFs {
     }
 }
 
-impl Fs for FakeFs {
-    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn DirWrite + '_>> {
+impl FakeFs {
+    /// The absolute open behind both [`Fs`] methods.
+    fn open_abs(&self, abs: &Path) -> SysResult<FakeDir> {
         let shown = abs.display().to_string();
         let (drive, segs) = parse_abs(abs)?;
         let node = self.lock().resolve_follow(drive, &segs, 0, &shown)?;
-        Ok(Box::new(FakeDir {
+        Ok(FakeDir {
             fs: self.clone(),
             node,
-        }))
+        })
+    }
+}
+
+impl Fs for FakeFs {
+    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn Dir + '_>> {
+        Ok(Box::new(self.open_abs(abs)?))
+    }
+
+    fn open_dir_write(&self, abs: &Path, _: &WriteCap) -> SysResult<Box<dyn DirWrite + '_>> {
+        Ok(Box::new(self.open_abs(abs)?))
     }
 }
 
@@ -1236,9 +1248,9 @@ impl Dir for FakeDir {
         let st = self.fs.lock();
         let children = &st.dir(node, &t)?.children;
         if children.len() > max_entries {
-            return Err(err(
-                SysErrorKind::TooLarge,
-                &format!("{t}, more than {max_entries} entries"),
+            return Err(SysError::too_large(
+                t,
+                u64::try_from(max_entries).unwrap_or(u64::MAX),
             ));
         }
         children

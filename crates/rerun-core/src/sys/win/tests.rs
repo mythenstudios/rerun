@@ -26,7 +26,7 @@ use crate::sys::contract::{
     fs_read_contract, fs_volume_contract, gpu_contract, known_folders_contract,
     registry_read_contract, registry_system_contract, topology_contract,
 };
-use crate::sys::fs::{Attrs, EntryKind, Fs, NewFile, TmpName};
+use crate::sys::fs::{Attrs, EntryKind, Fs, NewFile, TmpName, WriteCap};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
 use crate::sys::{Gpu, KnownFolder, KnownFolders, SysErrorKind, System, Topology};
 
@@ -156,10 +156,12 @@ fn read_only_walk_metadata_and_identity() {
     );
 
     // The write side does not exist yet (ADR 0017).
+    let w = fs.open_dir_write(&fx.0, &WriteCap::new()).unwrap();
     assert_eq!(
-        kind_of(root.create_dir(&rel("new"))),
+        kind_of(w.create_dir(&rel("new"))),
         SysErrorKind::Unsupported
     );
+    drop(w);
     assert_eq!(root.read(&rel("a.txt")).unwrap(), b"hello");
 }
 
@@ -419,7 +421,7 @@ fn win_dir_write_methods_are_unsupported() {
     fx.file(&base.join("a.txt"), b"a").unwrap();
     fx.dir(&base.join("d")).unwrap();
     let fs = WinFs::new();
-    let dir = fs.open_dir(base).unwrap();
+    let dir = fs.open_dir_write(base, &WriteCap::new()).unwrap();
     let (a, n) = (rel("a.txt"), rel("new"));
     let new = NewFile {
         tmp: TmpName::new(0xab, 1),
@@ -475,9 +477,10 @@ fn users_reports_a_held_handle_of_this_process() {
             .share_mode(0)
             .open(&file)
             .unwrap();
+        // The attribute-only open of the query is not blocked by a share mode of 0 ...
         let users = dir.users(&held).unwrap();
         assert!(users.contains(&me), "{users:?} lacks {me}");
-        // The attribute-only open of the query is not blocked by a share mode of 0.
+        // ... while a data read is.
         assert_eq!(kind_of(dir.read(&held)), SysErrorKind::Busy);
     }
     let after = dir.users(&held).unwrap();

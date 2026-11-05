@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::fs::{Attrs, Dir, EntryKind, Fs, tag};
+use super::fs::{Attrs, Dir, DirWrite, EntryKind, Fs, WriteCap, tag};
 use super::gpu::{MAX_NAME_UTF16, is_bidi_control};
 use super::registry::{
     Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegValue,
@@ -175,9 +175,18 @@ fn is_surrogate_with(dir: &dyn Dir, p: &str, expected: u32, what: &str) -> Contr
     )
 }
 
-/// Every operation of the read side through `p` (a path whose parent is a reparse point)
-/// returns `ReparsePoint`.
-fn refused_through(dir: &dyn Dir, p: &str, what: &str) -> ContractResult {
+/// Opens `abs` with the write capability (tests of this crate may create a [`WriteCap`]).
+fn open_write<'f>(
+    fs: &'f dyn Fs,
+    abs: &Path,
+    what: &str,
+) -> Result<Box<dyn DirWrite + 'f>, String> {
+    ok(fs.open_dir_write(abs, &WriteCap::new()), what)
+}
+
+/// Every operation of the read side through `p` (a path whose parent is a reparse point), and
+/// opening it with the write capability, returns `ReparsePoint`.
+fn refused_through(dir: &dyn DirWrite, p: &str, what: &str) -> ContractResult {
     let rp = SysErrorKind::ReparsePoint;
     let p = rel(p)?;
     err_kind(dir.read(&p), rp, &format!("{what}: read"))?;
@@ -185,17 +194,27 @@ fn refused_through(dir: &dyn Dir, p: &str, what: &str) -> ContractResult {
     err_kind(dir.metadata(&p), rp, &format!("{what}: metadata"))?;
     err_kind(dir.open_dir(&p), rp, &format!("{what}: open_dir"))?;
     err_kind(dir.read_dir(Some(&p)), rp, &format!("{what}: read_dir"))?;
-    err_kind(dir.users(&p), rp, &format!("{what}: users"))
+    err_kind(dir.users(&p), rp, &format!("{what}: users"))?;
+    err_kind(
+        dir.open_dir_write(&p),
+        rp,
+        &format!("{what}: open_dir_write"),
+    )
 }
 
 /// Operations on a reparse point itself that must not follow it.
-fn refused_at(dir: &dyn Dir, p: &str, what: &str) -> ContractResult {
+fn refused_at(dir: &dyn DirWrite, p: &str, what: &str) -> ContractResult {
     let rp = SysErrorKind::ReparsePoint;
     let p = rel(p)?;
     err_kind(dir.open_dir(&p), rp, &format!("{what}: open_dir"))?;
     err_kind(dir.read_dir(Some(&p)), rp, &format!("{what}: read_dir"))?;
     err_kind(dir.open_read(&p), rp, &format!("{what}: open_read"))?;
-    err_kind(dir.users(&p), rp, &format!("{what}: users"))
+    err_kind(dir.users(&p), rp, &format!("{what}: users"))?;
+    err_kind(
+        dir.open_dir_write(&p),
+        rp,
+        &format!("{what}: open_dir_write"),
+    )
 }
 
 /// File system contract, reading side: identity, lookups, metadata, error kinds, the input
@@ -365,7 +384,22 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
     )?;
 
     // The write capability is an open like `open_dir`: same object, same errors.
-    let w = ok(root.open_dir_write(&rel("GAME")?), "open_dir_write")?;
+    let wroot = open_write(fs, work, "Fs::open_dir_write")?;
+    ensure(
+        ok(wroot.info(), "Fs::open_dir_write info")?.file_id == info.file_id,
+        "Fs::open_dir_write reaches the same directory as Fs::open_dir",
+    )?;
+    err_kind(
+        fs.open_dir_write(&game_abs.join("Data.bin"), &WriteCap::new()),
+        SysErrorKind::InvalidPath,
+        "Fs::open_dir_write on a file",
+    )?;
+    err_kind(
+        fs.open_dir_write(&game_abs.join("missing"), &WriteCap::new()),
+        SysErrorKind::NotFound,
+        "Fs::open_dir_write missing",
+    )?;
+    let w = ok(wroot.open_dir_write(&rel("GAME")?), "open_dir_write")?;
     ensure(
         ok(w.info(), "open_dir_write info")?.file_id == dm.file_id,
         "open_dir_write reaches the same directory as open_dir",
@@ -373,15 +407,16 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
     read_is(&*w, "Data.bin", b"hello", "read through a write handle")?;
     drop(w);
     err_kind(
-        root.open_dir_write(&file),
+        wroot.open_dir_write(&file),
         SysErrorKind::InvalidPath,
         "open_dir_write on a file",
     )?;
     err_kind(
-        root.open_dir_write(&rel(r"Game\missing")?),
+        wroot.open_dir_write(&rel(r"Game\missing")?),
         SysErrorKind::NotFound,
         "open_dir_write missing",
     )?;
+    drop(wroot);
 
     // A sub handle.
     let sub = ok(root.open_dir(&game), "open_dir relative")?;
@@ -412,7 +447,126 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
     wof_files(fx, &*root, work, &mut skips)?;
     restricted_entries(fs, fx, &*root, work, &mut skips)?;
     bounded_reads(fx, &*root, work)?;
+    names_and_ancestor_renames(fx, &*root, work, &info.final_path)?;
     Ok(skips)
+}
+
+/// Name handling and handle identity, set up through the fixture (the read-side cases of the
+/// phase 1 write contract): case folding beyond ASCII, 1:1 per character (`ß` is not `SS`),
+/// names kept exactly as spelled, and a handle that survives a rename of an ancestor with
+/// `final_path` following it.
+fn names_and_ancestor_renames(
+    fx: &dyn FsFixture,
+    root: &dyn Dir,
+    work: &Path,
+    work_final: &Path,
+) -> ContractResult {
+    let base = work.join("spelling");
+    let spelled = [
+        "a..b",
+        ".hidden",
+        "$data.bin",
+        "my file.txt",
+        "Über.txt",
+        "Straße.txt",
+    ];
+    for n in spelled {
+        ok(fx.file(&base.join(n), n.as_bytes()), "fixture spelled name")?;
+    }
+    read_is(
+        root,
+        r"spelling\über.TXT",
+        "Über.txt".as_bytes(),
+        "non-ASCII case-insensitive",
+    )?;
+    read_is(
+        root,
+        r"spelling\ÜBER.txt",
+        "Über.txt".as_bytes(),
+        "non-ASCII upper case",
+    )?;
+    read_is(
+        root,
+        r"spelling\STRAßE.TXT",
+        "Straße.txt".as_bytes(),
+        "ß with ASCII upper case",
+    )?;
+    ensure(
+        ok(
+            root.metadata(&rel(r"spelling\STRASSE.txt")?),
+            "metadata STRASSE",
+        )?
+        .is_none(),
+        "Straße and STRASSE are two names (folding is 1:1 per character)",
+    )?;
+    let mut listed = names(root, Some(&rel("spelling")?), "read_dir spelling")?;
+    listed.sort();
+    let mut expected: Vec<String> = spelled.iter().map(|n| (*n).to_owned()).collect();
+    expected.sort();
+    ensure(
+        listed == expected,
+        &format!("read_dir keeps every name exactly as spelled: {listed:?}"),
+    )?;
+    for n in spelled {
+        read_is(
+            root,
+            &format!(r"spelling\{n}"),
+            n.as_bytes(),
+            "read by the exact name",
+        )?;
+    }
+
+    // A handle refers to an object, not a name. Renaming an ancestor of an open handle is
+    // refused by Windows (`AccessDenied`, observed, ADR 0017) and allowed by the fake; either
+    // way the handle keeps its directory, and its `final_path` is the current one.
+    ok(
+        fx.file(&work.join(r"anc\mid\leaf\f.txt"), b"f"),
+        "fixture anc",
+    )?;
+    let leaf = ok(root.open_dir(&rel(r"anc\mid\leaf")?), "open leaf")?;
+    let id = ok(leaf.info(), "leaf info")?.file_id;
+    let (anc, leaf_name) = match fx.rename(&work.join("anc"), &work.join("anc-moved")) {
+        Ok(()) => {
+            ensure(
+                ok(root.metadata(&rel("anc")?), "metadata old name")?.is_none(),
+                "the old ancestor name is gone",
+            )?;
+            ("anc-moved", "leaf")
+        }
+        Err(e) if e.kind == SysErrorKind::AccessDenied => ("anc", "leaf"),
+        Err(e) => return Err(format!("contract violated: rename of an ancestor: {e}")),
+    };
+    let check = |anc: &str, leaf_name: &str, what: &str| -> ContractResult {
+        let now = ok(leaf.info(), what)?;
+        ensure(
+            now.file_id == id,
+            &format!("{what}: the handle keeps its directory"),
+        )?;
+        ensure(
+            now.final_path == work_final.join(anc).join("mid").join(leaf_name),
+            &format!("{what}: final_path is the current path"),
+        )?;
+        read_is(
+            &*leaf,
+            "f.txt",
+            b"f",
+            &format!("{what}: read through the handle"),
+        )?;
+        ensure(
+            names(&*leaf, None, what)? == ["f.txt"],
+            &format!("{what}: listing through the handle"),
+        )
+    };
+    check(anc, leaf_name, "after renaming an ancestor")?;
+    // Renaming the handle's own directory is allowed on both: `final_path` follows.
+    ok(
+        fx.rename(
+            &work.join(anc).join(r"mid\leaf"),
+            &work.join(anc).join(r"mid\leaf-moved"),
+        ),
+        "fixture rename leaf",
+    )?;
+    check(anc, "leaf-moved", "after renaming the directory itself")
 }
 
 /// Entries of the large directory in [`bounded_reads`]: with names of 60 characters the
@@ -515,6 +669,12 @@ fn bounded_reads(fx: &dyn FsFixture, root: &dyn Dir, work: &Path) -> ContractRes
         root.read_dir_limited(Some(&many), BOUNDED_MANY - 1),
         tl,
         "a listing of several batches one entry over",
+    )?;
+    // Over the bound within the first batch (`sys::win` stops there).
+    err_kind(
+        root.read_dir_limited(Some(&many), 10),
+        tl,
+        "a listing far over the bound",
     )
 }
 
@@ -847,7 +1007,7 @@ pub fn fs_link_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> Fs
         fx.junction(&root_abs.join("link"), &outside_abs),
         "fixture junction",
     )?;
-    let root = ok(fs.open_dir(&root_abs), "open root")?;
+    let root = open_write(fs, &root_abs, "open root")?;
     let root_info = ok(root.info(), "root info")?;
     is_surrogate_with(
         &*root,
@@ -1055,7 +1215,7 @@ fn link_matrix(
             through.push("game.exe");
             let through_rel = format!("{link_rel}\\{}", through.join("\\"));
             let what = format!("{kind_name} at {}", DIRS[level]);
-            let sd = ok(fs.open_dir(&store), "open store")?;
+            let sd = open_write(fs, &store, "open store")?;
             is_surrogate_with(&*sd, &link_rel, link_tag, &format!("{what}: surrogate"))?;
             refused_at(&*sd, &link_rel, &what)?;
             refused_through(&*sd, &through_rel, &what)?;
@@ -1077,7 +1237,7 @@ fn link_matrix(
 /// skipped (`mount_volume`, `subst`).
 pub fn fs_volume_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContractResult {
     let mut skips = Skipped::new();
-    let w = ok(fs.open_dir(work), "open work dir")?;
+    let w = open_write(fs, work, "open work dir")?;
     let winfo = ok(w.info(), "work info")?;
 
     // I3: a volume mounted in a folder. Opened by absolute path it is a volume root with its
