@@ -26,8 +26,15 @@
 //! - Keys keep their spelling, duplicates and order are preserved; lookups compare keys ASCII
 //!   case-insensitively ([`Object::get_all`], [`Object::get_unique`]).
 //! - Errors carry a byte offset and never file content (at most one character as `U+XXXX`).
+//!
+//! [`read_store_file`] is the only way to read such a file from disk: handle-relative to a
+//! store root, at most `max_bytes + 1` bytes.
+
+pub mod read;
 
 use std::fmt;
+
+pub use read::{VdfReadError, read_store_file};
 
 /// UTF-8 byte order mark, skipped once at the start.
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
