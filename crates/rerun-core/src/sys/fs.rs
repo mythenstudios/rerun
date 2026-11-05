@@ -27,8 +27,8 @@
 //!   by another program while a second handle is still open) cannot be opened at all:
 //!   `metadata`, `open_read`, `read`, `users`, `open_dir`, `guard`, `lock` and the existence
 //!   check of `create_new` are `Busy`, and `read_dir` skips it like an entry that vanished
-//!   between the listing and its reopen. The fake models it; `sys::win` maps the status from
-//!   P2-4.
+//!   between the listing and its reopen. The fake models it; `sys::win` maps
+//!   `STATUS_DELETE_PENDING` to `Busy` and skips such an entry in a listing.
 //! - **Share modes.** A handle that reads data shares read only (`open_read`), a [`Dir`]
 //!   handle shares everything; an open that conflicts with another program's handle is
 //!   `Busy`. Attribute-only opens (`metadata`, `users`, the components of a walk) are never

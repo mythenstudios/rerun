@@ -24,6 +24,7 @@ pub(super) const STATUS_INFO_LENGTH_MISMATCH: NtStatus = st(0xC000_0004);
 pub(super) const STATUS_INVALID_PARAMETER: NtStatus = st(0xC000_000D);
 pub(super) const STATUS_NO_SUCH_FILE: NtStatus = st(0xC000_000F);
 pub(super) const STATUS_BUFFER_TOO_SMALL: NtStatus = st(0xC000_0023);
+pub(super) const STATUS_DELETE_PENDING: NtStatus = st(0xC000_0056);
 
 /// `ERROR_INVALID_PARAMETER`: only "unsupported" for an information class.
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -32,13 +33,10 @@ const ERROR_INVALID_PARAMETER: u32 = 87;
 pub(super) fn kind_of_ntstatus(status: NtStatus) -> SysErrorKind {
     // Compare as u32 so the table reads like ntstatus.h.
     match status.cast_unsigned() {
-        // OBJECT_NAME_NOT_FOUND, OBJECT_PATH_NOT_FOUND, NO_SUCH_FILE, DELETE_PENDING,
-        // FILE_DELETED
-        0xC000_0034 | 0xC000_003A | 0xC000_000F | 0xC000_0056 | 0xC000_0123 => {
-            SysErrorKind::NotFound
-        }
-        // ACCESS_DENIED, FILE_IS_A_DIRECTORY, MEDIA_WRITE_PROTECTED, CANNOT_DELETE
-        0xC000_0022 | 0xC000_00BA | 0xC000_00A2 | 0xC000_0121 => SysErrorKind::AccessDenied,
+        // OBJECT_NAME_NOT_FOUND, OBJECT_PATH_NOT_FOUND, NO_SUCH_FILE, FILE_DELETED
+        0xC000_0034 | 0xC000_003A | 0xC000_000F | 0xC000_0123 => SysErrorKind::NotFound,
+        // ACCESS_DENIED, FILE_IS_A_DIRECTORY, MEDIA_WRITE_PROTECTED
+        0xC000_0022 | 0xC000_00BA | 0xC000_00A2 => SysErrorKind::AccessDenied,
         // NOT_A_DIRECTORY, OBJECT_NAME_INVALID, OBJECT_PATH_INVALID, OBJECT_PATH_SYNTAX_BAD,
         // NAME_TOO_LONG, OBJECT_TYPE_MISMATCH
         0xC000_0103 | 0xC000_0033 | 0xC000_0039 | 0xC000_003B | 0xC000_0106 | 0xC000_0024 => {
@@ -49,8 +47,11 @@ pub(super) fn kind_of_ntstatus(status: NtStatus) -> SysErrorKind {
         0xC000_050B | 0x8000_002D | 0xC000_0279 | 0xC000_0280 | 0x0000_0104 => {
             SysErrorKind::ReparsePoint
         }
-        // SHARING_VIOLATION, FILE_LOCK_CONFLICT, LOCK_NOT_GRANTED
-        0xC000_0043 | 0xC000_0054 | 0xC000_0055 => SysErrorKind::Busy,
+        // SHARING_VIOLATION, FILE_LOCK_CONFLICT, LOCK_NOT_GRANTED; DELETE_PENDING (a name in
+        // legacy delete-pending state, ADR 0017 A6) and CANNOT_DELETE (with
+        // IGNORE_READONLY_ATTRIBUTE the remaining cause is an image section: in use). `Busy`
+        // is "transient or concurrent, a retry may succeed" (ADR 0017, "Error kinds").
+        0xC000_0043 | 0xC000_0054 | 0xC000_0055 | 0xC000_0056 | 0xC000_0121 => SysErrorKind::Busy,
         // OBJECT_NAME_COLLISION
         0xC000_0035 => SysErrorKind::AlreadyExists,
         // DIRECTORY_NOT_EMPTY
@@ -144,12 +145,10 @@ mod tests {
             (0xC000_0034, SysErrorKind::NotFound),
             (0xC000_003A, SysErrorKind::NotFound),
             (0xC000_000F, SysErrorKind::NotFound),
-            (0xC000_0056, SysErrorKind::NotFound),
             (0xC000_0123, SysErrorKind::NotFound),
             (0xC000_0022, SysErrorKind::AccessDenied),
             (0xC000_00BA, SysErrorKind::AccessDenied),
             (0xC000_00A2, SysErrorKind::AccessDenied),
-            (0xC000_0121, SysErrorKind::AccessDenied),
             (0xC000_0103, SysErrorKind::InvalidPath),
             (0xC000_0033, SysErrorKind::InvalidPath),
             (0xC000_0039, SysErrorKind::InvalidPath),
@@ -164,6 +163,8 @@ mod tests {
             (0xC000_0043, SysErrorKind::Busy),
             (0xC000_0054, SysErrorKind::Busy),
             (0xC000_0055, SysErrorKind::Busy),
+            (0xC000_0056, SysErrorKind::Busy),
+            (0xC000_0121, SysErrorKind::Busy),
             (0xC000_0035, SysErrorKind::AlreadyExists),
             (0xC000_0101, SysErrorKind::NotEmpty),
             (0xC000_00BB, SysErrorKind::Unsupported),
@@ -270,6 +271,12 @@ mod tests {
         assert_eq!(
             (e.kind, e.win32, e.ntstatus),
             (SysErrorKind::Busy, Some(32), None)
+        );
+        // Win32 code 5 is ambiguous (ACCESS_DENIED and CANNOT_DELETE), the status is not.
+        let e = nt_error(st(0xC000_0121), "d");
+        assert_eq!(
+            (e.kind, e.ntstatus),
+            (SysErrorKind::Busy, Some(st(0xC000_0121)))
         );
         let e = win32_info_error(87, "c");
         assert_eq!((e.kind, e.win32), (SysErrorKind::Unsupported, Some(87)));

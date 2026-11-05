@@ -36,7 +36,8 @@ use super::name::{self, DirLayout, Listed, Seg16};
 use super::nt::{self, Access, RelOpen};
 use super::reparse;
 use super::status::{
-    NtStatus, STATUS_UNSUCCESSFUL, is_unsupported_class, nt_error, win32_error, win32_info_error,
+    NtStatus, STATUS_DELETE_PENDING, STATUS_UNSUCCESSFUL, is_unsupported_class, nt_error,
+    win32_error, win32_info_error,
 };
 use super::token;
 use crate::fold::fold;
@@ -539,8 +540,10 @@ impl WinDir {
                 .ok_or_else(|| err(SysErrorKind::Other, target))?;
             let meta = match open_entry(dir, &seg, Access::Attributes, &t) {
                 Ok(o) => meta_of(o.handle.as_handle(), o.tag, &t)?,
-                // Vanished between listing and reopen (or renamed: L1 mismatch).
+                // Vanished between listing and reopen (or renamed: L1 mismatch), or in legacy
+                // delete-pending state: it is being removed (ADR 0017, A6).
                 Err(e) if e.kind == SysErrorKind::NotFound => continue,
+                Err(e) if e.ntstatus == Some(STATUS_DELETE_PENDING) => continue,
                 Err(e) if e.kind == SysErrorKind::AccessDenied => match restricted_meta(&l) {
                     Some(m) => m,
                     None => return Err(e),
