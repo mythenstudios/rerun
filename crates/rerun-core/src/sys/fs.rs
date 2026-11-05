@@ -1,5 +1,7 @@
 //! File system traits: one absolute [`Fs::open_dir`], everything else relative to a [`Dir`]
-//! handle (ADR 0007).
+//! handle (ADR 0007). Capabilities are split (ADR 0017): [`Dir`] reads, [`DirWrite`] writes
+//! the direct children of its handle, [`FileGuard`] holds one existing file for a check and
+//! an act on the same handle.
 //!
 //! Semantics (identical for `win` and `fake`, checked in `sys::contract`):
 //! - Names are case-insensitive, the original case is preserved. Folding is 1:1 per
@@ -9,7 +11,7 @@
 //! - Below a root, every component is opened relative to its parent. Name surrogates
 //!   (junction, mount point, symlink, LX symlink) and entries with an unknown reparse tag are
 //!   reported as [`EntryKind::Reparse`] and never traversed; operations through them return
-//!   `ReparsePoint`. Deleting such an entry itself is allowed.
+//!   `ReparsePoint`.
 //! - Entries with an allowlisted data tag ([`tag::is_allowed_data_tag`]: WOF, dedup, cloud
 //!   files) behave like normal files and directories and carry the tag in
 //!   [`Metadata::reparse`] as far as Windows reports it: while the `wof.sys` filter is
@@ -19,7 +21,6 @@
 //! - A handle refers to an object, not a name: it stays valid when the directory or one of
 //!   its parents is renamed. [`Dir::info`] computes the path at call time.
 //! - Writes into a case-sensitive directory return `Unsupported`.
-//! - If a parent directory is missing, writing operations return `NotFound`.
 //! - `read_dir` returns raw names as on disk; they may be invalid as a [`RelPath`]
 //!   (`d3d9.dll.`, `CON`). `policy::path::classify` separates them.
 //! - **Restricted entries.** An entry whose own security descriptor denies the current user
@@ -39,8 +40,10 @@
 //!   (`<dir>: entry "<name>"`), and [`SysError::new`] escapes any target that still holds a
 //!   control or an invisible/confusable character ([`crate::sys::shown_target`]), in `win`
 //!   and `fake` alike.
-//! - `sys::win` implements only the reading methods in phase 1; the writing ones return
-//!   `Unsupported`.
+//! - Implementation status: both `sys::fake` and `sys::win` implement the read side and
+//!   [`DirWrite::open_dir_write`]; every writing method of [`DirWrite`] returns `Unsupported`
+//!   until the fake write side (share model, faults) and then the real one follow
+//!   (ADR 0017). [`Dir::users`] is real in `sys::win`; the fake reports no users.
 
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -242,11 +245,13 @@ pub trait Fs: Send + Sync {
     /// `fake`). A non-allowlisted reparse tag on the opened directory itself yields
     /// `ReparsePoint`.
     ///
-    /// Only `policy::root` and `sys::snapshot` call this (ADR 0007).
-    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn Dir + '_>>;
+    /// The handle carries the write capability ([`DirWrite`]); `policy::root` decides who
+    /// gets it (ADR 0017). Only `policy::root` and `sys::snapshot` call this (ADR 0007).
+    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn DirWrite + '_>>;
 }
 
-/// An opened directory. All paths are relative to it and never follow reparse points.
+/// An opened directory, read side. All paths are relative to it and never follow reparse
+/// points.
 pub trait Dir: Send + Sync + std::fmt::Debug {
     /// Identity of this directory, computed at call time. `NotFound` if it was deleted.
     ///
@@ -258,7 +263,8 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     /// identity is never guessed).
     fn info(&self) -> SysResult<RootInfo>;
 
-    /// Opens a subdirectory relative to this handle. Never follows reparse points.
+    /// Opens a subdirectory relative to this handle, read side only. Never follows reparse
+    /// points.
     fn open_dir(&self, p: &RelPath) -> SysResult<Box<dyn Dir + '_>>;
 
     /// Metadata without following reparse points (lstat-like). `Ok(None)` = does not exist
@@ -270,7 +276,8 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     /// Opens a file for reading. A directory or a restricted entry yields `AccessDenied`.
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>>;
 
-    /// Reads a whole file.
+    /// Reads a whole file. Unbounded: input that someone else can make large goes through a
+    /// bounded read instead.
     fn read(&self, p: &RelPath) -> SysResult<Vec<u8>> {
         let mut reader = self.open_read(p)?;
         let mut buf = Vec::new();
@@ -286,57 +293,237 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     /// Restricted entries are listed with [`Metadata::restricted`], never dropped.
     fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>>;
 
-    /// Creates a new file (`FILE_CREATE`): an existing entry of any kind yields
-    /// `AlreadyExists` and is not touched.
-    fn create_new(&self, p: &RelPath, data: &[u8]) -> SysResult<()>;
-
-    /// Replaces an existing file (ADR 0007 "Replace"). `tmp` is a single segment supplied by
-    /// the journal; `<tmp>` is created next to the target with create-new semantics, then the
-    /// old file is renamed to `<tmp>.old`, `<tmp>` is renamed onto the target name and
-    /// `<tmp>.old` is deleted. The stored spelling of the target name is kept.
+    /// Process IDs that use the file `p` at this moment: open handles, image sections and
+    /// mapped views, the running process of an executable (ADR 0017, "users()"). A check at
+    /// a moment, not a lock. The current process counts only through handles other than the
+    /// one used for the query. Order unspecified, no duplicates.
     ///
-    /// Errors: missing target `NotFound`, directory or read-only file `AccessDenied`,
-    /// reparse point `ReparsePoint`, `<tmp>` or `<tmp>.old` already present `AlreadyExists`
-    /// (target unchanged). Other links of a hard-linked target keep the old content. If the
-    /// final rename fails, `<tmp>` and `<tmp>.old` stay for the journal to recover.
-    /// `tmp` or `<tmp>.old` equal to the target name (case-insensitively) yields `InvalidPath`.
-    ///
-    /// If the target is renamed or moved by someone else between the phases, the operation
-    /// aborts with `Busy`: `<tmp>` is removed and the target is left where it is, never
-    /// pulled back. `sys::win` checks this with `FileNameInformation` on the held handle
-    /// before each rename.
-    fn replace(&self, p: &RelPath, data: &[u8], tmp: &str) -> SysResult<()>;
+    /// Only plain files (an allowlisted data tag counts as plain): a directory or a
+    /// restricted entry yields `AccessDenied`, a reparse point `ReparsePoint`, a missing
+    /// entry `NotFound`. `sys::win` queries `FileProcessIdsUsingFileInformation` on an
+    /// attribute-only handle opened relative to the parent (never following a reparse point),
+    /// which no share mode blocks. `sys::fake` has no holders yet and always reports none.
+    fn users(&self, p: &RelPath) -> SysResult<Vec<u32>>;
+}
 
-    /// Creates exactly one directory. Deliberately no `create_dir_all`: every created
-    /// directory must be journaled individually.
-    fn create_dir(&self, p: &RelPath) -> SysResult<()>;
+/// An opened directory that can write its direct children (ADR 0017). `policy::root` hands
+/// it out only for game folders (and later Rerun's own folder), never for a store.
+///
+/// Every write names a direct child of this handle (`name` is exactly one segment, else
+/// `InvalidPath`): the parent is the handle that is checked, renamed into and flushed, never
+/// a path resolved again. Writes into a case-sensitive directory and on a volume without
+/// POSIX delete and rename semantics are `Unsupported`.
+///
+/// So far `sys::fake` and `sys::win` implement only [`Self::open_dir_write`]; every writing
+/// method returns `Unsupported` until the fake (share model, faults) and then the real write
+/// side follow (ADR 0017, ADR 0020).
+pub trait DirWrite: Dir {
+    /// Opens a subdirectory relative to this handle with the write capability. Same walk
+    /// and errors as [`Dir::open_dir`].
+    fn open_dir_write(&self, p: &RelPath) -> SysResult<Box<dyn DirWrite + '_>>;
 
-    /// Deletes a file, or a reparse point itself (never its target). A read-only file yields
-    /// `AccessDenied`, a directory `AccessDenied`. Other hard links stay.
-    fn remove_file(&self, p: &RelPath) -> SysResult<()>;
+    /// Holds the existing file `name` on one handle that shares read only, so it can be
+    /// hashed, backed up, replaced or deleted with nothing changing in between
+    /// ([`FileGuard`]). Refuses a directory (`AccessDenied`), a reparse point
+    /// (`ReparsePoint`), a case-sensitive parent (`Unsupported`) and a link count other than
+    /// 1 (`Linked`).
+    fn guard(&self, name: &RelPath) -> SysResult<Box<dyn FileGuard + '_>>;
 
-    /// Deletes an empty directory (or a directory reparse point itself). Not empty yields
-    /// `NotEmpty`, a file `InvalidPath`.
-    fn remove_dir(&self, p: &RelPath) -> SysResult<()>;
+    /// Creates the file `name` from `src` through the temp file `new.tmp` and a rename
+    /// without replace, so a crash never leaves a torn file under `name`. At most
+    /// `new.max_len` bytes; a hash other than `new.sha256` deletes the temp file and is
+    /// `Mismatch`. An existing `name` is `AlreadyExists`, a collision only at the rename
+    /// `Busy`. The attributes `new.attrs` are set after the last write.
+    fn create_new(&self, name: &RelPath, src: &mut dyn Read, new: &NewFile) -> SysResult<Written>;
 
-    /// Renames or moves within this handle's tree. Never overwrites (`AlreadyExists`);
-    /// a case-only change is allowed. "Case-only" is decided by file identity (the
-    /// destination resolves to the same file ID as the source), never by comparing folded
-    /// names. Moving a directory into its own subtree yields `InvalidPath`; a destination
-    /// through a reparse point `ReparsePoint`.
-    fn rename(&self, from: &RelPath, to: &RelPath) -> SysResult<()>;
+    /// Creates exactly one directory and returns its file ID. Deliberately no
+    /// `create_dir_all`: every created directory is journaled individually.
+    fn create_dir(&self, name: &RelPath) -> SysResult<u128>;
 
-    /// Sets or clears the read-only attribute. A file with more than one link yields
-    /// `Linked` (in-place change), a reparse point `ReparsePoint`.
-    fn set_readonly(&self, p: &RelPath, ro: bool) -> SysResult<()>;
+    /// Deletes the empty directory `name` by handle if its file ID is `expected_id`
+    /// (`Mismatch` otherwise, nothing changed). Not empty yields `NotEmpty`.
+    fn remove_dir(&self, name: &RelPath, expected_id: u128) -> SysResult<()>;
+
+    /// Flushes this directory (the renames into it), best effort (ADR 0019).
+    fn flush(&self) -> SysResult<()>;
+}
+
+/// One handle on an existing file that shares read only (ADR 0017, "FileGuard"): while it is
+/// held nobody else can write, rename or delete the file, so the hash taken on it is the hash
+/// of what [`Self::replace`] and [`Self::delete`] act on.
+pub trait FileGuard: Send + std::fmt::Debug {
+    /// Metadata, queried on the guard handle.
+    fn metadata(&self) -> SysResult<Metadata>;
+
+    /// SHA-256 of the content, streamed once, then cached.
+    fn sha256(&mut self) -> SysResult<[u8; 32]>;
+
+    /// The content from offset 0, for backups.
+    fn reader(&mut self) -> SysResult<Box<dyn Read + '_>>;
+
+    /// Process IDs using the file, queried on the guard handle itself (see [`Dir::users`]).
+    fn users(&self) -> SysResult<Vec<u32>>;
+
+    /// Replaces the file if its hash is `expected` (`Mismatch` otherwise, nothing touched):
+    /// temp file, rename to `<tmp>.old`, rename onto the stored spelling of the name, POSIX
+    /// delete of `<tmp>.old` (ADR 0017, "Replace sequence").
+    fn replace(
+        self: Box<Self>,
+        expected: &[u8; 32],
+        src: &mut dyn Read,
+        new: &NewFile,
+    ) -> SysResult<Replaced>;
+
+    /// Deletes the file (POSIX semantics) if its hash is `expected` (`Mismatch` otherwise).
+    fn delete(self: Box<Self>, expected: &[u8; 32]) -> SysResult<()>;
+
+    /// Renames the file to `name` in the same directory, never replacing. Recovery only.
+    fn rename_to(self: Box<Self>, name: &RelPath) -> SysResult<()>;
+}
+
+/// What a new file must be: its temp name, attributes, content hash and maximum length.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewFile {
+    /// Temp name next to the target, journaled before the write (ADR 0019).
+    pub tmp: TmpName,
+    /// Read-only, hidden and system, set after the last write.
+    pub attrs: Attrs,
+    /// Expected SHA-256 of the content streamed from the source.
+    pub sha256: [u8; 32],
+    /// Most bytes the source may yield.
+    pub max_len: u64,
+}
+
+/// A file written by [`DirWrite::create_new`] or [`FileGuard::replace`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Written {
+    /// SHA-256 of what was written.
+    pub sha256: [u8; 32],
+    /// Length in bytes.
+    pub len: u64,
+    /// 128-bit file ID of the new file.
+    pub file_id: u128,
+}
+
+/// Result of [`FileGuard::replace`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replaced {
+    /// The new file.
+    pub new: Written,
+    /// `Some(tmp)` if [`TmpName::old`] of `tmp` (the old content) is still present because it
+    /// is mapped as an image: success with pending cleanup, recorded by the journal
+    /// (ADR 0019).
+    pub old_left: Option<TmpName>,
+}
+
+/// Prefix of every [`TmpName`].
+const TMP_PREFIX: &str = ".rerun-";
+/// Suffix of every [`TmpName`].
+const TMP_SUFFIX: &str = ".tmp";
+
+/// A temp file name `.rerun-<tag>-<n>.tmp` (ADR 0019): `<tag>` the instance tag in lowercase
+/// hex (1 to 16 digits, a `u64`), `<n>` a decimal counter (a `u64`, no leading zero). Always
+/// a single valid segment; chosen and journaled before any write.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TmpName(String);
+
+impl TmpName {
+    /// The temp name for instance `tag` and counter `n`; `tag` as 16 hex digits.
+    pub fn new(tag: u64, n: u64) -> Self {
+        Self(format!("{TMP_PREFIX}{tag:016x}-{n}{TMP_SUFFIX}"))
+    }
+
+    /// Parses a name read back from the journal or from disk; `None` unless it has exactly
+    /// the shape of [`Self`].
+    pub fn parse(s: &str) -> Option<Self> {
+        let body = s.strip_prefix(TMP_PREFIX)?.strip_suffix(TMP_SUFFIX)?;
+        let (tag, n) = body.split_once('-')?;
+        let hex = |c: char| c.is_ascii_digit() || ('a'..='f').contains(&c);
+        let tag_ok = (1..=16).contains(&tag.len()) && tag.chars().all(hex);
+        let n_ok = n.chars().all(|c| c.is_ascii_digit())
+            && (n == "0" || !n.starts_with('0'))
+            && n.parse::<u64>().is_ok();
+        (tag_ok && n_ok).then(|| Self(s.to_owned()))
+    }
+
+    /// The name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The name as a single-segment path.
+    pub fn to_rel(&self) -> RelPath {
+        segment(&self.0)
+    }
+
+    /// `<tmp>.old`: the name of the old file during a replace (ADR 0017).
+    pub fn old(&self) -> RelPath {
+        segment(&format!("{}.old", self.0))
+    }
+}
+
+impl std::fmt::Display for TmpName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A name of the [`TmpName`] shape (ASCII letters, digits, `.`, `-`, no trailing dot) is
+/// always a valid single segment.
+fn segment(s: &str) -> RelPath {
+    match RelPath::from_segment(s) {
+        Ok(p) => p,
+        Err(e) => unreachable!("{s:?} has the TmpName shape and is a segment: {e}"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Dir, Fs, tag};
+    use super::{Dir, DirWrite, FileGuard, Fs, TmpName, tag};
 
-    // Compile test: both traits must be usable as trait objects.
-    fn _object_safe(_: &dyn Fs, _: &dyn Dir) {}
+    // Compile test: every trait must be usable as a trait object, and a write handle is a
+    // read handle.
+    fn _object_safe(_: &dyn Fs, _: &dyn Dir, w: &dyn DirWrite, _: &dyn FileGuard) {
+        let _: &dyn Dir = w;
+    }
+
+    #[test]
+    fn tmp_names_have_one_shape_and_are_segments() {
+        for (tag, n) in [(0, 0), (0x1234_abcd, 7), (u64::MAX, u64::MAX)] {
+            let t = TmpName::new(tag, n);
+            assert_eq!(TmpName::parse(t.as_str()), Some(t.clone()));
+            assert_eq!(t.to_rel().as_str(), t.as_str());
+            assert_eq!(t.old().as_str(), format!("{t}.old"));
+        }
+        assert_eq!(
+            TmpName::new(0xab, 12).as_str(),
+            ".rerun-00000000000000ab-12.tmp"
+        );
+        for ok in [
+            ".rerun-a-0.tmp",
+            ".rerun-ffffffffffffffff-18446744073709551615.tmp",
+        ] {
+            assert!(TmpName::parse(ok).is_some(), "{ok}");
+        }
+        for bad in [
+            "",
+            ".rerun--1.tmp",
+            ".rerun-a-.tmp",
+            ".rerun-A-1.tmp",
+            ".rerun-g-1.tmp",
+            ".rerun-a-01.tmp",
+            ".rerun-a-1-2.tmp",
+            ".rerun-a-+1.tmp",
+            ".rerun-11111111111111111-1.tmp",
+            ".rerun-a-18446744073709551616.tmp",
+            ".rerun-a-1.tmp.old",
+            "rerun-a-1.tmp",
+            r"x\.rerun-a-1.tmp",
+            ".rerun-a-1.TMP",
+        ] {
+            assert!(TmpName::parse(bad).is_none(), "{bad}");
+        }
+    }
 
     #[test]
     fn tag_classes() {

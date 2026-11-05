@@ -1,5 +1,7 @@
-//! [`WinFs`] and [`WinDir`]: the real, read-only file system (ADR 0007). No `unsafe` here;
-//! every system call goes through [`super::nt`] or [`super::token`].
+//! [`WinFs`] and [`WinDir`]: the real file system (ADR 0007), read side so far: of the write
+//! side (ADR 0017) only `DirWrite::open_dir_write` exists, every writing method returns
+//! `Unsupported`. No `unsafe` here; every system call goes through [`super::nt`] or
+//! [`super::token`].
 //!
 //! Walk: each segment is opened relative to its parent handle ([`nt::open_relative`],
 //! `OBJ_DONT_REPARSE`, `FILE_OPEN_REPARSE_POINT`), checked against the requested name (L1,
@@ -13,6 +15,7 @@
 //! of such an entry scans the listing of its parent for the same description, so both agree.
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsHandle, BorrowedHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
@@ -20,7 +23,8 @@ use std::sync::{Mutex, PoisonError};
 
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_INFORMATION_CLASS, FileAttributeTagInformation, FileCaseSensitiveInformation,
-    FileIdInformation, FileNameInformation, FileNormalizedNameInformation, FileStandardInformation,
+    FileIdInformation, FileNameInformation, FileNormalizedNameInformation,
+    FileProcessIdsUsingFileInformation, FileStandardInformation,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_OFFLINE,
@@ -38,12 +42,13 @@ use super::token;
 use crate::fold::fold;
 use crate::path::RelPath;
 use crate::sys::fs::{
-    Attrs, Dir, DirEntry, EntryKind, Fs, FsKind, Metadata, ReadSeek, ReparseInfo, RootInfo, tag,
+    Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, Fs, FsKind, Metadata, NewFile, ReadSeek,
+    ReparseInfo, RootInfo, Written, tag,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
-/// Message of every write method in phase 1.
-const READ_ONLY: &str = "sys::win is read-only in phase 1";
+/// Message of every writing method until the write side exists (ADR 0017).
+const NO_WRITE: &str = "sys::win: the write side is not implemented yet";
 /// Target shown for errors about the handle itself.
 const HANDLE_TARGET: &str = "<dir handle>";
 
@@ -201,6 +206,34 @@ fn link_target(h: BorrowedHandle<'_>, target: &str) -> SysResult<Option<String>>
         .map_err(|_| err(SysErrorKind::Other, target))
 }
 
+/// `FILE_PROCESS_IDS_USING_FILE_INFORMATION`: a `ULONG` count, then `ULONG_PTR` process IDs
+/// (aligned to a `ULONG_PTR`). Sorted, without duplicates. `None` if the reply is shorter
+/// than its count or an ID does not fit a `u32` (PIDs always do).
+fn parse_process_ids(b: &[u8]) -> Option<Vec<u32>> {
+    const PTR: usize = size_of::<usize>();
+    let count = usize::try_from(u32_at(b, 0)?).ok()?;
+    let mut out = Vec::with_capacity(count.min(b.len() / PTR));
+    for i in 0..count {
+        let at = PTR.checked_add(i.checked_mul(PTR)?)?;
+        let id = match PTR {
+            8 => u64_at(b, at)?,
+            _ => u64::from(u32_at(b, at)?),
+        };
+        out.push(u32::try_from(id).ok()?);
+    }
+    out.sort_unstable();
+    out.dedup();
+    Some(out)
+}
+
+/// Process IDs using the file of `h` (`FileProcessIdsUsingFileInformation`); the buffer
+/// grows like every name query (up to about 8,000 IDs, more is an error).
+fn process_ids(h: BorrowedHandle<'_>, target: &str) -> SysResult<Vec<u32>> {
+    let b = nt::query_info(h, FileProcessIdsUsingFileInformation, 4096)
+        .map_err(|s| nt_error(s, target))?;
+    parse_process_ids(&b).ok_or_else(|| err(SysErrorKind::Other, target))
+}
+
 /// Metadata of an entry from its handle (shared by `metadata` and `read_dir`).
 fn meta_of(h: BorrowedHandle<'_>, t: TagInfo, target: &str) -> SysResult<Metadata> {
     let kind = t.kind();
@@ -327,7 +360,7 @@ impl Fs for WinFs {
     /// GUID paths and segments with control characters or `<>:"|?*` yield `InvalidPath`.
     /// Opened as `\??\X:\…` with `NtCreateFile`, following reparse points (they are above the
     /// root). A non-allowlisted tag on the opened directory yields `ReparsePoint`.
-    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn Dir + '_>> {
+    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn DirWrite + '_>> {
         let shown = abs.display().to_string();
         let (drive, segs) = abs
             .to_str()
@@ -346,8 +379,9 @@ impl Fs for WinFs {
     }
 }
 
-/// An open directory of the real file system. Read-only in phase 1: every write method
-/// returns `Unsupported`.
+/// An open directory of the real file system. One handle type for reading and writing (it
+/// shares read, write and delete); the capability split is in the types (ADR 0017). Every
+/// writing method returns `Unsupported` so far.
 pub struct WinDir {
     handle: OwnedHandle,
     /// Serializes `read_dir(None)`: the enumeration position belongs to the handle.
@@ -635,32 +669,47 @@ impl Dir for WinDir {
         }
     }
 
-    fn create_new(&self, _: &RelPath, _: &[u8]) -> SysResult<()> {
-        Err(err(SysErrorKind::Unsupported, READ_ONLY))
+    fn users(&self, p: &RelPath) -> SysResult<Vec<u32>> {
+        let t = p.as_str();
+        self.ensure_live()?;
+        let (parent, last) = self.split(p)?;
+        let parent = parent.as_ref().map_or(self.h(), AsHandle::as_handle);
+        let s = seg16(last, t)?;
+        // Attribute-only, relative, never through or at a reparse point: no share mode blocks
+        // it, and it never opens the data.
+        let o = open_entry(parent, &s, Access::Attributes, t)?;
+        match o.tag.kind() {
+            EntryKind::File => process_ids(o.handle.as_handle(), t),
+            EntryKind::Dir => Err(err(SysErrorKind::AccessDenied, t)),
+            EntryKind::Reparse => Err(err(SysErrorKind::ReparsePoint, t)),
+        }
+    }
+}
+
+impl DirWrite for WinDir {
+    fn open_dir_write(&self, p: &RelPath) -> SysResult<Box<dyn DirWrite + '_>> {
+        self.ensure_live()?;
+        Ok(Box::new(WinDir::new(self.open_dir_handle(p)?)))
     }
 
-    fn replace(&self, _: &RelPath, _: &[u8], _: &str) -> SysResult<()> {
-        Err(err(SysErrorKind::Unsupported, READ_ONLY))
+    fn guard(&self, _: &RelPath) -> SysResult<Box<dyn FileGuard + '_>> {
+        Err(err(SysErrorKind::Unsupported, NO_WRITE))
     }
 
-    fn create_dir(&self, _: &RelPath) -> SysResult<()> {
-        Err(err(SysErrorKind::Unsupported, READ_ONLY))
+    fn create_new(&self, _: &RelPath, _: &mut dyn Read, _: &NewFile) -> SysResult<Written> {
+        Err(err(SysErrorKind::Unsupported, NO_WRITE))
     }
 
-    fn remove_file(&self, _: &RelPath) -> SysResult<()> {
-        Err(err(SysErrorKind::Unsupported, READ_ONLY))
+    fn create_dir(&self, _: &RelPath) -> SysResult<u128> {
+        Err(err(SysErrorKind::Unsupported, NO_WRITE))
     }
 
-    fn remove_dir(&self, _: &RelPath) -> SysResult<()> {
-        Err(err(SysErrorKind::Unsupported, READ_ONLY))
+    fn remove_dir(&self, _: &RelPath, _: u128) -> SysResult<()> {
+        Err(err(SysErrorKind::Unsupported, NO_WRITE))
     }
 
-    fn rename(&self, _: &RelPath, _: &RelPath) -> SysResult<()> {
-        Err(err(SysErrorKind::Unsupported, READ_ONLY))
-    }
-
-    fn set_readonly(&self, _: &RelPath, _: bool) -> SysResult<()> {
-        Err(err(SysErrorKind::Unsupported, READ_ONLY))
+    fn flush(&self) -> SysResult<()> {
+        Err(err(SysErrorKind::Unsupported, NO_WRITE))
     }
 }
 
@@ -739,7 +788,35 @@ fn fs_kind(name: &str) -> FsKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{SysErrorKind, ends_with_components, entry_target, err};
+    use super::{SysErrorKind, ends_with_components, entry_target, err, parse_process_ids};
+
+    /// `FILE_PROCESS_IDS_USING_FILE_INFORMATION` as the kernel writes it on this target.
+    fn reply(count: u32, ids: &[u64]) -> Vec<u8> {
+        const PTR: usize = size_of::<usize>();
+        let mut b = vec![0u8; PTR];
+        b[..4].copy_from_slice(&count.to_le_bytes());
+        for id in ids {
+            b.extend_from_slice(&id.to_le_bytes()[..PTR]);
+        }
+        b
+    }
+
+    #[test]
+    fn process_id_replies_are_parsed_strictly() {
+        assert_eq!(parse_process_ids(&reply(0, &[])), Some(vec![]));
+        assert_eq!(
+            parse_process_ids(&reply(3, &[1200, 4, 1200])),
+            Some(vec![4, 1200])
+        );
+        // Shorter than its count, or no count at all.
+        assert_eq!(parse_process_ids(&reply(2, &[4])), None);
+        assert_eq!(parse_process_ids(&[1, 0]), None);
+        // A huge count never allocates up front.
+        assert_eq!(parse_process_ids(&reply(u32::MAX, &[4])), None);
+        if size_of::<usize>() == 8 {
+            assert_eq!(parse_process_ids(&reply(1, &[1 << 32])), None);
+        }
+    }
 
     /// A raw name from a listing (LX symlink with a bidi override, a newline, an escape
     /// sequence) never reaches an error message unescaped, also on the error paths of the

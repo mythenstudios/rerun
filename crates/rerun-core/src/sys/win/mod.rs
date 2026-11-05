@@ -1,9 +1,10 @@
 //! The real system layer on Windows (ADR 0004, ADR 0007, ADR 0008, ADR 0009).
 //!
-//! Phase 1 is **read-only**: [`WinFs`]/[`WinDir`] implement [`Fs`](crate::sys::Fs) and
-//! [`Dir`](crate::sys::Dir); every write method returns `Unsupported`
-//! ("sys::win is read-only in phase 1"). [`WinRegistry`] implements
-//! [`Registry`](crate::sys::Registry), equally read-only. [`WinKnownFolders`] implements
+//! **Read side so far**: [`WinFs`]/[`WinDir`] implement [`Fs`](crate::sys::Fs),
+//! [`Dir`](crate::sys::Dir) and [`DirWrite`](crate::sys::DirWrite), whose writing methods
+//! return `Unsupported` until the write side (ADR 0017) lands; only `open_dir_write`, an open,
+//! works. [`WinRegistry`] implements [`Registry`](crate::sys::Registry), read-only in phase 1
+//! ("sys::win is read-only in phase 1"). [`WinKnownFolders`] implements
 //! [`KnownFolders`](crate::sys::KnownFolders), [`WinTopology`] implements
 //! [`Topology`](crate::sys::Topology) (ADR 0010), [`WinGpu`] implements
 //! [`Gpu`](crate::sys::Gpu) (DXGI, ADR 0008 amendment), and [`WinSystem`] bundles them into

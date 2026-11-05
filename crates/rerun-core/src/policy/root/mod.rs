@@ -14,6 +14,11 @@
 //!
 //! `open_abs` in this module is the only caller of [`crate::sys::Fs::open_dir`] outside
 //! `sys` (enforced by `clippy.toml`).
+//!
+//! Capabilities (ADR 0017): [`StoreDir::dir`] and [`GameDir::dir`] hand out the read side
+//! only ([`Dir`]). A store is never written. The write handle of a game folder
+//! ([`DirWrite`]) is crate-internal (`GameDir::dir_write`), for the executor and the journal
+//! only (ADR 0020), and refused on a volume without POSIX delete and rename semantics.
 
 mod forbidden;
 
@@ -24,7 +29,7 @@ pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
 
 use crate::path::{Anomaly, PathError, RelPath, RootPath, classify};
 use crate::sys::fs::RootInfo;
-use crate::sys::{Dir, SysError, SysErrorKind, SysResult, System};
+use crate::sys::{Dir, DirWrite, SysError, SysErrorKind, SysResult, System};
 
 /// Identity of a root: volume serial and file ID of the directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -125,7 +130,7 @@ pub enum RootError {
     clippy::disallowed_methods,
     reason = "ADR 0007: policy::root is the only place that opens roots by absolute path"
 )]
-fn open_abs<'s>(sys: &'s dyn System, abs: &Path) -> SysResult<Box<dyn Dir + 's>> {
+fn open_abs<'s>(sys: &'s dyn System, abs: &Path) -> SysResult<Box<dyn DirWrite + 's>> {
     sys.fs().open_dir(abs)
 }
 
@@ -134,7 +139,7 @@ fn open_checked<'s>(
     sys: &'s dyn System,
     fr: &ForbiddenRoots,
     abs: &Path,
-) -> Result<(Box<dyn Dir + 's>, RootPath, RootInfo), RootError> {
+) -> Result<(Box<dyn DirWrite + 's>, RootPath, RootInfo), RootError> {
     let lexical = RootPath::new(abs)?;
     fr.check(&lexical).map_err(|reason| RootError::Forbidden {
         path: lexical.clone(),
@@ -173,10 +178,12 @@ fn ensure(path: &RootPath, info: &RootInfo, expected: RootId) -> Result<(), Root
     }
 }
 
-/// A store folder (Steam folder or library).
+/// A store folder (Steam folder or library). Read-only: it hands out no write handle.
 #[derive(Debug)]
 pub struct StoreDir<'s> {
-    dir: Box<dyn Dir + 's>,
+    /// Write-capable only so that [`Self::game`] can open a game folder with the write
+    /// capability; never handed out as such.
+    dir: Box<dyn DirWrite + 's>,
     path: RootPath,
     info: RootInfo,
 }
@@ -216,7 +223,7 @@ impl<'s> StoreDir<'s> {
         }
 
         let rel = common.child(seg.as_str())?;
-        let dir = self.dir.open_dir(&rel).map_err(reparse(&rel))?;
+        let dir = self.dir.open_dir_write(&rel).map_err(reparse(&rel))?;
         let info = dir.info()?;
 
         // Case-sensitive `common` is an anomaly. Checked after the game is open, on the
@@ -283,7 +290,7 @@ impl<'s> StoreDir<'s> {
         &self.info
     }
 
-    /// The handle.
+    /// The handle, read side only.
     pub fn dir(&self) -> &dyn Dir {
         &*self.dir
     }
@@ -308,7 +315,7 @@ pub enum GameOrigin {
 /// A game folder. Detection and primitives take this type, never a bare [`Dir`].
 #[derive(Debug)]
 pub struct GameDir<'a> {
-    dir: Box<dyn Dir + 'a>,
+    dir: Box<dyn DirWrite + 'a>,
     path: RootPath,
     info: RootInfo,
     origin: GameOrigin,
@@ -355,9 +362,29 @@ impl<'a> GameDir<'a> {
         &self.info
     }
 
-    /// The handle.
+    /// The handle, read side only.
     pub fn dir(&self) -> &dyn Dir {
         &*self.dir
+    }
+
+    /// The handle with the write capability, for the executor and the journal only
+    /// (ADR 0020). `Unsupported` on a volume without POSIX delete and rename semantics (FAT,
+    /// exFAT; ADR 0017), as of opening; `sys` checks again per operation.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "first caller is the executor (ADR 0020)")
+    )]
+    pub(crate) fn dir_write(&self) -> SysResult<&dyn DirWrite> {
+        if !self.info.supports_posix_rename {
+            return Err(SysError::new(
+                SysErrorKind::Unsupported,
+                format!(
+                    "{}: volume without POSIX delete and rename (FAT, exFAT)",
+                    self.path
+                ),
+            ));
+        }
+        Ok(&*self.dir)
     }
 }
 

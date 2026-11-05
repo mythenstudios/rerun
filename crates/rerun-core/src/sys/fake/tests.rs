@@ -11,11 +11,11 @@ use std::time::{Duration, Instant};
 use super::{FakeFs, FakeSystem, FsOp, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
-    FsFixture, fs_link_read_contract, fs_link_write_contract, fs_race_contract, fs_read_contract,
-    fs_volume_contract, fs_write_contract, gpu_contract, known_folders_contract,
-    registry_read_contract, registry_system_contract, registry_write_contract, topology_contract,
+    FsFixture, fs_link_read_contract, fs_race_contract, fs_read_contract, fs_volume_contract,
+    gpu_contract, known_folders_contract, registry_read_contract, registry_system_contract,
+    registry_write_contract, topology_contract,
 };
-use crate::sys::fs::{Attrs, Dir, EntryKind, Fs, FsKind, tag};
+use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
 use crate::sys::snapshot::{Scope, snapshot};
 use crate::sys::{DriverVersion, GpuAdapter, KnownFolder};
@@ -37,7 +37,7 @@ fn hkcu(path: &str) -> RegKey {
     RegKey::new(Hive::CurrentUser, RegView::Native, path)
 }
 
-fn open<'a>(sys: &'a FakeSystem, abs: &str) -> Box<dyn Dir + 'a> {
+fn open<'a>(sys: &'a FakeSystem, abs: &str) -> Box<dyn DirWrite + 'a> {
     sys.fs().open_dir(Path::new(abs)).unwrap()
 }
 
@@ -87,20 +87,6 @@ fn fake_fulfils_fs_race_contract() {
 }
 
 #[test]
-fn fake_fulfils_fs_write_contract() {
-    let sys = fresh(r"C:\Work");
-    let skips = fs_write_contract(sys.fs(), Path::new(r"C:\Work")).unwrap();
-    assert!(skips.is_empty(), "{skips:?}");
-}
-
-#[test]
-fn fake_fulfils_fs_link_write_contract() {
-    let sys = fresh(r"D:\Work");
-    let skips = fs_link_write_contract(sys.fs(), sys.fake_fs(), Path::new(r"D:\Work")).unwrap();
-    assert!(skips.is_empty(), "{skips:?}");
-}
-
-#[test]
 fn contracts_can_run_twice_in_fresh_dirs() {
     let sys = fresh(r"C:\Work");
     let fx = sys.fake_fs();
@@ -114,8 +100,6 @@ fn contracts_can_run_twice_in_fresh_dirs() {
         fs_link_read_contract(sys.fs(), fx, &dir("link-read")).unwrap();
         fs_volume_contract(sys.fs(), fx, &dir("volume")).unwrap();
         fs_race_contract(sys.fs(), fx, &dir("race"), Duration::from_millis(20)).unwrap();
-        fs_write_contract(sys.fs(), &dir("write")).unwrap();
-        fs_link_write_contract(sys.fs(), fx, &dir("link-write")).unwrap();
     }
 }
 
@@ -679,14 +663,6 @@ fn reparse_point_is_visible_but_not_followed() {
         kind(g.metadata(&r(r"link\secret.txt"))),
         SysErrorKind::ReparsePoint
     );
-    // Deleting removes only the link, never the target.
-    g.remove_file(&r("link")).unwrap();
-    assert!(
-        open(&sys, r"C:\Outside")
-            .metadata(&r("secret.txt"))
-            .unwrap()
-            .is_some()
-    );
 }
 
 #[test]
@@ -757,23 +733,6 @@ fn forward_slashes_are_accepted() {
 }
 
 #[test]
-fn rename_moves_directory_with_children() {
-    let sys = FakeSystem::builder()
-        .file(r"C:\G\scripts\a.asi", "a")
-        .file(r"C:\G\scripts\sub\b.ini", "b")
-        .build()
-        .unwrap();
-    let g = open(&sys, r"C:\G");
-    g.rename(&r("scripts"), &r("plugins")).unwrap();
-    assert_eq!(g.read(&r(r"plugins\sub\b.ini")).unwrap(), b"b");
-    assert!(g.metadata(&r("scripts")).unwrap().is_none());
-    assert_eq!(
-        kind(g.rename(&r("plugins"), &r(r"plugins\sub\x"))),
-        SysErrorKind::InvalidPath
-    );
-}
-
-#[test]
 fn directory_is_not_a_file() {
     let sys = FakeSystem::builder()
         .dir(r"C:\G\d")
@@ -782,41 +741,12 @@ fn directory_is_not_a_file() {
         .unwrap();
     let g = open(&sys, r"C:\G");
     assert_eq!(kind(g.read(&r("d"))), SysErrorKind::AccessDenied);
-    assert_eq!(
-        kind(g.replace(&r("d"), b"x", "d.tmp")),
-        SysErrorKind::AccessDenied
-    );
-    assert_eq!(kind(g.remove_file(&r("d"))), SysErrorKind::AccessDenied);
-    assert_eq!(kind(g.remove_dir(&r("f"))), SysErrorKind::InvalidPath);
+    assert_eq!(kind(g.users(&r("d"))), SysErrorKind::AccessDenied);
     assert_eq!(kind(g.read_dir(Some(&r("f")))), SysErrorKind::InvalidPath);
+    assert_eq!(kind(g.open_dir(&r("f"))), SysErrorKind::InvalidPath);
     // File as parent directory.
-    assert_eq!(
-        kind(g.create_new(&r(r"f\x"), b"x")),
-        SysErrorKind::InvalidPath
-    );
+    assert_eq!(kind(g.read(&r(r"f\x"))), SysErrorKind::InvalidPath);
     assert_eq!(g.metadata(&r(r"f\x")).unwrap(), None);
-}
-
-#[test]
-fn replace_keeps_existing_name_case() {
-    let sys = FakeSystem::builder()
-        .file(r"C:\G\Game.ini", "a")
-        .build()
-        .unwrap();
-    let g = open(&sys, r"C:\G");
-    g.replace(&r("GAME.INI"), b"b", "Game.ini.rerun-1").unwrap();
-    let entries = g.read_dir(None).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "Game.ini");
-    assert_eq!(g.read(&r("game.ini")).unwrap(), b"b");
-}
-
-#[test]
-fn rename_onto_itself_is_a_no_op() {
-    let sys = FakeSystem::builder().file(r"C:\G\a", "x").build().unwrap();
-    let g = open(&sys, r"C:\G");
-    g.rename(&r("a"), &r("a")).unwrap();
-    assert_eq!(g.read(&r("a")).unwrap(), b"x");
 }
 
 #[test]
@@ -852,19 +782,8 @@ fn data_tags_are_files_unknown_tags_are_reparse_points() {
     assert_eq!(m.kind, EntryKind::Reparse);
     assert!(!m.reparse.unwrap().surrogate);
     assert_eq!(kind(g.read(&r("alias.exe"))), SysErrorKind::ReparsePoint);
-    assert_eq!(
-        kind(g.replace(&r("alias.exe"), b"x", "a.tmp")),
-        SysErrorKind::ReparsePoint
-    );
-    assert_eq!(
-        kind(g.set_readonly(&r("alias.exe"), true)),
-        SysErrorKind::ReparsePoint
-    );
-    g.remove_file(&r("alias.exe")).unwrap();
-    // Tagged files can be replaced (never written in place).
-    g.replace(&r("compressed.dll"), b"new", "c.tmp").unwrap();
-    let m = g.metadata(&r("compressed.dll")).unwrap().unwrap();
-    assert!(m.reparse.is_none());
+    assert_eq!(kind(g.users(&r("alias.exe"))), SysErrorKind::ReparsePoint);
+    assert_eq!(g.users(&r("compressed.dll")).unwrap(), Vec::<u32>::new());
     let err = FakeSystem::builder()
         .tagged_file(r"C:\G\x", "x", tag::SYMLINK)
         .build()
@@ -881,15 +800,8 @@ fn file_symlink_is_never_followed_below_the_root() {
         .unwrap();
     let g = open(&sys, r"C:\G");
     assert_eq!(kind(g.read(&r("d3d9.dll"))), SysErrorKind::ReparsePoint);
-    assert_eq!(
-        kind(g.replace(&r("d3d9.dll"), b"evil", "d3d9.tmp")),
-        SysErrorKind::ReparsePoint
-    );
-    assert_eq!(
-        kind(g.remove_dir(&r("d3d9.dll"))),
-        SysErrorKind::InvalidPath
-    );
-    g.remove_file(&r("d3d9.dll")).unwrap();
+    assert_eq!(kind(g.users(&r("d3d9.dll"))), SysErrorKind::ReparsePoint);
+    assert_eq!(kind(g.open_dir(&r("d3d9.dll"))), SysErrorKind::ReparsePoint);
     assert_eq!(
         open(&sys, r"C:\Windows\System32")
             .read(&r("kernel32.dll"))
@@ -924,7 +836,7 @@ fn raw_names_are_listed_as_on_disk() {
 }
 
 #[test]
-fn case_sensitive_dir_refuses_writes_and_matches_exactly() {
+fn case_sensitive_dir_matches_exactly() {
     let sys = FakeSystem::builder()
         .case_sensitive_dir(r"C:\G\cs")
         .file(r"C:\G\cs\a.txt", "lower")
@@ -935,12 +847,6 @@ fn case_sensitive_dir_refuses_writes_and_matches_exactly() {
     assert_eq!(g.read(&r(r"cs\a.txt")).unwrap(), b"lower");
     assert_eq!(g.read(&r(r"cs\A.txt")).unwrap(), b"upper");
     assert!(g.metadata(&r(r"cs\A.TXT")).unwrap().is_none());
-    let us = SysErrorKind::Unsupported;
-    assert_eq!(kind(g.replace(&r(r"cs\a.txt"), b"x", "t")), us);
-    assert_eq!(kind(g.remove_file(&r(r"cs\a.txt"))), us);
-    assert_eq!(kind(g.set_readonly(&r(r"cs\a.txt"), true)), us);
-    assert_eq!(kind(g.rename(&r(r"cs\a.txt"), &r("b.txt"))), us);
-    assert_eq!(kind(g.rename(&r("x"), &r(r"cs\x"))), us);
     assert_eq!(
         kind(sys.fake_fs().set_case_sensitive(&p(r"C:\G\cs"), false)),
         SysErrorKind::NotEmpty
@@ -975,9 +881,9 @@ fn handle_to_a_deleted_dir_is_not_found() {
     let sys = FakeSystem::builder().dir(r"C:\G\d").build().unwrap();
     let g = open(&sys, r"C:\G");
     let d = g.open_dir(&r("d")).unwrap();
-    g.remove_dir(&r("d")).unwrap();
+    sys.fake_fs().remove_abs(&p(r"C:\G\d")).unwrap();
     assert_eq!(kind(d.info()), SysErrorKind::NotFound);
-    assert_eq!(kind(d.create_new(&r("x"), b"x")), SysErrorKind::NotFound);
+    assert_eq!(kind(d.open_dir(&r("x"))), SysErrorKind::NotFound);
     assert_eq!(kind(d.read_dir(None)), SysErrorKind::NotFound);
     assert_eq!(kind(d.metadata(&r("x"))), SysErrorKind::NotFound);
 }
@@ -1009,11 +915,7 @@ fn tagged_dirs_allowlisted_are_traversed_unknown_are_refused() {
     assert_eq!(kind(g.read(&r(r"Projected\x.dat"))), rp);
     assert_eq!(kind(g.open_dir(&r("Projected"))), rp);
     assert_eq!(kind(g.read_dir(Some(&r("Projected")))), rp);
-    assert_eq!(kind(g.set_readonly(&r("Projected"), true)), rp);
-    assert_eq!(
-        kind(g.remove_file(&r("Projected"))),
-        SysErrorKind::AccessDenied
-    );
+    assert_eq!(kind(g.users(&r("Projected"))), rp);
     assert_eq!(kind(sys.fs().open_dir(&p(r"C:\G\Projected"))), rp);
     assert_eq!(
         kind(
@@ -1040,20 +942,6 @@ fn fs_kind_is_reported() {
 }
 
 #[test]
-fn replace_rejects_temp_names_equal_to_the_target() {
-    let sys = FakeSystem::builder()
-        .file(r"C:\G\x.old", "a")
-        .build()
-        .unwrap();
-    let g = open(&sys, r"C:\G");
-    let ip = SysErrorKind::InvalidPath;
-    assert_eq!(kind(g.replace(&r("x.old"), b"b", "X.OLD")), ip);
-    assert_eq!(kind(g.replace(&r("x.old"), b"b", "X")), ip);
-    assert_eq!(g.read(&r("x.old")).unwrap(), b"a");
-    assert_eq!(g.read_dir(None).unwrap().len(), 1);
-}
-
-#[test]
 fn hard_links_share_content_and_attributes() {
     let sys = FakeSystem::builder()
         .file(r"C:\G\a.bin", "x")
@@ -1068,7 +956,6 @@ fn hard_links_share_content_and_attributes() {
     let g = open(&sys, r"C:\G");
     let m = g.metadata(&r("a.bin")).unwrap().unwrap();
     assert_eq!((m.links, m.attrs), (Some(2), ro));
-    assert_eq!(kind(g.remove_file(&r("a.bin"))), SysErrorKind::AccessDenied);
     assert_eq!(
         kind(FakeSystem::builder().hardlink(r"C:\G\x", r"D:\y").build()),
         SysErrorKind::NotFound
@@ -1118,16 +1005,7 @@ fn restricted_entries_are_described_but_never_opened() {
     assert_eq!(kind(g.read_dir(Some(&r("locked")))), ad);
     assert_eq!(kind(g.metadata(&r(r"locked\inner.txt"))), ad);
     assert_eq!(kind(sys.fs().open_dir(&p(r"C:\G\locked"))), ad);
-    // Writes refuse too (Windows might delete through FILE_DELETE_CHILD; the fake is stricter).
-    assert_eq!(kind(g.replace(&r("secret.bin"), b"x", "s.tmp")), ad);
-    assert_eq!(kind(g.remove_file(&r("secret.bin"))), ad);
-    assert_eq!(kind(g.remove_dir(&r("locked"))), ad);
-    assert_eq!(kind(g.rename(&r("secret.bin"), &r("moved.bin"))), ad);
-    assert_eq!(kind(g.set_readonly(&r("secret.bin"), true)), ad);
-    assert_eq!(
-        kind(g.create_new(&r("secret.bin"), b"x")),
-        SysErrorKind::AlreadyExists
-    );
+    assert_eq!(kind(g.users(&r("secret.bin"))), ad);
     assert_eq!(g.read(&r("plain.txt")).unwrap(), b"plain");
 
     // Lifting the restriction restores normal access.
@@ -1178,23 +1056,12 @@ fn swap_at(sys: &FakeSystem, op: FsOp, index: usize, victim: &'static str) -> Ar
 }
 
 #[test]
-fn swap_during_create_new_walk_hits_reparse_point() {
-    let sys = toctou_system();
-    let fired = swap_at(&sys, FsOp::CreateNew, 1, r"C:\G\sub\deep");
-    let g = open(&sys, r"C:\G");
-    let res = g.create_new(&r(r"sub\deep\canary.txt"), b"evil");
-    assert!(fired.load(Ordering::SeqCst));
-    assert_eq!(kind(res), SysErrorKind::ReparsePoint);
-    assert_canary(&sys);
-}
-
-#[test]
 fn swap_of_an_already_opened_component_keeps_the_original() {
     let sys = toctou_system();
     // `sub` was resolved before the swap: the walk continues in the original node.
-    let fired = swap_at(&sys, FsOp::CreateNew, 1, r"C:\G\sub");
+    let fired = swap_at(&sys, FsOp::OpenRead, 1, r"C:\G\sub");
     let g = open(&sys, r"C:\G");
-    g.create_new(&r(r"sub\deep\new.txt"), b"mine").unwrap();
+    assert_eq!(g.read(&r(r"sub\deep\target.ini")).unwrap(), b"orig");
     assert!(fired.load(Ordering::SeqCst));
     assert_canary(&sys);
     let moved: Vec<String> = g
@@ -1205,24 +1072,18 @@ fn swap_of_an_already_opened_component_keeps_the_original() {
         .filter(|n| n.starts_with("sub.swapped"))
         .collect();
     assert_eq!(moved.len(), 1);
-    let new = r(&format!(r"{}\deep\new.txt", moved[0]));
-    assert_eq!(g.read(&new).unwrap(), b"mine");
-}
-
-#[test]
-fn swap_before_the_last_component_of_replace_hits_reparse_point() {
-    let sys = toctou_system();
-    let fired = swap_at(&sys, FsOp::Replace, 1, r"C:\G\sub\deep");
-    let g = open(&sys, r"C:\G");
-    let res = g.replace(&r(r"sub\deep\target.ini"), b"evil", "target.tmp");
-    assert!(fired.load(Ordering::SeqCst));
-    assert_eq!(kind(res), SysErrorKind::ReparsePoint);
-    assert_canary(&sys);
 }
 
 #[test]
 fn swap_during_metadata_and_open_read_walks() {
-    for op in [FsOp::Metadata, FsOp::OpenRead, FsOp::OpenDir, FsOp::ReadDir] {
+    for op in [
+        FsOp::Metadata,
+        FsOp::OpenRead,
+        FsOp::OpenDir,
+        FsOp::ReadDir,
+        FsOp::Users,
+        FsOp::OpenDirWrite,
+    ] {
         let sys = toctou_system();
         swap_at(&sys, op, 1, r"C:\G\sub\deep");
         let g = open(&sys, r"C:\G");
@@ -1230,112 +1091,11 @@ fn swap_during_metadata_and_open_read_walks() {
             FsOp::Metadata => g.metadata(&r(r"sub\deep\canary.txt")).map(|_| ()),
             FsOp::OpenRead => g.read(&r(r"sub\deep\canary.txt")).map(|_| ()),
             FsOp::OpenDir => g.open_dir(&r(r"sub\deep")).map(|_| ()),
+            FsOp::Users => g.users(&r(r"sub\deep\canary.txt")).map(|_| ()),
+            FsOp::OpenDirWrite => g.open_dir_write(&r(r"sub\deep")).map(|_| ()),
             _ => g.read_dir(Some(&r(r"sub\deep"))).map(|_| ()),
         };
         assert_eq!(kind(res), SysErrorKind::ReparsePoint, "{op:?}");
-    }
-}
-
-#[test]
-fn planted_old_name_during_replace_leaves_target_and_no_temp() {
-    let sys = toctou_system();
-    sys.fake_fs().on_step(|fs: &FakeFs, ev: &StepEvent| {
-        if ev.op == FsOp::ReplaceRenameOld {
-            fs.put_file(Path::new(r"C:\G\sub\deep\t.old"), b"planted")
-                .unwrap();
-        }
-    });
-    let deep = open(&sys, r"C:\G\sub\deep");
-    let res = deep.replace(&r("target.ini"), b"new", "t");
-    assert_eq!(kind(res), SysErrorKind::AlreadyExists);
-    sys.fake_fs().clear_on_step();
-    assert_eq!(deep.read(&r("target.ini")).unwrap(), b"orig");
-    let mut names: Vec<String> = deep
-        .read_dir(None)
-        .unwrap()
-        .into_iter()
-        .map(|e| e.name)
-        .collect();
-    names.sort();
-    assert_eq!(names, ["t.old", "target.ini"]);
-}
-
-#[test]
-fn planted_target_during_replace_never_gets_overwritten() {
-    let sys = toctou_system();
-    sys.fake_fs().on_step(|fs: &FakeFs, ev: &StepEvent| {
-        if ev.op == FsOp::ReplaceRenameTmp {
-            fs.put_link(
-                Path::new(r"C:\G\sub\deep\target.ini"),
-                tag::SYMLINK,
-                r"C:\Outside\canary.txt",
-                false,
-            )
-            .unwrap();
-        }
-    });
-    let deep = open(&sys, r"C:\G\sub\deep");
-    let res = deep.replace(&r("target.ini"), b"new", "t");
-    assert_eq!(kind(res), SysErrorKind::AlreadyExists);
-    sys.fake_fs().clear_on_step();
-    assert_canary(&sys);
-    // Temp and .old stay for the journal to recover.
-    assert_eq!(deep.read(&r("t")).unwrap(), b"new");
-    assert_eq!(deep.read(&r("t.old")).unwrap(), b"orig");
-}
-
-#[test]
-fn target_renamed_during_replace_aborts_with_busy() {
-    let sys = toctou_system();
-    sys.fake_fs().on_step(|fs: &FakeFs, ev: &StepEvent| {
-        if ev.op == FsOp::ReplaceRenameOld {
-            fs.rename_abs(
-                Path::new(r"C:\G\sub\deep\target.ini"),
-                Path::new(r"C:\G\sub\deep\renamed.ini"),
-            )
-            .unwrap();
-        }
-    });
-    let deep = open(&sys, r"C:\G\sub\deep");
-    let res = deep.replace(&r("target.ini"), b"new", "t");
-    sys.fake_fs().clear_on_step();
-    assert_eq!(kind(res), SysErrorKind::Busy);
-    let names: Vec<String> = deep
-        .read_dir(None)
-        .unwrap()
-        .into_iter()
-        .map(|e| e.name)
-        .collect();
-    assert_eq!(names, ["renamed.ini"], "temp removed, nothing else created");
-    assert_eq!(deep.read(&r("renamed.ini")).unwrap(), b"orig");
-}
-
-#[test]
-fn target_moved_out_of_the_root_during_replace_is_not_pulled_back() {
-    for op in [FsOp::ReplaceRenameOld, FsOp::ReplaceRenameTmp] {
-        let sys = toctou_system();
-        let from = if op == FsOp::ReplaceRenameOld {
-            r"C:\G\sub\deep\target.ini"
-        } else {
-            r"C:\G\sub\deep\t.old"
-        };
-        sys.fake_fs().on_step(move |fs: &FakeFs, ev: &StepEvent| {
-            if ev.op == op {
-                fs.rename_abs(Path::new(from), Path::new(r"C:\Outside\moved.ini"))
-                    .unwrap();
-            }
-        });
-        let deep = open(&sys, r"C:\G\sub\deep");
-        let res = deep.replace(&r("target.ini"), b"new", "t");
-        sys.fake_fs().clear_on_step();
-        assert_eq!(kind(res), SysErrorKind::Busy, "{op:?}");
-        assert!(
-            deep.read_dir(None).unwrap().is_empty(),
-            "{op:?}: temp removed"
-        );
-        let out = open(&sys, r"C:\Outside");
-        assert_eq!(out.read(&r("moved.ini")).unwrap(), b"orig", "{op:?}");
-        assert_eq!(out.read(&r("canary.txt")).unwrap(), b"canary");
     }
 }
 
@@ -1805,12 +1565,11 @@ fn snapshot_is_identical_after_create_and_remove() {
     let before = snapshot(&sys, &game_scope()).unwrap();
     assert!(!before.is_empty());
 
-    let ac = open(&sys, r"C:\Games\AC");
+    let fs = sys.fake_fs();
     let reg = sys.registry();
-    ac.create_dir(&r("scripts")).unwrap();
-    ac.create_new(&r(r"scripts\EaglePatchAC1.asi"), b"asi")
+    fs.put_file(&p(r"C:\Games\AC\scripts\EaglePatchAC1.asi"), b"asi")
         .unwrap();
-    ac.create_new(&r("dinput8.dll"), b"dll").unwrap();
+    fs.put_file(&p(r"C:\Games\AC\dinput8.dll"), b"dll").unwrap();
     let key = hkcu(r"Software\Ubisoft\AC\Rerun");
     reg.create_key(&key).unwrap();
     reg.set(&key, "x", &RegValue::Dword(1)).unwrap();
@@ -1820,9 +1579,10 @@ fn snapshot_is_identical_after_create_and_remove() {
 
     reg.delete_value(&key, "x").unwrap();
     reg.delete_key(&key).unwrap();
-    ac.remove_file(&r("dinput8.dll")).unwrap();
-    ac.remove_file(&r(r"scripts\EaglePatchAC1.asi")).unwrap();
-    ac.remove_dir(&r("scripts")).unwrap();
+    fs.remove_abs(&p(r"C:\Games\AC\dinput8.dll")).unwrap();
+    fs.remove_abs(&p(r"C:\Games\AC\scripts\EaglePatchAC1.asi"))
+        .unwrap();
+    fs.remove_abs(&p(r"C:\Games\AC\scripts")).unwrap();
 
     let after = snapshot(&sys, &game_scope()).unwrap();
     assert_eq!(before, after, "{:#?}", before.diff(&after));
@@ -1832,14 +1592,13 @@ fn snapshot_is_identical_after_create_and_remove() {
 fn snapshot_is_identical_after_replace_and_restore() {
     let sys = game_system();
     let before = snapshot(&sys, &game_scope()).unwrap();
-    let ac = open(&sys, r"C:\Games\AC");
-    let exe = r("AssassinsCreed_Dx9.exe");
-    ac.replace(&exe, b"patched", "exe.rerun-1").unwrap();
+    let exe = p(r"C:\Games\AC\AssassinsCreed_Dx9.exe");
+    sys.fake_fs().put_file(&exe, b"patched").unwrap();
     assert_eq!(
         before.diff(&snapshot(&sys, &game_scope()).unwrap()).len(),
         1
     );
-    ac.replace(&exe, b"MZ-dx9", "exe.rerun-2").unwrap();
+    sys.fake_fs().put_file(&exe, b"MZ-dx9").unwrap();
     let after = snapshot(&sys, &game_scope()).unwrap();
     assert_eq!(before, after, "{:#?}", before.diff(&after));
 }
@@ -1850,13 +1609,17 @@ fn snapshot_detects_every_kind_of_change() {
     type Mutation = fn(&FakeSystem);
     let cases: [(&str, Mutation); 12] = [
         ("content", |s| {
-            open(s, r"C:\Games\AC")
-                .replace(&r(r"Data\a.forge"), b"FORGE", "a.tmp")
+            s.fake_fs()
+                .put_file(&p(r"C:\Games\AC\Data\a.forge"), b"FORGE")
                 .unwrap();
         }),
         ("readonly", |s| {
-            open(s, r"C:\Games\AC")
-                .set_readonly(&r(r"Data\a.forge"), true)
+            let ro = Attrs {
+                readonly: true,
+                ..Attrs::default()
+            };
+            s.fake_fs()
+                .set_attrs(&p(r"C:\Games\AC\Data\a.forge"), ro)
                 .unwrap();
         }),
         ("hidden", |s| {
@@ -1869,8 +1632,7 @@ fn snapshot_detects_every_kind_of_change() {
                 .unwrap();
         }),
         ("case-only rename", |s| {
-            open(s, r"C:\Games\AC")
-                .rename(&r(r"Data\a.forge"), &r(r"Data\A.forge"))
+            s.rename_abs(r"C:\Games\AC\Data\a.forge", r"C:\Games\AC\Data\A.forge")
                 .unwrap();
         }),
         ("new empty key", |s| {
@@ -1885,7 +1647,7 @@ fn snapshot_detects_every_kind_of_change() {
                 .unwrap();
         }),
         ("new empty dir", |s| {
-            open(s, r"C:\Games\AC").create_dir(&r("scripts")).unwrap();
+            s.fake_fs().mkdir_all(&p(r"C:\Games\AC\scripts")).unwrap();
         }),
         ("anomaly appears", |s| {
             s.fake_fs()
@@ -2096,7 +1858,7 @@ fn snapshot_records_missing_roots() {
     };
     let before = snapshot(&sys, &scope).unwrap();
     assert_eq!(before.len(), 2);
-    open(&sys, r"C:\Base").create_dir(&r("Nope")).unwrap();
+    sys.fake_fs().mkdir_all(&p(r"C:\Base\Nope")).unwrap();
     let after = snapshot(&sys, &scope).unwrap();
     let diff = before.diff(&after);
     assert_eq!(diff.len(), 1);
@@ -2107,9 +1869,9 @@ fn snapshot_records_missing_roots() {
 fn diff_is_readable() {
     let sys = game_system();
     let before = snapshot(&sys, &game_scope()).unwrap();
-    let ac = open(&sys, r"C:\Games\AC");
-    ac.create_new(&r("dinput8.dll"), b"dll").unwrap();
-    ac.remove_file(&r(r"Data\a.forge")).unwrap();
+    let fs = sys.fake_fs();
+    fs.put_file(&p(r"C:\Games\AC\dinput8.dll"), b"dll").unwrap();
+    fs.remove_abs(&p(r"C:\Games\AC\Data\a.forge")).unwrap();
     let diff = before.diff(&snapshot(&sys, &game_scope()).unwrap());
     assert_eq!(diff.len(), 2);
     assert!(

@@ -181,12 +181,7 @@ fn reparse_points_and_restricted_entries_are_reported_and_never_followed() {
         .build()
         .unwrap();
     sys.fake_fs()
-        .put_link(
-            Path::new(&at("dirlink")),
-            tag::SYMLINK,
-            r"D:\Elsewhere",
-            true,
-        )
+        .put_link(Path::new(&at("dirlink")), tag::SYMLINK, r"D:\Elsewhere")
         .unwrap();
     let w = run(&sys);
     assert_eq!(paths(&w), ["compressed.exe", r"cloud\synced.exe"]);
@@ -575,25 +570,7 @@ impl Dir for Scripted<'_> {
         }
         Ok(entries)
     }
-    fn create_new(&self, p: &RelPath, data: &[u8]) -> SysResult<()> {
-        self.dir().create_new(p, data)
-    }
-    fn replace(&self, p: &RelPath, data: &[u8], tmp: &str) -> SysResult<()> {
-        self.dir().replace(p, data, tmp)
-    }
-    fn create_dir(&self, p: &RelPath) -> SysResult<()> {
-        self.dir().create_dir(p)
-    }
-    fn remove_file(&self, p: &RelPath) -> SysResult<()> {
-        self.dir().remove_file(p)
-    }
-    fn remove_dir(&self, p: &RelPath) -> SysResult<()> {
-        self.dir().remove_dir(p)
-    }
-    fn rename(&self, from: &RelPath, to: &RelPath) -> SysResult<()> {
-        self.dir().rename(from, to)
-    }
-    fn set_readonly(&self, p: &RelPath, ro: bool) -> SysResult<()> {
-        self.dir().set_readonly(p, ro)
+    fn users(&self, p: &RelPath) -> SysResult<Vec<u32>> {
+        self.dir().users(p)
     }
 }

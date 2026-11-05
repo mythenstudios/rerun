@@ -8,17 +8,19 @@
 //! The file system contracts are split by side:
 //!
 //! - **Read side** ([`fs_read_contract`], [`fs_link_read_contract`], [`fs_volume_contract`],
-//!   [`fs_race_contract`]) use only [`Fs::open_dir`] and the reading methods of
+//!   [`fs_race_contract`]) use only [`Fs::open_dir`], the methods of
 //!   [`Dir`](super::fs::Dir) (`info`, `open_dir`, `metadata`, `open_read`, `read`,
-//!   `read_dir`). Everything they need on disk, and every attacker move, is done by an
-//!   [`FsFixture`] (plain `std::fs` and raw calls in test code). They therefore run against
-//!   `sys::win`, which is read-only in phase 1.
-//! - **Write side** ([`fs_write_contract`], [`fs_link_write_contract`]) exercise the writing
-//!   methods. They run against the fake only until `sys::win` can write (phase 2).
+//!   `read_dir`, `users`) and [`DirWrite::open_dir_write`](super::fs::DirWrite), which only
+//!   opens. Everything they need on disk, and every attacker move, is done by an
+//!   [`FsFixture`] (plain `std::fs` and raw calls in test code). They run against `sys::fake`
+//!   and `sys::win`.
+//! - **Write side** (`DirWrite`, `FileGuard`, ADR 0017): the write contracts come with the
+//!   fake write side and then run against `sys::win` as well (`docs/09-testing.md`). The
+//!   phase 1 write contracts exercised the path-based writing methods that ADR 0017 replaced
+//!   and were removed with them.
 //!
 //! Each file system contract needs a fresh, **empty** working directory. The runner owns
-//! cleanup: the read contracts never delete anything, and the write contracts remove what they
-//! create only because that exercises the remove operations, not as a promise.
+//! cleanup: the read contracts never delete anything.
 //!
 //! A case that the fixture cannot set up on this machine (no symlink privilege, no second
 //! volume, 8.3 names disabled) is skipped, not failed. The file system contracts return the
@@ -182,7 +184,8 @@ fn refused_through(dir: &dyn Dir, p: &str, what: &str) -> ContractResult {
     err_kind(dir.open_read(&p), rp, &format!("{what}: open_read"))?;
     err_kind(dir.metadata(&p), rp, &format!("{what}: metadata"))?;
     err_kind(dir.open_dir(&p), rp, &format!("{what}: open_dir"))?;
-    err_kind(dir.read_dir(Some(&p)), rp, &format!("{what}: read_dir"))
+    err_kind(dir.read_dir(Some(&p)), rp, &format!("{what}: read_dir"))?;
+    err_kind(dir.users(&p), rp, &format!("{what}: users"))
 }
 
 /// Operations on a reparse point itself that must not follow it.
@@ -191,7 +194,8 @@ fn refused_at(dir: &dyn Dir, p: &str, what: &str) -> ContractResult {
     let p = rel(p)?;
     err_kind(dir.open_dir(&p), rp, &format!("{what}: open_dir"))?;
     err_kind(dir.read_dir(Some(&p)), rp, &format!("{what}: read_dir"))?;
-    err_kind(dir.open_read(&p), rp, &format!("{what}: open_read"))
+    err_kind(dir.open_read(&p), rp, &format!("{what}: open_read"))?;
+    err_kind(dir.users(&p), rp, &format!("{what}: users"))
 }
 
 /// File system contract, reading side: identity, lookups, metadata, error kinds, the input
@@ -332,6 +336,53 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
         "Fs::open_dir missing",
     )?;
 
+    // Users: a check at a moment, on plain files only. Who else holds the file is not
+    // asserted here (a scanner may hold a fresh file); the contract pins the error kinds.
+    ok(root.users(&file), "users of a plain file")?;
+    ok(
+        root.users(&rel(r"GAME\DATA.BIN")?),
+        "users case-insensitive",
+    )?;
+    err_kind(
+        root.users(&game),
+        SysErrorKind::AccessDenied,
+        "users of a directory",
+    )?;
+    err_kind(
+        root.users(&rel(r"Game\missing")?),
+        SysErrorKind::NotFound,
+        "users of a missing file",
+    )?;
+    err_kind(
+        root.users(&rel(r"Game\missing\deeper")?),
+        SysErrorKind::NotFound,
+        "users below a missing directory",
+    )?;
+    err_kind(
+        root.users(&rel(r"Game\Data.bin\x")?),
+        SysErrorKind::InvalidPath,
+        "users below a file",
+    )?;
+
+    // The write capability is an open like `open_dir`: same object, same errors.
+    let w = ok(root.open_dir_write(&rel("GAME")?), "open_dir_write")?;
+    ensure(
+        ok(w.info(), "open_dir_write info")?.file_id == dm.file_id,
+        "open_dir_write reaches the same directory as open_dir",
+    )?;
+    read_is(&*w, "Data.bin", b"hello", "read through a write handle")?;
+    drop(w);
+    err_kind(
+        root.open_dir_write(&file),
+        SysErrorKind::InvalidPath,
+        "open_dir_write on a file",
+    )?;
+    err_kind(
+        root.open_dir_write(&rel(r"Game\missing")?),
+        SysErrorKind::NotFound,
+        "open_dir_write missing",
+    )?;
+
     // A sub handle.
     let sub = ok(root.open_dir(&game), "open_dir relative")?;
     ensure(
@@ -451,6 +502,11 @@ fn restricted_entries(
         "open_read restricted",
     )?;
     err_kind(root.read(&rel(r"rs\secret.bin")?), ad, "read restricted")?;
+    err_kind(
+        root.users(&rel(r"rs\secret.bin")?),
+        ad,
+        "users of a restricted file",
+    )?;
     err_kind(
         root.open_dir(&rel(r"rs\secret.bin")?),
         ad,
@@ -1235,713 +1291,6 @@ pub fn fs_race_contract(
     });
     probe?;
     Ok(Skipped::new())
-}
-
-/// File system contract, writing side: create, replace, remove, rename, read-only, handles
-/// across renames, name spelling. `work` must be an existing, empty directory (fresh for every
-/// run). Fake only until `sys::win` can write (phase 2). The removals at the end exercise the
-/// remove operations; the runner must not rely on them for cleanup.
-pub fn fs_write_contract(fs: &dyn Fs, work: &Path) -> FsContractResult {
-    let root = ok(fs.open_dir(work), "open work dir")?;
-    let info = ok(root.info(), "info")?;
-    let game = rel("Game")?;
-    let file = rel(r"Game\Data.bin")?;
-
-    // Create.
-    ok(root.create_dir(&game), "create_dir")?;
-    err_kind(
-        root.create_dir(&game),
-        SysErrorKind::AlreadyExists,
-        "create_dir twice",
-    )?;
-    err_kind(
-        root.create_dir(&rel(r"nope\deeper")?),
-        SysErrorKind::NotFound,
-        "create_dir with missing parent",
-    )?;
-    ok(root.create_new(&file, b"hello"), "create_new")?;
-    err_kind(
-        root.create_new(&file, b"other"),
-        SysErrorKind::AlreadyExists,
-        "create_new twice",
-    )?;
-    read_is(
-        &*root,
-        r"Game\Data.bin",
-        b"hello",
-        "create_new twice leaves content",
-    )?;
-    err_kind(
-        root.create_new(&game, b"x"),
-        SysErrorKind::AlreadyExists,
-        "create_new over a directory",
-    )?;
-    err_kind(
-        root.create_new(&rel(r"nope\x.txt")?, b"x"),
-        SysErrorKind::NotFound,
-        "create_new with missing parent",
-    )?;
-
-    // Remove: kinds.
-    err_kind(
-        root.remove_dir(&game),
-        SysErrorKind::NotEmpty,
-        "remove_dir non-empty",
-    )?;
-    err_kind(
-        root.remove_dir(&file),
-        SysErrorKind::InvalidPath,
-        "remove_dir on a file",
-    )?;
-    err_kind(
-        root.remove_file(&game),
-        SysErrorKind::AccessDenied,
-        "remove_file on a dir",
-    )?;
-
-    // Read-only attribute.
-    ok(root.set_readonly(&file, true), "set_readonly")?;
-    ensure(
-        ok(root.metadata(&file), "metadata readonly")?.is_some_and(|m| m.attrs.readonly),
-        "readonly visible in metadata",
-    )?;
-    err_kind(
-        root.replace(&file, b"x", "Data.bin.rerun-tmp"),
-        SysErrorKind::AccessDenied,
-        "replace read-only",
-    )?;
-    err_kind(
-        root.remove_file(&file),
-        SysErrorKind::AccessDenied,
-        "remove read-only",
-    )?;
-    ok(root.set_readonly(&file, false), "clear readonly")?;
-
-    // Replace: works through another case, keeps the stored spelling, leaves no temp files.
-    ok(
-        root.replace(&rel(r"GAME\DATA.BIN")?, b"world", "Data.bin.rerun-tmp"),
-        "replace",
-    )?;
-    read_is(
-        &*root,
-        r"Game\Data.bin",
-        b"world",
-        "replace writes new content",
-    )?;
-    ensure(
-        names(&*root, Some(&game), "read_dir after replace")? == ["Data.bin"],
-        "replace keeps the spelling and leaves no temp or .old file",
-    )?;
-    err_kind(
-        root.replace(&rel(r"Game\missing.bin")?, b"x", "missing.tmp"),
-        SysErrorKind::NotFound,
-        "replace missing",
-    )?;
-    err_kind(
-        root.replace(&game, b"x", "Game.tmp"),
-        SysErrorKind::AccessDenied,
-        "replace a directory",
-    )?;
-
-    // Replace with a planted temp or .old name fails and leaves everything as it was.
-    ok(
-        root.create_new(&rel(r"Game\planted.tmp")?, b"attacker"),
-        "plant tmp",
-    )?;
-    err_kind(
-        root.replace(&file, b"evil", "planted.tmp"),
-        SysErrorKind::AlreadyExists,
-        "replace with planted tmp",
-    )?;
-    read_is(
-        &*root,
-        r"Game\Data.bin",
-        b"world",
-        "target unchanged after planted tmp",
-    )?;
-    read_is(
-        &*root,
-        r"Game\planted.tmp",
-        b"attacker",
-        "planted tmp unchanged",
-    )?;
-    ok(
-        root.create_new(&rel(r"Game\t2.old")?, b"attacker2"),
-        "plant .old",
-    )?;
-    err_kind(
-        root.replace(&file, b"evil", "t2"),
-        SysErrorKind::AlreadyExists,
-        "replace with planted .old",
-    )?;
-    read_is(
-        &*root,
-        r"Game\Data.bin",
-        b"world",
-        "target unchanged after planted .old",
-    )?;
-    ensure(
-        names(&*root, Some(&game), "read_dir after planted .old")?
-            == ["Data.bin", "planted.tmp", "t2.old"],
-        "failed replace removes its own temp file",
-    )?;
-    ok(
-        root.remove_file(&rel(r"Game\planted.tmp")?),
-        "remove planted",
-    )?;
-    ok(
-        root.remove_file(&rel(r"Game\t2.old")?),
-        "remove planted .old",
-    )?;
-    for bad in ["", r"a\b", "a/b", "..", "CON", "x.", " x"] {
-        err_kind(
-            root.replace(&file, b"evil", bad),
-            SysErrorKind::InvalidPath,
-            "replace with an invalid temp name",
-        )?;
-    }
-    read_is(
-        &*root,
-        r"Game\Data.bin",
-        b"world",
-        "target unchanged after invalid temp",
-    )?;
-
-    // Rename never overwrites, a case-only change is allowed.
-    let other = rel(r"Game\Other.bin")?;
-    ok(root.create_new(&other, b"other"), "create other")?;
-    err_kind(
-        root.rename(&file, &other),
-        SysErrorKind::AlreadyExists,
-        "rename onto existing",
-    )?;
-    err_kind(
-        root.rename(&file, &rel(r"Game\OTHER.BIN")?),
-        SysErrorKind::AlreadyExists,
-        "rename onto another entry that differs only in case",
-    )?;
-    let recased = rel(r"Game\DATA.bin")?;
-    ok(root.rename(&file, &recased), "rename case only")?;
-    ensure(
-        names(&*root, Some(&game), "read_dir after recase")? == ["DATA.bin", "Other.bin"],
-        "case-only rename changes the stored name",
-    )?;
-    err_kind(
-        root.rename(&rel(r"Game\missing")?, &rel(r"Game\x")?),
-        SysErrorKind::NotFound,
-        "rename missing",
-    )?;
-    err_kind(
-        root.rename(&other, &rel(r"Game\nope\x")?),
-        SysErrorKind::NotFound,
-        "rename into missing dir",
-    )?;
-    let sub = rel(r"Game\sub")?;
-    let moved = rel(r"Game\sub\Other.bin")?;
-    ok(root.create_dir(&sub), "create sub")?;
-    ok(root.rename(&other, &moved), "move into subdir")?;
-    read_is(&*root, r"Game\sub\Other.bin", b"other", "moved file")?;
-    ok(root.rename(&moved, &other), "move back")?;
-    err_kind(
-        root.rename(&game, &rel(r"Game\sub\Game2")?),
-        SysErrorKind::InvalidPath,
-        "move a directory into its own subtree",
-    )?;
-
-    // A handle to a deleted directory reports NotFound, not a missing entry.
-    ok(root.create_dir(&rel("D")?), "create D")?;
-    let doomed = ok(root.open_dir(&rel("D")?), "open D")?;
-    ok(root.remove_dir(&rel("D")?), "remove D")?;
-    err_kind(
-        doomed.metadata(&rel("x")?),
-        SysErrorKind::NotFound,
-        "metadata via a deleted handle",
-    )?;
-    drop(doomed);
-
-    // A handle stays valid when its parent is renamed.
-    ok(root.create_dir(&rel("A")?), "create A")?;
-    ok(root.create_dir(&rel(r"A\B")?), "create A\\B")?;
-    ok(root.create_new(&rel(r"A\B\f.txt")?, b"f"), "create f")?;
-    let held = ok(root.open_dir(&rel(r"A\B")?), "open A\\B")?;
-    ok(root.rename(&rel("A")?, &rel("A2")?), "rename parent")?;
-    read_is(
-        &*held,
-        "f.txt",
-        b"f",
-        "read through handle after parent rename",
-    )?;
-    ok(
-        held.create_new(&rel("g.txt")?, b"g"),
-        "write through handle",
-    )?;
-    read_is(
-        &*root,
-        r"A2\B\g.txt",
-        b"g",
-        "write landed in the renamed tree",
-    )?;
-    ensure(
-        ok(held.info(), "held info")?.final_path == info.final_path.join("A2").join("B"),
-        "final_path follows the rename",
-    )?;
-    ensure(
-        ok(root.metadata(&rel("A")?), "metadata old name")?.is_none(),
-        "old name is gone",
-    )?;
-    drop(held);
-    for f in [r"A2\B\f.txt", r"A2\B\g.txt"] {
-        ok(root.remove_file(&rel(f)?), "remove in A2")?;
-    }
-    ok(root.remove_dir(&rel(r"A2\B")?), "remove A2\\B")?;
-    ok(root.remove_dir(&rel("A2")?), "remove A2")?;
-
-    // Spelling of valid but unusual names round-trips; folding is 1:1 per character.
-    let spelled = [
-        "a..b",
-        ".hidden",
-        "$data.bin",
-        "Über.txt",
-        "my file.txt",
-        "Straße.ini",
-        "STRASSE.ini",
-    ];
-    for n in spelled {
-        ok(
-            root.create_new(&sub.child(n).map_err(|e| e.to_string())?, n.as_bytes()),
-            n,
-        )?;
-    }
-    let mut expected: Vec<String> = spelled.iter().map(|s| (*s).to_owned()).collect();
-    expected.sort();
-    ensure(
-        names(&*root, Some(&sub), "read_dir names")? == expected,
-        "names keep their exact spelling (Straße and STRASSE are different)",
-    )?;
-    err_kind(
-        root.create_new(&rel(r"Game\sub\über.TXT")?, b"x"),
-        SysErrorKind::AlreadyExists,
-        "case-insensitive beyond ASCII",
-    )?;
-    err_kind(
-        root.rename(
-            &rel(r"Game\sub\Straße.ini")?,
-            &rel(r"Game\sub\STRASSE.ini")?,
-        ),
-        SysErrorKind::AlreadyExists,
-        "rename onto a different entry (Straße to STRASSE)",
-    )?;
-    for n in spelled {
-        ok(
-            root.remove_file(&sub.child(n).map_err(|e| e.to_string())?),
-            n,
-        )?;
-    }
-
-    // Clean up.
-    ok(root.remove_dir(&sub), "remove sub")?;
-    ok(root.remove_file(&recased), "remove file")?;
-    ok(root.remove_file(&other), "remove other")?;
-    err_kind(
-        root.remove_file(&other),
-        SysErrorKind::NotFound,
-        "remove missing file",
-    )?;
-    err_kind(
-        root.remove_dir(&sub),
-        SysErrorKind::NotFound,
-        "remove missing dir",
-    )?;
-    ok(root.remove_dir(&game), "remove_dir")?;
-    ensure(
-        names(&*root, None, "read_dir after cleanup")?.is_empty(),
-        "work dir empty after cleanup",
-    )?;
-    Ok(Skipped::new())
-}
-
-/// File system contract with links, writing side (ADR 0007): nothing is created, replaced,
-/// removed, renamed or changed through a reparse point below a root, handles survive a swap,
-/// hard links and case-sensitive directories are handled. The read side is
-/// [`fs_link_read_contract`]. `work` must be an existing, empty directory (fresh for every
-/// run); `fx` creates what the API cannot. Fake only until `sys::win` can write (phase 2).
-pub fn fs_link_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContractResult {
-    let mut skips = Skipped::new();
-    const CANARY: &[u8] = b"canary";
-    let root_abs = work.join("root");
-    let outside_abs = work.join("outside");
-    let w = ok(fs.open_dir(work), "open work dir")?;
-    let outside = rel("outside")?;
-    ok(w.create_dir(&outside), "create outside")?;
-    ok(
-        w.create_new(&rel(r"outside\canary.txt")?, CANARY),
-        "create canary",
-    )?;
-    ok(w.create_dir(&rel("root")?), "create root")?;
-    let canary_intact = |what: &str| -> ContractResult {
-        ensure(
-            names(&*w, Some(&outside), what)? == ["canary.txt"],
-            &format!("{what}: outside unchanged"),
-        )?;
-        read_is(
-            &*w,
-            r"outside\canary.txt",
-            CANARY,
-            &format!("{what}: canary unchanged"),
-        )
-    };
-
-    ok(
-        fx.junction(&root_abs.join("link"), &outside_abs),
-        "fixture junction",
-    )?;
-    let root = ok(fs.open_dir(&root_abs), "open root")?;
-    let root_info = ok(root.info(), "root info")?;
-    let link = rel("link")?;
-
-    // Nothing is written through a junction below the root (the read side is checked by
-    // `fs_link_read_contract`).
-    let through = rel(r"link\canary.txt")?;
-    let rp = SysErrorKind::ReparsePoint;
-    err_kind(
-        root.create_new(&rel(r"link\new.txt")?, b"x"),
-        rp,
-        "create_new through junction",
-    )?;
-    err_kind(
-        root.create_dir(&rel(r"link\d")?),
-        rp,
-        "create_dir through junction",
-    )?;
-    err_kind(
-        root.replace(&through, b"x", "canary.tmp"),
-        rp,
-        "replace through junction",
-    )?;
-    err_kind(
-        root.replace(&link, b"x", "link.tmp"),
-        rp,
-        "replace the junction",
-    )?;
-    err_kind(
-        root.remove_file(&through),
-        rp,
-        "remove_file through junction",
-    )?;
-    err_kind(
-        root.set_readonly(&through, true),
-        rp,
-        "set_readonly through junction",
-    )?;
-    err_kind(
-        root.set_readonly(&link, true),
-        rp,
-        "set_readonly on junction",
-    )?;
-    err_kind(
-        root.rename(&through, &rel("stolen.txt")?),
-        rp,
-        "rename out of junction",
-    )?;
-    canary_intact("after operations through the junction")?;
-
-    // Deleting the junction itself leaves the target alone.
-    ok(root.remove_file(&link), "remove junction")?;
-    ensure(
-        ok(root.metadata(&link), "metadata removed link")?.is_none(),
-        "junction gone",
-    )?;
-    canary_intact("after removing the junction")?;
-
-    // A junction name is occupied: create_new and create_dir never go through it, live or
-    // dangling.
-    ok(
-        fx.junction(&root_abs.join("live"), &outside_abs),
-        "fixture live junction",
-    )?;
-    ok(
-        fx.junction(&root_abs.join("dangling"), &work.join("nowhere")),
-        "fixture dangling junction",
-    )?;
-    for name in ["live", "dangling"] {
-        let l = rel(name)?;
-        let ae = SysErrorKind::AlreadyExists;
-        err_kind(
-            root.create_new(&l, b"x"),
-            ae,
-            "create_new on a junction name",
-        )?;
-        err_kind(root.create_dir(&l), ae, "create_dir on a junction name")?;
-    }
-    ensure(
-        ok(w.metadata(&rel("nowhere")?), "metadata dangling target")?.is_none(),
-        "dangling target not created",
-    )?;
-    canary_intact("after create on junction names")?;
-
-    // Rename never moves anything through a junction, also deeper down.
-    ok(root.create_new(&rel("x.txt")?, b"x"), "create x")?;
-    ok(root.create_dir(&rel("d1")?), "create d1")?;
-    ok(root.create_dir(&rel(r"d1\d2")?), "create d1\\d2")?;
-    ok(
-        fx.junction(&root_abs.join("d1").join("d2").join("deep"), &outside_abs),
-        "fixture deep junction",
-    )?;
-    err_kind(
-        root.rename(&rel("x.txt")?, &rel(r"live\x.txt")?),
-        rp,
-        "rename into junction",
-    )?;
-    err_kind(
-        root.rename(&rel("x.txt")?, &rel(r"d1\d2\deep\x.txt")?),
-        rp,
-        "rename into deep junction",
-    )?;
-    read_is(&*root, "x.txt", b"x", "source of refused rename unchanged")?;
-    canary_intact("after renames into junctions")?;
-    ok(root.remove_file(&rel("x.txt")?), "remove x")?;
-    ok(
-        root.remove_file(&rel(r"d1\d2\deep")?),
-        "remove deep junction",
-    )?;
-    ok(root.remove_dir(&rel(r"d1\d2")?), "remove d1\\d2")?;
-    ok(root.remove_dir(&rel("d1")?), "remove d1")?;
-    ok(root.remove_file(&rel("live")?), "remove live junction")?;
-    ok(
-        root.remove_file(&rel("dangling")?),
-        "remove dangling junction",
-    )?;
-
-    // remove_dir on a junction to an empty directory removes only the link.
-    ok(w.create_dir(&rel("empty")?), "create empty")?;
-    ok(
-        fx.junction(&root_abs.join("elink"), &work.join("empty")),
-        "fixture junction to empty",
-    )?;
-    ok(root.remove_dir(&rel("elink")?), "remove_dir on junction")?;
-    ensure(
-        ok(root.metadata(&rel("elink")?), "metadata elink")?.is_none(),
-        "junction to empty dir removed",
-    )?;
-    ensure(
-        ok(w.metadata(&rel("empty")?), "metadata empty")?.is_some_and(|m| m.kind == EntryKind::Dir),
-        "target of the junction still exists",
-    )?;
-    ok(w.remove_dir(&rel("empty")?), "remove empty")?;
-
-    // File symbolic link: never read, replaced or changed through; deleting removes the link.
-    if ok(
-        fx.file_symlink(&root_abs.join("flink.dll"), &outside_abs.join("canary.txt")),
-        "fixture file symlink",
-    )? {
-        let fl = rel("flink.dll")?;
-        let m =
-            ok(root.metadata(&fl), "metadata flink")?.ok_or("contract violated: flink missing")?;
-        ensure(
-            m.kind == EntryKind::Reparse
-                && m.reparse
-                    .as_ref()
-                    .is_some_and(|r| r.surrogate && r.tag == tag::SYMLINK),
-            "file symlink is reported as a surrogate",
-        )?;
-        err_kind(root.open_read(&fl), rp, "open_read file symlink")?;
-        err_kind(
-            root.replace(&fl, b"evil", "flink.tmp"),
-            rp,
-            "replace file symlink",
-        )?;
-        err_kind(
-            root.set_readonly(&fl, true),
-            rp,
-            "set_readonly file symlink",
-        )?;
-        err_kind(
-            root.read(&rel(r"flink.dll\x")?),
-            rp,
-            "read through file symlink",
-        )?;
-        ok(root.remove_file(&fl), "remove file symlink")?;
-        ensure(
-            ok(root.metadata(&fl), "metadata removed flink")?.is_none(),
-            "file symlink gone",
-        )?;
-        canary_intact("after the file symlink")?;
-    } else {
-        skip(&mut skips, "file_symlink");
-    }
-
-    // Swap after open: the old handle keeps the original directory, a fresh walk hits the
-    // junction.
-    ok(root.create_dir(&rel("sub")?), "create sub")?;
-    ok(
-        root.create_new(&rel(r"sub\data.txt")?, b"orig"),
-        "create data",
-    )?;
-    let held = ok(root.open_dir(&rel("sub")?), "open sub")?;
-    ok(
-        fx.rename(&root_abs.join("sub"), &root_abs.join("sub-moved")),
-        "fixture rename",
-    )?;
-    ok(
-        fx.junction(&root_abs.join("sub"), &outside_abs),
-        "fixture swap junction",
-    )?;
-    read_is(&*held, "data.txt", b"orig", "old handle reads the original")?;
-    ok(
-        held.create_new(&rel("held.txt")?, b"h"),
-        "write through old handle",
-    )?;
-    read_is(
-        &*root,
-        r"sub-moved\held.txt",
-        b"h",
-        "write landed in the original",
-    )?;
-    ensure(
-        ok(held.info(), "held info")?.final_path == root_info.final_path.join("sub-moved"),
-        "old handle reports the moved path",
-    )?;
-    err_kind(
-        root.create_new(&rel(r"sub\fresh.txt")?, b"x"),
-        rp,
-        "fresh walk after swap",
-    )?;
-    err_kind(
-        root.read(&rel(r"sub\data.txt")?),
-        rp,
-        "fresh read after swap",
-    )?;
-    canary_intact("after the swap")?;
-    drop(held);
-    ok(root.remove_file(&rel("sub")?), "remove swap junction")?;
-    for f in [r"sub-moved\held.txt", r"sub-moved\data.txt"] {
-        ok(root.remove_file(&rel(f)?), "remove in sub-moved")?;
-    }
-    ok(root.remove_dir(&rel("sub-moved")?), "remove sub-moved")?;
-
-    // Hard links: no in-place change, unlink and replace of the entry are allowed.
-    let a = rel("a.bin")?;
-    let b = rel("b.bin")?;
-    ok(root.create_new(&a, b"shared"), "create a")?;
-    ok(
-        fx.hardlink(&root_abs.join("a.bin"), &root_abs.join("b.bin")),
-        "fixture hardlink",
-    )?;
-    let ma = ok(root.metadata(&a), "metadata a")?.ok_or("contract violated: a missing")?;
-    let mb = ok(root.metadata(&b), "metadata b")?.ok_or("contract violated: b missing")?;
-    ensure(
-        ma.links == Some(2) && mb.links == Some(2) && ma.file_id == mb.file_id,
-        "both links report two links and the same file id",
-    )?;
-    err_kind(
-        root.set_readonly(&a, true),
-        SysErrorKind::Linked,
-        "set_readonly on a linked file",
-    )?;
-    ok(
-        root.replace(&a, b"new", "a.bin.rerun-tmp"),
-        "replace a linked file",
-    )?;
-    read_is(&*root, "a.bin", b"new", "replaced link has new content")?;
-    read_is(&*root, "b.bin", b"shared", "other link keeps old content")?;
-    ensure(
-        ok(root.metadata(&a), "metadata a after")?.is_some_and(|m| m.is_single_link())
-            && ok(root.metadata(&b), "metadata b after")?.is_some_and(|m| m.is_single_link()),
-        "replace splits the links",
-    )?;
-    ok(
-        fx.hardlink(&root_abs.join("b.bin"), &root_abs.join("c.bin")),
-        "fixture hardlink c",
-    )?;
-    ok(root.remove_file(&rel("c.bin")?), "remove one of two links")?;
-    read_is(&*root, "b.bin", b"shared", "remaining link intact")?;
-    ensure(
-        ok(root.metadata(&b), "metadata b last")?.is_some_and(|m| m.is_single_link()),
-        "link count drops",
-    )?;
-    ok(root.set_readonly(&b, true), "set_readonly single link")?;
-    ok(root.set_readonly(&b, false), "clear readonly single link")?;
-    ok(root.remove_file(&a), "remove a")?;
-    ok(root.remove_file(&b), "remove b")?;
-
-    // Case-sensitive directory: writes are refused.
-    if ok(
-        fx.case_sensitive_dir(&root_abs.join("cs")),
-        "fixture case-sensitive dir",
-    )? {
-        let cs = rel("cs")?;
-        let h = ok(root.open_dir(&cs), "open cs")?;
-        ensure(
-            ok(h.info(), "cs info")?.case_sensitive,
-            "case_sensitive reported",
-        )?;
-        let us = SysErrorKind::Unsupported;
-        err_kind(
-            root.create_new(&rel(r"cs\x.txt")?, b"x"),
-            us,
-            "create_new in cs dir",
-        )?;
-        err_kind(
-            h.create_new(&rel("x.txt")?, b"x"),
-            us,
-            "create_new via cs handle",
-        )?;
-        err_kind(root.create_dir(&rel(r"cs\d")?), us, "create_dir in cs dir")?;
-        // Refused before the entry is looked up, so the directory can stay empty.
-        err_kind(
-            root.replace(&rel(r"cs\x.txt")?, b"x", "x.tmp"),
-            us,
-            "replace in cs dir",
-        )?;
-        err_kind(
-            root.remove_file(&rel(r"cs\x.txt")?),
-            us,
-            "remove_file in cs dir",
-        )?;
-        err_kind(root.remove_dir(&rel(r"cs\d")?), us, "remove_dir in cs dir")?;
-        err_kind(
-            root.set_readonly(&rel(r"cs\x.txt")?, true),
-            us,
-            "set_readonly in cs dir",
-        )?;
-        ok(root.create_new(&rel("in.txt")?, b"in"), "create in.txt")?;
-        err_kind(
-            root.rename(&rel("in.txt")?, &rel(r"cs\in.txt")?),
-            us,
-            "rename into cs dir",
-        )?;
-        err_kind(
-            root.rename(&rel(r"cs\x.txt")?, &rel("out.txt")?),
-            us,
-            "rename out of cs dir",
-        )?;
-        read_is(
-            &*root,
-            "in.txt",
-            b"in",
-            "source of refused rename unchanged",
-        )?;
-        ok(root.remove_file(&rel("in.txt")?), "remove in.txt")?;
-        drop(h);
-        ok(root.remove_dir(&cs), "remove cs dir")?;
-    } else {
-        skip(&mut skips, "case_sensitive_dir");
-    }
-
-    // Clean up.
-    ensure(
-        names(&*root, None, "read_dir root after")?.is_empty(),
-        "root empty after cleanup",
-    )?;
-    drop(root);
-    ok(w.remove_dir(&rel("root")?), "remove root")?;
-    ok(w.remove_file(&rel(r"outside\canary.txt")?), "remove canary")?;
-    ok(w.remove_dir(&outside), "remove outside")?;
-    ensure(
-        names(&*w, None, "read_dir work after")?.is_empty(),
-        "work dir empty after cleanup",
-    )?;
-    Ok(skips)
 }
 
 /// Setup that the registry API under test deliberately cannot do while it is read-only: create

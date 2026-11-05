@@ -28,6 +28,8 @@ pub enum SysErrorKind {
     Unsupported,
     /// In-place change of a file with more than one hard link (ADR 0007).
     Linked,
+    /// An expected hash or file ID differs (ADR 0017). Nothing was changed.
+    Mismatch,
     /// Other error.
     Other,
 }
@@ -44,6 +46,7 @@ impl fmt::Display for SysErrorKind {
             Self::Busy => "busy",
             Self::Unsupported => "unsupported",
             Self::Linked => "file has more than one hard link",
+            Self::Mismatch => "not the expected content or file",
             Self::Other => "other error",
         })
     }

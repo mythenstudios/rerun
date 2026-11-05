@@ -679,7 +679,7 @@ struct Run {
     exit: Exit,
     stdout: String,
     stderr: String,
-    /// Names of every directory component the scan opened.
+    /// Names of every directory component the scan opened (read or write capability).
     opened: Vec<String>,
 }
 
@@ -687,7 +687,7 @@ fn run(sys: &FakeSystem, app_ids: &[u32], hashes: bool) -> Run {
     let opened = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&opened);
     sys.fake_fs().on_step(move |_, ev| {
-        if ev.op == FsOp::OpenDir
+        if matches!(ev.op, FsOp::OpenDir | FsOp::OpenDirWrite)
             && let Ok(mut v) = seen.lock()
         {
             v.push(ev.name.clone());

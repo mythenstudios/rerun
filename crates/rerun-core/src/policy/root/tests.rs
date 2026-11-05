@@ -544,7 +544,7 @@ fn swap_to_a_junction_during_the_walk_is_caught() {
     let fired = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&fired);
     sys.fake_fs().on_step(move |fs, e| {
-        if e.op == FsOp::OpenDir && e.index == 2 && !flag.swap(true, Ordering::SeqCst) {
+        if e.op == FsOp::OpenDirWrite && e.index == 2 && !flag.swap(true, Ordering::SeqCst) {
             fs.swap_with_junction(Path::new(GAME), r"C:\Windows\System32")
                 .unwrap();
         }
@@ -583,14 +583,45 @@ fn swap_after_open_keeps_the_handle_and_identity_catches_a_replacement() {
         Err(RootError::Reparse { .. })
     ));
 
-    let rel = RelPath::parse(r"steamapps\common\Game").unwrap();
-    store.dir().remove_file(&rel).unwrap();
-    store.dir().create_dir(&rel).unwrap();
+    sys.fake_fs().remove_abs(Path::new(GAME)).unwrap();
+    sys.fake_fs().mkdir_all(Path::new(GAME)).unwrap();
     let fresh = store.game(&fr, "Game").unwrap();
     assert!(matches!(
         fresh.ensure_id(id),
         Err(RootError::IdentityMismatch { .. })
     ));
+}
+
+#[test]
+fn only_a_game_folder_on_a_posix_volume_hands_out_a_write_handle() {
+    // `StoreDir` has no write accessor at all (ADR 0017); its `dir()` is `&dyn Dir`.
+    let sys = base()
+        .file(format!(r"{GAME}\game.exe"), "MZ")
+        .file(r"E:\Lib\steamapps\common\Game\game.exe", "MZ")
+        .dir(r"E:\Manual")
+        .build()
+        .unwrap();
+    sys.fake_fs()
+        .set_fs_kind('E', crate::sys::fs::FsKind::ExFat);
+    let fr = fr(&sys);
+    let store = StoreDir::open(&sys, &fr, Path::new(LIB)).unwrap();
+    let game = store.game(&fr, "Game").unwrap();
+    let w = game.dir_write().unwrap();
+    // The same directory as the read side.
+    assert_eq!(w.info().unwrap().file_id, game.id().file_id);
+    assert_eq!(w.read(&RelPath::parse("GAME.EXE").unwrap()).unwrap(), b"MZ");
+
+    let exfat = StoreDir::open(&sys, &fr, Path::new(r"E:\Lib")).unwrap();
+    for g in [
+        exfat.game(&fr, "Game").unwrap(),
+        GameDir::open_manual(&sys, &fr, Path::new(r"E:\Manual")).unwrap(),
+    ] {
+        let e = g.dir_write().map(|_| ()).unwrap_err();
+        assert_eq!(e.kind, SysErrorKind::Unsupported);
+        assert!(e.target.contains("POSIX"), "{e}");
+        // Reading stays possible.
+        g.dir().read_dir(None).unwrap();
+    }
 }
 
 #[test]
@@ -736,12 +767,13 @@ fn game_whose_common_was_swapped_during_the_open_is_refused() {
     let sys = base().dir(GAME).build().unwrap();
     let fr = fr(&sys);
     let store = StoreDir::open(&sys, &fr, Path::new(LIB)).unwrap();
-    // `game()` walks `steamapps`, `common`, `Game` (OpenDir events 1–3), then opens
-    // `steamapps\common` again (events 4–5). Swap right before event 4.
+    // `game()` walks `steamapps`, `common`, `Game` with the write capability (events 1–3),
+    // then opens `steamapps\common` again (events 4–5). Swap right before event 4.
     let events = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&events);
     sys.fake_fs().on_step(move |fs, e| {
-        if e.op == FsOp::OpenDir && seen.fetch_add(1, Ordering::SeqCst) == 3 {
+        let walk = matches!(e.op, FsOp::OpenDir | FsOp::OpenDirWrite);
+        if walk && seen.fetch_add(1, Ordering::SeqCst) == 3 {
             fs.rename_abs(
                 Path::new(r"D:\Lib\steamapps\common"),
                 Path::new(r"D:\Lib\steamapps\common.old"),

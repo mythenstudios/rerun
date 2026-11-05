@@ -530,25 +530,7 @@ mod tests {
                 })
                 .collect())
         }
-        fn create_new(&self, _: &RelPath, _: &[u8]) -> SysResult<()> {
-            no()
-        }
-        fn replace(&self, _: &RelPath, _: &[u8], _: &str) -> SysResult<()> {
-            no()
-        }
-        fn create_dir(&self, _: &RelPath) -> SysResult<()> {
-            no()
-        }
-        fn remove_file(&self, _: &RelPath) -> SysResult<()> {
-            no()
-        }
-        fn remove_dir(&self, _: &RelPath) -> SysResult<()> {
-            no()
-        }
-        fn rename(&self, _: &RelPath, _: &RelPath) -> SysResult<()> {
-            no()
-        }
-        fn set_readonly(&self, _: &RelPath, _: bool) -> SysResult<()> {
+        fn users(&self, _: &RelPath) -> SysResult<Vec<u32>> {
             no()
         }
     }

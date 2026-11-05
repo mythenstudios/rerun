@@ -114,16 +114,16 @@ impl FsFixture for FakeFs {
     }
 
     fn junction(&self, link: &Path, target: &Path) -> SysResult<()> {
-        self.put_link(link, tag::MOUNT_POINT, &target.display().to_string(), true)
+        self.put_link(link, tag::MOUNT_POINT, &target.display().to_string())
     }
 
     fn dir_symlink(&self, link: &Path, target: &Path) -> SysResult<bool> {
-        self.put_link(link, tag::SYMLINK, &target.display().to_string(), true)?;
+        self.put_link(link, tag::SYMLINK, &target.display().to_string())?;
         Ok(true)
     }
 
     fn file_symlink(&self, link: &Path, target: &Path) -> SysResult<bool> {
-        self.put_link(link, tag::SYMLINK, &target.display().to_string(), false)?;
+        self.put_link(link, tag::SYMLINK, &target.display().to_string())?;
         Ok(true)
     }
 
@@ -227,12 +227,12 @@ impl FakeSystemBuilder {
 
     /// Junction with a target. The target need not exist.
     pub fn junction(self, path: impl AsRef<Path>, target: &str) -> Self {
-        self.step(|s| s.fs.put_link(path.as_ref(), tag::MOUNT_POINT, target, true))
+        self.step(|s| s.fs.put_link(path.as_ref(), tag::MOUNT_POINT, target))
     }
 
     /// File symbolic link with a target (absolute or relative). The target need not exist.
     pub fn file_symlink(self, path: impl AsRef<Path>, target: &str) -> Self {
-        self.step(|s| s.fs.put_link(path.as_ref(), tag::SYMLINK, target, false))
+        self.step(|s| s.fs.put_link(path.as_ref(), tag::SYMLINK, target))
     }
 
     /// Hard link `new` to the existing file `existing`.

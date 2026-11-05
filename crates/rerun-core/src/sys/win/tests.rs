@@ -26,7 +26,7 @@ use crate::sys::contract::{
     fs_read_contract, fs_volume_contract, gpu_contract, known_folders_contract,
     registry_read_contract, registry_system_contract, topology_contract,
 };
-use crate::sys::fs::{EntryKind, Fs};
+use crate::sys::fs::{Attrs, EntryKind, Fs, NewFile, TmpName};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
 use crate::sys::{Gpu, KnownFolder, KnownFolders, SysErrorKind, System, Topology};
 
@@ -155,19 +155,11 @@ fn read_only_walk_metadata_and_identity() {
         SysErrorKind::InvalidPath
     );
 
-    // Writes are refused in phase 1.
-    let p = rel("new.txt");
-    for r in [
-        root.create_new(&p, b"x"),
-        root.replace(&rel("a.txt"), b"x", "tmp"),
-        root.create_dir(&p),
-        root.remove_file(&rel("a.txt")),
-        root.remove_dir(&rel("Sub")),
-        root.rename(&rel("a.txt"), &p),
-        root.set_readonly(&rel("a.txt"), true),
-    ] {
-        assert_eq!(kind_of(r), SysErrorKind::Unsupported);
-    }
+    // The write side does not exist yet (ADR 0017).
+    assert_eq!(
+        kind_of(root.create_dir(&rel("new"))),
+        SysErrorKind::Unsupported
+    );
     assert_eq!(root.read(&rel("a.txt")).unwrap(), b"hello");
 }
 
@@ -429,19 +421,28 @@ fn win_dir_write_methods_are_unsupported() {
     let fs = WinFs::new();
     let dir = fs.open_dir(base).unwrap();
     let (a, n) = (rel("a.txt"), rel("new"));
-    for (what, r) in [
-        ("create_new", dir.create_new(&n, b"x")),
-        ("replace", dir.replace(&a, b"x", "a.tmp")),
-        ("create_dir", dir.create_dir(&n)),
-        ("remove_file", dir.remove_file(&a)),
-        ("remove_dir", dir.remove_dir(&rel("d"))),
-        ("rename", dir.rename(&a, &n)),
-        ("set_readonly", dir.set_readonly(&a, true)),
-    ] {
-        let e = r.expect_err(what);
+    let new = NewFile {
+        tmp: TmpName::new(0xab, 1),
+        attrs: Attrs::default(),
+        sha256: [0; 32],
+        max_len: 1,
+    };
+    let unsupported = |what: &str, e: Option<crate::sys::SysError>| {
+        let e = e.unwrap_or_else(|| panic!("{what}: expected an error"));
         assert_eq!(e.kind, SysErrorKind::Unsupported, "{what}");
-        assert!(e.target.contains("read-only in phase 1"), "{what}: {e}");
-    }
+        assert!(e.target.contains("not implemented yet"), "{what}: {e}");
+    };
+    unsupported("guard", dir.guard(&a).err());
+    unsupported("create_new", dir.create_new(&n, &mut &b"x"[..], &new).err());
+    unsupported("create_dir", dir.create_dir(&n).err());
+    unsupported("remove_dir", dir.remove_dir(&rel("d"), 0).err());
+    unsupported("flush", dir.flush().err());
+    // Opening with the write capability is an open, not a write: same object as `open_dir`.
+    let d = dir.open_dir_write(&rel("D")).unwrap();
+    assert_eq!(
+        d.info().unwrap().file_id,
+        dir.open_dir(&rel("d")).unwrap().info().unwrap().file_id
+    );
     assert_eq!(dir.read(&a).unwrap(), b"a");
     assert!(dir.metadata(&n).unwrap().is_none());
     let names: Vec<String> = dir
@@ -451,6 +452,36 @@ fn win_dir_write_methods_are_unsupported() {
         .map(|e| e.name)
         .collect();
     assert_eq!(names.len(), 2, "{names:?}");
+}
+
+/// `Dir::users` sees a handle this process holds on the file (another handle than the one it
+/// queries on), also one opened without `FILE_SHARE_*` that blocks every other open, and
+/// no longer sees it once it is closed.
+#[test]
+fn users_reports_a_held_handle_of_this_process() {
+    let Some(root) = TestRoot::new("users") else {
+        return;
+    };
+    let file = root.path().join("held.bin");
+    root.fx().file(&file, b"held").unwrap();
+    let fs = WinFs::new();
+    let dir = fs.open_dir(root.path()).unwrap();
+    let me = std::process::id();
+    let held = rel("held.bin");
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _exclusive = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&file)
+            .unwrap();
+        let users = dir.users(&held).unwrap();
+        assert!(users.contains(&me), "{users:?} lacks {me}");
+        // The attribute-only open of the query is not blocked by a share mode of 0.
+        assert_eq!(kind_of(dir.read(&held)), SysErrorKind::Busy);
+    }
+    let after = dir.users(&held).unwrap();
+    assert!(!after.contains(&me), "{after:?} still holds {me}");
 }
 
 /// The runner's cleanup (`std::fs::remove_dir_all` in `TestRoot`'s drop) removes a junction

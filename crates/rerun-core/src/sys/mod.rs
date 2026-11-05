@@ -7,11 +7,13 @@
 //!   [`crate::policy`] one level above, so the fake and the real system behave the same.
 //! - File access is handle-based: [`Fs::open_dir`] is the only absolute operation, everything
 //!   else goes through a [`Dir`] handle with a [`crate::path::RelPath`] and never follows
-//!   reparse points below the handle.
+//!   reparse points below the handle. Reading and writing are separate capabilities: [`Dir`]
+//!   reads, [`DirWrite`] writes direct children of its handle (ADR 0017).
 //! - `sys::fake` emulates Win32 semantics (case handling, error kinds, handle identity). The
 //!   contract tests in `sys::contract` check this; they also run against `sys::win`.
-//! - `sys::win` (Windows only) is the real file system and registry, **read-only in phase 1**:
-//!   every writing `Dir` and `Registry` method returns `Unsupported`; the real known folders;
+//! - `sys::win` (Windows only) is the real file system and registry, **read side so far**:
+//!   every writing `DirWrite` and `Registry` method returns `Unsupported` (ADR 0017,
+//!   ADR 0018); the real known folders;
 //!   the real CPU topology (ADR 0010); and the real graphics adapters (DXGI, ADR 0008
 //!   amendment). `unsafe` exists only in its modules `nt`, `token`, `reg`, `shell`, `cpu`,
 //!   `loader` and `dxgi`.
@@ -37,7 +39,7 @@ pub mod fake;
 pub mod win;
 
 pub use error::{SysError, SysErrorKind, SysResult, shown_target};
-pub use fs::{Dir, Fs};
+pub use fs::{Dir, DirWrite, Fs};
 pub use gpu::{DriverVersion, Gpu, GpuAdapter};
 pub use known_folders::{KnownFolder, KnownFolders};
 pub use registry::Registry;

@@ -332,25 +332,7 @@ impl Dir for EndlessDir {
     fn read_dir(&self, _: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
         unsupported()
     }
-    fn create_new(&self, _: &RelPath, _: &[u8]) -> SysResult<()> {
-        unsupported()
-    }
-    fn replace(&self, _: &RelPath, _: &[u8], _: &str) -> SysResult<()> {
-        unsupported()
-    }
-    fn create_dir(&self, _: &RelPath) -> SysResult<()> {
-        unsupported()
-    }
-    fn remove_file(&self, _: &RelPath) -> SysResult<()> {
-        unsupported()
-    }
-    fn remove_dir(&self, _: &RelPath) -> SysResult<()> {
-        unsupported()
-    }
-    fn rename(&self, _: &RelPath, _: &RelPath) -> SysResult<()> {
-        unsupported()
-    }
-    fn set_readonly(&self, _: &RelPath, _: bool) -> SysResult<()> {
+    fn users(&self, _: &RelPath) -> SysResult<Vec<u32>> {
         unsupported()
     }
 }

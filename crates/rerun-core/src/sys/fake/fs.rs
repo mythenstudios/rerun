@@ -17,7 +17,11 @@
 //! - No 8.3 short names, no stripping of trailing dots or spaces: raw names (see
 //!   [`FakeFs::put_raw_file`]) are stored exactly as given.
 //! - No share modes and no sharing violations (`Busy`): open handles never block a rename
-//!   or delete. A handle to a deleted directory returns `NotFound`.
+//!   or delete, and [`Dir::users`] always reports no users. A handle to a deleted directory
+//!   returns `NotFound`.
+//! - The write side ([`DirWrite`]) is not modelled yet: [`DirWrite::open_dir_write`] opens a
+//!   handle like [`Dir::open_dir`], every writing method returns `Unsupported` (ADR 0017).
+//!   Tests change the tree through the setup and attacker helpers of [`FakeFs`].
 //! - No ACLs and no elevation: `user_writable` ([`FakeFs::set_user_writable`]) is reported
 //!   in [`RootInfo`] but not enforced.
 //! - No alternate data streams.
@@ -38,18 +42,12 @@
 //!   itself (no separate directory underneath), the file system and file IDs stay those of
 //!   the drive, and the setup helpers walk through it without refusing.
 //! - Restricted entries ([`FakeFs::set_restricted`]) are a flag, not an ACL: every open of
-//!   one, every walk through it and every write to it (`replace`, `remove_*`, `rename`,
-//!   `set_readonly`) is `AccessDenied`, including `Fs::open_dir`. On Windows, deleting such an
-//!   entry can still succeed through the parent's `FILE_DELETE_CHILD`; the fake refuses
-//!   (only stricter). The setup helpers ignore the flag (they act like an administrator).
+//!   one and every walk through it is `AccessDenied`, including `Fs::open_dir`. The setup
+//!   helpers ignore the flag (they act like an administrator).
 //! - Volumes: the file system is NTFS unless set with [`FakeFs::set_fs_kind`]; it only
 //!   changes what [`RootInfo`] reports, not the behaviour.
-//! - `remove_file` removes any reparse point (file or directory link, like a handle-based
-//!   delete), `remove_dir` only directory links.
 //! - Hooks fire only for [`Dir`] operations, never for `Fs::open_dir` or the setup helpers,
 //!   and never reentrantly (a hook that calls into the fake does not trigger itself).
-//! - `replace` runs its phases (create temp, rename old, rename temp, delete old) as separate
-//!   lock sections with hook events in between; the checks are the same as on Windows.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -61,7 +59,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use crate::fold::fold;
 use crate::path::RelPath;
 use crate::sys::fs::{
-    Attrs, Dir, DirEntry, EntryKind, Fs, FsKind, Metadata, ReadSeek, ReparseInfo, RootInfo, tag,
+    Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, Fs, FsKind, Metadata, NewFile, ReadSeek,
+    ReparseInfo, RootInfo, Written, tag,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
@@ -82,32 +81,14 @@ pub enum FsOp {
     OpenRead,
     /// `Dir::read_dir`.
     ReadDir,
-    /// `Dir::create_new`.
-    CreateNew,
-    /// `Dir::replace`, walk to the target.
-    Replace,
-    /// `Dir::replace`, before renaming the old file to `<tmp>.old`.
-    ReplaceRenameOld,
-    /// `Dir::replace`, before renaming `<tmp>` onto the target.
-    ReplaceRenameTmp,
-    /// `Dir::replace`, before deleting `<tmp>.old`.
-    ReplaceDeleteOld,
-    /// `Dir::create_dir`.
-    CreateDir,
-    /// `Dir::remove_file`.
-    RemoveFile,
-    /// `Dir::remove_dir`.
-    RemoveDir,
-    /// `Dir::rename`, walk to the source.
-    Rename,
-    /// `Dir::rename`, walk to the destination.
-    RenameTarget,
-    /// `Dir::set_readonly`.
-    SetReadonly,
+    /// `Dir::users`.
+    Users,
+    /// `DirWrite::open_dir_write`.
+    OpenDirWrite,
 }
 
 /// A step of an operation: fires before component `index` (0-based) of the relative path is
-/// looked up. For the `Replace*` phases, `index` is 0 and `name` is the affected entry.
+/// looked up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepEvent {
     /// Operation.
@@ -179,7 +160,6 @@ struct Inode {
 struct LinkData {
     tag: u32,
     target: String,
-    is_dir: bool,
     restricted: bool,
 }
 
@@ -326,15 +306,6 @@ impl State {
             Some(_) => Err(err(SysErrorKind::InvalidPath, target)),
             None => Err(err(SysErrorKind::NotFound, target)),
         }
-    }
-
-    /// The parent of an entry that is about to be written: a live, case-insensitive directory.
-    fn writable_dir(&self, id: NodeId, target: &str) -> SysResult<&DirData> {
-        let d = self.dir(id, target)?;
-        if d.case_sensitive {
-            return Err(err(SysErrorKind::Unsupported, target));
-        }
-        Ok(d)
     }
 
     fn lookup(&self, dir: NodeId, name: &str, target: &str) -> SysResult<Option<NodeId>> {
@@ -554,12 +525,6 @@ impl State {
             node.name = name.to_owned();
         }
         Ok(())
-    }
-
-    /// The current name of `id` if it still is the entry `folded` in `parent`.
-    fn entry_at(&self, id: NodeId, parent: NodeId, folded: &str) -> Option<String> {
-        let n = self.nodes.get(&id)?;
-        (n.parent == Some(parent) && fold(&n.name) == folded).then(|| n.name.clone())
     }
 
     /// Removes a directory entry; the content goes when its last link goes.
@@ -910,13 +875,8 @@ impl FakeFs {
     }
 
     /// Creates a name surrogate (junction, symlink) with a target. The target need not exist.
-    pub fn put_link(
-        &self,
-        abs: &Path,
-        reparse_tag: u32,
-        target: &str,
-        is_dir: bool,
-    ) -> SysResult<()> {
+    /// Directory and file links behave alike (see the module docs).
+    pub fn put_link(&self, abs: &Path, reparse_tag: u32, target: &str) -> SysResult<()> {
         let shown = abs.display().to_string();
         if !tag::is_surrogate(reparse_tag) {
             return Err(err(SysErrorKind::InvalidPath, &shown));
@@ -927,7 +887,6 @@ impl FakeFs {
         let body = Body::Link(LinkData {
             tag: reparse_tag,
             target: target.to_owned(),
-            is_dir,
             restricted: false,
         });
         st.insert(parent, &name, body, &shown).map(|_| ())
@@ -1069,7 +1028,6 @@ impl FakeFs {
         let body = Body::Link(LinkData {
             tag: tag::MOUNT_POINT,
             target: target.to_owned(),
-            is_dir: true,
             restricted: false,
         });
         st.insert(parent, &name, body, &shown)?;
@@ -1097,6 +1055,28 @@ impl FakeFs {
         st.move_node(src, parent, &name, &shown)
     }
 
+    /// Attacker or setup: deletes the entry at `abs` by absolute path: a file (one hard link
+    /// of it), a link itself (never its target) or an empty directory. A directory with
+    /// entries is `NotEmpty`, a drive root `AccessDenied`. Handles to a deleted directory
+    /// return `NotFound` afterwards.
+    pub fn remove_abs(&self, abs: &Path) -> SysResult<()> {
+        let mut st = self.lock();
+        let id = st.require_abs(abs)?;
+        match st.nodes.get(&id) {
+            Some(Node { parent: None, .. }) => {
+                return Err(SysError::path(SysErrorKind::AccessDenied, abs));
+            }
+            Some(Node {
+                body: Body::Dir(d), ..
+            }) if !d.children.is_empty() => {
+                return Err(SysError::path(SysErrorKind::NotEmpty, abs));
+            }
+            _ => {}
+        }
+        st.unlink(id);
+        Ok(())
+    }
+
     /// Changes the target of an existing link.
     pub fn retarget(&self, abs: &Path, target: &str) -> SysResult<()> {
         let mut st = self.lock();
@@ -1122,7 +1102,7 @@ impl FakeFs {
 }
 
 impl Fs for FakeFs {
-    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn Dir + '_>> {
+    fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn DirWrite + '_>> {
         let shown = abs.display().to_string();
         let (drive, segs) = parse_abs(abs)?;
         let node = self.lock().resolve_follow(drive, &segs, 0, &shown)?;
@@ -1262,184 +1242,56 @@ impl Dir for FakeDir {
             .collect()
     }
 
-    fn create_new(&self, p: &RelPath, data: &[u8]) -> SysResult<()> {
+    fn users(&self, p: &RelPath) -> SysResult<Vec<u32>> {
         let t = p.as_str();
-        let (parent, name) = self.split(FsOp::CreateNew, p)?;
-        let mut st = self.fs.lock();
-        st.writable_dir(parent, t)?;
-        st.new_file(parent, name, data, t).map(|_| ())
-    }
-
-    fn replace(&self, p: &RelPath, data: &[u8], tmp: &str) -> SysResult<()> {
-        let t = p.as_str();
-        let old = format!("{tmp}.old");
-        if RelPath::from_segment(tmp).is_err() || RelPath::from_segment(&old).is_err() {
-            return Err(err(SysErrorKind::InvalidPath, tmp));
-        }
-        let (parent, name) = self.split(FsOp::Replace, p)?;
-        let folded = fold(name);
-        if fold(tmp) == folded || fold(&old) == folded {
-            return Err(err(SysErrorKind::InvalidPath, tmp));
-        }
-
-        // Phase 1: check the target, create the temp file (FILE_CREATE).
-        let (target, tmp_id) = {
-            let mut st = self.fs.lock();
-            st.writable_dir(parent, t)?;
-            let target = Self::require(&st, parent, name, t)?;
-            st.openable(target, t)?;
-            match st.nodes.get(&target).map(|n| &n.body) {
-                Some(Body::Dir(_)) => return Err(err(SysErrorKind::AccessDenied, t)),
-                Some(Body::File(ino)) if st.tag_allowed(*ino) => {
-                    if st.inode(*ino, t)?.attrs.readonly {
-                        return Err(err(SysErrorKind::AccessDenied, t));
-                    }
-                }
-                _ => return Err(err(SysErrorKind::ReparsePoint, t)),
-            }
-            let tmp_id = st.new_file(parent, tmp, data, tmp)?;
-            (target, tmp_id)
-        };
-
-        // Phase 2: old file → `<tmp>.old` (by handle, into the parent).
-        self.fs.fire(FsOp::ReplaceRenameOld, 0, &old);
-        let target_name = {
-            let mut st = self.fs.lock();
-            let (Some(target_name), Some(_)) = (
-                st.entry_at(target, parent, &folded),
-                st.entry_at(tmp_id, parent, &fold(tmp)),
-            ) else {
-                // Renamed or moved by someone else: never pull it back.
-                st.unlink(tmp_id);
-                return Err(err(SysErrorKind::Busy, t));
-            };
-            if let Err(e) = st.move_node(target, parent, &old, &old) {
-                st.unlink(tmp_id);
-                return Err(e);
-            }
-            target_name
-        };
-
-        // Phase 3: `<tmp>` → target name, never overwriting.
-        self.fs.fire(FsOp::ReplaceRenameTmp, 0, &target_name);
-        {
-            let mut st = self.fs.lock();
-            if st.entry_at(target, parent, &fold(&old)).is_none()
-                || st.entry_at(tmp_id, parent, &fold(tmp)).is_none()
-            {
-                st.unlink(tmp_id);
-                return Err(err(SysErrorKind::Busy, t));
-            }
-            st.move_node(tmp_id, parent, &target_name, t)?;
-        }
-
-        // Phase 4: delete `<tmp>.old` by handle.
-        self.fs.fire(FsOp::ReplaceDeleteOld, 0, &old);
-        let mut st = self.fs.lock();
-        let ino = match st.nodes.get(&target).map(|n| &n.body) {
-            Some(Body::File(ino)) => *ino,
-            _ => return Ok(()),
-        };
-        if st.inode(ino, &old)?.attrs.readonly {
-            return Err(err(SysErrorKind::AccessDenied, &old));
-        }
-        st.unlink(target);
-        Ok(())
-    }
-
-    fn create_dir(&self, p: &RelPath) -> SysResult<()> {
-        let t = p.as_str();
-        let (parent, name) = self.split(FsOp::CreateDir, p)?;
-        let mut st = self.fs.lock();
-        let uw = st.writable_dir(parent, t)?.user_writable;
-        st.insert(parent, name, Body::Dir(DirData::new(uw)), t)
-            .map(|_| ())
-    }
-
-    fn remove_file(&self, p: &RelPath) -> SysResult<()> {
-        let t = p.as_str();
-        let (parent, name) = self.split(FsOp::RemoveFile, p)?;
-        let mut st = self.fs.lock();
-        st.writable_dir(parent, t)?;
+        let (parent, name) = self.split(FsOp::Users, p)?;
+        let st = self.fs.lock();
         let id = Self::require(&st, parent, name, t)?;
         st.openable(id, t)?;
-        match (st.kind(id), st.nodes.get(&id).map(|n| &n.body)) {
-            (_, Some(Body::Dir(_))) => return Err(err(SysErrorKind::AccessDenied, t)),
-            (EntryKind::File, Some(Body::File(ino))) if st.inode(*ino, t)?.attrs.readonly => {
-                return Err(err(SysErrorKind::AccessDenied, t));
-            }
-            _ => {}
+        match st.rel_kind(id) {
+            // No share model yet: nobody ever holds a file.
+            EntryKind::File => Ok(Vec::new()),
+            EntryKind::Dir => Err(err(SysErrorKind::AccessDenied, t)),
+            EntryKind::Reparse => Err(err(SysErrorKind::ReparsePoint, t)),
         }
-        st.unlink(id);
-        Ok(())
+    }
+}
+
+/// Every writing method of the fake until its write side exists (ADR 0017).
+fn no_write<T>(target: &str) -> SysResult<T> {
+    Err(err(
+        SysErrorKind::Unsupported,
+        &format!("{target}: the fake write side is not implemented yet"),
+    ))
+}
+
+impl DirWrite for FakeDir {
+    fn open_dir_write(&self, p: &RelPath) -> SysResult<Box<dyn DirWrite + '_>> {
+        let segs: Vec<&str> = p.segments().collect();
+        let node = self.walk(FsOp::OpenDirWrite, &segs, p.as_str())?;
+        Ok(Box::new(FakeDir {
+            fs: self.fs.clone(),
+            node,
+        }))
     }
 
-    fn remove_dir(&self, p: &RelPath) -> SysResult<()> {
-        let t = p.as_str();
-        let (parent, name) = self.split(FsOp::RemoveDir, p)?;
-        let mut st = self.fs.lock();
-        st.writable_dir(parent, t)?;
-        let id = Self::require(&st, parent, name, t)?;
-        st.openable(id, t)?;
-        match st.nodes.get(&id).map(|n| &n.body) {
-            Some(Body::Dir(d)) if !d.children.is_empty() => {
-                return Err(err(SysErrorKind::NotEmpty, t));
-            }
-            Some(Body::Dir(d)) if d.attrs.readonly => {
-                return Err(err(SysErrorKind::AccessDenied, t));
-            }
-            Some(Body::Dir(_) | Body::Link(LinkData { is_dir: true, .. })) => {}
-            _ => return Err(err(SysErrorKind::InvalidPath, t)),
-        }
-        st.unlink(id);
-        Ok(())
+    fn guard(&self, name: &RelPath) -> SysResult<Box<dyn FileGuard + '_>> {
+        no_write(name.as_str())
     }
 
-    fn rename(&self, from: &RelPath, to: &RelPath) -> SysResult<()> {
-        let (fp, fname) = self.split(FsOp::Rename, from)?;
-        let (tp, tname) = self.split(FsOp::RenameTarget, to)?;
-        let (tf, tt) = (from.as_str(), to.as_str());
-        let mut st = self.fs.lock();
-        st.writable_dir(fp, tf)?;
-        st.writable_dir(tp, tt)?;
-        let src = Self::require(&st, fp, fname, tf)?;
-        st.openable(src, tf)?;
-        if let Some(existing) = st.lookup(tp, tname, tt)? {
-            if existing != src {
-                return Err(err(SysErrorKind::AlreadyExists, tt));
-            }
-        } else if matches!(st.nodes.get(&src).map(|n| &n.body), Some(Body::Dir(_)))
-            && st.is_ancestor_or_self(src, tp)
-        {
-            return Err(err(SysErrorKind::InvalidPath, tt));
-        }
-        st.move_node(src, tp, tname, tt)
+    fn create_new(&self, name: &RelPath, _: &mut dyn Read, _: &NewFile) -> SysResult<Written> {
+        no_write(name.as_str())
     }
 
-    fn set_readonly(&self, p: &RelPath, ro: bool) -> SysResult<()> {
-        let t = p.as_str();
-        let (parent, name) = self.split(FsOp::SetReadonly, p)?;
-        let mut st = self.fs.lock();
-        st.writable_dir(parent, t)?;
-        let id = Self::require(&st, parent, name, t)?;
-        st.openable(id, t)?;
-        let kind = st.kind(id);
-        let ino = match st.nodes.get_mut(&id).map(|n| &mut n.body) {
-            Some(Body::Dir(d)) if d.plain() && !d.volume_root => {
-                d.attrs.readonly = ro;
-                return Ok(());
-            }
-            Some(Body::File(ino)) if kind == EntryKind::File => *ino,
-            _ => return Err(err(SysErrorKind::ReparsePoint, t)),
-        };
-        let i = st
-            .inodes
-            .get_mut(&ino)
-            .ok_or_else(|| err(SysErrorKind::NotFound, t))?;
-        if i.links > 1 {
-            return Err(err(SysErrorKind::Linked, t));
-        }
-        i.attrs.readonly = ro;
-        Ok(())
+    fn create_dir(&self, name: &RelPath) -> SysResult<u128> {
+        no_write(name.as_str())
+    }
+
+    fn remove_dir(&self, name: &RelPath, _: u128) -> SysResult<()> {
+        no_write(name.as_str())
+    }
+
+    fn flush(&self) -> SysResult<()> {
+        no_write(&self.handle_target())
     }
 }
