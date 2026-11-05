@@ -61,28 +61,9 @@ pub(super) fn kind_of_ntstatus(status: NtStatus) -> SysErrorKind {
     }
 }
 
-/// Classifies a Win32 error code (winerror.h).
-pub(super) fn kind_of_win32(code: u32) -> SysErrorKind {
-    match code {
-        // FILE_NOT_FOUND, PATH_NOT_FOUND
-        2 | 3 => SysErrorKind::NotFound,
-        // ACCESS_DENIED, WRITE_PROTECT
-        5 | 19 => SysErrorKind::AccessDenied,
-        // INVALID_NAME, BAD_PATHNAME, FILENAME_EXCED_RANGE, DIRECTORY
-        123 | 161 | 206 | 267 => SysErrorKind::InvalidPath,
-        // CANT_ACCESS_FILE, CANT_RESOLVE_FILENAME
-        1920 | 1921 => SysErrorKind::ReparsePoint,
-        // SHARING_VIOLATION, LOCK_VIOLATION
-        32 | 33 => SysErrorKind::Busy,
-        // FILE_EXISTS, ALREADY_EXISTS
-        80 | 183 => SysErrorKind::AlreadyExists,
-        // DIR_NOT_EMPTY
-        145 => SysErrorKind::NotEmpty,
-        // INVALID_FUNCTION, NOT_SUPPORTED
-        1 | 50 => SysErrorKind::Unsupported,
-        _ => SysErrorKind::Other,
-    }
-}
+/// Classifies a Win32 error code (winerror.h). Lives in `sys::error`, which also maps the
+/// codes inside `std::io::Error`s of reads on a handle ([`SysError::io`](crate::sys::SysError::io)).
+pub(super) use crate::sys::error::kind_of_win32;
 
 /// Like [`kind_of_win32`], for a query of an information class: `ERROR_INVALID_PARAMETER`
 /// there means the class is not supported by the file system.

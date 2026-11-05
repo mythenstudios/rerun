@@ -431,7 +431,7 @@ fn hash_file(dir: &dyn Dir, p: &RelPath) -> SysResult<[u8; 32]> {
     loop {
         let n = reader
             .read(&mut buf)
-            .map_err(|_| SysError::new(SysErrorKind::Other, p.as_str()))?;
+            .map_err(|e| SysError::io(&e, p.as_str()))?;
         if n == 0 {
             break;
         }
@@ -473,9 +473,10 @@ fn walk_key(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Read, Seek, SeekFrom};
     use std::path::PathBuf;
 
-    use super::{Loc, SnapEntry, walk_dir};
+    use super::{Loc, SnapEntry, hash_file, walk_dir};
     use crate::path::RelPath;
     use crate::sys::fs::{Attrs, Dir, DirEntry, EntryKind, Metadata, ReadSeek, RootInfo};
     use crate::sys::{SysError, SysErrorKind, SysResult};
@@ -555,5 +556,59 @@ mod tests {
                 .iter()
                 .all(|e| matches!(e, SnapEntry::Anomaly { .. }))
         );
+    }
+
+    /// A directory whose only file fails to read like `ReadFile` on a locked range
+    /// (`ERROR_LOCK_VIOLATION`, 33). Every other call fails.
+    #[derive(Debug)]
+    struct Locked;
+
+    struct LockedReader;
+
+    impl Read for LockedReader {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from_raw_os_error(33))
+        }
+    }
+
+    impl Seek for LockedReader {
+        fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    impl Dir for Locked {
+        fn info(&self) -> SysResult<RootInfo> {
+            no()
+        }
+        fn open_dir(&self, _: &RelPath) -> SysResult<Box<dyn Dir + '_>> {
+            no()
+        }
+        fn metadata(&self, _: &RelPath) -> SysResult<Option<Metadata>> {
+            no()
+        }
+        fn open_read(&self, _: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>> {
+            Ok(Box::new(LockedReader))
+        }
+        fn read_dir(&self, _: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
+            no()
+        }
+        fn users(&self, _: &RelPath) -> SysResult<Vec<u32>> {
+            no()
+        }
+    }
+
+    #[test]
+    fn a_failed_read_keeps_its_win32_code() {
+        let p = RelPath::parse(r"Data\a.forge").unwrap();
+        for e in [
+            hash_file(&Locked, &p).unwrap_err(),
+            Locked.read(&p).unwrap_err(),
+        ] {
+            assert_eq!(
+                (e.kind, e.win32, e.target.as_str()),
+                (SysErrorKind::Busy, Some(33), r"Data\a.forge")
+            );
+        }
     }
 }

@@ -1,6 +1,7 @@
 //! Error type of the system layer.
 
 use std::fmt;
+use std::io;
 use std::path::Path;
 
 use crate::escape;
@@ -88,6 +89,23 @@ impl SysError {
         Self::new(kind, path.display().to_string())
     }
 
+    /// From an `io::Error` of a read on a handle (`Read` of a [`Dir::open_read`] reader).
+    /// The raw OS error, a Win32 code from `ReadFile` on Windows, is kept in
+    /// [`Self::win32`] and classified like every Win32 code of `sys` (sharing or lock
+    /// violation `Busy`, access denied `AccessDenied`, …); an error without one (from a test
+    /// reader) is classified by its [`io::ErrorKind`]. The message is never kept.
+    ///
+    /// [`Dir::open_read`]: crate::sys::Dir::open_read
+    pub fn io(e: &io::Error, target: impl Into<String>) -> Self {
+        match e.raw_os_error() {
+            Some(raw) => {
+                let code = raw.cast_unsigned();
+                Self::new(kind_of_win32(code), target).with_win32(code)
+            }
+            None => Self::new(kind_of_io(e.kind()), target),
+        }
+    }
+
     /// Attaches the original Win32 code.
     #[must_use]
     pub fn with_win32(mut self, code: u32) -> Self {
@@ -110,6 +128,40 @@ impl SysError {
     }
 }
 
+/// Classifies a Win32 error code (winerror.h).
+pub(crate) fn kind_of_win32(code: u32) -> SysErrorKind {
+    match code {
+        // FILE_NOT_FOUND, PATH_NOT_FOUND
+        2 | 3 => SysErrorKind::NotFound,
+        // ACCESS_DENIED, WRITE_PROTECT
+        5 | 19 => SysErrorKind::AccessDenied,
+        // INVALID_NAME, BAD_PATHNAME, FILENAME_EXCED_RANGE, DIRECTORY
+        123 | 161 | 206 | 267 => SysErrorKind::InvalidPath,
+        // CANT_ACCESS_FILE, CANT_RESOLVE_FILENAME
+        1920 | 1921 => SysErrorKind::ReparsePoint,
+        // SHARING_VIOLATION, LOCK_VIOLATION
+        32 | 33 => SysErrorKind::Busy,
+        // FILE_EXISTS, ALREADY_EXISTS
+        80 | 183 => SysErrorKind::AlreadyExists,
+        // DIR_NOT_EMPTY
+        145 => SysErrorKind::NotEmpty,
+        // INVALID_FUNCTION, NOT_SUPPORTED
+        1 | 50 => SysErrorKind::Unsupported,
+        _ => SysErrorKind::Other,
+    }
+}
+
+/// Classifies an `io::Error` without an OS error code.
+fn kind_of_io(kind: io::ErrorKind) -> SysErrorKind {
+    match kind {
+        io::ErrorKind::NotFound => SysErrorKind::NotFound,
+        io::ErrorKind::PermissionDenied => SysErrorKind::AccessDenied,
+        io::ErrorKind::AlreadyExists => SysErrorKind::AlreadyExists,
+        io::ErrorKind::Unsupported => SysErrorKind::Unsupported,
+        _ => SysErrorKind::Other,
+    }
+}
+
 /// `target` as it is if it holds no escapable character, otherwise escaped with
 /// [`escape::path`] (ADR 0016): `{:?}`-quoted, and every control, format, default-ignorable,
 /// noncharacter, private use or confusable character
@@ -125,6 +177,7 @@ pub type SysResult<T> = Result<T, SysError>;
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::path::Path;
 
     use super::{SysError, SysErrorKind, shown_target};
@@ -135,6 +188,28 @@ mod tests {
     fn clean(s: &str) -> bool {
         !s.chars()
             .any(|c| c.is_control() || is_deceptive(c) || crate::escape::in_base_set(c))
+    }
+
+    #[test]
+    fn io_errors_keep_their_os_code() {
+        for (code, kind) in [
+            (32, SysErrorKind::Busy),
+            (33, SysErrorKind::Busy),
+            (5, SysErrorKind::AccessDenied),
+            (23, SysErrorKind::Other),
+        ] {
+            let e = SysError::io(&io::Error::from_raw_os_error(code), "f.bin");
+            assert_eq!(
+                (e.kind, e.win32, e.target.as_str()),
+                (kind, Some(code.cast_unsigned()), "f.bin"),
+                "{code}"
+            );
+        }
+        let e = SysError::io(&io::Error::new(io::ErrorKind::InvalidData, "SECRET"), "f");
+        assert_eq!((e.kind, e.win32), (SysErrorKind::Other, None));
+        assert!(!format!("{e} {e:?}").contains("SECRET"));
+        let e = SysError::io(&io::Error::from(io::ErrorKind::PermissionDenied), "f");
+        assert_eq!(e.kind, SysErrorKind::AccessDenied);
     }
 
     #[test]

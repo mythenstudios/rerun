@@ -48,7 +48,7 @@
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
-use super::{SysError, SysErrorKind, SysResult};
+use super::{SysError, SysResult};
 use crate::path::RelPath;
 
 /// Reparse tags known to Rerun.
@@ -283,7 +283,7 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
         let mut buf = Vec::new();
         reader
             .read_to_end(&mut buf)
-            .map_err(|_| SysError::new(SysErrorKind::Other, p.as_str()))?;
+            .map_err(|e| SysError::io(&e, p.as_str()))?;
         Ok(buf)
     }
 
