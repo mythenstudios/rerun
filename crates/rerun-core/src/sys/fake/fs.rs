@@ -75,6 +75,9 @@
 //!   ([`FakeFs::fault`], [`Fault`]); after a crash every call of Rerun fails until
 //!   [`FakeFs::restart`], which closes Rerun's handles by origin. Fixture and attacker
 //!   helpers are never counted, faulted or blocked.
+//! - **Power loss** (ADR 0019 amendment, `fs/durable.rs`): one ordered log of Rerun's
+//!   metadata changes per volume, made durable by flushes; [`FakeFs::power_loss`] keeps any
+//!   prefix of the unflushed part per volume and resets content to the last flushed.
 //! - Hooks fire only for [`Dir`] operations and the write primitives, never for
 //!   `Fs::open_dir` or the setup helpers, and never reentrantly (a hook that calls into the
 //!   fake does not trigger itself).
@@ -95,9 +98,12 @@ use crate::sys::fs::{
 };
 use crate::sys::{SysError, SysErrorKind, SysResult, seq};
 
+mod durable;
 mod prim;
 
 pub use prim::FakeFile;
+
+use durable::VolLog;
 
 type NodeId = u64;
 
@@ -217,7 +223,7 @@ pub struct StepEvent {
 /// Test hook, see [`FakeFs::on_step`].
 pub type StepHook = Box<dyn FnMut(&FakeFs, &StepEvent) + Send>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct DirData {
     /// Child key (folded, or exact in a case-sensitive directory) → node.
     children: BTreeMap<String, NodeId>,
@@ -260,9 +266,11 @@ impl DirData {
 }
 
 /// File content shared by all hard links.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Inode {
     data: Vec<u8>,
+    /// Content as of the last flush (ADR 0019 amendment): what a power loss leaves.
+    durable: Vec<u8>,
     attrs: Attrs,
     tag: Option<u32>,
     links: u32,
@@ -271,14 +279,14 @@ struct Inode {
     restricted: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct LinkData {
     tag: u32,
     target: String,
     restricted: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Body {
     Dir(DirData),
     /// Directory entry of a file; the value is the inode.
@@ -287,7 +295,7 @@ enum Body {
     Link(LinkData),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node {
     parent: Option<NodeId>,
     /// Name in its original case; `X:` for a drive root.
@@ -367,6 +375,8 @@ struct State {
     next_open: OpenId,
     opens: BTreeMap<OpenId, OpenRec>,
     faults: Faults,
+    /// Per-volume logs of Rerun's metadata changes (power-loss model, `fs/durable.rs`).
+    logs: BTreeMap<char, VolLog>,
 }
 
 fn err(kind: SysErrorKind, target: &str) -> SysError {
@@ -691,6 +701,7 @@ impl State {
             ino,
             Inode {
                 data: data.to_vec(),
+                durable: data.to_vec(),
                 attrs: Attrs::default(),
                 tag: None,
                 links: 1,
@@ -851,6 +862,9 @@ impl State {
                 },
             };
             if still {
+                if rec.origin == Origin::Rerun {
+                    self.log_unlink(node);
+                }
                 self.unlink(node);
             }
         }
@@ -1399,6 +1413,7 @@ impl FakeFs {
                     st.check_share(st.obj_of(id), Access::WRITE, Share::RWD, &shown)?;
                     if let Some(i) = st.inodes.get_mut(&ino) {
                         i.data = data.to_vec();
+                        i.durable = data.to_vec();
                     }
                     Ok(())
                 }

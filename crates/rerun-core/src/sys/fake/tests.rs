@@ -3,6 +3,7 @@
     reason = "tests of the fake open directories by absolute path"
 )]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2731,6 +2732,33 @@ fn recover_replace(g: &dyn DirWrite, tmp: &TmpName) -> Phase {
     }
 }
 
+/// Recovery of `op` after a crash or a power loss, with the API only (A3): whether the op
+/// ended `After` (else `Before`), and the phase of a replace. Panics on `Foreign`.
+fn recover_op(g: &dyn DirWrite, op: WriteOp, what: &str) -> (bool, Option<Phase>) {
+    let x = op_tmp().to_rel();
+    match op {
+        WriteOp::Replace => {
+            let phase = recover_replace(g, &op_tmp());
+            assert_ne!(phase, Phase::Foreign, "{what}");
+            (matches!(phase, Phase::C | Phase::D), Some(phase))
+        }
+        WriteOp::CreateNew => match guarded_hash(g, &r("n.bin")) {
+            None => {
+                delete_tmp(g, &x);
+                (false, None)
+            }
+            Some(Some(h)) if h == sha(b"new") => {
+                assert!(g.metadata(&x).unwrap().is_none(), "{what}: X absent");
+                (true, None)
+            }
+            other => panic!("{what}: Foreign {other:?}"),
+        },
+        WriteOp::Delete => (g.metadata(&r("t.bin")).unwrap().is_none(), None),
+        WriteOp::CreateDir => (g.metadata(&r("nd")).unwrap().is_some(), None),
+        WriteOp::RemoveDir => (g.metadata(&r("d")).unwrap().is_none(), None),
+    }
+}
+
 #[test]
 fn f7_s7_a_crash_after_any_primitive_recovers_to_before_or_after() {
     let before = tree(&op_system(), r"C:\G");
@@ -2757,37 +2785,19 @@ fn f7_s7_a_crash_after_any_primitive_recovers_to_before_or_after() {
             }
             fx.restart();
             let g = open(&sys, r"C:\G");
-            let x = op_tmp().to_rel();
-            let result_after = match op {
-                WriteOp::Replace => {
-                    let phase = recover_replace(&*g, &op_tmp());
-                    phases.push(phase);
-                    assert_ne!(phase, Phase::Foreign, "{what}");
-                    if matches!(phase, Phase::C | Phase::D) {
-                        // X is left in C and D: a file there is not ours.
-                        fx.put_file(&p(&format!(r"C:\G\{planted}")), b"planted")
-                            .unwrap();
-                        assert_eq!(recover_replace(&*g, &op_tmp()), Phase::D, "{what}");
-                        assert_eq!(g.read(&x).unwrap(), b"planted", "{what}");
-                        fx.remove_abs(&p(&format!(r"C:\G\{planted}"))).unwrap();
-                    }
-                    matches!(phase, Phase::C | Phase::D)
+            let (result_after, phase) = recover_op(&*g, op, &what);
+            if let Some(phase) = phase {
+                phases.push(phase);
+                if matches!(phase, Phase::C | Phase::D) {
+                    // X is left in C and D: a file there is not ours.
+                    let x = op_tmp().to_rel();
+                    fx.put_file(&p(&format!(r"C:\G\{planted}")), b"planted")
+                        .unwrap();
+                    assert_eq!(recover_replace(&*g, &op_tmp()), Phase::D, "{what}");
+                    assert_eq!(g.read(&x).unwrap(), b"planted", "{what}");
+                    fx.remove_abs(&p(&format!(r"C:\G\{planted}"))).unwrap();
                 }
-                WriteOp::CreateNew => match guarded_hash(&*g, &r("n.bin")) {
-                    None => {
-                        delete_tmp(&*g, &x);
-                        false
-                    }
-                    Some(Some(h)) if h == sha(b"new") => {
-                        assert!(g.metadata(&x).unwrap().is_none(), "{what}: X absent");
-                        true
-                    }
-                    other => panic!("{what}: Foreign {other:?}"),
-                },
-                WriteOp::Delete => g.metadata(&r("t.bin")).unwrap().is_none(),
-                WriteOp::CreateDir => g.metadata(&r("nd")).unwrap().is_some(),
-                WriteOp::RemoveDir => g.metadata(&r("d")).unwrap().is_none(),
-            };
+            }
             let expected = if result_after { &after } else { &before };
             assert_eq!(&tree(&sys, r"C:\G"), expected, "{what}");
         }
@@ -2862,4 +2872,132 @@ fn f8_f13_after_a_crash_rerun_is_dead_until_restart_and_others_live_on() {
     drop(other);
     drop(image);
     assert!(g2.users(&r("t.bin")).unwrap().is_empty());
+}
+
+// ---------- Power loss (ADR 0019 amendment, D-1) ----------
+
+/// Runs `op` on a fresh `C:\G`, crashing after `calls[i]` (or completing for `i == len`).
+fn run_until(sys: &FakeSystem, op: WriteOp, calls: &[Prim], i: usize) {
+    let g = open(sys, r"C:\G");
+    let fx = sys.fake_fs();
+    fx.clear_faults();
+    if let Some(call) = calls.get(i) {
+        fx.fault(*call, nth_of(calls, i), Fault::CrashAfter);
+    }
+    let _ = run_op(&*g, op);
+}
+
+#[test]
+fn f9_every_power_loss_cut_recovers_to_before_or_after() {
+    let before = tree(&op_system(), r"C:\G");
+    for op in WRITE_OPS {
+        let (calls, after) = trace_of(op);
+        let mut phases = Vec::new();
+        // A power loss at every step boundary (after each call, and after the whole op).
+        for i in 0..=calls.len() {
+            let pending = {
+                let sys = op_system();
+                run_until(&sys, op, &calls, i);
+                sys.fake_fs().pending('C')
+            };
+            for keep in 0..=pending {
+                let sys = op_system();
+                run_until(&sys, op, &calls, i);
+                sys.fake_fs().power_loss(&BTreeMap::from([('C', keep)]));
+                let what = format!("{op:?}: power loss after call {i} of {calls:?}, cut {keep}");
+                let g = open(&sys, r"C:\G");
+                let (is_after, phase) = recover_op(&*g, op, &what);
+                phases.extend(phase);
+                let expected = if is_after { &after } else { &before };
+                assert_eq!(&tree(&sys, r"C:\G"), expected, "{what}");
+            }
+        }
+        if op == WriteOp::Replace {
+            // The ordered log produces every phase, B included (D-1).
+            for ph in [Phase::A, Phase::B, Phase::C, Phase::D] {
+                assert!(phases.contains(&ph), "{ph:?} not reached: {phases:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn f9_flush_rules_for_create_new() {
+    // Step 5 flushes `<tmp>`: its creation and content are durable, the rename is not until
+    // the folder is flushed.
+    let sys = op_system();
+    let g = open(&sys, r"C:\G");
+    let fx = sys.fake_fs();
+    g.create_new(&r("n.bin"), &mut &b"new"[..], &nf(3, b"new"))
+        .unwrap();
+    assert_eq!(fx.pending('C'), 1);
+    g.flush().unwrap();
+    assert_eq!(fx.pending('C'), 0);
+    fx.power_loss(&BTreeMap::new());
+    assert_eq!(open(&sys, r"C:\G").read(&r("n.bin")).unwrap(), b"new");
+    // Unflushed content is lost: a file reads as its last flushed content.
+    let sys = op_system();
+    let g = open(&sys, r"C:\G");
+    let fx = sys.fake_fs();
+    let mut tmp = nf(4, b"new");
+    tmp.attrs.hidden = true;
+    fx.fault(Prim::SetAttrs, 1, Fault::CrashAfter);
+    assert!(g.create_new(&r("n.bin"), &mut &b"new"[..], &tmp).is_err());
+    let all = fx.pending('C');
+    assert_eq!(all, 2, "created and attributes, nothing flushed");
+    fx.power_loss(&BTreeMap::from([('C', all)]));
+    let g = open(&sys, r"C:\G");
+    let m = g.metadata(&tmp.tmp.to_rel()).unwrap().unwrap();
+    assert_eq!(
+        (m.len, m.attrs.hidden),
+        (0, true),
+        "the content was never flushed"
+    );
+}
+
+#[test]
+fn f9_two_volumes_are_ordered_only_by_flushes() {
+    let setup = || {
+        FakeSystem::builder()
+            .dir(r"C:\J")
+            .dir(r"D:\G")
+            .build()
+            .unwrap()
+    };
+    let act = |sys: &FakeSystem, flush_c: bool| {
+        let j = open(sys, r"C:\J");
+        j.create_new(&r("rec.bin"), &mut &b"intent"[..], &nf(5, b"intent"))
+            .unwrap();
+        if flush_c {
+            j.flush().unwrap();
+        }
+        open(sys, r"D:\G")
+            .create_new(&r("n.bin"), &mut &b"change"[..], &nf(6, b"change"))
+            .unwrap();
+    };
+    for flush_c in [true, false] {
+        let (pc, pd) = {
+            let sys = setup();
+            act(&sys, flush_c);
+            (sys.fake_fs().pending('C'), sys.fake_fs().pending('D'))
+        };
+        let mut violated = false;
+        for c in 0..=pc {
+            for d in 0..=pd {
+                let sys = setup();
+                act(&sys, flush_c);
+                sys.fake_fs()
+                    .power_loss(&BTreeMap::from([('C', c), ('D', d)]));
+                let on_c = open(&sys, r"C:\J")
+                    .metadata(&r("rec.bin"))
+                    .unwrap()
+                    .is_some();
+                let on_d = open(&sys, r"D:\G").metadata(&r("n.bin")).unwrap().is_some();
+                violated |= on_d && !on_c;
+            }
+        }
+        // With the flush of C: before the change on D:, every pair of cuts keeps the order;
+        // without it, some pair loses the intent but keeps the change.
+        assert_eq!(violated, !flush_c, "flush of C: {flush_c}");
+    }
 }

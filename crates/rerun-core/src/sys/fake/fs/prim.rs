@@ -3,6 +3,7 @@
 //! `FsOp::Write` and its [`Prim`] (without the state lock, so a hook can act as a racing
 //! program), then acts on the state under one lock acquisition.
 
+use super::durable::Undo;
 use super::{
     Body, DirData, FakeDir, FakeFs, NodeId, Obj, OpenId, OpenToken, Origin, Prim, State,
     crashed_err, err,
@@ -211,6 +212,7 @@ impl PrimDir for FakeDir {
             single(name)?;
             let node = st.new_file(self.node, name, &[], name)?;
             let obj = st.obj_of(node);
+            st.log_created(node, self.node);
             FakeFs::open_rerun(st, obj, TMP_ACCESS, Share::NONE, name)
         })?;
         Ok(self.fs.file(id))
@@ -224,7 +226,11 @@ impl PrimDir for FakeDir {
                     st.openable(n, name)?;
                     n
                 }
-                None => st.new_file(self.node, name, &[], name)?,
+                None => {
+                    let n = st.new_file(self.node, name, &[], name)?;
+                    st.log_created(n, self.node);
+                    n
+                }
             };
             let obj = st.obj_of(node);
             FakeFs::open_rerun(st, obj, Access::READ, Share::NONE, name)
@@ -236,13 +242,14 @@ impl PrimDir for FakeDir {
         self.prim(Prim::CreateDir, name, |st| {
             single(name)?;
             let user_writable = st.dir(self.node, name)?.user_writable;
-            st.insert(
+            let node = st.insert(
                 self.node,
                 name,
                 Body::Dir(DirData::new(user_writable)),
                 name,
-            )
-            .map(u128::from)
+            )?;
+            st.log_created(node, self.node);
+            Ok(u128::from(node))
         })
     }
 
@@ -271,17 +278,39 @@ impl PrimDir for FakeDir {
             if st.open_below(node) {
                 return Err(err(SysErrorKind::AccessDenied, name));
             }
-            match st.lookup(self.node, name, name)? {
-                Some(other) if other != node => Err(err(SysErrorKind::Busy, name)),
-                _ => st.move_node(node, self.node, name, name),
+            if matches!(st.lookup(self.node, name, name)?, Some(other) if other != node) {
+                return Err(err(SysErrorKind::Busy, name));
             }
+            let (from_parent, from_name) = match st.nodes.get(&node) {
+                Some(n) => (n.parent.unwrap_or(self.node), n.name.clone()),
+                None => return Err(err(SysErrorKind::NotFound, name)),
+            };
+            st.move_node(node, self.node, name, name)?;
+            let ino = match st.obj_of(node) {
+                Obj::File { ino, .. } => Some(ino),
+                Obj::Node(_) => None,
+            };
+            st.log(
+                self.node,
+                Undo::Moved {
+                    node,
+                    from_parent,
+                    from_name,
+                },
+                vec![node, from_parent, self.node],
+                ino,
+            );
+            Ok(())
         })
     }
 
     fn flush(&self) -> SysResult<()> {
         let t = self.handle_target();
-        self.fs
-            .prim(Prim::FlushDir, "", |st| st.dir(self.node, &t).map(|_| ()))
+        self.prim(Prim::FlushDir, "", |st| {
+            st.dir(self.node, &t)?;
+            st.flush_dir(self.node);
+            Ok(())
+        })
     }
 }
 
@@ -349,22 +378,32 @@ impl PrimFile for FakeFile {
     fn set_attrs(&self, attrs: Attrs) -> SysResult<()> {
         self.fs.prim(Prim::SetAttrs, "", |st| {
             let t = "<held>";
-            match st.rec_obj(self.id(), t)? {
+            let obj = st.rec_obj(self.id(), t)?;
+            let old = match obj {
                 Obj::File { ino, .. } => {
-                    st.inodes
+                    let i = st
+                        .inodes
                         .get_mut(&ino)
-                        .ok_or_else(|| err(SysErrorKind::NotFound, t))?
-                        .attrs = attrs;
+                        .ok_or_else(|| err(SysErrorKind::NotFound, t))?;
+                    std::mem::replace(&mut i.attrs, attrs)
                 }
-                Obj::Node(node) => st.dir_mut(node, t)?.attrs = attrs,
-            }
+                Obj::Node(node) => std::mem::replace(&mut st.dir_mut(node, t)?.attrs, attrs),
+            };
+            let node = obj.node();
+            let ino = match obj {
+                Obj::File { ino, .. } => Some(ino),
+                Obj::Node(_) => None,
+            };
+            st.log(node, Undo::Attrs { obj, old }, vec![node], ino);
             Ok(())
         })
     }
 
     fn flush(&self) -> SysResult<()> {
         self.fs.prim(Prim::FlushFile, "", |st| {
-            st.rec_obj(self.id(), "<held>").map(|_| ())
+            let obj = st.rec_obj(self.id(), "<held>")?;
+            st.flush_file(obj);
+            Ok(())
         })
     }
 
