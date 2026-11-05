@@ -95,6 +95,31 @@ disallowed-methods = [
   # Review L4 (2026-11-04): app-container, transacted, legacy and ANSI variants.
   { path = "windows_sys::Win32::Storage::FileSystem::CreateFileFromAppW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Win32::Storage::FileSystem::DeleteFileFromAppW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  # Review P2-4 (SR2): short names, transacted, FromApp and more ANSI variants.
+  { path = "windows_sys::Win32::Storage::FileSystem::SetFileShortNameW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::MoveFileTransactedW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::DeleteFileTransactedW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::RemoveDirectoryTransactedW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateDirectoryTransactedW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CopyFileTransactedW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateHardLinkTransactedW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateSymbolicLinkTransactedW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::MoveFileFromAppW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::ReplaceFileFromAppW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::RemoveDirectoryFromAppW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateDirectoryFromAppW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CopyFileFromAppW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::SetFileAttributesFromAppW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::ReplaceFileA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::MoveFileWithProgressA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::SetFileAttributesA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CreateDirectoryExA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::CopyFileExA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
+  # File system controls only through sys::win::nt (FSCTL_GET_REPARSE_POINT); test fixtures set
+  # junctions and WOF under the module-wide expect in sys::win::testfx.
+  { path = "windows_sys::Win32::System::IO::DeviceIoControl", reason = "file system controls only via sys::win::nt (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtFsControlFile", reason = "file system controls only via sys::win::nt (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::ZwFsControlFile", reason = "file system controls only via sys::win::nt (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Win32::Storage::FileSystem::CreateFileTransactedW", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Win32::Storage::FileSystem::OpenFile", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Win32::Storage::FileSystem::DeleteFileA", reason = "path-based Win32 file API; handle-relative only (ADR 0007)", allow-invalid = true },
@@ -134,8 +159,8 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Threading::CreateProcessW", reason = "processes only through sys::Process", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::CreateProcessA", reason = "processes only through sys::Process", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::CreateProcessAsUserW", reason = "processes only through sys::Process", allow-invalid = true },
-  # NtCreateFile only through sys::win::nt::{open_relative, open_absolute_dir}; NtOpenFile never.
-  { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", reason = "only via sys::win::nt::{open_relative, open_absolute_dir} (ADR 0007)", allow-invalid = true },
+  # NtCreateFile only through sys::win::nt::{open_relative, open_self_for_flush, open_absolute_dir}; NtOpenFile never.
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", reason = "only via sys::win::nt::{open_relative, open_self_for_flush, open_absolute_dir} (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Wdk::Storage::FileSystem::NtOpenFile", reason = "use sys::win::nt::{open_relative, open_absolute_dir} (ADR 0007)", allow-invalid = true },
   { path = "std::process::Command::new", reason = "processes only through sys::Process" },
   # ADR 0009: known folders only through sys::win::shell; the environment is never a source of

@@ -48,6 +48,37 @@ impl WriteOp {
     pub const ALL: [Self; 4] = [Self::Replace, Self::Delete, Self::CreateNew, Self::Lock];
 }
 
+/// A small xorshift generator for the delays of one run: seeded per run, so attempts against a
+/// naive control never replay the same schedule (found in review: deterministic delays made
+/// every attempt hit the same timing). The seed is in every failure message.
+struct Rng(u64);
+
+impl Rng {
+    /// A seed from the clock and a process-wide counter (never 0).
+    fn seeded() -> Self {
+        static RUNS: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |t| t.subsec_nanos());
+        let run = RUNS.fetch_add(1, Ordering::Relaxed);
+        Self((u64::from(nanos) ^ run.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1)
+    }
+
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    /// A delay of 0 to `max_us` microseconds.
+    fn micros(&mut self, max_us: u64) -> Duration {
+        Duration::from_micros(self.next() % (max_us + 1))
+    }
+}
+
 fn sha(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
@@ -85,8 +116,8 @@ enum Move {
 
 /// The attacker's moves are by path through the fixture. A rename refused because of our
 /// handles is retried; a rename that finds the tree not as the attacker left it means the
-/// implementation touched a name that is not ours: a violation ("write race:"). Anything else
-/// is a harness problem ("write race flip:").
+/// implementation touched a name that is not ours: a violation (`RACE_LEAK`). Anything else is
+/// a harness problem ("write race flip:").
 struct Attacker<'a> {
     fx: &'a dyn FsFixture,
     tree: &'a Tree,
@@ -144,12 +175,12 @@ impl Attacker<'_> {
                     let _ = self.mv(&aside, &target);
                     return Err(match e.kind {
                         SysErrorKind::AlreadyExists => {
-                            "contract violated: write race: t.bin was created while the target \
+                            "contract violated: write race leak: t.bin was created while the target \
                              was moved aside"
                                 .to_owned()
                         }
                         SysErrorKind::NotFound => {
-                            "contract violated: write race: victim.bin is gone".to_owned()
+                            "contract violated: write race leak: victim.bin is gone".to_owned()
                         }
                         _ => Self::harness("put victim.bin at t.bin", &e),
                     });
@@ -158,17 +189,18 @@ impl Attacker<'_> {
                 if let Err(e) = self.mv(&target, &victim) {
                     let _ = self.mv(&aside, &target);
                     return Err(match e.kind {
-                        SysErrorKind::NotFound => "contract violated: write race: the victim \
+                        SysErrorKind::NotFound => "contract violated: write race leak: the victim \
                                                    standing at t.bin was deleted or moved"
                             .to_owned(),
                         SysErrorKind::AlreadyExists => {
-                            "contract violated: write race: victim.bin was recreated".to_owned()
+                            "contract violated: write race leak: victim.bin was recreated"
+                                .to_owned()
                         }
                         _ => Self::harness("take victim.bin back", &e),
                     });
                 }
                 self.mv(&aside, &target).map_err(|e| match e.kind {
-                    SysErrorKind::AlreadyExists => "contract violated: write race: t.bin was \
+                    SysErrorKind::AlreadyExists => "contract violated: write race leak: t.bin was \
                                                     created while the target was moved aside"
                         .to_owned(),
                     _ => Self::harness("put t.bin back", &e),
@@ -181,17 +213,19 @@ impl Attacker<'_> {
                     // Our n.bin stands there: nothing to plant.
                     Err(e) if e.kind == SysErrorKind::AlreadyExists => return Ok(()),
                     Err(e) if e.kind == SysErrorKind::NotFound => {
-                        return Err("contract violated: write race: intruder.bin is gone".into());
+                        return Err(
+                            "contract violated: write race leak: intruder.bin is gone".into()
+                        );
                     }
                     Err(e) => return Err(Self::harness("plant intruder.bin", &e)),
                 }
                 thread::sleep(hold);
                 self.mv(&name, &intruder).map_err(|e| match e.kind {
-                    SysErrorKind::NotFound => "contract violated: write race: the intruder \
+                    SysErrorKind::NotFound => "contract violated: write race leak: the intruder \
                                                planted at n.bin was deleted or moved"
                         .to_owned(),
                     SysErrorKind::AlreadyExists => {
-                        "contract violated: write race: intruder.bin was recreated".to_owned()
+                        "contract violated: write race leak: intruder.bin was recreated".to_owned()
                     }
                     _ => Self::harness("take the intruder back", &e),
                 })
@@ -259,7 +293,7 @@ fn operate(d: &dyn DirWrite, op: WriteOp, i: u64, m: &mut Model) -> ContractResu
             if let Some(rep) = outcome(r, "replace")? {
                 ensure(
                     rep.old_left.is_none(),
-                    "write race: replace left the old file pending (nothing maps it)",
+                    "write race leak: replace left the old file pending (nothing maps it)",
                 )?;
                 m.t = Some(next);
             }
@@ -317,16 +351,16 @@ fn check_and_reset(
     let out = ok(fs.open_dir(&tree.outside), "write race: open outside")?;
     ensure(
         names(&*out, None, "write race: outside")? == ["canary.txt"],
-        "write race: nothing appears in the junction's target",
+        "write race leak: nothing appears in the junction's target",
     )?;
     ensure(
         ok(out.read(&rel("canary.txt")?), "write race: canary")? == CANARY,
-        "write race: the canary behind the junction is unchanged",
+        "write race leak: the canary behind the junction is unchanged",
     )?;
     let root = ok(fs.open_dir(&tree.root), "write race: open root")?;
     ensure(
         names(&*root, None, "write race: root")? == ["d", "d.link"],
-        "write race: d and the junction are back in place",
+        "write race leak: d and the junction are back in place",
     )?;
     let chk = ok(fs.open_dir(&tree.d), "write race: open d")?;
     let mut want = vec!["intruder.bin".to_owned(), "victim.bin".to_owned()];
@@ -340,29 +374,29 @@ fn check_and_reset(
     ensure(
         have == want,
         &format!(
-            "write race: d holds exactly our names and the attacker's (round {i}: {have:?}, \
+            "write race leak: d holds exactly our names and the attacker's (round {i}: {have:?}, \
              expected {want:?}; no temp file, no .old)"
         ),
     )?;
     let content = |name: &str| ok(chk.read(&rel(name)?), &format!("write race: read {name}"));
     ensure(
         content("victim.bin")? == VICTIM,
-        "write race: victim.bin (swapped in at the target) is unchanged",
+        "write race leak: victim.bin (swapped in at the target) is unchanged",
     )?;
     ensure(
         content("intruder.bin")? == INTRUDER,
-        "write race: intruder.bin (planted at a created name) is unchanged",
+        "write race leak: intruder.bin (planted at a created name) is unchanged",
     )?;
     if let Some(t) = &m.t {
         ensure(
             &content("t.bin")? == t,
-            &format!("write race: t.bin holds what the last result says (round {i})"),
+            &format!("write race leak: t.bin holds what the last result says (round {i})"),
         )?;
     }
     if let Some(n) = m.n.take() {
         ensure(
             content("n.bin")? == n,
-            &format!("write race: n.bin holds what create_new wrote (round {i})"),
+            &format!("write race leak: n.bin holds what create_new wrote (round {i})"),
         )?;
         let name = rel("n.bin")?;
         ok(
@@ -385,15 +419,17 @@ fn check_and_reset(
 /// File system contract, writing race. An attacker thread runs one cycle per round (a junction
 /// flip of the handle's folder, a swap of the target for a victim, a plant at the name
 /// `create_new` writes), started together with one operation through the write handle
-/// (`replace`, `delete`, `create_new`, `lock`), both after a varying delay. Once the attacker
+/// (`replace`, `delete`, `create_new`, `lock`), both after a random delay (0 to 2 ms for the
+/// attacker, 0 to 1.5 ms for the operation; the swapped state holds 0 to 1.5 ms), seeded per
+/// run. Once the attacker
 /// is idle, the tree must be exactly what the results say: success is `After`, an error
 /// `Before` (ADR 0017, A3), no temp file or `.old` is left, the victim, the intruder and the
 /// junction's target are unchanged, and nothing appeared outside. Allowed errors: `NotFound`,
 /// `Mismatch`, `Busy`, `AlreadyExists`, `ReparsePoint`; any other fails the contract.
 ///
 /// `ops` are the operations it cycles through ([`WriteOp::ALL`] for the contract; the runner's
-/// control check also asks for each one alone, so each assertion is shown to catch the naive
-/// implementation). Runs for at least `budget` and [`MIN_ROUNDS`] rounds. `work` must be an existing, empty
+/// control check also asks for each one alone, so each operation is shown to be caught by at
+/// least one assertion). Runs for at least `budget` and [`MIN_ROUNDS`] rounds. `work` must be an existing, empty
 /// directory. Against `sys::win` the runner also runs a naive path-based implementation,
 /// which this harness must catch, so a passing run means something.
 pub fn fs_write_race_contract(
@@ -432,6 +468,11 @@ pub fn fs_write_race_contract(
         locked: false,
     };
 
+    let mut rng = Rng::seeded();
+    let seed = rng.0;
+    // The attacker's delays of the requested round, set before the request.
+    let attacker_delay_us = AtomicU64::new(0);
+    let hold_us = AtomicU64::new(0);
     let requested = AtomicU64::new(0);
     let finished = AtomicU64::new(0);
     let stop = AtomicBool::new(false);
@@ -445,13 +486,15 @@ pub fn fs_write_race_contract(
                     thread::yield_now();
                     continue;
                 }
-                thread::sleep(Duration::from_micros(n.wrapping_mul(7919) % 2000));
+                thread::sleep(Duration::from_micros(
+                    attacker_delay_us.load(Ordering::Acquire),
+                ));
                 let m = match n % 3 {
                     0 => Move::Flip,
                     1 => Move::Swap,
                     _ => Move::Plant,
                 };
-                let hold = Duration::from_micros(n.wrapping_mul(104_729) % 1500);
+                let hold = Duration::from_micros(hold_us.load(Ordering::Acquire));
                 if let Err(e) = attacker.cycle(m, hold) {
                     *failure
                         .lock()
@@ -466,8 +509,12 @@ pub fn fs_write_race_contract(
             let mut i = 0u64;
             while i < MIN_ROUNDS || started.elapsed() < budget {
                 i += 1;
+                let pick = |r: &mut Rng, max| u64::try_from(r.micros(max).as_micros()).unwrap_or(0);
+                attacker_delay_us.store(pick(&mut rng, 2000), Ordering::Release);
+                hold_us.store(pick(&mut rng, 1500), Ordering::Release);
+                let own_delay = rng.micros(1500);
                 requested.store(i, Ordering::Release);
-                thread::sleep(Duration::from_micros(i.wrapping_mul(31_337) % 1500));
+                thread::sleep(own_delay);
                 let op = ops
                     .get(usize::try_from(i).unwrap_or(0) % ops.len())
                     .copied()
@@ -496,6 +543,6 @@ pub fn fs_write_race_contract(
         stop.store(true, Ordering::Release);
         r
     });
-    result?;
+    result.map_err(|e| format!("{e} [seed {seed:#x}]"))?;
     Ok(Skipped::new())
 }

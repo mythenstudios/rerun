@@ -132,6 +132,7 @@ pub fn fs_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCont
     w19_mapped_image(fs, fx, work, &mut skips)?;
     w20_delete_pending(fs, fx, work, &mut skips)?;
     w24_mapped_data(fs, fx, work, &mut skips)?;
+    w24b_data_section(fs, fx, work, &mut skips)?;
     w25_wof(fs, fx, work, &mut skips)?;
     Ok(skips)
 }
@@ -250,6 +251,40 @@ fn w24_mapped_data(
     let d = open_write(fs, &work.join(r"w24\sub2"), "W24 open after the rename")?;
     drop(map);
     drop(ok(d.guard(&t), "W24 guard once the view is gone")?);
+    Ok(())
+}
+
+/// W24b (security review): a writable data section without any view and without a file
+/// handle (it can be mapped writable at any moment, also after a guard opened) already
+/// refuses the guard and our `open_read` (`Busy`, observed on Windows: the section counts as a
+/// writable user reference). A writable section created after the guard opened would need a
+/// handle with write access, which the guard's share mode refuses (W16). Once the section is
+/// closed, the guard opens.
+fn w24b_data_section(
+    fs: &dyn Fs,
+    fx: &dyn FsFixture,
+    work: &Path,
+    skips: &mut Skipped,
+) -> ContractResult {
+    let abs = work.join(r"w24b\data.bin");
+    let Some(section) = ok(fx.data_section(&abs), "fixture data section")? else {
+        skip(skips, "data_section");
+        return Ok(());
+    };
+    let d = open_write(fs, &work.join("w24b"), "W24b open")?;
+    let t = rel("data.bin")?;
+    err_kind(
+        d.guard(&t).map(|_| ()),
+        SysErrorKind::Busy,
+        "W24b guard of a file with a writable section and no view",
+    )?;
+    err_kind(
+        d.open_read(&t).map(|_| ()),
+        SysErrorKind::Busy,
+        "W24b open_read of a file with a writable section",
+    )?;
+    drop(section);
+    drop(ok(d.guard(&t), "W24b guard once the section is closed")?);
     Ok(())
 }
 

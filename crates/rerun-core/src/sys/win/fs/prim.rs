@@ -68,9 +68,15 @@ fn volume_name_of(h: BorrowedHandle<'_>, target: &str) -> SysResult<String> {
 /// The attribute-only classification of `name` after an open was denied: a link at the name
 /// is `ReparsePoint` (it is never followed or created through), anything else keeps `denied`.
 fn classify_denied(dir: BorrowedHandle<'_>, s: &Seg16, t: &str, denied: SysError) -> SysError {
-    match nt::open_relative(dir, Some(s), RelOpen::Entry(Access::Attributes)) {
+    match nt::open_relative(dir, s, RelOpen::Entry(Access::Attributes)) {
         Ok(h) => match tag_info(h.as_handle(), t) {
-            Ok(ti) if ti.kind() == EntryKind::Reparse => err(SysErrorKind::ReparsePoint, t),
+            Ok(ti) if ti.kind() == EntryKind::Reparse => {
+                let e = err(SysErrorKind::ReparsePoint, t);
+                match denied.ntstatus {
+                    Some(st) => e.with_ntstatus(st),
+                    None => e,
+                }
+            }
             _ => denied,
         },
         Err(_) => denied,
@@ -107,7 +113,7 @@ impl PrimDir for WinDir {
         let t = name.as_str();
         let s = seg16(t, t)?;
         let first =
-            nt::open_relative(self.h(), Some(&s), RelOpen::Guard).map_err(|st| nt_error(st, t))?;
+            nt::open_relative(self.h(), &s, RelOpen::Guard).map_err(|st| nt_error(st, t))?;
         check_long_name(first.as_handle(), &s, t)?;
         let ti = tag_info(first.as_handle(), t)?;
         if ti.kind() != EntryKind::File {
@@ -124,8 +130,9 @@ impl PrimDir for WinDir {
         // handle closed; the file ID ties the two together.
         let id = file_id(first.as_handle(), t)?;
         drop(first);
-        let data = nt::open_relative(self.h(), Some(&s), RelOpen::GuardData)
-            .map_err(|st| nt_error(st, t))?;
+        let data =
+            nt::open_relative(self.h(), &s, RelOpen::GuardData).map_err(|st| nt_error(st, t))?;
+        check_long_name(data.as_handle(), &s, t)?;
         if file_id(data.as_handle(), t)? != id {
             return Err(err(SysErrorKind::Busy, t));
         }
@@ -138,8 +145,8 @@ impl PrimDir for WinDir {
     fn create_tmp(&self, name: Seg<'_>) -> SysResult<WinFile> {
         let t = name.as_str();
         let s = seg16(t, t)?;
-        let h = nt::open_relative(self.h(), Some(&s), RelOpen::CreateTmp)
-            .map_err(|st| nt_error(st, t))?;
+        let h =
+            nt::open_relative(self.h(), &s, RelOpen::CreateTmp).map_err(|st| nt_error(st, t))?;
         Ok(WinFile::new(h))
     }
 
@@ -149,7 +156,7 @@ impl PrimDir for WinDir {
     fn open_lock(&self, name: Seg<'_>) -> SysResult<WinFile> {
         let t = name.as_str();
         let s = seg16(t, t)?;
-        let h = match nt::open_relative(self.h(), Some(&s), RelOpen::Lock) {
+        let h = match nt::open_relative(self.h(), &s, RelOpen::Lock) {
             Ok(h) => h,
             Err(st) => {
                 let e = nt_error(st, t);
@@ -167,16 +174,16 @@ impl PrimDir for WinDir {
     fn create_dir(&self, name: Seg<'_>) -> SysResult<u128> {
         let t = name.as_str();
         let s = seg16(t, t)?;
-        let h = nt::open_relative(self.h(), Some(&s), RelOpen::CreateDir)
-            .map_err(|st| nt_error(st, t))?;
+        let h =
+            nt::open_relative(self.h(), &s, RelOpen::CreateDir).map_err(|st| nt_error(st, t))?;
         Ok(file_id(h.as_handle(), t)?.1)
     }
 
     fn open_dir_delete(&self, name: Seg<'_>) -> SysResult<WinFile> {
         let t = name.as_str();
         let s = seg16(t, t)?;
-        let h = nt::open_relative(self.h(), Some(&s), RelOpen::DirDelete)
-            .map_err(|st| nt_error(st, t))?;
+        let h =
+            nt::open_relative(self.h(), &s, RelOpen::DirDelete).map_err(|st| nt_error(st, t))?;
         check_long_name(h.as_handle(), &s, t)?;
         Ok(WinFile::new(h))
     }
@@ -198,8 +205,7 @@ impl PrimDir for WinDir {
 
     fn flush(&self) -> SysResult<()> {
         let t = super::HANDLE_TARGET;
-        let h =
-            nt::open_relative(self.h(), None, RelOpen::FlushDir).map_err(|st| nt_error(st, t))?;
+        let h = nt::open_self_for_flush(self.h()).map_err(|st| nt_error(st, t))?;
         nt::flush(h.as_handle()).map_err(|st| nt_error(st, t))
     }
 }

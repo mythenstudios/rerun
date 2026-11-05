@@ -227,6 +227,9 @@ impl FsFixture for CopyFixture {
     fn mapped_data(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
         self.inner.mapped_data(p)
     }
+    fn data_section(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        self.inner.data_section(p)
+    }
 }
 
 #[test]
@@ -241,7 +244,7 @@ fn the_race_contract_catches_a_leaking_swap() {
         let work = PathBuf::from(format!(r"D:\Work\attempt-{attempt}"));
         fx.dir(&work).unwrap();
         if let Err(e) = fs_race_contract(sys.fs(), &fx, &work, Duration::from_millis(100)) {
-            assert!(e.contains("race:"), "{e}");
+            assert!(e.contains(crate::sys::contract::RACE_LEAK), "{e}");
             return;
         }
         assert!(

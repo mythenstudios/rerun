@@ -11,7 +11,9 @@
 //! the real [`System`](crate::sys::System).
 //!
 //! Modules:
-//! - `nt`: the only NT/Win32 file calls (`NtCreateFile` through exactly two wrappers,
+//! - `nt`: the only NT/Win32 file calls (`NtCreateFile` through exactly two calls, the
+//!   absolute directory open and the relative one behind `open_relative` and
+//!   `open_self_for_flush`,
 //!   `NtQueryInformationFile`, `NtQueryDirectoryFile`, `NtSetInformationFile` through one
 //!   wrapper with three classes, `NtFlushBuffersFileEx`, `GetFinalPathNameByHandleW`,
 //!   `GetVolumeInformationByHandleW`, `DeviceIoControl`), handles as `OwnedHandle`.

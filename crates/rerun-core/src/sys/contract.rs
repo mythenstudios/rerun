@@ -150,6 +150,11 @@ pub trait FsFixture: Sync {
     /// data section of this process (a writable view) without keeping a file or section
     /// handle, until the returned value drops. `Ok(None)` = not available.
     fn mapped_data(&self, p: &Path) -> SysResult<Option<Held<'_>>>;
+    /// Creates the file `p` with content of the fixture's choice and a writable data section
+    /// of it (`PAGE_READWRITE`) without any view and without a file handle, until the returned
+    /// value (the section) drops: anyone holding the section can map it writable at any
+    /// moment. `Ok(None)` = not available.
+    fn data_section(&self, p: &Path) -> SysResult<Option<Held<'_>>>;
 }
 
 /// Data access of a fixture handle ([`FsFixture::hold_open`]): `FILE_READ_DATA`,
@@ -1645,6 +1650,12 @@ pub fn fs_volume_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCon
     Ok(skips)
 }
 
+/// Marker of a race contract failure that is a leak or a violation of core rule 2 (the
+/// implementation under test exposed or changed what is not its own), as opposed to a harness
+/// problem (a failing attacker, an unexpected error kind). The runners use it to tell that a
+/// naive control was caught.
+pub const RACE_LEAK: &str = "race leak:";
+
 /// What a probe of the race contract must never see.
 struct Forbidden {
     file_ids: Vec<u128>,
@@ -1654,7 +1665,7 @@ impl Forbidden {
     fn id(&self, id: u128, what: &str) -> ContractResult {
         ensure(
             !self.file_ids.contains(&id),
-            &format!("race: {what} exposed the file ID of the outside canary"),
+            &format!("race leak: {what} exposed the file ID of the outside canary"),
         )
     }
 }
@@ -1815,12 +1826,12 @@ pub fn fs_race_contract(
                 if let Some(bytes) = racing(root.read(&data_p), "read data")? {
                     ensure(
                         bytes == b"inside",
-                        "race: read of data.txt returned foreign content (outside canary?)",
+                        "race leak: read of data.txt returned foreign content (outside canary?)",
                     )?;
                 }
                 ensure(
                     racing(root.read(&canary_p), "read canary")?.is_none(),
-                    "race: read of canary-only.txt succeeded (it exists only outside)",
+                    "race leak: read of canary-only.txt succeeded (it exists only outside)",
                 )?;
                 if let Some(Some(m)) = racing(root.metadata(&data_p), "metadata data")? {
                     forbidden.id(m.file_id, "metadata of data.txt")?;
@@ -1829,17 +1840,17 @@ pub fn fs_race_contract(
                     racing(root.metadata(&canary_p), "metadata canary")?
                         .flatten()
                         .is_none(),
-                    "race: metadata of canary-only.txt found an entry (it exists only outside)",
+                    "race leak: metadata of canary-only.txt found an entry (it exists only outside)",
                 )?;
                 ensure(
                     racing(root.open_read(&canary_p), "open_read canary")?.is_none(),
-                    "race: open_read of canary-only.txt succeeded",
+                    "race leak: open_read of canary-only.txt succeeded",
                 )?;
                 if let Some(entries) = racing(root.read_dir(Some(&dir_p)), "read_dir")? {
                     for e in &entries {
                         ensure(
                             e.name != NAME,
-                            "race: read_dir exposed the name canary-only.txt",
+                            "race leak: read_dir exposed the name canary-only.txt",
                         )?;
                         forbidden.id(e.meta.file_id, "read_dir entry")?;
                     }
@@ -1854,19 +1865,19 @@ pub fn fs_race_contract(
                     if let Some(entries) = racing(h.read_dir(None), "read_dir through handle")? {
                         ensure(
                             entries.iter().all(|e| e.name != NAME),
-                            "race: read_dir through the handle exposed canary-only.txt",
+                            "race leak: read_dir through the handle exposed canary-only.txt",
                         )?;
                     }
                     ensure(
                         racing(h.read(&name_p), "read canary through handle")?.is_none(),
-                        "race: read of canary-only.txt through the handle succeeded",
+                        "race leak: read of canary-only.txt through the handle succeeded",
                     )?;
                     if let Some(bytes) =
                         racing(h.read(&rel("data.txt")?), "read data through handle")?
                     {
                         ensure(
                             bytes == b"inside",
-                            "race: read through the handle returned foreign content",
+                            "race leak: read through the handle returned foreign content",
                         )?;
                     }
                 }

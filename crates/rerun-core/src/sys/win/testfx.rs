@@ -1330,6 +1330,22 @@ impl FsFixture for WinFixture {
         Ok(Some(Box::new(view)))
     }
 
+    /// The file `p` with a writable data section (`PAGE_READWRITE`) and no view; the file
+    /// handle is closed at once, the section handle is the returned value.
+    fn data_section(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        self.parents(p, Last::Plain)?;
+        std::fs::write(p, b"data section").map_err(|e| io_err(&e, p))?;
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(p)
+            .map_err(|e| io_err(&e, p))?;
+        let section = create_section(&f, PAGE_READWRITE, p)?;
+        drop(f);
+        Ok(Some(Box::new(section)))
+    }
+
     /// `CreateFileW` with `FILE_READ_DATA`/`FILE_WRITE_DATA`/`DELETE` (or
     /// `FILE_READ_ATTRIBUTES` alone), `SYNCHRONIZE` and the share mode, opening `p` itself
     /// (`FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`, so directories too).
@@ -1396,19 +1412,24 @@ impl Drop for View {
     }
 }
 
-/// Creates a section of `f` with `protect` and maps all of it with `access`; the section
-/// handle is closed before returning (the view keeps the section).
-fn map_view(f: &File, protect: u32, access: u32, p: &Path) -> SysResult<View> {
-    let what = p.display().to_string();
+/// A section of `f` (its whole size) with `protect`.
+fn create_section(f: &File, protect: u32, p: &Path) -> SysResult<OwnedHandle> {
     // SAFETY: `f` is a live file handle with the access `protect` needs; no security
     // attributes and no name (null); size 0 = the size of the file.
     let raw =
         unsafe { CreateFileMappingW(f.as_raw_handle(), ptr::null(), protect, 0, 0, ptr::null()) };
     if raw.is_null() {
-        return Err(win32_err(last_error(), &what));
+        return Err(win32_err(last_error(), &p.display().to_string()));
     }
     // SAFETY: CreateFileMappingW succeeded and returned a new handle that nothing else owns.
-    let section = unsafe { OwnedHandle::from_raw_handle(raw) };
+    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
+}
+
+/// Creates a section of `f` with `protect` and maps all of it with `access`; the section
+/// handle is closed before returning (the view keeps the section).
+fn map_view(f: &File, protect: u32, access: u32, p: &Path) -> SysResult<View> {
+    let what = p.display().to_string();
+    let section = create_section(f, protect, p)?;
     // SAFETY: `section` is a live section handle; offset 0 and size 0 map the whole section.
     let addr = unsafe { MapViewOfFile(section.as_raw_handle(), access, 0, 0, 0) };
     if addr.Value.is_null() {

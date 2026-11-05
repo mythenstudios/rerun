@@ -346,8 +346,8 @@ fn open_entry(
     access: Access,
     target: &str,
 ) -> SysResult<Opened> {
-    let handle = nt::open_relative(parent, Some(seg), RelOpen::Entry(access))
-        .map_err(|s| nt_error(s, target))?;
+    let handle =
+        nt::open_relative(parent, seg, RelOpen::Entry(access)).map_err(|s| nt_error(s, target))?;
     check_long_name(handle.as_handle(), seg, target)?;
     let tag = tag_info(handle.as_handle(), target)?;
     Ok(Opened { handle, tag })
@@ -675,7 +675,7 @@ impl Dir for WinDir {
             // Allowlisted data tag: the data is only visible without FILE_OPEN_REPARSE_POINT.
             // Reopen relative to the same parent and require the same object.
             let data =
-                nt::open_relative(parent, Some(&s), RelOpen::Data).map_err(|st| nt_error(st, t))?;
+                nt::open_relative(parent, &s, RelOpen::Data).map_err(|st| nt_error(st, t))?;
             if file_id(data.as_handle(), t)? != file_id(first.handle.as_handle(), t)? {
                 return Err(err(SysErrorKind::Busy, t));
             }

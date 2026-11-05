@@ -157,8 +157,8 @@ pub(crate) fn kind_of_win32(code: u32) -> SysErrorKind {
         123 | 161 | 206 | 267 => SysErrorKind::InvalidPath,
         // CANT_ACCESS_FILE, CANT_RESOLVE_FILENAME
         1920 | 1921 => SysErrorKind::ReparsePoint,
-        // SHARING_VIOLATION, LOCK_VIOLATION
-        32 | 33 => SysErrorKind::Busy,
+        // SHARING_VIOLATION, LOCK_VIOLATION, DELETE_PENDING (ADR 0017, like the NTSTATUS)
+        32 | 33 | 303 => SysErrorKind::Busy,
         // FILE_EXISTS, ALREADY_EXISTS
         80 | 183 => SysErrorKind::AlreadyExists,
         // DIR_NOT_EMPTY

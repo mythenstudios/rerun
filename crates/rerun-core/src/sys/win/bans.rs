@@ -518,6 +518,116 @@ fn banned_windows_sys_items_resolve() {
     let _ = windows_sys::Wdk::Storage::FileSystem::NtSetInformationFile;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: SetFileShortNameW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::SetFileShortNameW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: MoveFileTransactedW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::MoveFileTransactedW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: DeleteFileTransactedW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::DeleteFileTransactedW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RemoveDirectoryTransactedW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::RemoveDirectoryTransactedW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateDirectoryTransactedW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::CreateDirectoryTransactedW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CopyFileTransactedW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::CopyFileTransactedW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateHardLinkTransactedW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::CreateHardLinkTransactedW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateSymbolicLinkTransactedW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::CreateSymbolicLinkTransactedW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: MoveFileFromAppW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::MoveFileFromAppW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ReplaceFileFromAppW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::ReplaceFileFromAppW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RemoveDirectoryFromAppW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::RemoveDirectoryFromAppW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateDirectoryFromAppW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::CreateDirectoryFromAppW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CopyFileFromAppW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::CopyFileFromAppW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetFileAttributesFromAppW must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::SetFileAttributesFromAppW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ReplaceFileA must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::ReplaceFileA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: MoveFileWithProgressA must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::MoveFileWithProgressA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetFileAttributesA must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::SetFileAttributesA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateDirectoryExA must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::CreateDirectoryExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CopyFileExA must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::CopyFileExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: DeviceIoControl must be banned"
+    )]
+    let _ = windows_sys::Win32::System::IO::DeviceIoControl;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtFsControlFile must be banned"
+    )]
+    let _ = windows_sys::Wdk::Storage::FileSystem::NtFsControlFile;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwFsControlFile must be banned"
+    )]
+    let _ = windows_sys::Wdk::Storage::FileSystem::ZwFsControlFile;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: ZwSetInformationFile must be banned"
     )]
     let _ = windows_sys::Wdk::System::SystemServices::ZwSetInformationFile;

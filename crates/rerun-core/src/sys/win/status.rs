@@ -207,6 +207,7 @@ mod tests {
             (1921, SysErrorKind::ReparsePoint),
             (32, SysErrorKind::Busy),
             (33, SysErrorKind::Busy),
+            (303, SysErrorKind::Busy),
             (80, SysErrorKind::AlreadyExists),
             (183, SysErrorKind::AlreadyExists),
             (145, SysErrorKind::NotEmpty),

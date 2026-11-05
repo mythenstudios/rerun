@@ -3,8 +3,9 @@
 //! `GetVolumeInformationByHandleW` and `DeviceIoControl`.
 //!
 //! - Handles come back as [`OwnedHandle`] and are closed on drop, also in every error path.
-//! - `NtCreateFile` is reachable only through [`open_absolute_dir`] and [`open_relative`]
-//!   (`clippy.toml` bans it everywhere else). The flags are fixed here; callers choose from
+//! - `NtCreateFile` is reachable only through [`open_absolute_dir`], [`open_relative`] and
+//!   [`open_self_for_flush`] (`clippy.toml` bans it everywhere else; the two relative ones
+//!   share one private call). The flags are fixed here; callers choose from
 //!   [`Access`] and [`RelOpen`], so `FILE_OPEN_FOR_BACKUP_INTENT`, `FILE_OVERWRITE*`,
 //!   `FILE_SUPERSEDE`, another disposition or a relative open without `OBJ_DONT_REPARSE`
 //!   cannot be expressed.
@@ -137,10 +138,6 @@ pub(super) enum RelOpen {
     /// FILE_READ_ATTRIBUTES | SYNCHRONIZE`, shares read and write. A file is
     /// `STATUS_NOT_A_DIRECTORY`.
     DirDelete,
-    /// The parent directory itself (the empty name) for a flush: `FILE_OPEN |
-    /// FILE_DIRECTORY_FILE`, `FILE_ADD_FILE | SYNCHRONIZE` (read access is denied for a flush,
-    /// ADR 0017), shares read, write and delete.
-    FlushDir,
 }
 
 /// Everything `NtCreateFile` gets for a [`RelOpen`].
@@ -205,12 +202,6 @@ impl RelOpen {
             Self::DirDelete => plain(
                 DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
-                FILE_OPEN,
-                FILE_DIRECTORY_FILE | ITSELF,
-            ),
-            Self::FlushDir => plain(
-                FILE_ADD_FILE | SYNCHRONIZE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 FILE_OPEN,
                 FILE_DIRECTORY_FILE | ITSELF,
             ),
@@ -303,25 +294,41 @@ pub(super) fn open_absolute_dir(nt_path: &[u16]) -> Result<OwnedHandle, NtStatus
 
 /// Opens or creates `name` (one segment, checked by `name::Seg16`) relative to `parent`:
 /// `RootDirectory` = `parent`, `OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE`; disposition,
-/// access, share, options and attributes from [`RelOpen`]. `name` is `None` exactly for
-/// [`RelOpen::FlushDir`] (the empty name: `parent` itself); any other pairing is
-/// `STATUS_INVALID_PARAMETER` before the call. Never `FILE_OPEN_FOR_BACKUP_INTENT`, never
-/// `FILE_OVERWRITE*` or `FILE_SUPERSEDE`.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "one of the two NtCreateFile wrappers (ADR 0007)"
-)]
+/// access, share, options and attributes from [`RelOpen`]. Never
+/// `FILE_OPEN_FOR_BACKUP_INTENT`, never `FILE_OVERWRITE*` or `FILE_SUPERSEDE`.
 pub(super) fn open_relative(
     parent: BorrowedHandle<'_>,
-    name: Option<&super::name::Seg16>,
+    name: &super::name::Seg16,
     how: RelOpen,
 ) -> Result<OwnedHandle, NtStatus> {
-    let units: &[u16] = match (name, how) {
-        (None, RelOpen::FlushDir) => &[],
-        (Some(n), how) if how != RelOpen::FlushDir => n.units(),
-        _ => return Err(STATUS_INVALID_PARAMETER),
+    create_relative(parent, name.units(), &how.spec())
+}
+
+/// Reopens the directory `dir` itself (the empty name relative to it) for a flush:
+/// `FILE_OPEN | FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT`, `FILE_ADD_FILE | SYNCHRONIZE`
+/// (read access is denied for a flush, ADR 0017), shares read, write and delete.
+pub(super) fn open_self_for_flush(dir: BorrowedHandle<'_>) -> Result<OwnedHandle, NtStatus> {
+    let spec = Spec {
+        access: FILE_ADD_FILE | SYNCHRONIZE,
+        share: FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        disposition: FILE_OPEN,
+        options: FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        attributes: 0,
     };
-    let spec = how.spec();
+    create_relative(dir, &[], &spec)
+}
+
+/// The one `NtCreateFile` call of the relative opens: `units` (one checked segment, or empty
+/// for the parent itself) relative to `parent` with `OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the relative NtCreateFile call behind open_relative and open_self_for_flush (ADR 0007)"
+)]
+fn create_relative(
+    parent: BorrowedHandle<'_>,
+    units: &[u16],
+    spec: &Spec,
+) -> Result<OwnedHandle, NtStatus> {
     let name = unicode(units).ok_or(STATUS_INVALID_PARAMETER)?;
     let oa = object_attributes(
         parent.as_raw_handle(),
@@ -331,9 +338,9 @@ pub(super) fn open_relative(
     let mut iosb = IO_STATUS_BLOCK::default();
     let mut raw: HANDLE = ptr::null_mut();
     // SAFETY: `parent` is a live handle borrowed for the call; `raw` and `iosb` are valid for
-    // writes; `oa` points to `name`, whose buffer (the Seg16, or an empty slice with length
-    // 0) outlives the call; no allocation size, no EA buffer. Synchronous call: every spec
-    // has FILE_SYNCHRONOUS_IO_NONALERT.
+    // writes; `oa` points to `name`, whose buffer (`units`, borrowed by the caller) outlives
+    // the call; no allocation size, no EA buffer. Synchronous call: every spec has
+    // FILE_SYNCHRONOUS_IO_NONALERT.
     let status = unsafe {
         NtCreateFile(
             &mut raw,
@@ -461,7 +468,7 @@ pub(super) fn set_info(h: BorrowedHandle<'_>, info: SetInfo<'_>) -> Result<(), N
 }
 
 /// The only `NtFlushBuffersFileEx` call, flags 0: data and metadata of a file, or the
-/// entries of a directory opened with [`RelOpen::FlushDir`].
+/// entries of a directory opened with [`open_self_for_flush`].
 #[expect(
     clippy::disallowed_methods,
     reason = "the one flush wrapper (ADR 0017, ADR 0019)"
@@ -628,6 +635,10 @@ pub(super) fn volume_info(h: BorrowedHandle<'_>) -> Result<(Vec<u16>, u32), u32>
 
 /// Raw `REPARSE_DATA_BUFFER` of the entry `h` was opened on (`FSCTL_GET_REPARSE_POINT`; the
 /// handle must have been opened with `FILE_OPEN_REPARSE_POINT`).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one DeviceIoControl call, FSCTL_GET_REPARSE_POINT (ADR 0007)"
+)]
 pub(super) fn reparse_data(h: BorrowedHandle<'_>) -> Result<Vec<u8>, u32> {
     let size = MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize;
     let mut buf = vec![0u64; size / 8];
@@ -669,6 +680,7 @@ mod tests {
     /// `FILE_DISPOSITION_INFORMATION_EX` is one `ULONG`; `FILE_BASIC_INFORMATION` has four
     /// `LARGE_INTEGER` times, then `FileAttributes` at 32 (40 bytes).
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn set_info_layouts_match_the_documented_offsets() {
         assert_eq!(offset_of!(FILE_RENAME_INFORMATION, Anonymous), 0);
         assert_eq!(offset_of!(FILE_RENAME_INFORMATION, RootDirectory), 8);
@@ -681,6 +693,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn rename_buffer_is_flags_zero_root_length_name() {
         let name: Vec<u16> = "ab.txt".encode_utf16().collect();
         let (words, len) = rename_buffer(0x1234 as _, &name).unwrap();

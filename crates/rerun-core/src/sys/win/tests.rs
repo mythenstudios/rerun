@@ -14,7 +14,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use super::testfx::{HiveRoot, NaiveFs, TestRoot, hosted_ci, note, workflow_warning};
@@ -22,7 +22,7 @@ use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinSystem, WinTopology}
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{Forbidden, ForbiddenRoots, Protected, RootError, RootId, StoreDir};
 use crate::sys::contract::{
-    FsContractResult, FsFixture, RegFixture, WriteOp, fs_link_read_contract,
+    FsContractResult, FsFixture, RACE_LEAK, RegFixture, WriteOp, fs_link_read_contract,
     fs_link_write_contract, fs_race_contract, fs_read_contract, fs_volume_contract,
     fs_write_contract, fs_write_race_contract, gpu_contract, known_folders_contract,
     registry_read_contract, registry_system_contract, topology_contract,
@@ -381,10 +381,27 @@ const TEETH_RENAMES: u32 = 100_000;
 /// without a catch (the machine was busier than the measurement showed).
 const TEETH_ROUNDS: u32 = 2;
 
-/// A race contract failure that is a leak (canary content, file ID or name), not a harness
-/// problem (flipper error, unexpected error kind).
+/// The budget of the safe implementation after the naive control was caught: ten times the
+/// time to the catch, at least 5 s, at most 60 s (a slow catch on a loaded machine must not
+/// make the suite run for many minutes).
+fn safe_budget(caught: Duration) -> Duration {
+    (caught * 10).clamp(Duration::from_secs(5), Duration::from_secs(60))
+}
+
+/// Serialises the heavy file system tests of this process (both race contracts and the write
+/// contracts): run in parallel they slow each other's renames and flushes so much that a race
+/// harness gets a fraction of its usual flips (found in review: the whole suite took twenty
+/// minutes and a naive control escaped two windows). Poisoning is ignored: a failed test must
+/// not fail the others.
+fn heavy() -> MutexGuard<'static, ()> {
+    static HEAVY: Mutex<()> = Mutex::new(());
+    HEAVY.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A race contract failure that is a leak or a violation of core rule 2 ([`RACE_LEAK`]), not a
+/// harness problem (an attacker error, an unexpected error kind).
 fn is_leak(e: &str) -> bool {
-    e.contains("race:") && !e.contains("unexpected error") && !e.contains("flip")
+    e.contains(RACE_LEAK)
 }
 
 /// The teeth window for this machine right now: the time of [`TEETH_RENAMES`] fixture
@@ -405,8 +422,9 @@ fn teeth_window(root: &TestRoot, name: &str) -> Duration {
 /// Runs `attempt` (one contract run against a naive control in a fresh work directory under
 /// `name`) until it reports a leak; panics on a harness problem, or with "harness lost its
 /// teeth" when no attempt leaked within [`TEETH_ROUNDS`] windows of [`teeth_window`]. What it
-/// proves is unchanged: the naive control is caught. Returns the time to the catch (within its
-/// round), the number of attempts and the leak that caught it.
+/// proves is unchanged: the naive control is caught. Returns the total time to the catch (all
+/// rounds and speed measurements included), the number of attempts and the leak that caught
+/// it. A catch only in a later round is a `::warning::` on GitHub runners.
 fn catch_naive(
     root: &TestRoot,
     name: &str,
@@ -414,6 +432,7 @@ fn catch_naive(
 ) -> (Duration, u32, String) {
     let mut attempts = 0u32;
     let mut windows = Vec::new();
+    let total = Instant::now();
     for round in 0..TEETH_ROUNDS {
         let window = teeth_window(root, &format!("{name}-speed-{round}"));
         windows.push(window);
@@ -422,14 +441,16 @@ fn catch_naive(
             let work = root.work(&format!("{name}-{attempts}"));
             attempts += 1;
             match attempt(&work) {
-                Err(e) if is_leak(&e) => return (started.elapsed(), attempts, e),
+                Err(e) if is_leak(&e) => return (total.elapsed(), attempts, e),
                 Err(e) => panic!("race harness broken against the naive control: {e}"),
                 Ok(_) => {}
             }
         }
-        note(&format!(
-            "note: {name}: the naive control was not caught in round {round} ({window:?})"
-        ));
+        let msg = format!("{name}: the naive control was not caught in round {round} ({window:?})");
+        if hosted_ci() {
+            workflow_warning(&msg);
+        }
+        note(&format!("note: {msg}"));
     }
     panic!(
         "harness lost its teeth: the naive implementation was not caught in {TEETH_ROUNDS} \
@@ -439,6 +460,7 @@ fn catch_naive(
 
 #[test]
 fn win_fulfils_fs_race_contract_and_the_harness_has_teeth() {
+    let _heavy = heavy();
     let Some(root) = TestRoot::new("race") else {
         return;
     };
@@ -446,7 +468,7 @@ fn win_fulfils_fs_race_contract_and_the_harness_has_teeth() {
     let (caught, attempts, leak) = catch_naive(&root, "naive", |work| {
         fs_race_contract(&NaiveFs, root.fx(), work, Duration::from_millis(500))
     });
-    let budget = (caught * 10).max(Duration::from_secs(5));
+    let budget = safe_budget(caught);
     note(&format!(
         "note: race: NaiveFs caught after {caught:?} ({attempts} attempts: {leak}); WinFs runs \
          {budget:?}"
@@ -460,6 +482,7 @@ fn win_fulfils_fs_race_contract_and_the_harness_has_teeth() {
 
 #[test]
 fn win_fulfils_fs_write_contract() {
+    let _heavy = heavy();
     let Some(root) = TestRoot::new("write") else {
         return;
     };
@@ -472,6 +495,7 @@ fn win_fulfils_fs_write_contract() {
 
 #[test]
 fn win_fulfils_fs_link_write_contract() {
+    let _heavy = heavy();
     let Some(root) = TestRoot::new("link-write") else {
         return;
     };
@@ -1140,11 +1164,12 @@ fn store_dir_game_refuses_links_on_real_windows() {
 
 #[test]
 fn win_fulfils_fs_write_race_contract_and_the_harness_has_teeth() {
+    let _heavy = heavy();
     let Some(root) = TestRoot::new("write-race") else {
         return;
     };
-    // Control: the path-based writer (hash, pause, act by path) must be caught, by each
-    // operation alone, so every assertion of the contract has teeth.
+    // Control: the path-based writer (hash, pause, act by path) must be caught with each
+    // operation alone, so each operation is shown to be caught by at least one assertion.
     let mut slowest = Duration::ZERO;
     for op in WriteOp::ALL {
         let (caught, attempts, leak) = catch_naive(&root, &format!("naive-{op:?}"), |work| {
@@ -1156,7 +1181,7 @@ fn win_fulfils_fs_write_race_contract_and_the_harness_has_teeth() {
         ));
         slowest = slowest.max(caught);
     }
-    let budget = (slowest * 10).max(Duration::from_secs(5));
+    let budget = safe_budget(slowest);
     note(&format!("note: write race: WinFs runs {budget:?}"));
     let work = root.work("win");
     report(

@@ -187,6 +187,12 @@ impl FsFixture for FakeFs {
         Ok(Some(Box::new(self.map_data_as(std::process::id(), p)?)))
     }
 
+    /// A writable section without a view behaves as a writable view (observed, W24b).
+    fn data_section(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        self.put_file(p, b"data section")?;
+        Ok(Some(Box::new(self.map_data_as(std::process::id(), p)?)))
+    }
+
     fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>> {
         Ok(Box::new(self.hold_open_as(
             std::process::id(),
