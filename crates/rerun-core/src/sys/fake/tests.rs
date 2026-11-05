@@ -121,7 +121,8 @@ fn fake_fulfils_fs_link_write_contract() {
 fn fake_fulfils_fs_write_contract() {
     let sys = fresh(r"C:\Work");
     let skips = fs_write_contract(sys.fs(), sys.fake_fs(), Path::new(r"C:\Work")).unwrap();
-    assert!(skips.is_empty(), "{skips:?}");
+    // The fake has no WOF.
+    assert_eq!(skips, ["wof_compress"]);
 }
 
 /// The writing race against the fake, with a short budget: a sanity check of the harness (the

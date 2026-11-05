@@ -132,6 +132,7 @@ pub fn fs_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCont
     w19_mapped_image(fs, fx, work, &mut skips)?;
     w20_delete_pending(fs, fx, work, &mut skips)?;
     w24_mapped_data(fs, fx, work, &mut skips)?;
+    w25_wof(fs, fx, work, &mut skips)?;
     Ok(skips)
 }
 
@@ -250,6 +251,58 @@ fn w24_mapped_data(
     drop(map);
     drop(ok(d.guard(&t), "W24 guard once the view is gone")?);
     Ok(())
+}
+
+/// W25: a WOF-compressed file (CompactGUI) is guarded like a plain file: the guard's hash,
+/// metadata and reader see the real content (never the compressed stream behind the tag), and
+/// replace and delete work. `sys::win` reopens a file with an allowlisted data tag without
+/// `FILE_OPEN_REPARSE_POINT` for the guard when the filter does not hide the tag.
+fn w25_wof(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path, skips: &mut Skipped) -> ContractResult {
+    let data: Vec<u8> = (0..128 * 1024u32)
+        .map(|i| u8::try_from(i % 251).unwrap_or(0))
+        .collect();
+    let (a_abs, b_abs) = (work.join(r"w25\a.bin"), work.join(r"w25\b.bin"));
+    ok(fx.file(&a_abs, &data), "fixture")?;
+    ok(fx.file(&b_abs, &data), "fixture")?;
+    if !ok(fx.wof_compress(&a_abs), "fixture wof")? {
+        skip(skips, "wof_compress");
+        return Ok(());
+    }
+    ok(fx.wof_compress(&b_abs), "fixture wof")?;
+    let d = open_write(fs, &work.join("w25"), "W25 open")?;
+    let mut g = ok(d.guard(&rel("a.bin")?), "W25 guard of a WOF file")?;
+    ensure(
+        ok(g.sha256(), "W25 sha256")? == sha(&data),
+        "W25 the guard hashes the real content of a WOF file",
+    )?;
+    ensure(
+        ok(g.metadata(), "W25 metadata")?.len == len_of(&data),
+        "W25 the guard reports the real length",
+    )?;
+    let mut back = Vec::new();
+    ok(g.reader(), "W25 reader")?
+        .read_to_end(&mut back)
+        .map_err(|e| format!("contract violated: W25 reader: {e}"))?;
+    ensure(
+        back == data,
+        "W25 the guard's reader returns the real content",
+    )?;
+    let r = ok(
+        g.replace(
+            &sha(&data),
+            &mut &b"new"[..],
+            &new_file(1, Attrs::default(), b"new", 3),
+        ),
+        "W25 replace of a WOF file",
+    )?;
+    ensure(r.old_left.is_none(), "W25 nothing pending")?;
+    read_is(&*d, "a.bin", b"new", "W25 replaced")?;
+    let g = ok(d.guard(&rel("b.bin")?), "W25 guard of the second WOF file")?;
+    ok(g.delete(&sha(&data)), "W25 delete of a WOF file")?;
+    ensure(
+        names(&*d, None, "W25 listing")? == ["a.bin"],
+        "W25 no temp file, no .old, the deleted file is gone",
+    )
 }
 
 /// How long [`rename_settled`] retries.
