@@ -156,8 +156,9 @@ pub struct PeInfo {
     pub imports: Vec<DllName>,
     /// DLL names of the delay-import directory.
     pub delay_imports: Vec<DllName>,
-    /// The version resource, or why it could not be read: a malformed version resource does
-    /// not hide the rest (user decision 3, ADR 0013).
+    /// The version resource, or why it is malformed: a malformed version resource does not
+    /// hide the rest (user decision 3, ADR 0013). Only format errors land here; an I/O error
+    /// or the exhausted read budget fails [`Pe::info`] as a whole.
     pub version: Result<Option<VersionInfo>, PeError>,
 }
 
@@ -201,11 +202,18 @@ impl<R: Read + Seek> Pe<R> {
 
     /// Headers, imports, delay imports and the version resource. A malformed import table
     /// fails the whole call (the loader would refuse such an image); a malformed version
-    /// resource is kept as [`PeInfo::version`].
+    /// resource is kept as [`PeInfo::version`]. Reading errors ([`PeErrorKind::Io`],
+    /// [`PeErrorKind::ReadBudget`]) are no property of the file and fail the call, also in the
+    /// version part.
     pub fn info(&mut self) -> Result<PeInfo, PeError> {
         let imports = self.imports()?;
         let delay_imports = self.delay_imports()?;
-        let version = self.version_info();
+        let version = match self.version_info() {
+            Err(e) if matches!(e.kind, PeErrorKind::Io(_) | PeErrorKind::ReadBudget) => {
+                return Err(e);
+            }
+            other => other,
+        };
         Ok(PeInfo {
             headers: self.layout.headers.clone(),
             imports,

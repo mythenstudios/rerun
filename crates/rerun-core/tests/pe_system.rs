@@ -90,7 +90,7 @@ fn system32_kernel32_and_ntdll() {
         text(v.strings.original_filename.as_ref())
             .to_ascii_lowercase()
             .starts_with("kernel32"),
-        "OriginalFilename of {} units",
+        "OriginalFilename of {} bytes",
         v.strings.original_filename.as_ref().map_or(0, RawText::len)
     );
     assert!(!text(v.strings.file_description.as_ref()).is_empty());
@@ -347,7 +347,7 @@ fn dump_game_exes() {
                         };
                         let version = match &i.version {
                             Ok(Some(v)) => format!(
-                                "fixed {:?}, table {:?}, strings (units) company {} \
+                                "fixed {:?}, table {:?}, strings (bytes) company {} \
                                  description {} file {} original {} product {} \
                                  product version {}",
                                 v.fixed.map(|f| f.file_version),

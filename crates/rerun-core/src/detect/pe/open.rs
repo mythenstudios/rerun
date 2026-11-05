@@ -21,8 +21,9 @@ pub type GameExe<'g> = Pe<Box<dyn ReadSeek + 'g>>;
 #[non_exhaustive]
 pub enum PeReadError {
     /// Opening failed: missing, a directory, a reparse point on the way, restricted, an
-    /// online-only placeholder, busy, …
-    #[error("{file}: {source}")]
+    /// online-only placeholder, busy, … The message is that of the system layer, whose target
+    /// already names the file (escaped by [`crate::sys::shown_target`]).
+    #[error("{source}")]
     Open {
         /// The file, relative to the game folder.
         file: RelPath,

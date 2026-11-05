@@ -22,6 +22,30 @@ fn rerun_launch_exe_loads_dependencies_from_system32_only() {
     eprintln!("rerun-launch.exe imports: {}", hardening::joined(&imports));
 }
 
+/// The release shim as CI ships it (`cargo build -p rerun-launch --release`, without
+/// dev-dependencies): the test-profile binary above is linked with the features of the test
+/// build, so CI checks the release binary too. Its path comes from
+/// `RERUN_RELEASE_LAUNCH_EXE` (set in `.github/workflows/ci.yml`); unset, the check is skipped
+/// locally and fails on a GitHub-hosted runner.
+#[test]
+fn release_rerun_launch_exe_loads_dependencies_from_system32_only() {
+    let Some(exe) = std::env::var_os("RERUN_RELEASE_LAUNCH_EXE") else {
+        assert!(
+            !hardening::on_github_hosted_runner(),
+            "RERUN_RELEASE_LAUNCH_EXE is not set on a GitHub-hosted runner (ci.yml)"
+        );
+        eprintln!("RERUN_RELEASE_LAUNCH_EXE not set: release binary not checked");
+        return;
+    };
+    let exe = Path::new(&exe);
+    let imports =
+        hardening::check_hardened_file(exe).unwrap_or_else(|e| panic!("{}: {e}", exe.display()));
+    eprintln!(
+        "release rerun-launch.exe imports: {}",
+        hardening::joined(&imports)
+    );
+}
+
 #[test]
 fn rerun_launch_exe_runs_with_the_restricted_search_path() {
     let out = Command::new(env!("CARGO_BIN_EXE_rerun-launch"))

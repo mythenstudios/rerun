@@ -14,7 +14,7 @@ use crate::path::RelPath;
 use crate::policy::root::{ForbiddenRoots, GameDir};
 use crate::sys::fake::{FakeSystem, FakeSystemBuilder};
 use crate::sys::fs::{DirEntry, Metadata, ReadSeek, RootInfo, tag};
-use crate::sys::{Dir, SysError, SysErrorKind, SysResult};
+use crate::sys::{Dir, SysError, SysErrorKind, SysResult, shown_target};
 
 const INSTALL: &str = r"C:\Users\Player\AppData\Local\Programs\Rerun";
 const GAME: &str = r"D:\Games\Invented Game";
@@ -122,6 +122,42 @@ fn a_missing_file_is_not_found() {
     assert_eq!(exe_kind(&sys), SysErrorKind::NotFound);
     let sys = base().build().unwrap();
     assert_eq!(exe_kind(&sys), SysErrorKind::NotFound);
+}
+
+#[test]
+fn open_errors_name_the_file_once() {
+    let sys = base().dir(game_file("bin")).build().unwrap();
+    let Err(e) = open_game_exe(&game(&sys), &rel(EXE), &Limits::DEFAULT) else {
+        panic!("expected an error");
+    };
+    let PeReadError::Open { source, .. } = &e else {
+        panic!("expected Open, got {e:?}");
+    };
+    assert_eq!(e.to_string(), source.to_string());
+    assert_eq!(e.to_string().matches("game.exe").count(), 1, "{e}");
+}
+
+#[test]
+fn a_valid_rel_path_is_shown_as_it_is() {
+    // `PeReadError::Parse` shows the `RelPath` unescaped: `RelPath` and `shown_target` must
+    // refuse the same characters, so a valid path never needs escaping.
+    for p in [
+        EXE,
+        r"Größe\Spiel.exe",
+        r"日本語\ゲーム.exe",
+        r"Game (1998)\bin\GAME.EXE",
+        r"a b\c-d_e+f,g;h=i[j]k{l}m'n!o@p#q$r%s^t&u.exe",
+    ] {
+        let p = rel(p);
+        assert_eq!(shown_target(p.to_string()), p.to_string(), "{p}");
+    }
+    // What `shown_target` would escape is no valid `RelPath`: bidi override, newline,
+    // zero-width space, full-width solidus, division slash.
+    for bad in ['\u{202E}', '\n', '\u{200B}', '\u{FF0F}', '\u{2215}'] {
+        let raw = format!(r"bin\a{bad}b.exe");
+        assert_ne!(shown_target(raw.clone()), raw);
+        assert!(RelPath::parse(&raw).is_err(), "{raw:?}");
+    }
 }
 
 #[test]

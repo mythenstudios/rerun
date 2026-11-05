@@ -752,6 +752,69 @@ fn info_keeps_headers_and_imports_when_the_version_is_broken() {
     assert!(!shown.contains("Invented"), "{shown}");
 }
 
+/// A cursor that fails every read starting at or after `from` (before the end of the file).
+struct FailFrom<'a> {
+    inner: Cursor<&'a [u8]>,
+    from: u64,
+}
+
+impl std::io::Read for FailFrom<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let pos = self.inner.position();
+        let len = u64::try_from(self.inner.get_ref().len()).unwrap();
+        if pos >= self.from && pos < len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "SECRETMARKER from the device",
+            ));
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl std::io::Seek for FailFrom<'_> {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(to)
+    }
+}
+
+#[test]
+fn info_fails_on_reading_errors_in_the_version_part() {
+    // An I/O error from the resource directory on is no property of the file: `info` fails,
+    // `version_info` reports it as it is.
+    let img = with_version(&standard()).build();
+    let rsrc = off(img.rsrc.unwrap());
+    let reader = FailFrom {
+        inner: Cursor::new(&img.bytes[..]),
+        from: rsrc,
+    };
+    let mut p = Pe::parse(reader, &Limits::DEFAULT).unwrap();
+    let io = PeErrorKind::Io(std::io::ErrorKind::PermissionDenied);
+    let e = p.info().unwrap_err();
+    assert_eq!(e, PeError::at(io, rsrc));
+    assert!(!format!("{e} / {e:?}").contains("SECRET"));
+    assert_eq!(p.version_info().unwrap_err().kind, io);
+
+    // The budget runs out inside the version part: the header region and the 16-byte root
+    // table header fit, its entries do not.
+    let header = u64::try_from(Limits::DEFAULT.max_header_bytes).unwrap();
+    let limits = Limits {
+        max_read_bytes: header + 16 + 7,
+        ..Limits::DEFAULT
+    };
+    let mut p = Pe::parse(Cursor::new(&img.bytes[..]), &limits).unwrap();
+    let e = p.info().unwrap_err();
+    assert_eq!(e.kind, PeErrorKind::ReadBudget);
+    assert_eq!(p.bytes_read(), header + 16);
+    // With room for the three tables, the data entry and the blob, it is read again.
+    let limits = Limits {
+        max_read_bytes: header + 3 * (16 + 8) + 16 + 4096,
+        ..Limits::DEFAULT
+    };
+    let mut p = Pe::parse(Cursor::new(&img.bytes[..]), &limits).unwrap();
+    assert!(p.info().unwrap().version.unwrap().is_some());
+}
+
 #[test]
 fn the_worst_case_of_every_limit_stays_within_the_budget() {
     let mut vs = standard();

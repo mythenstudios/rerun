@@ -62,12 +62,26 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: clippy (i686, without workspace tests)
         run: cargo clippy -p rerun-cpu -p rerun-proto -p rerun-launch --target i686-pc-windows-msvc --locked -- -D warnings
+      - name: rerun-launch - size < 1 MiB
+        # Built with -p on purpose: feature unification in the workspace would pull in rerun-proto/serde.
+        # Before the tests: the hardening test checks this release binary too (RERUN_RELEASE_LAUNCH_EXE).
+        run: |
+          cargo build -p rerun-launch --release --locked
+          size=$(stat -c %s target/release/rerun-launch.exe)
+          echo "rerun-launch.exe: $size bytes"
+          if [ "$size" -ge 1048576 ]; then
+            echo "::error::rerun-launch.exe is $size bytes (limit 1 MiB)"
+            exit 1
+          fi
       - name: test (incl. schema validation of topos/ and packages/)
         # Opt-in for the machine-wide fs contract fixtures (mount point, subst, 8.3 names) and
         # the elevated run; only honoured together with RUNNER_ENVIRONMENT=github-hosted
         # (docs/09-testing.md, safeguard 4).
         env:
           RERUN_FS_MACHINE_FIXTURES: "1"
+          # The release shim built above, checked by crates/rerun-launch/tests/hardening.rs
+          # (required on GitHub-hosted runners, skipped locally when unset).
+          RERUN_RELEASE_LAUNCH_EXE: ${{ github.workspace }}/target/release/rerun-launch.exe
         run: cargo test --workspace --all-features --locked
       - name: rerun-core fake feature never in shipped binaries
         # ADR 0007: the in-memory fake and its TOCTOU hooks stay out of release builds.
@@ -91,16 +105,6 @@ jobs:
             | tail -n +2 | awk '{print $1}' | sort -u | grep -v -x -E 'windows-sys|rerun-proto' || true)
           if [ -n "$deps" ]; then
             echo "::error::rerun-launch has disallowed dependencies: $deps"
-            exit 1
-          fi
-      - name: rerun-launch - size < 1 MiB
-        # Built with -p on purpose: feature unification in the workspace would pull in rerun-proto/serde.
-        run: |
-          cargo build -p rerun-launch --release --locked
-          size=$(stat -c %s target/release/rerun-launch.exe)
-          echo "rerun-launch.exe: $size bytes"
-          if [ "$size" -ge 1048576 ]; then
-            echo "::error::rerun-launch.exe is $size bytes (limit 1 MiB)"
             exit 1
           fi
 

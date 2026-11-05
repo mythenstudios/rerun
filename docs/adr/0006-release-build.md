@@ -13,4 +13,4 @@
 
 ## Consequences
 - A panic terminates the process immediately, including the GUI. This is acceptable because the Journal works write-ahead.
-- CI checks the size and allowed dependencies of `rerun-launch`, always built with `-p` (otherwise feature unification pulls in `rerun-proto/serde`). The dependency check covers normal dependencies only (`cargo tree -e normal`): since ADR 0013 `rerun-core` is a dev-dependency of `rerun-launch` for its hardening test, which never reaches the shipped binary (the size build with `-p` does not build dev-dependencies).
+- CI checks the size and allowed dependencies of `rerun-launch`, always built with `-p` (otherwise feature unification pulls in `rerun-proto/serde`). The dependency check covers normal dependencies only (`cargo tree -e normal`): since ADR 0013 `rerun-core` is a dev-dependency of `rerun-launch` for its hardening test, which never reaches the shipped binary (the size build with `-p` does not build dev-dependencies). CI builds this release binary before the tests, and the hardening test checks it as well (`RERUN_RELEASE_LAUNCH_EXE`), since the test-profile binary is linked with the features of the test build.
