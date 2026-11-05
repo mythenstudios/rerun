@@ -174,3 +174,6 @@ pub const SUBSYSTEM_NATIVE: u16 = 1;
 pub const SUBSYSTEM_WINDOWS_GUI: u16 = 2;
 /// `IMAGE_SUBSYSTEM_WINDOWS_CUI`.
 pub const SUBSYSTEM_WINDOWS_CUI: u16 = 3;
+
+#[cfg(all(test, windows))]
+mod tests;
