@@ -1,6 +1,7 @@
 //! Streaming SHA-1 and SHA-256 over a reader (ADR 0014, "Hashes"). Only with `--hashes`.
 //!
-//! One buffer of [`HashLimits::chunk_bytes`]; each chunk is fed to both hashes in one pass.
+//! One buffer of [`HashLimits::chunk_bytes`] (clamped to 1 byte ..= [`MAX_CHUNK_BYTES`]); each
+//! chunk is fed to both hashes in one pass.
 //! The length is the number of bytes read, never asked from metadata. A read past the cap
 //! stops after at most the cap plus one chunk. `Interrupted` is retried as in the parser.
 //! SHA-1 is an identity hint for Topo and package matching, never authorization (the
@@ -18,6 +19,9 @@ use super::ExeError;
 /// the PE parser).
 const MAX_INTERRUPTS: u32 = 16;
 
+/// The largest read buffer [`stream`] allocates, whatever [`HashLimits::chunk_bytes`] says.
+pub const MAX_CHUNK_BYTES: usize = 16 << 20;
+
 /// Bounds of the hashing. A value of exactly the limit is accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HashLimits {
@@ -27,7 +31,8 @@ pub struct HashLimits {
     pub max_files: usize,
     /// Bytes per game (`scan_game` only).
     pub max_game_bytes: u64,
-    /// Size of the one read buffer.
+    /// Size of the one read buffer, clamped to 1 byte ..= [`MAX_CHUNK_BYTES`] (also the
+    /// overshoot past a cap: at most one chunk).
     pub chunk_bytes: usize,
 }
 
@@ -128,37 +133,48 @@ impl fmt::Display for HashOutcome {
     }
 }
 
-/// Why [`stream`] stopped.
+/// Why [`stream`] stopped, and how many bytes it had read by then (charged to the game
+/// budget by the caller).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Stop {
     /// More than the cap.
-    TooLarge,
+    TooLarge {
+        /// Bytes read, at most the cap plus one chunk.
+        read: u64,
+    },
     /// Seeking or reading failed.
-    Io(ErrorKind),
+    Io {
+        /// The kind of the I/O error.
+        kind: ErrorKind,
+        /// Bytes read before it.
+        read: u64,
+    },
 }
 
-/// Hashes `reader` from offset 0 to its end with one buffer of `chunk` bytes (at least 1).
-/// More than `cap` bytes is [`Stop::TooLarge`], after reading at most `cap + chunk` bytes.
+/// Hashes `reader` from offset 0 to its end with one buffer of `chunk` bytes (clamped to
+/// 1 ..= [`MAX_CHUNK_BYTES`]). More than `cap` bytes is [`Stop::TooLarge`], after reading at
+/// most `cap` plus one chunk.
 pub(super) fn stream<R: Read + Seek>(
     mut reader: R,
     cap: u64,
     chunk: usize,
 ) -> Result<Hashes, Stop> {
-    reader
-        .seek(SeekFrom::Start(0))
-        .map_err(|e| Stop::Io(e.kind()))?;
-    let mut buf = vec![0u8; chunk.max(1)];
+    reader.seek(SeekFrom::Start(0)).map_err(|e| Stop::Io {
+        kind: e.kind(),
+        read: 0,
+    })?;
+    let mut buf = vec![0u8; chunk.clamp(1, MAX_CHUNK_BYTES)];
     let mut sha1 = Sha1::new();
     let mut sha256 = Sha256::new();
     let mut len: u64 = 0;
     loop {
-        let n = read_some(&mut reader, &mut buf)?;
+        let n = read_some(&mut reader, &mut buf).map_err(|kind| Stop::Io { kind, read: len })?;
         let Some(data) = buf.get(..n).filter(|d| !d.is_empty()) else {
             break;
         };
         len = len.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
         if len > cap {
-            return Err(Stop::TooLarge);
+            return Err(Stop::TooLarge { read: len });
         }
         sha1.update(data);
         sha256.update(data);
@@ -172,7 +188,7 @@ pub(super) fn stream<R: Read + Seek>(
 
 /// One read into `buf`, `Interrupted` retried; a reader that claims more than the buffer is
 /// clamped, never trusted.
-fn read_some<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize, Stop> {
+fn read_some<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize, ErrorKind> {
     let mut interrupts = 0;
     loop {
         match reader.read(buf) {
@@ -180,7 +196,7 @@ fn read_some<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize, Stop> {
             Err(e) if e.kind() == ErrorKind::Interrupted && interrupts < MAX_INTERRUPTS => {
                 interrupts += 1;
             }
-            Err(e) => return Err(Stop::Io(e.kind())),
+            Err(e) => return Err(e.kind()),
         }
     }
 }

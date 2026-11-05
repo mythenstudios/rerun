@@ -53,8 +53,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::fold::fold;
@@ -749,6 +750,29 @@ impl State {
 struct Shared {
     state: Mutex<State>,
     hook: Mutex<Option<StepHook>>,
+    /// Bytes served by every reader `open_read` handed out ([`FakeFs::bytes_served`]).
+    served: Arc<AtomicU64>,
+}
+
+/// A reader over a copy of a file that counts the bytes it serves into its [`FakeFs`].
+struct Counted {
+    data: Cursor<Vec<u8>>,
+    served: Arc<AtomicU64>,
+}
+
+impl Read for Counted {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.data.read(buf)?;
+        self.served
+            .fetch_add(u64::try_from(n).unwrap_or(u64::MAX), Ordering::SeqCst);
+        Ok(n)
+    }
+}
+
+impl Seek for Counted {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        self.data.seek(to)
+    }
 }
 
 /// In-memory file system. Cheap to clone; clones share the same state.
@@ -800,6 +824,12 @@ impl FakeFs {
                 *slot = Some(hook);
             }
         }
+    }
+
+    /// Bytes served so far by every reader that `open_read` (and `read`) handed out, for
+    /// tests that bound how much a caller reads.
+    pub fn bytes_served(&self) -> u64 {
+        self.shared.served.load(Ordering::SeqCst)
     }
 
     /// Installs a test hook that runs before each component of a relative operation is looked
@@ -1202,9 +1232,10 @@ impl Dir for FakeDir {
         let id = Self::require(&st, parent, name, t)?;
         st.openable(id, t)?;
         match (st.rel_kind(id), st.nodes.get(&id).map(|n| &n.body)) {
-            (EntryKind::File, Some(Body::File(ino))) => {
-                Ok(Box::new(Cursor::new(st.inode(*ino, t)?.data.clone())))
-            }
+            (EntryKind::File, Some(Body::File(ino))) => Ok(Box::new(Counted {
+                data: Cursor::new(st.inode(*ino, t)?.data.clone()),
+                served: Arc::clone(&self.fs.shared.served),
+            })),
             (EntryKind::Dir, _) => Err(err(SysErrorKind::AccessDenied, t)),
             _ => Err(err(SysErrorKind::ReparsePoint, t)),
         }

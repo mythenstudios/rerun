@@ -135,7 +135,10 @@ fn interrupted_is_retried_sixteen_times() {
     odd.interrupts = 17;
     assert_eq!(
         stream(&mut odd, u64::MAX, 64),
-        Err(Stop::Io(io::ErrorKind::Interrupted))
+        Err(Stop::Io {
+            kind: io::ErrorKind::Interrupted,
+            read: 0
+        })
     );
 }
 
@@ -144,7 +147,14 @@ fn a_failing_reader_keeps_only_its_kind() {
     let mut odd = Odd::new(pattern());
     odd.fail_at = Some((4096, io::ErrorKind::InvalidData));
     let r = stream(&mut odd, u64::MAX, 1024);
-    assert_eq!(r, Err(Stop::Io(io::ErrorKind::InvalidData)));
+    // The bytes read before the error are reported (charged to the game budget).
+    assert_eq!(
+        r,
+        Err(Stop::Io {
+            kind: io::ErrorKind::InvalidData,
+            read: 4096
+        })
+    );
     assert!(!format!("{r:?}").contains("SECRET"));
 }
 
@@ -169,13 +179,31 @@ fn the_cap_is_exact_and_stops_after_one_more_chunk() {
     assert_eq!(stream(&mut odd, len, 4096).unwrap().len, len);
 
     let mut odd = Odd::new(data);
-    assert_eq!(stream(&mut odd, len - 1, 4096), Err(Stop::TooLarge));
+    assert_eq!(
+        stream(&mut odd, len - 1, 4096),
+        Err(Stop::TooLarge { read: len })
+    );
     assert!(odd.served <= len - 1 + 4096, "{}", odd.served);
 
     // A small cap on a large file reads at most the cap plus one chunk.
     let mut odd = Odd::new(pattern());
-    assert_eq!(stream(&mut odd, 10_000, 4096), Err(Stop::TooLarge));
+    let Err(Stop::TooLarge { read }) = stream(&mut odd, 10_000, 4096) else {
+        panic!("expected TooLarge");
+    };
+    assert_eq!(read, odd.served);
     assert!(odd.served <= 10_000 + 4096, "{}", odd.served);
+}
+
+#[test]
+fn the_buffer_is_clamped() {
+    // A huge chunk size allocates at most `MAX_CHUNK_BYTES`; the overshoot past a cap is at
+    // most that much.
+    let data = vec![7u8; (super::MAX_CHUNK_BYTES * 2) + 5];
+    let mut odd = Odd::new(data);
+    let Err(Stop::TooLarge { read }) = stream(&mut odd, 1, usize::MAX) else {
+        panic!("expected TooLarge");
+    };
+    assert_eq!(read, u64::try_from(super::MAX_CHUNK_BYTES).unwrap());
 }
 
 #[test]

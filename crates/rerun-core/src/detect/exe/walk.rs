@@ -193,7 +193,9 @@ fn walk_dir(root: &dyn Dir, limits: &ExeLimits) -> Walk {
 }
 
 /// Opens `dir` relative to `root` (or takes `root` itself), and lists it sorted by folded
-/// name; `None` for a case-sensitive directory (not listed at all).
+/// name; `None` for a case-sensitive directory: one that says so (not listed at all), or one
+/// whose listing holds two names that fold to the same path (it became case-sensitive between
+/// `info` and `read_dir`, or the file system does not fold like NTFS).
 fn list(root: &dyn Dir, dir: Option<&RelPath>) -> SysResult<Option<Vec<DirEntry>>> {
     let sub;
     let handle: &dyn Dir = match dir {
@@ -206,9 +208,17 @@ fn list(root: &dyn Dir, dir: Option<&RelPath>) -> SysResult<Option<Vec<DirEntry>
     if handle.info()?.case_sensitive {
         return Ok(None);
     }
-    let mut entries = handle.read_dir(None)?;
-    entries.sort_by_cached_key(|e| (fold(&e.name), e.name.clone()));
-    Ok(Some(entries))
+    let entries = handle.read_dir(None)?;
+    let mut keyed: Vec<(String, DirEntry)> =
+        entries.into_iter().map(|e| (fold(&e.name), e)).collect();
+    keyed.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.name.cmp(&y.name)));
+    if keyed
+        .windows(2)
+        .any(|w| matches!(w, [(a, _), (b, _)] if a == b))
+    {
+        return Ok(None);
+    }
+    Ok(Some(keyed.into_iter().map(|(_, e)| e).collect()))
 }
 
 /// The path of entry `name` below `dir`, or why it is an anomaly (an invalid segment, or a

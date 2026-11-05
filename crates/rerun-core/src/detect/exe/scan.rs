@@ -108,6 +108,9 @@ pub struct GameExes {
 /// parsed (no second open; the read share of `open_read` keeps writers out). The per-file
 /// pipeline of [`scan_game`] and of Topo matching (which names its paths itself, independent
 /// of the walk).
+///
+/// Only the per-file limits of `hashes` apply here ([`HashLimits::max_file_bytes`],
+/// [`HashLimits::chunk_bytes`]); `max_files` and `max_game_bytes` are for [`scan_game`].
 pub fn inspect_exe(
     game: &GameDir<'_>,
     exe: &RelPath,
@@ -115,37 +118,50 @@ pub fn inspect_exe(
     hashes: Option<&HashLimits>,
 ) -> Result<ExeFacts, ExeError> {
     let pe = open_game_exe(game, exe, limits)?;
-    inspect_pe(pe, exe, hashes)
+    inspect_pe(pe, exe, hashes, None).map(|(facts, _)| facts)
 }
 
-/// [`inspect_exe`] after the open; separate so the reads can be counted in tests.
+/// [`inspect_exe`] after the open; separate so the reads can be counted in tests. With
+/// `expected`, the file is hashed only if its facts equal them (else `Changed`, after the
+/// parser's reads only). Returns the facts and the bytes the hashing read.
 fn inspect_pe<R: Read + Seek>(
     mut pe: Pe<R>,
     exe: &RelPath,
     hashes: Option<&HashLimits>,
-) -> Result<ExeFacts, ExeError> {
+    expected: Option<&PeInfo>,
+) -> Result<(ExeFacts, u64), ExeError> {
     let info = pe.info().map_err(|error| PeReadError::Parse {
         file: exe.clone(),
         error,
     })?;
     let api = classify(&info.imports, &info.delay_imports, info.headers.managed);
     let bytes_read = pe.bytes_read();
-    let hashes = match hashes {
-        None => HashOutcome::NotRequested,
+    let (hashes, hashed) = match hashes {
+        None => (HashOutcome::NotRequested, 0),
+        Some(_) if expected.is_some_and(|e| *e != info) => {
+            (HashOutcome::Failed(HashError::Changed), 0)
+        }
         Some(h) => match stream(pe.into_inner(), h.max_file_bytes, h.chunk_bytes) {
-            Ok(done) => HashOutcome::Done(done),
-            Err(Stop::TooLarge) => HashOutcome::Skipped(HashSkip::TooLarge {
-                max: h.max_file_bytes,
-            }),
-            Err(Stop::Io(kind)) => HashOutcome::Failed(HashError::Io(kind)),
+            Ok(done) => {
+                let len = done.len;
+                (HashOutcome::Done(done), len)
+            }
+            Err(Stop::TooLarge { read }) => (
+                HashOutcome::Skipped(HashSkip::TooLarge {
+                    max: h.max_file_bytes,
+                }),
+                read,
+            ),
+            Err(Stop::Io { kind, read }) => (HashOutcome::Failed(HashError::Io(kind)), read),
         },
     };
-    Ok(ExeFacts {
+    let facts = ExeFacts {
         info,
         api,
         bytes_read,
         hashes,
-    })
+    };
+    Ok((facts, hashed))
 }
 
 /// Walks the game folder, inspects every candidate (one handle at a time), assigns roles and
@@ -184,9 +200,11 @@ pub fn scan_game(game: &GameDir<'_>, options: &Options) -> GameExes {
 }
 
 /// Hashes the parsed `Game` candidates in rank order within the per-game limits; marks every
-/// other parsed candidate `Skipped`. Each selected file is inspected again with hashes (one
-/// handle for parse and hash); if its facts differ from the first inspection, the hash is
-/// `Changed` and the first facts stay, so a hash always belongs to the facts shown.
+/// other parsed candidate `Skipped`. Each selected file is opened and parsed again; only if
+/// its facts equal those of the first inspection is that same handle hashed. Otherwise the
+/// hash is `Changed` (after the parser's reads only) and the first facts stay, so a hash
+/// always belongs to the facts shown. Every byte the hashing read is charged to the game
+/// budget, so a game reads at most `max_game_bytes` plus one chunk per hashed file.
 fn hash_games(game: &GameDir<'_>, candidates: &mut [Candidate], limits: &ExeLimits) {
     let h = &limits.hash;
     let mut files = 0usize;
@@ -224,16 +242,14 @@ fn hash_games(game: &GameDir<'_>, candidates: &mut [Candidate], limits: &ExeLimi
             max_file_bytes: cap,
             ..*h
         };
-        facts.hashes = match inspect_exe(game, &c.path, &limits.pe, Some(&per_file)) {
+        let again = open_game_exe(game, &c.path, &limits.pe)
+            .map_err(ExeError::from)
+            .and_then(|pe| inspect_pe(pe, &c.path, Some(&per_file), Some(&facts.info)));
+        facts.hashes = match again {
             Err(e) => HashOutcome::Failed(HashError::Inspect(Box::new(e))),
-            Ok(again) if again.info != facts.info => HashOutcome::Failed(HashError::Changed),
-            Ok(again) => match again.hashes {
-                HashOutcome::Done(done) => {
-                    used = used.saturating_add(done.len);
-                    HashOutcome::Done(done)
-                }
+            Ok((again, read)) => match again.hashes {
                 HashOutcome::Skipped(HashSkip::TooLarge { .. }) => {
-                    used = used.saturating_add(cap);
+                    used = used.saturating_add(read);
                     let skip = if cap < h.max_file_bytes {
                         HashSkip::GameBudget {
                             max: h.max_game_bytes,
@@ -245,7 +261,10 @@ fn hash_games(game: &GameDir<'_>, candidates: &mut [Candidate], limits: &ExeLimi
                     };
                     HashOutcome::Skipped(skip)
                 }
-                other => other,
+                other => {
+                    used = used.saturating_add(read);
+                    other
+                }
             },
         };
     }

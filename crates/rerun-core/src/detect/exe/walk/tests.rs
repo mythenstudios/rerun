@@ -361,6 +361,28 @@ fn a_folder_that_fails_is_an_issue_and_the_walk_goes_on() {
     assert_eq!(w.stats.listed_dirs, 3);
 }
 
+#[test]
+fn two_names_that_fold_alike_make_a_folder_case_sensitive() {
+    let sys = base()
+        .file(at("game.exe"), MZ)
+        .file(at(r"bin\a.exe"), MZ)
+        .file(at(r"bin\b.exe"), MZ)
+        .build()
+        .unwrap();
+    let g = game(&sys);
+    let mut dir = Scripted::new(g.dir());
+    dir.twin_at = Some(rel("bin"));
+    let w = walk_dir(&dir, &ExeLimits::DEFAULT);
+    assert_eq!(paths(&w), ["game.exe"]);
+    assert_eq!(
+        w.issues,
+        [ExeIssue {
+            at: Some(rel("bin")),
+            kind: ExeIssueKind::CaseSensitiveDir
+        }]
+    );
+}
+
 /// Folders `d0` … `d{n-1}`, each holding one executable.
 fn folders(n: usize) -> FakeSystem {
     (0..n)
@@ -488,13 +510,17 @@ fn the_shipped_limits() {
 
 // ---------- A handle that lists in reverse and can fail ----------
 
-/// Delegates to a real handle, lists every folder in reverse order and fails `open_dir` of
-/// `fail` with `NotFound`.
+/// Delegates to a real handle, lists every folder in reverse order, fails `open_dir` of
+/// `fail` with `NotFound`, and lists folder `twin_at` with an extra entry: its first entry
+/// again under an upper-case name (as if the folder turned case-sensitive between `info` and
+/// `read_dir`).
 #[derive(Debug)]
 struct Scripted<'a> {
     inner: &'a dyn Dir,
     owned: Option<Box<dyn Dir + 'a>>,
     fail: Option<RelPath>,
+    twin_at: Option<RelPath>,
+    twin: bool,
 }
 
 impl<'a> Scripted<'a> {
@@ -503,6 +529,8 @@ impl<'a> Scripted<'a> {
             inner,
             owned: None,
             fail: None,
+            twin_at: None,
+            twin: false,
         }
     }
 
@@ -524,6 +552,8 @@ impl Dir for Scripted<'_> {
             inner: self.dir(),
             owned: Some(sub),
             fail: None,
+            twin_at: None,
+            twin: self.twin_at.as_ref() == Some(p),
         }))
     }
     fn metadata(&self, p: &RelPath) -> SysResult<Option<Metadata>> {
@@ -535,6 +565,14 @@ impl Dir for Scripted<'_> {
     fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
         let mut entries = self.dir().read_dir(p)?;
         entries.reverse();
+        if self.twin
+            && let Some(first) = entries.first().cloned()
+        {
+            entries.push(DirEntry {
+                name: first.name.to_uppercase(),
+                ..first
+            });
+        }
         Ok(entries)
     }
     fn create_new(&self, p: &RelPath, data: &[u8]) -> SysResult<()> {

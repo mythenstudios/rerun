@@ -422,7 +422,7 @@ fn without_hashes_nothing_beyond_the_parser_is_read() {
     let len = u64::try_from(bytes.len()).unwrap();
     let (reader, served) = counted(&bytes);
     let pe = Pe::parse(reader, &Limits::DEFAULT).unwrap();
-    let facts = inspect_pe(pe, &rel("game.exe"), None).unwrap();
+    let (facts, _) = inspect_pe(pe, &rel("game.exe"), None, None).unwrap();
     assert_eq!(facts.hashes, HashOutcome::NotRequested);
     let n = served.load(Ordering::SeqCst);
     assert!(n <= facts.bytes_read, "{n} > {}", facts.bytes_read);
@@ -431,11 +431,13 @@ fn without_hashes_nothing_beyond_the_parser_is_read() {
     // With hashes: the same handle, read once more from 0 to its end.
     let (reader, served) = counted(&bytes);
     let pe = Pe::parse(reader, &Limits::DEFAULT).unwrap();
-    let facts = inspect_pe(pe, &rel("game.exe"), Some(&HashLimits::DEFAULT)).unwrap();
+    let (facts, hashed) =
+        inspect_pe(pe, &rel("game.exe"), Some(&HashLimits::DEFAULT), None).unwrap();
     let HashOutcome::Done(h) = &facts.hashes else {
         panic!("expected hashes, got {:?}", facts.hashes);
     };
     assert_eq!(h.len, len);
+    assert_eq!(hashed, len);
     assert_eq!(h.sha1, hex(&Sha1::digest(&bytes)));
     assert_eq!(h.sha256, hex(&Sha256::digest(&bytes)));
     assert!(served.load(Ordering::SeqCst) <= facts.bytes_read + h.len);
@@ -659,4 +661,131 @@ fn a_file_replaced_between_the_two_inspections_is_not_hashed() {
         "{e}"
     );
     assert_eq!(outcome.to_string(), format!("failed: {e}"));
+}
+
+/// Replaces each `(file, with)` (one segment, in the game folder) when that file is opened for
+/// reading the second time (the first is the inspection, the second the one that hashes).
+fn replace_each_on_second_open(fs: &FakeFs, files: Vec<(&'static str, Vec<u8>)>) {
+    let opens: Vec<AtomicUsize> = files.iter().map(|_| AtomicUsize::new(0)).collect();
+    fs.on_step(move |fs: &FakeFs, ev: &StepEvent| {
+        if ev.op != FsOp::OpenRead {
+            return;
+        }
+        for ((file, with), n) in files.iter().zip(&opens) {
+            if ev.name == *file && n.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                fs.put_file(Path::new(&at(file)), with).unwrap();
+            }
+        }
+    });
+}
+
+/// `exe(imports)` with `extra` bytes of overlay appended (the parser never reads it, so the
+/// facts stay the same).
+fn with_overlay(imports: &[&str], extra: usize) -> Vec<u8> {
+    let mut bytes = exe(imports);
+    bytes.resize(bytes.len() + extra, 0x5A);
+    bytes
+}
+
+#[test]
+fn changed_files_cost_only_parser_reads() {
+    // Two game executables are replaced by large, different ones before they are hashed;
+    // a third, unchanged one fills the budget.
+    let third = with_overlay(&["d3d9.dll"], 1 << 20);
+    let third_len = u64::try_from(third.len()).unwrap();
+    let sys = base()
+        .file(at("Invented.exe"), exe(&["d3d11.dll"]))
+        .file(at("Invented_A.exe"), exe(&["d3d10.dll"]))
+        .file(at("Invented_B.exe"), third)
+        .build()
+        .unwrap();
+    let big = with_overlay(&["opengl32.dll"], 8 << 20);
+    replace_each_on_second_open(
+        sys.fake_fs(),
+        vec![("Invented.exe", big.clone()), ("Invented_A.exe", big)],
+    );
+    let chunk = 4096;
+    let limits = ExeLimits {
+        hash: HashLimits {
+            max_game_bytes: third_len,
+            chunk_bytes: chunk,
+            ..HashLimits::DEFAULT
+        },
+        ..ExeLimits::DEFAULT
+    };
+    let before = sys.fake_fs().bytes_served();
+    let r = scan_game(
+        &game(&sys),
+        &Options {
+            limits,
+            ..hashing()
+        },
+    );
+    let served = sys.fake_fs().bytes_served() - before;
+    sys.fake_fs().clear_on_step();
+    assert_eq!(
+        order(&r),
+        ["Invented.exe", "Invented_A.exe", "Invented_B.exe"]
+    );
+    assert_eq!(
+        hashes(&r.candidates[0]),
+        &HashOutcome::Failed(HashError::Changed)
+    );
+    assert_eq!(
+        hashes(&r.candidates[1]),
+        &HashOutcome::Failed(HashError::Changed)
+    );
+    assert!(matches!(hashes(&r.candidates[2]), HashOutcome::Done(h) if h.len == third_len));
+    // Two parser passes over three files (each at most the parser budget), plus the game
+    // budget plus one chunk per hashed file; hashing the replaced 8 MiB files would exceed it.
+    let parser = 2 * 3 * Limits::DEFAULT.max_read_bytes;
+    let bound = parser + third_len + 3 * u64::try_from(chunk).unwrap();
+    assert!(served <= bound, "{served} > {bound}");
+}
+
+#[test]
+fn a_file_that_grew_hits_the_game_budget_and_later_ones_are_skipped() {
+    // The listing says small; before hashing, an overlay is appended (same facts). The
+    // remaining game budget caps the read: `GameBudget`, and nothing is left for the next.
+    let first = exe(&["d3d11.dll"]);
+    let first_len = u64::try_from(first.len()).unwrap();
+    let sys = base()
+        .file(at("Invented.exe"), first)
+        .file(at("Invented_A.exe"), exe(&["d3d9.dll"]))
+        .build()
+        .unwrap();
+    replace_each_on_second_open(
+        sys.fake_fs(),
+        vec![("Invented.exe", with_overlay(&["d3d11.dll"], 1 << 20))],
+    );
+    let budget = first_len + 100;
+    let limits = ExeLimits {
+        hash: HashLimits {
+            max_game_bytes: budget,
+            chunk_bytes: 4096,
+            ..HashLimits::DEFAULT
+        },
+        ..ExeLimits::DEFAULT
+    };
+    let before = sys.fake_fs().bytes_served();
+    let r = scan_game(
+        &game(&sys),
+        &Options {
+            limits,
+            ..hashing()
+        },
+    );
+    let served = sys.fake_fs().bytes_served() - before;
+    sys.fake_fs().clear_on_step();
+    assert_eq!(order(&r), ["Invented.exe", "Invented_A.exe"]);
+    assert_eq!(
+        hashes(&r.candidates[0]),
+        &HashOutcome::Skipped(HashSkip::GameBudget { max: budget })
+    );
+    assert_eq!(
+        hashes(&r.candidates[1]),
+        &HashOutcome::Skipped(HashSkip::GameBudget { max: budget })
+    );
+    let bound = 2 * 2 * Limits::DEFAULT.max_read_bytes + budget + 4096;
+    assert!(served <= bound, "{served} > {bound}");
 }
