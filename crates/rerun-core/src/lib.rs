@@ -6,9 +6,12 @@
 //!   folders, GPU), plus
 //!   `sys::fake` (in-memory) and the generic [`sys::snapshot`].
 //! - [`policy`]: rules above `sys`, e.g. which roots may be opened.
+//! - [`detect`]: detection of installed games (Steam files through the bounded VDF parser,
+//!   ADR 0011).
 //!
-//! See `docs/01-architecture.md`, ADR 0004 and ADR 0007.
+//! See `docs/01-architecture.md`, ADR 0004, ADR 0007 and ADR 0011.
 
+pub mod detect;
 mod fold;
 pub mod path;
 pub mod policy;

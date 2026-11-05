@@ -1,0 +1,13 @@
+// Hand-edited fixture with comments.
+"libraryfolders"
+{
+	// the main library
+	"0"
+	{
+		"path"		"C:\\Fixture\\Steam" // trailing comment
+		"label"		"Quote \" tab \t newline \n backslash \\ end"
+		"apps" {}
+	}
+	"contentstatsid"	"-1"
+}
+// the last line has no line break
