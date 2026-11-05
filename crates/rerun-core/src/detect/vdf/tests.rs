@@ -13,7 +13,8 @@ const ACF_MINIMAL: &[u8] =
     include_bytes!("../../../../../tests/fixtures/vdf/appmanifest-minimal.acf");
 const ACF_FULL: &[u8] = include_bytes!("../../../../../tests/fixtures/vdf/appmanifest-full.acf");
 
-const FIXTURES: &[&[u8]] = &[LIB_CURRENT, LIB_LEGACY, LIB_COMMENTS, ACF_MINIMAL, ACF_FULL];
+pub(super) const FIXTURES: &[&[u8]] =
+    &[LIB_CURRENT, LIB_LEGACY, LIB_COMMENTS, ACF_MINIMAL, ACF_FULL];
 
 const L: Limits = Limits::LIBRARY_FOLDERS;
 
@@ -55,7 +56,12 @@ fn only<'a>(o: &'a Object, key: &str) -> &'a Entry {
         .unwrap_or_else(|| panic!("{key} missing"))
 }
 
-fn small(max_bytes: usize, max_depth: usize, max_entries: usize, max_string: usize) -> Limits {
+pub(super) fn small(
+    max_bytes: usize,
+    max_depth: usize,
+    max_entries: usize,
+    max_string: usize,
+) -> Limits {
     Limits {
         max_bytes,
         max_depth,
@@ -713,7 +719,7 @@ fn write(doc: &Document) -> String {
 /// injective, so equal output means equal keys, values and structure; offsets differ). The
 /// written form may be longer than the input (indentation, escapes), so only the byte limit
 /// is lifted.
-fn assert_round_trip(doc: &Document, limits: &Limits) {
+pub(super) fn assert_round_trip(doc: &Document, limits: &Limits) {
     let text = write(doc);
     let limits = Limits {
         max_bytes: usize::MAX,
@@ -731,25 +737,25 @@ fn the_fixtures_round_trip() {
 }
 
 /// xorshift64*, so the loops are the same on every machine.
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
         self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub(super) fn below(&mut self, n: usize) -> usize {
         usize::try_from(self.next() % u64::try_from(n).unwrap()).unwrap()
     }
 
-    fn byte(&mut self) -> u8 {
+    pub(super) fn byte(&mut self) -> u8 {
         self.next().to_le_bytes()[0]
     }
 
-    fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+    pub(super) fn pick<T: Copy>(&mut self, items: &[T]) -> T {
         items[self.below(items.len())]
     }
 }
@@ -799,7 +805,7 @@ fn generated_documents_round_trip() {
 }
 
 /// Walks the tree without recursion and checks every limit.
-fn assert_within(doc: &Document, limits: &Limits) {
+pub(super) fn assert_within(doc: &Document, limits: &Limits) {
     let mut stack = vec![(doc.root(), 0usize)];
     let mut entries = 0;
     while let Some((o, depth)) = stack.pop() {

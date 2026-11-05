@@ -589,3 +589,6 @@ fn push(stack: &mut [Frame], root: &mut Vec<Entry>, entry: Entry) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod structural;
