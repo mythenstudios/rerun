@@ -4,10 +4,11 @@
 //! program), then acts on the state under one lock acquisition.
 
 use super::{
-    Body, DirData, FakeDir, FakeFs, NodeId, Obj, OpenId, OpenToken, Origin, Prim, State, err,
+    Body, DirData, FakeDir, FakeFs, NodeId, Obj, OpenId, OpenToken, Origin, Prim, State,
+    crashed_err, err,
 };
 use crate::sys::contract::{Access, Share};
-use crate::sys::fs::{Attrs, Dir, EntryKind, Metadata, RootInfo, tag};
+use crate::sys::fs::{Attrs, EntryKind, Metadata, RootInfo, tag};
 use crate::sys::seq::{HeldState, PrimDir, PrimFile};
 use crate::sys::{SysErrorKind, SysResult};
 
@@ -110,7 +111,8 @@ impl State {
 
 impl FakeFs {
     /// Runs one primitive: fires the hook (`FsOp::Write`, `call`) without the state lock,
-    /// then `f` under it.
+    /// then, under it, enters the call (crash, armed fault) and runs `f`. A
+    /// [`Fault::CrashAfter`](super::Fault) lets `f` act and then crashes.
     fn prim<T>(
         &self,
         call: Prim,
@@ -119,7 +121,13 @@ impl FakeFs {
     ) -> SysResult<T> {
         self.fire_call(call, name);
         let mut st = self.lock();
-        f(&mut st)
+        let crash = st.enter(call)?;
+        let r = f(&mut st);
+        if crash {
+            st.faults.crashed = true;
+            return Err(crashed_err());
+        }
+        r
     }
 
     /// Registers an open of `obj` by Rerun after a share check (`Busy`).
@@ -142,24 +150,40 @@ impl FakeFs {
     }
 }
 
+impl FakeDir {
+    /// A primitive on this directory handle: also `Other` once a restart closed it.
+    fn prim<T>(
+        &self,
+        call: Prim,
+        name: &str,
+        f: impl FnOnce(&mut State) -> SysResult<T>,
+    ) -> SysResult<T> {
+        let id = self._open.id;
+        self.fs.prim(call, name, |st| {
+            st.alive(id)?;
+            f(st)
+        })
+    }
+}
+
 impl PrimDir for FakeDir {
     type File = FakeFile;
 
     fn info(&self) -> SysResult<RootInfo> {
-        self.fs.fire_call(Prim::Info, "");
-        Dir::info(self)
+        let t = self.handle_target();
+        self.prim(Prim::Info, "", |st| st.root_info(self.node, &t))
     }
 
     fn volume_name(&self) -> SysResult<String> {
         let t = self.handle_target();
-        self.fs.prim(Prim::VolumeName, "", |st| {
+        self.prim(Prim::VolumeName, "", |st| {
             st.dir(self.node, &t)?;
             st.volume_name_of(self.node, &t)
         })
     }
 
     fn open_guard(&self, name: &str) -> SysResult<FakeFile> {
-        let id = self.fs.prim(Prim::OpenGuard, name, |st| {
+        let id = self.prim(Prim::OpenGuard, name, |st| {
             single(name)?;
             let node = st.child(self.node, name)?;
             let obj = st.obj_of(node);
@@ -169,7 +193,7 @@ impl PrimDir for FakeDir {
     }
 
     fn lookup(&self, name: &str) -> SysResult<Option<Metadata>> {
-        self.fs.prim(Prim::Lookup, name, |st| {
+        self.prim(Prim::Lookup, name, |st| {
             single(name)?;
             st.dir(self.node, name)?;
             match st.lookup(self.node, name, name)? {
@@ -183,7 +207,7 @@ impl PrimDir for FakeDir {
     }
 
     fn create_tmp(&self, name: &str) -> SysResult<FakeFile> {
-        let id = self.fs.prim(Prim::CreateTmp, name, |st| {
+        let id = self.prim(Prim::CreateTmp, name, |st| {
             single(name)?;
             let node = st.new_file(self.node, name, &[], name)?;
             let obj = st.obj_of(node);
@@ -193,7 +217,7 @@ impl PrimDir for FakeDir {
     }
 
     fn open_lock(&self, name: &str) -> SysResult<FakeFile> {
-        let id = self.fs.prim(Prim::OpenLock, name, |st| {
+        let id = self.prim(Prim::OpenLock, name, |st| {
             single(name)?;
             let node = match st.lookup(self.node, name, name)? {
                 Some(n) => {
@@ -209,7 +233,7 @@ impl PrimDir for FakeDir {
     }
 
     fn create_dir(&self, name: &str) -> SysResult<u128> {
-        self.fs.prim(Prim::CreateDir, name, |st| {
+        self.prim(Prim::CreateDir, name, |st| {
             single(name)?;
             let user_writable = st.dir(self.node, name)?.user_writable;
             st.insert(
@@ -223,7 +247,7 @@ impl PrimDir for FakeDir {
     }
 
     fn open_dir_delete(&self, name: &str) -> SysResult<FakeFile> {
-        let id = self.fs.prim(Prim::OpenDirDelete, name, |st| {
+        let id = self.prim(Prim::OpenDirDelete, name, |st| {
             single(name)?;
             let node = st.child(self.node, name)?;
             if matches!(st.nodes.get(&node).map(|n| &n.body), Some(Body::File(_))) {
@@ -235,7 +259,7 @@ impl PrimDir for FakeDir {
     }
 
     fn rename(&self, f: &FakeFile, name: &str) -> SysResult<()> {
-        self.fs.prim(Prim::Rename, name, |st| {
+        self.prim(Prim::Rename, name, |st| {
             single(name)?;
             let node = st.rec_obj(f.id(), name)?.node();
             if st.nodes.get(&node).is_none_or(|n| n.parent.is_none()) {

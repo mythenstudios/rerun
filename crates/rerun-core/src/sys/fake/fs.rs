@@ -70,6 +70,11 @@
 //!   helpers ignore the flag (they act like an administrator).
 //! - Volumes: the file system is NTFS unless set with [`FakeFs::set_fs_kind`]; it only
 //!   changes what [`RootInfo`] reports, not the behaviour.
+//! - **Faults and crashes** (ADR 0019 amendment): every call of Rerun (a write primitive, a
+//!   read-side call, `Fs::open_dir`) is counted and can be failed or crashed after
+//!   ([`FakeFs::fault`], [`Fault`]); after a crash every call of Rerun fails until
+//!   [`FakeFs::restart`], which closes Rerun's handles by origin. Fixture and attacker
+//!   helpers are never counted, faulted or blocked.
 //! - Hooks fire only for [`Dir`] operations and the write primitives, never for
 //!   `Fs::open_dir` or the setup helpers, and never reentrantly (a hook that calls into the
 //!   fake does not trigger itself).
@@ -117,6 +122,8 @@ pub enum FsOp {
     OpenDirWrite,
     /// A primitive call of the write side (`sys::seq`); [`StepEvent::call`] names it.
     Write,
+    /// `Dir::info` (only as a fault unit, [`Prim::ReadSide`]; no walk, no hook).
+    Info,
 }
 
 /// A primitive call of the write side (ADR 0017, A1), the unit of the fake's write hooks.
@@ -159,6 +166,37 @@ pub enum Prim {
     FlushFile,
     /// `PrimFile::posix_delete` (step 8, `delete`, `remove_dir`, the cleanup of `<tmp>`).
     PosixDelete,
+    /// A read-side operation of a `Dir` handle or `Fs::open_dir` (`FsOp::OpenDir`): a fault
+    /// unit only, its hooks are the walk steps.
+    ReadSide(FsOp),
+}
+
+/// What an armed fault does when its call comes ([`FakeFs::fault`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// The call fails with this kind before it acts.
+    Fail(SysErrorKind),
+    /// The call acts, then the process crashes (ADR 0019 amendment): this and every later
+    /// call of Rerun fails with `Other` ("fake: process crashed"), so no rollback runs, until
+    /// [`FakeFs::restart`]. A read-side call crashes before it acts.
+    CrashAfter,
+}
+
+/// Fault injection state of the file system (not shared with `FakeRegistry`).
+#[derive(Debug, Default)]
+struct Faults {
+    /// Armed faults: call, its 1-based occurrence, what happens.
+    armed: Vec<(Prim, usize, Fault)>,
+    /// Calls seen since the faults were last cleared, per call.
+    seen: Vec<(Prim, usize)>,
+    fired: bool,
+    record: bool,
+    calls: Vec<Prim>,
+    crashed: bool,
+}
+
+fn crashed_err() -> SysError {
+    err(SysErrorKind::Other, "fake: process crashed")
 }
 
 /// A step of an operation: fires before component `index` (0-based) of the relative path is
@@ -301,10 +339,6 @@ struct OpenRec {
     access: Access,
     share: Share,
     pid: u32,
-    #[expect(
-        dead_code,
-        reason = "read by the crash model's restart, which closes Rerun's handles only"
-    )]
     origin: Origin,
     /// A POSIX delete was set on the handle: the name goes when it closes.
     delete_on_close: bool,
@@ -332,6 +366,7 @@ struct State {
     fs_kinds: BTreeMap<char, FsKind>,
     next_open: OpenId,
     opens: BTreeMap<OpenId, OpenRec>,
+    faults: Faults,
 }
 
 fn err(kind: SysErrorKind, target: &str) -> SysError {
@@ -790,7 +825,17 @@ impl State {
     /// Closes a handle (applied from the close queue, see [`FakeFs::lock`]). A POSIX delete
     /// set on it removes its name now: the entry it was opened through (followed across
     /// renames), a directory only if it is still empty.
+    /// While the process is crashed, its own handles stay open until [`FakeFs::restart`]
+    /// (a dropped Rust value does not close a handle of a dead process early).
     fn close(&mut self, id: OpenId) {
+        if self.faults.crashed
+            && self
+                .opens
+                .get(&id)
+                .is_some_and(|o| o.origin == Origin::Rerun)
+        {
+            return;
+        }
         let Some(rec) = self.opens.remove(&id) else {
             return;
         };
@@ -842,6 +887,78 @@ impl State {
         pids.sort_unstable();
         pids.dedup();
         pids
+    }
+
+    /// Enters a call of Rerun: fails after a crash; counts it, records it, and applies an
+    /// armed fault. `Ok(true)`: crash after the call acts.
+    fn enter(&mut self, call: Prim) -> SysResult<bool> {
+        let f = &mut self.faults;
+        if f.crashed {
+            return Err(crashed_err());
+        }
+        let n = match f.seen.iter_mut().find(|(c, _)| *c == call) {
+            Some((_, n)) => {
+                *n += 1;
+                *n
+            }
+            None => {
+                f.seen.push((call, 1));
+                1
+            }
+        };
+        if f.record {
+            f.calls.push(call);
+        }
+        let Some(pos) = f.armed.iter().position(|(c, k, _)| *c == call && *k == n) else {
+            return Ok(false);
+        };
+        let (_, _, fault) = f.armed.remove(pos);
+        f.fired = true;
+        match fault {
+            Fault::Fail(kind) => Err(err(kind, &format!("fake: injected fault at {call:?} #{n}"))),
+            Fault::CrashAfter => Ok(true),
+        }
+    }
+
+    /// A read-side call: like [`Self::enter`]; a crash happens before it acts.
+    fn enter_read(&mut self, op: FsOp) -> SysResult<()> {
+        if self.enter(Prim::ReadSide(op))? {
+            self.faults.crashed = true;
+            return Err(crashed_err());
+        }
+        Ok(())
+    }
+
+    /// `Other` for a handle closed by a restart (stale).
+    fn alive(&self, id: OpenId) -> SysResult<()> {
+        if self.opens.contains_key(&id) {
+            Ok(())
+        } else {
+            Err(err(SysErrorKind::Other, "fake: handle closed by a restart"))
+        }
+    }
+
+    /// Identity of the directory `node` ([`Dir::info`]).
+    fn root_info(&self, node: NodeId, target: &str) -> SysResult<RootInfo> {
+        let d = self.dir(node, target)?;
+        let (drive, _) = self.path_of(node, target)?;
+        let fs_kind = self.fs_kinds.get(&drive).copied().unwrap_or(FsKind::Ntfs);
+        let (vol, vol_segs) = self.volume_of(node, target)?;
+        let serial = if self.drives.get(&drive) == Some(&vol) {
+            volume_serial(drive)
+        } else {
+            mounted_serial(vol)
+        };
+        Ok(RootInfo {
+            final_path: self.final_path(node, target)?,
+            volume_serial: serial,
+            file_id: u128::from(node),
+            user_writable: d.user_writable,
+            case_sensitive: d.case_sensitive,
+            volume_path: vol_segs.join("\\"),
+            fs_kind,
+            supports_posix_rename: matches!(fs_kind, FsKind::Ntfs | FsKind::Refs),
+        })
     }
 
     /// A rename by another program (`MoveFileExW`): the source is opened for delete, the
@@ -1190,6 +1307,70 @@ impl FakeFs {
     /// Removes the test hook (not from inside the hook itself).
     pub fn clear_on_step(&self) {
         *self.hook_slot() = None;
+    }
+
+    // ---------- Faults and crashes (ADR 0019 amendment) ----------
+
+    /// Arms `fault` for the `nth` (1-based) call of `call` counted from the last
+    /// [`Self::clear_faults`] or [`Self::restart`]. Fixture and attacker helpers are never
+    /// counted or faulted.
+    pub fn fault(&self, call: Prim, nth: usize, fault: Fault) {
+        self.lock().faults.armed.push((call, nth, fault));
+    }
+
+    /// `fault(call, nth, Fault::Fail(kind))`.
+    pub fn fail_at(&self, call: Prim, nth: usize, kind: SysErrorKind) {
+        self.fault(call, nth, Fault::Fail(kind));
+    }
+
+    /// Disarms every fault and resets the call counts (not the crash flag).
+    pub fn clear_faults(&self) {
+        let mut st = self.lock();
+        st.faults.armed.clear();
+        st.faults.seen.clear();
+        st.faults.fired = false;
+    }
+
+    /// An armed fault has fired since the last [`Self::clear_faults`].
+    pub fn fault_fired(&self) -> bool {
+        self.lock().faults.fired
+    }
+
+    /// Records every call of Rerun (primitives and read-side calls) from now on, or stops.
+    pub fn record_calls(&self, on: bool) {
+        self.lock().faults.record = on;
+    }
+
+    /// The calls recorded so far; clears the record.
+    pub fn take_calls(&self) -> Vec<Prim> {
+        std::mem::take(&mut self.lock().faults.calls)
+    }
+
+    /// The process crashed ([`Fault::CrashAfter`]) and was not restarted yet.
+    pub fn crashed(&self) -> bool {
+        self.lock().faults.crashed
+    }
+
+    /// Restarts after a crash (or at any time): closes every handle Rerun held, by origin,
+    /// not by process ID (pending POSIX deletes on them complete, a lock is released, the old
+    /// [`Dir`] handles and guards become stale), keeps the handles and image sections of
+    /// other programs (fixture holds), clears the crash flag, the armed faults and the call
+    /// counts.
+    pub fn restart(&self) {
+        let mut st = self.lock();
+        st.faults.crashed = false;
+        let ours: Vec<OpenId> = st
+            .opens
+            .iter()
+            .filter(|(_, o)| o.origin == Origin::Rerun)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ours {
+            st.close(id);
+        }
+        st.faults.armed.clear();
+        st.faults.seen.clear();
+        st.faults.fired = false;
     }
 
     // ---------- Setup and attacker helpers (absolute, never follow links) ----------
@@ -1597,7 +1778,11 @@ impl FakeFs {
     fn open_abs(&self, abs: &Path) -> SysResult<FakeDir> {
         let shown = abs.display().to_string();
         let (drive, segs) = parse_abs(abs)?;
-        let node = self.lock().resolve_follow(drive, &segs, 0, &shown)?;
+        let node = {
+            let mut st = self.lock();
+            st.enter_read(FsOp::OpenDir)?;
+            st.resolve_follow(drive, &segs, 0, &shown)?
+        };
         self.dir_handle(node, &shown)
     }
 
@@ -1647,6 +1832,13 @@ impl FakeDir {
         format!("<handle {}>", self.node)
     }
 
+    /// Enters a read-side call on this handle: crash, fault, stale handle.
+    fn check(&self, op: FsOp) -> SysResult<()> {
+        let mut st = self.fs.lock();
+        st.enter_read(op)?;
+        st.alive(self._open.id)
+    }
+
     /// Walks `segs` from this handle, firing the hook before each component.
     fn walk(&self, op: FsOp, segs: &[&str], target: &str) -> SysResult<NodeId> {
         let mut cur = self.node;
@@ -1677,36 +1869,19 @@ impl FakeDir {
 
 impl Dir for FakeDir {
     fn info(&self) -> SysResult<RootInfo> {
-        let target = self.handle_target();
-        let st = self.fs.lock();
-        let d = st.dir(self.node, &target)?;
-        let (drive, _) = st.path_of(self.node, &target)?;
-        let fs_kind = st.fs_kinds.get(&drive).copied().unwrap_or(FsKind::Ntfs);
-        let (vol, vol_segs) = st.volume_of(self.node, &target)?;
-        let serial = if st.drives.get(&drive) == Some(&vol) {
-            volume_serial(drive)
-        } else {
-            mounted_serial(vol)
-        };
-        Ok(RootInfo {
-            final_path: st.final_path(self.node, &target)?,
-            volume_serial: serial,
-            file_id: u128::from(self.node),
-            user_writable: d.user_writable,
-            case_sensitive: d.case_sensitive,
-            volume_path: vol_segs.join("\\"),
-            fs_kind,
-            supports_posix_rename: matches!(fs_kind, FsKind::Ntfs | FsKind::Refs),
-        })
+        self.check(FsOp::Info)?;
+        self.fs.lock().root_info(self.node, &self.handle_target())
     }
 
     fn open_dir(&self, p: &RelPath) -> SysResult<Box<dyn Dir + '_>> {
+        self.check(FsOp::OpenDir)?;
         let segs: Vec<&str> = p.segments().collect();
         let node = self.walk(FsOp::OpenDir, &segs, p.as_str())?;
         Ok(Box::new(self.fs.dir_handle(node, p.as_str())?))
     }
 
     fn metadata(&self, p: &RelPath) -> SysResult<Option<Metadata>> {
+        self.check(FsOp::Metadata)?;
         let t = p.as_str();
         // A deleted handle is an error, not a missing entry.
         self.fs.lock().dir(self.node, &self.handle_target())?;
@@ -1728,6 +1903,7 @@ impl Dir for FakeDir {
     }
 
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>> {
+        self.check(FsOp::OpenRead)?;
         let t = p.as_str();
         let (parent, name) = self.split(FsOp::OpenRead, p)?;
         let mut st = self.fs.lock();
@@ -1762,6 +1938,7 @@ impl Dir for FakeDir {
         p: Option<&RelPath>,
         max_entries: usize,
     ) -> SysResult<Vec<DirEntry>> {
+        self.check(FsOp::ReadDir)?;
         let (node, t) = match p {
             None => (self.node, self.handle_target()),
             Some(p) => {
@@ -1797,6 +1974,7 @@ impl Dir for FakeDir {
     }
 
     fn users(&self, p: &RelPath) -> SysResult<Vec<u32>> {
+        self.check(FsOp::Users)?;
         let t = p.as_str();
         let (parent, name) = self.split(FsOp::Users, p)?;
         let st = self.fs.lock();
@@ -1812,6 +1990,7 @@ impl Dir for FakeDir {
 
 impl DirWrite for FakeDir {
     fn open_dir_write(&self, p: &RelPath) -> SysResult<Box<dyn DirWrite + '_>> {
+        self.check(FsOp::OpenDirWrite)?;
         let segs: Vec<&str> = p.segments().collect();
         let node = self.walk(FsOp::OpenDirWrite, &segs, p.as_str())?;
         Ok(Box::new(self.fs.dir_handle(node, p.as_str())?))

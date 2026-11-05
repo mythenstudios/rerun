@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{FakeFs, FakeSystem, FsOp, Prim, StepEvent};
+use super::{FakeFs, FakeSystem, Fault, FsOp, Prim, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
     Access, FsFixture, Held, Share, fs_link_read_contract, fs_link_write_contract,
@@ -2509,4 +2509,357 @@ fn f10_users_reports_handles_and_images_by_process() {
     drop(image);
     assert!(g.users(&r("moved.bin")).unwrap().is_empty());
     fx.remove_abs(&p(r"C:\G\moved.bin")).unwrap();
+}
+
+// ---------- Faults and crashes at the primitive layer ----------
+
+/// Name, content and R/H/S of every entry of a directory, sorted by name.
+type Tree = Vec<(String, Vec<u8>, Attrs)>;
+
+fn tree(sys: &FakeSystem, abs: &str) -> Tree {
+    let d = open(sys, abs);
+    let mut v: Tree = d
+        .read_dir(None)
+        .unwrap()
+        .into_iter()
+        .map(|e| {
+            let data = if e.meta.kind == EntryKind::File {
+                d.read(&r(&e.name)).unwrap()
+            } else {
+                Vec::new()
+            };
+            (e.name, data, e.meta.attrs)
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
+}
+
+/// The write operations whose every primitive is faulted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteOp {
+    Replace,
+    CreateNew,
+    Delete,
+    CreateDir,
+    RemoveDir,
+}
+
+const WRITE_OPS: [WriteOp; 5] = [
+    WriteOp::Replace,
+    WriteOp::CreateNew,
+    WriteOp::Delete,
+    WriteOp::CreateDir,
+    WriteOp::RemoveDir,
+];
+
+fn op_system() -> FakeSystem {
+    FakeSystem::builder()
+        .file(r"C:\G\t.bin", "old")
+        .dir(r"C:\G\d")
+        .build()
+        .unwrap()
+}
+
+/// Temp name of every operation below.
+fn op_tmp() -> TmpName {
+    TmpName::new(1, 9)
+}
+
+/// Runs `op` on `C:\G`; `Ok(old_left)` for a replace.
+fn run_op(g: &dyn DirWrite, op: WriteOp) -> crate::sys::SysResult<Option<TmpName>> {
+    let mut new = nf(9, b"new");
+    new.tmp = op_tmp();
+    match op {
+        WriteOp::Replace => g
+            .guard(&r("t.bin"))?
+            .replace(&sha(b"old"), &mut &b"new"[..], &new)
+            .map(|done| done.old_left),
+        WriteOp::CreateNew => g
+            .create_new(&r("n.bin"), &mut &b"new"[..], &new)
+            .map(|_| None),
+        WriteOp::Delete => g.guard(&r("t.bin"))?.delete(&sha(b"old")).map(|()| None),
+        WriteOp::CreateDir => g.create_dir(&r("nd")).map(|_| None),
+        WriteOp::RemoveDir => {
+            let id = g.metadata(&r("d"))?.map_or(0, |m| m.file_id);
+            g.remove_dir(&r("d"), id).map(|()| None)
+        }
+    }
+}
+
+/// The calls of a successful run of `op` and the tree after it.
+fn trace_of(op: WriteOp) -> (Vec<Prim>, Tree) {
+    let sys = op_system();
+    let g = open(&sys, r"C:\G");
+    sys.fake_fs().clear_faults();
+    sys.fake_fs().record_calls(true);
+    assert_eq!(run_op(&*g, op).unwrap(), None, "{op:?}");
+    sys.fake_fs().record_calls(false);
+    (sys.fake_fs().take_calls(), tree(&sys, r"C:\G"))
+}
+
+/// Occurrence (1-based) of `calls[i]` among `calls[..=i]`.
+fn nth_of(calls: &[Prim], i: usize) -> usize {
+    calls[..=i].iter().filter(|c| **c == calls[i]).count()
+}
+
+#[test]
+fn f5_a_fault_at_any_primitive_leaves_the_state_before() {
+    let before = tree(&op_system(), r"C:\G");
+    for op in WRITE_OPS {
+        let (calls, after) = trace_of(op);
+        assert!(calls.contains(&Prim::Info), "{op:?}: {calls:?}");
+        let step7 = (op == WriteOp::Replace).then(|| {
+            calls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c == Prim::Rename)
+                .nth(1)
+                .map(|(i, _)| i)
+                .unwrap()
+        });
+        for i in 0..calls.len() {
+            let sys = op_system();
+            let g = open(&sys, r"C:\G");
+            let fx = sys.fake_fs();
+            fx.clear_faults();
+            fx.fail_at(calls[i], nth_of(&calls, i), SysErrorKind::Other);
+            let res = run_op(&*g, op);
+            let what = format!("{op:?}: fault at {:?} #{}", calls[i], nth_of(&calls, i));
+            assert!(fx.fault_fired(), "{what}");
+            if step7.is_some_and(|s| i > s) {
+                // Step 8 (its re-check or the delete): success with pending cleanup (A2).
+                assert_eq!(res.unwrap(), Some(op_tmp()), "{what}");
+                let mut expected = after.clone();
+                expected.push((
+                    op_tmp().old().as_str().to_owned(),
+                    b"old".to_vec(),
+                    Attrs::default(),
+                ));
+                expected.sort_by(|a, b| a.0.cmp(&b.0));
+                assert_eq!(tree(&sys, r"C:\G"), expected, "{what}");
+            } else {
+                assert_eq!(res.unwrap_err().kind, SysErrorKind::Other, "{what}");
+                assert_eq!(tree(&sys, r"C:\G"), before, "{what}");
+            }
+        }
+    }
+}
+
+#[test]
+fn f6_a_failed_undo_leaves_phase_b_without_tmp() {
+    let hidden = Attrs {
+        hidden: true,
+        ..Attrs::default()
+    };
+    // Step 7 and the undo rename fail; or step 7 fails and the undo's re-check refuses
+    // (`.old` changed, A4).
+    for variant in ["undo fails", "undo re-check fails"] {
+        let sys = op_system();
+        let g = open(&sys, r"C:\G");
+        let fx = sys.fake_fs();
+        fx.clear_faults();
+        fx.fail_at(Prim::Rename, 2, SysErrorKind::Busy);
+        let old = op_tmp().old();
+        if variant == "undo fails" {
+            fx.fail_at(Prim::Rename, 3, SysErrorKind::Other);
+        } else {
+            let old_abs = format!(r"C:\G\{}", old.as_str());
+            before_nth(&sys, Prim::Rename, 2, move |fs| {
+                fs.set_attrs(&p(&old_abs), hidden).unwrap();
+            });
+        }
+        let e = run_op(&*g, WriteOp::Replace).unwrap_err();
+        fx.clear_on_step();
+        assert_eq!(e.kind, SysErrorKind::Busy, "{variant}: the step-7 error");
+        assert!(g.metadata(&r("t.bin")).unwrap().is_none(), "{variant}");
+        assert_eq!(g.read(&old).unwrap(), b"old", "{variant}");
+        assert!(
+            g.metadata(&op_tmp().to_rel()).unwrap().is_none(),
+            "{variant}: no <tmp>"
+        );
+        // Recovery of phase B: `.old` back onto the target name.
+        g.guard(&old).unwrap().rename_to(&r("t.bin")).unwrap();
+        assert_eq!(g.read(&r("t.bin")).unwrap(), b"old", "{variant}");
+    }
+}
+
+/// A3 phase of a replace found on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    A,
+    B,
+    C,
+    D,
+    Foreign,
+}
+
+/// The hash of `p` taken on a guard: `None` missing, `Some(None)` not guardable (linked …).
+fn guarded_hash(g: &dyn DirWrite, p: &RelPath) -> Option<Option<[u8; 32]>> {
+    g.metadata(p).unwrap()?;
+    Some(g.guard(p).ok().and_then(|mut gd| gd.sha256().ok()))
+}
+
+/// Deletes the journaled `<tmp>` if present (on a guard: hash, then delete with it).
+fn delete_tmp(g: &dyn DirWrite, x: &RelPath) {
+    if let Ok(mut gx) = g.guard(x) {
+        let h = gx.sha256().unwrap();
+        gx.delete(&h).unwrap();
+    }
+}
+
+/// Recovery of a replace by the A3 table, with the API only.
+fn recover_replace(g: &dyn DirWrite, tmp: &TmpName) -> Phase {
+    let (h0, h1) = (sha(b"old"), sha(b"new"));
+    let (target, old, x) = (r("t.bin"), tmp.old(), tmp.to_rel());
+    match (guarded_hash(g, &target), guarded_hash(g, &old)) {
+        (Some(Some(t)), None) if t == h0 => {
+            delete_tmp(g, &x);
+            Phase::A
+        }
+        (None, Some(Some(o))) if o == h0 => {
+            g.guard(&old).unwrap().rename_to(&target).unwrap();
+            delete_tmp(g, &x);
+            Phase::B
+        }
+        (Some(Some(t)), Some(Some(o))) if t == h1 && o == h0 => {
+            g.guard(&old).unwrap().delete(&h0).unwrap();
+            Phase::C
+        }
+        (Some(Some(t)), None) if t == h1 => Phase::D,
+        _ => Phase::Foreign,
+    }
+}
+
+#[test]
+fn f7_s7_a_crash_after_any_primitive_recovers_to_before_or_after() {
+    let before = tree(&op_system(), r"C:\G");
+    let planted = op_tmp().as_str().to_owned();
+    for op in WRITE_OPS {
+        let (calls, after) = trace_of(op);
+        let mut phases = Vec::new();
+        for i in 0..calls.len() {
+            let sys = op_system();
+            let fx = sys.fake_fs();
+            let what = format!("{op:?}: crash after {:?} #{}", calls[i], nth_of(&calls, i));
+            {
+                let g = open(&sys, r"C:\G");
+                fx.clear_faults();
+                fx.fault(calls[i], nth_of(&calls, i), Fault::CrashAfter);
+                match run_op(&*g, op) {
+                    Err(e) => assert_eq!(e.kind, SysErrorKind::Other, "{what}"),
+                    // A crash in step 8 is a failed step 8: success with `old_left` (A2).
+                    Ok(left) => {
+                        assert_eq!((op, left), (WriteOp::Replace, Some(op_tmp())), "{what}")
+                    }
+                }
+                assert!(fx.crashed(), "{what}");
+            }
+            fx.restart();
+            let g = open(&sys, r"C:\G");
+            let x = op_tmp().to_rel();
+            let result_after = match op {
+                WriteOp::Replace => {
+                    let phase = recover_replace(&*g, &op_tmp());
+                    phases.push(phase);
+                    assert_ne!(phase, Phase::Foreign, "{what}");
+                    if matches!(phase, Phase::C | Phase::D) {
+                        // X is left in C and D: a file there is not ours.
+                        fx.put_file(&p(&format!(r"C:\G\{planted}")), b"planted")
+                            .unwrap();
+                        assert_eq!(recover_replace(&*g, &op_tmp()), Phase::D, "{what}");
+                        assert_eq!(g.read(&x).unwrap(), b"planted", "{what}");
+                        fx.remove_abs(&p(&format!(r"C:\G\{planted}"))).unwrap();
+                    }
+                    matches!(phase, Phase::C | Phase::D)
+                }
+                WriteOp::CreateNew => match guarded_hash(&*g, &r("n.bin")) {
+                    None => {
+                        delete_tmp(&*g, &x);
+                        false
+                    }
+                    Some(Some(h)) if h == sha(b"new") => {
+                        assert!(g.metadata(&x).unwrap().is_none(), "{what}: X absent");
+                        true
+                    }
+                    other => panic!("{what}: Foreign {other:?}"),
+                },
+                WriteOp::Delete => g.metadata(&r("t.bin")).unwrap().is_none(),
+                WriteOp::CreateDir => g.metadata(&r("nd")).unwrap().is_some(),
+                WriteOp::RemoveDir => g.metadata(&r("d")).unwrap().is_none(),
+            };
+            let expected = if result_after { &after } else { &before };
+            assert_eq!(&tree(&sys, r"C:\G"), expected, "{what}");
+        }
+        if op == WriteOp::Replace {
+            // Each phase is reached: A up to step 5, B after step 6, C after step 7 and the
+            // re-check of step 8, D after the delete of step 8 once restarted.
+            for ph in [Phase::A, Phase::B, Phase::C, Phase::D] {
+                assert!(phases.contains(&ph), "{ph:?} not reached: {phases:?}");
+            }
+            let at = |c: Prim, n: usize| {
+                phases[calls
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| **x == c)
+                    .nth(n - 1)
+                    .unwrap()
+                    .0]
+            };
+            assert_eq!(at(Prim::FlushFile, 1), Phase::A);
+            assert_eq!(at(Prim::Rename, 1), Phase::B);
+            assert_eq!(at(Prim::Rename, 2), Phase::C);
+            assert_eq!(at(Prim::PosixDelete, 1), Phase::D);
+        }
+    }
+}
+
+#[test]
+fn f8_f13_after_a_crash_rerun_is_dead_until_restart_and_others_live_on() {
+    let sys = op_system();
+    let fx = sys.fake_fs();
+    let g = open(&sys, r"C:\G");
+    let other = fx
+        .hold_open_as(77, &p(r"C:\G\t.bin"), Access::READ, Share::RWD)
+        .unwrap();
+    let image = fx.map_image_as(78, &p(r"C:\G\t.bin")).unwrap();
+    let lock = g.lock(&r("journal.lock")).unwrap();
+    fx.fault(Prim::ReadSide(FsOp::Metadata), 1, Fault::CrashAfter);
+    assert_eq!(kind(g.metadata(&r("t.bin"))), SysErrorKind::Other);
+    assert!(fx.crashed());
+    // Every later call of Rerun fails, on old handles and new opens alike.
+    assert_eq!(kind(g.read(&r("t.bin"))), SysErrorKind::Other);
+    assert_eq!(kind(g.read_dir(None)), SysErrorKind::Other);
+    assert_eq!(kind(g.guard(&r("t.bin")).map(|_| ())), SysErrorKind::Other);
+    assert_eq!(
+        kind(g.lock(&r("other.lock")).map(|_| ())),
+        SysErrorKind::Other
+    );
+    assert_eq!(
+        kind(sys.fs().open_dir(Path::new(r"C:\G")).map(|_| ())),
+        SysErrorKind::Other
+    );
+    // Fixture and attacker helpers are never blocked.
+    fx.put_file(&p(r"C:\G\new.bin"), b"x").unwrap();
+    fx.rename_abs(&p(r"C:\G\new.bin"), &p(r"C:\G\new2.bin"))
+        .unwrap();
+    drop(
+        fx.hold_open_as(79, &p(r"C:\G\new2.bin"), Access::READ, Share::RWD)
+            .unwrap(),
+    );
+    // Dropping the lock while crashed does not release it (the process is dead, not closed).
+    drop(lock);
+    fx.restart();
+    assert!(!fx.crashed());
+    // The old handle is stale; a new one works; other programs' handles and images survive.
+    assert_eq!(kind(g.metadata(&r("t.bin"))), SysErrorKind::Other);
+    let g2 = open(&sys, r"C:\G");
+    let mut users = vec![77, 78];
+    users.sort_unstable();
+    assert_eq!(g2.users(&r("t.bin")).unwrap(), users);
+    // The lock was released by the restart.
+    drop(g2.lock(&r("journal.lock")).unwrap());
+    drop(other);
+    drop(image);
+    assert!(g2.users(&r("t.bin")).unwrap().is_empty());
 }
