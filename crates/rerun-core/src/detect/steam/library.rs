@@ -15,7 +15,7 @@ use std::path::Path;
 use super::files::{AppManifest, Library, LibraryFolders, decimal_u32};
 use super::issue::{Issue, IssueKind, Location};
 use super::state::{AppState, StateFlags};
-use super::text::RawText;
+use crate::detect::text::RawText;
 use crate::detect::vdf::{Limits, VdfReadError, read_store_file};
 use crate::path::{RelPath, RootPath, classify};
 use crate::policy::root::{ForbiddenRoots, GameDir, RootError, RootId, StoreDir};

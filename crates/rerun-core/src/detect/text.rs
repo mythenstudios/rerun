@@ -1,9 +1,10 @@
-//! [`RawText`]: untrusted text from Steam's files and the registry (ADR 0012).
+//! [`RawText`]: untrusted text from files and the registry (ADR 0012): Steam's files, registry
+//! values and, since ADR 0013, version strings of executables.
 
 use std::fmt;
 
 /// Text exactly as read from an untrusted source (a path, label, name or install folder from
-/// a Steam file, a registry value), unchecked.
+/// a Steam file, a registry value, a version string of an executable), unchecked.
 ///
 /// Deliberately without `Display`, `Deref`, `AsRef<str>`, `AsRef<Path>` and `From`: the content
 /// is reached only through [`RawText::as_raw_str`], so a raw path never reaches a `Path` API

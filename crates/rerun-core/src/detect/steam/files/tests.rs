@@ -1,5 +1,5 @@
 use super::{AppManifest, Expected, Library, LibraryFolders, ViewError};
-use crate::detect::steam::text::RawText;
+use crate::detect::text::RawText;
 use crate::detect::vdf::{Document, Limits, parse};
 
 const LIB_CURRENT: &[u8] =

@@ -1,7 +1,6 @@
 //! Steam detection (ADR 0012).
 //!
 //! - [`files`]: typed views of `libraryfolders.vdf` and `appmanifest_<appid>.acf` (ADR 0011).
-//! - [`text`]: [`RawText`], untrusted text whose `Debug` shows only its length.
 //! - [`state`]: [`StateFlags`] and the derived [`AppState`].
 //! - [`issue`]: [`Issue`], what the scan reports instead of failing.
 //! - [`root`]: the Steam root from the registry ([`RootSource`]).
@@ -16,14 +15,13 @@ pub mod library;
 pub mod root;
 pub mod scan;
 pub mod state;
-pub mod text;
 
 #[cfg(test)]
 mod testfx;
 
+pub use crate::detect::text::RawText;
 pub use issue::{BadValue, Issue, IssueKind, Location};
 pub use library::{MAX_LIBRARIES, MAX_MANIFESTS, SteamApp, SteamLibrary};
 pub use root::RootSource;
 pub use scan::{SteamScan, scan};
 pub use state::{AppState, StateFlags};
-pub use text::RawText;

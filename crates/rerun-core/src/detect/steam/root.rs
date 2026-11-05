@@ -12,7 +12,7 @@ use std::fmt;
 use std::path::Path;
 
 use super::issue::{BadValue, Issue, IssueKind, Location};
-use super::text::RawText;
+use crate::detect::text::RawText;
 use crate::policy::root::{ForbiddenRoots, StoreDir};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, reg_type};
 use crate::sys::{Registry, SysErrorKind, System};

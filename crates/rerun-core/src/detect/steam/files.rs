@@ -15,7 +15,7 @@
 //! `StoreDir::game`) decides about paths, output layers sanitize names. Errors name fields and
 //! byte offsets only, never values.
 
-use super::text::RawText;
+use crate::detect::text::RawText;
 use crate::detect::vdf::{Document, Entry, Object, Value};
 
 /// The libraries listed in `libraryfolders.vdf`.
