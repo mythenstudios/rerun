@@ -6,9 +6,14 @@
 //! - Manual dumps (`#[ignore]`, user decision 6, never in CI, output never committed):
 //!   `dump_system32_pe` parses every top-level `*.exe` and `*.dll` of System32 and SysWOW64 and
 //!   prints a summary per outcome; `dump_game_exes` runs `steam::scan`, opens every game folder
-//!   with `open_game` and parses each top-level `*.exe` through `open_game_exe`. Both write
-//!   nothing, print names only escaped (`{:?}`) and version strings only as their length.
-//!   Run by hand: `cargo test -p rerun-core --test pe_system dump_ -- --ignored --nocapture`.
+//!   with `open_game` and parses each top-level `*.exe` through `open_game_exe`;
+//!   `dump_exe_candidates` (ADR 0014) runs `detect::exe::scan_game` for every game folder and
+//!   prints candidates, roles, API verdicts with their evidence, the main executable, walk
+//!   statistics, issues and times, then a summary of the observed graphics import
+//!   combinations (hashes only with `RERUN_DUMP_HASHES=1`). All write nothing, print names
+//!   only escaped (`{:?}`) and version strings only as their length.
+//!   Run by hand: `cargo test -p rerun-core --test pe_system dump_ -- --ignored --nocapture`
+//!   (all), or name one dump instead of `dump_`.
 
 #![cfg(windows)]
 #![expect(
@@ -391,5 +396,285 @@ fn dump_game_exes() {
     ));
     for (o, n) in &summary {
         note(&format!("  {n:6}  {o}"));
+    }
+}
+
+// ---------- Exe candidates (ADR 0014; read-only, never in CI) ----------
+
+/// `RERUN_DUMP_HASHES=1` turns hashing on for `dump_exe_candidates`. A test gate, never a path.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test gate for the manual dump, not a source of paths (ADR 0009)"
+)]
+fn dump_hashes() -> bool {
+    std::env::var_os("RERUN_DUMP_HASHES").is_some_and(|v| v == "1")
+}
+
+/// Graphics-related DLL names (lowercase) of a table, for the summary of combinations: what
+/// `detect::exe::api` maps and its near misses (`d3dcompiler_*`, `dxgi*`, engines).
+fn graphics_dlls(dlls: &[rerun_core::detect::pe::DllName]) -> Vec<String> {
+    const PREFIXES: &[&str] = &[
+        "d3d",
+        "dx",
+        "ddraw",
+        "opengl",
+        "glu",
+        "vulkan",
+        "glide",
+        "unityplayer",
+    ];
+    let mut out: Vec<String> = dlls
+        .iter()
+        .map(|d| d.as_str().to_ascii_lowercase())
+        .filter(|n| {
+            PREFIXES.iter().any(|p| n.starts_with(p)) || n == "core.dll" || n == "engine.dll"
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn api_set(set: &std::collections::BTreeSet<rerun_core::detect::exe::GraphicsApi>) -> String {
+    set.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(",")
+}
+
+/// Runs `steam::scan`, then `detect::exe::scan_game` for every game folder, and prints per
+/// game the candidates (paths escaped) with role, depth, similarity, machine, subsystem, LAA,
+/// CLR, the API verdict and its evidence, the DLL names (printable ASCII by construction),
+/// version strings only as their length, the main executable, the walk statistics, the issues
+/// and the time; then a summary of roles, verdicts and observed combinations of graphics
+/// imports. Hashes only with `RERUN_DUMP_HASHES=1`. Read-only: writes nothing.
+/// Run by hand: `cargo test -p rerun-core --test pe_system dump_exe_candidates -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "reads this machine's Steam games; run by hand, never in CI"]
+fn dump_exe_candidates() {
+    use rerun_core::detect::exe::{ExeIssueKind, HashOutcome, Main, Options, scan_game};
+    use rerun_core::detect::steam::scan;
+    use rerun_core::policy::root::ForbiddenRoots;
+
+    let sys = WinSystem::new().unwrap_or_else(|e| panic!("{e}"));
+    let exe = std::env::current_exe().unwrap_or_else(|e| panic!("current_exe: {e}"));
+    let install = exe
+        .parent()
+        .unwrap_or_else(|| panic!("the test binary has no folder"));
+    let fr = ForbiddenRoots::resolve(&sys, install).unwrap_or_else(|e| panic!("{e}"));
+    let hashes = dump_hashes();
+    let started = std::time::Instant::now();
+    let s = scan(&sys, &fr);
+
+    let mut games = 0usize;
+    let mut candidates = 0usize;
+    let mut mains: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut roles: BTreeMap<String, usize> = BTreeMap::new();
+    let mut verdicts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut combos: BTreeMap<String, usize> = BTreeMap::new();
+    let mut issue_kinds: BTreeMap<String, usize> = BTreeMap::new();
+    let mut incomplete = 0usize;
+    let mut hashed_bytes = 0u64;
+    let mut most_dirs = 0usize;
+    let mut most_entries = 0usize;
+    let mut slowest = std::time::Duration::ZERO;
+
+    for lib in &s.libraries {
+        for app in lib.apps() {
+            let game = match lib.open_game(&fr, app.app_id) {
+                Ok(g) => g,
+                Err(e) => {
+                    // As in `dump_steam_scan`: root errors escape raw names.
+                    note(&format!("app {}: game folder: {e}", app.app_id));
+                    continue;
+                }
+            };
+            games += 1;
+            let options = Options {
+                name_hint: Some(app.install_dir.clone()),
+                hashes,
+                ..Options::default()
+            };
+            let t = std::time::Instant::now();
+            let r = scan_game(&game, &options);
+            let took = t.elapsed();
+            slowest = slowest.max(took);
+            drop(game);
+
+            let main = match &r.main {
+                Main::One(i) => {
+                    *mains.entry("one").or_default() += 1;
+                    format!("{:?}", r.candidates[*i].path.as_str())
+                }
+                Main::Tied(v) => {
+                    *mains.entry("tied").or_default() += 1;
+                    let tied: Vec<String> = v
+                        .iter()
+                        .map(|i| format!("{:?}", r.candidates[*i].path.as_str()))
+                        .collect();
+                    format!("tied [{}]", tied.join(", "))
+                }
+                Main::None => {
+                    *mains.entry("none").or_default() += 1;
+                    "none".to_owned()
+                }
+            };
+            let st = &r.stats;
+            if !st.complete {
+                incomplete += 1;
+            }
+            most_dirs = most_dirs.max(st.listed_dirs);
+            most_entries = most_entries.max(st.entries);
+            let skipped: Vec<String> = st
+                .skipped_dirs
+                .iter()
+                .map(|p| format!("{:?}", p.as_str()))
+                .collect();
+            note(&format!(
+                "app {} installdir {:?}: {} candidates, main {main}; walk complete {}, {} dirs, \
+                 {} entries, {} exes found, {} depth cut, skipped [{}]; took {took:?}",
+                app.app_id,
+                app.install_dir.as_str(),
+                r.candidates.len(),
+                st.complete,
+                st.listed_dirs,
+                st.entries,
+                st.exes_found,
+                st.depth_cut,
+                skipped.join(", "),
+            ));
+            candidates += r.candidates.len();
+            for (i, c) in r.candidates.iter().enumerate() {
+                *roles.entry(format!("{:?}", c.role)).or_default() += 1;
+                let head = format!(
+                    "  #{i} {:?}: {}, depth {}, similarity {}, listed {} bytes",
+                    c.path.as_str(),
+                    c.role,
+                    c.depth,
+                    c.similarity,
+                    c.listed_len,
+                );
+                let f = match &c.facts {
+                    Ok(f) => f,
+                    Err(e) => {
+                        *verdicts.entry("error".to_owned()).or_default() += 1;
+                        let why = match e {
+                            rerun_core::detect::exe::ExeError::Pe(pe) => detail(pe),
+                            _ => "unknown error".to_owned(),
+                        };
+                        note(&format!("{head}; error: {why}"));
+                        continue;
+                    }
+                };
+                let h = &f.info.headers;
+                let ev = &f.api.evidence;
+                let verdict = format!("{:?}", f.api.verdict);
+                let kind = verdict
+                    .split([' ', '(', '{'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                *verdicts.entry(kind).or_default() += 1;
+                let names = |v: &[rerun_core::detect::pe::DllName]| {
+                    v.iter()
+                        .map(|d| d.as_str().to_owned())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                let combo = format!(
+                    "{} | static [{}] | delay [{}]{}",
+                    f.api,
+                    graphics_dlls(&f.info.imports).join(" "),
+                    graphics_dlls(&f.info.delay_imports).join(" "),
+                    if h.managed { " | managed" } else { "" },
+                );
+                *combos.entry(combo).or_default() += 1;
+                let version = match &f.info.version {
+                    Ok(Some(v)) => format!(
+                        "version fixed {:?}, strings (bytes) description {} product {} \
+                         original {}",
+                        v.fixed.map(|x| x.file_version),
+                        v.strings.file_description.as_ref().map_or(0, RawText::len),
+                        v.strings.product_name.as_ref().map_or(0, RawText::len),
+                        v.strings.original_filename.as_ref().map_or(0, RawText::len),
+                    ),
+                    Ok(None) => "no version resource".to_owned(),
+                    Err(e) => format!("version: {e}"),
+                };
+                let hash = match &f.hashes {
+                    HashOutcome::NotRequested => String::new(),
+                    HashOutcome::Done(d) => {
+                        hashed_bytes += d.len;
+                        format!("; {}", f.hashes)
+                    }
+                    other => format!("; hashes {other}"),
+                };
+                note(&format!(
+                    "{head}; {} {:?} subsystem {} laa {} managed {}; api {} = {verdict} \
+                     [static core {} helper {} dxgi {} | delay core {} helper {} dxgi {} | \
+                     engine {:?}]; imports [{}]; delay [{}]; {version}; parser read {} \
+                     bytes{hash}",
+                    machine(h.machine),
+                    h.format,
+                    h.subsystem,
+                    h.large_address_aware(),
+                    h.managed,
+                    f.api,
+                    api_set(&ev.imports.core),
+                    api_set(&ev.imports.helper),
+                    ev.imports.dxgi,
+                    api_set(&ev.delay.core),
+                    api_set(&ev.delay.helper),
+                    ev.delay.dxgi,
+                    ev.engine,
+                    names(&f.info.imports),
+                    names(&f.info.delay_imports),
+                    f.bytes_read,
+                ));
+            }
+            for issue in &r.issues {
+                let kind = match &issue.kind {
+                    ExeIssueKind::Sys(_) => "sys",
+                    ExeIssueKind::Anomaly(_) => "anomaly",
+                    ExeIssueKind::CaseSensitiveDir => "case-sensitive dir",
+                    ExeIssueKind::NotFollowed { .. } => "not followed",
+                    ExeIssueKind::WalkLimit { .. } => "walk limit",
+                    ExeIssueKind::TooManyExes { .. } => "too many exes",
+                    _ => "other",
+                };
+                *issue_kinds.entry(kind.to_owned()).or_default() += 1;
+                // Issues escape raw names and carry no file content (ADR 0014).
+                note(&format!("  issue: {issue}"));
+            }
+        }
+    }
+    for issue in &s.issues {
+        note(&format!("steam issue: {issue}"));
+    }
+    note(&format!(
+        "summary: {games} games in {} libraries, {candidates} candidates, {incomplete} \
+         incomplete walks, at most {most_dirs} dirs and {most_entries} entries in one game, \
+         slowest game {slowest:?}, hashes {}, {hashed_bytes} bytes hashed; took {:?}",
+        s.libraries.len(),
+        if hashes { "on" } else { "off" },
+        started.elapsed()
+    ));
+    note("main executables:");
+    for (k, n) in &mains {
+        note(&format!("  {n:6}  {k}"));
+    }
+    note("roles:");
+    for (k, n) in &roles {
+        note(&format!("  {n:6}  {k}"));
+    }
+    note("verdicts:");
+    for (k, n) in &verdicts {
+        note(&format!("  {n:6}  {k}"));
+    }
+    note("issues:");
+    for (k, n) in &issue_kinds {
+        note(&format!("  {n:6}  {k}"));
+    }
+    note("observed graphics import combinations (verdict | static | delay):");
+    for (k, n) in &combos {
+        note(&format!("  {n:6}  {k}"));
     }
 }
