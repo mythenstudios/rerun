@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -2149,11 +2149,11 @@ fn create_new_runs_the_sequence_of_adr_0017_through_primitives() {
     let calls = record_calls(&sys);
     g.create_new(&r("new.bin"), &mut &data[..], &new).unwrap();
     sys.fake_fs().clear_on_step();
-    use Prim::{CreateTmp, FlushFile, Info, Lookup, Rename, SetAttrs, State, Write};
+    use Prim::{CreateTmp, FlushFile, Lookup, Rename, SetAttrs, State, Support, Write};
     assert_eq!(
         *calls.lock().unwrap(),
         [
-            Info, Lookup, CreateTmp, Write, Write, SetAttrs, FlushFile, State, Rename
+            Support, Lookup, CreateTmp, Write, Write, SetAttrs, FlushFile, State, State, Rename
         ]
     );
     assert_eq!(g.read(&r("new.bin")).unwrap(), data);
@@ -2280,7 +2280,7 @@ fn f3_a_guarded_file_renamed_away_is_never_pulled_back() {
         let g = open(&sys, r"C:\G");
         // Before step 6: the re-check sees the new name, nothing is renamed.
         let target = to.to_owned();
-        before_nth(&sys, Prim::VolumeName, 1, move |fs| {
+        before_nth(&sys, Prim::VolumeName, 2, move |fs| {
             fs.rename_ignoring_shares(&p(r"C:\G\t.bin"), &p(&target))
                 .unwrap();
         });
@@ -2312,7 +2312,7 @@ fn f3_a_guarded_file_renamed_away_is_never_pulled_back() {
     let g = open(&sys, r"C:\G");
     let new = nf(1, b"new");
     let old_abs = format!(r"C:\G\{}", new.tmp.old().as_str());
-    before_nth(&sys, Prim::VolumeName, 2, move |fs| {
+    before_nth(&sys, Prim::VolumeName, 3, move |fs| {
         fs.rename_ignoring_shares(&p(&old_abs), &p(r"C:\Out\old.bin"))
             .unwrap();
     });
@@ -2469,7 +2469,7 @@ fn f12_the_guard_rechecks_before_every_act() {
     // Before a delete: an attribute change refuses it.
     let sys = g_system();
     let g = open(&sys, r"C:\G");
-    before_nth(&sys, Prim::VolumeName, 1, move |fs| {
+    before_nth(&sys, Prim::VolumeName, 2, move |fs| {
         fs.set_attrs(&p(r"C:\G\t.bin"), hidden).unwrap();
     });
     let e = g
@@ -2609,7 +2609,7 @@ fn f5_a_fault_at_any_primitive_leaves_the_state_before() {
     let before = tree(&op_system(), r"C:\G");
     for op in WRITE_OPS {
         let (calls, after) = trace_of(op);
-        assert!(calls.contains(&Prim::Info), "{op:?}: {calls:?}");
+        assert!(calls.contains(&Prim::Support), "{op:?}: {calls:?}");
         let step7 = (op == WriteOp::Replace).then(|| {
             calls
                 .iter()
@@ -2785,17 +2785,21 @@ fn f7_s7_a_crash_after_any_primitive_recovers_to_before_or_after() {
             }
             fx.restart();
             let g = open(&sys, r"C:\G");
+            // A file at X before recovery: deleted where the target does not hold the new
+            // content (A, B; ours or planted under our name), left in C and D (not ours).
+            if op == WriteOp::Replace {
+                fx.put_file(&p(&format!(r"C:\G\{planted}")), b"planted")
+                    .unwrap();
+            }
             let (result_after, phase) = recover_op(&*g, op, &what);
             if let Some(phase) = phase {
                 phases.push(phase);
+                let x = op_tmp().to_rel();
                 if matches!(phase, Phase::C | Phase::D) {
-                    // X is left in C and D: a file there is not ours.
-                    let x = op_tmp().to_rel();
-                    fx.put_file(&p(&format!(r"C:\G\{planted}")), b"planted")
-                        .unwrap();
-                    assert_eq!(recover_replace(&*g, &op_tmp()), Phase::D, "{what}");
-                    assert_eq!(g.read(&x).unwrap(), b"planted", "{what}");
+                    assert_eq!(g.read(&x).unwrap(), b"planted", "{what}: X left");
                     fx.remove_abs(&p(&format!(r"C:\G\{planted}"))).unwrap();
+                } else {
+                    assert!(g.metadata(&x).unwrap().is_none(), "{what}: X deleted");
                 }
             }
             let expected = if result_after { &after } else { &before };
@@ -2893,7 +2897,8 @@ fn f9_every_power_loss_cut_recovers_to_before_or_after() {
     for op in WRITE_OPS {
         let (calls, after) = trace_of(op);
         let mut phases = Vec::new();
-        // A power loss at every step boundary (after each call, and after the whole op).
+        let mut final_phases = Vec::new();
+        // A power loss after each call and after the whole op, at every cut of `C:`.
         for i in 0..=calls.len() {
             let pending = {
                 let sys = op_system();
@@ -2908,14 +2913,22 @@ fn f9_every_power_loss_cut_recovers_to_before_or_after() {
                 let g = open(&sys, r"C:\G");
                 let (is_after, phase) = recover_op(&*g, op, &what);
                 phases.extend(phase);
+                if i == calls.len() {
+                    final_phases.extend(phase);
+                }
                 let expected = if is_after { &after } else { &before };
                 assert_eq!(&tree(&sys, r"C:\G"), expected, "{what}");
             }
         }
         if op == WriteOp::Replace {
-            // The ordered log produces every phase, B included (D-1).
             for ph in [Phase::A, Phase::B, Phase::C, Phase::D] {
                 assert!(phases.contains(&ph), "{ph:?} not reached: {phases:?}");
+                // The cuts of the completed replace alone reach every phase: a power loss keeps
+                // any prefix of the unflushed log (D-1), not only all of it or nothing.
+                assert!(
+                    final_phases.contains(&ph),
+                    "{ph:?} not reached by the cuts after the whole replace: {final_phases:?}"
+                );
             }
         }
     }
@@ -3000,4 +3013,99 @@ fn f9_two_volumes_are_ordered_only_by_flushes() {
         // without it, some pair loses the intent but keeps the change.
         assert_eq!(violated, !flush_c, "flush of C: {flush_c}");
     }
+}
+
+// ---------- Review follow-ups ----------
+
+#[test]
+fn a_hard_link_added_to_tmp_is_never_renamed_onto_the_target() {
+    // `create_new`: the link check before the rename is the 2nd `State`.
+    let sys = g_system();
+    let g = open(&sys, r"C:\G");
+    let new = nf(1, b"n");
+    let tmp_abs = format!(r"C:\G\{}", new.tmp.as_str());
+    before_nth(&sys, Prim::State, 2, move |fs| {
+        fs.put_hardlink(&p(&tmp_abs), &p(r"C:\Out\stolen.bin"))
+            .unwrap();
+    });
+    let e = g.create_new(&r("n.bin"), &mut &b"n"[..], &new).unwrap_err();
+    sys.fake_fs().clear_on_step();
+    assert_eq!(e.kind, SysErrorKind::Linked);
+    assert_eq!(
+        listing(&sys, r"C:\G"),
+        ["t.bin"],
+        "target absent, our <tmp> name gone"
+    );
+    assert_eq!(open(&sys, r"C:\Out").read(&r("stolen.bin")).unwrap(), b"n");
+    // replace: guard open, fill, step-6 re-check, then the link check of step 7 (4th `State`);
+    // the guard goes back (A2), nothing changed at the target.
+    let sys = g_system();
+    let g = open(&sys, r"C:\G");
+    let new = nf(2, b"new");
+    let tmp_abs = format!(r"C:\G\{}", new.tmp.as_str());
+    before_nth(&sys, Prim::State, 4, move |fs| {
+        fs.put_hardlink(&p(&tmp_abs), &p(r"C:\Out\stolen.bin"))
+            .unwrap();
+    });
+    let e = g
+        .guard(&r("t.bin"))
+        .unwrap()
+        .replace(&sha(b"old"), &mut &b"new"[..], &new)
+        .unwrap_err();
+    sys.fake_fs().clear_on_step();
+    assert_eq!(e.kind, SysErrorKind::Linked);
+    assert_eq!(g.read(&r("t.bin")).unwrap(), b"old");
+    assert_eq!(listing(&sys, r"C:\G"), ["t.bin"]);
+}
+
+#[test]
+fn a_guard_compares_the_full_path_when_it_opens() {
+    // The file is moved to another folder under the same name right after the open: only
+    // the full volume path tells.
+    let sys = g_system();
+    let g = open(&sys, r"C:\G");
+    before_nth(&sys, Prim::State, 1, |fs| {
+        fs.rename_ignoring_shares(&p(r"C:\G\t.bin"), &p(r"C:\Out\t.bin"))
+            .unwrap();
+    });
+    let e = g.guard(&r("t.bin")).map(|_| ()).unwrap_err();
+    sys.fake_fs().clear_on_step();
+    assert_eq!(e.kind, SysErrorKind::Busy);
+}
+
+#[test]
+fn hooks_stop_after_a_crash_and_calls_from_hooks_are_not_counted() {
+    let sys = g_system();
+    let fx = sys.fake_fs();
+    let g = open(&sys, r"C:\G");
+    fx.clear_faults();
+    fx.fail_at(Prim::ReadSide(FsOp::OpenDir), 1, SysErrorKind::Busy);
+    let fired = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&fired);
+    fx.on_step(move |fs, _| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        // A call of the test from inside a hook: neither counted nor faulted.
+        drop(fs.open_dir(Path::new(r"C:\G")).unwrap());
+    });
+    assert!(g.metadata(&r("t.bin")).unwrap().is_some());
+    assert!(fired.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        kind(sys.fs().open_dir(Path::new(r"C:\G")).map(|_| ())),
+        SysErrorKind::Busy,
+        "the first counted open is the faulted one"
+    );
+    fx.fault(Prim::Lookup, 1, Fault::CrashAfter);
+    assert!(
+        g.create_new(&r("n.bin"), &mut &b"n"[..], &nf(1, b"n"))
+            .is_err()
+    );
+    assert!(fx.crashed());
+    let before = fired.load(Ordering::SeqCst);
+    assert!(g.create_dir(&r("x")).is_err());
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        before,
+        "no hook after a crash"
+    );
+    fx.clear_on_step();
 }

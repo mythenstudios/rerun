@@ -9,8 +9,8 @@ use super::{
     crashed_err, err,
 };
 use crate::sys::contract::{Access, Share};
-use crate::sys::fs::{Attrs, EntryKind, Metadata, RootInfo, tag};
-use crate::sys::seq::{HeldState, PrimDir, PrimFile};
+use crate::sys::fs::{Attrs, EntryKind, Metadata, tag};
+use crate::sys::seq::{HeldState, PrimDir, PrimFile, Seg, Support};
 use crate::sys::{SysErrorKind, SysResult};
 
 /// Access of a `<tmp>` handle: write and delete (and attributes).
@@ -38,14 +38,6 @@ impl FakeFile {
     fn id(&self) -> OpenId {
         self.open.id
     }
-}
-
-/// A primitive takes exactly one segment (re-asserted like `sys::win` does).
-fn single(name: &str) -> SysResult<()> {
-    if name.is_empty() || name.contains(['\\', '/', '\0']) {
-        return Err(err(SysErrorKind::InvalidPath, name));
-    }
-    Ok(())
 }
 
 impl State {
@@ -120,7 +112,10 @@ impl FakeFs {
         name: &str,
         f: impl FnOnce(&mut State) -> SysResult<T>,
     ) -> SysResult<T> {
-        self.fire_call(call, name);
+        // After a crash no hook fires: the call fails before anything happens.
+        if !self.lock().faults.crashed {
+            self.fire_call(call, name);
+        }
         let mut st = self.lock();
         let crash = st.enter(call)?;
         let r = f(&mut st);
@@ -170,9 +165,15 @@ impl FakeDir {
 impl PrimDir for FakeDir {
     type File = FakeFile;
 
-    fn info(&self) -> SysResult<RootInfo> {
+    fn support(&self) -> SysResult<Support> {
         let t = self.handle_target();
-        self.prim(Prim::Info, "", |st| st.root_info(self.node, &t))
+        self.prim(Prim::Support, "", |st| {
+            let info = st.root_info(self.node, &t)?;
+            Ok(Support {
+                case_sensitive: info.case_sensitive,
+                posix: info.supports_posix_rename,
+            })
+        })
     }
 
     fn volume_name(&self) -> SysResult<String> {
@@ -183,9 +184,9 @@ impl PrimDir for FakeDir {
         })
     }
 
-    fn open_guard(&self, name: &str) -> SysResult<FakeFile> {
+    fn open_guard(&self, name: Seg<'_>) -> SysResult<FakeFile> {
+        let name = name.as_str();
         let id = self.prim(Prim::OpenGuard, name, |st| {
-            single(name)?;
             let node = st.child(self.node, name)?;
             let obj = st.obj_of(node);
             FakeFs::open_rerun(st, obj, GUARD_ACCESS, Share::R, name)
@@ -193,9 +194,9 @@ impl PrimDir for FakeDir {
         Ok(self.fs.file(id))
     }
 
-    fn lookup(&self, name: &str) -> SysResult<Option<Metadata>> {
+    fn lookup(&self, name: Seg<'_>) -> SysResult<Option<Metadata>> {
+        let name = name.as_str();
         self.prim(Prim::Lookup, name, |st| {
-            single(name)?;
             st.dir(self.node, name)?;
             match st.lookup(self.node, name, name)? {
                 Some(id) => {
@@ -207,9 +208,9 @@ impl PrimDir for FakeDir {
         })
     }
 
-    fn create_tmp(&self, name: &str) -> SysResult<FakeFile> {
+    fn create_tmp(&self, name: Seg<'_>) -> SysResult<FakeFile> {
+        let name = name.as_str();
         let id = self.prim(Prim::CreateTmp, name, |st| {
-            single(name)?;
             let node = st.new_file(self.node, name, &[], name)?;
             let obj = st.obj_of(node);
             st.log_created(node, self.node);
@@ -218,9 +219,9 @@ impl PrimDir for FakeDir {
         Ok(self.fs.file(id))
     }
 
-    fn open_lock(&self, name: &str) -> SysResult<FakeFile> {
+    fn open_lock(&self, name: Seg<'_>) -> SysResult<FakeFile> {
+        let name = name.as_str();
         let id = self.prim(Prim::OpenLock, name, |st| {
-            single(name)?;
             let node = match st.lookup(self.node, name, name)? {
                 Some(n) => {
                     st.openable(n, name)?;
@@ -238,9 +239,9 @@ impl PrimDir for FakeDir {
         Ok(self.fs.file(id))
     }
 
-    fn create_dir(&self, name: &str) -> SysResult<u128> {
+    fn create_dir(&self, name: Seg<'_>) -> SysResult<u128> {
+        let name = name.as_str();
         self.prim(Prim::CreateDir, name, |st| {
-            single(name)?;
             let user_writable = st.dir(self.node, name)?.user_writable;
             let node = st.insert(
                 self.node,
@@ -253,9 +254,9 @@ impl PrimDir for FakeDir {
         })
     }
 
-    fn open_dir_delete(&self, name: &str) -> SysResult<FakeFile> {
+    fn open_dir_delete(&self, name: Seg<'_>) -> SysResult<FakeFile> {
+        let name = name.as_str();
         let id = self.prim(Prim::OpenDirDelete, name, |st| {
-            single(name)?;
             let node = st.child(self.node, name)?;
             if matches!(st.nodes.get(&node).map(|n| &n.body), Some(Body::File(_))) {
                 return Err(err(SysErrorKind::InvalidPath, name));
@@ -265,10 +266,18 @@ impl PrimDir for FakeDir {
         Ok(self.fs.file(id))
     }
 
-    fn rename(&self, f: &FakeFile, name: &str) -> SysResult<()> {
+    fn rename(&self, f: &FakeFile, name: Seg<'_>) -> SysResult<()> {
+        let name = name.as_str();
         self.prim(Prim::Rename, name, |st| {
-            single(name)?;
-            let node = st.rec_obj(f.id(), name)?.node();
+            let rec = st
+                .opens
+                .get(&f.id())
+                .ok_or_else(|| err(SysErrorKind::Other, &format!("{name}: handle is closed")))?;
+            // A rename needs `DELETE` on the renamed handle.
+            if !rec.access.delete {
+                return Err(err(SysErrorKind::AccessDenied, name));
+            }
+            let node = rec.obj.node();
             if st.nodes.get(&node).is_none_or(|n| n.parent.is_none()) {
                 return Err(err(SysErrorKind::NotFound, name));
             }
@@ -394,7 +403,10 @@ impl PrimFile for FakeFile {
                 Obj::File { ino, .. } => Some(ino),
                 Obj::Node(_) => None,
             };
-            st.log(node, Undo::Attrs { obj, old }, vec![node], ino);
+            // The entry and its folder: a flush of either covers the change.
+            let mut nodes = vec![node];
+            nodes.extend(st.nodes.get(&node).and_then(|n| n.parent));
+            st.log(node, Undo::Attrs { obj, old }, nodes, ino);
             Ok(())
         })
     }
@@ -432,5 +444,44 @@ impl PrimFile for FakeFile {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::FakeFs;
+    use crate::path::RelPath;
+    use crate::sys::SysErrorKind;
+    use crate::sys::seq::{PrimDir, Seg};
+
+    #[test]
+    fn a_rename_needs_delete_access_on_the_handle() {
+        let fs = FakeFs::default();
+        fs.mkdir_all(Path::new(r"C:\G")).unwrap();
+        let d = fs.open_abs(Path::new(r"C:\G")).unwrap();
+        let (a, b) = (
+            RelPath::parse("a.lock").unwrap(),
+            RelPath::parse("b.lock").unwrap(),
+        );
+        // A lock handle has read access only.
+        let lock = d.open_lock(Seg::new(&a).unwrap()).unwrap();
+        let e = d.rename(&lock, Seg::new(&b).unwrap()).unwrap_err();
+        assert_eq!(e.kind, SysErrorKind::AccessDenied);
+        // `<tmp>` has delete access.
+        let t = RelPath::parse("t.tmp").unwrap();
+        let tmp = d.create_tmp(Seg::new(&t).unwrap()).unwrap();
+        d.rename(&tmp, Seg::new(&b).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_segment_is_exactly_one_valid_path_segment() {
+        let two = RelPath::parse(r"a\b").unwrap();
+        assert_eq!(Seg::new(&two).unwrap_err().kind, SysErrorKind::InvalidPath);
+        // Streams, dot segments and device names never become a `RelPath`.
+        for bad in [":x", "x:s", ".", "..", "CON", "nul.txt", "a."] {
+            assert!(RelPath::from_segment(bad).is_err(), "{bad}");
+        }
     }
 }

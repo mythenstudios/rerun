@@ -73,15 +73,19 @@
 //! - **Faults and crashes** (ADR 0019 amendment): every call of Rerun (a write primitive, a
 //!   read-side call, `Fs::open_dir`) is counted and can be failed or crashed after
 //!   ([`FakeFs::fault`], [`Fault`]); after a crash every call of Rerun fails until
-//!   [`FakeFs::restart`], which closes Rerun's handles by origin. Fixture and attacker
-//!   helpers are never counted, faulted or blocked.
+//!   [`FakeFs::restart`], which closes Rerun's handles by origin, and no step hook fires.
+//!   Fixture and attacker helpers are never counted, faulted or blocked, and neither is a
+//!   call made from inside a step hook (it plays another program).
 //! - **Power loss** (ADR 0019 amendment, `fs/durable.rs`): one ordered log of Rerun's
 //!   metadata changes per volume, made durable by flushes; [`FakeFs::power_loss`] keeps any
-//!   prefix of the unflushed part per volume and resets content to the last flushed.
+//!   prefix of the unflushed part per volume and resets content to the last flushed. A
+//!   fixture change makes its volume's log durable (another program that flushed).
+//!   Deviation: a volume mounted in a folder shares the log of its drive.
 //! - Hooks fire only for [`Dir`] operations and the write primitives, never for
 //!   `Fs::open_dir` or the setup helpers, and never reentrantly (a hook that calls into the
 //!   fake does not trigger itself).
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -136,8 +140,8 @@ pub enum FsOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Prim {
-    /// `PrimDir::info` (identity, case sensitivity, POSIX support).
-    Info,
+    /// `PrimDir::support` (case sensitivity, POSIX support; before every write).
+    Support,
     /// `PrimDir::volume_name` (the guard's name re-check).
     VolumeName,
     /// `PrimDir::open_guard` (step 1).
@@ -199,6 +203,11 @@ struct Faults {
     record: bool,
     calls: Vec<Prim>,
     crashed: bool,
+}
+
+thread_local! {
+    /// The current thread runs a step hook ([`FakeFs::on_step`]).
+    static IN_HOOK: Cell<bool> = const { Cell::new(false) };
 }
 
 fn crashed_err() -> SysError {
@@ -862,10 +871,16 @@ impl State {
                 },
             };
             if still {
+                let drive = self.path_of(node, "").ok().map(|(d, _)| d);
                 if rec.origin == Origin::Rerun {
                     self.log_unlink(node);
                 }
                 self.unlink(node);
+                if rec.origin == Origin::Fixture
+                    && let Some(d) = drive
+                {
+                    self.fixture_flushed(d);
+                }
             }
         }
         if let Obj::File { ino, .. } = rec.obj {
@@ -905,10 +920,15 @@ impl State {
 
     /// Enters a call of Rerun: fails after a crash; counts it, records it, and applies an
     /// armed fault. `Ok(true)`: crash after the call acts.
+    /// A call made from inside a step hook (the hook plays another program or the test) is
+    /// neither counted, recorded nor faulted; it still fails after a crash.
     fn enter(&mut self, call: Prim) -> SysResult<bool> {
         let f = &mut self.faults;
         if f.crashed {
             return Err(crashed_err());
+        }
+        if IN_HOOK.with(Cell::get) {
+            return Ok(false);
         }
         let n = match f.seen.iter_mut().find(|(c, _)| *c == call) {
             Some((_, n)) => {
@@ -1223,6 +1243,18 @@ impl Seek for Counted {
     }
 }
 
+/// Marks the log of a volume durable when dropped (see [`FakeFs::fixture_scope`]); declared
+/// before any state lock of the helper, so it drops after it.
+struct FixtureFlush<'a>(&'a FakeFs, Option<char>);
+
+impl Drop for FixtureFlush<'_> {
+    fn drop(&mut self) {
+        if let Some(drive) = self.1 {
+            self.0.lock().fixture_flushed(drive);
+        }
+    }
+}
+
 /// In-memory file system. Cheap to clone; clones share the same state.
 #[derive(Clone, Default)]
 pub struct FakeFs {
@@ -1289,6 +1321,7 @@ impl FakeFs {
     fn fire_event(&self, op: FsOp, index: usize, name: &str, call: Option<Prim>) {
         let hook = self.hook_slot().take();
         if let Some(mut hook) = hook {
+            IN_HOOK.with(|h| h.set(true));
             hook(
                 self,
                 &StepEvent {
@@ -1298,6 +1331,7 @@ impl FakeFs {
                     call,
                 },
             );
+            IN_HOOK.with(|h| h.set(false));
             let mut slot = self.hook_slot();
             if slot.is_none() {
                 *slot = Some(hook);
@@ -1391,6 +1425,7 @@ impl FakeFs {
 
     /// Creates a directory including missing parents.
     pub fn mkdir_all(&self, abs: &Path) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
         let shown = abs.display().to_string();
         let (drive, segs) = parse_abs(abs)?;
         self.lock().mkdir_all(drive, &segs, &shown).map(|_| ())
@@ -1400,6 +1435,7 @@ impl FakeFs {
     /// i.e. all hard links see the new content). Overwriting opens the file for write
     /// (share-checked, `Busy`).
     pub fn put_file(&self, abs: &Path, data: &[u8]) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
         let shown = abs.display().to_string();
         let (drive, segs, name) = parse_abs_child(abs)?;
         let mut st = self.lock();
@@ -1425,6 +1461,7 @@ impl FakeFs {
     /// Creates a file with a raw name that need not be a valid segment (`d3d9.dll.`, `CON`),
     /// like a file created through `\\?\`. Only empty names, separators and NUL are refused.
     pub fn put_raw_file(&self, parent_abs: &Path, raw_name: &str, data: &[u8]) -> SysResult<()> {
+        let _flushed = self.fixture_scope(parent_abs);
         let shown = format!("{}\\{raw_name}", parent_abs.display());
         if raw_name.is_empty() || raw_name.contains(['\\', '/', '\0']) {
             return Err(err(SysErrorKind::InvalidPath, &shown));
@@ -1460,6 +1497,7 @@ impl FakeFs {
     /// Creates a name surrogate (junction, symlink) with a target. The target need not exist.
     /// Directory and file links behave alike (see the module docs).
     pub fn put_link(&self, abs: &Path, reparse_tag: u32, target: &str) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
         let shown = abs.display().to_string();
         if !tag::is_surrogate(reparse_tag) {
             return Err(err(SysErrorKind::InvalidPath, &shown));
@@ -1477,6 +1515,7 @@ impl FakeFs {
 
     /// Adds a hard link `new_abs` to the existing file `existing_abs` (same drive).
     pub fn put_hardlink(&self, existing_abs: &Path, new_abs: &Path) -> SysResult<()> {
+        let _flushed = self.fixture_scope(new_abs);
         let shown = new_abs.display().to_string();
         let (drive, segs, name) = parse_abs_child(new_abs)?;
         let mut st = self.lock();
@@ -1498,6 +1537,7 @@ impl FakeFs {
 
     /// Sets the attributes of a file (shared by its hard links) or directory.
     pub fn set_attrs(&self, abs: &Path, attrs: Attrs) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
         let mut st = self.lock();
         let id = st.require_abs(abs)?;
         let ino = match st.nodes.get_mut(&id).map(|n| &mut n.body) {
@@ -1517,6 +1557,7 @@ impl FakeFs {
     /// Makes an existing, empty directory case-sensitive (or not), like
     /// `fsutil file setCaseSensitiveInfo`.
     pub fn set_case_sensitive(&self, abs: &Path, on: bool) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
         let shown = abs.display().to_string();
         let mut st = self.lock();
         let id = st.require_abs(abs)?;
@@ -1531,6 +1572,7 @@ impl FakeFs {
     /// Gives an existing directory a non-surrogate reparse tag (e.g. [`tag::CLOUD`] for a
     /// OneDrive folder, allowed, or [`tag::PROJFS`], rejected).
     pub fn set_dir_tag(&self, abs: &Path, reparse_tag: u32) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
         let shown = abs.display().to_string();
         if tag::is_surrogate(reparse_tag) {
             return Err(err(SysErrorKind::InvalidPath, &shown));
@@ -1562,6 +1604,7 @@ impl FakeFs {
     /// `metadata` still describe it ([`Metadata::restricted`]); every open of it and every
     /// walk through it is `AccessDenied`. For a file the flag is shared by its hard links.
     pub fn set_restricted(&self, abs: &Path, on: bool) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
         let mut st = self.lock();
         let id = st.require_abs(abs)?;
         let ino = match st.nodes.get_mut(&id).map(|n| &mut n.body) {
@@ -1585,6 +1628,7 @@ impl FakeFs {
     /// Marks an existing directory as the root of a volume mounted in a folder. It gets its
     /// own volume serial; the file system stays that of the drive.
     pub fn set_volume_root(&self, abs: &Path) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
         let shown = abs.display().to_string();
         let mut st = self.lock();
         let id = st.require_abs(abs)?;
@@ -1596,6 +1640,7 @@ impl FakeFs {
     /// junction to `target` in its place. Returns the hidden name. The rename is checked like
     /// [`Self::rename_abs`].
     pub fn swap_with_junction(&self, abs: &Path, target: &str) -> SysResult<String> {
+        let _flushed = self.fixture_scope(abs);
         let shown = abs.display().to_string();
         let mut st = self.lock();
         let id = st.require_abs(abs)?;
@@ -1633,6 +1678,7 @@ impl FakeFs {
     }
 
     fn rename_impl(&self, from: &Path, to: &Path, checked: bool) -> SysResult<()> {
+        let _flushed = self.fixture_scope(to);
         let shown = to.display().to_string();
         let (drive, segs, name) = parse_abs_child(to)?;
         let mut st = self.lock();
@@ -1661,6 +1707,7 @@ impl FakeFs {
     /// entries is `NotEmpty`, a drive root `AccessDenied`, an entry held open without
     /// share-delete `Busy`. Handles to a deleted directory return `NotFound` afterwards.
     pub fn remove_abs(&self, abs: &Path) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
         let shown = abs.display().to_string();
         let mut st = self.lock();
         let id = st.require_abs(abs)?;
@@ -1684,6 +1731,7 @@ impl FakeFs {
 
     /// Changes the target of an existing link.
     pub fn retarget(&self, abs: &Path, target: &str) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
         let mut st = self.lock();
         let id = st.require_abs(abs)?;
         match st.nodes.get_mut(&id).map(|n| &mut n.body) {
@@ -1693,6 +1741,12 @@ impl FakeFs {
             }
             _ => Err(SysError::path(SysErrorKind::InvalidPath, abs)),
         }
+    }
+
+    /// A fixture change is another program that flushed: when the returned value drops, the
+    /// log of the volume of `abs` is durable up to now (power-loss model, `fs/durable.rs`).
+    fn fixture_scope(&self, abs: &Path) -> FixtureFlush<'_> {
+        FixtureFlush(self, parse_abs(abs).ok().map(|(d, _)| d))
     }
 
     /// Fixture: opens the existing file or directory `abs` itself (not a link) as process

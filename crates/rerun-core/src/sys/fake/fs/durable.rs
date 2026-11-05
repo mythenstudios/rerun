@@ -3,9 +3,10 @@
 //!
 //! - Logged are the metadata changes Rerun makes through the write primitives: a created
 //!   file or directory, a rename, a POSIX delete completing when its handle closes, an
-//!   attribute change. Fixture and attacker changes are durable at once (they model setup or
-//!   another program that flushed); a test that interleaves them with unflushed changes of
-//!   Rerun gets a best-effort undo (an entry whose object is gone is skipped).
+//!   attribute change. A fixture or attacker change is another program that flushed: it is
+//!   durable itself and makes its volume's log durable up to that moment, so an undo never
+//!   meets a change it did not log; an undo that collides anyway panics (a model error).
+//! - Deviation: a volume mounted in a folder shares the log of the drive it is mounted on.
 //! - File content is not in the log: each inode keeps its last flushed content. A fixture
 //!   write is flushed at once; a file Rerun creates starts empty and durable as empty.
 //! - `PrimFile::flush` makes the file's content durable and every volume's log durable up to
@@ -107,6 +108,14 @@ impl State {
         );
     }
 
+    /// A fixture change on `drive`: another program that flushed, so the volume's log is
+    /// durable up to now (the ordered log stays consistent with changes nobody logs).
+    pub(super) fn fixture_flushed(&mut self, drive: char) {
+        if let Some(log) = self.logs.get_mut(&drive) {
+            log.durable = log.entries.len();
+        }
+    }
+
     /// Makes every volume's log durable up to the last entry that `touches`.
     fn durable_up_to(&mut self, touches: impl Fn(&Entry) -> bool) {
         for log in self.logs.values_mut() {
@@ -139,26 +148,29 @@ impl State {
     fn undo(&mut self, u: Undo) {
         match u {
             Undo::Created { node } => {
-                if self.nodes.contains_key(&node) {
-                    self.unlink(node);
-                }
+                assert!(
+                    self.nodes.contains_key(&node),
+                    "fake power loss: created entry {node} is gone before its undo"
+                );
+                self.unlink(node);
             }
             Undo::Moved {
                 node,
                 from_parent,
                 from_name,
             } => {
-                if self.nodes.contains_key(&node) {
-                    let _ = self.move_node(node, from_parent, &from_name, "<undo>");
+                if let Err(e) = self.move_node(node, from_parent, &from_name, "<undo>") {
+                    panic!("fake power loss: undo of a rename of {node} collides: {e}");
                 }
             }
             Undo::Unlinked { node, saved, inode } => {
                 let (Some(parent), name) = (saved.parent, saved.name.clone()) else {
                     return;
                 };
-                if self.nodes.contains_key(&node) || !self.nodes.contains_key(&parent) {
-                    return;
-                }
+                assert!(
+                    !self.nodes.contains_key(&node) && self.nodes.contains_key(&parent),
+                    "fake power loss: undo of the unlink of {node} collides"
+                );
                 if let Body::File(ino) = saved.body {
                     match self.inodes.get_mut(&ino) {
                         Some(i) => i.links += 1,
@@ -170,8 +182,9 @@ impl State {
                         }
                     }
                 }
-                let Ok(key) = self.dir(parent, "<undo>").map(|d| d.key(&name)) else {
-                    return;
+                let key = match self.dir(parent, "<undo>") {
+                    Ok(d) if !d.children.contains_key(&d.key(&name)) => d.key(&name),
+                    _ => panic!("fake power loss: undo of the unlink of {node} collides"),
                 };
                 self.nodes.insert(node, saved);
                 if let Ok(d) = self.dir_mut(parent, "<undo>") {

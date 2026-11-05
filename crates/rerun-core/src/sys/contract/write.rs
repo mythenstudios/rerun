@@ -123,6 +123,7 @@ pub fn fs_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCont
     w16_guard_holds(fs, fx, work)?;
     w17_guard_and_readers(fs, fx, work)?;
     w18_folder_held(fs, fx, work)?;
+    w18b_folder_held_for_delete(fs, fx, work)?;
     w22_guard_blocks_ancestor(fs, fx, work)?;
     w23_handle_follows(fs, fx, work)?;
     s2_changes_under_a_guard(fs, fx, work)?;
@@ -1115,6 +1116,43 @@ fn w18_folder_held(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResu
     no_tmp(&*d, "W18 while held")?;
     drop(hold);
     no_tmp(&*d, "W18")
+}
+
+/// W18b: a folder held by another program with delete access (sharing everything, or read
+/// and write only) does not block renames into it: `create_new` and `replace` work (observed
+/// on Windows 11 build 26300: the target-directory open of a rename does not ask for delete).
+fn w18b_folder_held_for_delete(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w18b")?;
+    for (i, share) in [Share::RWD, Share::RW].into_iter().enumerate() {
+        let n = u64::try_from(i).unwrap_or(0) * 2;
+        let name = format!("t{i}.bin");
+        ok(fx.file(&work.join("w18b").join(&name), b"old"), "fixture")?;
+        let what = format!("W18b folder held for delete, {share:?}");
+        let hold = ok(
+            fx.hold_open(&work.join("w18b"), Access::DELETE, share),
+            &what,
+        )?;
+        ok(
+            d.create_new(
+                &rel(&format!("n{i}.bin"))?,
+                &mut &b"n"[..],
+                &new_file(n, Attrs::default(), b"n", 1),
+            ),
+            &format!("{what}: create_new"),
+        )?;
+        let g = ok(d.guard(&rel(&name)?), &what)?;
+        ok(
+            g.replace(
+                &sha(b"old"),
+                &mut &b"new"[..],
+                &new_file(n + 1, Attrs::default(), b"new", 3),
+            ),
+            &format!("{what}: replace"),
+        )?;
+        drop(hold);
+        read_is(&*d, &name, b"new", &what)?;
+    }
+    no_tmp(&*d, "W18b")
 }
 
 /// W22: an ancestor of a guarded file cannot be renamed (`AccessDenied`, A5) while the guard
