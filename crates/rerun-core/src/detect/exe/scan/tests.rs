@@ -226,7 +226,7 @@ fn inspect_exe_reaches_paths_the_walk_does_not() {
         .unwrap();
     let g = game(&sys);
     assert!(scan_game(&g, &options()).candidates.is_empty());
-    let facts = inspect_exe(&g, &rel(deep), &Limits::DEFAULT).unwrap();
+    let facts = inspect_exe(&g, &rel(deep), &Limits::DEFAULT, None).unwrap();
     assert_eq!(
         facts.api.verdict,
         ApiVerdict::One {
@@ -234,7 +234,7 @@ fn inspect_exe_reaches_paths_the_walk_does_not() {
             basis: Basis::Only
         }
     );
-    match inspect_exe(&g, &rel("missing.exe"), &Limits::DEFAULT) {
+    match inspect_exe(&g, &rel("missing.exe"), &Limits::DEFAULT, None) {
         Err(ExeError::Pe(PeReadError::Open { source, .. })) => {
             assert_eq!(source.kind, SysErrorKind::NotFound);
         }
@@ -348,4 +348,315 @@ fn no_content_reaches_the_output() {
         .find_map(|c| c.facts.as_ref().err())
         .unwrap();
     assert!(!format!("{e} / {e:?}").contains("SECRETMARKER"));
+}
+
+// ---------- Hashes ----------
+
+use std::io::{Cursor, SeekFrom};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use sha1::Sha1;
+use sha2::{Digest, Sha256};
+
+use super::inspect_pe;
+use crate::detect::exe::{HashError, HashLimits, HashOutcome, HashSkip, Hashes};
+use crate::detect::pe::Pe;
+use crate::sys::fake::{FakeFs, FsOp, StepEvent};
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect()
+}
+
+fn hashes(c: &Candidate) -> &HashOutcome {
+    &c.facts.as_ref().unwrap().hashes
+}
+
+fn hashing() -> Options {
+    Options {
+        hashes: true,
+        ..options()
+    }
+}
+
+/// A reader over an image that counts the bytes it served.
+struct Counted {
+    data: Cursor<Vec<u8>>,
+    served: Arc<AtomicU64>,
+}
+
+impl std::io::Read for Counted {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.data.read(buf)?;
+        self.served
+            .fetch_add(u64::try_from(n).unwrap(), Ordering::SeqCst);
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for Counted {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        self.data.seek(to)
+    }
+}
+
+/// An image with a large tail the parser never reads.
+fn padded() -> Vec<u8> {
+    let mut bytes = exe(&["d3d9.dll"]);
+    bytes.resize(bytes.len() + (3 << 20), 0xA5);
+    bytes
+}
+
+fn counted(bytes: &[u8]) -> (Counted, Arc<AtomicU64>) {
+    let served = Arc::new(AtomicU64::new(0));
+    let reader = Counted {
+        data: Cursor::new(bytes.to_vec()),
+        served: Arc::clone(&served),
+    };
+    (reader, served)
+}
+
+#[test]
+fn without_hashes_nothing_beyond_the_parser_is_read() {
+    let bytes = padded();
+    let len = u64::try_from(bytes.len()).unwrap();
+    let (reader, served) = counted(&bytes);
+    let pe = Pe::parse(reader, &Limits::DEFAULT).unwrap();
+    let facts = inspect_pe(pe, &rel("game.exe"), None).unwrap();
+    assert_eq!(facts.hashes, HashOutcome::NotRequested);
+    let n = served.load(Ordering::SeqCst);
+    assert!(n <= facts.bytes_read, "{n} > {}", facts.bytes_read);
+    assert!(n < len / 2);
+
+    // With hashes: the same handle, read once more from 0 to its end.
+    let (reader, served) = counted(&bytes);
+    let pe = Pe::parse(reader, &Limits::DEFAULT).unwrap();
+    let facts = inspect_pe(pe, &rel("game.exe"), Some(&HashLimits::DEFAULT)).unwrap();
+    let HashOutcome::Done(h) = &facts.hashes else {
+        panic!("expected hashes, got {:?}", facts.hashes);
+    };
+    assert_eq!(h.len, len);
+    assert_eq!(h.sha1, hex(&Sha1::digest(&bytes)));
+    assert_eq!(h.sha256, hex(&Sha256::digest(&bytes)));
+    assert!(served.load(Ordering::SeqCst) <= facts.bytes_read + h.len);
+
+    // A scan without `--hashes`: every parsed candidate says so.
+    let sys = base()
+        .file(at("Invented.exe"), bytes)
+        .file(at("InventedLauncher.exe"), exe(&[]))
+        .build()
+        .unwrap();
+    let r = scan(&sys);
+    for c in &r.candidates {
+        assert_eq!(hashes(c), &HashOutcome::NotRequested, "{}", c.path);
+    }
+}
+
+#[test]
+fn inspect_exe_hashes_the_file_it_parsed() {
+    let bytes = padded();
+    let len = u64::try_from(bytes.len()).unwrap();
+    let file = rel(r"bin\Invented.exe");
+    let sys = base()
+        .file(at(r"bin\Invented.exe"), bytes.clone())
+        .build()
+        .unwrap();
+    let g = game(&sys);
+    let facts = inspect_exe(&g, &file, &Limits::DEFAULT, Some(&HashLimits::DEFAULT)).unwrap();
+    assert_eq!(
+        facts.hashes,
+        HashOutcome::Done(Hashes {
+            len,
+            sha1: hex(&Sha1::digest(&bytes)),
+            sha256: hex(&Sha256::digest(&bytes)),
+        })
+    );
+    // The per-file limit: exactly the length is hashed, one byte less is too large.
+    let exact = HashLimits {
+        max_file_bytes: len,
+        ..HashLimits::DEFAULT
+    };
+    let at_limit = inspect_exe(&g, &file, &Limits::DEFAULT, Some(&exact)).unwrap();
+    assert!(matches!(at_limit.hashes, HashOutcome::Done(_)));
+    let under = HashLimits {
+        max_file_bytes: len - 1,
+        ..HashLimits::DEFAULT
+    };
+    let over = inspect_exe(&g, &file, &Limits::DEFAULT, Some(&under)).unwrap();
+    assert_eq!(
+        over.hashes,
+        HashOutcome::Skipped(HashSkip::TooLarge { max: len - 1 })
+    );
+}
+
+#[test]
+fn only_parsed_game_candidates_are_hashed_in_rank_order() {
+    let main = exe(&["d3d11.dll"]);
+    let sys = base()
+        .file(at(r"bin\Invented.exe"), main.clone())
+        .file(at("Invented_Dx9.exe"), exe(&["d3d9.dll", "d3d8.dll"]))
+        .file(at("Other.exe"), exe(&[]))
+        .file(at("InventedLauncher.exe"), exe(&["d3d9.dll"]))
+        .file(at("UnityCrashHandler64.exe"), exe(&[]))
+        .file(at("broken.exe"), b"not an executable".to_vec())
+        .build()
+        .unwrap();
+    let limits = ExeLimits {
+        hash: HashLimits {
+            max_files: 2,
+            ..HashLimits::DEFAULT
+        },
+        ..ExeLimits::DEFAULT
+    };
+    let r = scan_game(
+        &game(&sys),
+        &Options {
+            limits,
+            ..hashing()
+        },
+    );
+    assert_eq!(
+        order(&r),
+        [
+            r"bin\Invented.exe",
+            "Invented_Dx9.exe",
+            "Other.exe",
+            "InventedLauncher.exe",
+            "UnityCrashHandler64.exe",
+            "broken.exe"
+        ]
+    );
+    let HashOutcome::Done(h) = hashes(&r.candidates[0]) else {
+        panic!("{:?}", hashes(&r.candidates[0]));
+    };
+    assert_eq!(h.sha256, hex(&Sha256::digest(&main)));
+    assert!(matches!(hashes(&r.candidates[1]), HashOutcome::Done(_)));
+    assert_eq!(
+        hashes(&r.candidates[2]),
+        &HashOutcome::Skipped(HashSkip::TooManyFiles { max: 2 })
+    );
+    for c in &r.candidates[3..5] {
+        assert_eq!(
+            hashes(c),
+            &HashOutcome::Skipped(HashSkip::NotGame),
+            "{}",
+            c.path
+        );
+    }
+    // A candidate that failed has no hashes, only its error.
+    assert!(r.candidates[5].facts.is_err());
+}
+
+#[test]
+fn the_game_budget_and_the_file_limit_skip_by_the_listed_length() {
+    let big = padded();
+    let small = exe(&["d3d9.dll"]);
+    let big_len = u64::try_from(big.len()).unwrap();
+    let small_len = u64::try_from(small.len()).unwrap();
+    let sys = base()
+        .file(at("Invented.exe"), big)
+        .file(at("Invented_Dx9.exe"), padded())
+        .file(at("Other.exe"), small)
+        .build()
+        .unwrap();
+    // The budget fits the first file and the small one, not the second big one.
+    let budget = big_len + small_len;
+    let limits = ExeLimits {
+        hash: HashLimits {
+            max_game_bytes: budget,
+            ..HashLimits::DEFAULT
+        },
+        ..ExeLimits::DEFAULT
+    };
+    let r = scan_game(
+        &game(&sys),
+        &Options {
+            limits,
+            ..hashing()
+        },
+    );
+    assert_eq!(order(&r), ["Invented.exe", "Invented_Dx9.exe", "Other.exe"]);
+    assert!(matches!(hashes(&r.candidates[0]), HashOutcome::Done(h) if h.len == big_len));
+    assert_eq!(
+        hashes(&r.candidates[1]),
+        &HashOutcome::Skipped(HashSkip::GameBudget { max: budget })
+    );
+    assert!(matches!(hashes(&r.candidates[2]), HashOutcome::Done(h) if h.len == small_len));
+
+    // The per-file limit by the listed length: never read.
+    let limits = ExeLimits {
+        hash: HashLimits {
+            max_file_bytes: big_len - 1,
+            ..HashLimits::DEFAULT
+        },
+        ..ExeLimits::DEFAULT
+    };
+    let r = scan_game(
+        &game(&sys),
+        &Options {
+            limits,
+            ..hashing()
+        },
+    );
+    for c in &r.candidates[..2] {
+        assert_eq!(
+            hashes(c),
+            &HashOutcome::Skipped(HashSkip::TooLarge { max: big_len - 1 }),
+            "{}",
+            c.path
+        );
+    }
+    assert!(matches!(hashes(&r.candidates[2]), HashOutcome::Done(_)));
+}
+
+/// Replaces `file` (one segment, in the game folder) with `with` when it is opened for
+/// reading the `nth` time (from 1).
+fn replace_on_open(fs: &FakeFs, file: &'static str, nth: usize, with: Vec<u8>) {
+    let opens = AtomicUsize::new(0);
+    fs.on_step(move |fs: &FakeFs, ev: &StepEvent| {
+        if ev.op == FsOp::OpenRead
+            && ev.name == file
+            && opens.fetch_add(1, Ordering::SeqCst) + 1 == nth
+        {
+            fs.put_file(Path::new(&at(file)), &with).unwrap();
+        }
+    });
+}
+
+#[test]
+fn a_file_replaced_between_the_two_inspections_is_not_hashed() {
+    let sys = base()
+        .file(at("Invented.exe"), exe(&["d3d9.dll"]))
+        .build()
+        .unwrap();
+    replace_on_open(sys.fake_fs(), "Invented.exe", 2, exe(&["opengl32.dll"]));
+    let r = scan_game(&game(&sys), &hashing());
+    sys.fake_fs().clear_on_step();
+    let c = &r.candidates[0];
+    assert_eq!(hashes(c), &HashOutcome::Failed(HashError::Changed));
+    // The first facts stay.
+    assert_eq!(
+        verdict(c),
+        &ApiVerdict::One {
+            api: GraphicsApi::D3d9,
+            basis: Basis::Only
+        }
+    );
+
+    let sys = base()
+        .file(at("Invented.exe"), exe(&["d3d9.dll"]))
+        .build()
+        .unwrap();
+    replace_on_open(sys.fake_fs(), "Invented.exe", 2, b"gone".to_vec());
+    let r = scan_game(&game(&sys), &hashing());
+    sys.fake_fs().clear_on_step();
+    let outcome = hashes(&r.candidates[0]);
+    let HashOutcome::Failed(HashError::Inspect(e)) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(
+        matches!(**e, ExeError::Pe(PeReadError::Parse { .. })),
+        "{e}"
+    );
+    assert_eq!(outcome.to_string(), format!("failed: {e}"));
 }

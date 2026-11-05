@@ -13,10 +13,13 @@
 //!   nothing is dropped), and the ranking that names the main executable ([`Main`]).
 //! - [`scan_game`]: all of it for one game ([`GameExes`], owns everything);
 //!   [`inspect_exe`]: the per-file pipeline, also for Topo matching.
+//! - `hash`: with `--hashes` ([`Options::hashes`]), streaming SHA-1 and SHA-256 of the best
+//!   `Game` candidates on the very handle that was parsed ([`HashLimits`], [`HashOutcome`]).
 //! - Problems of the walk are [`ExeIssue`]s; they never carry file content, raw names only
 //!   escaped. Problems of a file stay on its [`Candidate`].
 
 mod api;
+mod hash;
 mod issue;
 mod rank;
 mod role;
@@ -24,6 +27,7 @@ mod scan;
 mod walk;
 
 pub use api::{ApiEvidence, ApiReport, ApiVerdict, Basis, Engine, GraphicsApi, classify};
+pub use hash::{HashError, HashLimits, HashOutcome, HashSkip, Hashes};
 pub use issue::{ExeIssue, ExeIssueKind, LimitKind};
 pub use role::{Role, name_role, similarity};
 pub use scan::{Candidate, ExeError, ExeFacts, GameExes, Main, Options, inspect_exe, scan_game};
@@ -45,6 +49,8 @@ pub struct ExeLimits {
     pub max_exes: usize,
     /// Bounds of the parser for each candidate.
     pub pe: pe::Limits,
+    /// Bounds of the hashing (`--hashes` only).
+    pub hash: HashLimits,
 }
 
 impl ExeLimits {
@@ -55,5 +61,6 @@ impl ExeLimits {
         max_entries: 20_000,
         max_exes: 64,
         pe: pe::Limits::DEFAULT,
+        hash: HashLimits::DEFAULT,
     };
 }

@@ -1,13 +1,17 @@
 //! The exe scan of one game folder (ADR 0014, "Layers"): walk, inspect every candidate, roles,
-//! ranking. Never fails as a whole.
+//! ranking, and with `--hashes` the hashes of the best `Game` candidates. Never fails as a
+//! whole.
+
+use std::io::{Read, Seek};
 
 use super::ExeLimits;
 use super::api::{ApiReport, classify};
+use super::hash::{HashError, HashLimits, HashOutcome, HashSkip, Stop, stream};
 use super::issue::ExeIssue;
 use super::rank::rank;
 use super::role::{Role, name_role, similarity, stem, with_facts};
 use super::walk::{WalkStats, walk};
-use crate::detect::pe::{self, PeInfo, PeReadError, open_game_exe};
+use crate::detect::pe::{self, Pe, PeInfo, PeReadError, open_game_exe};
 use crate::path::RelPath;
 use crate::policy::root::GameDir;
 
@@ -16,6 +20,9 @@ use crate::policy::root::GameDir;
 pub struct Options {
     /// The install folder name (Steam's `installdir`), for roles and ranking.
     pub name_hint: Option<RelPath>,
+    /// `--hashes`: hash the best `Game` candidates within [`ExeLimits::hash`]. Without it
+    /// nothing beyond the parser's reads is read.
+    pub hashes: bool,
     /// The bounds.
     pub limits: ExeLimits,
 }
@@ -24,6 +31,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             name_hint: None,
+            hashes: false,
             limits: ExeLimits::DEFAULT,
         }
     }
@@ -47,6 +55,8 @@ pub struct ExeFacts {
     pub api: ApiReport,
     /// Bytes the parser read.
     pub bytes_read: u64,
+    /// The hashes, computed on the handle that was parsed.
+    pub hashes: HashOutcome,
 }
 
 /// One executable of the game folder.
@@ -94,23 +104,47 @@ pub struct GameExes {
 }
 
 /// Opens `exe` (relative to the game folder) through [`open_game_exe`], parses it within
-/// `limits` and classifies its graphics API. The per-file pipeline of [`scan_game`] and of
-/// Topo matching (which names its paths itself, independent of the walk).
+/// `limits` and classifies its graphics API; with `hashes`, hashes the very handle that was
+/// parsed (no second open; the read share of `open_read` keeps writers out). The per-file
+/// pipeline of [`scan_game`] and of Topo matching (which names its paths itself, independent
+/// of the walk).
 pub fn inspect_exe(
     game: &GameDir<'_>,
     exe: &RelPath,
     limits: &pe::Limits,
+    hashes: Option<&HashLimits>,
 ) -> Result<ExeFacts, ExeError> {
-    let mut pe = open_game_exe(game, exe, limits)?;
+    let pe = open_game_exe(game, exe, limits)?;
+    inspect_pe(pe, exe, hashes)
+}
+
+/// [`inspect_exe`] after the open; separate so the reads can be counted in tests.
+fn inspect_pe<R: Read + Seek>(
+    mut pe: Pe<R>,
+    exe: &RelPath,
+    hashes: Option<&HashLimits>,
+) -> Result<ExeFacts, ExeError> {
     let info = pe.info().map_err(|error| PeReadError::Parse {
         file: exe.clone(),
         error,
     })?;
     let api = classify(&info.imports, &info.delay_imports, info.headers.managed);
+    let bytes_read = pe.bytes_read();
+    let hashes = match hashes {
+        None => HashOutcome::NotRequested,
+        Some(h) => match stream(pe.into_inner(), h.max_file_bytes, h.chunk_bytes) {
+            Ok(done) => HashOutcome::Done(done),
+            Err(Stop::TooLarge) => HashOutcome::Skipped(HashSkip::TooLarge {
+                max: h.max_file_bytes,
+            }),
+            Err(Stop::Io(kind)) => HashOutcome::Failed(HashError::Io(kind)),
+        },
+    };
     Ok(ExeFacts {
-        bytes_read: pe.bytes_read(),
         info,
         api,
+        bytes_read,
+        hashes,
     })
 }
 
@@ -124,7 +158,7 @@ pub fn scan_game(game: &GameDir<'_>, options: &Options) -> GameExes {
         .exes
         .into_iter()
         .map(|w| {
-            let facts = inspect_exe(game, &w.path, &options.limits.pe);
+            let facts = inspect_exe(game, &w.path, &options.limits.pe, None);
             let name = w.path.file_name();
             let role = with_facts(name_role(name, hint), &facts);
             Candidate {
@@ -138,11 +172,82 @@ pub fn scan_game(game: &GameDir<'_>, options: &Options) -> GameExes {
         })
         .collect();
     let main = rank(&mut candidates);
+    if options.hashes {
+        hash_games(game, &mut candidates, &options.limits);
+    }
     GameExes {
         candidates,
         main,
         stats: walked.stats,
         issues: walked.issues,
+    }
+}
+
+/// Hashes the parsed `Game` candidates in rank order within the per-game limits; marks every
+/// other parsed candidate `Skipped`. Each selected file is inspected again with hashes (one
+/// handle for parse and hash); if its facts differ from the first inspection, the hash is
+/// `Changed` and the first facts stay, so a hash always belongs to the facts shown.
+fn hash_games(game: &GameDir<'_>, candidates: &mut [Candidate], limits: &ExeLimits) {
+    let h = &limits.hash;
+    let mut files = 0usize;
+    let mut used = 0u64;
+    for c in candidates {
+        let Ok(facts) = &mut c.facts else {
+            continue;
+        };
+        let remaining = h.max_game_bytes.saturating_sub(used);
+        let skip = if c.role != Role::Game {
+            Some(HashSkip::NotGame)
+        } else if files >= h.max_files {
+            Some(HashSkip::TooManyFiles { max: h.max_files })
+        } else if c.listed_len > h.max_file_bytes {
+            // The listing is a hint; it only spares reading a file that cannot fit.
+            Some(HashSkip::TooLarge {
+                max: h.max_file_bytes,
+            })
+        } else if c.listed_len > remaining {
+            Some(HashSkip::GameBudget {
+                max: h.max_game_bytes,
+            })
+        } else {
+            None
+        };
+        if let Some(skip) = skip {
+            facts.hashes = HashOutcome::Skipped(skip);
+            continue;
+        }
+        files += 1;
+        // The remaining game budget caps the read as well, so a listing that understates the
+        // length costs at most the remaining budget plus one chunk.
+        let cap = remaining.min(h.max_file_bytes);
+        let per_file = HashLimits {
+            max_file_bytes: cap,
+            ..*h
+        };
+        facts.hashes = match inspect_exe(game, &c.path, &limits.pe, Some(&per_file)) {
+            Err(e) => HashOutcome::Failed(HashError::Inspect(Box::new(e))),
+            Ok(again) if again.info != facts.info => HashOutcome::Failed(HashError::Changed),
+            Ok(again) => match again.hashes {
+                HashOutcome::Done(done) => {
+                    used = used.saturating_add(done.len);
+                    HashOutcome::Done(done)
+                }
+                HashOutcome::Skipped(HashSkip::TooLarge { .. }) => {
+                    used = used.saturating_add(cap);
+                    let skip = if cap < h.max_file_bytes {
+                        HashSkip::GameBudget {
+                            max: h.max_game_bytes,
+                        }
+                    } else {
+                        HashSkip::TooLarge {
+                            max: h.max_file_bytes,
+                        }
+                    };
+                    HashOutcome::Skipped(skip)
+                }
+                other => other,
+            },
+        };
     }
 }
 

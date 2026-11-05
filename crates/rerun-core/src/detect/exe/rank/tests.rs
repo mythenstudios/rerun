@@ -4,7 +4,7 @@
 use super::{Key, rank};
 use crate::detect::exe::api::classify;
 use crate::detect::exe::role::Role;
-use crate::detect::exe::{Candidate, ExeError, ExeFacts, Main};
+use crate::detect::exe::{Candidate, ExeError, ExeFacts, HashOutcome, Main};
 use crate::detect::pe::layout::{SUBSYSTEM_WINDOWS_CUI, SUBSYSTEM_WINDOWS_GUI};
 use crate::detect::pe::{
     DllName, Headers, LegacyFormat, Machine, PeError, PeErrorKind, PeFormat, PeInfo, PeReadError,
@@ -37,6 +37,7 @@ fn facts(imports: &[&str], subsystem: u16) -> ExeFacts {
         },
         api,
         bytes_read: 0,
+        hashes: HashOutcome::NotRequested,
     }
 }
 
