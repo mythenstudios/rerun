@@ -92,4 +92,4 @@ In the fake (P2-3): `FakeFs::sync_all()` makes everything so far durable (a clea
 A crash stops the process after a primitive call (ADR 0017 amendment, A1): every later call of the crashed process fails, so no rollback runs. A restart closes the handles Rerun held, by origin (not by process ID): pending POSIX deletes on them complete and the journal lock is released; handles and image mappings of other processes (fixture holds) stay. Fixture and attacker helpers are never blocked by the crash flag. A power loss is a crash plus the cut above, and drops every hold and mapping.
 
 ### Lock
-`journal\lock` is taken with `DirWrite::lock` (ADR 0017 amendment, A7); it is part of the write contract, so `sys::win` must pass it unchanged in P2-4.
+`journal\lock` is taken with `DirWrite::lock` (ADR 0017 amendment, A7); it is part of the write contract, which `sys::win` passes unchanged (P2-4).

@@ -1,7 +1,6 @@
-//! [`WinFs`] and [`WinDir`]: the real file system (ADR 0007), read side so far: of the write
-//! side (ADR 0017) only `DirWrite::open_dir_write` exists, every writing method returns
-//! `Unsupported`. No `unsafe` here; every system call goes through [`super::nt`] or
-//! [`super::token`].
+//! [`WinFs`] and [`WinDir`]: the real file system (ADR 0007) and its write side (ADR 0017):
+//! the `DirWrite` methods run the sequences of `sys::seq` over the primitives in [`prim`]. No
+//! `unsafe` here; every system call goes through [`super::nt`] or [`super::token`].
 //!
 //! Walk: each segment is opened relative to its parent handle ([`nt::open_relative`],
 //! `OBJ_DONT_REPARSE`, `FILE_OPEN_REPARSE_POINT`), checked against the requested name (L1,
@@ -46,10 +45,11 @@ use crate::sys::fs::{
     Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, FileLock, Fs, FsKind, Metadata, NewFile,
     ReadSeek, ReparseInfo, RootInfo, WriteCap, Written, tag,
 };
+use crate::sys::seq;
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
-/// Message of every writing method until the write side exists (ADR 0017).
-const NO_WRITE: &str = "sys::win: the write side is not implemented yet";
+mod prim;
+
 /// Target shown for errors about the handle itself.
 const HANDLE_TARGET: &str = "<dir handle>";
 
@@ -207,6 +207,16 @@ fn link_target(h: BorrowedHandle<'_>, target: &str) -> SysResult<Option<String>>
         .map_err(|_| err(SysErrorKind::Other, target))
 }
 
+/// `FILE_CASE_SENSITIVE_DIR` of the directory `h` (`FileCaseSensitiveInformation`); a file
+/// system without the class (FAT) has no case-sensitive directories.
+fn case_sensitive(h: BorrowedHandle<'_>, target: &str) -> SysResult<bool> {
+    match nt::query_info(h, FileCaseSensitiveInformation, 4) {
+        Ok(b) => Ok(u32_at(&b, 0).is_some_and(|f| f & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0)),
+        Err(s) if is_unsupported_class(s) => Ok(false),
+        Err(s) => Err(nt_error(s, target)),
+    }
+}
+
 /// `FILE_PROCESS_IDS_USING_FILE_INFORMATION`: a `ULONG` count, then `ULONG_PTR` process IDs
 /// (aligned to a `ULONG_PTR`). Sorted, without duplicates. `None` if the reply is shorter
 /// than its count or an ID does not fit a `u32` (PIDs always do).
@@ -336,8 +346,8 @@ fn open_entry(
     access: Access,
     target: &str,
 ) -> SysResult<Opened> {
-    let handle =
-        nt::open_relative(parent, seg, RelOpen::Entry(access)).map_err(|s| nt_error(s, target))?;
+    let handle = nt::open_relative(parent, Some(seg), RelOpen::Entry(access))
+        .map_err(|s| nt_error(s, target))?;
     check_long_name(handle.as_handle(), seg, target)?;
     let tag = tag_info(handle.as_handle(), target)?;
     Ok(Opened { handle, tag })
@@ -356,8 +366,7 @@ fn dir_handle(o: Opened, target: &str) -> SysResult<OwnedHandle> {
     }
 }
 
-/// The real file system (`Fs`). Read side so far; the writing `DirWrite` methods return
-/// `Unsupported` (ADR 0017).
+/// The real file system (`Fs`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WinFs;
 
@@ -406,8 +415,7 @@ impl WinFs {
 }
 
 /// An open directory of the real file system. One handle type for reading and writing (it
-/// shares read, write and delete); the capability split is in the types (ADR 0017). Every
-/// writing method returns `Unsupported` so far.
+/// shares read, write and delete); the capability split is in the types (ADR 0017).
 pub struct WinDir {
     handle: OwnedHandle,
     /// Serializes `read_dir(None)`: the enumeration position belongs to the handle.
@@ -603,11 +611,7 @@ impl Dir for WinDir {
             settle(|| names_of(h), |e| e.kind == SysErrorKind::NotFound)?;
         let (volume_serial, file_id) = file_id(h, t)?;
         let user_writable = token::user_writable(h).map_err(|c| win32_error(c, t))?;
-        let case_sensitive = match nt::query_info(h, FileCaseSensitiveInformation, 4) {
-            Ok(b) => u32_at(&b, 0).is_some_and(|f| f & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0),
-            Err(s) if is_unsupported_class(s) => false,
-            Err(s) => return Err(nt_error(s, t)),
-        };
+        let case_sensitive = case_sensitive(h, t)?;
         let (fs_name, flags) = nt::volume_info(h).map_err(|c| win32_info_error(c, t))?;
         Ok(RootInfo {
             final_path,
@@ -671,7 +675,7 @@ impl Dir for WinDir {
             // Allowlisted data tag: the data is only visible without FILE_OPEN_REPARSE_POINT.
             // Reopen relative to the same parent and require the same object.
             let data =
-                nt::open_relative(parent, &s, RelOpen::Data).map_err(|st| nt_error(st, t))?;
+                nt::open_relative(parent, Some(&s), RelOpen::Data).map_err(|st| nt_error(st, t))?;
             if file_id(data.as_handle(), t)? != file_id(first.handle.as_handle(), t)? {
                 return Err(err(SysErrorKind::Busy, t));
             }
@@ -732,28 +736,28 @@ impl DirWrite for WinDir {
         Ok(Box::new(WinDir::new(self.open_dir_handle(p)?)))
     }
 
-    fn guard(&self, _: &RelPath) -> SysResult<Box<dyn FileGuard + '_>> {
-        Err(err(SysErrorKind::Unsupported, NO_WRITE))
+    fn guard(&self, name: &RelPath) -> SysResult<Box<dyn FileGuard + '_>> {
+        Ok(Box::new(seq::guard(self, name)?))
     }
 
-    fn create_new(&self, _: &RelPath, _: &mut dyn Read, _: &NewFile) -> SysResult<Written> {
-        Err(err(SysErrorKind::Unsupported, NO_WRITE))
+    fn create_new(&self, name: &RelPath, src: &mut dyn Read, new: &NewFile) -> SysResult<Written> {
+        seq::create_new(self, name, src, new)
     }
 
-    fn create_dir(&self, _: &RelPath) -> SysResult<u128> {
-        Err(err(SysErrorKind::Unsupported, NO_WRITE))
+    fn create_dir(&self, name: &RelPath) -> SysResult<u128> {
+        seq::create_dir(self, name)
     }
 
-    fn remove_dir(&self, _: &RelPath, _: u128) -> SysResult<()> {
-        Err(err(SysErrorKind::Unsupported, NO_WRITE))
+    fn remove_dir(&self, name: &RelPath, expected_id: u128) -> SysResult<()> {
+        seq::remove_dir(self, name, expected_id)
     }
 
     fn flush(&self) -> SysResult<()> {
-        Err(err(SysErrorKind::Unsupported, NO_WRITE))
+        seq::flush(self)
     }
 
-    fn lock(&self, _: &RelPath) -> SysResult<Box<dyn FileLock + '_>> {
-        Err(err(SysErrorKind::Unsupported, NO_WRITE))
+    fn lock(&self, name: &RelPath) -> SysResult<Box<dyn FileLock + '_>> {
+        Ok(Box::new(seq::lock(self, name)?))
     }
 }
 

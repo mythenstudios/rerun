@@ -518,6 +518,41 @@ fn banned_windows_sys_items_resolve() {
     let _ = windows_sys::Wdk::Storage::FileSystem::NtSetInformationFile;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: ZwSetInformationFile must be banned"
+    )]
+    let _ = windows_sys::Wdk::System::SystemServices::ZwSetInformationFile;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetFileInformationByHandle must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtFlushBuffersFileEx must be banned"
+    )]
+    let _ = windows_sys::Wdk::Storage::FileSystem::NtFlushBuffersFileEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: NtFlushBuffersFile must be banned"
+    )]
+    let _ = windows_sys::Wdk::Storage::FileSystem::NtFlushBuffersFile;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwFlushBuffersFileEx must be banned"
+    )]
+    let _ = windows_sys::Wdk::Storage::FileSystem::ZwFlushBuffersFileEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: ZwFlushBuffersFile must be banned"
+    )]
+    let _ = windows_sys::Wdk::Storage::FileSystem::ZwFlushBuffersFile;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: FlushFileBuffers must be banned"
+    )]
+    let _ = windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: CreateProcessW must be banned"
     )]
     let _ = windows_sys::Win32::System::Threading::CreateProcessW;

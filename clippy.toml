@@ -115,8 +115,21 @@ disallowed-methods = [
   { path = "windows_sys::Wdk::Storage::FileSystem::NtQueryInformationByName", reason = "NT path or by-name file API outside sys::win::nt (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Wdk::System::SystemServices::ZwCreateFile", reason = "NT path or by-name file API outside sys::win::nt (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Wdk::System::SystemServices::ZwOpenFile", reason = "NT path or by-name file API outside sys::win::nt (ADR 0007)", allow-invalid = true },
-  # Phase 2: by-handle rename/delete/attributes go through one sys::win::nt wrapper; nothing uses it yet.
-  { path = "windows_sys::Wdk::Storage::FileSystem::NtSetInformationFile", reason = "phase 2 by-handle rename/delete only via a sys::win::nt wrapper (ADR 0007)", allow-invalid = true },
+  # ADR 0017: by-handle rename, delete and attributes only through sys::win::nt::set_info (three
+  # classes: FileRenameInformationEx flags 0, FileDispositionInformationEx POSIX, FileBasicInformation);
+  # flushes only through sys::win::nt::flush. SetFileInformationByHandle is the Win32 twin of
+  # NtSetInformationFile (rename with replace, legacy delete); test fixtures use it under a
+  # module-wide expect in sys::win::testfx.
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtSetInformationFile", reason = "by-handle rename/delete/attributes only via sys::win::nt::set_info (ADR 0017)", allow-invalid = true },
+  { path = "windows_sys::Wdk::System::SystemServices::ZwSetInformationFile", reason = "by-handle rename/delete/attributes only via sys::win::nt::set_info (ADR 0017)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle", reason = "by-handle rename/delete/attributes only via sys::win::nt::set_info (ADR 0017)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtFlushBuffersFileEx", reason = "flush only via sys::win::nt::flush (ADR 0017)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtFlushBuffersFile", reason = "flush only via sys::win::nt::flush (ADR 0017)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::ZwFlushBuffersFileEx", reason = "flush only via sys::win::nt::flush (ADR 0017)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::ZwFlushBuffersFile", reason = "flush only via sys::win::nt::flush (ADR 0017)", allow-invalid = true },
+  { path = "windows_sys::Win32::Storage::FileSystem::FlushFileBuffers", reason = "flush only via sys::win::nt::flush (ADR 0017)", allow-invalid = true },
+  { path = "std::fs::File::sync_all", reason = "flush only via sys::win::nt::flush (ADR 0017)" },
+  { path = "std::fs::File::sync_data", reason = "flush only via sys::win::nt::flush (ADR 0017)" },
   # Processes only through sys::Process (phase 3).
   { path = "windows_sys::Win32::System::Threading::CreateProcessW", reason = "processes only through sys::Process", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::CreateProcessA", reason = "processes only through sys::Process", allow-invalid = true },

@@ -1,10 +1,10 @@
 //! The real system layer on Windows (ADR 0004, ADR 0007, ADR 0008, ADR 0009).
 //!
-//! **Read side so far**: [`WinFs`]/[`WinDir`] implement [`Fs`](crate::sys::Fs),
-//! [`Dir`](crate::sys::Dir) and [`DirWrite`](crate::sys::DirWrite), whose writing methods
-//! return `Unsupported` until the write side (ADR 0017) lands; only `open_dir_write`, an open,
-//! works. [`WinRegistry`] implements [`Registry`](crate::sys::Registry), read-only in phase 1
-//! ("sys::win is read-only in phase 1"). [`WinKnownFolders`] implements
+//! [`WinFs`]/[`WinDir`] implement [`Fs`](crate::sys::Fs), [`Dir`](crate::sys::Dir) and
+//! [`DirWrite`](crate::sys::DirWrite) (the write side of ADR 0017: the sequences of
+//! `sys::seq` over the primitives in `fs::prim`). [`WinRegistry`] implements
+//! [`Registry`](crate::sys::Registry), read-only in phase 1 ("sys::win is read-only in phase
+//! 1"). [`WinKnownFolders`] implements
 //! [`KnownFolders`](crate::sys::KnownFolders), [`WinTopology`] implements
 //! [`Topology`](crate::sys::Topology) (ADR 0010), [`WinGpu`] implements
 //! [`Gpu`](crate::sys::Gpu) (DXGI, ADR 0008 amendment), and [`WinSystem`] bundles them into
@@ -12,7 +12,8 @@
 //!
 //! Modules:
 //! - `nt`: the only NT/Win32 file calls (`NtCreateFile` through exactly two wrappers,
-//!   `NtQueryInformationFile`, `NtQueryDirectoryFile`, `GetFinalPathNameByHandleW`,
+//!   `NtQueryInformationFile`, `NtQueryDirectoryFile`, `NtSetInformationFile` through one
+//!   wrapper with three classes, `NtFlushBuffersFileEx`, `GetFinalPathNameByHandleW`,
 //!   `GetVolumeInformationByHandleW`, `DeviceIoControl`), handles as `OwnedHandle`.
 //! - `token`: `user_writable` via `AccessCheck` against the non-elevated user's token.
 //! - `shell`: the only calls to `SHGetKnownFolderPath` (with the process token, freed with
@@ -40,7 +41,8 @@
 //! - `name`: single-segment check, L1 long-name check, `volume_path`, `open_dir` input rules,
 //!   NT buffer decoding (pure).
 //! - `reparse`: `REPARSE_DATA_BUFFER` parser (pure).
-//! - `fs`: `WinFs`/`WinDir`, walk, classification, metadata; no `unsafe`.
+//! - `fs`: `WinFs`/`WinDir`, walk, classification, metadata; `fs::prim` the write
+//!   primitives (`PrimDir`, `PrimFile`, ADR 0017 A1); no `unsafe`.
 //! - `known_folders`: `WinKnownFolders`, the source of each folder, `ProfileList` expansion;
 //!   no `unsafe`, never the environment.
 //! - `registry`: `WinRegistry`, input rules, limits, retries and enumeration restarts; no

@@ -2,8 +2,8 @@
 //!
 //! `create_new`, `create_dir`, `remove_dir`, `flush` and `lock` (and, with the guard, replace,
 //! delete and `rename_to`) are generic over two small primitive traits: [`PrimDir`] (a
-//! directory handle) and [`PrimFile`] (a held file or directory handle). `sys::fake` and, from
-//! P2-4, `sys::win` implement only the primitives; the order of the steps, the cleanup of
+//! directory handle) and [`PrimFile`] (a held file or directory handle). `sys::fake` and
+//! `sys::win` implement only the primitives; the order of the steps, the cleanup of
 //! `<tmp>` and every check between the steps live here, so the failure paths that ship are the
 //! ones the fake's fault, crash and power-loss tests exercise.
 //!
@@ -71,6 +71,11 @@ impl<'a> Seg<'a> {
     /// The segment.
     pub(crate) fn as_str(self) -> &'a str {
         self.0.as_str()
+    }
+
+    /// The segment as a [`RelPath`] (for the read-side lookup of `sys::win`).
+    pub(crate) fn rel(self) -> &'a RelPath {
+        self.0
     }
 }
 

@@ -57,11 +57,11 @@
 //!   (`<dir>: entry "<name>"`), and [`SysError::new`] escapes any target that still holds a
 //!   control or an invisible/confusable character ([`crate::sys::shown_target`]), in `win`
 //!   and `fake` alike.
-//! - Implementation status: both `sys::fake` and `sys::win` implement the read side and
-//!   [`DirWrite::open_dir_write`]. The write sequences live once in `sys::seq` (ADR 0017,
-//!   A1) and [`FileGuard`] has one implementation there; the fake implements the primitives,
-//!   `sys::win` returns `Unsupported` for every writing method until P2-4. [`Dir::users`] is
-//!   real in both (the fake from its share model).
+//! - Implementation status: both `sys::fake` and `sys::win` implement the read side and the
+//!   write side. The write sequences live once in `sys::seq` (ADR 0017, A1) and
+//!   [`FileGuard`] has one implementation there; both implement only the primitives, and the
+//!   write contracts run unchanged against both. [`Dir::users`] is real in both (the fake
+//!   from its share model).
 
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -388,7 +388,7 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
 /// POSIX delete and rename semantics are `Unsupported`.
 ///
 /// The writing methods run the sequences of `sys::seq` (ADR 0017, A1) over the primitives of
-/// an implementation; `sys::win` returns `Unsupported` for them until P2-4.
+/// an implementation (`sys::fake`, `sys::win`).
 pub trait DirWrite: Dir {
     /// Opens a subdirectory relative to this handle with the write capability. Same walk
     /// and errors as [`Dir::open_dir`].

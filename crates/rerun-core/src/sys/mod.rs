@@ -11,9 +11,9 @@
 //!   reads, [`DirWrite`] writes direct children of its handle (ADR 0017).
 //! - `sys::fake` emulates Win32 semantics (case handling, error kinds, handle identity). The
 //!   contract tests in `sys::contract` check this; they also run against `sys::win`.
-//! - `sys::win` (Windows only) is the real file system and registry, **read side so far**:
-//!   every writing `DirWrite` and `Registry` method returns `Unsupported` (ADR 0017,
-//!   ADR 0018); the real known folders;
+//! - `sys::win` (Windows only) is the real file system with its write side (ADR 0017) and
+//!   the real registry, read-only so far (every writing `Registry` method returns
+//!   `Unsupported`, ADR 0018); the real known folders;
 //!   the real CPU topology (ADR 0010); and the real graphics adapters (DXGI, ADR 0008
 //!   amendment). `unsafe` exists only in its modules `nt`, `token`, `reg`, `shell`, `cpu`,
 //!   `loader` and `dxgi`.
@@ -35,9 +35,7 @@ pub mod topology;
 pub mod contract;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
-// The write sequences (ADR 0017, A1). Only the fake implements their primitives until the
-// real write side lands (P2-4), which ungates this module.
-#[cfg(any(test, feature = "fake"))]
+// The write sequences (ADR 0017, A1) over the primitives of `sys::fake` and `sys::win`.
 pub(crate) mod seq;
 #[cfg(windows)]
 pub mod win;

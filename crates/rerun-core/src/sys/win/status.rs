@@ -24,6 +24,7 @@ pub(super) const STATUS_INFO_LENGTH_MISMATCH: NtStatus = st(0xC000_0004);
 pub(super) const STATUS_INVALID_PARAMETER: NtStatus = st(0xC000_000D);
 pub(super) const STATUS_NO_SUCH_FILE: NtStatus = st(0xC000_000F);
 pub(super) const STATUS_BUFFER_TOO_SMALL: NtStatus = st(0xC000_0023);
+pub(super) const STATUS_OBJECT_NAME_COLLISION: NtStatus = st(0xC000_0035);
 pub(super) const STATUS_DELETE_PENDING: NtStatus = st(0xC000_0056);
 
 /// `ERROR_INVALID_PARAMETER`: only "unsupported" for an information class.
@@ -49,7 +50,7 @@ pub(super) fn kind_of_ntstatus(status: NtStatus) -> SysErrorKind {
         }
         // SHARING_VIOLATION, FILE_LOCK_CONFLICT, LOCK_NOT_GRANTED; DELETE_PENDING (a name in
         // legacy delete-pending state, ADR 0017 A6) and CANNOT_DELETE (with
-        // IGNORE_READONLY_ATTRIBUTE the remaining cause is an image section: in use). `Busy`
+        // IGNORE_READONLY_ATTRIBUTE the remaining cause is an image section: in use). "Busy"
         // is "transient or concurrent, a retry may succeed" (ADR 0017, "Error kinds").
         0xC000_0043 | 0xC000_0054 | 0xC000_0055 | 0xC000_0056 | 0xC000_0121 => SysErrorKind::Busy,
         // OBJECT_NAME_COLLISION
@@ -85,6 +86,18 @@ pub(super) fn is_unsupported_class(status: NtStatus) -> bool {
 /// `SysError` from an `NTSTATUS`, with the status attached.
 pub(super) fn nt_error(status: NtStatus, target: &str) -> SysError {
     SysError::new(kind_of_ntstatus(status), target).with_ntstatus(status)
+}
+
+/// `SysError` from the `NTSTATUS` of a rename by handle (ADR 0017): a collision with an
+/// existing name is `Busy` there (someone holds the name, "retry"), not `AlreadyExists` as on
+/// a create. The status is attached.
+pub(super) fn rename_error(status: NtStatus, target: &str) -> SysError {
+    let kind = if status == STATUS_OBJECT_NAME_COLLISION {
+        SysErrorKind::Busy
+    } else {
+        kind_of_ntstatus(status)
+    };
+    SysError::new(kind, target).with_ntstatus(status)
 }
 
 /// `SysError` from a Win32 error code, with the code attached.
@@ -271,6 +284,18 @@ mod tests {
         assert_eq!(
             (e.kind, e.win32, e.ntstatus),
             (SysErrorKind::Busy, Some(32), None)
+        );
+        // A rename collision is Busy, a create collision AlreadyExists; both keep the status.
+        let e = rename_error(STATUS_OBJECT_NAME_COLLISION, "r");
+        assert_eq!(
+            (e.kind, e.ntstatus),
+            (SysErrorKind::Busy, Some(STATUS_OBJECT_NAME_COLLISION))
+        );
+        let e = nt_error(STATUS_OBJECT_NAME_COLLISION, "c");
+        assert_eq!(e.kind, SysErrorKind::AlreadyExists);
+        assert_eq!(
+            rename_error(st(0xC000_0022), "r").kind,
+            SysErrorKind::AccessDenied
         );
         // Win32 code 5 is ambiguous (ACCESS_DENIED and CANNOT_DELETE), the status is not.
         let e = nt_error(st(0xC000_0121), "d");

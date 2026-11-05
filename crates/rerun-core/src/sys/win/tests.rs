@@ -26,7 +26,7 @@ use crate::sys::contract::{
     fs_race_contract, fs_read_contract, fs_volume_contract, fs_write_contract, gpu_contract,
     known_folders_contract, registry_read_contract, registry_system_contract, topology_contract,
 };
-use crate::sys::fs::{Attrs, EntryKind, Fs, NewFile, TmpName, WriteCap};
+use crate::sys::fs::{EntryKind, Fs, WriteCap};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
 use crate::sys::{Gpu, KnownFolder, KnownFolders, SysErrorKind, System, Topology};
 
@@ -155,12 +155,9 @@ fn read_only_walk_metadata_and_identity() {
         SysErrorKind::InvalidPath
     );
 
-    // The write side does not exist yet (ADR 0017).
+    // The write capability opens the same directory.
     let w = fs.open_dir_write(&fx.0, &WriteCap::new()).unwrap();
-    assert_eq!(
-        kind_of(w.create_dir(&rel("new"))),
-        SysErrorKind::Unsupported
-    );
+    assert_eq!(w.info().unwrap().file_id, info.file_id);
     drop(w);
     assert_eq!(root.read(&rel("a.txt")).unwrap(), b"hello");
 }
@@ -412,7 +409,6 @@ fn win_fulfils_fs_race_contract_and_the_harness_has_teeth() {
 }
 
 #[test]
-#[ignore = "sys::win write side lands in P2-4"]
 fn win_fulfils_fs_write_contract() {
     let Some(root) = TestRoot::new("write") else {
         return;
@@ -425,7 +421,6 @@ fn win_fulfils_fs_write_contract() {
 }
 
 #[test]
-#[ignore = "sys::win write side lands in P2-4"]
 fn win_fulfils_fs_link_write_contract() {
     let Some(root) = TestRoot::new("link-write") else {
         return;
@@ -435,52 +430,6 @@ fn win_fulfils_fs_link_write_contract() {
         "fs_link_write_contract",
         fs_link_write_contract(&WinFs::new(), root.fx(), &work),
     );
-}
-
-#[test]
-fn win_dir_write_methods_are_unsupported() {
-    let Some(root) = TestRoot::new("read-only") else {
-        return;
-    };
-    let fx = root.fx();
-    let base = root.path();
-    fx.file(&base.join("a.txt"), b"a").unwrap();
-    fx.dir(&base.join("d")).unwrap();
-    let fs = WinFs::new();
-    let dir = fs.open_dir_write(base, &WriteCap::new()).unwrap();
-    let (a, n) = (rel("a.txt"), rel("new"));
-    let new = NewFile {
-        tmp: TmpName::new(0xab, 1),
-        attrs: Attrs::default(),
-        sha256: [0; 32],
-        max_len: 1,
-    };
-    let unsupported = |what: &str, e: Option<crate::sys::SysError>| {
-        let e = e.unwrap_or_else(|| panic!("{what}: expected an error"));
-        assert_eq!(e.kind, SysErrorKind::Unsupported, "{what}");
-        assert!(e.target.contains("not implemented yet"), "{what}: {e}");
-    };
-    unsupported("guard", dir.guard(&a).err());
-    unsupported("create_new", dir.create_new(&n, &mut &b"x"[..], &new).err());
-    unsupported("create_dir", dir.create_dir(&n).err());
-    unsupported("remove_dir", dir.remove_dir(&rel("d"), 0).err());
-    unsupported("flush", dir.flush().err());
-    unsupported("lock", dir.lock(&n).err());
-    // Opening with the write capability is an open, not a write: same object as `open_dir`.
-    let d = dir.open_dir_write(&rel("D")).unwrap();
-    assert_eq!(
-        d.info().unwrap().file_id,
-        dir.open_dir(&rel("d")).unwrap().info().unwrap().file_id
-    );
-    assert_eq!(dir.read(&a).unwrap(), b"a");
-    assert!(dir.metadata(&n).unwrap().is_none());
-    let names: Vec<String> = dir
-        .read_dir(None)
-        .unwrap()
-        .into_iter()
-        .map(|e| e.name)
-        .collect();
-    assert_eq!(names.len(), 2, "{names:?}");
 }
 
 /// The runner's cleanup (`std::fs::remove_dir_all` in `TestRoot`'s drop) removes a junction

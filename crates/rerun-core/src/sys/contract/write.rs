@@ -1,5 +1,5 @@
 //! File system contract, writing side (ADR 0017 and its amendment): `DirWrite` and
-//! `FileGuard` against the fake and, from P2-4, `sys::win` in a `TestRoot`. Setup and every
+//! `FileGuard` against the fake and `sys::win` in a `TestRoot`. Setup and every
 //! move of another program go through the [`FsFixture`]; the case names (W1 …, K1, S8b) are
 //! those of `docs/09-testing.md`.
 

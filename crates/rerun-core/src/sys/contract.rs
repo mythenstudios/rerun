@@ -14,9 +14,9 @@
 //!   opens. Everything they need on disk, and every attacker move, is done by an
 //!   [`FsFixture`] (plain `std::fs` and raw calls in test code). They run against `sys::fake`
 //!   and `sys::win`.
-//! - **Write side** (`DirWrite`, `FileGuard`, ADR 0017): [`fs_write_contract`] runs against
-//!   the fake and, from P2-4, against `sys::win` (its runner is ignored until then;
-//!   `docs/09-testing.md`). The phase 1 write contracts exercised the path-based writing
+//! - **Write side** (`DirWrite`, `FileGuard`, ADR 0017): [`fs_write_contract`] and
+//!   [`fs_link_write_contract`] run against the fake and against `sys::win`
+//!   (`docs/09-testing.md`). The phase 1 write contracts exercised the path-based writing
 //!   methods that ADR 0017 replaced and were removed with them.
 //!
 //! Each file system contract needs a fresh, **empty** working directory. The runner owns

@@ -1,5 +1,5 @@
-//! [`WinSystem`]: the real [`System`] (ADR 0004), read side so far (the writing methods of
-//! `DirWrite` and `Registry` return `Unsupported`). No `unsafe`.
+//! [`WinSystem`]: the real [`System`] (ADR 0004); its registry is read-only so far (the
+//! writing methods of `Registry` return `Unsupported`). No `unsafe`.
 
 use std::fmt;
 use std::sync::Arc;

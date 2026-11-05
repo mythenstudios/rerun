@@ -1,11 +1,19 @@
 //! The only calls to `NtCreateFile`, `NtQueryInformationFile`, `NtQueryDirectoryFile`,
-//! `GetFinalPathNameByHandleW`, `GetVolumeInformationByHandleW` and `DeviceIoControl`.
+//! `NtSetInformationFile`, `NtFlushBuffersFileEx`, `GetFinalPathNameByHandleW`,
+//! `GetVolumeInformationByHandleW` and `DeviceIoControl`.
 //!
 //! - Handles come back as [`OwnedHandle`] and are closed on drop, also in every error path.
 //! - `NtCreateFile` is reachable only through [`open_absolute_dir`] and [`open_relative`]
 //!   (`clippy.toml` bans it everywhere else). The flags are fixed here; callers choose from
-//!   [`Access`] and [`RelOpen`], so `FILE_OPEN_FOR_BACKUP_INTENT`, another disposition or a
-//!   relative open without `OBJ_DONT_REPARSE` cannot be expressed.
+//!   [`Access`] and [`RelOpen`], so `FILE_OPEN_FOR_BACKUP_INTENT`, `FILE_OVERWRITE*`,
+//!   `FILE_SUPERSEDE`, another disposition or a relative open without `OBJ_DONT_REPARSE`
+//!   cannot be expressed.
+//! - `NtSetInformationFile` is reachable only through [`set_info`] with exactly three classes
+//!   ([`SetInfo`], ADR 0017): `FileRenameInformationEx` with flags 0 (never
+//!   `REPLACE_IF_EXISTS`) and `RootDirectory` = the parent handle,
+//!   `FileDispositionInformationEx` with `DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE`
+//!   (never the legacy class), and `FileBasicInformation` with unchanged times.
+//!   `NtFlushBuffersFileEx` only in [`flush`].
 //! - Buffers for the kernel are `Vec<u64>` (8-byte aligned, as `FILE_*_INFORMATION` with
 //!   `LARGE_INTEGER` members needs) and are copied out as little-endian bytes, so no
 //!   structure is read through a raw pointer.
@@ -20,18 +28,24 @@ use std::ptr;
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_DIRECTORY_FILE, FILE_INFORMATION_CLASS, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
-    FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, FileFullDirectoryInformation,
-    FileIdExtdDirectoryInformation, NtCreateFile, NtQueryDirectoryFile, NtQueryInformationFile,
+    FILE_BASIC_INFORMATION, FILE_CREATE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_DELETE,
+    FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_INFORMATION_EX,
+    FILE_DISPOSITION_POSIX_SEMANTICS, FILE_INFORMATION_CLASS, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+    FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
+    FileBasicInformation, FileDispositionInformationEx, FileFullDirectoryInformation,
+    FileIdExtdDirectoryInformation, FileRenameInformationEx, NTCREATEFILE_CREATE_DISPOSITION,
+    NtCreateFile, NtFlushBuffersFileEx, NtQueryDirectoryFile, NtQueryInformationFile,
+    NtSetInformationFile,
 };
 use windows_sys::Win32::Foundation::{
     HANDLE, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, OBJECT_ATTRIBUTE_FLAGS, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_GENERIC_READ, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, GetFinalPathNameByHandleW,
-    GetVolumeInformationByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE, READ_CONTROL, SYNCHRONIZE,
-    VOLUME_NAME_DOS,
+    DELETE, FILE_ADD_FILE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_LIST_DIRECTORY,
+    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
+    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+    READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_DOS,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
@@ -88,17 +102,120 @@ impl Access {
     }
 }
 
-/// Kind of a relative open. Both use `FILE_OPEN`, `OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE`
-/// and `FILE_SYNCHRONOUS_IO_NONALERT`.
+/// Kind of a relative open. Every kind uses `OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE` and
+/// `FILE_SYNCHRONOUS_IO_NONALERT`; all but [`RelOpen::Data`] and [`RelOpen::GuardData`] also
+/// `FILE_OPEN_REPARSE_POINT`, so the entry itself is opened, never what a link points to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RelOpen {
-    /// `FILE_OPEN_REPARSE_POINT`, neither `FILE_DIRECTORY_FILE` nor `FILE_NON_DIRECTORY_FILE`:
-    /// opens the entry itself, whatever it is; the caller classifies it on the handle.
+    /// `FILE_OPEN`, neither `FILE_DIRECTORY_FILE` nor `FILE_NON_DIRECTORY_FILE`: opens the
+    /// entry itself, whatever it is; the caller classifies it on the handle.
     Entry(Access),
     /// Data reopen of a file with an allowlisted data tag (WOF, dedup, cloud files):
     /// `FILE_NON_DIRECTORY_FILE` without `FILE_OPEN_REPARSE_POINT`, [`Access::Read`]. The
     /// caller compares volume serial and file ID with the first open.
     Data,
+    /// A guard (ADR 0017): `FILE_OPEN`, `DELETE | FILE_READ_DATA | FILE_READ_ATTRIBUTES |
+    /// SYNCHRONIZE`, share read only; the entry itself, classified by the caller.
+    Guard,
+    /// The guard's data reopen of a file with an allowlisted data tag: like
+    /// [`RelOpen::Guard`], with `FILE_NON_DIRECTORY_FILE` instead of
+    /// `FILE_OPEN_REPARSE_POINT` (the data of a WOF or dedup file is only visible so). The
+    /// caller compares the file ID with the first open.
+    GuardData,
+    /// `<tmp>` (ADR 0017, step 2): `FILE_CREATE | FILE_NON_DIRECTORY_FILE`, `FILE_WRITE_DATA |
+    /// FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | DELETE | SYNCHRONIZE`, share 0,
+    /// `FILE_ATTRIBUTE_NORMAL`. An existing name is `STATUS_OBJECT_NAME_COLLISION`.
+    CreateTmp,
+    /// A lock file (A7): `FILE_OPEN_IF | FILE_NON_DIRECTORY_FILE`, `FILE_READ_DATA |
+    /// FILE_READ_ATTRIBUTES | SYNCHRONIZE`, share 0. A directory (also a junction, opened as
+    /// itself) is `STATUS_FILE_IS_A_DIRECTORY`.
+    Lock,
+    /// A new directory: `FILE_CREATE | FILE_DIRECTORY_FILE`, `FILE_READ_ATTRIBUTES |
+    /// SYNCHRONIZE`, share 0.
+    CreateDir,
+    /// A directory opened for deleting: `FILE_OPEN | FILE_DIRECTORY_FILE`, `DELETE |
+    /// FILE_READ_ATTRIBUTES | SYNCHRONIZE`, shares read and write. A file is
+    /// `STATUS_NOT_A_DIRECTORY`.
+    DirDelete,
+    /// The parent directory itself (the empty name) for a flush: `FILE_OPEN |
+    /// FILE_DIRECTORY_FILE`, `FILE_ADD_FILE | SYNCHRONIZE` (read access is denied for a flush,
+    /// ADR 0017), shares read, write and delete.
+    FlushDir,
+}
+
+/// Everything `NtCreateFile` gets for a [`RelOpen`].
+struct Spec {
+    access: u32,
+    share: u32,
+    disposition: NTCREATEFILE_CREATE_DISPOSITION,
+    options: u32,
+    attributes: u32,
+}
+
+impl RelOpen {
+    fn spec(self) -> Spec {
+        const SYNC: u32 = FILE_SYNCHRONOUS_IO_NONALERT;
+        const ITSELF: u32 = FILE_OPEN_REPARSE_POINT | SYNC;
+        const GUARD: u32 = DELETE | FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+        let plain = |access: u32, share: u32, disposition, options: u32| Spec {
+            access,
+            share,
+            disposition,
+            options,
+            attributes: 0,
+        };
+        match self {
+            Self::Entry(a) => plain(a.mask(), a.share(), FILE_OPEN, ITSELF),
+            Self::Data => plain(
+                Access::Read.mask(),
+                Access::Read.share(),
+                FILE_OPEN,
+                FILE_NON_DIRECTORY_FILE | SYNC,
+            ),
+            Self::Guard => plain(GUARD, FILE_SHARE_READ, FILE_OPEN, ITSELF),
+            Self::GuardData => plain(
+                GUARD,
+                FILE_SHARE_READ,
+                FILE_OPEN,
+                FILE_NON_DIRECTORY_FILE | SYNC,
+            ),
+            Self::CreateTmp => Spec {
+                access: FILE_WRITE_DATA
+                    | FILE_READ_ATTRIBUTES
+                    | FILE_WRITE_ATTRIBUTES
+                    | DELETE
+                    | SYNCHRONIZE,
+                share: 0,
+                disposition: FILE_CREATE,
+                options: FILE_NON_DIRECTORY_FILE | ITSELF,
+                attributes: FILE_ATTRIBUTE_NORMAL,
+            },
+            Self::Lock => plain(
+                FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                0,
+                FILE_OPEN_IF,
+                FILE_NON_DIRECTORY_FILE | ITSELF,
+            ),
+            Self::CreateDir => plain(
+                FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                0,
+                FILE_CREATE,
+                FILE_DIRECTORY_FILE | ITSELF,
+            ),
+            Self::DirDelete => plain(
+                DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_OPEN,
+                FILE_DIRECTORY_FILE | ITSELF,
+            ),
+            Self::FlushDir => plain(
+                FILE_ADD_FILE | SYNCHRONIZE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_OPEN,
+                FILE_DIRECTORY_FILE | ITSELF,
+            ),
+        }
+    }
 }
 
 /// `UNICODE_STRING` over `name`; `None` if it is longer than `u16::MAX` bytes.
@@ -184,26 +301,28 @@ pub(super) fn open_absolute_dir(nt_path: &[u16]) -> Result<OwnedHandle, NtStatus
     finish(status, raw)
 }
 
-/// Opens `name` (one segment, checked by `name::Seg16`) relative to `parent`:
-/// `RootDirectory` = `parent`, `OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE`, `FILE_OPEN`,
-/// options from [`RelOpen`]. Never `FILE_OPEN_FOR_BACKUP_INTENT`.
+/// Opens or creates `name` (one segment, checked by `name::Seg16`) relative to `parent`:
+/// `RootDirectory` = `parent`, `OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE`; disposition,
+/// access, share, options and attributes from [`RelOpen`]. `name` is `None` exactly for
+/// [`RelOpen::FlushDir`] (the empty name: `parent` itself); any other pairing is
+/// `STATUS_INVALID_PARAMETER` before the call. Never `FILE_OPEN_FOR_BACKUP_INTENT`, never
+/// `FILE_OVERWRITE*` or `FILE_SUPERSEDE`.
 #[expect(
     clippy::disallowed_methods,
     reason = "one of the two NtCreateFile wrappers (ADR 0007)"
 )]
 pub(super) fn open_relative(
     parent: BorrowedHandle<'_>,
-    name: &super::name::Seg16,
+    name: Option<&super::name::Seg16>,
     how: RelOpen,
 ) -> Result<OwnedHandle, NtStatus> {
-    let (access, options) = match how {
-        RelOpen::Entry(a) => (a, FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT),
-        RelOpen::Data => (
-            Access::Read,
-            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
-        ),
+    let units: &[u16] = match (name, how) {
+        (None, RelOpen::FlushDir) => &[],
+        (Some(n), how) if how != RelOpen::FlushDir => n.units(),
+        _ => return Err(STATUS_INVALID_PARAMETER),
     };
-    let name = unicode(name.units()).ok_or(STATUS_INVALID_PARAMETER)?;
+    let spec = how.spec();
+    let name = unicode(units).ok_or(STATUS_INVALID_PARAMETER)?;
     let oa = object_attributes(
         parent.as_raw_handle(),
         &name,
@@ -212,24 +331,147 @@ pub(super) fn open_relative(
     let mut iosb = IO_STATUS_BLOCK::default();
     let mut raw: HANDLE = ptr::null_mut();
     // SAFETY: `parent` is a live handle borrowed for the call; `raw` and `iosb` are valid for
-    // writes; `oa` points to `name`, whose buffer (the Seg16) outlives the call; no
-    // allocation size, no EA buffer. Synchronous call (FILE_SYNCHRONOUS_IO_NONALERT).
+    // writes; `oa` points to `name`, whose buffer (the Seg16, or an empty slice with length
+    // 0) outlives the call; no allocation size, no EA buffer. Synchronous call: every spec
+    // has FILE_SYNCHRONOUS_IO_NONALERT.
     let status = unsafe {
         NtCreateFile(
             &mut raw,
-            access.mask(),
+            spec.access,
             &oa,
             &mut iosb,
             ptr::null(),
-            0,
-            access.share(),
-            FILE_OPEN,
-            options,
+            spec.attributes,
+            spec.share,
+            spec.disposition,
+            spec.options,
             ptr::null(),
             0,
         )
     };
     finish(status, raw)
+}
+
+/// A change made on a held handle: the three classes of ADR 0017.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SetInfo<'a> {
+    /// `FileRenameInformationEx` with flags 0 (no `REPLACE_IF_EXISTS`, so an existing name is
+    /// `STATUS_OBJECT_NAME_COLLISION`): the handle's object becomes `name` in the directory
+    /// `root`. The renamed handle needs `DELETE`.
+    Rename {
+        /// The parent directory (`RootDirectory`).
+        root: BorrowedHandle<'a>,
+        /// One segment, checked by `name::Seg16`: no `\`, so the kernel never resolves a path
+        /// (which would follow junctions, ADR 0017 "Renames").
+        name: &'a super::name::Seg16,
+    },
+    /// `FileDispositionInformationEx` with `DELETE | POSIX_SEMANTICS |
+    /// IGNORE_READONLY_ATTRIBUTE`: the name goes at once (POSIX), the object when the last
+    /// handle closes. The handle needs `DELETE`.
+    PosixDelete,
+    /// `FileBasicInformation`: the four times 0 (unchanged) and these attributes. Never 0,
+    /// which would also mean "unchanged": `FILE_ATTRIBUTE_NORMAL` clears every flag.
+    Attributes(u32),
+}
+
+/// `FILE_RENAME_INFORMATION` (`FileRenameInformationEx` uses the same layout, with `Flags` in
+/// the union) for `name` with flags 0, as 8-byte aligned words, and its length in bytes.
+fn rename_buffer(root: HANDLE, name: &[u16]) -> Option<(Vec<u64>, u32)> {
+    let root_at = std::mem::offset_of!(FILE_RENAME_INFORMATION, RootDirectory);
+    let len_at = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileNameLength);
+    let name_at = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
+    let name_bytes = name.len().checked_mul(2)?;
+    let total = name_at
+        .checked_add(name_bytes)?
+        .max(size_of::<FILE_RENAME_INFORMATION>());
+    // All zero: the flags (offset 0) stay 0.
+    let mut bytes = vec![0u8; total];
+    // The handle value, as the kernel reads the pointer-sized field.
+    let root_value = root as usize;
+    bytes
+        .get_mut(root_at..root_at + size_of::<usize>())?
+        .copy_from_slice(&root_value.to_le_bytes());
+    bytes
+        .get_mut(len_at..len_at + 4)?
+        .copy_from_slice(&u32::try_from(name_bytes).ok()?.to_le_bytes());
+    for (i, u) in name.iter().enumerate() {
+        let at = name_at + 2 * i;
+        bytes.get_mut(at..at + 2)?.copy_from_slice(&u.to_le_bytes());
+    }
+    let mut words = vec![0u64; total.div_ceil(8)];
+    for (w, chunk) in words.iter_mut().zip(bytes.chunks(8)) {
+        let mut a = [0u8; 8];
+        a[..chunk.len()].copy_from_slice(chunk);
+        *w = u64::from_le_bytes(a);
+    }
+    Some((words, u32::try_from(total).ok()?))
+}
+
+/// The only `NtSetInformationFile` call: one change of [`SetInfo`] on `h`. Each class acts
+/// completely or not at all, so an error means nothing was changed (for a rename: nothing was
+/// renamed).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one NtSetInformationFile wrapper (ADR 0017)"
+)]
+pub(super) fn set_info(h: BorrowedHandle<'_>, info: SetInfo<'_>) -> Result<(), NtStatus> {
+    let disposition = FILE_DISPOSITION_INFORMATION_EX {
+        Flags: FILE_DISPOSITION_DELETE
+            | FILE_DISPOSITION_POSIX_SEMANTICS
+            | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
+    };
+    let basic;
+    let rename;
+    let size_of_u32 = |n: usize| u32::try_from(n).map_err(|_| STATUS_INVALID_PARAMETER);
+    let (buf, len, class): (*const std::ffi::c_void, u32, FILE_INFORMATION_CLASS) = match info {
+        SetInfo::Rename { root, name } => {
+            rename = rename_buffer(root.as_raw_handle(), name.units())
+                .ok_or(STATUS_INVALID_PARAMETER)?;
+            (rename.0.as_ptr().cast(), rename.1, FileRenameInformationEx)
+        }
+        SetInfo::PosixDelete => (
+            ptr::from_ref(&disposition).cast(),
+            size_of_u32(size_of::<FILE_DISPOSITION_INFORMATION_EX>())?,
+            FileDispositionInformationEx,
+        ),
+        SetInfo::Attributes(attrs) => {
+            if attrs == 0 {
+                return Err(STATUS_INVALID_PARAMETER);
+            }
+            basic = FILE_BASIC_INFORMATION {
+                FileAttributes: attrs,
+                ..FILE_BASIC_INFORMATION::default()
+            };
+            (
+                ptr::from_ref(&basic).cast(),
+                size_of_u32(size_of::<FILE_BASIC_INFORMATION>())?,
+                FileBasicInformation,
+            )
+        }
+    };
+    let mut iosb = IO_STATUS_BLOCK::default();
+    // SAFETY: `h` is a live handle borrowed for the call (for a rename `root` too, whose raw
+    // value is in the buffer and which outlives the call); `buf` points to `len` readable
+    // bytes that live until the end of this function (`disposition`, `basic` or `rename.0`,
+    // at least 4-byte aligned, laid out as the class expects: pinned by
+    // `set_info_layouts_match_the_documented_offsets`); `iosb` is valid for writes. The
+    // handle is synchronous, so the call has completed when it returns.
+    let status = unsafe { NtSetInformationFile(h.as_raw_handle(), &mut iosb, buf, len, class) };
+    if status >= 0 { Ok(()) } else { Err(status) }
+}
+
+/// The only `NtFlushBuffersFileEx` call, flags 0: data and metadata of a file, or the
+/// entries of a directory opened with [`RelOpen::FlushDir`].
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one flush wrapper (ADR 0017, ADR 0019)"
+)]
+pub(super) fn flush(h: BorrowedHandle<'_>) -> Result<(), NtStatus> {
+    let mut iosb = IO_STATUS_BLOCK::default();
+    // SAFETY: `h` is a live handle borrowed for the call; no parameters (null, 0); `iosb` is
+    // valid for writes. Synchronous handle, so the call has completed when it returns.
+    let status = unsafe { NtFlushBuffersFileEx(h.as_raw_handle(), 0, ptr::null(), 0, &mut iosb) };
+    if status >= 0 { Ok(()) } else { Err(status) }
 }
 
 /// Copies the first `len` bytes of an aligned buffer out as little-endian bytes.
@@ -410,4 +652,49 @@ pub(super) fn reparse_data(h: BorrowedHandle<'_>) -> Result<Vec<u8>, u32> {
         return Err(last_error());
     }
     Ok(bytes_of(&buf, (returned as usize).min(size)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::offset_of;
+
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_BASIC_INFORMATION, FILE_DISPOSITION_INFORMATION_EX, FILE_RENAME_INFORMATION,
+    };
+
+    use super::rename_buffer;
+
+    /// The documented x64 layouts (ntifs.h, wdm.h): `FILE_RENAME_INFORMATION` has `Flags` at
+    /// 0, `RootDirectory` at 8, `FileNameLength` at 16, `FileName` at 20 (24 bytes);
+    /// `FILE_DISPOSITION_INFORMATION_EX` is one `ULONG`; `FILE_BASIC_INFORMATION` has four
+    /// `LARGE_INTEGER` times, then `FileAttributes` at 32 (40 bytes).
+    #[test]
+    fn set_info_layouts_match_the_documented_offsets() {
+        assert_eq!(offset_of!(FILE_RENAME_INFORMATION, Anonymous), 0);
+        assert_eq!(offset_of!(FILE_RENAME_INFORMATION, RootDirectory), 8);
+        assert_eq!(offset_of!(FILE_RENAME_INFORMATION, FileNameLength), 16);
+        assert_eq!(offset_of!(FILE_RENAME_INFORMATION, FileName), 20);
+        assert_eq!(size_of::<FILE_RENAME_INFORMATION>(), 24);
+        assert_eq!(size_of::<FILE_DISPOSITION_INFORMATION_EX>(), 4);
+        assert_eq!(offset_of!(FILE_BASIC_INFORMATION, FileAttributes), 32);
+        assert_eq!(size_of::<FILE_BASIC_INFORMATION>(), 40);
+    }
+
+    #[test]
+    fn rename_buffer_is_flags_zero_root_length_name() {
+        let name: Vec<u16> = "ab.txt".encode_utf16().collect();
+        let (words, len) = rename_buffer(0x1234 as _, &name).unwrap();
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(len, 20 + 12);
+        assert_eq!(bytes[0..8], [0; 8], "flags 0: never REPLACE_IF_EXISTS");
+        assert_eq!(bytes[8..16], 0x1234u64.to_le_bytes());
+        assert_eq!(bytes[16..20], 12u32.to_le_bytes());
+        let back: Vec<u16> = bytes[20..32]
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(back, name);
+        // A one-character name still passes the full fixed size.
+        assert_eq!(rename_buffer(0x1 as _, &[0x61]).unwrap().1, 24);
+    }
 }
