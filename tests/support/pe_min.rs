@@ -5,6 +5,11 @@
 //! Every read is a checked slice access; malformed input is an `Err`, never a panic. Step 13
 //! replaces it with `rerun_core::detect::pe`.
 
+#![allow(
+    dead_code,
+    reason = "shared by several test crates (#[path]); each uses a part of it"
+)]
+
 /// `IMAGE_NT_OPTIONAL_HDR64_MAGIC`.
 const PE32_PLUS: u16 = 0x20B;
 /// Data directory indices (winnt.h `IMAGE_DIRECTORY_ENTRY_*`).
@@ -203,8 +208,38 @@ pub fn forbidden_import(dll: &str) -> bool {
         || d.starts_with("api-ms-win-crt-")
 }
 
-/// Checks a built executable (ADR 0008, H2): `DependentLoadFlags` is exactly System32, no
-/// forbidden static import, no delay-load import. Returns the imported DLL names.
+/// The static imports a shipped executable may have: exact names, compared case-insensitively.
+/// Found on 2026-11-05 for `rerun.exe` and `rerun-launch.exe` (debug and release, x64). A new
+/// import fails the hardening tests: review it, then extend this list and ADR 0008 (amendment
+/// 2026-11-05, DLL hardening).
+pub const SHIPPED_IMPORTS: &[&str] = &[
+    "kernel32.dll",
+    "ntdll.dll",
+    "api-ms-win-core-synch-l1-2-0.dll",
+];
+
+/// `imports` has no forbidden DLL and nothing outside `allowed` (exact, case-insensitive).
+pub fn check_imports(imports: &[String], allowed: &[&str]) -> Result<(), String> {
+    if let Some(bad) = imports.iter().find(|d| forbidden_import(d)) {
+        return Err(format!(
+            "forbidden static import {bad} (imports: {imports:?})"
+        ));
+    }
+    let new: Vec<&String> = imports
+        .iter()
+        .filter(|d| !allowed.iter().any(|a| a.eq_ignore_ascii_case(d)))
+        .collect();
+    if !new.is_empty() {
+        return Err(format!(
+            "static imports not in the allowlist: {new:?} (all: {imports:?}); review them, then              update the allowlist in tests/support/pe_min.rs and ADR 0008 (amendment 2026-11-05)"
+        ));
+    }
+    Ok(())
+}
+
+/// Checks a built executable (ADR 0008, H2): `DependentLoadFlags` is exactly System32, every
+/// static import is in [`SHIPPED_IMPORTS`], no delay-load import. Returns the imported DLL
+/// names.
 pub fn check_hardened(image: &[u8]) -> Result<Vec<String>, String> {
     let pe = Pe::parse(image)?;
     let flags = pe.dependent_load_flags()?;
@@ -214,11 +249,7 @@ pub fn check_hardened(image: &[u8]) -> Result<Vec<String>, String> {
         ));
     }
     let imports = pe.imports()?;
-    if let Some(bad) = imports.iter().find(|d| forbidden_import(d)) {
-        return Err(format!(
-            "forbidden static import {bad} (imports: {imports:?})"
-        ));
-    }
+    check_imports(&imports, SHIPPED_IMPORTS)?;
     let delayed = pe.delay_imports()?;
     if !delayed.is_empty() {
         return Err(format!("delay-load imports {delayed:?}"));
@@ -243,4 +274,15 @@ fn pe_min_refuses_malformed_input_without_panicking() {
     assert!(
         !forbidden_import("kernel32.dll") && !forbidden_import("api-ms-win-core-synch-l1-2-0.dll")
     );
+    let names = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    assert!(check_imports(&names(&["KERNEL32.dll", "ntdll.dll"]), SHIPPED_IMPORTS).is_ok());
+    assert!(check_imports(&names(&["kernel32.dll", "user32.dll"]), SHIPPED_IMPORTS).is_err());
+    assert!(
+        check_imports(
+            &names(&["api-ms-win-core-file-l1-1-0.dll"]),
+            SHIPPED_IMPORTS
+        )
+        .is_err()
+    );
+    assert!(check_imports(&names(&["dxgi.dll"]), &["dxgi.dll"]).is_err());
 }

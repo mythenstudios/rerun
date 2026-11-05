@@ -1368,6 +1368,61 @@ fn banned_gpu_and_com_items_resolve() {
     let _ = windows_sys::Win32::System::Com::CoGetObject;
 }
 
+/// The bans of the step 10 security review (2026-11-05).
+#[test]
+fn banned_step10_review_items_resolve() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: LoadModule must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::LoadModule;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: QueryOptionalDelayLoadedAPI must be banned"
+    )]
+    let _ = windows_sys::Win32::System::LibraryLoader::QueryOptionalDelayLoadedAPI;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: LoadLibraryShim must be banned"
+    )]
+    let _ = windows_sys::Win32::System::ClrHosting::LoadLibraryShim;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoCreateInstanceFromApp must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::CoCreateInstanceFromApp;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: BindMoniker must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::BindMoniker;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoRegisterClassObject must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::CoRegisterClassObject;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoInitializeSecurity must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::CoInitializeSecurity;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoGetInstanceFromFile must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::StructuredStorage::CoGetInstanceFromFile;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CoGetClassObjectFromURL must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::Urlmon::CoGetClassObjectFromURL;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: OleInitialize must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Ole::OleInitialize;
+}
+
 /// The bans of the step 8 security review the same way.
 #[test]
 fn banned_review_items_resolve() {

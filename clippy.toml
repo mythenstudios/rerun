@@ -413,5 +413,19 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Com::CoInitialize", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::CoInitializeEx", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::CoGetObject", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  # Security review of step 10 (2026-11-05): the remaining process-start, delay-load symbol and
+  # COM activation paths. CoGetInstanceFromFile, CoGetClassObjectFromURL, OleInitialize and
+  # LoadLibraryShim live behind windows-sys features rerun-core does not use; the test-only
+  # features of rerun-core make them resolve in sys/win/bans.rs like every other entry.
+  { path = "windows_sys::Win32::System::LibraryLoader::LoadModule", reason = "processes only through sys::Process", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::QueryOptionalDelayLoadedAPI", reason = "dynamic loads only via sys::win::loader (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::ClrHosting::LoadLibraryShim", reason = "dynamic loads only via sys::win::loader (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoCreateInstanceFromApp", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::BindMoniker", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoRegisterClassObject", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoInitializeSecurity", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::StructuredStorage::CoGetInstanceFromFile", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::Urlmon::CoGetClassObjectFromURL", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Ole::OleInitialize", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "std::thread::available_parallelism", reason = "limited by the process affinity and CPU Sets, not the machine; use sys::Topology (ADR 0010)" },
 ]
