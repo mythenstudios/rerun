@@ -302,7 +302,9 @@ impl CpuTopology {
         self.logical_count() > self.core_count()
     }
 
-    /// `true` if there are several efficiency classes (Intel P/E-cores).
+    /// `true` if Windows reports more than one efficiency class. Not the same as "Intel
+    /// P/E-cores": any CPU whose cores report different classes counts, one with a single
+    /// class does not (ADR 0015).
     pub fn is_hybrid(&self) -> bool {
         self.cpus
             .iter()

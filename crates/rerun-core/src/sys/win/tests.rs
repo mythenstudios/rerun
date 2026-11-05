@@ -609,6 +609,43 @@ fn os_build_matches_rtl_get_version() {
     assert!(os.build > 0);
 }
 
+/// Read-only: the system profile of this machine (ADR 0015). CPU and OS are read, the build
+/// equals `RtlGetVersion`'s, the adapters are enumerated. On a GitHub runner (only the Basic
+/// Render Driver) there is no hardware adapter; elsewhere the primary adapter is a real GPU,
+/// never Microsoft's.
+#[test]
+fn system_profile_of_this_machine() {
+    use crate::hw::{self, Fact, GpuArchTable, VendorFact};
+
+    super::restrict_dll_search().unwrap();
+    let sys = WinSystem::new().unwrap();
+    let p = hw::read(&sys, Some(GpuArchTable::builtin().unwrap()));
+    let cpu = p.cpu.as_ref().unwrap();
+    assert_eq!(
+        p.cpu_threads(),
+        Fact::Known(u32::try_from(cpu.logical_count()).unwrap())
+    );
+    assert_eq!(p.cpu_hybrid(), Fact::Known(cpu.is_hybrid()));
+    assert_eq!(p.os_build(), Fact::Known(super::testfx::rtl_build_number()));
+    let gpu = p.gpu.as_ref().unwrap();
+    assert!(
+        gpu.adapters
+            .iter()
+            .all(|e| !e.adapter.software && e.adapter.vendor_id != 0x1414),
+        "{gpu:#?}"
+    );
+    if hosted_ci() {
+        assert_eq!(gpu.adapters, Vec::new(), "a GitHub runner has no GPU");
+        assert_eq!(p.gpu_vendor(), VendorFact::NoAdapter);
+    } else {
+        let primary = gpu
+            .primary()
+            .unwrap_or_else(|| panic!("no hardware adapter on this machine (a VM without a GPU?)"));
+        assert_ne!(primary.vendor.id(), 0x1414);
+        assert_eq!(p.gpu_vendor(), VendorFact::Known(primary.vendor));
+    }
+}
+
 // ---------- GPU (DXGI) ----------
 
 /// Read-only: the real adapters fulfil the GPU contract, and the Microsoft Basic Render Driver
