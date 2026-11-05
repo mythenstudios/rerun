@@ -133,24 +133,55 @@ fn the_role_comes_first() {
 }
 
 #[test]
-fn then_the_api_strength() {
+fn then_the_api_strength_by_where_it_comes_from() {
+    let delay = |p: &str| {
+        let mut f = facts(&[], SUBSYSTEM_WINDOWS_GUI);
+        let delay: Vec<DllName> = vec![DllName::for_test("d3d9.dll")];
+        f.api = classify(&[], &delay, false);
+        f.info.delay_imports = delay;
+        cand(p, Role::Game, Ok(f))
+    };
     let mut c = vec![
         game("none.exe", &[]),
         game("dxgi.exe", &["dxgi.dll"]),
         game("helper.exe", &["d3dx9_43.dll"]),
+        delay("delay.exe"),
+        game("several.exe", &["d3d9.dll", "opengl32.dll"]),
         game("highest.exe", &["d3d9.dll", "d3d11.dll"]),
         game("only.exe", &["d3d9.dll"]),
+    ];
+    // Static core imports all count 3, whatever the verdict: a tie.
+    assert_eq!(rank(&mut c), Main::Tied(vec![0, 1, 2]));
+    assert_eq!(
+        order(&c),
+        [
+            "highest.exe",
+            "only.exe",
+            "several.exe",
+            "delay.exe",
+            "dxgi.exe",
+            "helper.exe",
+            "none.exe"
+        ]
+    );
+}
+
+#[test]
+fn a_gui_executable_beats_a_console_tool_with_a_stronger_api() {
+    // The shape of a shader compile worker (console, a helper import) next to the GUI game
+    // without any graphics import.
+    let mut c = vec![
+        cand(
+            r"Binaries\InvShaderTool.exe",
+            Role::Game,
+            Ok(facts(&["d3dx10_43.dll"], SUBSYSTEM_WINDOWS_CUI)),
+        ),
+        game(r"Binaries\InvStartApp.exe", &[]),
     ];
     assert_eq!(rank(&mut c), Main::One(0));
     assert_eq!(
         order(&c),
-        [
-            "only.exe",
-            "highest.exe",
-            "helper.exe",
-            "dxgi.exe",
-            "none.exe"
-        ]
+        [r"Binaries\InvStartApp.exe", r"Binaries\InvShaderTool.exe"]
     );
 }
 

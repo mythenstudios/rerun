@@ -45,8 +45,12 @@ fn anti_cheat() {
     ] {
         assert_eq!(role(name), Role::AntiCheat, "{name}");
     }
+    // Prefixes: PunkBuster's services and their versions.
+    for name in ["pbsvc2.exe", "PnkBstrK.exe"] {
+        assert_eq!(role(name), Role::AntiCheat, "{name}");
+    }
     for name in [
-        "pbsvc2.exe",
+        "xpbsvc.exe",
         "Invented_BEx.exe",
         "Invented-BE.exe",
         "xbeservice.exe",
@@ -71,6 +75,10 @@ fn installers() {
         "oalinst.exe",
         "unins000.exe",
         "unins1.exe",
+        "InventedPatcher.exe",
+        "patch.exe",
+        "Updater.exe",
+        "InventedAutoUpdate.exe",
     ] {
         assert_eq!(role(name), Role::Installer, "{name}");
     }
@@ -86,6 +94,8 @@ fn launchers() {
         "FFLauncher.exe",
         "REDprelauncher.exe",
         "InventedLauncher.exe",
+        "InventedLaunch.exe",
+        "StartLaunchPad.exe",
     ] {
         assert_eq!(role(name), Role::Launcher, "{name}");
     }
@@ -107,15 +117,17 @@ fn helpers() {
         "Config.exe",
         "InventedSettings.exe",
         "LevelEditor.exe",
+        "InventedShaderCompileWorker.exe",
+        "ShaderCompiler.exe",
+        "GameOverlayUI.exe",
+        "Injector.exe",
+        "ActivationUI.exe",
+        "server.exe",
+        "InventedServer.exe",
     ] {
         assert_eq!(role(name), Role::Helper, "{name}");
     }
     assert_eq!(role("Invented_Servers.exe"), Role::Game);
-    assert_eq!(
-        role("server.exe"),
-        Role::Game,
-        "only with a separator in front"
-    );
 }
 
 #[test]
@@ -142,27 +154,39 @@ fn games_and_odd_names() {
     ] {
         assert_eq!(role(name), Role::Game, "{name}");
     }
-    // A non-ASCII stem never matches a rule.
-    assert_eq!(role("Crash\u{00e9}.exe"), Role::Game);
-    assert_eq!(role("\u{30b2}\u{30fc}\u{30e0}Launcher.exe"), Role::Game);
+    // ASCII tokens match inside a stem with non-ASCII characters too.
+    assert_eq!(role("Crash\u{00e9}.exe"), Role::CrashReporter);
+    assert_eq!(role("\u{30b2}\u{30fc}\u{30e0}Launcher.exe"), Role::Launcher);
+    assert_eq!(role("\u{30b2}\u{30fc}\u{30e0}.exe"), Role::Game);
+    // The Kelvin sign does not fold to `k`: no token matches by accident.
+    assert_eq!(role("Pn\u{212A}bstrA.exe"), Role::Game);
 }
 
 #[test]
 fn the_install_folder_hint_suspends_the_rules() {
+    // A rule is suspended only when its token occurs in the install folder name.
     assert_eq!(hinted("CrashBandicoot.exe", "Crash Bandicoot"), Role::Game);
     assert_eq!(hinted("Crash.exe", "Crash Bandicoot"), Role::Game);
-    assert_eq!(
-        hinted("crash_reporter.exe", "Crash Bandicoot"),
-        Role::CrashReporter
-    );
+    assert_eq!(hinted("Crash.exe", "Burnout Crash"), Role::Game);
     assert_eq!(hinted("SetupWorld.exe", "Setup World 2"), Role::Game);
+    assert_eq!(hinted("Dispatch.exe", "Dispatch"), Role::Game);
+    assert_eq!(hinted("Observer.exe", "Observer"), Role::Game);
+    // The folder name alone does not suspend a rule whose token it lacks.
+    assert_eq!(
+        hinted("Invented4Launcher.exe", "Invented 4"),
+        Role::Launcher
+    );
     assert_eq!(
         hinted("UnityCrashHandler64.exe", "Invented"),
         Role::CrashReporter
     );
-    // Provisional (ADR 0014, to check with the dump): a launcher whose name starts with the
-    // folder name is not a launcher by name.
-    assert_eq!(hinted("Invented4Launcher.exe", "Invented 4"), Role::Game);
+    // A suspended token lets the next rule decide.
+    assert_eq!(
+        hinted("CrashLauncher.exe", "Crash Bandicoot"),
+        Role::Launcher
+    );
+    // Without a hint, nothing is suspended.
+    assert_eq!(role("CrashBandicoot.exe"), Role::CrashReporter);
 }
 
 #[test]
@@ -173,11 +197,12 @@ fn similarity_of_stem_and_hint() {
     assert_eq!(similarity("Invented Game Deluxe", "Invented Game"), 1);
     assert_eq!(similarity("Inve", "Invented"), 1, "four characters suffice");
     assert_eq!(similarity("Inv", "Invented"), 0, "three do not");
-    assert_eq!(
-        similarity("Game", "Invented Game"),
-        0,
-        "only prefixes count"
-    );
+    // Containment in both directions, the shorter side at least four characters.
+    assert_eq!(similarity("Game", "Invented Game"), 1);
+    assert_eq!(similarity("Invented2", "Fortress Invented 2"), 1);
+    assert_eq!(similarity("Fortress Invented 2 HD", "Invented 2"), 1);
+    assert_eq!(similarity("IG", "Invented Game"), 0, "no acronyms");
+    assert_eq!(similarity("logview_viewer", "Fortress Invented 2"), 0);
     assert_eq!(similarity("", "Invented"), 0);
     assert_eq!(similarity("---", "---"), 0, "nothing left after reducing");
     assert_eq!(

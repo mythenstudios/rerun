@@ -1,6 +1,6 @@
 //! The API mapping (ADR 0014, "Graphics API"). Pure; DLL names only.
 
-use super::{ApiSet, ApiVerdict, Basis, Engine, GraphicsApi as A, classify};
+use super::{ApiSet, ApiVerdict, Basis, Engine, GraphicsApi as A, Source, classify};
 use crate::detect::pe::DllName;
 
 fn dlls(names: &[&str]) -> Vec<DllName> {
@@ -20,6 +20,14 @@ fn only(api: A) -> ApiVerdict {
 
 fn set(apis: &[A]) -> ApiSet {
     apis.iter().copied().collect()
+}
+
+fn several(apis: ApiSet, from: Source) -> ApiVerdict {
+    ApiVerdict::Several { apis, from }
+}
+
+fn several_static(apis: ApiSet) -> ApiVerdict {
+    several(apis, Source::Static)
 }
 
 #[test]
@@ -157,7 +165,7 @@ fn several_direct3d_versions_take_the_highest() {
 fn a_family_mix_is_several() {
     assert_eq!(
         verdict(&["d3d9.dll", "opengl32.dll"], &[], false),
-        ApiVerdict::Several(set(&[A::D3d9, A::Opengl]))
+        several_static(set(&[A::D3d9, A::Opengl]))
     );
     assert_eq!(
         verdict(
@@ -165,15 +173,15 @@ fn a_family_mix_is_several() {
             &[],
             false
         ),
-        ApiVerdict::Several(set(&[A::D3d9, A::D3d11, A::Opengl, A::Vulkan]))
+        several_static(set(&[A::D3d9, A::D3d11, A::Opengl, A::Vulkan]))
     );
     assert_eq!(
         verdict(&["glide2x.dll", "ddraw.dll"], &[], false),
-        ApiVerdict::Several(set(&[A::Ddraw, A::Glide]))
+        several_static(set(&[A::Ddraw, A::Glide]))
     );
     assert_eq!(
         verdict(&[], &["opengl32.dll", "d3d9.dll"], false),
-        ApiVerdict::Several(set(&[A::D3d9, A::Opengl])),
+        several(set(&[A::D3d9, A::Opengl]), Source::Delay),
         "several stays several in the delay table"
     );
 }
@@ -211,7 +219,7 @@ fn rules_apply_in_order() {
     );
     assert_eq!(
         verdict(&["glu32.dll"], &["d3dx9_43.dll"], false),
-        ApiVerdict::Several(set(&[A::D3d9, A::Opengl]))
+        several(set(&[A::D3d9, A::Opengl]), Source::Helper)
     );
     // 4. dxgi in either table over engines.
     assert_eq!(
@@ -276,6 +284,14 @@ fn display_names_the_verdict_and_its_basis() {
     );
     assert_eq!(shown(&[], &["d3d9.dll"], false), "d3d9 (delay-loaded)");
     assert_eq!(
+        shown(&[], &["d3d9.dll", "d3d12.dll"], false),
+        "d3d12 (delay-loaded, also d3d9)"
+    );
+    assert_eq!(
+        shown(&["d3dx9_43.dll"], &["d3dx11_43.dll"], false),
+        "d3d11 (helper DLL only, also d3d9)"
+    );
+    assert_eq!(
         shown(&["d3dx9_43.dll"], &[], false),
         "d3d9 (helper DLL only)"
     );
@@ -306,14 +322,20 @@ fn strengths() {
             .verdict
             .strength()
     };
-    assert_eq!(strength(&["d3d9.dll"], &[], false), 5);
-    assert_eq!(strength(&["d3d9.dll", "d3d11.dll"], &[], false), 4);
-    assert_eq!(strength(&[], &["d3d9.dll"], false), 3);
-    assert_eq!(strength(&["d3dx9_43.dll"], &[], false), 3);
+    // 3: static core imports, whatever the verdict.
+    assert_eq!(strength(&["d3d9.dll"], &[], false), 3);
+    assert_eq!(strength(&["d3d9.dll", "d3d11.dll"], &[], false), 3);
     assert_eq!(strength(&["d3d9.dll", "opengl32.dll"], &[], false), 3);
-    assert_eq!(strength(&["dxgi.dll"], &[], false), 2);
-    assert_eq!(strength(&["UnityPlayer.dll"], &[], false), 2);
-    assert_eq!(strength(&[], &[], true), 2);
+    // 2: delay core imports.
+    assert_eq!(strength(&[], &["d3d9.dll"], false), 2);
+    assert_eq!(strength(&[], &["d3d9.dll", "opengl32.dll"], false), 2);
+    // 1: helpers, dxgi alone, engines.
+    assert_eq!(strength(&["d3dx9_43.dll"], &[], false), 1);
+    assert_eq!(strength(&["glu32.dll", "d3dx9_43.dll"], &[], false), 1);
+    assert_eq!(strength(&["dxgi.dll"], &[], false), 1);
+    assert_eq!(strength(&["UnityPlayer.dll"], &[], false), 1);
+    // 0: managed, none.
+    assert_eq!(strength(&[], &[], true), 0);
     assert_eq!(strength(&[], &[], false), 0);
 }
 

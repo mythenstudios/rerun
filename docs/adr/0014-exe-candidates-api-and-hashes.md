@@ -39,7 +39,7 @@ Breadth-first from the game folder, one level after the other, every listing sor
 - Each directory to list is opened relative to the game handle (`GameDir::dir().open_dir`, never through a reparse point, ADR 0007), asked for `info().case_sensitive` and listed through that same handle (`read_dir(None)`). A case-sensitive directory is one `CaseSensitiveDir` issue and none of its entries is used (two names could fold to one `RelPath`); the game folder itself is checked the same way (through `info()` at walk time, not the `RootInfo` of opening). A listing in which two names fold to the same path (the folder turned case-sensitive between `info` and `read_dir`) is treated the same way (security review of step 14). A directory that fails to open, to report its info or to list is one `Sys` issue; the walk goes on.
 - Every entry name goes through `policy::path::classify`; an anomaly (`game.exe.`, `CON.exe`, `DATA~1`, a bidi override, invalid UTF-16, a path over 240 characters) is an `Anomaly` issue when it would have mattered (a directory to enter, a reparse point, or a name ending in `.exe`) and is never opened.
 - **Directories** are entered when they are plain directories (`EntryKind::Dir`, not restricted), not deeper than `max_depth`, and not in the skip list. A reparse point (junction, symlink, unknown tag; `EntryKind::Reparse` does not tell a directory from a file, so every one is reported) or a restricted directory is a `NotFollowed` issue and is never entered. A directory beyond `max_depth` is counted (`WalkStats::depth_cut`), not reported per entry.
-- **Skip list** (whole segment, ASCII case-insensitive, at every depth): `_CommonRedist`, `CommonRedist`, `__Installer`, `Installer`, `Installers`, `Redist`, `Redistributables`, `DirectX`, `DXSETUP`, `vcredist`, `dotNetFx`, `Support`, `EasyAntiCheat`, `BattlEye`. Skipped directories are not entered and are listed in `WalkStats::skipped_dirs` (never hidden). The list is data in `walk`.
+- **Skip list** (whole segment, ASCII case-insensitive, at every depth): `_CommonRedist`, `CommonRedist`, `__Installer`, `Installer`, `Installers`, `Redist`, `Redistributables`, `DirectX`, `DXSETUP`, `vcredist`, `dotNetFx`, `Support`, `EasyAntiCheat`, `BattlEye`, `PunkBuster` (added after the dump, see the amendment). Skipped directories are not entered and are listed in `WalkStats::skipped_dirs` (never hidden). The list is data in `walk`.
 - **Candidates** are plain files (`EntryKind::File`, also with an allowlisted data tag, not restricted) whose name ends in `.exe` (ASCII case-insensitive). A reparse point or a restricted entry named `*.exe` is a `NotFollowed` issue. `.com`, `.bat` and other files are not candidates.
 - **Depth:** the game folder is level 0; an executable's depth is the level of the folder that holds it, so `Game\Binaries\Win64\Game-Win64-Shipping.exe` has depth 3.
 - **Limits** (`ExeLimits::DEFAULT`; a value of exactly the limit is accepted):
@@ -55,19 +55,27 @@ Breadth-first from the game folder, one level after the other, every listing sor
 - Known limit (as ADR 0012): `Dir::read_dir` collects a whole directory before any limit applies; a phase 2 bounded `read_dir` would bound the single listing too.
 
 ### Roles
-`Role` from the file stem (the name without its `.exe`) by a fixed rule table (ASCII case-insensitive; a non-ASCII stem never matches a rule), first matching group in this order, then from PE facts:
-- `CrashReporter`: stem `createdump`, `crashpad_handler`, `crashreportclient`, `unitycrashhandler32`, `unitycrashhandler64`, `bssndrpt`, `bssndrpt64`, or containing `crash`.
-- `AntiCheat`: stem `start_protected_game`, `pbsvc`, `pnkbstra`, `pnkbstrb`, starting with `beservice` or `easyanticheat`, or ending in `_be` or `_eac`.
-- `Installer`: containing `setup`, `install`, `redist`, starting with `vc_redist`, `vcredist`, `dxsetup`, `dotnetfx`, `physx`, `oalinst`, or `unins` followed only by one or more digits.
-- `Launcher`: containing `launcher` (also `prelauncher`).
-- `Helper`: containing `webhelper`, `browsersubprocess`, `cefprocess`, `qtwebengineprocess`; ending in `_server`, `-server`, `dedicatedserver`; containing `config`, `settings`, `editor`.
+`Role` from the file stem (the name without its `.exe`, lowercased ASCII-only; ASCII tokens also match inside a stem with non-ASCII characters, e.g. `ゲームLauncher.exe` is a launcher) by a fixed table of category tokens (no game names), first group in this order, then from PE facts (table as amended after the dump, see the amendment):
+- `CrashReporter`: stem `createdump`, `crashpad_handler`, `crashreportclient`, `unitycrashhandler32`, `unitycrashhandler64`, `bssndrpt`, `bssndrpt64`, or containing `crash`, `bugsplat`.
+- `AntiCheat`: stem `start_protected_game`, starting with `pbsvc`, `pnkbstr`, `beservice` or `easyanticheat`, or ending in `_be` or `_eac`.
+- `Installer` (also updaters and patchers): containing `setup`, `install`, `redist`, `patch`, `update`, starting with `vc_redist`, `vcredist`, `dxsetup`, `dotnetfx`, `physx`, `oalinst`, or `unins` followed only by one or more digits.
+- `Launcher`: containing `launch` (also `launcher`, `prelauncher`).
+- `Helper`: containing `webhelper`, `browsersubprocess`, `cefprocess`, `qtwebengineprocess`, `config`, `settings`, `editor`, `compil`, `overlay`, `inject`, `activation`; ending in `server`.
 - Otherwise `Game`.
-- A name rule does not apply when the stem matches the install folder hint (similarity of at least 1, see "Ranking"), so `CrashBandicoot.exe` in `Crash Bandicoot` stays `Game`. (To check with the dump: this also keeps `Fallout4Launcher.exe` in `Fallout 4` a `Game`; ranking still puts `Fallout4.exe` first by similarity.)
+- A rule is suspended when its token (reduced to lowercase ASCII letters and digits) occurs in the reduced install folder hint; the next rule that matches decides. So `CrashBandicoot.exe` in `Crash Bandicoot` and `Crash.exe` in `Burnout Crash` stay `Game`, while `Fallout4Launcher.exe` in `Fallout 4` is a `Launcher` (the folder name has no `launch`). Suspension does not depend on the similarity (review of step 14).
 - PE facts override the name: the DLL flag is `NotAnApp`; a `Legacy` error (DOS, NE, LE/LX) is `Legacy(format)`; a candidate that failed to open or parse keeps its name role and its error.
 Roles are hints. Every candidate stays in the list with its role; nothing is dropped by role.
 
 ### Ranking
-Candidates are sorted by, in this order: role (`Game` first; `Launcher`; `Helper`; `CrashReporter`, `AntiCheat`, `Installer`; `NotAnApp`, `Legacy`; failed last), API strength (`One` with basis `Only` 5, `HighestD3d` 4, `DelayOnly`/`Helper` 3, `Several` 3, `RendererInDll`/`Managed`/`DxgiOnly` 2, `None` 0), GUI subsystem before console, similarity to the install folder hint (2: equal, 1: one is a prefix of the other with at least 4 characters, 0; both reduced to lowercase ASCII letters and digits), depth (shallower first), then the path. `GameExes::main` is `One(index)` when exactly one `Game` candidate has the best key (everything but the path), `Tied(indices)` when several share it (Assassin's Creed ships a DX9 and a DX10 executable; both are game executables), and `None` without a `Game` candidate that parsed. Detection never promotes a launcher to the main executable.
+Candidates are sorted by, in this order (review of step 14: structure before imports):
+1. role group: `Game`; `Launcher`; `Helper`; `CrashReporter`, `AntiCheat`, `Installer`; `NotAnApp`, `Legacy`; failed last;
+2. GUI subsystem before console (and before a failed or unknown subsystem), so a console tool with a graphics helper import never beats a GUI executable;
+3. API strength by where the evidence comes from: 3 static core imports (`One` with basis `Only` or `HighestD3d`, `Several` from the static table), 2 delay core imports, 1 helper DLLs, `DxgiOnly` and `RendererInDll`, 0 `Managed` and `None`. User decision 2 is unchanged: the verdict still names the highest Direct3D version; only the ranking does not prefer one static verdict over another;
+4. similarity to the install folder hint: 2 equal, 1 one contains the other and the shorter has at least 4 characters (no acronyms), else 0; both reduced to lowercase ASCII letters and digits;
+5. depth, shallower first;
+6. the path.
+
+`GameExes::main` is `One(index)` when exactly one `Game` candidate has the best key (everything but the path), `Tied(indices)` when several share it, and `None` without a `Game` candidate that parsed. Example of a tie: a game that ships one executable per renderer at the top level (`Game_Dx9.exe` importing `d3d9.dll`, `Game_Dx10.exe` importing `d3d10.dll`): both are GUI, both have static core imports (strength 3), neither equals the folder name; both are game executables, and the user (or a Topo) picks. Detection never promotes a launcher to the main executable.
 
 ### Graphics API
 `api::classify(&[DllName], &[DllName], managed) -> ApiReport`, pure, on the static and the delay imports. DLL names compare ASCII case-insensitively and exactly (no substring), duplicates count once.
@@ -94,13 +102,13 @@ Candidates are sorted by, in this order: role (`Game` first; `Launcher`; `Helper
 
 Verdict, first rule that applies:
 1. Static core imports present: one API is `One { api, basis: Only }`; only Direct3D family APIs (`ddraw` < `d3d8` < `d3d9` < `d3d10` < `d3d11` < `d3d12`) is `One { highest, basis: HighestD3d }` (many Direct3D 10/11 games import `d3d9.dll` for the `D3DPERF_*` markers only; `ddraw` next to `d3d8`/`d3d9` is common); anything mixing families (`opengl`, `vulkan`, `glide` with each other or with Direct3D) is `Several(set)`.
-2. Else delay core imports, by the same rule, with basis `DelayOnly` (`Several` stays `Several`).
+2. Else delay core imports, by the same rule, with basis `DelayOnly` (`Several` stays `Several`; `Several` records the table it comes from, `Source::Static`, `Delay` or `Helper`, for the ranking).
 3. Else helper imports of both tables, by the same rule, with basis `Helper` (`d3dx9_43.dll` alone is `d3d9`, the device is created through `LoadLibrary`).
 4. Else `dxgi.dll` in either table: `DxgiOnly` (the Direct3D version is loaded at runtime; never guessed).
 5. Else an engine import: `RendererInDll(engine)`. Engine DLLs are not parsed: they hold several renderers (Unity: Direct3D 11 and 12, Vulkan; Unreal 2 `D3DDrv`/`OpenGLDrv`), the one in use is chosen by a configuration file.
 6. Else managed (.NET): `Managed`. Else `None` (packed or DRM stubs, renderers loaded with `LoadLibrary`, e.g. Source).
 
-`ApiReport` keeps the verdict and the evidence (core and helper sets and the `dxgi` flag per table, the engine), so output can show `d3d11 (also d3d9)`.
+`ApiReport` keeps the verdict and the evidence (core and helper sets and the `dxgi` flag per table, the engine), so output can show `d3d11 (also d3d9)`, `d3d12 (delay-loaded, also d3d9)` or `d3d11 (helper DLL only, also d3d9)`.
 
 Topo vocabulary: `GraphicsApi` has `ddraw`, `d3d8`, `d3d9`, `d3d10`, `d3d11`, `d3d12`, `opengl`, `vulkan`, `glide` (`GraphicsApi::as_str`); `GraphicsApi::topo_name()` gives the Topo `api` value or `None` for `d3d12`, `vulkan` and `glide`. A parity test checks `topo_name` against `$defs/api` of both schemas. The schemas do not change in step 14 (user decision 1).
 
@@ -136,3 +144,12 @@ Topo vocabulary: `GraphicsApi` has `ddraw`, `d3d8`, `d3d9`, `d3d10`, `d3d11`, `d
 - `docs/06-security.md` scenario 13 gets the walk and hash bounds and the list of what is read; `docs/09-testing.md` a section "Executable candidates".
 - The `api` mapping, the role table and the skip list are heuristics with names in them; the developer-machine dump (`dump_exe_candidates` in `crates/rerun-core/tests/pe_system.rs`, `#[ignore]`, Windows only, read-only, never in CI, output never committed, names escaped, version strings only as their length, hashes only with `RERUN_DUMP_HASHES=1`) validates them and is recorded as an amendment here; the tables are tuned in a follow-up commit.
 - Games with an 8.3-like folder or file name (`~` followed by a digit) are reported as anomalies and not scanned below that name.
+
+## Amendment 2026-11-05: developer machine
+
+`dump_exe_candidates` on the developer machine (read-only, output not committed; debug test profile):
+- 33 game folders, 95 candidates, 7.8 s in all; the slowest game 2.0 s with 9,876 listed entries. One game reached `max_dirs` (128 listed directories, 1,182 directories cut by depth); its main executable was still found. No `TooManyExes`.
+- Main executable with the first tables: 30 `One`, 2 `Tied`, 1 `None`. The `None` is a store's shared-redistributables folder that holds only a skipped `_CommonRedist`: correct. One tie is a single-player and a multiplayer executable of one game: correct. The other is the game's executable next to a launcher whose name has no launcher token (`Play<Game>.exe`): accepted, no special names in the table.
+- Two wrong picks, fixed in the ranking and the table above: (1) a console shader compile worker with a helper-only Direct3D 10 import beat the GUI executables (a GUI start app without graphics imports, a renamed launcher with Direct3D 9, a .NET backup launcher), because API strength came before the subsystem; now the subsystem comes first, strength counts by evidence origin, and `compil` makes the worker a `Helper`. (2) A .NET log viewer in a tools folder (`Managed`) beat the game in `bin\<config>` (`None`), whose stem is contained in, but no prefix of, the install folder name; now `Managed` and `None` are both 0 and similarity uses containment.
+- Hashes (`RERUN_DUMP_HASHES=1`): 1.9 GB hashed in 72 s in the unoptimised test profile; the rate must be measured again in a release build (`docs/09-testing.md`), and `max_entries` = 20,000 is confirmed only after that measurement (pending).
+- Table changes from the dump, category tokens only: `bugsplat` (crash reporter), the `pbsvc`/`pnkbstr` prefixes and the `PunkBuster` skip folder (anti-cheat), `launch` (launcher), `patch` and `update` (installer/updater), `server` without separator, `compil`, `overlay`, `inject`, `activation` (helper). Not added on purpose: names of single tools or folders seen once.

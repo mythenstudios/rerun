@@ -12,10 +12,11 @@ pub(super) struct Key {
     /// Role group: `Game` 0, `Launcher` 1, `Helper` 2, crash reporter, anti-cheat and
     /// installer 3, `NotAnApp` and `Legacy` 4, failed 5.
     group: u8,
-    /// API strength, higher first.
-    strength: Reverse<u8>,
-    /// GUI subsystem 0, anything else (console, unknown, failed) 1.
+    /// GUI subsystem 0, anything else (console, unknown, failed) 1. Before the API: a
+    /// console tool with a helper import never beats a GUI executable (review of step 14).
     console: u8,
+    /// API strength by where the evidence comes from, higher first.
+    strength: Reverse<u8>,
     /// Similarity to the install folder hint, higher first.
     similarity: Reverse<u8>,
     /// Depth, shallower first.

@@ -435,7 +435,7 @@ fn graphics_dlls(dlls: &[rerun_core::detect::pe::DllName]) -> Vec<String> {
     out
 }
 
-fn api_set(set: &std::collections::BTreeSet<rerun_core::detect::exe::GraphicsApi>) -> String {
+fn api_set(set: &rerun_core::detect::exe::ApiSet) -> String {
     set.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(",")
 }
 

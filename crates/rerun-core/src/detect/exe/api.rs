@@ -106,6 +106,28 @@ impl fmt::Display for Engine {
     }
 }
 
+/// Where the core or helper imports of a verdict come from; decides the ranking strength.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// The static core imports.
+    Static,
+    /// The delay-load core imports (no static core import).
+    Delay,
+    /// Helper DLLs of either table (no core import).
+    Helper,
+}
+
+impl Basis {
+    /// The table the basis comes from.
+    pub fn source(self) -> Source {
+        match self {
+            Self::Only | Self::HighestD3d => Source::Static,
+            Self::DelayOnly => Source::Delay,
+            Self::Helper => Source::Helper,
+        }
+    }
+}
+
 /// What a single API verdict rests on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Basis {
@@ -131,7 +153,12 @@ pub enum ApiVerdict {
         basis: Basis,
     },
     /// APIs of more than one family (`opengl` next to Direct3D, …), no winner.
-    Several(ApiSet),
+    Several {
+        /// The APIs.
+        apis: ApiSet,
+        /// The table they come from.
+        from: Source,
+    },
     /// Only `dxgi.dll`: the Direct3D version is loaded at runtime, never guessed.
     DxgiOnly,
     /// The renderer lives in an engine DLL, which is not parsed.
@@ -143,24 +170,21 @@ pub enum ApiVerdict {
 }
 
 impl ApiVerdict {
-    /// Ranking strength (ADR 0014, "Ranking"): `Only` 5, `HighestD3d` 4, `DelayOnly`,
-    /// `Helper` and `Several` 3, `RendererInDll`, `Managed` and `DxgiOnly` 2, `None` 0.
+    /// Ranking strength by where the evidence comes from (ADR 0014, "Ranking"): 3 static core
+    /// imports (`One` with any static basis, `Several` from the static table), 2 delay core
+    /// imports, 1 helper DLLs, `DxgiOnly` and `RendererInDll`, 0 `Managed` and `None`. The
+    /// verdict itself (`HighestD3d`, user decision 2) does not change the strength.
     pub fn strength(&self) -> u8 {
-        match self {
-            Self::One {
-                basis: Basis::Only, ..
-            } => 5,
-            Self::One {
-                basis: Basis::HighestD3d,
-                ..
-            } => 4,
-            Self::One {
-                basis: Basis::DelayOnly | Basis::Helper,
-                ..
-            }
-            | Self::Several(_) => 3,
-            Self::RendererInDll(_) | Self::Managed | Self::DxgiOnly => 2,
-            Self::None => 0,
+        let source = match self {
+            Self::One { basis, .. } => basis.source(),
+            Self::Several { from, .. } => *from,
+            Self::DxgiOnly | Self::RendererInDll(_) => return 1,
+            Self::Managed | Self::None => return 0,
+        };
+        match source {
+            Source::Static => 3,
+            Source::Delay => 2,
+            Source::Helper => 1,
         }
     }
 
@@ -211,24 +235,27 @@ impl fmt::Display for ApiReport {
         match &self.verdict {
             ApiVerdict::One { api, basis } => {
                 write!(f, "{api}")?;
-                match basis {
-                    Basis::Only => Ok(()),
-                    Basis::HighestD3d => {
-                        let others: Vec<&str> = self
-                            .evidence
-                            .imports
-                            .core
-                            .iter()
-                            .filter(|a| *a != api)
-                            .map(|a| a.as_str())
-                            .collect();
-                        write!(f, " (also {})", others.join(", "))
-                    }
-                    Basis::DelayOnly => f.write_str(" (delay-loaded)"),
-                    Basis::Helper => f.write_str(" (helper DLL only)"),
+                let ev = &self.evidence;
+                let helpers: ApiSet = ev.imports.helper.union(&ev.delay.helper).copied().collect();
+                let (set, what) = match basis {
+                    Basis::Only | Basis::HighestD3d => (&ev.imports.core, None),
+                    Basis::DelayOnly => (&ev.delay.core, Some("delay-loaded")),
+                    Basis::Helper => (&helpers, Some("helper DLL only")),
+                };
+                let others: Vec<&str> = set
+                    .iter()
+                    .filter(|a| *a != api)
+                    .map(|a| a.as_str())
+                    .collect();
+                let also = (!others.is_empty()).then(|| format!("also {}", others.join(", ")));
+                let parts: Vec<String> = what.map(str::to_owned).into_iter().chain(also).collect();
+                if parts.is_empty() {
+                    Ok(())
+                } else {
+                    write!(f, " ({})", parts.join(", "))
                 }
             }
-            ApiVerdict::Several(set) => {
+            ApiVerdict::Several { apis: set, .. } => {
                 let all: Vec<&str> = set.iter().map(|a| a.as_str()).collect();
                 write!(f, "several: {}", all.join(", "))
             }
@@ -317,6 +344,7 @@ fn table(dlls: &[DllName], engine: &mut EngineSeen) -> TableEvidence {
 
 /// One API, the highest Direct3D version, or several families; `None` for an empty set.
 fn decide(set: &ApiSet, basis: Basis) -> Option<ApiVerdict> {
+    let from = basis.source();
     let highest = *set.last()?;
     if set.len() == 1 {
         return Some(ApiVerdict::One {
@@ -337,11 +365,14 @@ fn decide(set: &ApiSet, basis: Basis) -> Option<ApiVerdict> {
             basis,
         });
     }
-    Some(ApiVerdict::Several(set.clone()))
+    Some(ApiVerdict::Several {
+        apis: set.clone(),
+        from,
+    })
 }
 
 /// The verdict on the static imports `imports`, the delay imports `delay` and the CLR flag.
-pub fn classify(imports: &[DllName], delay: &[DllName], managed: bool) -> ApiReport {
+pub(crate) fn classify(imports: &[DllName], delay: &[DllName], managed: bool) -> ApiReport {
     let mut seen = EngineSeen::default();
     let evidence_imports = table(imports, &mut seen);
     let evidence_delay = table(delay, &mut seen);

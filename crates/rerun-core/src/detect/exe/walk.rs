@@ -19,7 +19,7 @@ use crate::sys::{Dir, SysResult};
 /// Folders that are never entered (whole segment, ASCII case-insensitive, at every depth):
 /// redistributables, installers and anti-cheat services. Provisional until the
 /// developer-machine dump (ADR 0014).
-pub const SKIP_DIRS: &[&str] = &[
+pub(crate) const SKIP_DIRS: &[&str] = &[
     "_CommonRedist",
     "CommonRedist",
     "__Installer",
@@ -34,11 +34,12 @@ pub const SKIP_DIRS: &[&str] = &[
     "Support",
     "EasyAntiCheat",
     "BattlEye",
+    "PunkBuster",
 ];
 
 /// An executable found by the walk.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WalkedExe {
+pub(crate) struct WalkedExe {
     /// The file, relative to the game folder.
     pub path: RelPath,
     /// Level of the folder that holds it (0: the game folder).
@@ -67,7 +68,7 @@ pub struct WalkStats {
 
 /// The result of [`walk()`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Walk {
+pub(crate) struct Walk {
     /// Candidates in walk order, at most [`ExeLimits::max_exes`].
     pub exes: Vec<WalkedExe>,
     /// What the walk did.
@@ -77,7 +78,7 @@ pub struct Walk {
 }
 
 /// Walks the game folder within `limits`. Never fails as a whole.
-pub fn walk(game: &GameDir<'_>, limits: &ExeLimits) -> Walk {
+pub(crate) fn walk(game: &GameDir<'_>, limits: &ExeLimits) -> Walk {
     walk_dir(game.dir(), limits)
 }
 

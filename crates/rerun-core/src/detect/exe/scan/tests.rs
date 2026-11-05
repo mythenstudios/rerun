@@ -789,3 +789,119 @@ fn a_file_that_grew_hits_the_game_budget_and_later_ones_are_skipped() {
     let bound = 2 * 2 * Limits::DEFAULT.max_read_bytes + budget + 4096;
     assert!(served <= bound, "{served} > {bound}");
 }
+
+// ---------- Regressions from the developer-machine dump (shapes only, invented names) ----------
+
+/// An x86 image with `imports`, `subsystem`, and optionally the CLR directory.
+fn image32(imports: &[&str], subsystem: u16, managed: bool) -> Vec<u8> {
+    let mut b = Builder::x86();
+    b.subsystem = subsystem;
+    b.imports = Some(imports.iter().map(|n| n.as_bytes().to_vec()).collect());
+    if managed {
+        b.dirs = vec![(l::DIR_COM_DESCRIPTOR, testfx::DATA_RVA, 0x48)];
+    }
+    b.build().bytes
+}
+
+fn hinted_scan(sys: &FakeSystem, hint: &str) -> GameExes {
+    scan_game(
+        &game(sys),
+        &Options {
+            name_hint: Some(rel(hint)),
+            ..Options::default()
+        },
+    )
+}
+
+#[test]
+fn a_console_shader_worker_never_beats_the_gui_executables() {
+    // A console shader compile worker with a helper-only import, a GUI start app without
+    // graphics imports, a renamed launcher with Direct3D 9 and a .NET backup launcher.
+    let gui = l::SUBSYSTEM_WINDOWS_GUI;
+    let sys = base()
+        .file(
+            at(r"Binaries\InvShaderCompileWorker.exe"),
+            image32(&["d3dx10_43.dll"], l::SUBSYSTEM_WINDOWS_CUI, false),
+        )
+        .file(at(r"Binaries\InvStartApp.exe"), image32(&[], gui, false))
+        .file(
+            at(r"Binaries\InvLauncher.exe"),
+            image32(&["d3d9.dll"], gui, false),
+        )
+        .file(
+            at(r"Binaries\InvLauncher_BackUP.exe"),
+            image32(&["mscoree.dll"], gui, true),
+        )
+        .build()
+        .unwrap();
+    let r = hinted_scan(&sys, "Invented Asylum");
+    assert_eq!(r.main, Main::One(0));
+    assert_eq!(r.candidates[0].path, rel(r"Binaries\InvStartApp.exe"));
+    assert_eq!(
+        find(&r, r"Binaries\InvShaderCompileWorker.exe").role,
+        Role::Helper
+    );
+    assert_eq!(find(&r, r"Binaries\InvLauncher.exe").role, Role::Launcher);
+    assert_eq!(
+        find(&r, r"Binaries\InvLauncher_BackUP.exe").role,
+        Role::Launcher
+    );
+}
+
+#[test]
+fn the_folder_name_contained_in_the_stem_beats_a_managed_tool() {
+    // A .NET log viewer deep in a tools folder against the game without graphics imports,
+    // whose stem is contained in the install folder name.
+    let gui = l::SUBSYSTEM_WINDOWS_GUI;
+    let sys = base()
+        .file(
+            at(r"tools\logview\logview_viewer.exe"),
+            image32(&["mscoree.dll"], gui, true),
+        )
+        .file(
+            at(r"bin\win32_release\Invented2.exe"),
+            image32(&[], gui, false),
+        )
+        .build()
+        .unwrap();
+    let r = hinted_scan(&sys, "Fortress Invented 2");
+    assert_eq!(r.main, Main::One(0));
+    let main = &r.candidates[0];
+    assert_eq!(main.path, rel(r"bin\win32_release\Invented2.exe"));
+    assert_eq!(main.similarity, 1);
+    assert_eq!(verdict(main), &ApiVerdict::None);
+    assert_eq!(verdict(&r.candidates[1]), &ApiVerdict::Managed);
+}
+
+#[test]
+fn a_launcher_without_the_word_ties_with_the_game() {
+    // Accepted (review of step 14): two GUI executables without graphics imports and without
+    // similarity to the folder name are tied.
+    let gui = l::SUBSYSTEM_WINDOWS_GUI;
+    let sys = base()
+        .file(at("Inv5_Enhanced.exe"), image32(&[], gui, false))
+        .file(at("PlayInv5.exe"), image32(&[], gui, false))
+        .build()
+        .unwrap();
+    let r = hinted_scan(&sys, "Grand Invented Five");
+    assert_eq!(r.main, Main::Tied(vec![0, 1]));
+    assert_eq!(order(&r), ["Inv5_Enhanced.exe", "PlayInv5.exe"]);
+}
+
+#[test]
+fn a_launcher_named_after_the_folder_stays_a_launcher() {
+    let gui = l::SUBSYSTEM_WINDOWS_GUI;
+    let sys = base()
+        .file(at("Invented4.exe"), image32(&["d3d11.dll"], gui, false))
+        .file(
+            at("Invented4Launcher.exe"),
+            image32(&["d3d9.dll"], gui, false),
+        )
+        .build()
+        .unwrap();
+    let r = hinted_scan(&sys, "Invented 4");
+    assert_eq!(r.main, Main::One(0));
+    assert_eq!(r.candidates[0].path, rel("Invented4.exe"));
+    assert_eq!(r.candidates[0].similarity, 2);
+    assert_eq!(find(&r, "Invented4Launcher.exe").role, Role::Launcher);
+}
