@@ -1,0 +1,75 @@
+# ADR 0012 · Steam detection
+
+**Status:** accepted · 2026-11-05 · extends ADR 0004, ADR 0007, ADR 0009, ADR 0011 (amends its typed views)
+
+## Context
+Step 12 of phase 1 turns the pieces of ADR 0011 (`detect::vdf::parse`, `read_store_file`, the views `LibraryFolders` and `AppManifest`) into a list of installed Steam games. Everything it reads is untrusted: the registry values under `HKCU` are writable by every process of the user, the Steam folder grants `Users` full control (ADR 0007), so `libraryfolders.vdf` and every `appmanifest_*.acf` can be edited or planted. Only `HKLM` is admin-written, and it points into the same user-writable folder.
+
+Steam has more than one place for the same fact: the Steam folder is in `HKCU\Software\Valve\Steam` `SteamPath` (rewritten by the client on every start, forward slashes, often lower case) and in `HKLM\SOFTWARE\WOW6432Node\Valve\Steam` `InstallPath` (written by the installer, can be stale after a move); the library list is in `steamapps\libraryfolders.vdf` and, since 2021, also in `config\libraryfolders.vdf`. Installed apps are only partly described by their manifest: `StateFlags` is a bit set whose meaning Valve does not document officially.
+
+Phase 1 is read-only. Nothing found here is changed; the result feeds the exe scan (step 13/14) and `rerun scan` (step 16).
+
+## Decision
+
+### Layers
+- `detect::steam` stays logic on top of `System` (ADR 0004: no `Steam` trait). It reads the registry through `Registry::get` only, and files only through `policy::root` (`StoreDir::open`, `StoreDir::game`), `Dir::open_dir`/`Dir::info`/`Dir::read_dir` relative to a store handle and `detect::vdf::read_store_file`. No new `sys` method, no new dependency, no `unsafe`.
+- Modules: `files` (views, ADR 0011), `text` (`RawText`), `state` (`StateFlags`, `AppState`), `issue` (`Issue`, `Location`, `IssueKind`), `root` (registry candidates, `RootSource`), `library` (library file, opening libraries, listing manifests, `SteamLibrary`, `SteamApp`), `scan` (orchestration, `SteamScan`). `issue` is its own module because `root` and `library` report issues before `scan` exists.
+- `scan(&dyn System, &ForbiddenRoots) -> SteamScan` never fails as a whole: every problem is an `Issue` with a location, and the scan goes on with what is left. The caller resolves `ForbiddenRoots` (fail closed there, ADR 0007); without it nothing is opened.
+- `SteamScan { root: Option<RootSource>, libraries: Vec<SteamLibrary>, issues: Vec<Issue> }`. Library 0 is the Steam root whenever `root` is `Some`. A `SteamLibrary` holds its `StoreDir`, the label and its apps (private fields, getters). Game folders are opened on demand with `SteamLibrary::open_game(&ForbiddenRoots, app_id)`, which looks the app up in that library's own list (an unknown ID is `NotFound`) and calls `StoreDir::game` with its install folder; a `GameDir` borrows the library's store handle and is never opened by absolute path.
+
+### Steam root
+User decision 2026-11-05.
+- Candidates in this order (`RootSource`): `HKCU\Software\Valve\Steam` `SteamPath` (native view), `HKLM\SOFTWARE\Valve\Steam` `InstallPath` in the 32-bit view (never spelled `WOW6432Node`, ADR 0009), the same in the native view.
+- A value counts if it is a string: `REG_SZ`, or `REG_EXPAND_SZ` without `%` (never expanded), or a raw `REG_SZ`/`REG_EXPAND_SZ` (`RegValue::Raw`) that is valid UTF-16LE of even length with no NUL except trailing ones (any number, also none: the tolerant helper ADR 0009 leaves to detection). An empty string, any other type, invalid UTF-16 or an expandable string with `%` is an `Issue` (`RegistryValue`, never with the value). A missing key or value is not an issue; another read error (`AccessDenied`) is.
+- Every present candidate is opened with `StoreDir::open`. The first one that opens is the Steam root and becomes library 0. A later candidate that opens to a different `RootId` is reported (`RootsDisagree`, at the later candidate, naming both folders) and not scanned; one that opens to the same `RootId` (other spelling, junction) is silent. A candidate that fails to open (missing, forbidden, network, volume root) is an `Issue`, also after the root is found (a stale `HKLM` after a move shows up). No candidate: no root, no libraries, no issue beyond the ones above ("Steam not installed").
+- `HKCU` wins because Steam itself rewrites it per user and per start; `HKLM` is not more trustworthy for this purpose, since it points into the same user-writable folder.
+
+### Library list
+User decision 2026-11-05.
+- `steamapps\libraryfolders.vdf` is read first. Only if opening it yields `VdfReadError::Open` with `NotFound` (file or `steamapps` missing) is `config\libraryfolders.vdf` read. Any other failure of the first file (parse or view error, `AccessDenied`, `Busy`, reparse point) is an `Issue` and there is no fallback: the second file is never used to override a damaged or locked first one. The two files are never merged. Neither file: library 0 only, with one `Issue` (the `NotFound` of `steamapps\libraryfolders.vdf`); a failure of `config\libraryfolders.vdf` other than `NotFound` is reported with that file instead.
+- The libraries are library 0 (the root, always, also for the pre-2021 format, which does not list it) followed by the listed ones in file order. Each listed path goes through `StoreDir::open`; a refused one is an `Issue` (at the file and the entry's index) and the others go on. Libraries are de-duplicated by `RootId`, first occurrence wins, silently (current files always list the root again as `"0"`; a junctioned library resolves to the same identity). The root's own entry therefore never contributes its label. At most 256 listed libraries (`MAX_LIBRARIES`); more refuses the whole file (`TooManyLibraries`), library 0 stays.
+- Network libraries are refused by `RootPath` (lexically, or after opening through a mapped drive) as before (v1). Accepted limit: opening a mapped drive contacts the share and can block for the SMB timeout when it is disconnected.
+
+### Manifests
+- `steamapps` is opened as a directory relative to the library handle and listed once. If it is missing, a reparse point, restricted or case-sensitive, the library has no apps and an `Issue`.
+- A manifest is an entry named `appmanifest_<id>.acf`, prefix and suffix compared ASCII case-insensitively, `<id>` with the rules of `appid` (1 to 10 ASCII digits, no leading zero, not 0, fits `u32`). Other names are ignored silently. A name with the prefix and suffix but a bad `<id>` (also an empty one) is an `Issue` (`ManifestName`). A matching entry that is not a plain file (directory, reparse point, restricted) is an `Issue` (`ManifestEntry`) and is never opened; a file with an allowlisted data tag (WOF, cloud files) is a plain file. At most 16,384 entries with the prefix and suffix per library (`MAX_MANIFESTS`), counted before anything is opened or reported; more is one `Issue` (`TooManyManifests`) and the library has no apps (never a partial list).
+- Each manifest is read with `read_store_file` (`steamapps\<name>` relative to the library, `Limits::APP_MANIFEST`) and `AppManifest::from_vdf`. The `<id>` of the file name must equal `appid`; otherwise the app is dropped with an `Issue` (`AppIdMismatch`). `installdir` is classified as a single segment (`policy::path::classify`, not case-sensitive; `StoreDir::game` checks `steamapps\common` itself) before anything is opened; an anomaly drops the app with an `Issue`.
+- User decision 2026-11-05: the same `appid` in more than one library: every copy is kept and each gets a `DuplicateApp` issue naming the first other library holding it and how many more there are (linear in the number of copies, so a forged set of libraries cannot make the issue list quadratic). Detection does not pick a winner; the `apps` map of `libraryfolders.vdf` is not evaluated.
+- Apps are sorted by `appid` within a library. A `SteamApp` holds `app_id`, `name` (`RawText`), `install_dir` (a checked single-segment `RelPath`), `state_flags` and the manifest's `RelPath`.
+
+### `StateFlags`
+`StateFlags(u32)` keeps the raw bits; `AppState` is derived. The bit names follow the community-documented `EAppState` (open-steamworks, SteamKit); Valve publishes no official table, so the derivation uses only the bits below and keeps unknown bits without interpreting them:
+- `NotInstalled`: `FullyInstalled` (4) is not set, or any of `Uninstalled` (1), `Encrypted` (8), `FilesMissing` (32), `FilesCorrupt` (128), `Uninstalling` (2048) is set.
+- `UpdatePending`: otherwise, if any of `UpdateRequired` (2), `UpdateRunning` (256), `UpdatePaused` (512), `UpdateStarted` (1024), `Reconfiguring` (65536), `Validating` (131072), `AddingFiles` (262144), `Preallocating` (524288), `Downloading` (1048576), `Staging` (2097152), `Committing` (4194304), `UpdateStopping` (8388608) is set. The files exist but Steam is about to change them; phase 2 refuses to apply in this state.
+- `Installed`: otherwise. `AppRunning` (64), `Locked` (16) and `BackupRunning` (4096) do not change the state; they matter at apply time, not for detection.
+All apps are reported with their state; the output layer decides what to show.
+
+### Untrusted text
+`Library::path`, `Library::label`, `AppManifest::name`, `AppManifest::install_dir` and the registry path become `RawText` (a newtype over `String`, `detect::steam::text`) instead of `String`. `RawText` has no `Display`, no `Deref`, no `AsRef<str>` or `AsRef<Path>`, no `From`; its `Debug` shows only the length (`RawText(12 bytes)`); it is made with `RawText::new` and the content is reached through the explicitly named `as_raw_str`. So `{:?}` of a view or of a scan result never prints file content, and a raw path cannot reach a `Path` API without a visible call. This amends ADR 0011 ("Paths stay raw strings").
+
+### Issues
+`Issue { at: Location, kind: IssueKind }`, both `#[non_exhaustive]`; `Display` is `<location>: <kind>`. Locations: a registry candidate, the root's library file, one entry of it (by index), a library, a manifest entry of a library. Issues reuse the existing errors (`SysError`, `RootError`, `VdfReadError`, `ViewError`, `Anomaly`) and add only what they lack (`RootsDisagree`, `TooManyLibraries`, `CaseSensitiveSteamapps`, `ManifestName`, `ManifestEntry`, `TooManyManifests`, `AppIdMismatch`, `DuplicateApp`, `RegistryValue`). They never contain file or registry content other than paths and names the user has to see to understand the issue (a refused library path, an anomalous install folder name, a manifest entry name). Raw ones appear only in their escaped (`{:?}`) form, as `PathError` and `Anomaly` already do; paths that passed `RootPath` or `RelPath` (no control, bidi or confusable characters) are printed as they are, as `RootError` already does. Output layers sanitize further (CLI step 16).
+
+### `Busy`
+User decision 2026-11-05: no retry in `detect::steam`: a `Busy` (Steam writing a manifest at that moment) is an `Issue` like any other read failure, and it never triggers the `config\libraryfolders.vdf` fallback. Running the scan again is the retry. Possible follow-up after the acceptance on the developer machine (phase 1, `rerun scan`): a bounded retry if `Busy` turns out to be common there.
+
+### Smoke test on the developer machine
+User decision 2026-11-05: `dump_steam_scan` (`#[ignore]`, `detect/steam/scan/tests.rs`, Windows only) runs `scan` against `WinSystem` and the real known folders (the test binary's folder stands in for Rerun's install folder) and opens each app's game folder. It only reads: it writes no file, no registry value, nothing under `target/`. It prints names only escaped or as their length, never the app name or the library label. Run only by hand (`cargo test -p rerun-core --lib dump_steam_scan -- --ignored --nocapture`), never in CI; its output is never committed.
+
+## Alternatives
+- **`HKLM` first** (admin-written): not more trustworthy here and stale after a move or for a copied Steam folder.
+- **Reading both `libraryfolders.vdf` and merging them:** two sources that can disagree with no rule for who wins; the `steamapps` file is the one every established tool reads.
+- **Using the `apps` map of `libraryfolders.vdf` to pick a winner for duplicate app IDs:** more parsing of untrusted data for a rare case; the copies are real folders and the user can choose.
+- **Failing the scan on the first problem:** one forged or offline library would hide every game.
+- **A bounded sleep-and-retry on `Busy`:** adds timing to the core and slows tests; deferred until the acceptance on the developer machine shows it is needed.
+- **Holding open `GameDir`s in the scan result:** self-referential (a `GameDir` borrows its store); reopening on demand also matches how plans reopen roots by identity.
+- **`steamlocate` or another crate:** reads by absolute path (ADR 0007) and brings dependencies (ADR 0011).
+
+## Consequences
+- `detect::steam::files` changes its field types (`RawText`); no persisted format exists yet, no migration.
+- A junctioned `steamapps` folder (a user moved it by hand instead of adding a library) yields no apps and an `Issue`; Rerun never follows it (ADR 0007).
+- Apps without a game folder below `steamapps\common` (soundtracks in `steamapps\music`, tools) show up as apps and fail `open_game` with `NotFound`; non-game apps are not filtered in phase 1.
+- The manifests are listed through the `steamapps` handle but read by name relative to the library (`read_store_file`): if `steamapps` is replaced between listing and reading, the read goes through the new entry under the same rules (a junction is `ReparsePoint`, never followed); the replacement lies in the same user-writable library, so nothing outside it is reached.
+- The registry values and files read are exactly: the three values above, `steamapps\libraryfolders.vdf` or `config\libraryfolders.vdf` of the root, the listing of `steamapps` and `steamapps\appmanifest_*.acf` of each library, and, on `open_game`, `steamapps\common` and `steamapps\common\<installdir>` (opened by `StoreDir::game`, with the metadata of the game entry for the identity check). Documented in `docs/06-security.md` (scenario 12) for the transparency of the first-start dialog.
+- Tests: `docs/09-testing.md`, "Steam detection"; all against `sys::fake`, plus the manual `dump_steam_scan` and the manual-matrix rows (disconnected mapped network drive, junction at `steamapps`, 64-bit client registry).
+- A manual library (user-added Steam library folder, open product question) would reuse the per-library listing on a `StoreDir`; nothing in this design needs to change for it.
