@@ -436,9 +436,13 @@ fn views_on_mutated_fixtures_never_panic() {
     const BYTES: &[u8] = b"\"{}\\0 a19\n";
     let fixtures: [&[u8]; 5] = [LIB_CURRENT, LIB_LEGACY, LIB_COMMENTS, ACF_MINIMAL, ACF_FULL];
     let mut rng = Rng(0x5DEE_CE66_D1CE_5EED);
-    let (mut ok, mut refused) = (0, 0);
+    // Only the view matching the fixture counts: the other one always fails on `Root`,
+    // which would satisfy "refused" without any mutation.
+    let (mut ok, mut refused) = ([0usize; 2], [0usize; 2]);
     for _ in 0..ROUNDS {
-        let mut buf = fixtures[rng.below(fixtures.len())].to_vec();
+        let pick = rng.below(fixtures.len());
+        let view = usize::from(pick >= 3);
+        let mut buf = fixtures[pick].to_vec();
         for _ in 0..=rng.below(2) {
             let at = rng.below(buf.len());
             match rng.below(3) {
@@ -452,18 +456,21 @@ fn views_on_mutated_fixtures_never_panic() {
         let Ok(d) = parse(&buf, &Limits::LIBRARY_FOLDERS) else {
             continue;
         };
-        for r in [
-            LibraryFolders::from_vdf(&d).map(|_| ()),
-            AppManifest::from_vdf(&d).map(|_| ()),
-        ] {
-            match r {
-                Ok(()) => ok += 1,
-                Err(e) => {
-                    assert!(!e.to_string().is_empty());
-                    refused += 1;
-                }
+        let r = if view == 0 {
+            LibraryFolders::from_vdf(&d).map(|_| ())
+        } else {
+            AppManifest::from_vdf(&d).map(|_| ())
+        };
+        match r {
+            Ok(()) => ok[view] += 1,
+            Err(e) => {
+                assert!(!e.to_string().is_empty());
+                refused[view] += 1;
             }
         }
     }
-    assert!(ok > 0 && refused > 0, "ok {ok}, refused {refused}");
+    assert!(
+        ok.iter().chain(&refused).all(|&n| n > 0),
+        "ok {ok:?}, refused {refused:?}"
+    );
 }

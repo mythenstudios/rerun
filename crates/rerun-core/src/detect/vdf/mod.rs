@@ -557,12 +557,20 @@ impl Parser<'_> {
 
     /// The input between two ASCII positions (always char boundaries).
     fn slice(&self, from: usize, to: usize) -> &str {
+        debug_assert!(
+            self.text.is_char_boundary(from) && self.text.is_char_boundary(to),
+            "slice off a char boundary"
+        );
         self.text.get(from..to).unwrap_or_default()
     }
 
     /// The character starting at `at` (a char boundary: only ASCII bytes are ever skipped
     /// singly), U+FFFD if not.
     fn char_at(&self, at: usize) -> CodePoint {
+        debug_assert!(
+            self.text.is_char_boundary(at),
+            "char_at off a char boundary"
+        );
         CodePoint(
             self.text
                 .get(at..)
