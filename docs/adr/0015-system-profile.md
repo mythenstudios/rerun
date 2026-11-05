@@ -180,7 +180,7 @@ pub struct ArchEntry {
 - **Phase 4 YAML loader:** typed `u32` in `serde-saphyr` 2.1.0 accepts quoted `"0x1002"`, `0o17`, `4_098` and `!!int`, while the schema refuses `"0x1002"`. The loader needs a strict integer visitor and fixtures for these forms, and it must refuse float forms as well (`30032.0`, `1e3`): JSON Schema 2020-12 counts `30032.0` as an integer, so the schema accepts it (fixture `gpu-arch-device-float.yaml`, listed as schema-valid and refused by the strict test conversion). No amendment of ADR 0005 now.
 - Whether the built-in table stays as an offline fallback after phase 4: decided by phase 4.
 - Efficiency classes of Zen 5c (Strix Point): verify on hardware or a dump before a Topo relies on `cpu.hybrid` for AMD.
-- Step 16 shows adapter names (driver) and table `source` texts through one sanitizer for untrusted strings: `new` refuses control and bidi characters only, so U+2028/U+2029, U+200B, U+FEFF and tag characters pass and must be handled at display.
+- **Closed by ADR 0016:** adapter names (driver) and table `source` texts are shown through `rerun_core::escape::text`, which also escapes what `new` lets pass (U+2028/U+2029, U+200B, U+FEFF, tag characters).
 - Phase 3: a source-rule test that the elevated helper's code never references `hw::` (it never builds a profile or evaluates `when`).
 - Phase 4: the pairing rule must hold by construction: the Topo loader and `hw::read` get the same table instance from one index object. The profile only records whether a table was given, not which one.
 - Licence check of each bulk source (vendor INF files and documentation, Mesa under MIT, the PCI ID Repository under BSD-3-Clause with a notice) before the full table is imported.

@@ -1,6 +1,6 @@
 # ADR 0008 · Win32 bindings
 
-**Status:** accepted · 2026-11-04 · amended 2026-11-05 (DLL hardening; DXGI on `windows-sys`)
+**Status:** accepted · 2026-11-04 · amended 2026-11-05 (DLL hardening; DXGI on `windows-sys`; import allowlist per binary)
 
 ## Context
 Phase 1 needs NT file APIs (`NtCreateFile`), registry, CPU sets, version info and GPU enumeration. Phase 3 needs Job Objects, IFEO and the firewall COM interface (`INetFwPolicy2`). `rerun-launch` and `rerun-cpu` must stay small (ADR 0006). `windows-sys` 0.61 no longer contains COM interfaces such as DXGI.
@@ -53,6 +53,16 @@ Supersedes the `windows` bullet of the decision for DXGI. `windows-sys` 0.61.2 h
 - **Bans** (`clippy.toml`, checked by `sys/win/bans.rs`): `D3DKMTEnumAdapters`, `D3DKMTEnumAdapters2`, `D3DKMTEnumAdapters3`, `D3DKMTQueryAdapterInfo` and `D3DKMTOpenAdapterFromLuid` everywhere (GPU data only through `dxgi`); COM activation (`CoCreateInstance`, `CoCreateInstanceEx`, `CoGetClassObject`, `CoInitialize`, `CoInitializeEx`, `CoGetObject`) until phase 3 gives it one wrapper with `CLSCTX_INPROC_SERVER` only. `CreateDXGIFactory`, `CreateDXGIFactory1`, `CreateDXGIFactory2`, `DXGIGetDebugInterface1`, `DXGIDeclareAdapterRemovalSupport` and `DXCoreCreateAdapterFactory` do not exist in `windows-sys` 0.61 and cannot be listed; they are reachable only through `GetProcAddress`, which is banned outside `loader`, or through a hand-written import, which the source rule refuses (and which the import allowlists of the shipped binaries and of the `WinSystem` test binary would also catch). Security review of step 10 added the remaining COM activation paths: `CoCreateInstanceFromApp`, `BindMoniker`, `CoRegisterClassObject`, `CoInitializeSecurity`, `CoGetInstanceFromFile`, `CoGetClassObjectFromURL`, `OleInitialize`. The ones behind `windows-sys` features `rerun-core` does not use (`Win32_System_Com_StructuredStorage`, `Win32_System_Com_Urlmon`, `Win32_System_Ole`, `Win32_System_ClrHosting`) resolve through test-only features of the existing dev-dependency, so `bans.rs` checks every entry.
 - **Found on the developer machine (2026-11-05, Ryzen 9 5950X, RX 9070 XT, Windows 11 build 26300):** two adapters, `AMD Radeon RX 9070 XT` (vendor `0x1002`, device `0x7550`, 16 GiB, driver `32.0.32015.7029`) and `Microsoft Basic Render Driver` (vendor `0x1414`, device `0x8c`, software, `10.0.26100.9711`); the first enumeration (loads `dxgi.dll`) takes about 11 ms, a later one under 1 ms. The same list comes back with the DLL search path restricted to System32.
 - **Phase 3:** the firewall COM interface (`INetFwPolicy2`) re-evaluates the `windows` crate (0.62); until then no crate is added.
+
+## Amendment 2026-11-05: import allowlist per binary (ADR 0016)
+
+From phase 1 step 16 `rerun.exe` builds `WinSystem` and links all of it, so its static imports are no longer those of `rerun-launch.exe`. The hardening policy (`tests/support/hardening.rs`) takes the allowlist as a parameter, `check_hardened(image, allowed)` and `check_hardened_file(path, allowed)`, with one list per binary:
+- `LAUNCH_IMPORTS` for `rerun-launch.exe`: the former `SHIPPED_IMPORTS`, unchanged (`kernel32.dll`, `ntdll.dll`, `api-ms-win-core-synch-l1-2-0.dll`).
+- `CLI_IMPORTS` for `rerun.exe`: the former `CORE_IMPORTS` of `crates/rerun-core/tests/win_gpu_restricted.rs`, moved here; it adds `advapi32.dll`, `combase.dll`, `shell32.dll` (from `windows-sys`) and `bcryptprimitives.dll`, `userenv.dll` (from `std`). `win_gpu_restricted.rs` checks its own binary against the same list, so the binary that links all of `WinSystem` and `rerun.exe` cannot drift apart.
+
+The forbidden names (graphics DLLs, dynamic CRT), the `DependentLoadFlags` check and the empty delay-import table apply to every list. A new import of either binary still fails its test and needs a review, then its list and this ADR. The PE writer of the teeth test moves to `tests/support/pe_image.rs`, which the CLI tests include as well.
+
+Alternative rejected: one list for both binaries, which would grant `rerun-launch.exe` `advapi32`, `combase` and `shell32` without review, against its minimal surface (ADR 0006).
 
 ### Alternatives (DXGI)
 - **`windows` 0.62 (`Win32_Graphics_Dxgi`):** generated, reviewed bindings and reference counting, but about nine `windows-*` crates plus the build-time proc-macro crates `windows-implement`/`windows-interface` with `syn`/`quote`, and its `CreateDXGIFactory1` is a static import of `dxgi.dll` (which the hardening forbids), all for four methods. Re-evaluated with the firewall in phase 3.
