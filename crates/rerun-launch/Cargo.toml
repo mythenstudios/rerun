@@ -16,5 +16,11 @@ publish.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
 
+# Test only: the hardening test reads the built shim with rerun_core::detect::pe (ADR 0013,
+# "Hardening tests"). A dev-dependency never reaches the shipped binary (`cargo tree -e normal`,
+# the size build uses -p without dev-dependencies).
+[dev-dependencies]
+rerun-core.workspace = true
+
 [lints]
 workspace = true

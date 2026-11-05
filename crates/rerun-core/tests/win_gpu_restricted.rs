@@ -17,8 +17,8 @@
 use rerun_core::sys::win::{WinSystem, restrict_dll_search};
 use rerun_core::sys::{KnownFolder, SysErrorKind, System};
 
-#[path = "../../../tests/support/pe_min.rs"]
-mod pe_min;
+#[path = "../../../tests/support/hardening.rs"]
+mod hardening;
 
 /// The static imports of a binary that uses `WinSystem` and the GPU, plus the test harness
 /// (exact, case-insensitive). Found on 2026-11-05. A new one fails the test: review it, then
@@ -64,10 +64,8 @@ fn win_system_gpu_with_the_dll_search_path_restricted_to_system32() {
     let dir = sys.fs().open_dir(&windows).unwrap();
     assert!(!dir.read_dir(None).unwrap().is_empty());
     let exe = std::env::current_exe().unwrap();
-    let image = std::fs::read(&exe).unwrap();
-    let pe = pe_min::Pe::parse(&image).unwrap_or_else(|e| panic!("{e}"));
-    let imports = pe.imports().unwrap_or_else(|e| panic!("{e}"));
-    eprintln!("imports: {}", imports.join(", "));
-    pe_min::check_imports(&imports, CORE_IMPORTS).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(pe.delay_imports(), Ok(vec![]));
+    let (imports, delayed) = hardening::imports_of(&exe).unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("imports: {}", hardening::joined(&imports));
+    hardening::check_imports(&imports, CORE_IMPORTS).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(delayed, vec![]);
 }

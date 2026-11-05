@@ -751,6 +751,7 @@ version = "0.1.0"
 name = "rerun-launch"
 version = "0.1.0"
 dependencies = [
+ "rerun-core",
  "windows-sys",
 ]
 
