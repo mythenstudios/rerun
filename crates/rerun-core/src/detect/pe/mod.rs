@@ -14,6 +14,11 @@
 //! - [`Pe::imports`], [`Pe::delay_imports`]: the imported DLL names ([`DllName`]), in table
 //!   order; no function names, ordinals, exports or forwarders (phase 6 may add them).
 //! - [`Pe::dependent_load_flags`]: `DependentLoadFlags` of the load config.
+//! - [`Pe::version_info`]: the version resource ([`VersionInfo`]: the fixed part and six
+//!   strings of one string table, as [`RawText`](crate::detect::text::RawText)), tolerant of
+//!   the quirks of old toolchains.
+//! - [`Pe::info`]: all of it at once ([`PeInfo`]); a broken version resource does not hide
+//!   the headers and imports, a broken import table fails the file.
 //! - Errors ([`PeError`]) carry a kind and a file offset, never file content.
 //!
 //! Facts read here are hints for display, matching and suggestions, never authorization
@@ -24,6 +29,8 @@ mod headers;
 mod imports;
 pub mod layout;
 mod reader;
+mod resource;
+mod version;
 
 #[cfg(test)]
 mod testfx;
@@ -34,6 +41,7 @@ use std::io::{Read, Seek};
 
 pub use error::{LegacyFormat, PeError, PeErrorKind};
 pub use imports::DllName;
+pub use version::{FixedFileInfo, StringTableId, VersionInfo, VersionStrings};
 
 use headers::Layout;
 use reader::Source;
@@ -135,6 +143,20 @@ impl Headers {
     }
 }
 
+/// Everything [`Pe::info`] reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeInfo {
+    /// Facts from the headers.
+    pub headers: Headers,
+    /// DLL names of the import directory.
+    pub imports: Vec<DllName>,
+    /// DLL names of the delay-import directory.
+    pub delay_imports: Vec<DllName>,
+    /// The version resource, or why it could not be read: a malformed version resource does
+    /// not hide the rest (user decision 3, ADR 0013).
+    pub version: Result<Option<VersionInfo>, PeError>,
+}
+
 /// A parsed executable over its reader. Further facts are read on demand within the same
 /// budget.
 ///
@@ -171,6 +193,21 @@ impl<R: Read + Seek> Pe<R> {
     /// Bytes charged to the budget so far.
     pub fn bytes_read(&self) -> u64 {
         self.source.used()
+    }
+
+    /// Headers, imports, delay imports and the version resource. A malformed import table
+    /// fails the whole call (the loader would refuse such an image); a malformed version
+    /// resource is kept as [`PeInfo::version`].
+    pub fn info(&mut self) -> Result<PeInfo, PeError> {
+        let imports = self.imports()?;
+        let delay_imports = self.delay_imports()?;
+        let version = self.version_info();
+        Ok(PeInfo {
+            headers: self.layout.headers.clone(),
+            imports,
+            delay_imports,
+            version,
+        })
     }
 
     /// Hands the reader back (e.g. to hash the very handle that was parsed).

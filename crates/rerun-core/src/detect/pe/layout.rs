@@ -1,6 +1,6 @@
-//! Offsets and constants of the PE format, written out from `winnt.h` (SDK 10.0.26100), ADR
-//! 0013. Offsets are relative to the start of their structure. A Windows-only test pins them
-//! against the `windows-sys` structures and constants.
+//! Offsets and constants of the PE format, written out from `winnt.h`, `winuser.h` and
+//! `verrsrc.h` (SDK 10.0.26100), ADR 0013. Offsets are relative to the start of their
+//! structure. A Windows-only test pins them against the `windows-sys` structures and constants.
 
 /// `IMAGE_DOS_SIGNATURE`.
 pub const DOS_SIGNATURE: &[u8; 2] = b"MZ";
@@ -111,6 +111,62 @@ pub const LOAD_CONFIG_SIZE: usize = 0;
 pub const LOAD_CONFIG32_DEPENDENT_LOAD_FLAGS: usize = 0x36;
 /// `IMAGE_LOAD_CONFIG_DIRECTORY64::DependentLoadFlags`.
 pub const LOAD_CONFIG64_DEPENDENT_LOAD_FLAGS: usize = 0x4E;
+
+/// Size of `IMAGE_RESOURCE_DIRECTORY`.
+pub const RESOURCE_DIRECTORY_SIZE: usize = 16;
+/// `IMAGE_RESOURCE_DIRECTORY::NumberOfNamedEntries`.
+pub const RESOURCE_NUMBER_OF_NAMED_ENTRIES: usize = 12;
+/// `IMAGE_RESOURCE_DIRECTORY::NumberOfIdEntries`.
+pub const RESOURCE_NUMBER_OF_ID_ENTRIES: usize = 14;
+/// Size of `IMAGE_RESOURCE_DIRECTORY_ENTRY`.
+pub const RESOURCE_ENTRY_SIZE: usize = 8;
+/// `IMAGE_RESOURCE_DIRECTORY_ENTRY::Name` (or `Id`).
+pub const RESOURCE_ENTRY_NAME: usize = 0;
+/// `IMAGE_RESOURCE_DIRECTORY_ENTRY::OffsetToData`.
+pub const RESOURCE_ENTRY_OFFSET_TO_DATA: usize = 4;
+/// `IMAGE_RESOURCE_NAME_IS_STRING`.
+pub const RESOURCE_NAME_IS_STRING: u32 = 0x8000_0000;
+/// `IMAGE_RESOURCE_DATA_IS_DIRECTORY`.
+pub const RESOURCE_DATA_IS_DIRECTORY: u32 = 0x8000_0000;
+/// Size of `IMAGE_RESOURCE_DATA_ENTRY`.
+pub const RESOURCE_DATA_ENTRY_SIZE: usize = 16;
+/// `IMAGE_RESOURCE_DATA_ENTRY::OffsetToData` (an RVA).
+pub const RESOURCE_DATA_OFFSET_TO_DATA: usize = 0;
+/// `IMAGE_RESOURCE_DATA_ENTRY::Size`.
+pub const RESOURCE_DATA_SIZE: usize = 4;
+/// `RT_VERSION` (`winuser.h`).
+pub const RT_VERSION: u16 = 16;
+/// `VS_VERSION_INFO` (`verrsrc.h`), the resource ID of the version resource.
+pub const VS_VERSION_INFO: u16 = 1;
+/// `LANG_NEUTRAL` with `SUBLANG_NEUTRAL`.
+pub const LANG_NEUTRAL: u16 = 0x0000;
+/// `MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)`.
+pub const LANG_EN_US: u16 = 0x0409;
+
+/// Size of `VS_FIXEDFILEINFO` (`verrsrc.h`).
+pub const FIXED_FILE_INFO_SIZE: usize = 52;
+/// `VS_FFI_SIGNATURE`.
+pub const FIXED_SIGNATURE_VALUE: u32 = 0xFEEF_04BD;
+/// `VS_FIXEDFILEINFO::dwSignature`.
+pub const FIXED_SIGNATURE: usize = 0;
+/// `VS_FIXEDFILEINFO::dwFileVersionMS`.
+pub const FIXED_FILE_VERSION_MS: usize = 8;
+/// `VS_FIXEDFILEINFO::dwFileVersionLS`.
+pub const FIXED_FILE_VERSION_LS: usize = 12;
+/// `VS_FIXEDFILEINFO::dwProductVersionMS`.
+pub const FIXED_PRODUCT_VERSION_MS: usize = 16;
+/// `VS_FIXEDFILEINFO::dwProductVersionLS`.
+pub const FIXED_PRODUCT_VERSION_LS: usize = 20;
+/// `VS_FIXEDFILEINFO::dwFileFlagsMask`.
+pub const FIXED_FILE_FLAGS_MASK: usize = 24;
+/// `VS_FIXEDFILEINFO::dwFileFlags`.
+pub const FIXED_FILE_FLAGS: usize = 28;
+/// `VS_FIXEDFILEINFO::dwFileOS`.
+pub const FIXED_FILE_OS: usize = 32;
+/// `VS_FIXEDFILEINFO::dwFileType`.
+pub const FIXED_FILE_TYPE: usize = 36;
+/// `VS_FIXEDFILEINFO::dwFileSubtype`.
+pub const FIXED_FILE_SUBTYPE: usize = 40;
 
 /// `IMAGE_SUBSYSTEM_NATIVE`.
 pub const SUBSYSTEM_NATIVE: u16 = 1;

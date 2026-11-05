@@ -60,6 +60,8 @@ pub(super) struct Builder {
     pub delay: Option<Vec<(Vec<u8>, bool)>>,
     /// Load config: its `Size` field and `DependentLoadFlags`.
     pub load_config: Option<(u32, u16)>,
+    /// Resource directory: the entries of the root table.
+    pub resources: Option<Vec<(ResId, Node)>>,
 }
 
 /// A built image and where its parts are.
@@ -80,6 +82,8 @@ pub(super) struct Image {
     pub delay_table: Option<usize>,
     /// File offset of the load config.
     pub load_config: Option<usize>,
+    /// File offset of the resource directory (its root table).
+    pub rsrc: Option<usize>,
     /// File offsets of the generated DLL names: imports, then delay imports.
     pub names: Vec<usize>,
 }
@@ -103,7 +107,14 @@ impl Builder {
             imports: None,
             delay: None,
             load_config: None,
+            resources: None,
         }
+    }
+
+    /// The image with `blob` as its version resource ([`version_tree`]).
+    pub fn with_version(mut self, blob: Vec<u8>) -> Self {
+        self.resources = Some(version_tree(blob));
+        self
     }
 
     /// An x86 GUI executable (PE32), not Large Address Aware, nothing imported.
@@ -158,6 +169,18 @@ impl Builder {
             .map(|(n, rva_based)| (name(&mut data, n), *rva_based))
             .collect();
         let align8 = |data: &mut Vec<u8>| data.resize(align(data.len(), 8), 0);
+        if let Some(root) = &self.resources {
+            align8(&mut data);
+            let at = data.len();
+            let tree = encode_tree(root, Self::rva(at));
+            data.extend_from_slice(&tree);
+            g.rsrc = Some(at);
+            dirs.push((
+                l::DIR_RESOURCE,
+                Self::rva(at),
+                u32::try_from(tree.len()).unwrap(),
+            ));
+        }
         if let Some((size, flags)) = self.load_config {
             align8(&mut data);
             let at = data.len();
@@ -316,6 +339,7 @@ impl Builder {
             import_table: g.import_table.map(file),
             delay_table: g.delay_table.map(file),
             load_config: g.load_config.map(file),
+            rsrc: g.rsrc.map(file),
             names: g.names.into_iter().map(file).collect(),
         }
     }
@@ -327,6 +351,7 @@ struct Generated {
     import_table: Option<usize>,
     delay_table: Option<usize>,
     load_config: Option<usize>,
+    rsrc: Option<usize>,
     names: Vec<usize>,
 }
 
@@ -358,3 +383,237 @@ pub(super) fn new_exe(sig: &[u8; 2]) -> Vec<u8> {
     put(&mut b, 0x80, sig);
     b
 }
+
+// ---------- Resources ----------
+
+/// The name or ID of a resource directory entry.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ResId {
+    Id(u16),
+    /// A named entry (its string is never read; the name offset is 0).
+    Name,
+}
+
+/// A resource directory node.
+#[derive(Debug, Clone)]
+pub(super) enum Node {
+    Dir(Vec<(ResId, Node)>),
+    Data(Vec<u8>),
+}
+
+/// `RT_VERSION` → ID 1 → language 0x0409 → `blob`. Encoded: root table at 0, the ID table at
+/// [`TREE_NAMES`], the language table at [`TREE_LANGS`], the data entry at [`TREE_ENTRY`], the
+/// blob at [`TREE_BLOB`].
+pub(super) fn version_tree(blob: Vec<u8>) -> Vec<(ResId, Node)> {
+    vec![(
+        ResId::Id(l::RT_VERSION),
+        Node::Dir(vec![(
+            ResId::Id(1),
+            Node::Dir(vec![(ResId::Id(l::LANG_EN_US), Node::Data(blob))]),
+        )]),
+    )]
+}
+
+/// Offsets of the parts of [`version_tree`] below the resource directory.
+pub(super) const TREE_NAMES: usize = 24;
+pub(super) const TREE_LANGS: usize = 48;
+pub(super) const TREE_ENTRY: usize = 72;
+pub(super) const TREE_BLOB: usize = 88;
+
+fn encode_table(entries: &[(ResId, Node)], buf: &mut Vec<u8>, base: u32) -> u32 {
+    let at = buf.len();
+    let named = entries
+        .iter()
+        .filter(|(id, _)| matches!(id, ResId::Name))
+        .count();
+    buf.resize(at + 16 + 8 * entries.len(), 0);
+    put16(buf, at + 12, u16::try_from(named).unwrap());
+    put16(buf, at + 14, u16::try_from(entries.len() - named).unwrap());
+    for (i, (id, node)) in entries.iter().enumerate() {
+        let name = match id {
+            ResId::Id(v) => u32::from(*v),
+            ResId::Name => l::RESOURCE_NAME_IS_STRING,
+        };
+        let target = match node {
+            Node::Dir(children) => {
+                encode_table(children, buf, base) | l::RESOURCE_DATA_IS_DIRECTORY
+            }
+            Node::Data(bytes) => {
+                let e = align(buf.len(), 4);
+                buf.resize(e + 16, 0);
+                let d = buf.len();
+                buf.extend_from_slice(bytes);
+                put32(buf, e, base + u32::try_from(d).unwrap());
+                put32(buf, e + 4, u32::try_from(bytes.len()).unwrap());
+                u32::try_from(e).unwrap()
+            }
+        };
+        put32(buf, at + 16 + 8 * i, name);
+        put32(buf, at + 20 + 8 * i, target);
+    }
+    u32::try_from(at).unwrap()
+}
+
+/// Encodes a resource directory whose root table holds `root`, depth first; `base` is its RVA.
+pub(super) fn encode_tree(root: &[(ResId, Node)], base: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    encode_table(root, &mut buf, base);
+    buf
+}
+
+// ---------- VS_VERSIONINFO ----------
+
+/// The value of a version block.
+#[derive(Debug, Clone)]
+pub(super) enum Value {
+    None,
+    Bin(Vec<u8>),
+    /// UTF-16 text plus its NUL; `wValueLength` in words (the specification).
+    Text(String),
+    /// Raw UTF-16 units, no NUL added.
+    Units(Vec<u16>),
+}
+
+/// A version block to encode.
+#[derive(Debug, Clone)]
+pub(super) struct Vs {
+    pub key: String,
+    pub value: Value,
+    /// `wValueLength` instead of the computed one.
+    pub value_len: Option<u16>,
+    /// `wLength` instead of the computed one.
+    pub length: Option<u16>,
+    pub children: Vec<Vs>,
+}
+
+impl Vs {
+    pub fn new(key: &str, value: Value, children: Vec<Vs>) -> Self {
+        Self {
+            key: key.to_owned(),
+            value,
+            value_len: None,
+            length: None,
+            children,
+        }
+    }
+
+    /// A string block `key` = `value`.
+    pub fn string(key: &str, value: &str) -> Self {
+        Self::new(key, Value::Text(value.to_owned()), Vec::new())
+    }
+
+    /// The encoded block, as the root of a resource.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.write(&mut out);
+        out
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        out.resize(align(out.len(), 4), 0);
+        let start = out.len();
+        out.resize(start + 6, 0);
+        for u in self.key.encode_utf16().chain([0]) {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+        out.resize(align(out.len(), 4), 0);
+        let value_len = match &self.value {
+            Value::None => 0,
+            Value::Bin(b) => {
+                out.extend_from_slice(b);
+                b.len()
+            }
+            Value::Text(t) => {
+                let units: Vec<u16> = t.encode_utf16().chain([0]).collect();
+                for u in &units {
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+                units.len()
+            }
+            Value::Units(units) => {
+                for u in units {
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+                units.len()
+            }
+        };
+        for c in &self.children {
+            c.write(out);
+        }
+        let length = self
+            .length
+            .unwrap_or_else(|| u16::try_from(out.len() - start).unwrap());
+        let value_len = self
+            .value_len
+            .unwrap_or_else(|| u16::try_from(value_len).unwrap());
+        put16(out, start, length);
+        put16(out, start + 2, value_len);
+        let w_type = u16::from(matches!(self.value, Value::Text(_) | Value::Units(_)));
+        put16(out, start + 4, w_type);
+    }
+}
+
+/// A `VS_FIXEDFILEINFO` with file version `file` and product version `product`.
+pub(super) fn fixed_info(file: [u16; 4], product: [u16; 4]) -> Vec<u8> {
+    let mut b = vec![0u8; l::FIXED_FILE_INFO_SIZE];
+    let ms = |v: [u16; 4]| u32::from(v[0]) << 16 | u32::from(v[1]);
+    let ls = |v: [u16; 4]| u32::from(v[2]) << 16 | u32::from(v[3]);
+    put32(&mut b, l::FIXED_SIGNATURE, l::FIXED_SIGNATURE_VALUE);
+    put32(&mut b, 4, 0x0001_0000);
+    put32(&mut b, l::FIXED_FILE_VERSION_MS, ms(file));
+    put32(&mut b, l::FIXED_FILE_VERSION_LS, ls(file));
+    put32(&mut b, l::FIXED_PRODUCT_VERSION_MS, ms(product));
+    put32(&mut b, l::FIXED_PRODUCT_VERSION_LS, ls(product));
+    put32(&mut b, l::FIXED_FILE_FLAGS_MASK, 0x3F);
+    put32(&mut b, l::FIXED_FILE_FLAGS, 0);
+    put32(&mut b, l::FIXED_FILE_OS, 0x0004_0004);
+    put32(&mut b, l::FIXED_FILE_TYPE, 1);
+    put32(&mut b, l::FIXED_FILE_SUBTYPE, 0);
+    b
+}
+
+/// A string table `key` (8 hex digits) with `strings`.
+pub(super) fn string_table(key: &str, strings: &[(&str, &str)]) -> Vs {
+    Vs::new(
+        key,
+        Value::None,
+        strings.iter().map(|(k, v)| Vs::string(k, v)).collect(),
+    )
+}
+
+/// `VarFileInfo` with one `Translation` pair.
+pub(super) fn var_file_info(language: u16, codepage: u16) -> Vs {
+    let mut pair = language.to_le_bytes().to_vec();
+    pair.extend_from_slice(&codepage.to_le_bytes());
+    Vs::new(
+        "VarFileInfo",
+        Value::None,
+        vec![Vs::new("Translation", Value::Bin(pair), Vec::new())],
+    )
+}
+
+/// A complete `VS_VERSION_INFO`: fixed part, `StringFileInfo` with `tables`, then
+/// `VarFileInfo` with `translation`.
+pub(super) fn version_info(tables: Vec<Vs>, translation: Option<(u16, u16)>) -> Vs {
+    let mut children = vec![Vs::new("StringFileInfo", Value::None, tables)];
+    if let Some((language, codepage)) = translation {
+        children.push(var_file_info(language, codepage));
+    }
+    Vs::new(
+        "VS_VERSION_INFO",
+        Value::Bin(fixed_info([1, 2, 3, 4], [1, 2, 0, 0])),
+        children,
+    )
+}
+
+/// The usual game executable's strings (invented).
+pub(super) const STRINGS: &[(&str, &str)] = &[
+    ("CompanyName", "Invented Games"),
+    ("FileDescription", "Invented Game"),
+    ("FileVersion", "1.2.3.4"),
+    ("InternalName", "game"),
+    ("LegalCopyright", "(c) nobody"),
+    ("OriginalFilename", "game.exe"),
+    ("ProductName", "Invented"),
+    ("ProductVersion", "1.2"),
+];
