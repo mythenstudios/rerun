@@ -117,7 +117,7 @@ entries:
 - Each `(vendor, device)` is covered at most once; revision and subsystem IDs are not keys. Full validation rules and limits: ADR 0015.
 - Device IDs come from public sources (vendor documentation, driver INF files, the PCI ID Repository). Check each source's licence before importing in bulk (`05-sources-policy.md`, "Reference data").
 - Intel ties the D3D9 path to the CPU generation, not the GPU family, so `dx9` is per entry, never per arch.
-- An unknown ID gives `arch: unknown`, is logged, and the UI says "GPU generation unknown, update the index". Topos with `gpu.arch` conditions then do not match; vendor conditions still do.
+- An unknown ID gives the profile state `GpuArch::Unknown` (never a value a Topo can name). `hw` logs nothing; from step 16 `rerun system` and later the UI say "GPU generation unknown, update the index". Topos with `gpu.arch` conditions then do not match; vendor conditions still do.
 
 ## Cases
 
@@ -151,7 +151,7 @@ The DXVK authors state they do not and cannot officially support Windows. Every 
 
 ## Test fixtures
 
-`tests/fixtures/gpu/`, adapter lists as JSON (as `GpuAdapter` stores them): developer machine (`rdna4` + Basic Render Driver, from the real dump), hybrid laptop (`xe_lp` + `ampere`), APU only (`rdna3` 780M), Arc A-series with an 11th-gen iGPU (D3D9On12 on the Arc), Kepler desktop (DXVK 1.10.3 path), unknown device ID, two identical discrete cards (LUID distinguishes them). Apart from the developer machine, device IDs in tests are synthetic and mapped by a test-only table; they never become shipped data (ADR 0015).
+Target, not yet in place (step 15 builds its adapters inline in `hw/tests.rs`): `tests/fixtures/gpu/`, adapter lists as JSON (as `GpuAdapter` stores them): developer machine (`rdna4` + Basic Render Driver, from the real dump), hybrid laptop (`xe_lp` + `ampere`), APU only (`rdna3` 780M), Arc A-series with an 11th-gen iGPU (D3D9On12 on the Arc), Kepler desktop (DXVK 1.10.3 path), unknown device ID, two identical discrete cards (LUID distinguishes them). Apart from the developer machine, device IDs in tests are synthetic and mapped by a test-only table; they never become shipped data (ADR 0015).
 
 ## Open decisions
 

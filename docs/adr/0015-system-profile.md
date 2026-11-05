@@ -37,7 +37,10 @@ impl SystemProfile {
 }
 
 pub struct GpuProfile { pub adapters: Vec<GpuEntry> } // hardware adapters only, DXGI order
-impl GpuProfile { pub fn primary(&self) -> Option<&GpuEntry>; } // the first one
+impl GpuProfile {
+    pub(crate) fn new(adapters: Vec<GpuAdapter>, table: Option<&GpuArchTable>) -> Self;
+    pub fn primary(&self) -> Option<&GpuEntry>; // the first one
+}
 
 pub struct GpuEntry {
     pub adapter: GpuAdapter,      // raw DXGI data (sys::gpu)
@@ -45,9 +48,13 @@ pub struct GpuEntry {
     pub arch: GpuArch,
     pub integrated: Option<bool>, // from the table entry; None without one
 }
-impl GpuEntry { pub fn vram_mb(&self) -> u64; } // dedicated_video_memory / 2^20
+impl GpuEntry {
+    pub(crate) fn new(adapter: GpuAdapter, table: Option<&GpuArchTable>) -> Self;
+    pub fn vram_mb(&self) -> u64; // dedicated_video_memory / 2^20, rounded down
+}
 
 pub enum GpuVendor { Amd, Nvidia, Intel, Other(u32) } // 0x1002, 0x10DE, 0x8086, else
+impl GpuVendor { pub fn from_id(vendor_id: u32) -> Self; pub fn id(self) -> u32; }
 pub enum GpuArch { Known(ArchId), Unknown }
 pub struct ArchId(String); // ArchId::new(&str) -> Result<ArchId, ArchIdError>
 pub struct OsBuild { pub build: u32, pub ubr: Option<u32> }
@@ -56,10 +63,19 @@ pub enum VendorFact { Unavailable, NoAdapter, Known(GpuVendor) }
 pub enum ArchFact { Unavailable, NoAdapter, Unknown, Known(ArchId) }
 pub enum Fact<T> { Known(T), Unavailable }
 
-pub enum ProfileError { Sys(SysError), Missing, Malformed }
+pub enum ProfileSource { Gpu, CpuTopology, CurrentBuildNumber }
+pub enum ProfileError {
+    Sys(ProfileSource, SysError),
+    Missing(ProfileSource),
+    Malformed(ProfileSource),
+}
+impl ProfileError { pub fn origin(&self) -> ProfileSource; } // not `source`: Error::source
+
+// crate-internal until step 16 needs more: hw::gpu::read(&dyn Gpu, Option<&GpuArchTable>),
+// hw::os::read(&dyn Registry), hw::os::current_version_key() and the value-name constants.
 ```
 
-`ProfileError` names the source (`GPU`, `CPU topology`, `CurrentBuildNumber`) and the kind, never raw registry or driver content.
+`ProfileError` names the source (`GPU`, `CPU topology`, `CurrentBuildNumber`, its `Display` prefix) and the kind, never raw registry or driver content.
 
 ### Adapters
 - `GpuProfile::adapters` holds hardware adapters only, in DXGI order: an adapter with `software` set **or** vendor `0x1414` (Microsoft) is dropped, because CI shows the Basic Render Driver without the flag.
@@ -83,9 +99,9 @@ The checks run in the order of the "Without data" column.
 
 ### OS build
 - Source: `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion` in `RegView::Native`, through the existing read-only `Registry::get` (ADR 0009).
-- `CurrentBuildNumber` must be `RegValue::String` of ASCII digits only, without a leading zero, at least 1, fitting `u32`; anything else is `Malformed` (also `Dword`, `Raw`, surrounding spaces), an absent value `Missing`.
+- `CurrentBuildNumber` must be `RegValue::String` of ASCII digits only, without a leading zero, at least 1, fitting `u32`; anything else is `Malformed` (also `Dword`, `Raw`, surrounding spaces), an absent value `Missing`. A missing `CurrentVersion` key is a read error, `Sys(CurrentBuildNumber, NotFound)`, like a denied one (`AccessDenied`).
 - `UBR` (`RegValue::Dword`) becomes `OsBuild::ubr` for display only and is never compared; absent, another type or a read error give `None` and never fail `os`.
-- Banned everywhere (`clippy.toml`, checked by `sys/win/bans.rs`): `GetVersion`, `GetVersionExA`/`W`, `VerifyVersionInfoA`/`W`, `VerSetConditionMask`, `RtlGetVersion`, `RtlVerifyVersionInfo`. A read-only test on real Windows in `sys::win::testfx` cross-checks `build` against `RtlGetVersion` (under the module-wide `expect`).
+- Banned everywhere (`clippy.toml`, checked by `sys/win/bans.rs`): `GetVersion`, `GetVersionExA`/`W`, `VerifyVersionInfoA`/`W`, `VerSetConditionMask`, `RtlGetVersion`, `RtlVerifyVersionInfo`. A read-only test on real Windows in `sys::win::testfx` cross-checks `build` against `RtlGetVersion`; the one call is `testfx::rtl_build_number`, under its own `#[expect(clippy::disallowed_methods)]`.
 
 ### GPU architecture table
 **Source of truth** `data/gpu-arch.yaml` (a new top-level directory next to `topos/` and `packages/`; under `topos/` it would break `all_topos_are_valid`), schema `schema/gpu-arch.schema.json`. Format 1:
@@ -96,7 +112,8 @@ The checks run in the order of the "Without data" column.
 - arch ids unique; every `entry.arch` declared, and its vendor equal to the declared one;
 - vendors only `0x1002`, `0x10DE`, `0x8086`;
 - device IDs and range bounds `0..=0xFFFF`, `from <= to`;
-- at most 1,024 items per entry (an ID or a range counts 1), at least one; at most 256 archs and 4,096 entries;
+- at most 1,024 items per entry (an ID or a range counts 1), at least one; at most 256 archs and 4,096 entries; at most 3 × 65,536 items in the whole table (`MAX_TOTAL_ITEMS`: a valid table covers each device once, so it cannot have more), checked before the lookup index is allocated;
+- `vulkan` minor at most 99 (the schema's `"1.<0-99>"`);
 - any double coverage of one `(vendor, device)` is an error, even with the same arch; checked over sorted intervals, never by expanding ranges;
 - `source` 1 to 200 characters, no control characters, no bidi controls (`sys::gpu::is_bidi_control`);
 - `revision` and `subsys` are deliberately not keys.
@@ -108,9 +125,13 @@ pub struct GpuArchTable { /* archs, entries, per-vendor sorted intervals */ }
 impl GpuArchTable {
     pub fn new(archs: Vec<ArchDecl>, entries: Vec<ArchEntry>) -> Result<Self, TableError>;
     pub fn builtin() -> Result<&'static GpuArchTable, TableError>; // built once through `new`
+    pub fn archs(&self) -> &[ArchDecl];
+    pub fn entries(&self) -> &[ArchEntry];
+    pub fn arch(&self, id: &ArchId) -> Option<&ArchDecl>;
     pub fn declares(&self, id: &ArchId) -> bool;
     pub fn lookup(&self, vendor_id: u32, device_id: u32) -> Option<&ArchEntry>;
 }
+pub struct VkVersion { pub minor: u8 } // 1.<minor>, minor <= 99
 pub struct ArchDecl { pub id: ArchId, pub vendor: u32 }
 pub struct ArchEntry {
     pub vendor: u32,
@@ -156,7 +177,10 @@ pub struct ArchEntry {
 - Core rules: everything is read-only and in-process (no background process, nothing to revert, no injection, no elevation); the table is declarative data, not code; its sources follow `docs/05-sources-policy.md`.
 
 ## Open points
-- **Phase 4 YAML loader:** typed `u32` in `serde-saphyr` 2.1.0 accepts quoted `"0x1002"`, `0o17`, `4_098` and `!!int`, while the schema refuses `"0x1002"`. The loader needs a strict integer visitor and fixtures for these forms. No amendment of ADR 0005 now.
+- **Phase 4 YAML loader:** typed `u32` in `serde-saphyr` 2.1.0 accepts quoted `"0x1002"`, `0o17`, `4_098` and `!!int`, while the schema refuses `"0x1002"`. The loader needs a strict integer visitor and fixtures for these forms, and it must refuse float forms as well (`30032.0`, `1e3`): JSON Schema 2020-12 counts `30032.0` as an integer, so the schema accepts it (fixture `gpu-arch-device-float.yaml`, listed as schema-valid and refused by the strict test conversion). No amendment of ADR 0005 now.
 - Whether the built-in table stays as an offline fallback after phase 4: decided by phase 4.
 - Efficiency classes of Zen 5c (Strix Point): verify on hardware or a dump before a Topo relies on `cpu.hybrid` for AMD.
+- Step 16 shows adapter names (driver) and table `source` texts through one sanitizer for untrusted strings: `new` refuses control and bidi characters only, so U+2028/U+2029, U+200B, U+FEFF and tag characters pass and must be handled at display.
+- Phase 3: a source-rule test that the elevated helper's code never references `hw::` (it never builds a profile or evaluates `when`).
+- Phase 4: the pairing rule must hold by construction: the Topo loader and `hw::read` get the same table instance from one index object. The profile only records whether a table was given, not which one.
 - Licence check of each bulk source (vendor INF files and documentation, Mesa under MIT, the PCI ID Repository under BSD-3-Clause with a notice) before the full table is imported.

@@ -40,6 +40,12 @@ pub const MAX_DEVICE_ID: u32 = 0xFFFF;
 pub const MAX_ARCH_ID_LEN: usize = 32;
 /// Longest `source`, in characters.
 pub const MAX_SOURCE_CHARS: usize = 200;
+/// Most device IDs plus ranges in the whole table: every `(vendor, device)` once. A valid table
+/// cannot have more (each item covers at least one device, none twice), so this bounds the
+/// lookup index before it is built.
+pub const MAX_TOTAL_ITEMS: usize = VENDORS.len() * (MAX_DEVICE_ID as usize + 1);
+/// Highest Vulkan minor version (`"1.<minor>"`, the schema allows `0` to `99`).
+pub const MAX_VULKAN_MINOR: u8 = 99;
 
 /// The value an identifier may never have: an unknown device is a profile state.
 const RESERVED_ARCH_ID: &str = "unknown";
@@ -119,7 +125,8 @@ pub struct ArchDecl {
 /// The highest Vulkan version a vendor states for a group of devices: `1.<minor>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VkVersion {
-    /// Minor version (the major version is always 1).
+    /// Minor version (the major version is always 1), at most [`MAX_VULKAN_MINOR`]
+    /// (checked by [`GpuArchTable::new`]).
     pub minor: u8,
 }
 
@@ -231,6 +238,10 @@ pub enum TableErrorKind {
     NoDevices,
     /// More than [`MAX_ITEMS`] device IDs and ranges together.
     TooManyDevices,
+    /// More than [`MAX_TOTAL_ITEMS`] device IDs and ranges in the whole table.
+    TooManyDevicesInTable,
+    /// A Vulkan minor version above [`MAX_VULKAN_MINOR`].
+    BadVulkan,
     /// A device ID or range bound above [`MAX_DEVICE_ID`].
     DeviceOutOfRange,
     /// A range with `from > to`.
@@ -267,6 +278,13 @@ impl fmt::Display for TableErrorKind {
             Self::TooManyDevices => {
                 write!(f, "more than {MAX_ITEMS} device IDs and ranges")
             }
+            Self::TooManyDevicesInTable => {
+                write!(
+                    f,
+                    "more than {MAX_TOTAL_ITEMS} device IDs and ranges in all entries"
+                )
+            }
+            Self::BadVulkan => write!(f, "vulkan minor version above {MAX_VULKAN_MINOR}"),
             Self::DeviceOutOfRange => write!(f, "device ID above {MAX_DEVICE_ID:#06x}"),
             Self::RangeReversed => f.write_str("device range with from > to"),
             Self::SourceLength => {
@@ -321,8 +339,9 @@ pub struct GpuArchTable {
 }
 
 impl GpuArchTable {
-    /// Checks every rule of ADR 0015 and builds the lookup index. Sizes are checked before
-    /// anything else; overlaps are found over sorted intervals, ranges are never expanded.
+    /// Checks every rule of ADR 0015 and builds the lookup index. Sizes (archs, entries, and
+    /// the device IDs plus ranges of all entries together) are checked before anything else;
+    /// overlaps are found over sorted intervals, ranges are never expanded.
     pub fn new(archs: Vec<ArchDecl>, entries: Vec<ArchEntry>) -> Result<Self, TableError> {
         if archs.len() > MAX_ARCHS {
             return Err(TableError::new(
@@ -336,6 +355,16 @@ impl GpuArchTable {
                 TableErrorKind::TooManyEntries,
             ));
         }
+        let total = entries.iter().fold(0usize, |n, e| {
+            n.saturating_add(e.device_ids.len())
+                .saturating_add(e.device_ranges.len())
+        });
+        if total > MAX_TOTAL_ITEMS {
+            return Err(TableError::new(
+                TablePos::Table,
+                TableErrorKind::TooManyDevicesInTable,
+            ));
+        }
         for (i, a) in archs.iter().enumerate() {
             let at = TablePos::Arch(i);
             if !VENDORS.contains(&a.vendor) {
@@ -345,7 +374,7 @@ impl GpuArchTable {
                 return Err(TableError::new(at, TableErrorKind::DuplicateArch { first }));
             }
         }
-        let mut intervals = Vec::new();
+        let mut intervals = Vec::with_capacity(total);
         for (i, e) in entries.iter().enumerate() {
             check_entry(&archs, e).map_err(|kind| TableError::new(TablePos::Entry(i), kind))?;
             intervals.extend(e.device_ids.iter().map(|&d| Interval {
@@ -431,6 +460,9 @@ fn check_entry(archs: &[ArchDecl], e: &ArchEntry) -> Result<(), TableErrorKind> 
         .ok_or(TableErrorKind::UndeclaredArch)?;
     if archs.get(arch).is_some_and(|a| a.vendor != e.vendor) {
         return Err(TableErrorKind::ArchVendorMismatch { arch });
+    }
+    if e.vulkan.is_some_and(|v| v.minor > MAX_VULKAN_MINOR) {
+        return Err(TableErrorKind::BadVulkan);
     }
     let items = e.device_ids.len().saturating_add(e.device_ranges.len());
     if items == 0 {

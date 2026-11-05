@@ -85,7 +85,7 @@ pub struct GpuEntry {
 
 impl GpuEntry {
     /// Builds the entry for `adapter`, looked up in `table` if one is given.
-    pub fn new(adapter: GpuAdapter, table: Option<&GpuArchTable>) -> Self {
+    pub(crate) fn new(adapter: GpuAdapter, table: Option<&GpuArchTable>) -> Self {
         let found = table.and_then(|t| t.lookup(adapter.vendor_id, adapter.device_id));
         Self {
             vendor: GpuVendor::from_id(adapter.vendor_id),
@@ -110,7 +110,7 @@ pub struct GpuProfile {
 
 impl GpuProfile {
     /// Keeps the hardware adapters of `adapters` in their order.
-    pub fn new(adapters: Vec<GpuAdapter>, table: Option<&GpuArchTable>) -> Self {
+    pub(crate) fn new(adapters: Vec<GpuAdapter>, table: Option<&GpuArchTable>) -> Self {
         Self {
             adapters: adapters
                 .into_iter()
@@ -133,7 +133,10 @@ fn is_hardware(a: &GpuAdapter) -> bool {
 }
 
 /// Reads the adapters.
-pub fn read(gpu: &dyn Gpu, table: Option<&GpuArchTable>) -> Result<GpuProfile, ProfileError> {
+pub(crate) fn read(
+    gpu: &dyn Gpu,
+    table: Option<&GpuArchTable>,
+) -> Result<GpuProfile, ProfileError> {
     gpu.adapters()
         .map(|a| GpuProfile::new(a, table))
         .map_err(|e| ProfileError::Sys(ProfileSource::Gpu, e))

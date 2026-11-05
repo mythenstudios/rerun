@@ -16,11 +16,11 @@ use super::{ProfileError, ProfileSource};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry};
 
 /// Path of the key below `HKLM`.
-pub const CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+pub(crate) const CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 /// Value with the build number (`REG_SZ`).
-pub const BUILD_VALUE: &str = "CurrentBuildNumber";
+pub(crate) const BUILD_VALUE: &str = "CurrentBuildNumber";
 /// Value with the update build revision (`REG_DWORD`).
-pub const UBR_VALUE: &str = "UBR";
+pub(crate) const UBR_VALUE: &str = "UBR";
 
 /// The Windows build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,13 +41,13 @@ impl fmt::Display for OsBuild {
 }
 
 /// The key the build is read from.
-pub fn current_version_key() -> RegKey {
+pub(crate) fn current_version_key() -> RegKey {
     RegKey::new(Hive::LocalMachine, RegView::Native, CURRENT_VERSION)
 }
 
 /// Reads the build. A failed read of the key or value is [`ProfileError::Sys`]; the error
 /// never carries the registry content.
-pub fn read(registry: &dyn Registry) -> Result<OsBuild, ProfileError> {
+pub(crate) fn read(registry: &dyn Registry) -> Result<OsBuild, ProfileError> {
     const SOURCE: ProfileSource = ProfileSource::CurrentBuildNumber;
     let key = current_version_key();
     let build = match registry.get(&key, BUILD_VALUE) {

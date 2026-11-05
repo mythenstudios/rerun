@@ -441,17 +441,15 @@ fn package_references_resolve() {
 #[test]
 fn download_urls_belong_to_the_source() {
     let mut wrong = Vec::new();
-    for f in yaml_files("packages")
+    let package_fixtures = yaml_files("tests/fixtures/schema/valid")
         .into_iter()
-        .chain(yaml_files("tests/fixtures/schema/valid"))
         .filter(|f| {
-            !f.file_name()
+            f.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .starts_with("topo-")
-                && !is_gpu_arch(f)
-        })
-    {
+                .starts_with("package-")
+        });
+    for f in yaml_files("packages").into_iter().chain(package_fixtures) {
         let doc = load_yaml(&f);
         let mut urls: Vec<&str> = doc["source"]["release"].as_str().into_iter().collect();
         for a in doc["assets"].as_array().into_iter().flatten() {
@@ -516,7 +514,9 @@ fn invalid_fixtures_fail() {
     let mut accepted = Vec::new();
     for f in yaml_files("tests/fixtures/schema/invalid") {
         let name = f.file_name().unwrap().to_string_lossy().into_owned();
-        if GPU_ARCH_NEW_ONLY.iter().any(|(n, _)| *n == name) {
+        if GPU_ARCH_NEW_ONLY.iter().any(|(n, _)| *n == name)
+            || GPU_ARCH_CONVERSION_ONLY.contains(&name.as_str())
+        {
             continue; // schema-valid by design, see gpu_arch_fixture_parity
         }
         let v = validator(&schema_for(&f));
@@ -642,6 +642,11 @@ const GPU_ARCH_NEW_ONLY: &[(&str, KindCheck)] = &[
     }),
 ];
 
+/// Invalid fixtures the schema accepts but a strict typed conversion refuses: JSON Schema
+/// 2020-12 counts `30032.0` as an integer, a typed `u32` must not (ADR 0015, open point on the
+/// phase 4 integer visitor).
+const GPU_ARCH_CONVERSION_ONLY: &[&str] = &["gpu-arch-device-float.yaml"];
+
 /// A strict test-only conversion of a parsed table document into the input of
 /// `GpuArchTable::new`, standing in for the phase 4 loader: exactly the keys of the schema,
 /// typed values only. `Err` names what failed.
@@ -705,10 +710,8 @@ fn table_input(doc: &Value) -> Result<(Vec<ArchDecl>, Vec<ArchEntry>), String> {
                     if minor.len() > 1 && minor.starts_with('0') {
                         return Err("vulkan minor with a leading zero".into());
                     }
+                    // The range (at most 99) is checked by `new`.
                     let minor: u8 = minor.parse().map_err(|_| "vulkan minor")?;
-                    if minor > 99 {
-                        return Err("vulkan minor above 99".into());
-                    }
                     Some(VkVersion { minor })
                 }
             };
@@ -788,7 +791,7 @@ fn gpu_arch_fixture_parity() {
             wrong.push(format!("{}: valid fixture refused: {e}", f.display()));
         }
     }
-    let mut new_only_seen = 0;
+    let (mut new_only_seen, mut conversion_only_seen) = (0, 0);
     for f in gpu_arch("tests/fixtures/schema/invalid") {
         let name = f.file_name().unwrap().to_string_lossy().into_owned();
         let doc = load_doc(&f);
@@ -796,6 +799,18 @@ fn gpu_arch_fixture_parity() {
         let rust = table_input(&doc)
             .map_err(|_| None)
             .and_then(|(a, e)| GpuArchTable::new(a, e).map_err(|e| Some(e.kind)));
+        if GPU_ARCH_CONVERSION_ONLY.contains(&name.as_str()) {
+            conversion_only_seen += 1;
+            if !schema_ok {
+                wrong.push(format!(
+                    "{name}: on the conversion-only list but schema-invalid"
+                ));
+            }
+            if table_input(&doc).is_ok() {
+                wrong.push(format!("{name}: the conversion accepts it"));
+            }
+            continue;
+        }
         match GPU_ARCH_NEW_ONLY.iter().find(|(n, _)| *n == name) {
             Some((_, expected)) => {
                 new_only_seen += 1;
@@ -821,6 +836,11 @@ fn gpu_arch_fixture_parity() {
         new_only_seen,
         GPU_ARCH_NEW_ONLY.len(),
         "new-only fixture missing"
+    );
+    assert_eq!(
+        conversion_only_seen,
+        GPU_ARCH_CONVERSION_ONLY.len(),
+        "conversion-only fixture missing"
     );
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

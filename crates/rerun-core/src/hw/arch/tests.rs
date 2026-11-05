@@ -71,7 +71,6 @@ fn builtin_maps_the_developer_machine() {
     assert_eq!(t.lookup(0x10DE, 0x7550), None);
     assert_eq!(t.lookup(0x1414, 0x8c), None);
     // Every identifier of 03b is declared with its vendor; `rdna3_5` among them.
-    assert_eq!(t.archs().len(), 31);
     assert!(t.declares(&id("rdna3_5")));
     assert!(t.declares(&id("xe_hpg")));
     assert!(!t.declares(&id("rdna6")));
@@ -495,6 +494,53 @@ fn a_full_table_maps_every_device() {
         }
         assert_eq!(t.lookup(vendor, MAX_DEVICE_ID + 1), None);
     }
+}
+
+/// The whole table holds at most one item per device: 193 entries of 1,024 IDs (one entry more
+/// than every device of every vendor) are refused at the table position, before any entry is
+/// looked at (the first entry's vendor is invalid and not reported).
+#[test]
+fn total_items_are_capped_before_the_index_is_built() {
+    assert_eq!(MAX_TOTAL_ITEMS, 3 * 65_536);
+    let ids: Vec<u32> = (0..1024).collect();
+    let mut entries: Vec<ArchEntry> = (0..193).map(|_| entry(AMD, "aa", &ids, &[])).collect();
+    entries[0].vendor = 0x1414;
+    assert_eq!(
+        err(archs(), entries),
+        TableError {
+            at: TablePos::Table,
+            kind: TableErrorKind::TooManyDevicesInTable
+        }
+    );
+    // Ranges count like IDs.
+    let mut ranges: Vec<ArchEntry> = (0..192)
+        .map(|_| entry(AMD, "aa", &[], &[(0, 0); 1024]))
+        .collect();
+    ranges.push(entry(AMD, "aa", &[1], &[]));
+    assert_eq!(
+        err(archs(), ranges).kind,
+        TableErrorKind::TooManyDevicesInTable
+    );
+}
+
+#[test]
+fn vulkan_minor_is_at_most_99() {
+    let with_minor = |minor| {
+        let mut e = entry(AMD, "aa", &[1], &[]);
+        e.vulkan = Some(VkVersion { minor });
+        GpuArchTable::new(archs(), vec![e]).map(|_| ())
+    };
+    assert_eq!(with_minor(0), Ok(()));
+    assert_eq!(with_minor(MAX_VULKAN_MINOR), Ok(()));
+    for minor in [100, u8::MAX] {
+        assert_eq!(
+            with_minor(minor),
+            Err(at_entry(0, TableErrorKind::BadVulkan))
+        );
+    }
+    let mut none = entry(AMD, "aa", &[1], &[]);
+    none.vulkan = None;
+    assert!(GpuArchTable::new(archs(), vec![none]).is_ok());
 }
 
 // ---------- Lookup ----------

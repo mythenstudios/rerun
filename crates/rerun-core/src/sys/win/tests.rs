@@ -607,15 +607,18 @@ fn os_build_matches_rtl_get_version() {
     let os = crate::hw::os::read(&reg).unwrap();
     assert_eq!(os.build, super::testfx::rtl_build_number());
     assert!(os.build > 0);
+    // Windows 10, Server 2022 and Windows 11 always set `UBR`.
+    assert!(os.ubr.is_some(), "UBR missing");
 }
 
 /// Read-only: the system profile of this machine (ADR 0015). CPU and OS are read, the build
-/// equals `RtlGetVersion`'s, the adapters are enumerated. On a GitHub runner (only the Basic
-/// Render Driver) there is no hardware adapter; elsewhere the primary adapter is a real GPU,
-/// never Microsoft's.
+/// equals `RtlGetVersion`'s. The GPU expectation comes from the raw DXGI list, with no CI
+/// special case: if it has a hardware adapter (no software flag, not vendor `0x1414`), the
+/// primary adapter is exactly the first one; otherwise (a GitHub runner, a VM without a GPU)
+/// the vendor fact is `NoAdapter` and the test says so on stderr.
 #[test]
 fn system_profile_of_this_machine() {
-    use crate::hw::{self, Fact, GpuArchTable, VendorFact};
+    use crate::hw::{self, ArchFact, Fact, GpuArchTable, VendorFact};
 
     super::restrict_dll_search().unwrap();
     let sys = WinSystem::new().unwrap();
@@ -628,21 +631,33 @@ fn system_profile_of_this_machine() {
     assert_eq!(p.cpu_hybrid(), Fact::Known(cpu.is_hybrid()));
     assert_eq!(p.os_build(), Fact::Known(super::testfx::rtl_build_number()));
     let gpu = p.gpu.as_ref().unwrap();
-    assert!(
-        gpu.adapters
-            .iter()
-            .all(|e| !e.adapter.software && e.adapter.vendor_id != 0x1414),
-        "{gpu:#?}"
-    );
-    if hosted_ci() {
-        assert_eq!(gpu.adapters, Vec::new(), "a GitHub runner has no GPU");
-        assert_eq!(p.gpu_vendor(), VendorFact::NoAdapter);
-    } else {
-        let primary = gpu
-            .primary()
-            .unwrap_or_else(|| panic!("no hardware adapter on this machine (a VM without a GPU?)"));
-        assert_ne!(primary.vendor.id(), 0x1414);
-        assert_eq!(p.gpu_vendor(), VendorFact::Known(primary.vendor));
+    let raw = sys.gpu().adapters().unwrap();
+    let hardware: Vec<_> = raw
+        .iter()
+        .filter(|a| !a.software && a.vendor_id != 0x1414)
+        .collect();
+    let kept: Vec<_> = gpu.adapters.iter().map(|e| &e.adapter).collect();
+    assert_eq!(kept, hardware, "hardware adapters in DXGI order");
+    match hardware.first() {
+        Some(first) => {
+            let primary = gpu.primary().unwrap();
+            assert_eq!(&&primary.adapter, first);
+            assert_eq!(
+                p.gpu_vendor(),
+                VendorFact::Known(hw::GpuVendor::from_id(first.vendor_id))
+            );
+            assert_ne!(p.gpu_arch(), ArchFact::NoAdapter);
+        }
+        None => {
+            assert_eq!(gpu.primary(), None);
+            assert_eq!(p.gpu_vendor(), VendorFact::NoAdapter);
+            assert_eq!(p.gpu_arch(), ArchFact::NoAdapter);
+            note(&format!(
+                "system_profile_of_this_machine: no hardware adapter among {} DXGI adapters \
+                 (GitHub runner or a VM without a GPU): gpu facts are NoAdapter",
+                raw.len()
+            ));
+        }
     }
 }
 
