@@ -12,7 +12,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 
 ## Phase 1 – Detection
 - Steam: `libraryfolders.vdf`, `appmanifest_*.acf` → games with path
-- PE parser: x86/x64, imports → graphics API (ddraw, d3d8, d3d9, d3d10, d3d11, opengl32), LAA flag, version info; SHA1/SHA256. Finding on the developer machine (ADR 0013 amendment): 9 of 33 game folders have their executables only in subfolders (`Binaries\Win64`), so the exe candidates are searched below the top level too (bounded)
+- PE parser: x86/x64, imports → graphics API (ddraw, d3d8, d3d9, d3d10, d3d11, opengl32), LAA flag, version info; SHA1/SHA256. Finding on the developer machine (ADR 0013 amendment): 9 of 33 game folders have their executables only in subfolders (`Binaries\Win64`), so the exe candidates are searched below the top level too (bounded); exe candidates, roles, ranking, graphics API (also `d3d12`, `vulkan`, `glide`, reserved for the schemas) and `--hashes` in ADR 0014
 - `hw`: GPU via DXGI, CPU topology, OS build
 - CLI: `rerun scan`, `rerun system`
 

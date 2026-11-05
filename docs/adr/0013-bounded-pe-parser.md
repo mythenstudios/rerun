@@ -84,11 +84,12 @@ Offsets and constants are written out from `winnt.h`/`verrsrc.h` (SDK 10.0.26100
 ## Consequences
 - PE facts are hints for display, matching and suggestions, never authorization: a Topo matches an exe by path and hash (`docs/02-topo-format.md`), the elevated helper (phase 3) by the signed hash, and `laa_patch` (later) re-reads the file it changes and checks its hash at apply time.
 - An exe that is missing, a reparse point, restricted, online-only or busy (Steam updating it) is a `PeReadError::Open`; a running game's exe can be read (shared read access).
-- Packed or DRM-wrapped executables (UPX, SteamStub, Denuvo) show the stub's imports, not the game's; step 14 reports the API as unknown for them rather than guessing. Games that load their renderer from a DLL (`D3DDrv.dll`) or with `LoadLibrary` show no graphics import in the exe; step 14 handles that.
-- DOS and Win16 games are recognised (`Legacy`), which step 14 can report as "needs DOSBox / not runnable on 64-bit Windows" instead of an error.
+- Packed or DRM-wrapped executables (UPX, SteamStub, Denuvo) show the stub's imports, not the game's; step 14 reports the API as unknown for them rather than guessing. Games that load their renderer from a DLL (`D3DDrv.dll`) or with `LoadLibrary` show no graphics import in the exe; step 14 handles that (ADR 0014: `None`, `RendererInDll`, `DxgiOnly`).
+- DOS and Win16 games are recognised (`Legacy`), which step 14 can report as "needs DOSBox / not runnable on 64-bit Windows" instead of an error (ADR 0014: role `Legacy`).
 - Tests: `docs/09-testing.md`, "PE parser": synthetic executables from a test-only builder (`detect/pe/testfx.rs`), every limit at and over the limit, every error kind with its offset, deterministic xorshift fuzzing, a reader that never ends and an instrumented reader for the budget, the layout pin, read-only smoke tests on System32 and SysWOW64 files (`kernel32.dll`, `ntdll.dll`, `notepad.exe`; `crates/rerun-core/tests/pe_system.rs`), and the migrated hardening tests. No differential test against `GetFileVersionInfoExW`: it would need `unsafe` and a `version.dll` import outside `sys::win`.
 - Manual dumps (user decision 6, Windows only, `#[ignore]`): `dump_system32_pe` parses every top-level `*.exe` and `*.dll` of System32 and SysWOW64 and prints a summary per error kind; `dump_game_exes` runs `steam::scan`, opens every game folder with `open_game` and parses each top-level `*.exe` through `open_game_exe`. Both read only, print names escaped (`{:?}`) and version strings only as their length, and are never run in CI.
 - `docs/06-security.md` gets scenario 13 (manipulated executables).
+- Step 14 builds on this parser: exe candidates of a game folder, roles, ranking, the graphics API from the imports and the hashes on the parsed handle are ADR 0014.
 
 ## Amendment 2026-11-05: developer machine
 
