@@ -131,7 +131,7 @@ clap repeats the user's own arguments raw in usage errors; noted, not escaped (t
 The hardening policy takes the list as a parameter, `check_hardened(image, allowed)`. `LAUNCH_IMPORTS` (today's `SHIPPED_IMPORTS`, unchanged) for `rerun-launch.exe`; `CLI_IMPORTS` (today's `CORE_IMPORTS`, moved from `win_gpu_restricted.rs` into `tests/support/hardening.rs`, one list used by both tests) for `rerun.exe`. ADR 0008 amendment.
 
 ### Runs outside the usual setup
-- Read-only, so no lock and no single-instance check.
+- Read-only, so no lock and no single-instance check. (Phase 2, amendment below: `apply`, `revert` and `forget` take the journal lock; `system`, `scan`, `plan` and `status` still do not.)
 - Elevated with another administrator account (over-the-shoulder UAC): `HKCU` and the known folders are that account's, so Steam is "not found" for the interactive user. Documented, no workaround.
 - `rerun.exe` on a network drive: `ForbiddenRoots::resolve` cannot resolve the forms of the install folder and fails closed; `rerun scan` exits 1. `rerun system` does not need it.
 
@@ -192,3 +192,7 @@ Run by the user on the developer machine (Ryzen 9 5950X, Radeon RX 9070 XT, Wind
 - **Found and fixed during the run:** an empty library label printed as a line; adapters numbered from 1 instead of 0 (both `aa12d6c`); single-player and multiplayer executables that differ only by an `sp`/`mp` token now tie instead of one being picked (ADR 0014 amendment, `6ca6a96`).
 - **Known limits confirmed:** when only the multiplayer part of a game is installed, Steam still lists the single-player app with the same install folder, and its main executable is the multiplayer one, because nothing else is on disk (correct for what is on disk; the per-app choice comes with Topos, phase 4). Games whose folders the user modified (ZLUDA through a Steam launch option) are not pristine and are no calibration cases.
 - **Not measured:** the cold scan time and the cold hash rate (need a reboot); open. The `Busy`/retry question (ADR 0012) and the `AppState` guard in the core stay open: no `Busy` occurred in this run.
+
+## Amendment 2026-11-05: phase 2 commands
+- Phase 2 adds `plan`, `apply`, `revert`, `status` and `forget` (ADR 0020). `apply`, `revert` and `forget` hold the journal lock (`<LocalAppData>\Rerun\journal\lock`, share 0, ADR 0019) for their whole run; a second one gets `Busy`. `system`, `scan`, `plan` and `status` take no lock (`status` reads immutable journal files and shows an unclosed transaction as "open (in progress or interrupted)"). This replaces "read-only, so no lock" for the phase 2 commands; `system` and `scan` stay read-only.
+- The output rules above apply unchanged: the preview of a plan and every `status` line show untrusted fields only as `escape::Shown` (condition S9). Exit codes of the new commands are fixed with their step (ADR 0020, open points).

@@ -184,3 +184,6 @@ pub struct ArchEntry {
 - Phase 3: a source-rule test that the elevated helper's code never references `hw::` (it never builds a profile or evaluates `when`).
 - Phase 4: the pairing rule must hold by construction: the Topo loader and `hw::read` get the same table instance from one index object. The profile only records whether a table was given, not which one.
 - Licence check of each bulk source (vendor INF files and documentation, Mesa under MIT, the PCI ID Repository under BSD-3-Clause with a notice) before the full table is imported.
+
+## Amendment 2026-11-05: `gpu_preference` in phase 4
+User decision D8 of the phase 2 plan: the `gpu_preference` primitive and with it the per-game adapter, `gpu.hybrid` and `gpu.integrated` move from phase 2 to phase 4. "Phase 2" in "Adapters" above now reads "phase 4"; until then the conditions adapter stays `primary()`. The registry slot is reserved (ADR 0018), `docs/03b-gpu-display.md` is updated.

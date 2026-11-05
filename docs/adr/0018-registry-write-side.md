@@ -1,0 +1,90 @@
+# ADR 0018 · Registry write side and `policy::registry`
+
+**Status:** accepted (decided by the user) · 2026-11-05 · amends ADR 0004 (registry allowlist now in phase 2) and ADR 0009 (write side), closes audit A1 B2
+
+## Context
+Phase 2 ships `registry_set` and `compat_layer` (`docs/08-roadmap.md`), but ADR 0004, `docs/01-architecture.md` and `docs/06-security.md` placed the allowlist `policy::registry` in phase 3 (A1 B2, core rule 4). `RegKey` compares and hashes case-sensitively, while the registry folds names, so two spellings of one key would be two journal objects. Enumerated names are converted lossily (ADR 0009, open for phase 2). ADR 0009 follows registry links on reads and defers the write side.
+
+Spike P2-1 (throwaway; observed on Windows 11 build 26300 in private app hives, standard user):
+- `RegCreateKeyExW(parent, "L\Sub")` with a link key `L` tries to follow it (error 5 in an app hive, where links cannot be followed; nothing created). `REG_OPTION_OPEN_LINK` affects only the **last** segment: it opens `L` itself, `L\Sub2` still follows.
+- A link is recognised on its own handle: `NtQueryKey(KeyFlagsInformation)` (12 bytes) has `REG_FLAG_LINK` (`0x2`; `0x1` = volatile) and needs `KEY_QUERY_VALUE`. `KeyNameInformation` (the kernel name) needs only `READ_CONTROL`. `REG_OPTION_CREATE_LINK` on an existing key is error 183.
+- `RegFlushKey` works without admin, also with only `KEY_QUERY_VALUE`: about 3 µs on an unchanged hive, 0.9 ms after a change.
+- Link following in the real `HKCU` cannot be tested in an app hive; it is a Windows Sandbox case.
+
+## Decision
+
+### Where the boundary is
+`sys` executes, `policy::registry` decides (ADR 0004). The read trait `Registry` stays as it is (plus raw names, below); writes move to a trait only `policy::registry` can reach:
+```rust
+pub trait RegistryWrite: Registry {
+    fn create_key(&self, k: &RegKey) -> SysResult<bool>;          // exactly one segment below an existing parent; true = new
+    fn set(&self, k: &RegKey, name: &str, v: &RegValue) -> SysResult<()>;
+    fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()>;
+    fn delete_empty_key(&self, k: &RegKey) -> SysResult<()>;      // no values, no subkeys, else NotEmpty
+    fn flush(&self, k: &RegKey) -> SysResult<()>;                 // RegFlushKey on the key's hive
+}
+// System::registry_write() -> &dyn RegistryWrite is a clippy.toml ban outside policy::registry,
+// like Fs::open_dir outside policy::root.
+```
+Contract of every `RegistryWrite` method (fake and `sys::win`): a link key anywhere on the path is `ReparsePoint` and is never followed or changed; `Hive::LocalMachine` is `Unsupported` (the GUI never writes `HKLM`, core rule 6); a typed value without a canonical encoding is `Unsupported` (ADR 0009).
+
+### `policy::registry`
+```rust
+pub struct RegPolicy;                                   // fixed rules, no state in phase 2
+pub enum RegSlot {
+    CompatLayers { exe: ExePath },                      // value name = canonical exe path
+    GameValue { key: GameKey, name: AsciiName },        // HKCU\Software\<Vendor>\<Product>[\…]
+    GpuPreference { exe: ExePath },                     // reserved (D8), refused until phase 4
+}
+pub struct AllowedKey { key: RegKey, anchor: usize }    // private; segments past `anchor` may be created
+pub struct AllowedValue { key: AllowedKey, name: String, slot: RegSlot }
+impl RegPolicy {
+    pub fn check(&self, slot: &RegSlot) -> Result<AllowedValue, RegPolicyError>;
+    pub fn check_new(&self, v: &AllowedValue, new: &RegValue) -> Result<(), RegPolicyError>;
+}
+pub struct RegWriter<'s> { /* &'s dyn RegistryWrite; built only by policy::registry */ }
+impl RegWriter<'_> {
+    pub fn get(&self, v: &AllowedValue) -> SysResult<Option<RegValue>>;
+    pub fn missing_keys(&self, k: &AllowedKey) -> SysResult<Vec<RegKey>>; // each one a CreateKey op
+    pub fn create_key(&self, k: &RegKey, of: &AllowedKey) -> SysResult<bool>;
+    pub fn set(&self, v: &AllowedValue, new: &RegValue) -> SysResult<()>;  // then reads back
+    pub fn delete_value(&self, v: &AllowedValue) -> SysResult<()>;
+    pub fn delete_empty_key(&self, k: &RegKey, of: &AllowedKey) -> SysResult<()>;
+    pub fn flush(&self, k: &AllowedKey) -> SysResult<()>;
+}
+```
+- **`HKCU` only, native view only.** `HKCU\Software` is shared between the views (ADR 0009). An op on `HKLM` is `NeedsHelper` at plan time and refused in phase 2 (ADR 0020); the phase 3 helper never writes `HKCU` (ADR 0009).
+- **`CompatLayers`:** key `HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers` (anchor `CurrentVersion`: `AppCompatFlags` and `Layers` may be created), value name the canonical path of an executable inside a `GameDir` as Windows writes it (`D:\Games\X\game.exe`, from the root's canonical path and a `RelPath`, without `\\?\`), type `REG_SZ`. Rerun adds or removes only tokens from an allowlist (compatibility modes, `DISABLEDXMAXIMIZEDWINDOWEDMODE`, `HIGHDPIAWARE`, `DPIUNAWARE`, colour and resolution modes, …; the exact list and the `~`/`$` prefixes are fixed with `compat_layer` in P2-11 after a sandbox check). `RUNASADMIN`, `RUNASHIGHEST` and every other elevation token are never written; tokens already present, also those, are kept as they are (`TokenList`, ADR 0020). Whether Windows matches the value through a junctioned library by the canonical or the launch path is checked in the sandbox (P2-11).
+- **`GpuPreference`:** `HKCU\Software\Microsoft\DirectX\UserGpuPreferences` is reserved as a slot so the plan format needs no change; `check` refuses it with `Unsupported` until the primitive lands in phase 4 together with `gpu.hybrid` (user decision D8).
+- **`GameValue`:** `HKCU\Software\<Vendor>\<Product>` plus at most 4 further segments, named in the step (later the reviewed Topo); anchor `Software`, so missing keys from `<Vendor>` down may be created. Key segments and value names are **printable ASCII only** (`0x20` to `0x7E`, no `\`, no leading or trailing space, segments 1 to 64 characters, value names 0 to 128, the empty name is the default value; condition S3), so folding, lookalikes and lossy names cannot occur on the write side. `<Vendor>` must not fold to a deny list: `Microsoft`, `Classes`, `Policies`, `Wow6432Node`, `Clients`, `RegisteredApplications`, `AppDataLow`, `Valve` (Steam's own keys, a detection source, ADR 0012), `Rerun`, `Mythen Studios`.
+- **Types and limits of new values:** `CompatLayers` a `REG_SZ` of allowlisted tokens, at most 512 UTF-16 units; `GameValue` `REG_DWORD`, `REG_QWORD`, `REG_SZ` (printable, no control characters, at most 1,024 UTF-16 units) and `REG_BINARY` (at most 4,096 bytes). Never `REG_EXPAND_SZ`, `REG_MULTI_SZ`, `REG_LINK` or a `Raw` type. Old values are recorded exactly whatever they are (`Raw` included, up to `MAX_VALUE_BYTES`; ADR 0019 condition S1).
+- **Folded keys.** `RegKey` keeps its spelling for display; `Eq`, `Hash` and `Ord` use hive, view and the folded path (the crate's 1:1 fold, as for file names). Value names are compared folded as well.
+- **Raw names.** `values` and `subkeys` return `RegName { name: String, lossy: bool }` (`lossy`: the UTF-16 name had an unpaired surrogate and was converted with U+FFFD). A lossy name, and two raw names that come out equal, are an anomaly: never addressed or written, recorded by `sys::snapshot` as an anomaly (A1 should-item 5c, ADR 0009 open point).
+
+### Implementation (`sys::win::reg`)
+- **Segment-wise walk.** Every write opens from the `HKCU` handle (`RegOpenCurrentUser`, kernel name checked, ADR 0009) one segment at a time relative to the parent handle, each with `REG_OPTION_OPEN_LINK` and at least `KEY_QUERY_VALUE`, and refuses a handle whose `KeyFlags & 0x2` (`REG_FLAG_LINK`) is set (`ReparsePoint`). Since `REG_OPTION_OPEN_LINK` only protects the last segment, each segment is its own last segment. A missing segment is created with `RegCreateKeyExW` on the parent handle with that one segment and `REG_OPTION_OPEN_LINK`; its disposition gives `create_key`'s `bool`.
+- **Kernel name as second check (condition S5).** Before a value is set or a key deleted, `KeyNameInformation` of the handle must equal `\REGISTRY\USER\<SID>\` plus the expected path, folded; otherwise `Busy` and nothing is written. The same check guards the app-hive fixture today (`docs/09-testing.md`).
+- **Values** are written with `NtSetValueKey` on the walked handle (not `RegSetValueExW`, which reads past the caller's buffer for string types, ADR 0009) and read back; deleted with `NtDeleteValueKey`.
+- **`delete_empty_key`** queries values and subkeys on the walked handle and deletes the key **by that handle** (`NtDeleteKey`, `DELETE` access). It is not atomic: a value written by another process between the check and the delete is deleted with the key. Accepted limit: only keys Rerun created are ever deleted, and only the same user can race it.
+- **No compare-and-swap.** The registry has none. Apply reads the old value, journals it (ADR 0019), writes, reads back; a write by another process inside that window is lost. Accepted limit, same user, microseconds. A revert first checks that the value is still Rerun's (ADR 0020) and never overwrites a foreign one (D10).
+- **Durability (B-1):** `RegFlushKey` on every changed key before the journal's closing record (ADR 0019).
+- **Revert re-checks the location:** the walk, the link and kernel-name checks and `RegPolicy::check` run again on revert; the journal is untrusted input (ADR 0019).
+- `clippy.toml`: the registry write calls stay bans outside `sys::win::reg`, and `RegFlushKey` joins them (the list text of ADR 0009 now names it; the entry itself comes with P2-9). `NtSetValueKey`, `NtDeleteValueKey`, `NtDeleteKey` and `NtQueryKey` stay bans outside `sys::win::reg`.
+
+## Alternatives
+- **Full-path `RegCreateKeyExW`/`RegOpenKeyExW`:** follow links in every segment but the last (observed).
+- **Only the last segment with `REG_OPTION_OPEN_LINK`, as ADR 0009 sketched:** the same gap for the intermediate segments.
+- **A hard-coded allowlist of game keys:** every game would need a Rerun release; the Topo names its keys and review approves them (`docs/06-security.md`). The deny list is the backstop, not the boundary.
+- **An allowlist of vendors instead of a deny list:** the same release problem.
+- **Transacted registry (KTM):** deprecated and banned (ADR 0009); it would not cover the files of the same plan anyway.
+- **`RegSaveKey` backups:** needs `SeBackupPrivilege` and saves whole subtrees; one value is what changes.
+
+## Consequences
+- `sys::registry`: `RegistryWrite` (the write methods leave `Registry`), `RegName`, folded `RegKey` comparisons, `System::registry_write`. P2-9 implements it; its review checks explicitly against A1 B2. `registry_write_contract` runs against the fake and, in private app hives under `target/`, against `sys::win` (other spelling, other type, `delete_empty_key` with a value, a link segment); `HKCU` link following runs in Windows Sandbox (`docs/09-testing.md`). The fake registry gets `fail_at` (condition S10).
+- ADR 0004: `policy::registry` is phase 2. ADR 0009: the write side is this ADR. `docs/06-security.md`: the allowed areas for phase 2.
+- Core rules: rule 4 (registry only on allowed keys) is enforced before `sys`; rule 6 (no `HKLM` from the GUI); rule 2 (old value recorded exactly, flushed, never overwritten when foreign).
+
+## Open points
+- **Security review:** the `GameValue` deny list is a blocklist. Any other `HKCU\Software\<Vendor>` key is writable by a Topo, including one another program reads as a plugin or start path; the defence is the type and content limits, review of every Topo key and the preview. The review decides whether that suffices or whether a key must also exist before Rerun may write it.
+- The `compat_layer` token list, the `~`/`$` prefixes and the junction question: P2-11, in Windows Sandbox.
+- `HKCU` link behaviour on the real hive (a link key planted by same-user malware): Windows Sandbox.

@@ -19,24 +19,27 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 **Acceptance:** `rerun scan` correctly lists the Steam games on the developer machine with API and architecture. The topology of the 5950X is detected as 2 L3 groups × 8 cores × 2 threads (as `rerun system` prints it). Run by the user (step 17); only a summary with counts is recorded (ADR 0016 amendment). **Accepted 2026-11-05** (ADR 0016 amendment "step 17 acceptance run"; audit A1 passed with conditions for the phase 2 plan).
 
 ## Phase 2 – Primitives + Journal + revert
-- Journal (SQLite, write-ahead), backups
-- Primitives: `compat_layer`, `file_install` (local test file), `ini_set`, `registry_set`
-- `plan`, preview output, plan hash
-- CLI: `rerun plan <id> --dry-run`, `apply`, `revert`, `status`
+- File write side (`DirWrite`, `FileGuard`, ADR 0017) and registry write side with `policy::registry` (`HKCU` only, ADR 0018); write contracts against the fake and `sys::win` (under `target/`, private app hives)
+- Journal: file-based under `AppDir` (`<LocalAppData>\Rerun\journal`, immutable records, write-ahead, backups, flushes before the closing record, lock, LIFO revert; ADR 0019)
+- Plans and op kinds (ADR 0020): primitives `file_install` (local package files under `AppDir`, test fixtures only), `registry_set`, `compat_layer`, `ini_set`; preview output, plan hash; apply and revert only with the game closed (`users()`), refused while Steam updates the game; a foreign change is never overwritten (`forget`)
+- CLI: `rerun plan <steps.json> [--dry-run]` (JSON step file until the Topo engine), `apply`, `revert [--rebind]`, `status`, `forget`
+- Moved out: `gpu_preference` and `UserData` roots to phase 4, the VirtualStore warning to phase 3
 
-**Acceptance:** Round-trip tests of all primitives green against `sys::fake`; crash and tampering tests green; manual test in Windows Sandbox.
+**Acceptance:** Round-trip tests of all primitives green against `sys::fake`; crash (every intermediate state), power-loss and tampering tests green; write contracts green against `sys::win`; the sandbox run (`scripts/sandbox-test.wsb`, real `HKCU`, a game folder fixture) green in Windows Sandbox; audits A2 (after `file_install`) and A3 passed.
 
 ## Phase 3 – Launching with CPU rules
 - `rerun-launch`: `direct` (Job Object), `watch`, post-launch check
 - CPU rule selection against all fixtures
 - Primitive `launch_option` (Steam closed) and `launch_method`
 - Elevated helper + primitives `priority`, `firewall_rule`
+- `verify` warns about UAC VirtualStore shadow copies of managed files (moved from phase 2)
 
 **Acceptance:** A Steam game launches via `rerun-launch` with 8 threads on one CCD, the check reports `ok`. A Ubisoft game via Steam with `watch` as well. The elevated helper (ADR 0008, H2, security review of step 10): its `System` has no GPU (a separate type, or a GPU part that returns `Unsupported` without touching DXGI); the helper binary never links `sys::win::loader`'s DLL loading or `sys::win::dxgi`, checked by an import allowlist test on the built helper with `tests/support/hardening.rs` (`detect::pe`, ADR 0013); and a source rule test refuses `WinGpu` and `WinSystem` in the helper's sources.
 
 ## Phase 4 – Topos and packages
 - Package download (allowed hosts, SHA256, Zip Slip safe), DLL slots, reference counting
 - Topo engine with `when`, variants, conflicts
+- Primitive `gpu_preference` with the `when` keys `gpu.hybrid` and `gpu.integrated`; `UserData` roots (`Documents`, `My Games`) with their own allowlist (both moved from phase 2, user decisions D6 and D8)
 - Signed index (Ed25519)
 - 20 Topos, at least 5 of them `verified` on the developer machine
 - `rerun-workbench`: PCGW query → draft

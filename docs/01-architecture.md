@@ -7,7 +7,7 @@ rerun_/
 ├─ crates/
 │  ├─ rerun-core/      Library: detection, Topo engine, primitives, Journal, system layer
 │  ├─ rerun-proto/     Small shared types (CPU topology and its pure Windows-record parser; from Phase 3 launch profile, CPU rule), no dependencies, serde only via feature
-│  ├─ rerun-cli/       Binary `rerun` (phase 1: system, scan; later plan, apply, revert, status, topo validate)
+│  ├─ rerun-cli/       Binary `rerun` (phase 1: system, scan; phase 2: plan, apply, revert, status, forget; later topo validate)
 │  ├─ rerun-launch/    Binary `rerun-launch.exe` – launch shim, only windows-sys + rerun-proto
 │  ├─ rerun-cpu/       cdylib `rerun-cpu.asi` – inproc CPU fix, x86 + x64
 │  └─ rerun-workbench/ Curator tool: query PCGamingWiki, generate Topo draft
@@ -30,27 +30,26 @@ Dependencies always point to `rerun-core` or `rerun-proto`, never back.
 | `hw` | System profile (ADR 0015): a consumer of `sys::Gpu`, `sys::Topology` and `sys::Registry`, no FFI of its own. `read(&dyn System, Option<&GpuArchTable>) -> SystemProfile` never fails as a whole (GPU, CPU and OS each a `Result`): hardware adapters in DXGI order (software and vendor `0x1414` dropped) with vendor, architecture and `integrated` from the GPU architecture table (`data/gpu-arch.yaml`; a built-in copy until the phase 4 index), the CPU topology (`03-cpu-topology.md`), the OS build from `CurrentBuildNumber`; accessors give the facts for the five `when` keys (`02-topo-format.md`). Display properties: `03b-gpu-display.md`. |
 | `topo` | Load, check signature, validate schema, evaluate `when` conditions against the system profile. |
 | `pkg` | Packages: download (allowed hosts only), SHA256, extraction (Zip Slip safe), cache. |
-| `prim` | Primitives (see below). |
-| `plan` | Build a `Plan` (list of `Change`) from Topo + selection + profile. Detect conflicts (DLL slots, dependencies). Plan hash. |
-| `journal` | SQLite (rusqlite) at `%LOCALAPPDATA%\Rerun\journal.db`. Write-ahead: entry before every change. Backups at `%LOCALAPPDATA%\Rerun\backups\<game>\`. |
+| `prim` | Primitives as planners (ADR 0020, see below): durable spec types (`deny_unknown_fields`) and one planner each, turning a step into ops; no system writes. |
+| `plan` | `Plan` (ADR 0020): `format`, `roots[]` (kind, canonical path, `RootId`, origin, main executable) and `ops`, each file op with its root index; op kinds `CreateDir`, `CreateFile`, `ReplaceFile`, `CreateKey`, `SetValue`, `IniValue`, `TokenList`; ops with equal old and new state omitted; serialised once, `PlanHash` = SHA-256 over the stored bytes (`BTreeMap` only, IDs and bytes as hex). Phase 4: conflicts (DLL slots, dependencies). |
+| `exec` | Apply, verify, revert and forget per op kind (ADR 0020): checks before the first change (lock, hash, root identity, Steam state, game closed via `users()`, stacking, old state re-observed), `Observed` (`Before`, `After`, `Drifted`, `Foreign`), a foreign state is never overwritten (`forget` instead), immediate rollback on failure, `--rebind` under strict conditions. |
+| `journal` | File-based (ADR 0019) under `AppDir` (`<LocalAppData>\Rerun\journal`): one folder per transaction with `head.json` (the plan bytes) and immutable numbered records and backups, each written with `create_new` and flushed; write-ahead (backup read back and hashed, then the intent, then the change); flush of every changed file, parent folder and registry key before the closing record; `journal\lock` (share 0) held by apply, revert and forget; untrusted reader with budgets; LIFO revert per object. |
 | `elevate` | Parts of a plan that need admin go as JSON to `rerun.exe --elevated-apply` (ShellExecute `runas`). The helper re-validates, executes, exits. |
-| `sys` | Traits `Fs` (only `open_dir`) and `Dir` (all file operations relative to an open root, ADR 0007), `Registry`, `Topology`, `KnownFolders` (via `GetSystemWindowsDirectoryW`, the raw `HKLM` `ProfileList` values and `SHGetKnownFolderPath` with the process token, never environment variables; ADR 0009), `Gpu` (DXGI adapters, raw IDs) (Phase 1), `Firewall`, `Process` (Phase 3), bundled in `System` (`&dyn System`). `sys::win` = real (from Phase 1, read-only in Phase 1: `nt` is the only module with NT/Win32 file calls and `NtCreateFile` through two wrappers, `token` the `AccessCheck` for `user_writable`, `shell` the only `SHGetKnownFolderPath`/`GetSystemWindowsDirectoryW` calls, `reg` the only registry calls (`RegOpenCurrentUser`, `RegOpenKeyExW`, `RegEnumKeyExW`, `RegQueryInfoKeyW`; values with `NtQueryValueKey`/`NtEnumerateValueKey`), `unsafe` only in these four; `status`/`name`/`reparse` pure, `fs` = `WinFs`/`WinDir`, `known_folders` = `WinKnownFolders`, `registry` = `WinRegistry` (read-only, input rules, limits, retries), `cpu`/`topology` = `WinTopology` (ADR 0010), `loader` the only `SetDefaultDllDirectories`/`LoadLibraryExW`/`GetProcAddress` (System32 only), `dxgi` a hand-written DXGI binding on `windows-sys` types and `gpu` = `WinGpu` (ADR 0008 amendment); `unsafe` also in `cpu`, `loader` and `dxgi`; `system` = `WinSystem`, the real `System` of all of them (`WinSystem::new() -> SysResult<Self>`, opens the current user's registry root; `rerun-cli` builds it after parsing its arguments)), `sys::fake` = tests, `sys::snapshot` = state comparison, `sys::contract` = contract tests for both. No `Steam` trait: Steam is logic in `detect`. Bindings: ADR 0008. See ADR 0004. |
+| `sys` | Traits `Fs` (only `open_dir`) and `Dir` (all file reads relative to an open root, ADR 0007), from phase 2 `DirWrite` (writes to direct children of a write handle: `create_new` through a temp file and a rename without replace, `create_dir`, `remove_dir` by file ID, `flush`) and `FileGuard` (one handle sharing read only: hash, backup reader, `users()`, `replace` and `delete` with an expected SHA-256, `Mismatch` otherwise; POSIX semantics required; ADR 0017), `Registry` (reads, raw names as `RegName`) and from phase 2 `RegistryWrite` (segment-wise, never through a link key, `HKCU` only; reached only through `policy::registry`, ADR 0018), `Topology`, `KnownFolders` (via `GetSystemWindowsDirectoryW`, the raw `HKLM` `ProfileList` values and `SHGetKnownFolderPath` with the process token, never environment variables; ADR 0009), `Gpu` (DXGI adapters, raw IDs) (Phase 1), `Firewall`, `Process` (Phase 3), bundled in `System` (`&dyn System`). `sys::win` = real (from Phase 1, read-only in Phase 1: `nt` is the only module with NT/Win32 file calls and `NtCreateFile` through two wrappers, `token` the `AccessCheck` for `user_writable`, `shell` the only `SHGetKnownFolderPath`/`GetSystemWindowsDirectoryW` calls, `reg` the only registry calls (`RegOpenCurrentUser`, `RegOpenKeyExW`, `RegEnumKeyExW`, `RegQueryInfoKeyW`; values with `NtQueryValueKey`/`NtEnumerateValueKey`), `unsafe` only in these four; `status`/`name`/`reparse` pure, `fs` = `WinFs`/`WinDir`, `known_folders` = `WinKnownFolders`, `registry` = `WinRegistry` (read-only, input rules, limits, retries), `cpu`/`topology` = `WinTopology` (ADR 0010), `loader` the only `SetDefaultDllDirectories`/`LoadLibraryExW`/`GetProcAddress` (System32 only), `dxgi` a hand-written DXGI binding on `windows-sys` types and `gpu` = `WinGpu` (ADR 0008 amendment); `unsafe` also in `cpu`, `loader` and `dxgi`; `system` = `WinSystem`, the real `System` of all of them (`WinSystem::new() -> SysResult<Self>`, opens the current user's registry root; `rerun-cli` builds it after parsing its arguments)), `sys::fake` = tests, `sys::snapshot` = state comparison, `sys::contract` = contract tests for both. No `Steam` trait: Steam is logic in `detect`. Bindings: ADR 0008. See ADR 0004. |
 | `escape` | Display of untrusted text (ADR 0016): one table of code points (Unicode 16, no Unicode crate), two entry points returning `Shown<'_>`, the only type in which untrusted fields reach output. `escape::path` (control, format and default-ignorable characters incl. tags and variation selectors, U+2028/U+2029, supplementary private use, noncharacters, plus every character `path::is_deceptive` matches) for `RelPath`, `RootPath` and `SysError` targets (`sys::error::shown_target` delegates to it); `escape::text` (the same without the printable confusables) for names, labels, adapter names and issue texts. Clean text is shown unchanged, anything else whole as `{:?}` with each such character as `\u{x}`; idempotent. |
-| `policy` | Rules above `sys`: `policy::path` (`RelPath`, `RootPath`, `classify` for names read from disk), `policy::root` (the only way to open a game or store folder: `StoreDir` by absolute path, `GameDir` handle-relative from its store or manually added, `ForbiddenRoots` resolved fail-closed from `KnownFolders`, lexical and canonical check, no volume or network roots, `RootId` re-checked at apply and revert; ADR 0007 and its amendment), from Phase 3 `policy::registry` (allowlist). Applies identically to the fake, the real system and the elevated helper. |
+| `policy` | Rules above `sys`: `policy::path` (`RelPath`, `RootPath`, `classify` for names read from disk), `policy::root` (the only way to open a game or store folder: `StoreDir` by absolute path, `GameDir` handle-relative from its store or manually added, `ForbiddenRoots` resolved fail-closed from `KnownFolders`, lexical and canonical check, no volume or network roots, `RootId` re-checked at apply and revert; ADR 0007 and its amendment; only `GameDir` and `AppDir` hand out a write handle, `StoreDir` is read-only), `AppDir` (`<LocalAppData>\Rerun` from `KnownFolders`, below it handle-relative, reparse points refused; journal, plans, local packages; ADR 0019), from phase 2 `policy::registry` (`RegPolicy`, `RegSlot`, `AllowedKey`, `AllowedValue`, `RegWriter`: `HKCU` only, `AppCompatFlags\Layers` with a token allowlist, game keys under `Software\<Vendor>\<Product>` in printable ASCII with a deny list, `UserGpuPreferences` reserved for phase 4; ADR 0018). Applies identically to the fake, the real system and the elevated helper. |
 
 ## Primitives
 
-Every primitive implements:
+A primitive is a planner (ADR 0020, user decision D9): it turns its spec into ops of a few generic kinds, and `exec` applies, verifies and reverts each op kind with the journal (ADR 0019). Every primitive still needs its own round-trip test (`docs/09-testing.md`).
 
 ```rust
-pub trait Primitive {
-    type Spec: DeserializeOwned;            // fields from the Topo
-    fn plan(&self, spec: &Self::Spec, ctx: &Ctx) -> Result<Vec<Change>>;
-    fn apply(&self, change: &Change, sys: &dyn System, j: &mut Journal) -> Result<()>;
-    fn verify(&self, change: &Change, sys: &dyn System) -> Result<Verified>;
-    fn revert(&self, entry: &JournalEntry, sys: &dyn System) -> Result<Reverted>;
-}
+pub enum Step { FileInstall(FileInstallSpec), RegistrySet(RegistrySetSpec),
+                CompatLayer(CompatLayerSpec), IniSet(IniSetSpec) }
+pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError>; // GameDir, AppDir, RegPolicy; reads only
 ```
+
+Phase 2: `file_install` (local package files under `<AppDir>\packages`), `registry_set`, `compat_layer`, `ini_set`. Until the Topo engine (phase 4) `rerun plan` reads a JSON step file whose step objects are the durable spec types (ADR 0020, D7).
 
 | Primitive | Effect | Admin |
 |---|---|---|
@@ -73,12 +72,13 @@ pub trait Primitive {
 detect ─► hw ─► topo(when) ─► plan ─► [preview UI/CLI] ─► apply ─► journal
                                                      └► elevate (admin parts only)
 start: Steam %command% / IFEO ─► rerun-launch ─► read profile ─► method ─► check ─► exit
-revert: journal ─► hash check ─► restore backups ─► restore registry/firewall/IFEO/launch option ─► folder comparison
+revert: journal ─► observe each op (never overwrite a foreign state) ─► restore backups / values, LIFO ─► (phase 3: firewall/IFEO/launch option) ─► folder comparison
 ```
 
 ## rerun-cli
 
 - Phase 1 (ADR 0016): `rerun system` (`hw::read` with the built-in GPU table: GPU, CPU topology, OS build, the five condition facts) and `rerun scan [APP_ID…] [--hashes]` (`ForbiddenRoots` from its own install folder, `steam::scan`, per installed app `open_game` + `scan_game`, streamed per game; apps Steam is updating are listed, never opened).
+- Phase 2 (ADR 0020): `rerun plan <steps.json> [--dry-run]` (preview, `PlanHash`; stores the plan unless `--dry-run`), `rerun apply <plan-hash>`, `rerun revert <txn> [--rebind]`, `rerun status`, `rerun forget <txn>`; `apply`, `revert` and `forget` take the journal lock, the others do not.
 - Order in `main`: `restrict_dll_search`, then clap (`--help`/`--version` touch neither registry nor file system), then `WinSystem::new()`. Exit codes: 0 report (also with partial failures), 1 fatal without report, 2 usage.
 - Modules: `messages` (every user-facing string, named parameters), `out` (`Out`: line writer, `BrokenPipe` ends silently, last-resort net: every line through `escape::text`, a panic in tests), `system`, `scan` (pure render functions over core values). Human-readable English text only, not a stable interface; untrusted fields only as `escape::Shown` (raw text through `RawText::escaped`, never `as_raw_str`; a source rule test checks it), untrusted text last on its line. Never changes console state (no `SetConsoleMode`, no `SetConsoleOutputCP`; clap without `color`).
 
@@ -99,7 +99,7 @@ revert: journal ─► hash check ─► restore backups ─► restore registry
 ## Frontend (app/)
 
 - Tauri 2, Svelte 5, TypeScript, Vite. No UI library.
-- Commands: `scan`, `game_detail`, `plan`, `apply(plan_hash)`, `revert(entry_ids)`, `status`, `system_profile`.
+- Commands: `scan`, `game_detail`, `plan`, `apply(plan_hash)`, `revert(txn_id)`, `forget(txn_id)`, `status`, `system_profile`.
 - The frontend holds no system state. It displays plans, the core executes.
 
 ## Network

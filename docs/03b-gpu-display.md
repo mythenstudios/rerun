@@ -33,7 +33,7 @@ pub struct GpuEntry {
 
 Target, added later:
 
-- `GpuProfile::hybrid` (an integrated and a discrete adapter are both present) and a game adapter chosen per game (see "Which adapter"): with `gpu_preference` (phase 2). Until then conditions use `primary()`.
+- `GpuProfile::hybrid` (an integrated and a discrete adapter are both present) and a game adapter chosen per game (see "Which adapter"): with `gpu_preference` (phase 4, user decision D8 of 2026-11-05, ADR 0020). Until then conditions use `primary()`.
 - `GpuEntry::vulkan` (table estimate until a query exists) and `GpuEntry::dx9` (`Native | D3d9On12 | Unknown`, from the table entry): with the keys that use them. The table carries both fields from step 15 on.
 
 `when` keys (extends `02-topo-format.md`; evaluated against the conditions adapter: `primary()` in step 15, the game adapter once `gpu_preference` exists):
@@ -42,8 +42,8 @@ Target, added later:
 |---|---|---|---|
 | `gpu.vendor` | `amd`, `nvidia`, `intel`; `other` later (additive) | from `vendor_id`; until `other` exists, any other vendor matches none | step 15 |
 | `gpu.arch` | identifiers declared in the table (`archs`) | `unknown` is a profile state, not a value: an unknown device matches no list | step 15 |
-| `gpu.integrated` | bool | | phase 2 |
-| `gpu.hybrid` | bool | system-wide | phase 2 |
+| `gpu.integrated` | bool | | phase 4 |
+| `gpu.hybrid` | bool | system-wide | phase 4 |
 | `gpu.vram_mb` | number, compared with `gt`/`lt` | | later |
 | `gpu.vulkan` | `"1.1"`, `"1.3"`, … | estimate until queried | phase 4 |
 | `gpu.dx9` | `native`, `d3d9on12` | Intel only differs | later |
@@ -131,10 +131,12 @@ entries:
 | DX9 game misbehaves on Intel | `gpu.dx9: d3d9on12` | separate variant (e.g. DXVK), verified per game |
 | Physics or game speed broken above 60 Hz | `display.refresh_hz` | frame cap through a wrapper or Special K; Rerun does not change the monitor mode |
 | Stretched image or HUD | `display.aspect` | widescreen/HUD fix packages |
-| GPU-vendor-only effects (GPU PhysX on AMD/Intel) | `gpu.vendor` | information only; existing third-party launch options (e.g. a ZLUDA wrapper) are detected and never overwritten (`HANDOFF.md`, phase 3) |
+| GPU-vendor-only effects (GPU PhysX on AMD/Intel) | `gpu.vendor` | information only; existing third-party launch options (e.g. a ZLUDA wrapper) are detected and never overwritten (phase 3, `launch_option`) |
 | Driver no longer maintained | arch table | information only, never offered as a fix |
 
-### Primitive `gpu_preference` (phase 2, registry write side)
+### Primitive `gpu_preference` (phase 4, with `gpu.hybrid`)
+
+Moved from phase 2 by user decision D8 (2026-11-05): the registry write side (ADR 0018) reserves the slot (`RegSlot::GpuPreference`, refused until then), so the plan format does not change when it lands.
 
 - Key `HKCU\Software\Microsoft\DirectX\UserGpuPreferences`, value name = full path of the game exe, `REG_SZ`. The same value Windows writes from Settings > Display > Graphics.
 - Content is a list of `Key=Value;` pairs: `GpuPreference` `0` (let Windows decide), `1` (power saving), `2` (high performance), plus other keys Windows may store, such as `AutoHDREnable`. The primitive **parses and merges**: it changes only its own key and keeps all others. Revert restores the exact original string, or deletes the value if there was none.
@@ -174,7 +176,7 @@ Amendments, approved 2026-11-05 (details in ADR 0015):
 
 Scheduled later:
 
-- `gpu.hybrid` and `gpu.integrated` as `when` keys: with the `gpu_preference` primitive (phase 2).
+- `gpu.hybrid` and `gpu.integrated` as `when` keys: with the `gpu_preference` primitive (phase 4; moved from phase 2 by user decision D8, 2026-11-05).
 - `gpu.vulkan`: with the DXVK packages (phase 4).
 - `display.*`: a separate step, once a Topo needs it.
 

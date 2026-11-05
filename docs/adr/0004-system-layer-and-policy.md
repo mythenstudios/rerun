@@ -19,3 +19,8 @@ Primitives must be testable against a fake system (`docs/09-testing.md`) and may
 - The policy check for reparse points in the real folder (`resolve_confined`) comes in Phase 2, the registry allowlist (`policy::registry`) in Phase 3.
 - A new system access means: trait method + fake + contract test, never a direct call.
 - ADR 0007 replaces the `Fs` signatures described here: file operations now go through `Dir` relative to a root handle opened by `policy::root`.
+
+## Amendment · 2026-11-05 (phase 2 plan)
+- The `resolve_confined` check of the "Consequences" above is superseded by ADR 0007: every component below a root is opened relative to its parent handle and a reparse point is never followed, so no separate confinement check of a resolved path exists or is needed.
+- `policy::registry` moves from phase 3 to **phase 2** (audit A1 B2): `registry_set` and `compat_layer` ship in phase 2 and must not write without the allowlist (core rule 4). Its shape, `HKCU` only, and the split of `Registry` into a read trait and `RegistryWrite`: ADR 0018.
+- Writing is a capability: `Dir` reads, `DirWrite` and `FileGuard` write (ADR 0017); only `GameDir` and `AppDir` hand out a write handle.

@@ -93,7 +93,7 @@ links:
   - `os.build`: `CurrentBuildNumber` of `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion` (e.g. 22000, the first Windows 11 build); the update revision (`UBR`) is never compared.
   - Evaluation (phase 4): each key is yes, no or unknown; a `when` is no if any key is no, else unknown if any key is unknown, else yes; an empty `when` is yes. A fact Rerun could not read is unknown; a variant whose `when` is unknown is never preselected or applied automatically. `when` selects suggestions and is never authorisation. Details: ADR 0015.
 - `checks`: pure hints about runtimes outside the game folder. Rerun does not install them (game folder boundary), but shows a hint with a link. Values: `{ runtime: vcredist-x86 | vcredist-x64 | directx-jun2010 }`.
-- `steps`: list of primitives. Each step is an object with **exactly one** key. Allowed in v1: `package: <package-id>`, `steam_input: enable`, `cpu: <CPU rule>`. Further primitives from `01-architecture.md` enter the schema only together with their spec and implementation; before that they are a validation error.
+- `steps`: list of primitives. Each step is an object with **exactly one** key. Allowed in v1: `package: <package-id>`, `steam_input: enable`, `cpu: <CPU rule>`. A `package` step is carried out by the `file_install` primitive: the package's files with their pinned hashes become `file_install` ops (ADR 0020); `file_install` itself is not a Topo step. Further primitives from `01-architecture.md` (`registry_set`, `compat_layer`, `ini_set` in phase 2) enter the schema only together with their spec and implementation; before that they are a validation error. Until the Topo engine exists (phase 4), `rerun plan` reads these step objects from a JSON step file (ADR 0020, user decision D7).
 - `sources`: links directly to the guide, thread, repo or section, always `https://`, never just the home page. Types and patterns:
   - `repo`: `https://github.com|gitlab.com|codeberg.org/<owner>/<repo>[/…]`
   - `steam-guide`: `https://steamcommunity.com/sharedfiles/filedetails/?id=<n>`
@@ -166,7 +166,7 @@ With `tier: community` (see `05-sources-policy.md`), `source.page` (original pag
 - `supports_exe_sha1`: exe versions the package is built for.
 - `files[]`: `{ from, to, config?, arch?, api? }`. `arch`/`api` restrict an entry to specific architectures or APIs. Folders are derived from `to`.
 - `options`: INI values that appear as toggles in the UI; `kind` as for variants. `section` and `key`: `^[A-Za-z0-9_. -]+$`. String `default`: no control characters (no CR/LF), no absolute paths, no `..`.
-- `config: true`: the file may be modified by the user; revert then asks instead of deleting it outright.
+- `config: true`: the file is meant to be modified by the user. A revert never overwrites or deletes a file whose content is no longer what Rerun wrote, whether `config` is set or not, and never asks: the change stays unresolved, its backup stays in the journal and `forget` closes it (user decision D10, ADR 0020). `config` is a hint for the preview and for `ini_set` options on that file.
 
 ## Signed index
 
