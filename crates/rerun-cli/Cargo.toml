@@ -15,7 +15,14 @@ path = "src/main.rs"
 
 [dependencies]
 rerun-core.workspace = true
+# The CPU topology type of the system profile (workspace crate).
+rerun-proto.workspace = true
 clap.workspace = true
+
+# In-process end-to-end tests against the fake system layer (ADR 0016). Never in the shipped
+# build: CI checks that `-e normal,build` of rerun-cli does not enable `fake`.
+[dev-dependencies]
+rerun-core = { workspace = true, features = ["fake"] }
 
 [lints]
 workspace = true

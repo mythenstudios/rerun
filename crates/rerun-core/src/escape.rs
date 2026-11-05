@@ -46,6 +46,11 @@ impl Shown<'_> {
         matches!(self.0, Cow::Owned(_))
     }
 
+    /// The same text, owned (for text computed by the caller, such as an error message).
+    pub fn into_owned(self) -> Shown<'static> {
+        Shown(Cow::Owned(self.0.into_owned()))
+    }
+
     /// The escaped text, or `None` for a clean input.
     pub(crate) fn into_escaped(self) -> Option<String> {
         match self.0 {

@@ -1,40 +1,86 @@
-//! `rerun` – command-line interface. Each phase brings its own subcommands (phase 1: `scan`).
+//! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system`.
+//!
+//! Order in `main`: `restrict_dll_search` first (ADR 0008), then clap parses (`--help`,
+//! `--version` and usage errors end there, before any registry or file system access), then
+//! `WinSystem::new`. The commands take a `&dyn System` and two line writers, so the tests run
+//! them against the fake system layer with in-memory output.
 
+mod cli;
+mod messages;
+mod out;
+mod system;
+
+use std::io;
 use std::process::ExitCode;
 
 use clap::Parser;
 
-/// Rerun by Mythen Studios – detects old PC games and applies (and cleanly removes)
-/// the compatibility fixes they need.
-#[derive(Debug, Parser)]
-// No `about` key: clap uses the doc comment (UI base string) instead of the package
-// description from Cargo.toml.
-#[command(name = "rerun", bin_name = "rerun", version)]
-struct Cli {}
+use crate::cli::{Cli, Command, Exit};
+use crate::messages::Message;
+use crate::out::Out;
 
+#[cfg(windows)]
 fn main() -> ExitCode {
+    use rerun_core::escape;
+    use rerun_core::sys::win::{WinSystem, restrict_dll_search};
+
     // First statement (ADR 0008, H2): no later DLL load may come from the install folder, the
     // current directory or `PATH`. Fail closed.
-    #[cfg(windows)]
-    if let Err(e) = rerun_core::sys::win::restrict_dll_search() {
-        eprintln!("rerun: cannot restrict the DLL search path to System32: {e}");
-        return ExitCode::FAILURE;
+    if let Err(e) = restrict_dll_search() {
+        let mut err = Out::new(io::stderr().lock());
+        let _ = err.line(&Message::DllSearch {
+            error: escape::text(&e.to_string()),
+        });
+        return Exit::Fatal.into();
     }
-    let _cli = Cli::parse();
-    println!(
-        "rerun {}: no commands yet. See `rerun --help`.",
-        rerun_core::VERSION
-    );
-    ExitCode::SUCCESS
+    let cli = match parse() {
+        Ok(cli) => cli,
+        Err(exit) => return exit.into(),
+    };
+    let mut out = Out::new(io::stdout().lock());
+    let mut err = Out::new(io::stderr().lock());
+    let sys = match WinSystem::new() {
+        Ok(sys) => sys,
+        Err(e) => {
+            let _ = err.line(&Message::SystemUnavailable {
+                error: escape::text(&e.to_string()),
+            });
+            return Exit::Fatal.into();
+        }
+    };
+    run(&sys, cli.command, &mut out, &mut err).into()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Cli;
-    use clap::CommandFactory;
+#[cfg(not(windows))]
+fn main() -> ExitCode {
+    if let Err(exit) = parse() {
+        return exit.into();
+    }
+    let _ = Out::new(io::stderr().lock()).line(&Message::WindowsOnly);
+    Exit::Fatal.into()
+}
 
-    #[test]
-    fn cli_definition_is_valid() {
-        Cli::command().debug_assert();
+/// Parses the command line; help, version and usage errors are printed by clap and end here.
+fn parse() -> Result<Cli, Exit> {
+    Cli::try_parse().map_err(|e| {
+        // A closed pipe while printing help changes nothing.
+        let _ = e.print();
+        if e.use_stderr() {
+            Exit::Usage
+        } else {
+            Exit::Report
+        }
+    })
+}
+
+/// Runs a command.
+fn run<W: io::Write, E: io::Write>(
+    sys: &dyn rerun_core::sys::System,
+    command: Command,
+    out: &mut Out<W>,
+    err: &mut Out<E>,
+) -> Exit {
+    match command {
+        Command::System => system::system(sys, out, err),
     }
 }

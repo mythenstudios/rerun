@@ -1,4 +1,5 @@
-//! Phase 0 acceptance: `rerun --help` and `rerun --version` work.
+//! Phase 0 acceptance (`rerun --help`, `rerun --version`) and the command line of phase 1
+//! (ADR 0016): help, usage errors (exit 2).
 
 #![allow(clippy::disallowed_methods, reason = "test launches its own binary")]
 #![allow(
@@ -8,29 +9,49 @@
 
 use std::process::{Command, Output};
 
-fn rerun(arg: &str) -> Output {
+fn rerun(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_rerun"))
-        .arg(arg)
+        .args(args)
         .output()
         .unwrap()
 }
 
 #[test]
-fn help_exits_zero_and_names_the_tool() {
-    let out = rerun("--help");
+fn help_exits_zero_and_names_the_tool_and_its_commands() {
+    let out = rerun(&["--help"]);
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("rerun"), "{stdout}");
     assert!(stdout.contains("Usage"), "{stdout}");
+    assert!(stdout.contains("\n  system "), "{stdout}");
+    // No colour: clap is built without `color` (ADR 0016).
+    assert!(!stdout.contains('\u{1b}'), "{stdout}");
 }
 
 #[test]
 fn version_matches_package_version() {
-    let out = rerun("--version");
+    let out = rerun(&["--version"]);
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert_eq!(
         stdout.trim(),
         format!("rerun {}", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn usage_errors_exit_2_without_a_report() {
+    for args in [
+        &[][..],
+        &["--no-such-flag"],
+        &["no-such-command"],
+        &["system", "extra"],
+    ] {
+        let out = rerun(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(stderr.contains("Usage"), "{args:?}: {stderr}");
+        assert!(!stderr.contains('\u{1b}'), "{stderr}");
+    }
 }

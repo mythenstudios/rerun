@@ -665,6 +665,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "rerun-core",
+ "rerun-proto",
 ]
 
 [[package]]

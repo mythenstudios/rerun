@@ -245,6 +245,18 @@ fn clean_strings_are_borrowed_and_unchanged() {
 }
 
 #[test]
+fn into_owned_keeps_the_shown_text() {
+    let computed = String::from("x\u{202E}y");
+    let shown = text(&computed).into_owned();
+    drop(computed);
+    assert_eq!(shown.as_str(), r#""x\u{202e}y""#);
+    let clean = String::from("plain");
+    let shown = path(&clean).into_owned();
+    drop(clean);
+    assert_eq!(shown.as_str(), "plain");
+}
+
+#[test]
 fn every_valid_rel_path_fixture_is_unchanged_by_path() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../../../../tests/fixtures/paths.json")).unwrap();
