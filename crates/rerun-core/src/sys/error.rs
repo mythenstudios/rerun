@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::path::is_deceptive;
+use crate::escape;
 
 /// Kind of a system error, modelled on the Win32 error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,7 +56,7 @@ pub struct SysError {
     /// Error kind.
     pub kind: SysErrorKind,
     /// Affected path or key, human-readable. Never raw text from the system: a target with a
-    /// control or an invisible/confusable character ([`is_deceptive`]) is stored escaped
+    /// control or an invisible/confusable character ([`escape::path`]) is stored escaped
     /// (`{:?}`), see [`shown_target`]. Build errors with [`SysError::new`] or
     /// [`SysError::path`], which apply it.
     pub target: String,
@@ -107,27 +107,14 @@ impl SysError {
     }
 }
 
-/// `target` as it is if it holds no control and no invisible or confusable character
-/// ([`is_deceptive`]), otherwise escaped: `{:?}` (control, bidi and format characters as
-/// `\u{…}`), and the printable confusables `{:?}` keeps (full-width ASCII, slash look-alikes,
-/// ¥ …) as `\u{…}` too. Idempotent: an escaped target has no such character left. So a raw name
-/// from disk or the registry (a U+202E in a file name, an embedded newline) never reaches a
-/// message unescaped, whichever error path carries it.
+/// `target` as it is if it holds no escapable character, otherwise escaped with
+/// [`escape::path`] (ADR 0016): `{:?}`-quoted, and every control, format, default-ignorable,
+/// noncharacter, private use or confusable character
+/// ([`is_deceptive`](crate::path::is_deceptive)) as `\u{…}`. Idempotent. So a raw name from
+/// disk or the registry (a U+202E in a file name, an embedded newline, tag characters) never
+/// reaches a message unescaped, whichever error path carries it.
 pub fn shown_target(target: String) -> String {
-    let bad = |c: char| c.is_control() || is_deceptive(c);
-    if !target.chars().any(bad) {
-        return target;
-    }
-    format!("{target:?}")
-        .chars()
-        .map(|c| {
-            if bad(c) {
-                format!("\\u{{{:x}}}", u32::from(c))
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
+    escape::path(&target).into_escaped().unwrap_or(target)
 }
 
 /// Result of a system operation.
@@ -143,7 +130,8 @@ mod tests {
     use crate::sys::fake::FakeSystem;
 
     fn clean(s: &str) -> bool {
-        !s.chars().any(|c| c.is_control() || is_deceptive(c))
+        !s.chars()
+            .any(|c| c.is_control() || is_deceptive(c) || crate::escape::in_base_set(c))
     }
 
     #[test]
@@ -167,6 +155,8 @@ mod tests {
             "zero\u{200B}width",
             "x\u{2215}y",
             "nul\0",
+            "tag\u{E0041}\u{E007F}",
+            "line\u{2028}sep",
         ] {
             let e = SysError::new(SysErrorKind::Other, raw);
             assert_ne!(e.target, raw);

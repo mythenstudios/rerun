@@ -3,6 +3,8 @@
 
 use std::fmt;
 
+use crate::escape::{self, Shown};
+
 /// Text exactly as read from an untrusted source (a path, label, name or install folder from
 /// a Steam file, a registry value, a version string of an executable), unchecked.
 ///
@@ -23,6 +25,12 @@ impl RawText {
     /// sanitize it before showing it.
     pub fn as_raw_str(&self) -> &str {
         &self.0
+    }
+
+    /// The content for display: [`escape::text`] (ADR 0016). The one way an output layer shows
+    /// raw text, so it never needs [`Self::as_raw_str`].
+    pub fn escaped(&self) -> Shown<'_> {
+        escape::text(&self.0)
     }
 
     /// Length in bytes (UTF-8).
@@ -56,5 +64,7 @@ mod tests {
         assert_eq!(t.len(), 17);
         assert!(!t.is_empty());
         assert!(RawText::new("").is_empty());
+        assert_eq!(t.escaped().as_str(), r#""secret \u{1b}[31m name""#);
+        assert!(!RawText::new("Half-Life 2").escaped().is_escaped());
     }
 }
