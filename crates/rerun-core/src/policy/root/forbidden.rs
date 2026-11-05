@@ -58,6 +58,24 @@ pub enum Forbidden {
     VolumeRoot,
 }
 
+/// The known folders the forbidden list is resolved from, explicitly (audit A1 should-item
+/// 10). Not [`KnownFolder::ALL`]: a known folder added later (`Documents`, the base of the
+/// `UserData` root of phase 4) can then be a root itself without becoming forbidden. Every
+/// folder the rules below name must be listed here; a folder missing here would resolve to
+/// no path and its rule would silently protect nothing (pinned by a test).
+const FORBIDDEN_SOURCES: [KnownFolder; 10] = [
+    KnownFolder::Windows,
+    KnownFolder::ProgramFiles,
+    KnownFolder::ProgramFilesX86,
+    KnownFolder::ProgramFilesCommon,
+    KnownFolder::ProgramFilesCommonX86,
+    KnownFolder::ProgramData,
+    KnownFolder::UserProfiles,
+    KnownFolder::Profile,
+    KnownFolder::LocalAppData,
+    KnownFolder::RoamingAppData,
+];
+
 /// Protected folders a root must neither be, lie in, nor contain.
 const OVERLAP_KNOWN: [KnownFolder; 3] = [
     KnownFolder::Windows,
@@ -139,16 +157,17 @@ pub struct ForbiddenRoots {
 }
 
 impl ForbiddenRoots {
-    /// Resolves the list from the known folders (never environment variables) and Rerun's
-    /// install folder (the directory of the running executable, passed in by the caller).
+    /// Resolves the list from the known folders in [`FORBIDDEN_SOURCES`] (never environment
+    /// variables) and Rerun's install folder (the directory of the running executable, passed
+    /// in by the caller).
     ///
     /// Fails closed: if any folder cannot be resolved, no root can be handed out. Each folder
     /// is kept in its lexical and its canonical form. A folder that does not exist keeps
     /// only its lexical form. `RoamingAppData` on a network path is never opened and skipped.
     pub fn resolve(sys: &dyn System, install_dir: &Path) -> Result<Self, RootError> {
         let kf = sys.known_folders();
-        let mut forms = Vec::with_capacity(KnownFolder::ALL.len());
-        for folder in KnownFolder::ALL {
+        let mut forms = Vec::with_capacity(FORBIDDEN_SOURCES.len());
+        for folder in FORBIDDEN_SOURCES {
             let what = folder.to_string();
             let raw = kf
                 .get(folder)
@@ -304,4 +323,50 @@ fn forms_of(
         Err(e) => return Err(incomplete(what, e.to_string())),
     }
     Ok(forms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DERIVED, FORBIDDEN_SOURCES, OVERLAP_KNOWN, UPWARD_KNOWN};
+    use crate::sys::KnownFolder;
+
+    /// The sources are pinned: changing them changes what is forbidden. Today they are the
+    /// same set as `KnownFolder::ALL`, so the split changed no behaviour.
+    #[test]
+    fn forbidden_sources_are_pinned() {
+        use KnownFolder as K;
+        assert_eq!(
+            FORBIDDEN_SOURCES,
+            [
+                K::Windows,
+                K::ProgramFiles,
+                K::ProgramFilesX86,
+                K::ProgramFilesCommon,
+                K::ProgramFilesCommonX86,
+                K::ProgramData,
+                K::UserProfiles,
+                K::Profile,
+                K::LocalAppData,
+                K::RoamingAppData,
+            ]
+        );
+        let mut sorted = FORBIDDEN_SOURCES.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), FORBIDDEN_SOURCES.len(), "no duplicates");
+    }
+
+    /// Every folder a rule names is resolved: one missing from the sources would resolve to
+    /// no path and its rule would protect nothing (fail open).
+    #[test]
+    fn every_folder_a_rule_names_is_a_source() {
+        let named = OVERLAP_KNOWN
+            .iter()
+            .chain(UPWARD_KNOWN.iter())
+            .chain(DERIVED.iter().map(|(k, _)| k))
+            .chain(&[KnownFolder::UserProfiles, KnownFolder::Profile]);
+        for k in named {
+            assert!(FORBIDDEN_SOURCES.contains(k), "{k} is not resolved");
+        }
+    }
 }

@@ -1,4 +1,6 @@
-//! Known folders: the machine and user folders that `policy::root` keeps off limits.
+//! Known folders: machine and user folders resolved by the system. `policy::root` builds its
+//! forbidden list from an explicit subset of them (`FORBIDDEN_SOURCES`), so a known folder is
+//! not forbidden just by being known.
 //!
 //! The real implementation (`sys::win`) resolves them with `GetSystemWindowsDirectoryW`
 //! (not `GetWindowsDirectoryW`, which is per session), the raw `ProfileList` values in `HKLM`
@@ -15,7 +17,8 @@ use std::path::PathBuf;
 
 use super::SysResult;
 
-/// A known folder. Only the folders `policy::root` needs (ADR 0007, forbidden roots).
+/// A known folder. Only the folders `policy::root` needs (ADR 0007: the forbidden roots; later
+/// also bases of allowed roots).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum KnownFolder {
