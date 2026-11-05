@@ -136,6 +136,14 @@ pub trait FsFixture: Sync {
     /// (an open with `FILE_WRITE_ATTRIBUTES` only, which no share mode blocks; the other
     /// attributes stay).
     fn set_attrs(&self, p: &Path, attrs: Attrs) -> SysResult<()>;
+    /// Creates the file `p` with content of the fixture's choice and maps it as an image
+    /// section of this process without keeping a handle (a running exe, a loaded DLL), until
+    /// the returned value drops. `Ok(None)` = not available.
+    fn mapped_image(&self, p: &Path) -> SysResult<Option<Held<'_>>>;
+    /// Creates the file `p` and puts it in legacy delete-pending state (a
+    /// `FileDispositionInformation` delete while a second handle stays open) until the
+    /// returned value (that handle) drops; then the name goes. `Ok(None)` = not available.
+    fn delete_pending(&self, p: &Path) -> SysResult<Option<Held<'_>>>;
 }
 
 /// Data access of a fixture handle ([`FsFixture::hold_open`]): `FILE_READ_DATA`,

@@ -23,6 +23,12 @@
 //!   while any handle below it is open is refused (`AccessDenied`, observed on Windows for
 //!   every kind of handle, modelled by the fake, ADR 0017 A5); renaming the directory itself
 //!   is allowed.
+//! - **Delete-pending entries** (ADR 0017, A6): a name in legacy delete-pending state (deleted
+//!   by another program while a second handle is still open) cannot be opened at all:
+//!   `metadata`, `open_read`, `read`, `users`, `open_dir`, `guard`, `lock` and the existence
+//!   check of `create_new` are `Busy`, and `read_dir` skips it like an entry that vanished
+//!   between the listing and its reopen. The fake models it; `sys::win` maps the status from
+//!   P2-4.
 //! - **Share modes.** A handle that reads data shares read only (`open_read`), a [`Dir`]
 //!   handle shares everything; an open that conflicts with another program's handle is
 //!   `Busy`. Attribute-only opens (`metadata`, `users`, the components of a walk) are never

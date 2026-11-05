@@ -172,6 +172,16 @@ impl FsFixture for FakeFs {
         FakeFs::set_attrs(self, p, attrs)
     }
 
+    fn mapped_image(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        self.put_file(p, b"MZ fake image")?;
+        Ok(Some(Box::new(self.map_image_as(std::process::id(), p)?)))
+    }
+
+    fn delete_pending(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        self.put_file(p, b"pending")?;
+        Ok(Some(Box::new(FakeFs::delete_pending(self, p)?)))
+    }
+
     fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>> {
         Ok(Box::new(self.hold_open_as(
             std::process::id(),

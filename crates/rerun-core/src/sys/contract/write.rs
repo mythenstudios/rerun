@@ -127,7 +127,111 @@ pub fn fs_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCont
     w23_handle_follows(fs, fx, work)?;
     s2_changes_under_a_guard(fs, fx, work)?;
     s8a_delete_in_held_folder(fs, fx, work)?;
+    w19_mapped_image(fs, fx, work, &mut skips)?;
+    w20_delete_pending(fs, fx, work, &mut skips)?;
     Ok(skips)
+}
+
+/// W19: an image-mapped file (no handle) is reported by `users`; `replace` succeeds with the
+/// old content left as `<tmp>.old` (`old_left`, step 8 refused); deleting `.old` stays `Busy`
+/// until the mapping is gone, then works.
+fn w19_mapped_image(
+    fs: &dyn Fs,
+    fx: &dyn FsFixture,
+    work: &Path,
+    skips: &mut Skipped,
+) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w19")?;
+    let Some(map) = ok(
+        fx.mapped_image(&work.join(r"w19\game.exe")),
+        "fixture image",
+    )?
+    else {
+        skip(skips, "mapped_image");
+        return Ok(());
+    };
+    let exe = rel("game.exe")?;
+    ensure(
+        !ok(d.users(&exe), "W19 users")?.is_empty(),
+        "W19 users reports an image-mapped file",
+    )?;
+    let mut g = ok(d.guard(&exe), "W19 guard")?;
+    let h0 = ok(g.sha256(), "W19 sha256")?;
+    let new = new_file(1, Attrs::default(), b"new exe", 7);
+    let r = ok(
+        g.replace(&h0, &mut &b"new exe"[..], &new),
+        "W19 replace of a mapped image",
+    )?;
+    ensure(
+        r.old_left.as_ref() == Some(&new.tmp),
+        "W19 the old image is left as pending cleanup",
+    )?;
+    read_is(
+        &*d,
+        "game.exe",
+        b"new exe",
+        "W19 the new content is in place",
+    )?;
+    let old = new.tmp.old();
+    let mut g = ok(d.guard(&old), "W19 guard .old")?;
+    ensure(ok(g.sha256(), "W19 .old hash")? == h0, "W19 .old holds h0")?;
+    err_kind(
+        g.delete(&h0),
+        SysErrorKind::Busy,
+        "W19 delete of .old while it is mapped",
+    )?;
+    drop(map);
+    let g = ok(d.guard(&old), "W19 guard .old after the mapping")?;
+    ok(g.delete(&h0), "W19 delete of .old once the mapping is gone")?;
+    ensure(
+        names(&*d, None, "W19 listing")? == ["game.exe"],
+        "W19 nothing is left",
+    )
+}
+
+/// W20 and A6: a name in legacy delete-pending state cannot be opened at all: `metadata`,
+/// `read`, `open_read`, `users`, `guard`, `lock` and `create_new` are `Busy`, `read_dir` skips
+/// it. Once the other handle closes, the name is free.
+fn w20_delete_pending(
+    fs: &dyn Fs,
+    fx: &dyn FsFixture,
+    work: &Path,
+    skips: &mut Skipped,
+) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w20")?;
+    ok(fx.file(&work.join(r"w20\keep.bin"), b"keep"), "fixture")?;
+    let Some(pending) = ok(
+        fx.delete_pending(&work.join(r"w20\gone.bin")),
+        "fixture delete pending",
+    )?
+    else {
+        skip(skips, "delete_pending");
+        return Ok(());
+    };
+    let p = rel("gone.bin")?;
+    let busy = SysErrorKind::Busy;
+    err_kind(d.metadata(&p), busy, "A6 metadata")?;
+    err_kind(d.read(&p), busy, "A6 read")?;
+    err_kind(d.open_read(&p).map(|_| ()), busy, "A6 open_read")?;
+    err_kind(d.users(&p), busy, "A6 users")?;
+    err_kind(d.guard(&p).map(|_| ()), busy, "W20 guard")?;
+    err_kind(d.lock(&p).map(|_| ()), busy, "A6 lock")?;
+    err_kind(
+        d.create_new(&p, &mut &b"x"[..], &new_file(1, Attrs::default(), b"x", 1)),
+        busy,
+        "W20 create_new",
+    )?;
+    ensure(
+        names(&*d, None, "A6 listing")? == ["keep.bin"],
+        "A6 read_dir skips a delete-pending entry",
+    )?;
+    drop(pending);
+    absent(&*d, "gone.bin", "W20 once the other handle is closed")?;
+    ok(
+        d.create_new(&p, &mut &b"x"[..], &new_file(2, Attrs::default(), b"x", 1)),
+        "W20 create_new once the name is free",
+    )?;
+    no_tmp(&*d, "W20")
 }
 
 /// W1: `create_new` writes what `Written` says, with exactly the requested R/H/S, and leaves

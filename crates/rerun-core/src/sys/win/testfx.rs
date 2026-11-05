@@ -1252,6 +1252,18 @@ impl FsFixture for WinFixture {
         Ok(())
     }
 
+    /// Not available until P2-4 (needs a valid PE image in the test root, mapped with
+    /// `SEC_IMAGE`, loadable under the restricted DLL search path).
+    fn mapped_image(&self, _p: &Path) -> SysResult<Option<Held<'_>>> {
+        Ok(None)
+    }
+
+    /// Not available until P2-4 (a legacy `FileDispositionInformation` delete with a second
+    /// handle held).
+    fn delete_pending(&self, _p: &Path) -> SysResult<Option<Held<'_>>> {
+        Ok(None)
+    }
+
     /// `CreateFileW` with `FILE_READ_DATA`/`FILE_WRITE_DATA`/`DELETE` (or
     /// `FILE_READ_ATTRIBUTES` alone), `SYNCHRONIZE` and the share mode, opening `p` itself
     /// (`FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`, so directories too).

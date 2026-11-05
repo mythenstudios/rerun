@@ -34,7 +34,9 @@
 //!   reports the process ID of every recorded handle on the file. A handle closes when its
 //!   owner drops: the drop queues the close and the next access to the state applies it (never
 //!   re-entrant, also when a handle drops while the state is locked). A handle to a deleted
-//!   directory returns `NotFound`.
+//!   directory returns `NotFound`. Image sections ([`FakeFs::map_image_as`]) and legacy
+//!   delete-pending entries ([`FakeFs::delete_pending`]) are records of their own kind, see
+//!   there.
 //! - **Write side** ([`DirWrite`], ADR 0017): the sequences live once in `sys::seq`; the fake
 //!   implements only their primitives (`fs/prim.rs`). Each primitive fires the step hook with
 //!   `FsOp::Write` and its [`Prim`] before it acts. `<tmp>` is created with write and delete
@@ -295,6 +297,7 @@ enum Origin {
 #[derive(Debug)]
 struct OpenRec {
     obj: Obj,
+    kind: RecKind,
     access: Access,
     share: Share,
     pid: u32,
@@ -305,6 +308,19 @@ struct OpenRec {
     origin: Origin,
     /// A POSIX delete was set on the handle: the name goes when it closes.
     delete_on_close: bool,
+}
+
+/// What a record stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecKind {
+    /// An open handle (share-checked).
+    Handle,
+    /// An image section without a handle ([`FakeFs::map_image_as`]): never share-checked,
+    /// but an open for write and every delete of the file are `Busy`; renames work.
+    Image,
+    /// A file in legacy delete-pending state ([`FakeFs::delete_pending`]): every open of it,
+    /// also attribute-only, is `Busy`, listings skip it; the name goes when this closes.
+    Pending,
 }
 
 #[derive(Debug, Default)]
@@ -478,12 +494,37 @@ impl State {
     }
 
     /// `AccessDenied` for a restricted entry: every open of it fails, like on Windows.
+    /// `Busy` for an entry in delete-pending state (ADR 0017, A6).
     fn openable(&self, id: NodeId, target: &str) -> SysResult<()> {
         if self.is_restricted(id) {
-            Err(err(SysErrorKind::AccessDenied, target))
-        } else {
-            Ok(())
+            return Err(err(SysErrorKind::AccessDenied, target));
         }
+        self.not_pending(id, target)
+    }
+
+    /// `Busy` if the entry is in legacy delete-pending state (A6).
+    fn not_pending(&self, id: NodeId, target: &str) -> SysResult<()> {
+        let pending = self
+            .opens
+            .values()
+            .any(|o| o.kind == RecKind::Pending && o.obj.node() == id);
+        if pending {
+            return Err(err(SysErrorKind::Busy, target));
+        }
+        Ok(())
+    }
+
+    /// `Busy` if the inode is mapped as an image (`STATUS_CANNOT_DELETE` for a delete, a
+    /// sharing violation for an open for write).
+    fn not_mapped(&self, obj: Obj, target: &str) -> SysResult<()> {
+        let mapped = self
+            .opens
+            .values()
+            .any(|o| o.kind == RecKind::Image && o.obj.same(obj));
+        if mapped {
+            return Err(err(SysErrorKind::Busy, target));
+        }
+        Ok(())
     }
 
     /// Metadata of an entry. A restricted entry is described the way `sys::win` describes it
@@ -693,14 +734,19 @@ impl State {
         }
     }
 
-    /// `Busy` if an open of `obj` with `access` and `share` conflicts with an open handle.
+    /// `Busy` if an open of `obj` with `access` and `share` conflicts with an open handle, or
+    /// asks for write on a mapped image.
     fn check_share(&self, obj: Obj, access: Access, share: Share, target: &str) -> SysResult<()> {
-        let conflict = self
-            .opens
-            .values()
-            .any(|o| o.obj.same(obj) && share_conflict(access, share, o.access, o.share));
+        let conflict = self.opens.values().any(|o| {
+            o.kind != RecKind::Image
+                && o.obj.same(obj)
+                && share_conflict(access, share, o.access, o.share)
+        });
         if conflict {
             return Err(err(SysErrorKind::Busy, target));
+        }
+        if access.write {
+            self.not_mapped(obj, target)?;
         }
         Ok(())
     }
@@ -713,16 +759,29 @@ impl State {
         pid: u32,
         origin: Origin,
     ) -> OpenId {
+        self.register_kind(obj, RecKind::Handle, access, share, pid, origin)
+    }
+
+    fn register_kind(
+        &mut self,
+        obj: Obj,
+        kind: RecKind,
+        access: Access,
+        share: Share,
+        pid: u32,
+        origin: Origin,
+    ) -> OpenId {
         self.next_open += 1;
         self.opens.insert(
             self.next_open,
             OpenRec {
                 obj,
+                kind,
                 access,
                 share,
                 pid,
                 origin,
-                delete_on_close: false,
+                delete_on_close: kind == RecKind::Pending,
             },
         );
         self.next_open
@@ -757,14 +816,20 @@ impl State {
 
     /// A recorded handle (of any kind) is open on an entry strictly below `anc`: Windows
     /// refuses to rename `anc` (`ACCESS_DENIED`, observed, ADR 0017 A5).
+    /// An image section without a handle does not count (not observed; the fake is never
+    /// stricter than Windows).
     fn open_below(&self, anc: NodeId) -> bool {
         self.opens.values().any(|o| {
             let n = o.obj.node();
-            n != anc && self.nodes.contains_key(&n) && self.is_ancestor_or_self(anc, n)
+            o.kind != RecKind::Image
+                && n != anc
+                && self.nodes.contains_key(&n)
+                && self.is_ancestor_or_self(anc, n)
         })
     }
 
-    /// Process IDs of the handles open on the inode `ino`, without `except`; sorted, unique.
+    /// Process IDs of the handles and image sections on the inode `ino`, without `except`;
+    /// sorted, unique.
     fn users_of(&self, ino: NodeId, except: Option<OpenId>) -> Vec<u32> {
         let mut pids: Vec<u32> = self
             .opens
@@ -1149,6 +1214,7 @@ impl FakeFs {
             Some(id) => match st.nodes.get(&id).map(|n| &n.body) {
                 Some(Body::File(ino)) => {
                     let ino = *ino;
+                    st.not_pending(id, &shown)?;
                     st.check_share(st.obj_of(id), Access::WRITE, Share::RWD, &shown)?;
                     if let Some(i) = st.inodes.get_mut(&ino) {
                         i.data = data.to_vec();
@@ -1402,7 +1468,9 @@ impl FakeFs {
         let shown = abs.display().to_string();
         let mut st = self.lock();
         let id = st.require_abs(abs)?;
+        st.not_pending(id, &shown)?;
         st.check_share(st.obj_of(id), Access::DELETE, Share::RWD, &shown)?;
+        st.not_mapped(st.obj_of(id), &shown)?;
         match st.nodes.get(&id) {
             Some(Node { parent: None, .. }) => {
                 return Err(SysError::path(SysErrorKind::AccessDenied, abs));
@@ -1452,6 +1520,61 @@ impl FakeFs {
             let obj = st.obj_of(node);
             st.check_share(obj, access, share, &shown)?;
             st.register(obj, access, share, pid, Origin::Fixture)
+        };
+        Ok(FakeHold {
+            _open: self.token(id),
+        })
+    }
+
+    /// Fixture: maps the existing file `abs` as an image section of process `pid` (a running
+    /// exe or a loaded DLL without an open handle) until the returned [`FakeHold`] drops.
+    /// `users` reports it; renames of the file work, a delete (also the POSIX delete of step
+    /// 8) and an open for write are `Busy` (ADR 0017, observed). A restart keeps it; a power
+    /// loss drops it.
+    pub fn map_image_as(&self, pid: u32, abs: &Path) -> SysResult<FakeHold> {
+        let shown = abs.display().to_string();
+        let id = {
+            let mut st = self.lock();
+            let node = st.require_abs(abs)?;
+            let obj = st.obj_of(node);
+            if !matches!(obj, Obj::File { .. }) {
+                return Err(err(SysErrorKind::AccessDenied, &shown));
+            }
+            st.register_kind(
+                obj,
+                RecKind::Image,
+                Access::ATTRS,
+                Share::RWD,
+                pid,
+                Origin::Fixture,
+            )
+        };
+        Ok(FakeHold {
+            _open: self.token(id),
+        })
+    }
+
+    /// Fixture: puts the existing file `abs` in legacy delete-pending state (a delete while
+    /// another handle is open) until the returned [`FakeHold`] (that handle) drops; then the
+    /// name goes. Meanwhile every open of it is `Busy` and listings skip it (ADR 0017, A6).
+    pub fn delete_pending(&self, abs: &Path) -> SysResult<FakeHold> {
+        let shown = abs.display().to_string();
+        let id = {
+            let mut st = self.lock();
+            let node = st.require_abs(abs)?;
+            let obj = st.obj_of(node);
+            if !matches!(obj, Obj::File { .. }) {
+                return Err(err(SysErrorKind::AccessDenied, &shown));
+            }
+            st.check_share(obj, Access::DELETE, Share::RWD, &shown)?;
+            st.register_kind(
+                obj,
+                RecKind::Pending,
+                Access::ATTRS,
+                Share::RWD,
+                std::process::id(),
+                Origin::Fixture,
+            )
         };
         Ok(FakeHold {
             _open: self.token(id),
@@ -1596,7 +1719,10 @@ impl Dir for FakeDir {
         };
         let st = self.fs.lock();
         match st.lookup(parent, name, t)? {
-            Some(id) => st.meta(id, t).map(Some),
+            Some(id) => {
+                st.not_pending(id, t)?;
+                st.meta(id, t).map(Some)
+            }
             None => Ok(None),
         }
     }
@@ -1656,8 +1782,11 @@ impl Dir for FakeDir {
                 u64::try_from(max_entries).unwrap_or(u64::MAX),
             ));
         }
+        // An entry in delete-pending state cannot be reopened: skipped like one that
+        // vanished between the listing and its reopen (A6).
         children
             .values()
+            .filter(|&&id| st.not_pending(id, &t).is_ok())
             .map(|&id| {
                 Ok(DirEntry {
                     name: st.node(id, &t)?.name.clone(),

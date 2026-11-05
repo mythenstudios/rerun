@@ -199,6 +199,12 @@ impl FsFixture for CopyFixture {
     fn set_attrs(&self, p: &Path, attrs: Attrs) -> SysResult<()> {
         FsFixture::set_attrs(&self.inner, p, attrs)
     }
+    fn mapped_image(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        self.inner.mapped_image(p)
+    }
+    fn delete_pending(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        FsFixture::delete_pending(&self.inner, p)
+    }
 }
 
 #[test]
@@ -2473,4 +2479,34 @@ fn f12_the_guard_rechecks_before_every_act() {
     sys.fake_fs().clear_on_step();
     assert_eq!(e.kind, SysErrorKind::Mismatch);
     assert_eq!(g.read(&r("t.bin")).unwrap(), b"old");
+}
+
+#[test]
+fn f10_users_reports_handles_and_images_by_process() {
+    let sys = g_system();
+    let fx = sys.fake_fs();
+    let g = open(&sys, r"C:\G");
+    let me = std::process::id();
+    let t = p(r"C:\G\t.bin");
+    let hold = fx.hold_open_as(100, &t, Access::READ, Share::RWD).unwrap();
+    let image = fx.map_image_as(200, &t).unwrap();
+    let mut all = vec![100, 200];
+    all.sort_unstable();
+    assert_eq!(g.users(&r("t.bin")).unwrap(), all);
+    // The guard: `Dir::users` counts it, `FileGuard::users` does not count itself.
+    let guard = g.guard(&r("t.bin")).unwrap();
+    let mut with_me = vec![100, 200, me];
+    with_me.sort_unstable();
+    assert_eq!(g.users(&r("t.bin")).unwrap(), with_me);
+    assert_eq!(guard.users().unwrap(), all);
+    // An image section blocks writes and deletes, not renames; it follows the file.
+    assert_eq!(kind(fx.put_file(&t, b"x")), SysErrorKind::Busy);
+    drop(guard);
+    drop(hold);
+    assert_eq!(kind(fx.remove_abs(&t)), SysErrorKind::Busy);
+    fx.rename_abs(&t, &p(r"C:\G\moved.bin")).unwrap();
+    assert_eq!(g.users(&r("moved.bin")).unwrap(), [200]);
+    drop(image);
+    assert!(g.users(&r("moved.bin")).unwrap().is_empty());
+    fx.remove_abs(&p(r"C:\G\moved.bin")).unwrap();
 }

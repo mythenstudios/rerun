@@ -173,7 +173,10 @@ impl PrimDir for FakeDir {
             single(name)?;
             st.dir(self.node, name)?;
             match st.lookup(self.node, name, name)? {
-                Some(id) => st.meta(id, name).map(Some),
+                Some(id) => {
+                    st.not_pending(id, name)?;
+                    st.meta(id, name).map(Some)
+                }
                 None => Ok(None),
             }
         })
@@ -351,6 +354,8 @@ impl PrimFile for FakeFile {
             if !rec.access.delete {
                 return Err(err(SysErrorKind::AccessDenied, t));
             }
+            // An image section refuses every delete (`STATUS_CANNOT_DELETE`, observed).
+            st.not_mapped(rec.obj, t)?;
             if let Obj::Node(node) = rec.obj
                 && st
                     .nodes
