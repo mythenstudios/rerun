@@ -131,6 +131,7 @@ pub fn fs_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCont
     s8a_delete_in_held_folder(fs, fx, work)?;
     w19_mapped_image(fs, fx, work, &mut skips)?;
     w20_delete_pending(fs, fx, work, &mut skips)?;
+    w24_mapped_data(fs, fx, work, &mut skips)?;
     Ok(skips)
 }
 
@@ -200,6 +201,54 @@ fn w19_mapped_image(
         "W19 renaming an ancestor of an image-mapped file",
     )?;
     drop(lib);
+    Ok(())
+}
+
+/// W24 (security review): a file mapped read-write as a data section, with no handle left,
+/// can change at any moment through the view, so the guard (whose cached hash must stay the
+/// content it acts on) is refused (`Busy`): observed on Windows, every open with data access
+/// that does not share write is a sharing violation, also our `open_read`. `users` reports the
+/// mapping, a read sharing write works, the folder can be renamed (no handle below it), and
+/// once the view is gone the guard opens.
+fn w24_mapped_data(
+    fs: &dyn Fs,
+    fx: &dyn FsFixture,
+    work: &Path,
+    skips: &mut Skipped,
+) -> ContractResult {
+    let abs = work.join(r"w24\sub\data.bin");
+    let Some(map) = ok(fx.mapped_data(&abs), "fixture data mapping")? else {
+        skip(skips, "mapped_data");
+        return Ok(());
+    };
+    let d = open_write(fs, &work.join(r"w24\sub"), "W24 open")?;
+    let t = rel("data.bin")?;
+    ensure(
+        !ok(d.users(&t), "W24 users")?.is_empty(),
+        "W24 users reports a data-mapped file",
+    )?;
+    err_kind(
+        d.guard(&t).map(|_| ()),
+        SysErrorKind::Busy,
+        "W24 guard of a file mapped writable without a handle",
+    )?;
+    err_kind(
+        d.open_read(&t).map(|_| ()),
+        SysErrorKind::Busy,
+        "W24 open_read (shares read only) of a writable mapping",
+    )?;
+    drop(ok(
+        fx.hold_open(&abs, Access::READ, Share::RW),
+        "W24 a read sharing write",
+    )?);
+    drop(d);
+    ok(
+        rename_settled(fx, &work.join(r"w24\sub"), &work.join(r"w24\sub2")),
+        "W24 renaming the folder of a data-mapped file",
+    )?;
+    let d = open_write(fs, &work.join(r"w24\sub2"), "W24 open after the rename")?;
+    drop(map);
+    drop(ok(d.guard(&t), "W24 guard once the view is gone")?);
     Ok(())
 }
 

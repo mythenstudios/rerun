@@ -144,6 +144,10 @@ pub trait FsFixture: Sync {
     /// `FileDispositionInformation` delete while a second handle stays open) until the
     /// returned value (that handle) drops; then the name goes. `Ok(None)` = not available.
     fn delete_pending(&self, p: &Path) -> SysResult<Option<Held<'_>>>;
+    /// Creates the file `p` with content of the fixture's choice and maps it read-write as a
+    /// data section of this process (a writable view) without keeping a file or section
+    /// handle, until the returned value drops. `Ok(None)` = not available.
+    fn mapped_data(&self, p: &Path) -> SysResult<Option<Held<'_>>>;
 }
 
 /// Data access of a fixture handle ([`FsFixture::hold_open`]): `FILE_READ_DATA`,

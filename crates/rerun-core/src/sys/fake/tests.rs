@@ -206,6 +206,9 @@ impl FsFixture for CopyFixture {
     fn delete_pending(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
         FsFixture::delete_pending(&self.inner, p)
     }
+    fn mapped_data(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        self.inner.mapped_data(p)
+    }
 }
 
 #[test]
@@ -2510,6 +2513,41 @@ fn f10_users_reports_handles_and_images_by_process() {
     drop(image);
     assert!(g.users(&r("moved.bin")).unwrap().is_empty());
     fx.remove_abs(&p(r"C:\G\moved.bin")).unwrap();
+}
+
+/// F13 (W24 in the fake's terms): a writable data section without a handle is share-checked
+/// like an open with write access sharing everything (the guard, `open_read` and a hold that
+/// does not share write are `Busy`; a hold sharing write, a rename and a delete work), counts
+/// for `users` and never for the ancestor rule (all observed on Windows).
+#[test]
+fn f13_a_writable_data_mapping_refuses_the_guard() {
+    let sys = g_system();
+    let fx = sys.fake_fs();
+    let t = p(r"C:\G\sub\t.bin");
+    fx.put_file(&t, b"mapped").unwrap();
+    let view = fx.map_data_as(300, &t).unwrap();
+    {
+        let sub = open(&sys, r"C:\G\sub");
+        assert_eq!(sub.users(&r("t.bin")).unwrap(), [300]);
+        assert_eq!(kind(sub.guard(&r("t.bin"))), SysErrorKind::Busy);
+        assert_eq!(
+            kind(sub.open_read(&r("t.bin")).map(drop)),
+            SysErrorKind::Busy
+        );
+        assert_eq!(
+            kind(fx.hold_open_as(1, &t, Access::READ, Share::R)),
+            SysErrorKind::Busy
+        );
+        drop(fx.hold_open_as(1, &t, Access::READ, Share::RW).unwrap());
+    }
+    fx.rename_abs(&p(r"C:\G\sub"), &p(r"C:\G\moved")).unwrap();
+    let moved = p(r"C:\G\moved\t.bin");
+    fx.rename_abs(&moved, &p(r"C:\G\moved\u.bin")).unwrap();
+    fx.remove_abs(&p(r"C:\G\moved\u.bin")).unwrap();
+    drop(view);
+    fx.put_file(&moved, b"plain").unwrap();
+    let g = open(&sys, r"C:\G\moved");
+    drop(g.guard(&r("t.bin")).unwrap());
 }
 
 // ---------- Faults and crashes at the primitive layer ----------

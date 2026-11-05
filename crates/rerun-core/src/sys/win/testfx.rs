@@ -86,8 +86,8 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::{FSCTL_SET_EXTERNAL_BACKING, FSCTL_SET_REPARSE_POINT};
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READONLY,
-    SEC_IMAGE, UnmapViewOfFile,
+    CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+    PAGE_READONLY, PAGE_READWRITE, SEC_IMAGE, UnmapViewOfFile,
 };
 use windows_sys::Win32::System::Registry::{
     HKEY, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, REG_BINARY,
@@ -1311,6 +1311,23 @@ impl FsFixture for WinFixture {
         }
         drop(del);
         Ok(Some(Box::new(keep)))
+    }
+
+    /// The file `p` mapped read-write as a data section (`PAGE_READWRITE`, a writable view),
+    /// with the file and section handles closed at once: only the view stays, until the
+    /// returned value drops.
+    fn mapped_data(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        self.parents(p, Last::Plain)?;
+        std::fs::write(p, b"mapped data").map_err(|e| io_err(&e, p))?;
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(p)
+            .map_err(|e| io_err(&e, p))?;
+        let view = map_view(&f, PAGE_READWRITE, FILE_MAP_WRITE, p)?;
+        drop(f);
+        Ok(Some(Box::new(view)))
     }
 
     /// `CreateFileW` with `FILE_READ_DATA`/`FILE_WRITE_DATA`/`DELETE` (or

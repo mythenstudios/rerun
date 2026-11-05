@@ -372,6 +372,11 @@ enum RecKind {
     /// A file in legacy delete-pending state ([`FakeFs::delete_pending`]): every open of it,
     /// also attribute-only, is `Busy`, listings skip it; the name goes when this closes.
     Pending,
+    /// A writable data section without a handle ([`FakeFs::map_data_as`]): share-checked
+    /// like an open with write access that shares everything, so every open with data
+    /// access that does not share write is `Busy` (observed); renames and deletes work and
+    /// it never counts for the ancestor rule (observed).
+    DataMap,
 }
 
 #[derive(Debug, Default)]
@@ -890,12 +895,12 @@ impl State {
 
     /// A recorded handle (of any kind) is open on an entry strictly below `anc`: Windows
     /// refuses to rename `anc` (`ACCESS_DENIED`, observed, ADR 0017 A5).
-    /// An image section without a handle does not count (observed 2026-11-05: the ancestor
-    /// renames; pinned by W19).
+    /// An image or data section without a handle does not count (observed 2026-11-05: the
+    /// ancestor renames; pinned by W19 and W24).
     fn open_below(&self, anc: NodeId) -> bool {
         self.opens.values().any(|o| {
             let n = o.obj.node();
-            o.kind != RecKind::Image
+            !matches!(o.kind, RecKind::Image | RecKind::DataMap)
                 && n != anc
                 && self.nodes.contains_key(&n)
                 && self.is_ancestor_or_self(anc, n)
@@ -1794,6 +1799,33 @@ impl FakeFs {
                 obj,
                 RecKind::Image,
                 Access::ATTRS,
+                Share::RWD,
+                pid,
+                Origin::Fixture,
+            )
+        };
+        Ok(FakeHold {
+            _open: self.token(id),
+        })
+    }
+
+    /// Fixture: maps the existing file `abs` read-write as a data section of process `pid`
+    /// (a writable view, no handle) until the returned [`FakeHold`] drops: `users` reports
+    /// it, an open with data access that does not share write is `Busy`, renames and deletes
+    /// work, an ancestor renames (observed on Windows 11 build 26300, ADR 0017).
+    pub fn map_data_as(&self, pid: u32, abs: &Path) -> SysResult<FakeHold> {
+        let shown = abs.display().to_string();
+        let id = {
+            let mut st = self.lock();
+            let node = st.require_abs(abs)?;
+            let obj = st.obj_of(node);
+            if !matches!(obj, Obj::File { .. }) {
+                return Err(err(SysErrorKind::AccessDenied, &shown));
+            }
+            st.register_kind(
+                obj,
+                RecKind::DataMap,
+                Access::WRITE,
                 Share::RWD,
                 pid,
                 Origin::Fixture,
