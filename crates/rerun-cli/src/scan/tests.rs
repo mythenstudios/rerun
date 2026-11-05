@@ -382,6 +382,25 @@ fn an_incomplete_walk_is_one_line() {
 }
 
 #[test]
+fn no_walk_line_when_a_main_executable_was_found() {
+    let a = app(4, "Fixture", "Fixture", 4);
+    let game = || {
+        cand(
+            "game.exe",
+            Role::Game,
+            Ok(facts(Machine::X64, one(GraphicsApi::D3d11), None)),
+        )
+    };
+    for main in [Main::One(0), Main::Tied(vec![0, 1])] {
+        let mut e = exes(vec![game(), game()], main, Vec::new());
+        e.stats.depth_cut = 5;
+        e.stats.complete = false;
+        let text = shown(&render_game(&a, &e));
+        assert!(!text.contains("    walk: "), "{text}");
+    }
+}
+
+#[test]
 fn apps_that_are_not_opened_show_their_state() {
     assert_eq!(
         shown(&render_app(&app(

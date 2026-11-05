@@ -279,8 +279,10 @@ pub fn render_game<'a>(app: &'a SteamApp, exes: &'a GameExes) -> Vec<Message<'a>
             m.push(Message::MainNone { reason });
         }
     }
+    // Only when nothing was found: it explains why (user decision; with a main executable the
+    // depth limit cuts engine and data folders in most games and the line was noise).
     let stats = &exes.stats;
-    if stats.depth_cut > 0 || !stats.complete {
+    if matches!(exes.main, Main::None) && (stats.depth_cut > 0 || !stats.complete) {
         m.push(Message::WalkIncomplete {
             depth_cut: stats.depth_cut,
             max_depth: ExeLimits::DEFAULT.max_depth,
