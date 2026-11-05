@@ -159,7 +159,7 @@ Steam detection (ADR 0012): the fake has no network, no 64-bit client and no Ste
 
 | Case | Checks / why manual | Status |
 |---|---|---|
-| Developer machine (5950X, Windows 11 build 26300), Steam as installed | root from `HKCU` `SteamPath`, `HKLM` agreeing (no `RootsDisagree`), every library listed, apps with plausible states, `open_game` succeeds for installed games; record the scan time and any issue | open |
+| Developer machine (5950X, Windows 11 build 26300), Steam as installed | root from `HKCU` `SteamPath`, `HKLM` agreeing (no `RootsDisagree`), every library listed, apps with plausible states, `open_game` succeeds for installed games; record the scan time and any issue | passed 2026-11-05: root from `HKCU`, 2 libraries, 33 apps, 0 issues, every game folder opened, 14 ms |
 | Library on a mapped network drive, share disconnected | the library is refused (`RootPath`: network after opening, or the open fails); record how long `StoreDir::open` blocks (SMB timeout, accepted limit) and that the other libraries are still listed | open |
 | `steamapps` of a library replaced by a junction (moved by hand) | the library is listed with no apps and one `ReparsePoint` issue; the junction is never followed (nothing from its target appears) | open |
 | 64-bit Steam client (writes `InstallPath` to the native `HKLM` view, or none) | which `HKLM` view holds `InstallPath`; the root still comes from `HKCU`, a native-only value is found as the third candidate | open |
