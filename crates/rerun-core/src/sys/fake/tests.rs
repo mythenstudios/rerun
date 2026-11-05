@@ -633,6 +633,11 @@ fn gpu_contract_catches_bad_adapters() {
         .build()
         .unwrap();
     assert!(gpu_contract(nul.gpu()).is_err(), "control character");
+    let bidi = FakeSystem::builder()
+        .gpu(adapter("A\u{202E}B", 1))
+        .build()
+        .unwrap();
+    assert!(gpu_contract(bidi.gpu()).is_err(), "bidi override");
 }
 
 #[test]

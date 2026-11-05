@@ -3,20 +3,22 @@
 //!
 //! Raw data only, in DXGI order (never reordered, never deduplicated): the name is the
 //! `Description` field up to its first NUL within the first 127 units, decoded lossily, with
-//! control characters replaced by U+FFFD and nothing trimmed; the LUID is
-//! `HighPart << 32 | LowPart`; `software` is `DXGI_ADAPTER_FLAG_SOFTWARE` (the remote flag is
+//! control characters and bidirectional formatting characters replaced by U+FFFD and nothing
+//! trimmed; the LUID is `HighPart << 32 | LowPart`; `software` is `DXGI_ADAPTER_FLAG_SOFTWARE` (the remote flag is
 //! ignored); the driver version is `None` whenever `CheckInterfaceSupport` fails. A failed
 //! `GetDesc1` fails the whole list.
 
 use super::dxgi::{self, DxgiError, MAX_ADAPTERS, RawAdapter};
-use crate::sys::gpu::MAX_NAME_UTF16;
+use crate::sys::gpu::{MAX_NAME_UTF16, is_bidi_control};
 use crate::sys::{DriverVersion, Gpu, GpuAdapter, SysError, SysErrorKind, SysResult};
 
 /// winerror.h `E_ACCESSDENIED`.
 const E_ACCESSDENIED: i32 = 0x8007_0005_u32.cast_signed();
 
 /// Enumerates the adapters with a fresh DXGI factory on every call (nothing is cached but the
-/// `CreateDXGIFactory1` address). `dxgi.dll` is loaded from System32 on the first call.
+/// `CreateDXGIFactory1` address). `dxgi.dll` is loaded from System32 on the first call. Every
+/// call fails with `Unsupported` until the process called
+/// [`restrict_dll_search`](super::restrict_dll_search) (ADR 0008, H2).
 #[derive(Debug, Default)]
 pub struct WinGpu(());
 
@@ -53,7 +55,9 @@ fn adapter_from(raw: &RawAdapter) -> GpuAdapter {
 }
 
 /// The adapter name: the units before the first NUL within the first 127 (the field holds 128
-/// with the terminator), unpaired surrogates and control characters as U+FFFD, untrimmed. At
+/// with the terminator), unpaired surrogates, control characters and bidirectional formatting
+/// characters ([`is_bidi_control`]: a name must not reorder the text around it in the UI) as
+/// U+FFFD, untrimmed. At
 /// most 127 UTF-16 units, so it always fits [`MAX_NAME_UTF16`].
 fn adapter_name(units: &[u16; MAX_NAME_UTF16]) -> String {
     let field = &units[..MAX_NAME_UTF16 - 1];
@@ -61,7 +65,7 @@ fn adapter_name(units: &[u16; MAX_NAME_UTF16]) -> String {
     char::decode_utf16(field[..end].iter().copied())
         .map(|c| {
             c.ok()
-                .filter(|c| !c.is_control())
+                .filter(|&c| !c.is_control() && !is_bidi_control(c))
                 .unwrap_or(char::REPLACEMENT_CHARACTER)
         })
         .collect()
@@ -95,6 +99,10 @@ fn gpu_error(e: DxgiError) -> SysError {
         DxgiError::Call { call, hr } => {
             SysError::new(kind_of_gpu_hresult(hr), format!("gpu: {call}")).with_hresult(hr)
         }
+        DxgiError::NotRestricted => SysError::new(
+            SysErrorKind::Unsupported,
+            "gpu: DLL search not restricted; call restrict_dll_search first",
+        ),
         DxgiError::TooMany => SysError::new(
             SysErrorKind::Other,
             format!("gpu: more than {MAX_ADAPTERS} adapters"),
@@ -142,6 +150,23 @@ mod tests {
         cut[127] = 0xDE00;
         let name = adapter_name(&cut);
         assert!(name.ends_with('\u{fffd}') && name.encode_utf16().count() == 127);
+    }
+
+    #[test]
+    fn adapter_names_replace_bidi_controls() {
+        for c in [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ] {
+            assert_eq!(
+                adapter_name(&units(&format!("a{c}b"))),
+                "a\u{fffd}b",
+                "{c:?}"
+            );
+        }
+        // Other format characters (zero-width joiner) and RTL letters stay.
+        assert_eq!(adapter_name(&units("a\u{200D}b")), "a\u{200D}b");
+        assert_eq!(adapter_name(&units("\u{05D0}")), "\u{05D0}");
     }
 
     #[test]
@@ -207,5 +232,8 @@ mod tests {
             assert!(e.target.contains("EnumAdapters1"), "{e}");
         }
         assert_eq!(gpu_error(DxgiError::TooMany).kind, SysErrorKind::Other);
+        let e = gpu_error(DxgiError::NotRestricted);
+        assert_eq!(e.kind, SysErrorKind::Unsupported);
+        assert!(e.target.contains("restrict_dll_search"), "{e}");
     }
 }

@@ -13,6 +13,16 @@ use super::SysResult;
 /// including the terminating NUL).
 pub const MAX_NAME_UTF16: usize = 128;
 
+/// A bidirectional formatting character (Unicode `Bidi_Control`): U+061C, U+200E, U+200F,
+/// U+202A to U+202E, U+2066 to U+2069. Adapter names never contain one (`sys::win` replaces
+/// them with U+FFFD): it would reorder the text around the name in the UI.
+pub fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 /// Version of the user-mode driver, `a.b.c.d` as Windows shows it in the device manager.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DriverVersion(pub [u16; 4]);

@@ -9,7 +9,8 @@ use crate::sys::{Fs, Gpu, KnownFolders, Registry, SysResult, System, Topology};
 /// The real file system, registry, known folders (on that registry), CPU topology and graphics
 /// adapters of this machine. Every writing method of the file system and the registry returns
 /// `Unsupported` in phase 1. Opening it opens the current user's registry root; `dxgi.dll` is
-/// loaded only on the first [`Gpu::adapters`] call.
+/// loaded only on the first [`Gpu::adapters`] call, which needs
+/// [`restrict_dll_search`](super::restrict_dll_search) first (else `Unsupported`).
 ///
 /// The elevated helper (phase 3) builds its own `System` without the GPU (ADR 0008, H2).
 pub struct WinSystem {

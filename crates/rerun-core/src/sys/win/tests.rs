@@ -568,6 +568,7 @@ fn win_fulfils_topology_contract() {
 /// system and registry contracts need fixtures and run on the parts directly above).
 #[test]
 fn win_system_bundles_the_real_parts() {
+    super::restrict_dll_search().unwrap();
     let sys = WinSystem::new().unwrap();
     assert_eq!(format!("{sys:?}"), "WinSystem { .. }");
     topology_contract(sys.topology()).unwrap_or_else(|e| panic!("{e}"));
@@ -602,6 +603,7 @@ fn win_system_bundles_the_real_parts() {
 /// GitHub runners without a GPU.
 #[test]
 fn win_fulfils_gpu_contract() {
+    super::restrict_dll_search().unwrap();
     let gpu = WinGpu::new();
     gpu_contract(&gpu).unwrap_or_else(|e| panic!("{e}"));
     let adapters = gpu.adapters().unwrap();
@@ -616,6 +618,7 @@ fn win_fulfils_gpu_contract() {
 /// `dxgi.dll` is the one in `<Windows>\System32`, never one from the application directory.
 #[test]
 fn dxgi_dll_is_loaded_from_system32() {
+    super::restrict_dll_search().unwrap();
     WinGpu::new().adapters().unwrap();
     let dxgi = super::loader::load_system32("dxgi.dll").unwrap();
     let path = super::testfx::module_path(dxgi.handle());
@@ -638,6 +641,7 @@ fn dxgi_dll_is_loaded_from_system32() {
 #[test]
 #[ignore = "prints this machine's adapters; run by hand"]
 fn dump_gpu_adapters() {
+    super::restrict_dll_search().unwrap();
     let gpu = WinGpu::new();
     let started = Instant::now();
     let adapters = gpu.adapters().unwrap();

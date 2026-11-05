@@ -41,7 +41,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::fs::{Attrs, Dir, EntryKind, Fs, tag};
-use super::gpu::MAX_NAME_UTF16;
+use super::gpu::{MAX_NAME_UTF16, is_bidi_control};
 use super::registry::{
     Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegValue,
     RegView, Registry, reg_type,
@@ -2888,7 +2888,8 @@ pub fn known_folders_contract(kf: &dyn KnownFolders, fs: &dyn Fs) -> ContractRes
 }
 
 /// GPU contract: at least one adapter (Windows always lists the Microsoft Basic Render
-/// Driver), stable across calls, names fit the DXGI field, LUIDs are unique. Read-only, so it
+/// Driver), stable across calls, names fit the DXGI field and hold no control or bidi
+/// formatting character, LUIDs are unique. Read-only, so it
 /// runs against the fake and real Windows.
 pub fn gpu_contract(gpu: &dyn Gpu) -> ContractResult {
     let adapters = ok(gpu.adapters(), "gpu adapters")?;
@@ -2905,8 +2906,8 @@ pub fn gpu_contract(gpu: &dyn Gpu) -> ContractResult {
             "adapter name fits the DXGI field",
         )?;
         ensure(
-            !a.name.chars().any(char::is_control),
-            "adapter name has no control characters",
+            !a.name.chars().any(|c| c.is_control() || is_bidi_control(c)),
+            "adapter name has no control or bidi formatting characters",
         )?;
         ensure(luids.insert(a.luid), "adapter LUIDs are unique")?;
     }

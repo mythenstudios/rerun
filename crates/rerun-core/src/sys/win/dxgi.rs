@@ -11,8 +11,12 @@
 //!   never read;
 //! - the IIDs of `IDXGIFactory1` and `IDXGIDevice`, the HRESULTs and the software flag.
 //!
-//! `dxgi.dll` is loaded on the first enumeration through `loader::load_system32` (System32
-//! only, never freed) and `CreateDXGIFactory1` is cached in a `OnceLock`; there is no static
+//! Enumeration refuses to run ([`DxgiError::NotRestricted`]) unless the process called
+//! `restrict_dll_search` first: DXGI and the drivers' user-mode parts load further DLLs, which
+//! must come from System32 as well. `dxgi.dll` is then loaded on the first enumeration through
+//! `loader::load_system32` (System32 only, never freed) and `CreateDXGIFactory1` is cached in a
+//! `OnceLock`. The `OnceLock` caches a load or symbol failure too, for the life of the process
+//! (a system DLL that is missing once does not appear later); there is no static
 //! or delay-load import of `dxgi.dll` (the shipped binaries' hardening tests check it). The
 //! elevated helper (phase 3) builds a `System` without a GPU and never reaches this module.
 //! DXGI needs no `CoInitialize`.
@@ -128,6 +132,8 @@ pub(super) enum DxgiError {
     },
     /// More than [`MAX_ADAPTERS`] adapters.
     TooMany,
+    /// The process has not restricted its DLL search path (`restrict_dll_search`).
+    NotRestricted,
 }
 
 /// An unused vtable slot (never read).
@@ -282,7 +288,7 @@ type CreateFactory1 =
     unsafe extern "system" fn(riid: *const GUID, out: *mut *mut c_void) -> HRESULT;
 
 /// `CreateDXGIFactory1` from `dxgi.dll` in System32, loaded on first use and kept (the DLL is
-/// never freed).
+/// never freed). A failure is cached as well and returned for the life of the process.
 fn create_factory1() -> Result<CreateFactory1, DxgiError> {
     static CREATE: OnceLock<Result<CreateFactory1, DxgiError>> = OnceLock::new();
     *CREATE.get_or_init(|| {
@@ -291,13 +297,17 @@ fn create_factory1() -> Result<CreateFactory1, DxgiError> {
             .symbol(c"CreateDXGIFactory1")
             .map_err(DxgiError::Symbol)?;
         // SAFETY: the export CreateDXGIFactory1 has exactly this signature (dxgi.h, `WINAPI` =
-        // "system"); `dxgi.dll` is never freed, so the address stays valid for the process.
-        Ok(unsafe { std::mem::transmute::<*mut c_void, CreateFactory1>(symbol.as_ptr()) })
+        // "system"); both are function pointers of the same size; `dxgi.dll` is never freed, so
+        // the address stays valid for the process.
+        Ok(unsafe { std::mem::transmute::<loader::Export, CreateFactory1>(symbol) })
     })
 }
 
 /// All adapters of a fresh factory, in DXGI order.
 pub(super) fn enumerate() -> Result<Vec<RawAdapter>, DxgiError> {
+    if !loader::dll_search_restricted() {
+        return Err(DxgiError::NotRestricted);
+    }
     let create = create_factory1()?;
     let mut out = ptr::null_mut();
     // SAFETY: `create` is CreateDXGIFactory1; the IID is a static GUID; `out` is a valid
@@ -349,6 +359,7 @@ mod tests {
     /// Offsets of `DXGI_ADAPTER_DESC1` (dxgi.h, x64: `WCHAR[128]`, four `UINT`, three
     /// `SIZE_T`, `LUID { DWORD; LONG }`, `UINT`, padded to 8).
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn adapter_desc1_layout_matches_dxgi_h() {
         type D = AdapterDesc1;
         assert_eq!((size_of::<D>(), align_of::<D>()), (312, 8));
@@ -421,6 +432,7 @@ mod tests {
     /// factory), and the Microsoft Basic Render Driver is a software adapter.
     #[test]
     fn the_real_enumeration_lists_the_basic_render_driver() {
+        loader::restrict_dll_search().unwrap();
         let first = enumerate().unwrap();
         assert_eq!(enumerate().unwrap(), first);
         assert!(

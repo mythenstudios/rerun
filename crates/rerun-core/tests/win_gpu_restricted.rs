@@ -1,5 +1,6 @@
 //! `WinSystem` and its GPU under the DLL hardening of the shipped executables (ADR 0008, H2).
 //!
+//! - Before `restrict_dll_search` the GPU is `Unsupported` (L2 of the step 10 review).
 //! - With the DLL search path restricted to System32 (as `rerun.exe` does first thing), DXGI
 //!   still loads, the drivers' user-mode parts still answer, and the Basic Render Driver is
 //!   listed.
@@ -14,7 +15,7 @@
 #![expect(clippy::disallowed_methods, reason = "test reads its own binary")]
 
 use rerun_core::sys::win::{WinSystem, restrict_dll_search};
-use rerun_core::sys::{KnownFolder, System};
+use rerun_core::sys::{KnownFolder, SysErrorKind, System};
 
 #[path = "../../../tests/support/pe_min.rs"]
 mod pe_min;
@@ -36,8 +37,11 @@ const CORE_IMPORTS: &[&str] = &[
 
 #[test]
 fn win_system_gpu_with_the_dll_search_path_restricted_to_system32() {
-    restrict_dll_search().unwrap();
     let sys = WinSystem::new().unwrap();
+    // Without the restriction the GPU refuses to load DXGI.
+    let e = sys.gpu().adapters().unwrap_err();
+    assert_eq!(e.kind, SysErrorKind::Unsupported, "{e}");
+    restrict_dll_search().unwrap();
     let adapters = sys.gpu().adapters().unwrap();
     assert!(
         adapters.iter().any(|a| a.vendor_id == 0x1414 && a.software),

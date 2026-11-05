@@ -26,8 +26,9 @@
               H2); every block has a SAFETY comment"
 )]
 
-use std::ffi::{CStr, c_void};
-use std::ptr::{self, NonNull};
+use std::ffi::CStr;
+use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{
@@ -37,9 +38,19 @@ use windows_sys::Win32::System::LibraryLoader::{
 use super::status::kind_of_win32;
 use crate::sys::{SysError, SysResult};
 
+/// Set once [`restrict_dll_search`] succeeded; never cleared (the restriction cannot be undone
+/// without the banned `SetDllDirectoryW`/`AddDllDirectory`).
+static RESTRICTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process restricted its DLL search path with [`restrict_dll_search`]. Code that
+/// loads non-KnownDLLs (`dxgi`) refuses to run otherwise.
+pub(super) fn dll_search_restricted() -> bool {
+    RESTRICTED.load(Ordering::Acquire)
+}
+
 /// Restricts the DLL search path of this process to System32 (ADR 0008, H2). Call it first
 /// thing in `main`, before anything can load a DLL; a shipped executable that cannot restrict
-/// its search path must not run (fail closed).
+/// its search path must not run (fail closed). Process-wide; calling it again is harmless.
 ///
 /// # Errors
 /// The Win32 error of `SetDefaultDllDirectories`.
@@ -57,8 +68,13 @@ pub fn restrict_dll_search() -> SysResult<()> {
             SysError::new(kind_of_win32(code), "SetDefaultDllDirectories").with_win32(code),
         );
     }
+    RESTRICTED.store(true, Ordering::Release);
     Ok(())
 }
+
+/// An export as `GetProcAddress` returns it; the caller transmutes it to the export's real
+/// function type.
+pub(super) type Export = unsafe extern "system" fn() -> isize;
 
 /// A DLL loaded from System32 by [`load_system32`]. Never freed (no `Drop`): the module and
 /// every symbol taken from it stay valid until the process exits.
@@ -90,9 +106,9 @@ pub(super) fn load_system32(name: &'static str) -> Result<SystemDll, u32> {
 }
 
 impl SystemDll {
-    /// The address of the export `name`; the Win32 error (`ERROR_PROC_NOT_FOUND`) if the DLL
+    /// The export `name` (the `FARPROC`); the Win32 error (`ERROR_PROC_NOT_FOUND`) if the DLL
     /// has no such export. The caller must know the export's signature.
-    pub(super) fn symbol(&self, name: &'static CStr) -> Result<NonNull<c_void>, u32> {
+    pub(super) fn symbol(&self, name: &'static CStr) -> Result<Export, u32> {
         #[expect(
             clippy::disallowed_methods,
             reason = "the one GetProcAddress call site (ADR 0008)"
@@ -100,8 +116,7 @@ impl SystemDll {
         // SAFETY: `self.0` is a module handle from LoadLibraryExW that is never freed; `name` is
         // a NUL-terminated string with static lifetime (an export name, not an ordinal).
         let f = unsafe { GetProcAddress(self.0, name.as_ptr().cast()) };
-        let f = f.ok_or_else(last_error)?;
-        NonNull::new((f as *const ()).cast_mut().cast::<c_void>()).ok_or(ERROR_INVALID_PARAMETER)
+        f.ok_or_else(last_error)
     }
 
     /// The module handle, for tests that ask Windows where the DLL came from.
@@ -123,6 +138,15 @@ mod tests {
     use windows_sys::Win32::Foundation::{ERROR_MOD_NOT_FOUND, ERROR_PROC_NOT_FOUND};
 
     use super::*;
+
+    #[test]
+    fn the_restriction_is_recorded() {
+        restrict_dll_search().unwrap();
+        assert!(dll_search_restricted());
+        // Again: harmless, still recorded.
+        restrict_dll_search().unwrap();
+        assert!(dll_search_restricted());
+    }
 
     #[test]
     fn load_system32_takes_bare_ascii_names_only() {

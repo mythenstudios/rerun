@@ -32,7 +32,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - Primitive `launch_option` (Steam closed) and `launch_method`
 - Elevated helper + primitives `priority`, `firewall_rule`
 
-**Acceptance:** A Steam game launches via `rerun-launch` with 8 threads on one CCD, the check reports `ok`. A Ubisoft game via Steam with `watch` as well.
+**Acceptance:** A Steam game launches via `rerun-launch` with 8 threads on one CCD, the check reports `ok`. A Ubisoft game via Steam with `watch` as well. The elevated helper (ADR 0008, H2, security review of step 10): its `System` has no GPU (a separate type, or a GPU part that returns `Unsupported` without touching DXGI); the helper binary never links `sys::win::loader`'s DLL loading or `sys::win::dxgi`, checked by an import allowlist test on the built helper like `tests/support/pe_min.rs`; and a source rule test refuses `WinGpu` and `WinSystem` in the helper's sources.
 
 ## Phase 4 – Topos and packages
 - Package download (allowed hosts, SHA256, Zip Slip safe), DLL slots, reference counting
