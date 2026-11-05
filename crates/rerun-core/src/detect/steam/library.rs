@@ -3,7 +3,7 @@
 //! - The library list comes from `steamapps\libraryfolders.vdf` of the Steam root, or from
 //!   `config\libraryfolders.vdf` only if the first is `NotFound`; never merged, no fallback
 //!   after any other failure. Library 0 is always the root; listed paths go through
-//!   [`StoreDir::open`] and are de-duplicated by [`RootId`](crate::policy::root::RootId),
+//!   [`StoreDir::open`] and are de-duplicated by [`RootId`],
 //!   first occurrence wins, silently. At most [`MAX_LIBRARIES`] listed.
 //! - Each library's `steamapps` is opened relative to the library handle and listed once;
 //!   entries named `appmanifest_<id>.acf` (ASCII case-insensitive) are the manifests, at most
@@ -18,9 +18,9 @@ use super::state::{AppState, StateFlags};
 use super::text::RawText;
 use crate::detect::vdf::{Limits, VdfReadError, read_store_file};
 use crate::path::{RelPath, RootPath, classify};
-use crate::policy::root::{ForbiddenRoots, RootError, RootId, StoreDir};
+use crate::policy::root::{ForbiddenRoots, GameDir, RootError, RootId, StoreDir};
 use crate::sys::fs::{DirEntry, EntryKind};
-use crate::sys::{SysErrorKind, System};
+use crate::sys::{SysError, SysErrorKind, System};
 
 /// Most libraries a library file may list (the root not counted); more refuses the file.
 pub const MAX_LIBRARIES: usize = 256;
@@ -93,6 +93,20 @@ impl<'s> SteamLibrary<'s> {
     /// The app with this ID in this library.
     pub fn app(&self, app_id: u32) -> Option<&SteamApp> {
         self.apps.iter().find(|a| a.app_id == app_id)
+    }
+
+    /// Opens the game folder `steamapps\common\<installdir>` of the app `app_id` of this
+    /// library, relative to the library handle ([`StoreDir::game`]: no reparse point followed,
+    /// canonical path and forbidden list checked). The app is looked up in this library's own
+    /// list; an unknown ID, like a missing folder (soundtracks, tools), is `NotFound`.
+    pub fn open_game(&self, fr: &ForbiddenRoots, app_id: u32) -> Result<GameDir<'_>, RootError> {
+        let app = self.app(app_id).ok_or_else(|| {
+            RootError::Sys(SysError::new(
+                SysErrorKind::NotFound,
+                format!("app {app_id} in library {}", self.path()),
+            ))
+        })?;
+        self.store.game(fr, app.install_dir.as_str())
     }
 }
 

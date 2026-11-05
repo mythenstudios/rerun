@@ -178,4 +178,24 @@ pub enum IssueKind {
         /// From the manifest.
         manifest: u32,
     },
+    /// The same app ID is also in another library. Every copy is kept and reported; no
+    /// winner is picked.
+    #[error("app {app_id} is also in library {other}{}", and_more(*.more))]
+    DuplicateApp {
+        /// The app ID.
+        app_id: u32,
+        /// The first other library that holds it.
+        other: RootPath,
+        /// How many more libraries hold it.
+        more: usize,
+    },
+}
+
+/// ` and N more libraries`, or nothing.
+fn and_more(more: usize) -> String {
+    match more {
+        0 => String::new(),
+        1 => " and 1 more library".to_owned(),
+        n => format!(" and {n} more libraries"),
+    }
 }
