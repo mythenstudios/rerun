@@ -20,6 +20,8 @@
 //! - [`Pe::info`]: all of it at once ([`PeInfo`]); a broken version resource does not hide
 //!   the headers and imports, a broken import table fails the file.
 //! - Errors ([`PeError`]) carry a kind and a file offset, never file content.
+//! - [`open_game_exe`]: the only reader for product code, relative to a
+//!   [`GameDir`](crate::policy::root::GameDir) handle (ADR 0007); [`PeReadError`] adds the file.
 //!
 //! Facts read here are hints for display, matching and suggestions, never authorization
 //! (ADR 0013, Consequences).
@@ -28,6 +30,7 @@ mod error;
 mod headers;
 mod imports;
 pub mod layout;
+mod open;
 mod reader;
 mod resource;
 mod version;
@@ -41,6 +44,7 @@ use std::io::{Read, Seek};
 
 pub use error::{LegacyFormat, PeError, PeErrorKind};
 pub use imports::DllName;
+pub use open::{GameExe, PeReadError, open_game_exe};
 pub use version::{FixedFileInfo, StringTableId, VersionInfo, VersionStrings};
 
 use headers::Layout;
