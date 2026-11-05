@@ -2,8 +2,13 @@
 //! "Hardening tests"), included with `#[path]` by `crates/rerun-cli/tests/hardening.rs`,
 //! `crates/rerun-launch/tests/hardening.rs` and `crates/rerun-core/tests/win_gpu_restricted.rs`.
 //! The executables are read with `rerun_core::detect::pe` over a `std::fs::File` of the build
-//! output; this file keeps only what is checked, plus a small PE writer for its own teeth
-//! test.
+//! output; this file keeps only what is checked. Its teeth test writes its images with the
+//! minimal PE writer in `tests/support/pe_image.rs` (independent of `detect::pe`), which the
+//! CLI tests use as well.
+//!
+//! One allowlist per shipped binary (ADR 0008 amendment "import allowlist per binary", ADR
+//! 0016): [`LAUNCH_IMPORTS`] for `rerun-launch.exe`, [`CLI_IMPORTS`] for `rerun.exe` (and for
+//! the `WinSystem` test binary, so the two cannot drift apart).
 
 #![allow(
     dead_code,
@@ -14,6 +19,9 @@ use std::io::{Read, Seek};
 use std::path::Path;
 
 use rerun_core::detect::pe::{DllName, Limits, Machine, Pe, PeFormat};
+
+#[path = "pe_image.rs"]
+mod pe_image;
 
 /// `LOAD_LIBRARY_SEARCH_SYSTEM32`, the flag `/DEPENDENTLOADFLAG:0x800` sets.
 pub const SEARCH_SYSTEM32: u16 = 0x800;
@@ -39,14 +47,30 @@ pub fn forbidden_import(dll: &str) -> bool {
         || d.starts_with("api-ms-win-crt-")
 }
 
-/// The static imports a shipped executable may have: exact names, compared case-insensitively.
-/// Found on 2026-11-05 for `rerun.exe` and `rerun-launch.exe` (debug and release, x64). A new
-/// import fails the hardening tests: review it, then extend this list and ADR 0008 (amendment
-/// 2026-11-05, DLL hardening).
-pub const SHIPPED_IMPORTS: &[&str] = &[
+/// The static imports `rerun-launch.exe` may have: exact names, compared case-insensitively.
+/// Found on 2026-11-05 (debug and release, x64). A new import fails the hardening test: review
+/// it, then extend this list and ADR 0008 (amendment 2026-11-05, DLL hardening).
+pub const LAUNCH_IMPORTS: &[&str] = &[
     "kernel32.dll",
     "ntdll.dll",
     "api-ms-win-core-synch-l1-2-0.dll",
+];
+
+/// The static imports `rerun.exe` may have, which links all of `WinSystem` from phase 1 step 16
+/// (ADR 0016); also the list of `crates/rerun-core/tests/win_gpu_restricted.rs`, the test binary
+/// that links every part of `WinSystem`. Found on 2026-11-05. `bcryptprimitives.dll` and
+/// `userenv.dll` come from `std`, `advapi32.dll`, `combase.dll` and `shell32.dll` from
+/// `windows-sys`. A new import fails the tests: review it, then extend this list and ADR 0008
+/// (amendment "import allowlist per binary").
+pub const CLI_IMPORTS: &[&str] = &[
+    "kernel32.dll",
+    "ntdll.dll",
+    "api-ms-win-core-synch-l1-2-0.dll",
+    "advapi32.dll",
+    "combase.dll",
+    "shell32.dll",
+    "bcryptprimitives.dll",
+    "userenv.dll",
 ];
 
 /// `imports` has no forbidden DLL and nothing outside `allowed` (exact, case-insensitive).
@@ -71,9 +95,9 @@ pub fn check_imports(imports: &[DllName], allowed: &[&str]) -> Result<(), String
 }
 
 /// Checks an executable (ADR 0008, H2): PE32+ for the [`NATIVE`] machine, `DependentLoadFlags`
-/// exactly System32, every static import in [`SHIPPED_IMPORTS`], no delay-load import. Returns
-/// the imported DLL names.
-pub fn check_hardened<R: Read + Seek>(image: R) -> Result<Vec<DllName>, String> {
+/// exactly System32, every static import in `allowed` (the list of that binary) and none
+/// forbidden, no delay-load import. Returns the imported DLL names.
+pub fn check_hardened<R: Read + Seek>(image: R, allowed: &[&str]) -> Result<Vec<DllName>, String> {
     let mut pe = Pe::parse(image, &Limits::DEFAULT).map_err(|e| e.to_string())?;
     let h = pe.headers();
     if h.format != PeFormat::Pe32Plus || h.machine != NATIVE {
@@ -89,7 +113,7 @@ pub fn check_hardened<R: Read + Seek>(image: R) -> Result<Vec<DllName>, String> 
         ));
     }
     let imports = pe.imports().map_err(|e| e.to_string())?;
-    check_imports(&imports, SHIPPED_IMPORTS)?;
+    check_imports(&imports, allowed)?;
     let delayed = pe.delay_imports().map_err(|e| e.to_string())?;
     if !delayed.is_empty() {
         return Err(format!("delay-load imports {delayed:?}"));
@@ -108,9 +132,9 @@ pub fn imports_of(path: &Path) -> Result<(Vec<DllName>, Vec<DllName>), String> {
 }
 
 /// [`check_hardened`] on the executable at `path`.
-pub fn check_hardened_file(path: &Path) -> Result<Vec<DllName>, String> {
+pub fn check_hardened_file(path: &Path, allowed: &[&str]) -> Result<Vec<DllName>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    check_hardened(file)
+    check_hardened(file, allowed)
 }
 
 /// A GitHub-hosted runner (as the machine-wide fs fixtures decide it, `sys::win::testfx`): there
@@ -129,107 +153,13 @@ pub fn joined(names: &[DllName]) -> String {
         .join(", ")
 }
 
-// ---------- Teeth: a minimal PE written here, independent of `detect::pe` ----------
-
-/// `IMAGE_FILE_MACHINE_I386`, `…_AMD64`, `…_ARM64`.
-const I386: u16 = 0x014C;
-const AMD64: u16 = 0x8664;
-const ARM64: u16 = 0xAA64;
-
-fn put(b: &mut [u8], at: usize, v: &[u8]) {
-    b[at..at + v.len()].copy_from_slice(v);
-}
-
-/// A minimal image for `machine`, PE32 for x86 and PE32+ otherwise (offsets from `winnt.h`,
-/// written out here on purpose so the teeth do not depend on the parser's own layout): one
-/// section `.rdata` at RVA 0x1000 (file offset 0x200, 0x200 bytes) holding the import table at
-/// +0x00, the delay-import table at +0x80, the load config at +0x100 and the DLL names from
-/// +0x180.
-fn image_for(machine: u16, imports: &[&str], delayed: &[&str], load_flags: u16) -> Vec<u8> {
-    const OPT: usize = 0x58;
-    const RVA: u32 = 0x1000;
-    const RAW: usize = 0x200;
-    let pe32 = machine == I386;
-    // Data directories at 96 (PE32) or 112 (PE32+) of the optional header (with 16 of them
-    // 224 or 240 bytes); `DependentLoadFlags` at 0x36 or 0x4E of the load config.
-    let (dirs, opt_size, flags_at): (usize, u16, usize) = if pe32 {
-        (96, 224, 0x36)
-    } else {
-        (112, 240, 0x4E)
-    };
-    let mut b = vec![0u8; 0x400];
-    put(&mut b, 0, b"MZ");
-    put(&mut b, 0x3C, &0x40u32.to_le_bytes()); // e_lfanew
-    put(&mut b, 0x40, b"PE\0\0");
-    put(&mut b, 0x44, &machine.to_le_bytes()); // Machine
-    put(&mut b, 0x46, &1u16.to_le_bytes()); // NumberOfSections
-    put(&mut b, 0x54, &opt_size.to_le_bytes()); // SizeOfOptionalHeader
-    put(&mut b, 0x56, &0x0022u16.to_le_bytes()); // Characteristics
-    if pe32 {
-        put(&mut b, OPT, &0x10Bu16.to_le_bytes()); // Magic: PE32
-        put(&mut b, OPT + 28, &0x40_0000u32.to_le_bytes()); // ImageBase
-        put(&mut b, OPT + 92, &16u32.to_le_bytes()); // NumberOfRvaAndSizes
-    } else {
-        put(&mut b, OPT, &0x20Bu16.to_le_bytes()); // Magic: PE32+
-        put(&mut b, OPT + 24, &0x1_4000_0000u64.to_le_bytes()); // ImageBase
-        put(&mut b, OPT + 108, &16u32.to_le_bytes()); // NumberOfRvaAndSizes
-    }
-    put(&mut b, OPT + 60, &0x200u32.to_le_bytes()); // SizeOfHeaders
-    put(&mut b, OPT + 68, &3u16.to_le_bytes()); // Subsystem: console
-    let dir = |b: &mut [u8], index: usize, rva: u32, size: u32| {
-        put(b, OPT + dirs + 8 * index, &rva.to_le_bytes());
-        put(b, OPT + dirs + 8 * index + 4, &size.to_le_bytes());
-    };
-    let section = OPT + usize::from(opt_size);
-    put(&mut b, section, b".rdata\0\0");
-    put(&mut b, section + 8, &0x200u32.to_le_bytes()); // VirtualSize
-    put(&mut b, section + 12, &RVA.to_le_bytes()); // VirtualAddress
-    put(&mut b, section + 16, &0x200u32.to_le_bytes()); // SizeOfRawData
-    put(&mut b, section + 20, &0x200u32.to_le_bytes()); // PointerToRawData
-
-    let mut name_at = 0x180;
-    let mut name = |b: &mut [u8], s: &str| {
-        let rva = RVA + u32::try_from(name_at).unwrap_or(u32::MAX);
-        put(b, RAW + name_at, s.as_bytes());
-        name_at += s.len() + 1;
-        rva
-    };
-    if !imports.is_empty() {
-        dir(&mut b, 1, RVA, 0x80);
-        for (i, s) in imports.iter().enumerate() {
-            let rva = name(&mut b, s);
-            put(&mut b, RAW + 20 * i + 12, &rva.to_le_bytes()); // IMAGE_IMPORT_DESCRIPTOR::Name
-        }
-    }
-    if !delayed.is_empty() {
-        dir(&mut b, 13, RVA + 0x80, 0x80);
-        for (i, s) in delayed.iter().enumerate() {
-            let rva = name(&mut b, s);
-            put(&mut b, RAW + 0x80 + 32 * i, &1u32.to_le_bytes()); // Attributes: RVA based
-            put(&mut b, RAW + 0x80 + 32 * i + 4, &rva.to_le_bytes()); // DllNameRVA
-        }
-    }
-    dir(&mut b, 10, RVA + 0x100, 0x80);
-    put(&mut b, RAW + 0x100, &0x80u32.to_le_bytes()); // IMAGE_LOAD_CONFIG_DIRECTORY*::Size
-    put(&mut b, RAW + 0x100 + flags_at, &load_flags.to_le_bytes());
-    b
-}
-
-/// [`image_for`] the [`NATIVE`] machine.
-fn image(imports: &[&str], delayed: &[&str], load_flags: u16) -> Vec<u8> {
-    let native = if NATIVE == Machine::Arm64 {
-        ARM64
-    } else {
-        AMD64
-    };
-    image_for(native, imports, delayed, load_flags)
-}
-
 #[test]
 fn hardening_checks_have_teeth() {
     use std::io::Cursor;
+
+    use pe_image::{AMD64, ARM64, I386, image, image_for};
     let check = |imports: &[&str], delayed: &[&str], flags: u16| {
-        check_hardened(Cursor::new(image(imports, delayed, flags)))
+        check_hardened(Cursor::new(image(imports, delayed, flags)), LAUNCH_IMPORTS)
     };
     // The positive control: a hardened image passes, so the failures below are not about the
     // writer.
@@ -252,7 +182,7 @@ fn hardening_checks_have_teeth() {
     }
     // A PE32 image and a PE32+ image for another machine fail, though hardened otherwise.
     let hardened_for = |machine| image_for(machine, &["kernel32.dll"], &[], SEARCH_SYSTEM32);
-    let e = check_hardened(Cursor::new(hardened_for(I386))).unwrap_err();
+    let e = check_hardened(Cursor::new(hardened_for(I386)), LAUNCH_IMPORTS).unwrap_err();
     assert!(e.contains("expected PE32+"), "{e}");
     // ... and the PE32 image itself is well-formed: the parser reads its flags and imports.
     let mut pe32 = Pe::parse(Cursor::new(hardened_for(I386)), &Limits::DEFAULT).unwrap();
@@ -264,14 +194,51 @@ fn hardening_checks_have_teeth() {
     } else {
         ARM64
     };
-    let e = check_hardened(Cursor::new(hardened_for(other))).unwrap_err();
+    let e = check_hardened(Cursor::new(hardened_for(other)), LAUNCH_IMPORTS).unwrap_err();
     assert!(e.contains("expected PE32+"), "{e}");
     // Malformed input is an error, never a panic.
-    assert!(check_hardened(Cursor::new(b"MZ")).is_err());
-    assert!(check_hardened(Cursor::new(b"")).is_err());
+    assert!(check_hardened(Cursor::new(b"MZ"), LAUNCH_IMPORTS).is_err());
+    assert!(check_hardened(Cursor::new(b""), CLI_IMPORTS).is_err());
 
     assert!(forbidden_import("D3D11.dll") && forbidden_import("api-ms-win-crt-heap-l1-1-0.dll"));
     assert!(
         !forbidden_import("kernel32.dll") && !forbidden_import("api-ms-win-core-synch-l1-2-0.dll")
     );
+}
+
+#[test]
+fn each_binary_has_its_own_allowlist() {
+    use std::io::Cursor;
+
+    use pe_image::image;
+    let check = |imports: &[&str], allowed: &[&str]| {
+        check_hardened(Cursor::new(image(imports, &[], SEARCH_SYSTEM32)), allowed)
+    };
+    // The CLI's imports pass its own list and fail the shim's: rerun-launch.exe never gets
+    // advapi32, combase or shell32 without a review.
+    for dll in [
+        "advapi32.dll",
+        "combase.dll",
+        "shell32.dll",
+        "bcryptprimitives.dll",
+        "userenv.dll",
+    ] {
+        check(&["kernel32.dll", dll], CLI_IMPORTS).unwrap();
+        let e = check(&["kernel32.dll", dll], LAUNCH_IMPORTS).unwrap_err();
+        assert!(e.contains("not in the allowlist"), "{e}");
+    }
+    // An import outside both lists fails both, a forbidden one fails both.
+    for allowed in [LAUNCH_IMPORTS, CLI_IMPORTS] {
+        let e = check(&["kernel32.dll", "user32.dll"], allowed).unwrap_err();
+        assert!(e.contains("not in the allowlist"), "{e}");
+        let e = check(&["kernel32.dll", "dxgi.dll"], allowed).unwrap_err();
+        assert!(e.contains("forbidden static import dxgi.dll"), "{e}");
+    }
+    // The shim's list is part of the CLI's; no list holds a forbidden name.
+    for dll in LAUNCH_IMPORTS {
+        assert!(CLI_IMPORTS.contains(dll), "{dll}");
+    }
+    for dll in LAUNCH_IMPORTS.iter().chain(CLI_IMPORTS) {
+        assert!(!forbidden_import(dll), "{dll}");
+    }
 }

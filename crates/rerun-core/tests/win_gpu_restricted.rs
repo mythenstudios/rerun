@@ -5,8 +5,8 @@
 //!   still loads, the drivers' user-mode parts still answer, and the Basic Render Driver is
 //!   listed.
 //! - This test binary links `WinSystem` with every part (file system, registry, known folders,
-//!   topology, GPU), i.e. everything a later shipped binary gets from `rerun-core` today. Its
-//!   static imports must stay within [`CORE_IMPORTS`] (no `dxgi.dll`, no `d3d*`, no dynamic
+//!   topology, GPU), as `rerun.exe` does from step 16. Its static imports must stay within
+//!   `hardening::CLI_IMPORTS`, the list of `rerun.exe` (no `dxgi.dll`, no `d3d*`, no dynamic
 //!   CRT), so a GPU or other import that slipped past the source rule and the bans shows here.
 //!
 //! Its own test binary, because the restriction is process-wide. Read-only.
@@ -19,21 +19,6 @@ use rerun_core::sys::{KnownFolder, SysErrorKind, System};
 
 #[path = "../../../tests/support/hardening.rs"]
 mod hardening;
-
-/// The static imports of a binary that uses `WinSystem` and the GPU, plus the test harness
-/// (exact, case-insensitive). Found on 2026-11-05. A new one fails the test: review it, then
-/// extend this list and ADR 0008 (amendment 2026-11-05).
-/// `bcryptprimitives.dll` and `userenv.dll` come from `std`, the others from `windows-sys`.
-const CORE_IMPORTS: &[&str] = &[
-    "kernel32.dll",
-    "ntdll.dll",
-    "api-ms-win-core-synch-l1-2-0.dll",
-    "advapi32.dll",
-    "combase.dll",
-    "shell32.dll",
-    "bcryptprimitives.dll",
-    "userenv.dll",
-];
 
 #[test]
 fn win_system_gpu_with_the_dll_search_path_restricted_to_system32() {
@@ -66,6 +51,6 @@ fn win_system_gpu_with_the_dll_search_path_restricted_to_system32() {
     let exe = std::env::current_exe().unwrap();
     let (imports, delayed) = hardening::imports_of(&exe).unwrap_or_else(|e| panic!("{e}"));
     eprintln!("imports: {}", hardening::joined(&imports));
-    hardening::check_imports(&imports, CORE_IMPORTS).unwrap_or_else(|e| panic!("{e}"));
+    hardening::check_imports(&imports, hardening::CLI_IMPORTS).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(delayed, vec![]);
 }

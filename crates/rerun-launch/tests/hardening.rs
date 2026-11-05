@@ -17,8 +17,8 @@ mod hardening;
 #[test]
 fn rerun_launch_exe_loads_dependencies_from_system32_only() {
     let exe = env!("CARGO_BIN_EXE_rerun-launch");
-    let imports =
-        hardening::check_hardened_file(Path::new(exe)).unwrap_or_else(|e| panic!("{exe}: {e}"));
+    let imports = hardening::check_hardened_file(Path::new(exe), hardening::LAUNCH_IMPORTS)
+        .unwrap_or_else(|e| panic!("{exe}: {e}"));
     eprintln!("rerun-launch.exe imports: {}", hardening::joined(&imports));
 }
 
@@ -38,8 +38,8 @@ fn release_rerun_launch_exe_loads_dependencies_from_system32_only() {
         return;
     };
     let exe = Path::new(&exe);
-    let imports =
-        hardening::check_hardened_file(exe).unwrap_or_else(|e| panic!("{}: {e}", exe.display()));
+    let imports = hardening::check_hardened_file(exe, hardening::LAUNCH_IMPORTS)
+        .unwrap_or_else(|e| panic!("{}: {e}", exe.display()));
     eprintln!(
         "release rerun-launch.exe imports: {}",
         hardening::joined(&imports)
