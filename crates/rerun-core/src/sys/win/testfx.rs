@@ -52,7 +52,8 @@ use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{FILE_OPEN, FILE_OPEN_REPARSE_POINT, NtCreateFile};
 use windows_sys::Wdk::System::Registry::NtSetValueKey;
 use windows_sys::Win32::Foundation::{
-    ERROR_NOT_ALL_ASSIGNED, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LUID,
+    ERROR_NOT_ALL_ASSIGNED, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    INVALID_HANDLE_VALUE, LUID,
 };
 use windows_sys::Win32::Foundation::{OBJ_CASE_INSENSITIVE, UNICODE_STRING};
 use windows_sys::Win32::Security::{
@@ -71,18 +72,23 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED,
     FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_UNPINNED, FILE_BASIC_INFO,
-    FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FileBasicInfo, FileCaseSensitiveInfo,
-    FileIdInfo, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetDriveTypeW,
-    GetFileInformationByHandleEx, GetLogicalDrives, GetVolumeInformationW,
-    GetVolumeNameForVolumeMountPointW, GetVolumePathNamesForVolumeNameW, MoveFileExW, READ_CONTROL,
+    FILE_CASE_SENSITIVE_INFO, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
+    FileBasicInfo, FileCaseSensitiveInfo, FileDispositionInfo, FileIdInfo, FindFirstVolumeW,
+    FindNextVolumeW, FindVolumeClose, GetDriveTypeW, GetFileInformationByHandleEx,
+    GetLogicalDrives, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
+    GetVolumePathNamesForVolumeNameW, MoveFileExW, READ_CONTROL,
     SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, SYMBOLIC_LINK_FLAG_DIRECTORY, SYNCHRONIZE,
     SetFileInformationByHandle, SetFileShortNameW, SetVolumeMountPointW, WRITE_DAC,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::{FSCTL_SET_EXTERNAL_BACKING, FSCTL_SET_REPARSE_POINT};
+use windows_sys::Win32::System::Memory::{
+    CreateFileMappingW, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READONLY,
+    SEC_IMAGE, UnmapViewOfFile,
+};
 use windows_sys::Win32::System::Registry::{
     HKEY, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, REG_BINARY,
     REG_CREATED_NEW_KEY, REG_LINK, REG_OPTION_CREATE_LINK, REG_OPTION_OPEN_LINK,
@@ -1252,16 +1258,59 @@ impl FsFixture for WinFixture {
         Ok(())
     }
 
-    /// Not available until P2-4 (needs a valid PE image in the test root, mapped with
-    /// `SEC_IMAGE`, loadable under the restricted DLL search path).
-    fn mapped_image(&self, _p: &Path) -> SysResult<Option<Held<'_>>> {
-        Ok(None)
+    /// A copy of `System32\version.dll` (a valid PE produced at runtime from the machine's
+    /// own system file; no binary in the repo), mapped as an image section with
+    /// `CreateFileMappingW(SEC_IMAGE)` and `MapViewOfFile`: the loader is never involved (no
+    /// `LoadLibrary`, no `DllMain`, no DLL search), and the file and section handles are
+    /// closed at once, so only the view keeps the image section, like a running exe or a
+    /// loaded DLL. Unmapped on drop.
+    fn mapped_image(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        self.parents(p, Last::Plain)?;
+        let src = system32().join("version.dll");
+        let bytes = std::fs::read(&src).map_err(|e| io_err(&e, &src))?;
+        std::fs::write(p, bytes).map_err(|e| io_err(&e, p))?;
+        let f = OpenOptions::new()
+            .access_mode(GENERIC_READ | GENERIC_EXECUTE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+            .open(p)
+            .map_err(|e| io_err(&e, p))?;
+        let view = map_view(&f, PAGE_READONLY | SEC_IMAGE, FILE_MAP_READ, p)?;
+        drop(f);
+        Ok(Some(Box::new(view)))
     }
 
-    /// Not available until P2-4 (a legacy `FileDispositionInformation` delete with a second
-    /// handle held).
-    fn delete_pending(&self, _p: &Path) -> SysResult<Option<Held<'_>>> {
-        Ok(None)
+    /// A legacy delete (`SetFileInformationByHandle(FileDispositionInfo)`, not POSIX) on one
+    /// handle while a second one (read, sharing everything) stays open: the name stays in
+    /// delete-pending state until the returned second handle drops.
+    fn delete_pending(&self, p: &Path) -> SysResult<Option<Held<'_>>> {
+        self.parents(p, Last::Plain)?;
+        std::fs::write(p, b"pending").map_err(|e| io_err(&e, p))?;
+        let open = |access: u32| {
+            OpenOptions::new()
+                .access_mode(access | SYNCHRONIZE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(p)
+                .map_err(|e| io_err(&e, p))
+        };
+        let keep = open(FILE_READ_DATA)?;
+        let del = open(DELETE)?;
+        let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: `del` is a live handle with DELETE; `info` is a FILE_DISPOSITION_INFO of the
+        // size passed that outlives the call.
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                del.as_raw_handle(),
+                FileDispositionInfo,
+                ptr::from_ref(&info).cast::<c_void>(),
+                u32::try_from(size_of::<FILE_DISPOSITION_INFO>()).unwrap_or(0),
+            )
+        };
+        if ok == 0 {
+            return Err(win32_err(last_error(), &p.display().to_string()));
+        }
+        drop(del);
+        Ok(Some(Box::new(keep)))
     }
 
     /// `CreateFileW` with `FILE_READ_DATA`/`FILE_WRITE_DATA`/`DELETE` (or
@@ -1300,6 +1349,55 @@ impl FsFixture for WinFixture {
             .map_err(|e| io_err(&e, p))?;
         Ok(Box::new(f))
     }
+}
+
+/// `<Windows>\System32` from the real known folders.
+fn system32() -> PathBuf {
+    use super::WinKnownFolders;
+    use crate::sys::{KnownFolder, KnownFolders};
+    let reg = WinRegistry::new().unwrap_or_else(|e| panic!("registry: {e}"));
+    WinKnownFolders::new(std::sync::Arc::new(reg))
+        .get(KnownFolder::Windows)
+        .unwrap_or_else(|e| panic!("known folder Windows: {e}"))
+        .join("System32")
+}
+
+/// A mapped view (its base address in this process) without any handle: the section lives
+/// as long as the view. Unmapped on drop.
+#[derive(Debug)]
+struct View(usize);
+
+impl Drop for View {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is the base address MapViewOfFile returned, unmapped exactly once
+        // here; the mapped memory is never read or borrowed.
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: self.0 as *mut c_void,
+            })
+        };
+    }
+}
+
+/// Creates a section of `f` with `protect` and maps all of it with `access`; the section
+/// handle is closed before returning (the view keeps the section).
+fn map_view(f: &File, protect: u32, access: u32, p: &Path) -> SysResult<View> {
+    let what = p.display().to_string();
+    // SAFETY: `f` is a live file handle with the access `protect` needs; no security
+    // attributes and no name (null); size 0 = the size of the file.
+    let raw =
+        unsafe { CreateFileMappingW(f.as_raw_handle(), ptr::null(), protect, 0, 0, ptr::null()) };
+    if raw.is_null() {
+        return Err(win32_err(last_error(), &what));
+    }
+    // SAFETY: CreateFileMappingW succeeded and returned a new handle that nothing else owns.
+    let section = unsafe { OwnedHandle::from_raw_handle(raw) };
+    // SAFETY: `section` is a live section handle; offset 0 and size 0 map the whole section.
+    let addr = unsafe { MapViewOfFile(section.as_raw_handle(), access, 0, 0, 0) };
+    if addr.Value.is_null() {
+        return Err(win32_err(last_error(), &what));
+    }
+    Ok(View(addr.Value as usize))
 }
 
 // ---------- App hive ----------

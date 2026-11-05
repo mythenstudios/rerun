@@ -890,8 +890,8 @@ impl State {
 
     /// A recorded handle (of any kind) is open on an entry strictly below `anc`: Windows
     /// refuses to rename `anc` (`ACCESS_DENIED`, observed, ADR 0017 A5).
-    /// An image section without a handle does not count (not observed; the fake is never
-    /// stricter than Windows).
+    /// An image section without a handle does not count (observed 2026-11-05: the ancestor
+    /// renames; pinned by W19).
     fn open_below(&self, anc: NodeId) -> bool {
         self.opens.values().any(|o| {
             let n = o.obj.node();
@@ -1778,9 +1778,9 @@ impl FakeFs {
 
     /// Fixture: maps the existing file `abs` as an image section of process `pid` (a running
     /// exe or a loaded DLL without an open handle) until the returned [`FakeHold`] drops.
-    /// `users` reports it; renames of the file work, a delete (also the POSIX delete of step
-    /// 8) and an open for write are `Busy` (ADR 0017, observed). A restart keeps it; a power
-    /// loss drops it.
+    /// `users` reports it; renames of the file and of a folder above it work, a delete (also
+    /// the POSIX delete of step 8) and an open for write are `Busy` (ADR 0017, observed). A
+    /// restart keeps it; a power loss drops it.
     pub fn map_image_as(&self, pid: u32, abs: &Path) -> SysResult<FakeHold> {
         let shown = abs.display().to_string();
         let id = {

@@ -5,6 +5,7 @@
 
 use std::io::{self, Read};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -135,7 +136,8 @@ pub fn fs_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCont
 
 /// W19: an image-mapped file (no handle) is reported by `users`; `replace` succeeds with the
 /// old content left as `<tmp>.old` (`old_left`, step 8 refused); deleting `.old` stays `Busy`
-/// until the mapping is gone, then works.
+/// until the mapping is gone, then works. An image section without a handle does not block
+/// renaming a folder above it (observed on Windows 11 build 26300, unlike a handle, A5).
 fn w19_mapped_image(
     fs: &dyn Fs,
     fx: &dyn FsFixture,
@@ -187,7 +189,41 @@ fn w19_mapped_image(
     ensure(
         names(&*d, None, "W19 listing")? == ["game.exe"],
         "W19 nothing is left",
-    )
+    )?;
+    let lib = ok(
+        fx.mapped_image(&work.join(r"w19-anc\sub\lib.dll")),
+        "fixture image below a folder",
+    )?
+    .ok_or("contract violated: W19 the fixture maps one image but not a second")?;
+    ok(
+        rename_settled(fx, &work.join("w19-anc"), &work.join("w19-anc2")),
+        "W19 renaming an ancestor of an image-mapped file",
+    )?;
+    drop(lib);
+    Ok(())
+}
+
+/// How long [`rename_settled`] retries.
+const SETTLE: Duration = Duration::from_secs(10);
+
+/// A fixture rename of a folder above a freshly written file, retried while it is
+/// `AccessDenied` or `Busy` for at most [`SETTLE`]: a virus scanner reading the new file holds
+/// a handle below the folder for a moment, and any handle blocks the rename (A5). What the
+/// caller asserts (a mapping it still holds does not block) is unaffected: a blocking mapping
+/// would block until it is gone, so the rename would never succeed within the retries.
+fn rename_settled(fx: &dyn FsFixture, from: &Path, to: &Path) -> crate::sys::SysResult<()> {
+    let started = Instant::now();
+    loop {
+        match fx.rename(from, to) {
+            Err(e)
+                if matches!(e.kind, SysErrorKind::AccessDenied | SysErrorKind::Busy)
+                    && started.elapsed() < SETTLE =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            r => return r,
+        }
+    }
 }
 
 /// W20 and A6: a name in legacy delete-pending state cannot be opened at all: `metadata`,
