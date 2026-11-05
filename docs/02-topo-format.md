@@ -76,15 +76,22 @@ links:
 - `variants`: may be empty = "no known fix", a valid answer.
 - `status` per variant: `verified` (tested ourselves, with hardware in the changelog), `reported` (several independent reports), `unverified` (single statement).
 - `kind` (required): `fix` (game runs as intended) or `enhancement`.
-- `when`: conditions against the system profile. Several fields = AND. Only these fields:
+- `when`: conditions against the system profile (ADR 0015). Several fields = AND. Only these fields:
   ```yaml
   when:
     gpu.vendor: amd                 # amd | nvidia | intel
-    gpu.arch: [vega, rdna1, rdna2]  # lowercase identifiers; Phase 1 defines the list of values
-    cpu.threads: { gt: 12 }         # gt | gte | lt | lte | eq
+    gpu.arch: [vega, rdna1, rdna2]  # identifiers declared in data/gpu-arch.yaml (archs)
+    cpu.threads: { gt: 12 }         # gt | gte | lt | lte | eq; several in one object = AND (range)
     cpu.hybrid: true
     os.build: { gte: 22000 }
   ```
+  - GPU keys use the **conditions adapter**: the first hardware adapter in DXGI order (software adapters and vendor `0x1414` skipped). A per-game adapter comes with `gpu_preference` (`03b-gpu-display.md`).
+  - `gpu.vendor`: from the PCI vendor ID (`0x1002` amd, `0x10DE` nvidia, `0x8086` intel); any other vendor matches none.
+  - `gpu.arch`: identifiers matching `^[a-z][a-z0-9_]{0,31}$`, never `unknown`, each declared in `archs` of `data/gpu-arch.yaml` (`03b-gpu-display.md`); from phase 4 the loader rejects an undeclared one. A device the table does not know matches no list.
+  - `cpu.threads`: logical processors available system-wide (`CpuTopology::logical_count`, CPU Sets flagged `RealTime` or `Allocated` excluded, ADR 0010), not Rerun's process affinity. Above 64, a game that asks `GetSystemInfo` sees only its processor group.
+  - `cpu.hybrid`: `true` when Windows reports more than one efficiency class.
+  - `os.build`: `CurrentBuildNumber` of `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion` (e.g. 22000, the first Windows 11 build); the update revision (`UBR`) is never compared.
+  - Evaluation (phase 4): each key is yes, no or unknown; a `when` is no if any key is no, else unknown if any key is unknown, else yes; an empty `when` is yes. A fact Rerun could not read is unknown; a variant whose `when` is unknown is never preselected or applied automatically. `when` selects suggestions and is never authorisation. Details: ADR 0015.
 - `checks`: pure hints about runtimes outside the game folder. Rerun does not install them (game folder boundary), but shows a hint with a link. Values: `{ runtime: vcredist-x86 | vcredist-x64 | directx-jun2010 }`.
 - `steps`: list of primitives. Each step is an object with **exactly one** key. Allowed in v1: `package: <package-id>`, `steam_input: enable`, `cpu: <CPU rule>`. Further primitives from `01-architecture.md` enter the schema only together with their spec and implementation; before that they are a validation error.
 - `sources`: links directly to the guide, thread, repo or section, always `https://`, never just the home page. Types and patterns:

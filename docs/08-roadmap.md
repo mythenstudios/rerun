@@ -13,7 +13,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 ## Phase 1 – Detection
 - Steam: `libraryfolders.vdf`, `appmanifest_*.acf` → games with path
 - PE parser: x86/x64, imports → graphics API (ddraw, d3d8, d3d9, d3d10, d3d11, opengl32), LAA flag, version info; SHA1/SHA256. Finding on the developer machine (ADR 0013 amendment): 9 of 33 game folders have their executables only in subfolders (`Binaries\Win64`), so the exe candidates are searched below the top level too (bounded); exe candidates, roles, ranking, graphics API (also `d3d12`, `vulkan`, `glide`, reserved for the schemas) and `--hashes` in ADR 0014
-- `hw`: GPU via DXGI, CPU topology, OS build
+- `hw`: GPU via DXGI, CPU topology, OS build → system profile for the five `when` keys of `02-topo-format.md` (`gpu.vendor`, `gpu.arch`, `cpu.threads`, `cpu.hybrid`, `os.build`), evaluated against the first hardware adapter in DXGI order (software adapters skipped); VRAM and `integrated` in the profile for `rerun system` only. The GPU architecture table `data/gpu-arch.yaml` with its schema, every identifier declared and one sourced entry (developer machine's RX 9070 XT); test entries are synthetic; `unknown` never matches (ADR 0015). Further GPU `when` keys are scheduled in `03b-gpu-display.md` ("Open decisions")
 - CLI: `rerun scan`, `rerun system`
 
 **Acceptance:** `rerun scan` correctly lists the Steam games on the developer machine with API and architecture. The topology of the 5950X is detected as 2 L3 groups × 8 cores × 2 threads.

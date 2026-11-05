@@ -22,6 +22,16 @@
 - Content is licensed CC BY-NC-SA: do not copy, use own wording, link as source.
 - PCGW is never evaluated live in the client. Topos are the reviewed form.
 
+## Reference data
+
+Tables that map hardware facts to names (the GPU architecture table `data/gpu-arch.yaml`, ADR 0015) follow the same standard as Topos:
+
+- Every entry names its own source (`source`): vendor documentation or driver INF files, Mesa, the PCI ID Repository, or a dump of a real machine.
+- No invented IDs: no extrapolated neighbours, ranges only as a source states them.
+- Unknown stays unknown: a device without a sourced entry is `unknown`, never guessed from its name or nearby IDs.
+- Licence check before any bulk import (e.g. Mesa under MIT; the PCI ID Repository under BSD-3-Clause, which requires a notice); notices travel with the data.
+- Test entries are synthetic and stay in test code.
+
 ## Links in the app
 
 Every variant links directly to its source: the specific Steam guide, the thread, the repo, the PCGW section. Never just the home page.
