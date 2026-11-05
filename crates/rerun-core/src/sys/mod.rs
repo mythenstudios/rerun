@@ -18,8 +18,8 @@
 //!
 //! - [`KnownFolders`] never reads environment variables (ADR 0007, ADR 0009).
 //!
-//! `Firewall` and `Process` arrive in phase 3. The `WinSystem` bundle follows in the next step
-//! of phase 1.
+//! `sys::win::WinSystem` bundles the real parts into one [`System`]. `Firewall` and `Process`
+//! arrive in phase 3.
 
 mod error;
 pub mod fs;

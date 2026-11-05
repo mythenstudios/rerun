@@ -17,10 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::testfx::{
-    HiveRoot, NaiveFs, TestRoot, TestWinSystem, hosted_ci, note, workflow_warning,
-};
-use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinTopology};
+use super::testfx::{HiveRoot, NaiveFs, TestRoot, hosted_ci, note, workflow_warning};
+use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinSystem, WinTopology};
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{Forbidden, ForbiddenRoots, Protected, RootError, RootId, StoreDir};
 use crate::sys::contract::{
@@ -564,11 +562,37 @@ fn win_fulfils_known_folders_contract() {
 #[test]
 fn win_fulfils_topology_contract() {
     topology_contract(&WinTopology::new()).unwrap_or_else(|e| panic!("{e}"));
-    let sys = TestWinSystem::new();
+}
+
+/// Read-only: `WinSystem` hands out the real parts, each fulfilling its contract (the file
+/// system and registry contracts need fixtures and run on the parts directly above).
+#[test]
+fn win_system_bundles_the_real_parts() {
+    let sys = WinSystem::new().unwrap();
+    assert_eq!(format!("{sys:?}"), "WinSystem { .. }");
+    topology_contract(sys.topology()).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(
         sys.topology().read().unwrap(),
         WinTopology::new().read().unwrap()
     );
+    known_folders_contract(sys.known_folders(), sys.fs()).unwrap_or_else(|e| panic!("{e}"));
+    gpu_contract(sys.gpu()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        sys.gpu().adapters().unwrap(),
+        WinGpu::new().adapters().unwrap()
+    );
+    let reg = WinRegistry::new().unwrap();
+    let kf = WinKnownFolders::new(Arc::new(reg));
+    for f in KnownFolder::ALL {
+        assert_eq!(
+            sys.known_folders().get(f).unwrap(),
+            kf.get(f).unwrap(),
+            "{f}"
+        );
+    }
+    // The registry is the real, read-only one.
+    let k = RegKey::new(Hive::CurrentUser, RegView::Native, "Software");
+    assert_eq!(sys.registry().key_exists(&k), Ok(true));
 }
 
 // ---------- GPU (DXGI) ----------
@@ -859,7 +883,7 @@ fn win_registry_enumerations_survive_concurrent_writes() {
 
 // ---------- policy::root against real Windows ----------
 
-fn known(sys: &TestWinSystem, f: KnownFolder) -> RootPath {
+fn known(sys: &WinSystem, f: KnownFolder) -> RootPath {
     RootPath::new(sys.known_folders().get(f).unwrap()).unwrap()
 }
 
@@ -876,7 +900,7 @@ fn forbidden_roots_resolve_on_real_windows() {
     };
     let install = root.work("Rerun");
     let games = root.work("Games");
-    let sys = TestWinSystem::new();
+    let sys = WinSystem::new().unwrap();
     let fr = ForbiddenRoots::resolve(&sys, &install).unwrap_or_else(|e| panic!("{e}"));
     let check = |p: &RootPath| fr.check(p);
     for f in [
@@ -927,7 +951,7 @@ fn store_dir_game_refuses_links_on_real_windows() {
         return;
     };
     let fx = root.fx();
-    let sys = TestWinSystem::new();
+    let sys = WinSystem::new().unwrap();
     let install = root.work("Rerun");
     let fr = ForbiddenRoots::resolve(&sys, &install).unwrap_or_else(|e| panic!("{e}"));
 

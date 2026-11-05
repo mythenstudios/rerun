@@ -6,8 +6,8 @@
 //! [`Registry`](crate::sys::Registry), equally read-only. [`WinKnownFolders`] implements
 //! [`KnownFolders`](crate::sys::KnownFolders), [`WinTopology`] implements
 //! [`Topology`](crate::sys::Topology) (ADR 0010), [`WinGpu`] implements
-//! [`Gpu`](crate::sys::Gpu) (DXGI, ADR 0008 amendment). `WinSystem` (the
-//! [`System`](crate::sys::System) bundle) follows in the next step.
+//! [`Gpu`](crate::sys::Gpu) (DXGI, ADR 0008 amendment), and [`WinSystem`] bundles them into
+//! the real [`System`](crate::sys::System).
 //!
 //! Modules:
 //! - `nt`: the only NT/Win32 file calls (`NtCreateFile` through exactly two wrappers,
@@ -34,6 +34,7 @@
 //!   `dxgi.dll` from System32 through `loader`, `CreateDXGIFactory1` cached, a fresh factory
 //!   per enumeration, at most 64 adapters.
 //! - `gpu`: `WinGpu`, name/LUID/driver-version mapping and error mapping; no `unsafe`.
+//! - `system`: `WinSystem`; no `unsafe`.
 //! - `status`: `NTSTATUS`/Win32 code → `SysErrorKind`, for files and the registry (pure).
 //! - `name`: single-segment check, L1 long-name check, `volume_path`, `open_dir` input rules,
 //!   NT buffer decoding (pure).
@@ -58,7 +59,8 @@
 //! outside `dxgi` and every COM activation call until phase 3 (ADR 0008).
 //!
 //! Test only: `testfx` (test root with the `docs/09-testing.md` safeguards, the `FsFixture`
-//! for real Windows, the naive control `Fs`, the private app hive that is the `RegFixture`;
+//! for real Windows, the naive control `Fs`, the private app hive that is the `RegFixture`,
+//! where a module was loaded from;
 //! path-based calls, registry writes to that hive and `unsafe` FFI allowed there), `tests`
 //! (smoke tests and the contract runners) and `bans` (every banned `windows-sys` and
 //! `std::env` item of `clippy.toml` must resolve, else clippy fails).
@@ -86,6 +88,7 @@ mod registry;
 mod reparse;
 mod shell;
 mod status;
+mod system;
 mod token;
 mod topology;
 
@@ -103,4 +106,5 @@ pub use gpu::WinGpu;
 pub use known_folders::WinKnownFolders;
 pub use loader::restrict_dll_search;
 pub use registry::WinRegistry;
+pub use system::WinSystem;
 pub use topology::WinTopology;
