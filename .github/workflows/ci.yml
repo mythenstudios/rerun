@@ -97,6 +97,20 @@ jobs:
               exit 1
             fi
           done
+      - name: clap without the color feature
+        # ADR 0016: clap's `color` feature (anstream) calls SetConsoleMode on the console the
+        # parent shell shares and reads colour variables. Risk: feature unification once another
+        # crate depends on clap with default features.
+        run: |
+          tree=$(cargo tree -p rerun-cli -e normal,features -i clap_builder --locked)
+          if ! grep -q 'clap_builder feature "std"' <<<"$tree"; then
+            echo "::error::sanity check failed: the grep pattern no longer matches cargo tree output"
+            exit 1
+          fi
+          if grep -q 'feature "color"' <<<"$tree"; then
+            echo "::error::rerun-cli builds clap with the color feature"
+            exit 1
+          fi
       - name: phase 0 acceptance - rerun --help
         run: cargo run -p rerun-cli --locked -- --help
       - name: rerun-launch - allowed dependencies

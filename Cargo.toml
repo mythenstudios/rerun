@@ -24,7 +24,16 @@ serde_json = "1.0.154"
 sha2 = "0.11.1"
 # Exe hashes (ADR 0014): same RustCrypto project and digest stack as sha2.
 sha1 = { version = "0.11.0", default-features = false }
-clap = { version = "4.6.7", features = ["derive"] }
+# Without `color` (anstream would call SetConsoleMode on the shared console and read colour
+# variables) and without `wrap_help` (terminal width), ADR 0016.
+clap = { version = "4.6.7", default-features = false, features = [
+  "std",
+  "derive",
+  "help",
+  "usage",
+  "error-context",
+  "suggestions",
+] }
 # Win32/NT bindings, features chosen per crate (ADR 0008).
 windows-sys = "0.61.2"
 
