@@ -56,6 +56,12 @@ fn err(kind: SysErrorKind, target: &str) -> SysError {
     SysError::new(kind, target)
 }
 
+/// Error target for a listed entry of the directory `dir` (a validated path or the handle
+/// placeholder): the raw name from disk, always escaped.
+fn entry_target(dir: &str, raw_name: &str) -> String {
+    format!("{dir}: entry {raw_name:?}")
+}
+
 fn u32_at(b: &[u8], off: usize) -> Option<u32> {
     let s = b.get(off..off + 4)?;
     Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
@@ -459,11 +465,13 @@ impl WinDir {
         let mut out = Vec::with_capacity(listed.len());
         for l in listed {
             let shown = String::from_utf16_lossy(&l.name);
+            // Raw from disk: in an error only escaped (module docs of `sys::fs`).
+            let t = entry_target(target, &shown);
             // A name from disk that is not a single segment cannot be reopened safely.
             let seg = Seg16::from_units(l.name.clone())
                 .ok_or_else(|| err(SysErrorKind::Other, target))?;
-            let meta = match open_entry(dir, &seg, Access::Attributes, &shown) {
-                Ok(o) => meta_of(o.handle.as_handle(), o.tag, &shown)?,
+            let meta = match open_entry(dir, &seg, Access::Attributes, &t) {
+                Ok(o) => meta_of(o.handle.as_handle(), o.tag, &t)?,
                 // Vanished between listing and reopen (or renamed: L1 mismatch).
                 Err(e) if e.kind == SysErrorKind::NotFound => continue,
                 Err(e) if e.kind == SysErrorKind::AccessDenied => match restricted_meta(&l) {
@@ -731,7 +739,26 @@ fn fs_kind(name: &str) -> FsKind {
 
 #[cfg(test)]
 mod tests {
-    use super::ends_with_components;
+    use super::{SysErrorKind, ends_with_components, entry_target, err};
+
+    /// A raw name from a listing (LX symlink with a bidi override, a newline, an escape
+    /// sequence) never reaches an error message unescaped, also on the error paths of the
+    /// attribute reopen in `entries`.
+    #[test]
+    fn listed_names_are_escaped_in_error_targets() {
+        for raw in ["evil\u{202E}gpj.exe", "a\nb", "\u{1b}[31m", "plain.acf"] {
+            let t = entry_target(r"steamapps", raw);
+            assert_eq!(t, format!("steamapps: entry {raw:?}"));
+            let shown = err(SysErrorKind::Other, &t).to_string();
+            for c in ['\u{202E}', '\n', '\u{1b}'] {
+                assert!(!shown.contains(c), "{shown:?}");
+            }
+        }
+        assert_eq!(
+            entry_target("steamapps", "evil\u{202E}gpj.exe"),
+            r#"steamapps: entry "evil\u{202e}gpj.exe""#
+        );
+    }
 
     #[test]
     fn final_path_must_end_with_the_volume_path() {

@@ -3,6 +3,8 @@
 use std::fmt;
 use std::path::Path;
 
+use crate::path::is_deceptive;
+
 /// Kind of a system error, modelled on the Win32 error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -53,7 +55,10 @@ impl fmt::Display for SysErrorKind {
 pub struct SysError {
     /// Error kind.
     pub kind: SysErrorKind,
-    /// Affected path or key, human-readable.
+    /// Affected path or key, human-readable. Never raw text from the system: a target with a
+    /// control or an invisible/confusable character ([`is_deceptive`]) is stored escaped
+    /// (`{:?}`), see [`shown_target`]. Build errors with [`SysError::new`] or
+    /// [`SysError::path`], which apply it.
     pub target: String,
     /// Original Win32 error code, if any.
     pub win32: Option<u32>,
@@ -64,11 +69,11 @@ pub struct SysError {
 }
 
 impl SysError {
-    /// New error without a Win32 code.
+    /// New error without a Win32 code. `target` goes through [`shown_target`].
     pub fn new(kind: SysErrorKind, target: impl Into<String>) -> Self {
         Self {
             kind,
-            target: target.into(),
+            target: shown_target(target.into()),
             win32: None,
             ntstatus: None,
             hresult: None,
@@ -102,5 +107,93 @@ impl SysError {
     }
 }
 
+/// `target` as it is if it holds no control and no invisible or confusable character
+/// ([`is_deceptive`]), otherwise escaped: `{:?}` (control, bidi and format characters as
+/// `\u{…}`), and the printable confusables `{:?}` keeps (full-width ASCII, slash look-alikes,
+/// ¥ …) as `\u{…}` too. Idempotent: an escaped target has no such character left. So a raw name
+/// from disk or the registry (a U+202E in a file name, an embedded newline) never reaches a
+/// message unescaped, whichever error path carries it.
+pub fn shown_target(target: String) -> String {
+    let bad = |c: char| c.is_control() || is_deceptive(c);
+    if !target.chars().any(bad) {
+        return target;
+    }
+    format!("{target:?}")
+        .chars()
+        .map(|c| {
+            if bad(c) {
+                format!("\\u{{{:x}}}", u32::from(c))
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Result of a system operation.
 pub type SysResult<T> = Result<T, SysError>;
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{SysError, SysErrorKind, shown_target};
+    use crate::path::is_deceptive;
+    use crate::sys::System;
+    use crate::sys::fake::FakeSystem;
+
+    fn clean(s: &str) -> bool {
+        !s.chars().any(|c| c.is_control() || is_deceptive(c))
+    }
+
+    #[test]
+    fn plain_targets_stay_as_they_are() {
+        for t in [
+            r"C:\Games\Some Game",
+            r"steamapps\appmanifest_10.acf",
+            "Straße ä",
+            "",
+        ] {
+            assert_eq!(shown_target(t.to_owned()), t);
+        }
+    }
+
+    #[test]
+    fn control_and_deceptive_characters_are_escaped_once() {
+        for raw in [
+            "evil\u{202E}gpj.exe",
+            "a\nb",
+            "\u{1b}[31mred",
+            "zero\u{200B}width",
+            "x\u{2215}y",
+            "nul\0",
+        ] {
+            let e = SysError::new(SysErrorKind::Other, raw);
+            assert_ne!(e.target, raw);
+            assert!(clean(&e.target), "{:?}", e.target);
+            assert!(clean(&e.to_string()), "{:?}", e.to_string());
+            // Idempotent.
+            assert_eq!(shown_target(e.target.clone()), e.target);
+        }
+        let p = SysError::path(SysErrorKind::NotFound, Path::new("C:\\a\u{202E}b"));
+        assert_eq!(p.target, r#""C:\\a\u{202e}b""#);
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test of the fake system layer itself, not a root for game files"
+    )]
+    fn an_error_path_with_a_raw_name_carries_it_escaped() {
+        // The fake has no rule against bidi characters in an absolute path: the open fails
+        // with `NotFound`, and the target is escaped.
+        let sys = FakeSystem::new();
+        let e = sys
+            .fs()
+            .open_dir(Path::new("C:\\Games\\x\u{202E}y"))
+            .unwrap_err();
+        assert_eq!(e.kind, SysErrorKind::NotFound);
+        assert!(clean(&e.to_string()), "{e}");
+        assert!(e.target.contains(r"\u{202e}"), "{e}");
+    }
+}

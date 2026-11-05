@@ -62,7 +62,7 @@ A value of exactly the limit is accepted, one more is an error. There is no per-
 - Step 12 owns Steam root discovery, the two locations of `libraryfolders.vdf`, the check that the file name `appmanifest_<appid>.acf` matches `appid`, de-duplication of libraries by `RootId` and the meaning of `StateFlags`.
 - `name` can contain any character Steam can encode (including an escaped newline or a raw control character); output layers sanitize it for display (CLI in step 16, UI in phase 5).
 - The parser is fuzzed with a deterministic xorshift loop and checked with a round trip against a test-only writer (`docs/09-testing.md`).
-- Phase 2 follow-up: `Dir::read_limited` in `sys` with a contract test; `detect::vdf::read` then uses it.
+- Phase 2 follow-up: `Dir::read_limited` in `sys` with a contract test; `detect::vdf::read` then uses it. Together with it a bounded `Dir::read_dir` for the `steamapps` listing (ADR 0012).
 
 ## Amendment · 2026-11-05 (`RawText`, ADR 0012)
 The views keep untrusted text in `detect::steam::RawText` instead of `String`: `Library::path`, `Library::label`, `AppManifest::name` and `AppManifest::install_dir`. `RawText` has no `Display`, `Deref`, `AsRef` or `From`; its `Debug` shows only the length, and the content is reached through `as_raw_str`. This replaces "Paths stay raw strings" and "`installdir` stays raw" above: they stay raw, now in a type that cannot be printed or used as a `Path` by accident. Parsing, limits and errors are unchanged.

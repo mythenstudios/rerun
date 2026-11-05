@@ -42,8 +42,8 @@ pub fn scan<'s>(sys: &'s dyn System, fr: &ForbiddenRoots) -> SteamScan<'s> {
 }
 
 /// One [`IssueKind::DuplicateApp`] per copy of an app ID that is in more than one library,
-/// naming the first other library and how many more there are (linear in the number of
-/// copies).
+/// naming the first other library and how many more there are. O(1) per copy, so time and
+/// the issue list are linear in the number of apps (each issue holds one path and a count).
 fn duplicates(libraries: &[SteamLibrary<'_>], issues: &mut Vec<Issue>) {
     let mut holders: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
     for (index, lib) in libraries.iter().enumerate() {
@@ -53,11 +53,22 @@ fn duplicates(libraries: &[SteamLibrary<'_>], issues: &mut Vec<Issue>) {
     }
     for (index, lib) in libraries.iter().enumerate() {
         for app in lib.apps() {
+            // `held` lists each library once (app IDs are unique within a library), in
+            // library order: the first other one is `held[0]` unless that is this one.
             let Some(held) = holders.get(&app.app_id).filter(|h| h.len() > 1) else {
                 continue;
             };
-            let mut others = held.iter().filter(|&&i| i != index);
-            let Some(other) = others.next().and_then(|&i| libraries.get(i)) else {
+            let other = match held.as_slice() {
+                [first, second, ..] => {
+                    if *first == index {
+                        *second
+                    } else {
+                        *first
+                    }
+                }
+                _ => continue,
+            };
+            let Some(other) = libraries.get(other) else {
                 continue;
             };
             issues.push(Issue {
@@ -68,7 +79,7 @@ fn duplicates(libraries: &[SteamLibrary<'_>], issues: &mut Vec<Issue>) {
                 kind: IssueKind::DuplicateApp {
                     app_id: app.app_id,
                     other: other.path().clone(),
-                    more: others.count(),
+                    more: held.len().saturating_sub(2),
                 },
             });
         }

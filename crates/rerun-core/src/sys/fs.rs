@@ -33,6 +33,12 @@
 //!   `sys::win`: listing with `FileIdExtdDirectoryInformation`; on a file system without that
 //!   class (FAT) the listing has no file ID and a denied entry stays an `AccessDenied` error
 //!   (fail closed; FAT has no ACLs, so this does not happen in practice).
+//! - **Error targets.** `SysError.target` only ever contains validated paths (`RelPath`,
+//!   `RootPath`, input that passed the rules above), fixed placeholders, or names from the
+//!   system escaped (`{:?}`). `sys::win` formats every listed entry name escaped
+//!   (`<dir>: entry "<name>"`), and [`SysError::new`] escapes any target that still holds a
+//!   control or an invisible/confusable character ([`crate::sys::shown_target`]), in `win`
+//!   and `fake` alike.
 //! - `sys::win` implements only the reading methods in phase 1; the writing ones return
 //!   `Unsupported`.
 

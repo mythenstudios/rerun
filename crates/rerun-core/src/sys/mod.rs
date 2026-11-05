@@ -36,7 +36,7 @@ pub mod fake;
 #[cfg(windows)]
 pub mod win;
 
-pub use error::{SysError, SysErrorKind, SysResult};
+pub use error::{SysError, SysErrorKind, SysResult, shown_target};
 pub use fs::{Dir, Fs};
 pub use gpu::{DriverVersion, Gpu, GpuAdapter};
 pub use known_folders::{KnownFolder, KnownFolders};

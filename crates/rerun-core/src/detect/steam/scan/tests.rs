@@ -6,7 +6,7 @@ use crate::detect::steam::testfx::{STEAM, SteamFixture, acf, base, fr, library_f
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{GameOrigin, RootError};
 use crate::sys::SysErrorKind;
-use crate::sys::registry::RegValue;
+use crate::sys::registry::{RegValue, reg_type};
 
 const LIB: &str = r"D:\SteamLibrary";
 const LIB2: &str = r"E:\Steam Library";
@@ -214,6 +214,13 @@ fn nothing_read_from_files_or_the_registry_appears_in_the_output() {
             RootSource::MachineNative,
             RegValue::ExpandString(format!(r"%{MARK}%\Steam")),
         )
+        // A raw REG_SZ with a NUL in the middle, holding the marker on both sides.
+        .raw_value(
+            RootSource::Machine32.key(),
+            RootSource::Machine32.value_name(),
+            reg_type::REG_SZ,
+            &utf16_with_nul(&format!(r"C:\{MARK}"), MARK),
+        )
         .library_file(STEAM, &labelled)
         // Names of good apps, and fields that are ignored.
         .app(LIB, 1_000_005, MARK, "Marked")
@@ -257,6 +264,7 @@ fn nothing_read_from_files_or_the_registry_appears_in_the_output() {
     assert_eq!(s.libraries[1].label().map(|l| l.as_raw_str()), Some(MARK));
     let kinds: Vec<&IssueKind> = s.issues.iter().map(|i| &i.kind).collect();
     assert!(kinds.contains(&&IssueKind::RegistryValue(BadValue::Unexpanded)));
+    assert!(kinds.contains(&&IssueKind::RegistryValue(BadValue::InvalidString)));
     assert!(
         kinds
             .iter()
@@ -275,11 +283,77 @@ fn nothing_read_from_files_or_the_registry_appears_in_the_output() {
             == 3
     );
 
+    assert_no_marker(&s, MARK);
+
+    // Library files refused by the parser and by the view, and a raw REG_SZ of odd length,
+    // each holding the marker.
+    let refused_files = [
+        format!(
+            "\"libraryfolders\" {{ \"0\" {{ \"label\" \"{MARK}\" \"path\" \"x\" }} #base \"{MARK}\" }}"
+        ),
+        format!(
+            "\"libraryfolders\" {{ \"0\" {{ \"label\" \"{MARK}\" \"label\" \"{MARK}\" \"path\" \"{MARK}\" }} }}"
+        ),
+    ];
+    for (i, content) in refused_files.iter().enumerate() {
+        let mut odd = utf16_with_nul(MARK, MARK);
+        odd.push(0x41);
+        let sys = installed()
+            .library_file(STEAM, content)
+            .raw_value(
+                RootSource::MachineNative.key(),
+                RootSource::MachineNative.value_name(),
+                reg_type::REG_SZ,
+                &odd,
+            )
+            .build()
+            .unwrap();
+        let roots = crate::detect::steam::testfx::fr(&sys);
+        let s = scan(&sys, &roots);
+        let file_issue = s
+            .issues
+            .iter()
+            .find(|i| matches!(i.at, Location::LibraryFile { .. }))
+            .unwrap_or_else(|| panic!("{i}: {:?}", s.issues));
+        let expected_parse = i == 0;
+        assert_eq!(
+            matches!(file_issue.kind, IssueKind::VdfRead(_)),
+            expected_parse,
+            "{file_issue:?}"
+        );
+        assert_eq!(
+            matches!(file_issue.kind, IssueKind::View(_)),
+            !expected_parse,
+            "{file_issue:?}"
+        );
+        assert!(
+            s.issues
+                .iter()
+                .any(|i| i.kind == IssueKind::RegistryValue(BadValue::InvalidString)),
+            "{:?}",
+            s.issues
+        );
+        assert_no_marker(&s, MARK);
+    }
+}
+
+/// `a`, a NUL, `b`, a NUL, as UTF-16LE bytes: a raw `REG_SZ` with a NUL inside.
+fn utf16_with_nul(a: &str, b: &str) -> Vec<u8> {
+    a.encode_utf16()
+        .chain([0])
+        .chain(b.encode_utf16())
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+/// Neither `{:?}`/`{:#?}` of the scan nor `Display`/`Debug` of any issue contains `mark`.
+fn assert_no_marker(s: &SteamScan<'_>, mark: &str) {
     let shown = format!("{s:?}\n{s:#?}");
-    assert!(!shown.contains(MARK), "{shown}");
+    assert!(!shown.contains(mark), "{shown}");
     for i in &s.issues {
         let shown = format!("{i}\n{i:?}\n{i:#?}");
-        assert!(!shown.contains(MARK), "{shown}");
+        assert!(!shown.contains(mark), "{shown}");
         assert!(!i.to_string().is_empty());
     }
 }

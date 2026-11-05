@@ -80,7 +80,7 @@ impl WinRegistry {
             ),
             UserHiveError::NotAUserHive(name) => SysError::new(
                 SysErrorKind::Unsupported,
-                format!("{WHAT}: returned {name}, not the user's own hive (profile not loaded?)"),
+                format!("{WHAT}: returned {name:?}, not the user's own hive (profile not loaded?)"),
             ),
         })?;
         Ok(Self {
