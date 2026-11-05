@@ -39,7 +39,7 @@ pub(crate) const SKIP_DIRS: &[&str] = &[
 
 /// An executable found by the walk.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WalkedExe {
+pub struct WalkedExe {
     /// The file, relative to the game folder.
     pub path: RelPath,
     /// Level of the folder that holds it (0: the game folder).
@@ -68,7 +68,7 @@ pub struct WalkStats {
 
 /// The result of [`walk()`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Walk {
+pub struct Walk {
     /// Candidates in walk order, at most [`ExeLimits::max_exes`].
     pub exes: Vec<WalkedExe>,
     /// What the walk did.
@@ -78,7 +78,7 @@ pub(crate) struct Walk {
 }
 
 /// Walks the game folder within `limits`. Never fails as a whole.
-pub(crate) fn walk(game: &GameDir<'_>, limits: &ExeLimits) -> Walk {
+pub fn walk(game: &GameDir<'_>, limits: &ExeLimits) -> Walk {
     walk_dir(game.dir(), limits)
 }
 

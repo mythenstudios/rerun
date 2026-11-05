@@ -48,7 +48,7 @@ Breadth-first from the game folder, one level after the other, every listing sor
 |---|---|---|
 | `max_depth` | 3 directory levels below the game folder | `Game\Binaries\Win64\Game-Win64-Shipping.exe` (Unreal 4/5) is level 3; `Binaries\Win64`, `bin\x64`, `System` are level 1 or 2 |
 | `max_dirs` | 128 listed directories (the game folder counts) | breadth-first reaches every level-1 and most level-2 folders of real games first |
-| `max_entries` | 20,000 entries across all listings | `sys::win` opens every listed entry attribute-only (ADR 0012), about 10 to 20 µs each: at most about 0.4 s per game |
+| `max_entries` | 20,000 entries across all listings | `sys::win` opens every listed entry attribute-only (ADR 0012), about 10 to 20 µs each: at most about 0.4 s per game. Pending: confirmed only by the release-build measurement of the dump (walk timed separately, see the amendment) |
 | `max_exes` | 64 candidates opened and parsed | real folders hold 1 to 15; at most 64 MiB read by the parser (ADR 0013 budget) |
 
   Before each further directory is listed, the walk stops if `max_dirs` directories were listed or at least `max_entries` entries were seen (the listing that crossed the limit is used); the result keeps what was found, `WalkStats::complete` is `false` and one `WalkLimit` issue names the limit. A walk that reaches a limit exactly with nothing left to list is complete. More than `max_exes` candidates: the first 64 in walk order are parsed, one `TooManyExes { found, max }` issue reports the count, and the others are not in the list. Partial results are acceptable here, unlike ADR 0012's manifests, because the walk only feeds display and suggestions; matching opens Topo paths directly (`inspect_exe`).

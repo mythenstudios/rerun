@@ -3,7 +3,7 @@
 //! Store-agnostic: everything here takes a [`GameDir`](crate::policy::root::GameDir), never a
 //! bare `Dir`. No new `sys` method, no `unsafe`, no recursion.
 //!
-//! - `walk`: the bounded breadth-first listing of the game folder ([`ExeLimits`]); every
+//! - [`walk()`]: the bounded breadth-first listing of the game folder ([`ExeLimits`]); every
 //!   directory opened relative to the game handle, every listing sorted by folded name, every
 //!   name through `policy::path::classify`, reparse points and restricted entries reported
 //!   and never followed. A limit keeps a partial result ([`WalkStats::complete`]).
@@ -33,7 +33,7 @@ pub use hash::{HashError, HashLimits, HashOutcome, HashSkip, Hashes, MAX_CHUNK_B
 pub use issue::{ExeIssue, ExeIssueKind, LimitKind};
 pub use role::Role;
 pub use scan::{Candidate, ExeError, ExeFacts, GameExes, Main, Options, inspect_exe, scan_game};
-pub use walk::WalkStats;
+pub use walk::{Walk, WalkStats, WalkedExe, walk};
 
 use crate::detect::pe;
 

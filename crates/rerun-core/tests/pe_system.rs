@@ -450,7 +450,7 @@ fn api_set(set: &rerun_core::detect::exe::ApiSet) -> String {
 #[test]
 #[ignore = "reads this machine's Steam games; run by hand, never in CI"]
 fn dump_exe_candidates() {
-    use rerun_core::detect::exe::{ExeIssueKind, HashOutcome, Main, Options, scan_game};
+    use rerun_core::detect::exe::{ExeIssueKind, HashOutcome, Main, Options, scan_game, walk};
     use rerun_core::detect::steam::scan;
     use rerun_core::policy::root::ForbiddenRoots;
 
@@ -476,6 +476,9 @@ fn dump_exe_candidates() {
     let mut most_dirs = 0usize;
     let mut most_entries = 0usize;
     let mut slowest = std::time::Duration::ZERO;
+    let mut walk_total = std::time::Duration::ZERO;
+    let mut scan_total = std::time::Duration::ZERO;
+    let mut slowest_walk = std::time::Duration::ZERO;
 
     for lib in &s.libraries {
         for app in lib.apps() {
@@ -493,11 +496,22 @@ fn dump_exe_candidates() {
                 hashes,
                 ..Options::default()
             };
+            // The walk alone first (listings only), then the whole scan, which walks again:
+            // parsing, ranking and hashing take about `scan - walk`.
+            let t = std::time::Instant::now();
+            let walked = walk(&game, &options.limits);
+            let walk_took = t.elapsed();
             let t = std::time::Instant::now();
             let r = scan_game(&game, &options);
             let took = t.elapsed();
-            slowest = slowest.max(took);
             drop(game);
+            if walked.stats != r.stats {
+                note("  (the folder changed between the timed walk and the scan)");
+            }
+            slowest = slowest.max(took);
+            slowest_walk = slowest_walk.max(walk_took);
+            walk_total += walk_took;
+            scan_total += took;
 
             let main = match &r.main {
                 Main::One(i) => {
@@ -530,7 +544,7 @@ fn dump_exe_candidates() {
                 .collect();
             note(&format!(
                 "app {} installdir {:?}: {} candidates, main {main}; walk complete {}, {} dirs, \
-                 {} entries, {} exes found, {} depth cut, skipped [{}]; took {took:?}",
+                 {} entries, {} exes found, {} depth cut, skipped [{}]; walk {walk_took:?}, scan {took:?} (parse, rank and hash about {:?})",
                 app.app_id,
                 app.install_dir.as_str(),
                 r.candidates.len(),
@@ -540,6 +554,7 @@ fn dump_exe_candidates() {
                 st.exes_found,
                 st.depth_cut,
                 skipped.join(", "),
+                took.saturating_sub(walk_took),
             ));
             candidates += r.candidates.len();
             for (i, c) in r.candidates.iter().enumerate() {
@@ -652,10 +667,18 @@ fn dump_exe_candidates() {
     note(&format!(
         "summary: {games} games in {} libraries, {candidates} candidates, {incomplete} \
          incomplete walks, at most {most_dirs} dirs and {most_entries} entries in one game, \
-         slowest game {slowest:?}, hashes {}, {hashed_bytes} bytes hashed; took {:?}",
+         slowest game {slowest:?} (walk alone at most {slowest_walk:?}), walks {walk_total:?}, \
+         scans {scan_total:?} (parse, rank and hash about {:?}), hashes {}, {hashed_bytes} bytes \
+         hashed; took {:?} ({} build)",
         s.libraries.len(),
+        scan_total.saturating_sub(walk_total),
         if hashes { "on" } else { "off" },
-        started.elapsed()
+        started.elapsed(),
+        if cfg!(debug_assertions) {
+            "debug: times are not representative, use --release"
+        } else {
+            "release"
+        },
     ));
     note("main executables:");
     for (k, n) in &mains {
