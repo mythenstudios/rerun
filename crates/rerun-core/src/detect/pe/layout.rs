@@ -92,6 +92,26 @@ pub const SECTION_SIZE_OF_RAW_DATA: usize = 16;
 /// `IMAGE_SECTION_HEADER::PointerToRawData`.
 pub const SECTION_POINTER_TO_RAW_DATA: usize = 20;
 
+/// Size of `IMAGE_IMPORT_DESCRIPTOR`.
+pub const IMPORT_DESCRIPTOR_SIZE: usize = 20;
+/// `IMAGE_IMPORT_DESCRIPTOR::Name`.
+pub const IMPORT_NAME: usize = 12;
+/// Size of `IMAGE_DELAYLOAD_DESCRIPTOR`.
+pub const DELAYLOAD_DESCRIPTOR_SIZE: usize = 32;
+/// `IMAGE_DELAYLOAD_DESCRIPTOR::Attributes`.
+pub const DELAYLOAD_ATTRIBUTES: usize = 0;
+/// `IMAGE_DELAYLOAD_DESCRIPTOR::DllNameRVA`.
+pub const DELAYLOAD_DLL_NAME_RVA: usize = 4;
+/// `Attributes.RvaBased`: clear in VC6-style descriptors, which hold virtual addresses.
+pub const DELAYLOAD_RVA_BASED: u32 = 1;
+
+/// `IMAGE_LOAD_CONFIG_DIRECTORY32::Size` and `…64::Size`.
+pub const LOAD_CONFIG_SIZE: usize = 0;
+/// `IMAGE_LOAD_CONFIG_DIRECTORY32::DependentLoadFlags`.
+pub const LOAD_CONFIG32_DEPENDENT_LOAD_FLAGS: usize = 0x36;
+/// `IMAGE_LOAD_CONFIG_DIRECTORY64::DependentLoadFlags`.
+pub const LOAD_CONFIG64_DEPENDENT_LOAD_FLAGS: usize = 0x4E;
+
 /// `IMAGE_SUBSYSTEM_NATIVE`.
 pub const SUBSYSTEM_NATIVE: u16 = 1;
 /// `IMAGE_SUBSYSTEM_WINDOWS_GUI`.

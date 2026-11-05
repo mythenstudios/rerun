@@ -11,6 +11,9 @@
 //! - DOS, NE and LE/LX executables are recognised ([`PeErrorKind::Legacy`]).
 //! - [`Headers`]: machine, PE32/PE32+, characteristics (Large Address Aware, DLL),
 //!   subsystem, DLL characteristics, image base, CLR header present.
+//! - [`Pe::imports`], [`Pe::delay_imports`]: the imported DLL names ([`DllName`]), in table
+//!   order; no function names, ordinals, exports or forwarders (phase 6 may add them).
+//! - [`Pe::dependent_load_flags`]: `DependentLoadFlags` of the load config.
 //! - Errors ([`PeError`]) carry a kind and a file offset, never file content.
 //!
 //! Facts read here are hints for display, matching and suggestions, never authorization
@@ -18,6 +21,7 @@
 
 mod error;
 mod headers;
+mod imports;
 pub mod layout;
 mod reader;
 
@@ -29,6 +33,7 @@ mod tests;
 use std::io::{Read, Seek};
 
 pub use error::{LegacyFormat, PeError, PeErrorKind};
+pub use imports::DllName;
 
 use headers::Layout;
 use reader::Source;
@@ -138,6 +143,7 @@ impl Headers {
 #[derive(Debug)]
 pub struct Pe<R> {
     source: Source<R>,
+    limits: Limits,
     layout: Layout,
 }
 
@@ -150,7 +156,11 @@ impl<R: Read + Seek> Pe<R> {
         let region = source.read_at(0, limits.max_header_bytes)?;
         let eof = region.len() < limits.max_header_bytes;
         let layout = headers::parse(&region, eof, limits)?;
-        Ok(Self { source, layout })
+        Ok(Self {
+            source,
+            limits: *limits,
+            layout,
+        })
     }
 
     /// Facts from the headers.

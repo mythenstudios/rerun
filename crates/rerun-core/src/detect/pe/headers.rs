@@ -1,14 +1,6 @@
 //! DOS and NT headers, data directories, section table and RVA mapping (ADR 0013, "What is
 //! parsed"). Everything here works on the header region, read once.
 
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the mapping is used by the import and version parts"
-    )
-)]
-
 use super::error::{LegacyFormat, PeError, PeErrorKind};
 use super::layout as l;
 use super::reader::{off, u16_at, u32_at, u64_at};
@@ -233,6 +225,11 @@ pub(super) fn parse(buf: &[u8], eof: bool, limits: &Limits) -> Result<Layout, Pe
 }
 
 impl Layout {
+    /// The data directory `index` if it is present (`VirtualAddress` not 0).
+    pub(super) fn dir(&self, index: usize) -> Option<DataDir> {
+        self.dirs.get(index).copied().filter(|d| d.rva != 0)
+    }
+
     /// Maps an RVA to the file: the first section in table order that covers it, else the
     /// headers below `SizeOfHeaders`.
     pub(super) fn map(&self, rva: u32) -> Result<Mapped, PeErrorKind> {
