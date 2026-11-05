@@ -1,6 +1,6 @@
 # ADR 0017 · File write side
 
-**Status:** accepted (decided by the user) · 2026-11-05 · amends ADR 0007 ("Other rules", "Implementation"), closes audit A1 B1 and should-items 1, 2, 3, 8, 9
+**Status:** accepted (decided by the user) · 2026-11-05 · amends ADR 0007 ("Other rules", "Implementation"), closes audit A1 B1 and should-items 1, 2, 3, 8, 9 · amended 2026-11-05, P2-3 plan (see "Amendment" at the end; it takes precedence where the two differ)
 
 ## Context
 Phase 2 writes into game folders (`file_install`, `ini_set`) and into Rerun's own folder (journal, ADR 0019). The phase 1 `Dir` trait already has writing methods, but audit A1 found them unfit for that:
@@ -80,7 +80,7 @@ pub struct TmpName(String); // `.rerun-<instance tag>-<n>.tmp`, chosen and journ
 `create_new` is the same without the guard: `<tmp>` `FILE_CREATE` share 0, write, attributes, flush, rename onto the name without replace (an existing name is `AlreadyExists` before step 2; a collision only at the rename is `Busy`), so a crash never leaves a torn file under the final name. `delete` is step 8 on the guard of the file itself.
 
 ### Intermediate states and recovery (condition S2)
-The journal records `<tmp>`, the old hash `h0` and the new hash `h1` before step 2 (ADR 0019). Recovery and in-process rollback decide from what is on disk, checking every hash on a guard, never from the record alone:
+(The table below is replaced by the complete tables in "Amendment", A3.) The journal records `<tmp>`, the old hash `h0` and the new hash `h1` before step 2 (ADR 0019). Recovery and in-process rollback decide from what is on disk, checking every hash on a guard, never from the record alone:
 
 | Phase | On disk | Rule |
 |---|---|---|
@@ -138,3 +138,53 @@ A backup is streamed from `FileGuard::reader` into the journal with `create_new`
 - Whether `windows-sys` 0.61 has `FILE_RENAME_INFORMATION_EX` and `FILE_DISPOSITION_INFORMATION_EX`; if not, `#[repr(C)]` copies in `sys::win::nt` with a layout test against the documented offsets (P2-4).
 - Durability of a rename after a flush is undocumented (NTFS commits its log up to the flushed LSN); ADR 0019 treats it as best effort.
 - Manual checks on a FAT32/exFAT stick (`Unsupported`), with a game running (`users()` blocks before the first write), and with a third party holding the game folder without `FILE_SHARE_WRITE` (`Busy`): `docs/09-testing.md`.
+
+## Amendment (amended 2026-11-05, P2-3 plan; decided by the user after a senior-dev cross-check)
+
+### A1 · One sequence, written once (user decision D-4)
+The replace, `create_new`, delete, `remove_dir` and lock sequences (the checks on open, steps 1 to 8, the undo of A2, the cleanup of `<tmp>`, the re-checks of A4, the handling of step 8) live once, in a crate-internal module of `sys` (`sys::seq`), generic over a small primitive trait. `sys::fake` and `sys::win` implement only the primitives: open a guard, read on it, create `<tmp>` (`FILE_CREATE`, share 0), write, set attributes, flush a file, rename a held handle to a single segment of its parent without replace, POSIX delete on a held handle, query a held handle (name, link count, attributes, kind), create a directory, open a directory for deleting, flush a directory, open-or-create a lock file. `FileGuard` has one implementation, in `sys::seq`. The fake injects faults, crashes and power loss at the primitive layer, so the failure paths that ship in `sys::win` are the ones the fake tests exercise. `sys::win` keeps the rules that belong to one call (single-segment re-assertion, status mapping, `IGNORE_READONLY_ATTRIBUTE`) inside its primitives.
+
+### A2 · Failures inside a sequence (user decision D-2)
+`<tmp>` is created with share 0 and its handle is held until step 7, which renames that handle; cleaning up `<tmp>` is a POSIX delete on the held handle, never a re-open, so no hash is needed and nobody can swap it.
+- Steps 2 to 5 fail: delete `<tmp>`, return the error. Nothing else changed.
+- Step 6 fails (also a failed re-check, A4): nothing renamed; delete `<tmp>`, return the error.
+- Step 7 fails: rename the guard (now `<tmp>.old`) back onto the stored name **on the same handle**, without replace, after the re-checks of A4; delete `<tmp>`; return the step-7 error. The backup state is never unguarded in between. If the undo rename fails too (an intruder holds the name: `Busy`), `<tmp>` is still deleted and the step-7 error is returned; the disk is in phase B or `Foreign` and recovery decides (A3).
+- Step 8 fails for any reason (`STATUS_CANNOT_DELETE`, a failed re-check, anything else): the replace succeeded; `Ok` with `Replaced::old_left`, pending cleanup as before.
+- `FileGuard::delete` (step 8 alone): any failure is an error and nothing was deleted (`STATUS_CANNOT_DELETE` stays `Busy`).
+- `replace` refuses `new.sha256 == expected` with `Unsupported` ("content unchanged"): with equal hashes the phases below cannot be told apart. Planners never emit such a replace (same content with other R/H/S is not a replace; no op kind of phase 2 changes attributes only).
+
+### A3 · Phase tables (replaces the table in "Intermediate states and recovery")
+Every hash is taken on a guard (link count 1, else that entry counts as "other"). `X` is the journaled `<tmp>`. One rule for `X` in every table: **`X` is deleted if and only if the target does not hold the new content**; then it can only be ours (or planted under our journaled name, which deleting harms no one). Where the target holds the new content, our `<tmp>` was renamed away, so a file at `X` is not ours: it is left and reported. Attributes and link count beyond the hash are judged by `Observed` (ADR 0020), which may turn a phase's `After` into `Foreign`.
+
+Replace (`h0` old, `h1` new, `h0 != h1` by A2):
+
+| Target | `.old` | Phase | Action | Result |
+|---|---|---|---|---|
+| `h0` | absent | A | delete `X` | `Before` |
+| absent | `h0` | B | rename `.old` back onto the target name (never delete it), delete `X` | `Before` |
+| `h1` | `h0` | C | delete `.old` (expected `h0`); `X` left, reported | `After` |
+| `h1` | absent | D | `X` left, reported | `After` |
+| `h0` | present (any content) | — | delete `X`; nothing else | `Foreign` |
+| absent | absent | — | delete `X` | `Foreign` |
+| absent | not `h0` | — | delete `X` | `Foreign` |
+| other (an intruder) | any | — | delete `X` | `Foreign` |
+| `h1` | not `h0` | — | `X` left | `Foreign` |
+
+`create_new` (`h1` new): target absent → delete `X`, `Before`; target `h1` → `X` left and reported, `After`; target other → delete `X`, `Foreign`.
+`delete` (`h0` old): target `h0` → `Before`; absent → `After`; other → `Foreign`.
+Under the power-loss model of ADR 0019 (amendment) every cut of these sequences lands in a row with result `Before` or `After`; `Foreign` arises only from someone else's change.
+
+### A4 · Re-checks on the guard
+The guard's share mode does not cover `FILE_WRITE_ATTRIBUTES` (no data access) and probably not `CreateHardLinkW` (`FileLinkInformation` on a handle without data access); contract cases pin what another process can do while a guard is held. So before step 6, before the undo rename of A2 and before step 8 (and before `delete`), the guard re-checks on its own handle: the name (`Busy`, as before), the link count is still 1 (`Linked`), and read-only, hidden and system are those it saw when it was opened (`Mismatch`). A failure there is handled by A2.
+
+### A5 · Ancestor renames
+Line 68 ("while any handle below a folder is open") and `docs/09-testing.md` (race harness: "a handle opened without `FILE_SHARE_DELETE`") disagree. P2-3 adds a read-contract case that holds each handle kind below a folder (a `Dir` handle, an `open_read` reader, a fixture hold with and without share-delete, an attribute-only query) and renames an ancestor through the fixture; it runs on the developer machine and on the CI runner, requires the observed outcome on both (user decision D-3), and this paragraph and line 68 are corrected with the result in that commit. Principle: the fake is never stricter than Windows. Fake tests that rename an ancestor of an open handle and turn out to be refused move to a fake-only rename that ignores share modes, kept as defence-in-depth tests.
+
+### A6 · `DELETE_PENDING` on the read side
+A name in legacy delete-pending state cannot be opened at all, not even attribute-only. `metadata`, `open_read`, `read`, `users`, `open_dir`, `guard`, `lock` and the existence check of `create_new` return `Busy`; `read_dir` skips such an entry like one that vanished between the listing and its reopen (it is being removed). The fake models the state (fixture `delete_pending`); P2-4 maps the status in `sys::win`.
+
+### A7 · Lock files (journal lock, ADR 0019)
+`DirWrite::lock(name) -> SysResult<Box<dyn FileLock + '_>>`: opens or creates (`FILE_OPEN_IF`) the plain file `name` directly under its final name (it stays empty and its content never matters, so no `<tmp>`), `FILE_READ_DATA | SYNCHRONIZE`, share 0, never following a reparse point (`ReparsePoint`); a directory is `AccessDenied`, a link count other than 1 `Linked`; any other open of it, by Rerun or anyone, is `Busy` until the `FileLock` drops; the kernel releases it when the process ends. `FileLock` is a marker trait (`Send + Debug`). Part of the fake and the write contract in P2-3, `sys::win` in P2-4 (`Unsupported` until then).
+
+### A8 · Names in tests
+The fake's fixture and fault names (`hold_open`, `mapped_image`, `delete_pending`, faults on primitive calls, crash and power loss) are fixed by the P2-3 commits that introduce them; each such commit updates "Consequences" above and `docs/09-testing.md` to the final names.

@@ -1,6 +1,6 @@
 # ADR 0019 · Journal
 
-**Status:** accepted (decided by the user) · 2026-11-05 · replaces the SQLite journal of `docs/01-architecture.md`, introduces `AppDir` (ADR 0007), closes audit A1 should-item 6 and the plan review's design blockers B-1 and B-2
+**Status:** accepted (decided by the user) · 2026-11-05 · amended 2026-11-05, P2-3 plan (see "Amendment" at the end) · replaces the SQLite journal of `docs/01-architecture.md`, introduces `AppDir` (ADR 0007), closes audit A1 should-item 6 and the plan review's design blockers B-1 and B-2
 
 ## Context
 Core rule 2: every change is reversible, the journal is written before the change, a revert restores the state before the first change exactly, also after a crash. `docs/01-architecture.md` planned SQLite (`rusqlite`) at `%LOCALAPPDATA%\Rerun\journal.db`. Audit A1 (should-item 6) found that at odds with ADR 0007: SQLite opens by path, creates temporary files through `GetTempPathW` (banned, ADR 0009), adds C code and needs its own allowlist entry. The plan review raised two design blockers: **B-1** a plan touches two volumes (journal on `C:`, game on `D:`) whose writes the OS does not order; **B-2** what happens on an in-process failure, and when two transactions touch the same object.
@@ -75,3 +75,19 @@ Transaction directories are `<seq>-<tag>`: `seq` is one more than the highest ex
 ## Open points
 - Retention of closed transactions (only `.bin` files are removed when a transaction closes; heads and records stay as the log). Decide with the app's log screen (phase 5).
 - The power-loss VM run (journal on `C:`, game on `D:`) is a manual case (`docs/09-testing.md`); it can show the absence of a problem, not prove durability.
+
+## Amendment (amended 2026-11-05, P2-3 plan; decided by the user after a senior-dev cross-check)
+
+### Power-loss model of the fake (user decision D-1)
+"Drops every change not yet flushed" leaves open what a flush covers, and dropping all unflushed changes together never separates two renames of one replace, so phase B (ADR 0017) would never come out of a power loss. The fake models a volume like NTFS's ordered log instead:
+- Each volume has one ordered log of metadata changes: create, rename (it touches the source and the target directory), delete, attribute change, link change, create and remove of a directory. File content is not in the log.
+- Flushing a file makes its content durable and the volume's log durable up to the last change that touched that file. Flushing a directory makes the log durable up to the last change that touched an entry in it or the directory itself. Because the log is ordered, every earlier change on that volume becomes durable with it, whatever it touched.
+- A power loss keeps the durable part and **any prefix** of the rest, chosen per volume independently; the tests enumerate every cut on every volume at every step boundary. Cut 0 is the original sentence (every unflushed change dropped). Content written but not flushed is lost: the file reads as its last flushed content, or empty if it was never flushed (a simplification; NTFS may show zeros).
+- Across volumes nothing is ordered except by the flushes of "Write order and durability". A test passes if, for every cut, recovery finds each op `Before` or `After` (ADR 0017 amendment, A3), never `Foreign`, and never loses a backup whose intent is durable.
+This is still a model of best-effort durability, not a proof; the manual VM case stays.
+
+### Crash model of the fake
+A crash stops the process after a primitive call (ADR 0017 amendment, A1): every later call of the crashed process fails, so no rollback runs. A restart closes the handles Rerun held, by origin (not by process ID): pending POSIX deletes on them complete and the journal lock is released; handles and image mappings of other processes (fixture holds) stay. Fixture and attacker helpers are never blocked by the crash flag. A power loss is a crash plus the cut above, and drops every hold and mapping.
+
+### Lock
+`journal\lock` is taken with `DirWrite::lock` (ADR 0017 amendment, A7); it is part of the write contract, so `sys::win` must pass it unchanged in P2-4.
