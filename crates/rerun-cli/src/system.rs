@@ -7,14 +7,13 @@ use std::io::Write;
 use rerun_core::escape;
 use rerun_core::hw::arch::TableError;
 use rerun_core::hw::{
-    self, ArchFact, Fact, GpuArch, GpuArchTable, GpuProfile, ProfileError, SystemProfile,
-    VendorFact,
+    self, ArchFact, CpuTopology, Fact, GpuArch, GpuArchTable, GpuProfile, ProfileError,
+    SystemProfile, VendorFact,
 };
 use rerun_core::sys::System;
-use rerun_proto::cpu::CpuTopology;
 
 use crate::cli::Exit;
-use crate::messages::{ArchText, CacheLevel, FactText, Heading, Message};
+use crate::messages::{ArchText, CacheLevel, FactText, Heading, Message, NotUniform};
 use crate::out::{Out, failed};
 
 /// Reads the profile with the built-in architecture table and prints it. Exit 0 also when a
@@ -90,7 +89,7 @@ fn gpu<'a>(
     for (i, a) in g.adapters.iter().enumerate() {
         m.push(Message::Adapter {
             number: i + 1,
-            conditions: i == 0,
+            conditions: g.primary().is_some_and(|p| std::ptr::eq(p, a)),
             name: escape::text(&a.adapter.name),
         });
         let arch = match (&a.arch, table_error) {
@@ -182,6 +181,17 @@ fn cpu(m: &mut Vec<Message<'_>>, t: &CpuTopology) {
             total_threads,
         },
         _ => Message::CpuMixed {
+            why: if groups
+                .values()
+                .map(|g| g.cores.len())
+                .collect::<BTreeSet<_>>()
+                .len()
+                > 1
+            {
+                NotUniform::GroupSizes
+            } else {
+                NotUniform::ThreadsPerCore
+            },
             level,
             groups: groups.len(),
             total_cores,

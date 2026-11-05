@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use rerun_core::detect::exe::{
     ApiEvidence, ApiReport, ApiVerdict, Basis, Candidate, ExeError, ExeFacts, ExeIssue,
-    ExeIssueKind, GameExes, GraphicsApi, HashOutcome, HashSkip, Hashes, Main, Role, WalkStats,
+    ExeIssueKind, GameExes, GraphicsApi, HashError, HashOutcome, HashSkip, Hashes, Main, Role,
+    WalkStats,
 };
 use rerun_core::detect::pe::{
     FixedFileInfo, Headers, Machine, PeError, PeErrorKind, PeFormat, PeInfo, PeReadError,
@@ -169,7 +170,7 @@ fn one_main_executable_with_machine_api_and_version() {
         "  app 220 (installed): Half-Life 2
     install folder: Half-Life 2
     main executable: bin\\hl2.exe
-      x86, API d3d9, version 1.0.0.1
+      x86 (not large address aware), API d3d9, version 1.0.0.1
 "
     );
 }
@@ -206,9 +207,9 @@ fn a_tie_lists_every_tied_executable_and_picks_none() {
     install folder: Fixture Creed
     main executable: a tie between 2 executables, none picked
     tied: Fixture_Dx10.exe
-      x86, API d3d10 (also d3d9), version 1.2.0.0
+      x86 (not large address aware), API d3d10 (also d3d9), version 1.2.0.0
     tied: Fixture_Dx9.exe
-      x86, API d3d9, no version
+      x86 (not large address aware), API d3d9, no version
 "
     );
 }
@@ -287,6 +288,96 @@ fn hashes_done_and_skipped() {
 "
         ),
         "{text}"
+    );
+}
+
+#[test]
+fn a_failed_hash_names_its_file_escaped() {
+    // A tag character is no control character and no `is_deceptive` one: a valid RelPath.
+    let hostile = "game\u{E0041}.exe";
+    assert!(RelPath::parse(hostile).is_ok());
+    let a = app(1, "Fixture", "Fixture", 4);
+    let mut f = facts(Machine::X64, one(GraphicsApi::D3d11), None);
+    f.hashes = HashOutcome::Failed(HashError::Inspect(Box::new(parse_error(hostile))));
+    let e = exes(
+        vec![cand("ok.exe", Role::Game, Ok(f))],
+        Main::One(0),
+        Vec::new(),
+    );
+    let text = shown(&render_game(&a, &e));
+    assert!(
+        text.ends_with(
+            "      hashes: \"failed: game\\u{e0041}.exe: file ends inside a structure at offset \
+             0x3c\"\n"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn failed_game_executables_are_issues_whatever_the_main_executable() {
+    let a = app(2, "Fixture", "Fixture", 4);
+    let e = exes(
+        vec![
+            cand(
+                "game.exe",
+                Role::Game,
+                Ok(facts(Machine::X64, one(GraphicsApi::D3d11), None)),
+            ),
+            cand(
+                "game_dx12.exe",
+                Role::Game,
+                Err(parse_error("game_dx12.exe")),
+            ),
+            cand("setup.exe", Role::Installer, Err(parse_error("setup.exe"))),
+        ],
+        Main::One(0),
+        Vec::new(),
+    );
+    assert_eq!(
+        shown(&render_game(&a, &e)),
+        "  app 2 (installed): Fixture
+    install folder: Fixture
+    main executable: game.exe
+      x64, API d3d11, no version
+    issue: game_dx12.exe: file ends inside a structure at offset 0x3c
+"
+    );
+    let mut counts = ScanCounts::default();
+    super::tally(&mut counts, &e);
+    assert_eq!((counts.one, counts.issues), (1, 1));
+}
+
+#[test]
+fn an_incomplete_walk_is_one_line() {
+    let a = app(3, "Fixture", "Fixture", 4);
+    let mut e = exes(Vec::new(), Main::None, Vec::new());
+    e.stats.depth_cut = 2;
+    let head = "  app 3 (installed): Fixture
+    install folder: Fixture
+    main executable: none (no executable found)
+";
+    assert_eq!(
+        shown(&render_game(&a, &e)),
+        format!(
+            "{head}    walk: 2 folders deeper than 3 levels not listed (the list of executables \
+             may be incomplete)\n"
+        )
+    );
+    e.stats.complete = false;
+    e.stats.depth_cut = 1;
+    assert_eq!(
+        shown(&render_game(&a, &e)),
+        format!(
+            "{head}    walk: 1 folder deeper than 3 levels not listed; stopped at a limit (the \
+             list of executables may be incomplete)\n"
+        )
+    );
+    e.stats.depth_cut = 0;
+    assert!(
+        shown(&render_game(&a, &e)).ends_with(
+            "    walk: stopped at a limit (the list of executables may be incomplete)\n"
+        )
     );
 }
 
@@ -583,7 +674,7 @@ library 0: C:\Program Files (x86)\Steam
   app 1000001 (installed): Fixture Game
     install folder: Fixture Game
     main executable: FixtureGame.exe
-      x86, API d3d9, no version
+      x86 (large address aware), API d3d9, no version
 
 library 1: D:\SteamLibrary
   label: "GamesEvil\u{1b}]0;title\u{7}\u{202e}Name\u{e0041}"

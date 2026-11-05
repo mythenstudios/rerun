@@ -47,7 +47,7 @@ impl<W: Write> Out<W> {
     pub fn line(&mut self, m: &Message<'_>) -> Result<(), OutError> {
         let text = m.to_string();
         let shown = escape::text(&text);
-        if shown.is_escaped() {
+        if shown.as_str() != text {
             net_hit(&text);
         }
         writeln!(self.w, "{shown}")?;

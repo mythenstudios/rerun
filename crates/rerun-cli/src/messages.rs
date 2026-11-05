@@ -8,7 +8,7 @@
 use std::fmt;
 use std::io;
 
-use rerun_core::detect::exe::{ApiReport, HashOutcome};
+use rerun_core::detect::exe::{ApiReport, Hashes};
 use rerun_core::detect::pe::Machine;
 use rerun_core::detect::steam::{AppState, RootSource};
 use rerun_core::escape::Shown;
@@ -66,6 +66,24 @@ pub enum FactText<'a> {
 /// of one CPU are of different levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheLevel(pub Option<u8>);
+
+/// Why the CPU summary is not one `groups x cores x threads` product.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotUniform {
+    /// The groups have different numbers of cores.
+    GroupSizes,
+    /// The cores have different numbers of threads (hybrid parts, SMT on some cores only).
+    ThreadsPerCore,
+}
+
+/// The hashes of one executable as shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HashText<'a> {
+    /// Hashed.
+    Done(&'a Hashes),
+    /// Skipped or failed: the core's text, escaped (a failure may name a file).
+    NotDone(Shown<'a>),
+}
 
 /// Why a game has no main executable, derived from its candidates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +196,8 @@ pub enum Message<'a> {
     },
     /// Groups of different shapes.
     CpuMixed {
+        /// What differs.
+        why: NotUniform,
         /// The cache level of the groups.
         level: CacheLevel,
         /// Number of groups.
@@ -312,15 +332,23 @@ pub enum Message<'a> {
     ExeFacts {
         /// Machine.
         machine: Machine,
+        /// `IMAGE_FILE_LARGE_ADDRESS_AWARE` (shown for x86 only).
+        large_address_aware: bool,
         /// The graphics API with its evidence.
         api: &'a ApiReport,
         /// The file version from the fixed part of the version resource.
         version: Option<[u16; 4]>,
     },
     /// The hashes of the executable above (`--hashes`).
-    ExeHashes {
-        /// Done, skipped or failed.
-        outcome: &'a HashOutcome,
+    ExeHashes(HashText<'a>),
+    /// The walk of the game folder did not list everything.
+    WalkIncomplete {
+        /// Folders not entered because they lie deeper than `max_depth`.
+        depth_cut: usize,
+        /// The depth limit.
+        max_depth: usize,
+        /// A limit stopped the walk (see its issue line).
+        stopped: bool,
     },
     /// An issue of the game scan.
     GameIssue {
@@ -482,6 +510,15 @@ impl fmt::Display for FactText<'_> {
     }
 }
 
+impl fmt::Display for NotUniform {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::GroupSizes => "groups of different sizes",
+            Self::ThreadsPerCore => "threads per core differ",
+        })
+    }
+}
+
 impl fmt::Display for NoneReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -605,13 +642,14 @@ impl fmt::Display for Message<'_> {
                 threads(*total_threads),
             ),
             Self::CpuMixed {
+                why,
                 level,
                 groups,
                 total_cores,
                 total_threads,
             } => write!(
                 f,
-                "  {}, {}, {} (not uniform)",
+                "  {}, {}, {} ({})",
                 Count(
                     *groups,
                     &format!("{level} group"),
@@ -619,6 +657,7 @@ impl fmt::Display for Message<'_> {
                 ),
                 cores(*total_cores),
                 threads(*total_threads),
+                why,
             ),
             Self::CacheGroup {
                 level,
@@ -694,23 +733,52 @@ impl fmt::Display for Message<'_> {
             Self::MainNone { reason } => write!(f, "    main executable: none ({reason})"),
             Self::ExeFacts {
                 machine,
+                large_address_aware,
                 api,
                 version,
             } => {
-                write!(f, "      {}, API {api}, ", MachineText(*machine))?;
+                write!(f, "      {}", MachineText(*machine))?;
+                if *machine == Machine::X86 {
+                    let laa = if *large_address_aware {
+                        "large address aware"
+                    } else {
+                        "not large address aware"
+                    };
+                    write!(f, " ({laa})")?;
+                }
+                write!(f, ", API {api}, ")?;
                 match version {
                     Some([a, b, c, d]) => write!(f, "version {a}.{b}.{c}.{d}"),
                     None => f.write_str("no version"),
                 }
             }
-            Self::ExeHashes { outcome } => match outcome {
-                HashOutcome::Done(h) => write!(
-                    f,
-                    "      SHA-1 {}, SHA-256 {} ({} bytes)",
-                    h.sha1, h.sha256, h.len
-                ),
-                other => write!(f, "      hashes: {other}"),
-            },
+            Self::ExeHashes(HashText::Done(h)) => write!(
+                f,
+                "      SHA-1 {}, SHA-256 {} ({} bytes)",
+                h.sha1, h.sha256, h.len
+            ),
+            Self::ExeHashes(HashText::NotDone(text)) => write!(f, "      hashes: {text}"),
+            Self::WalkIncomplete {
+                depth_cut,
+                max_depth,
+                stopped,
+            } => {
+                f.write_str("    walk: ")?;
+                if *depth_cut > 0 {
+                    write!(
+                        f,
+                        "{} deeper than {max_depth} levels not listed",
+                        Count(*depth_cut, "folder", "folders")
+                    )?;
+                    if *stopped {
+                        f.write_str("; ")?;
+                    }
+                }
+                if *stopped {
+                    f.write_str("stopped at a limit")?;
+                }
+                f.write_str(" (the list of executables may be incomplete)")
+            }
             Self::GameIssue { issue } => write!(f, "    issue: {issue}"),
             Self::AppNotFound { app_id } => write!(f, "app {app_id}: not found in any library"),
             Self::Summary(counts) => write!(f, "{counts}"),

@@ -36,25 +36,31 @@ fn rerun_scan_on_this_machine_counts_only() {
         "exit code (stderr: {stderr_lines} lines)"
     );
     let count = |prefix: &str| stdout.lines().filter(|l| l.starts_with(prefix)).count();
+    let state = |s: &str| {
+        stdout
+            .lines()
+            .filter(|l| l.starts_with("  app ") && l.contains(s))
+            .count()
+    };
     let control = stdout
         .chars()
         .filter(|c| c.is_control() && *c != '\n')
         .count();
     eprintln!(
-        "libraries {}, apps {}, installed {}, one main {}, ties {}, none {}, steam issues {}, \
-         game issues {}, escaped lines {}, control characters {control}, stderr lines \
-         {stderr_lines}",
+        "libraries {}, apps {}, installed {}, update pending {}, not installed {}, one main {}, \
+         ties {}, none {}, incomplete walks {}, steam issues {}, game issues {}, escaped lines \
+         {}, control characters {control}, stderr lines {stderr_lines}",
         count("library "),
         count("  app "),
-        stdout
-            .lines()
-            .filter(|l| l.starts_with("  app ") && l.contains(" (installed): "))
-            .count(),
+        state(" (installed): "),
+        state(" (update pending; not opened): "),
+        state(" (not installed; not opened): "),
         count("    main executable: ")
             - count("    main executable: a tie")
             - count("    main executable: none"),
         count("    main executable: a tie"),
         count("    main executable: none"),
+        count("    walk: "),
         count("  issue: "),
         count("    issue: "),
         stdout.lines().filter(|l| l.contains(r"\u{")).count(),

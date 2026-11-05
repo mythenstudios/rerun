@@ -250,10 +250,18 @@ fn into_owned_keeps_the_shown_text() {
     let shown = text(&computed).into_owned();
     drop(computed);
     assert_eq!(shown.as_str(), r#""x\u{202e}y""#);
+    assert!(shown.is_escaped());
     let clean = String::from("plain");
     let shown = path(&clean).into_owned();
     drop(clean);
     assert_eq!(shown.as_str(), "plain");
+    // A clean string stays "not escaped" once owned (the Cow is owned, the flag is not).
+    assert!(!shown.is_escaped());
+    assert_eq!(shown.clone().into_escaped(), None);
+    assert_eq!(
+        text("a\u{1b}").into_owned().into_escaped().as_deref(),
+        Some(r#""a\u{1b}""#)
+    );
 }
 
 #[test]

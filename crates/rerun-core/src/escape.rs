@@ -23,40 +23,45 @@ use std::fmt;
 
 use crate::path::is_deceptive;
 
-/// Text that went through [`path`] or [`text`]. The field is private and there is no other
+/// Text that went through [`path`] or [`text`]. The fields are private and there is no other
 /// constructor, so a `Shown` always holds escaped (or clean) text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Shown<'a>(Cow<'a, str>);
+pub struct Shown<'a> {
+    text: Cow<'a, str>,
+    /// The input had to be escaped (kept through [`Shown::into_owned`]).
+    escaped: bool,
+}
 
 impl fmt::Display for Shown<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.text)
     }
 }
 
 impl Shown<'_> {
     /// The text as it is shown.
     pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// `true` if the input had to be escaped (and was quoted); `false` for a clean input that
-    /// is shown unchanged, without an allocation.
-    pub fn is_escaped(&self) -> bool {
-        matches!(self.0, Cow::Owned(_))
+        &self.text
     }
 
     /// The same text, owned (for text computed by the caller, such as an error message).
     pub fn into_owned(self) -> Shown<'static> {
-        Shown(Cow::Owned(self.0.into_owned()))
+        Shown {
+            text: Cow::Owned(self.text.into_owned()),
+            escaped: self.escaped,
+        }
+    }
+
+    /// `true` if the input had to be escaped (and was quoted); `false` for a clean input that
+    /// is shown unchanged. Crate-internal: an output compares [`Self::as_str`] with its input.
+    #[cfg(test)]
+    pub(crate) fn is_escaped(&self) -> bool {
+        self.escaped
     }
 
     /// The escaped text, or `None` for a clean input.
     pub(crate) fn into_escaped(self) -> Option<String> {
-        match self.0 {
-            Cow::Owned(s) => Some(s),
-            Cow::Borrowed(_) => None,
-        }
+        self.escaped.then(|| self.text.into_owned())
     }
 }
 
@@ -73,7 +78,10 @@ pub fn text(s: &str) -> Shown<'_> {
 
 fn shown(s: &str, bad: fn(char) -> bool) -> Shown<'_> {
     if !s.chars().any(bad) {
-        return Shown(Cow::Borrowed(s));
+        return Shown {
+            text: Cow::Borrowed(s),
+            escaped: false,
+        };
     }
     let quoted = format!("{s:?}");
     let mut out = String::with_capacity(quoted.len() + 16);
@@ -84,7 +92,10 @@ fn shown(s: &str, bad: fn(char) -> bool) -> Shown<'_> {
             out.push(c);
         }
     }
-    Shown(Cow::Owned(out))
+    Shown {
+        text: Cow::Owned(out),
+        escaped: true,
+    }
 }
 
 /// The base set as sorted, non-overlapping, inclusive ranges (Unicode 16). Noncharacters at

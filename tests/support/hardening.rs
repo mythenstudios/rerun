@@ -73,6 +73,21 @@ pub const CLI_IMPORTS: &[&str] = &[
     "userenv.dll",
 ];
 
+/// Console APIs that change state the parent shell shares (code page, modes; ADR 0016).
+/// `rerun.exe` must not name them anywhere: neither as a static import (the hint/name table
+/// holds the function name) nor as a string for `GetProcAddress`.
+pub const CONSOLE_STATE_APIS: &[&str] = &["SetConsoleMode", "SetConsoleOutputCP", "SetConsoleCP"];
+
+/// The [`CONSOLE_STATE_APIS`] whose name occurs in `image` (a byte search over the whole file,
+/// so `detect::pe` needs no function-name API).
+pub fn console_state_apis(image: &[u8]) -> Vec<&'static str> {
+    CONSOLE_STATE_APIS
+        .iter()
+        .copied()
+        .filter(|name| image.windows(name.len()).any(|w| w == name.as_bytes()))
+        .collect()
+}
+
 /// `imports` has no forbidden DLL and nothing outside `allowed` (exact, case-insensitive).
 pub fn check_imports(imports: &[DllName], allowed: &[&str]) -> Result<(), String> {
     let all: Vec<&str> = imports.iter().map(DllName::as_str).collect();
@@ -204,6 +219,21 @@ fn hardening_checks_have_teeth() {
     assert!(
         !forbidden_import("kernel32.dll") && !forbidden_import("api-ms-win-core-synch-l1-2-0.dll")
     );
+}
+
+#[test]
+fn the_console_api_check_has_teeth() {
+    assert!(console_state_apis(b"MZ kernel32.dll\0GetStdHandle\0").is_empty());
+    assert_eq!(
+        console_state_apis(b"\0\0SetConsoleMode\0WriteConsoleW\0"),
+        ["SetConsoleMode"]
+    );
+    assert_eq!(
+        console_state_apis(b"SetConsoleOutputCP\0SetConsoleCP\0"),
+        ["SetConsoleOutputCP", "SetConsoleCP"]
+    );
+    // SetConsoleCtrlHandler is no console state API.
+    assert!(console_state_apis(b"SetConsoleCtrlHandler\0").is_empty());
 }
 
 #[test]

@@ -16,8 +16,6 @@
 
 use std::fmt;
 
-use rerun_proto::cpu::CpuTopology;
-
 use crate::sys::{SysError, System};
 
 pub mod arch;
@@ -27,6 +25,9 @@ pub mod os;
 pub use arch::{ArchId, GpuArchTable};
 pub use gpu::{GpuArch, GpuEntry, GpuProfile, GpuVendor};
 pub use os::OsBuild;
+/// The CPU topology type of [`SystemProfile::cpu`], re-exported so output layers need no
+/// direct dependency on `rerun-proto` (ADR 0016 amendment).
+pub use rerun_proto::cpu::CpuTopology;
 
 /// The source a [`ProfileError`] is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

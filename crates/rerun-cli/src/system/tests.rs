@@ -13,7 +13,6 @@ use rerun_core::hw::{
 use rerun_core::sys::fake::{FakeSystem, FakeSystemBuilder};
 use rerun_core::sys::registry::{Hive, RegKey, RegValue, RegView};
 use rerun_core::sys::{GpuAdapter, SysErrorKind};
-use rerun_proto::cpu::{CpuTopology, Llc, LogicalCpu};
 
 use super::{render, system};
 use crate::cli::Exit;
@@ -338,51 +337,55 @@ CPU
     );
 }
 
-/// A synthetic hybrid part: 2 P-cores with SMT (class 1), 4 E-cores (class 0), one L3.
-fn hybrid() -> CpuTopology {
+/// A topology fixture as JSON (validated by the fake): per core `(core, threads, llc,
+/// efficiency class)`, per last-level cache `(level, size)`.
+fn topology_json(cores: &[(u32, usize, u32, u8)], llcs: &[(u8, u64)]) -> String {
     let mut cpus = Vec::new();
-    let mut index = 0u8;
-    for (core, threads, class) in [
-        (0, 2, 1),
-        (1, 2, 1),
-        (2, 1, 0),
-        (3, 1, 0),
-        (4, 1, 0),
-        (5, 1, 0),
-    ] {
+    for &(core, threads, llc, class) in cores {
         for _ in 0..threads {
-            cpus.push(LogicalCpu {
-                cpu_set_id: 0x100 + u32::from(index),
-                group: 0,
-                index,
-                core,
-                llc: 0,
-                efficiency_class: class,
-            });
-            index += 1;
+            let i = cpus.len();
+            cpus.push(format!(
+                r#"{{"cpu_set_id":{},"group":0,"index":{i},"core":{core},"llc":{llc},"efficiency_class":{class}}}"#,
+                0x100 + i
+            ));
         }
     }
-    let t = CpuTopology {
-        cpus,
-        llcs: vec![Llc {
-            level: 3,
-            size: 12 << 20,
-        }],
-    };
-    t.validate().unwrap();
-    t
+    let llcs: Vec<String> = llcs
+        .iter()
+        .map(|(level, size)| format!(r#"{{"level":{level},"size":{size}}}"#))
+        .collect();
+    format!(
+        r#"{{"cpus":[{}],"llcs":[{}]}}"#,
+        cpus.join(","),
+        llcs.join(",")
+    )
+}
+
+/// A synthetic hybrid part: 2 P-cores with SMT (class 1), 4 E-cores (class 0), one L3.
+fn hybrid() -> String {
+    topology_json(
+        &[
+            (0, 2, 0, 1),
+            (1, 2, 0, 1),
+            (2, 1, 0, 0),
+            (3, 1, 0, 0),
+            (4, 1, 0, 0),
+            (5, 1, 0, 0),
+        ],
+        &[(3, 12 << 20)],
+    )
 }
 
 #[test]
 fn a_hybrid_cpu() {
-    let p = read(dev_machine().topology(hybrid()), Some(table()));
+    let p = read(dev_machine().topology_json(&hybrid()), Some(table()));
     let all = shown(&p, None);
     let cpu = all.split("\n\n").nth(1).unwrap();
     assert_eq!(
         cpu,
         "\
 CPU
-  1 L3 group, 6 cores, 8 threads (not uniform)
+  1 L3 group, 6 cores, 8 threads (threads per core differ)
   L3 group 0: 12 MiB, 6 cores, 8 threads, cores 0-5
   efficiency class 0: 4 cores, 4 threads
   efficiency class 1: 2 cores, 4 threads
@@ -397,49 +400,24 @@ CPU
 #[test]
 fn groups_of_different_sizes_and_levels() {
     // Two groups: 4 cores with SMT under an L3, 2 cores under an L2 (last level).
-    let mut cpus = Vec::new();
-    let mut index = 0u8;
-    for (core, threads, llc) in [
-        (0, 2, 0),
-        (1, 2, 0),
-        (2, 2, 0),
-        (3, 2, 0),
-        (4, 1, 1),
-        (5, 1, 1),
-    ] {
-        for _ in 0..threads {
-            cpus.push(LogicalCpu {
-                cpu_set_id: 0x100 + u32::from(index),
-                group: 0,
-                index,
-                core,
-                llc,
-                efficiency_class: 0,
-            });
-            index += 1;
-        }
-    }
-    let t = CpuTopology {
-        cpus,
-        llcs: vec![
-            Llc {
-                level: 3,
-                size: 16 << 20,
-            },
-            Llc {
-                level: 2,
-                size: 2 << 20,
-            },
+    let t = topology_json(
+        &[
+            (0, 2, 0, 0),
+            (1, 2, 0, 0),
+            (2, 2, 0, 0),
+            (3, 2, 0, 0),
+            (4, 1, 1, 0),
+            (5, 1, 1, 0),
         ],
-    };
-    t.validate().unwrap();
-    let p = read(dev_machine().topology(t), Some(table()));
+        &[(3, 16 << 20), (2, 2 << 20)],
+    );
+    let p = read(dev_machine().topology_json(&t), Some(table()));
     let all = shown(&p, None);
     assert_eq!(
         all.split("\n\n").nth(1).unwrap(),
         "\
 CPU
-  2 last-level cache groups, 6 cores, 10 threads (not uniform)
+  2 last-level cache groups, 6 cores, 10 threads (groups of different sizes)
   L3 group 0: 16 MiB, 4 cores x 2 threads, cores 0-3
   L2 group 1: 2 MiB, 2 cores x 1 thread, cores 4-5
   efficiency class 0: 6 cores, 10 threads

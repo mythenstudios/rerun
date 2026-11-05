@@ -73,6 +73,10 @@ jobs:
             echo "::error::rerun-launch.exe is $size bytes (limit 1 MiB)"
             exit 1
           fi
+      - name: rerun - release build
+        # Built with -p (no dev-dependencies, so without rerun-core/fake), before the tests: the
+        # hardening test checks this release binary too (RERUN_RELEASE_CLI_EXE).
+        run: cargo build -p rerun-cli --release --locked
       - name: test (incl. schema validation of topos/ and packages/)
         # Opt-in for the machine-wide fs contract fixtures (mount point, subst, 8.3 names) and
         # the elevated run; only honoured together with RUNNER_ENVIRONMENT=github-hosted
@@ -82,6 +86,8 @@ jobs:
           # The release shim built above, checked by crates/rerun-launch/tests/hardening.rs
           # (required on GitHub-hosted runners, skipped locally when unset).
           RERUN_RELEASE_LAUNCH_EXE: ${{ github.workspace }}/target/release/rerun-launch.exe
+          # The release rerun.exe built above, checked by crates/rerun-cli/tests/hardening.rs.
+          RERUN_RELEASE_CLI_EXE: ${{ github.workspace }}/target/release/rerun.exe
         run: cargo test --workspace --all-features --locked
       - name: rerun-core fake feature never in shipped binaries
         # ADR 0007: the in-memory fake and its TOCTOU hooks stay out of release builds.
@@ -101,16 +107,19 @@ jobs:
         # ADR 0016: clap's `color` feature (anstream) calls SetConsoleMode on the console the
         # parent shell shares and reads colour variables. Risk: feature unification once another
         # crate depends on clap with default features.
+        # Checked for rerun-cli alone and for the whole workspace.
         run: |
-          tree=$(cargo tree -p rerun-cli -e normal,features -i clap_builder --locked)
-          if ! grep -q 'clap_builder feature "std"' <<<"$tree"; then
-            echo "::error::sanity check failed: the grep pattern no longer matches cargo tree output"
-            exit 1
-          fi
-          if grep -q 'feature "color"' <<<"$tree"; then
-            echo "::error::rerun-cli builds clap with the color feature"
-            exit 1
-          fi
+          for scope in "-p rerun-cli" "--workspace"; do
+            tree=$(cargo tree $scope -e normal,features -i clap_builder --locked)
+            if ! grep -q 'clap_builder feature "std"' <<<"$tree"; then
+              echo "::error::sanity check failed ($scope): the grep pattern no longer matches cargo tree output"
+              exit 1
+            fi
+            if grep -q 'feature "color"' <<<"$tree"; then
+              echo "::error::clap is built with the color feature ($scope)"
+              exit 1
+            fi
+          done
       - name: phase 0 acceptance - rerun --help
         run: cargo run -p rerun-cli --locked -- --help
       - name: rerun-launch - allowed dependencies

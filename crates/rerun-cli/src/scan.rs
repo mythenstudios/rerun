@@ -21,7 +21,7 @@ use rerun_core::policy::root::{ForbiddenRoots, RootError};
 use rerun_core::sys::System;
 
 use crate::cli::Exit;
-use crate::messages::{Message, NoneReason, ScanCounts};
+use crate::messages::{HashText, Message, NoneReason, ScanCounts};
 use crate::out::{Out, OutError, failed};
 
 /// Scans and prints. Exit 0 also with issues, Steam not found or an unknown requested app ID;
@@ -204,12 +204,12 @@ pub fn render_unopened<'a>(app: &'a SteamApp, e: &RootError) -> Vec<Message<'a>>
     ]
 }
 
-/// The game candidates that failed to open or parse.
+/// The game candidates that failed to open or parse, whatever became the main executable
+/// (failed candidates rank last, so another one may have won).
 fn failed_games(exes: &GameExes) -> impl Iterator<Item = &Candidate> {
-    let none = matches!(exes.main, Main::None);
     exes.candidates
         .iter()
-        .filter(move |c| none && c.role == Role::Game && c.facts.is_err())
+        .filter(|c| c.role == Role::Game && c.facts.is_err())
 }
 
 /// Facts (and hashes) of one executable.
@@ -223,11 +223,17 @@ fn exe_lines<'a>(m: &mut Vec<Message<'a>>, c: &'a Candidate) {
     };
     m.push(Message::ExeFacts {
         machine: f.info.headers.machine,
+        large_address_aware: f.info.headers.large_address_aware(),
         api: &f.api,
         version,
     });
-    if f.hashes != HashOutcome::NotRequested {
-        m.push(Message::ExeHashes { outcome: &f.hashes });
+    match &f.hashes {
+        HashOutcome::NotRequested => {}
+        HashOutcome::Done(h) => m.push(Message::ExeHashes(HashText::Done(h))),
+        // Skipped and failed through the text rule: a failure may name a file (ADR 0016).
+        other => m.push(Message::ExeHashes(HashText::NotDone(
+            escape::text(&other.to_string()).into_owned(),
+        ))),
     }
 }
 
@@ -271,13 +277,21 @@ pub fn render_game<'a>(app: &'a SteamApp, exes: &'a GameExes) -> Vec<Message<'a>
                 NoneReason::AllFailed { games }
             };
             m.push(Message::MainNone { reason });
-            for c in failed_games(exes) {
-                if let Err(e) = &c.facts {
-                    m.push(Message::GameIssue {
-                        issue: escape::text(&e.to_string()).into_owned(),
-                    });
-                }
-            }
+        }
+    }
+    let stats = &exes.stats;
+    if stats.depth_cut > 0 || !stats.complete {
+        m.push(Message::WalkIncomplete {
+            depth_cut: stats.depth_cut,
+            max_depth: ExeLimits::DEFAULT.max_depth,
+            stopped: !stats.complete,
+        });
+    }
+    for c in failed_games(exes) {
+        if let Err(e) = &c.facts {
+            m.push(Message::GameIssue {
+                issue: escape::text(&e.to_string()).into_owned(),
+            });
         }
     }
     for issue in &exes.issues {
