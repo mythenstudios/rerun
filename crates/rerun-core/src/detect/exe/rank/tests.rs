@@ -276,6 +276,87 @@ fn no_parsed_game_is_no_main_and_a_launcher_never_is() {
 }
 
 #[test]
+fn single_player_and_multiplayer_names_pair() {
+    use super::sp_mp_pair;
+    for (a, b) in [
+        ("BlackOps.exe", "BlackOpsMP.exe"),
+        ("t6sp.exe", "t6mp.exe"),
+        ("CoDWaW.exe", "CoDWaWmp.exe"),
+        ("Game.exe", "GameMP.exe"),
+        ("Game_SP.exe", "Game_MP.exe"),
+        ("Game.exe", "Game-Multiplayer.exe"),
+        ("GAMESINGLEPLAYER.EXE", "gamemultiplayer.exe"),
+    ] {
+        assert!(sp_mp_pair(a, b), "{a} {b}");
+        assert!(sp_mp_pair(b, a), "{b} {a}");
+    }
+    for (a, b) in [
+        ("Champion.exe", "Champions.exe"),
+        ("Hemp.exe", "Hem.exe"),
+        ("Hemp.exe", "Hemp.exe"),
+        ("Game.exe", "GameDX9.exe"),
+        ("t6mp.exe", "t6zm.exe"),
+        ("mp.exe", "sp.exe"),
+        ("Gamemp.exe", "Gamemp.exe"),
+        ("BlackOpsMP.exe", "BlackOpsMPx.exe"),
+    ] {
+        assert!(!sp_mp_pair(a, b), "{a} {b}");
+        assert!(!sp_mp_pair(b, a), "{b} {a}");
+    }
+}
+
+#[test]
+fn a_single_player_and_a_multiplayer_executable_tie_whatever_their_keys() {
+    // The multiplayer executable ranks first (static imports), the single-player one has
+    // none (a packed executable): still a tie, in rank order.
+    let mut c = vec![
+        game("BlackOps.exe", &["kernel32.dll"]),
+        game("BlackOpsMP.exe", &["d3d9.dll"]),
+        cand(
+            "launcher.exe",
+            Role::Launcher,
+            Ok(facts(&["d3d9.dll"], SUBSYSTEM_WINDOWS_GUI)),
+        ),
+    ];
+    assert_eq!(rank(&mut c), Main::Tied(vec![0, 1]));
+    assert_eq!(
+        order(&c),
+        ["BlackOpsMP.exe", "BlackOps.exe", "launcher.exe"]
+    );
+
+    let mut c = vec![
+        game("t6mp.exe", &["d3d9.dll"]),
+        game("t6sp.exe", &["d3d9.dll"]),
+        game("t6zm.exe", &["kernel32.dll"]),
+    ];
+    assert_eq!(rank(&mut c), Main::Tied(vec![0, 1]));
+    assert_eq!(order(&c)[..2], ["t6mp.exe", "t6sp.exe"]);
+
+    // A failed counterpart does not join (it is no parsed game executable).
+    let mut c = vec![
+        game("Game.exe", &["d3d9.dll"]),
+        failed("GameMP.exe", Role::Game, PeErrorKind::NotExecutable),
+    ];
+    assert_eq!(rank(&mut c), Main::One(0));
+}
+
+#[test]
+fn names_that_only_contain_mp_are_not_affected() {
+    for names in [
+        ["Champion.exe", "Champions.exe"],
+        ["Hemp.exe", "Hem.exe"],
+        ["Game.exe", "GameDX9.exe"],
+    ] {
+        let mut c = vec![
+            game(names[0], &["d3d9.dll"]),
+            game(names[1], &["kernel32.dll"]),
+        ];
+        assert_eq!(rank(&mut c), Main::One(0), "{names:?}");
+        assert_eq!(order(&c)[0], names[0]);
+    }
+}
+
+#[test]
 fn the_key_ignores_the_path() {
     let a = game("a.exe", &["d3d9.dll"]);
     let b = game("b.exe", &["d3d9.dll"]);

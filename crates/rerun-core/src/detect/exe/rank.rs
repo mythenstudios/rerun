@@ -2,7 +2,7 @@
 
 use std::cmp::Reverse;
 
-use super::role::Role;
+use super::role::{Role, reduce, stem};
 use super::{Candidate, Main};
 use crate::detect::pe::layout::SUBSYSTEM_WINDOWS_GUI;
 
@@ -63,6 +63,11 @@ impl Key {
 /// Sorts `candidates` by rank (key, then path) and names the main executable: `One` when
 /// exactly one `Game` candidate has the best key, `Tied` when several share it, `None` without
 /// a parsed `Game` candidate. A launcher is never the main executable.
+///
+/// Single-player and multiplayer executables tie (ADR 0014 amendment): a parsed `Game`
+/// candidate whose name differs from a chosen one only by a single-player/multiplayer token
+/// ([`sp_mp_pair`]) joins the tie, whatever its key. Which one an app starts is not a
+/// property of the files; a Topo names it (phase 4).
 pub(super) fn rank(candidates: &mut [Candidate]) -> Main {
     candidates.sort_by_cached_key(|c| (Key::of(c), c.path.clone()));
     let keys: Vec<Key> = candidates.iter().map(Key::of).collect();
@@ -70,11 +75,47 @@ pub(super) fn rank(candidates: &mut [Candidate]) -> Main {
         return Main::None;
     };
     let tied = keys.iter().take_while(|k| *k == best).count();
-    if tied == 1 {
-        Main::One(0)
-    } else {
-        Main::Tied((0..tied).collect())
+    let mut chosen: Vec<usize> = (0..tied).collect();
+    for (i, (c, k)) in candidates.iter().zip(&keys).enumerate().skip(tied) {
+        let name = c.path.file_name();
+        if k.is_game()
+            && chosen
+                .iter()
+                .filter_map(|j| candidates.get(*j))
+                .any(|m| sp_mp_pair(m.path.file_name(), name))
+        {
+            chosen.push(i);
+        }
     }
+    match chosen.as_slice() {
+        [_] => Main::One(0),
+        _ => Main::Tied(chosen),
+    }
+}
+
+/// Multiplayer tokens at the end of a reduced stem.
+const MP: [&str; 2] = ["multiplayer", "mp"];
+/// Single-player tokens at the end of a reduced stem (or none).
+const SP: [&str; 3] = ["singleplayer", "sp", ""];
+/// The shared part must be at least this long (no `mp.exe` against `sp.exe`).
+const MIN_BASE: usize = 2;
+
+/// `a` and `b` (file names) differ only by a single-player/multiplayer token at the end of
+/// their stems, compared as lowercase ASCII letters and digits: `BlackOps`/`BlackOpsMP`,
+/// `t6sp`/`t6mp`, `CoDWaW`/`CoDWaWmp`, `Game_SP`/`Game_MP`. Never by the app's name.
+pub(super) fn sp_mp_pair(a: &str, b: &str) -> bool {
+    let (a, b) = (reduce(stem(a)), reduce(stem(b)));
+    let one_way = |mp: &str, sp: &str| {
+        MP.iter().any(|m| {
+            mp.strip_suffix(m).is_some_and(|base| {
+                base.len() >= MIN_BASE
+                    && SP
+                        .iter()
+                        .any(|s| sp.strip_suffix(s).is_some_and(|other| other == base))
+            })
+        })
+    };
+    a != b && (one_way(&a, &b) || one_way(&b, &a))
 }
 
 #[cfg(test)]

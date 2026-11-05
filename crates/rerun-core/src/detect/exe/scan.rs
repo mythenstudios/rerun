@@ -82,7 +82,8 @@ pub enum Main {
     /// Exactly one `Game` candidate ranks first.
     One(usize),
     /// Several `Game` candidates share the best rank (a DX9 and a DX10 executable), in path
-    /// order.
+    /// order; then any single-player or multiplayer counterpart of them (`BlackOps.exe` and
+    /// `BlackOpsMP.exe`), in rank order.
     Tied(Vec<usize>),
     /// No `Game` candidate that parsed.
     None,

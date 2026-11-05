@@ -129,7 +129,7 @@ pub(super) fn stem(file_name: &str) -> &str {
 }
 
 /// Lowercase ASCII letters and digits of `s`.
-fn reduce(s: &str) -> String {
+pub(super) fn reduce(s: &str) -> String {
     s.chars()
         .filter(char::is_ascii_alphanumeric)
         .map(|c| c.to_ascii_lowercase())
