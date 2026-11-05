@@ -25,7 +25,7 @@ Dependencies always point to `rerun-core` or `rerun-proto`, never back.
 
 | Module | Purpose |
 |---|---|
-| `detect` | Steam (libraryfolders.vdf, appmanifest_*.acf), GOG (registry), Ubisoft Connect, Epic, manual. PE parsing (architecture, imports → graphics API, LAA flag, version info), hashes. |
+| `detect` | Steam (libraryfolders.vdf, appmanifest_*.acf), GOG (registry), Ubisoft Connect, Epic, manual. PE parsing (architecture, imports → graphics API, LAA flag, version info), hashes. `detect::vdf`: pure bounded parser for Valve KeyValues text (quoted subset only, limits for bytes, depth, entries and string length, explicit stack, no recursion) and `read_store_file`, the only reader, handle-relative to a `StoreDir` with at most `max_bytes + 1` bytes; `detect::steam::files`: typed views `LibraryFolders` (current and pre-2021 format) and `AppManifest`, raw paths for `policy::root` (ADR 0011). |
 | `hw` | System profile: GPU (DXGI: vendor ID, device ID → generation, driver), CPU topology (see `03-cpu-topology.md`), OS build, monitor. |
 | `topo` | Load, check signature, validate schema, evaluate `when` conditions against the system profile. |
 | `pkg` | Packages: download (allowed hosts only), SHA256, extraction (Zip Slip safe), cache. |

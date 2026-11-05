@@ -19,6 +19,7 @@ The user's system (files outside the game folder, registry, firewall, autostart)
 | 9 | Revert deletes foreign/modified files | Delete only if the hash matches, otherwise ask |
 | 10 | Crash in the middle of apply | Write-ahead Journal, revert also works with incomplete entries |
 | 11 | Rerun itself perceived as malware | Code signing, no injection, IFEO opt-in only, transparent preview |
+| 12 | Manipulated Steam files (`libraryfolders.vdf`, `appmanifest_*.acf` edited or planted by any process of the user: huge or deeply nested files, `#include`/`#base`, odd escapes, forged paths and install folder names) | Bounded parser `detect::vdf` (ADR 0011): only the quoted subset Steam writes, limits for bytes, depth, entries and string length, explicit stack instead of recursion, directives never followed, errors without file content; read handle-relative to the store root with at most `max_bytes + 1` bytes, metadata length never trusted; strict typed views (exactly one of each required field, strict `appid`), a malformed library entry fails the whole file; paths and install folder names stay raw and pass `policy::root` (`StoreDir::open`, `StoreDir::game`) before anything is opened |
 
 ## Principles
 
