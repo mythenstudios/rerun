@@ -367,13 +367,73 @@ fn win_fulfils_fs_volume_contract() {
     );
 }
 
-/// The race harness must catch the naive implementation within this time.
+/// The race harness must catch the naive implementation within this time per round on an
+/// ordinary machine; [`teeth_window`] stretches it on a slow or loaded one.
 const TEETH: Duration = Duration::from_secs(30);
+
+/// Fixture renames that fit into one teeth window: about [`TEETH`] at the developer machine's
+/// speed (a rename by path takes 200 to 300 µs there), so a machine whose renames are slower
+/// (load, a scanner) gets proportionally more time, at most four times [`TEETH`].
+const TEETH_RENAMES: u32 = 100_000;
+
+/// Rounds of [`catch_naive`]: a second, freshly measured window when the first one ends
+/// without a catch (the machine was busier than the measurement showed).
+const TEETH_ROUNDS: u32 = 2;
 
 /// A race contract failure that is a leak (canary content, file ID or name), not a harness
 /// problem (flipper error, unexpected error kind).
 fn is_leak(e: &str) -> bool {
     e.contains("race:") && !e.contains("unexpected error") && !e.contains("flip")
+}
+
+/// The teeth window for this machine right now: the time of [`TEETH_RENAMES`] fixture
+/// renames, measured on 32 renames of a scratch folder, within [`TEETH`] and four times that.
+/// A flip of the race harness is renames, so this keeps the number of flips the naive control
+/// gets about the same on a loaded machine instead of failing on a slow one.
+fn teeth_window(root: &TestRoot, name: &str) -> Duration {
+    let (a, b) = (root.work(name), root.path().join(format!("{name}-b")));
+    let started = Instant::now();
+    for i in 0..32 {
+        let (from, to) = if i % 2 == 0 { (&a, &b) } else { (&b, &a) };
+        root.fx().rename(from, to).unwrap();
+    }
+    let per = started.elapsed() / 32;
+    (per * TEETH_RENAMES).clamp(TEETH, TEETH * 4)
+}
+
+/// Runs `attempt` (one contract run against a naive control in a fresh work directory under
+/// `name`) until it reports a leak; panics on a harness problem, or with "harness lost its
+/// teeth" when no attempt leaked within [`TEETH_ROUNDS`] windows of [`teeth_window`]. What it
+/// proves is unchanged: the naive control is caught. Returns the time to the catch (within its
+/// round) and the number of attempts.
+fn catch_naive(
+    root: &TestRoot,
+    name: &str,
+    attempt: impl Fn(&Path) -> FsContractResult,
+) -> (Duration, u32) {
+    let mut attempts = 0u32;
+    let mut windows = Vec::new();
+    for round in 0..TEETH_ROUNDS {
+        let window = teeth_window(root, &format!("{name}-speed-{round}"));
+        windows.push(window);
+        let started = Instant::now();
+        while started.elapsed() < window {
+            let work = root.work(&format!("{name}-{attempts}"));
+            attempts += 1;
+            match attempt(&work) {
+                Err(e) if is_leak(&e) => return (started.elapsed(), attempts),
+                Err(e) => panic!("race harness broken against the naive control: {e}"),
+                Ok(_) => {}
+            }
+        }
+        note(&format!(
+            "note: {name}: the naive control was not caught in round {round} ({window:?})"
+        ));
+    }
+    panic!(
+        "harness lost its teeth: the naive implementation was not caught in {TEETH_ROUNDS} \
+         windows ({windows:?}, {attempts} attempts)"
+    )
 }
 
 #[test]
@@ -382,24 +442,12 @@ fn win_fulfils_fs_race_contract_and_the_harness_has_teeth() {
         return;
     };
     // Control: the check-then-use-by-path implementation must be caught.
-    let started = Instant::now();
-    let mut attempt = 0u32;
-    let caught = loop {
-        let work = root.work(&format!("naive-{attempt}"));
-        attempt += 1;
-        match fs_race_contract(&NaiveFs, root.fx(), &work, Duration::from_millis(500)) {
-            Err(e) if is_leak(&e) => break started.elapsed(),
-            Err(e) => panic!("race harness broken against NaiveFs: {e}"),
-            Ok(_) => {}
-        }
-        assert!(
-            started.elapsed() < TEETH,
-            "harness lost its teeth: the naive implementation was not caught within {TEETH:?}"
-        );
-    };
+    let (caught, attempts) = catch_naive(&root, "naive", |work| {
+        fs_race_contract(&NaiveFs, root.fx(), work, Duration::from_millis(500))
+    });
     let budget = (caught * 10).max(Duration::from_secs(5));
     note(&format!(
-        "note: race: NaiveFs caught after {caught:?} ({attempt} attempts); WinFs runs {budget:?}"
+        "note: race: NaiveFs caught after {caught:?} ({attempts} attempts); WinFs runs {budget:?}"
     ));
     let work = root.work("win");
     report(
