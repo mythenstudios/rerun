@@ -53,10 +53,9 @@
 //!   and `fake` alike.
 //! - Implementation status: both `sys::fake` and `sys::win` implement the read side and
 //!   [`DirWrite::open_dir_write`]. The write sequences live once in `sys::seq` (ADR 0017,
-//!   A1); the fake implements their primitives for `create_new`, `create_dir`, `remove_dir`,
-//!   `flush` and `lock` (the guard follows), `sys::win` returns `Unsupported` for every
-//!   writing method until P2-4. [`Dir::users`] is real in both (the fake from its share
-//!   model).
+//!   A1) and [`FileGuard`] has one implementation there; the fake implements the primitives,
+//!   `sys::win` returns `Unsupported` for every writing method until P2-4. [`Dir::users`] is
+//!   real in both (the fake from its share model).
 
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -444,7 +443,10 @@ pub trait FileGuard: Send + std::fmt::Debug {
 
     /// Replaces the file if its hash is `expected` (`Mismatch` otherwise, nothing touched):
     /// temp file, rename to `<tmp>.old`, rename onto the stored spelling of the name, POSIX
-    /// delete of `<tmp>.old` (ADR 0017, "Replace sequence").
+    /// delete of `<tmp>.old` (ADR 0017, "Replace sequence"). `new.sha256 == expected` is
+    /// `Unsupported`. Before each rename and the delete the guard re-checks its name (`Busy`),
+    /// its link count (`Linked`) and R/H/S (`Mismatch`); a failed step 7 renames the guard
+    /// back on the same handle; a failed step 8 is success with `old_left` (amendment A2, A4).
     fn replace(
         self: Box<Self>,
         expected: &[u8; 32],
@@ -452,7 +454,9 @@ pub trait FileGuard: Send + std::fmt::Debug {
         new: &NewFile,
     ) -> SysResult<Replaced>;
 
-    /// Deletes the file (POSIX semantics) if its hash is `expected` (`Mismatch` otherwise).
+    /// Deletes the file (POSIX semantics, also read-only) if its hash is `expected`
+    /// (`Mismatch` otherwise) and the re-checks of [`Self::replace`] pass; the name is free
+    /// when this returns.
     fn delete(self: Box<Self>, expected: &[u8; 32]) -> SysResult<()>;
 
     /// Renames the file to `name` in the same directory, never replacing. Recovery only.

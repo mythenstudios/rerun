@@ -42,8 +42,8 @@
 //!   deleting with share read and write; a rename into a directory needs every handle on it
 //!   to share write and refuses an existing name (`Busy`); a POSIX delete removes the name
 //!   when its handle closes (a directory only if it is still empty), keeping the content for
-//!   other open handles. `DirWrite::guard` is not modelled yet (`Unsupported`). Tests change
-//!   the tree through the setup and attacker helpers of [`FakeFs`].
+//!   other open handles. A guard opens with read and delete access and shares read. Tests
+//!   change the tree through the setup and attacker helpers of [`FakeFs`].
 //! - No ACLs and no elevation: `user_writable` ([`FakeFs::set_user_writable`]) is reported
 //!   in [`RootInfo`] but not enforced.
 //! - No alternate data streams.
@@ -68,8 +68,9 @@
 //!   helpers ignore the flag (they act like an administrator).
 //! - Volumes: the file system is NTFS unless set with [`FakeFs::set_fs_kind`]; it only
 //!   changes what [`RootInfo`] reports, not the behaviour.
-//! - Hooks fire only for [`Dir`] operations, never for `Fs::open_dir` or the setup helpers,
-//!   and never reentrantly (a hook that calls into the fake does not trigger itself).
+//! - Hooks fire only for [`Dir`] operations and the write primitives, never for
+//!   `Fs::open_dir` or the setup helpers, and never reentrantly (a hook that calls into the
+//!   fake does not trigger itself).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -122,6 +123,10 @@ pub enum FsOp {
 pub enum Prim {
     /// `PrimDir::info` (identity, case sensitivity, POSIX support).
     Info,
+    /// `PrimDir::volume_name` (the guard's name re-check).
+    VolumeName,
+    /// `PrimDir::open_guard` (step 1).
+    OpenGuard,
     /// `PrimDir::lookup` (attribute-only metadata of a child).
     Lookup,
     /// `PrimDir::create_tmp` (step 2).
@@ -138,6 +143,12 @@ pub enum Prim {
     FlushDir,
     /// `PrimFile::state`.
     State,
+    /// `PrimFile::name` (the guard's name re-check).
+    Name,
+    /// `PrimFile::read_at` (one chunk of the guard's hash or reader).
+    ReadAt,
+    /// `PrimFile::users`.
+    Users,
     /// `PrimFile::write` (one chunk of step 3).
     Write,
     /// `PrimFile::set_attrs` (step 4).
@@ -1670,14 +1681,6 @@ impl Dir for FakeDir {
     }
 }
 
-/// `DirWrite::guard` until the fake models it (ADR 0017).
-fn no_write<T>(target: &str) -> SysResult<T> {
-    Err(err(
-        SysErrorKind::Unsupported,
-        &format!("{target}: the fake guard is not implemented yet"),
-    ))
-}
-
 impl DirWrite for FakeDir {
     fn open_dir_write(&self, p: &RelPath) -> SysResult<Box<dyn DirWrite + '_>> {
         let segs: Vec<&str> = p.segments().collect();
@@ -1686,7 +1689,7 @@ impl DirWrite for FakeDir {
     }
 
     fn guard(&self, name: &RelPath) -> SysResult<Box<dyn FileGuard + '_>> {
-        no_write(name.as_str())
+        Ok(Box::new(seq::guard(self, name)?))
     }
 
     fn create_new(&self, name: &RelPath, src: &mut dyn Read, new: &NewFile) -> SysResult<Written> {

@@ -22,9 +22,9 @@ use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinSystem, WinTopology}
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{Forbidden, ForbiddenRoots, Protected, RootError, RootId, StoreDir};
 use crate::sys::contract::{
-    FsContractResult, FsFixture, RegFixture, fs_link_read_contract, fs_race_contract,
-    fs_read_contract, fs_volume_contract, fs_write_contract, gpu_contract, known_folders_contract,
-    registry_read_contract, registry_system_contract, topology_contract,
+    FsContractResult, FsFixture, RegFixture, fs_link_read_contract, fs_link_write_contract,
+    fs_race_contract, fs_read_contract, fs_volume_contract, fs_write_contract, gpu_contract,
+    known_folders_contract, registry_read_contract, registry_system_contract, topology_contract,
 };
 use crate::sys::fs::{Attrs, EntryKind, Fs, NewFile, TmpName, WriteCap};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
@@ -421,6 +421,19 @@ fn win_fulfils_fs_write_contract() {
     report(
         "fs_write_contract",
         fs_write_contract(&WinFs::new(), root.fx(), &work),
+    );
+}
+
+#[test]
+#[ignore = "sys::win write side lands in P2-4"]
+fn win_fulfils_fs_link_write_contract() {
+    let Some(root) = TestRoot::new("link-write") else {
+        return;
+    };
+    let work = root.work("w");
+    report(
+        "fs_link_write_contract",
+        fs_link_write_contract(&WinFs::new(), root.fx(), &work),
     );
 }
 

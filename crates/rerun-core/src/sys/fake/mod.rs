@@ -164,6 +164,14 @@ impl FsFixture for FakeFs {
         Ok(true)
     }
 
+    fn remove(&self, p: &Path) -> SysResult<()> {
+        self.remove_abs(p)
+    }
+
+    fn set_attrs(&self, p: &Path, attrs: Attrs) -> SysResult<()> {
+        FakeFs::set_attrs(self, p, attrs)
+    }
+
     fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>> {
         Ok(Box::new(self.hold_open_as(
             std::process::id(),

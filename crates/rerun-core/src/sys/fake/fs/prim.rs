@@ -18,6 +18,13 @@ const TMP_ACCESS: Access = Access {
     delete: true,
 };
 
+/// Access of a guard: read data and delete (and attributes).
+const GUARD_ACCESS: Access = Access {
+    read: true,
+    write: false,
+    delete: true,
+};
+
 /// A held handle of the fake's write side.
 #[derive(Debug)]
 pub struct FakeFile {
@@ -81,6 +88,16 @@ impl State {
         }
     }
 
+    /// `FileNameInformation` of a node: its path below its volume root with a leading `\`.
+    /// A name that is gone (POSIX-deleted, still open) reports a path below `$Extend`.
+    fn volume_name_of(&self, node: NodeId, target: &str) -> SysResult<String> {
+        if !self.nodes.contains_key(&node) {
+            return Ok(format!(r"\$Extend\$Deleted\{node:016X}"));
+        }
+        let (_, segs) = self.volume_of(node, target)?;
+        Ok(format!(r"\{}", segs.join("\\")))
+    }
+
     /// Opens an existing child for a primitive: restricted entries are `AccessDenied`.
     fn child(&self, dir: NodeId, name: &str) -> SysResult<NodeId> {
         let id = self
@@ -131,6 +148,24 @@ impl PrimDir for FakeDir {
     fn info(&self) -> SysResult<RootInfo> {
         self.fs.fire_call(Prim::Info, "");
         Dir::info(self)
+    }
+
+    fn volume_name(&self) -> SysResult<String> {
+        let t = self.handle_target();
+        self.fs.prim(Prim::VolumeName, "", |st| {
+            st.dir(self.node, &t)?;
+            st.volume_name_of(self.node, &t)
+        })
+    }
+
+    fn open_guard(&self, name: &str) -> SysResult<FakeFile> {
+        let id = self.fs.prim(Prim::OpenGuard, name, |st| {
+            single(name)?;
+            let node = st.child(self.node, name)?;
+            let obj = st.obj_of(node);
+            FakeFs::open_rerun(st, obj, GUARD_ACCESS, Share::R, name)
+        })?;
+        Ok(self.fs.file(id))
     }
 
     fn lookup(&self, name: &str) -> SysResult<Option<Metadata>> {
@@ -228,6 +263,40 @@ impl PrimFile for FakeFile {
         self.fs.prim(Prim::State, "", |st| {
             let obj = st.rec_obj(self.id(), "<held>")?;
             st.held_state(obj, "<held>")
+        })
+    }
+
+    fn name(&self) -> SysResult<String> {
+        self.fs.prim(Prim::Name, "", |st| {
+            let node = st.rec_obj(self.id(), "<held>")?.node();
+            st.volume_name_of(node, "<held>")
+        })
+    }
+
+    fn read_at(&mut self, off: u64, buf: &mut [u8]) -> SysResult<usize> {
+        self.fs.prim(Prim::ReadAt, "", |st| {
+            let t = "<held>";
+            let rec = st
+                .opens
+                .get(&self.id())
+                .ok_or_else(|| err(SysErrorKind::Other, t))?;
+            let (Obj::File { ino, .. }, true) = (rec.obj, rec.access.read) else {
+                return Err(err(SysErrorKind::AccessDenied, t));
+            };
+            let data = &st.inode(ino, t)?.data;
+            let start = usize::try_from(off).unwrap_or(usize::MAX).min(data.len());
+            let n = buf.len().min(data.len() - start);
+            buf[..n].copy_from_slice(&data[start..start + n]);
+            Ok(n)
+        })
+    }
+
+    fn users(&self) -> SysResult<Vec<u32>> {
+        self.fs.prim(Prim::Users, "", |st| {
+            match st.rec_obj(self.id(), "<held>")? {
+                Obj::File { ino, .. } => Ok(st.users_of(ino, Some(self.id()))),
+                Obj::Node(_) => Err(err(SysErrorKind::AccessDenied, "<held>")),
+            }
         })
     }
 

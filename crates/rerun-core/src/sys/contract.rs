@@ -54,7 +54,7 @@ use crate::path::{RelPath, RootPath};
 
 mod write;
 
-pub use write::fs_write_contract;
+pub use write::{fs_link_write_contract, fs_write_contract};
 
 /// Failed contract with a description.
 pub type ContractResult = Result<(), String>;
@@ -128,6 +128,14 @@ pub trait FsFixture: Sync {
     /// already open is `Busy`. All of `access` false is an attribute-only open, which no share
     /// mode blocks and which blocks nobody.
     fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>>;
+    /// Deletes the file, link or empty directory `p` itself like another program
+    /// (`DeleteFileW`/`RemoveDirectoryW`: an open for delete, so a handle that does not share
+    /// delete makes it `Busy`).
+    fn remove(&self, p: &Path) -> SysResult<()>;
+    /// Sets read-only, hidden and system of the file or directory `p` like another program
+    /// (an open with `FILE_WRITE_ATTRIBUTES` only, which no share mode blocks; the other
+    /// attributes stay).
+    fn set_attrs(&self, p: &Path, attrs: Attrs) -> SysResult<()>;
 }
 
 /// Data access of a fixture handle ([`FsFixture::hold_open`]): `FILE_READ_DATA`,

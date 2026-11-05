@@ -113,6 +113,20 @@ pub fn fs_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCont
     w21_case_sensitive(fs, fx, work, &mut skips)?;
     k1_lock(fs, fx, work)?;
     s8b_remove_dir_held(fs, fx, work)?;
+    w9_guard_refusals(fs, fx, work, &mut skips)?;
+    w10_guard_reads(fs, fx, work)?;
+    w11_replace_refused(fs, fx, work)?;
+    w12_replace(fs, fx, work)?;
+    w13_planted_old(fs, fx, work)?;
+    w14_delete(fs, fx, work)?;
+    w15_rename_to(fs, fx, work)?;
+    w16_guard_holds(fs, fx, work)?;
+    w17_guard_and_readers(fs, fx, work)?;
+    w18_folder_held(fs, fx, work)?;
+    w22_guard_blocks_ancestor(fs, fx, work)?;
+    w23_handle_follows(fs, fx, work)?;
+    s2_changes_under_a_guard(fs, fx, work)?;
+    s8a_delete_in_held_folder(fs, fx, work)?;
     Ok(skips)
 }
 
@@ -280,6 +294,7 @@ fn w5_one_segment(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResul
     err_kind(d.create_dir(&two), ip, "W5 create_dir")?;
     err_kind(d.remove_dir(&rel(r"a\c")?, 0), ip, "W5 remove_dir")?;
     err_kind(d.lock(&two), ip, "W5 lock")?;
+    err_kind(d.guard(&two).map(|_| ()), ip, "W5 guard")?;
     read_is(&*d, r"a\b.txt", b"b", "W5 nothing changed")?;
     no_tmp(&*d, "W5")
 }
@@ -318,7 +333,29 @@ fn w6_spelling(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
         ),
         SysErrorKind::AlreadyExists,
         "W6 another spelling of Straße.txt",
-    )
+    )?;
+    // The guard finds a name only by its 1:1 folding and replaces under the stored spelling.
+    let g6 = case_dir(fs, fx, work, "w6g")?;
+    ok(fx.file(&work.join(r"w6g\Straße.txt"), b"old"), "fixture")?;
+    err_kind(
+        g6.guard(&rel("STRASSE.txt")?).map(|_| ()),
+        SysErrorKind::NotFound,
+        "W6 guard of STRASSE.txt when only Straße.txt exists",
+    )?;
+    let g = ok(g6.guard(&rel("straße.TXT")?), "W6 guard in another case")?;
+    ok(
+        g.replace(
+            &sha(b"old"),
+            &mut &b"new"[..],
+            &new_file(6, Attrs::default(), b"new", 3),
+        ),
+        "W6 replace through another case",
+    )?;
+    ensure(
+        names(&*g6, None, "W6 listing")? == ["Straße.txt"],
+        "W6 replace keeps the stored spelling",
+    )?;
+    read_is(&*g6, "Straße.txt", b"new", "W6 replaced")
 }
 
 /// W7: `create_dir` returns the ID `metadata` reports and refuses an existing name;
@@ -406,6 +443,7 @@ fn w21_case_sensitive(
     err_kind(d.remove_dir(&n, 0), un, "W21 remove_dir")?;
     err_kind(d.flush(), un, "W21 flush")?;
     err_kind(d.lock(&n), un, "W21 lock")?;
+    err_kind(d.guard(&n).map(|_| ()), un, "W21 guard")?;
     ensure(
         names(&*d, None, "W21 listing")?.is_empty(),
         "W21 nothing was created",
@@ -512,4 +550,742 @@ fn s8b_remove_dir_held(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> Contract
         "S8b remove_dir once the hold is closed",
     )?;
     absent(&*d, "held", "S8b")
+}
+
+/// W9: the guard refuses a directory (`AccessDenied`), a missing name (`NotFound`), a
+/// restricted file (`AccessDenied`) and a file with two links (`Linked`, both unchanged); once
+/// the second link is gone, it opens.
+fn w9_guard_refusals(
+    fs: &dyn Fs,
+    fx: &dyn FsFixture,
+    work: &Path,
+    skips: &mut Skipped,
+) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w9")?;
+    ok(fx.dir(&work.join(r"w9\dir")), "fixture")?;
+    err_kind(
+        d.guard(&rel("dir")?).map(|_| ()),
+        SysErrorKind::AccessDenied,
+        "W9 guard of a directory",
+    )?;
+    err_kind(
+        d.guard(&rel("missing")?).map(|_| ()),
+        SysErrorKind::NotFound,
+        "W9 guard of a missing file",
+    )?;
+    ok(fx.file(&work.join(r"w9\a.bin"), b"a"), "fixture")?;
+    ok(
+        fx.hardlink(&work.join(r"w9\a.bin"), &work.join(r"w9\b.bin")),
+        "fixture hard link",
+    )?;
+    for n in ["a.bin", "b.bin"] {
+        err_kind(
+            d.guard(&rel(n)?).map(|_| ()),
+            SysErrorKind::Linked,
+            &format!("W9 guard of {n} with two links"),
+        )?;
+        read_is(&*d, n, b"a", "W9 a linked file is unchanged")?;
+    }
+    ok(fx.remove(&work.join(r"w9\b.bin")), "fixture remove link")?;
+    drop(ok(
+        d.guard(&rel("a.bin")?),
+        "W9 guard once the second link is gone",
+    )?);
+    let r_abs = work.join(r"w9\r.bin");
+    ok(fx.file(&r_abs, b"r"), "fixture")?;
+    if ok(fx.restricted(&r_abs), "fixture restricted")? {
+        err_kind(
+            d.guard(&rel("r.bin")?).map(|_| ()),
+            SysErrorKind::AccessDenied,
+            "W9 guard of a restricted file",
+        )?;
+    } else {
+        skip(skips, "restricted");
+    }
+    Ok(())
+}
+
+/// W10: the guard's metadata is `Dir::metadata`; its hash is right and stable; its reader
+/// starts at offset 0, also after hashing.
+fn w10_guard_reads(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w10")?;
+    let data = b"guarded content";
+    let abs = work.join(r"w10\g.bin");
+    ok(fx.file(&abs, data), "fixture")?;
+    let hidden = Attrs {
+        hidden: true,
+        ..Attrs::default()
+    };
+    ok(fx.set_attrs(&abs, hidden), "fixture attrs")?;
+    let mut g = ok(d.guard(&rel("G.BIN")?), "W10 guard")?;
+    let dm = ok(d.metadata(&rel("g.bin")?), "W10 metadata")?
+        .ok_or("contract violated: W10 file missing")?;
+    ensure(
+        ok(g.metadata(), "W10 guard metadata")? == dm,
+        "W10 the guard's metadata equals Dir::metadata",
+    )?;
+    ensure(
+        ok(g.sha256(), "W10 sha256")? == sha(data)
+            && ok(g.sha256(), "W10 sha256 again")? == sha(data),
+        "W10 the guard's hash is right and stable",
+    )?;
+    for round in 0..2 {
+        let mut got = Vec::new();
+        ok(g.reader(), "W10 reader")?
+            .read_to_end(&mut got)
+            .map_err(|e| format!("contract violated: W10 reader: {e}"))?;
+        ensure(
+            got == data,
+            &format!("W10 the reader starts at offset 0 (round {round})"),
+        )?;
+    }
+    Ok(())
+}
+
+/// W11: `replace` with another expected hash, a source with another hash, a source over
+/// `max_len` and an unchanged content (A2: `Unsupported`) changes nothing; no temp file and
+/// no `.old` are left.
+fn w11_replace_refused(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w11")?;
+    ok(fx.file(&work.join(r"w11\t.bin"), b"old"), "fixture")?;
+    let t = rel("t.bin")?;
+    let id0 = ok(d.metadata(&t), "W11 metadata")?
+        .ok_or("contract violated: W11 missing")?
+        .file_id;
+    let g = ok(d.guard(&t), "W11 guard")?;
+    err_kind(
+        g.replace(
+            &sha(b"other"),
+            &mut &b"new"[..],
+            &new_file(1, Attrs::default(), b"new", 3),
+        ),
+        SysErrorKind::Mismatch,
+        "W11 replace with another expected hash",
+    )?;
+    let g = ok(d.guard(&t), "W11 guard")?;
+    let mut wrong = new_file(2, Attrs::default(), b"new", 3);
+    wrong.sha256 = sha(b"else");
+    err_kind(
+        g.replace(&sha(b"old"), &mut &b"new"[..], &wrong),
+        SysErrorKind::Mismatch,
+        "W11 replace with a source of another hash",
+    )?;
+    let g = ok(d.guard(&t), "W11 guard")?;
+    let long = [1u8; 11];
+    err_kind(
+        g.replace(
+            &sha(b"old"),
+            &mut &long[..],
+            &new_file(3, Attrs::default(), &long, 10),
+        ),
+        SysErrorKind::TooLarge,
+        "W11 replace with a source over max_len",
+    )?;
+    let g = ok(d.guard(&t), "W11 guard")?;
+    err_kind(
+        g.replace(
+            &sha(b"old"),
+            &mut &b"old"[..],
+            &new_file(4, Attrs::default(), b"old", 3),
+        ),
+        SysErrorKind::Unsupported,
+        "W11 replace with the same content (A2)",
+    )?;
+    read_is(&*d, "t.bin", b"old", "W11 unchanged")?;
+    ensure(
+        ok(d.metadata(&t), "W11 metadata after")?.is_some_and(|m| m.file_id == id0),
+        "W11 the file is the same object",
+    )?;
+    ensure(
+        names(&*d, None, "W11 listing")? == ["t.bin"],
+        "W11 no temp file and no .old left",
+    )
+}
+
+/// W12: `replace` writes the new content with exactly the requested R/H/S as a new file whose
+/// ID `Written` reports, also over a read-only target; nothing is left pending.
+fn w12_replace(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w12")?;
+    let mut expected = Vec::new();
+    for (i, attrs) in all_attrs().into_iter().enumerate() {
+        let n = u64::try_from(i).unwrap_or(0);
+        let name = format!("t{i}.bin");
+        let abs = work.join("w12").join(&name);
+        ok(fx.file(&abs, b"old"), "fixture")?;
+        let read_only = i % 2 == 1;
+        if read_only {
+            let ro = Attrs {
+                readonly: true,
+                ..Attrs::default()
+            };
+            ok(fx.set_attrs(&abs, ro), "fixture read-only target")?;
+        }
+        let what = format!("W12 replace {name} (target read-only: {read_only}) with {attrs:?}");
+        let id0 = ok(d.metadata(&rel(&name)?), &what)?
+            .ok_or(format!("contract violated: {what}: missing"))?
+            .file_id;
+        let data = format!("new {i}").into_bytes();
+        let g = ok(d.guard(&rel(&name)?), &what)?;
+        let r = ok(
+            g.replace(
+                &sha(b"old"),
+                &mut &data[..],
+                &new_file(10 + n, attrs, &data, 100),
+            ),
+            &what,
+        )?;
+        let m = ok(d.metadata(&rel(&name)?), &what)?
+            .ok_or(format!("contract violated: {what}: missing after"))?;
+        ensure(
+            r.old_left.is_none() && r.new.sha256 == sha(&data) && r.new.len == len_of(&data),
+            &format!("{what}: Replaced reports the new file, nothing pending"),
+        )?;
+        ensure(
+            m.file_id == r.new.file_id && m.file_id != id0 && m.attrs == attrs,
+            &format!("{what}: a new file with the requested R/H/S"),
+        )?;
+        read_is(&*d, &name, &data, &what)?;
+        expected.push(name);
+    }
+    expected.sort();
+    ensure(
+        names(&*d, None, "W12 listing")? == expected,
+        "W12 no temp file and no .old left",
+    )
+}
+
+/// No temp file is left in `d` except `allowed`.
+fn no_tmp_but(d: &dyn Dir, allowed: &[&str], what: &str) -> ContractResult {
+    let left: Vec<String> = names(d, None, what)?
+        .into_iter()
+        .filter(|n| n.starts_with(".rerun-") && !allowed.contains(&n.as_str()))
+        .collect();
+    ensure(
+        left.is_empty(),
+        &format!("{what}: no temp file is left ({left:?})"),
+    )
+}
+
+/// W13: a file planted at `<tmp>.old` makes `replace` `Busy` at step 6: the target (ID, hash)
+/// and the planted file are unchanged, no temp file is left.
+fn w13_planted_old(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w13")?;
+    ok(fx.file(&work.join(r"w13\t.bin"), b"old"), "fixture")?;
+    let new = new_file(1, Attrs::default(), b"new", 3);
+    let old = new.tmp.old();
+    ok(
+        fx.file(&work.join("w13").join(old.as_str()), b"planted"),
+        "fixture planted .old",
+    )?;
+    let t = rel("t.bin")?;
+    let id0 = ok(d.metadata(&t), "W13")?
+        .ok_or("contract violated: W13 missing")?
+        .file_id;
+    let g = ok(d.guard(&t), "W13 guard")?;
+    err_kind(
+        g.replace(&sha(b"old"), &mut &b"new"[..], &new),
+        SysErrorKind::Busy,
+        "W13 replace with a planted .old",
+    )?;
+    read_is(&*d, "t.bin", b"old", "W13 target unchanged")?;
+    ensure(
+        ok(d.metadata(&t), "W13 after")?.is_some_and(|m| m.file_id == id0),
+        "W13 the target is the same object",
+    )?;
+    read_is(
+        &*d,
+        old.as_str(),
+        b"planted",
+        "W13 the planted file is unchanged",
+    )?;
+    no_tmp_but(&*d, &[old.as_str()], "W13")
+}
+
+/// W14: `delete` with another hash is `Mismatch`; with the right one the name is free at
+/// once, also while another program still holds the file (sharing delete), and a read-only
+/// file is deleted too.
+fn w14_delete(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w14")?;
+    let abs = work.join(r"w14\t.bin");
+    ok(fx.file(&abs, b"old"), "fixture")?;
+    let t = rel("t.bin")?;
+    let g = ok(d.guard(&t), "W14 guard")?;
+    err_kind(
+        g.delete(&sha(b"other")),
+        SysErrorKind::Mismatch,
+        "W14 delete with another hash",
+    )?;
+    read_is(&*d, "t.bin", b"old", "W14 unchanged after Mismatch")?;
+    let hold = ok(
+        fx.hold_open(&abs, Access::READ, Share::RWD),
+        "W14 another program holds the file",
+    )?;
+    let g = ok(d.guard(&t), "W14 guard while held")?;
+    ok(g.delete(&sha(b"old")), "W14 delete")?;
+    absent(&*d, "t.bin", "W14 the name is free at once")?;
+    ok(
+        d.create_new(
+            &t,
+            &mut &b"fresh"[..],
+            &new_file(1, Attrs::default(), b"fresh", 5),
+        ),
+        "W14 create_new of the freed name while the old file is still held",
+    )?;
+    drop(hold);
+    read_is(&*d, "t.bin", b"fresh", "W14 the new file")?;
+    let ro_abs = work.join(r"w14\ro.bin");
+    ok(fx.file(&ro_abs, b"ro"), "fixture")?;
+    let ro = Attrs {
+        readonly: true,
+        ..Attrs::default()
+    };
+    ok(fx.set_attrs(&ro_abs, ro), "fixture read-only")?;
+    let g = ok(d.guard(&rel("ro.bin")?), "W14 guard read-only")?;
+    ok(g.delete(&sha(b"ro")), "W14 delete of a read-only file")?;
+    absent(&*d, "ro.bin", "W14 the read-only file is gone")?;
+    no_tmp(&*d, "W14")
+}
+
+/// W15: `rename_to` moves the held file to a free name (same object); onto an existing name
+/// (any spelling) it is `Busy` and nothing changes; two segments are `InvalidPath`.
+fn w15_rename_to(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w15")?;
+    ok(fx.file(&work.join(r"w15\a.bin"), b"a"), "fixture")?;
+    ok(fx.file(&work.join(r"w15\b.bin"), b"b"), "fixture")?;
+    let a = rel("a.bin")?;
+    let id = ok(d.metadata(&a), "W15")?
+        .ok_or("contract violated: W15 missing")?
+        .file_id;
+    let g = ok(d.guard(&a), "W15 guard")?;
+    err_kind(
+        g.rename_to(&rel("B.BIN")?),
+        SysErrorKind::Busy,
+        "W15 rename_to an existing name",
+    )?;
+    read_is(&*d, "a.bin", b"a", "W15 a unchanged")?;
+    read_is(&*d, "b.bin", b"b", "W15 b unchanged")?;
+    let g = ok(d.guard(&a), "W15 guard")?;
+    err_kind(
+        g.rename_to(&rel(r"sub\c.bin")?),
+        SysErrorKind::InvalidPath,
+        "W15 rename_to two segments",
+    )?;
+    let g = ok(d.guard(&a), "W15 guard")?;
+    ok(g.rename_to(&rel("c.bin")?), "W15 rename_to")?;
+    absent(&*d, "a.bin", "W15 the old name is gone")?;
+    ensure(
+        ok(d.metadata(&rel("c.bin")?), "W15 metadata c")?.is_some_and(|m| m.file_id == id),
+        "W15 the same object under the new name",
+    )?;
+    read_is(&*d, "c.bin", b"a", "W15 content")
+}
+
+/// W16: while a guard is held, another program can neither overwrite, rename nor remove the
+/// file, nor open it for read without share-delete (`Busy`); a read sharing delete and
+/// `metadata` work; our own `open_read` (sharing read only) is `Busy`. `Dir::users` reports
+/// the guard, `FileGuard::users` does not count the guard itself.
+fn w16_guard_holds(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w16")?;
+    let abs = work.join(r"w16\t.bin");
+    ok(fx.file(&abs, b"held"), "fixture")?;
+    let t = rel("t.bin")?;
+    let me = std::process::id();
+    let g = ok(d.guard(&t), "W16 guard")?;
+    let busy = SysErrorKind::Busy;
+    err_kind(fx.file(&abs, b"x"), busy, "W16 overwrite while guarded")?;
+    err_kind(
+        fx.rename(&abs, &work.join(r"w16\u.bin")),
+        busy,
+        "W16 rename while guarded",
+    )?;
+    err_kind(fx.remove(&abs), busy, "W16 remove while guarded")?;
+    err_kind(
+        fx.hold_open(&abs, Access::READ, Share::R).map(|_| ()),
+        busy,
+        "W16 a read without share-delete while guarded",
+    )?;
+    let rd = ok(
+        fx.hold_open(&abs, Access::READ, Share::RD),
+        "W16 a read sharing delete while guarded",
+    )?;
+    drop(rd);
+    err_kind(
+        d.open_read(&t).map(|_| ()),
+        busy,
+        "W16 open_read (shares read only) while guarded",
+    )?;
+    ensure(
+        ok(d.metadata(&t), "W16 metadata")?.is_some_and(|m| m.len == 4),
+        "W16 metadata while guarded",
+    )?;
+    ensure(
+        ok(d.users(&t), "W16 Dir::users")?.contains(&me),
+        "W16 Dir::users reports the guard",
+    )?;
+    ensure(
+        !ok(g.users(), "W16 FileGuard::users")?.contains(&me),
+        "W16 FileGuard::users does not count the guard itself",
+    )?;
+    drop(g);
+    read_is(&*d, "t.bin", b"held", "W16 nothing changed")?;
+    ensure(
+        names(&*d, None, "W16 listing")? == ["t.bin"],
+        "W16 nothing was renamed or added",
+    )
+}
+
+/// W17: our own `open_read` reader makes the guard `Busy`; another program's read sharing
+/// delete does not, and `replace` works while it stays open.
+fn w17_guard_and_readers(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w17")?;
+    let abs = work.join(r"w17\t.bin");
+    ok(fx.file(&abs, b"old"), "fixture")?;
+    let t = rel("t.bin")?;
+    let reader = ok(d.open_read(&t), "W17 open_read")?;
+    err_kind(
+        d.guard(&t).map(|_| ()),
+        SysErrorKind::Busy,
+        "W17 guard while our reader is open",
+    )?;
+    drop(reader);
+    let hold = ok(
+        fx.hold_open(&abs, Access::READ, Share::RD),
+        "W17 another program reads, sharing delete",
+    )?;
+    let g = ok(d.guard(&t), "W17 guard while the read is open")?;
+    let r = ok(
+        g.replace(
+            &sha(b"old"),
+            &mut &b"new"[..],
+            &new_file(1, Attrs::default(), b"new", 3),
+        ),
+        "W17 replace while the read is open",
+    )?;
+    ensure(r.old_left.is_none(), "W17 nothing pending")?;
+    read_is(&*d, "t.bin", b"new", "W17 replaced")?;
+    drop(hold);
+    ensure(
+        names(&*d, None, "W17 listing")? == ["t.bin"],
+        "W17 no temp file and no .old left",
+    )
+}
+
+/// W18: while another program holds the folder without share-write, renames into it are
+/// `Busy`: `replace` changes nothing, `create_new` leaves the name absent, no temp file.
+fn w18_folder_held(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w18")?;
+    ok(fx.file(&work.join(r"w18\t.bin"), b"old"), "fixture")?;
+    let t = rel("t.bin")?;
+    let id0 = ok(d.metadata(&t), "W18")?
+        .ok_or("contract violated: W18 missing")?
+        .file_id;
+    let hold = ok(
+        fx.hold_open(&work.join("w18"), Access::READ, Share::RD),
+        "W18 another program holds the folder without share-write",
+    )?;
+    let g = ok(d.guard(&t), "W18 guard")?;
+    err_kind(
+        g.replace(
+            &sha(b"old"),
+            &mut &b"new"[..],
+            &new_file(1, Attrs::default(), b"new", 3),
+        ),
+        SysErrorKind::Busy,
+        "W18 replace in a held folder",
+    )?;
+    read_is(&*d, "t.bin", b"old", "W18 unchanged")?;
+    ensure(
+        ok(d.metadata(&t), "W18 after")?.is_some_and(|m| m.file_id == id0),
+        "W18 the same object",
+    )?;
+    err_kind(
+        d.create_new(
+            &rel("n.bin")?,
+            &mut &b"n"[..],
+            &new_file(2, Attrs::default(), b"n", 1),
+        ),
+        SysErrorKind::Busy,
+        "W18 create_new in a held folder",
+    )?;
+    absent(&*d, "n.bin", "W18")?;
+    no_tmp(&*d, "W18 while held")?;
+    drop(hold);
+    no_tmp(&*d, "W18")
+}
+
+/// W22: an ancestor of a guarded file cannot be renamed (`AccessDenied`, A5) while the guard
+/// is held; afterwards it can.
+fn w22_guard_blocks_ancestor(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w22")?;
+    ok(fx.file(&work.join(r"w22\sub\t.bin"), b"t"), "fixture")?;
+    let sub = ok(d.open_dir_write(&rel("sub")?), "W22 open sub")?;
+    let g = ok(sub.guard(&rel("t.bin")?), "W22 guard")?;
+    err_kind(
+        fx.rename(&work.join(r"w22\sub"), &work.join(r"w22\sub2")),
+        SysErrorKind::AccessDenied,
+        "W22 renaming the folder of a guarded file",
+    )?;
+    drop(g);
+    ok(
+        fx.rename(&work.join(r"w22\sub"), &work.join(r"w22\sub2")),
+        "W22 rename once the guard is closed",
+    )?;
+    read_is(&*sub, "t.bin", b"t", "W22 the handle follows its folder")
+}
+
+/// W23: a write handle stays on its folder: renamed, with a new folder planted at the old
+/// name, `create_new` lands in the renamed folder.
+fn w23_handle_follows(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w23")?;
+    ok(fx.dir(&work.join(r"w23\sub")), "fixture")?;
+    let sub = ok(d.open_dir_write(&rel("sub")?), "W23 open sub")?;
+    ok(
+        fx.rename(&work.join(r"w23\sub"), &work.join(r"w23\sub-moved")),
+        "W23 rename the handle's own folder",
+    )?;
+    ok(fx.dir(&work.join(r"w23\sub")), "W23 plant a new folder")?;
+    ok(
+        sub.create_new(
+            &rel("x.bin")?,
+            &mut &b"x"[..],
+            &new_file(1, Attrs::default(), b"x", 1),
+        ),
+        "W23 create_new through the handle",
+    )?;
+    read_is(
+        &*d,
+        r"sub-moved\x.bin",
+        b"x",
+        "W23 lands in the renamed folder",
+    )?;
+    absent(&*d, r"sub\x.bin", "W23 nothing in the planted folder")
+}
+
+/// S2 (A4): another program may change R/H/S of a guarded file and add a hard link to it
+/// (both observed allowed on Windows); `replace` then refuses at its re-check (`Mismatch`,
+/// `Linked`) and nothing is renamed; `delete` after an attribute change is `Mismatch`.
+fn s2_changes_under_a_guard(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "s2")?;
+    let abs = work.join(r"s2\t.bin");
+    ok(fx.file(&abs, b"old"), "fixture")?;
+    let t = rel("t.bin")?;
+    let hidden = Attrs {
+        hidden: true,
+        ..Attrs::default()
+    };
+    let g = ok(d.guard(&t), "S2 guard")?;
+    ok(
+        fx.set_attrs(&abs, hidden),
+        "S2 another program sets attributes of a guarded file",
+    )?;
+    err_kind(
+        g.replace(
+            &sha(b"old"),
+            &mut &b"new"[..],
+            &new_file(1, Attrs::default(), b"new", 3),
+        ),
+        SysErrorKind::Mismatch,
+        "S2 replace after an attribute change",
+    )?;
+    read_is(&*d, "t.bin", b"old", "S2 unchanged after Mismatch")?;
+    ensure(
+        names(&*d, None, "S2 listing")? == ["t.bin"],
+        "S2 nothing renamed, no temp file",
+    )?;
+    let g = ok(d.guard(&t), "S2 guard again")?;
+    ok(
+        fx.hardlink(&abs, &work.join(r"s2\link.bin")),
+        "S2 another program adds a hard link to a guarded file",
+    )?;
+    err_kind(
+        g.replace(
+            &sha(b"old"),
+            &mut &b"new"[..],
+            &new_file(2, Attrs::default(), b"new", 3),
+        ),
+        SysErrorKind::Linked,
+        "S2 replace after a hard link was added",
+    )?;
+    read_is(&*d, "t.bin", b"old", "S2 unchanged after Linked")?;
+    read_is(&*d, "link.bin", b"old", "S2 the new link is unchanged")?;
+    let d_abs = work.join(r"s2\d.bin");
+    ok(fx.file(&d_abs, b"d"), "fixture")?;
+    let g = ok(d.guard(&rel("d.bin")?), "S2 guard d")?;
+    ok(fx.set_attrs(&d_abs, hidden), "S2 attributes of d")?;
+    err_kind(
+        g.delete(&sha(b"d")),
+        SysErrorKind::Mismatch,
+        "S2 delete after an attribute change",
+    )?;
+    read_is(&*d, "d.bin", b"d", "S2 d is still there")?;
+    no_tmp(&*d, "S2")
+}
+
+/// S8a: `FileGuard::delete` needs nothing from the folder: it works while another program
+/// holds the folder without share-write.
+fn s8a_delete_in_held_folder(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
+    let d = case_dir(fs, fx, work, "s8a")?;
+    ok(fx.file(&work.join(r"s8a\t.bin"), b"t"), "fixture")?;
+    let hold = ok(
+        fx.hold_open(&work.join("s8a"), Access::READ, Share::RD),
+        "S8a hold the folder without share-write",
+    )?;
+    let g = ok(d.guard(&rel("t.bin")?), "S8a guard")?;
+    ok(g.delete(&sha(b"t")), "S8a delete in a held folder")?;
+    absent(&*d, "t.bin", "S8a")?;
+    drop(hold);
+    Ok(())
+}
+
+/// File system contract for links on the writing side: nothing is ever written through a
+/// junction or symlink, and a write handle stays on its folder when it is swapped for a
+/// junction. `work` must be an existing, empty directory. Cases the fixture cannot set up are
+/// skipped (`dir_symlink`, `file_symlink`).
+pub fn fs_link_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContractResult {
+    const CANARY: &[u8] = b"canary";
+    let mut skips = Skipped::new();
+    let root_abs = work.join("root");
+    let outside_abs = work.join("outside");
+    ok(fx.dir(&root_abs), "fixture root")?;
+    ok(
+        fx.file(&outside_abs.join("canary.txt"), CANARY),
+        "fixture canary",
+    )?;
+    let w = ok(fs.open_dir(work), "open work dir")?;
+    let canary_intact = |what: &str| -> ContractResult {
+        ensure(
+            names(&*w, Some(&rel("outside")?), what)? == ["canary.txt"],
+            &format!("{what}: nothing appeared outside"),
+        )?;
+        read_is(
+            &*w,
+            r"outside\canary.txt",
+            CANARY,
+            &format!("{what}: canary unchanged"),
+        )
+    };
+    let d = open_write(fs, &root_abs, "open root")?;
+
+    // L1, L2: a link at the name.
+    let mut links = vec!["junction", "dangling"];
+    ok(
+        fx.junction(&root_abs.join("junction"), &outside_abs),
+        "fixture junction",
+    )?;
+    ok(
+        fx.junction(&root_abs.join("dangling"), &work.join("nowhere")),
+        "fixture dangling junction",
+    )?;
+    if ok(
+        fx.dir_symlink(&root_abs.join("dsym"), &outside_abs),
+        "fixture dir symlink",
+    )? {
+        links.push("dsym");
+    } else {
+        skip(&mut skips, "dir_symlink");
+    }
+    if ok(
+        fx.file_symlink(&root_abs.join("fsym"), &outside_abs.join("canary.txt")),
+        "fixture file symlink",
+    )? {
+        links.push("fsym");
+    } else {
+        skip(&mut skips, "file_symlink");
+    }
+    for (i, link) in links.iter().enumerate() {
+        let n = u64::try_from(i).unwrap_or(0);
+        let p = rel(link)?;
+        err_kind(
+            d.create_new(&p, &mut &b"x"[..], &new_file(n, Attrs::default(), b"x", 1)),
+            SysErrorKind::AlreadyExists,
+            &format!("L1 create_new over {link}"),
+        )?;
+        err_kind(
+            d.create_dir(&p),
+            SysErrorKind::AlreadyExists,
+            &format!("L1 create_dir over {link}"),
+        )?;
+        err_kind(
+            d.guard(&p).map(|_| ()),
+            SysErrorKind::ReparsePoint,
+            &format!("L2 guard of {link}"),
+        )?;
+        err_kind(
+            d.lock(&p).map(|_| ()),
+            SysErrorKind::ReparsePoint,
+            &format!("L2 lock of {link}"),
+        )?;
+        ensure(
+            ok(d.metadata(&p), "L1 metadata")?.is_some_and(|m| m.kind == EntryKind::Reparse),
+            &format!("L1 {link} is still a link"),
+        )?;
+        canary_intact(&format!("L1 after {link}"))?;
+    }
+    let jid = ok(d.metadata(&rel("junction")?), "L2 metadata junction")?
+        .ok_or("contract violated: L2 junction missing")?
+        .file_id;
+    err_kind(
+        d.remove_dir(&rel("junction")?, jid),
+        SysErrorKind::ReparsePoint,
+        "L2 remove_dir of a junction",
+    )?;
+    ensure(
+        ok(d.metadata(&rel("junction")?), "L2 junction after")?
+            .is_some_and(|m| m.kind == EntryKind::Reparse),
+        "L2 the junction stays",
+    )?;
+    ensure(
+        ok(w.metadata(&rel("nowhere")?), "L1 dangling target")?.is_none(),
+        "L1 nothing was created at a dangling target",
+    )?;
+    canary_intact("L2")?;
+
+    // L3: swap after open.
+    ok(
+        fx.file(&root_abs.join(r"sub\data.txt"), b"orig"),
+        "fixture sub",
+    )?;
+    let sub = ok(d.open_dir_write(&rel("sub")?), "L3 open sub")?;
+    ok(
+        fx.rename(&root_abs.join("sub"), &root_abs.join("sub-moved")),
+        "L3 rename sub",
+    )?;
+    ok(
+        fx.junction(&root_abs.join("sub"), &outside_abs),
+        "L3 junction in its place",
+    )?;
+    ok(
+        sub.create_new(
+            &rel("new.bin")?,
+            &mut &b"new"[..],
+            &new_file(50, Attrs::default(), b"new", 3),
+        ),
+        "L3 create_new through the held handle",
+    )?;
+    let g = ok(
+        sub.guard(&rel("data.txt")?),
+        "L3 guard through the held handle",
+    )?;
+    ok(
+        g.replace(
+            &sha(b"orig"),
+            &mut &b"changed"[..],
+            &new_file(51, Attrs::default(), b"changed", 7),
+        ),
+        "L3 replace through the held handle",
+    )?;
+    read_is(
+        &*d,
+        r"sub-moved\new.bin",
+        b"new",
+        "L3 create_new landed in sub-moved",
+    )?;
+    read_is(
+        &*d,
+        r"sub-moved\data.txt",
+        b"changed",
+        "L3 replace landed in sub-moved",
+    )?;
+    canary_intact("L3")?;
+    Ok(skips)
 }

@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 use super::{FakeFs, FakeSystem, FsOp, Prim, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
-    Access, FsFixture, Held, Share, fs_link_read_contract, fs_race_contract, fs_read_contract,
-    fs_volume_contract, fs_write_contract, gpu_contract, known_folders_contract,
-    registry_read_contract, registry_system_contract, registry_write_contract, topology_contract,
+    Access, FsFixture, Held, Share, fs_link_read_contract, fs_link_write_contract,
+    fs_race_contract, fs_read_contract, fs_volume_contract, fs_write_contract, gpu_contract,
+    known_folders_contract, registry_read_contract, registry_system_contract,
+    registry_write_contract, topology_contract,
 };
 use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, NewFile, TmpName, WriteCap, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
@@ -104,7 +105,15 @@ fn contracts_can_run_twice_in_fresh_dirs() {
         fs_volume_contract(sys.fs(), fx, &dir("volume")).unwrap();
         fs_race_contract(sys.fs(), fx, &dir("race"), Duration::from_millis(20)).unwrap();
         fs_write_contract(sys.fs(), fx, &dir("write")).unwrap();
+        fs_link_write_contract(sys.fs(), fx, &dir("link-write")).unwrap();
     }
+}
+
+#[test]
+fn fake_fulfils_fs_link_write_contract() {
+    let sys = fresh(r"D:\Work");
+    let skips = fs_link_write_contract(sys.fs(), sys.fake_fs(), Path::new(r"D:\Work")).unwrap();
+    assert!(skips.is_empty(), "{skips:?}");
 }
 
 #[test]
@@ -183,6 +192,12 @@ impl FsFixture for CopyFixture {
     }
     fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>> {
         self.inner.hold_open(p, access, share)
+    }
+    fn remove(&self, p: &Path) -> SysResult<()> {
+        self.inner.remove(p)
+    }
+    fn set_attrs(&self, p: &Path, attrs: Attrs) -> SysResult<()> {
+        FsFixture::set_attrs(&self.inner, p, attrs)
     }
 }
 
@@ -2142,4 +2157,320 @@ fn create_new_runs_the_sequence_of_adr_0017_through_primitives() {
         .map(|e| e.name)
         .collect();
     assert_eq!(names, ["new.bin"]);
+}
+
+fn sha(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data).into()
+}
+
+/// What a write must produce: `data` with temp name `n` of instance tag 1.
+fn nf(n: u64, data: &[u8]) -> NewFile {
+    NewFile {
+        tmp: TmpName::new(1, n),
+        attrs: Attrs::default(),
+        sha256: sha(data),
+        max_len: 1 << 20,
+    }
+}
+
+/// Sorted names in `C:\G`.
+fn listing(sys: &FakeSystem, abs: &str) -> Vec<String> {
+    let mut v: Vec<String> = open(sys, abs)
+        .read_dir(None)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    v.sort();
+    v
+}
+
+/// Runs `act` once, the `nth` (1-based) time the primitive `call` is about to run.
+fn before_nth(
+    sys: &FakeSystem,
+    call: Prim,
+    nth: usize,
+    act: impl Fn(&FakeFs) + Send + 'static,
+) -> Arc<AtomicBool> {
+    let fired = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&fired);
+    let mut seen = 0;
+    sys.fake_fs().on_step(move |fs, e| {
+        if e.call == Some(call) {
+            seen += 1;
+            if seen == nth {
+                act(fs);
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+    });
+    fired
+}
+
+fn g_system() -> FakeSystem {
+    FakeSystem::builder()
+        .file(r"C:\G\t.bin", "old")
+        .dir(r"C:\Out")
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn f1_an_intruder_between_the_two_renames_is_never_overwritten() {
+    let sys = g_system();
+    let g = open(&sys, r"C:\G");
+    let fired = before_nth(&sys, Prim::Rename, 2, |fs| {
+        fs.put_file(&p(r"C:\G\t.bin"), b"intruder").unwrap();
+    });
+    let guard = g.guard(&r("t.bin")).unwrap();
+    let new = nf(1, b"new");
+    let e = guard
+        .replace(&sha(b"old"), &mut &b"new"[..], &new)
+        .unwrap_err();
+    sys.fake_fs().clear_on_step();
+    assert!(fired.load(Ordering::SeqCst));
+    assert_eq!(e.kind, SysErrorKind::Busy);
+    // The intruder and `.old` (h0) stay, `<tmp>` is gone: a Foreign combination (A3).
+    assert_eq!(g.read(&r("t.bin")).unwrap(), b"intruder");
+    assert_eq!(g.read(&new.tmp.old()).unwrap(), b"old");
+    assert_eq!(
+        listing(&sys, r"C:\G"),
+        [new.tmp.old().as_str().to_owned(), "t.bin".to_owned()]
+    );
+}
+
+#[test]
+fn f2_a_junction_planted_before_the_rename_of_create_new_is_refused() {
+    let sys = g_system();
+    let g = open(&sys, r"C:\G");
+    let fired = before_nth(&sys, Prim::Rename, 1, |fs| {
+        fs.put_link(&p(r"C:\G\n.bin"), tag::MOUNT_POINT, r"C:\Out")
+            .unwrap();
+    });
+    let e = g
+        .create_new(&r("n.bin"), &mut &b"n"[..], &nf(1, b"n"))
+        .unwrap_err();
+    sys.fake_fs().clear_on_step();
+    assert!(fired.load(Ordering::SeqCst));
+    assert_eq!(e.kind, SysErrorKind::Busy);
+    assert_eq!(
+        g.metadata(&r("n.bin")).unwrap().unwrap().kind,
+        EntryKind::Reparse
+    );
+    assert!(
+        listing(&sys, r"C:\Out").is_empty(),
+        "nothing behind the junction"
+    );
+    assert_eq!(listing(&sys, r"C:\G"), ["n.bin", "t.bin"], "no <tmp> left");
+}
+
+#[test]
+fn f3_a_guarded_file_renamed_away_is_never_pulled_back() {
+    // Windows refuses these renames (the guard does not share delete); the fake-only rename
+    // checks the name re-check behind them.
+    for to in [r"C:\G\t-moved.bin", r"C:\Out\t.bin"] {
+        let sys = g_system();
+        let g = open(&sys, r"C:\G");
+        // Before step 6: the re-check sees the new name, nothing is renamed.
+        let target = to.to_owned();
+        before_nth(&sys, Prim::VolumeName, 1, move |fs| {
+            fs.rename_ignoring_shares(&p(r"C:\G\t.bin"), &p(&target))
+                .unwrap();
+        });
+        let e = g
+            .guard(&r("t.bin"))
+            .unwrap()
+            .replace(&sha(b"old"), &mut &b"new"[..], &nf(1, b"new"))
+            .unwrap_err();
+        sys.fake_fs().clear_on_step();
+        assert_eq!(e.kind, SysErrorKind::Busy, "{to}");
+        assert!(g.metadata(&r("t.bin")).unwrap().is_none(), "{to}");
+        let moved = open(&sys, r"C:\").read(&r(&to[3..])).unwrap();
+        assert_eq!(moved, b"old", "{to}: left where it was moved");
+        assert!(
+            listing(&sys, r"C:\G")
+                .iter()
+                .all(|n| !n.starts_with(".rerun-")),
+            "{to}: no <tmp>"
+        );
+        assert_eq!(
+            listing(&sys, r"C:\Out").len(),
+            usize::from(to.starts_with(r"C:\Out"))
+        );
+    }
+    // After step 7, before the re-check of step 8: `.old` moved out of the root. The replace
+    // succeeded; step 8 fails its re-check, so `.old` is pending cleanup (A2), never deleted
+    // or pulled back where it went.
+    let sys = g_system();
+    let g = open(&sys, r"C:\G");
+    let new = nf(1, b"new");
+    let old_abs = format!(r"C:\G\{}", new.tmp.old().as_str());
+    before_nth(&sys, Prim::VolumeName, 2, move |fs| {
+        fs.rename_ignoring_shares(&p(&old_abs), &p(r"C:\Out\old.bin"))
+            .unwrap();
+    });
+    let done = g
+        .guard(&r("t.bin"))
+        .unwrap()
+        .replace(&sha(b"old"), &mut &b"new"[..], &new)
+        .unwrap();
+    sys.fake_fs().clear_on_step();
+    assert_eq!(done.old_left, Some(new.tmp.clone()));
+    assert_eq!(g.read(&r("t.bin")).unwrap(), b"new");
+    assert_eq!(open(&sys, r"C:\Out").read(&r("old.bin")).unwrap(), b"old");
+    assert_eq!(listing(&sys, r"C:\G"), ["t.bin"]);
+}
+
+#[test]
+fn f4_a_volume_without_posix_semantics_refuses_every_write() {
+    let sys = FakeSystem::builder()
+        .file(r"F:\G\t.bin", "old")
+        .dir(r"F:\G\d")
+        .build()
+        .unwrap();
+    sys.fake_fs().set_fs_kind('F', FsKind::Fat);
+    let g = open(&sys, r"F:\G");
+    let un = SysErrorKind::Unsupported;
+    assert_eq!(kind(g.guard(&r("t.bin")).map(|_| ())), un);
+    assert_eq!(
+        kind(g.create_new(&r("n.bin"), &mut &b"n"[..], &nf(1, b"n"))),
+        un
+    );
+    assert_eq!(kind(g.create_dir(&r("n"))), un);
+    assert_eq!(kind(g.remove_dir(&r("d"), 0)), un);
+    assert_eq!(kind(g.flush()), un);
+    assert_eq!(kind(g.lock(&r("l")).map(|_| ())), un);
+    assert_eq!(listing(&sys, r"F:\G"), ["d", "t.bin"]);
+}
+
+#[test]
+fn f11_share_conflict_matches_the_observed_guard_matrix() {
+    use crate::sys::contract::share_conflict;
+    // ADR 0017: while a guard (DELETE | read data, shares read) is held, another open for
+    // write, for delete, or for read without FILE_SHARE_DELETE fails; read with
+    // FILE_SHARE_DELETE and attribute-only opens succeed.
+    let guard = (
+        Access {
+            read: true,
+            write: false,
+            delete: true,
+        },
+        Share::R,
+    );
+    let refused = [
+        (Access::WRITE, Share::RWD),
+        (Access::DELETE, Share::RWD),
+        (Access::READ, Share::R),
+        (Access::READ, Share::NONE),
+    ];
+    for (a, s) in refused {
+        assert!(share_conflict(a, s, guard.0, guard.1), "{a:?} {s:?}");
+    }
+    for (a, s) in [
+        (Access::READ, Share::RD),
+        (Access::READ, Share::RWD),
+        (Access::ATTRS, Share::NONE),
+    ] {
+        assert!(!share_conflict(a, s, guard.0, guard.1), "{a:?} {s:?}");
+    }
+    // A `Dir` handle never conflicts with a reader; a reader does with a writer (D10).
+    assert!(!share_conflict(
+        Access::READ,
+        Share::RWD,
+        Access::READ,
+        Share::R
+    ));
+    assert!(share_conflict(
+        Access::READ,
+        Share::R,
+        Access::WRITE,
+        Share::RWD
+    ));
+    // Symmetric for every combination.
+    let all: Vec<(Access, Share)> = (0..64u8)
+        .map(|b| {
+            (
+                Access {
+                    read: b & 1 != 0,
+                    write: b & 2 != 0,
+                    delete: b & 4 != 0,
+                },
+                Share {
+                    read: b & 8 != 0,
+                    write: b & 16 != 0,
+                    delete: b & 32 != 0,
+                },
+            )
+        })
+        .collect();
+    for &(a, s) in &all {
+        for &(b, t) in &all {
+            assert_eq!(share_conflict(a, s, b, t), share_conflict(b, t, a, s));
+        }
+    }
+}
+
+#[test]
+fn f12_the_guard_rechecks_before_every_act() {
+    let hidden = Attrs {
+        hidden: true,
+        ..Attrs::default()
+    };
+    // Before step 6 (hook before step 5): an attribute change and a new hard link.
+    for (what, expected) in [
+        ("attributes", SysErrorKind::Mismatch),
+        ("hard link", SysErrorKind::Linked),
+    ] {
+        let sys = g_system();
+        let g = open(&sys, r"C:\G");
+        before_nth(&sys, Prim::FlushFile, 1, move |fs| {
+            if what == "attributes" {
+                fs.set_attrs(&p(r"C:\G\t.bin"), hidden).unwrap();
+            } else {
+                fs.put_hardlink(&p(r"C:\G\t.bin"), &p(r"C:\Out\link.bin"))
+                    .unwrap();
+            }
+        });
+        let e = g
+            .guard(&r("t.bin"))
+            .unwrap()
+            .replace(&sha(b"old"), &mut &b"new"[..], &nf(1, b"new"))
+            .unwrap_err();
+        sys.fake_fs().clear_on_step();
+        assert_eq!(e.kind, expected, "{what}");
+        assert_eq!(g.read(&r("t.bin")).unwrap(), b"old", "{what}");
+        assert_eq!(listing(&sys, r"C:\G"), ["t.bin"], "{what}: nothing renamed");
+    }
+    // Before step 8 (hook before step 7): `.old` changed; the replace succeeded and `.old`
+    // stays as pending cleanup.
+    let sys = g_system();
+    let g = open(&sys, r"C:\G");
+    let new = nf(1, b"new");
+    let old_abs = format!(r"C:\G\{}", new.tmp.old().as_str());
+    before_nth(&sys, Prim::Rename, 2, move |fs| {
+        fs.set_attrs(&p(&old_abs), hidden).unwrap();
+    });
+    let done = g
+        .guard(&r("t.bin"))
+        .unwrap()
+        .replace(&sha(b"old"), &mut &b"new"[..], &new)
+        .unwrap();
+    sys.fake_fs().clear_on_step();
+    assert_eq!(done.old_left, Some(new.tmp.clone()));
+    assert_eq!(g.read(&new.tmp.old()).unwrap(), b"old");
+    assert_eq!(g.read(&r("t.bin")).unwrap(), b"new");
+    // Before a delete: an attribute change refuses it.
+    let sys = g_system();
+    let g = open(&sys, r"C:\G");
+    before_nth(&sys, Prim::VolumeName, 1, move |fs| {
+        fs.set_attrs(&p(r"C:\G\t.bin"), hidden).unwrap();
+    });
+    let e = g
+        .guard(&r("t.bin"))
+        .unwrap()
+        .delete(&sha(b"old"))
+        .unwrap_err();
+    sys.fake_fs().clear_on_step();
+    assert_eq!(e.kind, SysErrorKind::Mismatch);
+    assert_eq!(g.read(&r("t.bin")).unwrap(), b"old");
 }

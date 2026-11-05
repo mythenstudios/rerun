@@ -67,17 +67,18 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateSymbolicLinkW, DDD_EXACT_MATCH_ON_REMOVE, DDD_REMOVE_DEFINITION, DELETE,
-    DefineDosDeviceW, DeleteVolumeMountPointW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_OFFLINE,
-    FILE_ATTRIBUTE_PINNED, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_UNPINNED, FILE_CASE_SENSITIVE_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
-    FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
-    FILE_WRITE_DATA, FileCaseSensitiveInfo, FileIdInfo, FindFirstVolumeW, FindNextVolumeW,
-    FindVolumeClose, GetDriveTypeW, GetFileInformationByHandleEx, GetLogicalDrives,
-    GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, GetVolumePathNamesForVolumeNameW,
-    MoveFileExW, READ_CONTROL, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
-    SYMBOLIC_LINK_FLAG_DIRECTORY, SYNCHRONIZE, SetFileInformationByHandle, SetFileShortNameW,
-    SetVolumeMountPointW, WRITE_DAC,
+    DefineDosDeviceW, DeleteVolumeMountPointW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED,
+    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_UNPINNED, FILE_BASIC_INFO,
+    FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FileBasicInfo, FileCaseSensitiveInfo,
+    FileIdInfo, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetDriveTypeW,
+    GetFileInformationByHandleEx, GetLogicalDrives, GetVolumeInformationW,
+    GetVolumeNameForVolumeMountPointW, GetVolumePathNamesForVolumeNameW, MoveFileExW, READ_CONTROL,
+    SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, SYMBOLIC_LINK_FLAG_DIRECTORY, SYNCHRONIZE,
+    SetFileInformationByHandle, SetFileShortNameW, SetVolumeMountPointW, WRITE_DAC,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
@@ -1192,6 +1193,63 @@ impl FsFixture for WinFixture {
         );
         self.push_undo(Undo::Dacl(p.to_path_buf(), f));
         r.map(|()| true)
+    }
+
+    /// `RemoveDirectoryW` for a plain directory, `DeleteFileW` for anything else (a link is
+    /// removed itself).
+    fn remove(&self, p: &Path) -> SysResult<()> {
+        self.guard(p, Last::Link)?;
+        // `symlink_metadata` does not follow; a junction or directory symlink carries
+        // FILE_ATTRIBUTE_DIRECTORY and `RemoveDirectoryW` removes the link itself.
+        let m = std::fs::symlink_metadata(p).map_err(|e| io_err(&e, p))?;
+        if m.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            std::fs::remove_dir(p).map_err(|e| io_err(&e, p))
+        } else {
+            std::fs::remove_file(p).map_err(|e| io_err(&e, p))
+        }
+    }
+
+    /// `SetFileInformationByHandle(FileBasicInfo)` on a handle with `FILE_WRITE_ATTRIBUTES`;
+    /// times 0 stay unchanged, attributes other than R/H/S are kept.
+    fn set_attrs(&self, p: &Path, attrs: Attrs) -> SysResult<()> {
+        self.guard(p, Last::Plain)?;
+        let f = open_entry(p, FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES)?;
+        let current = f.metadata().map_err(|e| io_err(&e, p))?.file_attributes();
+        let mut bits =
+            current & !(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+        for (on, bit) in [
+            (attrs.readonly, FILE_ATTRIBUTE_READONLY),
+            (attrs.hidden, FILE_ATTRIBUTE_HIDDEN),
+            (attrs.system, FILE_ATTRIBUTE_SYSTEM),
+        ] {
+            if on {
+                bits |= bit;
+            }
+        }
+        if bits == 0 {
+            bits = FILE_ATTRIBUTE_NORMAL;
+        }
+        let info = FILE_BASIC_INFO {
+            CreationTime: 0,
+            LastAccessTime: 0,
+            LastWriteTime: 0,
+            ChangeTime: 0,
+            FileAttributes: bits,
+        };
+        // SAFETY: `f` is a live handle with FILE_WRITE_ATTRIBUTES; `info` is a
+        // FILE_BASIC_INFO of the size passed that outlives the call.
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                f.as_raw_handle(),
+                FileBasicInfo,
+                ptr::from_ref(&info).cast::<c_void>(),
+                u32::try_from(size_of::<FILE_BASIC_INFO>()).unwrap_or(0),
+            )
+        };
+        if ok == 0 {
+            return Err(win32_err(last_error(), &p.display().to_string()));
+        }
+        Ok(())
     }
 
     /// `CreateFileW` with `FILE_READ_DATA`/`FILE_WRITE_DATA`/`DELETE` (or

@@ -11,14 +11,23 @@
 //! re-assertion of a rename target, the status mapping (a rename collision is `Busy`, a
 //! create collision `AlreadyExists`), `IGNORE_READONLY_ATTRIBUTE` on a delete, never following
 //! a reparse point on an open.
+//!
+//! [`Guard`] is the one implementation of [`FileGuard`]: the replace sequence (steps 1 to 8),
+//! the undo of a failed step 7 on the same handle and the success with pending cleanup of a
+//! failed step 8 (A2), and the re-checks of name, link count and R/H/S on the guard before
+//! step 6, before the undo rename, before step 8 and before a delete or `rename_to` (A4).
 
 use std::fmt;
 use std::io::{self, Read};
 
 use sha2::{Digest, Sha256};
 
-use super::fs::{Attrs, EntryKind, FileLock, Metadata, NewFile, RootInfo, Written};
+use super::fs::{
+    Attrs, EntryKind, FileGuard, FileLock, Metadata, NewFile, ReparseInfo, Replaced, RootInfo,
+    Written, tag,
+};
 use super::{SysError, SysErrorKind, SysResult};
+use crate::fold::fold;
 use crate::path::RelPath;
 
 /// Bytes streamed per write call.
@@ -51,8 +60,18 @@ pub(crate) trait PrimDir: Send + Sync {
     /// Identity and properties of this directory.
     fn info(&self) -> SysResult<RootInfo>;
 
+    /// This directory's path on its volume as `FileNameInformation` reports it: `\`-separated
+    /// with a leading `\` (`\` alone for a volume root). The guard's name re-check compares
+    /// [`PrimFile::name`] with it plus the expected name.
+    fn volume_name(&self) -> SysResult<String>;
+
     /// Attribute-only metadata of the child `name` (`Ok(None)`: missing).
     fn lookup(&self, name: &str) -> SysResult<Option<Metadata>>;
+
+    /// Opens the entry `name` itself for a guard (`DELETE | FILE_READ_DATA |
+    /// FILE_READ_ATTRIBUTES | SYNCHRONIZE`, share read only, never following a reparse
+    /// point); the sequence classifies it on the handle.
+    fn open_guard(&self, name: &str) -> SysResult<Self::File>;
 
     /// Creates `name` (`FILE_CREATE`, write, delete, share 0); an existing name is
     /// `AlreadyExists`.
@@ -82,6 +101,16 @@ pub(crate) trait PrimDir: Send + Sync {
 pub(crate) trait PrimFile: Send + fmt::Debug {
     /// What the handle reports about its object.
     fn state(&self) -> SysResult<HeldState>;
+
+    /// The object's current path on its volume (`FileNameInformation`, see
+    /// [`PrimDir::volume_name`]); it follows renames at once.
+    fn name(&self) -> SysResult<String>;
+
+    /// Reads at `off` into `buf` (a guard); 0 at the end.
+    fn read_at(&mut self, off: u64, buf: &mut [u8]) -> SysResult<usize>;
+
+    /// Process IDs using the object, queried on this handle (which itself is not counted).
+    fn users(&self) -> SysResult<Vec<u32>>;
 
     /// Appends `buf` (a file created by [`PrimDir::create_tmp`]).
     fn write(&mut self, buf: &[u8]) -> SysResult<()>;
@@ -237,6 +266,229 @@ pub(crate) fn remove_dir<D: PrimDir>(d: &D, name: &RelPath, expected_id: u128) -
 pub(crate) fn flush<D: PrimDir>(d: &D) -> SysResult<()> {
     writable(d, ".")?;
     d.flush()
+}
+
+/// The last segment of a volume path (`\a\b` → `b`).
+fn last_segment(path: &str) -> &str {
+    path.rsplit('\\').next().unwrap_or(path)
+}
+
+/// [`DirWrite::guard`](super::fs::DirWrite::guard): one handle on the existing plain file
+/// `name` that shares read only. Refuses a directory (`AccessDenied`), a reparse point
+/// (`ReparsePoint`), a link count other than 1 (`Linked`); keeps the stored spelling of the
+/// name and the R/H/S it saw (A4).
+pub(crate) fn guard<'a, D: PrimDir>(d: &'a D, name: &RelPath) -> SysResult<Guard<'a, D>> {
+    let n = segment(name)?;
+    writable(d, n)?;
+    let file = d.open_guard(n)?;
+    let st = file.state()?;
+    match st.kind {
+        EntryKind::File => {}
+        EntryKind::Dir => return Err(SysError::new(SysErrorKind::AccessDenied, n)),
+        EntryKind::Reparse => return Err(SysError::new(SysErrorKind::ReparsePoint, n)),
+    }
+    if st.links != 1 {
+        return Err(SysError::new(SysErrorKind::Linked, n));
+    }
+    let stored = last_segment(&file.name()?).to_owned();
+    if fold(&stored) != fold(n) {
+        return Err(SysError::new(
+            SysErrorKind::Busy,
+            format!("{n}: renamed while it was opened"),
+        ));
+    }
+    Ok(Guard {
+        d,
+        file,
+        stored,
+        attrs: st.attrs,
+        hash: None,
+    })
+}
+
+/// The one [`FileGuard`] (ADR 0017): a held handle on a plain file of `d`.
+pub(crate) struct Guard<'a, D: PrimDir> {
+    d: &'a D,
+    file: D::File,
+    /// The stored spelling of the name it was opened by.
+    stored: String,
+    /// Read-only, hidden and system when it was opened (A4).
+    attrs: Attrs,
+    /// SHA-256 of the content, once streamed.
+    hash: Option<[u8; 32]>,
+}
+
+impl<D: PrimDir> fmt::Debug for Guard<'_, D> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Guard")
+            .field("name", &self.stored)
+            .field("file", &self.file)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<D: PrimDir> Guard<'_, D> {
+    /// A4: the guard is still at `expected` in its directory (`Busy`), still has one link
+    /// (`Linked`) and the R/H/S it was opened with (`Mismatch`).
+    fn recheck(&self, expected: &str) -> SysResult<()> {
+        let dir = self.d.volume_name()?;
+        let want = format!("{}\\{expected}", dir.trim_end_matches('\\'));
+        if fold(&self.file.name()?) != fold(&want) {
+            return Err(SysError::new(
+                SysErrorKind::Busy,
+                format!("{expected}: renamed while it was held"),
+            ));
+        }
+        let st = self.file.state()?;
+        if st.links != 1 {
+            return Err(SysError::new(SysErrorKind::Linked, expected));
+        }
+        if st.attrs != self.attrs {
+            return Err(SysError::new(
+                SysErrorKind::Mismatch,
+                format!("{expected}: attributes changed while it was held"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The hash compared with `expected` before an act (`Mismatch`, nothing touched).
+    fn expect(&mut self, expected: &[u8; 32]) -> SysResult<()> {
+        if self.sha256()? != *expected {
+            return Err(SysError::new(
+                SysErrorKind::Mismatch,
+                format!("{}: not the expected content", self.stored),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Reads a guard from offset 0.
+struct GuardReader<'g, F> {
+    file: &'g mut F,
+    off: u64,
+}
+
+impl<F: PrimFile> Read for GuardReader<'_, F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.file.read_at(self.off, buf).map_err(io::Error::other)?;
+        self.off = self
+            .off
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        Ok(n)
+    }
+}
+
+impl<D: PrimDir> FileGuard for Guard<'_, D> {
+    fn metadata(&self) -> SysResult<Metadata> {
+        let st = self.file.state()?;
+        Ok(Metadata {
+            kind: st.kind,
+            len: st.len,
+            attrs: st.attrs,
+            links: Some(st.links),
+            file_id: st.file_id,
+            reparse: st.reparse_tag.map(|t| ReparseInfo {
+                tag: t,
+                surrogate: tag::is_surrogate(t),
+                target: None,
+            }),
+            restricted: false,
+        })
+    }
+
+    fn sha256(&mut self) -> SysResult<[u8; 32]> {
+        if let Some(h) = self.hash {
+            return Ok(h);
+        }
+        let mut hash = Sha256::new();
+        let mut off = 0u64;
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            let n = self.file.read_at(off, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hash.update(buf.get(..n).unwrap_or_default());
+            off = off.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        }
+        let h: [u8; 32] = hash.finalize().into();
+        self.hash = Some(h);
+        Ok(h)
+    }
+
+    fn reader(&mut self) -> SysResult<Box<dyn Read + '_>> {
+        Ok(Box::new(GuardReader {
+            file: &mut self.file,
+            off: 0,
+        }))
+    }
+
+    fn users(&self) -> SysResult<Vec<u32>> {
+        self.file.users()
+    }
+
+    /// Steps 1 to 8 of ADR 0017 with the failure handling of A2 and the re-checks of A4.
+    fn replace(
+        mut self: Box<Self>,
+        expected: &[u8; 32],
+        src: &mut dyn Read,
+        new: &NewFile,
+    ) -> SysResult<Replaced> {
+        if new.sha256 == *expected {
+            return Err(SysError::new(
+                SysErrorKind::Unsupported,
+                format!("{}: content unchanged", self.stored),
+            ));
+        }
+        self.expect(expected)?;
+        let stored = self.stored.clone();
+        let old = new.tmp.old();
+        let old = old.as_str();
+        // Steps 2 to 5.
+        let mut tmp = self.d.create_tmp(new.tmp.as_str())?;
+        let written = match fill(&mut tmp, src, new, &stored) {
+            Ok(w) => w,
+            Err(e) => return Err(discard(tmp, e)),
+        };
+        // Step 6: the guard becomes `<tmp>.old`.
+        if let Err(e) = self
+            .recheck(&stored)
+            .and_then(|()| self.d.rename(&self.file, old))
+        {
+            return Err(discard(tmp, e));
+        }
+        // Step 7: `<tmp>` onto the stored spelling; on failure the guard goes back (A2).
+        if let Err(e) = self.d.rename(&tmp, &stored) {
+            let _undo = self
+                .recheck(old)
+                .and_then(|()| self.d.rename(&self.file, &stored));
+            return Err(discard(tmp, e));
+        }
+        drop(tmp);
+        // Step 8: any failure is success with pending cleanup (A2).
+        let old_left = match self.recheck(old).and_then(|()| self.file.posix_delete()) {
+            Ok(()) => None,
+            Err(_) => Some(new.tmp.clone()),
+        };
+        Ok(Replaced {
+            new: written,
+            old_left,
+        })
+    }
+
+    fn delete(mut self: Box<Self>, expected: &[u8; 32]) -> SysResult<()> {
+        self.expect(expected)?;
+        self.recheck(&self.stored)?;
+        self.file.posix_delete()
+    }
+
+    fn rename_to(self: Box<Self>, name: &RelPath) -> SysResult<()> {
+        let n = segment(name)?;
+        self.recheck(&self.stored)?;
+        self.d.rename(&self.file, n)
+    }
 }
 
 /// A held lock file (ADR 0017, A7); released when it drops.
