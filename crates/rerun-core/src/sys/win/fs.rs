@@ -311,6 +311,17 @@ fn find_listed(listed: Vec<Listed>, seg: &Seg16) -> Option<Listed> {
     }
 }
 
+/// Why a listing stopped early.
+#[derive(Debug, Clone, Copy)]
+enum ListStop {
+    /// `NtQueryDirectoryFile` failed.
+    Status(NtStatus),
+    /// A buffer that does not parse.
+    Malformed,
+    /// More names than the caller's bound.
+    TooMany,
+}
+
 /// A freshly opened entry: L1-checked, classified on its own handle.
 struct Opened {
     handle: OwnedHandle,
@@ -458,33 +469,42 @@ impl WinDir {
         }
     }
 
-    /// Lists `dir` (raw UTF-16 names, without `.` and `..`). `FileIdExtdDirectoryInformation`;
-    /// only if the file system does not support that class (FAT) on the first call,
-    /// `FileFullDirectoryInformation` (no file IDs).
-    fn list(dir: BorrowedHandle<'_>, target: &str) -> SysResult<Vec<Listed>> {
-        match Self::list_as(dir, DirLayout::IdExtd) {
-            Err(Some(s)) if is_unsupported_class(s) => {}
-            Err(Some(s)) => return Err(nt_error(s, target)),
-            Err(None) => return Err(err(SysErrorKind::Other, target)),
+    /// Lists `dir` (raw UTF-16 names, without `.` and `..`), at most `max` names (else
+    /// `TooLarge`). `FileIdExtdDirectoryInformation`; only if the file system does not support
+    /// that class (FAT) on the first call, `FileFullDirectoryInformation` (no file IDs).
+    fn list(dir: BorrowedHandle<'_>, max: usize, target: &str) -> SysResult<Vec<Listed>> {
+        let stop = |s: ListStop| match s {
+            ListStop::Status(s) => nt_error(s, target),
+            ListStop::Malformed => err(SysErrorKind::Other, target),
+            ListStop::TooMany => err(
+                SysErrorKind::TooLarge,
+                &format!("{target}, more than {max} entries"),
+            ),
+        };
+        match Self::list_as(dir, DirLayout::IdExtd, max) {
+            Err(ListStop::Status(s)) if is_unsupported_class(s) => {}
+            Err(s) => return Err(stop(s)),
             Ok(l) => return Ok(l),
         }
-        Self::list_as(dir, DirLayout::Full).map_err(|s| match s {
-            Some(s) => nt_error(s, target),
-            None => err(SysErrorKind::Other, target),
-        })
+        Self::list_as(dir, DirLayout::Full, max).map_err(stop)
     }
 
-    /// One complete listing in `layout`; `Err(None)` for a malformed buffer.
+    /// One complete listing in `layout`. Stops with [`ListStop::TooMany`] at the first batch
+    /// that brings the count over `max`, so at most `max` names plus one batch are held.
     fn list_as(
         dir: BorrowedHandle<'_>,
         layout: DirLayout,
-    ) -> Result<Vec<Listed>, Option<NtStatus>> {
+        max: usize,
+    ) -> Result<Vec<Listed>, ListStop> {
         let mut out = Vec::new();
         let mut restart = true;
-        while let Some(buf) = nt::query_dir(dir, restart, layout).map_err(Some)? {
+        while let Some(buf) = nt::query_dir(dir, restart, layout).map_err(ListStop::Status)? {
             restart = false;
-            let batch = name::parse_dir_entries(&buf, layout).ok_or(None)?;
+            let batch = name::parse_dir_entries(&buf, layout).ok_or(ListStop::Malformed)?;
             out.extend(batch.into_iter().filter(|l| !name::is_dot_entry(&l.name)));
+            if out.len() > max {
+                return Err(ListStop::TooMany);
+            }
         }
         Ok(out)
     }
@@ -535,7 +555,7 @@ impl WinDir {
         let t = denied.target.clone();
         let listed = if parents.is_empty() {
             let _guard = self.listing.lock().unwrap_or_else(PoisonError::into_inner);
-            Self::list(self.h(), &t)?
+            Self::list(self.h(), usize::MAX, &t)?
         } else {
             let rel = RelPath::parse(&parents.join("\\"))
                 .map_err(|_| err(SysErrorKind::InvalidPath, &t))?;
@@ -543,7 +563,7 @@ impl WinDir {
             if file_id(parent.as_handle(), &t)? != file_id(walked, &t)? {
                 return Err(err(SysErrorKind::Busy, &t));
             }
-            Self::list(parent.as_handle(), &t)?
+            Self::list(parent.as_handle(), usize::MAX, &t)?
         };
         match find_listed(listed, seg) {
             None => Ok(None),
@@ -651,19 +671,23 @@ impl Dir for WinDir {
         Ok(Box::new(std::fs::File::from(handle)))
     }
 
-    fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
+    fn read_dir_limited(
+        &self,
+        p: Option<&RelPath>,
+        max_entries: usize,
+    ) -> SysResult<Vec<DirEntry>> {
         self.ensure_live()?;
         match p {
             None => {
                 let names = {
                     let _guard = self.listing.lock().unwrap_or_else(PoisonError::into_inner);
-                    Self::list(self.h(), HANDLE_TARGET)?
+                    Self::list(self.h(), max_entries, HANDLE_TARGET)?
                 };
                 Self::entries(self.h(), names, HANDLE_TARGET)
             }
             Some(p) => {
                 let dir = self.open_dir_handle(p)?;
-                let names = Self::list(dir.as_handle(), p.as_str())?;
+                let names = Self::list(dir.as_handle(), max_entries, p.as_str())?;
                 Self::entries(dir.as_handle(), names, p.as_str())
             }
         }

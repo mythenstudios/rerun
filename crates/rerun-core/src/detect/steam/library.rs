@@ -5,8 +5,10 @@
 //!   after any other failure. Library 0 is always the root; listed paths go through
 //!   [`StoreDir::open`] and are de-duplicated by [`RootId`],
 //!   first occurrence wins, silently. At most [`MAX_LIBRARIES`] listed.
-//! - Each library's `steamapps` is opened relative to the library handle and listed once;
-//!   entries named `appmanifest_<id>.acf` (ASCII case-insensitive) are the manifests, at most
+//! - Each library's `steamapps` is opened relative to the library handle and listed once,
+//!   bounded to [`MAX_MANIFESTS`] plus [`STEAMAPPS_OTHER`] entries (`Dir::read_dir_limited`:
+//!   more is refused before any entry is opened, never a partial list); entries named
+//!   `appmanifest_<id>.acf` (ASCII case-insensitive) are the manifests, at most
 //!   [`MAX_MANIFESTS`], each a plain file read with `read_store_file` and checked (`appid`
 //!   equals `<id>`, `installdir` a valid single segment).
 
@@ -26,6 +28,10 @@ use crate::sys::{SysError, SysErrorKind, System};
 pub const MAX_LIBRARIES: usize = 256;
 /// Most `appmanifest_*.acf` entries per library; more and the library has no apps.
 pub const MAX_MANIFESTS: usize = 16_384;
+/// Margin for the other entries of `steamapps` (`common`, `downloading`, `shadercache`,
+/// `workshop`, `libraryfolders.vdf`, … about a dozen in practice): the listing is bounded to
+/// the manifest limit plus this; more and the library has no apps (ADR 0012).
+pub const STEAMAPPS_OTHER: usize = 1_024;
 
 const PRIMARY: &str = r"steamapps\libraryfolders.vdf";
 const FALLBACK: &str = r"config\libraryfolders.vdf";
@@ -124,7 +130,7 @@ fn read_library_file(root: &StoreDir<'_>, file: &RelPath) -> Result<LibraryFolde
 fn is_not_found(kind: &IssueKind) -> bool {
     matches!(
         kind,
-        IssueKind::VdfRead(VdfReadError::Open { source, .. })
+        IssueKind::VdfRead(VdfReadError::Read { source, .. })
             if source.kind == SysErrorKind::NotFound
     )
 }
@@ -228,7 +234,8 @@ fn manifest_id(name: &str) -> Option<&str> {
     (head.eq_ignore_ascii_case(PREFIX) && tail.eq_ignore_ascii_case(SUFFIX)).then_some(id)
 }
 
-/// The apps of one library, sorted by app ID. `max` is [`MAX_MANIFESTS`] (smaller in tests).
+/// The apps of one library, sorted by app ID. `max` is [`MAX_MANIFESTS`] (smaller in tests);
+/// the listing of `steamapps` is bounded to `max` plus [`STEAMAPPS_OTHER`] entries.
 pub(super) fn apps(store: &StoreDir<'_>, max: usize, issues: &mut Vec<Issue>) -> Vec<SteamApp> {
     let mut report = |kind| {
         issues.push(Issue {
@@ -263,8 +270,13 @@ pub(super) fn apps(store: &StoreDir<'_>, max: usize, issues: &mut Vec<Issue>) ->
         }
         Ok(_) => {}
     }
-    let entries = match dir.read_dir(None) {
+    let listed_max = max.saturating_add(STEAMAPPS_OTHER);
+    let entries = match dir.read_dir_limited(None, listed_max) {
         Ok(entries) => entries,
+        Err(e) if e.kind == SysErrorKind::TooLarge => {
+            report(IssueKind::TooManyEntries { max: listed_max });
+            return Vec::new();
+        }
         Err(e) => {
             report(IssueKind::Sys(e));
             return Vec::new();

@@ -1677,11 +1677,14 @@ impl Dir for NaiveDir {
         Ok(Box::new(File::open(&full).map_err(|_| naive_err(&full))?))
     }
 
-    fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
+    fn read_dir_limited(&self, p: Option<&RelPath>, max: usize) -> SysResult<Vec<DirEntry>> {
         let full = self.check(p)?;
         let mut out = Vec::new();
         for e in std::fs::read_dir(&full).map_err(|_| naive_err(&full))? {
             let e = e.map_err(|_| naive_err(&full))?;
+            if out.len() == max {
+                return Err(SysError::path(SysErrorKind::TooLarge, &full));
+            }
             let path = e.path();
             out.push(DirEntry {
                 name: e.file_name().to_string_lossy().into_owned(),

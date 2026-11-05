@@ -707,7 +707,7 @@ fn run(sys: &FakeSystem, app_ids: &[u32], hashes: bool) -> Run {
 
 const FULL: &str = r#"Steam: found through HKCU\Software\Valve\Steam SteamPath
   issue: library D:\SteamLibrary, steamapps entry "appmanifest_1000005.acf": anomalous name "..": '.' or '..' segment
-  issue: library D:\SteamLibrary, steamapps entry "appmanifest_1000006.acf": steamapps\appmanifest_1000006.acf: input larger than 1048576 bytes at byte 1048576 (line 4, column 1048544)
+  issue: library D:\SteamLibrary, steamapps entry "appmanifest_1000006.acf": steamapps\appmanifest_1000006.acf: too large: steamapps\appmanifest_1000006.acf, more than 1048576 bytes
   issue: library D:\SteamLibrary, steamapps entry "appmanifest_1000007.acf": steamapps\appmanifest_1000007.acf: nesting deeper than 16 at byte 130 (line 19, column 5)
   issue: library D:\SteamLibrary, steamapps entry "appmanifest_1000008.acf": "installdir" missing in the object at byte 0
 

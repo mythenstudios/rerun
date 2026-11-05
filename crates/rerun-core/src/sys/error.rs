@@ -31,6 +31,11 @@ pub enum SysErrorKind {
     Linked,
     /// An expected hash or file ID differs (ADR 0017). Nothing was changed.
     Mismatch,
+    /// More than the caller's limit: a file longer than the bound of
+    /// [`Dir::read_limited`](crate::sys::Dir::read_limited), a directory with more entries than
+    /// the bound of [`Dir::read_dir_limited`](crate::sys::Dir::read_dir_limited) (ADR 0011,
+    /// ADR 0012). Nothing partial is returned.
+    TooLarge,
     /// Other error.
     Other,
 }
@@ -48,6 +53,7 @@ impl fmt::Display for SysErrorKind {
             Self::Unsupported => "unsupported",
             Self::Linked => "file has more than one hard link",
             Self::Mismatch => "not the expected content or file",
+            Self::TooLarge => "too large",
             Self::Other => "other error",
         })
     }

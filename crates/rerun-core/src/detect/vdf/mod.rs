@@ -28,7 +28,7 @@
 //! - Errors carry a byte offset and never file content (at most one character as `U+XXXX`).
 //!
 //! [`read_store_file`] is the only way to read such a file from disk: handle-relative to a
-//! store root, at most `max_bytes + 1` bytes.
+//! store root, with `Dir::read_limited` (more than `max_bytes` is refused, never truncated).
 
 pub mod read;
 

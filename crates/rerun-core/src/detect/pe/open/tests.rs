@@ -329,7 +329,7 @@ impl Dir for EndlessDir {
     fn read(&self, _: &RelPath) -> SysResult<Vec<u8>> {
         panic!("the unbounded Dir::read must never be used")
     }
-    fn read_dir(&self, _: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
+    fn read_dir_limited(&self, _: Option<&RelPath>, _: usize) -> SysResult<Vec<DirEntry>> {
         unsupported()
     }
     fn users(&self, _: &RelPath) -> SysResult<Vec<u32>> {

@@ -42,20 +42,13 @@ fn read(sys: &FakeSystem) -> Result<Document, VdfReadError> {
     read_with(sys, FILE, &Limits::LIBRARY_FOLDERS)
 }
 
-fn open_kind(r: Result<Document, VdfReadError>) -> SysErrorKind {
+fn read_kind(r: Result<Document, VdfReadError>) -> SysErrorKind {
     match r {
-        Err(VdfReadError::Open { file, source }) => {
+        Err(VdfReadError::Read { file, source }) => {
             assert_eq!(file, rel(FILE));
             source.kind
         }
-        other => panic!("expected Open, got {other:?}"),
-    }
-}
-
-fn parse_kind(r: Result<Document, VdfReadError>) -> (VdfErrorKind, usize) {
-    match r {
-        Err(VdfReadError::Parse { error, .. }) => (error.kind, error.offset),
-        other => panic!("expected Parse, got {other:?}"),
+        other => panic!("expected Read, got {other:?}"),
     }
 }
 
@@ -99,14 +92,10 @@ fn a_file_at_the_limit_is_read_and_one_byte_more_is_too_large() {
             .file(store_file(FILE), padded(limits.max_bytes + 1))
             .build()
             .unwrap();
+        // Refused by the bounded read before the parser sees a byte.
         assert_eq!(
-            parse_kind(read_with(&over, FILE, &limits)),
-            (
-                VdfErrorKind::TooLarge {
-                    limit: limits.max_bytes
-                },
-                limits.max_bytes
-            )
+            read_kind(read_with(&over, FILE, &limits)),
+            SysErrorKind::TooLarge
         );
     }
     let tiny = Limits {
@@ -116,24 +105,26 @@ fn a_file_at_the_limit_is_read_and_one_byte_more_is_too_large() {
     let sys = base().file(store_file(FILE), padded(7)).build().unwrap();
     assert!(read_with(&sys, FILE, &tiny).is_ok());
     let sys = base().file(store_file(FILE), padded(8)).build().unwrap();
+    let e = read_with(&sys, FILE, &tiny).unwrap_err();
     assert_eq!(
-        parse_kind(read_with(&sys, FILE, &tiny)),
-        (VdfErrorKind::TooLarge { limit: 7 }, 7)
+        e.to_string(),
+        r"steamapps\libraryfolders.vdf: too large: steamapps\libraryfolders.vdf, more than 7 bytes"
     );
+    assert_eq!(read_kind(Err(e)), SysErrorKind::TooLarge);
 }
 
 #[test]
 fn a_missing_file_is_not_found() {
     let sys = base().dir(store_file("steamapps")).build().unwrap();
-    assert_eq!(open_kind(read(&sys)), SysErrorKind::NotFound);
+    assert_eq!(read_kind(read(&sys)), SysErrorKind::NotFound);
     let sys = base().build().unwrap();
-    assert_eq!(open_kind(read(&sys)), SysErrorKind::NotFound);
+    assert_eq!(read_kind(read(&sys)), SysErrorKind::NotFound);
 }
 
 #[test]
 fn a_directory_is_refused() {
     let sys = base().dir(store_file(FILE)).build().unwrap();
-    assert_eq!(open_kind(read(&sys)), SysErrorKind::AccessDenied);
+    assert_eq!(read_kind(read(&sys)), SysErrorKind::AccessDenied);
 }
 
 #[test]
@@ -143,7 +134,7 @@ fn a_file_symlink_is_never_followed() {
         .file_symlink(store_file(FILE), r"D:\Elsewhere\libraryfolders.vdf")
         .build()
         .unwrap();
-    assert_eq!(open_kind(read(&sys)), SysErrorKind::ReparsePoint);
+    assert_eq!(read_kind(read(&sys)), SysErrorKind::ReparsePoint);
 }
 
 #[test]
@@ -153,7 +144,7 @@ fn a_junction_at_steamapps_is_never_followed() {
         .junction(store_file("steamapps"), r"D:\Elsewhere")
         .build()
         .unwrap();
-    assert_eq!(open_kind(read(&sys)), SysErrorKind::ReparsePoint);
+    assert_eq!(read_kind(read(&sys)), SysErrorKind::ReparsePoint);
 }
 
 #[test]
@@ -162,7 +153,7 @@ fn a_file_with_a_rejected_reparse_tag_is_refused() {
         .tagged_file(store_file(FILE), DOC, tag::APPEXECLINK)
         .build()
         .unwrap();
-    assert_eq!(open_kind(read(&sys)), SysErrorKind::ReparsePoint);
+    assert_eq!(read_kind(read(&sys)), SysErrorKind::ReparsePoint);
     // An allowed data tag (WOF) reads like a plain file.
     let sys = base()
         .tagged_file(store_file(FILE), DOC, tag::WOF)
@@ -178,13 +169,13 @@ fn a_restricted_file_or_folder_is_refused() {
         .restricted(store_file(FILE))
         .build()
         .unwrap();
-    assert_eq!(open_kind(read(&sys)), SysErrorKind::AccessDenied);
+    assert_eq!(read_kind(read(&sys)), SysErrorKind::AccessDenied);
     let sys = base()
         .file(store_file(FILE), DOC)
         .restricted(store_file("steamapps"))
         .build()
         .unwrap();
-    assert_eq!(open_kind(read(&sys)), SysErrorKind::AccessDenied);
+    assert_eq!(read_kind(read(&sys)), SysErrorKind::AccessDenied);
 }
 
 #[test]
@@ -292,7 +283,7 @@ impl Dir for EndlessDir {
     fn read(&self, _: &RelPath) -> SysResult<Vec<u8>> {
         panic!("the unbounded Dir::read must never be used")
     }
-    fn read_dir(&self, _: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
+    fn read_dir_limited(&self, _: Option<&RelPath>, _: usize) -> SysResult<Vec<DirEntry>> {
         unsupported()
     }
     fn users(&self, _: &RelPath) -> SysResult<Vec<u32>> {
@@ -305,16 +296,8 @@ fn an_endless_file_is_cut_at_the_limit_plus_one() {
     for limits in [Limits::LIBRARY_FOLDERS, Limits::APP_MANIFEST] {
         let dir = EndlessDir::default();
         let r = read_bounded(&dir, &rel(FILE), &limits);
-        assert_eq!(
-            parse_kind(r),
-            (
-                VdfErrorKind::TooLarge {
-                    limit: limits.max_bytes
-                },
-                limits.max_bytes
-            )
-        );
-        // `Take` never asks the reader for more than the cap.
+        assert_eq!(read_kind(r), SysErrorKind::TooLarge);
+        // `Dir::read_limited` never asks the reader for more than the limit plus one byte.
         let served = dir.served.load(Ordering::SeqCst);
         assert_eq!(served, u64::try_from(limits.max_bytes).unwrap() + 1);
     }
@@ -331,7 +314,7 @@ fn a_read_error_is_reported_without_its_message() {
         e,
         VdfReadError::Read {
             file: rel(FILE),
-            kind: io::ErrorKind::InvalidData
+            source: SysError::new(SysErrorKind::Other, FILE),
         }
     );
     assert!(!format!("{e} / {e:?}").contains("SECRET"));

@@ -1221,7 +1221,11 @@ impl Dir for FakeDir {
         }
     }
 
-    fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
+    fn read_dir_limited(
+        &self,
+        p: Option<&RelPath>,
+        max_entries: usize,
+    ) -> SysResult<Vec<DirEntry>> {
         let (node, t) = match p {
             None => (self.node, self.handle_target()),
             Some(p) => {
@@ -1230,8 +1234,14 @@ impl Dir for FakeDir {
             }
         };
         let st = self.fs.lock();
-        st.dir(node, &t)?
-            .children
+        let children = &st.dir(node, &t)?.children;
+        if children.len() > max_entries {
+            return Err(err(
+                SysErrorKind::TooLarge,
+                &format!("{t}, more than {max_entries} entries"),
+            ));
+        }
+        children
             .values()
             .map(|&id| {
                 Ok(DirEntry {

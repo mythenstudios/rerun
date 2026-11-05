@@ -513,7 +513,7 @@ mod tests {
             assert_eq!(p.as_str(), "other.bin", "colliding name opened");
             Ok(Box::new(std::io::Cursor::new(vec![1u8])))
         }
-        fn read_dir(&self, _: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
+        fn read_dir_limited(&self, _: Option<&RelPath>, _: usize) -> SysResult<Vec<DirEntry>> {
             let meta = Metadata {
                 kind: EntryKind::File,
                 len: 1,
@@ -590,7 +590,7 @@ mod tests {
         fn open_read(&self, _: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>> {
             Ok(Box::new(LockedReader))
         }
-        fn read_dir(&self, _: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
+        fn read_dir_limited(&self, _: Option<&RelPath>, _: usize) -> SysResult<Vec<DirEntry>> {
             no()
         }
         fn users(&self, _: &RelPath) -> SysResult<Vec<u32>> {

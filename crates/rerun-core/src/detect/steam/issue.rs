@@ -151,6 +151,13 @@ pub enum IssueKind {
     /// `steamapps` is case-sensitive; two manifests could fold to one name. No apps read.
     #[error("steamapps is case-sensitive; no apps read")]
     CaseSensitiveSteamapps,
+    /// `steamapps` has more entries than allowed (manifests plus a margin for the others);
+    /// refused by the bounded listing before any entry was opened. No apps read.
+    #[error("steamapps has more than {max} entries; no apps read")]
+    TooManyEntries {
+        /// The limit.
+        max: usize,
+    },
     /// More manifest entries than allowed. No apps read (never a partial list).
     #[error("{count} app manifest entries, more than {max}; no apps read")]
     TooManyManifests {

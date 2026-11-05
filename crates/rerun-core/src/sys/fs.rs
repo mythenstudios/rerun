@@ -23,6 +23,10 @@
 //! - Writes into a case-sensitive directory return `Unsupported`.
 //! - `read_dir` returns raw names as on disk; they may be invalid as a [`RelPath`]
 //!   (`d3d9.dll.`, `CON`). `policy::path::classify` separates them.
+//! - **Bounded reads** (ADR 0011, ADR 0012). Input that someone else can make large is read
+//!   with a bound: [`Dir::read_limited`] (a file of at most `max_len` bytes) and
+//!   [`Dir::read_dir_limited`] (a listing of at most `max_entries` entries). Beyond the bound
+//!   both refuse with `TooLarge`; neither ever returns a truncated file or a partial list.
 //! - **Restricted entries.** An entry whose own security descriptor denies the current user
 //!   even an attribute-only open (e.g. `%LOCALAPPDATA%\ElevatedDiagnostics`,
 //!   `C:\ProgramData\ntuser.pol`) is neither an error nor dropped: `read_dir` and `metadata`
@@ -48,7 +52,7 @@
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
-use super::{SysError, SysResult};
+use super::{SysError, SysErrorKind, SysResult};
 use crate::path::RelPath;
 
 /// Reparse tags known to Rerun.
@@ -276,8 +280,8 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     /// Opens a file for reading. A directory or a restricted entry yields `AccessDenied`.
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>>;
 
-    /// Reads a whole file. Unbounded: input that someone else can make large goes through a
-    /// bounded read instead.
+    /// Reads a whole file. Unbounded: input that someone else can make large goes through
+    /// [`Self::read_limited`] instead.
     fn read(&self, p: &RelPath) -> SysResult<Vec<u8>> {
         let mut reader = self.open_read(p)?;
         let mut buf = Vec::new();
@@ -287,11 +291,48 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
         Ok(buf)
     }
 
-    /// Lists a directory (`None` = this one). Raw names, order unspecified. Names with
-    /// unpaired UTF-16 surrogates are converted with U+FFFD and such entries are never
-    /// dropped (`policy::path::classify` turns them into anomalies).
-    /// Restricted entries are listed with [`Metadata::restricted`], never dropped.
-    fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>>;
+    /// Reads a whole file of at most `max_len` bytes (ADR 0011). A longer file is `TooLarge`
+    /// and nothing is returned, never a truncated read. The length from metadata is never
+    /// trusted: at most `max_len + 1` bytes are read from the handle, so a file that grows
+    /// while it is read is refused as well, and a file of exactly `max_len` bytes is read.
+    /// Errors of the open as in [`Self::open_read`]; read errors keep their code
+    /// ([`SysError::io`]).
+    fn read_limited(&self, p: &RelPath, max_len: u64) -> SysResult<Vec<u8>> {
+        let reader = self.open_read(p)?;
+        let mut buf = Vec::new();
+        reader
+            .take(max_len.saturating_add(1))
+            .read_to_end(&mut buf)
+            .map_err(|e| SysError::io(&e, p.as_str()))?;
+        if u64::try_from(buf.len()).map_or(true, |n| n > max_len) {
+            return Err(SysError::new(
+                SysErrorKind::TooLarge,
+                format!("{p}, more than {max_len} bytes"),
+            ));
+        }
+        Ok(buf)
+    }
+
+    /// Lists a directory (`None` = this one) without a bound on the number of entries; see
+    /// [`Self::read_dir_limited`].
+    fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
+        self.read_dir_limited(p, usize::MAX)
+    }
+
+    /// Lists a directory (`None` = this one) of at most `max_entries` entries (ADR 0012). Raw
+    /// names, order unspecified. Names with unpaired UTF-16 surrogates are converted with
+    /// U+FFFD and such entries are never dropped (`policy::path::classify` turns them into
+    /// anomalies). Restricted entries are listed with [`Metadata::restricted`], never
+    /// dropped.
+    ///
+    /// The bound counts the names in the listing (without `.` and `..`) **before** any entry
+    /// is opened: more than `max_entries` is `TooLarge` and nothing is returned, never a
+    /// partial list. `sys::win` stops listing at the first batch that crosses the bound, so
+    /// it holds at most `max_entries` names plus one 64 KiB batch and opens none of them. An
+    /// entry that vanishes between the listing and its reopen is skipped (the result may
+    /// have fewer entries than were counted).
+    fn read_dir_limited(&self, p: Option<&RelPath>, max_entries: usize)
+    -> SysResult<Vec<DirEntry>>;
 
     /// Process IDs that use the file `p` at this moment: open handles, image sections and
     /// mapped views, the running process of an executable (ADR 0017, "users()"). A check at

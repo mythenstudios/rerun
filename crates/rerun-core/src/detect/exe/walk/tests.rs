@@ -557,8 +557,8 @@ impl Dir for Scripted<'_> {
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>> {
         self.dir().open_read(p)
     }
-    fn read_dir(&self, p: Option<&RelPath>) -> SysResult<Vec<DirEntry>> {
-        let mut entries = self.dir().read_dir(p)?;
+    fn read_dir_limited(&self, p: Option<&RelPath>, max: usize) -> SysResult<Vec<DirEntry>> {
+        let mut entries = self.dir().read_dir_limited(p, max)?;
         entries.reverse();
         if self.twin
             && let Some(first) = entries.first().cloned()

@@ -1,6 +1,10 @@
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{MAX_LIBRARIES, MAX_MANIFESTS, SteamLibrary, apps, libraries, manifest_id};
+use super::{
+    MAX_LIBRARIES, MAX_MANIFESTS, STEAMAPPS_OTHER, SteamLibrary, apps, libraries, manifest_id,
+};
 use crate::detect::steam::issue::{Issue, IssueKind, Location};
 use crate::detect::steam::testfx::{
     STEAM, SteamFixture, acf, base, fr, legacy_folders, library_folders,
@@ -10,7 +14,7 @@ use crate::detect::vdf::VdfReadError;
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{Forbidden, RootError, StoreDir};
 use crate::sys::SysErrorKind;
-use crate::sys::fake::FakeSystem;
+use crate::sys::fake::{FakeSystem, FsOp};
 use crate::sys::fs::{EntryKind, tag};
 
 const LIB: &str = r"D:\SteamLibrary";
@@ -93,7 +97,7 @@ fn root_err(issue: &Issue) -> &RootError {
 fn sys_kind(issue: &Issue) -> SysErrorKind {
     match &issue.kind {
         IssueKind::Sys(e) => e.kind,
-        IssueKind::VdfRead(VdfReadError::Open { source, .. }) => source.kind,
+        IssueKind::VdfRead(VdfReadError::Read { source, .. }) => source.kind,
         other => panic!("expected a system error, got {other:?}"),
     }
 }
@@ -749,9 +753,9 @@ fn a_broken_manifest_is_an_issue_and_the_others_go_on() {
     for i in &issues {
         assert!(
             matches!(
-                i.kind,
+                &i.kind,
                 IssueKind::VdfRead(VdfReadError::Parse { .. }) | IssueKind::View(_)
-            ),
+            ) || sys_kind(i) == SysErrorKind::TooLarge,
             "{i:?}"
         );
     }
@@ -781,6 +785,45 @@ fn at_most_max_manifests_and_never_a_partial_list() {
             kind: IssueKind::TooManyManifests { count: 4, max: 3 },
         }]
     );
+}
+
+#[test]
+fn the_steamapps_listing_is_bounded_before_any_entry_is_opened() {
+    // `max` manifests are fine; other entries count against the margin only.
+    let mut b = base()
+        .file_in(LIB, r"steamapps\appmanifest_1.acf", &acf(1, "A", "A", 4))
+        .dir(format!(r"{LIB}\steamapps\common"));
+    for i in 0..STEAMAPPS_OTHER - 1 {
+        b = b.file_in(LIB, &format!(r"steamapps\other-{i}"), "");
+    }
+    let sys = b.build().unwrap();
+    // 1 manifest + 1,024 others = max (1) + margin: listed and read.
+    let (apps, issues) = apps_of(&sys, 1);
+    assert_eq!((apps.len(), issues.len()), (1, 0), "{issues:?}");
+    // One entry more than the bound: refused as a whole, nothing read or opened.
+    sys.fake_fs()
+        .put_file(Path::new(&format!(r"{LIB}\steamapps\one-more")), b"")
+        .unwrap();
+    let opened = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&opened);
+    sys.fake_fs().on_step(move |_, ev| {
+        if ev.op == FsOp::OpenRead {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let (apps, issues) = apps_of(&sys, 1);
+    sys.fake_fs().clear_on_step();
+    assert_eq!(apps, []);
+    assert_eq!(
+        issues,
+        [Issue {
+            at: Location::Library(rp(LIB)),
+            kind: IssueKind::TooManyEntries {
+                max: 1 + STEAMAPPS_OTHER
+            },
+        }]
+    );
+    assert_eq!(opened.load(Ordering::SeqCst), 0, "a manifest was read");
 }
 
 #[test]

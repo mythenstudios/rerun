@@ -411,7 +411,111 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
     long_name_lookups(fx, &*root, work, &mut skips)?;
     wof_files(fx, &*root, work, &mut skips)?;
     restricted_entries(fs, fx, &*root, work, &mut skips)?;
+    bounded_reads(fx, &*root, work)?;
     Ok(skips)
+}
+
+/// Entries of the large directory in [`bounded_reads`]: with names of 60 characters the
+/// listing spans several 64 KiB batches in `sys::win`.
+const BOUNDED_MANY: usize = 1_000;
+
+/// Bounded reads (ADR 0011, ADR 0012): at the bound the whole file or listing, one over it
+/// `TooLarge`; never a truncated file or a partial list.
+fn bounded_reads(fx: &dyn FsFixture, root: &dyn Dir, work: &Path) -> ContractResult {
+    let base = work.join("bounded");
+    ok(
+        fx.file(&base.join("five.bin"), b"12345"),
+        "fixture five.bin",
+    )?;
+    ok(fx.file(&base.join("empty.bin"), b""), "fixture empty.bin")?;
+    ok(fx.dir(&base.join("sub")), "fixture sub")?;
+    let tl = SysErrorKind::TooLarge;
+
+    // Files.
+    let five = rel(r"bounded\five.bin")?;
+    ensure(
+        ok(root.read_limited(&five, 5), "read_limited at the bound")? == b"12345",
+        "read_limited at the bound reads the whole file",
+    )?;
+    ensure(
+        ok(root.read_limited(&five, u64::MAX), "read_limited unbounded")? == b"12345",
+        "read_limited with the largest bound",
+    )?;
+    err_kind(
+        root.read_limited(&five, 4),
+        tl,
+        "read_limited one byte over",
+    )?;
+    err_kind(root.read_limited(&five, 0), tl, "read_limited bound 0")?;
+    ensure(
+        ok(
+            root.read_limited(&rel(r"bounded\empty.bin")?, 0),
+            "read_limited empty",
+        )?
+        .is_empty(),
+        "an empty file at bound 0",
+    )?;
+    err_kind(
+        root.read_limited(&rel(r"bounded\sub")?, 5),
+        SysErrorKind::AccessDenied,
+        "read_limited on a dir",
+    )?;
+    err_kind(
+        root.read_limited(&rel(r"bounded\missing")?, 5),
+        SysErrorKind::NotFound,
+        "read_limited missing",
+    )?;
+
+    // Listings, by path and of the handle's own directory.
+    let b = rel("bounded")?;
+    ensure(
+        ok(root.read_dir_limited(Some(&b), 3), "read_dir_limited at")?.len() == 3,
+        "read_dir_limited at the bound lists everything",
+    )?;
+    err_kind(
+        root.read_dir_limited(Some(&b), 2),
+        tl,
+        "read_dir_limited one entry over",
+    )?;
+    err_kind(root.read_dir_limited(Some(&b), 0), tl, "read_dir_limited 0")?;
+    ensure(
+        ok(
+            root.read_dir_limited(Some(&rel(r"bounded\sub")?), 0),
+            "read_dir_limited empty",
+        )?
+        .is_empty(),
+        "an empty directory at bound 0",
+    )?;
+    let sub = ok(root.open_dir(&b), "open bounded")?;
+    ensure(
+        ok(sub.read_dir_limited(None, 3), "own listing at")?.len() == 3,
+        "own listing at the bound",
+    )?;
+    err_kind(sub.read_dir_limited(None, 2), tl, "own listing one over")?;
+    ensure(
+        ok(sub.read_dir(None), "own listing after a refusal")?.len() == 3,
+        "a refused listing does not disturb the next one on the same handle",
+    )?;
+    drop(sub);
+
+    // A listing that spans several batches.
+    let many_abs = base.join("many");
+    for i in 0..BOUNDED_MANY {
+        ok(
+            fx.file(&many_abs.join(format!("{i:0>60}")), b""),
+            "fixture many",
+        )?;
+    }
+    let many = rel(r"bounded\many")?;
+    ensure(
+        ok(root.read_dir_limited(Some(&many), BOUNDED_MANY), "many at")?.len() == BOUNDED_MANY,
+        "a listing of several batches at the bound",
+    )?;
+    err_kind(
+        root.read_dir_limited(Some(&many), BOUNDED_MANY - 1),
+        tl,
+        "a listing of several batches one entry over",
+    )
 }
 
 /// Entries whose own DACL denies the current user every open are neither an error nor

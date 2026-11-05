@@ -21,7 +21,7 @@ mod testfx;
 
 pub use crate::detect::text::RawText;
 pub use issue::{BadValue, Issue, IssueKind, Location};
-pub use library::{MAX_LIBRARIES, MAX_MANIFESTS, SteamApp, SteamLibrary};
+pub use library::{MAX_LIBRARIES, MAX_MANIFESTS, STEAMAPPS_OTHER, SteamApp, SteamLibrary};
 pub use root::RootSource;
 pub use scan::{SteamScan, scan};
 pub use state::{AppState, StateFlags};

@@ -1,16 +1,11 @@
 //! The only reader for VDF files on disk (ADR 0011).
 //!
-//! [`read_store_file`] opens the file relative to an open [`StoreDir`] handle (ADR 0007: never
-//! by absolute path, never through a reparse point below the store) and reads at most
-//! `max_bytes + 1` bytes through [`Read::take`], so the parser can tell "exactly at the limit"
-//! from "over it". The file length from metadata is never asked for: a file can grow between
-//! a size check and the read, and a device or a filter can report any length. The unbounded
-//! [`Dir::read`] is never used.
-//!
-//! Phase 2 follow-up: a general `Dir::read_limited` in `sys` with a contract test; this module
-//! then uses it.
-
-use std::io::Read;
+//! [`read_store_file`] reads the file relative to an open [`StoreDir`] handle (ADR 0007: never
+//! by absolute path, never through a reparse point below the store) with
+//! [`Dir::read_limited`] and `max_bytes` as the bound: a longer file is refused with
+//! `TooLarge` before the parser sees a byte, never truncated. The file length from metadata
+//! is never asked for: a file can grow between a size check and the read, and a device or a
+//! filter can report any length. The unbounded [`Dir::read`] is never used.
 
 use super::{Document, Limits, LineCol, VdfError, parse};
 use crate::path::RelPath;
@@ -21,21 +16,15 @@ use crate::sys::{Dir, SysError};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum VdfReadError {
-    /// Opening failed: missing, a directory, a reparse point on the way, restricted, …
+    /// Reading failed: missing (`NotFound`), a directory or restricted (`AccessDenied`), a
+    /// reparse point on the way (`ReparsePoint`), an I/O error (its code kept, its message
+    /// not), or longer than `max_bytes` (`TooLarge`).
     #[error("{file}: {source}")]
-    Open {
+    Read {
         /// The file, relative to the store.
         file: RelPath,
         /// Error of the system layer.
         source: SysError,
-    },
-    /// Reading failed after the file was opened.
-    #[error("{file}: read failed ({kind})")]
-    Read {
-        /// The file, relative to the store.
-        file: RelPath,
-        /// Kind of the I/O error (its message is not kept).
-        kind: std::io::ErrorKind,
     },
     /// The content was refused by the parser.
     #[error("{file}: {error} ({at})")]
@@ -61,21 +50,12 @@ pub fn read_store_file(
 /// [`read_store_file`] on a bare handle; separate so the bound can be tested with a reader
 /// that never ends.
 fn read_bounded(dir: &dyn Dir, file: &RelPath, limits: &Limits) -> Result<Document, VdfReadError> {
-    let reader = dir.open_read(file).map_err(|source| VdfReadError::Open {
-        file: file.clone(),
-        source,
-    })?;
-    // One byte over the limit is enough for `parse` to report `TooLarge`.
-    let cap = u64::try_from(limits.max_bytes)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let mut buf = Vec::new();
-    reader
-        .take(cap)
-        .read_to_end(&mut buf)
-        .map_err(|e| VdfReadError::Read {
+    let max = u64::try_from(limits.max_bytes).unwrap_or(u64::MAX);
+    let buf = dir
+        .read_limited(file, max)
+        .map_err(|source| VdfReadError::Read {
             file: file.clone(),
-            kind: e.kind(),
+            source,
         })?;
     parse(&buf, limits).map_err(|error| VdfReadError::Parse {
         file: file.clone(),
