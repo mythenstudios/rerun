@@ -105,8 +105,8 @@ use super::status::kind_of_win32;
 use crate::path::RelPath;
 use crate::sys::contract::{Access, FsFixture, Held, RegFixture, Share};
 use crate::sys::fs::{
-    Attrs, Dir, DirEntry, DirWrite, EntryKind, Fs, FsKind, Metadata, ReadSeek, ReparseInfo,
-    RootInfo, WriteCap, tag,
+    Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, FileLock, Fs, FsKind, Metadata, NewFile,
+    ReadSeek, ReparseInfo, Replaced, RootInfo, WriteCap, Written, tag,
 };
 use crate::sys::registry::{Hive, RegKey};
 use crate::sys::{SysError, SysErrorKind, SysResult};
@@ -1765,8 +1765,11 @@ pub(super) fn module_path(module: windows_sys::Win32::Foundation::HMODULE) -> Pa
 
 /// Check-then-use-by-path control implementation (never use outside this test): checks each
 /// prefix with `symlink_metadata`, yields, then acts on the full path, which Windows resolves
-/// again and follows every junction in it. Every error is reported as `NotFound`, so the race
-/// contract can only catch it by a leak.
+/// again and follows every junction in it. Every error is reported as `NotFound` (on the write
+/// side also `Mismatch` and `AlreadyExists` from its own checks), so the race contracts can
+/// only catch it by a leak. Its write side hashes a guarded file by path when the guard opens,
+/// writes a temp file by path and renames it with replace (`std::fs::rename`), and deletes by
+/// path, each after the pause: the writing race contract must catch it.
 #[derive(Debug, Default)]
 pub(super) struct NaiveFs;
 
@@ -1864,9 +1867,183 @@ impl Fs for NaiveFs {
             id: naive_id(abs)?,
         }))
     }
-    /// The race contract never writes.
+    /// Same as `open_dir`: the writing race contract writes through it.
     fn open_dir_write(&self, abs: &Path, _: &WriteCap) -> SysResult<Box<dyn DirWrite + '_>> {
-        Err(SysError::path(SysErrorKind::Unsupported, abs))
+        if !std::fs::metadata(abs).map_err(|_| naive_err(abs))?.is_dir() {
+            return Err(SysError::path(SysErrorKind::InvalidPath, abs));
+        }
+        Ok(Box::new(NaiveDir {
+            base: abs.to_path_buf(),
+            id: naive_id(abs)?,
+        }))
+    }
+}
+
+/// The naive pause between a check and the act (see [`NAIVE_PAUSE`]).
+fn naive_pause() {
+    thread::yield_now();
+    thread::sleep(NAIVE_PAUSE);
+}
+
+fn naive_sha(data: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(data).into()
+}
+
+fn naive_mismatch(p: &Path) -> SysError {
+    SysError::path(SysErrorKind::Mismatch, p)
+}
+
+/// Reads `src` and checks it against `new` (hash and bound), like the real sequence does.
+fn naive_source(src: &mut dyn std::io::Read, new: &NewFile, p: &Path) -> SysResult<Vec<u8>> {
+    let mut data = Vec::new();
+    src.read_to_end(&mut data).map_err(|_| naive_err(p))?;
+    if u64::try_from(data.len()).unwrap_or(u64::MAX) > new.max_len {
+        return Err(SysError::too_large(p.display().to_string(), new.max_len));
+    }
+    if naive_sha(&data) != new.sha256 {
+        return Err(naive_mismatch(p));
+    }
+    Ok(data)
+}
+
+/// The naive write: the temp file next to the target by path, then `std::fs::rename`, which
+/// replaces an existing target (`MOVEFILE_REPLACE_EXISTING`).
+fn naive_put(path: &Path, tmp: &str, data: &[u8]) -> SysResult<Written> {
+    let tmp = path.with_file_name(tmp);
+    std::fs::write(&tmp, data).map_err(|_| naive_err(&tmp))?;
+    std::fs::rename(&tmp, path).map_err(|_| naive_err(path))?;
+    Ok(Written {
+        sha256: naive_sha(data),
+        len: u64::try_from(data.len()).unwrap_or(u64::MAX),
+        file_id: naive_id(path)?.1,
+    })
+}
+
+/// The naive guard: the hash is taken by path when it is opened; `replace` and `delete` act
+/// by path after the pause, on whatever is at the name then.
+#[derive(Debug)]
+struct NaiveGuard {
+    path: PathBuf,
+    hash: [u8; 32],
+}
+
+impl FileGuard for NaiveGuard {
+    fn metadata(&self) -> SysResult<Metadata> {
+        naive_meta(&self.path)
+    }
+
+    fn sha256(&mut self) -> SysResult<[u8; 32]> {
+        Ok(self.hash)
+    }
+
+    fn reader(&mut self) -> SysResult<Box<dyn std::io::Read + '_>> {
+        Ok(Box::new(
+            File::open(&self.path).map_err(|_| naive_err(&self.path))?,
+        ))
+    }
+
+    fn users(&self) -> SysResult<Vec<u32>> {
+        Err(SysError::path(SysErrorKind::Unsupported, &self.path))
+    }
+
+    fn replace(
+        self: Box<Self>,
+        expected: &[u8; 32],
+        src: &mut dyn std::io::Read,
+        new: &NewFile,
+    ) -> SysResult<Replaced> {
+        if self.hash != *expected {
+            return Err(naive_mismatch(&self.path));
+        }
+        let data = naive_source(src, new, &self.path)?;
+        naive_pause();
+        Ok(Replaced {
+            new: naive_put(&self.path, new.tmp.as_str(), &data)?,
+            old_left: None,
+        })
+    }
+
+    fn delete(self: Box<Self>, expected: &[u8; 32]) -> SysResult<()> {
+        if self.hash != *expected {
+            return Err(naive_mismatch(&self.path));
+        }
+        naive_pause();
+        std::fs::remove_file(&self.path).map_err(|_| naive_err(&self.path))
+    }
+
+    fn rename_to(self: Box<Self>, name: &RelPath) -> SysResult<()> {
+        naive_pause();
+        let to = self.path.with_file_name(name.as_str());
+        std::fs::rename(&self.path, &to).map_err(|_| naive_err(&to))
+    }
+}
+
+/// A naive lock: a file opened (or created) by path with share 0.
+#[derive(Debug)]
+struct NaiveLock(#[expect(dead_code, reason = "held for its drop")] File);
+
+impl FileLock for NaiveLock {}
+
+impl DirWrite for NaiveDir {
+    fn open_dir_write(&self, p: &RelPath) -> SysResult<Box<dyn DirWrite + '_>> {
+        let full = self.check(Some(p))?;
+        let id = naive_id(&full)?;
+        Ok(Box::new(NaiveDir { base: full, id }))
+    }
+
+    fn guard(&self, name: &RelPath) -> SysResult<Box<dyn FileGuard + '_>> {
+        let path = self.check(Some(name))?;
+        let data = std::fs::read(&path).map_err(|_| naive_err(&path))?;
+        Ok(Box::new(NaiveGuard {
+            hash: naive_sha(&data),
+            path,
+        }))
+    }
+
+    fn create_new(
+        &self,
+        name: &RelPath,
+        src: &mut dyn std::io::Read,
+        new: &NewFile,
+    ) -> SysResult<Written> {
+        let path = self.base.join(name.as_str());
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return Err(SysError::path(SysErrorKind::AlreadyExists, &path));
+        }
+        let data = naive_source(src, new, &path)?;
+        naive_pause();
+        naive_put(&path, new.tmp.as_str(), &data)
+    }
+
+    fn create_dir(&self, name: &RelPath) -> SysResult<u128> {
+        let path = self.base.join(name.as_str());
+        naive_pause();
+        std::fs::create_dir(&path).map_err(|_| naive_err(&path))?;
+        Ok(naive_id(&path)?.1)
+    }
+
+    fn remove_dir(&self, name: &RelPath, _expected_id: u128) -> SysResult<()> {
+        let path = self.check(Some(name))?;
+        std::fs::remove_dir(&path).map_err(|_| naive_err(&path))
+    }
+
+    fn flush(&self) -> SysResult<()> {
+        Ok(())
+    }
+
+    fn lock(&self, name: &RelPath) -> SysResult<Box<dyn FileLock + '_>> {
+        let path = self.base.join(name.as_str());
+        naive_pause();
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(&path)
+            .map_err(|_| naive_err(&path))?;
+        Ok(Box::new(NaiveLock(f)))
     }
 }
 

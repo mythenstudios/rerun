@@ -13,9 +13,9 @@ use super::{FakeFs, FakeSystem, Fault, FsOp, Prim, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
     Access, FsFixture, Held, Share, fs_link_read_contract, fs_link_write_contract,
-    fs_race_contract, fs_read_contract, fs_volume_contract, fs_write_contract, gpu_contract,
-    known_folders_contract, registry_read_contract, registry_system_contract,
-    registry_write_contract, topology_contract,
+    fs_race_contract, fs_read_contract, fs_volume_contract, fs_write_contract,
+    fs_write_race_contract, gpu_contract, known_folders_contract, registry_read_contract,
+    registry_system_contract, registry_write_contract, topology_contract,
 };
 use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, NewFile, TmpName, WriteCap, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
@@ -121,6 +121,23 @@ fn fake_fulfils_fs_link_write_contract() {
 fn fake_fulfils_fs_write_contract() {
     let sys = fresh(r"C:\Work");
     let skips = fs_write_contract(sys.fs(), sys.fake_fs(), Path::new(r"C:\Work")).unwrap();
+    assert!(skips.is_empty(), "{skips:?}");
+}
+
+/// The writing race against the fake, with a short budget: a sanity check of the harness (the
+/// fake's renames are atomic and instant; its deterministic step hooks remain the precise
+/// TOCTOU tests).
+#[test]
+fn fake_fulfils_fs_write_race_contract() {
+    let sys = fresh(r"C:\Work");
+    let skips = fs_write_race_contract(
+        sys.fs(),
+        sys.fake_fs(),
+        Path::new(r"C:\Work"),
+        Duration::from_millis(200),
+        &crate::sys::contract::WriteOp::ALL,
+    )
+    .unwrap();
     assert!(skips.is_empty(), "{skips:?}");
 }
 

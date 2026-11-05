@@ -14,9 +14,9 @@
 //!   opens. Everything they need on disk, and every attacker move, is done by an
 //!   [`FsFixture`] (plain `std::fs` and raw calls in test code). They run against `sys::fake`
 //!   and `sys::win`.
-//! - **Write side** (`DirWrite`, `FileGuard`, ADR 0017): [`fs_write_contract`] and
-//!   [`fs_link_write_contract`] run against the fake and against `sys::win`
-//!   (`docs/09-testing.md`). The phase 1 write contracts exercised the path-based writing
+//! - **Write side** (`DirWrite`, `FileGuard`, ADR 0017): [`fs_write_contract`],
+//!   [`fs_link_write_contract`] and the writing race [`fs_write_race_contract`] run against
+//!   the fake and against `sys::win` (`docs/09-testing.md`). The phase 1 write contracts exercised the path-based writing
 //!   methods that ADR 0017 replaced and were removed with them.
 //!
 //! Each file system contract needs a fresh, **empty** working directory. The runner owns
@@ -53,8 +53,10 @@ use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 
 mod write;
+mod write_race;
 
 pub use write::{fs_link_write_contract, fs_write_contract};
+pub use write_race::{WriteOp, fs_write_race_contract};
 
 /// Failed contract with a description.
 pub type ContractResult = Result<(), String>;

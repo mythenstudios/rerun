@@ -22,9 +22,10 @@ use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinSystem, WinTopology}
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{Forbidden, ForbiddenRoots, Protected, RootError, RootId, StoreDir};
 use crate::sys::contract::{
-    FsContractResult, FsFixture, RegFixture, fs_link_read_contract, fs_link_write_contract,
-    fs_race_contract, fs_read_contract, fs_volume_contract, fs_write_contract, gpu_contract,
-    known_folders_contract, registry_read_contract, registry_system_contract, topology_contract,
+    FsContractResult, FsFixture, RegFixture, WriteOp, fs_link_read_contract,
+    fs_link_write_contract, fs_race_contract, fs_read_contract, fs_volume_contract,
+    fs_write_contract, fs_write_race_contract, gpu_contract, known_folders_contract,
+    registry_read_contract, registry_system_contract, topology_contract,
 };
 use crate::sys::fs::{EntryKind, Fs, WriteCap};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
@@ -405,12 +406,12 @@ fn teeth_window(root: &TestRoot, name: &str) -> Duration {
 /// `name`) until it reports a leak; panics on a harness problem, or with "harness lost its
 /// teeth" when no attempt leaked within [`TEETH_ROUNDS`] windows of [`teeth_window`]. What it
 /// proves is unchanged: the naive control is caught. Returns the time to the catch (within its
-/// round) and the number of attempts.
+/// round), the number of attempts and the leak that caught it.
 fn catch_naive(
     root: &TestRoot,
     name: &str,
     attempt: impl Fn(&Path) -> FsContractResult,
-) -> (Duration, u32) {
+) -> (Duration, u32, String) {
     let mut attempts = 0u32;
     let mut windows = Vec::new();
     for round in 0..TEETH_ROUNDS {
@@ -421,7 +422,7 @@ fn catch_naive(
             let work = root.work(&format!("{name}-{attempts}"));
             attempts += 1;
             match attempt(&work) {
-                Err(e) if is_leak(&e) => return (started.elapsed(), attempts),
+                Err(e) if is_leak(&e) => return (started.elapsed(), attempts, e),
                 Err(e) => panic!("race harness broken against the naive control: {e}"),
                 Ok(_) => {}
             }
@@ -442,12 +443,13 @@ fn win_fulfils_fs_race_contract_and_the_harness_has_teeth() {
         return;
     };
     // Control: the check-then-use-by-path implementation must be caught.
-    let (caught, attempts) = catch_naive(&root, "naive", |work| {
+    let (caught, attempts, leak) = catch_naive(&root, "naive", |work| {
         fs_race_contract(&NaiveFs, root.fx(), work, Duration::from_millis(500))
     });
     let budget = (caught * 10).max(Duration::from_secs(5));
     note(&format!(
-        "note: race: NaiveFs caught after {caught:?} ({attempts} attempts); WinFs runs {budget:?}"
+        "note: race: NaiveFs caught after {caught:?} ({attempts} attempts: {leak}); WinFs runs \
+         {budget:?}"
     ));
     let work = root.work("win");
     report(
@@ -1134,4 +1136,31 @@ fn store_dir_game_refuses_links_on_real_windows() {
             panic!("{s} skipped on a GitHub runner");
         }
     }
+}
+
+#[test]
+fn win_fulfils_fs_write_race_contract_and_the_harness_has_teeth() {
+    let Some(root) = TestRoot::new("write-race") else {
+        return;
+    };
+    // Control: the path-based writer (hash, pause, act by path) must be caught, by each
+    // operation alone, so every assertion of the contract has teeth.
+    let mut slowest = Duration::ZERO;
+    for op in WriteOp::ALL {
+        let (caught, attempts, leak) = catch_naive(&root, &format!("naive-{op:?}"), |work| {
+            fs_write_race_contract(&NaiveFs, root.fx(), work, Duration::from_millis(500), &[op])
+        });
+        note(&format!(
+            "note: write race: NaiveFs {op:?} caught after {caught:?} ({attempts} attempts: \
+             {leak})"
+        ));
+        slowest = slowest.max(caught);
+    }
+    let budget = (slowest * 10).max(Duration::from_secs(5));
+    note(&format!("note: write race: WinFs runs {budget:?}"));
+    let work = root.work("win");
+    report(
+        "fs_write_race_contract",
+        fs_write_race_contract(&WinFs::new(), root.fx(), &work, budget, &WriteOp::ALL),
+    );
 }
