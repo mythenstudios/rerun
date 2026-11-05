@@ -56,22 +56,53 @@ The FFI lives in one module per binary: `rerun-core::sys::win::cpu` now (size qu
 | LP E-cores (Core Ultra) | lowest class, own LLC with `level: 2` | never for games, unless explicit |
 | > 64 threads | several groups | mask per group; game in one group |
 | 32-bit game | PE header x86 | select at most 32 logical processors |
+| Zen 2 CCX (Ryzen 3000) | two `llc` groups of 4 cores per CCD | `single_l3: true` → 4 cores, not 8; never infer the group size from the product name |
+| X3D with V-Cache on both CCDs (9950X3D2) | several `llc` groups, **equal** sizes | `prefer_l3: largest` → tie → same as `single_l3` (see step 3) |
+| Hybrid without SMT (Arrow Lake, Lunar Lake, Panther Lake) | several `efficiency_class`, one thread per `core` | `smt: off` is a no-op, not an error |
+| Compact cores (Zen 5c, later Zen 6c) | own `llc` group with a smaller size; efficiency class still to be verified | `prefer_l3: largest` / `single_l3` pick the full-size cores |
+| Intel with several compute tiles (Nova Lake-S, unreleased) | several `llc` groups on one Intel package | treated exactly like dual-CCD Ryzen: `single_l3` keeps a game on one tile |
 
 ## Selection algorithm (order)
 
 1. Candidates = all logical CPUs of group 0 (or of the largest group).
 2. `prefer: performance` → only the highest `efficiency_class`.
-3. `prefer_l3: largest` → L3 group with the largest cache; otherwise with `single_l3` the L3 group with the most candidates.
+3. `prefer_l3: largest` → L3 group with the largest cache; otherwise with `single_l3` the L3 group with the most candidates. **Ties** (equal size, e.g. 9950X3D2 or plain dual-CCD parts): the group with the most candidates, then the lowest `llc` number. A rule never spreads a game across tied groups. The number of cores per group is always read, never assumed (4 on Zen 2, 8 on Zen 3–5, up to 12 on Zen 6, 16 on Zen 6c).
 4. `smt: off` → only the first thread per `core`.
 5. 32-bit → truncate to 32.
 6. `max_threads` → the first N (cores before SMT siblings).
 7. Empty result → rule too strict, error with explanation instead of a silent fallback.
+
+## Coverage by CPU family (as of 2026-11-05)
+
+Rerun keeps no model list; every row below is handled by the rules above. The table records what each family looks like to the parser, so fixtures and tests can target the differences. "Unreleased" rows come from announcements and leaks and must be re-checked against a real dump before they are treated as fact.
+
+| Family | Status | What the parser sees | Notes |
+|---|---|---|---|
+| Intel Core 6th–11th gen | released | one `llc`, one efficiency class, SMT on most SKUs | fixture `i5-6600.json` (no SMT) |
+| Intel Core 12th–14th gen (Alder/Raptor Lake) | released | one `llc`, two classes, SMT on P-cores only | |
+| Core Ultra 100 (Meteor Lake, mobile) | released | three core types; LP-E on the SoC tile with their own `llc` (level 2) | |
+| Core Ultra 200S/HX (Arrow Lake, incl. 200K Plus) | released | two classes, no SMT, one `llc` | 200H/U add two LP-E cores |
+| Core Ultra 200V (Lunar Lake) | released | 4 P + 4 LP-E, no SMT; LP-E cluster outside the P-core ring | |
+| Core Ultra Series 3 (Panther Lake, mobile) | released (CES 2026) | 4P + 4LP-E or 4P + 8E + 4LP-E; LP-E use the same core design as the E-cores on a separate power island | **the efficiency class alone may not separate E from LP-E**; the `llc` must. Verify with a dump. |
+| Core Ultra 400 (Nova Lake-S, desktop) | unreleased (announced/leaked, H2 2026 or later) | up to 16P + 32E + 4LP-E on two compute tiles, each with its own large LLC | first Intel desktop part with several L3 groups |
+| Ryzen 1000/2000 (Zen, Zen+) | released | CCX of 4 cores with their own L3 | Zen+ is the oldest officially supported by Windows 11 |
+| Ryzen 3000 (Zen 2) | released | per CCD two CCX of 4 cores, 16 MB L3 each | |
+| Ryzen 5000/7000/9000 (Zen 3–5) | released | per CCD one group of 8 cores, 32 MB L3; Ryzen 9 has two | fixture `ryzen9-5950x` (real dump) |
+| X3D, one CCD (5800X3D, 7800X3D, 9800X3D) | released | one `llc` | |
+| X3D, two CCDs, V-Cache on one (7900X3D, 7950X3D, 9900X3D, 9950X3D) | released | two `llc`, unequal sizes | see pitfall on AMD's driver |
+| X3D, V-Cache on both CCDs (9950X3D2 Dual Edition) | released (April 2026) | two `llc`, equal sizes (96 MB each) | tie-break in step 3 |
+| Ryzen AI 300 (Strix Point) | released | Zen 5 and Zen 5c clusters with different L3 sizes | efficiency class to be verified |
+| Ryzen AI Max (Strix Halo) | released | two Zen 5 CCDs, like desktop Ryzen 9 | |
+| Zen 6 desktop/mobile | unreleased (late 2026 to 2027) | CCD with up to 12 cores and 48 MB L3, up to two CCDs; Zen 6c up to 16 per CCD | the reason group sizes are never assumed |
+| Threadripper, EPYC, Xeon | released | many `llc` groups, more than 64 threads, several processor groups | |
+| Windows on ARM (Snapdragon X) | out of scope for v1 | — | `tested_on: [arm64]` in the Topo format |
 
 ## Pitfalls
 
 - **Core count ≠ affinity.** `GetSystemInfo().dwNumberOfProcessors` stays the same, no matter which mask is set. Games that count this way and crash with too many cores need `inproc` with `report_cores`.
 - **Hard vs. soft.** Affinity (`SetProcessAffinityMask`, Job Object) is hard. CPU Sets (`SetProcessDefaultCpuSets`) are a preference; often better on hybrid CPUs because Thread Director can keep working. Default: hard.
 - **Games that set affinity themselves.** Only `hold` (set again) or `inproc` (hook) helps.
+- **Vendor schedulers already at work.** On dual-CCD X3D parts with V-Cache on one CCD, AMD's chipset driver parks the other CCD for games it recognises (via Game Bar); on Intel hybrid parts Thread Director steers threads. Rerun's rule must agree with them (`prefer_l3: largest` picks the same CCD the driver keeps awake) and never fight them. Parked state is ignored by the parser on purpose; the post-launch check reports what the game actually got.
 
 ## UI
 
@@ -81,4 +112,11 @@ Thread tiles grouped by topology: one row per L3 group or core type, SMT sibling
 
 `tests/fixtures/cpu/` (see its `README.md`). A real machine is stored **raw**: `<cpu>.raw.json` (format 1) holds the bytes of both calls as hex, next to it `<cpu>.json` is the expected parsed `CpuTopology`; a test parses the raw file and compares. Machines without a dump are parsed-only fixtures (`CpuTopology` JSON, validated). Parser edge cases are byte records built in the `rerun-proto` tests.
 
-Present: `ryzen9-5950x.raw.json` + `ryzen9-5950x.json` (2 CCD, 32 T, real dump, Windows 11 build 26300), `i5-6600.json` (4 cores, no SMT, datasheet). Planned: `ryzen9-7950x3d.json`, `i9-14900k.json`, `core-ultra-9-285k.json`, `core-ultra-7-155h.json` (LP-E), `threadripper-7980x.json` (>64).
+Present: `ryzen9-5950x.raw.json` + `ryzen9-5950x.json` (2 CCD, 32 T, real dump, Windows 11 build 26300), `i5-6600.json` (4 cores, no SMT, datasheet). Planned: `ryzen9-7950x3d.json`, `i9-14900k.json`, `core-ultra-9-285k.json`, `core-ultra-7-155h.json` (LP-E), `threadripper-7980x.json` (>64), `ryzen7-3700x.json` (Zen 2, two CCX per CCD), `ryzen9-9950x3d2.json` (equal V-Cache, tie-break), `ryzen-ai-9-hx370.json` (Zen 5 + Zen 5c), `core-ultra-x9-388h.json` (Panther Lake, E and LP-E possibly in the same class). Synthetic only until real hardware exists: `nova-lake-2tile.json` (two compute tiles), `zen6-12c.json` (12 cores per CCD).
+
+## Sources (checked 2026-11-05)
+
+- Panther Lake configurations and LP-E design: heise online, "Panther Lake notebook processor" (heise.de/-10748523); PCWorld, "Intel launches Core Ultra Series 3" (pcworld.com/article/3023764).
+- Nova Lake-S tiles and bLLC (leaks, unreleased): Tom's Hardware and TweakTown reports on the 52/44/28/24-core bLLC configurations.
+- Zen 2 CCX layout and Zen 6 CCD (12 cores, 48 MB L3, unreleased): Wccftech, "Zen 6 Olympic Ridge" core configurations.
+- 9950X3D2 Dual Edition (V-Cache on both CCDs, 96 MB L3 each, April 2026): StorageReview and HotHardware reviews.
