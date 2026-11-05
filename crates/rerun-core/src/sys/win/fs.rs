@@ -42,8 +42,8 @@ use super::token;
 use crate::fold::fold;
 use crate::path::RelPath;
 use crate::sys::fs::{
-    Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, Fs, FsKind, Metadata, NewFile, ReadSeek,
-    ReparseInfo, RootInfo, WriteCap, Written, tag,
+    Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, FileLock, Fs, FsKind, Metadata, NewFile,
+    ReadSeek, ReparseInfo, RootInfo, WriteCap, Written, tag,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
@@ -746,6 +746,10 @@ impl DirWrite for WinDir {
     }
 
     fn flush(&self) -> SysResult<()> {
+        Err(err(SysErrorKind::Unsupported, NO_WRITE))
+    }
+
+    fn lock(&self, _: &RelPath) -> SysResult<Box<dyn FileLock + '_>> {
         Err(err(SysErrorKind::Unsupported, NO_WRITE))
     }
 }

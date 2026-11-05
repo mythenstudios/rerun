@@ -52,9 +52,11 @@
 //!   control or an invisible/confusable character ([`crate::sys::shown_target`]), in `win`
 //!   and `fake` alike.
 //! - Implementation status: both `sys::fake` and `sys::win` implement the read side and
-//!   [`DirWrite::open_dir_write`]; every writing method of [`DirWrite`] returns `Unsupported`
-//!   until the fake write side (share model, faults) and then the real one follow
-//!   (ADR 0017). [`Dir::users`] is real in both (the fake from its share model).
+//!   [`DirWrite::open_dir_write`]. The write sequences live once in `sys::seq` (ADR 0017,
+//!   A1); the fake implements their primitives for `create_new`, `create_dir`, `remove_dir`,
+//!   `flush` and `lock` (the guard follows), `sys::win` returns `Unsupported` for every
+//!   writing method until P2-4. [`Dir::users`] is real in both (the fake from its share
+//!   model).
 
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -380,9 +382,8 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
 /// a path resolved again. Writes into a case-sensitive directory and on a volume without
 /// POSIX delete and rename semantics are `Unsupported`.
 ///
-/// So far `sys::fake` and `sys::win` implement only [`Self::open_dir_write`]; every writing
-/// method returns `Unsupported` until the fake (share model, faults) and then the real write
-/// side follow (ADR 0017, ADR 0020).
+/// The writing methods run the sequences of `sys::seq` (ADR 0017, A1) over the primitives of
+/// an implementation; `sys::win` returns `Unsupported` for them until P2-4.
 pub trait DirWrite: Dir {
     /// Opens a subdirectory relative to this handle with the write capability. Same walk
     /// and errors as [`Dir::open_dir`].
@@ -412,7 +413,18 @@ pub trait DirWrite: Dir {
 
     /// Flushes this directory (the renames into it), best effort (ADR 0019).
     fn flush(&self) -> SysResult<()>;
+
+    /// Opens or creates the plain file `name` under its final name (it stays empty; its
+    /// content never matters) with share 0 and keeps it open until the [`FileLock`] drops: any
+    /// other open of it, by Rerun or anyone, is `Busy` meanwhile; the kernel releases it when
+    /// the process ends (ADR 0017, A7; the journal lock of ADR 0019). Never follows a reparse
+    /// point (`ReparsePoint`); a directory is `AccessDenied`, a link count other than 1
+    /// `Linked`.
+    fn lock(&self, name: &RelPath) -> SysResult<Box<dyn FileLock + '_>>;
 }
+
+/// A held lock file ([`DirWrite::lock`]); dropping it releases the lock.
+pub trait FileLock: Send + std::fmt::Debug {}
 
 /// One handle on an existing file that shares read only (ADR 0017, "FileGuard"): while it is
 /// held nobody else can write, rename or delete the file, so the hash taken on it is the hash
@@ -564,11 +576,17 @@ fn segment(s: &str) -> RelPath {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dir, DirWrite, FileGuard, Fs, TmpName, tag};
+    use super::{Dir, DirWrite, FileGuard, FileLock, Fs, TmpName, tag};
 
     // Compile test: every trait must be usable as a trait object, and a write handle is a
     // read handle.
-    fn _object_safe(_: &dyn Fs, _: &dyn Dir, w: &dyn DirWrite, _: &dyn FileGuard) {
+    fn _object_safe(
+        _: &dyn Fs,
+        _: &dyn Dir,
+        w: &dyn DirWrite,
+        _: &dyn FileGuard,
+        _: &dyn FileLock,
+    ) {
         let _: &dyn Dir = w;
     }
 

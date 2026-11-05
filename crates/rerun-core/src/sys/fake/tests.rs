@@ -8,19 +8,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{FakeFs, FakeSystem, FsOp, StepEvent};
+use super::{FakeFs, FakeSystem, FsOp, Prim, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
     Access, FsFixture, Held, Share, fs_link_read_contract, fs_race_contract, fs_read_contract,
-    fs_volume_contract, gpu_contract, known_folders_contract, registry_read_contract,
-    registry_system_contract, registry_write_contract, topology_contract,
+    fs_volume_contract, fs_write_contract, gpu_contract, known_folders_contract,
+    registry_read_contract, registry_system_contract, registry_write_contract, topology_contract,
 };
-use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, WriteCap, tag};
+use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, NewFile, TmpName, WriteCap, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
 use crate::sys::snapshot::{Scope, snapshot};
 use crate::sys::{DriverVersion, GpuAdapter, KnownFolder};
 use crate::sys::{SysErrorKind, SysResult, System, Topology};
 use rerun_proto::cpu::CpuTopology;
+use sha2::{Digest, Sha256};
 
 const RYZEN_5950X: &str = include_str!("../../../../../tests/fixtures/cpu/ryzen9-5950x.json");
 const I5_6600: &str = include_str!("../../../../../tests/fixtures/cpu/i5-6600.json");
@@ -102,7 +103,15 @@ fn contracts_can_run_twice_in_fresh_dirs() {
         fs_link_read_contract(sys.fs(), fx, &dir("link-read")).unwrap();
         fs_volume_contract(sys.fs(), fx, &dir("volume")).unwrap();
         fs_race_contract(sys.fs(), fx, &dir("race"), Duration::from_millis(20)).unwrap();
+        fs_write_contract(sys.fs(), fx, &dir("write")).unwrap();
     }
+}
+
+#[test]
+fn fake_fulfils_fs_write_contract() {
+    let sys = fresh(r"C:\Work");
+    let skips = fs_write_contract(sys.fs(), sys.fake_fs(), Path::new(r"C:\Work")).unwrap();
+    assert!(skips.is_empty(), "{skips:?}");
 }
 
 #[test]
@@ -2084,4 +2093,53 @@ fn the_values_total_counts_long_names() {
         sys.registry().values(&root).unwrap_err().kind,
         SysErrorKind::Unsupported
     );
+}
+
+// ---------- Write side ----------
+
+/// The primitive calls of a sequence, in order, as the step hook sees them.
+fn record_calls(sys: &FakeSystem) -> Arc<Mutex<Vec<Prim>>> {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&calls);
+    sys.fake_fs().on_step(move |_, e| {
+        if let Some(c) = e.call {
+            assert_eq!(e.op, FsOp::Write);
+            seen.lock().unwrap().push(c);
+        }
+    });
+    calls
+}
+
+#[test]
+fn create_new_runs_the_sequence_of_adr_0017_through_primitives() {
+    let sys = FakeSystem::builder().dir(r"C:\G").build().unwrap();
+    let g = open(&sys, r"C:\G");
+    let data = vec![5u8; 64 * 1024 + 1];
+    let new = NewFile {
+        tmp: TmpName::new(1, 1),
+        attrs: Attrs {
+            hidden: true,
+            ..Attrs::default()
+        },
+        sha256: Sha256::digest(&data).into(),
+        max_len: 1 << 20,
+    };
+    let calls = record_calls(&sys);
+    g.create_new(&r("new.bin"), &mut &data[..], &new).unwrap();
+    sys.fake_fs().clear_on_step();
+    use Prim::{CreateTmp, FlushFile, Info, Lookup, Rename, SetAttrs, State, Write};
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            Info, Lookup, CreateTmp, Write, Write, SetAttrs, FlushFile, State, Rename
+        ]
+    );
+    assert_eq!(g.read(&r("new.bin")).unwrap(), data);
+    let names: Vec<String> = g
+        .read_dir(None)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, ["new.bin"]);
 }

@@ -23,7 +23,7 @@ use crate::path::{RelPath, RootPath};
 use crate::policy::root::{Forbidden, ForbiddenRoots, Protected, RootError, RootId, StoreDir};
 use crate::sys::contract::{
     FsContractResult, FsFixture, RegFixture, fs_link_read_contract, fs_race_contract,
-    fs_read_contract, fs_volume_contract, gpu_contract, known_folders_contract,
+    fs_read_contract, fs_volume_contract, fs_write_contract, gpu_contract, known_folders_contract,
     registry_read_contract, registry_system_contract, topology_contract,
 };
 use crate::sys::fs::{Attrs, EntryKind, Fs, NewFile, TmpName, WriteCap};
@@ -412,6 +412,19 @@ fn win_fulfils_fs_race_contract_and_the_harness_has_teeth() {
 }
 
 #[test]
+#[ignore = "sys::win write side lands in P2-4"]
+fn win_fulfils_fs_write_contract() {
+    let Some(root) = TestRoot::new("write") else {
+        return;
+    };
+    let work = root.work("w");
+    report(
+        "fs_write_contract",
+        fs_write_contract(&WinFs::new(), root.fx(), &work),
+    );
+}
+
+#[test]
 fn win_dir_write_methods_are_unsupported() {
     let Some(root) = TestRoot::new("read-only") else {
         return;
@@ -439,6 +452,7 @@ fn win_dir_write_methods_are_unsupported() {
     unsupported("create_dir", dir.create_dir(&n).err());
     unsupported("remove_dir", dir.remove_dir(&rel("d"), 0).err());
     unsupported("flush", dir.flush().err());
+    unsupported("lock", dir.lock(&n).err());
     // Opening with the write capability is an open, not a write: same object as `open_dir`.
     let d = dir.open_dir_write(&rel("D")).unwrap();
     assert_eq!(

@@ -35,9 +35,15 @@
 //!   owner drops: the drop queues the close and the next access to the state applies it (never
 //!   re-entrant, also when a handle drops while the state is locked). A handle to a deleted
 //!   directory returns `NotFound`.
-//! - The write side ([`DirWrite`]) is not modelled yet: [`DirWrite::open_dir_write`] opens a
-//!   handle like [`Dir::open_dir`], every writing method returns `Unsupported` (ADR 0017).
-//!   Tests change the tree through the setup and attacker helpers of [`FakeFs`].
+//! - **Write side** ([`DirWrite`], ADR 0017): the sequences live once in `sys::seq`; the fake
+//!   implements only their primitives (`fs/prim.rs`). Each primitive fires the step hook with
+//!   `FsOp::Write` and its [`Prim`] before it acts. `<tmp>` is created with write and delete
+//!   access and share 0, a lock file with read access and share 0, a directory is opened for
+//!   deleting with share read and write; a rename into a directory needs every handle on it
+//!   to share write and refuses an existing name (`Busy`); a POSIX delete removes the name
+//!   when its handle closes (a directory only if it is still empty), keeping the content for
+//!   other open handles. `DirWrite::guard` is not modelled yet (`Unsupported`). Tests change
+//!   the tree through the setup and attacker helpers of [`FakeFs`].
 //! - No ACLs and no elevation: `user_writable` ([`FakeFs::set_user_writable`]) is reported
 //!   in [`RootInfo`] but not enforced.
 //! - No alternate data streams.
@@ -76,10 +82,14 @@ use crate::fold::fold;
 use crate::path::RelPath;
 use crate::sys::contract::{Access, Share, share_conflict};
 use crate::sys::fs::{
-    Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, Fs, FsKind, Metadata, NewFile, ReadSeek,
-    ReparseInfo, RootInfo, WriteCap, Written, tag,
+    Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, FileLock, Fs, FsKind, Metadata, NewFile,
+    ReadSeek, ReparseInfo, RootInfo, WriteCap, Written, tag,
 };
-use crate::sys::{SysError, SysErrorKind, SysResult};
+use crate::sys::{SysError, SysErrorKind, SysResult, seq};
+
+mod prim;
+
+pub use prim::FakeFile;
 
 type NodeId = u64;
 
@@ -102,18 +112,55 @@ pub enum FsOp {
     Users,
     /// `DirWrite::open_dir_write`.
     OpenDirWrite,
+    /// A primitive call of the write side (`sys::seq`); [`StepEvent::call`] names it.
+    Write,
+}
+
+/// A primitive call of the write side (ADR 0017, A1), the unit of the fake's write hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Prim {
+    /// `PrimDir::info` (identity, case sensitivity, POSIX support).
+    Info,
+    /// `PrimDir::lookup` (attribute-only metadata of a child).
+    Lookup,
+    /// `PrimDir::create_tmp` (step 2).
+    CreateTmp,
+    /// `PrimDir::open_lock`.
+    OpenLock,
+    /// `PrimDir::create_dir`.
+    CreateDir,
+    /// `PrimDir::open_dir_delete`.
+    OpenDirDelete,
+    /// `PrimDir::rename` (steps 6 and 7, the undo, `rename_to`, `create_new`).
+    Rename,
+    /// `PrimDir::flush`.
+    FlushDir,
+    /// `PrimFile::state`.
+    State,
+    /// `PrimFile::write` (one chunk of step 3).
+    Write,
+    /// `PrimFile::set_attrs` (step 4).
+    SetAttrs,
+    /// `PrimFile::flush` (step 5).
+    FlushFile,
+    /// `PrimFile::posix_delete` (step 8, `delete`, `remove_dir`, the cleanup of `<tmp>`).
+    PosixDelete,
 }
 
 /// A step of an operation: fires before component `index` (0-based) of the relative path is
-/// looked up.
+/// looked up, and before each primitive call of the write side (`op` is [`FsOp::Write`],
+/// `call` names the primitive, `name` is its name argument or empty).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepEvent {
     /// Operation.
     pub op: FsOp,
-    /// Index of the component that is looked up next.
+    /// Index of the component that is looked up next (0 for a primitive call).
     pub index: usize,
     /// Name of that component.
     pub name: String,
+    /// The primitive about to run (`None` for a step of a read-side walk).
+    pub call: Option<Prim>,
 }
 
 /// Test hook, see [`FakeFs::on_step`].
@@ -245,6 +292,8 @@ struct OpenRec {
         reason = "read by the crash model's restart, which closes Rerun's handles only"
     )]
     origin: Origin,
+    /// A POSIX delete was set on the handle: the name goes when it closes.
+    delete_on_close: bool,
 }
 
 #[derive(Debug, Default)]
@@ -662,18 +711,35 @@ impl State {
                 share,
                 pid,
                 origin,
+                delete_on_close: false,
             },
         );
         self.next_open
     }
 
-    /// Closes a handle (applied from the close queue, see [`FakeFs::lock`]).
+    /// Closes a handle (applied from the close queue, see [`FakeFs::lock`]). A POSIX delete
+    /// set on it removes its name now: the entry it was opened through (followed across
+    /// renames), a directory only if it is still empty.
     fn close(&mut self, id: OpenId) {
-        if let Some(OpenRec {
-            obj: Obj::File { ino, .. },
-            ..
-        }) = self.opens.remove(&id)
-        {
+        let Some(rec) = self.opens.remove(&id) else {
+            return;
+        };
+        if rec.delete_on_close {
+            let node = rec.obj.node();
+            let still = match (rec.obj, self.nodes.get(&node)) {
+                (_, Some(Node { parent: None, .. }) | None) => false,
+                (Obj::File { ino, .. }, Some(n)) => matches!(n.body, Body::File(i) if i == ino),
+                (Obj::Node(_), Some(n)) => match &n.body {
+                    Body::Dir(d) => d.children.is_empty(),
+                    Body::Link(_) => true,
+                    Body::File(_) => false,
+                },
+            };
+            if still {
+                self.unlink(node);
+            }
+        }
+        if let Obj::File { ino, .. } = rec.obj {
             self.drop_orphan(ino);
         }
     }
@@ -1001,9 +1067,19 @@ impl FakeFs {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Runs the hook for a step of a read-side walk.
+    fn fire(&self, op: FsOp, index: usize, name: &str) {
+        self.fire_event(op, index, name, None);
+    }
+
+    /// Runs the hook before a primitive call of the write side.
+    fn fire_call(&self, call: Prim, name: &str) {
+        self.fire_event(FsOp::Write, 0, name, Some(call));
+    }
+
     /// Runs the hook without holding the state lock. The hook is taken out while it runs, so
     /// operations it performs do not trigger it again.
-    fn fire(&self, op: FsOp, index: usize, name: &str) {
+    fn fire_event(&self, op: FsOp, index: usize, name: &str, call: Option<Prim>) {
         let hook = self.hook_slot().take();
         if let Some(mut hook) = hook {
             hook(
@@ -1012,6 +1088,7 @@ impl FakeFs {
                     op,
                     index,
                     name: name.to_owned(),
+                    call,
                 },
             );
             let mut slot = self.hook_slot();
@@ -1028,7 +1105,8 @@ impl FakeFs {
     }
 
     /// Installs a test hook that runs before each component of a relative operation is looked
-    /// up (and between the phases of `replace`). Replaces an earlier hook.
+    /// up and before each primitive call of the write side ([`StepEvent`]). Replaces an
+    /// earlier hook.
     pub fn on_step(&self, hook: impl FnMut(&FakeFs, &StepEvent) + Send + 'static) {
         *self.hook_slot() = Some(Box::new(hook));
     }
@@ -1592,11 +1670,11 @@ impl Dir for FakeDir {
     }
 }
 
-/// Every writing method of the fake until its write side exists (ADR 0017).
+/// `DirWrite::guard` until the fake models it (ADR 0017).
 fn no_write<T>(target: &str) -> SysResult<T> {
     Err(err(
         SysErrorKind::Unsupported,
-        &format!("{target}: the fake write side is not implemented yet"),
+        &format!("{target}: the fake guard is not implemented yet"),
     ))
 }
 
@@ -1611,19 +1689,23 @@ impl DirWrite for FakeDir {
         no_write(name.as_str())
     }
 
-    fn create_new(&self, name: &RelPath, _: &mut dyn Read, _: &NewFile) -> SysResult<Written> {
-        no_write(name.as_str())
+    fn create_new(&self, name: &RelPath, src: &mut dyn Read, new: &NewFile) -> SysResult<Written> {
+        seq::create_new(self, name, src, new)
     }
 
     fn create_dir(&self, name: &RelPath) -> SysResult<u128> {
-        no_write(name.as_str())
+        seq::create_dir(self, name)
     }
 
-    fn remove_dir(&self, name: &RelPath, _: u128) -> SysResult<()> {
-        no_write(name.as_str())
+    fn remove_dir(&self, name: &RelPath, expected_id: u128) -> SysResult<()> {
+        seq::remove_dir(self, name, expected_id)
     }
 
     fn flush(&self) -> SysResult<()> {
-        no_write(&self.handle_target())
+        seq::flush(self)
+    }
+
+    fn lock(&self, name: &RelPath) -> SysResult<Box<dyn FileLock + '_>> {
+        Ok(Box::new(seq::lock(self, name)?))
     }
 }

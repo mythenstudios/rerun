@@ -35,6 +35,10 @@ pub mod topology;
 pub mod contract;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+// The write sequences (ADR 0017, A1). Only the fake implements their primitives until the
+// real write side lands (P2-4), which ungates this module.
+#[cfg(any(test, feature = "fake"))]
+pub(crate) mod seq;
 #[cfg(windows)]
 pub mod win;
 

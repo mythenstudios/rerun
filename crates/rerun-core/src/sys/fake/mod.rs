@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use rerun_proto::cpu::CpuTopology;
 
-pub use fs::{FakeDir, FakeFs, FakeHold, FsOp, StepEvent, StepHook};
+pub use fs::{FakeDir, FakeFile, FakeFs, FakeHold, FsOp, Prim, StepEvent, StepHook};
 pub use gpu::FakeGpu;
 pub use known_folders::FakeKnownFolders;
 pub use registry::FakeRegistry;
