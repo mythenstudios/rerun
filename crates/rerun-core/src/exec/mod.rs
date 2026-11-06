@@ -1015,6 +1015,8 @@ mod crash_tests;
 #[cfg(test)]
 mod halt_tests;
 #[cfg(test)]
+mod reg_crash_tests;
+#[cfg(test)]
 pub(crate) mod reg_tests;
 #[cfg(test)]
 pub(crate) mod tests;
