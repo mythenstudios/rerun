@@ -52,9 +52,11 @@ use super::{Gpu, KnownFolder, KnownFolders, SysErrorKind, SysResult, Topology};
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 
+mod snapshot;
 mod write;
 mod write_race;
 
+pub use snapshot::snapshot_contract;
 pub use write::{fs_link_write_contract, fs_write_contract};
 pub use write_race::{WriteOp, fs_write_race_contract};
 

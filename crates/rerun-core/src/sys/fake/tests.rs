@@ -15,7 +15,7 @@ use crate::sys::contract::{
     Access, FsFixture, Held, Share, fs_link_read_contract, fs_link_write_contract,
     fs_race_contract, fs_read_contract, fs_volume_contract, fs_write_contract,
     fs_write_race_contract, gpu_contract, known_folders_contract, registry_read_contract,
-    registry_system_contract, registry_write_contract, topology_contract,
+    registry_system_contract, registry_write_contract, snapshot_contract, topology_contract,
 };
 use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, NewFile, TmpName, WriteCap, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
@@ -2417,6 +2417,173 @@ fn snapshot_registry_walk_has_a_key_budget() {
         (SysErrorKind::TooLarge, Some(100_000)),
         "{e}"
     );
+}
+
+// ---------- Snapshot contract ----------
+
+const SNAP_WORK: &str = r"C:\Work\w";
+
+fn snap_key() -> RegKey {
+    hkcu(r"Software\Snap")
+}
+
+fn snapshot_fake() -> FakeSystem {
+    FakeSystem::builder()
+        .dir(SNAP_WORK)
+        .key(snap_key())
+        .build()
+        .unwrap()
+}
+
+/// Runs the snapshot contract on a fresh fake, with the work directory's handle passed
+/// through `wrap` and the registry read through [`CaseBlindRegistry`] if `case_blind`.
+fn run_snapshot_contract(
+    wrap: impl FnOnce(Box<dyn crate::sys::Dir + '_>) -> Box<dyn crate::sys::Dir + '_>,
+    case_blind: bool,
+) -> crate::sys::contract::FsContractResult {
+    let sys = snapshot_fake();
+    let work = Path::new(SNAP_WORK);
+    let dir = wrap(sys.fs().open_dir(work).unwrap());
+    let read: Box<dyn Registry + '_> = if case_blind {
+        Box::new(CaseBlindRegistry(sys.registry()))
+    } else {
+        Box::new(SpyRegistry {
+            inner: sys.registry(),
+            doubled: false,
+        })
+    };
+    snapshot_contract(
+        SnapRoot::new(&*dir, SNAP_WORK),
+        sys.fake_fs(),
+        work,
+        &*read,
+        sys.fake_registry(),
+        &snap_key(),
+    )
+}
+
+#[test]
+fn fake_fulfils_snapshot_contract() {
+    let skips = run_snapshot_contract(|d| d, false).unwrap();
+    // The fake has no WOF.
+    assert_eq!(skips, ["wof_compress"]);
+}
+
+/// What a broken `Dir` loses.
+#[derive(Debug, Clone, Copy)]
+enum Loses {
+    Attrs,
+    Links,
+    Case,
+}
+
+/// A `Dir` that loses read-only/hidden/system, the link count or the case of names in its
+/// listing and metadata (on every handle below it too). The snapshot contract must catch
+/// each.
+#[derive(Debug)]
+struct LossyDir<'a> {
+    inner: Box<dyn crate::sys::Dir + 'a>,
+    loses: Loses,
+}
+
+impl LossyDir<'_> {
+    fn blur(&self, mut m: crate::sys::fs::Metadata) -> crate::sys::fs::Metadata {
+        match self.loses {
+            Loses::Attrs => m.attrs = Attrs::default(),
+            Loses::Links => m.links = m.links.map(|_| 1),
+            Loses::Case => {}
+        }
+        m
+    }
+}
+
+impl crate::sys::Dir for LossyDir<'_> {
+    fn info(&self) -> SysResult<crate::sys::fs::RootInfo> {
+        self.inner.info()
+    }
+    fn open_dir(&self, p: &RelPath) -> SysResult<Box<dyn crate::sys::Dir + '_>> {
+        Ok(Box::new(LossyDir {
+            inner: self.inner.open_dir(p)?,
+            loses: self.loses,
+        }))
+    }
+    fn metadata(&self, p: &RelPath) -> SysResult<Option<crate::sys::fs::Metadata>> {
+        Ok(self.inner.metadata(p)?.map(|m| self.blur(m)))
+    }
+    fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn crate::sys::fs::ReadSeek + '_>> {
+        self.inner.open_read(p)
+    }
+    fn read_dir_limited(
+        &self,
+        p: Option<&RelPath>,
+        max: usize,
+    ) -> SysResult<Vec<crate::sys::fs::DirEntry>> {
+        Ok(self
+            .inner
+            .read_dir_limited(p, max)?
+            .into_iter()
+            .map(|mut e| {
+                if matches!(self.loses, Loses::Case) {
+                    e.name = e.name.to_lowercase();
+                }
+                e.meta = self.blur(e.meta);
+                e
+            })
+            .collect())
+    }
+    fn users(&self, p: &RelPath) -> SysResult<Vec<u32>> {
+        self.inner.users(p)
+    }
+}
+
+#[test]
+fn the_snapshot_contract_catches_a_dir_that_loses_attributes_links_or_case() {
+    for loses in [Loses::Attrs, Loses::Links, Loses::Case] {
+        let res = run_snapshot_contract(|inner| Box::new(LossyDir { inner, loses }), false);
+        let e = res.expect_err(&format!("{loses:?} not caught"));
+        assert!(e.contains("contract violated"), "{loses:?}: {e}");
+    }
+}
+
+/// A registry that loses the case of value names.
+struct CaseBlindRegistry<'a>(&'a dyn Registry);
+
+impl Registry for CaseBlindRegistry<'_> {
+    fn key_exists(&self, k: &RegKey) -> SysResult<bool> {
+        self.0.key_exists(k)
+    }
+    fn get(&self, k: &RegKey, name: &str) -> SysResult<Option<RegValue>> {
+        self.0.get(k, name)
+    }
+    fn values(&self, k: &RegKey) -> SysResult<Vec<(String, RegValue)>> {
+        Ok(self
+            .0
+            .values(k)?
+            .into_iter()
+            .map(|(n, v)| (n.to_lowercase(), v))
+            .collect())
+    }
+    fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
+        self.0.subkeys(k)
+    }
+    fn create_key(&self, k: &RegKey) -> SysResult<bool> {
+        self.0.create_key(k)
+    }
+    fn set(&self, k: &RegKey, name: &str, v: &RegValue) -> SysResult<()> {
+        self.0.set(k, name, v)
+    }
+    fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
+        self.0.delete_value(k, name)
+    }
+    fn delete_key(&self, k: &RegKey) -> SysResult<()> {
+        self.0.delete_key(k)
+    }
+}
+
+#[test]
+fn the_snapshot_contract_catches_a_registry_that_loses_the_case_of_value_names() {
+    let e = run_snapshot_contract(|d| d, true).unwrap_err();
+    assert!(e.contains("contract violated"), "{e}");
 }
 
 #[test]

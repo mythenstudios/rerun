@@ -443,8 +443,8 @@ impl Snapshot {
             Loc::Fs { root, path } => {
                 format!("{}\\{}", self.label(*root), path.replace('\0', "<raw>"))
             }
-            Loc::Key(k) => k.clone(),
-            Loc::Value(k, v) => format!("{k} @ {v:?}"),
+            Loc::Key(k) => k.replace('\0', "<raw>"),
+            Loc::Value(k, v) => format!("{k} @ {:?}", v.replace('\0', "<raw>")),
         }
     }
 
