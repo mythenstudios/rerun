@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::testfx::{HiveRoot, NaiveFs, TestRoot, hosted_ci, note, workflow_warning};
+use super::testfx::{
+    HiveRoot, NaiveFs, TestRoot, backup_restore_privileges, hosted_ci, note, workflow_warning,
+};
 use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinSystem, WinTopology};
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{Forbidden, ForbiddenRoots, Protected, RootError, RootId, StoreDir};
@@ -1187,5 +1189,90 @@ fn win_fulfils_fs_write_race_contract_and_the_harness_has_teeth() {
     report(
         "fs_write_race_contract",
         fs_write_race_contract(&WinFs::new(), root.fx(), &work, budget, &WriteOp::ALL),
+    );
+}
+
+/// An open of `p` by another program: read or write access, share read, write and delete, with
+/// or without backup intent (`FILE_FLAG_BACKUP_SEMANTICS`). `Ok` or the raw Win32 error.
+fn foreign_open(p: &Path, write: bool, backup: bool) -> Result<(), i32> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT
+        | if backup {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            0
+        };
+    std::fs::OpenOptions::new()
+        .read(!write)
+        .write(write)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(flags)
+        .open(p)
+        .map(drop)
+        .map_err(|e| e.raw_os_error().unwrap_or(-1))
+}
+
+/// Backup intent against the journal lock and the guard (ADR 0017 A7, open point). Without
+/// backup intent another program's read of the lock and write of the guarded file are sharing
+/// violations (as K1 and the guard contract require). The hypothesis from CI run 42130639073:
+/// with `SeBackupPrivilege` enabled, a read with backup intent passes the share-0 lock. Runs
+/// only where the privilege is enabled (the elevated GitHub runner); the outcomes of all four
+/// opens are printed, the read of the lock is asserted.
+#[test]
+fn backup_intent_against_lock_and_guard() {
+    const SHARING_VIOLATION: i32 = 32;
+    let (backup, restore) = backup_restore_privileges();
+    if backup != "enabled" {
+        note(&format!(
+            "skipped backup_intent_against_lock_and_guard: SeBackupPrivilege {backup} (runs on the elevated GitHub runner)"
+        ));
+        return;
+    }
+    let Some(root) = TestRoot::new("backup-intent") else {
+        return;
+    };
+    let work = root.work("w");
+    std::fs::write(work.join("game.bin"), b"guarded").unwrap();
+    let fs = WinFs::new();
+    let d = fs.open_dir_write(&work, &WriteCap::new()).unwrap();
+    let lock = d.lock(&rel("journal.lock")).unwrap();
+    let guard = d.guard(&rel("game.bin")).unwrap();
+    let lock_p = work.join("journal.lock");
+    let game_p = work.join("game.bin");
+
+    assert_eq!(foreign_open(&lock_p, false, false), Err(SHARING_VIOLATION));
+    assert_eq!(foreign_open(&game_p, true, false), Err(SHARING_VIOLATION));
+    let outcomes = [
+        ("read of the lock", foreign_open(&lock_p, false, true)),
+        ("write of the lock", foreign_open(&lock_p, true, true)),
+        (
+            "read of the guarded file",
+            foreign_open(&game_p, false, true),
+        ),
+        (
+            "write of the guarded file",
+            foreign_open(&game_p, true, true),
+        ),
+    ];
+    let shown: Vec<String> = outcomes
+        .iter()
+        .map(|(what, r)| match r {
+            Ok(()) => format!("{what}: opened"),
+            Err(e) => format!("{what}: error {e}"),
+        })
+        .collect();
+    note(&format!(
+        "note: backup intent (SeBackupPrivilege {backup}, SeRestorePrivilege {restore}): {}",
+        shown.join("; ")
+    ));
+    drop((guard, lock));
+    assert_eq!(
+        outcomes[0].1,
+        Ok(()),
+        "hypothesis: a read with backup intent passes the share-0 lock"
     );
 }

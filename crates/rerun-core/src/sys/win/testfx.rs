@@ -1415,6 +1415,15 @@ fn ci_token_note() {
     });
 }
 
+/// `SeBackupPrivilege` and `SeRestorePrivilege` of the process token, each `enabled`,
+/// `disabled`, `absent` or `unknown`.
+pub(super) fn backup_restore_privileges() -> (&'static str, &'static str) {
+    (
+        privilege_state(SE_BACKUP_NAME),
+        privilege_state(SE_RESTORE_NAME),
+    )
+}
+
 /// `enabled`, `disabled` (held, not enabled), `absent` or `unknown` for a privilege of the
 /// process token (`TokenPrivileges`).
 fn privilege_state(name: windows_sys::core::PCWSTR) -> &'static str {
