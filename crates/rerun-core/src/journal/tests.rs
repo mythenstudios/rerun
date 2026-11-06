@@ -673,7 +673,7 @@ fn j3_planted_transaction_folders() {
     let lock = j.lock().unwrap();
     assert!(matches!(
         lock.begin(HEAD),
-        Err(JournalError::TooLarge { .. })
+        Err(JournalError::SeqExhausted { highest }) if highest.to_string() == "99999999-0000000000000000"
     ));
     drop(lock);
     // S5: a second folder with the same seq makes both damaged.
@@ -841,17 +841,60 @@ fn j9_writer_budgets_refuse_before_writing() {
     assert!(lock.begin(b"1234").is_ok());
     drop(lock);
 
-    let j = Journal::with_limits(&app, InstanceTag::fixed(2), small(|l| l.records = 3));
+    // S3: an intent only with room for its done, a full revert, Applied and Closed.
+    let j = Journal::with_limits(&app, InstanceTag::fixed(2), small(|l| l.records = 5));
+    let lock = j.lock().unwrap();
+    let mut w = lock.begin(HEAD).unwrap();
+    assert!(too_large(w.intent(0, None, None)), "needs 6 records");
+    let mut guard = g.guard(&r("a.bin")).unwrap();
+    assert!(
+        too_large(w.backup(&mut *guard).map(|_| ())),
+        "checked before streaming"
+    );
+    drop(guard);
+    let dir = txn_dir(w.id());
+    drop(w);
+    drop(lock);
+    assert_eq!(names_in(&sys, &dir), ["head.json"]);
+
+    let j = Journal::with_limits(&app, InstanceTag::fixed(6), small(|l| l.records = 8));
     let lock = j.lock().unwrap();
     let mut w = lock.begin(HEAD).unwrap();
     w.intent(0, None, None).unwrap();
     w.done(0, 1, false).unwrap();
-    w.intent(1, None, None).unwrap();
-    assert!(too_large(w.done(1, 1, false)));
+    assert!(
+        too_large(w.intent(1, None, None)),
+        "op 1 would need 10 records"
+    );
+    // What is left is always enough to roll back and close.
+    w.revert_intent(0, None).unwrap();
+    w.revert_done(0, Observed::After, false).unwrap();
     let id = *w.id();
-    drop(w);
+    w.close(Closing::RolledBack).unwrap();
     drop(lock);
-    assert_eq!(j.load(&id, VerifyBackups::Length).unwrap().log.len(), 3);
+    assert_eq!(
+        j.load(&id, VerifyBackups::Length).unwrap().state,
+        TxnState::Closed(Closing::RolledBack)
+    );
+
+    // The last slot is only for Closed: repeated revert intents cannot take it.
+    let j = Journal::with_limits(&app, InstanceTag::fixed(7), small(|l| l.records = 6));
+    let lock = j.lock().unwrap();
+    let mut w = lock.begin(HEAD).unwrap();
+    w.intent(0, None, None).unwrap();
+    w.done(0, 1, false).unwrap();
+    w.applied(1).unwrap();
+    w.revert_intent(0, None).unwrap();
+    w.revert_intent(0, None).unwrap();
+    assert!(too_large(w.revert_intent(0, None)));
+    let id = *w.id();
+    w.close(Closing::Forgotten).unwrap();
+    drop(lock);
+    let v = j.load(&id, VerifyBackups::Length).unwrap();
+    assert_eq!(
+        (v.state, v.log.len()),
+        (TxnState::Closed(Closing::Forgotten), 6)
+    );
 
     let j = Journal::with_limits(&app, InstanceTag::fixed(3), small(|l| l.record = 80));
     let lock = j.lock().unwrap();
@@ -928,4 +971,165 @@ fn j9_reader_budgets() {
         "{e}"
     );
     assert_eq!(lim(|l| l.journal_entries = 2).list().unwrap().txns.len(), 1);
+}
+
+// ---------- Review follow-ups ----------
+
+#[test]
+fn a_head_is_usable_only_when_a_record_confirmed_it() {
+    // Swapped head.json and a mangled first record: nothing confirms the planted head.
+    let (sys, id) = tampered(|s, d| {
+        put(s, format!(r"{d}\head.json"), b"{\"planted\":1}");
+        put(s, format!(r"{d}\0001.json"), b"{");
+    });
+    let v = read_back(&sys, &id, VerifyBackups::Length);
+    assert_eq!(v.state, TxnState::Damaged(Damage::Unparsable { n: 1 }));
+    assert!(!v.head_usable());
+    // Damage at a later record: record 1 confirmed the head.
+    let (sys, id) = tampered(|s, d| put(s, format!(r"{d}\0003.json"), b"{"));
+    let v = read_back(&sys, &id, VerifyBackups::Length);
+    assert_eq!(v.state, TxnState::Damaged(Damage::Unparsable { n: 3 }));
+    assert!(v.head_usable());
+    // Damage before the head was read, or of the head itself.
+    for (what, f) in [
+        (
+            "head edited",
+            Box::new(|s: &FakeSystem, d: &str| put(s, format!(r"{d}\head.json"), b"{}"))
+                as Box<dyn FnOnce(&FakeSystem, &str)>,
+        ),
+        (
+            "head removed",
+            Box::new(|s: &FakeSystem, d: &str| {
+                s.fake_fs()
+                    .remove_abs(Path::new(&format!(r"{d}\head.json")))
+                    .unwrap()
+            }),
+        ),
+        (
+            "gap at 1",
+            Box::new(|s: &FakeSystem, d: &str| {
+                s.fake_fs()
+                    .remove_abs(Path::new(&format!(r"{d}\0001.json")))
+                    .unwrap()
+            }),
+        ),
+    ] {
+        let (sys, id) = tampered(f);
+        assert!(
+            !read_back(&sys, &id, VerifyBackups::Length).head_usable(),
+            "{what}"
+        );
+    }
+    let (sys, id) = tampered(|_, _| {});
+    let app = open_app(&sys);
+    let small = Journal::with_limits(&app, InstanceTag::fixed(1), small(|l| l.txn_entries = 2));
+    let v = small.load(&id, VerifyBackups::Length).unwrap();
+    assert_eq!(
+        (v.state.clone(), v.head_usable()),
+        (TxnState::Damaged(Damage::TooManyEntries), false)
+    );
+    // A head without records (Empty) is usable; a clean applied one too.
+    assert!(read_back(&sys, &id, VerifyBackups::Length).head_usable());
+    let sys = system();
+    let app = open_app(&sys);
+    let j = Journal::new(&app, InstanceTag::fixed(TAG));
+    let lock = j.lock().unwrap();
+    let id = *lock.begin(HEAD).unwrap().id();
+    let v = j.load(&id, VerifyBackups::Length).unwrap();
+    assert_eq!((v.state.clone(), v.head_usable()), (TxnState::Empty, true));
+}
+
+#[test]
+fn list_keeps_head_hashes_only_and_duplicates_keep_closed_and_first_causes() {
+    let sys = system();
+    let app = open_app(&sys);
+    let g = game(&sys, r"D:\G");
+    let j = Journal::new(&app, InstanceTag::fixed(TAG));
+    let lock = j.lock().unwrap();
+    let closed = {
+        let w = apply2(&lock, &*g);
+        let id = *w.id();
+        w.close(Closing::Forgotten).unwrap();
+        id
+    };
+    let applied = *apply2(&lock, &*g).id();
+    drop(lock);
+    let listed = j.list().unwrap();
+    for l in &listed.txns {
+        let v = l.view.as_ref().unwrap();
+        assert_eq!((v.head.as_ref(), v.head_sha256), (None, Some(head_sha())));
+        assert!(v.head_usable());
+    }
+    // Plant a twin of each seq; damage the applied one first.
+    for id in [closed, applied] {
+        let twin = TxnId::new(id.seq(), 0).unwrap();
+        sys.fake_fs().mkdir_all(Path::new(&txn_dir(&twin))).unwrap();
+    }
+    put(&sys, format!(r"{}\notes.txt", txn_dir(&applied)), b"x");
+    let listed = j.list().unwrap();
+    let state = |id: TxnId| {
+        let v = listed
+            .txns
+            .iter()
+            .find(|l| l.id == id)
+            .unwrap()
+            .view
+            .as_ref()
+            .unwrap();
+        (v.state.clone(), v.anomaly.clone())
+    };
+    assert_eq!(
+        state(closed),
+        (
+            TxnState::Closed(Closing::Forgotten),
+            Some(Damage::DuplicateSeq)
+        )
+    );
+    assert_eq!(
+        state(applied),
+        (TxnState::Damaged(Damage::UnknownEntry), None)
+    );
+    assert_eq!(
+        state(TxnId::new(closed.seq(), 0).unwrap()),
+        (TxnState::Damaged(Damage::DuplicateSeq), None)
+    );
+    // `load` keeps the head bytes.
+    assert_eq!(
+        j.load(&closed, VerifyBackups::Length)
+            .unwrap()
+            .head
+            .as_deref(),
+        Some(HEAD)
+    );
+}
+
+#[test]
+fn a_backup_token_of_another_transaction_is_refused() {
+    let sys = system();
+    let app = open_app(&sys);
+    let g = game(&sys, r"D:\G");
+    let j = Journal::new(&app, InstanceTag::fixed(TAG));
+    let lock = j.lock().unwrap();
+    let mut w1 = lock.begin(HEAD).unwrap();
+    let mut w2 = lock.begin(HEAD).unwrap();
+    let mut guard = g.guard(&r("a.bin")).unwrap();
+    let b1 = w1.backup(&mut *guard).unwrap();
+    drop(guard);
+    assert!(matches!(
+        w2.intent(0, None, Some(b1)),
+        Err(JournalError::Order(_))
+    ));
+    assert_eq!(state(&j, w2.id()), TxnState::Empty);
+}
+
+#[test]
+fn resume_hands_out_the_hashed_head() {
+    let sys = system();
+    let app = open_app(&sys);
+    let g = game(&sys, r"D:\G");
+    let j = Journal::new(&app, InstanceTag::fixed(TAG));
+    let lock = j.lock().unwrap();
+    let id = *apply2(&lock, &*g).id();
+    let w = lock.resume(&id).unwrap();
+    assert_eq!(w.head(), HEAD);
 }

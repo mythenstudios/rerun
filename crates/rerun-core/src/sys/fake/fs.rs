@@ -81,9 +81,9 @@
 //!   prefix of the unflushed part per volume and resets content to the last flushed. A
 //!   fixture change makes its volume's log durable (another program that flushed).
 //!   Deviation: a volume mounted in a folder shares the log of its drive.
-//! - Hooks fire only for [`Dir`] operations and the write primitives, never for
-//!   `Fs::open_dir` or the setup helpers, and never reentrantly (a hook that calls into the
-//!   fake does not trigger itself).
+//! - Hooks fire for [`Dir`] operations, the write primitives and once before `Fs::open_dir`
+//!   resolves its path ([`FsOp::OpenAbs`]), never for the setup helpers, and never
+//!   reentrantly (a hook that calls into the fake does not trigger itself).
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -134,6 +134,10 @@ pub enum FsOp {
     Write,
     /// `Dir::info` (only as a fault unit, [`Prim::ReadSide`]; no walk, no hook).
     Info,
+    /// `Fs::open_dir` and `Fs::open_dir_write`: a hook only (`name` is the absolute path as
+    /// given), fired once before the path is resolved; the fault unit stays
+    /// `Prim::ReadSide(FsOp::OpenDir)`.
+    OpenAbs,
 }
 
 /// A primitive call of the write side (ADR 0017, A1), the unit of the fake's write hooks.
@@ -1960,11 +1964,10 @@ impl FakeFs {
     fn open_abs(&self, abs: &Path) -> SysResult<FakeDir> {
         let shown = abs.display().to_string();
         let (drive, segs) = parse_abs(abs)?;
-        let node = {
-            let mut st = self.lock();
-            st.enter_read(FsOp::OpenDir)?;
-            st.resolve_follow(drive, &segs, 0, &shown)?
-        };
+        self.lock().enter_read(FsOp::OpenDir)?;
+        // A test can change the tree before the path is resolved (`FsOp::OpenAbs`).
+        self.fire(FsOp::OpenAbs, 0, &shown);
+        let node = self.lock().resolve_follow(drive, &segs, 0, &shown)?;
         self.dir_handle(node, &shown)
     }
 

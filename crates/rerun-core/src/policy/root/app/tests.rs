@@ -251,3 +251,43 @@ fn a3_a_folder_swapped_between_create_and_open_is_busy() {
     sys.fake_fs().clear_on_step();
     assert_eq!(opens.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn a3_a_folder_swapped_before_the_absolute_reopen_is_busy() {
+    let sys = base().dir(format!(r"{LAD}\Rerun")).build().unwrap();
+    let rerun = format!(r"{LAD}\Rerun");
+    sys.fake_fs().on_step(move |fs, ev| {
+        if ev.op == FsOp::OpenAbs && ev.name.ends_with(r"\Rerun") {
+            fs.rename_abs(Path::new(&rerun), Path::new(r"C:\Out\Rerun"))
+                .unwrap();
+            fs.mkdir_all(Path::new(&rerun)).unwrap();
+        }
+    });
+    let r = AppDir::open(&sys, Create::Never);
+    sys.fake_fs().clear_on_step();
+    assert_eq!(sys_kind(r), SysErrorKind::Busy);
+}
+
+#[test]
+fn a3_a_junction_to_the_moved_folder_is_escaped() {
+    // Same directory (same file ID) reached through a junction: only the path check tells.
+    let sys = base().dir(format!(r"{LAD}\Rerun")).build().unwrap();
+    let rerun = format!(r"{LAD}\Rerun");
+    let moved = format!(r"{LAD}\Rerun2");
+    sys.fake_fs().on_step(move |fs, ev| {
+        if ev.op == FsOp::OpenAbs && ev.name.ends_with(r"\Rerun") {
+            fs.rename_abs(Path::new(&rerun), Path::new(&moved)).unwrap();
+            fs.put_link(Path::new(&rerun), crate::sys::fs::tag::MOUNT_POINT, &moved)
+                .unwrap();
+        }
+    });
+    let r = AppDir::open(&sys, Create::Never);
+    sys.fake_fs().clear_on_step();
+    match r {
+        Err(RootError::Escaped { store, child }) => {
+            assert_eq!(store, RootPath::new(LAD).unwrap());
+            assert_eq!(child, RootPath::new(format!(r"{LAD}\Rerun2")).unwrap());
+        }
+        other => panic!("expected Escaped, got {other:?}"),
+    }
+}

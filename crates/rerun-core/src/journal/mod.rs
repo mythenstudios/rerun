@@ -103,6 +103,12 @@ pub enum JournalError {
         /// The limit.
         limit: u64,
     },
+    /// An entry with the highest transaction name exists; `begin` cannot go on.
+    #[error("journal entry {highest} has the highest sequence number; forget or remove it")]
+    SeqExhausted {
+        /// The entry.
+        highest: TxnId,
+    },
     /// The record would break the grammar (a caller error); nothing was written.
     #[error("journal record refused: {0}")]
     Order(&'static str),
@@ -141,8 +147,12 @@ pub enum VerifyBackups {
 pub struct TxnView {
     /// The transaction.
     pub id: TxnId,
-    /// `head.json`, if present and within its limit (opaque plan bytes).
+    /// `head.json`, if present and within its limit (opaque plan bytes). Only
+    /// [`Journal::load`] keeps the bytes; [`Journal::list`] keeps [`Self::head_sha256`]
+    /// only, so a listing holds no head in memory (a budget per listing is not needed).
     pub head: Option<Vec<u8>>,
+    /// SHA-256 of `head.json`, if it was read.
+    pub head_sha256: Option<[u8; 32]>,
     /// The state.
     pub state: TxnState,
     /// The anomaly of a transaction whose valid prefix ends in `Closed` (user decision E2):
@@ -152,6 +162,19 @@ pub struct TxnView {
     pub ops: BTreeMap<u16, OpLog>,
     /// The records of the valid prefix, in order.
     pub(crate) log: Vec<record::Record>,
+    /// The folder holds at least one record file.
+    pub(crate) has_records: bool,
+}
+
+impl TxnView {
+    /// The head can be trusted for stacking (ADR 0019 amendment, E2): it was read, no damage
+    /// concerns it, and at least one record confirmed its hash (or there are no records at
+    /// all). Otherwise the transaction blocks every apply until it is forgotten; so does a
+    /// [`Listed`] entry whose view is an error.
+    pub fn head_usable(&self) -> bool {
+        let head_damage = matches!(&self.state, TxnState::Damaged(d) if d.head_unusable());
+        self.head_sha256.is_some() && !head_damage && (!self.log.is_empty() || !self.has_records)
+    }
 }
 
 /// One entry of [`Listing`].
@@ -336,9 +359,8 @@ pub enum Damage {
 }
 
 impl Damage {
-    /// The head cannot be trusted (ADR 0019 amendment, E2): such a transaction blocks every
-    /// apply until it is forgotten. With any other damage the head is readable and
-    /// hash-consistent, and its objects count as open.
+    /// This damage concerns the head itself. Whether a head can be trusted is decided by
+    /// [`TxnView::head_usable`], which also requires a record that confirmed its hash.
     pub fn head_unusable(&self) -> bool {
         matches!(
             self,

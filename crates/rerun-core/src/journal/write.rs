@@ -76,17 +76,15 @@ impl<'j> JournalLock<'j> {
             });
         }
         let (ids, _) = read::scan(self.dir, &self.lim)?;
-        let seq = ids
-            .iter()
-            .map(|(id, _)| id.seq())
-            .max()
-            .unwrap_or(0)
+        let highest = ids.iter().map(|(id, _)| *id).max_by_key(TxnId::seq);
+        let seq = highest
+            .map_or(0, |h| h.seq())
             .checked_add(1)
             .filter(|s| *s <= MAX_SEQ);
         let Some(id) = seq.and_then(|s| TxnId::new(s, self.tag)) else {
-            return Err(JournalError::TooLarge {
-                what: "the transaction sequence number",
-                limit: u64::from(MAX_SEQ),
+            return Err(match highest {
+                Some(highest) => JournalError::SeqExhausted { highest },
+                None => JournalError::Order("no sequence number"),
             });
         };
         let rel = id.rel();
@@ -137,8 +135,10 @@ impl<'j> JournalLock<'j> {
             });
         };
         let sha: [u8; 32] = Sha256::digest(head).into();
+        let head = head.to_vec();
         Ok(RevertWriter {
             t: Txn::new(self, *id, dir, sha, m),
+            head,
         })
     }
 }
@@ -229,7 +229,14 @@ impl<'l> Txn<'l> {
         self.m.check(rec).map_err(JournalError::Order)?;
         let lim = &self.lock.lim;
         let n = self.m.records().saturating_add(1);
-        if n > lim.records {
+        // The last slot is kept for `Closed`, so `forget` can always close (rule 2); an intent
+        // also needs room for the rest of a full revert ([`Self::room_for_intent`]).
+        let cap = if matches!(rec, Record::Closed { .. }) {
+            lim.records
+        } else {
+            lim.records.saturating_sub(1)
+        };
+        if n > cap || (matches!(rec, Record::Intent { .. }) && !self.room_for_intent()) {
             return Err(JournalError::TooLarge {
                 what: "the records of a transaction",
                 limit: u64::from(lim.records),
@@ -261,6 +268,14 @@ impl<'l> Txn<'l> {
         }
     }
 
+    /// Room for one more intent: its intent and done, a revert intent and done for every op
+    /// including it, `Applied` and `Closed`.
+    fn room_for_intent(&self) -> bool {
+        let ops = u32::from(self.m.intents()) + 1;
+        let need = u32::from(self.m.records()) + 2 + 2 * ops + 2;
+        need <= u32::from(self.lock.lim.records)
+    }
+
     fn backup(&mut self, g: &mut dyn FileGuard) -> Result<Backup, JournalError> {
         let op = self.m.intents();
         let probe = Record::Intent {
@@ -271,6 +286,12 @@ impl<'l> Txn<'l> {
         self.m.check(&probe).map_err(JournalError::Order)?;
         if self.pending.is_some() {
             return Err(JournalError::Order("a second backup before its intent"));
+        }
+        if !self.room_for_intent() {
+            return Err(JournalError::TooLarge {
+                what: "the records of a transaction",
+                limit: u64::from(self.lock.lim.records),
+            });
         }
         let lim = &self.lock.lim;
         let len = g.metadata()?.len;
@@ -317,8 +338,10 @@ impl<'l> Txn<'l> {
         b: Option<Backup>,
     ) -> Result<(), JournalError> {
         match (&b, self.pending) {
-            (Some(b), _) if b.op != op => {
-                return Err(JournalError::Order("the backup belongs to another op"));
+            (Some(b), pending) if b.op != op || pending != Some(b.op) => {
+                return Err(JournalError::Order(
+                    "the backup belongs to another op or transaction",
+                ));
             }
             (None, Some(_)) => {
                 return Err(JournalError::Order("an intent without its backup"));
@@ -356,6 +379,15 @@ pub(crate) struct TxnWriter<'l> {
 #[derive(Debug)]
 pub(crate) struct RevertWriter<'l> {
     t: Txn<'l>,
+    /// The bytes of `head.json` whose hash the records carry: `exec` parses exactly these.
+    head: Vec<u8>,
+}
+
+impl RevertWriter<'_> {
+    /// The head bytes read under the lock and hashed (`exec` parses these, never a re-read).
+    pub(crate) fn head(&self) -> &[u8] {
+        &self.head
+    }
 }
 
 macro_rules! common {

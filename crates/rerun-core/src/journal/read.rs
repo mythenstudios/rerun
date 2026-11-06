@@ -42,7 +42,9 @@ pub(super) fn scan(
     Ok((txns, foreign))
 }
 
-/// Every transaction of `journal\` (S5: two folders with one `seq` are both damaged).
+/// Every transaction of `journal\`, without head bytes (only their hashes). S5: every entry
+/// with a transaction name counts for its `seq`; two with one `seq` make an open or applied
+/// one damaged, a closed one gets the anomaly, a damaged one keeps its first cause.
 pub(super) fn list(jdir: &dyn Dir, lim: &Limits, app: &RootPath) -> Result<Listing, JournalError> {
     let (ids, foreign) = scan(jdir, lim)?;
     let mut per_seq: BTreeMap<u32, usize> = BTreeMap::new();
@@ -53,10 +55,17 @@ pub(super) fn list(jdir: &dyn Dir, lim: &Limits, app: &RootPath) -> Result<Listi
         .into_iter()
         .map(|(id, _)| {
             let mut view = load(jdir, &id, VerifyBackups::Length, lim, app);
-            if per_seq.get(&id.seq()).copied().unwrap_or(0) > 1
-                && let Ok(v) = &mut view
-            {
-                v.state = TxnState::Damaged(Damage::DuplicateSeq);
+            if let Ok(v) = &mut view {
+                v.head = None;
+                if per_seq.get(&id.seq()).copied().unwrap_or(0) > 1 {
+                    match v.state {
+                        TxnState::Damaged(_) => {}
+                        TxnState::Closed(_) => {
+                            v.anomaly.get_or_insert(Damage::DuplicateSeq);
+                        }
+                        _ => v.state = TxnState::Damaged(Damage::DuplicateSeq),
+                    }
+                }
             }
             Listed { id, view }
         })
@@ -127,10 +136,12 @@ pub(super) fn read_txn(
     let mut view = TxnView {
         id,
         head: None,
+        head_sha256: None,
         state: TxnState::Empty,
         anomaly: None,
         ops: BTreeMap::new(),
         log: Vec::new(),
+        has_records: false,
     };
     let mut m = Machine::default();
     let damaged = |mut view: TxnView, m: Machine, d: Damage| {
@@ -140,6 +151,7 @@ pub(super) fn read_txn(
     let Some(found) = entries(dir, lim)? else {
         return damaged(view, m, Damage::TooManyEntries);
     };
+    view.has_records = !found.records.is_empty();
     if found.records.is_empty() && !found.head {
         // B2: a folder without head and records changed nothing (a crash right after
         // `begin` created it); it still counts for `seq`.
@@ -161,6 +173,7 @@ pub(super) fn read_txn(
     };
     let head_sha: [u8; 32] = Sha256::digest(&head).into();
     view.head = Some(head);
+    view.head_sha256 = Some(head_sha);
 
     let last = found.records.last().copied().unwrap_or(0);
     let mut damage = None;
