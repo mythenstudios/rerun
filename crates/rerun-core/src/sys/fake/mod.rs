@@ -15,33 +15,50 @@
 //! assert_eq!(game.read(&exe).unwrap(), b"MZ");
 //! ```
 
+mod faults;
 mod fs;
 mod gpu;
 mod known_folders;
 mod registry;
 mod topology;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rerun_proto::cpu::CpuTopology;
 
-pub use fs::{FakeDir, FakeFile, FakeFs, FakeHold, Fault, FsOp, Prim, StepEvent, StepHook};
+pub use faults::{Fault, Prim, RegPrim};
+pub use fs::{FakeDir, FakeFile, FakeFs, FakeHold, FsOp, StepEvent, StepHook};
 pub use gpu::FakeGpu;
 pub use known_folders::FakeKnownFolders;
-pub use registry::FakeRegistry;
+pub use registry::{FakeRegistry, MAX_LINK_HOPS, RegHook};
 pub use topology::FakeTopology;
 
 use super::contract::{Access, FsFixture, Held, Share};
 use super::fs::{Attrs, tag};
-use super::registry::{RegKey, RegValue};
+use super::registry::{Hive, RegKey, RegValue};
 use super::{
     Fs, Gpu, GpuAdapter, KnownFolder, KnownFolders, Registry, RegistryWrite, SysErrorKind,
     SysResult, System, Topology,
 };
+use faults::FaultHub;
+
+/// A durability domain of the power-loss model (ADR 0019 amendment, P2-9): a volume of the
+/// file system or a registry hive. Nothing orders two domains except their flushes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Domain {
+    /// The volume with this drive letter.
+    Volume(char),
+    /// A registry hive.
+    Hive(Hive),
+}
 
 /// Fake system made of [`FakeFs`], [`FakeRegistry`], [`FakeTopology`],
-/// [`FakeKnownFolders`] and [`FakeGpu`].
-#[derive(Debug, Default)]
+/// [`FakeKnownFolders`] and [`FakeGpu`]. The file system and the registry share one fault
+/// hub: their calls are counted, failed and crashed in one sequence, a crash blocks both, and
+/// [`FakeSystem::power_loss`] cuts volumes and hives in one go.
+#[derive(Debug)]
 pub struct FakeSystem {
     fs: FakeFs,
     registry: FakeRegistry,
@@ -50,11 +67,68 @@ pub struct FakeSystem {
     gpu: FakeGpu,
 }
 
+impl Default for FakeSystem {
+    fn default() -> Self {
+        let sys = Self {
+            fs: FakeFs::default(),
+            registry: FakeRegistry::default(),
+            topology: FakeTopology::default(),
+            known_folders: FakeKnownFolders::default(),
+            gpu: FakeGpu::default(),
+        };
+        let hub = Arc::new(FaultHub::default());
+        sys.fs.set_hub(hub.clone());
+        sys.registry.set_hub(hub);
+        sys
+    }
+}
+
 impl FakeSystem {
     /// Empty system: only drive roots and hive roots exist, the known folders point to the
     /// standard layout (without directories), no graphics adapter.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A power loss (ADR 0019 amendment, P2-9): per domain the durable changes plus
+    /// `keep[domain]` (default 0) more survive, the rest is undone newest first, volumes and
+    /// hives under both locks (file system first, then registry); every handle is gone and the
+    /// process starts fresh (see `FakeFs` and `FakeRegistry`).
+    pub fn power_loss(&self, keep: &BTreeMap<Domain, usize>) {
+        let mut volumes = BTreeMap::new();
+        let mut hives = BTreeMap::new();
+        for (d, n) in keep {
+            match d {
+                Domain::Volume(c) => {
+                    volumes.insert(c.to_ascii_uppercase(), *n);
+                }
+                Domain::Hive(h) => {
+                    hives.insert(*h, *n);
+                }
+            }
+        }
+        self.fs
+            .power_loss_with(&volumes, || self.registry.cut(&hives));
+    }
+
+    /// Changes of `d` that a power loss could drop (logged, not durable).
+    pub fn pending(&self, d: Domain) -> usize {
+        match d {
+            Domain::Volume(c) => self.fs.pending(c),
+            Domain::Hive(h) => self.registry.pending(h),
+        }
+    }
+
+    /// Restarts after a crash: see [`FakeFs::restart`] (it also makes every registry handle
+    /// stale; registry changes stay).
+    pub fn restart(&self) {
+        self.fs.restart();
+    }
+
+    /// Makes every change so far durable on every volume and in every hive.
+    pub fn sync_all(&self) {
+        self.fs.sync_all();
+        self.registry.sync_all();
     }
 
     /// Builder for an initial state.

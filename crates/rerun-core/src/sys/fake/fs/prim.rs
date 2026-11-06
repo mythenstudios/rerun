@@ -113,14 +113,14 @@ impl FakeFs {
         f: impl FnOnce(&mut State) -> SysResult<T>,
     ) -> SysResult<T> {
         // After a crash no hook fires: the call fails before anything happens.
-        if !self.lock().faults.crashed {
+        if !self.lock().hub.crashed() {
             self.fire_call(call, name);
         }
         let mut st = self.lock();
         let crash = st.enter(call)?;
         let r = f(&mut st);
         if crash {
-            st.faults.crashed = true;
+            st.hub.crash();
             return Err(crashed_err());
         }
         r

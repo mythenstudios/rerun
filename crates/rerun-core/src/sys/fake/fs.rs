@@ -75,17 +75,17 @@
 //!   ([`FakeFs::fault`], [`Fault`]); after a crash every call of Rerun fails until
 //!   [`FakeFs::restart`], which closes Rerun's handles by origin, and no step hook fires.
 //!   Fixture and attacker helpers are never counted, faulted or blocked, and neither is a
-//!   call made from inside a step hook (it plays another program).
+//!   call made from inside a step hook (it plays another program). The counting lives in the
+//!   fault hub (`fake/faults.rs`) that a `FakeSystem` shares with its registry (P2-9).
 //! - **Power loss** (ADR 0019 amendment, `fs/durable.rs`): one ordered log of Rerun's
-//!   metadata changes per volume, made durable by flushes; [`FakeFs::power_loss`] keeps any
-//!   prefix of the unflushed part per volume and resets content to the last flushed. A
-//!   fixture change makes its volume's log durable (another program that flushed).
+//!   metadata changes per volume, made durable by flushes; `FakeSystem::power_loss` keeps any prefix of
+//!   the unflushed part per volume (and per hive, in the same go) and resets content to the
+//!   last flushed. A fixture change makes its volume's log durable (another program that flushed).
 //!   Deviation: a volume mounted in a folder shares the log of its drive.
 //! - Hooks fire for [`Dir`] operations, the write primitives and once before `Fs::open_dir`
 //!   resolves its path ([`FsOp::OpenAbs`]), never for the setup helpers, and never
 //!   reentrantly (a hook that calls into the fake does not trigger itself).
 
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -93,6 +93,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+pub use super::faults::{Fault, Prim};
+use super::faults::{FaultHub, crashed_err, set_in_hook};
 use crate::fold::fold;
 use crate::path::RelPath;
 use crate::sys::contract::{Access, Share, share_conflict};
@@ -138,84 +140,6 @@ pub enum FsOp {
     /// given), fired once before the path is resolved; the fault unit stays
     /// `Prim::ReadSide(FsOp::OpenDir)`.
     OpenAbs,
-}
-
-/// A primitive call of the write side (ADR 0017, A1), the unit of the fake's write hooks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Prim {
-    /// `PrimDir::support` (case sensitivity, POSIX support; before every write).
-    Support,
-    /// `PrimDir::volume_name` (the guard's name re-check).
-    VolumeName,
-    /// `PrimDir::open_guard` (step 1).
-    OpenGuard,
-    /// `PrimDir::lookup` (attribute-only metadata of a child).
-    Lookup,
-    /// `PrimDir::create_tmp` (step 2).
-    CreateTmp,
-    /// `PrimDir::open_lock`.
-    OpenLock,
-    /// `PrimDir::create_dir`.
-    CreateDir,
-    /// `PrimDir::open_dir_delete`.
-    OpenDirDelete,
-    /// `PrimDir::rename` (steps 6 and 7, the undo, `rename_to`, `create_new`).
-    Rename,
-    /// `PrimDir::flush`.
-    FlushDir,
-    /// `PrimFile::state`.
-    State,
-    /// `PrimFile::name` (the guard's name re-check).
-    Name,
-    /// `PrimFile::read_at` (one chunk of the guard's hash or reader).
-    ReadAt,
-    /// `PrimFile::users`.
-    Users,
-    /// `PrimFile::write` (one chunk of step 3).
-    Write,
-    /// `PrimFile::set_attrs` (step 4).
-    SetAttrs,
-    /// `PrimFile::flush` (step 5).
-    FlushFile,
-    /// `PrimFile::posix_delete` (step 8, `delete`, `remove_dir`, the cleanup of `<tmp>`).
-    PosixDelete,
-    /// A read-side operation of a `Dir` handle or `Fs::open_dir` (`FsOp::OpenDir`): a fault
-    /// unit only, its hooks are the walk steps.
-    ReadSide(FsOp),
-}
-
-/// What an armed fault does when its call comes ([`FakeFs::fault`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fault {
-    /// The call fails with this kind before it acts.
-    Fail(SysErrorKind),
-    /// The call acts, then the process crashes (ADR 0019 amendment): this and every later
-    /// call of Rerun fails with `Other` ("fake: process crashed"), so no rollback runs, until
-    /// [`FakeFs::restart`]. A read-side call crashes before it acts.
-    CrashAfter,
-}
-
-/// Fault injection state of the file system (not shared with `FakeRegistry`).
-#[derive(Debug, Default)]
-struct Faults {
-    /// Armed faults: call, its 1-based occurrence, what happens.
-    armed: Vec<(Prim, usize, Fault)>,
-    /// Calls seen since the faults were last cleared, per call.
-    seen: Vec<(Prim, usize)>,
-    fired: bool,
-    record: bool,
-    calls: Vec<Prim>,
-    crashed: bool,
-}
-
-thread_local! {
-    /// The current thread runs a step hook ([`FakeFs::on_step`]).
-    static IN_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-fn crashed_err() -> SysError {
-    err(SysErrorKind::Other, "fake: process crashed")
 }
 
 /// A step of an operation: fires before component `index` (0-based) of the relative path is
@@ -394,7 +318,8 @@ struct State {
     fs_kinds: BTreeMap<char, FsKind>,
     next_open: OpenId,
     opens: BTreeMap<OpenId, OpenRec>,
-    faults: Faults,
+    /// The fault hub, shared with the registry of a `FakeSystem`.
+    hub: Arc<FaultHub>,
     /// Per-volume logs of Rerun's metadata changes (power-loss model, `fs/durable.rs`).
     logs: BTreeMap<char, VolLog>,
 }
@@ -875,7 +800,7 @@ impl State {
     /// While the process is crashed, its own handles stay open until [`FakeFs::restart`]
     /// (a dropped Rust value does not close a handle of a dead process early).
     fn close(&mut self, id: OpenId) {
-        if self.faults.crashed
+        if self.hub.crashed()
             && self
                 .opens
                 .get(&id)
@@ -950,41 +875,13 @@ impl State {
     /// A call made from inside a step hook (the hook plays another program or the test) is
     /// neither counted, recorded nor faulted; it still fails after a crash.
     fn enter(&mut self, call: Prim) -> SysResult<bool> {
-        let f = &mut self.faults;
-        if f.crashed {
-            return Err(crashed_err());
-        }
-        if IN_HOOK.with(Cell::get) {
-            return Ok(false);
-        }
-        let n = match f.seen.iter_mut().find(|(c, _)| *c == call) {
-            Some((_, n)) => {
-                *n += 1;
-                *n
-            }
-            None => {
-                f.seen.push((call, 1));
-                1
-            }
-        };
-        if f.record {
-            f.calls.push(call);
-        }
-        let Some(pos) = f.armed.iter().position(|(c, k, _)| *c == call && *k == n) else {
-            return Ok(false);
-        };
-        let (_, _, fault) = f.armed.remove(pos);
-        f.fired = true;
-        match fault {
-            Fault::Fail(kind) => Err(err(kind, &format!("fake: injected fault at {call:?} #{n}"))),
-            Fault::CrashAfter => Ok(true),
-        }
+        self.hub.enter(call)
     }
 
     /// A read-side call: like [`Self::enter`]; a crash happens before it acts.
     fn enter_read(&mut self, op: FsOp) -> SysResult<()> {
         if self.enter(Prim::ReadSide(op))? {
-            self.faults.crashed = true;
+            self.hub.crash();
             return Err(crashed_err());
         }
         Ok(())
@@ -1348,7 +1245,7 @@ impl FakeFs {
     fn fire_event(&self, op: FsOp, index: usize, name: &str, call: Option<Prim>) {
         let hook = self.hook_slot().take();
         if let Some(mut hook) = hook {
-            IN_HOOK.with(|h| h.set(true));
+            set_in_hook(true);
             hook(
                 self,
                 &StepEvent {
@@ -1358,7 +1255,7 @@ impl FakeFs {
                     call,
                 },
             );
-            IN_HOOK.with(|h| h.set(false));
+            set_in_hook(false);
             let mut slot = self.hook_slot();
             if slot.is_none() {
                 *slot = Some(hook);
@@ -1390,7 +1287,7 @@ impl FakeFs {
     /// [`Self::clear_faults`] or [`Self::restart`]. Fixture and attacker helpers are never
     /// counted or faulted.
     pub fn fault(&self, call: Prim, nth: usize, fault: Fault) {
-        self.lock().faults.armed.push((call, nth, fault));
+        self.hub().arm(call, nth, fault);
     }
 
     /// `fault(call, nth, Fault::Fail(kind))`.
@@ -1400,40 +1297,49 @@ impl FakeFs {
 
     /// Disarms every fault and resets the call counts (not the crash flag).
     pub fn clear_faults(&self) {
-        let mut st = self.lock();
-        st.faults.armed.clear();
-        st.faults.seen.clear();
-        st.faults.fired = false;
+        self.hub().clear();
     }
 
     /// An armed fault has fired since the last [`Self::clear_faults`].
     pub fn fault_fired(&self) -> bool {
-        self.lock().faults.fired
+        self.hub().fired()
     }
 
-    /// Records every call of Rerun (primitives and read-side calls) from now on, or stops.
+    /// Records every call of Rerun (primitives, read-side calls, registry primitives of the
+    /// same `FakeSystem`) from now on, or stops.
     pub fn record_calls(&self, on: bool) {
-        self.lock().faults.record = on;
+        self.hub().record(on);
     }
 
     /// The calls recorded so far; clears the record.
     pub fn take_calls(&self) -> Vec<Prim> {
-        std::mem::take(&mut self.lock().faults.calls)
+        self.hub().take_calls()
     }
 
     /// The process crashed ([`Fault::CrashAfter`]) and was not restarted yet.
     pub fn crashed(&self) -> bool {
-        self.lock().faults.crashed
+        self.hub().crashed()
+    }
+
+    /// The shared fault hub.
+    fn hub(&self) -> Arc<FaultHub> {
+        self.lock().hub.clone()
+    }
+
+    /// Shares `hub` with another component of the same `FakeSystem` (its registry).
+    pub(super) fn set_hub(&self, hub: Arc<FaultHub>) {
+        self.lock().hub = hub;
     }
 
     /// Restarts after a crash (or at any time): closes every handle Rerun held, by origin,
     /// not by process ID (pending POSIX deletes on them complete, a lock is released, the old
     /// [`Dir`] handles and guards become stale), keeps the handles and image sections of
     /// other programs (fixture holds), clears the crash flag, the armed faults and the call
-    /// counts.
+    /// counts, and makes every registry handle of the same `FakeSystem` stale (its changes
+    /// stay).
     pub fn restart(&self) {
         let mut st = self.lock();
-        st.faults.crashed = false;
+        st.hub.restart();
         let ours: Vec<OpenId> = st
             .opens
             .iter()
@@ -1443,9 +1349,6 @@ impl FakeFs {
         for id in ours {
             st.close(id);
         }
-        st.faults.armed.clear();
-        st.faults.seen.clear();
-        st.faults.fired = false;
     }
 
     // ---------- Setup and attacker helpers (absolute, never follow links) ----------

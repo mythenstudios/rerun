@@ -15,6 +15,14 @@
 //! ([`FakeRegistry::rename_key`]). Volatile keys ([`FakeRegistry::put_volatile_key`]) and an
 //! elevated process ([`FakeRegistry::set_elevated`]) are flags.
 //!
+//! Faults and power loss (ADR 0019 amendment P2-9): every primitive is a unit of the fault hub
+//! the registry shares with the file system of its `FakeSystem` ([`Prim::Reg`]); after a crash
+//! every call of Rerun fails, reads included, and a restart makes every handle stale.
+//! [`FakeRegistry::on_step`] runs before each primitive (another program). Each hive keeps an
+//! ordered log of Rerun's changes; `PrimKey::flush` makes the hive durable, a fixture change
+//! counts as another program that flushed, and `FakeSystem::power_loss` keeps the durable part
+//! plus any prefix of the rest.
+//!
 //! # WOW64 model
 //!
 //! A key is stored once, in its native location. [`RegView::Wow32`] only changes where a key of
@@ -56,6 +64,8 @@ use crate::sys::registry::{
     RegLink, RegValue, RegView, Registry, RegistryWrite, check_key, check_value_name,
 };
 use crate::sys::seq::reg::{self as reg_seq, KeyAccess, KeyFlags, KeySeg, PrimHive, PrimKey};
+
+use super::faults::{Fault, FaultHub, Prim, RegPrim, crashed_err, set_in_hook};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
 /// Most symbolic-link keys one lookup follows.
@@ -95,6 +105,12 @@ struct State {
     next_id: u64,
     /// The process counts as elevated ([`FakeRegistry::set_elevated`]).
     elevated: bool,
+    /// The fault hub, shared with the file system of a `FakeSystem`.
+    hub: Arc<FaultHub>,
+    /// Per-hive logs of Rerun's changes (power-loss model).
+    logs: BTreeMap<Hive, HiveLog>,
+    /// Control K-R4: a flush makes nothing durable.
+    flush_broken: bool,
 }
 
 impl Default for State {
@@ -117,14 +133,38 @@ impl Default for State {
             denied: Vec::new(),
             next_id: 16,
             elevated: false,
+            hub: Arc::default(),
+            logs: BTreeMap::new(),
+            flush_broken: false,
         }
     }
 }
 
+/// The shared state of a [`FakeRegistry`] and its handles.
+#[derive(Default)]
+struct Inner {
+    state: Mutex<State>,
+    hook: Mutex<Option<RegHook>>,
+}
+
+impl Inner {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// In-memory registry. Hive roots always exist and cannot be deleted.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct FakeRegistry {
-    inner: Arc<Mutex<State>>,
+    inner: Arc<Inner>,
+}
+
+impl std::fmt::Debug for FakeRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeRegistry")
+            .field("keys", &self.lock().keys.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Folded name of `WOW6432Node`.
@@ -323,7 +363,15 @@ fn last_name(k: &RegKey) -> String {
 
 impl FakeRegistry {
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        self.inner.lock()
+    }
+
+    /// The state for a fixture or setup change: another program that flushed, so every hive
+    /// log is durable up to now.
+    fn fixture(&self) -> MutexGuard<'_, State> {
+        let mut st = self.inner.lock();
+        st.fixture_flushed();
+        st
     }
 
     /// Builder only: `k` and everything below it refuse every method with `AccessDenied`
@@ -354,7 +402,7 @@ impl FakeRegistry {
     /// followed); `true` if it is new.
     pub fn put_key(&self, k: &RegKey) -> SysResult<bool> {
         let mk = map_key(k)?;
-        let mut st = self.lock();
+        let mut st = self.fixture();
         let mk = st.follow_parent(&mk)?;
         st.check_access(k, &mk)?;
         st.create(k, &mk, &last_name(k))
@@ -383,7 +431,7 @@ impl FakeRegistry {
         if v.encode().is_none() {
             return Err(unsupported(k, "value has no canonical encoding"));
         }
-        let mut st = self.lock();
+        let mut st = self.fixture();
         let mk = st.follow(&mk)?;
         st.check_access(k, &mk)?;
         let node = st.keys.get_mut(&mk).ok_or_else(|| not_found(k))?;
@@ -400,7 +448,7 @@ impl FakeRegistry {
     pub fn remove_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
         let mk = map_key(k)?;
         check_value_name(k, name)?;
-        let mut st = self.lock();
+        let mut st = self.fixture();
         let mk = st.follow(&mk)?;
         st.check_access(k, &mk)?;
         let node = st.keys.get_mut(&mk).ok_or_else(|| not_found(k))?;
@@ -420,7 +468,7 @@ impl FakeRegistry {
         if k.path.is_empty() {
             return Err(SysError::new(SysErrorKind::InvalidPath, k.to_string()));
         }
-        let mut st = self.lock();
+        let mut st = self.fixture();
         let mk = st.follow_parent(&mk)?;
         st.check_access(k, &mk)?;
         if !st.keys.contains_key(&mk) {
@@ -438,6 +486,7 @@ impl Registry for FakeRegistry {
     fn key_exists(&self, k: &RegKey) -> SysResult<bool> {
         let mk = map_key(k)?;
         let st = self.lock();
+        st.alive()?;
         let mk = st.follow(&mk)?;
         st.check_access(k, &mk)?;
         Ok(st.keys.contains_key(&mk))
@@ -447,6 +496,7 @@ impl Registry for FakeRegistry {
         let mk = map_key(k)?;
         check_value_name(k, name)?;
         let st = self.lock();
+        st.alive()?;
         let mk = st.follow(&mk)?;
         st.check_access(k, &mk)?;
         let node = st.keys.get(&mk).ok_or_else(|| not_found(k))?;
@@ -463,6 +513,7 @@ impl Registry for FakeRegistry {
     fn values(&self, k: &RegKey) -> SysResult<Vec<(String, RegValue)>> {
         let mk = map_key(k)?;
         let st = self.lock();
+        st.alive()?;
         let mk = st.follow(&mk)?;
         st.check_access(k, &mk)?;
         let node = st.keys.get(&mk).ok_or_else(|| not_found(k))?;
@@ -492,6 +543,7 @@ impl Registry for FakeRegistry {
     fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
         let mk = map_key(k)?;
         let st = self.lock();
+        st.alive()?;
         let mk = st.follow(&mk)?;
         st.check_access(k, &mk)?;
         if !st.keys.contains_key(&mk) {
@@ -507,6 +559,7 @@ impl Registry for FakeRegistry {
     fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>> {
         let mk = map_key(k)?;
         let st = self.lock();
+        st.alive()?;
         let mk = st.follow_parent(&mk)?;
         st.check_access(k, &mk)?;
         let node = st.keys.get(&mk).ok_or_else(|| not_found(k))?;
@@ -542,7 +595,7 @@ impl RegFixture for FakeRegistry {
             ));
         }
         let pmk = map_key(parent)?;
-        let mut st = self.lock();
+        let mut st = self.fixture();
         let pmk = st.follow(&pmk)?;
         if !st.keys.contains_key(&pmk) {
             return Err(not_found(parent));
@@ -573,7 +626,7 @@ impl RegFixture for FakeRegistry {
             ));
         }
         let mk = map_key(k)?;
-        let mut st = self.lock();
+        let mut st = self.fixture();
         let mk = st.follow(&mk)?;
         let node = st.keys.get_mut(&mk).ok_or_else(|| not_found(k))?;
         let original = node.values.get(&folded).map_or(shown, |(n, _)| n.clone());
@@ -591,7 +644,7 @@ impl RegFixture for FakeRegistry {
                 format!("{link} -> {target}"),
             ));
         }
-        let mut st = self.lock();
+        let mut st = self.fixture();
         let mk = st.follow_parent(&mk)?;
         if !st.create(link, &mk, &last_name(link))? {
             return Err(SysError::new(
@@ -633,6 +686,29 @@ impl RegFixture for FakeRegistry {
 
 // ---------- Write side: the primitives of `sys::seq::reg` (ADR 0018 amendment P2-9) ----------
 
+/// How to undo one logged change of Rerun (power-loss model, see the module docs).
+#[derive(Debug)]
+enum Undo {
+    /// A key was created: remove it again (it must exist and be empty by then).
+    KeyCreated { id: u64 },
+    /// A key was deleted: put it back where it was.
+    KeyDeleted { mk: MapKey, node: KeyNode },
+    /// A value was set or deleted: its old state (`None`: it was missing).
+    Value {
+        id: u64,
+        folded: String,
+        old: Option<(String, RegValue)>,
+    },
+}
+
+/// The ordered log of one hive.
+#[derive(Debug, Default)]
+struct HiveLog {
+    entries: Vec<Undo>,
+    /// Entries `..durable` are durable.
+    durable: usize,
+}
+
 impl State {
     /// The map key of the node `id` (a key renamed by another program keeps its ID).
     fn path_of_id(&self, hive: Hive, id: u64) -> Option<MapKey> {
@@ -659,15 +735,86 @@ impl State {
         }
         shown.join("\\")
     }
+
+    /// Appends a change of Rerun to the log of `hive`.
+    fn log(&mut self, hive: Hive, undo: Undo) {
+        self.logs.entry(hive).or_default().entries.push(undo);
+    }
+
+    /// A fixture change: another program that flushed, so every hive log is durable up to now
+    /// (the ordered log stays consistent with changes nobody logs).
+    fn fixture_flushed(&mut self) {
+        for log in self.logs.values_mut() {
+            log.durable = log.entries.len();
+        }
+    }
+
+    /// `AccessDenied`-free check that the process is alive (reads of Rerun after a crash).
+    fn alive(&self) -> SysResult<()> {
+        if self.hub.crashed() {
+            Err(crashed_err())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn undo(&mut self, hive: Hive, u: Undo) {
+        match u {
+            Undo::KeyCreated { id } => {
+                let Some(mk) = self.path_of_id(hive, id) else {
+                    panic!("fake power loss: created key {id} is gone before its undo");
+                };
+                assert!(
+                    self.child_keys(&mk).next().is_none(),
+                    "fake power loss: created key {id} has subkeys at its undo"
+                );
+                self.keys.remove(&mk);
+            }
+            Undo::KeyDeleted { mk, node } => {
+                let parent = split_last(&mk.1).map(|(p, _)| p.to_owned());
+                assert!(
+                    !self.keys.contains_key(&mk)
+                        && parent.is_some_and(|p| self.keys.contains_key(&(mk.0, p))),
+                    "fake power loss: undo of the delete of {} collides",
+                    mk.1
+                );
+                self.keys.insert(mk, node);
+            }
+            Undo::Value { id, folded, old } => {
+                let Some(mk) = self.path_of_id(hive, id) else {
+                    panic!("fake power loss: key {id} is gone before the undo of its value");
+                };
+                if let Some(node) = self.keys.get_mut(&mk) {
+                    match old {
+                        Some(v) => {
+                            node.values.insert(folded, v);
+                        }
+                        None => {
+                            node.values.remove(&folded);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A key handle of the fake's write side: the key's identity, so it follows a rename, and a
-/// key deleted under it is `Busy` (`STATUS_KEY_DELETED`, S3).
-#[derive(Debug)]
+/// key deleted under it is `Busy` (`STATUS_KEY_DELETED`, S3); a restart makes it stale.
 pub(crate) struct FakeKey {
-    reg: Arc<Mutex<State>>,
+    reg: Arc<Inner>,
     hive: Hive,
     id: u64,
+    epoch: u64,
+}
+
+impl std::fmt::Debug for FakeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeKey")
+            .field("hive", &self.hive)
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 fn deleted() -> SysError {
@@ -677,20 +824,65 @@ fn deleted() -> SysError {
     )
 }
 
-impl FakeKey {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.reg.lock().unwrap_or_else(PoisonError::into_inner)
+/// Runs one registry primitive of Rerun: fires the hook (without the state lock), then,
+/// under it, checks the handle's epoch, enters the call at the hub (crash, armed fault) and
+/// runs `f`. A [`Fault::CrashAfter`] lets `f` act and then crashes.
+fn prim<T>(
+    reg: &Arc<Inner>,
+    call: RegPrim,
+    epoch: Option<u64>,
+    f: impl FnOnce(&mut State) -> SysResult<T>,
+) -> SysResult<T> {
+    let crashed = reg.lock().hub.crashed();
+    if !crashed {
+        fire(reg, call);
     }
+    let mut st = reg.lock();
+    let hub = st.hub.clone();
+    let crash = hub.enter(Prim::Reg(call))?;
+    if epoch.is_some_and(|e| e != hub.epoch()) {
+        return Err(SysError::new(
+            SysErrorKind::Other,
+            "fake: registry handle closed by a restart",
+        ));
+    }
+    let r = f(&mut st);
+    if crash {
+        hub.crash();
+        return Err(crashed_err());
+    }
+    r
+}
 
-    /// The child `seg` of this key: its map key and its ID if it exists.
-    fn child(&self, seg: KeySeg<'_>) -> SysResult<(MapKey, Option<u64>)> {
-        let st = self.lock();
-        let mk = st.path_of_id(self.hive, self.id).ok_or_else(deleted)?;
-        let child = (mk.0, join(&mk.1, &fold(seg.as_str())));
-        let shown = RegKey::new(self.hive, RegView::Native, st.shown_path(&child));
-        st.check_access(&shown, &child)?;
-        let id = st.keys.get(&child).map(|n| n.id);
-        Ok((child, id))
+/// Runs the registry hook (another program) before `call`, without the state lock.
+fn fire(reg: &Arc<Inner>, call: RegPrim) {
+    let hook = reg
+        .hook
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    if let Some(mut hook) = hook {
+        set_in_hook(true);
+        hook(&FakeRegistry { inner: reg.clone() }, call);
+        set_in_hook(false);
+        let mut slot = reg.hook.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot.is_none() {
+            *slot = Some(hook);
+        }
+    }
+}
+
+impl FakeKey {
+    fn prim<T>(
+        &self,
+        call: RegPrim,
+        f: impl FnOnce(&mut State, MapKey) -> SysResult<T>,
+    ) -> SysResult<T> {
+        let (hive, id) = (self.hive, self.id);
+        prim(&self.reg, call, Some(self.epoch), |st| {
+            let mk = st.path_of_id(hive, id).ok_or_else(deleted)?;
+            f(st, mk)
+        })
     }
 
     fn handle(&self, id: u64) -> Self {
@@ -698,56 +890,53 @@ impl FakeKey {
             reg: self.reg.clone(),
             hive: self.hive,
             id,
+            epoch: self.epoch,
         }
     }
 
-    fn with_node<T>(
-        &self,
-        f: impl FnOnce(&State, &MapKey, &KeyNode) -> SysResult<T>,
-    ) -> SysResult<T> {
-        let st = self.lock();
-        let mk = st.path_of_id(self.hive, self.id).ok_or_else(deleted)?;
-        let node = st.keys.get(&mk).ok_or_else(deleted)?;
-        f(&st, &mk, node)
-    }
-
-    fn with_node_mut<T>(&self, f: impl FnOnce(&mut KeyNode) -> SysResult<T>) -> SysResult<T> {
-        let mut st = self.lock();
-        let mk = st.path_of_id(self.hive, self.id).ok_or_else(deleted)?;
-        let node = st.keys.get_mut(&mk).ok_or_else(deleted)?;
-        f(node)
+    /// The child `seg` of the key `mk`: its map key and its ID if it exists.
+    fn child(st: &State, mk: &MapKey, seg: KeySeg<'_>) -> SysResult<(MapKey, Option<u64>)> {
+        let child = (mk.0, join(&mk.1, &fold(seg.as_str())));
+        let shown = RegKey::new(mk.0, RegView::Native, st.shown_path(&child));
+        st.check_access(&shown, &child)?;
+        let id = st.keys.get(&child).map(|n| n.id);
+        Ok((child, id))
     }
 }
 
 impl PrimKey for FakeKey {
     fn open(&self, seg: KeySeg<'_>, _a: KeyAccess) -> SysResult<Option<Self>> {
-        let (_, id) = self.child(seg)?;
+        let id = self.prim(RegPrim::Open, |st, mk| Ok(Self::child(st, &mk, seg)?.1))?;
         Ok(id.map(|id| self.handle(id)))
     }
 
     fn create(&self, seg: KeySeg<'_>, _a: KeyAccess) -> SysResult<(Self, bool)> {
-        let (child, id) = self.child(seg)?;
-        if let Some(id) = id {
-            return Ok((self.handle(id), false));
-        }
-        let mut st = self.lock();
-        let id = st.new_id();
-        st.keys.insert(
-            child,
-            KeyNode {
-                id,
-                name: seg.as_str().to_owned(),
-                values: BTreeMap::new(),
-                link: None,
-                volatile: false,
-            },
-        );
-        drop(st);
-        Ok((self.handle(id), true))
+        let hive = self.hive;
+        let (id, created) = self.prim(RegPrim::Create, |st, mk| {
+            let (child, id) = Self::child(st, &mk, seg)?;
+            if let Some(id) = id {
+                return Ok((id, false));
+            }
+            let id = st.new_id();
+            st.keys.insert(
+                child,
+                KeyNode {
+                    id,
+                    name: seg.as_str().to_owned(),
+                    values: BTreeMap::new(),
+                    link: None,
+                    volatile: false,
+                },
+            );
+            st.log(hive, Undo::KeyCreated { id });
+            Ok((id, true))
+        })?;
+        Ok((self.handle(id), created))
     }
 
     fn flags(&self) -> SysResult<KeyFlags> {
-        self.with_node(|_, _, n| {
+        self.prim(RegPrim::Flags, |st, mk| {
+            let n = st.keys.get(&mk).ok_or_else(deleted)?;
             Ok(KeyFlags {
                 link: n.link.is_some(),
                 volatile: n.volatile,
@@ -756,11 +945,14 @@ impl PrimKey for FakeKey {
     }
 
     fn kernel_name(&self) -> SysResult<String> {
-        self.with_node(|st, mk, _| Ok(kernel_name(mk.0, &st.shown_path(mk))))
+        self.prim(RegPrim::KernelName, |st, mk| {
+            Ok(kernel_name(mk.0, &st.shown_path(&mk)))
+        })
     }
 
     fn query(&self, name: &str) -> SysResult<Option<RegValue>> {
-        self.with_node(|_, _, n| {
+        self.prim(RegPrim::Query, |st, mk| {
+            let n = st.keys.get(&mk).ok_or_else(deleted)?;
             let v = n.values.get(&fold(name)).map(|(_, v)| v.clone());
             if v.as_ref().is_some_and(|v| data_len(v) > MAX_VALUE_BYTES) {
                 return Err(SysError::too_large(
@@ -773,8 +965,9 @@ impl PrimKey for FakeKey {
     }
 
     fn counts(&self) -> SysResult<(u32, u32)> {
-        self.with_node(|st, mk, n| {
-            let subkeys = st.child_keys(mk).count();
+        self.prim(RegPrim::Counts, |st, mk| {
+            let n = st.keys.get(&mk).ok_or_else(deleted)?;
+            let subkeys = st.child_keys(&mk).count();
             Ok((
                 u32::try_from(n.values.len()).unwrap_or(u32::MAX),
                 u32::try_from(subkeys).unwrap_or(u32::MAX),
@@ -783,48 +976,75 @@ impl PrimKey for FakeKey {
     }
 
     fn set_value(&self, name: &str, v: &RegValue) -> SysResult<()> {
-        if v.encode().is_none() {
-            return Err(SysError::new(
-                SysErrorKind::Unsupported,
-                format!("{name:?}: no canonical encoding"),
-            ));
-        }
-        self.with_node_mut(|n| {
+        let (hive, id) = (self.hive, self.id);
+        self.prim(RegPrim::SetValue, |st, mk| {
+            if v.encode().is_none() {
+                return Err(SysError::new(
+                    SysErrorKind::Unsupported,
+                    format!("{name:?}: no canonical encoding"),
+                ));
+            }
+            let n = st.keys.get_mut(&mk).ok_or_else(deleted)?;
             let folded = fold(name);
-            let original = n
-                .values
-                .get(&folded)
+            let old = n.values.get(&folded).cloned();
+            let original = old
+                .as_ref()
                 .map_or_else(|| name.to_owned(), |(o, _)| o.clone());
-            n.values.insert(folded, (original, v.clone()));
+            n.values.insert(folded.clone(), (original, v.clone()));
+            st.log(hive, Undo::Value { id, folded, old });
             Ok(())
         })
     }
 
     fn delete_value(&self, name: &str) -> SysResult<()> {
-        self.with_node_mut(|n| match n.values.remove(&fold(name)) {
-            Some(_) => Ok(()),
-            None => Err(SysError::new(SysErrorKind::NotFound, format!("{name:?}"))),
+        let (hive, id) = (self.hive, self.id);
+        self.prim(RegPrim::DeleteValue, |st, mk| {
+            let n = st.keys.get_mut(&mk).ok_or_else(deleted)?;
+            let folded = fold(name);
+            let Some(old) = n.values.remove(&folded) else {
+                return Err(SysError::new(SysErrorKind::NotFound, format!("{name:?}")));
+            };
+            st.log(
+                hive,
+                Undo::Value {
+                    id,
+                    folded,
+                    old: Some(old),
+                },
+            );
+            Ok(())
         })
     }
 
     fn delete(self) -> SysResult<()> {
-        let mut st = self.lock();
-        let mk = st.path_of_id(self.hive, self.id).ok_or_else(deleted)?;
-        if mk.1.is_empty() {
-            return Err(SysError::new(
-                SysErrorKind::AccessDenied,
-                "fake: a hive root cannot be deleted",
-            ));
-        }
-        if st.child_keys(&mk).next().is_some() {
-            return Err(SysError::new(SysErrorKind::NotEmpty, st.shown_path(&mk)));
-        }
-        st.keys.remove(&mk);
-        Ok(())
+        let hive = self.hive;
+        self.prim(RegPrim::Delete, |st, mk| {
+            if mk.1.is_empty() {
+                return Err(SysError::new(
+                    SysErrorKind::AccessDenied,
+                    "fake: a hive root cannot be deleted",
+                ));
+            }
+            if st.child_keys(&mk).next().is_some() {
+                return Err(SysError::new(SysErrorKind::NotEmpty, st.shown_path(&mk)));
+            }
+            if let Some(node) = st.keys.remove(&mk) {
+                st.log(hive, Undo::KeyDeleted { mk, node });
+            }
+            Ok(())
+        })
     }
 
     fn flush(&self) -> SysResult<()> {
-        self.with_node(|_, _, _| Ok(()))
+        let hive = self.hive;
+        self.prim(RegPrim::Flush, |st, _| {
+            if !st.flush_broken
+                && let Some(log) = st.logs.get_mut(&hive)
+            {
+                log.durable = log.entries.len();
+            }
+            Ok(())
+        })
     }
 }
 
@@ -832,16 +1052,19 @@ impl PrimHive for FakeRegistry {
     type Key = FakeKey;
 
     fn open_root(&self, h: Hive, _a: KeyAccess) -> SysResult<FakeKey> {
-        let st = self.lock();
-        let id = st
-            .keys
-            .get(&(h, String::new()))
-            .map(|n| n.id)
-            .ok_or_else(|| SysError::new(SysErrorKind::NotFound, h.to_string()))?;
+        let (id, epoch) = prim(&self.inner, RegPrim::Root, None, |st| {
+            let id = st
+                .keys
+                .get(&(h, String::new()))
+                .map(|n| n.id)
+                .ok_or_else(|| SysError::new(SysErrorKind::NotFound, h.to_string()))?;
+            Ok((id, st.hub.epoch()))
+        })?;
         Ok(FakeKey {
             reg: self.inner.clone(),
             hive: h,
             id,
+            epoch,
         })
     }
 
@@ -890,7 +1113,83 @@ impl RegistryWrite for FakeRegistry {
     }
 }
 
+/// Test hook, see [`FakeRegistry::on_step`].
+pub type RegHook = Box<dyn FnMut(&FakeRegistry, RegPrim) + Send>;
+
 impl FakeRegistry {
+    /// Shares `hub` with the file system of the same `FakeSystem`.
+    pub(super) fn set_hub(&self, hub: Arc<FaultHub>) {
+        self.lock().hub = hub;
+    }
+
+    /// Installs a hook that runs before each registry primitive of Rerun (another program:
+    /// rename a key, plant a link), without the state lock; calls it makes are not counted.
+    /// Replaces an earlier hook.
+    pub fn on_step(&self, hook: impl FnMut(&FakeRegistry, RegPrim) + Send + 'static) {
+        *self
+            .inner
+            .hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(hook));
+    }
+
+    /// Removes the hook (not from inside the hook itself).
+    pub fn clear_on_step(&self) {
+        *self
+            .inner
+            .hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// Arms `fault` for the `nth` (1-based) call of `call` (shared hub, see
+    /// [`FakeFs::fault`](super::FakeFs::fault)).
+    pub fn fault(&self, call: RegPrim, nth: usize, fault: Fault) {
+        self.lock().hub.arm(Prim::Reg(call), nth, fault);
+    }
+
+    /// `fault(call, nth, Fault::Fail(kind))`.
+    pub fn fail_at(&self, call: RegPrim, nth: usize, kind: SysErrorKind) {
+        self.fault(call, nth, Fault::Fail(kind));
+    }
+
+    /// Makes every change so far durable in every hive, like a clean shutdown.
+    pub fn sync_all(&self) {
+        let mut st = self.lock();
+        for log in st.logs.values_mut() {
+            log.durable = log.entries.len();
+        }
+    }
+
+    /// Changes of `hive` a power loss could drop (logged, not durable).
+    pub fn pending(&self, hive: Hive) -> usize {
+        self.lock()
+            .logs
+            .get(&hive)
+            .map_or(0, |l| l.entries.len() - l.durable)
+    }
+
+    /// The registry part of a power loss (`FakeSystem::power_loss`): per hive the durable
+    /// changes plus `keep[hive]` (default 0) more survive, the rest is undone newest first.
+    pub(super) fn cut(&self, keep: &BTreeMap<Hive, usize>) {
+        let mut st = self.lock();
+        let logs = std::mem::take(&mut st.logs);
+        for (hive, mut log) in logs {
+            let kept = (log.durable + keep.get(&hive).copied().unwrap_or(0)).min(log.entries.len());
+            while log.entries.len() > kept {
+                if let Some(u) = log.entries.pop() {
+                    st.undo(hive, u);
+                }
+            }
+        }
+    }
+
+    /// Control K-R4: `PrimKey::flush` makes nothing durable.
+    #[cfg(test)]
+    pub(crate) fn break_flush(&self, on: bool) {
+        self.lock().flush_broken = on;
+    }
+
     /// Test: the process counts as elevated, so every changing write method is `Unsupported`
     /// (S2).
     pub fn set_elevated(&self, on: bool) {
@@ -902,7 +1201,7 @@ impl FakeRegistry {
     /// an open handle follows. The new name must be free.
     pub fn rename_key(&self, k: &RegKey, new_name: &str) -> SysResult<()> {
         let mk = map_key(k)?;
-        let mut st = self.lock();
+        let mut st = self.fixture();
         let mk = st.follow_parent(&mk)?;
         let Some((parent, _)) = split_last(&mk.1) else {
             return Err(SysError::new(SysErrorKind::InvalidPath, k.to_string()));
@@ -939,7 +1238,7 @@ impl FakeRegistry {
     /// Setup: creates the key `k` (its parent must exist) as a volatile key (S4).
     pub fn put_volatile_key(&self, k: &RegKey) -> SysResult<()> {
         let mk = map_key(k)?;
-        let mut st = self.lock();
+        let mut st = self.fixture();
         let mk = st.follow_parent(&mk)?;
         st.create(k, &mk, &last_name(k))?;
         if let Some(n) = st.keys.get_mut(&mk) {

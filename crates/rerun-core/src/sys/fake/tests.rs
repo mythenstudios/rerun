@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{FakeFs, FakeSystem, Fault, FsOp, Prim, StepEvent};
+use super::{Domain, FakeFs, FakeSystem, Fault, FsOp, Prim, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
     Access, FsFixture, Held, Share, fs_link_read_contract, fs_link_write_contract,
@@ -3802,7 +3802,7 @@ fn f9_every_power_loss_cut_recovers_to_before_or_after() {
             for keep in 0..=pending {
                 let sys = op_system();
                 run_until(&sys, op, &calls, i);
-                sys.fake_fs().power_loss(&BTreeMap::from([('C', keep)]));
+                sys.power_loss(&BTreeMap::from([(Domain::Volume('C'), keep)]));
                 let what = format!("{op:?}: power loss after call {i} of {calls:?}, cut {keep}");
                 let g = open(&sys, r"C:\G");
                 let (is_after, phase) = recover_op(&*g, op, &what);
@@ -3840,7 +3840,7 @@ fn f9_flush_rules_for_create_new() {
     assert_eq!(fx.pending('C'), 1);
     g.flush().unwrap();
     assert_eq!(fx.pending('C'), 0);
-    fx.power_loss(&BTreeMap::new());
+    sys.power_loss(&BTreeMap::new());
     assert_eq!(open(&sys, r"C:\G").read(&r("n.bin")).unwrap(), b"new");
     // Unflushed content is lost: a file reads as its last flushed content.
     let sys = op_system();
@@ -3852,7 +3852,7 @@ fn f9_flush_rules_for_create_new() {
     assert!(g.create_new(&r("n.bin"), &mut &b"new"[..], &tmp).is_err());
     let all = fx.pending('C');
     assert_eq!(all, 2, "created and attributes, nothing flushed");
-    fx.power_loss(&BTreeMap::from([('C', all)]));
+    sys.power_loss(&BTreeMap::from([(Domain::Volume('C'), all)]));
     let g = open(&sys, r"C:\G");
     let m = g.metadata(&tmp.tmp.to_rel()).unwrap().unwrap();
     assert_eq!(
@@ -3893,8 +3893,10 @@ fn f9_two_volumes_are_ordered_only_by_flushes() {
             for d in 0..=pd {
                 let sys = setup();
                 act(&sys, flush_c);
-                sys.fake_fs()
-                    .power_loss(&BTreeMap::from([('C', c), ('D', d)]));
+                sys.power_loss(&BTreeMap::from([
+                    (Domain::Volume('C'), c),
+                    (Domain::Volume('D'), d),
+                ]));
                 let on_c = open(&sys, r"C:\J")
                     .metadata(&r("rec.bin"))
                     .unwrap()
@@ -4003,3 +4005,5 @@ fn hooks_stop_after_a_crash_and_calls_from_hooks_are_not_counted() {
     );
     fx.clear_on_step();
 }
+
+mod reg_faults;

@@ -22,7 +22,7 @@ use super::{
     Closing, FlushSite, InstanceTag, Journal, JournalError, Observed, TxnState, VerifyBackups, knob,
 };
 use crate::policy::root::AppDir;
-use crate::sys::fake::{FakeSystem, Fault, Prim};
+use crate::sys::fake::{Domain, FakeSystem, Fault, Prim};
 use crate::sys::fs::{Attrs, DirWrite, NewFile, TmpName};
 
 const C: [&[u8]; 2] = [b"change of op 0", b"change of op 1"];
@@ -279,8 +279,10 @@ fn matrix(skip: Option<Site>, want: Option<&str>) -> (Vec<String>, Size) {
             for d in 0..=pd {
                 let sys = setup();
                 let p = run(&sys, &calls, i, skip);
-                sys.fake_fs()
-                    .power_loss(&BTreeMap::from([('C', c), ('D', d)]));
+                sys.power_loss(&BTreeMap::from([
+                    (Domain::Volume('C'), c),
+                    (Domain::Volume('D'), d),
+                ]));
                 size.runs += 1;
                 for x in violations(&see(&sys), p) {
                     let hit = want.is_some_and(|w| x.contains(w));

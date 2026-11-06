@@ -13,7 +13,7 @@
 //!   the last entry touching that file; `PrimDir::flush` up to the last entry touching the
 //!   directory or an entry in it. Because a log is ordered, every earlier entry of that
 //!   volume becomes durable with it.
-//! - [`FakeFs::power_loss`] keeps, per volume, the durable part plus `keep` more entries (cut
+//! - `FakeSystem::power_loss` keeps, per volume, the durable part plus `keep` more entries (cut
 //!   0 drops every unflushed change), undoes the rest newest first, resets every file to its
 //!   last flushed content and drops every handle and image section without completing a
 //!   pending delete; afterwards the process is fresh (not crashed, no faults).
@@ -231,14 +231,17 @@ impl FakeFs {
     /// A power loss: per volume, the durable changes plus `keep[volume]` (default 0) more
     /// survive, the rest is undone newest first; every file reads its last flushed content;
     /// every handle and image section is gone (no pending delete completes); the process
-    /// starts fresh (see the module docs).
-    pub fn power_loss(&self, keep: &BTreeMap<char, usize>) {
+    /// starts fresh (see the module docs). `also` runs under the state lock (the registry
+    /// cut of `FakeSystem::power_loss`; lock order file system, then registry).
+    pub(in crate::sys::fake) fn power_loss_with(
+        &self,
+        keep: &BTreeMap<char, usize>,
+        also: impl FnOnce(),
+    ) {
         let mut st = self.lock();
+        also();
         st.opens.clear();
-        st.faults.crashed = false;
-        st.faults.armed.clear();
-        st.faults.seen.clear();
-        st.faults.fired = false;
+        st.hub.restart();
         let logs = std::mem::take(&mut st.logs);
         for (drive, mut log) in logs {
             let kept =

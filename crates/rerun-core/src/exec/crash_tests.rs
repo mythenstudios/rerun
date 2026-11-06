@@ -19,7 +19,7 @@ use crate::journal::{FlushSite, TxnState, knob as journal_knob};
 use crate::plan::{self, Plan, PlanHash, store};
 use crate::prim::tests::{app, entry, spec};
 use crate::sys::Fs;
-use crate::sys::fake::{Fault, Prim};
+use crate::sys::fake::{Domain, Fault, Prim};
 use crate::sys::snapshot::Snapshot;
 
 /// The plans of condition 7.
@@ -366,9 +366,10 @@ fn matrix(k: Kind, skip: Option<Site>, want: Option<&str>) -> (Vec<String>, Size
             for d in 0..=pd {
                 let (env, h, before) = setup(k);
                 let got = run(&env, &h, at);
-                env.sys
-                    .fake_fs()
-                    .power_loss(&BTreeMap::from([('C', c), ('D', d)]));
+                env.sys.power_loss(&BTreeMap::from([
+                    (Domain::Volume('C'), c),
+                    (Domain::Volume('D'), d),
+                ]));
                 size.runs += 1;
                 knobs(None);
                 let v = violations(&env, &before, got);
@@ -494,9 +495,10 @@ fn b2_a_restore_intent_without_its_restore_falls_back_to_the_replace() {
         if keep_d > pending {
             break;
         }
-        env.sys
-            .fake_fs()
-            .power_loss(&BTreeMap::from([('C', 0), ('D', keep_d)]));
+        env.sys.power_loss(&BTreeMap::from([
+            (Domain::Volume('C'), 0),
+            (Domain::Volume('D'), keep_d),
+        ]));
         let target = super::tests::exists_abs(&env.sys, &game("d3d9.dll"));
         let names = tmp_names(&env);
         if !target && names.iter().any(|n| n.ends_with(".tmp.old")) {
@@ -623,9 +625,10 @@ fn m1_a_failure_or_a_recovery_then_a_power_loss_on_the_game_volume() {
                 for d in 0..=pd {
                     let (env, h, before) = setup(k);
                     let got = prepare(&env, &h, &before);
-                    env.sys
-                        .fake_fs()
-                        .power_loss(&BTreeMap::from([('C', 1 << 20), ('D', d)]));
+                    env.sys.power_loss(&BTreeMap::from([
+                        (Domain::Volume('C'), 1 << 20),
+                        (Domain::Volume('D'), d),
+                    ]));
                     runs += 1;
                     let v = violations(&env, &before, got);
                     assert!(v.is_empty(), "{k:?} {at:?}, cut D {d}: {v:?}");
