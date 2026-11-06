@@ -1,6 +1,6 @@
 # ADR 0019 · Journal
 
-**Status:** accepted (decided by the user) · 2026-11-05 · amended 2026-11-05, P2-3 plan (see "Amendment" at the end) · replaces the SQLite journal of `docs/01-architecture.md`, introduces `AppDir` (ADR 0007), closes audit A1 should-item 6 and the plan review's design blockers B-1 and B-2
+**Status:** accepted (decided by the user) · 2026-11-05 · amended 2026-11-05, P2-3 plan, and 2026-11-06, P2-7 (see the amendments at the end) · replaces the SQLite journal of `docs/01-architecture.md`, introduces `AppDir` (ADR 0007), closes audit A1 should-item 6 and the plan review's design blockers B-1 and B-2
 
 ## Context
 Core rule 2: every change is reversible, the journal is written before the change, a revert restores the state before the first change exactly, also after a crash. `docs/01-architecture.md` planned SQLite (`rusqlite`) at `%LOCALAPPDATA%\Rerun\journal.db`. Audit A1 (should-item 6) found that at odds with ADR 0007: SQLite opens by path, creates temporary files through `GetTempPathW` (banned, ADR 0009), adds C code and needs its own allowlist entry. The plan review raised two design blockers: **B-1** a plan touches two volumes (journal on `C:`, game on `D:`) whose writes the OS does not order; **B-2** what happens on an in-process failure, and when two transactions touch the same object.
@@ -95,7 +95,7 @@ A crash stops the process after a primitive call (ADR 0017 amendment, A1): every
 ### Lock
 `journal\lock` is taken with `DirWrite::lock` (ADR 0017 amendment, A7); it is part of the write contract, which `sys::win` passes unchanged (P2-4).
 
-## Amendment (P2-7, 2026-11-06; decided by the user after a senior-dev cross-check; in progress until the crash and power-loss matrix is green)
+## Amendment (P2-7, 2026-11-06; decided by the user after a senior-dev cross-check)
 
 ### Format freeze (user decision E1)
 `format: 1` stays unstable until the first release (audit A6): a journal written during development may read as `Damaged` after a format change and is then closed with `forget`. From the first release on, a format only gains variants (additive); journal files are never rewritten.
@@ -119,3 +119,13 @@ Wire: `{"format":1,"n":N,"head":"<hex>","record":{"<kind>":{…}}}`, `serde` wit
 `Journal::new(&AppDir, InstanceTag)`; `list()` and `load(id, VerifyBackups::{Length, Hash})` take no lock and return `TxnView { id, head, state, anomaly, ops }`; `lock()` takes `journal\lock` (`Busy` while another Rerun holds it). Under the lock, `begin(head)` creates the next folder (reopened and compared by file ID) and `head.json`, and returns a `TxnWriter` (`backup`, `intent`, `done`, `applied` and the revert records, `close`); `resume(id)` accepts `Empty`, `Open` and `Applied` (with a head) and returns a `RevertWriter`, which has no `backup`, `intent`, `done` or `applied` (condition S4). `backup` checks the per-file and per-transaction budgets before it streams. Writers are crate-internal (`exec`, P2-8).
 
 For stacking (E2): a damaged transaction whose head is readable and hash-consistent counts as open with the objects of its head (the code path of `Open`, also for LIFO); one whose head is unusable (`HeadMissing`, `HeadTooLarge`, `HeadHash`, or a head `exec` cannot parse) blocks every apply with a hint to `forget`.
+
+### Durability (P2-7 results)
+Write order as decided above, with one addition: the caller flushes the changed folders before `close` as well as before `applied` (condition S2), and `close` flushes the transaction folder. Who flushes what: `intent`, `applied`, `revert_intent` and `close` flush the transaction folder; `done` and `revert_done` do not (the next flush covers them); `begin` and `backup` do not (the first intent's flush covers the folder, `head.json` and the backup through the ordered log). The read-back of a backup proves its content, not its durability.
+Tested against the fake (`journal/crash_tests.rs`), the journal on `C:` and stub changes on `D:`: J4 crashes after every call of Rerun of an apply and revert of two ops (condition S1, 184 calls): never damaged, a prefix of the full log, the lock free, `resume` finishes and closes. J5 cuts power after every call and after the end at every cut of `C:` times every cut of `D:` (455 power losses, under a second): never damaged, no gap, a durable intent with a backup has an intact backup, a durable change has a durable intent, a durable `Applied` has every change durable, a durable `Closed { RolledBack | Reverted }` has every revert durable, and every record whose flushing call returned `Ok` survives every cut (S2). J6 switches off each flush site in turn (intent, the game folder before `applied`, `applied`, `revert_intent`, the game folder before `close`, `close`): each time a named property fails.
+
+### Open points (P2-7)
+- **`CreateDir` (condition S6, for P2-8):** `Done.file_id` is the only proof that a directory is ours, and `Done` is not flushed. P2-8 decides what a revert does with a `CreateDir` intent without `Done` (for example: remove only an empty directory created after the intent, by its file ID observed then, else `Foreign`).
+- `Rebind`, registry `before` values and their `.bin`, `exec::forget`, deleting `.bin` files when a transaction closes, retention, and cleaning up `.old` files of other transactions come later (P2-9/10, phase 5).
+- `Observed` lives in `journal` because `RevertDone` carries it; `exec` produces it (ADR 0020).
+- Windows runs J1, J7 and a junction at a transaction folder in a `TestRoot` with a fake `LocalAppData`; crashes and power losses only in the fake, the real `LocalAppData` and the VM power-loss case only in Windows Sandbox and the manual matrix (`docs/09-testing.md`).

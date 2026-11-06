@@ -152,6 +152,28 @@ pub(crate) enum FlushSite {
     Close,
 }
 
+#[cfg(test)]
+pub(crate) mod knob {
+    //! J6: a flush site of this thread's writers that does nothing.
+
+    use std::cell::Cell;
+
+    use super::FlushSite;
+
+    thread_local! {
+        static SKIP: Cell<Option<FlushSite>> = const { Cell::new(None) };
+    }
+
+    /// From now on, the flush at `site` does nothing (on this thread).
+    pub(crate) fn skip(site: Option<FlushSite>) {
+        SKIP.with(|s| s.set(site));
+    }
+
+    pub(super) fn skipped(site: FlushSite) -> bool {
+        SKIP.with(|s| s.get() == Some(site))
+    }
+}
+
 /// The token of a backup taken by [`TxnWriter::backup`]; only its intent consumes it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Backup {
@@ -193,6 +215,11 @@ impl<'l> Txn<'l> {
     }
 
     fn flush(&self, site: FlushSite) -> Result<(), JournalError> {
+        #[cfg(test)]
+        if knob::skipped(site) {
+            return Ok(());
+        }
+        #[cfg(not(test))]
         let _ = site;
         Ok(self.dir.flush()?)
     }

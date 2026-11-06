@@ -37,7 +37,7 @@ pub use names::{InstanceTag, TxnId};
 pub use record::{BackupRef, Closing, FORMAT, Observed};
 pub use write::JournalLock;
 #[cfg(test)]
-pub(crate) use write::TxnWriter;
+pub(crate) use write::{FlushSite, TxnWriter, knob};
 
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{AppDir, AppSub, Create, RootError};
@@ -408,5 +408,7 @@ pub struct RevertDoneRec {
     pub old_left: bool,
 }
 
+#[cfg(test)]
+mod crash_tests;
 #[cfg(test)]
 pub(crate) mod tests;
