@@ -215,7 +215,7 @@ fn r_t1_the_plan_puts_files_first() {
 #[test]
 fn r_t2_verify_names_exactly_the_op_someone_changed() {
     type Change = fn(&FakeSystem);
-    let cases: [(&str, &[u16], Change); 5] = [
+    let cases: [(&str, &[u16], Change); 7] = [
         ("our value changed", &[5, 6, 7, 8], |s| {
             s.fake_registry()
                 .put_value(&hkcu(SUB), "A", &RegValue::Dword(9))
@@ -236,6 +236,20 @@ fn r_t2_verify_names_exactly_the_op_someone_changed() {
                 .put_key(&hkcu(r"Software\New\Prod\Other"))
                 .unwrap();
         }),
+        // S6: our value grown over 1 MiB by the game: `Foreign`, verify does not abort.
+        ("our value grown over 1 MiB", &[5, 6, 7, 8], |s| {
+            s.fake_registry()
+                .put_value(&hkcu(SUB), "A", &RegValue::Binary(vec![1; (1 << 20) + 1]))
+                .unwrap();
+        }),
+        // S6: the counts fit the later ops, but listing the key is too large (our value
+        // deleted, a value over 1 MiB put beside ours): the created key is `Foreign`.
+        ("a key too large to list", &[5, 6, 7], |s| {
+            let r = s.fake_registry();
+            r.remove_value(&hkcu(SUB), "A").unwrap();
+            r.put_value(&hkcu(SUB), "X", &RegValue::Binary(vec![1; (1 << 20) + 1]))
+                .unwrap();
+        }),
         ("a file", &[0], |s| {
             let p = game("d3d9.dll");
             s.fake_fs().remove_abs(Path::new(&p)).unwrap();
@@ -249,8 +263,10 @@ fn r_t2_verify_names_exactly_the_op_someone_changed() {
         let v = env.verify(&t);
         assert_eq!(foreign_of(&v), ops, "{what}: {v:?}");
         assert!(
-            v.iter()
-                .all(|(k, o)| ops.contains(k) || *o == Observed::After),
+            v.iter().all(|(k, o)| ops.contains(k)
+                    || *o == Observed::After
+                    // Our value deleted by the game: as before the op.
+                    || (what == "a key too large to list" && *k == 8 && *o == Observed::Before)),
             "{what}: {v:?}"
         );
         let rep = env.revert(&t).unwrap();
@@ -531,7 +547,7 @@ fn k1_trusting_the_records_breaks_rt6() {
     super::knob::trust_records(false);
     assert!(
         f.iter()
-            .any(|x| x.starts_with("RT6 the user changes our value")),
+            .any(|x| x.starts_with("RT6 the user changes our value revert:")),
         "K1 not caught: {f:#?}"
     );
 }
@@ -628,7 +644,7 @@ fn k_r7_an_existing_key_taken_as_own_breaks_t3_key() {
     let f = t3_key_check();
     super::reg::KNOB_EXISTED_AS_OWN.with(|k| k.set(false));
     assert!(
-        f.iter().any(|x| x.starts_with("T3 key")),
+        f.iter().any(|x| x.starts_with("T3 key kept")),
         "K-R7 not caught: {f:#?}"
     );
 }
@@ -679,10 +695,21 @@ fn r_t3_the_rollback_uses_the_result_of_create_key() {
         let before = snap_all(&env);
         let h = plan_all(&env, &rt1_steps());
         let r = env.apply_armed(&h, |fx| fx.fail_at(call, nth, SysErrorKind::Other));
-        assert!(
-            matches!(&r, Err(ApplyError::RolledBack { .. })),
-            "{what}: {r:?}"
-        );
+        let Err(ApplyError::RolledBack { txn, cause }) = &r else {
+            panic!("{what}: {r:?}");
+        };
+        // Review nit 4: the failure is op 5's (its call, or its `Done` record).
+        match &**cause {
+            ExecError::Op { op, .. } => assert_eq!(*op, 5, "{what}: {cause:?}"),
+            ExecError::Journal(_) => {
+                let a = app(&env.sys);
+                let j = Journal::new(&a, InstanceTag::fixed(5));
+                let v = j.load(txn, VerifyBackups::Length).unwrap();
+                assert_eq!(v.ops.keys().max(), Some(&5), "{what}");
+                assert!(v.ops[&5].done.is_none(), "{what}");
+            }
+            other => panic!("{what}: {other:?}"),
+        }
         assert!(!key_exists(&env.sys, r"Software\New"), "{what}: deleted");
         same(&before, &snap_all(&env));
     }
@@ -1050,4 +1077,99 @@ fn r_t3_a_value_another_program_wrote_before_our_set_is_left() {
         value(&env.sys, VENDOR_GAME, "TypeChange"),
         Some(RegValue::Dword(2))
     );
+}
+
+/// R-T5, the record form of registry ops (senior-dev should-item 1): records that are
+/// grammatical but do not fit the op's planned old value or kind are `Blocked` for revert and
+/// verify, nothing written.
+#[test]
+fn r_t5_records_that_do_not_fit_a_registry_op_are_blocked() {
+    use crate::journal::tests::{RecordEdit, append_semantic_revert_intent, rewrite};
+    use crate::journal::{Before, Digest};
+    type Tamper = fn(&Env, &str);
+    let edit = |env: &Env, dir: &str, f: fn(&mut RecordEdit)| {
+        rewrite(env.sys.fake_fs(), dir, None, f);
+    };
+    // Op 10 of R-T1 replaces a small value (inline), op 8 sets a new one, op 5 creates a key;
+    // op 0 of `big` replaces a 20 KiB value (`.bin`).
+    let cases: [(&str, bool, Tamper); 8] = [
+        ("Bin with another digest", true, |env, dir| {
+            rewrite(env.sys.fake_fs(), dir, None, |e| {
+                e.intent_before(
+                    0,
+                    Some(Before::Bin(Digest {
+                        sha256: [9; 32],
+                        len: u64::try_from(BIG).unwrap(),
+                    })),
+                );
+            });
+        }),
+        ("Inline above 16 KiB", true, |env, dir| {
+            rewrite(env.sys.fake_fs(), dir, None, |e| {
+                e.intent_before(0, Some(Before::Inline(vec![7; BIG])));
+            });
+        }),
+        ("Bin at 16 KiB or less", false, |_, _| {}),
+        ("before on a CreateKey", false, |env, dir| {
+            rewrite(env.sys.fake_fs(), dir, None, |e| {
+                e.intent_before(5, Some(Before::Inline(vec![1])));
+            });
+        }),
+        ("before on a new value", false, |env, dir| {
+            rewrite(env.sys.fake_fs(), dir, None, |e| {
+                e.intent_before(8, Some(Before::Inline(vec![1])));
+            });
+        }),
+        ("a file ID on a registry op", false, |env, dir| {
+            rewrite(env.sys.fake_fs(), dir, None, |e| e.done_file_id(5, 1));
+        }),
+        ("a temp name on a registry op", false, |env, dir| {
+            rewrite(env.sys.fake_fs(), dir, None, |e| {
+                e.intent_tmp(8, crate::sys::fs::TmpName::new(0x77, 1));
+            });
+        }),
+        ("from/to on a registry op", false, |env, dir| {
+            append_semantic_revert_intent(env.sys.fake_fs(), dir, 10);
+        }),
+    ];
+    for (what, big, tamper) in cases {
+        let env = Env::new(finish(reg_base()));
+        let steps = if big {
+            vec![step(&format!(r"HKCU\{VENDOR_GAME}"), vec![dword("Big", 1)])]
+        } else {
+            rt1_steps()
+        };
+        let t = env.applied(&plan_all(&env, &steps));
+        let dir = env.txn_dir(&t);
+        if what == "Bin at 16 KiB or less" {
+            edit(&env, &dir, |e| {
+                let old = RegValue::String("text".into()).encode().unwrap().1;
+                e.intent_before(
+                    10,
+                    Some(Before::Bin(Digest {
+                        sha256: crate::plan::tests::sha(&old),
+                        len: u64::try_from(old.len()).unwrap(),
+                    })),
+                );
+            });
+        } else {
+            tamper(&env, &dir);
+        }
+        let after = snap_all(&env);
+        let n = records(&env, &t);
+        assert!(
+            matches!(
+                env.try_verify(&t),
+                Err(ExecError::Refused(Refusal::Blocked { .. }))
+            ),
+            "{what}: verify"
+        );
+        let r = env.revert(&t);
+        assert!(
+            matches!(&r, Err(ExecError::Refused(Refusal::Blocked { .. }))),
+            "{what}: {r:?}"
+        );
+        same(&after, &snap_all(&env));
+        assert_eq!(records(&env, &t), n, "{what}: no record written");
+    }
 }

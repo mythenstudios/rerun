@@ -14,14 +14,23 @@
 //!   `delete_empty_key` (`NotEmpty` checked on the handle); `Existed` in the rollback, or not
 //!   empty → `Foreign`. `verify` (newest op first, S3) counts a key holding only the keys and
 //!   values of later ops that will be gone (observed `After` or `Before`) as empty, after
-//!   `counts()` (S6: a key too large to list is `Foreign`).
+//!   `counts()` (S6: a key too large to list is `Foreign`). Only `verify` lists names, and it
+//!   does so through the read side, which follows links below `K` (review N3): that listing
+//!   only shapes the read-only preview; the rollback and the recovery decide on the walked
+//!   handle's counts alone, and the delete runs on a handle with its own `NotEmpty` check.
+//!   Rest risk (review nit 5, the class of 6a): `false` is never deleted in the same run, but
+//!   a crash between it and the rollback's `RevertDone` leaves an intent without `Done`, and a
+//!   recovery then deletes that key if it is still empty.
 //! - `SetValue`: apply re-reads the value (`Mismatch` before the intent if it is not `old`),
 //!   keeps the old bytes in the intent (`Before::Inline` up to 16 KiB, else `op-NNNN.bin`
 //!   through `backup_bytes`), then `set(expected = the value read, new)`. Observed: exactly
 //!   `new` (and not a refused write in this run) → `After`, restored to the old value from
 //!   `before_bytes` (hashed before use) or deleted if there was none, with `new` expected; the
 //!   old value (or missing) → `Before`; anything else (another type, a `REG_SZ` without its
-//!   NUL, a link or volatile key) → `Foreign` (S4).
+//!   NUL, a link or volatile key) → `Foreign` (S4). Rest risk (review nit 5): a refused write
+//!   (`NotWritten`) is left only by the rollback of the same run; after a crash before its
+//!   `RevertDone`, a recovery cannot tell another program's write of exactly `new` from Rerun's
+//!   and restores the old value over it (the class of 6a, `docs/06-security.md` scenario 10).
 
 use std::collections::BTreeMap;
 

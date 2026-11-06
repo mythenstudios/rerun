@@ -97,10 +97,12 @@ fn shown(s: &str) -> String {
 /// The game key of `key` (module docs).
 fn game_key(key: &str) -> Result<GameKey, PlanError> {
     let Some(rest) = key.strip_prefix(KEY_PREFIX) else {
-        if key
-            .get(..5)
-            .is_some_and(|p| p.eq_ignore_ascii_case(r"HKLM\"))
-        {
+        // Both spellings of the machine hive need the elevated helper (review N2).
+        let machine = [r"HKLM\", r"HKEY_LOCAL_MACHINE\"].iter().any(|h| {
+            key.get(..h.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(h))
+        });
+        if machine {
             return Err(PlanError::NeedsHelper);
         }
         return Err(refuse(format!(

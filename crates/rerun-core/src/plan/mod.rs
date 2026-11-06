@@ -36,7 +36,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub use preview::{NOT_RESTORED, Preview, PreviewOp, PreviewRoot, preview};
+pub use preview::{
+    NOT_RESTORED, Preview, PreviewOp, PreviewRoot, REGISTRY_NOTE, RegShown, preview,
+};
 pub(crate) use store::load;
 pub use store::store;
 

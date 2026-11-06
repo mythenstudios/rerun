@@ -229,6 +229,14 @@ fn t9r_refusals() {
             "helper",
         ),
         (
+            "HKEY_LOCAL_MACHINE (review N2)",
+            vec![step(
+                r"hkey_local_machine\SOFTWARE\Vendor\Game",
+                vec![dword("A", 1)],
+            )],
+            "helper",
+        ),
+        (
             "prefix case",
             vec![step(r"HKCU\SOFTWARE\Vendor\Game", vec![dword("A", 1)])],
             r"HKCU\Software",

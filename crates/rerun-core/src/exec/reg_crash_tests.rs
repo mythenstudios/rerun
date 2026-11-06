@@ -452,26 +452,42 @@ fn matrix(k: Kind, skip: Option<Site>, want: Option<&str>) -> (Vec<String>, Size
     (found, size)
 }
 
-/// R-T4: every point, every cut of `C:`, `D:` and `HKCU`.
-#[test]
-fn r_t4_every_power_loss_cut_recovers_to_the_state_before() {
-    let all = Instant::now();
-    for k in KINDS {
-        let t = Instant::now();
-        let (found, size) = matrix(k, None, None);
-        eprintln!("R-T4 {k:?}: {size:?} in {:.1} s", t.elapsed().as_secs_f64());
-        assert!(
-            found.is_empty(),
-            "{k:?}: {} violations: {:#?}",
-            found.len(),
-            found
-        );
-        assert!(size.max_c >= 2 && size.max_h >= 1, "{k:?}: {size:?}");
-        if k == Kind::Mixed {
-            assert!(size.max_d >= 1, "{k:?}: {size:?}");
-        }
+/// R-T4 for `k`: every point, every cut of `C:`, `D:` and `HKCU` (one test per kind, so they
+/// run in parallel; review nit 7).
+fn r_t4(k: Kind) {
+    let t = Instant::now();
+    let (found, size) = matrix(k, None, None);
+    eprintln!("R-T4 {k:?}: {size:?} in {:.1} s", t.elapsed().as_secs_f64());
+    assert!(
+        found.is_empty(),
+        "{k:?}: {} violations: {:#?}",
+        found.len(),
+        found
+    );
+    assert!(size.max_c >= 2 && size.max_h >= 1, "{k:?}: {size:?}");
+    if k == Kind::Mixed {
+        assert!(size.max_d >= 1, "{k:?}: {size:?}");
     }
-    eprintln!("R-T4: {:.1} s", all.elapsed().as_secs_f64());
+}
+
+#[test]
+fn r_t4_reg_new_every_power_loss_cut_recovers() {
+    r_t4(Kind::RegNew);
+}
+
+#[test]
+fn r_t4_reg_replace_every_power_loss_cut_recovers() {
+    r_t4(Kind::RegReplace);
+}
+
+#[test]
+fn r_t4_mixed_every_power_loss_cut_recovers() {
+    r_t4(Kind::Mixed);
+}
+
+#[test]
+fn r_t4_stacked_every_power_loss_cut_recovers() {
+    r_t4(Kind::Stacked);
 }
 
 /// J6 with 8 sites: without any one flush of the journal or of `exec` (game folders and

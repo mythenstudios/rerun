@@ -180,10 +180,12 @@ pub enum Refusal {
         /// The error, with its Win32 or NTSTATUS code.
         source: SysError,
     },
-    /// Rerun runs elevated: it never writes the registry then (ADR 0018, S2).
+    /// Rerun runs elevated, or whether it does cannot be determined (fail closed): it never
+    /// writes the registry then (ADR 0018, S2).
     #[error(
-        "Rerun runs as administrator and does not change the registry then; run it as a standard \
-         user (with UAC turned off, an administrator account always runs elevated)"
+        "Rerun runs as administrator, or whether it does cannot be determined, and does not \
+         change the registry then; run it as a standard user (with UAC turned off, an \
+         administrator account always runs elevated)"
     )]
     Elevated,
     /// The stored plan is missing, changed or invalid.

@@ -319,11 +319,12 @@ fn p7_a_manipulated_slot_or_value_is_refused_on_decode() {
 /// 1,024 characters that each need escaping) fits the op budget of 8 KiB.
 #[test]
 fn p8_the_worst_case_registry_op_fits_the_op_budget() {
-    let long = "v".repeat(64);
+    // `"` is allowed in segments, names and REG_SZ data and costs 2 bytes escaped (review nit 6).
+    let long = "\"".repeat(64);
     let rest = [long.as_str(); 4];
     let mut p = sample();
     p.ops.push(Op::SetValue {
-        slot: slot(&long, &long, &rest, &"n".repeat(128)),
+        slot: slot(&long, &long, &rest, &"\"".repeat(128)),
         old: ValueState::of(&RegValue::Binary(vec![0xff; OLD_INLINE])),
         new: NewValue::Sz("\"".repeat(1_024)),
     });
@@ -331,7 +332,7 @@ fn p8_the_worst_case_registry_op_fits_the_op_budget() {
     let size = serde_json::to_vec(&p.ops[3]).unwrap().len();
     eprintln!("P8: worst-case SetValue is {size} bytes");
     assert!(size < MAX_OP_BYTES, "{size}");
-    assert!(size > 4_500, "{size}: the worst case is the worst case");
+    assert!(size > 5_300, "{size}: the worst case is the worst case");
     let b = p.encode().unwrap();
     assert_eq!(decode(b.bytes()).unwrap(), p);
 }
@@ -387,7 +388,7 @@ fn p4_the_preview_shows_keys_values_and_the_registry_note() {
         "     old missing",
         "     new REG_DWORD 1 (0x00000001)",
         r"  6. set value HKCU\Software\Vendor\Game\Settings @ Seed",
-        r#"     old REG_SZ "old""#,
+        "     old REG_SZ: old\n",
         "     new REG_QWORD 18446744073709551615 (0xffffffffffffffff)",
         "the type of the value changes",
         "note: registry: if the game fills a created key",
@@ -421,4 +422,24 @@ fn p4_the_preview_shows_keys_values_and_the_registry_note() {
     }
     let text = preview(&q).to_string();
     assert!(!text.contains('\u{1b}'), "{text}");
+    // Review S3: the untrusted text is a `Shown`, last on its line; a `"` in it cannot close
+    // a quote of the preview or make anything look like it follows.
+    if let Op::SetValue { old, .. } = &mut q.ops[6] {
+        *old = ValueState::of(&sz(r#"x" new REG_DWORD 0"#));
+    }
+    let pv = preview(&q);
+    let o = pv.ops[6].old_value.as_ref().unwrap();
+    assert_eq!(o.kind, "REG_SZ");
+    assert_eq!(o.text.as_ref().unwrap().as_str(), r#"x" new REG_DWORD 0"#);
+    let text = pv.to_string();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("     old REG"))
+        .unwrap();
+    assert_eq!(line, r#"     old REG_SZ: x" new REG_DWORD 0"#);
+    let new = pv.ops[6].new_value.as_ref().unwrap();
+    assert!(
+        new.text.is_none() && new.kind.starts_with("REG_QWORD "),
+        "{new:?}"
+    );
 }

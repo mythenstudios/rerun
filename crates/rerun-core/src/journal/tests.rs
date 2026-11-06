@@ -1356,6 +1356,24 @@ impl RecordEdit {
         }
     }
 
+    /// Sets the old state of the intent of `op`.
+    pub(crate) fn intent_before(&mut self, of: u16, b: Option<super::Before>) {
+        if let Record::Intent { op, before, .. } = &mut self.0
+            && *op == of
+        {
+            *before = b;
+        }
+    }
+
+    /// Gives the intent of `op` a temp name.
+    pub(crate) fn intent_tmp(&mut self, of: u16, t: crate::sys::fs::TmpName) {
+        if let Record::Intent { op, tmp, .. } = &mut self.0
+            && *op == of
+        {
+            *tmp = Some(t);
+        }
+    }
+
     /// Keeps the old state of the intent of `op` inline instead of in its `.bin`.
     pub(crate) fn intent_inline(&mut self, of: u16, bytes: &[u8]) {
         if let Record::Intent { op, before, .. } = &mut self.0

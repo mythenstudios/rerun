@@ -58,10 +58,10 @@ pub struct PreviewOp {
     pub path: Shown<'static>,
     /// The value name of a `set value` (`(default)` for the default value).
     pub name: Option<Shown<'static>>,
-    /// The old value of a `set value` (`missing` if there was none).
-    pub old_value: Option<String>,
+    /// The old value of a `set value` (kind `missing` if there was none).
+    pub old_value: Option<RegShown>,
     /// The new value of a `set value`.
-    pub new_value: Option<String>,
+    pub new_value: Option<RegShown>,
     /// A `set value` changes the value's type.
     pub type_change: bool,
     /// Source: `<package id> <version>: <file>`.
@@ -74,6 +74,26 @@ pub struct PreviewOp {
     pub old: Option<(String, u64, String)>,
     /// A configuration file: a revert after the user edited it leaves it.
     pub config: bool,
+}
+
+/// A registry value for display (review S3: the `Shown` guarantee kept): `kind` is built by
+/// Rerun only (the type, a number, or type, length and SHA-256; `missing`), `text` is the
+/// untrusted string data through `escape::text`, shown last on its line with nothing after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegShown {
+    /// `REG_SZ`, `REG_DWORD 1 (0x00000001)`, `REG_BINARY, 3 bytes, sha256 …`, `missing`.
+    pub kind: String,
+    /// The string data of a `REG_SZ`/`REG_EXPAND_SZ`.
+    pub text: Option<Shown<'static>>,
+}
+
+impl fmt::Display for RegShown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.text {
+            Some(t) => write!(f, "{}: {t}", self.kind),
+            None => f.write_str(&self.kind),
+        }
+    }
 }
 
 /// The preview of a whole plan.
@@ -127,23 +147,34 @@ fn opaque(s: &ValueState) -> String {
 
 /// A registry value for display: numbers and strings decoded (strings through
 /// `escape::text`), anything else by type, length and SHA-256 (ADR 0016).
-fn value_text(v: &RegValue, s: &ValueState) -> String {
+fn value_text(v: &RegValue, s: &ValueState) -> RegShown {
+    let plain = |kind: String| RegShown { kind, text: None };
+    let text = |kind: &str, t: &str| RegShown {
+        kind: kind.to_owned(),
+        text: Some(escape::text(t).into_owned()),
+    };
     match v {
-        RegValue::Dword(n) => format!("REG_DWORD {n} ({n:#010x})"),
-        RegValue::Qword(n) => format!("REG_QWORD {n} ({n:#018x})"),
-        RegValue::String(t) => format!("REG_SZ \"{}\"", escape::text(t)),
-        RegValue::ExpandString(t) => format!("REG_EXPAND_SZ \"{}\"", escape::text(t)),
-        _ => opaque(s),
+        RegValue::Dword(n) => plain(format!("REG_DWORD {n} ({n:#010x})")),
+        RegValue::Qword(n) => plain(format!("REG_QWORD {n} ({n:#018x})")),
+        RegValue::String(t) => text("REG_SZ", t),
+        RegValue::ExpandString(t) => text("REG_EXPAND_SZ", t),
+        _ => plain(opaque(s)),
     }
 }
 
 /// The old value of a `set value` for display.
-fn old_value(o: Option<&ValueState>) -> String {
+fn old_value(o: Option<&ValueState>) -> RegShown {
     match o {
-        None => "missing".to_owned(),
+        None => RegShown {
+            kind: "missing".to_owned(),
+            text: None,
+        },
         Some(s) => match &s.data {
             Some(d) => value_text(&RegValue::decode(s.kind, d), s),
-            None => opaque(s),
+            None => RegShown {
+                kind: opaque(s),
+                text: None,
+            },
         },
     }
 }
@@ -213,8 +244,13 @@ pub fn preview(p: &Plan) -> Preview {
             let (old_value, new_value, type_change) = match op {
                 Op::SetValue { old: o, new, .. } => {
                     let v = new.value();
-                    let shown =
-                        ValueState::of(&v).map_or_else(|| v.to_string(), |s| value_text(&v, &s));
+                    let shown = ValueState::of(&v).map_or_else(
+                        || RegShown {
+                            kind: "a value without an encoding".to_owned(),
+                            text: None,
+                        },
+                        |s| value_text(&v, &s),
+                    );
                     let changed = o
                         .as_ref()
                         .is_some_and(|o| v.encode().is_some_and(|(k, _)| k != o.kind));
