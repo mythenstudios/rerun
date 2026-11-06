@@ -172,11 +172,15 @@ fn raced(e: SysError) -> SysError {
     }
 }
 
+/// A root opened by absolute path: the handle, its canonical path, its properties and the path
+/// it was opened by.
+type Opened<'s> = (Box<dyn DirWrite + 's>, RootPath, RootInfo, RootPath);
+
 fn open_checked<'s>(
     sys: &'s dyn System,
     fr: &ForbiddenRoots,
     abs: &Path,
-) -> Result<(Box<dyn DirWrite + 's>, RootPath, RootInfo), RootError> {
+) -> Result<Opened<'s>, RootError> {
     let lexical = RootPath::new(abs)?;
     fr.check(&lexical).map_err(|reason| RootError::Forbidden {
         path: lexical.clone(),
@@ -186,7 +190,7 @@ fn open_checked<'s>(
     let info = dir.info().map_err(raced)?;
     let path = RootPath::from_final_path(&info.final_path)?;
     check_canonical(fr, &path, &info)?;
-    Ok((dir, path, info))
+    Ok((dir, path, info, lexical))
 }
 
 fn check_canonical(fr: &ForbiddenRoots, path: &RootPath, info: &RootInfo) -> Result<(), RootError> {
@@ -223,14 +227,21 @@ pub struct StoreDir<'s> {
     dir: Box<dyn DirWrite + 's>,
     path: RootPath,
     info: RootInfo,
+    /// The path it was opened by (from the registry or `libraryfolders.vdf`), normalised.
+    opened_as: RootPath,
 }
 
 impl<'s> StoreDir<'s> {
     /// Opens a store folder by absolute path (from the registry or `libraryfolders.vdf`).
     /// Follows junctions above and at the store folder; checks the canonical path.
     pub fn open(sys: &'s dyn System, fr: &ForbiddenRoots, abs: &Path) -> Result<Self, RootError> {
-        let (dir, path, info) = open_checked(sys, fr, abs)?;
-        Ok(Self { dir, path, info })
+        let (dir, path, info, opened_as) = open_checked(sys, fr, abs)?;
+        Ok(Self {
+            dir,
+            path,
+            info,
+            opened_as,
+        })
     }
 
     /// Opens the game folder `steamapps\common\<installdir>` relative to this store.
@@ -298,10 +309,16 @@ impl<'s> StoreDir<'s> {
                 child: path,
             });
         }
+        let opened_as = self
+            .opened_as
+            .child("steamapps")?
+            .child("common")?
+            .child(seg.as_str())?;
         Ok(GameDir {
             dir,
             path,
             info,
+            opened_as,
             origin: GameOrigin::Store {
                 store: self.path.clone(),
                 store_id: self.id(),
@@ -358,6 +375,7 @@ pub struct GameDir<'a> {
     dir: Box<dyn DirWrite + 'a>,
     path: RootPath,
     info: RootInfo,
+    opened_as: RootPath,
     origin: GameOrigin,
 }
 
@@ -368,11 +386,12 @@ impl<'a> GameDir<'a> {
         fr: &ForbiddenRoots,
         abs: &Path,
     ) -> Result<Self, RootError> {
-        let (dir, path, info) = open_checked(sys, fr, abs)?;
+        let (dir, path, info, opened_as) = open_checked(sys, fr, abs)?;
         Ok(Self {
             dir,
             path,
             info,
+            opened_as,
             origin: GameOrigin::Manual,
         })
     }
@@ -385,6 +404,16 @@ impl<'a> GameDir<'a> {
     /// Where the folder came from.
     pub fn origin(&self) -> &GameOrigin {
         &self.origin
+    }
+
+    /// The path the folder was reached by, normalised (`RootPath::new`): the chosen path of a
+    /// manual folder, `<library>\steamapps\common\<installdir>` with the library's path as
+    /// Steam names it. Other than [`Self::path`] (compared folded) when a link, a junctioned
+    /// library or an 8.3 name lies on the way (P2-11: `compat_layer` refuses such a folder
+    /// until the Sandbox shows which name Windows matches, user decision E3). Read only; never
+    /// used to reach a file.
+    pub fn launch_path(&self) -> &RootPath {
+        &self.opened_as
     }
 
     /// Canonical path as of opening.

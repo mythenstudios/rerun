@@ -1,0 +1,18 @@
+# Invalid: a token has no space or prefix
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues:
+  - id: issue
+    title: "Issue"
+    variants:
+      - id: v
+        status: unverified
+        kind: fix
+        steps:
+          - compat_layer: { exe: game.exe, layers: ['~ ZZ_OS_A'] }

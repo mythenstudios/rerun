@@ -7,16 +7,21 @@
 //!   into the game folder (ADR 0020, D11).
 //! - [`registry_set`]: values below `HKCU\Software\<Vendor>\<Product>[\…]` (P2-10b), read
 //!   through [`PlanCtx::reg`].
+//! - [`compat_layer`]: compatibility-layer tokens of an executable of the game folder in
+//!   `HKCU\…\AppCompatFlags\Layers` (P2-11; no token is allowlisted until the Sandbox probes,
+//!   review S8).
 //!
 //! The builder orders the ops: every file op first, then every registry op, whatever the
-//! order of the steps (6b-d; `plan::check` refuses anything else). `compat_layer` and `ini_set`
-//! follow with P2-11 and P2-12.
+//! order of the steps (6b-d; `plan::check` refuses anything else). `ini_set` follows with
+//! P2-12.
 
+pub mod compat_layer;
 pub mod file_install;
 pub mod registry_set;
 
 use serde::{Deserialize, Serialize};
 
+pub use compat_layer::CompatLayerSpec;
 pub use file_install::{FileEntry, FileInstallSpec};
 pub use registry_set::{RegValueEntry, RegistrySetSpec};
 
@@ -37,6 +42,8 @@ pub enum Step {
     FileInstall(FileInstallSpec),
     /// [`registry_set`].
     RegistrySet(RegistrySetSpec),
+    /// [`compat_layer`].
+    CompatLayer(CompatLayerSpec),
 }
 
 /// What a planner reads: the game folder, Rerun's folder (packages), and what identifies the
@@ -126,6 +133,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
         match step {
             Step::FileInstall(spec) => file_install::plan_into(spec, ctx, &mut b)?,
             Step::RegistrySet(spec) => registry_set::plan_into(spec, ctx, &mut b)?,
+            Step::CompatLayer(spec) => compat_layer::plan_into(spec, ctx, &mut b)?,
         }
     }
     // 6b-d: every registry op after every file op.
@@ -187,6 +195,8 @@ pub(crate) fn folded(p: &RelPath) -> String {
     fold(p.as_str())
 }
 
+#[cfg(test)]
+pub(crate) mod layer_tests;
 #[cfg(test)]
 pub(crate) mod reg_tests;
 #[cfg(test)]

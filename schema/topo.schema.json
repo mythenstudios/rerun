@@ -558,6 +558,40 @@
         },
         "registry_set": {
           "$ref": "#/$defs/registrySet"
+        },
+        "compat_layer": {
+          "$ref": "#/$defs/compatLayer"
+        }
+      }
+    },
+    "compatLayer": {
+      "description": "Compatibility-layer tokens for an executable of the game folder in HKCU\\...\\AppCompatFlags\\Layers (docs/02-topo-format.md, ADR 0018 amendment P2-11). The schema checks the form; the token allowlist (empty until the Windows Sandbox probes), the groups and the executable itself are checked by the loader and the planner.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exe",
+        "layers"
+      ],
+      "properties": {
+        "exe": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/relPath"
+            },
+            {
+              "pattern": "\\.[Ee][Xx][Ee]$"
+            }
+          ]
+        },
+        "layers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z0-9_]{1,40}$"
+          }
         }
       }
     },
