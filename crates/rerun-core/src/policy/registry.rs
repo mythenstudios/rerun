@@ -9,8 +9,11 @@
 //! - `HKCU` only, native view; `HKLM` is `NeedsHelper` (the GUI never writes it, core rule 6).
 //! - `CompatLayers`: `HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers`,
 //!   the value name the canonical path of an executable in a plan root, built from the root's
-//!   path (parsed again) and a [`RelPath`] (M2); new values are refused until `compat_layer`
-//!   (P2-11) brings its token allowlist.
+//!   path (parsed again) and a [`RelPath`] (M2). No value is set there: [`RegWriter::add_tokens`]
+//!   appends allowlisted tokens ([`layers`], P2-11) to the old value, [`RegWriter::remove_tokens`]
+//!   removes them again; [`RegPolicy::check_new`] refuses every `CompatLayers` value, so `exec`
+//!   cannot write a free string there. The keys `AppCompatFlags` and `Layers` are shared Windows
+//!   keys ([`AllowedValue::shared_keys`], user decisions E6 and E7).
 //! - `GameValue`: `HKCU\Software\<Vendor>\<Product>` plus at most 4 segments, printable ASCII,
 //!   `<Vendor>` not on the deny list (folded); value names printable ASCII without `\ / : %`;
 //!   new values `REG_DWORD`, `REG_QWORD` or a `REG_SZ` of printable ASCII (review M1: no best-fit
@@ -21,7 +24,11 @@
 //! Old values are restored exactly whatever they are ([`RegWriter::restore`] does not apply
 //! [`RegPolicy::check_new`]).
 
+pub mod layers;
+
 use std::fmt;
+
+pub use layers::{Group, TokenName, Unmerged};
 
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
@@ -423,6 +430,13 @@ impl AllowedValue {
     pub fn slot(&self) -> &RegSlot {
         &self.slot
     }
+
+    /// The keys below the anchor are shared Windows keys (`AppCompatFlags`, `Layers`; user
+    /// decisions E6 and E7): created by Rerun, they hold the values of other programs too, so
+    /// they are only one object each for stacking, and a revert leaves one that is not empty.
+    pub fn shared_keys(&self) -> bool {
+        matches!(self.slot, RegSlot::CompatLayers { .. })
+    }
 }
 
 /// The canonical path of `exe` in `root` as Windows writes it (`D:\Games\X\game.exe`): the
@@ -517,6 +531,26 @@ impl RegPolicy {
                 )),
             },
         }
+    }
+
+    /// May `add` be appended to a `CompatLayers` value holding `old` (`None`: missing)? `add`
+    /// has 1 to 8 tokens, unique and in byte order, each on the add allowlist and none an
+    /// elevation token, none already in `old` (folded); `old` in the strict grammar; at most
+    /// one token of an exclusive group in `old` and `add` together (folded); the merged value at
+    /// most [`layers::MAX_LAYERS_BYTES`] (module [`layers`]).
+    pub fn check_tokens(
+        &self,
+        v: &AllowedValue,
+        old: Option<&str>,
+        add: &[TokenName],
+    ) -> Result<(), RegPolicyError> {
+        if !matches!(v.slot, RegSlot::CompatLayers { .. }) {
+            return Err(denied(
+                format!("{} @ {:?}", v.key.key, v.name),
+                "only a compatibility-layer value takes tokens",
+            ));
+        }
+        layers::check(old, add)
     }
 
     /// The read side of the write side, for planners: state, value and missing keys without
@@ -651,6 +685,61 @@ impl RegWriter<'_> {
     ) -> Result<(), RegWriteError> {
         self.policy.check_new(v, new)?;
         Ok(self.r.w.set(&v.key.key, &v.name, expected, new)?)
+    }
+
+    /// Appends `add` to the `CompatLayers` value if it is still `expected` (`None`: missing)
+    /// and [`RegPolicy::check_tokens`] allows it: the new value is formed here
+    /// ([`layers::merge`]), never by the caller.
+    pub fn add_tokens(
+        &self,
+        v: &AllowedValue,
+        expected: Option<&RegValue>,
+        add: &[TokenName],
+    ) -> Result<(), RegWriteError> {
+        let old = match expected {
+            None => None,
+            Some(RegValue::String(s)) => Some(s.as_str()),
+            Some(_) => {
+                return Err(
+                    denied("the Layers value", "not a REG_SZ; Rerun leaves it alone").into(),
+                );
+            }
+        };
+        self.policy.check_tokens(v, old, add)?;
+        let new = RegValue::String(layers::merge(old, add));
+        Ok(self.r.w.set(&v.key.key, &v.name, expected, &new)?)
+    }
+
+    /// Revert of a value someone changed since the apply (`Drifted`): removes the words `ours`
+    /// from the `CompatLayers` value if it is still `expected` ([`layers::unmerge`]), deleting
+    /// the value if only prefix words are left (review S2). Nothing else is ever written:
+    /// `Foreign` or `Untouched` is refused. `true`: the value was deleted.
+    pub fn remove_tokens(
+        &self,
+        v: &AllowedValue,
+        expected: &RegValue,
+        ours: &[TokenName],
+    ) -> Result<bool, RegWriteError> {
+        let refuse = |why| Err(denied(format!("{} @ {:?}", v.key.key, v.name), why).into());
+        if !matches!(v.slot, RegSlot::CompatLayers { .. }) {
+            return refuse("only a compatibility-layer value takes tokens");
+        }
+        let RegValue::String(cur) = expected else {
+            return refuse("not a REG_SZ");
+        };
+        match layers::unmerge(cur, ours) {
+            Unmerged::Foreign | Unmerged::Untouched => refuse("nothing of Rerun's to remove"),
+            Unmerged::Rest(Some(rest)) => Ok(self
+                .r
+                .w
+                .set(&v.key.key, &v.name, Some(expected), &RegValue::String(rest))
+                .map(|()| false)?),
+            Unmerged::Rest(None) => Ok(self
+                .r
+                .w
+                .delete_value(&v.key.key, &v.name, expected)
+                .map(|()| true)?),
+        }
     }
 
     /// Revert: puts `old` back exactly (also a raw or otherwise disallowed value), or deletes
