@@ -22,15 +22,18 @@ use super::testfx::{
 };
 use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinSystem, WinTopology};
 use crate::path::{RelPath, RootPath};
-use crate::policy::root::{Forbidden, ForbiddenRoots, Protected, RootError, RootId, StoreDir};
+use crate::policy::root::{
+    Forbidden, ForbiddenRoots, GameDir, Protected, RootError, RootId, StoreDir,
+};
 use crate::sys::contract::{
     FsContractResult, FsFixture, RACE_LEAK, RegFixture, WriteOp, fs_link_read_contract,
     fs_link_write_contract, fs_race_contract, fs_read_contract, fs_volume_contract,
     fs_write_contract, fs_write_race_contract, gpu_contract, known_folders_contract,
-    registry_read_contract, registry_system_contract, topology_contract,
+    registry_read_contract, registry_system_contract, snapshot_contract, topology_contract,
 };
 use crate::sys::fs::{EntryKind, Fs, WriteCap};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
+use crate::sys::snapshot::SnapRoot;
 use crate::sys::{Gpu, KnownFolder, KnownFolders, SysErrorKind, System, Topology};
 
 /// A [`TestRoot`] for the smoke tests; `.0` is its verbatim path (`\\?\X:\…`), as
@@ -506,6 +509,41 @@ fn win_fulfils_fs_link_write_contract() {
         "fs_link_write_contract",
         fs_link_write_contract(&WinFs::new(), root.fx(), &work),
     );
+}
+
+/// The snapshot contract on real Windows: the work directory is opened as a manually added
+/// game folder through `policy::root` (a `TestRoot` folder stands in for Rerun's install
+/// folder), its handle is the snapshot root; the key lives in a private app hive.
+#[test]
+fn win_fulfils_snapshot_contract() {
+    let _heavy = heavy();
+    let Some(root) = TestRoot::new("snapshot") else {
+        return;
+    };
+    let Some(h) = HiveRoot::new("snapshot-hive") else {
+        return;
+    };
+    let sys = WinSystem::new().unwrap();
+    let install = root.work("Rerun");
+    let fr = ForbiddenRoots::resolve(&sys, &install).unwrap_or_else(|e| panic!("{e}"));
+    let work = root.work("w");
+    let game = GameDir::open_manual(&sys, &fr, &work).unwrap_or_else(|e| panic!("{e}"));
+    let key = RegKey::new(Hive::CurrentUser, RegView::Native, "RerunSnapshot");
+    h.hive.key(&key).unwrap();
+    let started = Instant::now();
+    let result = snapshot_contract(
+        SnapRoot::new(game.dir(), game.path().to_string()),
+        root.fx(),
+        &work,
+        &h.registry,
+        &h.hive,
+        &key,
+    );
+    note(&format!(
+        "note: snapshot_contract took {:?}",
+        started.elapsed()
+    ));
+    report("snapshot_contract", result);
 }
 
 /// The runner's cleanup (`std::fs::remove_dir_all` in `TestRoot`'s drop) removes a junction
