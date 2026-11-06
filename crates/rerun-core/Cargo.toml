@@ -21,6 +21,9 @@ sha2.workspace = true
 sha1.workspace = true
 # Topology fixtures; from phase 1 also profile and topo.
 serde_json.workspace = true
+# Journal records (ADR 0019) and later plans (ADR 0020): derive with deny_unknown_fields.
+# Already in the tree through rerun-proto and serde_json.
+serde.workspace = true
 
 # sys::win (ADR 0008): NT file APIs, final path, volume info, reparse data, AccessCheck;
 # known folders (ADR 0009): SHGetKnownFolderPath, CoTaskMemFree, GetSystemWindowsDirectoryW;

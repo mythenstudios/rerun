@@ -94,3 +94,25 @@ A crash stops the process after a primitive call (ADR 0017 amendment, A1): every
 
 ### Lock
 `journal\lock` is taken with `DirWrite::lock` (ADR 0017 amendment, A7); it is part of the write contract, which `sys::win` passes unchanged (P2-4).
+
+## Amendment (P2-7, 2026-11-06; decided by the user after a senior-dev cross-check; in progress until the crash and power-loss matrix is green)
+
+### Format freeze (user decision E1)
+`format: 1` stays unstable until the first release (audit A6): a journal written during development may read as `Damaged` after a format change and is then closed with `forget`. From the first release on, a format only gains variants (additive); journal files are never rewritten.
+
+### Layout and names
+- Backups are named after their op, not their record: `op-NNNN.bin` (condition B1, replaces "`0003.bin` belongs to record `0003`"). A `.bin` is allowed if `Intent(k)` names it, or if there is no `Intent(k)` and `k` equals the number of intents (an orphan after a crash or power loss between backup and intent, or after a failed read-back); an orphan never makes a transaction `Damaged`, and since `resume` only reverts it never takes a new backup number.
+- A transaction folder holds `head.json`, `NNNN.json` (1 to 1,024, four digits), `op-NNNN.bin` and Rerun temp names (`.rerun-<tag>-<n>.tmp`, crash remnants, never read); anything else, or a known name of the wrong kind, is `Damage::UnknownEntry`. Names are compared exactly.
+- `TxnId` is `<seq>-<tag>` (`%08u-%016x`), parsed only in that form and ordered by `seq`; `seq` is one more than the highest name of that form in `journal\` (a file or link of that form counts too); above 99,999,999 `begin` refuses.
+
+### Records (replaces the record list above)
+`Intent { op, tmp, backup }` (`backup`: SHA-256 and length of `op-NNNN.bin`), `Done { op, file_id, old_left }` (replaces `Cleanup`: `old_left` records a `<tmp>.old` still mapped), `Applied { ops }`, `RevertIntent { op, tmp }` (a restore creates a `<tmp>` too), `RevertDone { op, observed, old_left }`, `Closed { RolledBack | Reverted | Forgotten }`. `op` is the index of the op in the head: the journal is op-agnostic and never parses `head.json` (its bytes are opaque, their SHA-256 is in every record); op kinds and their bounds are checked by `exec`, a second source of `Damaged`. `Observed` is defined in `journal` (the record carries it), not in `exec`. Registry `before` values, `.bin` files for registry values above 16 KiB (P2-9/10) and `Rebind` come later.
+
+Wire: `{"format":1,"n":N,"head":"<hex>","record":{"<kind>":{…}}}`, `serde` with `deny_unknown_fields`, no `flatten`. The reader checks `format` first (another value is `Damage::Format`), then parses strictly and accepts the bytes only if serialising the result gives the same bytes (one form per record), then checks `n` against the file name and `head` against `head.json`.
+
+### Grammar (`journal::replay`, shared by reader and writer)
+`Intent(k)` only before `Applied` and before any `RevertIntent`, `k` the number of intents so far, every earlier intent done; `Done(k)` directly after `Intent(k)`; `Applied { ops }` once, `ops` ≥ 1 equal to the number of intents, all done; `RevertIntent(k)` for the highest intended op without `RevertDone`, repeatable until `RevertDone(k)`, which comes directly after it; `Closed { RolledBack }` only without `Applied` and `Closed { Reverted }` only after it, both only when every intended op has its `RevertDone` and none observed `Foreign` (condition S3, ADR 0020 D10); `Closed { Forgotten }` at any time; nothing after `Closed`. The writer checks every record with the same machine before writing it, so Rerun never writes what it would read as damaged.
+
+### States (conditions B2, user decision E2)
+`Empty`: no record (with or without `head.json`; a folder with neither counts for `seq`); nothing was changed and it blocks nothing. `Open`: records, neither `Applied` nor `Closed`. `Applied`: active. `Closed(how)`. `Damaged(why)`: a gap, a record too large, unparsable, of another format, numbered or headed wrongly, against the grammar, an unknown entry, too many entries, records without `head.json` (`HeadMissing`; never for a folder without records), a backup missing or of another length (or hash, when asked), or a second folder with the same `seq` (condition S5). A removed tail leaves a valid prefix and is accepted (documented; a later record cannot be told from a never-written one). A valid prefix that ends in `Closed` followed by anything else counts as `Closed` with that anomaly and blocks nothing.
+For stacking (E2): a damaged transaction whose head is readable and hash-consistent counts as open with the objects of its head (the code path of `Open`, also for LIFO); one whose head is unusable (`HeadMissing`, `HeadTooLarge`, `HeadHash`, or a head `exec` cannot parse) blocks every apply with a hint to `forget`.
