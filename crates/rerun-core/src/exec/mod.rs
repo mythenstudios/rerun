@@ -28,15 +28,23 @@
 //!
 //! Dispatch (audit A2 should-item 3): apply, observe, act, the record check, the flushes and
 //! the game-closed check match on [`Op::target`] and hand the op to the module of its domain
-//! (`file` for files and directories); the revert loop is one for every domain. A new domain
-//! (registry keys and values, P2-10b) adds a [`Target`] variant, a variant of [`Seen`] (and
-//! of [`Hint`] where it needs one) and its part of [`Touched`].
+//! (`file` for files and directories, `reg` for registry keys and values, P2-10b); the revert
+//! loop is one for every domain. A new domain adds a [`Target`] variant, a variant of [`Seen`]
+//! (and of [`Hint`] where it needs one) and its part of [`Touched`].
+//!
+//! Registry ops (P2-10b): a plan with registry ops is refused in an elevated process before
+//! anything is written, by an apply and by a revert (`Refusal::Elevated`, S2); the old state of
+//! every key and value is re-observed with the files (`Mismatch`, `Refusal::Registry`); `HKCU`
+//! is flushed before `Applied` (after the game folders) and before the `RevertDone` of every
+//! registry op. Registry ops need no root: they never halt a revert, and `plan::check` puts them
+//! after every file op, so a halt comes after every registry op is reverted (6b-d).
 
 mod file;
+mod reg;
 mod roots;
 mod stack;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use file::Mode;
 
@@ -48,8 +56,10 @@ use crate::journal::{
 };
 use crate::path::RelPath;
 use crate::plan::{self, Object, Op, Plan, PlanError, PlanHash, Target};
+use crate::policy::registry::{RegPolicy, RegWriter};
 use crate::policy::root::{AppDir, ForbiddenRoots, RootError};
 use crate::sys::fs::TmpName;
+use crate::sys::registry::Hive;
 use crate::sys::{SysError, SysResult, System};
 
 /// What `exec` works with.
@@ -161,6 +171,21 @@ pub enum Refusal {
     /// the game-closed check would ask nothing about it.
     #[error("the main executable {0} is missing or not a file; plan again")]
     MainExe(Shown<'static>),
+    /// A key or value of op `op` cannot be checked: a symbolic-link or volatile key on the way,
+    /// a key deleted while it was opened, a value too large to read.
+    #[error("op {op}: the registry cannot be checked: {source}")]
+    Registry {
+        /// Op index.
+        op: u16,
+        /// The error, with its Win32 or NTSTATUS code.
+        source: SysError,
+    },
+    /// Rerun runs elevated: it never writes the registry then (ADR 0018, S2).
+    #[error(
+        "Rerun runs as administrator and does not change the registry then; run it as a standard \
+         user (with UAC turned off, an administrator account always runs elevated)"
+    )]
+    Elevated,
     /// The stored plan is missing, changed or invalid.
     #[error(transparent)]
     Plan(PlanError),
@@ -414,14 +439,18 @@ fn restoring_without_attrs() -> bool {
     false
 }
 
-/// A flush of `exec` (ADR 0019 amendments P2-7 S2 and P2-8), named by domain and place; J6
-/// switches each off in turn.
+/// A flush of `exec` (ADR 0019 amendments P2-7 S2, P2-8 and P2-10b), named by domain and
+/// place; J6 switches each off in turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Flush {
     /// The game folders an apply wrote into, before `Applied`.
     GameBeforeApplied,
+    /// The hives an apply wrote into (`RegFlushKey`), before `Applied`.
+    HiveBeforeApplied,
     /// The game folder of an op, before its `RevertDone` (and so before `Closed`).
     GameBeforeRevertDone,
+    /// `HKCU`, before the `RevertDone` of a registry op.
+    HiveBeforeRevertDone,
 }
 
 /// J6 (tests): this flush is switched off.
@@ -441,6 +470,11 @@ enum Hint {
     Dir(u128),
     /// `create_dir` or `create_new` found the name taken: someone else's.
     Foreign,
+    /// The result of `create_key` (6a).
+    Key(reg::KeyHint),
+    /// `set` refused the value (`Mismatch` or the policy): nothing was written in this run, so
+    /// the new value there is not Rerun's.
+    NotWritten,
 }
 
 /// What an op observes and what its revert does, by the domain of its target.
@@ -448,6 +482,8 @@ enum Hint {
 enum Seen {
     /// A file or directory.
     File(file::Seen),
+    /// A registry key or value.
+    Reg(reg::Seen),
 }
 
 impl Seen {
@@ -455,6 +491,7 @@ impl Seen {
     fn observed(&self) -> Observed {
         match self {
             Self::File(s) => s.observed,
+            Self::Reg(s) => s.observed,
         }
     }
 
@@ -462,6 +499,7 @@ impl Seen {
     fn restore(&self) -> bool {
         match self {
             Self::File(s) => s.restore,
+            Self::Reg(_) => false,
         }
     }
 }
@@ -476,23 +514,34 @@ struct Acted {
     left: Vec<RelPath>,
 }
 
-/// What a run touches, per domain, for the flushes (ADR 0019): the game folders written into.
+/// What a run touches, per domain, for the flushes (ADR 0019): the game folders and the hives
+/// written into; and the registry writer and system the registry ops use.
 struct Touched<'g> {
     dirs: file::Dirs<'g>,
+    hives: BTreeSet<Hive>,
+    reg: RegWriter<'g>,
+    sys: &'g dyn System,
 }
 
 impl<'g> Touched<'g> {
-    fn new(roots: &'g roots::Roots<'g>) -> Self {
+    fn new(sys: &'g dyn System, roots: &'g roots::Roots<'g>) -> Self {
         Self {
             dirs: file::Dirs::new(roots),
+            hives: BTreeSet::new(),
+            reg: RegPolicy.writer(sys),
+            sys,
         }
     }
 
     /// Before `Applied`: every domain the apply changed (the game folders, after every guard
-    /// is dropped: a POSIX delete through a guard reaches the volume log when it closes).
+    /// is dropped: a POSIX delete through a guard reaches the volume log when it closes; then
+    /// the hives: `RegFlushKey` flushes a whole hive).
     fn flush_all(&mut self) -> SysResult<()> {
         if !flush_skipped(Flush::GameBeforeApplied) {
             self.dirs.flush()?;
+        }
+        if !self.hives.is_empty() && !flush_skipped(Flush::HiveBeforeApplied) {
+            self.reg.flush()?;
         }
         Ok(())
     }
@@ -510,23 +559,22 @@ impl<'g> Touched<'g> {
                     self.dirs.flush()?;
                 }
             }
-            Target::Key { .. } | Target::Value { .. } => {}
+            Target::Key { .. } | Target::Value { .. } => {
+                if !flush_skipped(Flush::HiveBeforeRevertDone) {
+                    self.reg
+                        .flush()
+                        .map_err(|source| ExecError::Op { op: k, source })?;
+                }
+            }
         }
         Ok(())
-    }
-}
-
-/// A registry op before `exec` runs registry ops.
-fn no_registry_yet(k: u16) -> ExecError {
-    ExecError::Op {
-        op: k,
-        source: SysError::new(crate::sys::SysErrorKind::Unsupported, "a registry op"),
     }
 }
 
 /// Applies op `k` in its domain.
 fn apply_op(
     cx: &ExecCtx<'_>,
+    plan: &Plan,
     w: &mut TxnWriter<'_>,
     t: &mut Touched<'_>,
     k: u16,
@@ -535,7 +583,10 @@ fn apply_op(
 ) -> Result<(), ExecError> {
     match op.target() {
         Target::File { .. } => file::apply_op(cx, w, &mut t.dirs, k, op, hints),
-        Target::Key { .. } | Target::Value { .. } => Err(no_registry_yet(k)),
+        Target::Key { .. } | Target::Value { .. } => {
+            t.hives.insert(Hive::CurrentUser);
+            reg::apply_op(w, &t.reg, plan, k, op, hints)
+        }
     }
 }
 
@@ -559,7 +610,9 @@ fn observe(
         Target::File { .. } => {
             file::observe(plan, &mut t.dirs, k, op, log, mode, hint, later).map(Seen::File)
         }
-        Target::Key { .. } | Target::Value { .. } => Err(no_registry_yet(k)),
+        Target::Key { .. } | Target::Value { .. } => {
+            reg::observe(&t.reg, t.sys, plan, k, op, log, mode, hint, later).map(Seen::Reg)
+        }
     }
 }
 
@@ -629,6 +682,7 @@ fn act<W: Reverting>(
 ) -> Result<Acted, ExecError> {
     match seen {
         Seen::File(s) => file::act(w, &mut t.dirs, k, op, s, y),
+        Seen::Reg(s) => reg::act(w, &t.reg, k, op, s),
     }
 }
 
@@ -640,7 +694,7 @@ fn records_fit(plan: &Plan, ops: &BTreeMap<u16, OpLog>) -> bool {
             None => false,
             Some(op) => match op.target() {
                 Target::File { .. } => file::records_fit(op, log),
-                Target::Key { .. } | Target::Value { .. } => false,
+                Target::Key { .. } | Target::Value { .. } => reg::records_fit(op, log),
             },
         })
 }
@@ -652,13 +706,6 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     if plan.ops.is_empty() {
         return Ok(Outcome::Nothing);
     }
-    if plan.ops.iter().any(|o| o.target().is_registry()) {
-        return Err(Refusal::Plan(PlanError::Invalid {
-            op: None,
-            why: "registry ops are not executed yet",
-        })
-        .into());
-    }
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
@@ -666,13 +713,15 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     stack::for_apply(&j, &listing, &objects)?;
     let stores = roots::open_stores(cx, &plan);
     let roots = roots::Roots::all(cx, &plan, &stores)?;
+    writable(cx, &plan)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
     roots::main_exe_present(&plan, &roots)?;
     roots::game_closed(&plan, &roots, &all)?;
     roots::old_state(cx, &plan, &roots)?;
+    reg::old_state(&RegPolicy.writer(cx.sys), &plan)?;
     let mut w = lock.begin(bytes.bytes()).map_err(Refusal::from)?;
     let txn = *w.id();
-    let mut touched = Touched::new(&roots);
+    let mut touched = Touched::new(cx.sys, &roots);
     let mut hints = BTreeMap::new();
     let cause = match run(cx, &plan, &mut w, &mut touched, &roots, &mut hints) {
         Ok(()) => return Ok(Outcome::Applied(txn)),
@@ -691,6 +740,18 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     }
 }
 
+/// S2: a plan with registry ops is refused in an elevated process, before the first record
+/// (apply and revert alike).
+fn writable(cx: &ExecCtx<'_>, plan: &Plan) -> Result<(), Refusal> {
+    if plan.ops.iter().any(|o| o.target().is_registry()) {
+        RegPolicy
+            .writer(cx.sys)
+            .writable()
+            .map_err(|_| Refusal::Elevated)?;
+    }
+    Ok(())
+}
+
 /// `k` as an op index of the journal (a plan has at most 128 ops).
 fn op_ix(k: usize) -> u16 {
     u16::try_from(k).unwrap_or(u16::MAX)
@@ -706,7 +767,7 @@ fn run(
     hints: &mut BTreeMap<u16, Hint>,
 ) -> Result<(), ExecError> {
     for (k, op) in plan.ops.iter().enumerate() {
-        apply_op(cx, w, t, op_ix(k), op, hints)?;
+        apply_op(cx, plan, w, t, op_ix(k), op, hints)?;
     }
     let ops = w.ops().clone();
     let v = verify_ops(plan, t, roots, &ops)?;
@@ -859,7 +920,8 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     let roots = roots::Roots::each(cx, &plan, &stores)?;
     let intended: Vec<u16> = w.ops().keys().copied().collect();
     roots::game_closed(&plan, &roots, &intended)?;
-    let mut touched = Touched::new(&roots);
+    writable(cx, &plan)?;
+    let mut touched = Touched::new(cx.sys, &roots);
     let (ops, halted) = revert_loop(
         cx,
         &plan,
@@ -906,7 +968,7 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     }
     let stores = roots::open_stores(cx, &plan);
     let roots = roots::Roots::each(cx, &plan, &stores)?;
-    let mut touched = Touched::new(&roots);
+    let mut touched = Touched::new(cx.sys, &roots);
     verify_ops(&plan, &mut touched, &roots, &v.ops)
 }
 
@@ -952,5 +1014,7 @@ pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
 mod crash_tests;
 #[cfg(test)]
 mod halt_tests;
+#[cfg(test)]
+pub(crate) mod reg_tests;
 #[cfg(test)]
 pub(crate) mod tests;

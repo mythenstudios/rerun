@@ -600,6 +600,10 @@ impl RegistryWrite for WinRegistry {
     fn flush(&self, hive: Hive) -> SysResult<()> {
         reg_seq::flush(self, hive)
     }
+
+    fn writable(&self) -> SysResult<()> {
+        reg_seq::writable(self)
+    }
 }
 
 #[cfg(test)]

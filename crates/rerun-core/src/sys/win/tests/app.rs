@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use super::super::WinFs;
-use super::super::testfx::{TestRoot, target_dir};
+use super::super::testfx::{HiveRoot, TestRoot, target_dir};
 use crate::journal::tests::j1_round_trip;
 use crate::journal::{InstanceTag, Journal, JournalError, TxnState, VerifyBackups};
 use crate::path::{RelPath, RootPath};
@@ -16,11 +16,13 @@ use crate::sys::fs::WriteCap;
 use crate::sys::{Fs, Gpu, KnownFolder, KnownFolders, Registry, RegistryWrite, System, Topology};
 
 /// The real file system with fake known folders (and fake everything else): `LocalAppData`
-/// is a folder of a [`TestRoot`].
+/// is a folder of a [`TestRoot`]. The registry is a fake one, or ([`Self::with_hive`]) the real
+/// `WinRegistry` on a private app hive whose `HKCU` root is a `KEY_READ` handle (never the real
+/// `HKCU`, P2-10b).
 pub(super) struct AppTestSys {
     fs: WinFs,
     kf: FakeKnownFolders,
-    reg: FakeRegistry,
+    reg: Box<dyn RegistryWrite>,
     topo: FakeTopology,
     gpu: FakeGpu,
 }
@@ -28,6 +30,21 @@ pub(super) struct AppTestSys {
 impl AppTestSys {
     /// Panics unless `lad` lies inside the canonical cargo target directory.
     pub(super) fn new(lad: &Path) -> Self {
+        Self::with_registry(lad, Box::new(FakeRegistry::default()))
+    }
+
+    /// [`Self::new`] with the registry of the app hive of `h` (`HKCU\Software` created in it).
+    /// Drop it before `h`: its handles must close before the hive unloads.
+    pub(super) fn with_hive(lad: &Path, h: &HiveRoot) -> Self {
+        use crate::sys::contract::RegFixture;
+        use crate::sys::registry::{Hive, RegKey, RegView};
+        h.hive
+            .key(&RegKey::new(Hive::CurrentUser, RegView::Native, "Software"))
+            .unwrap();
+        Self::with_registry(lad, Box::new(h.hive.registry().unwrap()))
+    }
+
+    fn with_registry(lad: &Path, reg: Box<dyn RegistryWrite>) -> Self {
         let target = std::fs::canonicalize(target_dir()).unwrap();
         let canon = std::fs::canonicalize(lad).unwrap();
         assert!(
@@ -41,7 +58,7 @@ impl AppTestSys {
         Self {
             fs: WinFs::new(),
             kf,
-            reg: FakeRegistry::default(),
+            reg,
             topo: FakeTopology::default(),
             gpu: FakeGpu::default(),
         }
@@ -53,10 +70,10 @@ impl System for AppTestSys {
         &self.fs
     }
     fn registry(&self) -> &dyn Registry {
-        &self.reg
+        &*self.reg
     }
     fn registry_write(&self) -> &dyn RegistryWrite {
-        &self.reg
+        &*self.reg
     }
     fn topology(&self) -> &dyn Topology {
         &self.topo

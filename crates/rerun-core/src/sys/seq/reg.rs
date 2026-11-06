@@ -413,6 +413,18 @@ pub(crate) fn delete_empty_key<H: PrimHive>(h: &H, k: &RegKey) -> SysResult<()> 
     key.delete()
 }
 
+/// [`RegistryWrite::writable`](super::super::RegistryWrite::writable): the S2 rule of
+/// [`preflight`] on its own.
+pub(crate) fn writable<H: PrimHive>(h: &H) -> SysResult<()> {
+    if h.elevated() {
+        return Err(SysError::new(
+            SysErrorKind::Unsupported,
+            "an elevated process never writes the registry (ADR 0018, S2)",
+        ));
+    }
+    Ok(())
+}
+
 /// [`RegistryWrite::flush`](super::super::RegistryWrite::flush).
 pub(crate) fn flush<H: PrimHive>(h: &H, hive: Hive) -> SysResult<()> {
     preflight(h, &RegKey::new(hive, RegView::Native, ""), false)?;

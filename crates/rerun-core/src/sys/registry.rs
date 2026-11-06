@@ -543,6 +543,10 @@ pub trait RegistryWrite: Registry {
 
     /// Makes every change of `hive` durable (`RegFlushKey` flushes the whole hive).
     fn flush(&self, hive: Hive) -> SysResult<()>;
+
+    /// The changing methods may run: `Unsupported` in an elevated process (S2), so a caller
+    /// refuses before its first change (ADR 0020 amendment P2-10b) instead of failing midway.
+    fn writable(&self) -> SysResult<()>;
 }
 
 #[cfg(test)]

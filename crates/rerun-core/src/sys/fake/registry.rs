@@ -1125,6 +1125,10 @@ impl RegistryWrite for FakeRegistry {
     fn flush(&self, hive: Hive) -> SysResult<()> {
         reg_seq::flush(self, hive)
     }
+
+    fn writable(&self) -> SysResult<()> {
+        reg_seq::writable(self)
+    }
 }
 
 /// Test hook, see [`FakeRegistry::on_step`].

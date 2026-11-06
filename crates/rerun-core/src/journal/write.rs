@@ -224,7 +224,6 @@ pub(crate) enum BeforeArg {
     /// The backup `op-NNNN.bin` of the op.
     Backup(Backup),
     /// The bytes, in the record.
-    #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
     Inline(Vec<u8>),
 }
 
@@ -394,8 +393,6 @@ impl<'l> Txn<'l> {
         let mut src = g.reader()?;
         self.backup_from(op, &mut *src, sha256, len)
     }
-
-    #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
     fn backup_bytes(&mut self, data: &[u8]) -> Result<Backup, JournalError> {
         let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
         let op = self.backup_allowed(len)?;
@@ -450,7 +447,6 @@ impl<'l> Txn<'l> {
     /// The old state of `op` as bytes, at most `max`: inline from its intent, or
     /// `op-NNNN.bin` read whole (bounded) and checked against the intent's digest (else
     /// `BackupMismatch`), so what is used is what was checked (no TOCTOU).
-    #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
     fn before_bytes(&self, op: u16, max: u64) -> Result<Vec<u8>, JournalError> {
         let too_large = || JournalError::TooLarge {
             what: "an old state",
@@ -581,7 +577,6 @@ macro_rules! common {
             /// The old state of `op` as bytes, at most `max` (old registry values): inline,
             /// or `op-NNNN.bin` read whole and checked against the intent (else
             /// `BackupMismatch`); the bytes returned are the bytes checked.
-            #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
             pub(crate) fn before_bytes(&self, op: u16, max: u64) -> Result<Vec<u8>, JournalError> {
                 self.t.before_bytes(op, max)
             }
@@ -652,7 +647,6 @@ pub(crate) trait Reverting {
     /// The backup of `op`.
     fn backup_reader(&self, op: u16) -> Result<Box<dyn Read + '_>, JournalError>;
     /// The old state of `op` as checked bytes, at most `max`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
     fn before_bytes(&self, op: u16, max: u64) -> Result<Vec<u8>, JournalError>;
     /// `Closed`; flushed.
     fn close(self, how: Closing) -> Result<(), JournalError>
@@ -674,7 +668,6 @@ impl TxnWriter<'_> {
     /// Writes `data` as `op-NNNN.bin` of the next op (an old registry value above
     /// [`record::INLINE_MAX`]), with the budgets of [`Self::backup`], reads it back and
     /// compares hash and length. The token goes into that op's [`Self::intent`].
-    #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
     pub(crate) fn backup_bytes(&mut self, data: &[u8]) -> Result<Backup, JournalError> {
         self.t.backup_bytes(data)
     }

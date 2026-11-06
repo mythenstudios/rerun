@@ -519,15 +519,8 @@ impl RegPolicy {
         RegReader { w }
     }
 
-    /// The writer over the system's registry write side; the only caller of
-    /// `System::registry_write`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "exec writes the registry through it from P2-10 on"
-        )
-    )]
+    /// The writer over the system's registry write side (through [`Self::reader`], the only
+    /// caller of `System::registry_write`); `exec` writes the registry with it.
     pub(crate) fn writer<'s>(&self, sys: &'s dyn System) -> RegWriter<'s> {
         RegWriter {
             r: self.reader(sys),
@@ -672,6 +665,18 @@ impl RegWriter<'_> {
     /// Flushes `HKCU`.
     pub fn flush(&self) -> SysResult<()> {
         self.r.w.flush(Hive::CurrentUser)
+    }
+
+    /// The writes may run (not elevated, S2): `exec` asks before its first record.
+    pub fn writable(&self) -> SysResult<()> {
+        self.r.w.writable()
+    }
+
+    /// The state of `k`, which must be `of` or one of its keys below the anchor (a key a
+    /// `CreateKey` op names), without following links.
+    pub fn state_at(&self, k: &RegKey, of: &AllowedKey) -> SysResult<KeyState> {
+        inside(k, of)?;
+        self.r.w.key_state(k)
     }
 }
 

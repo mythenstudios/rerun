@@ -182,10 +182,10 @@ D4 runs on the open roots (targets and `main_exe`; a missing `main_exe` is fine 
 
 ### Checklist for P2-10b (from the P2-10a reviews)
 - `check` refuses a registry op before a file op, on encode and decode (the head is untrusted; the planner's order alone is not the guarantee). **Done (P2-10b, `plan::check`, test P7).**
-- S2: `writable()` (elevated) in the revert too, after `game_closed` and before `revert_loop`, for plans with registry ops.
+- S2: `writable()` (elevated) in the revert too, after `game_closed` and before `revert_loop`, for plans with registry ops. **Done (P2-10b, `exec::writable`, test R-T8).**
 - N2: a `CompatLayers` slot is refused in `check` until P2-11. **Done (P2-10b, `plan::allowed`, test P7).**
 - P-tests: a registry plan with `roots: []` and one without `main_exe` refused, also on decode. **Done (P2-10b, test P7).**
-- `records_fit` compares `Before::Inline`/`Bin` exactly with the planned old value of a `SetValue`.
+- `records_fit` compares `Before::Inline`/`Bin` exactly with the planned old value of a `SetValue`. **Done (P2-10b, `exec::reg::records_fit`, test R-T5).**
 
 ## Amendment (P2-10b, 2026-11-06; plan `P2-10` with the user decisions E1 to E3 and the senior-dev conditions)
 
@@ -207,6 +207,25 @@ pub(crate) enum Object { File { .. }, Key { key: RegKey, created: bool }, Value 
 - **Preview:** the key (`HKCU\…`), the value name (`(default)` for `""`), the old value (numbers and strings decoded from the inline bytes, strings through `escape::text`; anything else by type, length and SHA-256; `missing`), a type change marked, the new value; once per plan with registry ops the note that a game filling the key or changing the value later (also with another type, review S4) is left as it is and closed with `forget`, and that a revert does not restore the last-write times of keys. This is the one place where old registry data reaches output (review N6; ADR 0016 output rules apply).
 
 ### `registry_set` (`prim::registry_set`)
-- Step object (Topo step and step file alike, `deny_unknown_fields`; `docs/02-topo-format.md`, `schema/topo.schema.json`): `{"registry_set":{"key":"HKCU\Software\<Vendor>\<Product>[\…]","values":[{"name":…,"dword"|"qword"|"sz":…}]}}`. `key` begins exactly with `HKCU\Software\` (`HKLM\` is `NeedsHelper`); segments through `AsciiSeg::parse`, the key through `GameKey::new` (deny list, folded); 1 to 32 values with unique folded names (`AsciiName::parse`) and exactly one of `dword`, `qword` (decimal string, no leading zero), `sz` (`null` refused, review N5); every new value through `check_new`.
+- Step object (Topo step and step file alike, `deny_unknown_fields`; `docs/02-topo-format.md`, `schema/topo.schema.json`): `{"registry_set":{"key":"HKCU\\Software\\<Vendor>\\<Product>[\\…]","values":[{"name":…,"dword"|"qword"|"sz":…}]}}`. `key` begins exactly with `HKCU\Software\` (`HKLM\` is `NeedsHelper`); segments through `AsciiSeg::parse`, the key through `GameKey::new` (deny list, folded); 1 to 32 values with unique folded names (`AsciiName::parse`) and exactly one of `dword`, `qword` (decimal string, no leading zero), `sz` (`null` refused, review N5); every new value through `check_new`.
 - `PlanCtx { game, app, steam_app, main_exe, reg }`: `reg` is a `RegReader` (`RegPolicy::reader`, the non-changing methods of the write side, so a link or volatile key on the way is refused, never followed). Per value: equal to the new value → omitted; otherwise `SetValue` with the old value's `ValueState` (another type, raw, more than 16 KiB included; over 1 MiB is `TooLarge`, refused). Missing keys (`missing_keys`, below the anchor) → one `CreateKey` each, top-down, once over all steps.
 - The builder puts every registry op after every file op, whatever the order of the steps. Refused besides: the same value in two steps, a plan with registry ops and no `main_exe` (E2), more than 128 ops. No delete op.
+
+### `exec` for registry ops (`exec::reg`)
+- **Dispatch:** `Target::Key`/`Target::Value` go to `exec::reg` (apply, observe, act, `records_fit`); `Touched` holds the hives an apply wrote into, the `RegWriter` and the system. Registry ops never halt and need no root; D4 asks the main executable of every root (E2).
+- **Apply**, before anything is written: every root open (`Roots::all`); for a plan with registry ops `RegWriter::writable()` (an elevated process: `Refusal::Elevated`, S2; with UAC off an administrator always gets it, the message says how to run as a standard user); D4; old state: a created key still missing (`Mismatch`), a value exactly its planned old state (`ValueState::is`; `Mismatch`), a link or volatile key on the way, a key deleted while opened, a value too large: `Refusal::Registry { op, source }`. Then per op: `CreateKey` intent → `create_key` → `true`: `Done` (hint `Created`); `false`: hint `Existed`, `Mismatch`, the rollback leaves the key (`Foreign`, 6a); an error: hint `Unknown`, the rollback observes. `SetValue`: read again (`Mismatch` before the intent), old bytes into the intent (`Inline` up to 16 KiB, else `backup_bytes`), `set(expected = the value read, new)`, `Done`; `Mismatch` or a policy refusal: hint `NotWritten` (nothing was written: `new` found there later is not Rerun's, `Foreign`, review N3). `verify` (every op `After`), the game folders, then `HKCU` flushed, `Applied`.
+- **Revert**: after `game_closed`, `writable()` for a plan with registry ops (`Elevated` before the first record, S2). The location of every key and value is built again from the head (`RegPolicy::check` with the plan's roots). Observation (never a record alone; K1 trusts the records and fails R-T6):
+
+| Op | Seen | Observed / act |
+|---|---|---|
+| `CreateKey` | missing | `Before` |
+| | a link or volatile key on the way | `Foreign` |
+| | empty, and `Done`, or hint `Created`/`Unknown`, or no proof in a recovery or `verify` (6a, rest risk scenario 10) | `After` / `delete_empty_key` (`NotEmpty` on the handle) |
+| | empty with hint `Existed`; not empty (`verify`: except what later ops will remove, S3, after `counts()`, a key too large to list counts as not empty, S6) | `Foreign` |
+| `SetValue` | exactly `new` and no hint `NotWritten` | `After` / `restore(expected new, old)`: the old bytes from `before_bytes` (hashed against the intent first) decoded with the head's type, or the value deleted if there was none |
+| | the old value (missing for none) | `Before` |
+| | anything else (another type, a `REG_SZ` without its NUL, a link or volatile key, too large) | `Foreign` (S4) |
+
+- **Errors in a revert** (`restore`, `delete_empty_key`: `Busy`, `Mismatch`, `NotEmpty`; a swapped `.bin`: `BackupMismatch`) are `ExecError`s after the `RevertIntent`: the op stays open, the revert can be repeated. `HKCU` is flushed before every registry op's `RevertDone`, also when nothing changed.
+- **E3 for registry ops (user decision b, narrow):** an undecided root (an update pending, another folder, busy, access denied) refuses the whole revert before any change, the registry ops included (R-H2/H3); an absent root or one the user cannot write halts at its newest file op after every registry op is reverted (R-H1). The draft's "H2/H3 halt" is superseded by E3.
+- **Tests:** `exec/reg_tests.rs` (R-T1, R-T2, R-T3, R-T5 to R-T8, R-H, K1, K-R7, K-R9), `sys/win/tests/exec.rs` (R-T1, R-T6, R-T8, R-H1 on an app hive), `docs/09-testing.md`.
