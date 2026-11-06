@@ -12,21 +12,38 @@
 //! and, for [`SnapRoot::below`], the subtree: two snapshots of different roots are never
 //! identical, whatever their content. The root's label is for display only.
 //!
-//! "Identical" means: existence, kind, case, content (SHA-256), length, attributes
-//! (read-only, hidden, system), link count, reparse tag and link target; for the registry:
-//! keys, value names, value type and value. Names that fail `policy::path::classify` (and
-//! all entries of case-sensitive directories, and entries whose names fold to the same key)
-//! are captured as [`SnapEntry::Anomaly`] with metadata only: never hashed, never opened,
-//! never descended into. Restricted entries (their DACL denies the current user every open,
-//! [`Metadata::restricted`](super::fs::Metadata::restricted)) are captured as
-//! [`SnapEntry::Restricted`] from the listing: kind, length, attributes and reparse tag count,
-//! the link count does not (unknown); they are never opened, hashed or descended into.
+//! "Identical" means (ADR 0017, "What exact means"; ADR 0018 for the registry):
+//! - a file: name and its case, length, content (SHA-256), read-only, hidden and system,
+//!   link count; a directory: name and its case, read-only, hidden and system; a reparse
+//!   point (never followed): name and its case, tag, link target, read-only, hidden and
+//!   system;
+//! - a restricted entry (its DACL denies the current user every open,
+//!   [`Metadata::restricted`](super::fs::Metadata::restricted)), [`SnapEntry::Restricted`]:
+//!   kind, length, read-only, hidden and system, reparse tag, from the listing (the link count
+//!   is unknown and does not count); never opened, hashed or descended into;
+//! - an anomaly, [`SnapEntry::Anomaly`]: a name that fails `policy::path::classify` (also
+//!   U+FFFD for invalid UTF-16), every entry of a case-sensitive directory, and entries whose
+//!   names fold to the same key: the raw name, kind, length, read-only, hidden and system and
+//!   the restricted flag; never hashed, opened or descended into. Anomalies with the same raw
+//!   name under one directory (two names that differ only in unpaired surrogates list alike)
+//!   are kept as a multiset, none overwrites another;
+//! - for the registry: keys, value names and their case, value type and the exact bytes.
+//!
+//! Shown in a diff but **not compared** (user decision E3): the allowlisted data tag of a
+//! file (WOF, dedup, cloud, [`Shown`]). `wof.sys` hides the WOF tag anyway (ADR 0007), so it
+//! cannot be pinned, and compressing or deduplicating a folder changes no content. A cloud
+//! placeholder stays distinguishable: its content is not hashed (`sha256: None`), since
+//! reading it could trigger a download (ADR 0007). The tag of a reparse point (a name
+//! surrogate or an unknown tag) and of a restricted entry is compared.
 //!
 //! Not captured: timestamps and file IDs of entries (restored backups have a new mtime and a
-//! new ID), the attributes and the name of a root itself (only its identity), and the content
-//! of cloud placeholders (allowlisted `0x9000_x01A` tags): hashing them could trigger a
-//! download (ADR 0007), so they are recorded with metadata only. Directories nested deeper
-//! than [`MAX_DEPTH`] below a root are an error.
+//! new ID), DACL and owner, alternate data streams, 8.3 names, extended attributes,
+//! compression and EFS state, `ARCHIVE` and every other attribute, and the attributes and the
+//! name of a root itself (only its identity). **Delete-pending entries** (user decision E2)
+//! are skipped like every listing of `sys` skips them (ADR 0017, A6): a name that another
+//! program deleted while a handle of it is still open is on its way out and cannot be
+//! opened, so a snapshot taken meanwhile is identical to one taken after it is gone.
+//! Directories nested deeper than [`MAX_DEPTH`] below a root are `TooLarge`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -40,8 +57,23 @@ use super::{SysError, SysErrorKind, SysResult};
 use crate::fold::fold;
 use crate::path::{RelPath, classify};
 
-/// Maximum directory depth below a root.
+/// Maximum directory depth below a root: a directory 64 levels below it (a direct child is
+/// level 1) is walked, one at level 65 is `TooLarge` with this limit. The depth bounds a walk
+/// that a cycle could make endless.
 pub const MAX_DEPTH: usize = 64;
+
+/// A value that a diff shows and a comparison ignores: two `Shown` are always equal (user
+/// decision E3, the data tag of a file).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Shown<T>(pub T);
+
+impl<T> PartialEq for Shown<T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<T> Eq for Shown<T> {}
 
 /// One directory of a [`Scope`]: the handle of a root and what of it to capture.
 #[derive(Debug, Clone)]
@@ -144,8 +176,9 @@ pub enum SnapEntry {
         len: u64,
         /// SHA-256 of the content; `None` for cloud placeholders (not hashed).
         sha256: Option<[u8; 32]>,
-        /// Allowlisted data tag (WOF, dedup, cloud), if any.
-        tag: Option<u32>,
+        /// Allowlisted data tag (WOF, dedup, cloud), if `sys` reports one. Shown, not
+        /// compared ([`Shown`]).
+        tag: Shown<Option<u32>>,
         /// Attributes.
         attrs: Attrs,
         /// Number of hard links (`None` = unknown; only for entries `sys` could not open).
@@ -159,6 +192,8 @@ pub enum SnapEntry {
         tag: u32,
         /// Link target, if any.
         target: Option<String>,
+        /// Attributes.
+        attrs: Attrs,
     },
     /// Entry whose raw name is not a valid segment, or an entry of a case-sensitive
     /// directory. Metadata only.
@@ -245,7 +280,7 @@ impl fmt::Display for SnapEntry {
                     }
                     None => f.write_str(" (not hashed)")?,
                 }
-                if let Some(t) = tag {
+                if let Some(t) = tag.0 {
                     write!(f, " tag {t:#010x}")?;
                 }
                 write!(f, "{}", ShowAttrs(attrs))?;
@@ -256,12 +291,17 @@ impl fmt::Display for SnapEntry {
                 }
                 Ok(())
             }
-            Self::Reparse { name, tag, target } => {
+            Self::Reparse {
+                name,
+                tag,
+                target,
+                attrs,
+            } => {
                 write!(f, "reparse {name:?} tag {tag:#010x}")?;
                 if let Some(t) = target {
                     write!(f, " → {t:?}")?;
                 }
-                Ok(())
+                write!(f, "{}", ShowAttrs(attrs))
             }
             Self::Anomaly {
                 name,
@@ -294,6 +334,10 @@ impl fmt::Display for SnapEntry {
     }
 }
 
+/// Entries per location: one, or a multiset of anomalies with the same raw name, sorted by
+/// [`order_key`] so that equal multisets compare equal.
+type Entries = BTreeMap<Loc, Vec<SnapEntry>>;
+
 /// State of a [`Scope`] at a point in time. Two snapshots are equal if they captured the same
 /// roots (identity and subtree, in the same order) and the same entries; the labels of the
 /// roots are not compared.
@@ -301,7 +345,7 @@ impl fmt::Display for SnapEntry {
 pub struct Snapshot {
     roots: Vec<RootIdent>,
     labels: Vec<String>,
-    entries: BTreeMap<Loc, SnapEntry>,
+    entries: Entries,
 }
 
 impl PartialEq for Snapshot {
@@ -315,7 +359,7 @@ impl Eq for Snapshot {}
 impl Snapshot {
     /// Number of captured entries (the roots themselves not counted).
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.values().map(Vec::len).sum()
     }
 
     /// `true` if no entry was captured.
@@ -353,21 +397,75 @@ impl Snapshot {
                 _ => {}
             }
         }
-        for (loc, before) in &self.entries {
-            match other.entries.get(loc) {
-                None => out.push(format!("- {}: {before}", self.show(loc))),
-                Some(after) if after != before => {
-                    out.push(format!("~ {}: {before} → {after}", self.show(loc)));
-                }
-                Some(_) => {}
+        let none = Vec::new();
+        let locs: std::collections::BTreeSet<&Loc> =
+            self.entries.keys().chain(other.entries.keys()).collect();
+        for loc in locs {
+            let before = self.entries.get(loc).unwrap_or(&none);
+            let after = other.entries.get(loc).unwrap_or(&none);
+            if before == after {
+                continue;
             }
-        }
-        for (loc, after) in &other.entries {
-            if !self.entries.contains_key(loc) {
-                out.push(format!("+ {}: {after}", other.show(loc)));
+            // Multiset differences: what only `before` has, what only `after` has.
+            let gone = minus(before, after);
+            let new = minus(after, before);
+            let shown = if before.is_empty() {
+                other.show(loc)
+            } else {
+                self.show(loc)
+            };
+            if let ([b], [a]) = (gone.as_slice(), new.as_slice()) {
+                out.push(format!("~ {shown}: {b} → {a}"));
+                continue;
             }
+            out.extend(gone.iter().map(|b| format!("- {shown}: {b}")));
+            out.extend(new.iter().map(|a| format!("+ {shown}: {a}")));
         }
         out
+    }
+}
+
+/// The elements of the multiset `a` that `b` does not have (as often as `a` has them more).
+fn minus<'e>(a: &'e [SnapEntry], b: &[SnapEntry]) -> Vec<&'e SnapEntry> {
+    let mut left: Vec<&SnapEntry> = b.iter().collect();
+    let mut out = Vec::new();
+    for e in a {
+        match left.iter().position(|x| *x == e) {
+            Some(i) => {
+                left.swap_remove(i);
+            }
+            None => out.push(e),
+        }
+    }
+    out
+}
+
+/// Sort key of an entry inside the multiset of one location: every compared field. Only
+/// anomalies share a location; other entries are ordered by their display text.
+fn order_key(e: &SnapEntry) -> (String, Vec<u8>) {
+    match e {
+        SnapEntry::Anomaly {
+            name,
+            kind,
+            len,
+            attrs,
+            restricted,
+        } => {
+            let mut k = vec![
+                match kind {
+                    EntryKind::File => 0,
+                    EntryKind::Dir => 1,
+                    EntryKind::Reparse => 2,
+                },
+                u8::from(attrs.readonly),
+                u8::from(attrs.hidden),
+                u8::from(attrs.system),
+                u8::from(*restricted),
+            ];
+            k.extend(len.to_be_bytes());
+            (name.clone(), k)
+        }
+        other => (other.to_string(), Vec::new()),
     }
 }
 
@@ -394,6 +492,9 @@ pub fn snapshot(reg: &dyn Registry, scope: &Scope<'_>) -> SysResult<Snapshot> {
     for key in &scope.keys {
         walk_key(reg, key, key.path.clone(), &mut snap.entries)?;
     }
+    for list in snap.entries.values_mut() {
+        list.sort_by_cached_key(order_key);
+    }
     Ok(snap)
 }
 
@@ -405,18 +506,16 @@ fn is_cloud(tag: u32) -> bool {
 /// The walk of one root.
 struct Walk<'o> {
     root: usize,
-    out: &'o mut BTreeMap<Loc, SnapEntry>,
+    out: &'o mut Entries,
 }
 
 impl Walk<'_> {
     fn insert(&mut self, path: String, entry: SnapEntry) {
-        self.out.insert(
-            Loc::Fs {
-                root: self.root,
-                path,
-            },
-            entry,
-        );
+        let loc = Loc::Fs {
+            root: self.root,
+            path,
+        };
+        self.out.entry(loc).or_default().push(entry);
     }
 
     /// The entry `sub` of [`SnapRoot::below`] and the tree below it.
@@ -470,9 +569,9 @@ impl Walk<'_> {
     /// Lists `dir` (at `depth` below the root) and captures its entries.
     fn dir(&mut self, dir: &dyn Dir, prefix: &str, depth: usize) -> SysResult<()> {
         if depth > MAX_DEPTH {
-            return Err(SysError::new(
-                SysErrorKind::Other,
-                format!("{prefix}: deeper than {MAX_DEPTH} directories"),
+            return Err(SysError::too_large(
+                format!("{prefix}: directories nested deeper than the limit"),
+                MAX_DEPTH as u64,
             ));
         }
         let case_sensitive = dir.info()?.case_sensitive;
@@ -557,20 +656,28 @@ impl Walk<'_> {
                             name: entry.name,
                             len: meta.len,
                             sha256,
-                            tag,
+                            tag: Shown(tag),
                             attrs: meta.attrs,
                             links: meta.links,
                         },
                     );
                 }
                 EntryKind::Reparse => {
-                    let (tag, target) = meta.reparse.map_or((0, None), |r| (r.tag, r.target));
+                    // `sys` always reports the tag of a reparse point it could open; without
+                    // it the entry would be recorded as tag 0 and a changed tag go unseen.
+                    let Some(reparse) = meta.reparse else {
+                        return Err(SysError::new(
+                            SysErrorKind::Other,
+                            format!("{loc}: reparse point without reparse data"),
+                        ));
+                    };
                     self.insert(
                         loc,
                         SnapEntry::Reparse {
                             name: entry.name,
-                            tag,
-                            target,
+                            tag: reparse.tag,
+                            target: reparse.target,
+                            attrs: meta.attrs,
                         },
                     );
                 }
@@ -620,25 +727,20 @@ fn key_loc(k: &RegKey) -> String {
     format!("{}[{}]\\{}", k.hive, k.view, fold(&k.path))
 }
 
-fn walk_key(
-    reg: &dyn Registry,
-    key: &RegKey,
-    name: String,
-    out: &mut BTreeMap<Loc, SnapEntry>,
-) -> SysResult<()> {
+fn walk_key(reg: &dyn Registry, key: &RegKey, name: String, out: &mut Entries) -> SysResult<()> {
     let loc = key_loc(key);
     if !reg.key_exists(key)? {
-        out.insert(Loc::Key(loc), SnapEntry::Missing);
+        out.insert(Loc::Key(loc), vec![SnapEntry::Missing]);
         return Ok(());
     }
-    out.insert(Loc::Key(loc.clone()), SnapEntry::Key { name });
+    out.insert(Loc::Key(loc.clone()), vec![SnapEntry::Key { name }]);
     for (value_name, value) in reg.values(key)? {
         out.insert(
             Loc::Value(loc.clone(), fold(&value_name)),
-            SnapEntry::Value {
+            vec![SnapEntry::Value {
                 name: value_name,
                 value,
-            },
+            }],
         );
     }
     for sub in reg.subkeys(key)? {
@@ -724,12 +826,13 @@ mod tests {
         assert_eq!(out.len(), 3, "{out:#?}");
         assert!(
             out.values()
+                .flatten()
                 .any(|e| matches!(e, SnapEntry::File { name, .. } if name == "other.bin"))
         );
         let anomalies: Vec<&SnapEntry> = out
             .iter()
             .filter(|(loc, _)| matches!(loc, Loc::Fs { path, .. } if path.contains('\0')))
-            .map(|(_, e)| e)
+            .flat_map(|(_, e)| e)
             .collect();
         assert_eq!(anomalies.len(), 2, "{out:#?}");
         assert!(
@@ -737,6 +840,56 @@ mod tests {
                 .iter()
                 .all(|e| matches!(e, SnapEntry::Anomaly { .. }))
         );
+    }
+
+    /// A directory that lists a reparse point without its reparse data (a broken `sys`).
+    #[derive(Debug)]
+    struct NoTag;
+
+    impl Dir for NoTag {
+        fn info(&self) -> SysResult<RootInfo> {
+            Colliding.info()
+        }
+        fn open_dir(&self, _: &RelPath) -> SysResult<Box<dyn Dir + '_>> {
+            no()
+        }
+        fn metadata(&self, _: &RelPath) -> SysResult<Option<Metadata>> {
+            no()
+        }
+        fn open_read(&self, _: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>> {
+            no()
+        }
+        fn read_dir_limited(&self, _: Option<&RelPath>, _: usize) -> SysResult<Vec<DirEntry>> {
+            Ok(vec![DirEntry {
+                name: "Saves".to_owned(),
+                meta: Metadata {
+                    kind: EntryKind::Reparse,
+                    len: 0,
+                    attrs: Attrs::default(),
+                    links: Some(1),
+                    file_id: 3,
+                    reparse: None,
+                    restricted: false,
+                },
+            }])
+        }
+        fn users(&self, _: &RelPath) -> SysResult<Vec<u32>> {
+            no()
+        }
+    }
+
+    /// Never a silent tag 0: a changed tag would go unseen.
+    #[test]
+    fn a_reparse_point_without_reparse_data_is_an_error() {
+        let mut out = std::collections::BTreeMap::new();
+        let e = Walk {
+            root: 0,
+            out: &mut out,
+        }
+        .dir(&NoTag, "", 0)
+        .unwrap_err();
+        assert_eq!(e.kind, SysErrorKind::Other, "{e}");
+        assert!(e.target.contains("SAVES"), "{e}");
     }
 
     /// A directory whose only file fails to read like `ReadFile` on a locked range

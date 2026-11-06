@@ -1735,10 +1735,33 @@ fn snapshot_is_identical_after_replace_and_restore() {
 #[test]
 fn snapshot_detects_every_kind_of_change() {
     type Mutation = fn(&FakeSystem);
-    let cases: [(&str, Mutation); 12] = [
+    let cases: [(&str, Mutation); 14] = [
         ("content", |s| {
             s.fake_fs()
                 .put_file(&p(r"C:\Games\AC\Data\a.forge"), b"FORGE")
+                .unwrap();
+        }),
+        ("length", |s| {
+            s.fake_fs()
+                .put_file(&p(r"C:\Games\AC\Data\a.forge"), b"forge!")
+                .unwrap();
+        }),
+        ("hidden directory", |s| {
+            let hidden = Attrs {
+                hidden: true,
+                ..Attrs::default()
+            };
+            s.fake_fs()
+                .set_attrs(&p(r"C:\Games\AC\Data"), hidden)
+                .unwrap();
+        }),
+        ("system reparse point", |s| {
+            let system = Attrs {
+                system: true,
+                ..Attrs::default()
+            };
+            s.fake_fs()
+                .set_attrs(&p(r"C:\Games\AC\Saves"), system)
                 .unwrap();
         }),
         ("readonly", |s| {
@@ -1790,11 +1813,6 @@ fn snapshot_detects_every_kind_of_change() {
         ("link count", |s| {
             s.fake_fs()
                 .put_hardlink(&p(r"C:\Games\AC\Data\a.forge"), &p(r"C:\Elsewhere\a.forge"))
-                .unwrap();
-        }),
-        ("data tag (same content)", |s| {
-            s.fake_fs()
-                .put_tagged_file(&p(r"C:\Games\AC\Data\a.forge"), b"forge", tag::WOF)
                 .unwrap();
         }),
         ("restricted", |s| {
@@ -1952,22 +1970,110 @@ fn snapshot_does_not_hash_cloud_placeholders() {
 
 #[test]
 fn snapshot_depth_is_capped() {
-    let deep: String = (0..crate::sys::snapshot::MAX_DEPTH + 2)
-        .map(|i| format!(r"\d{i}"))
-        .collect();
+    use crate::sys::snapshot::MAX_DEPTH;
+    let nested = |levels: usize| {
+        let deep: String = (0..levels).map(|i| format!(r"\d{i}")).collect();
+        FakeSystem::builder()
+            .dir(format!(r"C:\G{deep}"))
+            .build()
+            .unwrap()
+    };
+    // Exactly 64 levels of directories below the root are walked (with a file in the
+    // deepest one), 65 are refused with the limit.
+    let deep: String = (0..MAX_DEPTH).map(|i| format!(r"\d{i}")).collect();
     let sys = FakeSystem::builder()
-        .dir(format!(r"C:\G{deep}"))
+        .file(format!(r"C:\G{deep}\leaf.bin"), "x")
         .build()
         .unwrap();
-    assert_eq!(kind(snap_of(&sys, &[r"C:\G"], &[])), SysErrorKind::Other);
-    let ok_depth: String = (0..crate::sys::snapshot::MAX_DEPTH)
-        .map(|i| format!(r"\d{i}"))
-        .collect();
-    let sys = FakeSystem::builder()
-        .dir(format!(r"C:\G{ok_depth}"))
-        .build()
+    assert_eq!(snap_of(&sys, &[r"C:\G"], &[]).unwrap().len(), MAX_DEPTH + 1);
+    let e = snap_of(&nested(MAX_DEPTH + 1), &[r"C:\G"], &[]).unwrap_err();
+    assert_eq!((e.kind, e.limit), (SysErrorKind::TooLarge, Some(64)), "{e}");
+}
+
+/// The data tag of a file (WOF, dedup, cloud) is shown, never compared (user decision E3):
+/// compressing a file changes nothing, a cloud placeholder differs by its missing hash.
+#[test]
+fn snapshot_shows_data_tags_without_comparing_them() {
+    let sys = game_system();
+    let before = game_snap(&sys);
+    let forge = p(r"C:\Games\AC\Data\a.forge");
+    sys.fake_fs()
+        .put_tagged_file(&forge, b"forge", tag::WOF)
         .unwrap();
-    snap_of(&sys, &[r"C:\G"], &[]).unwrap();
+    let after = game_snap(&sys);
+    assert_eq!(before, after, "{:#?}", before.diff(&after));
+    let shown = after.diff(&Snapshot::default());
+    assert!(
+        shown
+            .iter()
+            .any(|l| l.contains("a.forge") && l.contains("tag 0x80000017")),
+        "{shown:#?}"
+    );
+    sys.fake_fs()
+        .put_tagged_file(&forge, b"forge", tag::DEDUP)
+        .unwrap();
+    assert_eq!(before, game_snap(&sys));
+    // A placeholder of the same content is not hashed: one difference.
+    sys.fake_fs()
+        .put_tagged_file(&forge, b"forge", tag::CLOUD)
+        .unwrap();
+    let cloud = before.diff(&game_snap(&sys));
+    assert!(
+        cloud.len() == 1 && cloud[0].contains("not hashed"),
+        "{cloud:#?}"
+    );
+}
+
+/// A delete-pending entry is skipped like every listing skips it (user decision E2): the
+/// snapshot equals one taken before the file existed, and taking it does not fail.
+#[test]
+fn snapshot_skips_delete_pending_entries() {
+    let sys = game_system();
+    let before = game_snap(&sys);
+    let doomed = p(r"C:\Games\AC\Data\doomed.bin");
+    sys.fake_fs().put_file(&doomed, b"going").unwrap();
+    let hold = sys.fake_fs().delete_pending(&doomed).unwrap();
+    let during = game_snap(&sys);
+    assert_eq!(before, during, "{:#?}", before.diff(&during));
+    drop(hold);
+    assert_eq!(before, game_snap(&sys));
+}
+
+/// Two names that differ only in an unpaired surrogate list alike: both are anomalies under
+/// one location, kept as a multiset (neither overwrites the other), in any listing order.
+#[test]
+fn snapshot_keeps_anomalies_with_the_same_raw_name_apart() {
+    let sys = game_system();
+    let data = p(r"C:\Games\AC\Data");
+    let (high, low) = ([0x61, 0xD800], [0x61, 0xDC00]);
+    sys.fake_fs().put_utf16_file(&data, &high, b"1").unwrap();
+    sys.fake_fs().put_utf16_file(&data, &low, b"22").unwrap();
+    let before = game_snap(&sys);
+    let lines = before.diff(&Snapshot::default());
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.contains("anomaly \"a\u{FFFD}\""))
+            .count(),
+        2,
+        "{lines:#?}"
+    );
+    assert_eq!(before, game_snap(&sys));
+    // A change to one of them is exactly one difference at that location.
+    sys.fake_fs().put_utf16_file(&data, &low, b"333").unwrap();
+    let diff = before.diff(&game_snap(&sys));
+    assert!(
+        diff.len() == 1 && diff[0].starts_with('~') && diff[0].contains("3 bytes"),
+        "{diff:#?}"
+    );
+    sys.fake_fs().put_utf16_file(&data, &low, b"22").unwrap();
+    assert_eq!(before, game_snap(&sys));
+    // A third one with the same raw name is one more entry, not a change.
+    sys.fake_fs()
+        .put_utf16_file(&data, &[0x61, 0xDFFF], b"1")
+        .unwrap();
+    let diff = before.diff(&game_snap(&sys));
+    assert!(diff.len() == 1 && diff[0].starts_with('+'), "{diff:#?}");
 }
 
 /// A missing key of the scope and a missing subtree of a root are recorded as missing.
