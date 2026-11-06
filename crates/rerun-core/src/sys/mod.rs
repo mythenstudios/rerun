@@ -28,13 +28,15 @@ pub mod fs;
 pub mod gpu;
 pub mod known_folders;
 pub mod registry;
-pub mod snapshot;
 pub mod topology;
 
 #[cfg(any(test, feature = "fake"))]
 pub mod contract;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+// The state comparison of the round-trip tests (ADR 0004, test code only like `contract`).
+#[cfg(any(test, feature = "fake"))]
+pub mod snapshot;
 // The write sequences (ADR 0017, A1) over the primitives of `sys::fake` and `sys::win`.
 pub(crate) mod seq;
 #[cfg(windows)]

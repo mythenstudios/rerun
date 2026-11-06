@@ -1,12 +1,16 @@
 //! Snapshot of directories and registry keys for the round-trip contract
-//! `apply → verify → revert → snapshot identical` (see `docs/09-testing.md`).
+//! `apply → verify → revert → snapshot identical` (see `docs/09-testing.md`). Test code only
+//! (`cfg(any(test, feature = "fake"))`, like `contract` and `fake`; ADR 0004).
 //!
-//! Generic over `&dyn System`: runs against `sys::fake` in tests, against `sys::win` in the
-//! contract runs and later for the folder comparison after a revert.
+//! A scope names its directories as **root handles** ([`SnapRoot`]): the [`Dir`] of a root
+//! that `policy::root` opened (a `GameDir`, later an `AppDir`), never an absolute path. The
+//! snapshot walks each one through [`Dir`] handles and never follows a reparse point. It reads
+//! the registry through `&dyn Registry`, so it runs against `sys::fake` and `sys::win`
+//! (`sys::contract::snapshot_contract`).
 //!
-//! Each scope directory is opened by absolute path (one of the two allowed callers of
-//! [`Fs::open_dir`](super::Fs::open_dir), ADR 0007) and then walked through [`Dir`] handles,
-//! never following reparse points.
+//! Each root is recorded with its identity (volume serial and file ID of the opened directory)
+//! and, for [`SnapRoot::below`], the subtree: two snapshots of different roots are never
+//! identical, whatever their content. The root's label is for display only.
 //!
 //! "Identical" means: existence, kind, case, content (SHA-256), length, attributes
 //! (read-only, hidden, system), link count, reparse tag and link target; for the registry:
@@ -18,60 +22,112 @@
 //! [`SnapEntry::Restricted`] from the listing: kind, length, attributes and reparse tag count,
 //! the link count does not (unknown); they are never opened, hashed or descended into.
 //!
-//! Not captured: timestamps and file IDs (restored backups have a new mtime and a new ID),
-//! the attributes of a scope root itself (that would need a second absolute open of its
-//! parent), and the content of cloud placeholders (allowlisted `0x9000_x01A` tags): hashing
-//! them could trigger a download (ADR 0007), so they are recorded with metadata only.
-//! Directories nested deeper than [`MAX_DEPTH`] below a scope root are an error.
+//! Not captured: timestamps and file IDs of entries (restored backups have a new mtime and a
+//! new ID), the attributes and the name of a root itself (only its identity), and the content
+//! of cloud placeholders (allowlisted `0x9000_x01A` tags): hashing them could trigger a
+//! download (ADR 0007), so they are recorded with metadata only. Directories nested deeper
+//! than [`MAX_DEPTH`] below a root are an error.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
-use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
-use super::fs::{Attrs, Dir, EntryKind};
+use super::fs::{Attrs, Dir, DirEntry, EntryKind};
 use super::registry::{RegKey, RegValue, Registry};
-use super::{SysError, SysErrorKind, SysResult, System};
+use super::{SysError, SysErrorKind, SysResult};
 use crate::fold::fold;
 use crate::path::{RelPath, classify};
 
-/// Maximum directory depth below a scope root.
+/// Maximum directory depth below a root.
 pub const MAX_DEPTH: usize = 64;
 
-/// What a snapshot captures. Directories and keys, each recursively.
+/// One directory of a [`Scope`]: the handle of a root and what of it to capture.
+#[derive(Debug, Clone)]
+pub struct SnapRoot<'a> {
+    dir: &'a dyn Dir,
+    label: String,
+    sub: Option<RelPath>,
+}
+
+impl<'a> SnapRoot<'a> {
+    /// The whole tree below the root `dir`. `dir` is the read handle of a root that
+    /// `policy::root` handed out (`GameDir::dir`, later `AppDir`); test code of this crate
+    /// may pass any [`Dir`]. `label` is shown in a diff (e.g. the root's canonical path) and
+    /// never compared.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "built by the tests of this crate only")
+    )]
+    pub(crate) fn new(dir: &'a dyn Dir, label: impl Into<String>) -> Self {
+        Self {
+            dir,
+            label: label.into(),
+            sub: None,
+        }
+    }
+
+    /// Only the entry `sub` below the root and, if it is a directory, the tree below it (a
+    /// second call replaces the first). The entry is captured like any entry of its parent's
+    /// listing: a file is hashed, a reparse point is recorded and not followed, a restricted
+    /// entry is recorded from the listing. A missing `sub` (or a parent of it that is missing
+    /// or a file) is [`SnapEntry::Missing`]; a reparse point or a restricted entry among its
+    /// parents is an error (`ReparsePoint`, `AccessDenied`), never followed.
+    #[must_use]
+    pub fn below(mut self, sub: RelPath) -> Self {
+        self.sub = Some(sub);
+        self
+    }
+}
+
+/// What a snapshot captures: root handles and registry keys, each recursively.
 #[derive(Debug, Clone, Default)]
-pub struct Scope {
-    /// Absolute directories.
-    pub dirs: Vec<PathBuf>,
+pub struct Scope<'a> {
+    /// Directories, as root handles.
+    pub dirs: Vec<SnapRoot<'a>>,
     /// Registry keys.
     pub keys: Vec<RegKey>,
+}
+
+/// Identity of a captured root: the opened directory and the subtree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootIdent {
+    volume_serial: u64,
+    file_id: u128,
+    /// Folded [`SnapRoot::below`] path.
+    sub: Option<String>,
+}
+
+impl fmt::Display for RootIdent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}-{:032x}", self.volume_serial, self.file_id)?;
+        if let Some(s) = &self.sub {
+            write!(f, " below {s:?}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Location of an entry (folded, i.e. unique case-insensitively; exact in case-sensitive
 /// directories).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Loc {
-    Fs(String),
+    /// Path below root number `root` of [`Scope::dirs`], `\`-separated; a segment that
+    /// starts with NUL is a raw name (an anomaly).
+    Fs {
+        root: usize,
+        path: String,
+    },
     Key(String),
     Value(String, String),
-}
-
-impl fmt::Display for Loc {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Fs(p) => write!(f, "{}", p.replace('\0', "<raw>")),
-            Self::Key(k) => write!(f, "{k}"),
-            Self::Value(k, v) => write!(f, "{k} @ {v:?}"),
-        }
-    }
 }
 
 /// A captured entry. Names in their original case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapEntry {
-    /// Root of the scope does not exist.
+    /// The entry does not exist (a registry key of the scope, or the `sub` of
+    /// [`SnapRoot::below`]).
     Missing,
     /// Directory.
     Dir {
@@ -238,68 +294,105 @@ impl fmt::Display for SnapEntry {
     }
 }
 
-/// State of a [`Scope`] at a point in time.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// State of a [`Scope`] at a point in time. Two snapshots are equal if they captured the same
+/// roots (identity and subtree, in the same order) and the same entries; the labels of the
+/// roots are not compared.
+#[derive(Debug, Clone, Default)]
 pub struct Snapshot {
+    roots: Vec<RootIdent>,
+    labels: Vec<String>,
     entries: BTreeMap<Loc, SnapEntry>,
 }
 
+impl PartialEq for Snapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.roots == other.roots && self.entries == other.entries
+    }
+}
+
+impl Eq for Snapshot {}
+
 impl Snapshot {
-    /// Number of captured entries.
+    /// Number of captured entries (the roots themselves not counted).
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// `true` if nothing was captured.
+    /// `true` if no entry was captured.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    fn label(&self, root: usize) -> &str {
+        self.labels.get(root).map_or("<root>", String::as_str)
+    }
+
+    fn show(&self, loc: &Loc) -> String {
+        match loc {
+            Loc::Fs { root, path } if path.is_empty() => self.label(*root).to_owned(),
+            Loc::Fs { root, path } => {
+                format!("{}\\{}", self.label(*root), path.replace('\0', "<raw>"))
+            }
+            Loc::Key(k) => k.clone(),
+            Loc::Value(k, v) => format!("{k} @ {v:?}"),
+        }
+    }
+
     /// Human-readable differences from `self` (before) to `other` (after).
-    /// `-` = gone, `+` = new, `~` = changed. Empty = identical.
+    /// `-` = gone, `+` = new, `~` = changed. Empty = identical. A different root (another
+    /// directory, another subtree, or another number of roots) is a difference of its own.
     pub fn diff(&self, other: &Self) -> Vec<String> {
         let mut out = Vec::new();
+        for i in 0..self.roots.len().max(other.roots.len()) {
+            match (self.roots.get(i), other.roots.get(i)) {
+                (Some(a), Some(b)) if a != b => {
+                    out.push(format!("~ root {i} ({}): {a} → {b}", self.label(i)))
+                }
+                (Some(a), None) => out.push(format!("- root {i} ({}): {a}", self.label(i))),
+                (None, Some(b)) => out.push(format!("+ root {i} ({}): {b}", other.label(i))),
+                _ => {}
+            }
+        }
         for (loc, before) in &self.entries {
             match other.entries.get(loc) {
-                None => out.push(format!("- {loc}: {before}")),
-                Some(after) if after != before => out.push(format!("~ {loc}: {before} → {after}")),
+                None => out.push(format!("- {}: {before}", self.show(loc))),
+                Some(after) if after != before => {
+                    out.push(format!("~ {}: {before} → {after}", self.show(loc)));
+                }
                 Some(_) => {}
             }
         }
         for (loc, after) in &other.entries {
             if !self.entries.contains_key(loc) {
-                out.push(format!("+ {loc}: {after}"));
+                out.push(format!("+ {}: {after}", other.show(loc)));
             }
         }
         out
     }
 }
 
-/// Captures the state of `scope`.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "ADR 0007: the snapshot opens its scope roots by absolute path, read-only"
-)]
-pub fn snapshot(sys: &dyn System, scope: &Scope) -> SysResult<Snapshot> {
+/// Captures the state of `scope`. Directories through their root handles, keys through `reg`.
+pub fn snapshot(reg: &dyn Registry, scope: &Scope<'_>) -> SysResult<Snapshot> {
     let mut snap = Snapshot::default();
-    for dir in &scope.dirs {
-        let name = dir.display().to_string();
-        let loc = fold(name.replace('/', "\\").trim_end_matches('\\'));
-        let handle = match sys.fs().open_dir(dir) {
-            Ok(h) => h,
-            Err(e) if e.kind == SysErrorKind::NotFound => {
-                snap.entries.insert(Loc::Fs(loc), SnapEntry::Missing);
-                continue;
-            }
-            Err(e) => return Err(e),
+    for (i, root) in scope.dirs.iter().enumerate() {
+        let info = root.dir.info()?;
+        snap.roots.push(RootIdent {
+            volume_serial: info.volume_serial,
+            file_id: info.file_id,
+            sub: root.sub.as_ref().map(|s| fold(s.as_str())),
+        });
+        snap.labels.push(root.label.clone());
+        let mut walk = Walk {
+            root: i,
+            out: &mut snap.entries,
         };
-        let attrs = Attrs::default();
-        snap.entries
-            .insert(Loc::Fs(loc.clone()), SnapEntry::Dir { name, attrs });
-        walk_dir(&*handle, &loc, 0, &mut snap.entries)?;
+        match &root.sub {
+            None => walk.dir(root.dir, "", 0)?,
+            Some(sub) => walk.sub(root.dir, sub)?,
+        }
     }
     for key in &scope.keys {
-        walk_key(sys.registry(), key, key.path.clone(), &mut snap.entries)?;
+        walk_key(reg, key, key.path.clone(), &mut snap.entries)?;
     }
     Ok(snap)
 }
@@ -309,119 +402,202 @@ fn is_cloud(tag: u32) -> bool {
     tag & 0xFFFF_0FFF == super::fs::tag::CLOUD
 }
 
-fn walk_dir(
-    dir: &dyn Dir,
-    prefix: &str,
-    depth: usize,
-    out: &mut BTreeMap<Loc, SnapEntry>,
-) -> SysResult<()> {
-    if depth > MAX_DEPTH {
-        return Err(SysError::new(
-            SysErrorKind::Other,
-            format!("{prefix}: deeper than {MAX_DEPTH} directories"),
-        ));
+/// The walk of one root.
+struct Walk<'o> {
+    root: usize,
+    out: &'o mut BTreeMap<Loc, SnapEntry>,
+}
+
+impl Walk<'_> {
+    fn insert(&mut self, path: String, entry: SnapEntry) {
+        self.out.insert(
+            Loc::Fs {
+                root: self.root,
+                path,
+            },
+            entry,
+        );
     }
-    let case_sensitive = dir.info()?.case_sensitive;
-    let entries = dir.read_dir(None)?;
-    let key_of = |name: &str| {
-        if case_sensitive {
-            name.to_owned()
-        } else {
-            fold(name)
-        }
-    };
-    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
-    for e in &entries {
-        *seen.entry(key_of(&e.name)).or_default() += 1;
-    }
-    for entry in entries {
-        let key = key_of(&entry.name);
-        let collides = seen.get(&key).is_some_and(|&n| n > 1);
-        let meta = entry.meta;
-        let seg = if collides {
-            None
-        } else {
-            classify(&entry.name, case_sensitive).ok()
+
+    /// The entry `sub` of [`SnapRoot::below`] and the tree below it.
+    fn sub(&mut self, root: &dyn Dir, sub: &RelPath) -> SysResult<()> {
+        let folded = fold(sub.as_str());
+        let parent = sub.parent();
+        let opened;
+        let dir: &dyn Dir = match &parent {
+            None => root,
+            Some(p) => match root.metadata(p)? {
+                Some(m) if m.kind == EntryKind::Dir && !m.restricted => {
+                    opened = root.open_dir(p)?;
+                    &*opened
+                }
+                // A file on the way: nothing below it exists.
+                Some(m) if m.kind == EntryKind::File && !m.restricted => {
+                    self.insert(folded, SnapEntry::Missing);
+                    return Ok(());
+                }
+                // A reparse point or a restricted entry: never followed or opened.
+                Some(m) => {
+                    let kind = if m.restricted {
+                        SysErrorKind::AccessDenied
+                    } else {
+                        SysErrorKind::ReparsePoint
+                    };
+                    return Err(SysError::new(kind, p.as_str()));
+                }
+                None => {
+                    self.insert(folded, SnapEntry::Missing);
+                    return Ok(());
+                }
+            },
         };
-        let Some(seg) = seg else {
-            // NUL cannot occur in a name on disk: raw keys never clash with folded ones.
-            let loc = if collides || case_sensitive {
-                format!("{prefix}\\\0{}", entry.name)
+        let case_sensitive = dir.info()?.case_sensitive;
+        let name = sub.file_name();
+        let wanted = key_of(name, case_sensitive);
+        let entries: Vec<DirEntry> = dir
+            .read_dir(None)?
+            .into_iter()
+            .filter(|e| key_of(&e.name, case_sensitive) == wanted)
+            .collect();
+        if entries.is_empty() {
+            self.insert(folded, SnapEntry::Missing);
+            return Ok(());
+        }
+        let prefix = parent.map(|p| fold(p.as_str())).unwrap_or_default();
+        self.entries(dir, &prefix, entries, case_sensitive, 0)
+    }
+
+    /// Lists `dir` (at `depth` below the root) and captures its entries.
+    fn dir(&mut self, dir: &dyn Dir, prefix: &str, depth: usize) -> SysResult<()> {
+        if depth > MAX_DEPTH {
+            return Err(SysError::new(
+                SysErrorKind::Other,
+                format!("{prefix}: deeper than {MAX_DEPTH} directories"),
+            ));
+        }
+        let case_sensitive = dir.info()?.case_sensitive;
+        let entries = dir.read_dir(None)?;
+        self.entries(dir, prefix, entries, case_sensitive, depth)
+    }
+
+    /// Captures `entries` of `dir`, whose path below the root is `prefix`.
+    fn entries(
+        &mut self,
+        dir: &dyn Dir,
+        prefix: &str,
+        entries: Vec<DirEntry>,
+        case_sensitive: bool,
+        depth: usize,
+    ) -> SysResult<()> {
+        let join = |name: &str| {
+            if prefix.is_empty() {
+                name.to_owned()
             } else {
-                format!("{prefix}\\{key}")
-            };
-            out.insert(
-                Loc::Fs(loc),
-                SnapEntry::Anomaly {
-                    name: entry.name,
-                    kind: meta.kind,
-                    len: meta.len,
-                    attrs: meta.attrs,
-                    restricted: meta.restricted,
-                },
-            );
-            continue;
+                format!("{prefix}\\{name}")
+            }
         };
-        let loc = format!("{prefix}\\{key}");
-        if meta.restricted {
-            // Cannot be opened: metadata only, never hashed or descended into.
-            out.insert(
-                Loc::Fs(loc),
-                SnapEntry::Restricted {
-                    name: entry.name,
-                    kind: meta.kind,
-                    len: meta.len,
-                    attrs: meta.attrs,
-                    tag: meta.reparse.map(|r| r.tag),
-                },
-            );
-            continue;
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        for e in &entries {
+            *seen.entry(key_of(&e.name, case_sensitive)).or_default() += 1;
         }
-        match meta.kind {
-            EntryKind::File => {
-                let tag = meta.reparse.map(|r| r.tag);
-                let sha256 = if tag.is_some_and(is_cloud) {
-                    None
+        for entry in entries {
+            let key = key_of(&entry.name, case_sensitive);
+            let collides = seen.get(&key).is_some_and(|&n| n > 1);
+            let meta = entry.meta;
+            let seg = if collides {
+                None
+            } else {
+                classify(&entry.name, case_sensitive).ok()
+            };
+            let Some(seg) = seg else {
+                // NUL cannot occur in a name on disk: raw keys never clash with folded ones.
+                let loc = if collides || case_sensitive {
+                    join(&format!("\0{}", entry.name))
                 } else {
-                    Some(hash_file(dir, &seg)?)
+                    join(&key)
                 };
-                out.insert(
-                    Loc::Fs(loc),
-                    SnapEntry::File {
+                self.insert(
+                    loc,
+                    SnapEntry::Anomaly {
                         name: entry.name,
+                        kind: meta.kind,
                         len: meta.len,
-                        sha256,
-                        tag,
                         attrs: meta.attrs,
-                        links: meta.links,
+                        restricted: meta.restricted,
                     },
                 );
-            }
-            EntryKind::Reparse => {
-                let (tag, target) = meta.reparse.map_or((0, None), |r| (r.tag, r.target));
-                out.insert(
-                    Loc::Fs(loc),
-                    SnapEntry::Reparse {
+                continue;
+            };
+            let loc = join(&key);
+            if meta.restricted {
+                // Cannot be opened: metadata only, never hashed or descended into.
+                self.insert(
+                    loc,
+                    SnapEntry::Restricted {
                         name: entry.name,
-                        tag,
-                        target,
-                    },
-                );
-            }
-            EntryKind::Dir => {
-                out.insert(
-                    Loc::Fs(loc.clone()),
-                    SnapEntry::Dir {
-                        name: entry.name,
+                        kind: meta.kind,
+                        len: meta.len,
                         attrs: meta.attrs,
+                        tag: meta.reparse.map(|r| r.tag),
                     },
                 );
-                let sub = dir.open_dir(&seg)?;
-                walk_dir(&*sub, &loc, depth + 1, out)?;
+                continue;
+            }
+            match meta.kind {
+                EntryKind::File => {
+                    let tag = meta.reparse.map(|r| r.tag);
+                    let sha256 = if tag.is_some_and(is_cloud) {
+                        None
+                    } else {
+                        Some(hash_file(dir, &seg)?)
+                    };
+                    self.insert(
+                        loc,
+                        SnapEntry::File {
+                            name: entry.name,
+                            len: meta.len,
+                            sha256,
+                            tag,
+                            attrs: meta.attrs,
+                            links: meta.links,
+                        },
+                    );
+                }
+                EntryKind::Reparse => {
+                    let (tag, target) = meta.reparse.map_or((0, None), |r| (r.tag, r.target));
+                    self.insert(
+                        loc,
+                        SnapEntry::Reparse {
+                            name: entry.name,
+                            tag,
+                            target,
+                        },
+                    );
+                }
+                EntryKind::Dir => {
+                    self.insert(
+                        loc.clone(),
+                        SnapEntry::Dir {
+                            name: entry.name,
+                            attrs: meta.attrs,
+                        },
+                    );
+                    let sub = dir.open_dir(&seg)?;
+                    self.dir(&*sub, &loc, depth + 1)?;
+                }
             }
         }
+        Ok(())
     }
-    Ok(())
+}
+
+/// The key of a name in its directory: folded, exact in a case-sensitive directory.
+fn key_of(name: &str, case_sensitive: bool) -> String {
+    if case_sensitive {
+        name.to_owned()
+    } else {
+        fold(name)
+    }
 }
 
 fn hash_file(dir: &dyn Dir, p: &RelPath) -> SysResult<[u8; 32]> {
@@ -476,7 +652,7 @@ mod tests {
     use std::io::{self, Read, Seek, SeekFrom};
     use std::path::PathBuf;
 
-    use super::{Loc, SnapEntry, hash_file, walk_dir};
+    use super::{Loc, SnapEntry, Walk, hash_file};
     use crate::path::RelPath;
     use crate::sys::fs::{Attrs, Dir, DirEntry, EntryKind, Metadata, ReadSeek, RootInfo};
     use crate::sys::{SysError, SysErrorKind, SysResult};
@@ -539,7 +715,12 @@ mod tests {
     #[test]
     fn colliding_names_become_anomalies_and_are_never_opened() {
         let mut out = std::collections::BTreeMap::new();
-        walk_dir(&Colliding, r"c:\g", 0, &mut out).unwrap();
+        Walk {
+            root: 0,
+            out: &mut out,
+        }
+        .dir(&Colliding, "", 0)
+        .unwrap();
         assert_eq!(out.len(), 3, "{out:#?}");
         assert!(
             out.values()
@@ -547,7 +728,7 @@ mod tests {
         );
         let anomalies: Vec<&SnapEntry> = out
             .iter()
-            .filter(|(loc, _)| matches!(loc, Loc::Fs(p) if p.contains('\0')))
+            .filter(|(loc, _)| matches!(loc, Loc::Fs { path, .. } if path.contains('\0')))
             .map(|(_, e)| e)
             .collect();
         assert_eq!(anomalies.len(), 2, "{out:#?}");

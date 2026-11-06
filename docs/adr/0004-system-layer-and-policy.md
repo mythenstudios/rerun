@@ -10,7 +10,7 @@ Primitives must be testable against a fake system (`docs/09-testing.md`) and may
 - **No `Steam` trait.** Steam is domain logic (`detect::steam`) on top of `Registry`, `Fs` and `Process`.
 - `sys` is "dumb and honest": absolute paths, no confinement, no allowlist. **Confinement and the allowlist live in `rerun-core::policy`** and thus apply identically to the fake, the real system and the elevated helper.
 - `Fs` never follows reparse points; `metadata` reports them, all other operations through them result in `ReparsePoint`. No `create_dir_all`, `Registry::create_key` requires an existing parent key: every created folder/key is recorded individually in the Journal.
-- `sys::snapshot` is generic over `&dyn System` and ignores timestamps. It serves the round-trip tests and later the folder comparison after a revert.
+- `sys::snapshot` ignores timestamps and serves the round-trip tests. **Amended 2026-11-06 (P2-5, user decision E4):** it is test code like `sys::contract` and `sys::fake` (`cfg(any(test, feature = "fake"))`), takes root handles (`SnapRoot`) and `&dyn Registry` instead of `&dyn System` and absolute paths, and runs against `sys::win` as well; a folder comparison after a revert in the product would be a new decision.
 - `sys::contract` contains contract tests that run against `fake` and (from Phase 1/2, in Windows Sandbox) against `win`.
 - `clippy.toml` blocks `std::fs` write operations and `std::process::Command::new` via `disallowed_methods`; exceptions only via `#[allow(…, reason = "…")]`.
 

@@ -3,8 +3,8 @@
 //! - [`path`]: [`path::RelPath`] (relative, confined) and [`path::RootPath`] (absolute root),
 //!   pure and without I/O.
 //! - [`sys`]: the system layer (traits for file system, registry, CPU topology, known
-//!   folders, GPU), plus
-//!   `sys::fake` (in-memory) and the generic [`sys::snapshot`].
+//!   folders, GPU), plus, for tests only (feature `fake`), `sys::fake` (in-memory),
+//!   `sys::contract` and `sys::snapshot` (state comparison of the round-trip tests).
 //! - [`policy`]: rules above `sys`, e.g. which roots may be opened.
 //! - [`detect`]: detection of installed games (Steam files through the bounded VDF parser,
 //!   ADR 0011).

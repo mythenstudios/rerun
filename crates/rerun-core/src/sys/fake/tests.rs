@@ -19,7 +19,7 @@ use crate::sys::contract::{
 };
 use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, NewFile, TmpName, WriteCap, tag};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
-use crate::sys::snapshot::{Scope, snapshot};
+use crate::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
 use crate::sys::{DriverVersion, GpuAdapter, KnownFolder};
 use crate::sys::{SysErrorKind, SysResult, System, Topology};
 use rerun_proto::cpu::CpuTopology;
@@ -1554,17 +1554,27 @@ fn raw_values_are_kept_exactly_and_snapshotted() {
         dirs: vec![],
         keys: vec![key.clone()],
     };
-    let before = snapshot(&sys, &scope).unwrap();
+    let before = snapshot(sys.registry(), &scope).unwrap();
     reg.set(&key, "none", &RegValue::decode(0, &[1, 2, 4]))
         .unwrap();
-    assert_eq!(before.diff(&snapshot(&sys, &scope).unwrap()).len(), 1);
+    assert_eq!(
+        before
+            .diff(&snapshot(sys.registry(), &scope).unwrap())
+            .len(),
+        1
+    );
     reg.set(&key, "none", &RegValue::decode(0, &[1, 2, 3]))
         .unwrap();
-    assert_eq!(before, snapshot(&sys, &scope).unwrap());
+    assert_eq!(before, snapshot(sys.registry(), &scope).unwrap());
     // Same bytes under another type number differ as well.
     reg.set(&key, "none", &RegValue::decode(8, &[1, 2, 3]))
         .unwrap();
-    assert_eq!(before.diff(&snapshot(&sys, &scope).unwrap()).len(), 1);
+    assert_eq!(
+        before
+            .diff(&snapshot(sys.registry(), &scope).unwrap())
+            .len(),
+        1
+    );
 }
 
 /// `r` is `TooLarge` with the bound `limit` (registry read limits, ADR 0009).
@@ -1645,6 +1655,23 @@ fn reads_refuse_hostile_amounts_of_data() {
 
 // ---------- Snapshot ----------
 
+/// Snapshot of the directories `dirs` (opened by absolute path, as test code may) and `keys`.
+fn snap_of(sys: &FakeSystem, dirs: &[&str], keys: &[RegKey]) -> SysResult<Snapshot> {
+    let handles = dirs
+        .iter()
+        .map(|d| sys.fs().open_dir(Path::new(d)))
+        .collect::<SysResult<Vec<_>>>()?;
+    let scope = Scope {
+        dirs: handles
+            .iter()
+            .zip(dirs)
+            .map(|(h, d)| SnapRoot::new(&**h, *d))
+            .collect(),
+        keys: keys.to_vec(),
+    };
+    snapshot(sys.registry(), &scope)
+}
+
 fn game_system() -> FakeSystem {
     FakeSystem::builder()
         .file(r"C:\Games\AC\AssassinsCreed_Dx9.exe", "MZ-dx9")
@@ -1659,17 +1686,14 @@ fn game_system() -> FakeSystem {
         .unwrap()
 }
 
-fn game_scope() -> Scope {
-    Scope {
-        dirs: vec![p(r"C:\Games\AC")],
-        keys: vec![hkcu(r"Software\Ubisoft\AC")],
-    }
+fn game_snap(sys: &FakeSystem) -> Snapshot {
+    snap_of(sys, &[r"C:\Games\AC"], &[hkcu(r"Software\Ubisoft\AC")]).unwrap()
 }
 
 #[test]
 fn snapshot_is_identical_after_create_and_remove() {
     let sys = game_system();
-    let before = snapshot(&sys, &game_scope()).unwrap();
+    let before = game_snap(&sys);
     assert!(!before.is_empty());
 
     let fs = sys.fake_fs();
@@ -1681,7 +1705,7 @@ fn snapshot_is_identical_after_create_and_remove() {
     reg.create_key(&key).unwrap();
     reg.set(&key, "x", &RegValue::Dword(1)).unwrap();
 
-    let during = snapshot(&sys, &game_scope()).unwrap();
+    let during = game_snap(&sys);
     assert_eq!(before.diff(&during).len(), 5, "{:#?}", before.diff(&during));
 
     reg.delete_value(&key, "x").unwrap();
@@ -1691,22 +1715,19 @@ fn snapshot_is_identical_after_create_and_remove() {
         .unwrap();
     fs.remove_abs(&p(r"C:\Games\AC\scripts")).unwrap();
 
-    let after = snapshot(&sys, &game_scope()).unwrap();
+    let after = game_snap(&sys);
     assert_eq!(before, after, "{:#?}", before.diff(&after));
 }
 
 #[test]
 fn snapshot_is_identical_after_replace_and_restore() {
     let sys = game_system();
-    let before = snapshot(&sys, &game_scope()).unwrap();
+    let before = game_snap(&sys);
     let exe = p(r"C:\Games\AC\AssassinsCreed_Dx9.exe");
     sys.fake_fs().put_file(&exe, b"patched").unwrap();
-    assert_eq!(
-        before.diff(&snapshot(&sys, &game_scope()).unwrap()).len(),
-        1
-    );
+    assert_eq!(before.diff(&game_snap(&sys)).len(), 1);
     sys.fake_fs().put_file(&exe, b"MZ-dx9").unwrap();
-    let after = snapshot(&sys, &game_scope()).unwrap();
+    let after = game_snap(&sys);
     assert_eq!(before, after, "{:#?}", before.diff(&after));
 }
 
@@ -1784,9 +1805,9 @@ fn snapshot_detects_every_kind_of_change() {
     ];
     for (name, mutate) in cases {
         let sys = game_system();
-        let before = snapshot(&sys, &game_scope()).unwrap();
+        let before = game_snap(&sys);
         mutate(&sys);
-        let after = snapshot(&sys, &game_scope()).unwrap();
+        let after = game_snap(&sys);
         assert_ne!(before, after, "{name} not detected");
         assert_eq!(
             before.diff(&after).len(),
@@ -1808,10 +1829,6 @@ fn snapshot_captures_anomalies_without_opening_them() {
         .file(r"C:\G\cs\A", "2")
         .build()
         .unwrap();
-    let scope = Scope {
-        dirs: vec![p(r"C:\G")],
-        keys: vec![],
-    };
     // Any open of an anomaly name would hit this hook.
     sys.fake_fs().on_step(|_: &FakeFs, ev: &StepEvent| {
         assert!(
@@ -1819,14 +1836,17 @@ fn snapshot_captures_anomalies_without_opening_them() {
             "opened anomaly {ev:?}"
         );
     });
-    let snap = snapshot(&sys, &scope);
+    let snap = snap_of(&sys, &[r"C:\G"], &[]);
     sys.fake_fs().clear_on_step();
     let snap = snap.unwrap();
-    // Root, d3d9.dll, d3d9.dll., CON, cs, cs\a, cs\A.
-    assert_eq!(snap.len(), 7);
-    let shown = Scope::default();
-    assert!(snapshot(&sys, &shown).unwrap().is_empty());
-    let lines = snap.diff(&Default::default());
+    // d3d9.dll, d3d9.dll., CON, cs, cs\a, cs\A.
+    assert_eq!(snap.len(), 6);
+    assert!(
+        snapshot(sys.registry(), &Scope::default())
+            .unwrap()
+            .is_empty()
+    );
+    let lines = snap.diff(&Snapshot::default());
     assert_eq!(
         lines.iter().filter(|l| l.contains("anomaly")).count(),
         4,
@@ -1847,10 +1867,6 @@ fn snapshot_records_restricted_entries_without_opening_them() {
             .unwrap()
     };
     let sys = build();
-    let scope = Scope {
-        dirs: vec![p(r"C:\G")],
-        keys: vec![],
-    };
     // Any open of a restricted entry (data, descent) would hit this hook.
     sys.fake_fs().on_step(|_: &FakeFs, ev: &StepEvent| {
         assert!(
@@ -1858,12 +1874,12 @@ fn snapshot_records_restricted_entries_without_opening_them() {
             "opened a restricted entry {ev:?}"
         );
     });
-    let snap = snapshot(&sys, &scope);
+    let snap = snap_of(&sys, &[r"C:\G"], &[]);
     sys.fake_fs().clear_on_step();
     let snap = snap.unwrap();
-    // Root, secret.bin, locked (not descended into), plain.txt.
-    assert_eq!(snap.len(), 4);
-    let lines = snap.diff(&Default::default());
+    // secret.bin, locked (not descended into), plain.txt.
+    assert_eq!(snap.len(), 3);
+    let lines = snap.diff(&Snapshot::default());
     assert!(
         lines
             .iter()
@@ -1880,7 +1896,7 @@ fn snapshot_records_restricted_entries_without_opening_them() {
 
     // Identity: the same state is identical; attributes and the flag itself count.
     let again = build();
-    assert_eq!(snapshot(&again, &scope).unwrap(), snap);
+    assert_eq!(snap_of(&again, &[r"C:\G"], &[]).unwrap(), snap);
     let hidden = Attrs {
         hidden: true,
         ..Attrs::default()
@@ -1889,13 +1905,19 @@ fn snapshot_records_restricted_entries_without_opening_them() {
         .fake_fs()
         .set_attrs(&p(r"C:\G\secret.bin"), hidden)
         .unwrap();
-    assert_eq!(snap.diff(&snapshot(&again, &scope).unwrap()).len(), 1);
+    assert_eq!(
+        snap.diff(&snap_of(&again, &[r"C:\G"], &[]).unwrap()).len(),
+        1
+    );
     let lifted = build();
     lifted
         .fake_fs()
         .set_restricted(&p(r"C:\G\secret.bin"), false)
         .unwrap();
-    assert_eq!(snap.diff(&snapshot(&lifted, &scope).unwrap()).len(), 1);
+    assert_eq!(
+        snap.diff(&snap_of(&lifted, &[r"C:\G"], &[]).unwrap()).len(),
+        1
+    );
 }
 
 #[test]
@@ -1905,19 +1927,15 @@ fn snapshot_does_not_hash_cloud_placeholders() {
         .tagged_file(r"C:\G\wof.dll", "local", tag::WOF)
         .build()
         .unwrap();
-    let scope = Scope {
-        dirs: vec![p(r"C:\G")],
-        keys: vec![],
-    };
     sys.fake_fs().on_step(|_: &FakeFs, ev: &StepEvent| {
         assert!(
             !(ev.op == FsOp::OpenRead && ev.name == "cloud.pak"),
             "cloud placeholder opened"
         );
     });
-    let snap = snapshot(&sys, &scope);
+    let snap = snap_of(&sys, &[r"C:\G"], &[]);
     sys.fake_fs().clear_on_step();
-    let lines = snap.unwrap().diff(&Default::default());
+    let lines = snap.unwrap().diff(&Snapshot::default());
     assert!(
         lines
             .iter()
@@ -1941,11 +1959,7 @@ fn snapshot_depth_is_capped() {
         .dir(format!(r"C:\G{deep}"))
         .build()
         .unwrap();
-    let scope = Scope {
-        dirs: vec![p(r"C:\G")],
-        keys: vec![],
-    };
-    assert_eq!(kind(snapshot(&sys, &scope)), SysErrorKind::Other);
+    assert_eq!(kind(snap_of(&sys, &[r"C:\G"], &[])), SysErrorKind::Other);
     let ok_depth: String = (0..crate::sys::snapshot::MAX_DEPTH)
         .map(|i| format!(r"\d{i}"))
         .collect();
@@ -1953,37 +1967,139 @@ fn snapshot_depth_is_capped() {
         .dir(format!(r"C:\G{ok_depth}"))
         .build()
         .unwrap();
-    snapshot(&sys, &scope).unwrap();
+    snap_of(&sys, &[r"C:\G"], &[]).unwrap();
 }
 
+/// A missing key of the scope and a missing subtree of a root are recorded as missing.
 #[test]
-fn snapshot_records_missing_roots() {
-    let sys = FakeSystem::builder().dir(r"C:\Base").build().unwrap();
-    let scope = Scope {
-        dirs: vec![p(r"C:\Base\Nope")],
-        keys: vec![hkcu(r"Software\Nope")],
+fn snapshot_records_missing_keys_and_subtrees() {
+    let sys = FakeSystem::builder()
+        .dir(r"C:\Base")
+        .key(hkcu("Software"))
+        .build()
+        .unwrap();
+    let base = sys.fs().open_dir(Path::new(r"C:\Base")).unwrap();
+    let take = || {
+        let scope = Scope {
+            dirs: vec![SnapRoot::new(&*base, r"C:\Base").below(r("Nope"))],
+            keys: vec![hkcu(r"Software\Nope")],
+        };
+        snapshot(sys.registry(), &scope).unwrap()
     };
-    let before = snapshot(&sys, &scope).unwrap();
+    let before = take();
     assert_eq!(before.len(), 2);
     sys.fake_fs().mkdir_all(&p(r"C:\Base\Nope")).unwrap();
-    let after = snapshot(&sys, &scope).unwrap();
-    let diff = before.diff(&after);
-    assert_eq!(diff.len(), 1);
-    assert!(diff[0].starts_with('~'), "{diff:?}");
+    sys.registry().create_key(&hkcu(r"Software\Nope")).unwrap();
+    let diff = before.diff(&take());
+    assert_eq!(diff.len(), 2, "{diff:#?}");
+    assert!(diff.iter().all(|l| l.starts_with('~')), "{diff:#?}");
+}
+
+/// `below` captures the entry itself like an entry of its parent's listing: a directory and
+/// the tree below it, a file hashed, a reparse point recorded and not followed; a file on the
+/// way is missing, a reparse point on the way is refused.
+#[test]
+fn snapshot_below_captures_the_entry_and_its_tree() {
+    let sys = FakeSystem::builder()
+        .file(r"C:\G\Data\Sub\x.bin", "x")
+        .file(r"C:\G\Data\file.bin", "f")
+        .file(r"C:\G\outside.bin", "o")
+        .junction(r"C:\G\Link", r"C:\Elsewhere")
+        .file(r"C:\Elsewhere\secret.bin", "s")
+        .build()
+        .unwrap();
+    let g = sys.fs().open_dir(Path::new(r"C:\G")).unwrap();
+    let take = |sub: &str| {
+        let scope = Scope {
+            dirs: vec![SnapRoot::new(&*g, r"C:\G").below(r(sub))],
+            keys: vec![],
+        };
+        snapshot(sys.registry(), &scope)
+    };
+    // The entries only, without the line of the root itself.
+    let lines = |sub: &str| -> Vec<String> {
+        let all = take(sub).unwrap().diff(&Snapshot::default());
+        all.into_iter()
+            .filter(|l| !l.starts_with("- root "))
+            .collect()
+    };
+
+    let data = lines(r"DATA\sub");
+    assert_eq!(data.len(), 2, "{data:#?}");
+    assert!(data.iter().any(|l| l.contains("dir \"Sub\"")), "{data:#?}");
+    assert!(data.iter().any(|l| l.contains("x.bin")), "{data:#?}");
+    assert!(!data.iter().any(|l| l.contains("outside")), "{data:#?}");
+
+    let file = lines(r"Data\file.bin");
+    assert!(
+        file.len() == 1 && file[0].contains("file \"file.bin\" 1 bytes sha256"),
+        "{file:#?}"
+    );
+    let link = lines("Link");
+    assert!(
+        link.len() == 1 && link[0].contains("reparse \"Link\""),
+        "{link:#?}"
+    );
+    for missing in [r"Data\file.bin\x", "nope", r"nope\x"] {
+        let m = lines(missing);
+        assert!(
+            m.len() == 1 && m[0].contains("<missing>"),
+            "{missing}: {m:#?}"
+        );
+    }
+    assert_eq!(kind(take(r"Link\secret.bin")), SysErrorKind::ReparsePoint);
+
+    // The subtree is part of the root's identity.
+    let whole = snap_of(&sys, &[r"C:\G"], &[]).unwrap();
+    let below = take("Data").unwrap();
+    let diff = whole.diff(&below);
+    assert!(diff.iter().any(|l| l.starts_with("~ root 0")), "{diff:#?}");
+}
+
+/// Two snapshots of different roots differ even with identical content; the label is never
+/// compared.
+#[test]
+fn snapshot_roots_are_compared_by_identity_not_by_label() {
+    let sys = FakeSystem::builder()
+        .file(r"C:\A\x.bin", "same")
+        .file(r"C:\B\x.bin", "same")
+        .build()
+        .unwrap();
+    let a = sys.fs().open_dir(Path::new(r"C:\A")).unwrap();
+    let b = sys.fs().open_dir(Path::new(r"C:\B")).unwrap();
+    let take = |dir: &dyn crate::sys::Dir, label: &str| {
+        let scope = Scope {
+            dirs: vec![SnapRoot::new(dir, label)],
+            keys: vec![],
+        };
+        snapshot(sys.registry(), &scope).unwrap()
+    };
+    assert_eq!(take(&*a, "one label"), take(&*a, "another label"));
+    let (sa, sb) = (take(&*a, "A"), take(&*b, "A"));
+    assert_ne!(sa, sb);
+    assert_eq!(sa.diff(&sb).len(), 1, "{:#?}", sa.diff(&sb));
+    // A different number of roots differs too, also without entries.
+    let none = snapshot(sys.registry(), &Scope::default()).unwrap();
+    assert_ne!(none, sa);
+    assert!(
+        none.diff(&sa).iter().any(|l| l.starts_with("+ root 0 (A)")),
+        "{:#?}",
+        none.diff(&sa)
+    );
 }
 
 #[test]
 fn diff_is_readable() {
     let sys = game_system();
-    let before = snapshot(&sys, &game_scope()).unwrap();
+    let before = game_snap(&sys);
     let fs = sys.fake_fs();
     fs.put_file(&p(r"C:\Games\AC\dinput8.dll"), b"dll").unwrap();
     fs.remove_abs(&p(r"C:\Games\AC\Data\a.forge")).unwrap();
-    let diff = before.diff(&snapshot(&sys, &game_scope()).unwrap());
+    let diff = before.diff(&game_snap(&sys));
     assert_eq!(diff.len(), 2);
     assert!(
         diff.iter()
-            .any(|l| l.starts_with("- ") && l.contains("a.forge")),
+            .any(|l| l.starts_with(r"- C:\Games\AC\") && l.contains("a.forge")),
         "{diff:#?}"
     );
     assert!(

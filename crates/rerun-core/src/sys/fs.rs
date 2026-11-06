@@ -47,7 +47,8 @@
 //!   attributes, file ID and reparse tag come from the listing; the link count is unknown
 //!   (`links: None`, never "single-link") and so is a link target (`None`). `open_read`,
 //!   `read`, `open_dir`, `read_dir(Some(_))` on it and any walk through it stay
-//!   `AccessDenied`; nothing ever opens it (snapshot and policy record it as metadata only).
+//!   `AccessDenied`; nothing ever opens it (the snapshot of the round-trip tests and policy
+//!   record it as metadata only).
 //!   `sys::win`: listing with `FileIdExtdDirectoryInformation`; on a file system without that
 //!   class (FAT) the listing has no file ID and a denied entry stays an `AccessDenied` error
 //!   (fail closed; FAT has no ACLs, so this does not happen in practice).
@@ -263,8 +264,8 @@ pub trait Fs: Send + Sync {
     /// `fake`). A non-allowlisted reparse tag on the opened directory itself yields
     /// `ReparsePoint`.
     ///
-    /// Read side only ([`Dir`]). Only `policy::root` and `sys::snapshot` call this
-    /// (ADR 0007).
+    /// Read side only ([`Dir`]). Only `policy::root` calls this (ADR 0007); test code opts
+    /// out of the `clippy.toml` ban per module.
     fn open_dir(&self, abs: &Path) -> SysResult<Box<dyn Dir + '_>>;
 
     /// Opens a directory by absolute path with the write capability ([`DirWrite`]). Same

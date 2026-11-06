@@ -19,7 +19,7 @@ At the same time, legitimate libraries reached through junctions (a moved librar
 - `Dir::open_read` returns `Read + Seek` (needed for PE parsing).
 
 ### Only policy hands out roots
-- `policy::root` wraps `Dir` in purpose-specific types (`StoreDir`, `GameDir`, later `AppDir`). Only policy can construct them. Detection and primitives take these types, never `&dyn Dir`. `Fs::open_dir` is listed in `clippy.toml` `disallowed-methods`; exceptions only in `policy::root` and `sys::snapshot`.
+- `policy::root` wraps `Dir` in purpose-specific types (`StoreDir`, `GameDir`, later `AppDir`). Only policy can construct them. Detection and primitives take these types, never `&dyn Dir`. `Fs::open_dir` is listed in `clippy.toml` `disallowed-methods`; the only exception in product code is `policy::root` (contract and test code opt out per module). `sys::snapshot` was a second exception until P2-5; it now takes root handles (ADR 0004 amendment).
 - **Who may follow a reparse point at the root:** only *store roots* (the Steam folder and its libraries, from the registry and `libraryfolders.vdf`) are opened by absolute path and may be reached through a junction (moved library). **A `GameDir` is never opened by absolute path.** It is opened from its `StoreDir` handle-relative (`steamapps\common\<installdir>`), so a junction at the game folder level is reported as an anomaly and never becomes a root. Otherwise same-user malware could turn `common\GameX` into a junction to an admin-only folder of its choice (review finding H1).
 - Before handing out a root, policy validates the **canonical** path again (`RootPath`) and rejects:
   - network paths (`\\?\UNC\…`) and volumes without a drive letter (v1),

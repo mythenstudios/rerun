@@ -4,8 +4,8 @@ allow-expect-in-tests = true
 # System access only through rerun_core::sys (ADR 0004); roots only through
 # rerun_core::policy::root (ADR 0007). Exceptions via
 # #[expect(clippy::disallowed_methods, reason = "...")] so a stale exception warns:
-# policy::root::open_abs, sys::snapshot::snapshot, contract and test code, sys::win and
-# rerun-launch. NtCreateFile has exactly two exceptions in production code, in sys::win::nt
+# policy::root::open_abs, contract and test code, sys::win and rerun-launch (sys::snapshot
+# takes root handles since P2-5). NtCreateFile has exactly two exceptions in production code, in sys::win::nt
 # (test fixtures in sys::win::testfx also use it).
 disallowed-methods = [
   { path = "std::fs::write", reason = "filesystem access only through sys::Fs" },
@@ -29,7 +29,7 @@ disallowed-methods = [
   { path = "std::fs::File::set_permissions", reason = "filesystem access only through sys::Fs" },
   { path = "std::fs::File::set_times", reason = "filesystem access only through sys::Fs" },
   { path = "std::fs::File::set_modified", reason = "filesystem access only through sys::Fs" },
-  # ADR 0007: roots are opened only by policy::root (and sys::snapshot); nothing else reads by absolute path.
+  # ADR 0007: roots are opened only by policy::root; nothing else reads by absolute path.
   { path = "rerun_core::sys::fs::Fs::open_dir", reason = "open roots only through policy::root (ADR 0007)", allow-invalid = true },
   # ADR 0017: the write capability. Only policy::root opens with it; only exec and journal reach a game folder's write handle.
   { path = "rerun_core::sys::fs::Fs::open_dir_write", reason = "write handles only through policy::root (ADR 0017)", allow-invalid = true },
