@@ -948,6 +948,19 @@ impl FsFixture for WinFixture {
         std::fs::write(p, data).map_err(|e| io_err(&e, p))
     }
 
+    /// `OsString::from_wide` keeps unpaired surrogates (WTF-8), and `std::fs::write` hands the
+    /// units to `CreateFileW` unchanged.
+    fn utf16_file(&self, parent: &Path, units: &[u16], data: &[u8]) -> SysResult<bool> {
+        let sep = [0, u16::from(b'\\'), u16::from(b'/')];
+        if units.is_empty() || units.iter().any(|u| sep.contains(u)) {
+            return Err(SysError::path(SysErrorKind::InvalidPath, parent));
+        }
+        let p = parent.join(OsString::from_wide(units));
+        self.parents(&p, Last::Plain)?;
+        std::fs::write(&p, data).map_err(|e| io_err(&e, &p))?;
+        Ok(true)
+    }
+
     /// `FSCTL_SET_REPARSE_POINT` with a mount point buffer on a new empty directory: no admin
     /// and no `mklink` needed.
     fn junction(&self, link: &Path, target: &Path) -> SysResult<()> {

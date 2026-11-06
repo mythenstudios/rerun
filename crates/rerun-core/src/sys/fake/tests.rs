@@ -169,6 +169,9 @@ impl FsFixture for CopyFixture {
             .push((p.to_path_buf(), data.to_vec()));
         self.inner.file(p, data)
     }
+    fn utf16_file(&self, parent: &Path, units: &[u16], data: &[u8]) -> SysResult<bool> {
+        self.inner.utf16_file(parent, units, data)
+    }
     fn junction(&self, link: &Path, target: &Path) -> SysResult<()> {
         self.inner.dir(link)?;
         let files = self.files.lock().unwrap().clone();

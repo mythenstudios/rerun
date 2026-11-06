@@ -684,6 +684,19 @@ impl State {
         target: &str,
     ) -> SysResult<NodeId> {
         let key = self.dir(parent, target)?.key(name);
+        self.insert_keyed(parent, key, name, body, target)
+    }
+
+    /// [`Self::insert`] under an explicit child key (a raw UTF-16 name that the listing shows
+    /// with U+FFFD, [`FakeFs::put_utf16_file`]).
+    fn insert_keyed(
+        &mut self,
+        parent: NodeId,
+        key: String,
+        name: &str,
+        body: Body,
+        target: &str,
+    ) -> SysResult<NodeId> {
         if self.dir(parent, target)?.children.contains_key(&key) {
             return Err(err(SysErrorKind::AlreadyExists, target));
         }
@@ -737,6 +750,9 @@ impl State {
             let key = d.key(&name);
             if d.children.get(&key) == Some(&id) {
                 d.children.remove(&key);
+            } else {
+                // A raw UTF-16 name lives under its own key (`put_utf16_file`).
+                d.children.retain(|_, child| *child != id);
             }
         }
     }
@@ -1475,6 +1491,63 @@ impl FakeFs {
         let mut st = self.lock();
         let parent = st.mkdir_all(drive, &segs, &shown)?;
         st.new_file(parent, raw_name, data, &shown).map(|_| ())
+    }
+
+    /// Creates or overwrites the file whose name is the raw UTF-16 `units` in `parent_abs`,
+    /// like a file created through `\\?\` with `CreateFileW`: the units may hold unpaired
+    /// surrogates. The listing shows the name converted with U+FFFD, as `sys::win` does, and
+    /// two names that differ only in their unpaired surrogates stay two entries; a lookup by
+    /// the converted name finds neither (on Windows it names other units). Empty names,
+    /// separators and NUL are refused.
+    pub fn put_utf16_file(&self, parent_abs: &Path, units: &[u16], data: &[u8]) -> SysResult<()> {
+        let _flushed = self.fixture_scope(parent_abs);
+        let name = String::from_utf16_lossy(units);
+        let shown = format!("{}\\{name:?}", parent_abs.display());
+        if name.is_empty() || name.contains(['\\', '/', '\0']) {
+            return Err(err(SysErrorKind::InvalidPath, &shown));
+        }
+        let (drive, segs) = parse_abs(parent_abs)?;
+        let mut st = self.lock();
+        let parent = st.mkdir_all(drive, &segs, &shown)?;
+        let mut key = st.dir(parent, &shown)?.key(&name);
+        if String::from_utf16(units).is_err() {
+            // NUL never occurs in a name: the suffix keeps raw keys apart from every other.
+            key.push('\0');
+            for u in units {
+                key.push_str(&format!("{u:04x}"));
+            }
+        }
+        let existing = st.dir(parent, &shown)?.children.get(&key).copied();
+        match existing {
+            None => {
+                let ino = st.alloc();
+                st.inodes.insert(
+                    ino,
+                    Inode {
+                        data: data.to_vec(),
+                        durable: data.to_vec(),
+                        attrs: Attrs::default(),
+                        tag: None,
+                        links: 1,
+                        restricted: false,
+                    },
+                );
+                st.insert_keyed(parent, key, &name, Body::File(ino), &shown)
+                    .map(|_| ())
+            }
+            Some(id) => match st.nodes.get(&id).map(|n| &n.body) {
+                Some(Body::File(ino)) => {
+                    let ino = *ino;
+                    st.check_share(st.obj_of(id), Access::WRITE, Share::RWD, &shown)?;
+                    if let Some(i) = st.inodes.get_mut(&ino) {
+                        i.data = data.to_vec();
+                        i.durable = data.to_vec();
+                    }
+                    Ok(())
+                }
+                _ => Err(err(SysErrorKind::AlreadyExists, &shown)),
+            },
+        }
     }
 
     /// Creates a file with a reparse tag. Name-surrogate tags are refused (use

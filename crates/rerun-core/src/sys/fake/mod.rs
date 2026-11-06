@@ -113,6 +113,11 @@ impl FsFixture for FakeFs {
         self.put_file(p, data)
     }
 
+    fn utf16_file(&self, parent: &Path, units: &[u16], data: &[u8]) -> SysResult<bool> {
+        self.put_utf16_file(parent, units, data)?;
+        Ok(true)
+    }
+
     fn junction(&self, link: &Path, target: &Path) -> SysResult<()> {
         self.put_link(link, tag::MOUNT_POINT, &target.display().to_string())
     }

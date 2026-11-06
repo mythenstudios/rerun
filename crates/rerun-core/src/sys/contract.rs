@@ -63,7 +63,8 @@ pub type ContractResult = Result<(), String>;
 
 /// Names of the cases a file system contract skipped because the fixture reported "not
 /// available" (`"dir_symlink"`, `"file_symlink"`, `"case_sensitive_dir"`, `"mount_volume"`,
-/// `"subst"`, `"short_name"`, `"wof_compress"`, `"restricted"`). Without duplicates.
+/// `"subst"`, `"short_name"`, `"wof_compress"`, `"restricted"`, `"utf16_name"`, …). Without
+/// duplicates.
 pub type Skipped = Vec<&'static str>;
 
 /// Result of a file system contract: the skipped cases on success.
@@ -90,6 +91,12 @@ pub trait FsFixture: Sync {
     fn dir(&self, p: &Path) -> SysResult<()>;
     /// Creates the file `p` with `data` (overwriting an existing file).
     fn file(&self, p: &Path, data: &[u8]) -> SysResult<()>;
+    /// Creates or overwrites the file named by the raw UTF-16 `units` in the directory
+    /// `parent` (created if missing) with `data`. The units may hold unpaired surrogates:
+    /// `read_dir` reports such a name converted with U+FFFD, and two names that differ only in
+    /// their unpaired surrogates are two entries that list under the same name. Empty names,
+    /// `\`, `/` and NUL are `InvalidPath`. `Ok(false)` = not available.
+    fn utf16_file(&self, parent: &Path, units: &[u16], data: &[u8]) -> SysResult<bool>;
     /// Creates a directory junction `link` pointing to `target`. The target need not exist.
     fn junction(&self, link: &Path, target: &Path) -> SysResult<()>;
     /// Creates a directory symbolic link. `Ok(false)` = not available (no Developer Mode or
@@ -608,6 +615,7 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
     wof_files(fx, &*root, work, &mut skips)?;
     restricted_entries(fs, fx, &*root, work, &mut skips)?;
     bounded_reads(fx, &*root, work)?;
+    utf16_names(fx, &*root, work, &mut skips)?;
     names_and_ancestor_renames(fx, &*root, work, &info.final_path)?;
     holds(fx, &*root, work)?;
     ancestor_renames(fx, &*root, work)?;
@@ -1030,6 +1038,67 @@ fn bounded_reads(fx: &dyn FsFixture, root: &dyn Dir, work: &Path) -> ContractRes
         root.read_dir_limited(Some(&many), 10),
         tl,
         "a listing far over the bound",
+    )
+}
+
+/// Names with unpaired UTF-16 surrogates: `read_dir` converts them with U+FFFD and drops none,
+/// also two names that differ only in their unpaired surrogates and so list under one name.
+/// The converted name addresses neither of them. Skipped as `"utf16_name"`.
+fn utf16_names(
+    fx: &dyn FsFixture,
+    root: &dyn Dir,
+    work: &Path,
+    skips: &mut Skipped,
+) -> ContractResult {
+    let base = work.join("utf16");
+    ok(fx.dir(&base), "fixture utf16")?;
+    let (high, low) = ([0x61, 0xD800, 0x62], [0x61, 0xDC00, 0x62]);
+    if !ok(fx.utf16_file(&base, &high, b"1"), "fixture high surrogate")?
+        || !ok(fx.utf16_file(&base, &low, b"22"), "fixture low surrogate")?
+    {
+        skip(skips, "utf16_name");
+        return Ok(());
+    }
+    // A valid name through the same fixture method is listed exactly.
+    let valid: Vec<u16> = "ok\u{1F3AE}".encode_utf16().collect();
+    ok(fx.utf16_file(&base, &valid, b"333"), "fixture valid utf16")?;
+    let b = rel("utf16")?;
+    let mut listed: Vec<(String, u64)> = ok(root.read_dir(Some(&b)), "list utf16")?
+        .into_iter()
+        .map(|e| (e.name, e.meta.len))
+        .collect();
+    listed.sort();
+    ensure(
+        listed
+            == [
+                ("a\u{FFFD}b".to_owned(), 1),
+                ("a\u{FFFD}b".to_owned(), 2),
+                ("ok\u{1F3AE}".to_owned(), 3),
+            ],
+        &format!("unpaired surrogates are listed as U+FFFD, none dropped: {listed:?}"),
+    )?;
+    ensure(
+        ok(root.read(&rel("utf16\\ok\u{1F3AE}")?), "read valid utf16")? == b"333",
+        "a valid name made from UTF-16 units reads",
+    )?;
+    ensure(
+        ok(
+            root.metadata(&rel("utf16\\a\u{FFFD}b")?),
+            "metadata of the shown name",
+        )?
+        .is_none(),
+        "the converted name addresses no entry",
+    )?;
+    // The fixture overwrites by the exact units.
+    ok(fx.utf16_file(&base, &high, b"4444"), "fixture overwrite")?;
+    let mut lens: Vec<u64> = ok(root.read_dir(Some(&b)), "list utf16 again")?
+        .into_iter()
+        .map(|e| e.meta.len)
+        .collect();
+    lens.sort_unstable();
+    ensure(
+        lens == [2, 3, 4],
+        "the fixture overwrites by the exact units",
     )
 }
 
