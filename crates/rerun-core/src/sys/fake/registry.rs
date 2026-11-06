@@ -156,6 +156,22 @@ impl FakeRegistry {
             .map(|(_, node)| node)
     }
 
+    /// The folded map name of the raw UTF-16 name `units`: a valid name folds as usual; a name
+    /// with unpaired surrogates (listed with U+FFFD, as `sys::win` does) gets the units as a
+    /// suffix after a NUL, which no name holds, so two such names stay apart and a lookup by
+    /// the converted name finds neither (on Windows it names other units).
+    fn utf16_map_name(units: &[u16]) -> (String, String) {
+        let shown = String::from_utf16_lossy(units);
+        let mut folded = fold(&shown);
+        if String::from_utf16(units).is_err() {
+            folded.push('\0');
+            for u in units {
+                folded.push_str(&format!("{u:04x}"));
+            }
+        }
+        (shown, folded)
+    }
+
     /// Builder only: creates a key including missing parents.
     pub(super) fn create_key_all(&self, k: &RegKey) -> SysResult<()> {
         let mut chain = Vec::new();
@@ -351,6 +367,58 @@ impl RegFixture for FakeRegistry {
 
     fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
         Registry::delete_value(self, k, name)
+    }
+
+    fn delete_key(&self, k: &RegKey) -> SysResult<()> {
+        if k.path.is_empty() {
+            return Err(SysError::new(SysErrorKind::InvalidPath, k.to_string()));
+        }
+        Registry::delete_key(self, k)
+    }
+
+    fn utf16_key(&self, parent: &RegKey, units: &[u16]) -> SysResult<bool> {
+        let (shown, folded) = Self::utf16_map_name(units);
+        if units.is_empty() || shown.contains(['\0', '\\']) {
+            return Err(SysError::new(
+                SysErrorKind::InvalidPath,
+                format!("{parent} \\ {shown:?}"),
+            ));
+        }
+        let pmk = map_key(parent)?;
+        let mut keys = self.lock();
+        if !Self::exists(&keys, parent, &pmk) {
+            return Err(not_found(parent));
+        }
+        let path = if pmk.1.is_empty() {
+            folded
+        } else {
+            format!("{}\\{folded}", pmk.1)
+        };
+        keys.entry((pmk.0, path)).or_insert_with(|| KeyNode {
+            name: shown,
+            values: BTreeMap::new(),
+        });
+        Ok(true)
+    }
+
+    fn utf16_value(&self, k: &RegKey, units: &[u16], kind: u32, data: &[u8]) -> SysResult<bool> {
+        let (shown, folded) = Self::utf16_map_name(units);
+        if shown.contains('\0') {
+            return Err(SysError::new(
+                SysErrorKind::InvalidPath,
+                format!("{k} @ {shown:?}"),
+            ));
+        }
+        let mk = map_key(k)?;
+        let mut keys = self.lock();
+        if !Self::exists(&keys, k, &mk) {
+            return Err(not_found(k));
+        }
+        let node = keys.entry(mk).or_default();
+        let original = node.values.get(&folded).map_or(shown, |(n, _)| n.clone());
+        node.values
+            .insert(folded, (original, RegValue::decode(kind, data)));
+        Ok(true)
     }
 
     fn link(&self, _link: &RegKey, _target: &RegKey) -> SysResult<bool> {

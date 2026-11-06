@@ -2002,6 +2002,17 @@ pub trait RegFixture: Sync {
     fn raw(&self, k: &RegKey, name: &str, kind: u32, data: &[u8]) -> SysResult<()>;
     /// Deletes a value of the existing key `k`.
     fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()>;
+    /// Deletes the existing key `k` without subkeys (never the hive root, `InvalidPath`).
+    fn delete_key(&self, k: &RegKey) -> SysResult<()>;
+    /// Creates the subkey of the existing key `parent` whose name is the raw UTF-16 `units`
+    /// (it may hold unpaired surrogates; `subkeys` reports such a name converted with U+FFFD,
+    /// and two names that differ only in their unpaired surrogates list alike). An empty name,
+    /// NUL and `\` are `InvalidPath`. `Ok(false)` = not available.
+    fn utf16_key(&self, parent: &RegKey, units: &[u16]) -> SysResult<bool>;
+    /// Stores the value of the existing key `k` whose name is the raw UTF-16 `units` with type
+    /// number `kind` and `data` (overwriting a value of exactly these units), like
+    /// [`Self::raw`]. NUL is `InvalidPath`. `Ok(false)` = not available.
+    fn utf16_value(&self, k: &RegKey, units: &[u16], kind: u32, data: &[u8]) -> SysResult<bool>;
     /// Creates `link` as a symbolic-link key to the existing key `target` (same hive and
     /// view). `Ok(false)` = not available.
     fn link(&self, link: &RegKey, target: &RegKey) -> SysResult<bool>;
@@ -2183,7 +2194,8 @@ fn decode_cases() -> Vec<DecodeCase> {
 ///
 /// `root` must be an existing key without values and subkeys and **outside**
 /// `HKLM\SOFTWARE`, where the 32-bit view is not redirected: the runner calls the contract
-/// once per view, with different roots (the contract deletes nothing), and the contract checks
+/// once per view, with different roots (the contract deletes only a key it created itself),
+/// and the contract checks
 /// that the other view sees the same data. The redirection itself is pinned by
 /// [`registry_system_contract`].
 ///
@@ -2585,6 +2597,71 @@ pub fn registry_read_contract(
     )?;
     ok(fx.key(&subs.join("one more")), "fixture: one subkey more")?;
     too_large_at(reg.subkeys(&subs), MAX_SUBKEYS, "subkeys over 65,536 names")?;
+
+    // Raw UTF-16 names: unpaired surrogates are listed as U+FFFD, none dropped, and the
+    // converted name addresses neither of two names that list alike.
+    let raw_names = root.join("RawNames");
+    ok(fx.key(&raw_names), "fixture: RawNames")?;
+    let (high, low) = ([0x61, 0xD800, 0x62], [0x61, 0xDC00, 0x62]);
+    let made = ok(fx.utf16_key(&raw_names, &high), "fixture: raw key")?
+        && ok(fx.utf16_key(&raw_names, &low), "fixture: raw key 2")?
+        && ok(
+            fx.utf16_value(&raw_names, &high, reg_type::REG_DWORD, &[1, 0, 0, 0]),
+            "fixture: raw value",
+        )?
+        && ok(
+            fx.utf16_value(&raw_names, &low, reg_type::REG_DWORD, &[2, 0, 0, 0]),
+            "fixture: raw value 2",
+        )?;
+    if made {
+        let shown = "a\u{FFFD}b";
+        ensure(
+            subkey_names(reg, &raw_names, "subkeys of raw names")? == [shown, shown],
+            "two raw subkey names are both listed with U+FFFD",
+        )?;
+        let mut values: Vec<(String, RegValue)> = ok(reg.values(&raw_names), "raw values")?;
+        values.sort_by_key(|(_, v)| v.encode());
+        ensure(
+            values
+                == [
+                    (shown.to_owned(), RegValue::Dword(1)),
+                    (shown.to_owned(), RegValue::Dword(2)),
+                ],
+            "two raw value names are both listed with U+FFFD and their own data",
+        )?;
+        ensure(
+            !ok(reg.key_exists(&raw_names.join(shown)), "key_exists shown")?
+                && ok(reg.get(&raw_names, shown), "get shown")?.is_none(),
+            "the converted name addresses neither raw name",
+        )?;
+    } else {
+        skip(&mut skips, "utf16_name");
+    }
+    // The fixture deletes a key with a value, and only a key without subkeys.
+    let doomed = root.join("Doomed");
+    ok(fx.key(&doomed.join("Child")), "fixture: Doomed")?;
+    ok(
+        fx.raw(
+            &doomed.join("Child"),
+            "v",
+            reg_type::REG_DWORD,
+            &[1, 0, 0, 0],
+        ),
+        "fixture: Doomed value",
+    )?;
+    ensure(
+        fx.delete_key(&doomed).is_err(),
+        "the fixture refuses a key with subkeys",
+    )?;
+    ok(
+        fx.delete_key(&doomed.join("Child")),
+        "fixture: delete Child",
+    )?;
+    ok(fx.delete_key(&doomed), "fixture: delete Doomed")?;
+    ensure(
+        !ok(reg.key_exists(&doomed), "key_exists Doomed")?,
+        "a deleted key is gone",
+    )?;
 
     // Symbolic-link keys are followed on reads.
     let link = root.join("Link");

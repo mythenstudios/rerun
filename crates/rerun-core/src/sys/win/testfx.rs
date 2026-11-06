@@ -28,7 +28,7 @@
               (std::fs, MoveFileExW, CreateSymbolicLinkW, SetVolumeMountPointW, \
               DefineDosDeviceW), NaiveFs is a path-based control implementation, and the app \
               hive is loaded (RegLoadAppKeyW) and written (RegCreateKeyExW, NtSetValueKey, \
-              RegDeleteValueW) only here"
+              RegDeleteValueW, NtDeleteKey) only here"
 )]
 #![allow(
     unsafe_code,
@@ -50,7 +50,7 @@ use std::{ptr, thread};
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{FILE_OPEN, FILE_OPEN_REPARSE_POINT, NtCreateFile};
-use windows_sys::Wdk::System::Registry::NtSetValueKey;
+use windows_sys::Wdk::System::Registry::{NtDeleteKey, NtSetValueKey};
 use windows_sys::Win32::Foundation::{
     ERROR_NOT_ALL_ASSIGNED, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE, HANDLE,
     INVALID_HANDLE_VALUE, LUID,
@@ -90,9 +90,10 @@ use windows_sys::Win32::System::Memory::{
     PAGE_READONLY, PAGE_READWRITE, SEC_IMAGE, UnmapViewOfFile,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, REG_BINARY,
-    REG_CREATED_NEW_KEY, REG_LINK, REG_OPTION_CREATE_LINK, REG_OPTION_OPEN_LINK,
-    REG_PROCESS_APPKEY, RegCreateKeyExW, RegDeleteValueW, RegLoadAppKeyW, RegOpenKeyExW,
+    HKEY, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_QUERY_VALUE, KEY_READ,
+    KEY_SET_VALUE, REG_BINARY, REG_CREATED_NEW_KEY, REG_LINK, REG_OPTION_CREATE_LINK,
+    REG_OPTION_OPEN_LINK, REG_PROCESS_APPKEY, RegCreateKeyExW, RegDeleteValueW, RegLoadAppKeyW,
+    RegOpenKeyExW,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetExitCodeProcess, OpenProcess, OpenProcessToken,
@@ -1556,6 +1557,17 @@ pub(super) struct AppHive {
     no_links: Option<String>,
 }
 
+/// What [`AppHive::walk`] does with the segments of a hive path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyEnd {
+    /// Open or create every segment.
+    Create,
+    /// Open or create every segment but the last, which must be new and becomes a link.
+    CreateLink,
+    /// Open every segment, create nothing.
+    Open,
+}
+
 /// Kernel name of an open key, as a fixture error.
 fn key_name(key: &OwnedKey, what: &str) -> SysResult<String> {
     reg::key_name(key).map_err(|st| SysError::new(SysErrorKind::Other, what).with_ntstatus(st))
@@ -1664,20 +1676,59 @@ impl AppHive {
     /// handle is guarded by its kernel name as well. `link`: the last segment must be new and
     /// becomes a symbolic-link key.
     fn create(&self, path: &str, access: u32, link: bool) -> SysResult<OwnedKey> {
-        let what = format!("app hive key {path}");
-        let segs: Vec<&str> = path.split('\\').collect();
+        let end = if link {
+            KeyEnd::CreateLink
+        } else {
+            KeyEnd::Create
+        };
+        self.walk(
+            &format!("app hive key {path}"),
+            &Self::segments(path),
+            access,
+            end,
+        )
+    }
+
+    /// The UTF-16 units of each segment of a hive path.
+    fn segments(path: &str) -> Vec<Vec<u16>> {
+        path.split('\\')
+            .map(|s| s.encode_utf16().collect())
+            .collect()
+    }
+
+    /// The walk of [`Self::create`] over raw UTF-16 segments (a segment may hold unpaired
+    /// surrogates). [`KeyEnd::Open`] opens every segment (`RegOpenKeyExW` with
+    /// `REG_OPTION_OPEN_LINK`) and creates nothing: a missing one is `NotFound`.
+    fn walk(&self, what: &str, segs: &[Vec<u16>], access: u32, end: KeyEnd) -> SysResult<OwnedKey> {
         let mut parent: Option<OwnedKey> = None;
         for (i, seg) in segs.iter().enumerate() {
             let last = i + 1 == segs.len();
+            let link = end == KeyEnd::CreateLink;
             let (options, rights) = match (last, link) {
                 (true, true) => (REG_OPTION_CREATE_LINK, access | KEY_CREATE_LINK),
                 (true, false) => (REG_OPTION_OPEN_LINK, access),
+                (false, _) if end == KeyEnd::Open => (REG_OPTION_OPEN_LINK, KEY_QUERY_VALUE),
                 (false, _) => (REG_OPTION_OPEN_LINK, KEY_CREATE_SUB_KEY),
             };
             let base = parent.as_ref().map_or(self.hive.raw(), OwnedKey::raw);
-            let w = wide(seg);
+            let mut w = seg.clone();
+            w.push(0);
             let mut raw: HKEY = ptr::null_mut();
             let mut disposition: u32 = 0;
+            if end == KeyEnd::Open {
+                // SAFETY: `base` is the hive key or the previous segment's key, both kept
+                // alive (`self`, `parent`) until after the call; `w` is NUL-terminated and
+                // outlives the call; `raw` is valid for a write and on success a new key
+                // handle that `OwnedKey` takes over below.
+                let rc = unsafe { RegOpenKeyExW(base, w.as_ptr(), options, rights, &mut raw) };
+                if rc != 0 || raw.is_null() {
+                    return Err(win32_err(rc, what));
+                }
+                // SAFETY: `raw` was just returned by a successful RegOpenKeyExW; nothing else
+                // owns or closes it.
+                parent = Some(unsafe { OwnedKey::from_raw(raw) });
+                continue;
+            }
             // SAFETY: `base` is the hive key or the previous segment's key, both kept alive
             // (`self`, `parent`) until after the call; `w` is NUL-terminated and outlives the
             // call; class and security attributes are null; `raw` and `disposition` are valid
@@ -1697,7 +1748,7 @@ impl AppHive {
                 )
             };
             if rc != 0 || raw.is_null() {
-                return Err(win32_err(rc, &what));
+                return Err(win32_err(rc, what));
             }
             // SAFETY: `raw` was just returned by a successful RegCreateKeyExW; nothing else
             // owns or closes it.
@@ -1710,8 +1761,8 @@ impl AppHive {
             }
             parent = Some(key);
         }
-        let key = parent.ok_or_else(|| SysError::new(SysErrorKind::InvalidPath, &what))?;
-        self.guard(&key, &what)?;
+        let key = parent.ok_or_else(|| SysError::new(SysErrorKind::InvalidPath, what))?;
+        self.guard(&key, what)?;
         Ok(key)
     }
 
@@ -1737,6 +1788,17 @@ impl AppHive {
     /// caller's buffer in memory (found on Windows 11, 2026-11-04).
     fn set_raw(key: &OwnedKey, name: &str, kind: u32, data: &[u8], what: &str) -> SysResult<()> {
         let units: Vec<u16> = name.encode_utf16().collect();
+        Self::set_raw_units(key, &units, kind, data, what)
+    }
+
+    /// [`Self::set_raw`] with the value name as raw UTF-16 units.
+    fn set_raw_units(
+        key: &OwnedKey,
+        units: &[u16],
+        kind: u32,
+        data: &[u8],
+        what: &str,
+    ) -> SysResult<()> {
         let bytes = u16::try_from(units.len() * 2)
             .map_err(|_| SysError::new(SysErrorKind::InvalidPath, what))?;
         let us = UNICODE_STRING {
@@ -1792,6 +1854,53 @@ impl RegFixture for AppHive {
         }
         self.make_link(&Self::path_of(link), &Self::path_of(target))?;
         Ok(true)
+    }
+
+    fn utf16_key(&self, parent: &RegKey, units: &[u16]) -> SysResult<bool> {
+        let what = format!(
+            "app hive key {parent} \\ {:?}",
+            String::from_utf16_lossy(units)
+        );
+        if units.is_empty() || units.iter().any(|&u| u == 0 || u == u16::from(b'\\')) {
+            return Err(SysError::new(SysErrorKind::InvalidPath, what));
+        }
+        let mut segs = Self::segments(&Self::path_of(parent));
+        segs.push(units.to_vec());
+        self.walk(&what, &segs, KEY_READ, KeyEnd::Create)?;
+        Ok(true)
+    }
+
+    fn utf16_value(&self, k: &RegKey, units: &[u16], kind: u32, data: &[u8]) -> SysResult<bool> {
+        let what = format!("app hive {k} @ {:?}", String::from_utf16_lossy(units));
+        if units.contains(&0) {
+            return Err(SysError::new(SysErrorKind::InvalidPath, what));
+        }
+        let key = self.create(&Self::path_of(k), KEY_SET_VALUE, false)?;
+        Self::set_raw_units(&key, units, kind, data, &what)?;
+        Ok(true)
+    }
+
+    /// Opens the key itself segment by segment (a link is opened, never followed), guarded by
+    /// its kernel name, and deletes it by that handle (`NtDeleteKey`).
+    fn delete_key(&self, k: &RegKey) -> SysResult<()> {
+        let what = format!("app hive delete {k}");
+        if k.path.is_empty() {
+            return Err(SysError::new(SysErrorKind::InvalidPath, what));
+        }
+        let key = self.walk(
+            &what,
+            &Self::segments(&Self::path_of(k)),
+            DELETE,
+            KeyEnd::Open,
+        )?;
+        // SAFETY: `key` is an open key with DELETE access, kept alive by the borrow until
+        // after the call; the handle itself stays valid (and is closed by `OwnedKey`).
+        let status = unsafe { NtDeleteKey(key.raw()) };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(SysError::new(SysErrorKind::Other, what).with_ntstatus(status))
+        }
     }
 
     fn large(&self, k: &RegKey, name: &str, len: usize) -> SysResult<bool> {
