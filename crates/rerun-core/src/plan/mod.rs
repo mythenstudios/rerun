@@ -13,9 +13,19 @@
 //! spelling), then the same bounds as `encode` ([`MAX_OPS`], [`MAX_OP_BYTES`],
 //! [`MAX_PLAN_BYTES`], root indices, package names, one op per object).
 //!
-//! Phase 2 has the file op kinds `CreateDir`, `CreateFile`, `ReplaceFile`; registry and INI
-//! op kinds are added as further variants with their primitives (format 1 stays unstable until
-//! the first release, ADR 0019 amendment E1).
+//! Phase 2 has the file op kinds `CreateDir`, `CreateFile`, `ReplaceFile` and the registry
+//! op kinds `CreateKey`, `SetValue` (P2-10b); INI op kinds are added as further variants with
+//! their primitive (format 1 stays unstable until the first release, ADR 0019 amendment E1).
+//!
+//! Registry ops (ADR 0020 amendment P2-10b), checked on encode and decode alike (the journal
+//! head is untrusted): every slot passes `RegPolicy::check` with the plan's roots (a
+//! `CompatLayers` slot is refused until P2-11), every new value `RegPolicy::check_new`; every
+//! registry op comes after every file op (a revert that halts at a file op has then reverted
+//! every registry op, 6b-d); one op per key and per value (folded); a `CreateKey` names its
+//! key by `segs` within its slot, and comes before every key and value below it; an old value
+//! is consistent (length at most 1 MiB, its bytes inline exactly up to [`OLD_INLINE`] with
+//! their hash), differs from the new one, and is absent in a key the plan creates; a plan with
+//! registry ops has at least one root and a main executable for each (user decision E2).
 
 mod preview;
 mod store;
@@ -32,9 +42,11 @@ pub use store::store;
 
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
+use crate::policy::registry::{RegPolicy, RegPolicyError, RegSlot};
 use crate::policy::root::{RootError, RootId};
 use crate::sys::SysError;
 use crate::sys::fs::Attrs;
+use crate::sys::registry::{MAX_VALUE_BYTES, RegKey, RegValue};
 
 /// The one plan format.
 pub const FORMAT: u32 = 1;
@@ -148,6 +160,99 @@ pub enum Op {
         /// Read-only, hidden, system of the new file.
         attrs: Attrs,
     },
+    /// Creates one registry key: the key of `slot` cut to its first `segs` segments below
+    /// `HKCU` (below the slot's anchor, at most the slot's key itself), so no key outside the
+    /// slot can be expressed.
+    CreateKey {
+        /// The slot whose key (or ancestor) is created.
+        slot: RegSlot,
+        /// Segments of the created key below the hive root.
+        segs: u8,
+    },
+    /// Sets the value of `slot` to `new`: a new value (`old` is `None`) or a replaced one.
+    SetValue {
+        /// The value.
+        slot: RegSlot,
+        /// The old value as planned, re-observed before the change (`None`: missing).
+        old: Option<ValueState>,
+        /// The new value.
+        new: NewValue,
+    },
+}
+
+/// Largest old registry value whose bytes a plan carries inline (for the preview only; the
+/// revert's source is always the journal's `Intent.before`).
+pub const OLD_INLINE: usize = 1 << 10;
+
+/// A registry value as planned: its type, length and SHA-256, and its bytes up to
+/// [`OLD_INLINE`] (`data` is there exactly then).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValueState {
+    /// The registry type number (`REG_*`, also an unknown one).
+    pub kind: u32,
+    /// Length of the data in bytes (at most `MAX_VALUE_BYTES`).
+    pub len: u32,
+    /// SHA-256 of the data.
+    #[serde(with = "crate::wire::hex32")]
+    pub sha256: [u8; 32],
+    /// The data, lower-case hex, if `len` is at most [`OLD_INLINE`].
+    #[serde(with = "crate::wire::hex_bytes_opt")]
+    pub data: Option<Vec<u8>>,
+}
+
+impl ValueState {
+    /// The state of `v` as it is stored; `None` if it has no encoding or is larger than
+    /// `MAX_VALUE_BYTES`.
+    pub fn of(v: &RegValue) -> Option<Self> {
+        let (kind, data) = v.encode()?;
+        if data.len() > MAX_VALUE_BYTES {
+            return None;
+        }
+        Some(Self {
+            kind,
+            len: u32::try_from(data.len()).ok()?,
+            sha256: Sha256::digest(&data).into(),
+            data: (data.len() <= OLD_INLINE).then_some(data),
+        })
+    }
+
+    /// `v` (`None`: missing) is exactly this state: type, length, SHA-256.
+    pub fn is(this: Option<&Self>, v: Option<&RegValue>) -> bool {
+        match (this, v) {
+            (None, None) => true,
+            (Some(s), Some(v)) => v.encode().is_some_and(|(kind, data)| {
+                kind == s.kind
+                    && usize::try_from(s.len).is_ok_and(|l| l == data.len())
+                    && <[u8; 32]>::from(Sha256::digest(&data)) == s.sha256
+            }),
+            _ => false,
+        }
+    }
+}
+
+/// A new registry value (only what `RegPolicy::check_new` may allow). On the wire
+/// `{"dword":1}`, `{"qword":"<decimal>"}` (no JSON number above 2^53), `{"sz":"…"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum NewValue {
+    /// `REG_DWORD`.
+    Dword(u32),
+    /// `REG_QWORD`.
+    Qword(#[serde(with = "crate::wire::dec_u64")] u64),
+    /// `REG_SZ`.
+    Sz(String),
+}
+
+impl NewValue {
+    /// As a registry value.
+    pub fn value(&self) -> RegValue {
+        match self {
+            Self::Dword(v) => RegValue::Dword(*v),
+            Self::Qword(v) => RegValue::Qword(*v),
+            Self::Sz(s) => RegValue::String(s.clone()),
+        }
+    }
 }
 
 /// What an op targets (audit A2 should-item 3): the generic paths of `plan` and `exec`
@@ -165,6 +270,18 @@ pub enum Target<'a> {
         /// The op creates a directory.
         dir: bool,
     },
+    /// A registry key the op creates: the key of `slot` cut to `segs` segments.
+    Key {
+        /// The slot.
+        slot: &'a RegSlot,
+        /// Segments below the hive root.
+        segs: u8,
+    },
+    /// A registry value.
+    Value {
+        /// The slot.
+        slot: &'a RegSlot,
+    },
 }
 
 impl Target<'_> {
@@ -174,7 +291,13 @@ impl Target<'_> {
     pub fn needs_main_exe(&self) -> bool {
         match self {
             Self::File { .. } => false,
+            Self::Key { .. } | Self::Value { .. } => true,
         }
+    }
+
+    /// A registry key or value.
+    pub fn is_registry(&self) -> bool {
+        matches!(self, Self::Key { .. } | Self::Value { .. })
     }
 }
 
@@ -194,16 +317,69 @@ impl Op {
                     dir: false,
                 }
             }
+            Self::CreateKey { slot, segs } => Target::Key { slot, segs: *segs },
+            Self::SetValue { slot, .. } => Target::Value { slot },
         }
     }
 
     /// The content of a file op.
     pub fn content(&self) -> Option<&ContentRef> {
         match self {
-            Self::CreateDir { .. } => None,
+            Self::CreateDir { .. } | Self::CreateKey { .. } | Self::SetValue { .. } => None,
             Self::CreateFile { content, .. } | Self::ReplaceFile { content, .. } => Some(content),
         }
     }
+}
+
+/// The value or key a registry slot names, by the rules of `policy::registry` and with the
+/// plan's roots (parsed again): what `check`, the objects and `exec` use. A
+/// `CompatLayers` slot is refused until `compat_layer` (P2-11, review N2).
+pub(crate) fn allowed(
+    plan: &Plan,
+    slot: &RegSlot,
+    op: usize,
+) -> Result<crate::policy::registry::AllowedValue, PlanError> {
+    if matches!(slot, RegSlot::CompatLayers { .. }) {
+        return Err(invalid(
+            Some(op),
+            "compatibility layers come with compat_layer (P2-11)",
+        ));
+    }
+    let roots: Vec<RootPath> = plan.roots.iter().map(|r| r.path.clone()).collect();
+    RegPolicy
+        .check(slot, &roots)
+        .map_err(|source| PlanError::Registry { op, source })
+}
+
+/// The key a `CreateKey` op creates.
+pub(crate) fn created_key(
+    plan: &Plan,
+    slot: &RegSlot,
+    segs: u8,
+    op: usize,
+) -> Result<(crate::policy::registry::AllowedValue, RegKey), PlanError> {
+    let av = allowed(plan, slot, op)?;
+    let key = av.key().cut(segs).ok_or_else(|| {
+        invalid(
+            Some(op),
+            "a created key outside its slot (below the anchor, at most the key)",
+        )
+    })?;
+    Ok((av, key))
+}
+
+/// `k` is `of` or lies below it.
+pub(crate) fn key_at_or_below(k: &RegKey, of: &RegKey) -> bool {
+    k == of || is_below(k, of)
+}
+
+/// `k` lies strictly below `of` (folded paths, same hive and view).
+pub(crate) fn is_below(k: &RegKey, of: &RegKey) -> bool {
+    k.hive == of.hive
+        && k.view == of.view
+        && fold(&k.path)
+            .strip_prefix(&fold(&of.path))
+            .is_some_and(|rest| rest.starts_with('\\'))
 }
 
 /// The state of a file: what a guard observes and a revert restores (ADR 0017, "exact").
@@ -379,7 +555,15 @@ pub enum PlanError {
     /// The stored bytes do not hash to the name they are stored under.
     #[error("the stored plan {0} was changed; run plan again")]
     HashMismatch(PlanHash),
-    /// A step the planner refuses (`file_install`).
+    /// A registry slot or new value `policy::registry` refuses.
+    #[error("op {op}: {source}")]
+    Registry {
+        /// Op index.
+        op: usize,
+        /// The rule.
+        source: RegPolicyError,
+    },
+    /// A step the planner refuses (`file_install`, `registry_set`).
     #[error("{0}")]
     Step(String),
     /// The game folder cannot be written by the current user; phase 3 sends such a plan to
@@ -467,6 +651,82 @@ pub(crate) fn decode_with(b: &[u8], lim: &Limits) -> Result<Plan, PlanError> {
     Ok(plan)
 }
 
+/// The registry ops `check` has seen so far.
+#[derive(Default)]
+struct RegSeen {
+    /// A registry op came (every file op must come before).
+    any: bool,
+    /// The keys `CreateKey` ops create.
+    created: Vec<RegKey>,
+    /// The key and folded name of each `SetValue`.
+    values: Vec<(RegKey, String)>,
+}
+
+impl RegSeen {
+    fn key(&mut self, plan: &Plan, k: usize, slot: &RegSlot, segs: u8) -> Result<(), PlanError> {
+        self.any = true;
+        let (_, key) = created_key(plan, slot, segs, k)?;
+        if self.created.contains(&key) {
+            return Err(invalid(Some(k), "a second op on the same object"));
+        }
+        // A key or value below a created key comes after its `CreateKey` (the revert, newest
+        // first, then finds the key empty).
+        if self.created.iter().any(|c| is_below(c, &key))
+            || self.values.iter().any(|(v, _)| key_at_or_below(v, &key))
+        {
+            return Err(invalid(
+                Some(k),
+                "a key or value below a created key comes before it",
+            ));
+        }
+        self.created.push(key);
+        Ok(())
+    }
+
+    fn value(&mut self, plan: &Plan, k: usize, op: &Op, slot: &RegSlot) -> Result<(), PlanError> {
+        self.any = true;
+        let Op::SetValue { old, new, .. } = op else {
+            return Err(invalid(Some(k), "a value target of no SetValue"));
+        };
+        let av = allowed(plan, slot, k)?;
+        let obj = (av.key().key().clone(), fold(av.name()));
+        if self.values.contains(&obj) {
+            return Err(invalid(Some(k), "a second op on the same object"));
+        }
+        RegPolicy
+            .check_new(&av, &new.value())
+            .map_err(|source| PlanError::Registry { op: k, source })?;
+        if let Some(s) = old {
+            let len = usize::try_from(s.len).unwrap_or(usize::MAX);
+            let data_ok = match &s.data {
+                Some(d) => {
+                    len <= OLD_INLINE
+                        && d.len() == len
+                        && <[u8; 32]>::from(Sha256::digest(d)) == s.sha256
+                }
+                None => len > OLD_INLINE,
+            };
+            if len > MAX_VALUE_BYTES || !data_ok {
+                return Err(invalid(
+                    Some(k),
+                    "an old value whose length, hash or inline data do not fit",
+                ));
+            }
+            if ValueState::is(Some(s), Some(&new.value())) {
+                return Err(invalid(Some(k), "a value set to the value it has"));
+            }
+            if self.created.iter().any(|c| key_at_or_below(&obj.0, c)) {
+                return Err(invalid(
+                    Some(k),
+                    "a value in a created key with an old value",
+                ));
+            }
+        }
+        self.values.push(obj);
+        Ok(())
+    }
+}
+
 /// The bounds and rules shared by [`Plan::encode`] and [`decode`].
 fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
     if plan.format != FORMAT {
@@ -507,6 +767,7 @@ fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
         }
     }
     let mut seen: Vec<(RootIx, String)> = Vec::with_capacity(plan.ops.len());
+    let mut reg = RegSeen::default();
     let mut backups = 0u64;
     for (k, op) in plan.ops.iter().enumerate() {
         let size = serde_json::to_vec(op)
@@ -520,6 +781,11 @@ fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
         }
         match op.target() {
             Target::File { root, path, .. } => {
+                // 6b-d: a halt at a file op must come after every registry op is reverted
+                // (the head is untrusted: the planner's order alone is no guarantee).
+                if reg.any {
+                    return Err(invalid(Some(k), "a file op after a registry op"));
+                }
                 if usize::from(root.0) >= plan.roots.len() {
                     return Err(invalid(Some(k), "root index outside the plan's roots"));
                 }
@@ -529,6 +795,8 @@ fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
                 }
                 seen.push(key);
             }
+            Target::Key { slot, segs } => reg.key(plan, k, slot, segs)?,
+            Target::Value { slot } => reg.value(plan, k, op, slot)?,
         }
         if let Some(ContentRef::Package {
             id, version, len, ..
@@ -574,33 +842,83 @@ pub(crate) enum Object {
         /// A directory the op creates.
         dir: bool,
     },
+    /// A registry key.
+    Key {
+        /// The key (compared folded).
+        key: RegKey,
+        /// The op creates it: everything below it is its object too.
+        created: bool,
+    },
+    /// A registry value.
+    Value {
+        /// Its key (compared folded).
+        key: RegKey,
+        /// Its folded name.
+        name: String,
+    },
 }
 
 impl Object {
-    /// The objects of `plan` (an op whose root index is outside the plan has none; `decode`
-    /// refuses such a plan anyway).
-    pub(crate) fn of(plan: &Plan) -> Vec<Self> {
+    /// The objects of `plan`. A registry slot `policy::registry` refuses, or a root index
+    /// outside the plan, is an error, never a missing object (`decode` refuses such a plan
+    /// anyway; the caller fails closed).
+    pub(crate) fn of(plan: &Plan) -> Result<Vec<Self>, PlanError> {
         plan.ops
             .iter()
-            .filter_map(|op| match op.target() {
+            .enumerate()
+            .map(|(k, op)| match op.target() {
                 Target::File { root, path, dir } => {
-                    let r = plan.roots.get(usize::from(root.0))?;
-                    Some(Self::File {
+                    let r = plan
+                        .roots
+                        .get(usize::from(root.0))
+                        .ok_or_else(|| invalid(Some(k), "root index outside the plan's roots"))?;
+                    Ok(Self::File {
                         root: r.id,
                         root_path: r.path.clone(),
                         path: fold(path.as_str()),
                         dir,
                     })
                 }
+                Target::Key { slot, segs } => Ok(Self::Key {
+                    key: created_key(plan, slot, segs, k)?.1,
+                    created: true,
+                }),
+                Target::Value { slot } => {
+                    let av = allowed(plan, slot, k)?;
+                    Ok(Self::Value {
+                        key: av.key().key().clone(),
+                        name: fold(av.name()),
+                    })
+                }
             })
             .collect()
     }
 
-    /// Same object, or one a created directory with the other below it; any two objects of
-    /// two different roots of which one lies inside the other (a manual root inside a Steam
-    /// install folder): no rebasing of paths, fail closed.
+    /// Same object, or one a created directory or key with the other below it; any two
+    /// objects of two different roots of which one lies inside the other (a manual root
+    /// inside a Steam install folder): no rebasing of paths, fail closed. A file and a
+    /// registry object never overlap.
     pub(crate) fn overlaps(&self, other: &Self) -> bool {
         match (self, other) {
+            (
+                Self::Key {
+                    key: a,
+                    created: ca,
+                },
+                Self::Key {
+                    key: b,
+                    created: cb,
+                },
+            ) => a == b || (*ca && is_below(b, a)) || (*cb && is_below(a, b)),
+            (Self::Key { key, created }, Self::Value { key: v, .. })
+            | (Self::Value { key: v, .. }, Self::Key { key, created }) => {
+                *created && key_at_or_below(v, key)
+            }
+            (Self::Value { key: a, name: na }, Self::Value { key: b, name: nb }) => {
+                a == b && na == nb
+            }
+            (Self::File { .. }, Self::Key { .. } | Self::Value { .. })
+            | (Self::Key { .. } | Self::Value { .. }, Self::File { .. }) => false,
             (
                 Self::File {
                     root: ra,

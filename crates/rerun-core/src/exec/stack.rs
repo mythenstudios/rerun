@@ -45,7 +45,9 @@ fn classify(j: &Journal<'_>, l: &Listed) -> Class {
     let Ok(p) = plan::decode(head) else {
         return Class::Blocked;
     };
-    let objs = Object::of(&p);
+    let Ok(objs) = Object::of(&p) else {
+        return Class::Blocked;
+    };
     match &full.state {
         TxnState::Damaged(_) if !full.head_usable() => Class::Blocked,
         _ if damaged => Class::Open(objs),

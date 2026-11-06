@@ -37,9 +37,18 @@ use crate::sys::fs::{Attrs, EntryKind, NewFile, TmpName};
 use crate::sys::{DirWrite, SysError, SysErrorKind, SysResult};
 
 /// The root index and path of a file op (the dispatch of `exec` hands only file ops here).
-fn file_target(op: &Op) -> (u16, &RelPath) {
+fn file_target(k: u16, op: &Op) -> Result<(u16, &RelPath), ExecError> {
     match op.target() {
-        Target::File { root, path, .. } => (root.0, path),
+        Target::File { root, path, .. } => Ok((root.0, path)),
+        Target::Key { .. } | Target::Value { .. } => Err(not_a_file_op(k)),
+    }
+}
+
+/// A registry op handed to the file domain (a caller's error).
+fn not_a_file_op(k: u16) -> ExecError {
+    ExecError::Op {
+        op: k,
+        source: SysError::new(SysErrorKind::Other, "not a file op"),
     }
 }
 
@@ -164,7 +173,7 @@ pub(super) fn apply_op(
     hints: &mut BTreeMap<u16, Hint>,
 ) -> Result<(), ExecError> {
     let e = op_err(k);
-    let (root, path) = file_target(op);
+    let (root, path) = file_target(k, op)?;
     let Some((parent, name)) = dirs.parent(root, path, true).map_err(&e)? else {
         return Err(e(SysError::new(
             SysErrorKind::NotFound,
@@ -272,6 +281,7 @@ pub(super) fn apply_op(
             w.done(k, Some(r.new.file_id), r.old_left.is_some())?;
             Ok(())
         }
+        Op::CreateKey { .. } | Op::SetValue { .. } => Err(not_a_file_op(k)),
     }
 }
 
@@ -471,6 +481,7 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
                             len: old.len,
                         }))
             }
+            Op::CreateKey { .. } | Op::SetValue { .. } => false,
         }
 }
 
@@ -491,7 +502,9 @@ fn later_children(
         let Some(super::Seen::File(s)) = later.get(&super::op_ix(j)) else {
             continue;
         };
-        let Target::File { root: r, path, .. } = o.target();
+        let Target::File { root: r, path, .. } = o.target() else {
+            continue;
+        };
         if r.0 != root || path.parent().as_ref() != Some(dir) {
             continue;
         }
@@ -527,7 +540,7 @@ pub(super) fn observe(
         return Ok(trusted(op, log));
     }
     let e = op_err(k);
-    let (root, path) = file_target(op);
+    let (root, path) = file_target(k, op)?;
     let found = dirs.parent(root, path, false).map_err(&e)?;
     let (parent, name) = match &found {
         Some((d, n)) => (Some(*d), n.clone()),
@@ -602,6 +615,7 @@ pub(super) fn observe(
             };
             replace_seen(parent, &name, log, &x, old, content, attrs).map_err(&e)
         }
+        Op::CreateKey { .. } | Op::SetValue { .. } => Err(not_a_file_op(k)),
     }
 }
 
@@ -618,6 +632,7 @@ fn trusted(op: &Op, log: &OpLog) -> Seen {
         },
         Op::CreateFile { content, .. } => s.act(Action::DeleteTarget(*content.sha256())),
         Op::ReplaceFile { .. } => Seen { restore: true, ..s },
+        Op::CreateKey { .. } | Op::SetValue { .. } => Seen::new(Observed::Foreign),
     }
 }
 
@@ -837,7 +852,7 @@ pub(super) fn act<W: Reverting>(
     y: Option<TmpName>,
 ) -> Result<Acted, ExecError> {
     let e = op_err(k);
-    let (root, path) = file_target(op);
+    let (root, path) = file_target(k, op)?;
     let mut done = Acted {
         old_left: false,
         left: seen.left.clone(),

@@ -181,8 +181,27 @@ D4 runs on the open roots (targets and `main_exe`; a missing `main_exe` is fine 
 - Write access only for a root that file ops target (S1), in the planner and in the apply; D4 needs read access only, so a root without file ops may be read-only to the user.
 
 ### Checklist for P2-10b (from the P2-10a reviews)
-- `check` refuses a registry op before a file op, on encode and decode (the head is untrusted; the planner's order alone is not the guarantee).
+- `check` refuses a registry op before a file op, on encode and decode (the head is untrusted; the planner's order alone is not the guarantee). **Done (P2-10b, `plan::check`, test P7).**
 - S2: `writable()` (elevated) in the revert too, after `game_closed` and before `revert_loop`, for plans with registry ops.
-- N2: a `CompatLayers` slot is refused in `check` until P2-11.
-- P-tests: a registry plan with `roots: []` and one without `main_exe` refused, also on decode.
+- N2: a `CompatLayers` slot is refused in `check` until P2-11. **Done (P2-10b, `plan::allowed`, test P7).**
+- P-tests: a registry plan with `roots: []` and one without `main_exe` refused, also on decode. **Done (P2-10b, test P7).**
 - `records_fit` compares `Before::Inline`/`Bin` exactly with the planned old value of a `SetValue`.
+
+## Amendment (P2-10b, 2026-11-06; plan `P2-10` with the user decisions E1 to E3 and the senior-dev conditions)
+
+### Registry op kinds in format 1
+```rust
+pub enum Op { /* file op kinds */
+    CreateKey { slot: RegSlot, segs: u8 },   // the slot's key cut to `segs` segments below HKCU
+    SetValue  { slot: RegSlot, old: Option<ValueState>, new: NewValue } }
+pub enum NewValue { Dword(u32), Qword(u64), Sz(String) }   // {"dword":1} | {"qword":"<decimal>"} | {"sz":"…"}
+pub struct ValueState { pub kind: u32, pub len: u32, pub sha256: [u8; 32], pub data: Option<Vec<u8>> }
+pub const OLD_INLINE: usize = 1 << 10;      // `data` (hex) exactly when len <= OLD_INLINE: preview only
+pub enum Target<'a> { File { .. }, Key { slot: &'a RegSlot, segs: u8 }, Value { slot: &'a RegSlot } }
+pub(crate) enum Object { File { .. }, Key { key: RegKey, created: bool }, Value { key: RegKey, name: String } }
+```
+- A slot is written as `{"game_value":{"vendor":…,"product":…,"rest":[…],"name":…}}` (`compat_layers`/`gpu_preference` with `root` and `exe`) and read back through `AsciiSeg::parse`, `AsciiName::parse`, `GameKey::new` and `RelPath::parse` (ADR 0018 amendment P2-10b). `CreateKey` names its key by `segs` (`AllowedKey::cut`: below the anchor, at most the slot's key), so no key outside the slot can be expressed. `qword` is a decimal string (no JSON number above 2^53), without sign or leading zero.
+- The old value of a `SetValue` is its type, length and SHA-256; its bytes ride along only up to 1 KiB, for the preview. The revert's source is always the journal (`Intent.before`, inline up to 16 KiB, else `op-NNNN.bin`). The worst case (the longest slot, 1 KiB of old data, a `REG_SZ` of 1,024 characters that each need escaping) is 4,833 bytes, inside the 8 KiB op budget (test P8).
+- **`check` (encode and decode alike; the head is untrusted):** every slot passes `RegPolicy::check` with the plan's root paths (a `CompatLayers` slot is refused until P2-11, review N2; `GpuPreference` stays reserved), every new value `RegPolicy::check_new` (`PlanError::Registry`); every registry op comes after every file op (so a revert that halts at a file op has reverted every registry op, 6b-d); one op per key and per value (folded); `segs` within the slot; a `CreateKey` before every key and value below it; an old value with length at most 1 MiB, inline bytes exactly up to 1 KiB with the length and hash they claim, not equal to the new value, and absent in a key the plan creates; a plan with registry ops has at least one root and a `main_exe` for each (E2, review M1).
+- **Objects:** a created key holds every key and value below it; a value is its key plus the folded name; a file and a registry object never overlap. `Object::of` fails closed: a slot the policy refuses is `Blocked`, never a missing object.
+- **Preview:** the key (`HKCU\…`), the value name (`(default)` for `""`), the old value (numbers and strings decoded from the inline bytes, strings through `escape::text`; anything else by type, length and SHA-256; `missing`), a type change marked, the new value; once per plan with registry ops the note that a game filling the key or changing the value later (also with another type, review S4) is left as it is and closed with `forget`, and that a revert does not restore the last-write times of keys. This is the one place where old registry data reaches output (review N6; ADR 0016 output rules apply).

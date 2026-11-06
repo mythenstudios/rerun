@@ -380,7 +380,8 @@ pub(super) fn game_closed(plan: &Plan, roots: &Roots<'_>, ops: &[u16]) -> Result
                 path,
                 dir: false,
             } => unused(plan, roots, usize::from(root.0), path)?,
-            Target::File { dir: true, .. } => {}
+            // A registry op has no file to ask: the main executables below are (E2).
+            Target::File { dir: true, .. } | Target::Key { .. } | Target::Value { .. } => {}
         }
     }
     for (i, r) in plan.roots.iter().enumerate() {
@@ -398,7 +399,10 @@ pub(super) fn old_state(cx: &ExecCtx<'_>, plan: &Plan, roots: &Roots<'_>) -> Res
     let packages = cx.app.sub(AppSub::Packages)?;
     for (k, op) in plan.ops.iter().enumerate() {
         let mismatch = || Refusal::Mismatch { op: op_ix(k) };
-        let Target::File { root, .. } = op.target();
+        // Registry ops: `exec::reg::old_state`.
+        let Target::File { root, .. } = op.target() else {
+            continue;
+        };
         let g = roots.game(usize::from(root.0)).ok_or_else(mismatch)?;
         match op {
             Op::CreateDir { path, .. } | Op::CreateFile { path, .. } => {
@@ -437,6 +441,7 @@ pub(super) fn old_state(cx: &ExecCtx<'_>, plan: &Plan, roots: &Roots<'_>) -> Res
                     return Err(mismatch());
                 }
             }
+            Op::CreateKey { .. } | Op::SetValue { .. } => {}
         }
         if let Some(ContentRef::Package {
             id,

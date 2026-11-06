@@ -286,7 +286,7 @@ fn p4_preview_shows_every_op_and_what_is_not_restored() {
 #[test]
 fn p5_objects_overlap_when_equal_or_below_a_created_directory() {
     let p = sample();
-    let objs = Object::of(&p);
+    let objs = Object::of(&p).unwrap();
     assert_eq!(objs.len(), 3);
     // The root paths of `sample` (7, 8) and one beside them (9).
     let one = |root: u128, path: &str, dir: bool| {
@@ -319,11 +319,16 @@ fn p5_objects_overlap_when_equal_or_below_a_created_directory() {
         &one(8, "", true)
             .into_iter()
             .map(|mut o| {
-                let Object::File { path, .. } = &mut o;
-                *path = "D3D9.DLL".into();
+                if let Object::File { path, .. } = &mut o {
+                    *path = "D3D9.DLL".into();
+                }
                 o
             })
             .collect::<Vec<_>>()
     ),);
     assert!(overlap(&one(7, "a", true), &one(7, r"A\B", true)));
 }
+
+#[cfg(test)]
+#[path = "reg_tests.rs"]
+mod reg_tests;

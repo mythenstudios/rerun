@@ -188,8 +188,9 @@ fn t9_plans_folders_top_down_new_files_and_replaces() {
     let spelled: Vec<&str> = p
         .ops
         .iter()
-        .map(|o| match o.target() {
-            crate::plan::Target::File { path, .. } => path.as_str(),
+        .filter_map(|o| match o.target() {
+            crate::plan::Target::File { path, .. } => Some(path.as_str()),
+            crate::plan::Target::Key { .. } | crate::plan::Target::Value { .. } => None,
         })
         .collect();
     assert_eq!(

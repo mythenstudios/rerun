@@ -117,6 +117,63 @@ pub(crate) mod hex_bytes {
     }
 }
 
+/// An optional byte string: `null` or [`hex_bytes`].
+pub(crate) mod hex_bytes_opt {
+    use super::{Deserialize, Deserializer, Serializer};
+
+    /// Serialises `None` as `null`, `Some(v)` as lower-case hex.
+    pub(crate) fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) => super::hex_bytes::serialize(v, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    /// Parses `null` or an even number of lower-case hex digits.
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        use serde::de::Error as _;
+        Option::<String>::deserialize(d)?
+            .map(|s| {
+                super::hex_bytes::from_str(&s)
+                    .ok_or_else(|| D::Error::custom("expected lower-case hex bytes"))
+            })
+            .transpose()
+    }
+}
+
+/// A `u64` as a decimal string without sign or leading zero (`"0"` is zero): no JSON number
+/// above 2^53 (ADR 0020).
+pub(crate) mod dec_u64 {
+    use serde::de::Error as _;
+
+    use super::{Deserialize, Deserializer, Serializer};
+
+    /// Serialises `v` as its decimal digits.
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "the signature serde's `with` expects"
+    )]
+    pub(crate) fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+
+    /// Parses exactly what [`serialize`] writes.
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        let s = String::deserialize(d)?;
+        from_str(&s).ok_or_else(|| D::Error::custom("expected a decimal u64 without leading zero"))
+    }
+
+    /// Decimal digits, no sign, no leading zero, at most `u64::MAX`.
+    pub(crate) fn from_str(s: &str) -> Option<u64> {
+        let canonical = !s.is_empty()
+            && s.bytes().all(|b| b.is_ascii_digit())
+            && (s == "0" || !s.starts_with('0'));
+        canonical.then(|| s.parse().ok())?
+    }
+}
+
 impl Serialize for TmpName {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(self.as_str())
@@ -243,6 +300,26 @@ mod tests {
         );
         for bad in ["0", "0F", "+f", " f", "0g", "fff"] {
             assert_eq!(super::hex_bytes::from_str(bad), None, "{bad}");
+        }
+        // Decimal u64 (P2-10b, `qword`): canonical digits only.
+        assert_eq!(super::dec_u64::from_str("0"), Some(0));
+        assert_eq!(
+            super::dec_u64::from_str("18446744073709551615"),
+            Some(u64::MAX)
+        );
+        for bad in [
+            "",
+            "00",
+            "01",
+            "+1",
+            "-1",
+            " 1",
+            "1 ",
+            "1e3",
+            "0x1",
+            "18446744073709551616",
+        ] {
+            assert_eq!(super::dec_u64::from_str(bad), None, "{bad}");
         }
     }
 

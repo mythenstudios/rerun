@@ -3,18 +3,34 @@
 //! configuration file, and once per plan what a revert does not restore (ADR 0017, D3). Every
 //! untrusted field is an [`escape::Shown`] (`escape::path` for paths and for the source,
 //! which joins package ID, version and file), built from the decoded plan, i.e. from the stored bytes.
+//!
+//! Registry ops (P2-10b) show the key and the value name (`escape::path`, `(default)` for the
+//! default value), the old value (decoded from the plan's inline bytes up to `OLD_INLINE`,
+//! strings through `escape::text`; otherwise type, length and SHA-256; `missing`) with a type
+//! change marked (audit nit N6: the one place where old registry data reaches output, ADR 0016),
+//! and the new value; a plan with registry ops adds [`REGISTRY_NOTE`] once.
 
 use std::fmt;
 
-use super::{ContentRef, FileState, Op, Plan, PlanOrigin, Target};
+use super::{
+    ContentRef, FileState, Op, Plan, PlanOrigin, Target, ValueState, allowed, created_key,
+};
 use crate::escape::{self, Shown};
 use crate::sys::fs::Attrs;
+use crate::sys::registry::{RegValue, reg_type};
 use crate::wire::hex32;
 
 /// What a revert does not restore (ADR 0017, "What exact means", user decision D3).
 pub const NOT_RESTORED: &str = "a revert restores existence, content, length, read-only, \
 hidden and system; not timestamps, file IDs, permissions, alternate data streams, short names \
 or the archive attribute";
+
+/// What a plan with registry ops says once (ADR 0020 amendment P2-10b, review S4): the normal
+/// case of a game that writes its own key, and what a revert does not restore there.
+pub const REGISTRY_NOTE: &str = "registry: if the game fills a created key or changes a value \
+later (also by writing it with another type), a revert leaves it as it is and the transaction \
+is closed with forget; a revert restores keys and values exactly, not the last-write times of \
+registry keys";
 
 /// One root of a [`Preview`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,12 +50,20 @@ pub struct PreviewRoot {
 pub struct PreviewOp {
     /// Index in the plan.
     pub index: usize,
-    /// What it does: `create folder`, `create file`, `replace file`.
+    /// What it does: `create folder`, `create file`, `replace file`, `create key`, `set value`.
     pub action: &'static str,
-    /// Root index.
-    pub root: usize,
-    /// Path below the root.
+    /// Root index (`None` for a registry op).
+    pub root: Option<usize>,
+    /// Path below the root, or the registry key (`HKCU\…`).
     pub path: Shown<'static>,
+    /// The value name of a `set value` (`(default)` for the default value).
+    pub name: Option<Shown<'static>>,
+    /// The old value of a `set value` (`missing` if there was none).
+    pub old_value: Option<String>,
+    /// The new value of a `set value`.
+    pub new_value: Option<String>,
+    /// A `set value` changes the value's type.
+    pub type_change: bool,
     /// Source: `<package id> <version>: <file>`.
     pub source: Option<Shown<'static>>,
     /// SHA-256 (hex) and length of the new content.
@@ -61,6 +85,8 @@ pub struct Preview {
     pub ops: Vec<PreviewOp>,
     /// [`NOT_RESTORED`], once per plan.
     pub not_restored: &'static str,
+    /// [`REGISTRY_NOTE`], once per plan with registry ops.
+    pub registry: Option<&'static str>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -74,6 +100,79 @@ fn rhs(a: &Attrs) -> String {
 
 fn old(o: &FileState) -> (String, u64, String) {
     (hex32::to_string(&o.sha256), o.len, rhs(&o.attrs))
+}
+
+/// A registry type for display.
+fn type_name(kind: u32) -> String {
+    match kind {
+        reg_type::REG_SZ => "REG_SZ".to_owned(),
+        reg_type::REG_EXPAND_SZ => "REG_EXPAND_SZ".to_owned(),
+        reg_type::REG_BINARY => "REG_BINARY".to_owned(),
+        reg_type::REG_DWORD => "REG_DWORD".to_owned(),
+        reg_type::REG_MULTI_SZ => "REG_MULTI_SZ".to_owned(),
+        reg_type::REG_QWORD => "REG_QWORD".to_owned(),
+        k => format!("type {k}"),
+    }
+}
+
+/// A value by type, length and SHA-256.
+fn opaque(s: &ValueState) -> String {
+    format!(
+        "{}, {} bytes, sha256 {}",
+        type_name(s.kind),
+        s.len,
+        hex32::to_string(&s.sha256)
+    )
+}
+
+/// A registry value for display: numbers and strings decoded (strings through
+/// `escape::text`), anything else by type, length and SHA-256 (ADR 0016).
+fn value_text(v: &RegValue, s: &ValueState) -> String {
+    match v {
+        RegValue::Dword(n) => format!("REG_DWORD {n} ({n:#010x})"),
+        RegValue::Qword(n) => format!("REG_QWORD {n} ({n:#018x})"),
+        RegValue::String(t) => format!("REG_SZ \"{}\"", escape::text(t)),
+        RegValue::ExpandString(t) => format!("REG_EXPAND_SZ \"{}\"", escape::text(t)),
+        _ => opaque(s),
+    }
+}
+
+/// The old value of a `set value` for display.
+fn old_value(o: Option<&ValueState>) -> String {
+    match o {
+        None => "missing".to_owned(),
+        Some(s) => match &s.data {
+            Some(d) => value_text(&RegValue::decode(s.kind, d), s),
+            None => opaque(s),
+        },
+    }
+}
+
+/// The key (`HKCU\…`) and value name of a registry op, for display; a slot the policy
+/// refuses (never in a decoded plan) is shown as such.
+fn reg_target(p: &Plan, k: usize, t: Target<'_>) -> (Shown<'static>, Option<Shown<'static>>) {
+    let refused = || escape::path("(a slot the policy refuses)").into_owned();
+    let key_text = |key: &crate::sys::registry::RegKey| {
+        escape::path(&format!(r"{}\{}", key.hive, key.path)).into_owned()
+    };
+    match t {
+        Target::Key { slot, segs } => match created_key(p, slot, segs, k) {
+            Ok((_, key)) => (key_text(&key), None),
+            Err(_) => (refused(), None),
+        },
+        Target::Value { slot } => match allowed(p, slot, k) {
+            Ok(av) => {
+                let name = if av.name().is_empty() {
+                    escape::path("(default)").into_owned()
+                } else {
+                    escape::path(av.name()).into_owned()
+                };
+                (key_text(av.key().key()), Some(name))
+            }
+            Err(_) => (refused(), None),
+        },
+        Target::File { path, .. } => (escape::path(path.as_str()).into_owned(), None),
+    }
 }
 
 /// The preview of `p`.
@@ -108,6 +207,20 @@ pub fn preview(p: &Plan) -> Preview {
                 Op::ReplaceFile { attrs, old: o, .. } => {
                     ("replace file", Some(rhs(attrs)), Some(old(o)))
                 }
+                Op::CreateKey { .. } => ("create key", None, None),
+                Op::SetValue { .. } => ("set value", None, None),
+            };
+            let (old_value, new_value, type_change) = match op {
+                Op::SetValue { old: o, new, .. } => {
+                    let v = new.value();
+                    let shown =
+                        ValueState::of(&v).map_or_else(|| v.to_string(), |s| value_text(&v, &s));
+                    let changed = o
+                        .as_ref()
+                        .is_some_and(|o| v.encode().is_some_and(|(k, _)| k != o.kind));
+                    (Some(old_value(o.as_ref())), Some(shown), changed)
+                }
+                _ => (None, None, false),
             };
             let (source, content, config) = match op.content() {
                 Some(ContentRef::Package {
@@ -124,14 +237,26 @@ pub fn preview(p: &Plan) -> Preview {
                 ),
                 None => (None, None, false),
             };
-            let (root, path) = match op.target() {
-                Target::File { root, path, .. } => (usize::from(root.0), path),
+            let (root, path, name) = match op.target() {
+                Target::File { root, path, .. } => (
+                    Some(usize::from(root.0)),
+                    escape::path(path.as_str()).into_owned(),
+                    None,
+                ),
+                t @ (Target::Key { .. } | Target::Value { .. }) => {
+                    let (path, name) = reg_target(p, index, t);
+                    (None, path, name)
+                }
             };
             PreviewOp {
                 index,
                 action,
                 root,
-                path: escape::path(path.as_str()).into_owned(),
+                path,
+                name,
+                old_value,
+                new_value,
+                type_change,
                 source,
                 content,
                 attrs,
@@ -140,10 +265,16 @@ pub fn preview(p: &Plan) -> Preview {
             }
         })
         .collect();
+    let registry = p
+        .ops
+        .iter()
+        .any(|o| o.target().is_registry())
+        .then_some(REGISTRY_NOTE);
     Preview {
         roots,
         ops,
         not_restored: NOT_RESTORED,
+        registry,
     }
 }
 
@@ -163,7 +294,11 @@ impl fmt::Display for Preview {
             writeln!(f, "nothing to do")?;
         }
         for o in &self.ops {
-            write!(f, "{:>3}. {} {}:{}", o.index, o.action, o.root, o.path)?;
+            match (o.root, &o.name) {
+                (Some(r), _) => write!(f, "{:>3}. {} {}:{}", o.index, o.action, r, o.path)?,
+                (None, Some(n)) => write!(f, "{:>3}. {} {} @ {}", o.index, o.action, o.path, n)?,
+                (None, None) => write!(f, "{:>3}. {} {}", o.index, o.action, o.path)?,
+            }
             if let Some(s) = &o.source {
                 write!(f, " from {s}")?;
             }
@@ -178,6 +313,13 @@ impl fmt::Display for Preview {
             if let Some((sha, len, a)) = &o.old {
                 writeln!(f, "     old sha256 {sha}, {len} bytes, attributes {a}")?;
             }
+            if let (Some(old), Some(new)) = (&o.old_value, &o.new_value) {
+                writeln!(f, "     old {old}")?;
+                writeln!(f, "     new {new}")?;
+                if o.type_change {
+                    writeln!(f, "     the type of the value changes")?;
+                }
+            }
             if o.config {
                 writeln!(
                     f,
@@ -185,6 +327,10 @@ impl fmt::Display for Preview {
                 )?;
             }
         }
-        writeln!(f, "note: {}", self.not_restored)
+        writeln!(f, "note: {}", self.not_restored)?;
+        if let Some(r) = self.registry {
+            writeln!(f, "note: {r}")?;
+        }
+        Ok(())
     }
 }

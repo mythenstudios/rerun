@@ -248,7 +248,14 @@ impl GameKey {
 }
 
 /// Where a value is written (ADR 0018).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// On the wire (a plan's `head.json`, ADR 0020 amendment P2-10b) a slot is externally tagged
+/// in `snake_case`: `{"game_value":{"vendor":…,"product":…,"rest":[…],"name":…}}`,
+/// `{"compat_layers":{"root":0,"exe":"…"}}`, `{"gpu_preference":{…}}`. Deserialising goes
+/// through [`AsciiSeg::parse`], [`AsciiName::parse`], [`GameKey::new`] and `RelPath::parse`
+/// (amendment P2-9): a manipulated journal cannot name a key the rules refuse.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "SlotWire", into = "SlotWire")]
 pub enum RegSlot {
     /// `AppCompatFlags\Layers`, value name the canonical path of `exe` in plan root `root`.
     CompatLayers {
@@ -273,6 +280,73 @@ pub enum RegSlot {
     },
 }
 
+/// [`RegSlot`] on the wire: plain fields, checked by [`TryFrom`].
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum SlotWire {
+    CompatLayers {
+        root: RootIx,
+        exe: RelPath,
+    },
+    GameValue {
+        vendor: String,
+        product: String,
+        rest: Vec<String>,
+        name: String,
+    },
+    GpuPreference {
+        root: RootIx,
+        exe: RelPath,
+    },
+}
+
+impl TryFrom<SlotWire> for RegSlot {
+    type Error = RegPolicyError;
+
+    fn try_from(w: SlotWire) -> Result<Self, RegPolicyError> {
+        Ok(match w {
+            SlotWire::CompatLayers { root, exe } => Self::CompatLayers { root, exe },
+            SlotWire::GpuPreference { root, exe } => Self::GpuPreference { root, exe },
+            SlotWire::GameValue {
+                vendor,
+                product,
+                rest,
+                name,
+            } => {
+                if rest.len() > MAX_REST {
+                    return Err(denied(
+                        product,
+                        "at most 4 segments below <Vendor>\\<Product>",
+                    ));
+                }
+                let rest = rest
+                    .iter()
+                    .map(|s| AsciiSeg::parse(s))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Self::GameValue {
+                    key: GameKey::new(AsciiSeg::parse(&vendor)?, AsciiSeg::parse(&product)?, rest)?,
+                    name: AsciiName::parse(&name)?,
+                }
+            }
+        })
+    }
+}
+
+impl From<RegSlot> for SlotWire {
+    fn from(s: RegSlot) -> Self {
+        match s {
+            RegSlot::CompatLayers { root, exe } => Self::CompatLayers { root, exe },
+            RegSlot::GpuPreference { root, exe } => Self::GpuPreference { root, exe },
+            RegSlot::GameValue { key, name } => Self::GameValue {
+                vendor: key.vendor.0,
+                product: key.product.0,
+                rest: key.rest.into_iter().map(|s| s.0).collect(),
+                name: name.0,
+            },
+        }
+    }
+}
+
 /// A key `policy::registry` allows, with its anchor: the first `anchor` segments must exist,
 /// the ones below may be created.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,6 +368,16 @@ impl AllowedKey {
     /// The key.
     pub fn key(&self) -> &RegKey {
         &self.key
+    }
+
+    /// The key cut to its first `segs` segments below the hive root, if that lies below the
+    /// anchor and at most at the key itself (a `CreateKey` op names its key this way, so no
+    /// key outside the slot can be expressed).
+    pub(crate) fn cut(&self, segs: u8) -> Option<RegKey> {
+        let all: Vec<&str> = self.key.path.split('\\').collect();
+        let n = usize::from(segs);
+        (n > self.anchor && n <= all.len())
+            .then(|| RegKey::new(self.key.hive, self.key.view, all[..n].join("\\")))
     }
 
     /// The keys from just below the anchor down to the key itself, top-down.

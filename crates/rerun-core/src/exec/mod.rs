@@ -510,8 +510,17 @@ impl<'g> Touched<'g> {
                     self.dirs.flush()?;
                 }
             }
+            Target::Key { .. } | Target::Value { .. } => {}
         }
         Ok(())
+    }
+}
+
+/// A registry op before `exec` runs registry ops.
+fn no_registry_yet(k: u16) -> ExecError {
+    ExecError::Op {
+        op: k,
+        source: SysError::new(crate::sys::SysErrorKind::Unsupported, "a registry op"),
     }
 }
 
@@ -526,6 +535,7 @@ fn apply_op(
 ) -> Result<(), ExecError> {
     match op.target() {
         Target::File { .. } => file::apply_op(cx, w, &mut t.dirs, k, op, hints),
+        Target::Key { .. } | Target::Value { .. } => Err(no_registry_yet(k)),
     }
 }
 
@@ -549,6 +559,7 @@ fn observe(
         Target::File { .. } => {
             file::observe(plan, &mut t.dirs, k, op, log, mode, hint, later).map(Seen::File)
         }
+        Target::Key { .. } | Target::Value { .. } => Err(no_registry_yet(k)),
     }
 }
 
@@ -560,6 +571,8 @@ fn halt(roots: &roots::Roots<'_>, k: u16, op: &Op) -> Option<Halt> {
             root: root.0,
             why: Box::new(n.refusal()),
         }),
+        // Registry ops never halt: they need no root (6b-d).
+        Target::Key { .. } | Target::Value { .. } => None,
     }
 }
 
@@ -627,6 +640,7 @@ fn records_fit(plan: &Plan, ops: &BTreeMap<u16, OpLog>) -> bool {
             None => false,
             Some(op) => match op.target() {
                 Target::File { .. } => file::records_fit(op, log),
+                Target::Key { .. } | Target::Value { .. } => false,
             },
         })
 }
@@ -638,10 +652,18 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     if plan.ops.is_empty() {
         return Ok(Outcome::Nothing);
     }
+    if plan.ops.iter().any(|o| o.target().is_registry()) {
+        return Err(Refusal::Plan(PlanError::Invalid {
+            op: None,
+            why: "registry ops are not executed yet",
+        })
+        .into());
+    }
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
-    stack::for_apply(&j, &listing, &Object::of(&plan))?;
+    let objects = Object::of(&plan).map_err(Refusal::Plan)?;
+    stack::for_apply(&j, &listing, &objects)?;
     let stores = roots::open_stores(cx, &plan);
     let roots = roots::Roots::all(cx, &plan, &stores)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
@@ -831,7 +853,8 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     if !records_fit(&plan, w.ops()) {
         return Err(Refusal::Blocked { txn: *t }.into());
     }
-    stack::for_revert(&j, &listing, t, &Object::of(&plan))?;
+    let objects = Object::of(&plan).map_err(|_| Refusal::Blocked { txn: *t })?;
+    stack::for_revert(&j, &listing, t, &objects)?;
     let stores = roots::open_stores(cx, &plan);
     let roots = roots::Roots::each(cx, &plan, &stores)?;
     let intended: Vec<u16> = w.ops().keys().copied().collect();
