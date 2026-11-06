@@ -21,8 +21,8 @@ use crate::detect::text::RawText;
 use crate::detect::vdf::{Limits, VdfReadError, read_store_file};
 use crate::path::{RelPath, RootPath, classify};
 use crate::policy::root::{ForbiddenRoots, GameDir, RootError, RootId, StoreDir};
-use crate::sys::fs::{DirEntry, EntryKind};
-use crate::sys::{SysError, SysErrorKind, System};
+use crate::sys::fs::{DirEntry, EntryKind, Metadata};
+use crate::sys::{Dir, SysError, SysErrorKind, System};
 
 /// Most libraries a library file may list (the root not counted); more refuses the file.
 pub const MAX_LIBRARIES: usize = 256;
@@ -234,6 +234,18 @@ fn manifest_id(name: &str) -> Option<&str> {
     (head.eq_ignore_ascii_case(PREFIX) && tail.eq_ignore_ascii_case(SUFFIX)).then_some(id)
 }
 
+/// `steamapps` of `store`, opened relative to the library handle: a junction or symlink at
+/// `steamapps` is `ReparsePoint`, never followed; restricted is `AccessDenied`; a
+/// case-sensitive `steamapps` is refused.
+fn steamapps_dir<'d>(store: &'d StoreDir<'_>) -> Result<(RelPath, Box<dyn Dir + 'd>), IssueKind> {
+    let steamapps = fixed(STEAMAPPS)?;
+    let dir = store.dir().open_dir(&steamapps).map_err(IssueKind::Sys)?;
+    if dir.info().map_err(IssueKind::Sys)?.case_sensitive {
+        return Err(IssueKind::CaseSensitiveSteamapps);
+    }
+    Ok((steamapps, dir))
+}
+
 /// The apps of one library, sorted by app ID. `max` is [`MAX_MANIFESTS`] (smaller in tests);
 /// the listing of `steamapps` is bounded to `max` plus [`STEAMAPPS_OTHER`] entries.
 pub(super) fn apps(store: &StoreDir<'_>, max: usize, issues: &mut Vec<Issue>) -> Vec<SteamApp> {
@@ -243,33 +255,13 @@ pub(super) fn apps(store: &StoreDir<'_>, max: usize, issues: &mut Vec<Issue>) ->
             kind,
         });
     };
-    let steamapps = match fixed(STEAMAPPS) {
-        Ok(p) => p,
+    let (steamapps, dir) = match steamapps_dir(store) {
+        Ok(d) => d,
         Err(kind) => {
             report(kind);
             return Vec::new();
         }
     };
-    // Relative to the library handle: a junction or symlink at `steamapps` is
-    // `ReparsePoint`, never followed; restricted is `AccessDenied`.
-    let dir = match store.dir().open_dir(&steamapps) {
-        Ok(dir) => dir,
-        Err(e) => {
-            report(IssueKind::Sys(e));
-            return Vec::new();
-        }
-    };
-    match dir.info() {
-        Err(e) => {
-            report(IssueKind::Sys(e));
-            return Vec::new();
-        }
-        Ok(info) if info.case_sensitive => {
-            report(IssueKind::CaseSensitiveSteamapps);
-            return Vec::new();
-        }
-        Ok(_) => {}
-    }
     let listed_max = max.saturating_add(STEAMAPPS_OTHER);
     let entries = match dir.read_dir_limited(None, listed_max) {
         Ok(entries) => entries,
@@ -296,7 +288,7 @@ pub(super) fn apps(store: &StoreDir<'_>, max: usize, issues: &mut Vec<Issue>) ->
     }
     let mut apps = Vec::with_capacity(candidates.len());
     for (entry, id) in candidates {
-        match read_app(store, &steamapps, entry, id) {
+        match read_app(store, &steamapps, &entry.name, &entry.meta, id) {
             Ok(app) => apps.push(app),
             Err(kind) => issues.push(Issue {
                 at: Location::Manifest {
@@ -311,22 +303,37 @@ pub(super) fn apps(store: &StoreDir<'_>, max: usize, issues: &mut Vec<Issue>) ->
     apps
 }
 
+/// The manifest `steamapps\appmanifest_<app_id>.acf` of one app of `store`, read and checked
+/// like a manifest of the scan (`exec` re-reads the app state before apply and revert,
+/// ADR 0020). `Ok(None)` if there is no such manifest.
+pub fn app_manifest(store: &StoreDir<'_>, app_id: u32) -> Result<Option<SteamApp>, IssueKind> {
+    let (steamapps, dir) = steamapps_dir(store)?;
+    let name = format!("{PREFIX}{app_id}{SUFFIX}");
+    let seg = RelPath::from_segment(&name)
+        .map_err(|e| IssueKind::Root(Box::new(RootError::InvalidPath(e))))?;
+    let Some(meta) = dir.metadata(&seg).map_err(IssueKind::Sys)? else {
+        return Ok(None);
+    };
+    read_app(store, &steamapps, &name, &meta, &app_id.to_string()).map(Some)
+}
+
 /// One manifest entry: checked before it is opened, checked again after it is parsed.
 fn read_app(
     store: &StoreDir<'_>,
     steamapps: &RelPath,
-    entry: &DirEntry,
+    name: &str,
+    meta: &Metadata,
     id: &str,
 ) -> Result<SteamApp, IssueKind> {
     let file_id = decimal_u32(id, false).ok_or(IssueKind::ManifestName)?;
     // A file with an allowlisted data tag (WOF, cloud files) is `File` too.
-    if entry.meta.kind != EntryKind::File || entry.meta.restricted {
+    if meta.kind != EntryKind::File || meta.restricted {
         return Err(IssueKind::ManifestEntry {
-            kind: entry.meta.kind,
-            restricted: entry.meta.restricted,
+            kind: meta.kind,
+            restricted: meta.restricted,
         });
     }
-    let seg = classify(&entry.name, false).map_err(IssueKind::Anomaly)?;
+    let seg = classify(name, false).map_err(IssueKind::Anomaly)?;
     let manifest = steamapps
         .child(seg.as_str())
         .map_err(|e| IssueKind::Root(Box::new(RootError::InvalidPath(e))))?;

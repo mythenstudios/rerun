@@ -847,3 +847,48 @@ fn the_shipped_manifest_limit_refuses_one_more_without_reading_any() {
         }]
     );
 }
+
+#[test]
+fn app_manifest_reads_one_app_like_the_scan() {
+    let sys = base()
+        .app(STEAM, 220, "Half-Life 2", "Half-Life 2")
+        .file_in(
+            STEAM,
+            r"steamapps\appmanifest_400.acf",
+            &acf(400, "Portal", "Portal", 4 | 2),
+        )
+        .file_in(
+            STEAM,
+            r"steamapps\appmanifest_500.acf",
+            &acf(501, "Other", "Other", 4),
+        )
+        .dir(format!(r"{STEAM}\steamapps\appmanifest_600.acf"))
+        .build()
+        .unwrap();
+    let fr = fr(&sys);
+    let store = StoreDir::open(&sys, &fr, Path::new(STEAM)).unwrap();
+    let app = super::app_manifest(&store, 220).unwrap().unwrap();
+    assert_eq!(
+        (app.app_id, app.install_dir.as_str(), app.state()),
+        (220, "Half-Life 2", AppState::Installed)
+    );
+    assert_eq!(
+        super::app_manifest(&store, 400).unwrap().unwrap().state(),
+        AppState::UpdatePending
+    );
+    assert!(super::app_manifest(&store, 300).unwrap().is_none());
+    assert!(matches!(
+        super::app_manifest(&store, 500),
+        Err(IssueKind::AppIdMismatch {
+            file: 500,
+            manifest: 501
+        })
+    ));
+    assert!(matches!(
+        super::app_manifest(&store, 600),
+        Err(IssueKind::ManifestEntry {
+            kind: EntryKind::Dir,
+            ..
+        })
+    ));
+}
