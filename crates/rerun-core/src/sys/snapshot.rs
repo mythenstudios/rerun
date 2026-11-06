@@ -27,7 +27,14 @@
 //!   the restricted flag; never hashed, opened or descended into. Anomalies with the same raw
 //!   name under one directory (two names that differ only in unpaired surrogates list alike)
 //!   are kept as a multiset, none overwrites another;
-//! - for the registry: keys, value names and their case, value type and the exact bytes.
+//! - for the registry: keys (existing, empty or missing), key and value names and their case,
+//!   value type and the exact bytes. A key or value name with U+FFFD (an unpaired surrogate
+//!   converted by `sys`, user decision E1: the same rule as `classify` for file names) and
+//!   names that fold to the same key are a [`SnapEntry::RegAnomaly`]: a key anomaly is never
+//!   opened or descended into, a value anomaly keeps the value `values` returned (it is never
+//!   addressed by its name). Anomalies with the same name under one key are a multiset. The
+//!   walk is bounded: [`MAX_KEY_DEPTH`] levels of subkeys and [`MAX_KEYS_WALKED`] keys in
+//!   all, beyond either `TooLarge` (the depth stops a cycle, the budget a fan-out).
 //!
 //! Shown in a diff but **not compared** (user decision E3): the allowlisted data tag of a
 //! file (WOF, dedup, cloud, [`Shown`]). `wof.sys` hides the WOF tag anyway (ADR 0007), so it
@@ -61,6 +68,15 @@ use crate::path::{RelPath, classify};
 /// level 1) is walked, one at level 65 is `TooLarge` with this limit. The depth bounds a walk
 /// that a cycle could make endless.
 pub const MAX_DEPTH: usize = 64;
+
+/// Maximum depth of subkeys below a key of the scope: a key 64 levels below it (a direct
+/// subkey is level 1) is walked, one at level 65 is `TooLarge` with this limit.
+pub const MAX_KEY_DEPTH: usize = 64;
+
+/// Most registry keys one snapshot walks (the keys of the scope included); one more is
+/// `TooLarge` with this limit. Symbolic-link keys are followed on reads (ADR 0009, ADR 0018
+/// open point), so a cycle through one ends at [`MAX_KEY_DEPTH`] and a wide tree here.
+pub const MAX_KEYS_WALKED: usize = 100_000;
 
 /// A value that a diff shows and a comparison ignores: two `Shown` are always equal (user
 /// decision E3, the data tag of a file).
@@ -236,6 +252,36 @@ pub enum SnapEntry {
         /// Typed value.
         value: RegValue,
     },
+    /// Registry key or value whose name cannot be used to address it (see [`RegWhy`]).
+    RegAnomaly {
+        /// Key or value.
+        kind: RegKind,
+        /// The name as `sys` returned it.
+        name: String,
+        /// Why it is an anomaly.
+        why: RegWhy,
+        /// The value as `values` returned it (`None` for a key).
+        value: Option<RegValue>,
+    },
+}
+
+/// What a [`SnapEntry::RegAnomaly`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegKind {
+    /// A subkey (never opened, never descended into).
+    Key,
+    /// A value.
+    Value,
+}
+
+/// Why a registry name is a [`SnapEntry::RegAnomaly`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegWhy {
+    /// The name holds U+FFFD: `sys` converted an unpaired surrogate, so the name does not
+    /// address the key or value on disk (user decision E1).
+    Lossy,
+    /// The name folds to the same key as another name of the same key.
+    Collides,
 }
 
 struct ShowAttrs<'a>(&'a Attrs);
@@ -330,6 +376,26 @@ impl fmt::Display for SnapEntry {
             }
             Self::Key { name } => write!(f, "key {name:?}"),
             Self::Value { name, value } => write!(f, "value {name:?} = {value}"),
+            Self::RegAnomaly {
+                kind,
+                name,
+                why,
+                value,
+            } => {
+                let kind = match kind {
+                    RegKind::Key => "key",
+                    RegKind::Value => "value",
+                };
+                let why = match why {
+                    RegWhy::Lossy => "lossy name",
+                    RegWhy::Collides => "colliding name",
+                };
+                write!(f, "anomaly {kind} {name:?} ({why})")?;
+                if let Some(v) = value {
+                    write!(f, " = {v}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -465,6 +531,24 @@ fn order_key(e: &SnapEntry) -> (String, Vec<u8>) {
             k.extend(len.to_be_bytes());
             (name.clone(), k)
         }
+        SnapEntry::RegAnomaly {
+            kind,
+            name,
+            why,
+            value,
+        } => {
+            let mut k = vec![
+                u8::from(*kind == RegKind::Key),
+                u8::from(*why == RegWhy::Lossy),
+            ];
+            // `RegValue` has no order; its exact type and bytes do.
+            if let Some((t, d)) = value.as_ref().and_then(RegValue::encode) {
+                k.push(1);
+                k.extend(t.to_be_bytes());
+                k.extend(d);
+            }
+            (name.clone(), k)
+        }
         other => (other.to_string(), Vec::new()),
     }
 }
@@ -489,8 +573,14 @@ pub fn snapshot(reg: &dyn Registry, scope: &Scope<'_>) -> SysResult<Snapshot> {
             Some(sub) => walk.sub(root.dir, sub)?,
         }
     }
+    let mut walked = 0;
     for key in &scope.keys {
-        walk_key(reg, key, key.path.clone(), &mut snap.entries)?;
+        let mut walk = KeyWalk {
+            reg,
+            walked: &mut walked,
+            out: &mut snap.entries,
+        };
+        walk.key(key, key.path.clone(), 0)?;
     }
     for list in snap.entries.values_mut() {
         list.sort_by_cached_key(order_key);
@@ -727,26 +817,106 @@ fn key_loc(k: &RegKey) -> String {
     format!("{}[{}]\\{}", k.hive, k.view, fold(&k.path))
 }
 
-fn walk_key(reg: &dyn Registry, key: &RegKey, name: String, out: &mut Entries) -> SysResult<()> {
-    let loc = key_loc(key);
-    if !reg.key_exists(key)? {
-        out.insert(Loc::Key(loc), vec![SnapEntry::Missing]);
-        return Ok(());
+/// The registry walk of one snapshot, with its key budget.
+struct KeyWalk<'w> {
+    reg: &'w dyn Registry,
+    walked: &'w mut usize,
+    out: &'w mut Entries,
+}
+
+/// The folded names of one enumeration, to tell which names cannot address what they name.
+struct NameCounts(BTreeMap<String, usize>);
+
+impl NameCounts {
+    fn of<'n>(names: impl Iterator<Item = &'n str>) -> Self {
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        for n in names {
+            *seen.entry(fold(n)).or_default() += 1;
+        }
+        Self(seen)
     }
-    out.insert(Loc::Key(loc.clone()), vec![SnapEntry::Key { name }]);
-    for (value_name, value) in reg.values(key)? {
-        out.insert(
-            Loc::Value(loc.clone(), fold(&value_name)),
-            vec![SnapEntry::Value {
-                name: value_name,
-                value,
-            }],
-        );
+
+    /// U+FFFD (lossy) first, then a name that folds to the same key as another one.
+    /// `Some(why)` for an anomaly.
+    fn why(&self, n: &str) -> Option<RegWhy> {
+        if n.contains('\u{FFFD}') {
+            Some(RegWhy::Lossy)
+        } else if self.0.get(&fold(n)).is_some_and(|&c| c > 1) {
+            Some(RegWhy::Collides)
+        } else {
+            None
+        }
     }
-    for sub in reg.subkeys(key)? {
-        walk_key(reg, &key.join(&sub), sub, out)?;
+}
+
+impl KeyWalk<'_> {
+    fn push(&mut self, loc: Loc, entry: SnapEntry) {
+        self.out.entry(loc).or_default().push(entry);
     }
-    Ok(())
+
+    /// The key `key` (named `name`, `depth` levels below a key of the scope) and everything
+    /// below it.
+    fn key(&mut self, key: &RegKey, name: String, depth: usize) -> SysResult<()> {
+        if depth > MAX_KEY_DEPTH {
+            return Err(SysError::too_large(
+                format!("{key}: subkeys nested deeper than the limit"),
+                MAX_KEY_DEPTH as u64,
+            ));
+        }
+        let loc = key_loc(key);
+        if !self.reg.key_exists(key)? {
+            self.push(Loc::Key(loc), SnapEntry::Missing);
+            return Ok(());
+        }
+        *self.walked += 1;
+        if *self.walked > MAX_KEYS_WALKED {
+            return Err(SysError::too_large(
+                format!("{key}: more registry keys than the limit"),
+                MAX_KEYS_WALKED as u64,
+            ));
+        }
+        self.push(Loc::Key(loc.clone()), SnapEntry::Key { name });
+        let values = self.reg.values(key)?;
+        let counts = NameCounts::of(values.iter().map(|(n, _)| n.as_str()));
+        for (value_name, value) in values {
+            match counts.why(&value_name) {
+                Some(why) => self.push(
+                    Loc::Value(loc.clone(), format!("\0{value_name}")),
+                    SnapEntry::RegAnomaly {
+                        kind: RegKind::Value,
+                        name: value_name,
+                        why,
+                        value: Some(value),
+                    },
+                ),
+                None => self.push(
+                    Loc::Value(loc.clone(), fold(&value_name)),
+                    SnapEntry::Value {
+                        name: value_name,
+                        value,
+                    },
+                ),
+            }
+        }
+        let subkeys = self.reg.subkeys(key)?;
+        let counts = NameCounts::of(subkeys.iter().map(String::as_str));
+        for sub in subkeys {
+            match counts.why(&sub) {
+                // Never opened: the name would address another key, or none.
+                Some(why) => self.push(
+                    Loc::Key(format!("{loc}\\\0{sub}")),
+                    SnapEntry::RegAnomaly {
+                        kind: RegKind::Key,
+                        name: sub,
+                        why,
+                        value: None,
+                    },
+                ),
+                None => self.key(&key.join(&sub), sub, depth + 1)?,
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

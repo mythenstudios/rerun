@@ -2194,6 +2194,231 @@ fn snapshot_roots_are_compared_by_identity_not_by_label() {
     );
 }
 
+/// A registry that hands out what another one has, but checks that the snapshot never
+/// addresses a name with U+FFFD, and can add a second spelling of every name (like a
+/// registry whose upcase table differs from ours).
+struct SpyRegistry<'a> {
+    inner: &'a dyn Registry,
+    doubled: bool,
+}
+
+impl SpyRegistry<'_> {
+    fn check(k: &RegKey) {
+        assert!(!k.path.contains('\u{FFFD}'), "addressed a lossy key {k}");
+    }
+}
+
+impl Registry for SpyRegistry<'_> {
+    fn key_exists(&self, k: &RegKey) -> SysResult<bool> {
+        Self::check(k);
+        self.inner.key_exists(k)
+    }
+    fn get(&self, k: &RegKey, name: &str) -> SysResult<Option<RegValue>> {
+        Self::check(k);
+        assert!(!name.contains('\u{FFFD}'), "addressed a lossy value");
+        self.inner.get(k, name)
+    }
+    fn values(&self, k: &RegKey) -> SysResult<Vec<(String, RegValue)>> {
+        Self::check(k);
+        let mut v = self.inner.values(k)?;
+        if self.doubled {
+            let upper: Vec<_> = v
+                .iter()
+                .map(|(n, x)| (n.to_uppercase(), x.clone()))
+                .collect();
+            v.extend(upper);
+        }
+        Ok(v)
+    }
+    fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
+        Self::check(k);
+        let mut v = self.inner.subkeys(k)?;
+        if self.doubled {
+            let upper: Vec<_> = v.iter().map(|n| n.to_uppercase()).collect();
+            v.extend(upper);
+        }
+        Ok(v)
+    }
+    fn create_key(&self, _: &RegKey) -> SysResult<bool> {
+        unreachable!("the snapshot only reads")
+    }
+    fn set(&self, _: &RegKey, _: &str, _: &RegValue) -> SysResult<()> {
+        unreachable!("the snapshot only reads")
+    }
+    fn delete_value(&self, _: &RegKey, _: &str) -> SysResult<()> {
+        unreachable!("the snapshot only reads")
+    }
+    fn delete_key(&self, _: &RegKey) -> SysResult<()> {
+        unreachable!("the snapshot only reads")
+    }
+}
+
+fn key_scope(key: &RegKey) -> Scope<'static> {
+    Scope {
+        dirs: vec![],
+        keys: vec![key.clone()],
+    }
+}
+
+/// Registry names with U+FFFD are anomalies (user decision E1): a lossy subkey is never
+/// opened, a lossy value keeps its data, two that list alike are a multiset.
+#[test]
+fn snapshot_records_lossy_registry_names_without_addressing_them() {
+    use crate::sys::contract::RegFixture as _;
+    let key = hkcu(r"Software\Lossy");
+    let sys = FakeSystem::builder().key(key.clone()).build().unwrap();
+    let fx = sys.fake_registry();
+    let (high, low) = ([0x61, 0xD800], [0x61, 0xDC00]);
+    assert!(fx.utf16_key(&key, &high).unwrap());
+    assert!(fx.utf16_key(&key, &low).unwrap());
+    assert!(
+        fx.utf16_value(&key, &high, reg_type::REG_DWORD, &[1, 0, 0, 0])
+            .unwrap()
+    );
+    assert!(
+        fx.utf16_value(&key, &low, reg_type::REG_DWORD, &[2, 0, 0, 0])
+            .unwrap()
+    );
+    let spy = SpyRegistry {
+        inner: sys.registry(),
+        doubled: false,
+    };
+    let before = snapshot(&spy, &key_scope(&key)).unwrap();
+    // The key, two key anomalies, two value anomalies.
+    assert_eq!(before.len(), 5);
+    let lines = before.diff(&Snapshot::default());
+    for want in [
+        "anomaly key \"a\u{FFFD}\" (lossy name)",
+        "anomaly value \"a\u{FFFD}\" (lossy name) = REG_DWORD 0x00000001",
+        "anomaly value \"a\u{FFFD}\" (lossy name) = REG_DWORD 0x00000002",
+    ] {
+        assert!(lines.iter().any(|l| l.contains(want)), "{want}: {lines:#?}");
+    }
+    assert_eq!(before, snapshot(&spy, &key_scope(&key)).unwrap());
+    // A change of one of them is one difference.
+    fx.utf16_value(&key, &low, reg_type::REG_DWORD, &[3, 0, 0, 0])
+        .unwrap();
+    let diff = before.diff(&snapshot(&spy, &key_scope(&key)).unwrap());
+    assert!(diff.len() == 1 && diff[0].starts_with('~'), "{diff:#?}");
+}
+
+/// Names that fold to the same key are anomalies and never opened.
+#[test]
+fn snapshot_records_colliding_registry_names() {
+    let key = hkcu(r"Software\Twice");
+    let sys = FakeSystem::builder()
+        .key(key.join("Sub"))
+        .value(key.clone(), "v", RegValue::Dword(1))
+        .build()
+        .unwrap();
+    let spy = SpyRegistry {
+        inner: sys.registry(),
+        doubled: true,
+    };
+    let snap = snapshot(&spy, &key_scope(&key)).unwrap();
+    let lines = snap.diff(&Snapshot::default());
+    assert_eq!(snap.len(), 5, "{lines:#?}");
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.contains("(colliding name)"))
+            .count(),
+        4,
+        "{lines:#?}"
+    );
+    // The colliding subkey was not descended into: no entry below it.
+    assert!(!lines.iter().any(|l| l.contains(r"SUB\")), "{lines:#?}");
+}
+
+/// The case of a value name and of a key name counts, an empty key differs from a missing one.
+#[test]
+fn snapshot_tells_registry_case_and_empty_keys_apart() {
+    let key = hkcu(r"Software\Case");
+    let sys = FakeSystem::builder()
+        .key(key.join("Child"))
+        .value(key.clone(), "Lang", RegValue::String("de".into()))
+        .build()
+        .unwrap();
+    let reg = sys.registry();
+    let take = || snapshot(reg, &key_scope(&key)).unwrap();
+    let before = take();
+    reg.delete_value(&key, "Lang").unwrap();
+    reg.set(&key, "LANG", &RegValue::String("de".into()))
+        .unwrap();
+    let diff = before.diff(&take());
+    assert!(diff.len() == 1 && diff[0].starts_with('~'), "{diff:#?}");
+    reg.delete_value(&key, "LANG").unwrap();
+    reg.set(&key, "Lang", &RegValue::String("de".into()))
+        .unwrap();
+    assert_eq!(before, take());
+
+    reg.delete_key(&key.join("Child")).unwrap();
+    reg.create_key(&key.join("CHILD")).unwrap();
+    let diff = before.diff(&take());
+    assert!(diff.len() == 1 && diff[0].starts_with('~'), "{diff:#?}");
+    reg.delete_key(&key.join("CHILD")).unwrap();
+    let diff = before.diff(&take());
+    assert!(diff.len() == 1 && diff[0].starts_with('-'), "{diff:#?}");
+    reg.create_key(&key.join("Child")).unwrap();
+    assert_eq!(before, take());
+}
+
+/// 64 levels of subkeys are walked, 65 are `TooLarge` with the limit.
+#[test]
+fn snapshot_registry_depth_is_capped() {
+    use crate::sys::snapshot::MAX_KEY_DEPTH;
+    let root = hkcu(r"Software\Deep");
+    let chain = |levels: usize| {
+        let mut k = root.clone();
+        for i in 0..levels {
+            k = k.join(&format!("k{i}"));
+        }
+        FakeSystem::builder().key(k).build().unwrap()
+    };
+    let sys = chain(MAX_KEY_DEPTH);
+    assert_eq!(
+        snapshot(sys.registry(), &key_scope(&root)).unwrap().len(),
+        MAX_KEY_DEPTH + 1
+    );
+    let sys = chain(MAX_KEY_DEPTH + 1);
+    let e = snapshot(sys.registry(), &key_scope(&root)).unwrap_err();
+    assert_eq!((e.kind, e.limit), (SysErrorKind::TooLarge, Some(64)), "{e}");
+}
+
+/// A broad tree without links: 100,000 keys are walked, one more is `TooLarge` with the
+/// limit (the budget stops a fan-out that the depth does not).
+#[test]
+fn snapshot_registry_walk_has_a_key_budget() {
+    use crate::sys::snapshot::MAX_KEYS_WALKED;
+    let root = hkcu(r"Software\Wide");
+    let sys = FakeSystem::builder().key(root.clone()).build().unwrap();
+    let reg = sys.registry();
+    let mut total = 1;
+    'fill: for i in 0.. {
+        let child = root.join(&format!("c{i}"));
+        reg.create_key(&child).unwrap();
+        total += 1;
+        for j in 0..1000 {
+            if total == MAX_KEYS_WALKED {
+                break 'fill;
+            }
+            reg.create_key(&child.join(&format!("g{j}"))).unwrap();
+            total += 1;
+        }
+    }
+    assert_eq!(
+        snapshot(reg, &key_scope(&root)).unwrap().len(),
+        MAX_KEYS_WALKED
+    );
+    reg.create_key(&root.join("one more")).unwrap();
+    let e = snapshot(reg, &key_scope(&root)).unwrap_err();
+    assert_eq!(
+        (e.kind, e.limit),
+        (SysErrorKind::TooLarge, Some(100_000)),
+        "{e}"
+    );
+}
+
 #[test]
 fn diff_is_readable() {
     let sys = game_system();
