@@ -6,12 +6,13 @@
 //!   the old state of every op and every source re-observed), then the transaction: op by op
 //!   intent, change, done; every op observed `After`; the changed game folders flushed;
 //!   `Applied`. Any error after `begin` rolls back at once on the same writer (the revert
-//!   loop), then the game folders are flushed and the transaction closed `RolledBack`; if the
-//!   rollback fails or meets a foreign state, the transaction stays open.
+//!   loop, which flushes the game folders an op changed before its `RevertDone`), then the
+//!   transaction is closed `RolledBack`; if the rollback fails or meets a foreign state, it
+//!   stays open.
 //! - [`revert`]: the one path for a revert, the recovery of an interrupted apply and (through
 //!   the same loop) the rollback: the head parsed from the bytes the writer read under the
 //!   lock, LIFO against later transactions, roots, Steam and `users()` again, then newest op
-//!   first: observe, `RevertIntent`, act, `RevertDone`. A foreign op is recorded `Foreign` and
+//!   first: observe, `RevertIntent`, act, flush, `RevertDone`. A foreign op is recorded `Foreign` and
 //!   left; the lower ops are still reverted (user decision D3, R1), and only `forget` closes.
 //! - [`verify`]: what each op of a transaction observes now, read only, without the lock;
 //!   also the preview before a revert (rule 5).
@@ -266,8 +267,9 @@ pub(crate) mod knob {
     pub(crate) enum GameFlush {
         /// Before `Applied`.
         BeforeApplied,
-        /// Before `Closed`.
-        BeforeClose,
+        /// Before each `RevertDone` of an op that changed something (and so before
+        /// `Closed`).
+        BeforeRevertDone,
     }
 
     thread_local! {
@@ -276,7 +278,7 @@ pub(crate) mod knob {
         static RESTORE_WITHOUT_ATTRS: Cell<bool> = const { Cell::new(false) };
     }
 
-    #[expect(dead_code, reason = "J6 against exec (crash_tests, P2-8 C5)")]
+    #[expect(dead_code, reason = "J6 against exec (crash_tests, next commit)")]
     pub(crate) fn skip(f: Option<GameFlush>) {
         SKIP.with(|s| s.set(f));
     }
@@ -322,7 +324,7 @@ fn flush_skipped(
     #[cfg(test)]
     return knob::skipped(match at {
         Flush::BeforeApplied => knob::GameFlush::BeforeApplied,
-        Flush::BeforeClose => knob::GameFlush::BeforeClose,
+        Flush::BeforeRevertDone => knob::GameFlush::BeforeRevertDone,
     });
     #[cfg(not(test))]
     false
@@ -332,7 +334,7 @@ fn flush_skipped(
 #[derive(Debug, Clone, Copy)]
 enum Flush {
     BeforeApplied,
-    BeforeClose,
+    BeforeRevertDone,
 }
 
 /// Applies the stored plan `h` (module docs).
@@ -427,7 +429,7 @@ fn rollback(
     if !foreign.is_empty() {
         return Err(ExecError::Foreign { ops: foreign });
     }
-    close(w, dirs)
+    close(w)
 }
 
 /// The ops whose `RevertDone` recorded `Foreign`, in this run or an earlier one: the
@@ -440,12 +442,9 @@ fn foreign_ops<W: Reverting>(w: &W) -> Vec<u16> {
         .collect()
 }
 
-/// Flushes the game folders (after every guard is dropped), then `Closed` by how far the
-/// transaction got.
-fn close<W: Reverting>(w: W, dirs: &mut Dirs<'_>) -> Result<(), ExecError> {
-    if !flush_skipped(Flush::BeforeClose) {
-        dirs.flush()?;
-    }
+/// `Closed` by how far the transaction got. Every change of the revert was flushed before its
+/// `RevertDone` (in [`revert_loop`]), so the game folders need no flush here.
+fn close<W: Reverting>(w: W) -> Result<(), ExecError> {
     let how = if w.is_applied() {
         Closing::Reverted
     } else {
@@ -456,7 +455,15 @@ fn close<W: Reverting>(w: W, dirs: &mut Dirs<'_>) -> Result<(), ExecError> {
 }
 
 /// Newest op first while one is left: observe, `RevertIntent` (with a temp name only when a
-/// restore starts, B2), act, `RevertDone`. A foreign op gets its records and is left (R1).
+/// restore starts, B2), act, flush the game folders the act changed, `RevertDone`. A foreign
+/// op gets its records and is left (R1).
+///
+/// The flush before `RevertDone` (found by T4): `RevertDone` is not flushed itself, but the
+/// flush of its own temp file makes the journal's volume log durable up to just before its
+/// rename, so a power loss can keep `RevertDone` while the change on the game's volume is
+/// lost; a recovery that then skips the op (the grammar allows no second revert of it) would
+/// trust the record alone. With the flush, a durable `RevertDone` has a durable change; it
+/// also covers `Closed`, which therefore needs no flush of its own.
 fn revert_loop<W: Reverting>(
     cx: &ExecCtx<'_>,
     plan: &Plan,
@@ -477,6 +484,9 @@ fn revert_loop<W: Reverting>(
         let y = seen.restore.then(|| w.tmp());
         w.revert_intent(k, y.clone())?;
         let done = file::act(plan, w, dirs, k, op, &seen, y)?;
+        if seen.changes() && !flush_skipped(Flush::BeforeRevertDone) {
+            dirs.flush()?;
+        }
         w.revert_done(k, seen.observed, done.old_left)?;
         reports.push(OpReport {
             op: k,
@@ -538,7 +548,7 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     } else {
         Closing::RolledBack
     };
-    close(w, &mut dirs)?;
+    close(w)?;
     Ok(RevertReport {
         txn: *t,
         closed: Some(how),

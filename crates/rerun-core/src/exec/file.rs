@@ -414,6 +414,11 @@ impl Seen {
         }
     }
 
+    /// The revert changes something on disk (an action or a restore).
+    pub(super) fn changes(&self) -> bool {
+        self.restore || !self.actions.is_empty()
+    }
+
     fn act(mut self, a: Action) -> Self {
         self.actions.push(a);
         self
