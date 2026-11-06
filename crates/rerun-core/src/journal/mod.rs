@@ -4,7 +4,7 @@
 //!
 //! - [`names`]: [`TxnId`] (`<seq>-<tag>`), [`InstanceTag`], the names in a transaction folder.
 //! - `record`: wire format 1 of a record (crate-internal), [`Observed`], [`Closing`],
-//!   [`BackupRef`].
+//!   [`Before`], [`Digest`].
 //! - `replay`: the grammar, pure; the reader and the writer share it.
 //! - `read`: [`Journal::list`] and [`Journal::load`], without the lock. The journal is
 //!   untrusted input: bounded reads, one written form, `Damaged` instead of guessing.
@@ -34,11 +34,11 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 
 pub use names::{InstanceTag, TxnId};
-pub use record::{BackupRef, Closing, FORMAT, Observed};
+pub use record::{Before, Closing, Digest, FORMAT, INLINE_MAX, Observed};
 pub use write::JournalLock;
+pub(crate) use write::{BeforeArg, Reverting, TxnWriter};
 #[cfg(test)]
 pub(crate) use write::{FlushSite, knob};
-pub(crate) use write::{Reverting, TxnWriter};
 
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{AppDir, AppSub, Create, RootError};
@@ -408,8 +408,8 @@ pub struct OpLog {
     pub intent: IntentRec,
     /// Its `Done`, if recorded.
     pub done: Option<DoneRec>,
-    /// The temp name of each `RevertIntent`, in order.
-    pub reverts: Vec<Option<TmpName>>,
+    /// Each `RevertIntent`, in order.
+    pub reverts: Vec<RevertRec>,
     /// Its `RevertDone`, if recorded.
     pub reverted: Option<RevertDoneRec>,
 }
@@ -419,15 +419,36 @@ pub struct OpLog {
 pub struct IntentRec {
     /// Temp name next to the target.
     pub tmp: Option<TmpName>,
-    /// Backup of the old content.
-    pub backup: Option<BackupRef>,
+    /// The old state its revert needs.
+    pub before: Option<Before>,
+}
+
+impl IntentRec {
+    /// The digest of the backup `op-NNNN.bin` this intent names, if any.
+    pub fn bin(&self) -> Option<Digest> {
+        match &self.before {
+            Some(Before::Bin(d)) => Some(*d),
+            Some(Before::Inline(_)) | None => None,
+        }
+    }
+}
+
+/// A `RevertIntent` record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevertRec {
+    /// Temp name of a restore.
+    pub tmp: Option<TmpName>,
+    /// A semantic revert's start (P2-11).
+    pub from: Option<Digest>,
+    /// A semantic revert's end (P2-11).
+    pub to: Option<Digest>,
 }
 
 /// A `Done` record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DoneRec {
-    /// File ID of what the op created.
-    pub file_id: u128,
+    /// File ID of what a file op created or wrote (`None` for keys and values).
+    pub file_id: Option<u128>,
     /// `<tmp>.old` was left behind.
     pub old_left: bool,
 }

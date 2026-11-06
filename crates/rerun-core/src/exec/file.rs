@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 
 use super::{Acted, ExecCtx, ExecError, Hint, roots};
 use crate::fold::fold;
-use crate::journal::{BackupRef, Observed, OpLog, Reverting, TxnWriter};
+use crate::journal::{Before, BeforeArg, Digest, Observed, OpLog, Reverting, TxnWriter};
 use crate::path::RelPath;
 use crate::plan::{ContentRef, Op, Plan, Target};
 use crate::policy::root::{AppSub, GameDir};
@@ -194,7 +194,7 @@ pub(super) fn apply_op(
             match parent.create_dir(&name) {
                 Ok(id) => {
                     hints.insert(k, Hint::Dir(id));
-                    w.done(k, id, false)?;
+                    w.done(k, Some(id), false)?;
                     Ok(())
                 }
                 Err(x) => {
@@ -220,7 +220,7 @@ pub(super) fn apply_op(
                 max_len: *len,
             };
             match parent.create_new(&name, &mut src, &new) {
-                Ok(wr) => Ok(w.done(k, wr.file_id, false)?),
+                Ok(wr) => Ok(w.done(k, Some(wr.file_id), false)?),
                 Err(x) => {
                     // `Busy` here is a collision at the final rename: someone else's file.
                     if matches!(x.kind, SysErrorKind::AlreadyExists | SysErrorKind::Busy) {
@@ -259,7 +259,7 @@ pub(super) fn apply_op(
             let mut src = pkg.open_read(file).map_err(&e)?;
             let b = w.backup(&mut *g)?;
             let x = w.tmp();
-            w.intent(k, Some(x.clone()), Some(b))?;
+            w.intent(k, Some(x.clone()), Some(BeforeArg::Backup(b)))?;
             let new = NewFile {
                 tmp: x,
                 attrs: *attrs,
@@ -267,7 +267,7 @@ pub(super) fn apply_op(
                 max_len: *len,
             };
             let r = g.replace(&old.sha256, &mut src, &new).map_err(&e)?;
-            w.done(k, r.new.file_id, r.old_left.is_some())?;
+            w.done(k, Some(r.new.file_id), r.old_left.is_some())?;
             Ok(())
         }
     }
@@ -443,24 +443,33 @@ impl Seen {
     }
 }
 
-/// The records of a file op fit its kind (condition 5): a `CreateDir` has neither temp name
-/// nor backup, a `CreateFile` a temp name and no backup, a `ReplaceFile` a temp name and the
-/// backup of exactly its old state; no revert of a non-replace names a temp file.
+/// The records of a file op fit its kind (condition 5; record form of P2-10a): a `CreateDir`
+/// has neither temp name nor old state, a `CreateFile` a temp name and no old state, a
+/// `ReplaceFile` a temp name and the backup (`Before::Bin`) of exactly its old state; no
+/// revert of a non-replace names a temp file; every `Done` has a file ID; no revert names
+/// `from`/`to` (no file op reverts semantically).
 pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
     let i = &log.intent;
-    let no_restore = log.reverts.iter().all(Option::is_none);
-    match op {
-        Op::CreateDir { .. } => i.tmp.is_none() && i.backup.is_none() && no_restore,
-        Op::CreateFile { .. } => i.tmp.is_some() && i.backup.is_none() && no_restore,
-        Op::ReplaceFile { old, .. } => {
-            i.tmp.is_some()
-                && i.backup
-                    == Some(BackupRef {
-                        sha256: old.sha256,
-                        len: old.len,
-                    })
+    let no_restore = log.reverts.iter().all(|r| r.tmp.is_none());
+    let not_semantic = log
+        .reverts
+        .iter()
+        .all(|r| r.from.is_none() && r.to.is_none());
+    let file_id = log.done.is_none_or(|d| d.file_id.is_some());
+    not_semantic
+        && file_id
+        && match op {
+            Op::CreateDir { .. } => i.tmp.is_none() && i.before.is_none() && no_restore,
+            Op::CreateFile { .. } => i.tmp.is_some() && i.before.is_none() && no_restore,
+            Op::ReplaceFile { old, .. } => {
+                i.tmp.is_some()
+                    && i.before
+                        == Some(Before::Bin(Digest {
+                            sha256: old.sha256,
+                            len: old.len,
+                        }))
+            }
         }
-    }
 }
 
 /// The folded names of the direct children of `dir` that later file ops of `plan` (after
@@ -512,7 +521,7 @@ pub(super) fn observe(
                 Vec::new()
             };
             let seen = see_dir(parent, &name, &allowed).map_err(&e)?;
-            let proven = log.done.map(|d| d.file_id).or(match hint {
+            let proven = log.done.and_then(|d| d.file_id).or(match hint {
                 Some(Hint::Dir(id)) => Some(id),
                 _ => None,
             });
@@ -579,7 +588,10 @@ fn trusted(op: &Op, log: &OpLog) -> Seen {
     };
     let s = Seen::new(Observed::After);
     match op {
-        Op::CreateDir { .. } => s.act(Action::RemoveDir(done.file_id)),
+        Op::CreateDir { .. } => match done.file_id {
+            Some(id) => s.act(Action::RemoveDir(id)),
+            None => Seen::new(Observed::Foreign),
+        },
         Op::CreateFile { content, .. } => s.act(Action::DeleteTarget(*content.sha256())),
         Op::ReplaceFile { .. } => Seen { restore: true, ..s },
     }
@@ -635,7 +647,7 @@ fn replace_seen(
     let x_rel = x.to_rel();
     let x_exists = exists(parent, &x_rel)?;
     // The restores, newest first; the first one with a trace decides (B2).
-    let restores: Vec<&TmpName> = log.reverts.iter().flatten().collect();
+    let restores: Vec<&TmpName> = log.reverts.iter().filter_map(|r| r.tmp.as_ref()).collect();
     let mut decided: Option<(usize, bool, Is)> = None;
     for (i, y) in restores.iter().enumerate().rev() {
         let ys = exists(parent, &y.to_rel())?;
@@ -822,7 +834,7 @@ pub(super) fn act<W: Reverting>(
         let b = w
             .ops()
             .get(&k)
-            .and_then(|l| l.intent.backup)
+            .and_then(|l| l.intent.bin())
             .ok_or_else(|| e(SysError::new(SysErrorKind::NotFound, "the backup")))?;
         let y = y.ok_or_else(|| {
             e(SysError::new(

@@ -5,8 +5,8 @@ use std::path::Path;
 
 use super::record::{self, Record};
 use super::{
-    BackupFault, Closing, Damage, InstanceTag, Journal, JournalError, JournalLock, Limits,
-    Observed, TxnId, TxnState, TxnView, TxnWriter, VerifyBackups,
+    BackupFault, BeforeArg, Closing, Damage, InstanceTag, Journal, JournalError, JournalLock,
+    Limits, Observed, TxnId, TxnState, TxnView, TxnWriter, VerifyBackups,
 };
 use crate::path::RelPath;
 use crate::policy::root::{AppDir, Create, RootError};
@@ -63,10 +63,10 @@ pub(super) fn apply2<'l>(lock: &'l JournalLock<'_>, g: &dyn DirWrite) -> TxnWrit
     let b = w.backup(&mut *guard).unwrap();
     drop(guard);
     let t0 = w.tmp();
-    w.intent(0, Some(t0), Some(b)).unwrap();
-    w.done(0, 7, false).unwrap();
+    w.intent(0, Some(t0), Some(BeforeArg::Backup(b))).unwrap();
+    w.done(0, Some(7), false).unwrap();
     w.intent(1, None, None).unwrap();
-    w.done(1, 8, true).unwrap();
+    w.done(1, Some(8), true).unwrap();
     w.applied(2).unwrap();
     w
 }
@@ -105,11 +105,12 @@ pub(crate) fn j1_round_trip(app: &AppDir<'_>, src: &dyn DirWrite, old: &[u8]) ->
     let b = w.backup(&mut *guard).unwrap_or_else(|e| panic!("{e}"));
     drop(guard);
     let (t0, t1, t2) = (w.tmp(), w.tmp(), w.tmp());
-    w.intent(0, Some(t0.clone()), Some(b)).unwrap();
+    w.intent(0, Some(t0.clone()), Some(BeforeArg::Backup(b)))
+        .unwrap();
     assert_eq!(state(&j, &id), TxnState::Open);
-    w.done(0, u128::MAX, false).unwrap();
+    w.done(0, Some(u128::MAX), false).unwrap();
     w.intent(1, None, None).unwrap();
-    w.done(1, 8, true).unwrap();
+    w.done(1, Some(8), true).unwrap();
     w.applied(2).unwrap();
     assert_eq!(state(&j, &id), TxnState::Applied);
     w.revert_intent(1, Some(t1.clone())).unwrap();
@@ -124,39 +125,46 @@ pub(crate) fn j1_round_trip(app: &AppDir<'_>, src: &dyn DirWrite, old: &[u8]) ->
     assert_eq!((v.head.as_deref(), v.anomaly.as_ref()), (Some(HEAD), None));
     let sha: [u8; 32] =
         sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(old)).into();
-    let backup = Some(record::BackupRef {
+    let before = Some(record::Before::Bin(record::Digest {
         sha256: sha,
         len: u64::try_from(old.len()).unwrap(),
-    });
+    }));
     assert_eq!(
         v.log,
         [
             Record::Intent {
                 op: 0,
                 tmp: Some(t0.clone()),
-                backup,
+                before,
             },
             Record::Done {
                 op: 0,
-                file_id: u128::MAX,
+                file_id: Some(u128::MAX),
                 old_left: false,
             },
             Record::Intent {
                 op: 1,
                 tmp: None,
-                backup: None,
+                before: None,
             },
             Record::Done {
                 op: 1,
-                file_id: 8,
+                file_id: Some(8),
                 old_left: true,
             },
             Record::Applied { ops: 2 },
             Record::RevertIntent {
                 op: 1,
                 tmp: Some(t1.clone()),
+                from: None,
+                to: None,
             },
-            Record::RevertIntent { op: 1, tmp: None },
+            Record::RevertIntent {
+                op: 1,
+                tmp: None,
+                from: None,
+                to: None,
+            },
             Record::RevertDone {
                 op: 1,
                 observed: Observed::After,
@@ -165,6 +173,8 @@ pub(crate) fn j1_round_trip(app: &AppDir<'_>, src: &dyn DirWrite, old: &[u8]) ->
             Record::RevertIntent {
                 op: 0,
                 tmp: Some(t2),
+                from: None,
+                to: None,
             },
             Record::RevertDone {
                 op: 0,
@@ -176,7 +186,14 @@ pub(crate) fn j1_round_trip(app: &AppDir<'_>, src: &dyn DirWrite, old: &[u8]) ->
             },
         ]
     );
-    assert_eq!(v.ops[&1].reverts, [Some(t1), None]);
+    assert_eq!(
+        v.ops[&1]
+            .reverts
+            .iter()
+            .map(|r| r.tmp.clone())
+            .collect::<Vec<_>>(),
+        [Some(t1), None]
+    );
     assert_eq!(v.ops[&0].intent.tmp, Some(t0));
     // The backup is the old content, under its op's name.
     let jd = app.dir().open_dir(&r(&format!(r"journal\{id}"))).unwrap();
@@ -226,7 +243,7 @@ fn j1_rollback_and_forget_paths() {
     let mut w = lock.begin(HEAD).unwrap();
     let id = *w.id();
     w.intent(0, None, None).unwrap();
-    w.done(0, 1, false).unwrap();
+    w.done(0, Some(1), false).unwrap();
     w.intent(1, None, None).unwrap();
     assert_eq!(w.next_revert(), Some(1));
     assert!(!w.is_applied());
@@ -266,7 +283,7 @@ fn j1_the_writer_refuses_what_the_reader_would_call_damaged() {
     let mut w = lock.begin(HEAD).unwrap();
     let id = *w.id();
     let order = |r: Result<(), JournalError>| matches!(r, Err(JournalError::Order(_)));
-    assert!(order(w.done(0, 1, false)));
+    assert!(order(w.done(0, Some(1), false)));
     assert!(order(w.intent(1, None, None)));
     assert!(order(w.applied(0)));
     assert!(order(w.revert_intent(0, None)));
@@ -278,9 +295,9 @@ fn j1_the_writer_refuses_what_the_reader_would_call_damaged() {
         order(w.intent(0, None, None)),
         "an intent without its backup"
     );
-    w.intent(0, None, Some(b)).unwrap();
+    w.intent(0, None, Some(BeforeArg::Backup(b))).unwrap();
     assert!(order(w.applied(1)), "op 0 is not done");
-    w.done(0, 1, false).unwrap();
+    w.done(0, Some(1), false).unwrap();
     w.applied(1).unwrap();
     assert!(order(w.intent(1, None, None)));
     drop(w);
@@ -319,6 +336,102 @@ fn j1_a_backup_that_reads_back_differently_is_refused_and_its_orphan_allowed() {
     w.revert_done(0, Observed::Before, false).unwrap_err();
     w.close(Closing::RolledBack).unwrap();
     assert_eq!(state(&j, &id), TxnState::Closed(Closing::RolledBack));
+}
+
+/// The record form of P2-10a: `backup_bytes` (a `.bin` from memory, read back), an inline
+/// old state, and `before_bytes` giving either back as checked bytes.
+#[test]
+fn j1_old_states_from_memory_inline_or_in_a_bin_come_back_checked() {
+    use super::{Before, Digest, INLINE_MAX, Reverting};
+    let sys = system();
+    let app = open_app(&sys);
+    let j = Journal::new(&app, InstanceTag::fixed(TAG));
+    let lock = j.lock().unwrap();
+    let mut w = lock.begin(HEAD).unwrap();
+    let id = *w.id();
+    let big = vec![0x5a; INLINE_MAX + 1];
+    let b = w.backup_bytes(&big).unwrap();
+    // An inline old state with a backup waiting for its intent is refused.
+    assert!(matches!(
+        w.intent(0, None, Some(BeforeArg::Inline(vec![1]))),
+        Err(JournalError::Order(_))
+    ));
+    w.intent(0, None, Some(BeforeArg::Backup(b))).unwrap();
+    w.done(0, None, false).unwrap();
+    // More than 16 KiB inline is against the grammar: the writer refuses it.
+    assert!(matches!(
+        w.intent(1, None, Some(BeforeArg::Inline(big.clone()))),
+        Err(JournalError::Order(_))
+    ));
+    w.intent(1, None, Some(BeforeArg::Inline(b"small".to_vec())))
+        .unwrap();
+    w.done(1, None, false).unwrap();
+    w.applied(2).unwrap();
+    assert_eq!(w.before_bytes(0, 1 << 20).unwrap(), big);
+    assert_eq!(w.before_bytes(1, 5).unwrap(), b"small");
+    assert!(matches!(
+        w.before_bytes(1, 4),
+        Err(JournalError::TooLarge { .. })
+    ));
+    drop(w);
+    let v = j.load(&id, VerifyBackups::Hash).unwrap();
+    assert_eq!(v.state, TxnState::Applied);
+    assert_eq!(
+        v.ops[&0].intent.before,
+        Some(Before::Bin(Digest {
+            sha256: sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(&big))
+                .into(),
+            len: u64::try_from(big.len()).unwrap(),
+        }))
+    );
+    assert_eq!(
+        v.ops[&1].intent.before,
+        Some(Before::Inline(b"small".to_vec()))
+    );
+    assert_eq!(v.ops[&1].done.map(|d| d.file_id), Some(None));
+    // After a resume the same; a swapped `.bin` (same length) is `BackupMismatch`.
+    let w = lock.resume(&id).unwrap();
+    // Through the trait the revert loop uses.
+    assert_eq!(Reverting::before_bytes(&w, 0, 1 << 20).unwrap(), big);
+    let bin = format!(r"{}\op-0000.bin", txn_dir(&id));
+    let mut swapped = big.clone();
+    swapped[0] ^= 1;
+    sys.fake_fs().remove_abs(Path::new(&bin)).unwrap();
+    sys.fake_fs().put_file(Path::new(&bin), &swapped).unwrap();
+    assert!(matches!(
+        w.before_bytes(0, 1 << 20),
+        Err(JournalError::BackupMismatch(0))
+    ));
+    // A longer one too (read with the intent's length as the limit).
+    sys.fake_fs().remove_abs(Path::new(&bin)).unwrap();
+    let mut longer = big.clone();
+    longer.push(0);
+    sys.fake_fs().put_file(Path::new(&bin), &longer).unwrap();
+    assert!(matches!(
+        w.before_bytes(0, 1 << 20),
+        Err(JournalError::BackupMismatch(0))
+    ));
+}
+
+#[test]
+fn j1_a_backup_from_memory_that_reads_back_differently_is_refused() {
+    let sys = system();
+    let app = open_app(&sys);
+    let j = Journal::new(&app, InstanceTag::fixed(TAG));
+    let lock = j.lock().unwrap();
+    let mut w = lock.begin(HEAD).unwrap();
+    let id = *w.id();
+    let bin = format!(r"{}\op-0000.bin", txn_dir(&id));
+    sys.fake_fs().on_step(move |fs, ev| {
+        if ev.op == FsOp::OpenRead && ev.name == "op-0000.bin" {
+            fs.put_file(Path::new(&bin), b"swapped").unwrap();
+        }
+    });
+    let e = w.backup_bytes(b"old value bytes").unwrap_err();
+    sys.fake_fs().clear_on_step();
+    assert!(matches!(e, JournalError::BackupMismatch(0)), "{e}");
+    drop(w);
+    assert_eq!(state(&j, &id), TxnState::Empty, "the orphan is allowed");
 }
 
 // ---------- J3: tampering ----------
@@ -528,8 +641,13 @@ fn j3_edited_removed_duplicated_and_planted_records() {
         (
             "valid record appended",
             Box::new(|s, d| {
-                let b = record::encode(6, &head_sha(), &Record::RevertIntent { op: 1, tmp: None })
-                    .unwrap();
+                let rec = Record::RevertIntent {
+                    op: 1,
+                    tmp: None,
+                    from: None,
+                    to: None,
+                };
+                let b = record::encode(6, &head_sha(), &rec).unwrap();
                 put(s, format!(r"{d}\0006.json"), &b);
             }),
             TxnState::Applied,
@@ -543,7 +661,7 @@ fn j3_edited_removed_duplicated_and_planted_records() {
                     &Record::Intent {
                         op: 2,
                         tmp: None,
-                        backup: None,
+                        before: None,
                     },
                 )
                 .unwrap();
@@ -552,6 +670,48 @@ fn j3_edited_removed_duplicated_and_planted_records() {
             damaged(Damage::Grammar {
                 n: 6,
                 why: "an intent after Applied",
+            }),
+        ),
+        (
+            "an inline old state over 16 KiB appended (P2-10a)",
+            Box::new(|s, d| {
+                let rec = Record::Intent {
+                    op: 2,
+                    tmp: None,
+                    before: Some(super::Before::Inline(vec![1; super::INLINE_MAX + 1])),
+                };
+                put(
+                    s,
+                    format!(r"{d}\0006.json"),
+                    &record::encode(6, &head_sha(), &rec).unwrap(),
+                );
+            }),
+            damaged(Damage::Grammar {
+                n: 6,
+                why: "an inline old state larger than 16 KiB",
+            }),
+        ),
+        (
+            "a revert intent with `from` and without `to` appended (P2-10a)",
+            Box::new(|s, d| {
+                let rec = Record::RevertIntent {
+                    op: 1,
+                    tmp: None,
+                    from: Some(super::Digest {
+                        sha256: [1; 32],
+                        len: 1,
+                    }),
+                    to: None,
+                };
+                put(
+                    s,
+                    format!(r"{d}\0006.json"),
+                    &record::encode(6, &head_sha(), &rec).unwrap(),
+                );
+            }),
+            damaged(Damage::Grammar {
+                n: 6,
+                why: "a revert intent with only one of from and to",
             }),
         ),
     ];
@@ -861,7 +1021,7 @@ fn j9_writer_budgets_refuse_before_writing() {
     let lock = j.lock().unwrap();
     let mut w = lock.begin(HEAD).unwrap();
     w.intent(0, None, None).unwrap();
-    w.done(0, 1, false).unwrap();
+    w.done(0, Some(1), false).unwrap();
     assert!(
         too_large(w.intent(1, None, None)),
         "op 1 would need 10 records"
@@ -882,7 +1042,7 @@ fn j9_writer_budgets_refuse_before_writing() {
     let lock = j.lock().unwrap();
     let mut w = lock.begin(HEAD).unwrap();
     w.intent(0, None, None).unwrap();
-    w.done(0, 1, false).unwrap();
+    w.done(0, Some(1), false).unwrap();
     w.applied(1).unwrap();
     w.revert_intent(0, None).unwrap();
     w.revert_intent(0, None).unwrap();
@@ -926,8 +1086,8 @@ fn j9_writer_budgets_refuse_before_writing() {
     let mut guard = g.guard(&r("a.bin")).unwrap();
     let b = w.backup(&mut *guard).unwrap();
     drop(guard);
-    w.intent(0, None, Some(b)).unwrap();
-    w.done(0, 1, false).unwrap();
+    w.intent(0, None, Some(BeforeArg::Backup(b))).unwrap();
+    w.done(0, Some(1), false).unwrap();
     let mut guard = g.guard(&r("b.bin")).unwrap();
     assert!(too_large(w.backup(&mut *guard).map(|_| ())));
     drop(guard);
@@ -1116,7 +1276,7 @@ fn a_backup_token_of_another_transaction_is_refused() {
     let b1 = w1.backup(&mut *guard).unwrap();
     drop(guard);
     assert!(matches!(
-        w2.intent(0, None, Some(b1)),
+        w2.intent(0, None, Some(BeforeArg::Backup(b1))),
         Err(JournalError::Order(_))
     ));
     assert_eq!(state(&j, w2.id()), TxnState::Empty);
@@ -1183,9 +1343,59 @@ impl RecordEdit {
         if let Record::Done { op, file_id, .. } = &mut self.0
             && *op == of
         {
-            *file_id = id;
+            *file_id = Some(id);
         }
     }
+
+    /// Drops the file ID of the `Done` of `op` (the form of a key or value op).
+    pub(crate) fn done_without_file_id(&mut self, of: u16) {
+        if let Record::Done { op, file_id, .. } = &mut self.0
+            && *op == of
+        {
+            *file_id = None;
+        }
+    }
+
+    /// Keeps the old state of the intent of `op` inline instead of in its `.bin`.
+    pub(crate) fn intent_inline(&mut self, of: u16, bytes: &[u8]) {
+        if let Record::Intent { op, before, .. } = &mut self.0
+            && *op == of
+        {
+            *before = Some(super::Before::Inline(bytes.to_vec()));
+        }
+    }
+}
+
+/// Appends a `RevertIntent` of `op` with `from` and `to` (a semantic revert, P2-11) as the
+/// next record of the transaction folder `dir`, consistent with its head.
+pub(crate) fn append_semantic_revert_intent(fx: &crate::sys::fake::FakeFs, dir: &str, op: u16) {
+    let read = |name: &str| -> Option<Vec<u8>> {
+        #[expect(clippy::disallowed_methods, reason = "test: read a fixture file")]
+        let d = fx.open_dir(Path::new(dir)).ok()?;
+        d.read(&r(name)).ok()
+    };
+    let head = read("head.json").unwrap();
+    let sha: [u8; 32] =
+        sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(&head)).into();
+    let mut n = 1u16;
+    while read(&format!("{n:04}.json")).is_some() {
+        n += 1;
+    }
+    let d = super::Digest {
+        sha256: [1; 32],
+        len: 1,
+    };
+    let rec = Record::RevertIntent {
+        op,
+        tmp: None,
+        from: Some(d),
+        to: Some(d),
+    };
+    fx.put_file(
+        &Path::new(dir).join(format!("{n:04}.json")),
+        &record::encode(n, &sha, &rec).unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]

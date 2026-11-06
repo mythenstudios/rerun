@@ -653,7 +653,7 @@ fn revert_loop<W: Reverting>(
             op: k,
             observed,
             left: done.left,
-            backup: (observed == Observed::Foreign && log.intent.backup.is_some()).then(|| {
+            backup: (observed == Observed::Foreign && log.intent.bin().is_some()).then(|| {
                 let p = format!(r"{}\journal\{}\op-{k:04}.bin", cx.app.path(), w.id());
                 crate::escape::path(&p).to_string()
             }),

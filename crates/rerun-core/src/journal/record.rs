@@ -6,6 +6,12 @@
 //! "unparsable") and accepts the bytes only if serialising the parsed record gives the same
 //! bytes, so every accepted file has exactly one form. No `flatten` (it does not work with
 //! `deny_unknown_fields`).
+//!
+//! The record form of P2-10a (ADR 0019 amendment), fixed once for P2-10 to P2-12: an intent
+//! keeps the old state its revert needs in [`Before`] (a file or a large old value in
+//! `op-NNNN.bin`, a small old value inline); `Done.file_id` is only for what has a file ID;
+//! `RevertIntent { from, to }` names the digests of a semantic revert (P2-11), both or
+//! neither, and is never written yet.
 
 use serde::{Deserialize, Serialize};
 
@@ -42,37 +48,52 @@ pub enum Closing {
     Forgotten,
 }
 
-/// The backup an intent names: `op-NNNN.bin` of its op, with hash and length.
+/// Content by its SHA-256 and length: a backup `op-NNNN.bin`, or the bytes a semantic revert
+/// starts from and ends in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BackupRef {
-    /// SHA-256 of the backup (the guard's hash of the old file).
+pub struct Digest {
+    /// SHA-256 of the content.
     #[serde(with = "crate::wire::hex32")]
     pub sha256: [u8; 32],
     /// Length in bytes.
     pub len: u64,
 }
 
+/// Most bytes of an old state kept inline in an intent (ADR 0019 budgets); more go to
+/// `op-NNNN.bin`. A larger inline value is against the grammar (`Damaged`).
+pub const INLINE_MAX: usize = 16 << 10;
+
+/// The old state an intent keeps for its revert.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Before {
+    /// In `op-NNNN.bin` of its op, with this digest (a replaced file, a large old value).
+    Bin(Digest),
+    /// In the record, as lower-case hex, at most [`INLINE_MAX`] bytes (a small old value).
+    Inline(#[serde(with = "crate::wire::hex_bytes")] Vec<u8>),
+}
+
 /// One record (ADR 0019 amendment). `op` is the index of the op in the head.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Record {
-    /// Before op `op` changes anything: its temp name and its backup.
+    /// Before op `op` changes anything: its temp name and the old state its revert needs.
     Intent {
         /// Op index.
         op: u16,
         /// Temp name the change uses next to its target.
         tmp: Option<TmpName>,
-        /// Backup of the old content.
-        backup: Option<BackupRef>,
+        /// The old state (`None`: the op creates its object).
+        before: Option<Before>,
     },
     /// Op `op` is done.
     Done {
         /// Op index.
         op: u16,
-        /// File ID of what the op created.
-        #[serde(with = "crate::wire::hex128")]
-        file_id: u128,
+        /// File ID of what a file op created or wrote (`None` for keys and values).
+        #[serde(with = "crate::wire::hex128_opt")]
+        file_id: Option<u128>,
         /// `<tmp>.old` was left behind (mapped as an image, ADR 0017).
         old_left: bool,
     },
@@ -87,6 +108,10 @@ pub(crate) enum Record {
         op: u16,
         /// Temp name the revert uses (a restore creates `<tmp>`).
         tmp: Option<TmpName>,
+        /// A semantic revert (P2-11): the content it starts from; with `to`, or neither.
+        from: Option<Digest>,
+        /// A semantic revert (P2-11): the content it writes; with `from`, or neither.
+        to: Option<Digest>,
     },
     /// The revert of op `op` is done.
     RevertDone {
@@ -156,7 +181,7 @@ pub(crate) fn decode(bytes: &[u8], n: u16, head: &[u8; 32]) -> Result<Record, Da
 
 #[cfg(test)]
 mod tests {
-    use super::{BackupRef, Closing, Observed, Record, decode, encode};
+    use super::{Before, Closing, Digest, Observed, Record, decode, encode};
     use crate::journal::Damage;
     use crate::sys::fs::TmpName;
 
@@ -165,25 +190,54 @@ mod tests {
             Record::Intent {
                 op: 0,
                 tmp: Some(TmpName::new(0xab, 1)),
-                backup: Some(BackupRef {
+                before: Some(Before::Bin(Digest {
                     sha256: [7; 32],
                     len: 3,
-                }),
+                })),
             },
             Record::Intent {
                 op: 1,
                 tmp: None,
-                backup: None,
+                before: None,
+            },
+            Record::Intent {
+                op: 2,
+                tmp: None,
+                before: Some(Before::Inline(vec![0, 0xab, 0xff])),
+            },
+            Record::Intent {
+                op: 3,
+                tmp: None,
+                before: Some(Before::Inline(Vec::new())),
             },
             Record::Done {
                 op: 0,
-                file_id: u128::MAX,
+                file_id: Some(u128::MAX),
                 old_left: true,
+            },
+            Record::Done {
+                op: 2,
+                file_id: None,
+                old_left: false,
             },
             Record::Applied { ops: 2 },
             Record::RevertIntent {
                 op: 1,
                 tmp: Some(TmpName::new(0xab, 2)),
+                from: None,
+                to: None,
+            },
+            Record::RevertIntent {
+                op: 1,
+                tmp: None,
+                from: Some(Digest {
+                    sha256: [1; 32],
+                    len: 0,
+                }),
+                to: Some(Digest {
+                    sha256: [2; 32],
+                    len: u64::MAX,
+                }),
             },
             Record::RevertDone {
                 op: 1,
@@ -217,6 +271,33 @@ mod tests {
                 r#"{{"format":1,"n":1,"head":"{}","record":{{"applied":{{"ops":2}}}}}}"#,
                 "09".repeat(32)
             )
+        );
+        // The wire form of the P2-10a fields.
+        let wire = |r: &Record| {
+            let b = encode(1, &head, r).unwrap();
+            let s = String::from_utf8(b).unwrap();
+            let at = s.find(r#""record":"#).unwrap() + 9;
+            s[at..s.len() - 1].to_owned()
+        };
+        let all = every_kind();
+        assert_eq!(
+            wire(&all[0]),
+            format!(
+                r#"{{"intent":{{"op":0,"tmp":".rerun-00000000000000ab-1.tmp","before":{{"bin":{{"sha256":"{}","len":3}}}}}}}}"#,
+                "07".repeat(32)
+            )
+        );
+        assert_eq!(
+            wire(&all[2]),
+            r#"{"intent":{"op":2,"tmp":null,"before":{"inline":"00abff"}}}"#
+        );
+        assert_eq!(
+            wire(&all[5]),
+            r#"{"done":{"op":2,"file_id":null,"old_left":false}}"#
+        );
+        assert_eq!(
+            wire(&all[7]),
+            r#"{"revert_intent":{"op":1,"tmp":".rerun-00000000000000ab-2.tmp","from":null,"to":null}}"#
         );
     }
 
@@ -277,7 +358,7 @@ mod tests {
                 &Record::Intent {
                     op: 0,
                     tmp: Some(TmpName::new(0xab, 1)),
-                    backup: None,
+                    before: Some(Before::Inline(vec![0xab])),
                 },
             )
             .unwrap(),
@@ -286,7 +367,12 @@ mod tests {
         for bad in [
             intent.replace(".rerun-00000000000000ab-1.tmp", r"..\\x"),
             intent.replace(".rerun-00000000000000ab-1.tmp", ".rerun-ab-1.tmp"),
-            intent.replace(r#","backup":null"#, ""),
+            intent.replace(r#","before":{"inline":"ab"}"#, ""),
+            intent.replace(r#"{"inline":"ab"}"#, "null,\"backup\":null"),
+            intent.replace(r#""inline":"ab""#, r#""inline":"AB""#),
+            intent.replace(r#""inline":"ab""#, r#""inline":"a""#),
+            intent.replace(r#""inline":"ab""#, r#""inline":[171]"#),
+            intent.replace(r#"{"inline":"ab"}"#, r#"{"bin":{"sha256":"ab","len":1}}"#),
         ] {
             assert_eq!(
                 decode(bad.as_bytes(), 1, &head),

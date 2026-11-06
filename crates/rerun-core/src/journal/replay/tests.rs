@@ -2,23 +2,23 @@
 
 use super::Machine;
 use crate::journal::TxnState;
-use crate::journal::record::{BackupRef, Closing, Observed, Record};
+use crate::journal::record::{Before, Closing, Digest, INLINE_MAX, Observed, Record};
 use crate::sys::fs::TmpName;
 
 fn i(op: u16) -> Record {
     Record::Intent {
         op,
         tmp: Some(TmpName::new(1, u64::from(op))),
-        backup: (op == 0).then_some(BackupRef {
+        before: (op == 0).then_some(Before::Bin(Digest {
             sha256: [1; 32],
             len: 1,
-        }),
+        })),
     }
 }
 fn d(op: u16) -> Record {
     Record::Done {
         op,
-        file_id: u128::from(op) + 1,
+        file_id: Some(u128::from(op) + 1),
         old_left: false,
     }
 }
@@ -26,7 +26,12 @@ fn a(ops: u16) -> Record {
     Record::Applied { ops }
 }
 fn ri(op: u16) -> Record {
-    Record::RevertIntent { op, tmp: None }
+    Record::RevertIntent {
+        op,
+        tmp: None,
+        from: None,
+        to: None,
+    }
 }
 fn rd(op: u16) -> Record {
     rdo(op, Observed::After)
@@ -271,19 +276,70 @@ fn j2_replay_keeps_the_records_of_each_op() {
     assert_eq!((m.intents(), m.records(), m.applied()), (2, 8, true));
     assert_eq!(m.next_revert(), Some(0));
     let op1 = &m.ops()[&1];
-    assert_eq!(op1.done.map(|x| x.file_id), Some(2));
-    assert_eq!(op1.reverts, vec![None, None]);
+    assert_eq!(op1.done.and_then(|x| x.file_id), Some(2));
+    assert_eq!(
+        op1.reverts
+            .iter()
+            .map(|r| r.tmp.clone())
+            .collect::<Vec<_>>(),
+        vec![None, None]
+    );
     assert_eq!(op1.reverted.map(|x| x.observed), Some(Observed::After));
     assert_eq!(
-        m.ops()[&0].intent.backup,
-        Some(BackupRef {
+        m.ops()[&0].intent.before,
+        Some(Before::Bin(Digest {
             sha256: [1; 32],
             len: 1
-        })
+        }))
     );
     // A refused record changes nothing.
     let before = format!("{m:?}");
     assert!(m.step(&i(2)).is_err());
     assert_eq!(format!("{m:?}"), before);
     assert_eq!(m.closed(), None);
+}
+
+/// The record contents of P2-10a: an inline old state up to 16 KiB, `from` and `to` of a
+/// revert intent both or neither (J test of the P2-10 plan: "`from` without `to` is a grammar
+/// error").
+#[test]
+fn j2_inline_old_states_and_semantic_revert_intents() {
+    let inline = |n: usize| Record::Intent {
+        op: 0,
+        tmp: None,
+        before: Some(Before::Inline(vec![7; n])),
+    };
+    let mut m = Machine::default();
+    assert_eq!(
+        m.step(&inline(INLINE_MAX + 1)),
+        Err("an inline old state larger than 16 KiB")
+    );
+    m.step(&inline(INLINE_MAX)).unwrap();
+    m.step(&d(0)).unwrap();
+    m.step(&a(1)).unwrap();
+    let dg = Digest {
+        sha256: [3; 32],
+        len: 3,
+    };
+    for (from, to) in [(Some(dg), None), (None, Some(dg))] {
+        let r = Record::RevertIntent {
+            op: 0,
+            tmp: None,
+            from,
+            to,
+        };
+        assert_eq!(
+            m.check(&r),
+            Err("a revert intent with only one of from and to")
+        );
+    }
+    // Both is grammatical (`exec` refuses it for every op kind of P2-10, `records_fit`).
+    m.step(&Record::RevertIntent {
+        op: 0,
+        tmp: None,
+        from: Some(dg),
+        to: Some(dg),
+    })
+    .unwrap();
+    assert_eq!(m.ops()[&0].reverts[0].from, Some(dg));
 }

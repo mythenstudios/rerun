@@ -750,6 +750,57 @@ pub(crate) fn t6_check(case: &T6Case) -> Vec<String> {
     f
 }
 
+/// T5, the record form of P2-10a: records that are grammatical but do not fit a file op are
+/// `Blocked` for revert and verify, nothing written: a `RevertIntent` with `from`/`to` (a
+/// semantic revert, no op kind of P2-10 has one), a `Done` without a file ID, a replace whose
+/// old state is kept inline instead of in its backup.
+#[test]
+fn t5_records_of_another_form_than_the_op_kind_are_blocked() {
+    use crate::journal::tests::{append_semantic_revert_intent, rewrite};
+    type Tamper = fn(&Env, &str);
+    let cases: [(&str, Tamper); 3] = [
+        ("from/to", |env, dir| {
+            append_semantic_revert_intent(env.sys.fake_fs(), dir, 4);
+        }),
+        ("no file ID", |env, dir| {
+            rewrite(env.sys.fake_fs(), dir, None, |e| e.done_without_file_id(3));
+        }),
+        ("inline old state", |env, dir| {
+            rewrite(env.sys.fake_fs(), dir, None, |e| e.intent_inline(0, OLD));
+            env.sys
+                .fake_fs()
+                .remove_abs(Path::new(&format!(r"{dir}\op-0000.bin")))
+                .unwrap();
+        }),
+    ];
+    for (what, tamper) in cases {
+        let env = Env::new(finish(base()));
+        let t = env.applied(&env.plan(&t1_spec()));
+        let dir = env.txn_dir(&t);
+        tamper(&env, &dir);
+        let after = env.snap();
+        let n = rewrite(env.sys.fake_fs(), &dir, None, |_| {});
+        assert!(
+            matches!(
+                env.try_verify(&t),
+                Err(ExecError::Refused(Refusal::Blocked { .. }))
+            ),
+            "{what}: verify"
+        );
+        let r = env.revert(&t);
+        assert!(
+            matches!(&r, Err(ExecError::Refused(Refusal::Blocked { .. }))),
+            "{what}: {r:?}"
+        );
+        same(&after, &env.snap());
+        assert_eq!(
+            rewrite(env.sys.fake_fs(), &dir, None, |_| {}),
+            n,
+            "{what}: no record written"
+        );
+    }
+}
+
 #[test]
 fn t6_a_foreign_state_is_left_with_its_backup_and_only_forget_closes() {
     for case in &T6_CASES {

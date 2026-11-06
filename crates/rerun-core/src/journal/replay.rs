@@ -13,6 +13,8 @@
 //! - `RevertIntent(k)` for the highest intended op without `RevertDone` (descending, the op
 //!   whose intent came last first); repeatable (after a crash) until `RevertDone(k)`.
 //! - `RevertDone(k)` directly after `RevertIntent(k)`.
+//! - Record contents (P2-10a): an inline old state at most [`INLINE_MAX`] bytes; a
+//!   `RevertIntent` names both `from` and `to` or neither.
 //! - `Closed { RolledBack }` only without `Applied`, `Closed { Reverted }` only after it; both
 //!   only when every intended op has its `RevertDone` and none observed `Foreign` (ADR 0020,
 //!   D10). `Closed { Forgotten }` at any time.
@@ -20,9 +22,8 @@
 
 use std::collections::BTreeMap;
 
-use super::record::{BackupRef, Closing, Observed, Record};
-use super::{DoneRec, IntentRec, OpLog, RevertDoneRec, TxnState};
-use crate::sys::fs::TmpName;
+use super::record::{Before, Closing, INLINE_MAX, Observed, Record};
+use super::{DoneRec, IntentRec, OpLog, RevertDoneRec, RevertRec, TxnState};
 
 /// The record before the next one, as far as the grammar needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +97,18 @@ impl Machine {
         }
         let all_done = self.ops.values().all(|o| o.done.is_some());
         match *r {
+            Record::Intent {
+                before: Some(Before::Inline(ref v)),
+                ..
+            } if v.len() > INLINE_MAX => {
+                return Err("an inline old state larger than 16 KiB");
+            }
+            Record::RevertIntent { from, to, .. } if from.is_some() != to.is_some() => {
+                return Err("a revert intent with only one of from and to");
+            }
+            _ => {}
+        }
+        match *r {
             Record::Intent { op, .. } => {
                 if self.applied {
                     return Err("an intent after Applied");
@@ -165,8 +178,9 @@ impl Machine {
         self.check(r)?;
         self.last = Some(Last::Other);
         match r {
-            Record::Intent { op, tmp, backup } => {
-                self.ops.insert(*op, OpLog::new(tmp.clone(), *backup));
+            Record::Intent { op, tmp, before } => {
+                self.ops
+                    .insert(*op, OpLog::new(tmp.clone(), before.clone()));
                 self.last = Some(Last::Intent(*op));
             }
             Record::Done {
@@ -182,10 +196,14 @@ impl Machine {
                 }
             }
             Record::Applied { .. } => self.applied = true,
-            Record::RevertIntent { op, tmp } => {
+            Record::RevertIntent { op, tmp, from, to } => {
                 self.reverting = true;
                 if let Some(o) = self.ops.get_mut(op) {
-                    o.reverts.push(tmp.clone());
+                    o.reverts.push(RevertRec {
+                        tmp: tmp.clone(),
+                        from: *from,
+                        to: *to,
+                    });
                 }
                 self.last = Some(Last::RevertIntent(*op));
             }
@@ -210,9 +228,9 @@ impl Machine {
 }
 
 impl OpLog {
-    fn new(tmp: Option<TmpName>, backup: Option<BackupRef>) -> Self {
+    fn new(tmp: Option<crate::sys::fs::TmpName>, before: Option<Before>) -> Self {
         Self {
-            intent: IntentRec { tmp, backup },
+            intent: IntentRec { tmp, before },
             done: None,
             reverts: Vec::new(),
             reverted: None,

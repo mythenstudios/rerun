@@ -1,8 +1,9 @@
 //! Wire helpers for the durable JSON formats (journal records, ADR 0019; plans, ADR 0020).
 //!
-//! - [`hex32`] and [`hex128`]: `#[serde(with = …)]` modules for a SHA-256 and a 128-bit file
-//!   ID as lower-case hex strings of exactly 64 and 32 digits (no JSON number above 2^53,
-//!   ADR 0020). Parsing accepts exactly what is written.
+//! - [`hex32`] and [`hex128_opt`]: `#[serde(with = …)]` modules for a SHA-256 and an optional
+//!   128-bit file ID as lower-case hex strings of exactly 64 and 32 digits (or `null`; no JSON
+//!   number above 2^53, ADR 0020); [`hex_bytes`] a byte string as lower-case hex, two digits
+//!   per byte. Parsing accepts exactly what is written.
 //! - [`TmpName`] serialises as its name and parses back only through [`TmpName::parse`].
 //! - [`RelPath`] and [`RootPath`] serialise as their backslash-separated string and parse back
 //!   through [`RelPath::parse`] and [`RootPath::new`] (every lexical rule again); a plan's
@@ -59,22 +60,60 @@ pub(crate) mod hex32 {
     }
 }
 
-/// A 128-bit file ID as 32 lower-case hex digits.
-pub(crate) mod hex128 {
+/// An optional 128-bit file ID: `null` or exactly 32 lower-case hex digits.
+pub(crate) mod hex128_opt {
     use serde::de::Error as _;
 
     use super::{Deserialize, Deserializer, Serializer};
 
-    /// Serialises `v` as 32 lower-case hex digits.
-    pub(crate) fn serialize<S: Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&format!("{v:032x}"))
+    /// Serialises `None` as `null`, `Some(v)` as 32 lower-case hex digits.
+    pub(crate) fn serialize<S: Serializer>(v: &Option<u128>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) => s.serialize_str(&format!("{v:032x}")),
+            None => s.serialize_none(),
+        }
     }
 
-    /// Parses exactly 32 lower-case hex digits.
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u128, D::Error> {
+    /// Parses `null` or exactly 32 lower-case hex digits.
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u128>, D::Error> {
+        Option::<String>::deserialize(d)?
+            .map(|s| {
+                super::parse_hex(&s, 32)
+                    .ok_or_else(|| D::Error::custom("expected 32 lower-case hex digits"))
+            })
+            .transpose()
+    }
+}
+
+/// A byte string as lower-case hex, two digits per byte (ADR 0020: no JSON arrays of numbers
+/// for bytes). The caller bounds the input (a record is read with a limit).
+pub(crate) mod hex_bytes {
+    use serde::de::Error as _;
+
+    use super::{Deserialize, Deserializer, Serializer};
+
+    /// Serialises `v` as lower-case hex.
+    pub(crate) fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.iter().map(|b| format!("{b:02x}")).collect::<String>())
+    }
+
+    /// Parses an even number of lower-case hex digits.
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let s = String::deserialize(d)?;
-        super::parse_hex(&s, 32)
-            .ok_or_else(|| D::Error::custom("expected 32 lower-case hex digits"))
+        from_str(&s).ok_or_else(|| D::Error::custom("expected lower-case hex bytes"))
+    }
+
+    /// Parses an even number of lower-case hex digits.
+    pub(crate) fn from_str(s: &str) -> Option<Vec<u8>> {
+        if !s.len().is_multiple_of(2) {
+            return None;
+        }
+        (0..s.len() / 2)
+            .map(|i| {
+                let pair = s.get(i * 2..i * 2 + 2)?;
+                u8::try_from(super::parse_hex(pair, 2)?).ok()
+            })
+            .collect()
     }
 }
 
@@ -196,6 +235,15 @@ mod tests {
             assert_eq!(parse_hex(bad, bad.len()), None, "{bad}");
         }
         assert_eq!(parse_hex(&"f".repeat(32), 32), Some(u128::MAX));
+        // Byte strings (P2-10a): even, lower-case, exactly.
+        assert_eq!(super::hex_bytes::from_str(""), Some(Vec::new()));
+        assert_eq!(
+            super::hex_bytes::from_str("00ff10"),
+            Some(vec![0, 0xff, 0x10])
+        );
+        for bad in ["0", "0F", "+f", " f", "0g", "fff"] {
+            assert_eq!(super::hex_bytes::from_str(bad), None, "{bad}");
+        }
     }
 
     #[test]

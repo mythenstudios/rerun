@@ -9,10 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 
 use super::names::{self, HEAD, TxnEntry};
-use super::record::{self, BackupRef};
+use super::record::{self, Digest};
 use super::replay::Machine;
 use super::{
     BackupFault, Damage, JournalError, Limits, Listed, Listing, TxnId, TxnState, TxnView,
@@ -285,13 +285,13 @@ fn check_backups(
 ) -> Result<Option<Damage>, JournalError> {
     let ops = m.ops();
     for op in bins.keys() {
-        let named = ops.get(op).is_some_and(|o| o.intent.backup.is_some());
+        let named = ops.get(op).is_some_and(|o| o.intent.bin().is_some());
         let orphan = !ops.contains_key(op) && *op == m.intents();
         if !named && !orphan {
             return Ok(Some(Damage::UnknownEntry));
         }
     }
-    for (op, b) in ops.iter().filter_map(|(k, o)| Some((*k, o.intent.backup?))) {
+    for (op, b) in ops.iter().filter_map(|(k, o)| Some((*k, o.intent.bin()?))) {
         let Some(len) = bins.get(&op) else {
             return Ok(Some(Damage::Backup {
                 op,
@@ -315,7 +315,7 @@ fn check_backups(
 }
 
 /// Streams at most `b.len + 1` bytes of `name` and compares hash and length.
-fn hash_matches(dir: &dyn Dir, name: &RelPath, b: &BackupRef) -> Result<bool, JournalError> {
+fn hash_matches(dir: &dyn Dir, name: &RelPath, b: &Digest) -> Result<bool, JournalError> {
     let reader = match dir.open_read(name) {
         Ok(r) => r,
         Err(e) if e.kind == SysErrorKind::NotFound => return Ok(false),

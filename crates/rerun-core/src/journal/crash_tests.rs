@@ -87,15 +87,19 @@ fn script(
     let b = w.backup(&mut *guard)?;
     drop(guard);
     let t0 = w.tmp();
-    w.intent(0, Some(t0.clone()), Some(b))?;
+    w.intent(
+        0,
+        Some(t0.clone()),
+        Some(crate::journal::BeforeArg::Backup(b)),
+    )?;
     p.flushed = 1;
     let id0 = change(0, t0)?;
-    w.done(0, id0, false)?;
+    w.done(0, Some(id0), false)?;
     let t1 = w.tmp();
     w.intent(1, Some(t1.clone()), None)?;
     p.flushed = 3;
     let id1 = change(1, t1)?;
-    w.done(1, id1, false)?;
+    w.done(1, Some(id1), false)?;
     game_flush(Site::GameBeforeApplied)?;
     w.applied(2)?;
     p.flushed = 5;

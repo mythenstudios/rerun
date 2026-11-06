@@ -12,11 +12,11 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 
 use super::names::{self, HEAD, LOCK, MAX_SEQ};
 use super::read;
-use super::record::{self, BackupRef, Closing, Observed, Record};
+use super::record::{self, Before, Closing, Digest, Observed, Record};
 use super::replay::Machine;
 use super::{Journal, JournalError, Limits, OpLog, TxnId, TxnState, VerifyBackups, reparse};
 use crate::path::RootPath;
@@ -208,12 +208,24 @@ pub(crate) mod knob {
     }
 }
 
-/// The token of a backup taken by [`TxnWriter::backup`]; only its intent consumes it.
+/// The token of a backup taken by [`TxnWriter::backup`] or [`TxnWriter::backup_bytes`]; only
+/// its intent consumes it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Backup {
     op: u16,
     sha256: [u8; 32],
     len: u64,
+}
+
+/// The old state an intent keeps ([`Before`]): a backup taken for it, or the bytes inline
+/// (at most [`record::INLINE_MAX`]; the grammar refuses more).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BeforeArg {
+    /// The backup `op-NNNN.bin` of the op.
+    Backup(Backup),
+    /// The bytes, in the record.
+    #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
+    Inline(Vec<u8>),
 }
 
 /// One open transaction.
@@ -310,12 +322,15 @@ impl<'l> Txn<'l> {
         need <= u32::from(self.lock.lim.records)
     }
 
-    fn backup(&mut self, g: &mut dyn FileGuard) -> Result<Backup, JournalError> {
+    /// The checks of a backup of `len` bytes for the next op, before anything is written:
+    /// the grammar allows its intent, no other backup waits for its intent, the record budget
+    /// holds the intent and a full revert, the per-file and per-transaction budgets hold it.
+    fn backup_allowed(&self, len: u64) -> Result<u16, JournalError> {
         let op = self.m.intents();
         let probe = Record::Intent {
             op,
             tmp: None,
-            backup: None,
+            before: None,
         };
         self.m.check(&probe).map_err(JournalError::Order)?;
         if self.pending.is_some() {
@@ -328,7 +343,6 @@ impl<'l> Txn<'l> {
             });
         }
         let lim = &self.lock.lim;
-        let len = g.metadata()?.len;
         if len > lim.backup {
             return Err(JournalError::TooLarge {
                 what: "a backup",
@@ -342,7 +356,19 @@ impl<'l> Txn<'l> {
                 limit: lim.backups,
             });
         }
-        let sha256 = g.sha256()?;
+        Ok(op)
+    }
+
+    /// Writes `op-NNNN.bin` of `op` from `src` with `create_new` (`sha256` and `len` the
+    /// expected ones), then reads it back and compares: proves the content, not its
+    /// durability (the intent's flush does that).
+    fn backup_from(
+        &mut self,
+        op: u16,
+        src: &mut dyn Read,
+        sha256: [u8; 32],
+        len: u64,
+    ) -> Result<Backup, JournalError> {
         let name = names::backup_name(op);
         let new = NewFile {
             tmp: self.lock.tmp(),
@@ -350,12 +376,8 @@ impl<'l> Txn<'l> {
             sha256,
             max_len: len,
         };
-        {
-            let mut src = g.reader()?;
-            self.dir.create_new(&name, &mut *src, &new)?;
-        }
+        self.dir.create_new(&name, src, &new)?;
         self.pending = Some(op);
-        // Read back: proves the content, not its durability (the intent's flush does that).
         let reader = self.dir.open_read(&name)?;
         let back = read::stream_hash(reader.take(len.saturating_add(1)), &name)?;
         if back != (sha256, len) {
@@ -365,28 +387,47 @@ impl<'l> Txn<'l> {
         Ok(Backup { op, sha256, len })
     }
 
+    fn backup(&mut self, g: &mut dyn FileGuard) -> Result<Backup, JournalError> {
+        let len = g.metadata()?.len;
+        let op = self.backup_allowed(len)?;
+        let sha256 = g.sha256()?;
+        let mut src = g.reader()?;
+        self.backup_from(op, &mut *src, sha256, len)
+    }
+
+    #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
+    fn backup_bytes(&mut self, data: &[u8]) -> Result<Backup, JournalError> {
+        let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        let op = self.backup_allowed(len)?;
+        let sha256: [u8; 32] = Sha256::digest(data).into();
+        self.backup_from(op, &mut &data[..], sha256, len)
+    }
+
     fn intent(
         &mut self,
         op: u16,
         tmp: Option<TmpName>,
-        b: Option<Backup>,
+        before: Option<BeforeArg>,
     ) -> Result<(), JournalError> {
-        match (&b, self.pending) {
-            (Some(b), pending) if b.op != op || pending != Some(b.op) => {
+        match (&before, self.pending) {
+            (Some(BeforeArg::Backup(b)), pending) if b.op != op || pending != Some(b.op) => {
                 return Err(JournalError::Order(
                     "the backup belongs to another op or transaction",
                 ));
             }
-            (None, Some(_)) => {
+            (None | Some(BeforeArg::Inline(_)), Some(_)) => {
                 return Err(JournalError::Order("an intent without its backup"));
             }
             _ => {}
         }
-        let backup = b.map(|b| BackupRef {
-            sha256: b.sha256,
-            len: b.len,
+        let before = before.map(|b| match b {
+            BeforeArg::Backup(b) => Before::Bin(Digest {
+                sha256: b.sha256,
+                len: b.len,
+            }),
+            BeforeArg::Inline(v) => Before::Inline(v),
         });
-        self.write(&Record::Intent { op, tmp, backup }, Some(FlushSite::Intent))?;
+        self.write(&Record::Intent { op, tmp, before }, Some(FlushSite::Intent))?;
         self.pending = None;
         Ok(())
     }
@@ -396,10 +437,52 @@ impl<'l> Txn<'l> {
             // The orphan backup of an op that never got its intent stays allowed (B1).
             self.pending = None;
         }
-        self.write(
-            &Record::RevertIntent { op, tmp },
-            Some(FlushSite::RevertIntent),
-        )
+        // `from`/`to` (semantic reverts) come with P2-11; no op kind of P2-10 has them.
+        let rec = Record::RevertIntent {
+            op,
+            tmp,
+            from: None,
+            to: None,
+        };
+        self.write(&rec, Some(FlushSite::RevertIntent))
+    }
+
+    /// The old state of `op` as bytes, at most `max`: inline from its intent, or
+    /// `op-NNNN.bin` read whole (bounded) and checked against the intent's digest (else
+    /// `BackupMismatch`), so what is used is what was checked (no TOCTOU).
+    #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
+    fn before_bytes(&self, op: u16, max: u64) -> Result<Vec<u8>, JournalError> {
+        let too_large = || JournalError::TooLarge {
+            what: "an old state",
+            limit: max,
+        };
+        match self.m.ops().get(&op).and_then(|o| o.intent.before.as_ref()) {
+            None => Err(JournalError::Order("an op without an old state")),
+            Some(Before::Inline(v)) => {
+                if u64::try_from(v.len()).unwrap_or(u64::MAX) > max {
+                    return Err(too_large());
+                }
+                Ok(v.clone())
+            }
+            Some(Before::Bin(d)) => {
+                if d.len > max {
+                    return Err(too_large());
+                }
+                let bytes = match self.dir.read_limited(&names::backup_name(op), d.len) {
+                    Ok(b) => b,
+                    Err(e) if e.kind == SysErrorKind::TooLarge => {
+                        return Err(JournalError::BackupMismatch(op));
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                let sha: [u8; 32] = Sha256::digest(&bytes).into();
+                let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                if sha != d.sha256 || len != d.len {
+                    return Err(JournalError::BackupMismatch(op));
+                }
+                Ok(bytes)
+            }
+        }
     }
 }
 
@@ -494,6 +577,14 @@ macro_rules! common {
             ) -> Result<Box<dyn Read + '_>, JournalError> {
                 Ok(Box::new(self.t.dir.open_read(&names::backup_name(op))?))
             }
+
+            /// The old state of `op` as bytes, at most `max` (old registry values): inline,
+            /// or `op-NNNN.bin` read whole and checked against the intent (else
+            /// `BackupMismatch`); the bytes returned are the bytes checked.
+            #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
+            pub(crate) fn before_bytes(&self, op: u16, max: u64) -> Result<Vec<u8>, JournalError> {
+                self.t.before_bytes(op, max)
+            }
         }
 
         impl Reverting for $ty<'_> {
@@ -526,6 +617,9 @@ macro_rules! common {
             fn backup_reader(&self, op: u16) -> Result<Box<dyn Read + '_>, JournalError> {
                 $ty::backup_reader(self, op)
             }
+            fn before_bytes(&self, op: u16, max: u64) -> Result<Vec<u8>, JournalError> {
+                $ty::before_bytes(self, op, max)
+            }
             fn close(self, how: Closing) -> Result<(), JournalError> {
                 $ty::close(self, how)
             }
@@ -557,6 +651,9 @@ pub(crate) trait Reverting {
     ) -> Result<(), JournalError>;
     /// The backup of `op`.
     fn backup_reader(&self, op: u16) -> Result<Box<dyn Read + '_>, JournalError>;
+    /// The old state of `op` as checked bytes, at most `max`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
+    fn before_bytes(&self, op: u16, max: u64) -> Result<Vec<u8>, JournalError>;
     /// `Closed`; flushed.
     fn close(self, how: Closing) -> Result<(), JournalError>
     where
@@ -574,21 +671,29 @@ impl TxnWriter<'_> {
         self.t.backup(g)
     }
 
-    /// Before op `op` changes anything: its temp name and backup; flushed.
+    /// Writes `data` as `op-NNNN.bin` of the next op (an old registry value above
+    /// [`record::INLINE_MAX`]), with the budgets of [`Self::backup`], reads it back and
+    /// compares hash and length. The token goes into that op's [`Self::intent`].
+    #[cfg_attr(not(test), expect(dead_code, reason = "old registry values, P2-10b"))]
+    pub(crate) fn backup_bytes(&mut self, data: &[u8]) -> Result<Backup, JournalError> {
+        self.t.backup_bytes(data)
+    }
+
+    /// Before op `op` changes anything: its temp name and old state; flushed.
     pub(crate) fn intent(
         &mut self,
         op: u16,
         tmp: Option<TmpName>,
-        backup: Option<Backup>,
+        before: Option<BeforeArg>,
     ) -> Result<(), JournalError> {
-        self.t.intent(op, tmp, backup)
+        self.t.intent(op, tmp, before)
     }
 
-    /// Op `op` is done (not flushed; the next flush covers it).
+    /// Op `op` is done (not flushed; the next flush covers it). `file_id` for a file op.
     pub(crate) fn done(
         &mut self,
         op: u16,
-        file_id: u128,
+        file_id: Option<u128>,
         old_left: bool,
     ) -> Result<(), JournalError> {
         let rec = Record::Done {
