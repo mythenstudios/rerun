@@ -442,7 +442,8 @@ pub struct RegLink {
     pub target: Vec<u16>,
 }
 
-/// Registry. Key and value names are case-insensitive, the original case is preserved.
+/// Registry, read side. Key and value names are case-insensitive, the original case is
+/// preserved. Writing is [`RegistryWrite`] (ADR 0018).
 ///
 /// An existing empty key is different from a missing one: the revert must restore
 /// this difference.
@@ -453,8 +454,7 @@ pub struct RegLink {
 /// `TooLarge` (the exceeded limit in [`SysError::limit`]) and never a partial result, a value
 /// above [`MAX_VALUE_BYTES`], more than [`MAX_VALUES`] values or [`MAX_VALUES_TOTAL_BYTES`]
 /// bytes in `values`, and more than [`MAX_SUBKEYS`] names in `subkeys`: the same kind as every
-/// other bound of `sys` (ADR 0011). A value that [`RegValue::encode`] cannot encode is refused
-/// by `set` with `Unsupported`.
+/// other bound of `sys` (ADR 0011). Reads follow symbolic-link keys (ADR 0009).
 pub trait Registry: Send + Sync {
     /// Does the key exist?
     fn key_exists(&self, k: &RegKey) -> SysResult<bool>;
@@ -473,19 +473,73 @@ pub trait Registry: Send + Sync {
     /// link is reported and never entered. `None` for a plain key and the hive root; a missing
     /// key is `NotFound`.
     fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>>;
+}
 
-    /// Creates exactly one key; the parent key must exist (`NotFound` otherwise).
-    /// `true` = newly created, `false` = already existed (important for the journal).
+/// What [`RegistryWrite::key_state`] sees of a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyState {
+    /// The key (or a key above it) does not exist.
+    Missing,
+    /// The key exists with this many values and direct subkeys.
+    Present {
+        /// Number of values.
+        values: u32,
+        /// Number of direct subkeys.
+        subkeys: u32,
+    },
+}
+
+/// The registry write side (ADR 0018, amendment P2-9). Reached only through
+/// `policy::registry` (`System::registry_write` is a `clippy.toml` ban elsewhere); the sequence
+/// of every method lives once in `sys::seq::reg`, so the fake and `sys::win` share it.
+///
+/// Common rules of every method, before anything is opened: the input rules of [`Registry`];
+/// `Hive::LocalMachine` and `RegView::Wow32` are `Unsupported` (the GUI never writes `HKLM`;
+/// the views of `HKCU` are one key, a second view would be a second object, S1); a method that
+/// changes something in an elevated process is `Unsupported` (S2, fail closed). Then the key
+/// is walked from the hive root **one segment at a time**, each opened itself
+/// (`REG_OPTION_OPEN_LINK`) and never followed: a symbolic-link key anywhere on the path is
+/// `ReparsePoint` and stays as it is, a volatile key `Unsupported` (S4), a missing segment
+/// `NotFound`. Before a change the walked handle's kernel name must still be the key's
+/// (folded), otherwise `Busy` and nothing is changed; checking and acting run on that one
+/// handle. A key deleted under the handle is `Busy`.
+pub trait RegistryWrite: Registry {
+    /// The key's state, without following links (`Missing` if a segment is missing).
+    fn key_state(&self, k: &RegKey) -> SysResult<KeyState>;
+
+    /// A value, without following links. Key missing → `NotFound`, value missing → `None`.
+    fn read(&self, k: &RegKey, name: &str) -> SysResult<Option<RegValue>>;
+
+    /// Creates exactly the last segment of `k` below its existing parent (`NotFound`
+    /// otherwise; the hive root is `InvalidPath`). `true` = created by this call, `false` = it
+    /// existed (in whatever spelling, which stays). An existing link there is `ReparsePoint`.
     fn create_key(&self, k: &RegKey) -> SysResult<bool>;
 
-    /// Sets a value. Key missing → `NotFound`.
-    fn set(&self, k: &RegKey, name: &str, v: &RegValue) -> SysResult<()>;
+    /// Sets `name` (`""` = default value) to `new` if its current value is `expected` (`None`:
+    /// missing), else `Mismatch` and nothing is written; then reads it back (`Busy` if it is
+    /// not `new`). An existing name keeps its stored spelling. A value [`RegValue::encode`]
+    /// cannot encode is `Unsupported`. After a failure past the write the value is the old or
+    /// the new one; the caller observes it. No compare-and-swap: a write by another program
+    /// between the check and the write is lost (ADR 0018).
+    fn set(
+        &self,
+        k: &RegKey,
+        name: &str,
+        expected: Option<&RegValue>,
+        new: &RegValue,
+    ) -> SysResult<()>;
 
-    /// Deletes a value. Missing → `NotFound`.
-    fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()>;
+    /// Deletes `name` if its value is `expected` (`Mismatch` otherwise, `NotFound` if it is
+    /// missing).
+    fn delete_value(&self, k: &RegKey, name: &str, expected: &RegValue) -> SysResult<()>;
 
-    /// Deletes a key without subkeys (`NotEmpty` otherwise).
-    fn delete_key(&self, k: &RegKey) -> SysResult<()>;
+    /// Deletes `k` if it has no values and no subkeys (`NotEmpty`), by its walked handle; the
+    /// hive root is `InvalidPath`. A value another program writes between the check and the
+    /// delete goes with the key (ADR 0018).
+    fn delete_empty_key(&self, k: &RegKey) -> SysResult<()>;
+
+    /// Makes every change of `hive` durable (`RegFlushKey` flushes the whole hive).
+    fn flush(&self, hive: Hive) -> SysResult<()>;
 }
 
 #[cfg(test)]

@@ -52,10 +52,12 @@ use super::{Gpu, KnownFolder, KnownFolders, SysErrorKind, SysResult, Topology};
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 
+mod reg_write;
 mod snapshot;
 mod write;
 mod write_race;
 
+pub use reg_write::registry_write_contract;
 pub use snapshot::snapshot_contract;
 pub use write::{fs_link_write_contract, fs_write_contract};
 pub use write_race::{WriteOp, fs_write_race_contract};
@@ -2040,6 +2042,9 @@ pub fn fs_race_contract(
     Ok(Skipped::new())
 }
 
+/// A rename that runs later, see [`RegFixture::rename_later`].
+pub type DeferredRename = Box<dyn FnOnce() -> SysResult<()>>;
+
 /// Setup that the registry API under test deliberately cannot do while it is read-only: create
 /// keys, write values with any type number and bytes, delete a value, create a symbolic-link
 /// key. For `sys::fake` it is implemented by `FakeRegistry`; for `sys::win` by test code in a
@@ -2073,6 +2078,12 @@ pub trait RegFixture: Sync {
     /// Reads follow a link key made by [`Self::link`] (in a private app hive Windows refuses
     /// to follow one, ADR 0018).
     fn links_followed(&self) -> bool;
+    /// A deferred rename of the existing key `k` to `new_name` under the same parent (like
+    /// `RegRenameKey`, another program): the contract runs it between the walk and the act of
+    /// a write (RW9). `Ok(None)` = not available.
+    fn rename_later(&self, k: &RegKey, new_name: &str) -> SysResult<Option<DeferredRename>>;
+    /// Creates `k` (its parent exists) as a volatile key. `Ok(false)` = not available.
+    fn volatile_key(&self, k: &RegKey) -> SysResult<bool>;
     /// Stores the value `name` of the existing key `k` as `REG_BINARY` of `len` bytes (each
     /// `7`). `Ok(false)` = the registry cannot hold one value that large (Windows refuses more
     /// than 1,048,572 bytes, below [`MAX_VALUE_BYTES`]).
@@ -2909,127 +2920,6 @@ pub fn registry_system_contract(
         Ok(_) => skip(&mut skips, "security_denied"),
     }
     Ok(skips)
-}
-
-/// Registry write contract. `root` must be an existing key without values and subkeys.
-/// Runs against the fake only until `sys::win` can write (phase 2); then in a private app hive
-/// (ADR 0009).
-pub fn registry_write_contract(reg: &dyn Registry, root: &RegKey) -> ContractResult {
-    let a = root.join("Alpha");
-
-    ensure(
-        ok(reg.create_key(&a), "create_key")?,
-        "create_key reports new key",
-    )?;
-    ensure(
-        !ok(reg.create_key(&a), "create_key again")?,
-        "create_key reports existing key",
-    )?;
-    err_kind(
-        reg.create_key(&root.join("Missing").join("Child")),
-        SysErrorKind::NotFound,
-        "create_key with missing parent",
-    )?;
-
-    // NUL would truncate the path in the Win32 call and must be rejected.
-    err_kind(
-        reg.create_key(&root.join("Bad\0Name")),
-        SysErrorKind::InvalidPath,
-        "create_key with NUL",
-    )?;
-    err_kind(
-        reg.set(&a, "Bad\0Name", &RegValue::Dword(1)),
-        SysErrorKind::InvalidPath,
-        "set value name with NUL",
-    )?;
-
-    // Empty key ≠ missing key.
-    ensure(ok(reg.key_exists(&a), "key_exists")?, "empty key exists")?;
-    ensure(
-        ok(reg.get(&a, "Nope"), "get missing value")?.is_none(),
-        "missing value = None",
-    )?;
-    err_kind(
-        reg.get(&root.join("Missing"), "x"),
-        SysErrorKind::NotFound,
-        "get on missing key",
-    )?;
-
-    // Value type is preserved, names are case-insensitive.
-    ok(reg.set(&a, "Flag", &RegValue::Dword(1)), "set dword")?;
-    let v = ok(reg.get(&a, "FLAG"), "get other case")?;
-    ensure(
-        v == Some(RegValue::Dword(1)),
-        "dword round-trip, case-insensitive name",
-    )?;
-    ensure(
-        v != Some(RegValue::String("1".into())),
-        "dword differs from string",
-    )?;
-    let names: Vec<String> = ok(reg.values(&a), "values")?
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect();
-    ensure(names == ["Flag"], "value name keeps original case")?;
-
-    // Raw values are stored exactly; a typed value without a canonical encoding is refused.
-    let raw = RegValue::decode(reg_type::REG_NONE, &[1, 2, 3]);
-    ok(reg.set(&a, "Raw", &raw), "set raw")?;
-    ensure(
-        ok(reg.get(&a, "Raw"), "get raw")? == Some(raw),
-        "raw value round-trip",
-    )?;
-    err_kind(
-        reg.set(&a, "Bad", &RegValue::String("a\0b".into())),
-        SysErrorKind::Unsupported,
-        "set string with NUL",
-    )?;
-    ensure(
-        ok(reg.get(&a, "Bad"), "get refused value")?.is_none(),
-        "a refused value is not stored",
-    )?;
-    ok(reg.delete_value(&a, "Raw"), "delete raw")?;
-
-    // Default value.
-    ok(
-        reg.set(&a, "", &RegValue::String("default".into())),
-        "set default",
-    )?;
-    ensure(
-        ok(reg.get(&a, ""), "get default")? == Some(RegValue::String("default".into())),
-        "default value",
-    )?;
-
-    // A key with subkeys cannot be deleted.
-    let child = a.join("Child");
-    ok(reg.create_key(&child), "create child")?;
-    let subs = ok(reg.subkeys(&root.join("ALPHA")), "subkeys other case")?;
-    ensure(subs == ["Child"], "subkeys keep original case")?;
-    err_kind(
-        reg.delete_key(&a),
-        SysErrorKind::NotEmpty,
-        "delete_key with subkeys",
-    )?;
-    err_kind(
-        reg.delete_value(&a, "Nope"),
-        SysErrorKind::NotFound,
-        "delete missing value",
-    )?;
-
-    // Clean up.
-    ok(reg.delete_key(&child), "delete child")?;
-    ok(reg.delete_value(&a, "Flag"), "delete value")?;
-    ok(reg.delete_value(&a, ""), "delete default")?;
-    ok(reg.delete_key(&a), "delete key")?;
-    ensure(
-        !ok(reg.key_exists(&a), "key_exists after delete")?,
-        "key gone",
-    )?;
-    err_kind(
-        reg.delete_key(&a),
-        SysErrorKind::NotFound,
-        "delete missing key",
-    )
 }
 
 /// Topology contract: the topology reads, passes [`CpuTopology::validate`] (non-empty, dense

@@ -32,7 +32,7 @@ use crate::sys::contract::{
     registry_read_contract, registry_system_contract, snapshot_contract, topology_contract,
 };
 use crate::sys::fs::{EntryKind, Fs, WriteCap};
-use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
+use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, RegistryWrite, reg_type};
 use crate::sys::snapshot::SnapRoot;
 use crate::sys::{Gpu, KnownFolder, KnownFolders, SysErrorKind, System, Topology};
 
@@ -922,16 +922,20 @@ fn win_registry_write_methods_are_unsupported() {
         .unwrap();
     let reg = &h.registry;
     let new = k.join("New");
+    let (one, two) = (RegValue::Dword(1), RegValue::Dword(2));
     for (what, r) in [
-        ("create_key", reg.create_key(&new).map(drop)),
-        ("set", reg.set(&k, "v", &RegValue::Dword(2))),
-        ("set new", reg.set(&k, "w", &RegValue::Dword(2))),
-        ("delete_value", reg.delete_value(&k, "v")),
-        ("delete_key", reg.delete_key(&k)),
+        ("create_key", RegistryWrite::create_key(reg, &new).map(drop)),
+        ("set", RegistryWrite::set(reg, &k, "v", Some(&one), &two)),
+        ("set new", RegistryWrite::set(reg, &k, "w", None, &two)),
+        (
+            "delete_value",
+            RegistryWrite::delete_value(reg, &k, "v", &one),
+        ),
+        ("delete_empty_key", reg.delete_empty_key(&k)),
     ] {
         let e = r.expect_err(what);
         assert_eq!(e.kind, SysErrorKind::Unsupported, "{what}");
-        assert!(e.target.contains("read-only in phase 1"), "{what}: {e}");
+        assert!(e.target.contains("not implemented yet"), "{what}: {e}");
     }
     assert!(reg.key_exists(&k).unwrap());
     assert!(!reg.key_exists(&new).unwrap());

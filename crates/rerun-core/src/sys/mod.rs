@@ -12,8 +12,8 @@
 //! - `sys::fake` emulates Win32 semantics (case handling, error kinds, handle identity). The
 //!   contract tests in `sys::contract` check this; they also run against `sys::win`.
 //! - `sys::win` (Windows only) is the real file system with its write side (ADR 0017) and
-//!   the real registry, read-only so far (every writing `Registry` method returns
-//!   `Unsupported`, ADR 0018); the real known folders;
+//!   the real registry with its write side ([`RegistryWrite`], ADR 0018, reached only through
+//!   `policy::registry`); the real known folders;
 //!   the real CPU topology (ADR 0010); and the real graphics adapters (DXGI, ADR 0008
 //!   amendment). `unsafe` exists only in its modules `nt`, `token`, `reg`, `shell`, `cpu`,
 //!   `loader` and `dxgi`.
@@ -46,15 +46,18 @@ pub use error::{SysError, SysErrorKind, SysResult, shown_target};
 pub use fs::{Dir, DirWrite, Fs, WriteCap};
 pub use gpu::{DriverVersion, Gpu, GpuAdapter};
 pub use known_folders::{KnownFolder, KnownFolders};
-pub use registry::Registry;
+pub use registry::{Registry, RegistryWrite};
 pub use topology::Topology;
 
 /// Entry point for all system access.
 pub trait System: Send + Sync {
     /// File system.
     fn fs(&self) -> &dyn Fs;
-    /// Registry.
+    /// Registry, read side.
     fn registry(&self) -> &dyn Registry;
+    /// Registry, write side (ADR 0018): a `clippy.toml` ban outside `policy::registry`, like
+    /// `Fs::open_dir` outside `policy::root`.
+    fn registry_write(&self) -> &dyn RegistryWrite;
     /// CPU topology.
     fn topology(&self) -> &dyn Topology;
     /// Known folders (Windows, Program Files, profile, …).

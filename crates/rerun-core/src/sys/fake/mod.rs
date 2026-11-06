@@ -35,8 +35,8 @@ use super::contract::{Access, FsFixture, Held, Share};
 use super::fs::{Attrs, tag};
 use super::registry::{RegKey, RegValue};
 use super::{
-    Fs, Gpu, GpuAdapter, KnownFolder, KnownFolders, Registry, SysErrorKind, SysResult, System,
-    Topology,
+    Fs, Gpu, GpuAdapter, KnownFolder, KnownFolders, Registry, RegistryWrite, SysErrorKind,
+    SysResult, System, Topology,
 };
 
 /// Fake system made of [`FakeFs`], [`FakeRegistry`], [`FakeTopology`],
@@ -91,6 +91,9 @@ impl System for FakeSystem {
         &self.fs
     }
     fn registry(&self) -> &dyn Registry {
+        &self.registry
+    }
+    fn registry_write(&self) -> &dyn RegistryWrite {
         &self.registry
     }
     fn topology(&self) -> &dyn Topology {

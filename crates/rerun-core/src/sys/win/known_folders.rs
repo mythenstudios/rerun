@@ -194,7 +194,7 @@ mod tests {
     use crate::sys::win::WinFs;
     use crate::sys::win::WinRegistry;
     use crate::sys::win::testfx::{TestRoot, note};
-    use crate::sys::{KnownFolder, KnownFolders, Registry, SysErrorKind};
+    use crate::sys::{KnownFolder, KnownFolders, SysErrorKind};
 
     /// Set (to `1`) only in the child process of `known_folders_ignore_the_environment`.
     const CHILD_MARKER: &str = "RERUN_KNOWN_FOLDERS_CHILD";
@@ -320,12 +320,12 @@ mod tests {
                     path.push('\\');
                 }
                 path.push_str(seg);
-                reg.create_key(&RegKey::new(k.hive, k.view, &path)).unwrap();
+                reg.put_key(&RegKey::new(k.hive, k.view, &path)).unwrap();
             }
         };
         let set = |name: &str, v: RegValue| {
             create_all(&key);
-            reg.set(&key, name, &v).unwrap();
+            reg.put_value(&key, name, &v).unwrap();
         };
         let w = r"C:\Windows";
         let kind = |r: crate::sys::SysResult<String>| r.unwrap_err().kind;
@@ -359,7 +359,7 @@ mod tests {
         // The WOW64 view is never consulted.
         let wow = RegKey::new(Hive::LocalMachine, RegView::Wow32, PROFILE_LIST);
         create_all(&wow);
-        reg.set(&wow, "ProgramData", &RegValue::String(r"X:\Decoy".into()))
+        reg.put_value(&wow, "ProgramData", &RegValue::String(r"X:\Decoy".into()))
             .unwrap();
         assert_eq!(
             profile_list(&reg, "ProgramData", w, "t").unwrap(),

@@ -8,6 +8,13 @@
 //! follow it in every segment (like the real `HKCU`, ADR 0009), at most [`MAX_LINK_HOPS`]
 //! times per lookup. [`Registry::link`] opens the last segment itself.
 //!
+//! The write side ([`RegistryWrite`]) is the one sequence of `sys::seq::reg` over the
+//! primitives at the end of this file: a [`FakeKey`] holds a key's ID, opens and creates one
+//! segment at a time without following a link, and reports a kernel-style name
+//! (`\REGISTRY\FAKE\HKCU\…`, the stored spelling) that follows a rename
+//! ([`FakeRegistry::rename_key`]). Volatile keys ([`FakeRegistry::put_volatile_key`]) and an
+//! elevated process ([`FakeRegistry::set_elevated`]) are flags.
+//!
 //! # WOW64 model
 //!
 //! A key is stored once, in its native location. [`RegView::Wow32`] only changes where a key of
@@ -43,11 +50,12 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::fold::fold;
-use crate::sys::contract::RegFixture;
+use crate::sys::contract::{DeferredRename, RegFixture};
 use crate::sys::registry::{
-    Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegLink,
-    RegValue, RegView, Registry, check_key, check_value_name,
+    Hive, KeyState, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey,
+    RegLink, RegValue, RegView, Registry, RegistryWrite, check_key, check_value_name,
 };
+use crate::sys::seq::reg::{self as reg_seq, KeyAccess, KeyFlags, KeySeg, PrimHive, PrimKey};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
 /// Most symbolic-link keys one lookup follows.
@@ -65,16 +73,14 @@ struct LinkTo {
 #[derive(Debug, Clone)]
 struct KeyNode {
     /// Identity; stays with the key across a rename.
-    #[expect(
-        dead_code,
-        reason = "the key identity of the write primitives, read from P2-9 C3 on"
-    )]
     id: u64,
     name: String,
     /// Folded value name → (original name, value).
     values: BTreeMap<String, (String, RegValue)>,
     /// `Some` for a symbolic-link key.
     link: Option<LinkTo>,
+    /// A volatile key (`REG_OPTION_VOLATILE`).
+    volatile: bool,
 }
 
 /// Hive and folded path of the native location.
@@ -87,6 +93,8 @@ struct State {
     /// Keys (with everything below them) that refuse every method.
     denied: Vec<MapKey>,
     next_id: u64,
+    /// The process counts as elevated ([`FakeRegistry::set_elevated`]).
+    elevated: bool,
 }
 
 impl Default for State {
@@ -100,6 +108,7 @@ impl Default for State {
                     name: String::new(),
                     values: BTreeMap::new(),
                     link: None,
+                    volatile: false,
                 },
             );
         }
@@ -107,6 +116,7 @@ impl Default for State {
             keys,
             denied: Vec::new(),
             next_id: 16,
+            elevated: false,
         }
     }
 }
@@ -287,6 +297,7 @@ impl State {
                     name: "WOW6432Node".to_owned(),
                     values: BTreeMap::new(),
                     link: None,
+                    volatile: false,
                 },
             );
         }
@@ -298,6 +309,7 @@ impl State {
                 name: name.to_owned(),
                 values: BTreeMap::new(),
                 link: None,
+                volatile: false,
             },
         );
         Ok(true)
@@ -502,26 +514,6 @@ impl Registry for FakeRegistry {
             target: kernel_name(k.hive, &to.shown).encode_utf16().collect(),
         }))
     }
-
-    fn create_key(&self, k: &RegKey) -> SysResult<bool> {
-        self.put_key(k)
-    }
-
-    fn set(&self, k: &RegKey, name: &str, v: &RegValue) -> SysResult<()> {
-        self.put_value(k, name, v)
-    }
-
-    fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
-        self.remove_value(k, name)
-    }
-
-    fn delete_key(&self, k: &RegKey) -> SysResult<()> {
-        if k.path.is_empty() {
-            map_key(k)?;
-            return Err(SysError::new(SysErrorKind::AccessDenied, k.to_string()));
-        }
-        self.remove_key(k)
-    }
 }
 
 impl RegFixture for FakeRegistry {
@@ -565,6 +557,7 @@ impl RegFixture for FakeRegistry {
                     name: shown,
                     values: BTreeMap::new(),
                     link: None,
+                    volatile: false,
                 },
             );
         }
@@ -619,8 +612,339 @@ impl RegFixture for FakeRegistry {
         true
     }
 
+    fn rename_later(&self, k: &RegKey, new_name: &str) -> SysResult<Option<DeferredRename>> {
+        let other = Self {
+            inner: self.inner.clone(),
+        };
+        let (k, new_name) = (k.clone(), new_name.to_owned());
+        Ok(Some(Box::new(move || other.rename_key(&k, &new_name))))
+    }
+
+    fn volatile_key(&self, k: &RegKey) -> SysResult<bool> {
+        self.put_volatile_key(k)?;
+        Ok(true)
+    }
+
     fn large(&self, k: &RegKey, name: &str, len: usize) -> SysResult<bool> {
         self.put_value(k, name, &RegValue::Binary(vec![7; len]))?;
         Ok(true)
+    }
+}
+
+// ---------- Write side: the primitives of `sys::seq::reg` (ADR 0018 amendment P2-9) ----------
+
+impl State {
+    /// The map key of the node `id` (a key renamed by another program keeps its ID).
+    fn path_of_id(&self, hive: Hive, id: u64) -> Option<MapKey> {
+        self.keys
+            .iter()
+            .find(|((h, _), n)| *h == hive && n.id == id)
+            .map(|(mk, _)| mk.clone())
+    }
+
+    /// The stored spelling of the path `mk` (every segment's own name).
+    fn shown_path(&self, mk: &MapKey) -> String {
+        if mk.1.is_empty() {
+            return String::new();
+        }
+        let mut cur = String::new();
+        let mut shown = Vec::new();
+        for seg in mk.1.split('\\') {
+            cur = join(&cur, seg);
+            shown.push(
+                self.keys
+                    .get(&(mk.0, cur.clone()))
+                    .map_or_else(|| seg.to_owned(), |n| n.name.clone()),
+            );
+        }
+        shown.join("\\")
+    }
+}
+
+/// A key handle of the fake's write side: the key's identity, so it follows a rename, and a
+/// key deleted under it is `Busy` (`STATUS_KEY_DELETED`, S3).
+#[derive(Debug)]
+pub(crate) struct FakeKey {
+    reg: Arc<Mutex<State>>,
+    hive: Hive,
+    id: u64,
+}
+
+fn deleted() -> SysError {
+    SysError::new(
+        SysErrorKind::Busy,
+        "fake: the key was deleted under the handle (STATUS_KEY_DELETED)",
+    )
+}
+
+impl FakeKey {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.reg.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The child `seg` of this key: its map key and its ID if it exists.
+    fn child(&self, seg: KeySeg<'_>) -> SysResult<(MapKey, Option<u64>)> {
+        let st = self.lock();
+        let mk = st.path_of_id(self.hive, self.id).ok_or_else(deleted)?;
+        let child = (mk.0, join(&mk.1, &fold(seg.as_str())));
+        let shown = RegKey::new(self.hive, RegView::Native, st.shown_path(&child));
+        st.check_access(&shown, &child)?;
+        let id = st.keys.get(&child).map(|n| n.id);
+        Ok((child, id))
+    }
+
+    fn handle(&self, id: u64) -> Self {
+        Self {
+            reg: self.reg.clone(),
+            hive: self.hive,
+            id,
+        }
+    }
+
+    fn with_node<T>(
+        &self,
+        f: impl FnOnce(&State, &MapKey, &KeyNode) -> SysResult<T>,
+    ) -> SysResult<T> {
+        let st = self.lock();
+        let mk = st.path_of_id(self.hive, self.id).ok_or_else(deleted)?;
+        let node = st.keys.get(&mk).ok_or_else(deleted)?;
+        f(&st, &mk, node)
+    }
+
+    fn with_node_mut<T>(&self, f: impl FnOnce(&mut KeyNode) -> SysResult<T>) -> SysResult<T> {
+        let mut st = self.lock();
+        let mk = st.path_of_id(self.hive, self.id).ok_or_else(deleted)?;
+        let node = st.keys.get_mut(&mk).ok_or_else(deleted)?;
+        f(node)
+    }
+}
+
+impl PrimKey for FakeKey {
+    fn open(&self, seg: KeySeg<'_>, _a: KeyAccess) -> SysResult<Option<Self>> {
+        let (_, id) = self.child(seg)?;
+        Ok(id.map(|id| self.handle(id)))
+    }
+
+    fn create(&self, seg: KeySeg<'_>, _a: KeyAccess) -> SysResult<(Self, bool)> {
+        let (child, id) = self.child(seg)?;
+        if let Some(id) = id {
+            return Ok((self.handle(id), false));
+        }
+        let mut st = self.lock();
+        let id = st.new_id();
+        st.keys.insert(
+            child,
+            KeyNode {
+                id,
+                name: seg.as_str().to_owned(),
+                values: BTreeMap::new(),
+                link: None,
+                volatile: false,
+            },
+        );
+        drop(st);
+        Ok((self.handle(id), true))
+    }
+
+    fn flags(&self) -> SysResult<KeyFlags> {
+        self.with_node(|_, _, n| {
+            Ok(KeyFlags {
+                link: n.link.is_some(),
+                volatile: n.volatile,
+            })
+        })
+    }
+
+    fn kernel_name(&self) -> SysResult<String> {
+        self.with_node(|st, mk, _| Ok(kernel_name(mk.0, &st.shown_path(mk))))
+    }
+
+    fn query(&self, name: &str) -> SysResult<Option<RegValue>> {
+        self.with_node(|_, _, n| {
+            let v = n.values.get(&fold(name)).map(|(_, v)| v.clone());
+            if v.as_ref().is_some_and(|v| data_len(v) > MAX_VALUE_BYTES) {
+                return Err(SysError::too_large(
+                    format!("{name:?}: value larger than 1 MiB"),
+                    u64::try_from(MAX_VALUE_BYTES).unwrap_or(u64::MAX),
+                ));
+            }
+            Ok(v)
+        })
+    }
+
+    fn counts(&self) -> SysResult<(u32, u32)> {
+        self.with_node(|st, mk, n| {
+            let subkeys = st.child_keys(mk).count();
+            Ok((
+                u32::try_from(n.values.len()).unwrap_or(u32::MAX),
+                u32::try_from(subkeys).unwrap_or(u32::MAX),
+            ))
+        })
+    }
+
+    fn set_value(&self, name: &str, v: &RegValue) -> SysResult<()> {
+        if v.encode().is_none() {
+            return Err(SysError::new(
+                SysErrorKind::Unsupported,
+                format!("{name:?}: no canonical encoding"),
+            ));
+        }
+        self.with_node_mut(|n| {
+            let folded = fold(name);
+            let original = n
+                .values
+                .get(&folded)
+                .map_or_else(|| name.to_owned(), |(o, _)| o.clone());
+            n.values.insert(folded, (original, v.clone()));
+            Ok(())
+        })
+    }
+
+    fn delete_value(&self, name: &str) -> SysResult<()> {
+        self.with_node_mut(|n| match n.values.remove(&fold(name)) {
+            Some(_) => Ok(()),
+            None => Err(SysError::new(SysErrorKind::NotFound, format!("{name:?}"))),
+        })
+    }
+
+    fn delete(self) -> SysResult<()> {
+        let mut st = self.lock();
+        let mk = st.path_of_id(self.hive, self.id).ok_or_else(deleted)?;
+        if mk.1.is_empty() {
+            return Err(SysError::new(
+                SysErrorKind::AccessDenied,
+                "fake: a hive root cannot be deleted",
+            ));
+        }
+        if st.child_keys(&mk).next().is_some() {
+            return Err(SysError::new(SysErrorKind::NotEmpty, st.shown_path(&mk)));
+        }
+        st.keys.remove(&mk);
+        Ok(())
+    }
+
+    fn flush(&self) -> SysResult<()> {
+        self.with_node(|_, _, _| Ok(()))
+    }
+}
+
+impl PrimHive for FakeRegistry {
+    type Key = FakeKey;
+
+    fn open_root(&self, h: Hive, _a: KeyAccess) -> SysResult<FakeKey> {
+        let st = self.lock();
+        let id = st
+            .keys
+            .get(&(h, String::new()))
+            .map(|n| n.id)
+            .ok_or_else(|| SysError::new(SysErrorKind::NotFound, h.to_string()))?;
+        Ok(FakeKey {
+            reg: self.inner.clone(),
+            hive: h,
+            id,
+        })
+    }
+
+    fn root_name(&self, h: Hive) -> SysResult<String> {
+        Ok(kernel_name(h, ""))
+    }
+
+    fn elevated(&self) -> bool {
+        self.lock().elevated
+    }
+}
+
+impl RegistryWrite for FakeRegistry {
+    fn key_state(&self, k: &RegKey) -> SysResult<KeyState> {
+        reg_seq::key_state(self, k)
+    }
+
+    fn read(&self, k: &RegKey, name: &str) -> SysResult<Option<RegValue>> {
+        reg_seq::read(self, k, name)
+    }
+
+    fn create_key(&self, k: &RegKey) -> SysResult<bool> {
+        reg_seq::create_key(self, k)
+    }
+
+    fn set(
+        &self,
+        k: &RegKey,
+        name: &str,
+        expected: Option<&RegValue>,
+        new: &RegValue,
+    ) -> SysResult<()> {
+        reg_seq::set(self, k, name, expected, new)
+    }
+
+    fn delete_value(&self, k: &RegKey, name: &str, expected: &RegValue) -> SysResult<()> {
+        reg_seq::delete_value(self, k, name, expected)
+    }
+
+    fn delete_empty_key(&self, k: &RegKey) -> SysResult<()> {
+        reg_seq::delete_empty_key(self, k)
+    }
+
+    fn flush(&self, hive: Hive) -> SysResult<()> {
+        reg_seq::flush(self, hive)
+    }
+}
+
+impl FakeRegistry {
+    /// Test: the process counts as elevated, so every changing write method is `Unsupported`
+    /// (S2).
+    pub fn set_elevated(&self, on: bool) {
+        self.lock().elevated = on;
+    }
+
+    /// Attacker or other program: renames the existing key `k` (with everything below it) to
+    /// `new_name` under the same parent, like `RegRenameKey`; the keys keep their identity, so
+    /// an open handle follows. The new name must be free.
+    pub fn rename_key(&self, k: &RegKey, new_name: &str) -> SysResult<()> {
+        let mk = map_key(k)?;
+        let mut st = self.lock();
+        let mk = st.follow_parent(&mk)?;
+        let Some((parent, _)) = split_last(&mk.1) else {
+            return Err(SysError::new(SysErrorKind::InvalidPath, k.to_string()));
+        };
+        let to = (mk.0, join(parent, &fold(new_name)));
+        if !st.keys.contains_key(&mk) {
+            return Err(not_found(k));
+        }
+        if st.keys.contains_key(&to) {
+            return Err(SysError::new(
+                SysErrorKind::AlreadyExists,
+                new_name.to_owned(),
+            ));
+        }
+        let prefix = format!("{}\\", mk.1);
+        let moved: Vec<MapKey> = st
+            .keys
+            .keys()
+            .filter(|(h, p)| *h == mk.0 && (*p == mk.1 || p.starts_with(&prefix)))
+            .cloned()
+            .collect();
+        for old in moved {
+            if let Some(mut node) = st.keys.remove(&old) {
+                let rest = old.1.get(mk.1.len()..).unwrap_or_default().to_owned();
+                if old == mk {
+                    new_name.clone_into(&mut node.name);
+                }
+                st.keys.insert((old.0, format!("{}{rest}", to.1)), node);
+            }
+        }
+        Ok(())
+    }
+
+    /// Setup: creates the key `k` (its parent must exist) as a volatile key (S4).
+    pub fn put_volatile_key(&self, k: &RegKey) -> SysResult<()> {
+        let mk = map_key(k)?;
+        let mut st = self.lock();
+        let mk = st.follow_parent(&mk)?;
+        st.create(k, &mk, &last_name(k))?;
+        if let Some(n) = st.keys.get_mut(&mk) {
+            n.volatile = true;
+        }
+        Ok(())
     }
 }

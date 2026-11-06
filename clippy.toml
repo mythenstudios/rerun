@@ -36,6 +36,8 @@ disallowed-methods = [
   { path = "rerun_core::sys::fs::WriteCap::new", reason = "the write capability is created only in policy::root (ADR 0017)", allow-invalid = true },
   { path = "rerun_core::policy::root::GameDir::dir_write", reason = "a game folder's write handle only for exec and journal (ADR 0017, ADR 0020)", allow-invalid = true },
   { path = "rerun_core::policy::root::AppDir::dir_write", reason = "Rerun's own folder is written only through AppDir::sub_write (ADR 0019)", allow-invalid = true },
+  # ADR 0018: the registry write side. Only policy::registry reaches it (tests carry an expect).
+  { path = "rerun_core::sys::System::registry_write", reason = "the registry write side only through policy::registry (ADR 0018)", allow-invalid = true },
   { path = "std::fs::read", reason = "read files only through a root handle (ADR 0007)" },
   { path = "std::fs::read_to_string", reason = "read files only through a root handle (ADR 0007)" },
   { path = "std::fs::read_dir", reason = "read files only through a root handle (ADR 0007)" },

@@ -18,7 +18,9 @@ use crate::sys::contract::{
     registry_system_contract, registry_write_contract, snapshot_contract, topology_contract,
 };
 use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, NewFile, TmpName, WriteCap, tag};
-use crate::sys::registry::{Hive, RegKey, RegLink, RegValue, RegView, Registry, reg_type};
+use crate::sys::registry::{
+    Hive, RegKey, RegLink, RegValue, RegView, Registry, RegistryWrite, reg_type,
+};
 use crate::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
 use crate::sys::{DriverVersion, GpuAdapter, KnownFolder};
 use crate::sys::{SysErrorKind, SysResult, System, Topology};
@@ -261,7 +263,67 @@ fn the_race_contract_catches_a_leaking_swap() {
 fn fake_fulfils_registry_write_contract() {
     let root = hkcu(r"Software\RerunContract");
     let sys = FakeSystem::builder().key(root.clone()).build().unwrap();
-    registry_write_contract(sys.registry(), &root).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test: the contract runs on the system's write side"
+    )]
+    let w = sys.registry_write();
+    let skips = registry_write_contract(w, sys.fake_registry(), &root).unwrap();
+    assert!(skips.is_empty(), "{skips:?}");
+}
+
+/// K-R1 to K-R3: with the link flag, the kernel-name comparison or the expected value switched
+/// off, the write contract fails (at RW5, RW9 and RW2).
+#[test]
+fn the_registry_write_contract_catches_a_missing_check() {
+    use crate::sys::seq::reg::knob;
+    type Knob = fn(bool);
+    for (what, knob, at) in [
+        ("K-R1 link flag", knob::no_link_flag as Knob, "link key"),
+        (
+            "K-R2 kernel name",
+            knob::no_kernel_name as Knob,
+            "renamed key",
+        ),
+        ("K-R3 expected", knob::no_expected as Knob, "expecting"),
+    ] {
+        let root = hkcu(r"Software\RerunContract");
+        let sys = FakeSystem::builder().key(root.clone()).build().unwrap();
+        knob(true);
+        let r = registry_write_contract(sys.fake_registry(), sys.fake_registry(), &root);
+        knob(false);
+        let e = r.expect_err(what);
+        assert!(e.contains(at), "{what}: {e}");
+    }
+}
+
+/// S2: an elevated process changes nothing; reads and the flush still work.
+#[test]
+fn an_elevated_process_never_writes_the_registry() {
+    let k = hkcu(r"Software\Game");
+    let sys = FakeSystem::builder()
+        .value(k.clone(), "v", RegValue::Dword(1))
+        .build()
+        .unwrap();
+    let w = sys.fake_registry();
+    w.set_elevated(true);
+    let (one, two) = (RegValue::Dword(1), RegValue::Dword(2));
+    for (what, r) in [
+        (
+            "create_key",
+            RegistryWrite::create_key(w, &k.join("New")).map(drop),
+        ),
+        ("set", RegistryWrite::set(w, &k, "v", Some(&one), &two)),
+        (
+            "delete_value",
+            RegistryWrite::delete_value(w, &k, "v", &one),
+        ),
+        ("delete_empty_key", w.delete_empty_key(&k)),
+    ] {
+        assert_eq!(r.unwrap_err().kind, SysErrorKind::Unsupported, "{what}");
+    }
+    assert_eq!(w.read(&k, "v").unwrap(), Some(one));
+    w.flush(Hive::CurrentUser).unwrap();
 }
 
 fn key(hive: Hive, view: RegView, path: &str) -> RegKey {
@@ -326,18 +388,6 @@ impl Registry for LossyRegistry<'_> {
     }
     fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>> {
         self.0.link(k)
-    }
-    fn create_key(&self, k: &RegKey) -> SysResult<bool> {
-        self.0.create_key(k)
-    }
-    fn set(&self, k: &RegKey, name: &str, v: &RegValue) -> SysResult<()> {
-        self.0.set(k, name, v)
-    }
-    fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
-        self.0.delete_value(k, name)
-    }
-    fn delete_key(&self, k: &RegKey) -> SysResult<()> {
-        self.0.delete_key(k)
     }
 }
 
@@ -1256,7 +1306,9 @@ fn hkcu_is_shared_between_the_views() {
         sys.registry().get(&wow, "v").unwrap(),
         Some(RegValue::Dword(1))
     );
-    sys.registry().set(&wow, "w", &RegValue::Dword(2)).unwrap();
+    sys.fake_registry()
+        .put_value(&wow, "w", &RegValue::Dword(2))
+        .unwrap();
     assert_eq!(
         sys.registry().get(&native, "w").unwrap(),
         Some(RegValue::Dword(2))
@@ -1278,8 +1330,10 @@ fn hklm_outside_software_is_shared_between_the_views() {
     // Names that merely start like SOFTWARE are not redirected.
     let near = key(Hive::LocalMachine, RegView::Native, r"SOFTWAREX\Y");
     let near_wow = key(Hive::LocalMachine, RegView::Wow32, r"SOFTWAREX\Y");
-    sys.registry().create_key(&near.parent().unwrap()).unwrap();
-    sys.registry().create_key(&near).unwrap();
+    sys.fake_registry()
+        .put_key(&near.parent().unwrap())
+        .unwrap();
+    sys.fake_registry().put_key(&near).unwrap();
     assert!(sys.registry().key_exists(&near_wow).unwrap());
 }
 
@@ -1300,7 +1354,7 @@ fn hklm_software_is_redirected_in_the_32_bit_view() {
         )
         .build()
         .unwrap();
-    let reg = sys.registry();
+    let reg = sys.fake_registry();
 
     // The 32-bit view of SOFTWARE\X is SOFTWARE\WOW6432Node\X, not SOFTWARE\X.
     let steam = wow(r"SOFTWARE\Valve\Steam");
@@ -1314,7 +1368,7 @@ fn hklm_software_is_redirected_in_the_32_bit_view() {
     assert!(reg.key_exists(&wow(r"software\VALVE")).unwrap());
     // SOFTWARE itself is one key.
     assert!(reg.key_exists(&wow("SOFTWARE")).unwrap());
-    reg.set(&wow("SOFTWARE"), "Shared", &RegValue::Dword(1))
+    reg.put_value(&wow("SOFTWARE"), "Shared", &RegValue::Dword(1))
         .unwrap();
     assert_eq!(
         reg.get(&native("SOFTWARE"), "Shared").unwrap(),
@@ -1341,9 +1395,12 @@ fn hklm_software_is_redirected_in_the_32_bit_view() {
         .build()
         .unwrap();
     let k = wow(r"SOFTWARE\Game\Sub");
-    assert!(fresh.registry().create_key(&k.parent().unwrap()).unwrap());
-    assert!(fresh.registry().create_key(&k).unwrap());
-    fresh.registry().set(&k, "v", &RegValue::Dword(7)).unwrap();
+    assert!(fresh.fake_registry().put_key(&k.parent().unwrap()).unwrap());
+    assert!(fresh.fake_registry().put_key(&k).unwrap());
+    fresh
+        .fake_registry()
+        .put_value(&k, "v", &RegValue::Dword(7))
+        .unwrap();
     let physical = native(r"SOFTWARE\WOW6432Node\Game\Sub");
     assert_eq!(
         fresh.registry().get(&physical, "v").unwrap(),
@@ -1356,15 +1413,15 @@ fn hklm_software_is_redirected_in_the_32_bit_view() {
     // The parent has to exist.
     assert_eq!(
         fresh
-            .registry()
-            .create_key(&wow(r"SOFTWARE\No\Parent"))
+            .fake_registry()
+            .put_key(&wow(r"SOFTWARE\No\Parent"))
             .unwrap_err()
             .kind,
         SysErrorKind::NotFound
     );
     // Deleting goes to the same place.
-    fresh.registry().delete_value(&k, "v").unwrap();
-    fresh.registry().delete_key(&k).unwrap();
+    fresh.fake_registry().remove_value(&k, "v").unwrap();
+    fresh.fake_registry().remove_key(&k).unwrap();
     assert!(!fresh.registry().key_exists(&physical).unwrap());
 }
 
@@ -1377,7 +1434,7 @@ fn a_denied_key_refuses_everything_below_it() {
         .key(hklm("SECURITYX"))
         .build()
         .unwrap();
-    let reg = sys.registry();
+    let reg = sys.fake_registry();
     for k in [hklm("SECURITY"), hklm(r"security\Policy")] {
         assert_eq!(
             reg.key_exists(&k).unwrap_err().kind,
@@ -1393,15 +1450,17 @@ fn a_denied_key_refuses_everything_below_it() {
             SysErrorKind::AccessDenied
         );
         assert_eq!(
-            reg.create_key(&k).unwrap_err().kind,
+            reg.put_key(&k).unwrap_err().kind,
             SysErrorKind::AccessDenied
         );
         assert_eq!(
-            reg.set(&k, "v", &RegValue::Dword(2)).unwrap_err().kind,
+            reg.put_value(&k, "v", &RegValue::Dword(2))
+                .unwrap_err()
+                .kind,
             SysErrorKind::AccessDenied
         );
         assert_eq!(
-            reg.delete_key(&k).unwrap_err().kind,
+            reg.remove_key(&k).unwrap_err().kind,
             SysErrorKind::AccessDenied
         );
     }
@@ -1517,18 +1576,6 @@ fn the_snapshot_contract_catches_a_snapshot_that_follows_links() {
         fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>> {
             self.0.link(k).map(|_| None)
         }
-        fn create_key(&self, k: &RegKey) -> SysResult<bool> {
-            self.0.create_key(k)
-        }
-        fn set(&self, k: &RegKey, name: &str, v: &RegValue) -> SysResult<()> {
-            self.0.set(k, name, v)
-        }
-        fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
-            self.0.delete_value(k, name)
-        }
-        fn delete_key(&self, k: &RegKey) -> SysResult<()> {
-            self.0.delete_key(k)
-        }
     }
     let e = run_snapshot_contract_with(|d| d, |r| Box::new(LinkBlind(r))).unwrap_err();
     assert!(e.contains("link key"), "{e}");
@@ -1539,8 +1586,10 @@ fn hives_are_separate_and_roots_cannot_be_deleted() {
     let sys = FakeSystem::builder().key(hkcu("Software")).build().unwrap();
     let hklm = RegKey::new(Hive::LocalMachine, RegView::Native, "Software");
     assert!(!sys.registry().key_exists(&hklm).unwrap());
-    let err = sys.registry().delete_key(&hkcu("")).unwrap_err();
-    assert_eq!(err.kind, SysErrorKind::AccessDenied);
+    let err = sys.fake_registry().remove_key(&hkcu("")).unwrap_err();
+    assert_eq!(err.kind, SysErrorKind::InvalidPath);
+    let err = sys.fake_registry().delete_empty_key(&hkcu("")).unwrap_err();
+    assert_eq!(err.kind, SysErrorKind::InvalidPath);
 }
 
 #[test]
@@ -1560,7 +1609,7 @@ fn empty_path_segments_are_rejected() {
 #[test]
 fn registry_input_rules_apply_to_every_method() {
     let sys = FakeSystem::builder().key(hkcu("Software")).build().unwrap();
-    let reg = sys.registry();
+    let reg = sys.fake_registry();
     let key = |p: &str| RegKey {
         hive: Hive::CurrentUser,
         view: RegView::Native,
@@ -1580,10 +1629,10 @@ fn registry_input_rules_apply_to_every_method() {
             reg.get(k, "x").map(drop),
             reg.values(k).map(drop),
             reg.subkeys(k).map(drop),
-            reg.create_key(k).map(drop),
-            reg.set(k, "x", &v),
-            reg.delete_value(k, "x"),
-            reg.delete_key(k),
+            reg.put_key(k).map(drop),
+            reg.put_value(k, "x", &v),
+            reg.remove_value(k, "x"),
+            reg.remove_key(k),
         ];
         for r in kinds {
             assert_eq!(
@@ -1602,19 +1651,21 @@ fn registry_input_rules_apply_to_every_method() {
             SysErrorKind::InvalidPath
         );
         assert_eq!(
-            reg.set(&k, name, &RegValue::Dword(1)).unwrap_err().kind,
+            reg.put_value(&k, name, &RegValue::Dword(1))
+                .unwrap_err()
+                .kind,
             SysErrorKind::InvalidPath
         );
         assert_eq!(
-            reg.delete_value(&k, name).unwrap_err().kind,
+            reg.remove_value(&k, name).unwrap_err().kind,
             SysErrorKind::InvalidPath
         );
     }
     // Exactly at the limits works.
     let ok_name = "n".repeat(16_383);
-    reg.set(&k, &ok_name, &RegValue::Dword(1)).unwrap();
+    reg.put_value(&k, &ok_name, &RegValue::Dword(1)).unwrap();
     assert_eq!(reg.get(&k, &ok_name).unwrap(), Some(RegValue::Dword(1)));
-    reg.create_key(&k.join(&"a".repeat(255))).unwrap();
+    reg.put_key(&k.join(&"a".repeat(255))).unwrap();
 }
 
 #[test]
@@ -1626,7 +1677,7 @@ fn a_typed_value_without_canonical_encoding_is_refused() {
         RegValue::MultiString(vec![String::new()]),
     ] {
         assert_eq!(
-            sys.registry().set(&k, "v", &v).unwrap_err().kind,
+            sys.fake_registry().put_value(&k, "v", &v).unwrap_err().kind,
             SysErrorKind::Unsupported
         );
     }
@@ -1643,7 +1694,7 @@ fn raw_values_are_kept_exactly_and_snapshotted() {
         .raw_value(key.clone(), "canonical", 4, &[1, 0, 0, 0])
         .build()
         .unwrap();
-    let reg = sys.registry();
+    let reg = sys.fake_registry();
     let get = |n: &str| reg.get(&key, n).unwrap().unwrap().encode().unwrap();
     assert_eq!(get("none"), (0, vec![1, 2, 3]));
     assert_eq!(get("bigendian"), (5, vec![0, 0, 0, 1]));
@@ -1663,7 +1714,7 @@ fn raw_values_are_kept_exactly_and_snapshotted() {
         keys: vec![key.clone()],
     };
     let before = snapshot(sys.registry(), &scope).unwrap();
-    reg.set(&key, "none", &RegValue::decode(0, &[1, 2, 4]))
+    reg.put_value(&key, "none", &RegValue::decode(0, &[1, 2, 4]))
         .unwrap();
     assert_eq!(
         before
@@ -1671,11 +1722,11 @@ fn raw_values_are_kept_exactly_and_snapshotted() {
             .len(),
         1
     );
-    reg.set(&key, "none", &RegValue::decode(0, &[1, 2, 3]))
+    reg.put_value(&key, "none", &RegValue::decode(0, &[1, 2, 3]))
         .unwrap();
     assert_eq!(before, snapshot(sys.registry(), &scope).unwrap());
     // Same bytes under another type number differ as well.
-    reg.set(&key, "none", &RegValue::decode(8, &[1, 2, 3]))
+    reg.put_value(&key, "none", &RegValue::decode(8, &[1, 2, 3]))
         .unwrap();
     assert_eq!(
         before
@@ -1709,8 +1760,8 @@ fn reads_refuse_hostile_amounts_of_data() {
     assert_eq!(sys.registry().values(&key).unwrap().len(), 1);
     let mut over = mib();
     over.push(0);
-    sys.registry()
-        .set(&key, "over", &RegValue::decode(3, &over))
+    sys.fake_registry()
+        .put_value(&key, "over", &RegValue::decode(3, &over))
         .unwrap();
     assert_too_large(sys.registry().get(&key, "over"), 1 << 20);
     assert_too_large(sys.registry().values(&key), 1 << 20);
@@ -1732,8 +1783,8 @@ fn reads_refuse_hostile_amounts_of_data() {
     }
     let sys = b.build().unwrap();
     assert_eq!(sys.registry().values(&key).unwrap().len(), 16);
-    sys.registry()
-        .set(&key, "v16", &RegValue::decode(3, &[0]))
+    sys.fake_registry()
+        .put_value(&key, "v16", &RegValue::decode(3, &[0]))
         .unwrap();
     assert_too_large(sys.registry().values(&key), 16 << 20);
 
@@ -1744,20 +1795,20 @@ fn reads_refuse_hostile_amounts_of_data() {
     }
     let sys = b.build().unwrap();
     assert_eq!(sys.registry().values(&key).unwrap().len(), 16_384);
-    sys.registry()
-        .set(&key, "one more", &RegValue::Dword(1))
+    sys.fake_registry()
+        .put_value(&key, "one more", &RegValue::Dword(1))
         .unwrap();
     assert_too_large(sys.registry().values(&key), 16_384);
 
     // Subkeys: 65,536 are fine, one more is not.
     let sys = FakeSystem::builder().key(key.clone()).build().unwrap();
     for i in 0..65_536 {
-        sys.registry()
-            .create_key(&key.join(&format!("k{i}")))
+        sys.fake_registry()
+            .put_key(&key.join(&format!("k{i}")))
             .unwrap();
     }
     assert_eq!(sys.registry().subkeys(&key).unwrap().len(), 65_536);
-    sys.registry().create_key(&key.join("one more")).unwrap();
+    sys.fake_registry().put_key(&key.join("one more")).unwrap();
     assert_too_large(sys.registry().subkeys(&key), 65_536);
 }
 
@@ -1805,19 +1856,19 @@ fn snapshot_is_identical_after_create_and_remove() {
     assert!(!before.is_empty());
 
     let fs = sys.fake_fs();
-    let reg = sys.registry();
+    let reg = sys.fake_registry();
     fs.put_file(&p(r"C:\Games\AC\scripts\EaglePatchAC1.asi"), b"asi")
         .unwrap();
     fs.put_file(&p(r"C:\Games\AC\dinput8.dll"), b"dll").unwrap();
     let key = hkcu(r"Software\Ubisoft\AC\Rerun");
-    reg.create_key(&key).unwrap();
-    reg.set(&key, "x", &RegValue::Dword(1)).unwrap();
+    reg.put_key(&key).unwrap();
+    reg.put_value(&key, "x", &RegValue::Dword(1)).unwrap();
 
     let during = game_snap(&sys);
     assert_eq!(before.diff(&during).len(), 5, "{:#?}", before.diff(&during));
 
-    reg.delete_value(&key, "x").unwrap();
-    reg.delete_key(&key).unwrap();
+    reg.remove_value(&key, "x").unwrap();
+    reg.remove_key(&key).unwrap();
     fs.remove_abs(&p(r"C:\Games\AC\dinput8.dll")).unwrap();
     fs.remove_abs(&p(r"C:\Games\AC\scripts\EaglePatchAC1.asi"))
         .unwrap();
@@ -1895,14 +1946,14 @@ fn snapshot_detects_every_kind_of_change() {
                 .unwrap();
         }),
         ("new empty key", |s| {
-            s.registry()
-                .create_key(&hkcu(r"Software\Ubisoft\AC\Empty"))
+            s.fake_registry()
+                .put_key(&hkcu(r"Software\Ubisoft\AC\Empty"))
                 .unwrap();
         }),
         ("value type", |s| {
             let k = hkcu(r"Software\Ubisoft\AC");
-            s.registry()
-                .set(&k, "Language", &RegValue::ExpandString("de".into()))
+            s.fake_registry()
+                .put_value(&k, "Language", &RegValue::ExpandString("de".into()))
                 .unwrap();
         }),
         ("new empty dir", |s| {
@@ -2203,7 +2254,9 @@ fn snapshot_records_missing_keys_and_subtrees() {
     let before = take();
     assert_eq!(before.len(), 2);
     sys.fake_fs().mkdir_all(&p(r"C:\Base\Nope")).unwrap();
-    sys.registry().create_key(&hkcu(r"Software\Nope")).unwrap();
+    sys.fake_registry()
+        .put_key(&hkcu(r"Software\Nope"))
+        .unwrap();
     let diff = before.diff(&take());
     assert_eq!(diff.len(), 2, "{diff:#?}");
     assert!(diff.iter().all(|l| l.starts_with('~')), "{diff:#?}");
@@ -2358,18 +2411,6 @@ impl Registry for SpyRegistry<'_> {
         Self::check(k);
         self.inner.link(k)
     }
-    fn create_key(&self, _: &RegKey) -> SysResult<bool> {
-        unreachable!("the snapshot only reads")
-    }
-    fn set(&self, _: &RegKey, _: &str, _: &RegValue) -> SysResult<()> {
-        unreachable!("the snapshot only reads")
-    }
-    fn delete_value(&self, _: &RegKey, _: &str) -> SysResult<()> {
-        unreachable!("the snapshot only reads")
-    }
-    fn delete_key(&self, _: &RegKey) -> SysResult<()> {
-        unreachable!("the snapshot only reads")
-    }
 }
 
 fn key_scope(key: &RegKey) -> Scope<'static> {
@@ -2460,27 +2501,27 @@ fn snapshot_tells_registry_case_and_empty_keys_apart() {
         .value(key.clone(), "Lang", RegValue::String("de".into()))
         .build()
         .unwrap();
-    let reg = sys.registry();
+    let reg = sys.fake_registry();
     let take = || snapshot(reg, &key_scope(&key)).unwrap();
     let before = take();
-    reg.delete_value(&key, "Lang").unwrap();
-    reg.set(&key, "LANG", &RegValue::String("de".into()))
+    reg.remove_value(&key, "Lang").unwrap();
+    reg.put_value(&key, "LANG", &RegValue::String("de".into()))
         .unwrap();
     let diff = before.diff(&take());
     assert!(diff.len() == 1 && diff[0].starts_with('~'), "{diff:#?}");
-    reg.delete_value(&key, "LANG").unwrap();
-    reg.set(&key, "Lang", &RegValue::String("de".into()))
+    reg.remove_value(&key, "LANG").unwrap();
+    reg.put_value(&key, "Lang", &RegValue::String("de".into()))
         .unwrap();
     assert_eq!(before, take());
 
-    reg.delete_key(&key.join("Child")).unwrap();
-    reg.create_key(&key.join("CHILD")).unwrap();
+    reg.remove_key(&key.join("Child")).unwrap();
+    reg.put_key(&key.join("CHILD")).unwrap();
     let diff = before.diff(&take());
     assert!(diff.len() == 1 && diff[0].starts_with('~'), "{diff:#?}");
-    reg.delete_key(&key.join("CHILD")).unwrap();
+    reg.remove_key(&key.join("CHILD")).unwrap();
     let diff = before.diff(&take());
     assert!(diff.len() == 1 && diff[0].starts_with('-'), "{diff:#?}");
-    reg.create_key(&key.join("Child")).unwrap();
+    reg.put_key(&key.join("Child")).unwrap();
     assert_eq!(before, take());
 }
 
@@ -2513,17 +2554,17 @@ fn snapshot_registry_walk_has_a_key_budget() {
     use crate::sys::snapshot::MAX_KEYS_WALKED;
     let root = hkcu(r"Software\Wide");
     let sys = FakeSystem::builder().key(root.clone()).build().unwrap();
-    let reg = sys.registry();
+    let reg = sys.fake_registry();
     let mut total = 1;
     'fill: for i in 0.. {
         let child = root.join(&format!("c{i}"));
-        reg.create_key(&child).unwrap();
+        reg.put_key(&child).unwrap();
         total += 1;
         for j in 0..1000 {
             if total == MAX_KEYS_WALKED {
                 break 'fill;
             }
-            reg.create_key(&child.join(&format!("g{j}"))).unwrap();
+            reg.put_key(&child.join(&format!("g{j}"))).unwrap();
             total += 1;
         }
     }
@@ -2531,7 +2572,7 @@ fn snapshot_registry_walk_has_a_key_budget() {
         snapshot(reg, &key_scope(&root)).unwrap().len(),
         MAX_KEYS_WALKED
     );
-    reg.create_key(&root.join("one more")).unwrap();
+    reg.put_key(&root.join("one more")).unwrap();
     let e = snapshot(reg, &key_scope(&root)).unwrap_err();
     assert_eq!(
         (e.kind, e.limit),
@@ -2708,18 +2749,6 @@ impl Registry for CaseBlindRegistry<'_> {
     }
     fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>> {
         self.0.link(k)
-    }
-    fn create_key(&self, k: &RegKey) -> SysResult<bool> {
-        self.0.create_key(k)
-    }
-    fn set(&self, k: &RegKey, name: &str, v: &RegValue) -> SysResult<()> {
-        self.0.set(k, name, v)
-    }
-    fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
-        self.0.delete_value(k, name)
-    }
-    fn delete_key(&self, k: &RegKey) -> SysResult<()> {
-        self.0.delete_key(k)
     }
 }
 

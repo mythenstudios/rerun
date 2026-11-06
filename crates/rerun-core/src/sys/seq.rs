@@ -29,6 +29,15 @@ use super::{SysError, SysErrorKind, SysResult};
 use crate::fold::fold;
 use crate::path::RelPath;
 
+#[cfg_attr(
+    not(any(test, feature = "fake")),
+    expect(
+        dead_code,
+        reason = "sys::win uses the registry sequences from P2-9 C5 on"
+    )
+)]
+pub(crate) mod reg;
+
 /// Bytes streamed per write call.
 const CHUNK: usize = 64 * 1024;
 

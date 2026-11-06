@@ -13,7 +13,7 @@ use crate::policy::root::{AppDir, AppSub, Create, RootError};
 use crate::sys::contract::FsFixture;
 use crate::sys::fake::{FakeGpu, FakeKnownFolders, FakeRegistry, FakeTopology};
 use crate::sys::fs::WriteCap;
-use crate::sys::{Fs, Gpu, KnownFolder, KnownFolders, Registry, System, Topology};
+use crate::sys::{Fs, Gpu, KnownFolder, KnownFolders, Registry, RegistryWrite, System, Topology};
 
 /// The real file system with fake known folders (and fake everything else): `LocalAppData`
 /// is a folder of a [`TestRoot`].
@@ -53,6 +53,9 @@ impl System for AppTestSys {
         &self.fs
     }
     fn registry(&self) -> &dyn Registry {
+        &self.reg
+    }
+    fn registry_write(&self) -> &dyn RegistryWrite {
         &self.reg
     }
     fn topology(&self) -> &dyn Topology {

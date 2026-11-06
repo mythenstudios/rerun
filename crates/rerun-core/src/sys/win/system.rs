@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinTopology};
-use crate::sys::{Fs, Gpu, KnownFolders, Registry, SysResult, System, Topology};
+use crate::sys::{Fs, Gpu, KnownFolders, Registry, RegistryWrite, SysResult, System, Topology};
 
 /// The real file system, registry, known folders (on that registry), CPU topology and graphics
 /// adapters of this machine. Every writing method of the file system and the registry returns
@@ -51,6 +51,10 @@ impl System for WinSystem {
     }
 
     fn registry(&self) -> &dyn Registry {
+        &*self.registry
+    }
+
+    fn registry_write(&self) -> &dyn RegistryWrite {
         &*self.registry
     }
 

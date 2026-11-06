@@ -30,13 +30,13 @@ use std::fmt;
 use super::reg::{self, EnumValue, OwnedKey, Read, ReadAccess, Root, UserHiveError, View};
 use super::status::{reg_error, reg_nt_error};
 use crate::sys::registry::{
-    Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegLink,
-    RegValue, RegView, Registry, check_key, check_value_name,
+    Hive, KeyState, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey,
+    RegLink, RegValue, RegView, Registry, RegistryWrite, check_key, check_value_name,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
 /// Message of every refused write.
-const READ_ONLY: &str = "sys::win is read-only in phase 1";
+const READ_ONLY: &str = "the sys::win registry write side is not implemented yet";
 /// Attempts of one read after "buffer too small" (`STATUS_BUFFER_OVERFLOW`).
 pub(super) const MORE_DATA_RETRIES: usize = 16;
 /// Attempts of one enumeration (restart on a change or a duplicate name).
@@ -404,39 +404,47 @@ impl Registry for WinRegistry {
                 .collect(),
         }))
     }
+}
+
+/// Every write method refuses after the input rules until the write primitives land.
+fn read_only(k: &RegKey) -> SysResult<()> {
+    check_key(k)?;
+    Err(SysError::new(
+        SysErrorKind::Unsupported,
+        format!("{k}: {READ_ONLY}"),
+    ))
+}
+
+impl RegistryWrite for WinRegistry {
+    fn key_state(&self, k: &RegKey) -> SysResult<KeyState> {
+        read_only(k).map(|()| KeyState::Missing)
+    }
+
+    fn read(&self, k: &RegKey, name: &str) -> SysResult<Option<RegValue>> {
+        check_value_name(k, name)?;
+        read_only(k).map(|()| None)
+    }
 
     fn create_key(&self, k: &RegKey) -> SysResult<bool> {
-        check_key(k)?;
-        Err(SysError::new(
-            SysErrorKind::Unsupported,
-            format!("{k}: {READ_ONLY}"),
-        ))
+        read_only(k).map(|()| false)
     }
 
-    fn set(&self, k: &RegKey, name: &str, _v: &RegValue) -> SysResult<()> {
-        check_key(k)?;
+    fn set(&self, k: &RegKey, name: &str, _: Option<&RegValue>, _: &RegValue) -> SysResult<()> {
         check_value_name(k, name)?;
-        Err(SysError::new(
-            SysErrorKind::Unsupported,
-            format!("{k} @ {name:?}: {READ_ONLY}"),
-        ))
+        read_only(k)
     }
 
-    fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
-        check_key(k)?;
+    fn delete_value(&self, k: &RegKey, name: &str, _: &RegValue) -> SysResult<()> {
         check_value_name(k, name)?;
-        Err(SysError::new(
-            SysErrorKind::Unsupported,
-            format!("{k} @ {name:?}: {READ_ONLY}"),
-        ))
+        read_only(k)
     }
 
-    fn delete_key(&self, k: &RegKey) -> SysResult<()> {
-        check_key(k)?;
-        Err(SysError::new(
-            SysErrorKind::Unsupported,
-            format!("{k}: {READ_ONLY}"),
-        ))
+    fn delete_empty_key(&self, k: &RegKey) -> SysResult<()> {
+        read_only(k)
+    }
+
+    fn flush(&self, hive: Hive) -> SysResult<()> {
+        read_only(&RegKey::new(hive, RegView::Native, ""))
     }
 }
 

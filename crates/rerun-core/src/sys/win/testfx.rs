@@ -104,7 +104,7 @@ use super::WinRegistry;
 use super::reg::{self, OwnedKey};
 use super::status::kind_of_win32;
 use crate::path::RelPath;
-use crate::sys::contract::{Access, FsFixture, Held, RegFixture, Share};
+use crate::sys::contract::{Access, DeferredRename, FsFixture, Held, RegFixture, Share};
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, FileLock, Fs, FsKind, Metadata, NewFile,
     ReadSeek, ReparseInfo, Replaced, RootInfo, WriteCap, Written, tag,
@@ -1869,6 +1869,14 @@ impl RegFixture for AppHive {
 
     fn links_followed(&self) -> bool {
         self.follows
+    }
+
+    fn rename_later(&self, _: &RegKey, _: &str) -> SysResult<Option<DeferredRename>> {
+        Ok(None)
+    }
+
+    fn volatile_key(&self, _: &RegKey) -> SysResult<bool> {
+        Ok(false)
     }
 
     fn utf16_key(&self, parent: &RegKey, units: &[u16]) -> SysResult<bool> {
