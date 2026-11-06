@@ -11,6 +11,8 @@
 //! with the same content is omitted whatever its attributes (senior-dev B1: a replace needs
 //! two different hashes, ADR 0017 A2), any other content a `ReplaceFile` with the old hash,
 //! length and attributes. New files get no read-only, hidden or system attribute.
+//! Every existing segment of a target goes into the plan in its stored spelling (audit A2-B1),
+//! a created one in the spelling of the first step that creates it.
 //!
 //! Refused: a package or version name outside the rules or not present; a source missing, not
 //! a plain file, a reparse point or restricted, with another hash or over 2 GiB; a target
@@ -190,35 +192,57 @@ pub(crate) fn plan_into(
         if sha != f.sha256 {
             return Err(bad_src("does not have the SHA-256 of the step"));
         }
-        // The way to the target, top-down.
+        // The way to the target, top-down. Every segment that exists is written into the
+        // plan in its stored spelling (A2-B1): the plan names the objects as they are, a
+        // recovery renames back onto exactly that name, and `exec` refuses a name whose
+        // spelling changed since the preview. A segment the plan creates keeps the spelling
+        // of the step that creates it first.
         let bad_to = |why: &str| refuse(format!("target {}: {why}", shown(&f.to)));
         let segs: Vec<&str> = f.to.segments().collect();
-        let mut prefix: Option<RelPath> = None;
-        let mut creating = false;
-        for seg in &segs[..segs.len().saturating_sub(1)] {
-            let p = match &prefix {
+        let Some((last, ancestors)) = segs.split_last() else {
+            return Err(bad_to("empty"));
+        };
+        let join = |prefix: &Option<RelPath>, seg: &str| {
+            match prefix {
                 None => RelPath::from_segment(seg),
                 Some(p) => p.child(seg),
             }
-            .map_err(|e| bad_to(&e.to_string()))?;
-            let key = folded(&p);
-            if b.creates(&key) {
+            .map_err(|e| bad_to(&e.to_string()))
+        };
+        // The stored spelling of the existing `asked` below `prefix`.
+        let stored = |prefix: &Option<RelPath>, asked: &RelPath| -> Result<RelPath, PlanError> {
+            let name = game
+                .stored_name(asked)
+                .map_err(|e| bad_to(&e.to_string()))?
+                .ok_or_else(|| bad_to("changed while it was planned"))?;
+            join(prefix, &name)
+        };
+        let mut prefix: Option<RelPath> = None;
+        let mut creating = false;
+        for seg in ancestors {
+            let asked = join(&prefix, seg)?;
+            let key = folded(&asked);
+            let p = if b.creates(&key) {
                 // Created by an earlier target of this plan: so is everything below it.
                 creating = true;
+                b.created_path(&key).unwrap_or(asked)
             } else {
                 if !creating {
-                    match game.metadata(&p).map_err(|e| bad_to(&e.to_string()))? {
+                    match game.metadata(&asked).map_err(|e| bad_to(&e.to_string()))? {
                         None => creating = true,
                         Some(m) => {
                             if m.restricted || m.kind != EntryKind::Dir {
                                 return Err(bad_to(&format!(
                                     "{} is not a plain folder",
-                                    shown(&p)
+                                    shown(&asked)
                                 )));
                             }
-                            let d = game.open_dir(&p).map_err(|e| bad_to(&e.to_string()))?;
+                            let d = game.open_dir(&asked).map_err(|e| bad_to(&e.to_string()))?;
                             if d.info()?.case_sensitive {
-                                return Err(bad_to(&format!("{} is case-sensitive", shown(&p))));
+                                return Err(bad_to(&format!(
+                                    "{} is case-sensitive",
+                                    shown(&asked)
+                                )));
                             }
                         }
                     }
@@ -227,12 +251,16 @@ pub(crate) fn plan_into(
                     b.created.push(key);
                     b.ops.push(Op::CreateDir {
                         root: RootIx(0),
-                        path: p.clone(),
+                        path: asked.clone(),
                     });
+                    asked
+                } else {
+                    stored(&prefix, &asked)?
                 }
-            }
+            };
             prefix = Some(p);
         }
+        let asked = join(&prefix, last)?;
         b.targets.push(folded(&f.to));
         let content = ContentRef::Package {
             id: spec.package.clone(),
@@ -245,12 +273,12 @@ pub(crate) fn plan_into(
         let existing = if creating {
             None
         } else {
-            game.metadata(&f.to).map_err(|e| bad_to(&e.to_string()))?
+            game.metadata(&asked).map_err(|e| bad_to(&e.to_string()))?
         };
         match existing {
             None => b.ops.push(Op::CreateFile {
                 root: RootIx(0),
-                path: f.to.clone(),
+                path: asked,
                 content,
                 attrs: Attrs::default(),
             }),
@@ -259,14 +287,15 @@ pub(crate) fn plan_into(
                 if !m.is_single_link() {
                     return Err(bad_to("is hard-linked (managed by a mod manager)"));
                 }
-                let (old_sha, old_len) = hash_file(game, &f.to)?;
+                let to = stored(&prefix, &asked)?;
+                let (old_sha, old_len) = hash_file(game, &to)?;
                 if old_sha == sha {
                     // B1: the same content is no op, whatever the attributes.
                     continue;
                 }
                 b.ops.push(Op::ReplaceFile {
                     root: RootIx(0),
-                    path: f.to.clone(),
+                    path: to,
                     old: FileState {
                         sha256: old_sha,
                         len: old_len,

@@ -241,8 +241,9 @@ pub(super) fn apply_op(
                 file, sha256, len, ..
             } = content;
             let mut g = parent.guard(&name).map_err(&e)?;
-            // Condition 5: the guard holds exactly the old state before backup and intent.
-            if !roots::same_state(&mut *g, old).map_err(&e)? {
+            // Condition 5: the guard holds exactly the old state before backup and intent,
+            // under exactly the planned spelling (A2-B1: a recovery renames back onto it).
+            if g.name().as_str() != name.as_str() || !roots::same_state(&mut *g, old).map_err(&e)? {
                 return Err(e(SysError::new(
                     SysErrorKind::Mismatch,
                     format!("{}: changed since the preview", op.path()),
@@ -391,7 +392,9 @@ enum Action {
     /// Delete a `.old` if it holds the expected hash (else leave it); `Busy` is a pending
     /// cleanup.
     DeleteOld(RelPath, [u8; 32]),
-    /// Rename a `.old` holding the expected hash back onto the target name (phase B).
+    /// Rename a `.old` holding the expected hash back onto the target name (phase B): the
+    /// name as the plan spells it, which is the stored spelling the planner saw and the apply
+    /// checked on its guard (A2-B1).
     RenameBack(RelPath, [u8; 32]),
 }
 

@@ -57,6 +57,14 @@ impl Builder {
     pub(crate) fn creates(&self, folded: &str) -> bool {
         self.created.iter().any(|c| c == folded)
     }
+
+    /// The path, as spelled in the plan, of the directory a `CreateDir` creates.
+    pub(crate) fn created_path(&self, folded: &str) -> Option<RelPath> {
+        self.ops.iter().find_map(|o| match o {
+            Op::CreateDir { path, .. } if fold(path.as_str()) == folded => Some(path.clone()),
+            _ => None,
+        })
+    }
 }
 
 /// Plans `steps` against the game folder of `ctx` (reads only). A spec without files gives a

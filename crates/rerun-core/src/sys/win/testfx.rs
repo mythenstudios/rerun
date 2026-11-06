@@ -2152,10 +2152,16 @@ fn naive_put(path: &Path, tmp: &str, data: &[u8]) -> SysResult<Written> {
 #[derive(Debug)]
 struct NaiveGuard {
     path: PathBuf,
+    /// The name as requested (the naive guard does not ask for the stored spelling).
+    name: RelPath,
     hash: [u8; 32],
 }
 
 impl FileGuard for NaiveGuard {
+    fn name(&self) -> &RelPath {
+        &self.name
+    }
+
     fn metadata(&self) -> SysResult<Metadata> {
         naive_meta(&self.path)
     }
@@ -2224,6 +2230,7 @@ impl DirWrite for NaiveDir {
         let data = std::fs::read(&path).map_err(|_| naive_err(&path))?;
         Ok(Box::new(NaiveGuard {
             hash: naive_sha(&data),
+            name: name.clone(),
             path,
         }))
     }

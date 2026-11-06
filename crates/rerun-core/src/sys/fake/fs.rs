@@ -2087,6 +2087,28 @@ impl Dir for FakeDir {
         }
     }
 
+    fn stored_name(&self, p: &RelPath) -> SysResult<Option<String>> {
+        self.check(FsOp::Metadata)?;
+        let t = p.as_str();
+        self.fs.lock().dir(self.node, &self.handle_target())?;
+        let (parent, name) = match self.split(FsOp::Metadata, p) {
+            Ok(x) => x,
+            Err(e) if matches!(e.kind, SysErrorKind::NotFound | SysErrorKind::InvalidPath) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        let st = self.fs.lock();
+        let Some(id) = st.lookup(parent, name, t)? else {
+            return Ok(None);
+        };
+        st.not_pending(id, t)?;
+        if st.is_restricted(id) {
+            return Err(err(SysErrorKind::AccessDenied, t));
+        }
+        Ok(Some(st.node(id, t)?.name.clone()))
+    }
+
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>> {
         self.check(FsOp::OpenRead)?;
         let t = p.as_str();

@@ -673,6 +673,19 @@ fn names_and_ancestor_renames(
         .is_none(),
         "Straße and STRASSE are two names (folding is 1:1 per character)",
     )?;
+    // `stored_name`: the spelling the directory holds, whatever the request (A2-B1).
+    for (asked, stored) in [
+        (r"spelling\über.TXT", Some("Über.txt")),
+        (r"spelling\straße.TXT", Some("Straße.txt")),
+        ("spelling", Some("spelling")),
+        (r"spelling\STRASSE.txt", None),
+        (r"missing\x.txt", None),
+    ] {
+        ensure(
+            ok(root.stored_name(&rel(asked)?), "stored_name")?.as_deref() == stored,
+            &format!("stored_name of {asked} is {stored:?}"),
+        )?;
+    }
     let mut listed = names(root, Some(&rel("spelling")?), "read_dir spelling")?;
     listed.sort();
     let mut expected: Vec<String> = spelled.iter().map(|n| (*n).to_owned()).collect();

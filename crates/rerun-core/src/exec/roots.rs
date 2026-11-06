@@ -151,8 +151,9 @@ pub(super) fn game_closed(plan: &Plan, games: &[GameDir<'_>], ops: &[u16]) -> Re
     Ok(())
 }
 
-/// Step 5: a created object is still missing, a replaced file still has its old state (on a
-/// guard: hash, length, R/H/S, one link), and every source still has its hash and length.
+/// Step 5: a created object is still missing (in any spelling), a replaced file still has its
+/// old state (on a guard: the stored spelling of its name exactly as planned, hash, length,
+/// R/H/S, one link), and every source still has its hash and length.
 pub(super) fn old_state(
     cx: &ExecCtx<'_>,
     plan: &Plan,
@@ -194,7 +195,8 @@ pub(super) fn old_state(
                     }
                     Err(e) => return Err(e.into()),
                 };
-                if !same_state(&mut *guard, old)? {
+                // A2-B1: the plan holds the stored spelling; another one since is a change.
+                if guard.name().as_str() != name.as_str() || !same_state(&mut *guard, old)? {
                     return Err(mismatch());
                 }
             }

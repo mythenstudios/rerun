@@ -972,6 +972,15 @@ fn t8_refusals_write_no_transaction() {
             |r| matches!(r, Refusal::NeedsHelper),
         ),
         (
+            "the target renamed in another case (A2-B1)",
+            |env| {
+                env.sys
+                    .rename_abs(game("d3d9.dll"), game("D3D9.DLL"))
+                    .unwrap()
+            },
+            |r| matches!(r, Refusal::Mismatch { op: 0 }),
+        ),
+        (
             "another folder now",
             |env| {
                 env.sys.rename_abs(GAME, r"D:\Games\Moved").unwrap();
@@ -1042,6 +1051,41 @@ fn t8_refusals_write_no_transaction() {
             if matches!(&**cause, ExecError::Op { op: 0, source } if source.kind == SysErrorKind::Busy)),
         "{r:?}"
     );
+    same(&before, &env.snap());
+}
+
+/// A2-B1: a replace names its target in the stored spelling, and the apply refuses any other
+/// (a recovery renames back onto the planned name, so it must be the one on disk). The plan
+/// here is written by hand in the step's spelling, which the planner never produces.
+#[test]
+fn t8_a_replace_in_another_spelling_than_the_disk_is_a_mismatch() {
+    use crate::plan::{self, Op, Plan};
+    let env = Env::new(finish(base()));
+    let h = env.plan(&spec(vec![entry("d3d9.dll", "D3D9.DLL", NEW)]));
+    let app = app(&env.sys);
+    let mut p: Plan = plan::decode(plan::load(&app, &h).unwrap().bytes()).unwrap();
+    match p.ops.first_mut() {
+        Some(Op::ReplaceFile { path, .. }) => {
+            assert_eq!(
+                path.as_str(),
+                "d3d9.dll",
+                "the planner writes the stored spelling"
+            );
+            *path = rel("D3D9.DLL");
+        }
+        other => panic!("{other:?}"),
+    }
+    let crafted = store(&app, &p.encode().unwrap()).unwrap();
+    let before = env.snap();
+    match env.apply(&crafted) {
+        Err(ApplyError::Refused(Refusal::Mismatch { op: 0 })) => {}
+        other => panic!("{other:?}"),
+    }
+    assert!(env.states().is_empty(), "no transaction folder");
+    same(&before, &env.snap());
+    // The plan in the stored spelling applies and reverts to the exact name.
+    let t = env.applied(&h);
+    assert!(closed(&env.revert(&t)).is_some());
     same(&before, &env.snap());
 }
 

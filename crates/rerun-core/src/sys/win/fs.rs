@@ -655,6 +655,35 @@ impl Dir for WinDir {
         }
     }
 
+    fn stored_name(&self, p: &RelPath) -> SysResult<Option<String>> {
+        let t = p.as_str();
+        self.ensure_live()?;
+        let absent =
+            |e: &SysError| matches!(e.kind, SysErrorKind::NotFound | SysErrorKind::InvalidPath);
+        let (parent, last) = match self.split(p) {
+            Ok(x) => x,
+            Err(e) if absent(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let parent = parent.as_ref().map_or(self.h(), AsHandle::as_handle);
+        let s = seg16(last, t)?;
+        // Attribute-only, never following a reparse point; L1 refuses an 8.3 short name.
+        let o = match open_entry(parent, &s, Access::Attributes, t) {
+            Ok(o) => o,
+            Err(e) if absent(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        // The name the guard renames onto (`seq::guard`): `FileNameInformation`.
+        let units =
+            name_info(o.handle.as_handle(), FileNameInformation).map_err(|st| nt_error(st, t))?;
+        let full = String::from_utf16(&units).map_err(|_| err(SysErrorKind::Other, t))?;
+        let stored = full.rsplit('\\').next().unwrap_or_default();
+        if fold(stored) != fold(last) {
+            return Err(err(SysErrorKind::Busy, t));
+        }
+        Ok(Some(stored.to_owned()))
+    }
+
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>> {
         let t = p.as_str();
         self.ensure_live()?;

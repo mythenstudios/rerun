@@ -67,7 +67,7 @@
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
-use super::{SysError, SysResult};
+use super::{SysError, SysErrorKind, SysResult};
 use crate::path::RelPath;
 
 /// Reparse tags known to Rerun.
@@ -312,6 +312,19 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     /// listing of its parent ([`Metadata::restricted`]), exactly as `read_dir` reports it.
     fn metadata(&self, p: &RelPath) -> SysResult<Option<Metadata>>;
 
+    /// The stored spelling of the last segment of `p`: the name as its directory holds it
+    /// (`p` may spell it in another case), the one a [`FileGuard`] renames onto. `Ok(None)` =
+    /// does not exist (as [`Self::metadata`]). Never follows a reparse point; a restricted
+    /// entry is `AccessDenied`, a name that resolves to an entry of another folding (an 8.3
+    /// short name, or renamed in between) `Busy`. `sys::win` asks `FileNameInformation` on
+    /// an attribute-only handle opened relative to the parent, as the guard does.
+    ///
+    /// The default refuses (`Unsupported`): a test double that does not model names makes a
+    /// planner fail closed rather than guess a spelling.
+    fn stored_name(&self, p: &RelPath) -> SysResult<Option<String>> {
+        Err(SysError::new(SysErrorKind::Unsupported, p.as_str()))
+    }
+
     /// Opens a file for reading. A directory or a restricted entry yields `AccessDenied`.
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>>;
 
@@ -436,6 +449,11 @@ pub trait FileLock: Send + std::fmt::Debug {}
 /// held nobody else can write, rename or delete the file, so the hash taken on it is the hash
 /// of what [`Self::replace`] and [`Self::delete`] act on.
 pub trait FileGuard: Send + std::fmt::Debug {
+    /// The stored spelling of the name it was opened by (one segment, as its directory
+    /// holds it when the guard was opened): the name a replace renames onto. Compare its
+    /// spelling with `as_str()`: `==` on a [`RelPath`] folds.
+    fn name(&self) -> &RelPath;
+
     /// Metadata, queried on the guard handle.
     fn metadata(&self) -> SysResult<Metadata>;
 

@@ -118,7 +118,8 @@ fn t9_plans_folders_top_down_new_files_and_replaces() {
         ini,
         entry("y.txt", r"MODS\a\y.txt", b"y"),
         entry("same.txt", "same.txt", b"same"),
-        entry("y.txt", r"existing\new\y.txt", b"y"),
+        entry("y.txt", r"EXISTING\New\y.txt", b"y"),
+        entry("y.txt", r"existing\new\z.txt", b"y"),
     ]);
     let p = plan_manual(&sys, &s).unwrap();
     assert_eq!(p.roots.len(), 1);
@@ -130,7 +131,7 @@ fn t9_plans_folders_top_down_new_files_and_replaces() {
         vec![
             Op::ReplaceFile {
                 root,
-                path: rel("D3D9.dll"),
+                path: rel("d3d9.dll"),
                 old: FileState {
                     sha256: sha(b"old d3d9"),
                     len: 8,
@@ -155,22 +156,45 @@ fn t9_plans_folders_top_down_new_files_and_replaces() {
             },
             Op::CreateFile {
                 root,
-                path: rel(r"MODS\a\y.txt"),
+                path: rel(r"mods\a\y.txt"),
                 content: content("y.txt", b"y", false),
                 attrs: Attrs::default(),
             },
             Op::CreateDir {
                 root,
-                path: rel(r"existing\new"),
+                path: rel(r"existing\New"),
             },
             Op::CreateFile {
                 root,
-                path: rel(r"existing\new\y.txt"),
+                path: rel(r"existing\New\y.txt"),
+                content: content("y.txt", b"y", false),
+                attrs: Attrs::default(),
+            },
+            Op::CreateFile {
+                root,
+                path: rel(r"existing\New\z.txt"),
                 content: content("y.txt", b"y", false),
                 attrs: Attrs::default(),
             },
         ],
         "B1: same.txt has the content already (other attributes): no op"
+    );
+    // A2-B1 (`==` on a path folds, so the spelling is compared on its own): an existing
+    // segment in its stored spelling whatever the step says, a segment the plan creates in
+    // the spelling of the first step that creates it, a new file as the step spells it.
+    let spelled: Vec<&str> = p.ops.iter().map(|o| o.path().as_str()).collect();
+    assert_eq!(
+        spelled,
+        [
+            "d3d9.dll",
+            "mods",
+            r"mods\a",
+            r"mods\a\x.ini",
+            r"mods\a\y.txt",
+            r"existing\New",
+            r"existing\New\y.txt",
+            r"existing\New\z.txt",
+        ]
     );
     // Planning again gives the same bytes.
     assert_eq!(

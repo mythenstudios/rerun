@@ -28,13 +28,16 @@ enum Kind {
     CreateDir,
     CreateFile,
     Replace,
+    /// A replace whose step spells the target in another case than the disk (A2-B1).
+    ReplaceCased,
     DirAndFile,
 }
 
-const KINDS: [Kind; 4] = [
+const KINDS: [Kind; 5] = [
     Kind::CreateDir,
     Kind::CreateFile,
     Kind::Replace,
+    Kind::ReplaceCased,
     Kind::DirAndFile,
 ];
 
@@ -46,6 +49,7 @@ fn setup(k: Kind) -> (Env, PlanHash, Snapshot) {
         Kind::CreateDir | Kind::DirAndFile => spec(vec![entry(r"mods\x.dll", r"mods\x.dll", X)]),
         Kind::CreateFile => spec(vec![entry("new.dll", "new.dll", super::tests::N)]),
         Kind::Replace => spec(vec![entry("d3d9.dll", "d3d9.dll", NEW)]),
+        Kind::ReplaceCased => spec(vec![entry("d3d9.dll", "D3D9.DLL", NEW)]),
     };
     let mut h = env.plan(&s);
     if k == Kind::CreateDir {

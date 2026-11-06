@@ -443,6 +443,10 @@ impl<F: PrimFile> Read for GuardReader<'_, F> {
 }
 
 impl<D: PrimDir> FileGuard for Guard<'_, D> {
+    fn name(&self) -> &RelPath {
+        &self.stored
+    }
+
     fn metadata(&self) -> SysResult<Metadata> {
         let st = self.file.state()?;
         Ok(Metadata {

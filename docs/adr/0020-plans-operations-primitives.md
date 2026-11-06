@@ -126,6 +126,7 @@ Sources are files below `<AppDir>\packages\<id>\<version>\` (`id` and `version` 
 
 ### `file_install` and the planner context
 `PlanCtx { game, app, steam_app, main_exe }` (no `sys`: the planner reads through the `GameDir` and `AppDir` handles; `RegPolicy` joins with P2-9). A Steam root needs its app ID, a manual one has none. Same content is no op whatever its attributes (senior-dev B1); new files get no R/H/S; refusals as in `docs/02-topo-format.md` and `prim::file_install`.
+- **Name spelling (audit A2-B1; ADR 0017 D3: the case of a name is part of "exact").** The planner writes every existing segment of a target in its stored spelling (`Dir::stored_name`, `FileNameInformation` on an attribute-only handle, as the guard), whatever the step says: a replace names its target as the folder holds it. A segment the plan creates keeps the spelling of the first step that creates it; a new file keeps the step's. `exec` compares the guard's name (`FileGuard::name`) with the plan's last segment exactly (`as_str()`: `==` on a `RelPath` folds) in the old-state check and again before backup and intent; another spelling is `Mismatch`. So a recovery that renames `X.old` or `Yi.old` back in phase B renames onto the name the file had (before: onto the step's spelling, a silent snapshot difference at 4 of 217 crash points). Existing ancestors are only opened, never renamed; their spelling in the plan is for the preview.
 
 ### `exec` (P2-8)
 ```rust
