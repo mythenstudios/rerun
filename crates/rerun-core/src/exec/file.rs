@@ -31,7 +31,7 @@ use crate::fold::fold;
 use crate::journal::{Before, BeforeArg, Digest, Observed, OpLog, Reverting, TxnWriter};
 use crate::path::RelPath;
 use crate::plan::{ContentRef, Op, Plan, Target};
-use crate::policy::root::{AppSub, GameDir};
+use crate::policy::root::AppSub;
 use crate::prim::file_install::open_package;
 use crate::sys::fs::{Attrs, EntryKind, NewFile, TmpName};
 use crate::sys::{DirWrite, SysError, SysErrorKind, SysResult};
@@ -50,8 +50,8 @@ pub(super) enum Mode {
     Rollback,
     /// A revert or recovery from the records (D1).
     Recovery,
-    /// Read only (`verify`, and `After` right after an apply): a created directory may hold
-    /// the targets of the plan's later ops.
+    /// Read only (`verify`, and `After` right after an apply), newest op first: a created
+    /// directory may hold the targets of the plan's later ops that will be gone (S3).
     Verify,
 }
 
@@ -59,25 +59,27 @@ pub(super) enum Mode {
 /// and cached; the folders written into are flushed before `Applied` and before every
 /// `RevertDone`.
 pub(super) struct Dirs<'g> {
-    games: &'g [GameDir<'g>],
+    roots: &'g roots::Roots<'g>,
     open: Vec<(u16, RelPath, Box<dyn DirWrite + 'g>)>,
     touched: Vec<(u16, Option<RelPath>)>,
 }
 
 impl<'g> Dirs<'g> {
-    pub(super) fn new(games: &'g [GameDir<'g>]) -> Self {
+    pub(super) fn new(roots: &'g roots::Roots<'g>) -> Self {
         Self {
-            games,
+            roots,
             open: Vec::new(),
             touched: Vec::new(),
         }
     }
 
+    /// The write handle of `root`; the revert halted before any file op of a root that
+    /// cannot run file ops, so an error here is a caller's.
     fn base(&self, root: u16) -> SysResult<&'g dyn DirWrite> {
         let g = self
-            .games
-            .get(usize::from(root))
-            .ok_or_else(|| SysError::new(SysErrorKind::NotFound, "root of the plan"))?;
+            .roots
+            .for_files(usize::from(root))
+            .map_err(|_| SysError::new(SysErrorKind::NotFound, "root of the plan"))?;
         roots::write_handle(g)
     }
 
@@ -473,23 +475,42 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
 }
 
 /// The folded names of the direct children of `dir` that later file ops of `plan` (after
-/// `k`, in the same root) create.
-fn later_children(plan: &Plan, k: u16, root: u16, dir: &RelPath) -> Vec<String> {
+/// `k`, in the same root) create and that will be gone when the revert reaches `k`: observed
+/// `After` (the revert removes them) or `Before` (not there) in `later` (review S3; a later
+/// op not observed, or `Foreign`, stays).
+fn later_children(
+    plan: &Plan,
+    k: u16,
+    root: u16,
+    dir: &RelPath,
+    later: &BTreeMap<u16, Observed>,
+) -> Vec<String> {
     plan.ops
         .iter()
+        .enumerate()
         .skip(usize::from(k) + 1)
-        .filter_map(|o| match o.target() {
-            Target::File { root: r, path, .. }
-                if r.0 == root && path.parent().as_ref() == Some(dir) =>
-            {
-                Some(fold(path.file_name()))
+        .filter_map(|(j, o)| {
+            let gone = later
+                .get(&super::op_ix(j))
+                .is_some_and(|s| matches!(s, Observed::After | Observed::Before));
+            match o.target() {
+                Target::File { root: r, path, .. }
+                    if gone && r.0 == root && path.parent().as_ref() == Some(dir) =>
+                {
+                    Some(fold(path.file_name()))
+                }
+                Target::File { .. } => None,
             }
-            Target::File { .. } => None,
         })
         .collect()
 }
 
 /// Observes op `k` (module docs; read only: guards are opened and dropped, nothing changes).
+/// `later`: what the later ops observed ([`Mode::Verify`] only).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the observation of every file op kind"
+)]
 pub(super) fn observe(
     plan: &Plan,
     dirs: &mut Dirs<'_>,
@@ -498,6 +519,7 @@ pub(super) fn observe(
     log: &OpLog,
     mode: Mode,
     hint: Option<Hint>,
+    later: &BTreeMap<u16, Observed>,
 ) -> Result<Seen, ExecError> {
     if super::trusting_records() {
         return Ok(trusted(op, log));
@@ -516,7 +538,7 @@ pub(super) fn observe(
     match op {
         Op::CreateDir { .. } => {
             let allowed = if mode == Mode::Verify {
-                later_children(plan, k, root, path)
+                later_children(plan, k, root, path, later)
             } else {
                 Vec::new()
             };

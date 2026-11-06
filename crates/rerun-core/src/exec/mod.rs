@@ -11,11 +11,15 @@
 //!   stays open.
 //! - [`revert`]: the one path for a revert, the recovery of an interrupted apply and (through
 //!   the same loop) the rollback: the head parsed from the bytes the writer read under the
-//!   lock, LIFO against later transactions, roots, Steam and `users()` again, then newest op
-//!   first: observe, `RevertIntent`, act, flush, `RevertDone`. A foreign op is recorded `Foreign` and
-//!   left; the lower ops are still reverted (user decision D3, R1), and only `forget` closes.
-//! - [`verify`]: what each op of a transaction observes now, read only, without the lock;
-//!   also the preview before a revert (rule 5).
+//!   lock, LIFO against later transactions, each root on its own (`roots`, E3: open, absent,
+//!   or undecided, which refuses), Steam and `users()` of the open roots again, then newest op
+//!   first: observe, `RevertIntent`, act, flush, `RevertDone`. A foreign op is recorded
+//!   `Foreign` and left; the lower ops are still reverted (user decision D3, R1), and only
+//!   `forget` closes. A file op whose root cannot run file ops halts the revert without a
+//!   record (6b-d, [`Halt`]): the transaction stays open and resumable.
+//! - [`verify`]: what each op of a transaction observes now, read only, without the lock,
+//!   newest first and halting where the revert would; also the preview before a revert
+//!   (rule 5).
 //! - [`forget`]: closes an empty, open or applied transaction with `Closed { Forgotten }`, a
 //!   damaged or unreadable one with the marker `journal\<txn>.forgotten` (user decision D2).
 //!
@@ -44,7 +48,7 @@ use crate::journal::{
 };
 use crate::path::RelPath;
 use crate::plan::{self, Object, Op, Plan, PlanError, PlanHash, Target};
-use crate::policy::root::{AppDir, ForbiddenRoots, GameDir, RootError};
+use crate::policy::root::{AppDir, ForbiddenRoots, RootError};
 use crate::sys::fs::TmpName;
 use crate::sys::{SysError, SysResult, System};
 
@@ -277,15 +281,40 @@ pub struct OpReport {
     pub backup: Option<String>,
 }
 
+/// Where a revert stopped (6b-d): at file op `op`, whose root `root` cannot run file ops now
+/// (gone, or not writable). Nothing was recorded for it; the transaction stays open and a
+/// later revert goes on from there (after a reinstall, or a rebind, D5).
+#[derive(Debug)]
+pub struct Halt {
+    /// Op index.
+    pub op: u16,
+    /// Root index.
+    pub root: u16,
+    /// Why.
+    pub why: Box<Refusal>,
+}
+
 /// What [`revert`] did.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct RevertReport {
     /// The transaction.
     pub txn: TxnId,
-    /// How it was closed; `None` if an op was foreign (it stays open, `forget` closes it).
+    /// How it was closed; `None` if an op was foreign (it stays open, `forget` closes it) or
+    /// the revert halted.
     pub closed: Option<Closing>,
     /// The ops reverted in this run, newest first.
     pub ops: Vec<OpReport>,
+    /// Where the revert halted, if it did (review N4: also at its first op, an `Ok`).
+    pub halted: Option<Halt>,
+}
+
+/// What [`verify`] observed.
+#[derive(Debug)]
+pub struct Verified {
+    /// Each intended op observed, by index (ascending); the ops below a halt are missing.
+    pub ops: Vec<(u16, Observed)>,
+    /// Where a revert would halt now.
+    pub halted: Option<Halt>,
 }
 
 #[cfg(test)]
@@ -301,6 +330,7 @@ pub(crate) mod knob {
         static SKIP: Cell<Option<Flush>> = const { Cell::new(None) };
         static TRUST_RECORDS: Cell<bool> = const { Cell::new(false) };
         static RESTORE_WITHOUT_ATTRS: Cell<bool> = const { Cell::new(false) };
+        static EAGER_ROOTS: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(crate) fn skip(f: Option<Flush>) {
@@ -322,6 +352,13 @@ pub(crate) mod knob {
     }
     pub(crate) fn restoring_without_attrs() -> bool {
         RESTORE_WITHOUT_ATTRS.with(Cell::get)
+    }
+    /// K-R9: a revert needs every root open for file ops (as before P2-10a).
+    pub(crate) fn open_eagerly(on: bool) {
+        EAGER_ROOTS.with(|s| s.set(on));
+    }
+    pub(crate) fn opening_eagerly() -> bool {
+        EAGER_ROOTS.with(Cell::get)
     }
 }
 
@@ -409,9 +446,9 @@ struct Touched<'g> {
 }
 
 impl<'g> Touched<'g> {
-    fn new(games: &'g [GameDir<'g>]) -> Self {
+    fn new(roots: &'g roots::Roots<'g>) -> Self {
         Self {
-            dirs: file::Dirs::new(games),
+            dirs: file::Dirs::new(roots),
         }
     }
 
@@ -456,7 +493,12 @@ fn apply_op(
     }
 }
 
-/// Observes op `k` in its domain (read only).
+/// Observes op `k` in its domain (read only). `later`: what the later ops observed
+/// ([`Mode::Verify`], newest first: review S3).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the one dispatch of an observation"
+)]
 fn observe(
     plan: &Plan,
     t: &mut Touched<'_>,
@@ -465,12 +507,53 @@ fn observe(
     log: &OpLog,
     mode: Mode,
     hint: Option<Hint>,
+    later: &BTreeMap<u16, Observed>,
 ) -> Result<Seen, ExecError> {
     match op.target() {
         Target::File { .. } => {
-            file::observe(plan, &mut t.dirs, k, op, log, mode, hint).map(Seen::File)
+            file::observe(plan, &mut t.dirs, k, op, log, mode, hint, later).map(Seen::File)
         }
     }
+}
+
+/// The halt of a revert at op `k` (6b-d): a file op whose root cannot run file ops.
+fn halt(roots: &roots::Roots<'_>, k: u16, op: &Op) -> Option<Halt> {
+    match op.target() {
+        Target::File { root, .. } => roots.for_files(usize::from(root.0)).err().map(|n| Halt {
+            op: k,
+            root: root.0,
+            why: Box::new(n.refusal()),
+        }),
+    }
+}
+
+/// Observes the intended ops `ops` newest first, as `verify` (review S3: a created directory
+/// counts only the later targets observed `Before` or `After` as gone), halting where a revert
+/// would; an op already reverted whose root cannot run file ops is skipped.
+fn verify_ops(
+    plan: &Plan,
+    t: &mut Touched<'_>,
+    roots: &roots::Roots<'_>,
+    ops: &BTreeMap<u16, OpLog>,
+) -> Result<Verified, ExecError> {
+    let mut seen = BTreeMap::new();
+    let mut halted = None;
+    for (k, log) in ops.iter().rev() {
+        let op = op_of(plan, *k)?;
+        if let Some(h) = halt(roots, *k, op) {
+            if log.reverted.is_some() {
+                continue;
+            }
+            halted = Some(h);
+            break;
+        }
+        let s = observe(plan, t, *k, op, log, Mode::Verify, None, &seen)?;
+        seen.insert(*k, s.observed());
+    }
+    Ok(Verified {
+        ops: seen.into_iter().collect(),
+        halted,
+    })
 }
 
 /// Carries out what `seen` says for op `k`, after its `RevertIntent`.
@@ -510,20 +593,20 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
     stack::for_apply(&j, &listing, &Object::of(&plan))?;
-    let stores = roots::open_stores(cx, &plan)?;
-    let games = roots::open_games(cx, &plan, &stores)?;
+    let stores = roots::open_stores(cx, &plan);
+    let roots = roots::Roots::all(cx, &plan, &stores)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
-    roots::game_closed(&plan, &games, &all)?;
-    roots::old_state(cx, &plan, &games)?;
+    roots::game_closed(&plan, &roots, &all)?;
+    roots::old_state(cx, &plan, &roots)?;
     let mut w = lock.begin(bytes.bytes()).map_err(Refusal::from)?;
     let txn = *w.id();
-    let mut touched = Touched::new(&games);
+    let mut touched = Touched::new(&roots);
     let mut hints = BTreeMap::new();
-    let cause = match run(cx, &plan, &mut w, &mut touched, &mut hints) {
+    let cause = match run(cx, &plan, &mut w, &mut touched, &roots, &mut hints) {
         Ok(()) => return Ok(Outcome::Applied(txn)),
         Err(e) => e,
     };
-    match rollback(cx, &plan, w, &mut touched, &hints) {
+    match rollback(cx, &plan, w, &mut touched, &roots, &hints) {
         Ok(()) => Err(ApplyError::RolledBack {
             txn,
             cause: Box::new(cause),
@@ -547,21 +630,21 @@ fn run(
     plan: &Plan,
     w: &mut TxnWriter<'_>,
     t: &mut Touched<'_>,
+    roots: &roots::Roots<'_>,
     hints: &mut BTreeMap<u16, Hint>,
 ) -> Result<(), ExecError> {
     for (k, op) in plan.ops.iter().enumerate() {
         apply_op(cx, w, t, op_ix(k), op, hints)?;
     }
     let ops = w.ops().clone();
-    for (k, log) in &ops {
-        let op = op_of(plan, *k)?;
-        let seen = observe(plan, t, *k, op, log, Mode::Verify, None)?;
-        if seen.observed() != Observed::After {
-            return Err(ExecError::Verify {
-                op: *k,
-                observed: seen.observed(),
-            });
+    let v = verify_ops(plan, t, roots, &ops)?;
+    for (k, observed) in v.ops {
+        if observed != Observed::After {
+            return Err(ExecError::Verify { op: k, observed });
         }
+    }
+    if let Some(h) = v.halted {
+        return Err(ExecError::Refused(*h.why));
     }
     t.flush_all()?;
     w.applied(op_ix(plan.ops.len()))?;
@@ -582,9 +665,14 @@ fn rollback(
     plan: &Plan,
     mut w: TxnWriter<'_>,
     t: &mut Touched<'_>,
+    roots: &roots::Roots<'_>,
     hints: &BTreeMap<u16, Hint>,
 ) -> Result<(), ExecError> {
-    revert_loop(cx, plan, &mut w, t, Mode::Rollback, hints)?;
+    // Every root opened for the apply, so the rollback never halts; if it did, it is open.
+    let (_, halted) = revert_loop(cx, plan, &mut w, t, roots, Mode::Rollback, hints)?;
+    if let Some(h) = halted {
+        return Err(ExecError::Refused(*h.why));
+    }
     let foreign = foreign_ops(&w);
     if !foreign.is_empty() {
         return Err(ExecError::Foreign { ops: foreign });
@@ -616,7 +704,8 @@ fn close<W: Reverting>(w: W) -> Result<(), ExecError> {
 
 /// Newest op first while one is left: observe, `RevertIntent` (with a temp name only when a
 /// restore starts, B2), act, flush the domain of the op (always), `RevertDone`. A foreign
-/// op gets its records and is left (R1).
+/// op gets its records and is left (R1). A file op whose root cannot run file ops ends the
+/// loop before any record of it ([`Halt`], 6b-d).
 ///
 /// The flush before `RevertDone` (found by T4): `RevertDone` is not flushed itself, but the
 /// flush of its own temp file makes the journal's volume log durable up to just before its
@@ -630,9 +719,10 @@ fn revert_loop<W: Reverting>(
     plan: &Plan,
     w: &mut W,
     t: &mut Touched<'_>,
+    roots: &roots::Roots<'_>,
     mode: Mode,
     hints: &BTreeMap<u16, Hint>,
-) -> Result<Vec<OpReport>, ExecError> {
+) -> Result<(Vec<OpReport>, Option<Halt>), ExecError> {
     let mut reports = Vec::new();
     while let Some(k) = w.next_revert() {
         let log: OpLog = w
@@ -641,7 +731,11 @@ fn revert_loop<W: Reverting>(
             .cloned()
             .ok_or(JournalError::Order("an op to revert without its intent"))?;
         let op = op_of(plan, k)?;
-        let seen = observe(plan, t, k, op, &log, mode, hints.get(&k).copied())?;
+        if let Some(h) = halt(roots, k, op) {
+            return Ok((reports, Some(h)));
+        }
+        let none = BTreeMap::new();
+        let seen = observe(plan, t, k, op, &log, mode, hints.get(&k).copied(), &none)?;
         let observed = seen.observed();
         let y = seen.restore().then(|| w.tmp());
         w.revert_intent(k, y.clone())?;
@@ -659,7 +753,7 @@ fn revert_loop<W: Reverting>(
             }),
         });
     }
-    Ok(reports)
+    Ok((reports, None))
 }
 
 /// Reverts transaction `t` (module docs): also the recovery of an interrupted apply.
@@ -688,24 +782,26 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
         return Err(Refusal::Blocked { txn: *t }.into());
     }
     stack::for_revert(&j, &listing, t, &Object::of(&plan))?;
-    let stores = roots::open_stores(cx, &plan)?;
-    let games = roots::open_games(cx, &plan, &stores)?;
+    let stores = roots::open_stores(cx, &plan);
+    let roots = roots::Roots::each(cx, &plan, &stores)?;
     let intended: Vec<u16> = w.ops().keys().copied().collect();
-    roots::game_closed(&plan, &games, &intended)?;
-    let mut touched = Touched::new(&games);
-    let ops = revert_loop(
+    roots::game_closed(&plan, &roots, &intended)?;
+    let mut touched = Touched::new(&roots);
+    let (ops, halted) = revert_loop(
         cx,
         &plan,
         &mut w,
         &mut touched,
+        &roots,
         Mode::Recovery,
         &BTreeMap::new(),
     )?;
-    if !foreign_ops(&w).is_empty() {
+    if halted.is_some() || !foreign_ops(&w).is_empty() {
         return Ok(RevertReport {
             txn: *t,
             closed: None,
             ops,
+            halted,
         });
     }
     let how = if w.is_applied() {
@@ -718,11 +814,13 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
         txn: *t,
         closed: Some(how),
         ops,
+        halted: None,
     })
 }
 
-/// What each intended op of `t` observes now (read only, no lock).
-pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Vec<(u16, Observed)>, ExecError> {
+/// What each intended op of `t` observes now, newest first and halting where a revert would
+/// (read only, no lock).
+pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     let j = Journal::new(cx.app, cx.tag);
     let v = j.load(t, crate::journal::VerifyBackups::Length)?;
     let blocked = || ExecError::Refused(Refusal::Blocked { txn: *t });
@@ -733,16 +831,10 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Vec<(u16, Observed)>, ExecE
     if !records_fit(&plan, &v.ops) {
         return Err(blocked());
     }
-    let stores = roots::open_stores(cx, &plan)?;
-    let games = roots::open_games(cx, &plan, &stores)?;
-    let mut touched = Touched::new(&games);
-    let mut out = Vec::with_capacity(v.ops.len());
-    for (k, log) in &v.ops {
-        let op = op_of(&plan, *k)?;
-        let seen = observe(&plan, &mut touched, *k, op, log, Mode::Verify, None)?;
-        out.push((*k, seen.observed()));
-    }
-    Ok(out)
+    let stores = roots::open_stores(cx, &plan);
+    let roots = roots::Roots::each(cx, &plan, &stores)?;
+    let mut touched = Touched::new(&roots);
+    verify_ops(&plan, &mut touched, &roots, &v.ops)
 }
 
 /// Forgets transaction `t` (module docs). Backups stay.
@@ -785,5 +877,7 @@ pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
 
 #[cfg(test)]
 mod crash_tests;
+#[cfg(test)]
+mod halt_tests;
 #[cfg(test)]
 pub(crate) mod tests;

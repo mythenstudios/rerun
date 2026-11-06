@@ -121,7 +121,8 @@ fn t1_exec_round_trip_on_real_windows() {
     assert_eq!(read(&w.game.join("d3d9.dll")), NEW);
     assert_eq!(read(&w.game.join(r"mods\a\x.dll")), X);
     let v = w.with(|cx, _| verify(cx, &t)).unwrap();
-    assert!(v.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    assert!(v.halted.is_none(), "{v:?}");
+    assert!(v.ops.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
     let rep = w
         .with(|cx, _| revert(cx, &t))
         .unwrap_or_else(|e| panic!("{e}"));

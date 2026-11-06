@@ -168,7 +168,16 @@ impl Env {
         self.try_verify(t).unwrap_or_else(|e| panic!("{e}"))
     }
 
+    /// The ops `verify` observed; a halt (not expected by the callers) is an error.
     pub(crate) fn try_verify(&self, t: &TxnId) -> Result<Vec<(u16, Observed)>, ExecError> {
+        let v = self.verified(t)?;
+        match v.halted {
+            None => Ok(v.ops),
+            Some(h) => Err(ExecError::Refused(*h.why)),
+        }
+    }
+
+    pub(crate) fn verified(&self, t: &TxnId) -> Result<super::Verified, ExecError> {
         self.with(|cx| verify(cx, t))
     }
 
@@ -219,11 +228,11 @@ pub(crate) fn snap_at(sys: &FakeSystem, abs: &str) -> Snapshot {
     .unwrap()
 }
 
-fn same(a: &Snapshot, b: &Snapshot) {
+pub(crate) fn same(a: &Snapshot, b: &Snapshot) {
     assert!(a == b, "not identical: {:#?}", a.diff(b));
 }
 
-fn closed(r: &Result<RevertReport, ExecError>) -> Option<Closing> {
+pub(crate) fn closed(r: &Result<RevertReport, ExecError>) -> Option<Closing> {
     r.as_ref().ok().and_then(|r| r.closed)
 }
 
@@ -294,37 +303,43 @@ fn t1_round_trip_restores_the_game_folder_exactly() {
     assert!(f.is_empty(), "{f:#?}");
 }
 
+/// T2: `verify` names exactly the ops someone changed, and the folders above a changed one
+/// that the revert must leave because they will not be empty (review S3: newest op first, a
+/// created folder counts only later targets that will be gone); the revert then finds
+/// exactly these foreign.
 #[test]
 fn t2_verify_names_exactly_the_op_someone_changed() {
     type Change = fn(&FakeSystem);
-    let cases: [(u16, Change); 5] = [
-        (0, |s| {
+    let cases: [(&[u16], Change); 5] = [
+        (&[0], |s| {
             s.fake_fs()
                 .set_attrs(Path::new(&game("d3d9.dll")), RH)
                 .unwrap();
         }),
-        (1, |s| {
+        (&[1], |s| {
             s.fake_fs()
                 .put_file(Path::new(&game(r"mods\extra.txt")), b"user")
                 .unwrap();
         }),
-        (2, |s| {
+        // `mods\a` stays, so `mods` will not be empty either.
+        (&[1, 2], |s| {
             s.fake_fs()
                 .put_file(Path::new(&game(r"mods\a\extra.txt")), b"user")
                 .unwrap();
         }),
-        (3, |s| {
+        // The edited `x.dll` stays, so do `mods\a` and `mods`.
+        (&[1, 2, 3], |s| {
             let p = game(r"mods\a\x.dll");
             s.fake_fs().remove_abs(Path::new(&p)).unwrap();
             s.fake_fs().put_file(Path::new(&p), b"edited").unwrap();
         }),
-        (4, |s| {
+        (&[4], |s| {
             s.fake_fs()
                 .put_hardlink(Path::new(&game("new.dll")), Path::new(&game("link.dll")))
                 .unwrap();
         }),
     ];
-    for (op, change) in cases {
+    for (ops, change) in cases {
         let env = Env::new(finish(base()));
         let t = env.applied(&env.plan(&t1_spec()));
         change(&env.sys);
@@ -334,15 +349,25 @@ fn t2_verify_names_exactly_the_op_someone_changed() {
             .filter(|(_, o)| *o == Observed::Foreign)
             .map(|(k, _)| *k)
             .collect();
-        assert_eq!(foreign, [op], "{v:?}");
+        assert_eq!(foreign, ops, "{v:?}");
         assert!(
-            v.iter().all(|(k, o)| *k == op || *o == Observed::After),
+            v.iter()
+                .all(|(k, o)| ops.contains(k) || *o == Observed::After),
             "{v:?}"
         );
+        let rep = env.revert(&t).unwrap();
+        let mut met: Vec<u16> = rep
+            .ops
+            .iter()
+            .filter(|o| o.observed == Observed::Foreign)
+            .map(|o| o.op)
+            .collect();
+        met.sort_unstable();
+        assert_eq!(met, ops, "the revert meets what verify showed: {rep:?}");
     }
 }
 
-/// Reverts every transaction that is not closed; each must close.
+// Reverts every transaction that is not closed; each must close.
 pub(crate) fn finish_open(env: &Env, what: &str) {
     for (t, s) in env.states() {
         match s {
@@ -872,17 +897,17 @@ pub(crate) fn exists_abs(sys: &FakeSystem, abs: &str) -> bool {
 }
 
 /// A Steam library with app `id` installed in `G` (`StateFlags` `flags`).
-fn acf(id: u32, flags: u32) -> String {
+pub(crate) fn acf(id: u32, flags: u32) -> String {
     format!(
         "\"AppState\"\n{{\n\t\"appid\"\t\t\"{id}\"\n\t\"name\"\t\t\"G\"\n\t\"StateFlags\"\t\t\"{flags}\"\n\t\"installdir\"\t\t\"G\"\n}}\n"
     )
 }
 
-fn manifest(id: u32) -> String {
+pub(crate) fn manifest(id: u32) -> String {
     format!(r"{STEAM_LIB}\steamapps\appmanifest_{id}.acf")
 }
 
-fn steam_sys() -> FakeSystem {
+pub(crate) fn steam_sys() -> FakeSystem {
     finish(
         base()
             .file(manifest(220), acf(220, 4).into_bytes())
@@ -892,7 +917,7 @@ fn steam_sys() -> FakeSystem {
     )
 }
 
-fn steam_plan(env: &Env, app_id: u32, s: &FileInstallSpec) -> PlanHash {
+pub(crate) fn steam_plan(env: &Env, app_id: u32, s: &FileInstallSpec) -> PlanHash {
     let fr = fr(&env.sys);
     let store = StoreDir::open(&env.sys, &fr, Path::new(STEAM_LIB)).unwrap();
     let g = store.game(&fr, "G").unwrap();
@@ -1021,7 +1046,7 @@ fn t7_stacking_and_lifo() {
     }
 }
 
-fn sys_put(sys: &FakeSystem, abs: &str, data: &[u8]) {
+pub(crate) fn sys_put(sys: &FakeSystem, abs: &str, data: &[u8]) {
     sys.fake_fs().put_file(Path::new(abs), data).unwrap();
 }
 
