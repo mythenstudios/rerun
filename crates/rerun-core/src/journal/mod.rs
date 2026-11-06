@@ -37,7 +37,8 @@ pub use names::{InstanceTag, TxnId};
 pub use record::{BackupRef, Closing, FORMAT, Observed};
 pub use write::JournalLock;
 #[cfg(test)]
-pub(crate) use write::{FlushSite, TxnWriter, knob};
+pub(crate) use write::{FlushSite, knob};
+pub(crate) use write::{Reverting, TxnWriter};
 
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{AppDir, AppSub, Create, RootError};
@@ -184,6 +185,10 @@ pub struct Listed {
     pub id: TxnId,
     /// What was read (an error for a folder that cannot be opened, e.g. a reparse point).
     pub view: Result<TxnView, JournalError>,
+    /// `journal\<txn>.forgotten` applies to it (user decision D2): a damaged transaction, or
+    /// one whose view is an error, that `forget` closed without a record. It blocks nothing
+    /// and is never acted on; its backups stay.
+    pub forgotten: bool,
 }
 
 /// Every transaction in `journal\`, ordered by [`TxnId`].

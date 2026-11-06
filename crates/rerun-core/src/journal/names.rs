@@ -166,6 +166,19 @@ pub(crate) fn backup_name(op: u16) -> RelPath {
     segment(&format!("op-{op:04}.bin"))
 }
 
+/// Suffix of a forget marker `<txn>.forgotten` in `journal\` (user decision D2).
+const MARKER_SUFFIX: &str = ".forgotten";
+
+/// `<txn>.forgotten`.
+pub(crate) fn marker_name(id: &TxnId) -> RelPath {
+    segment(&format!("{id}{MARKER_SUFFIX}"))
+}
+
+/// The transaction of a forget marker name, exactly in the written form.
+pub(crate) fn marker_of(name: &str) -> Option<TxnId> {
+    name.strip_suffix(MARKER_SUFFIX)?.parse().ok()
+}
+
 /// A fixed name (`head.json`, `lock`) as a segment.
 pub(crate) fn fixed(name: &str) -> RelPath {
     segment(name)

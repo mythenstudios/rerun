@@ -22,54 +22,103 @@ use crate::path::{RelPath, RootPath};
 use crate::sys::fs::{EntryKind, TmpName};
 use crate::sys::{Dir, SysErrorKind};
 
-/// The highest `seq` of any entry of `journal\` that has a transaction name (whatever its
-/// kind), and the entries that are neither such a name, nor `lock`, nor a temp name.
-pub(super) fn scan(
-    jdir: &dyn Dir,
-    lim: &Limits,
-) -> Result<(Vec<(TxnId, EntryKind)>, usize), JournalError> {
+/// What [`scan`] finds in `journal\`.
+pub(super) struct Scan {
+    /// Every entry with a transaction name (whatever its kind), ordered.
+    pub(super) txns: Vec<(TxnId, EntryKind)>,
+    /// Plain files `<txn>.forgotten` (user decision D2): their transactions.
+    pub(super) forgotten: Vec<TxnId>,
+    /// Entries that are none of these, nor `lock`, nor a temp name.
+    pub(super) foreign: usize,
+}
+
+/// The entries of `journal\`: transaction names (every one counts for `seq`), forget markers
+/// and the rest.
+pub(super) fn scan(jdir: &dyn Dir, lim: &Limits) -> Result<Scan, JournalError> {
     let entries = jdir.read_dir_limited(None, lim.journal_entries)?;
-    let mut txns = Vec::new();
-    let mut foreign = 0;
+    let mut s = Scan {
+        txns: Vec::new(),
+        forgotten: Vec::new(),
+        foreign: 0,
+    };
     for e in entries {
         if let Ok(id) = e.name.parse::<TxnId>() {
-            txns.push((id, e.meta.kind));
+            s.txns.push((id, e.meta.kind));
+        } else if let Some(id) = names::marker_of(&e.name)
+            && e.meta.kind == EntryKind::File
+            && !e.meta.restricted
+        {
+            s.forgotten.push(id);
         } else if e.name != names::LOCK && TmpName::parse(&e.name).is_none() {
-            foreign += 1;
+            s.foreign += 1;
         }
     }
-    txns.sort_by_key(|(id, _)| *id);
-    Ok((txns, foreign))
+    s.txns.sort_by_key(|(id, _)| *id);
+    Ok(s)
+}
+
+/// A forget marker applies to the transaction as it is now: its content names the head
+/// hash that was forgotten (or nothing, for a transaction without a readable head), so a
+/// head swapped in afterwards is not covered.
+fn marker_applies(
+    jdir: &dyn Dir,
+    id: &TxnId,
+    head: Option<&[u8; 32]>,
+) -> Result<bool, JournalError> {
+    let content = match jdir.read_limited(&names::marker_name(id), 64) {
+        Ok(c) => c,
+        Err(e) if matches!(e.kind, SysErrorKind::NotFound | SysErrorKind::TooLarge) => {
+            return Ok(false);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(match head {
+        Some(h) => content == crate::wire::hex32::to_string(h).as_bytes(),
+        None => true,
+    })
 }
 
 /// Every transaction of `journal\`, without head bytes (only their hashes). S5: every entry
 /// with a transaction name counts for its `seq`; two with one `seq` make an open or applied
-/// one damaged, a closed one gets the anomaly, a damaged one keeps its first cause.
+/// one damaged, a closed one gets the anomaly, a damaged one keeps its first cause. A
+/// transaction with a forget marker that applies to it is [`Listed::forgotten`].
 pub(super) fn list(jdir: &dyn Dir, lim: &Limits, app: &RootPath) -> Result<Listing, JournalError> {
-    let (ids, foreign) = scan(jdir, lim)?;
+    let Scan {
+        txns: ids,
+        forgotten,
+        foreign,
+    } = scan(jdir, lim)?;
     let mut per_seq: BTreeMap<u32, usize> = BTreeMap::new();
     for (id, _) in &ids {
         *per_seq.entry(id.seq()).or_default() += 1;
     }
-    let txns = ids
-        .into_iter()
-        .map(|(id, _)| {
-            let mut view = load(jdir, &id, VerifyBackups::Length, lim, app);
-            if let Ok(v) = &mut view {
-                v.head = None;
-                if per_seq.get(&id.seq()).copied().unwrap_or(0) > 1 {
-                    match v.state {
-                        TxnState::Damaged(_) => {}
-                        TxnState::Closed(_) => {
-                            v.anomaly.get_or_insert(Damage::DuplicateSeq);
-                        }
-                        _ => v.state = TxnState::Damaged(Damage::DuplicateSeq),
+    let mut txns = Vec::with_capacity(ids.len());
+    for (id, _) in ids {
+        let mut view = load(jdir, &id, VerifyBackups::Length, lim, app);
+        if let Ok(v) = &mut view {
+            v.head = None;
+            if per_seq.get(&id.seq()).copied().unwrap_or(0) > 1 {
+                match v.state {
+                    TxnState::Damaged(_) => {}
+                    TxnState::Closed(_) => {
+                        v.anomaly.get_or_insert(Damage::DuplicateSeq);
                     }
+                    _ => v.state = TxnState::Damaged(Damage::DuplicateSeq),
                 }
             }
-            Listed { id, view }
-        })
-        .collect();
+        }
+        let forgotten = forgotten.contains(&id)
+            && marker_applies(
+                jdir,
+                &id,
+                view.as_ref().ok().and_then(|v| v.head_sha256.as_ref()),
+            )?;
+        txns.push(Listed {
+            id,
+            view,
+            forgotten,
+        });
+    }
     Ok(Listing { txns, foreign })
 }
 

@@ -27,10 +27,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use preview::{NOT_RESTORED, Preview, PreviewOp, PreviewRoot, preview};
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "first caller is exec (P2-8, next commit)")
-)]
 pub(crate) use store::load;
 pub use store::store;
 
@@ -416,19 +412,11 @@ impl Plan {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller is exec (P2-8, next commit)")
-)]
 /// Parses plan bytes as untrusted input (module docs).
 pub(crate) fn decode(b: &[u8]) -> Result<Plan, PlanError> {
     decode_with(b, &Limits::default())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller is exec (P2-8, next commit)")
-)]
 pub(crate) fn decode_with(b: &[u8], lim: &Limits) -> Result<Plan, PlanError> {
     if b.len() > lim.plan_bytes {
         return Err(PlanError::TooLarge {
@@ -527,10 +515,6 @@ fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
     Ok(())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller is exec (P2-8, next commit)")
-)]
 /// An object a plan's op touches, for stacking (ADR 0019, B-2): a file or directory as root
 /// identity and folded path. Two objects overlap if they are the same, or if one is a
 /// directory an op creates and the other lies below it.
@@ -541,10 +525,6 @@ pub(crate) struct Object {
     pub(crate) dir: bool,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller is exec (P2-8, next commit)")
-)]
 impl Object {
     /// The objects of `plan` (an op whose root index is outside the plan has none; `decode`
     /// refuses such a plan anyway).
@@ -575,10 +555,6 @@ impl Object {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller is exec (P2-8, next commit)")
-)]
 /// Any object of `a` overlaps any of `b`.
 pub(crate) fn overlap(a: &[Object], b: &[Object]) -> bool {
     a.iter().any(|x| b.iter().any(|y| x.overlaps(y)))

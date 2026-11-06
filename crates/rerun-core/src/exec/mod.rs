@@ -1,0 +1,612 @@
+//! Apply, verify, revert and forget plans (ADR 0020 and its P2-8 amendment), with the journal
+//! (ADR 0019).
+//!
+//! - [`apply`]: checks without writing anything (stored plan and its hash, the lock, stacking
+//!   on the listing, every root reopened by identity, the Steam app state, the game closed,
+//!   the old state of every op and every source re-observed), then the transaction: op by op
+//!   intent, change, done; every op observed `After`; the changed game folders flushed;
+//!   `Applied`. Any error after `begin` rolls back at once on the same writer (the revert
+//!   loop), then the game folders are flushed and the transaction closed `RolledBack`; if the
+//!   rollback fails or meets a foreign state, the transaction stays open.
+//! - [`revert`]: the one path for a revert, the recovery of an interrupted apply and (through
+//!   the same loop) the rollback: the head parsed from the bytes the writer read under the
+//!   lock, LIFO against later transactions, roots, Steam and `users()` again, then newest op
+//!   first: observe, `RevertIntent`, act, `RevertDone`. A foreign op is recorded `Foreign` and
+//!   left; the lower ops are still reverted (user decision D3, R1), and only `forget` closes.
+//! - [`verify`]: what each op of a transaction observes now, read only, without the lock;
+//!   also the preview before a revert (rule 5).
+//! - [`forget`]: closes an empty, open or applied transaction with `Closed { Forgotten }`, a
+//!   damaged or unreadable one with the marker `journal\<txn>.forgotten` (user decision D2).
+//!
+//! Observing never trusts a record alone (`file`): every hash is taken on a guard, a link
+//! count other than 1 or other R/H/S is "other".
+
+mod file;
+mod roots;
+mod stack;
+
+use std::collections::BTreeMap;
+
+use file::{Dirs, Hint, Mode, Seen};
+
+use crate::detect::steam::AppState;
+use crate::escape::Shown;
+use crate::journal::{
+    Closing, InstanceTag, Journal, JournalError, Observed, OpLog, Reverting, TxnId, TxnState,
+    TxnWriter,
+};
+use crate::path::RelPath;
+use crate::plan::{self, Object, Op, Plan, PlanError, PlanHash};
+use crate::policy::root::{AppDir, ForbiddenRoots, RootError};
+use crate::sys::{SysError, System};
+
+/// What `exec` works with.
+#[derive(Clone, Copy)]
+pub struct ExecCtx<'a> {
+    /// The system.
+    pub sys: &'a dyn System,
+    /// The forbidden roots (every root is reopened through `policy::root`).
+    pub fr: &'a ForbiddenRoots,
+    /// Rerun's folder (journal, plans, packages).
+    pub app: &'a AppDir<'a>,
+    /// The instance tag of this run (transaction names, temp names).
+    pub tag: InstanceTag,
+}
+
+impl std::fmt::Debug for ExecCtx<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecCtx")
+            .field("app", &self.app.path())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Result of a successful [`apply`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The plan has no ops: nothing to do, no transaction (ADR 0020).
+    Nothing,
+    /// Applied as this transaction.
+    Applied(TxnId),
+}
+
+/// Why nothing was done: refused before anything was written (no transaction folder, or
+/// only an empty one that blocks nothing).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Refusal {
+    /// A file of the game is in use (user decision D4).
+    #[error("{0} is in use; close the game and try again later")]
+    Busy(Shown<'static>),
+    /// Another Rerun holds the journal lock.
+    #[error("another Rerun is applying or reverting; try again when it has finished")]
+    JournalBusy,
+    /// A transaction is damaged, unreadable or has a head that cannot be parsed: nothing is
+    /// applied (and no earlier one reverted) until it is forgotten (fail closed, E2).
+    #[error("transaction {txn} is damaged or unreadable; forget it first")]
+    Blocked {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// An interrupted transaction touches an object of this plan.
+    #[error("transaction {txn} is interrupted; revert it first")]
+    Interrupted {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// A later transaction touches an object of the one to revert (LIFO).
+    #[error("transaction {txn} changed the same files later; revert it first")]
+    Later {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// The Steam app is not installed or is updating (ADR 0012).
+    #[error("Steam app {app_id} is {state:?}; try again when Steam has finished")]
+    Steam {
+        /// The app.
+        app_id: u32,
+        /// Its state.
+        state: AppState,
+    },
+    /// A root cannot be reopened or is another folder now.
+    #[error(transparent)]
+    Root(Box<RootError>),
+    /// The old state of op `op` (or its source) changed since the preview.
+    #[error("op {op} changed since the preview; plan again")]
+    Mismatch {
+        /// Op index.
+        op: u16,
+    },
+    /// A root the current user cannot write (phase 3: the elevated helper).
+    #[error("the game folder needs administrator rights (not supported yet)")]
+    NeedsHelper,
+    /// The stored plan is missing, changed or invalid.
+    #[error(transparent)]
+    Plan(PlanError),
+    /// The journal could not be read or the transaction not begun.
+    #[error(transparent)]
+    Journal(Box<JournalError>),
+}
+
+impl From<RootError> for Refusal {
+    fn from(e: RootError) -> Self {
+        Self::Root(Box::new(e))
+    }
+}
+
+impl From<JournalError> for Refusal {
+    fn from(e: JournalError) -> Self {
+        match e {
+            JournalError::Busy => Self::JournalBusy,
+            e => Self::Journal(Box::new(e)),
+        }
+    }
+}
+
+impl From<SysError> for Refusal {
+    fn from(e: SysError) -> Self {
+        Self::Root(Box::new(RootError::Sys(e)))
+    }
+}
+
+/// An error of `exec` after its checks.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ExecError {
+    /// Refused before anything was written.
+    #[error(transparent)]
+    Refused(Refusal),
+    /// The journal.
+    #[error(transparent)]
+    Journal(#[from] JournalError),
+    /// Op `op` failed in the system layer.
+    #[error("op {op}: {source}")]
+    Op {
+        /// Op index.
+        op: u16,
+        /// The error, with its Win32 or NTSTATUS code.
+        source: SysError,
+    },
+    /// An op did not observe `After` right after it was applied.
+    #[error("op {op} is {observed:?} right after it was applied")]
+    Verify {
+        /// Op index.
+        op: u16,
+        /// What it observed.
+        observed: Observed,
+    },
+    /// These ops met a state Rerun did not leave: left as they are, their backups kept; only
+    /// `forget` closes the transaction (ADR 0020, D10).
+    #[error(
+        "ops {ops:?} were changed by someone else and are left as they are; forget closes the transaction"
+    )]
+    Foreign {
+        /// Op indices.
+        ops: Vec<u16>,
+    },
+    /// The system layer outside an op (a flush of a game folder).
+    #[error(transparent)]
+    Sys(#[from] SysError),
+}
+
+impl From<Refusal> for ExecError {
+    fn from(r: Refusal) -> Self {
+        Self::Refused(r)
+    }
+}
+
+/// An error of [`apply`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ApplyError {
+    /// Nothing was written (or only an empty transaction that blocks nothing).
+    #[error(transparent)]
+    Refused(Refusal),
+    /// Failed and rolled back completely: `Closed { RolledBack }`.
+    #[error("apply failed and was rolled back ({txn}): {cause}")]
+    RolledBack {
+        /// The transaction.
+        txn: TxnId,
+        /// The failure.
+        cause: Box<ExecError>,
+    },
+    /// Failed, and the rollback failed too or met a foreign state: the transaction stays
+    /// open; `revert` finishes it later (or `forget` closes it).
+    #[error("apply failed ({txn}): {cause}; the rollback did not finish: {rollback}")]
+    LeftOpen {
+        /// The transaction.
+        txn: TxnId,
+        /// The failure.
+        cause: Box<ExecError>,
+        /// Why the rollback did not finish.
+        rollback: Box<ExecError>,
+    },
+}
+
+impl From<Refusal> for ApplyError {
+    fn from(r: Refusal) -> Self {
+        Self::Refused(r)
+    }
+}
+
+/// One op of a [`RevertReport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpReport {
+    /// Op index.
+    pub op: u16,
+    /// What it observed before the revert acted.
+    pub observed: Observed,
+    /// Names Rerun left in the op's folder: a `.old` still mapped (pending cleanup), a temp
+    /// name that is not Rerun's any more.
+    pub left: Vec<RelPath>,
+    /// Where the backup of a foreign op stays (`journal\<txn>\op-NNNN.bin` below `AppDir`).
+    pub backup: Option<String>,
+}
+
+/// What [`revert`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevertReport {
+    /// The transaction.
+    pub txn: TxnId,
+    /// How it was closed; `None` if an op was foreign (it stays open, `forget` closes it).
+    pub closed: Option<Closing>,
+    /// The ops reverted in this run, newest first.
+    pub ops: Vec<OpReport>,
+}
+
+#[cfg(test)]
+pub(crate) mod knob {
+    //! Test knobs of this thread: J6 switches off a game-folder flush; the controls K1 and K3
+    //! break the revert on purpose, and the tests that must notice fail.
+
+    use std::cell::Cell;
+
+    /// A flush of the game folders by `exec`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum GameFlush {
+        /// Before `Applied`.
+        BeforeApplied,
+        /// Before `Closed`.
+        BeforeClose,
+    }
+
+    thread_local! {
+        static SKIP: Cell<Option<GameFlush>> = const { Cell::new(None) };
+        static TRUST_RECORDS: Cell<bool> = const { Cell::new(false) };
+        static RESTORE_WITHOUT_ATTRS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[expect(dead_code, reason = "J6 against exec (crash_tests, P2-8 C5)")]
+    pub(crate) fn skip(f: Option<GameFlush>) {
+        SKIP.with(|s| s.set(f));
+    }
+    pub(crate) fn skipped(f: GameFlush) -> bool {
+        SKIP.with(|s| s.get() == Some(f))
+    }
+    /// K1: observe from the records instead of the disk.
+    pub(crate) fn trust_records(on: bool) {
+        TRUST_RECORDS.with(|s| s.set(on));
+    }
+    pub(crate) fn trusting_records() -> bool {
+        TRUST_RECORDS.with(Cell::get)
+    }
+    /// K3: restore without the old R/H/S.
+    pub(crate) fn restore_without_attrs(on: bool) {
+        RESTORE_WITHOUT_ATTRS.with(|s| s.set(on));
+    }
+    pub(crate) fn restoring_without_attrs() -> bool {
+        RESTORE_WITHOUT_ATTRS.with(Cell::get)
+    }
+}
+
+/// K1 (tests): observe from the records.
+fn trusting_records() -> bool {
+    #[cfg(test)]
+    return knob::trusting_records();
+    #[cfg(not(test))]
+    false
+}
+
+/// K3 (tests): restore without the old R/H/S.
+fn restoring_without_attrs() -> bool {
+    #[cfg(test)]
+    return knob::restoring_without_attrs();
+    #[cfg(not(test))]
+    false
+}
+
+/// J6 (tests): this game-folder flush is switched off.
+fn flush_skipped(
+    #[cfg_attr(not(test), expect(unused_variables, reason = "test knob"))] at: Flush,
+) -> bool {
+    #[cfg(test)]
+    return knob::skipped(match at {
+        Flush::BeforeApplied => knob::GameFlush::BeforeApplied,
+        Flush::BeforeClose => knob::GameFlush::BeforeClose,
+    });
+    #[cfg(not(test))]
+    false
+}
+
+/// A flush of the game folders by `exec` (ADR 0019 amendment, S2).
+#[derive(Debug, Clone, Copy)]
+enum Flush {
+    BeforeApplied,
+    BeforeClose,
+}
+
+/// Applies the stored plan `h` (module docs).
+pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
+    let bytes = plan::load(cx.app, h).map_err(Refusal::Plan)?;
+    let plan = plan::decode(bytes.bytes()).map_err(Refusal::Plan)?;
+    if plan.ops.is_empty() {
+        return Ok(Outcome::Nothing);
+    }
+    let j = Journal::new(cx.app, cx.tag);
+    let lock = j.lock().map_err(Refusal::from)?;
+    let listing = j.list().map_err(Refusal::from)?;
+    stack::for_apply(&j, &listing, &Object::of(&plan))?;
+    let stores = roots::open_stores(cx, &plan)?;
+    let games = roots::open_games(cx, &plan, &stores)?;
+    let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
+    roots::game_closed(&plan, &games, &all)?;
+    roots::old_state(cx, &plan, &games)?;
+    let mut w = lock.begin(bytes.bytes()).map_err(Refusal::from)?;
+    let txn = *w.id();
+    let mut dirs = Dirs::new(&games);
+    let mut hints = BTreeMap::new();
+    let cause = match run(cx, &plan, &mut w, &mut dirs, &mut hints) {
+        Ok(()) => return Ok(Outcome::Applied(txn)),
+        Err(e) => e,
+    };
+    match rollback(cx, &plan, w, &mut dirs, &hints) {
+        Ok(()) => Err(ApplyError::RolledBack {
+            txn,
+            cause: Box::new(cause),
+        }),
+        Err(rollback) => Err(ApplyError::LeftOpen {
+            txn,
+            cause: Box::new(cause),
+            rollback: Box::new(rollback),
+        }),
+    }
+}
+
+/// `k` as an op index of the journal (a plan has at most 128 ops).
+fn op_ix(k: usize) -> u16 {
+    u16::try_from(k).unwrap_or(u16::MAX)
+}
+
+/// The ops, `After` for each, the flush of the game folders, `Applied`.
+fn run(
+    cx: &ExecCtx<'_>,
+    plan: &Plan,
+    w: &mut TxnWriter<'_>,
+    dirs: &mut Dirs<'_>,
+    hints: &mut BTreeMap<u16, Hint>,
+) -> Result<(), ExecError> {
+    for (k, op) in plan.ops.iter().enumerate() {
+        file::apply_op(cx, plan, w, dirs, op_ix(k), op, hints)?;
+    }
+    let ops = w.ops().clone();
+    for (k, log) in &ops {
+        let op = op_of(plan, *k)?;
+        let seen = file::observe(plan, dirs, *k, op, log, Mode::Verify, None)?;
+        if seen.observed != Observed::After {
+            return Err(ExecError::Verify {
+                op: *k,
+                observed: seen.observed,
+            });
+        }
+    }
+    if !flush_skipped(Flush::BeforeApplied) {
+        dirs.flush()?;
+    }
+    w.applied(op_ix(plan.ops.len()))?;
+    Ok(())
+}
+
+fn op_of(plan: &Plan, k: u16) -> Result<&Op, ExecError> {
+    plan.ops.get(usize::from(k)).ok_or(ExecError::Verify {
+        op: k,
+        observed: Observed::Foreign,
+    })
+}
+
+/// The rollback of a failed apply: the revert loop on the apply's own writer, with the
+/// in-process results of the calls (`hints`, senior-dev condition 4).
+fn rollback(
+    cx: &ExecCtx<'_>,
+    plan: &Plan,
+    mut w: TxnWriter<'_>,
+    dirs: &mut Dirs<'_>,
+    hints: &BTreeMap<u16, Hint>,
+) -> Result<(), ExecError> {
+    revert_loop(cx, plan, &mut w, dirs, Mode::Rollback, hints)?;
+    let foreign = foreign_ops(&w);
+    if !foreign.is_empty() {
+        return Err(ExecError::Foreign { ops: foreign });
+    }
+    close(w, dirs)
+}
+
+/// The ops whose `RevertDone` recorded `Foreign`, in this run or an earlier one: the
+/// transaction cannot be closed as reverted (ADR 0019 grammar, S3), only forgotten.
+fn foreign_ops<W: Reverting>(w: &W) -> Vec<u16> {
+    w.ops()
+        .iter()
+        .filter(|(_, o)| o.reverted.is_some_and(|r| r.observed == Observed::Foreign))
+        .map(|(k, _)| *k)
+        .collect()
+}
+
+/// Flushes the game folders (after every guard is dropped), then `Closed` by how far the
+/// transaction got.
+fn close<W: Reverting>(w: W, dirs: &mut Dirs<'_>) -> Result<(), ExecError> {
+    if !flush_skipped(Flush::BeforeClose) {
+        dirs.flush()?;
+    }
+    let how = if w.is_applied() {
+        Closing::Reverted
+    } else {
+        Closing::RolledBack
+    };
+    w.close(how)?;
+    Ok(())
+}
+
+/// Newest op first while one is left: observe, `RevertIntent` (with a temp name only when a
+/// restore starts, B2), act, `RevertDone`. A foreign op gets its records and is left (R1).
+fn revert_loop<W: Reverting>(
+    cx: &ExecCtx<'_>,
+    plan: &Plan,
+    w: &mut W,
+    dirs: &mut Dirs<'_>,
+    mode: Mode,
+    hints: &BTreeMap<u16, Hint>,
+) -> Result<Vec<OpReport>, ExecError> {
+    let mut reports = Vec::new();
+    while let Some(k) = w.next_revert() {
+        let log: OpLog = w
+            .ops()
+            .get(&k)
+            .cloned()
+            .ok_or(JournalError::Order("an op to revert without its intent"))?;
+        let op = op_of(plan, k)?;
+        let seen: Seen = file::observe(plan, dirs, k, op, &log, mode, hints.get(&k).copied())?;
+        let y = seen.restore.then(|| w.tmp());
+        w.revert_intent(k, y.clone())?;
+        let done = file::act(plan, w, dirs, k, op, &seen, y)?;
+        w.revert_done(k, seen.observed, done.old_left)?;
+        reports.push(OpReport {
+            op: k,
+            observed: seen.observed,
+            left: done.left,
+            backup: (seen.observed == Observed::Foreign && log.intent.backup.is_some())
+                .then(|| format!(r"{}\journal\{}\op-{k:04}.bin", cx.app.path(), w.id())),
+        });
+    }
+    Ok(reports)
+}
+
+/// Reverts transaction `t` (module docs): also the recovery of an interrupted apply.
+pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
+    let j = Journal::new(cx.app, cx.tag);
+    let lock = j.lock().map_err(Refusal::from)?;
+    let listing = j.list().map_err(Refusal::from)?;
+    let own = listing
+        .txns
+        .iter()
+        .find(|l| l.id == *t)
+        .ok_or(JournalError::NotFound(*t))?;
+    let damaged = own.forgotten
+        || own
+            .view
+            .as_ref()
+            .map_or(true, |v| matches!(v.state, TxnState::Damaged(_)));
+    if damaged {
+        return Err(Refusal::Blocked { txn: *t }.into());
+    }
+    let mut w = lock.resume(t)?;
+    let plan = plan::decode(w.head()).map_err(|_| Refusal::Blocked { txn: *t })?;
+    if !file::records_fit(&plan, w.ops()) {
+        return Err(Refusal::Blocked { txn: *t }.into());
+    }
+    stack::for_revert(&j, &listing, t, &Object::of(&plan))?;
+    let stores = roots::open_stores(cx, &plan)?;
+    let games = roots::open_games(cx, &plan, &stores)?;
+    let intended: Vec<u16> = w.ops().keys().copied().collect();
+    roots::game_closed(&plan, &games, &intended)?;
+    let mut dirs = Dirs::new(&games);
+    let ops = revert_loop(
+        cx,
+        &plan,
+        &mut w,
+        &mut dirs,
+        Mode::Recovery,
+        &BTreeMap::new(),
+    )?;
+    if !foreign_ops(&w).is_empty() {
+        return Ok(RevertReport {
+            txn: *t,
+            closed: None,
+            ops,
+        });
+    }
+    let how = if w.is_applied() {
+        Closing::Reverted
+    } else {
+        Closing::RolledBack
+    };
+    close(w, &mut dirs)?;
+    Ok(RevertReport {
+        txn: *t,
+        closed: Some(how),
+        ops,
+    })
+}
+
+/// What each intended op of `t` observes now (read only, no lock).
+pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Vec<(u16, Observed)>, ExecError> {
+    let j = Journal::new(cx.app, cx.tag);
+    let v = j.load(t, crate::journal::VerifyBackups::Length)?;
+    let blocked = || ExecError::Refused(Refusal::Blocked { txn: *t });
+    if !v.head_usable() {
+        return Err(blocked());
+    }
+    let plan = plan::decode(v.head.as_deref().unwrap_or_default()).map_err(|_| blocked())?;
+    if !file::records_fit(&plan, &v.ops) {
+        return Err(blocked());
+    }
+    let stores = roots::open_stores(cx, &plan)?;
+    let games = roots::open_games(cx, &plan, &stores)?;
+    let mut dirs = Dirs::new(&games);
+    let mut out = Vec::with_capacity(v.ops.len());
+    for (k, log) in &v.ops {
+        let op = op_of(&plan, *k)?;
+        let seen = file::observe(&plan, &mut dirs, *k, op, log, Mode::Verify, None)?;
+        out.push((*k, seen.observed));
+    }
+    Ok(out)
+}
+
+/// Forgets transaction `t` (module docs). Backups stay.
+pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
+    let j = Journal::new(cx.app, cx.tag);
+    let lock = j.lock().map_err(Refusal::from)?;
+    let listing = j.list()?;
+    let l = listing
+        .txns
+        .iter()
+        .find(|l| l.id == *t)
+        .ok_or(JournalError::NotFound(*t))?;
+    if l.forgotten {
+        return Ok(());
+    }
+    let head = match &l.view {
+        Ok(v) => match v.state {
+            TxnState::Closed(_) => {
+                return Err(JournalError::NotResumable {
+                    id: *t,
+                    state: v.state.clone(),
+                }
+                .into());
+            }
+            TxnState::Empty | TxnState::Open | TxnState::Applied => {
+                match lock.resume(t) {
+                    Ok(w) => return Ok(w.close(Closing::Forgotten)?),
+                    // Damaged since the listing: the marker below.
+                    Err(JournalError::NotResumable { .. }) => v.head_sha256,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            TxnState::Damaged(_) => v.head_sha256,
+        },
+        Err(_) => None,
+    };
+    lock.forget_marker(t, head.as_ref())?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests;

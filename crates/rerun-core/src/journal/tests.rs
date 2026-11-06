@@ -14,7 +14,7 @@ use crate::sys::fake::{FakeSystem, FsOp};
 use crate::sys::fs::{DirWrite, Fs, WriteCap, tag};
 use crate::sys::{SysErrorKind, System};
 
-pub(super) const LAD: &str = r"C:\Users\Player\AppData\Local";
+pub(crate) const LAD: &str = r"C:\Users\Player\AppData\Local";
 pub(super) const JDIR: &str = r"C:\Users\Player\AppData\Local\Rerun\journal";
 pub(super) const HEAD: &[u8] = br#"{"format":1,"ops":["a","b"]}"#;
 pub(super) const OLD: &[u8] = b"old content of a.bin";
@@ -1132,4 +1132,99 @@ fn resume_hands_out_the_hashed_head() {
     let id = *apply2(&lock, &*g).id();
     let w = lock.resume(&id).unwrap();
     assert_eq!(w.head(), HEAD);
+}
+
+/// Tamper helper for the `exec` tests: rewrites `head.json` of the transaction folder `dir`
+/// (absolute, fake) to `head` and every record consistently with its hash, as someone who
+/// knows the format would; `edit` may change each record. Returns the number of records.
+pub(crate) fn rewrite(
+    fx: &crate::sys::fake::FakeFs,
+    dir: &str,
+    head: Option<&[u8]>,
+    mut edit: impl FnMut(&mut RecordEdit),
+) -> u16 {
+    let read = |name: &str| -> Option<Vec<u8>> {
+        #[expect(clippy::disallowed_methods, reason = "test: read a fixture file")]
+        let d = fx.open_dir(Path::new(dir)).ok()?;
+        d.read(&r(name)).ok()
+    };
+    let old_head = read("head.json").unwrap();
+    let old_sha: [u8; 32] =
+        sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(&old_head)).into();
+    let new_head = head.map_or(old_head.clone(), <[u8]>::to_vec);
+    let new_sha: [u8; 32] =
+        sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(&new_head)).into();
+    let put = |name: &str, bytes: &[u8]| {
+        let p = Path::new(dir).join(name);
+        fx.remove_abs(&p).unwrap();
+        fx.put_file(&p, bytes).unwrap();
+    };
+    let mut n = 1u16;
+    while let Some(bytes) = read(&format!("{n:04}.json")) {
+        let rec = record::decode(&bytes, n, &old_sha).unwrap();
+        let mut e = RecordEdit(rec);
+        edit(&mut e);
+        put(
+            &format!("{n:04}.json"),
+            &record::encode(n, &new_sha, &e.0).unwrap(),
+        );
+        n += 1;
+    }
+    put("head.json", &new_head);
+    n - 1
+}
+
+/// One record as [`rewrite`] passes it.
+pub(crate) struct RecordEdit(Record);
+
+impl RecordEdit {
+    /// Sets the file ID of the `Done` of `op`.
+    pub(crate) fn done_file_id(&mut self, of: u16, id: u128) {
+        if let Record::Done { op, file_id, .. } = &mut self.0
+            && *op == of
+        {
+            *file_id = id;
+        }
+    }
+}
+
+#[test]
+fn d2_a_forget_marker_covers_the_head_it_names() {
+    let sys = system();
+    let app = open_app(&sys);
+    let g = game(&sys, r"D:\G");
+    let j = Journal::new(&app, InstanceTag::fixed(TAG));
+    let lock = j.lock().unwrap();
+    let id = *apply2(&lock, &*g).id();
+    // Damage it: a gap.
+    let fx = sys.fake_fs();
+    fx.put_file(Path::new(&format!(r"{}\0009.json", txn_dir(&id))), b"{}")
+        .unwrap();
+    let listed = |j: &Journal<'_>| j.list().unwrap().txns.into_iter().next().unwrap();
+    let l = listed(&j);
+    assert!(matches!(
+        l.view.as_ref().unwrap().state,
+        TxnState::Damaged(_)
+    ));
+    assert!(!l.forgotten);
+    let head = l.view.as_ref().unwrap().head_sha256;
+    lock.forget_marker(&id, head.as_ref()).unwrap();
+    lock.forget_marker(&id, head.as_ref()).unwrap();
+    assert!(listed(&j).forgotten);
+    assert_eq!(j.list().unwrap().foreign, 0, "a marker is no foreign entry");
+    assert!(matches!(
+        lock.forget_marker(&id, None),
+        Err(JournalError::Order(_))
+    ));
+    // A head swapped in afterwards is not covered.
+    fx.remove_abs(Path::new(&format!(r"{}\head.json", txn_dir(&id))))
+        .unwrap();
+    fx.put_file(Path::new(&format!(r"{}\head.json", txn_dir(&id))), b"{}")
+        .unwrap();
+    assert!(!listed(&j).forgotten);
+    // A marker that is a folder does not count.
+    let other = TxnId::new(5, 1).unwrap();
+    fx.mkdir_all(Path::new(&format!(r"{JDIR}\{other}.forgotten")))
+        .unwrap();
+    assert_eq!(j.list().unwrap().foreign, 1);
 }

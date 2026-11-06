@@ -391,10 +391,6 @@ impl<'a> GameDir<'a> {
     /// The handle with the write capability, for the executor and the journal only
     /// (ADR 0020). `Unsupported` on a volume without POSIX delete and rename semantics (FAT,
     /// exFAT; ADR 0017), as of opening; `sys` checks again per operation.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "first caller is the executor (ADR 0020)")
-    )]
     pub(crate) fn dir_write(&self) -> SysResult<&dyn DirWrite> {
         if !self.info.supports_posix_rename {
             return Err(SysError::new(

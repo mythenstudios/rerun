@@ -8,11 +8,6 @@
 //! replace), and, for `intent`, `applied`, `revert_intent` and `close`, followed by a flush
 //! of the transaction folder.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the writers' first caller is exec (P2-8)")
-)]
-
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -75,7 +70,7 @@ impl<'j> JournalLock<'j> {
                 limit: self.lim.head,
             });
         }
-        let (ids, _) = read::scan(self.dir, &self.lim)?;
+        let ids = read::scan(self.dir, &self.lim)?.txns;
         let highest = ids.iter().map(|(id, _)| *id).max_by_key(TxnId::seq);
         let seq = highest
             .map_or(0, |h| h.seq())
@@ -111,6 +106,40 @@ impl<'j> JournalLock<'j> {
         Ok(TxnWriter {
             t: Txn::new(self, id, dir, sha, Machine::default()),
         })
+    }
+
+    /// `forget` of a damaged transaction, or of one whose folder cannot be read (user
+    /// decision D2): `journal\<txn>.forgotten` with `create_new`, holding the hex SHA-256 of
+    /// the head as listed (empty without one), then `journal\` flushed. Nothing in the
+    /// transaction folder changes and its backups stay. A marker already there is `Ok`.
+    pub(crate) fn forget_marker(
+        &self,
+        id: &TxnId,
+        head: Option<&[u8; 32]>,
+    ) -> Result<(), JournalError> {
+        let content = head.map(crate::wire::hex32::to_string).unwrap_or_default();
+        let new = NewFile {
+            tmp: self.tmp(),
+            attrs: Attrs::default(),
+            sha256: Sha256::digest(content.as_bytes()).into(),
+            max_len: u64::try_from(content.len()).unwrap_or(u64::MAX),
+        };
+        match self
+            .dir
+            .create_new(&names::marker_name(id), &mut content.as_bytes(), &new)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind == SysErrorKind::AlreadyExists => {
+                let have = self.dir.read_limited(&names::marker_name(id), 64)?;
+                if have != content.as_bytes() {
+                    return Err(JournalError::Order(
+                        "a forget marker for another head is in the way; remove it",
+                    ));
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(self.dir.flush()?)
     }
 
     /// Reopens transaction `id` to revert it (after a crash, or a revert of an applied one).
@@ -449,8 +478,84 @@ macro_rules! common {
                 self.t
                     .write(&Record::Closed { how }, Some(FlushSite::Close))
             }
+
+            /// The backup `op-NNNN.bin` of `op`, from offset 0, for a restore. Its hash is
+            /// not checked here: the restore streams it into `<tmp>` with the intent's
+            /// SHA-256 and length as the expected ones (`NewFile`), so what is checked is
+            /// what is written (no earlier check, TOCTOU).
+            pub(crate) fn backup_reader(
+                &self,
+                op: u16,
+            ) -> Result<Box<dyn Read + '_>, JournalError> {
+                Ok(Box::new(self.t.dir.open_read(&names::backup_name(op))?))
+            }
+        }
+
+        impl Reverting for $ty<'_> {
+            fn id(&self) -> &TxnId {
+                $ty::id(self)
+            }
+            fn tmp(&self) -> TmpName {
+                $ty::tmp(self)
+            }
+            fn ops(&self) -> &BTreeMap<u16, OpLog> {
+                $ty::ops(self)
+            }
+            fn next_revert(&self) -> Option<u16> {
+                $ty::next_revert(self)
+            }
+            fn is_applied(&self) -> bool {
+                $ty::is_applied(self)
+            }
+            fn revert_intent(&mut self, op: u16, tmp: Option<TmpName>) -> Result<(), JournalError> {
+                $ty::revert_intent(self, op, tmp)
+            }
+            fn revert_done(
+                &mut self,
+                op: u16,
+                observed: Observed,
+                old_left: bool,
+            ) -> Result<(), JournalError> {
+                $ty::revert_done(self, op, observed, old_left)
+            }
+            fn backup_reader(&self, op: u16) -> Result<Box<dyn Read + '_>, JournalError> {
+                $ty::backup_reader(self, op)
+            }
+            fn close(self, how: Closing) -> Result<(), JournalError> {
+                $ty::close(self, how)
+            }
         }
     };
+}
+
+/// What a revert needs of a writer: the rollback of an apply ([`TxnWriter`]) and the revert
+/// or recovery of a resumed transaction ([`RevertWriter`]) run the same code (`exec`).
+pub(crate) trait Reverting {
+    /// The transaction.
+    fn id(&self) -> &TxnId;
+    /// A fresh temp name of this instance.
+    fn tmp(&self) -> TmpName;
+    /// The records so far, per op.
+    fn ops(&self) -> &BTreeMap<u16, OpLog>;
+    /// The op whose revert comes next.
+    fn next_revert(&self) -> Option<u16>;
+    /// `Applied` is recorded.
+    fn is_applied(&self) -> bool;
+    /// `RevertIntent`; flushed.
+    fn revert_intent(&mut self, op: u16, tmp: Option<TmpName>) -> Result<(), JournalError>;
+    /// `RevertDone`.
+    fn revert_done(
+        &mut self,
+        op: u16,
+        observed: Observed,
+        old_left: bool,
+    ) -> Result<(), JournalError>;
+    /// The backup of `op`.
+    fn backup_reader(&self, op: u16) -> Result<Box<dyn Read + '_>, JournalError>;
+    /// `Closed`; flushed.
+    fn close(self, how: Closing) -> Result<(), JournalError>
+    where
+        Self: Sized;
 }
 
 common!(TxnWriter);

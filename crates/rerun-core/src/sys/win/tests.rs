@@ -37,6 +37,7 @@ use crate::sys::snapshot::SnapRoot;
 use crate::sys::{Gpu, KnownFolder, KnownFolders, SysErrorKind, System, Topology};
 
 mod app;
+mod exec;
 
 /// A [`TestRoot`] for the smoke tests; `.0` is its verbatim path (`\\?\X:\…`), as
 /// `final_path` reports it.
