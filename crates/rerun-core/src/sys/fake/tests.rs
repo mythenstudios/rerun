@@ -2200,6 +2200,8 @@ fn snapshot_roots_are_compared_by_identity_not_by_label() {
 struct SpyRegistry<'a> {
     inner: &'a dyn Registry,
     doubled: bool,
+    /// A subkey name this registry adds to the listing of that key (a hostile `sys`).
+    extra: Option<(RegKey, &'static str)>,
 }
 
 impl SpyRegistry<'_> {
@@ -2233,6 +2235,11 @@ impl Registry for SpyRegistry<'_> {
     fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
         Self::check(k);
         let mut v = self.inner.subkeys(k)?;
+        if let Some((at, name)) = &self.extra
+            && at == k
+        {
+            v.push((*name).to_owned());
+        }
         if self.doubled {
             let upper: Vec<_> = v.iter().map(|n| n.to_uppercase()).collect();
             v.extend(upper);
@@ -2282,6 +2289,7 @@ fn snapshot_records_lossy_registry_names_without_addressing_them() {
     let spy = SpyRegistry {
         inner: sys.registry(),
         doubled: false,
+        extra: None,
     };
     let before = snapshot(&spy, &key_scope(&key)).unwrap();
     // The key, two key anomalies, two value anomalies.
@@ -2314,6 +2322,7 @@ fn snapshot_records_colliding_registry_names() {
     let spy = SpyRegistry {
         inner: sys.registry(),
         doubled: true,
+        extra: None,
     };
     let snap = snapshot(&spy, &key_scope(&key)).unwrap();
     let lines = snap.diff(&Snapshot::default());
@@ -2450,6 +2459,7 @@ fn run_snapshot_contract(
         Box::new(SpyRegistry {
             inner: sys.registry(),
             doubled: false,
+            extra: None,
         })
     };
     snapshot_contract(
@@ -2538,10 +2548,18 @@ impl crate::sys::Dir for LossyDir<'_> {
 
 #[test]
 fn the_snapshot_contract_catches_a_dir_that_loses_attributes_links_or_case() {
-    for loses in [Loses::Attrs, Loses::Links, Loses::Case] {
+    // Each is caught by the check that is about it.
+    for (loses, check) in [
+        (Loses::Attrs, "on a.bin"),
+        (Loses::Links, "a second hard link"),
+        (Loses::Case, "case of a file name"),
+    ] {
         let res = run_snapshot_contract(|inner| Box::new(LossyDir { inner, loses }), false);
         let e = res.expect_err(&format!("{loses:?} not caught"));
-        assert!(e.contains("contract violated"), "{loses:?}: {e}");
+        assert!(
+            e.contains("contract violated") && e.contains(check),
+            "{loses:?}: {e}"
+        );
     }
 }
 
@@ -2583,7 +2601,61 @@ impl Registry for CaseBlindRegistry<'_> {
 #[test]
 fn the_snapshot_contract_catches_a_registry_that_loses_the_case_of_value_names() {
     let e = run_snapshot_contract(|d| d, true).unwrap_err();
-    assert!(e.contains("contract violated"), "{e}");
+    assert!(e.contains("case of a value name"), "{e}");
+}
+
+/// A subkey name with NUL (neither lossy nor colliding) is an anomaly and never opened: one
+/// hostile name does not abort the snapshot.
+#[test]
+fn snapshot_records_a_subkey_name_with_nul_as_an_anomaly() {
+    let key = hkcu(r"Software\Nul");
+    let sys = FakeSystem::builder()
+        .key(key.join("Plain"))
+        .build()
+        .unwrap();
+    let spy = SpyRegistry {
+        inner: sys.registry(),
+        doubled: false,
+        extra: Some((key.clone(), "a\0b")),
+    };
+    let snap = snapshot(&spy, &key_scope(&key)).unwrap();
+    let lines = snap.diff(&Snapshot::default());
+    assert_eq!(snap.len(), 3, "{lines:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("anomaly key") && l.contains("(invalid name)")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("key \"Plain\"")),
+        "{lines:#?}"
+    );
+}
+
+/// `below` counts the depth from the root, not from `sub`: 64 levels below the root are
+/// walked, 65 refused, wherever the subtree starts.
+#[test]
+fn snapshot_below_keeps_the_depth_limit_of_the_root() {
+    use crate::sys::snapshot::MAX_DEPTH;
+    let chain = |levels: usize| -> String { (0..levels).map(|i| format!(r"\d{i}")).collect() };
+    let below = |levels: usize| {
+        let sys = FakeSystem::builder()
+            .dir(format!(r"C:\G{}", chain(levels)))
+            .build()
+            .unwrap();
+        let g = sys.fs().open_dir(Path::new(r"C:\G")).unwrap();
+        let sub = r(chain(10).trim_start_matches('\\'));
+        let scope = Scope {
+            dirs: vec![SnapRoot::new(&*g, r"C:\G").below(sub)],
+            keys: vec![],
+        };
+        snapshot(sys.registry(), &scope).map(|s| s.len())
+    };
+    // d9 (level 10) and the 54 levels below it.
+    assert_eq!(below(MAX_DEPTH).unwrap(), MAX_DEPTH - 9);
+    let e = below(MAX_DEPTH + 1).unwrap_err();
+    assert_eq!((e.kind, e.limit), (SysErrorKind::TooLarge, Some(64)), "{e}");
 }
 
 #[test]

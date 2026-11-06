@@ -950,10 +950,15 @@ impl FsFixture for WinFixture {
     }
 
     /// `OsString::from_wide` keeps unpaired surrogates (WTF-8), and `std::fs::write` hands the
-    /// units to `CreateFileW` unchanged.
+    /// units to `CreateFileW` unchanged. Refused besides separators and NUL: `:` (a stream)
+    /// and a trailing `.` or space, which Win32 path normalisation strips, so the file would
+    /// be another object than the units name.
     fn utf16_file(&self, parent: &Path, units: &[u16], data: &[u8]) -> SysResult<bool> {
-        let sep = [0, u16::from(b'\\'), u16::from(b'/')];
-        if units.is_empty() || units.iter().any(|u| sep.contains(u)) {
+        let sep = [0, u16::from(b'\\'), u16::from(b'/'), u16::from(b':')];
+        let trailing = units
+            .last()
+            .is_some_and(|&u| u == u16::from(b'.') || u == u16::from(b' '));
+        if units.is_empty() || trailing || units.iter().any(|u| sep.contains(u)) {
             return Err(SysError::path(SysErrorKind::InvalidPath, parent));
         }
         let p = parent.join(OsString::from_wide(units));

@@ -5,8 +5,8 @@ allow-expect-in-tests = true
 # rerun_core::policy::root (ADR 0007). Exceptions via
 # #[expect(clippy::disallowed_methods, reason = "...")] so a stale exception warns:
 # policy::root::open_abs, contract and test code, sys::win and rerun-launch (sys::snapshot
-# takes root handles since P2-5). NtCreateFile has exactly two exceptions in production code, in sys::win::nt
-# (test fixtures in sys::win::testfx also use it).
+# takes root handles since P2-5). NtCreateFile has exactly two exceptions in production
+# code, in sys::win::nt (test fixtures in sys::win::testfx also use it).
 disallowed-methods = [
   { path = "std::fs::write", reason = "filesystem access only through sys::Fs" },
   { path = "std::fs::remove_file", reason = "filesystem access only through sys::Fs" },

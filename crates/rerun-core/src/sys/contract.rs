@@ -97,7 +97,8 @@ pub trait FsFixture: Sync {
     /// `parent` (created if missing) with `data`. The units may hold unpaired surrogates:
     /// `read_dir` reports such a name converted with U+FFFD, and two names that differ only in
     /// their unpaired surrogates are two entries that list under the same name. Empty names,
-    /// `\`, `/` and NUL are `InvalidPath`. `Ok(false)` = not available.
+    /// `\`, `/` and NUL are `InvalidPath`; the `sys::win` fixture also refuses `:` and a
+    /// trailing `.` or space (Win32 would create another object). `Ok(false)` = not available.
     fn utf16_file(&self, parent: &Path, units: &[u16], data: &[u8]) -> SysResult<bool>;
     /// Creates a directory junction `link` pointing to `target`. The target need not exist.
     fn junction(&self, link: &Path, target: &Path) -> SysResult<()>;

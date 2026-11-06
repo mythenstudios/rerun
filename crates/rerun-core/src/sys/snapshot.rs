@@ -34,7 +34,11 @@
 //!   opened or descended into, a value anomaly keeps the value `values` returned (it is never
 //!   addressed by its name). Anomalies with the same name under one key are a multiset. The
 //!   walk is bounded: [`MAX_KEY_DEPTH`] levels of subkeys and [`MAX_KEYS_WALKED`] keys in
-//!   all, beyond either `TooLarge` (the depth stops a cycle, the budget a fan-out).
+//!   all, beyond either `TooLarge` (the depth stops a cycle, the budget a fan-out). A name
+//!   that cannot be a key path segment or value name at all (NUL; for a subkey also `\` or
+//!   empty) is a `RegAnomaly` too and never opened, so one hostile name does not abort the
+//!   snapshot. The name of a key of the scope itself comes from the caller, not from the
+//!   registry: a change of its case is not seen (like the name of a root on the file side).
 //!
 //! Shown in a diff but **not compared** (user decision E3): the allowlisted data tag of a
 //! file (WOF, dedup, cloud, [`Shown`]). `wof.sys` hides the WOF tag anyway (ADR 0007), so it
@@ -101,14 +105,11 @@ pub struct SnapRoot<'a> {
 
 impl<'a> SnapRoot<'a> {
     /// The whole tree below the root `dir`. `dir` is the read handle of a root that
-    /// `policy::root` handed out (`GameDir::dir`, later `AppDir`); test code of this crate
-    /// may pass any [`Dir`]. `label` is shown in a diff (e.g. the root's canonical path) and
-    /// never compared.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "built by the tests of this crate only")
-    )]
-    pub(crate) fn new(dir: &'a dyn Dir, label: impl Into<String>) -> Self {
+    /// `policy::root` handed out (`GameDir::dir`, later `AppDir`); test code may pass any
+    /// [`Dir`]. `label` is shown in a diff (e.g. the root's canonical path) and never
+    /// compared. Public because the whole module is test code (`feature = "fake"`): a crate
+    /// that enables it (CLI end-to-end tests, the sandbox runner) snapshots its roots too.
+    pub fn new(dir: &'a dyn Dir, label: impl Into<String>) -> Self {
         Self {
             dir,
             label: label.into(),
@@ -282,6 +283,9 @@ pub enum RegWhy {
     Lossy,
     /// The name folds to the same key as another name of the same key.
     Collides,
+    /// The name cannot address anything at all: it holds NUL (a subkey also `\`, or it is
+    /// empty), which no key path or value name may hold.
+    Invalid,
 }
 
 struct ShowAttrs<'a>(&'a Attrs);
@@ -389,6 +393,7 @@ impl fmt::Display for SnapEntry {
                 let why = match why {
                     RegWhy::Lossy => "lossy name",
                     RegWhy::Collides => "colliding name",
+                    RegWhy::Invalid => "invalid name",
                 };
                 write!(f, "anomaly {kind} {name:?} ({why})")?;
                 if let Some(v) = value {
@@ -537,10 +542,12 @@ fn order_key(e: &SnapEntry) -> (String, Vec<u8>) {
             why,
             value,
         } => {
-            let mut k = vec![
-                u8::from(*kind == RegKind::Key),
-                u8::from(*why == RegWhy::Lossy),
-            ];
+            let why = match why {
+                RegWhy::Lossy => 0,
+                RegWhy::Collides => 1,
+                RegWhy::Invalid => 2,
+            };
+            let mut k = vec![u8::from(*kind == RegKind::Key), why];
             // `RegValue` has no order; its exact type and bytes do.
             if let Some((t, d)) = value.as_ref().and_then(RegValue::encode) {
                 k.push(1);
@@ -653,7 +660,10 @@ impl Walk<'_> {
             return Ok(());
         }
         let prefix = parent.map(|p| fold(p.as_str())).unwrap_or_default();
-        self.entries(dir, &prefix, entries, case_sensitive, 0)
+        // The listed directory lies one level above `sub`: depths count from the root, so
+        // `below` keeps the limit of 64 levels below the root.
+        let depth = sub.segments().count() - 1;
+        self.entries(dir, &prefix, entries, case_sensitive, depth)
     }
 
     /// Lists `dir` (at `depth` below the root) and captures its entries.
@@ -699,12 +709,9 @@ impl Walk<'_> {
                 classify(&entry.name, case_sensitive).ok()
             };
             let Some(seg) = seg else {
-                // NUL cannot occur in a name on disk: raw keys never clash with folded ones.
-                let loc = if collides || case_sensitive {
-                    join(&format!("\0{}", entry.name))
-                } else {
-                    join(&key)
-                };
+                // Always under the raw name after NUL, which no name on disk holds: raw keys
+                // never clash with folded ones.
+                let loc = join(&format!("\0{}", entry.name));
                 self.insert(
                     loc,
                     SnapEntry::Anomaly {
@@ -836,10 +843,13 @@ impl NameCounts {
         Self(seen)
     }
 
-    /// U+FFFD (lossy) first, then a name that folds to the same key as another one.
+    /// A name no key path or value name may hold first (NUL; for a subkey, `subkey`, also `\`
+    /// or empty), then U+FFFD (lossy), then a name that folds to the same key as another one.
     /// `Some(why)` for an anomaly.
-    fn why(&self, n: &str) -> Option<RegWhy> {
-        if n.contains('\u{FFFD}') {
+    fn why(&self, n: &str, subkey: bool) -> Option<RegWhy> {
+        if n.contains('\0') || (subkey && (n.is_empty() || n.contains('\\'))) {
+            Some(RegWhy::Invalid)
+        } else if n.contains('\u{FFFD}') {
             Some(RegWhy::Lossy)
         } else if self.0.get(&fold(n)).is_some_and(|&c| c > 1) {
             Some(RegWhy::Collides)
@@ -879,7 +889,7 @@ impl KeyWalk<'_> {
         let values = self.reg.values(key)?;
         let counts = NameCounts::of(values.iter().map(|(n, _)| n.as_str()));
         for (value_name, value) in values {
-            match counts.why(&value_name) {
+            match counts.why(&value_name, false) {
                 Some(why) => self.push(
                     Loc::Value(loc.clone(), format!("\0{value_name}")),
                     SnapEntry::RegAnomaly {
@@ -901,7 +911,7 @@ impl KeyWalk<'_> {
         let subkeys = self.reg.subkeys(key)?;
         let counts = NameCounts::of(subkeys.iter().map(String::as_str));
         for sub in subkeys {
-            match counts.why(&sub) {
+            match counts.why(&sub, true) {
                 // Never opened: the name would address another key, or none.
                 Some(why) => self.push(
                     Loc::Key(format!("{loc}\\\0{sub}")),

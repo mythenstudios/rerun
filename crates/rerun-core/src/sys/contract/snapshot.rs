@@ -43,8 +43,13 @@ impl Taker<'_> {
     ) -> Result<(), String> {
         let after = self.take(what)?;
         let diff = before.diff(&after);
+        // Case-insensitive: a line holds the folded location next to the names, and a case
+        // change shows in exactly one line anyway.
+        let found = diff
+            .first()
+            .is_some_and(|l| l.to_lowercase().contains(&needle.to_lowercase()));
         ensure(
-            diff.len() == 1 && diff[0].starts_with(sign) && diff[0].contains(needle),
+            diff.len() == 1 && diff[0].starts_with(sign) && found,
             &format!("{what}: one difference {sign} at {needle:?}, got {diff:#?}"),
         )
     }
