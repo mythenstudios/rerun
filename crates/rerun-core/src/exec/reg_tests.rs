@@ -1173,3 +1173,91 @@ fn r_t5_records_that_do_not_fit_a_registry_op_are_blocked() {
         assert_eq!(records(&env, &t), n, "{what}: no record written");
     }
 }
+
+/// Resets a test knob when dropped, also when a check panics.
+pub(crate) struct Reset(pub(crate) fn());
+
+impl Drop for Reset {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
+/// R-L8 for `registry_set` (P2-11, user decision E4; the rule half of ADR 0018 open point S1)
+/// as a check: a rule for new values tightened after the apply (the `REG_SZ` limit, from 1,024
+/// down to 3 units) does not block the applied transaction: `verify` sees it, a later apply on
+/// another value is not `Blocked` by it, the revert restores everything exactly; the same plan
+/// applied again is refused (the apply decodes with the current rules).
+pub(crate) fn l8_set_check() -> Vec<String> {
+    use crate::policy::registry::KNOB_MAX_SZ;
+    let mut f = Vec::new();
+    let _reset = Reset(|| KNOB_MAX_SZ.with(|c| c.set(None)));
+    let env = Env::new(finish(reg_base()));
+    let before = snap_all(&env);
+    let h = plan_all(
+        &env,
+        &[step(&format!(r"HKCU\{SUB}"), vec![sz("B", "english")])],
+    );
+    let t = env.applied(&h);
+    KNOB_MAX_SZ.with(|c| c.set(Some(3)));
+    match env.try_verify(&t) {
+        Ok(v) if v.iter().all(|(_, o)| *o == Observed::After) => {}
+        other => f.push(format!("RL8 verify under the tightened rule: {other:?}")),
+    }
+    let other = plan_all(
+        &env,
+        &[step(
+            &format!(r"HKCU\{VENDOR_GAME}"),
+            vec![dword("Other", 1)],
+        )],
+    );
+    match env.apply(&other) {
+        Ok(Outcome::Applied(t2)) => {
+            if closed(&env.revert(&t2)) != Some(Closing::Reverted) {
+                f.push("RL8 the other transaction did not revert".to_owned());
+            }
+        }
+        r => f.push(format!("RL8 an apply on another value: {r:?}")),
+    }
+    match env.revert(&t) {
+        Ok(r) if r.closed == Some(Closing::Reverted) => {}
+        r => f.push(format!("RL8 revert under the tightened rule: {r:?}")),
+    }
+    let now = snap_all(&env);
+    if before != now {
+        f.push(format!("RL8 snapshot: {:#?}", before.diff(&now)));
+    }
+    if !matches!(
+        env.apply(&h),
+        Err(ApplyError::Refused(Refusal::Plan(
+            plan::PlanError::Registry { .. }
+        )))
+    ) {
+        f.push("RL8 the same plan applied again under the tightened rule".to_owned());
+    }
+    f
+}
+
+#[test]
+fn r_l8_a_tightened_rule_never_blocks_the_revert_of_a_registry_set() {
+    let f = l8_set_check();
+    assert!(f.is_empty(), "{f:#?}");
+}
+
+/// K-L3: decoding a recorded head with the current rules (as before P2-11) fails R-L8.
+#[test]
+fn k_l3_recorded_heads_decoded_with_current_rules_break_l8() {
+    let _reset = Reset(|| super::knob::current_for_recorded(false));
+    super::knob::current_for_recorded(true);
+    let f = l8_set_check();
+    assert!(
+        f.iter()
+            .any(|x| x.starts_with("RL8 revert under the tightened rule")),
+        "{f:#?}"
+    );
+    assert!(
+        f.iter()
+            .any(|x| x.starts_with("RL8 an apply on another value")),
+        "{f:#?}"
+    );
+}

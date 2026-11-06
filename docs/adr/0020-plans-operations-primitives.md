@@ -232,3 +232,8 @@ pub(crate) enum Object { File { .. }, Key { key: RegKey, created: bool }, Value 
 - **Tests:** `exec/reg_tests.rs` (R-T1, R-T2, R-T3, R-T5 to R-T8, R-H, K1, K-R7, K-R9), `sys/win/tests/exec.rs` (R-T1, R-T6, R-T8, R-H1 on an app hive), `docs/09-testing.md`.
 - **Crash and power-loss matrix (C7):** R-T3 (a failure and a crash after every file-system and registry call of apply and revert) and R-T4 (a power loss after every call × every cut of `C:`, `D:` and `HKCU`) for `RegNew`, `RegReplace`, `Mixed` and `Stacked`; J6 with 8 flush sites. The full product is 3,157 runs (about 40 s in a debug build; one test per kind, about 19 s wall clock), under the 60 s of S5, so no pairwise reduction is applied (`exec/reg_crash_tests.rs`).
 - **`CreateKey` slot (review nit 8):** a `CreateKey` carries the whole slot of the first value that needs its key, including the value name and segments below the created key; only `segs` decides which key is created. The rest affects nothing but the plan hash.
+
+## Amendment (P2-11, 2026-11-07; plan `P2-11` with the user decisions E1 to E8 and the senior-dev conditions)
+
+### Rule sets of `decode` (user decision E4)
+`plan::decode` takes a rule set: `Rules::Current` (planning, `encode`, apply) or `Rules::Recorded` (revert, `verify`, stacking: every location and form rule, no rule for new values). A rule tightened after an apply refuses only a new apply of the old plan (ADR 0018 amendment P2-11).

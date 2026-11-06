@@ -26,6 +26,14 @@
 //! is consistent (length at most 1 MiB, its bytes inline exactly up to [`OLD_INLINE`] with
 //! their hash), differs from the new one, and is absent in a key the plan creates; a plan with
 //! registry ops has at least one root and a main executable for each (user decision E2).
+//!
+//! Two rule sets (P2-11, user decision E4; the rule half of ADR 0018 open point S1): planning,
+//! [`Plan::encode`] and the apply decode with [`Rules::Current`], every rule in force now;
+//! the revert, `verify` and the stacking check decode a recorded head with
+//! [`Rules::Recorded`]: the same location and form rules, without the rules for new values
+//! (`RegPolicy::check_new`), so a rule tightened by a later version never makes an applied
+//! transaction unrevertable. A revert only writes back old values from the journal; it never
+//! writes a new value.
 
 mod preview;
 mod store;
@@ -487,6 +495,16 @@ impl PlanBytes {
     }
 }
 
+/// Which rules a decoded plan must meet (module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rules {
+    /// Planning, encode and apply: every rule in force now.
+    Current,
+    /// Revert, `verify` and stacking of a recorded head: location and form, not the rules for
+    /// new values.
+    Recorded,
+}
+
 /// Bounds of a plan (crate-internal so tests can shrink them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Limits {
@@ -621,17 +639,23 @@ impl Plan {
 
     pub(crate) fn encode_with(&self, lim: &Limits) -> Result<PlanBytes, PlanError> {
         let bytes = serde_json::to_vec(self).map_err(|e| PlanError::Encode(e.to_string()))?;
-        check(self, bytes.len(), lim)?;
+        check(self, bytes.len(), lim, Rules::Current)?;
         Ok(PlanBytes::from_bytes(bytes))
     }
 }
 
-/// Parses plan bytes as untrusted input (module docs).
+/// Parses plan bytes as untrusted input (module docs), with the rules in force now (apply).
 pub(crate) fn decode(b: &[u8]) -> Result<Plan, PlanError> {
-    decode_with(b, &Limits::default())
+    decode_with(b, &Limits::default(), Rules::Current)
 }
 
-pub(crate) fn decode_with(b: &[u8], lim: &Limits) -> Result<Plan, PlanError> {
+/// Parses a recorded head as untrusted input with [`Rules::Recorded`] (revert, `verify`,
+/// stacking).
+pub(crate) fn decode_recorded(b: &[u8]) -> Result<Plan, PlanError> {
+    decode_with(b, &Limits::default(), Rules::Recorded)
+}
+
+pub(crate) fn decode_with(b: &[u8], lim: &Limits, rules: Rules) -> Result<Plan, PlanError> {
     if b.len() > lim.plan_bytes {
         return Err(PlanError::TooLarge {
             limit: lim.plan_bytes,
@@ -649,7 +673,7 @@ pub(crate) fn decode_with(b: &[u8], lim: &Limits) -> Result<Plan, PlanError> {
     if serde_json::to_vec(&plan).ok().as_deref() != Some(b) {
         return Err(PlanError::NotOneForm);
     }
-    check(&plan, b.len(), lim)?;
+    check(&plan, b.len(), lim, rules)?;
     Ok(plan)
 }
 
@@ -685,7 +709,14 @@ impl RegSeen {
         Ok(())
     }
 
-    fn value(&mut self, plan: &Plan, k: usize, op: &Op, slot: &RegSlot) -> Result<(), PlanError> {
+    fn value(
+        &mut self,
+        plan: &Plan,
+        k: usize,
+        op: &Op,
+        slot: &RegSlot,
+        rules: Rules,
+    ) -> Result<(), PlanError> {
         self.any = true;
         let Op::SetValue { old, new, .. } = op else {
             return Err(invalid(Some(k), "a value target of no SetValue"));
@@ -695,9 +726,11 @@ impl RegSeen {
         if self.values.contains(&obj) {
             return Err(invalid(Some(k), "a second op on the same object"));
         }
-        RegPolicy
-            .check_new(&av, &new.value())
-            .map_err(|source| PlanError::Registry { op: k, source })?;
+        if rules == Rules::Current {
+            RegPolicy
+                .check_new(&av, &new.value())
+                .map_err(|source| PlanError::Registry { op: k, source })?;
+        }
         if let Some(s) = old {
             let len = usize::try_from(s.len).unwrap_or(usize::MAX);
             let data_ok = match &s.data {
@@ -729,8 +762,8 @@ impl RegSeen {
     }
 }
 
-/// The bounds and rules shared by [`Plan::encode`] and [`decode`].
-fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
+/// The bounds and rules shared by [`Plan::encode`] and [`decode`] (`rules`: module docs).
+fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), PlanError> {
     if plan.format != FORMAT {
         return Err(PlanError::Format(plan.format));
     }
@@ -798,7 +831,7 @@ fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
                 seen.push(key);
             }
             Target::Key { slot, segs } => reg.key(plan, k, slot, segs)?,
-            Target::Value { slot } => reg.value(plan, k, op, slot)?,
+            Target::Value { slot } => reg.value(plan, k, op, slot, rules)?,
         }
         if let Some(ContentRef::Package {
             id, version, len, ..

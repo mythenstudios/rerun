@@ -196,7 +196,7 @@ fn p2_decode_refuses_every_other_form_and_every_broken_rule() {
         ..Limits::default()
     };
     assert!(matches!(
-        decode_with(b.bytes(), &small),
+        decode_with(b.bytes(), &small, super::Rules::Current),
         Err(PlanError::OpTooLarge { op: 1, limit: 100 })
     ));
     let tiny = Limits {
@@ -204,7 +204,7 @@ fn p2_decode_refuses_every_other_form_and_every_broken_rule() {
         ..Limits::default()
     };
     assert!(matches!(
-        decode_with(b.bytes(), &tiny),
+        decode_with(b.bytes(), &tiny, super::Rules::Current),
         Err(PlanError::TooLarge { limit: 100 })
     ));
     assert!(matches!(

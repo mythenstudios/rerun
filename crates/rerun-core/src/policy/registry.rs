@@ -99,6 +99,17 @@ thread_local! {
     pub(crate) static KNOB_UNFOLDED_DENY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Control K-R6: the G1 content rule is off.
     pub(crate) static KNOB_NO_CONTENT_RULE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// R-L8: a tightened rule for new values (a shorter `REG_SZ` limit than [`MAX_SZ_UTF16`]).
+    pub(crate) static KNOB_MAX_SZ: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`MAX_SZ_UTF16`], or the tightened limit of R-L8 (tests).
+fn max_sz() -> usize {
+    #[cfg(test)]
+    if let Some(n) = KNOB_MAX_SZ.with(std::cell::Cell::get) {
+        return n;
+    }
+    MAX_SZ_UTF16
 }
 
 fn unfolded_deny() -> bool {
@@ -484,7 +495,7 @@ impl RegPolicy {
             RegSlot::GameValue { .. } => match new {
                 RegValue::Dword(_) | RegValue::Qword(_) => Ok(()),
                 RegValue::String(s) => {
-                    if s.encode_utf16().count() > MAX_SZ_UTF16 {
+                    if s.encode_utf16().count() > max_sz() {
                         Err(denied(what(), "a REG_SZ has at most 1,024 UTF-16 units"))
                     } else if !s.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
                         // M1 (review): best-fit characters (U+FF1A, U+FF3C, U+2215, ...) turn

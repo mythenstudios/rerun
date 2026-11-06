@@ -394,6 +394,7 @@ pub(crate) mod knob {
         static TRUST_RECORDS: Cell<bool> = const { Cell::new(false) };
         static RESTORE_WITHOUT_ATTRS: Cell<bool> = const { Cell::new(false) };
         static EAGER_ROOTS: Cell<bool> = const { Cell::new(false) };
+        static CURRENT_FOR_RECORDED: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(crate) fn skip(f: Option<Flush>) {
@@ -423,6 +424,23 @@ pub(crate) mod knob {
     pub(crate) fn opening_eagerly() -> bool {
         EAGER_ROOTS.with(Cell::get)
     }
+    /// K-L3: a recorded head is decoded with the rules in force now (as before P2-11).
+    pub(crate) fn current_for_recorded(on: bool) {
+        CURRENT_FOR_RECORDED.with(|s| s.set(on));
+    }
+    pub(crate) fn decoding_recorded_as_current() -> bool {
+        CURRENT_FOR_RECORDED.with(Cell::get)
+    }
+}
+
+/// A recorded head (revert, `verify`, stacking) with `plan::Rules::Recorded` (E4: a rule
+/// tightened since the apply does not block the revert); K-L3 (tests) uses the current rules.
+pub(crate) fn decode_head(b: &[u8]) -> Result<Plan, PlanError> {
+    #[cfg(test)]
+    if knob::decoding_recorded_as_current() {
+        return plan::decode(b);
+    }
+    plan::decode_recorded(b)
 }
 
 /// K1 (tests): observe from the records.
@@ -912,7 +930,7 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
         return Err(Refusal::Blocked { txn: *t }.into());
     }
     let mut w = lock.resume(t)?;
-    let plan = plan::decode(w.head()).map_err(|_| Refusal::Blocked { txn: *t })?;
+    let plan = decode_head(w.head()).map_err(|_| Refusal::Blocked { txn: *t })?;
     if !records_fit(&plan, w.ops()) {
         return Err(Refusal::Blocked { txn: *t }.into());
     }
@@ -964,7 +982,7 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     if !v.head_usable() {
         return Err(blocked());
     }
-    let plan = plan::decode(v.head.as_deref().unwrap_or_default()).map_err(|_| blocked())?;
+    let plan = decode_head(v.head.as_deref().unwrap_or_default()).map_err(|_| blocked())?;
     if !records_fit(&plan, &v.ops) {
         return Err(blocked());
     }

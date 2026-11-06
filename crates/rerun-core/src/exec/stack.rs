@@ -5,7 +5,7 @@
 
 use super::Refusal;
 use crate::journal::{Journal, Listed, Listing, TxnId, TxnState, VerifyBackups};
-use crate::plan::{self, Object, overlap};
+use crate::plan::{Object, overlap};
 
 /// What a listed transaction means for stacking.
 enum Class {
@@ -42,7 +42,8 @@ fn classify(j: &Journal<'_>, l: &Listed) -> Class {
     let Some(head) = full.head.as_deref() else {
         return Class::Blocked;
     };
-    let Ok(p) = plan::decode(head) else {
+    // E4: the recorded rules, so a tightened rule never blocks every later apply.
+    let Ok(p) = super::decode_head(head) else {
         return Class::Blocked;
     };
     let Ok(objs) = Object::of(&p) else {
