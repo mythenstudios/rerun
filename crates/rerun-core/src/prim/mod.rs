@@ -5,22 +5,29 @@
 //!
 //! - [`file_install`]: files of a local package below `<AppDir>\packages\<id>\<version>`
 //!   into the game folder (ADR 0020, D11).
+//! - [`registry_set`]: values below `HKCU\Software\<Vendor>\<Product>[\…]` (P2-10b), read
+//!   through [`PlanCtx::reg`].
 //!
-//! `registry_set`, `compat_layer` and `ini_set` follow with P2-10 to P2-12 (their spec types
-//! become further [`Step`] variants and need a `RegPolicy` in [`PlanCtx`]).
+//! The builder orders the ops: every file op first, then every registry op, whatever the
+//! order of the steps (6b-d; `plan::check` refuses anything else). `compat_layer` and `ini_set`
+//! follow with P2-11 and P2-12.
 
 pub mod file_install;
+pub mod registry_set;
 
 use serde::{Deserialize, Serialize};
 
 pub use file_install::{FileEntry, FileInstallSpec};
+pub use registry_set::{RegValueEntry, RegistrySetSpec};
 
 use crate::fold::fold;
 use crate::path::RelPath;
 use crate::plan::{FORMAT, Op, Plan, PlanError, PlanOrigin, PlanRoot, RootKind, Target};
+use crate::policy::registry::RegReader;
 use crate::policy::root::{AppDir, GameDir, GameOrigin};
 use crate::sys::SysErrorKind;
 use crate::sys::fs::EntryKind;
+use crate::sys::registry::RegKey;
 
 /// One step: an object with exactly one key (ADR 0020, D7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +35,8 @@ use crate::sys::fs::EntryKind;
 pub enum Step {
     /// [`file_install`].
     FileInstall(FileInstallSpec),
+    /// [`registry_set`].
+    RegistrySet(RegistrySetSpec),
 }
 
 /// What a planner reads: the game folder, Rerun's folder (packages), and what identifies the
@@ -44,6 +53,8 @@ pub struct PlanCtx<'a> {
     /// The game's main executable below the game folder, asked by `users()` (D4). If given,
     /// it must be a file there (audit A2 should-item 8); registry steps need it (E2).
     pub main_exe: Option<&'a RelPath>,
+    /// The registry as `registry_set` reads it (`RegPolicy::reader`: no link followed).
+    pub reg: RegReader<'a>,
 }
 
 /// The ops planned so far, shared by the steps of one plan.
@@ -54,6 +65,12 @@ pub(crate) struct Builder {
     pub(crate) created: Vec<String>,
     /// Folded target paths of the file ops (also of the omitted ones).
     pub(crate) targets: Vec<String>,
+    /// The registry ops, after every file op.
+    pub(crate) reg_ops: Vec<Op>,
+    /// The keys a `CreateKey` of `reg_ops` creates.
+    pub(crate) reg_keys: Vec<RegKey>,
+    /// Key and folded name of every value of a step (also of the omitted ones).
+    pub(crate) reg_values: Vec<(RegKey, String)>,
 }
 
 impl Builder {
@@ -108,8 +125,12 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
     for step in steps {
         match step {
             Step::FileInstall(spec) => file_install::plan_into(spec, ctx, &mut b)?,
+            Step::RegistrySet(spec) => registry_set::plan_into(spec, ctx, &mut b)?,
         }
     }
+    // 6b-d: every registry op after every file op.
+    let reg_ops = std::mem::take(&mut b.reg_ops);
+    b.ops.extend(reg_ops);
     // E2: ops that need it (registry ops, P2-10b) need the main executable.
     if ctx.main_exe.is_none() && b.ops.iter().any(|o| o.target().needs_main_exe()) {
         return Err(PlanError::Step(
@@ -166,5 +187,7 @@ pub(crate) fn folded(p: &RelPath) -> String {
     fold(p.as_str())
 }
 
+#[cfg(test)]
+pub(crate) mod reg_tests;
 #[cfg(test)]
 pub(crate) mod tests;

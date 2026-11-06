@@ -1,0 +1,26 @@
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues:
+  - id: issue
+    title: "Issue"
+    variants:
+      - id: v
+        status: unverified
+        kind: fix
+        steps:
+          - registry_set:
+              key: 'HKCU\Software\Ubisoft\AC'
+              values:
+                - { name: Windowed, dword: 1 }
+                - { name: "", sz: "en, mode 2 (fast)" }
+                - { name: Seed, qword: "18446744073709551615" }
+                - { name: Zero, qword: "0" }
+          - registry_set:
+              key: 'HKCU\Software\V\P\a\b\c\d'
+              values: [{ name: "Max", dword: 4294967295 }]

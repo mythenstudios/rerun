@@ -555,8 +555,83 @@
         },
         "cpu": {
           "$ref": "#/$defs/cpuRule"
+        },
+        "registry_set": {
+          "$ref": "#/$defs/registrySet"
         }
       }
+    },
+    "registrySet": {
+      "description": "Values below HKCU\\Software\\<Vendor>\\<Product>[\\...] (docs/02-topo-format.md, ADR 0018). The schema checks the form; the vendor deny list, unique names and the qword range are checked by the loader and the planner.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "values"
+      ],
+      "properties": {
+        "key": {
+          "description": "HKCU\\Software, then <Vendor>, <Product> and at most 4 more segments: 1 to 64 printable ASCII characters without a backslash or a space at either end.",
+          "type": "string",
+          "pattern": "^HKCU\\\\Software(\\\\[\\x21-\\x5b\\x5d-\\x7e]([\\x20-\\x5b\\x5d-\\x7e]{0,62}[\\x21-\\x5b\\x5d-\\x7e])?){2,6}$"
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/registryValue"
+          }
+        }
+      }
+    },
+    "registryValue": {
+      "description": "A value name and exactly one of dword, qword (a decimal string), sz.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "description": "Printable ASCII without \\ / : % and without a space at either end; empty is the default value.",
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^([\\x21-\\x24\\x26-\\x2e\\x30-\\x39\\x3b-\\x5b\\x5d-\\x7e]([\\x20-\\x24\\x26-\\x2e\\x30-\\x39\\x3b-\\x5b\\x5d-\\x7e]*[\\x21-\\x24\\x26-\\x2e\\x30-\\x39\\x3b-\\x5b\\x5d-\\x7e])?)?$"
+        },
+        "dword": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "qword": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,19})$"
+        },
+        "sz": {
+          "description": "Printable ASCII without \\ / : % (no paths, no variables), at most 1,024 characters.",
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^[\\x20-\\x24\\x26-\\x2e\\x30-\\x39\\x3b-\\x5b\\x5d-\\x7e]*$"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "dword"
+          ]
+        },
+        {
+          "required": [
+            "qword"
+          ]
+        },
+        {
+          "required": [
+            "sz"
+          ]
+        }
+      ]
     },
     "source": {
       "description": "Direct link to a guide, thread, repo or section - never just the home page.",

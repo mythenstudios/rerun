@@ -1,0 +1,20 @@
+# Invalid: sz null is refused
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues:
+  - id: issue
+    title: "Issue"
+    variants:
+      - id: v
+        status: unverified
+        kind: fix
+        steps:
+          - registry_set:
+              key: 'HKCU\Software\Ubisoft\AC'
+              values: [{ name: A, sz: null }]

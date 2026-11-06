@@ -508,6 +508,17 @@ impl RegPolicy {
         }
     }
 
+    /// The read side of the write side, for planners: state, value and missing keys without
+    /// following links (ADR 0018 amendment P2-10b).
+    pub fn reader<'s>(&self, sys: &'s dyn System) -> RegReader<'s> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "policy::registry is the one caller of System::registry_write (ADR 0018)"
+        )]
+        let w = sys.registry_write();
+        RegReader { w }
+    }
+
     /// The writer over the system's registry write side; the only caller of
     /// `System::registry_write`.
     #[cfg_attr(
@@ -518,12 +529,48 @@ impl RegPolicy {
         )
     )]
     pub(crate) fn writer<'s>(&self, sys: &'s dyn System) -> RegWriter<'s> {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "policy::registry is the one caller of System::registry_write (ADR 0018)"
-        )]
-        let w = sys.registry_write();
-        RegWriter { w, policy: *self }
+        RegWriter {
+            r: self.reader(sys),
+            policy: *self,
+        }
+    }
+}
+
+/// What a planner reads of the registry (P2-10b): the methods of the write side that change
+/// nothing, so a link or volatile key on the way is reported (`ReparsePoint`,
+/// `Unsupported`), never followed.
+#[derive(Clone, Copy)]
+pub struct RegReader<'s> {
+    w: &'s dyn RegistryWrite,
+}
+
+impl fmt::Debug for RegReader<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegReader").finish_non_exhaustive()
+    }
+}
+
+impl RegReader<'_> {
+    /// The state of the key.
+    pub fn state(&self, k: &AllowedKey) -> SysResult<KeyState> {
+        self.w.key_state(&k.key)
+    }
+
+    /// The current value (without following links). Key missing → `NotFound`.
+    pub fn get(&self, v: &AllowedValue) -> SysResult<Option<RegValue>> {
+        self.w.read(&v.key.key, &v.name)
+    }
+
+    /// The missing keys between the anchor and the key itself, top-down: each one a
+    /// `CreateKey` op.
+    pub fn missing_keys(&self, k: &AllowedKey) -> SysResult<Vec<RegKey>> {
+        let mut out = Vec::new();
+        for key in k.below_anchor() {
+            if !out.is_empty() || self.w.key_state(&key)? == KeyState::Missing {
+                out.push(key);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -541,7 +588,7 @@ pub enum RegWriteError {
 /// The write side, reachable only through `policy::registry`: every method takes an
 /// [`AllowedKey`] or [`AllowedValue`].
 pub struct RegWriter<'s> {
-    w: &'s dyn RegistryWrite,
+    r: RegReader<'s>,
     policy: RegPolicy,
 }
 
@@ -570,30 +617,24 @@ fn inside(k: &RegKey, of: &AllowedKey) -> SysResult<()> {
 impl RegWriter<'_> {
     /// The state of the key.
     pub fn state(&self, k: &AllowedKey) -> SysResult<KeyState> {
-        self.w.key_state(&k.key)
+        self.r.state(k)
     }
 
     /// The current value (without following links).
     pub fn get(&self, v: &AllowedValue) -> SysResult<Option<RegValue>> {
-        self.w.read(&v.key.key, &v.name)
+        self.r.get(v)
     }
 
     /// The missing keys between the anchor and the key itself, top-down: each one a
     /// `CreateKey` op.
     pub fn missing_keys(&self, k: &AllowedKey) -> SysResult<Vec<RegKey>> {
-        let mut out = Vec::new();
-        for key in k.below_anchor() {
-            if !out.is_empty() || self.w.key_state(&key)? == KeyState::Missing {
-                out.push(key);
-            }
-        }
-        Ok(out)
+        self.r.missing_keys(k)
     }
 
     /// Creates `k`, which must be `of` or one of its keys below the anchor.
     pub fn create_key(&self, k: &RegKey, of: &AllowedKey) -> SysResult<bool> {
         inside(k, of)?;
-        self.w.create_key(k)
+        self.r.w.create_key(k)
     }
 
     /// Writes `new` if the current value is `expected` and the policy allows `new` (checked
@@ -605,7 +646,7 @@ impl RegWriter<'_> {
         new: &RegValue,
     ) -> Result<(), RegWriteError> {
         self.policy.check_new(v, new)?;
-        Ok(self.w.set(&v.key.key, &v.name, expected, new)?)
+        Ok(self.r.w.set(&v.key.key, &v.name, expected, new)?)
     }
 
     /// Revert: puts `old` back exactly (also a raw or otherwise disallowed value), or deletes
@@ -617,20 +658,20 @@ impl RegWriter<'_> {
         old: Option<&RegValue>,
     ) -> SysResult<()> {
         match old {
-            Some(old) => self.w.set(&v.key.key, &v.name, Some(expected), old),
-            None => self.w.delete_value(&v.key.key, &v.name, expected),
+            Some(old) => self.r.w.set(&v.key.key, &v.name, Some(expected), old),
+            None => self.r.w.delete_value(&v.key.key, &v.name, expected),
         }
     }
 
     /// Deletes the empty key `k`, which must be `of` or one of its keys below the anchor.
     pub fn delete_empty_key(&self, k: &RegKey, of: &AllowedKey) -> SysResult<()> {
         inside(k, of)?;
-        self.w.delete_empty_key(k)
+        self.r.w.delete_empty_key(k)
     }
 
     /// Flushes `HKCU`.
     pub fn flush(&self) -> SysResult<()> {
-        self.w.flush(Hive::CurrentUser)
+        self.r.w.flush(Hive::CurrentUser)
     }
 }
 

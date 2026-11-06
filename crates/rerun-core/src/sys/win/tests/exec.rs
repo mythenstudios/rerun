@@ -81,6 +81,7 @@ impl Win {
                     app: cx.app,
                     steam_app: None,
                     main_exe: Some(&main),
+                    reg: crate::policy::registry::RegPolicy.reader(&self.sys),
                 },
             )
             .unwrap_or_else(|e| panic!("{e}"));

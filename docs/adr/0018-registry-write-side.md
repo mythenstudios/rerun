@@ -114,3 +114,4 @@ impl RegWriter<'_> {
 ## Amendment (P2-10b, 2026-11-06)
 - **Slots on the wire:** `RegSlot` serialises through a plain mirror (`{"game_value":{"vendor","product","rest","name"}}`, `{"compat_layers":{"root","exe"}}`, `{"gpu_preference":{…}}`, `deny_unknown_fields`) and deserialises only through `AsciiSeg::parse`, `AsciiName::parse`, `GameKey::new` and `RelPath::parse`, so a plan or journal head cannot name a key or value the rules refuse.
 - **`AllowedKey::cut(segs)`:** the allowed key cut to its first `segs` segments, only below the anchor and at most the key itself; a `CreateKey` op names its key this way (ADR 0020 amendment P2-10b).
+- **`RegReader`** (`RegPolicy::reader`): `state`, `get`, `missing_keys` of the write side, which follow no link; the planner's view of the registry. `RegWriter` holds one.
