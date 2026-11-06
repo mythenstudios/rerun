@@ -13,6 +13,7 @@
 //!   ADR 0015).
 //! - [`journal`]: the file-based journal below `AppDir` (ADR 0019).
 //! - [`plan`]: plans, their one serialisation, hash, storage and preview (ADR 0020).
+//! - [`prim`]: primitives as planners (`file_install`), ADR 0020.
 //!
 //! See `docs/01-architecture.md`, ADR 0004, ADR 0007 and ADR 0011.
 
@@ -24,6 +25,7 @@ pub mod journal;
 pub mod path;
 pub mod plan;
 pub mod policy;
+pub mod prim;
 pub mod sys;
 mod wire;
 

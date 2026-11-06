@@ -49,7 +49,7 @@ pub enum Step { FileInstall(FileInstallSpec), RegistrySet(RegistrySetSpec),
 pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError>; // GameDir, AppDir, RegPolicy; reads only
 ```
 
-Phase 2: `file_install` (local package files under `<AppDir>\packages`), `registry_set`, `compat_layer`, `ini_set`. Until the Topo engine (phase 4) `rerun plan` reads a JSON step file whose step objects are the durable spec types (ADR 0020, D7).
+Phase 2: `file_install` (local package files under `<AppDir>\packages`; `prim::file_install`, done in P2-8: `PlanCtx { game, app, steam_app, main_exe }`, the `RegPolicy` joins with P2-9), `registry_set`, `compat_layer`, `ini_set`. Until the Topo engine (phase 4) `rerun plan` reads a JSON step file whose step objects are the durable spec types (ADR 0020, D7).
 
 | Primitive | Effect | Admin |
 |---|---|---|

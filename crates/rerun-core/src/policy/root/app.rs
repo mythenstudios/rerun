@@ -45,10 +45,6 @@ pub(crate) enum AppSub {
     /// `plans` (ADR 0020).
     Plans,
     /// `packages` (ADR 0020, D11).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "first caller is the package store (P2-8)")
-    )]
     Packages,
 }
 
