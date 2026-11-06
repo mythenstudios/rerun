@@ -1216,12 +1216,12 @@ fn foreign_open(p: &Path, write: bool, backup: bool) -> Result<(), i32> {
         .map_err(|e| e.raw_os_error().unwrap_or(-1))
 }
 
-/// Backup intent against the journal lock and the guard (ADR 0017 A7, open point). Without
+/// Backup intent against the journal lock and the guard (ADR 0017, "Backup intent"). Without
 /// backup intent another program's read of the lock and write of the guarded file are sharing
-/// violations (as K1 and the guard contract require). The hypothesis from CI run 42130639073:
-/// with `SeBackupPrivilege` enabled, a read with backup intent passes the share-0 lock. Runs
-/// only where the privilege is enabled (the elevated GitHub runner); the outcomes of all four
-/// opens are printed, the read of the lock is asserted.
+/// violations (as K1 and the guard contract require). With `SeBackupPrivilege` enabled, a read
+/// with backup intent passes both, a write does not (observed in CI run 42134204098, also with
+/// `SeRestorePrivilege` enabled). Runs only where the privilege is enabled (the elevated GitHub
+/// runner); prints the privilege state and the outcomes.
 #[test]
 fn backup_intent_against_lock_and_guard() {
     const SHARING_VIOLATION: i32 = 32;
@@ -1270,9 +1270,15 @@ fn backup_intent_against_lock_and_guard() {
         shown.join("; ")
     ));
     drop((guard, lock));
+    let got: Vec<_> = outcomes.iter().map(|(_, r)| *r).collect();
     assert_eq!(
-        outcomes[0].1,
-        Ok(()),
-        "hypothesis: a read with backup intent passes the share-0 lock"
+        got,
+        [
+            Ok(()),
+            Err(SHARING_VIOLATION),
+            Ok(()),
+            Err(SHARING_VIOLATION)
+        ],
+        "backup intent: reads pass the lock and the guard, writes do not"
     );
 }

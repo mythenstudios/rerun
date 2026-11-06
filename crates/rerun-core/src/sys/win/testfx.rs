@@ -1354,7 +1354,6 @@ impl FsFixture for WinFixture {
     /// lock (K1, CI run 42130639073), so the hold would not test the share mode there.
     fn hold_open(&self, p: &Path, access: Access, share: Share) -> SysResult<Held<'_>> {
         self.guard(p, Last::Plain)?;
-        ci_token_note();
         let dir = std::fs::symlink_metadata(p)
             .map_err(|e| io_err(&e, p))?
             .file_attributes()
@@ -1395,24 +1394,6 @@ impl FsFixture for WinFixture {
             .map_err(|e| io_err(&e, p))?;
         Ok(Box::new(f))
     }
-}
-
-/// Diagnostic on GitHub runners, once per process: whether the token is elevated and whether
-/// `SeBackupPrivilege` and `SeRestorePrivilege` are enabled (they decide what an open with
-/// backup intent may do; K1 failed there with a fixture open by backup semantics).
-fn ci_token_note() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    if !hosted_ci() {
-        return;
-    }
-    ONCE.call_once(|| {
-        note(&format!(
-            "note: CI token: elevated {}, SeBackupPrivilege {}, SeRestorePrivilege {}",
-            is_elevated(),
-            privilege_state(SE_BACKUP_NAME),
-            privilege_state(SE_RESTORE_NAME),
-        ));
-    });
 }
 
 /// `SeBackupPrivilege` and `SeRestorePrivilege` of the process token, each `enabled`,
