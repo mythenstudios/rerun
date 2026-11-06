@@ -5,11 +5,6 @@
 //!   ADR 0020). Parsing accepts exactly what is written.
 //! - [`TmpName`] serialises as its name and parses back only through [`TmpName::parse`].
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the journal reader and writer use it (P2-7)")
-)]
-
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

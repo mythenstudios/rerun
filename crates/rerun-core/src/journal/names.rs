@@ -1,11 +1,6 @@
 //! Names in the journal (ADR 0019, "Names"): transaction folders, records, backups and the
 //! instance tag. Every name has one written form, and parsing accepts only that form.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the journal reader and writer use it (P2-7)")
-)]
-
 use std::fmt;
 use std::hash::{BuildHasher, Hasher};
 use std::str::FromStr;
@@ -18,6 +13,8 @@ pub const MAX_SEQ: u32 = 99_999_999;
 
 /// `head.json`: the plan bytes.
 pub(crate) const HEAD: &str = "head.json";
+/// `lock` in `journal`.
+pub(crate) const LOCK: &str = "lock";
 
 /// A transaction: `<seq>-<tag>`, 8 decimal digits and 16 lower-case hex digits. Ordered by
 /// `seq` (then `tag`), which totally orders transactions for LIFO (ADR 0019).
@@ -167,6 +164,11 @@ pub(crate) fn record_name(n: u16) -> RelPath {
 /// `op-NNNN.bin`.
 pub(crate) fn backup_name(op: u16) -> RelPath {
     segment(&format!("op-{op:04}.bin"))
+}
+
+/// A fixed name (`head.json`, `lock`) as a segment.
+pub(crate) fn fixed(name: &str) -> RelPath {
+    segment(name)
 }
 
 /// Names built here are ASCII digits, letters, `-` and `.` without a trailing dot: always a

@@ -7,11 +7,6 @@
 //! bytes, so every accepted file has exactly one form. No `flatten` (it does not work with
 //! `deny_unknown_fields`).
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the journal reader and writer use it (P2-7)")
-)]
-
 use serde::{Deserialize, Serialize};
 
 use super::Damage;

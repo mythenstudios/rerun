@@ -18,11 +18,6 @@
 //!   D10). `Closed { Forgotten }` at any time.
 //! - Nothing after `Closed`.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the journal reader and writer use it (P2-7)")
-)]
-
 use std::collections::BTreeMap;
 
 use super::record::{BackupRef, Closing, Observed, Record};

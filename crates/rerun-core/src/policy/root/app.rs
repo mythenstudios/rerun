@@ -38,24 +38,24 @@ pub enum Create {
 }
 
 /// A fixed folder below [`AppDir`].
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller is the journal (P2-7)")
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppSub {
     /// `journal` (ADR 0019).
     Journal,
     /// `plans` (ADR 0020).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "first caller is plan storage (P2-8)")
+    )]
     Plans,
     /// `packages` (ADR 0020, D11).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "first caller is the package store (P2-8)")
+    )]
     Packages,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller is the journal (P2-7)")
-)]
 impl AppSub {
     fn rel(self) -> RelPath {
         let name = match self {
@@ -180,10 +180,6 @@ impl<'s> AppDir<'s> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller is the journal (P2-7)")
-)]
 impl AppDir<'_> {
     /// The handle with the write capability, for the journal and plan storage only
     /// (`clippy.toml`). `Unsupported` on a volume without POSIX delete and rename semantics

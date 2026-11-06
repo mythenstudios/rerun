@@ -6,10 +6,13 @@ use std::path::{Path, PathBuf};
 
 use super::super::WinFs;
 use super::super::testfx::{TestRoot, target_dir};
+use crate::journal::tests::j1_round_trip;
+use crate::journal::{InstanceTag, Journal, JournalError, TxnState, VerifyBackups};
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{AppDir, AppSub, Create, RootError};
 use crate::sys::contract::FsFixture;
 use crate::sys::fake::{FakeGpu, FakeKnownFolders, FakeRegistry, FakeTopology};
+use crate::sys::fs::WriteCap;
 use crate::sys::{Fs, Gpu, KnownFolder, KnownFolders, Registry, System, Topology};
 
 /// The real file system with fake known folders (and fake everything else): `LocalAppData`
@@ -137,5 +140,46 @@ fn a4_app_dir_opens_creates_and_refuses_links_on_real_windows() {
             other => panic!("Rerun junction ({create:?}): {other:?}"),
         }
     }
+    assert_eq!(listing(&out), ["canary.txt"]);
+}
+
+#[test]
+fn j1_j3_j7_journal_on_real_windows() {
+    let Some((root, lad, out)) = app_root("journal") else {
+        return;
+    };
+    let sys = AppTestSys::new(&lad);
+    let app = AppDir::open(&sys, Create::IfMissing).unwrap().unwrap();
+    let game = root.work("game");
+    let old = b"old content on real Windows";
+    std::fs::write(game.join("a.bin"), old).unwrap();
+    let fs = WinFs::new();
+    let g = fs.open_dir_write(&game, &WriteCap::new()).unwrap();
+    let id = j1_round_trip(&app, &*g, old);
+
+    // J7: one lock at a time, also between two AppDir handles; status without it.
+    let app2 = AppDir::open(&sys, Create::Never).unwrap().unwrap();
+    let j1 = Journal::new(&app, InstanceTag::new());
+    let j2 = Journal::new(&app2, InstanceTag::new());
+    let held = j1.lock().unwrap();
+    assert!(matches!(j2.lock(), Err(JournalError::Busy)));
+    assert_eq!(j2.list().unwrap().txns.len(), 2);
+    drop(held);
+    drop(j2.lock().unwrap());
+
+    // J3: a junction in place of a transaction folder is refused, never followed.
+    let txn = lad.join(format!(r"Rerun\journal\{id}"));
+    std::fs::rename(&txn, root.path().join("moved")).unwrap();
+    root.fx().junction(&txn, &out).unwrap();
+    assert!(crate::journal::tests::is_reparse(
+        &j1.load(&id, VerifyBackups::Length)
+    ));
+    let txns = j1.list().unwrap().txns;
+    assert!(txns.iter().any(|l| l.id == id && l.view.is_err()));
+    assert!(
+        txns.iter()
+            .any(|l| l.id != id
+                && matches!(&l.view, Ok(v) if matches!(v.state, TxnState::Closed(_))))
+    );
     assert_eq!(listing(&out), ["canary.txt"]);
 }

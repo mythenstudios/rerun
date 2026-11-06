@@ -32,10 +32,6 @@ mod forbidden;
 use std::fmt;
 use std::path::Path;
 
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "first caller is the journal (P2-7)")
-)]
 pub(crate) use app::AppSub;
 pub use app::{AppDir, Create};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
