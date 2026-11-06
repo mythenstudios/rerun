@@ -13,7 +13,10 @@
 //! `Unsupported`. Before a change the walked handle's kernel name must still be the root's
 //! name plus the key's path (folded), otherwise `Busy`: checking and acting then run on one
 //! handle, so another program that renames or replaces a key between the walk and the act is
-//! noticed instead of written through.
+//! noticed instead of written through. A rename in the microseconds between that check and the
+//! write is not prevented (the registry has no compare-and-swap; accepted, ADR 0018 amendment
+//! P2-9): the write follows the handle into the moved key, and a second check after it reports
+//! `Busy`, so the caller observes.
 
 use super::super::registry::{
     Hive, KeyState, RegKey, RegValue, RegView, check_key, check_value_name,
@@ -313,6 +316,7 @@ pub(crate) fn create_key<H: PrimHive>(h: &H, k: &RegKey) -> SysResult<bool> {
     after_walk(k);
     still_at(h, &p, &parent)?;
     let (child, created) = p.create(last, KeyAccess::Query)?;
+    // A failure from here on may leave a key this call created: the caller observes it.
     check_flags(&child, k, last.as_str())?;
     Ok(created)
 }
@@ -344,6 +348,9 @@ pub(crate) fn set<H: PrimHive>(
         ));
     }
     key.set_value(name, new)?;
+    // The key may have been renamed between the check and the write (accepted window, ADR
+    // 0018 amendment P2-9): then the write landed in the moved key; say so.
+    still_at(h, &key, k)?;
     if key.query(name)?.as_ref() != Some(new) {
         return Err(SysError::new(
             SysErrorKind::Busy,
@@ -381,6 +388,7 @@ pub(crate) fn delete_value<H: PrimHive>(
         Some(_) => {}
     }
     key.delete_value(name)?;
+    still_at(h, &key, k)?;
     if key.query(name)?.is_some() {
         return Err(SysError::new(
             SysErrorKind::Busy,

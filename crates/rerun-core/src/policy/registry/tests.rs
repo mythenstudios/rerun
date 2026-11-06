@@ -119,7 +119,7 @@ fn rp_table() -> Result<(), String> {
         RegValue::Qword(u64::MAX),
         RegValue::String("x".repeat(1_024)),
         RegValue::String(String::new()),
-        RegValue::String("de-CH, Ünïcode".into()),
+        RegValue::String("de-CH, mode 2 (fast)".into()),
     ] {
         if p.check_new(&v, &ok).is_err() {
             return fail(&format!("{ok} is allowed"));
@@ -132,6 +132,15 @@ fn rp_table() -> Result<(), String> {
         RegValue::String("%APPDATA%".into()),
         RegValue::String("a/b".into()),
         RegValue::String("a:b".into()),
+        // Best-fit characters an ANSI reader turns into `\ : % /`, bidi, format, non-ASCII.
+        RegValue::String("C\u{FF1A}\u{FF3C}x".into()),
+        RegValue::String("a\u{FF3C}b".into()),
+        RegValue::String("\u{FF05}TEMP\u{FF05}".into()),
+        RegValue::String("a\u{FF0F}b".into()),
+        RegValue::String("a\u{2215}b".into()),
+        RegValue::String("a\u{202E}b".into()),
+        RegValue::String("a\u{2028}b".into()),
+        RegValue::String("caf\u{E9}".into()),
         RegValue::Binary(vec![]),
         RegValue::Binary(vec![1; 16]),
         RegValue::ExpandString("x".into()),

@@ -2042,8 +2042,9 @@ pub fn fs_race_contract(
     Ok(Skipped::new())
 }
 
-/// A rename that runs later, see [`RegFixture::rename_later`].
-pub type DeferredRename = Box<dyn FnOnce() -> SysResult<()>>;
+/// A change of another program that runs later, see [`RegFixture::rename_later`] and
+/// [`RegFixture::delete_later`].
+pub type Deferred = Box<dyn FnOnce() -> SysResult<()>>;
 
 /// Setup that the registry API under test deliberately cannot do while it is read-only: create
 /// keys, write values with any type number and bytes, delete a value, create a symbolic-link
@@ -2081,7 +2082,11 @@ pub trait RegFixture: Sync {
     /// A deferred rename of the existing key `k` to `new_name` under the same parent (like
     /// `RegRenameKey`, another program): the contract runs it between the walk and the act of
     /// a write (RW9). `Ok(None)` = not available.
-    fn rename_later(&self, k: &RegKey, new_name: &str) -> SysResult<Option<DeferredRename>>;
+    fn rename_later(&self, k: &RegKey, new_name: &str) -> SysResult<Option<Deferred>>;
+    /// A deferred delete of the existing key `k` without subkeys (its values go with it), and with
+    /// `recreate` a new, empty key of the same name right after: the contract runs it between
+    /// the walk and the act of a write. `Ok(None)` = not available.
+    fn delete_later(&self, k: &RegKey, recreate: bool) -> SysResult<Option<Deferred>>;
     /// Creates `k` (its parent exists) as a volatile key. `Ok(false)` = not available.
     fn volatile_key(&self, k: &RegKey) -> SysResult<bool>;
     /// Stores the value `name` of the existing key `k` as `REG_BINARY` of `len` bytes (each
@@ -2755,7 +2760,9 @@ pub fn registry_read_contract(
     let made = ok(fx.link(&link, &a), "fixture: link")?;
     if made {
         let got = ok(reg.link(&link), "link of a link key")?;
-        let target = got.map(|l| String::from_utf16_lossy(&l.target));
+        let target = got
+            .and_then(|l| l.target)
+            .map(|t| String::from_utf16_lossy(&t));
         ensure(
             target
                 .as_deref()

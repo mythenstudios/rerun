@@ -22,8 +22,8 @@ fn get(w: &dyn RegistryWrite, k: &RegKey, name: &str) -> Result<Option<RegValue>
 }
 
 /// Registry write contract. `root` must be an existing, empty key in `HKCU`, native view.
-/// Skipped cases: `"key_link"` (no link keys), `"rename_key"` (the fixture cannot rename a key
-/// between the walk and the act), `"volatile_key"`.
+/// Skipped cases: `"key_link"` (no link keys), `"rename_key"` and `"delete_key"` (the fixture
+/// cannot rename or delete a key between the walk and the act), `"volatile_key"`.
 pub fn registry_write_contract(
     w: &dyn RegistryWrite,
     fx: &dyn RegFixture,
@@ -265,6 +265,7 @@ pub fn registry_write_contract(
     )?;
 
     renamed_between_walk_and_act(w, fx, root, &mut skips)?;
+    deleted_between_walk_and_act(w, fx, root, &mut skips)?;
 
     // S4: a volatile key (or one below it) is never written.
     let vol = root.join("Volatile");
@@ -343,8 +344,53 @@ fn link_keys(
     Ok(())
 }
 
+/// A write under test.
+type Act<'a> = Box<dyn Fn() -> crate::sys::SysResult<()> + 'a>;
+
+/// The write cases of RW9 and RW11, each on the key `k` holding `keep = 5`.
+fn hooked_cases<'a>(
+    w: &'a dyn RegistryWrite,
+    k: &'a RegKey,
+    v: &'a RegValue,
+    keep: &'a RegValue,
+) -> [(&'static str, Act<'a>); 4] {
+    [
+        ("set", Box::new(move || w.set(k, "v", None, v))),
+        (
+            "create_key",
+            Box::new(move || w.create_key(&k.join("Kid")).map(drop)),
+        ),
+        (
+            "delete_value",
+            Box::new(move || w.delete_value(k, "keep", keep)),
+        ),
+        ("delete_empty_key", Box::new(move || w.delete_empty_key(k))),
+    ]
+}
+
+/// Runs `act` with `change` (another program) between its walk and its act; the change must
+/// have run.
+fn with_change(
+    change: crate::sys::contract::Deferred,
+    act: &dyn Fn() -> crate::sys::SysResult<()>,
+    what: &str,
+) -> Result<crate::sys::SysResult<()>, String> {
+    let fired = Rc::new(Cell::new(false));
+    let flag = fired.clone();
+    hook::after_walk_once(move |_| {
+        flag.set(change().is_ok());
+    });
+    let r = act();
+    hook::clear();
+    ensure(
+        fired.get(),
+        &format!("{what}: the change ran between walk and act"),
+    )?;
+    Ok(r)
+}
+
 /// RW9: another program renames the key between the walk and the act: `Busy`, nothing is
-/// written, at the old name or the new one.
+/// written or deleted, at the old name or the new one.
 fn renamed_between_walk_and_act(
     w: &dyn RegistryWrite,
     fx: &dyn RegFixture,
@@ -353,38 +399,72 @@ fn renamed_between_walk_and_act(
 ) -> Result<(), String> {
     let k = root.join("Renamed");
     let moved = root.join("RenamedAway");
-    let v = RegValue::Dword(1);
-    let cases: [(&str, &dyn Fn() -> crate::sys::SysResult<()>); 3] = [
-        ("set", &|| w.set(&k, "v", None, &v)),
-        ("create_key", &|| w.create_key(&k.join("Kid")).map(drop)),
-        ("delete_empty_key", &|| w.delete_empty_key(&k)),
-    ];
-    for (what, act) in cases {
+    let (v, keep) = (RegValue::Dword(1), RegValue::Dword(5));
+    for (what, act) in hooked_cases(w, &k, &v, &keep) {
         ok(fx.key(&k), "fixture: key to rename")?;
+        ok(
+            fx.raw(&k, "keep", reg_type::REG_DWORD, &[5, 0, 0, 0]),
+            "fixture: keep",
+        )?;
         let Some(rename) = ok(fx.rename_later(&k, "RenamedAway"), "fixture: rename")? else {
             skip(skips, "rename_key");
             ok(fx.delete_key(&k), "fixture: cleanup")?;
             return Ok(());
         };
-        let fired = Rc::new(Cell::new(false));
-        let flag = fired.clone();
-        hook::after_walk_once(move |_| {
-            flag.set(rename().is_ok());
-        });
-        let r = act();
-        hook::clear();
-        ensure(
-            fired.get(),
-            &format!("{what}: the rename ran between walk and act"),
-        )?;
+        let r = with_change(rename, &*act, what)?;
         err_kind(r, SysErrorKind::Busy, &format!("{what} on a renamed key"))?;
         ensure(
             !ok(w.key_exists(&k), "old name")?
-                && get(w, &moved, "v")?.is_none()
+                && ok(w.values(&moved), "values of the moved key")?
+                    == [("keep".to_owned(), keep.clone())]
                 && ok(w.subkeys(&moved), "subkeys of the moved key")?.is_empty(),
             &format!("{what}: nothing written to the renamed key"),
         )?;
         ok(fx.delete_key(&moved), "fixture: cleanup")?;
+    }
+    Ok(())
+}
+
+/// RW11 (review S1): another program deletes the key between the walk and the act, and
+/// recreates it empty: the handle points to a deleted key, `Busy`, nothing written to the new
+/// key of the same name.
+fn deleted_between_walk_and_act(
+    w: &dyn RegistryWrite,
+    fx: &dyn RegFixture,
+    root: &RegKey,
+    skips: &mut Skipped,
+) -> Result<(), String> {
+    let k = root.join("Deleted");
+    let (v, keep) = (RegValue::Dword(1), RegValue::Dword(5));
+    for recreate in [false, true] {
+        for (what, act) in hooked_cases(w, &k, &v, &keep) {
+            let what = format!("{what} (recreated: {recreate})");
+            ok(fx.key(&k), "fixture: key to delete")?;
+            ok(
+                fx.raw(&k, "keep", reg_type::REG_DWORD, &[5, 0, 0, 0]),
+                "fixture: keep",
+            )?;
+            let Some(delete) = ok(fx.delete_later(&k, recreate), "fixture: delete")? else {
+                skip(skips, "delete_key");
+                ok(fx.delete_key(&k), "fixture: cleanup")?;
+                return Ok(());
+            };
+            let r = with_change(delete, &*act, &what)?;
+            err_kind(r, SysErrorKind::Busy, &format!("{what} on a deleted key"))?;
+            if recreate {
+                ensure(
+                    ok(w.values(&k), "values of the new key")?.is_empty()
+                        && ok(w.subkeys(&k), "subkeys of the new key")?.is_empty(),
+                    &format!("{what}: nothing written to the new key"),
+                )?;
+                ok(fx.delete_key(&k), "fixture: cleanup")?;
+            } else {
+                ensure(
+                    !ok(w.key_exists(&k), "deleted key")?,
+                    &format!("{what}: the key stays deleted"),
+                )?;
+            }
+        }
     }
     Ok(())
 }

@@ -1512,7 +1512,7 @@ fn fake_link_keys_are_followed_on_reads_and_reported_by_link() {
     assert_eq!(reg.subkeys(&root.join("L")).unwrap(), ["Sub"]);
     let l = reg.link(&root.join("L")).unwrap().unwrap();
     assert_eq!(
-        String::from_utf16(&l.target).unwrap(),
+        String::from_utf16(&l.target.unwrap()).unwrap(),
         r"\REGISTRY\FAKE\HKCU\Software\Fx\Target"
     );
     // Below a link, `link` follows the parent: `L\Sub` is the plain `Target\Sub`.

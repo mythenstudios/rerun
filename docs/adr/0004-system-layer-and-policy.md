@@ -16,7 +16,7 @@ Primitives must be testable against a fake system (`docs/09-testing.md`) and may
 
 ## Consequences
 - The fake replicates Win32 semantics (case-insensitive with preserved casing, error kinds). Known deviations are listed in `sys/fake/fs.rs`.
-- The policy check for reparse points in the real folder (`resolve_confined`) comes in Phase 2, the registry allowlist (`policy::registry`) in Phase 3.
+- The policy check for reparse points in the real folder (`resolve_confined`) comes in Phase 2, the registry allowlist (`policy::registry`) in Phase 3 (superseded: `policy::registry` is phase 2, ADR 0018; `resolve_confined` became `policy::root`, ADR 0007).
 - A new system access means: trait method + fake + contract test, never a direct call.
 - ADR 0007 replaces the `Fs` signatures described here: file operations now go through `Dir` relative to a root handle opened by `policy::root`.
 

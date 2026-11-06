@@ -17,13 +17,16 @@
 //!   `NtQueryInformationFile`, `NtQueryDirectoryFile`, `NtSetInformationFile` through one
 //!   wrapper with three classes, `NtFlushBuffersFileEx`, `GetFinalPathNameByHandleW`,
 //!   `GetVolumeInformationByHandleW`, `DeviceIoControl`), handles as `OwnedHandle`.
-//! - `token`: `user_writable` via `AccessCheck` against the non-elevated user's token.
+//! - `token`: `user_writable` via `AccessCheck` against the non-elevated user's token, and
+//!   `TokenElevation` for the registry write side (S2).
 //! - `shell`: the only calls to `SHGetKnownFolderPath` (with the process token, freed with
 //!   `CoTaskMemFree`) and `GetSystemWindowsDirectoryW`.
 //! - `reg`: the only registry calls (`RegOpenCurrentUser`, `RegOpenKeyExW`, `RegEnumKeyExW`,
 //!   `RegQueryInfoKeyW`, `RegCloseKey`; values with `NtQueryValueKey`/`NtEnumerateValueKey`,
-//!   because the Win32 value reads fix up strings; `NtQueryKey` for key names), key handles
-//!   as `OwnedKey`.
+//!   because the Win32 value reads fix up strings; `NtQueryKey` for key names and flags; the
+//!   write side of ADR 0018: `RegOpenKeyExW`/`RegCreateKeyExW` of one segment with
+//!   `REG_OPTION_OPEN_LINK`, `NtSetValueKey`, `NtDeleteValueKey`, `NtDeleteKey`, `RegFlushKey`),
+//!   key handles as `OwnedKey`.
 //! - `loader`: the only call to `SetDefaultDllDirectories` ([`restrict_dll_search`], ADR 0008,
 //!   H2), the first statement of `rerun.exe`'s `main`; the only `LoadLibraryExW` (bare name,
 //!   System32 only, never freed) and `GetProcAddress`.
@@ -47,8 +50,8 @@
 //!   primitives (`PrimDir`, `PrimFile`, ADR 0017 A1); no `unsafe`.
 //! - `known_folders`: `WinKnownFolders`, the source of each folder, `ProfileList` expansion;
 //!   no `unsafe`, never the environment.
-//! - `registry`: `WinRegistry`, input rules, limits, retries and enumeration restarts; no
-//!   `unsafe`.
+//! - `registry`: `WinRegistry`, input rules, limits, retries and enumeration restarts, and the
+//!   write primitives of `sys::seq::reg` (`WinKey`, ADR 0018); no `unsafe`.
 //!
 //! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu`, `loader` and `dxgi`. Path-based Win32 file APIs
 //! (`CreateFileW`, `DeleteFileW`, `MoveFileExW`, `GetFileAttributesW`, …) and every
@@ -110,6 +113,6 @@ pub use fs::{WinDir, WinFs};
 pub use gpu::WinGpu;
 pub use known_folders::WinKnownFolders;
 pub use loader::restrict_dll_search;
-pub use registry::WinRegistry;
+pub(crate) use registry::WinRegistry;
 pub use system::WinSystem;
 pub use topology::WinTopology;

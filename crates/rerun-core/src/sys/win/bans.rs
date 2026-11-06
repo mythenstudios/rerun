@@ -2020,3 +2020,40 @@ fn every_banned_item_is_listed_here() {
     }
     assert!(n > 40, "parsed only {n} windows_sys bans");
 }
+
+/// The registry write methods (ADR 0018) are bans outside `policy::registry`, like
+/// `System::registry_write`: each path must resolve and be caught.
+#[test]
+fn banned_registry_write_methods_resolve() {
+    use crate::sys::RegistryWrite;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: System::registry_write must be banned"
+    )]
+    let _ = <dyn crate::sys::System as crate::sys::System>::registry_write;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegistryWrite::create_key must be banned"
+    )]
+    let _ = <dyn RegistryWrite as RegistryWrite>::create_key;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegistryWrite::set must be banned"
+    )]
+    let _ = <dyn RegistryWrite as RegistryWrite>::set;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegistryWrite::delete_value must be banned"
+    )]
+    let _ = <dyn RegistryWrite as RegistryWrite>::delete_value;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegistryWrite::delete_empty_key must be banned"
+    )]
+    let _ = <dyn RegistryWrite as RegistryWrite>::delete_empty_key;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: RegistryWrite::flush must be banned"
+    )]
+    let _ = <dyn RegistryWrite as RegistryWrite>::flush;
+}

@@ -989,8 +989,9 @@ fn win_registry_write_refuses_an_elevated_process() {
     reg.flush(Hive::CurrentUser).unwrap();
 }
 
-/// The real `WinRegistry` knows whether this process is elevated; only reads here (no write
-/// ever reaches the real `HKCU` in a test).
+/// The real `WinRegistry` knows whether this process is elevated. The write it tries can never
+/// create anything in the real `HKCU`, even if the guard regressed: the parent of its key is
+/// missing, so without the guard it is `NotFound` (review S2).
 #[test]
 fn win_registry_reports_elevation_like_the_token() {
     let reg = WinRegistry::new().unwrap();
@@ -999,11 +1000,17 @@ fn win_registry_reports_elevation_like_the_token() {
         reg.key_state(&k).unwrap(),
         crate::sys::registry::KeyState::Present { .. }
     ));
-    if super::token::process_elevated().unwrap_or(true) {
+    let parent = k.join("RerunNeverCreated");
+    assert!(!reg.key_exists(&parent).unwrap(), "{parent} must not exist");
+    let e = RegistryWrite::create_key(&reg, &parent.join("X")).unwrap_err();
+    let want = if super::token::process_elevated().unwrap_or(true) {
         // Elevated (a GitHub runner): refused before anything is opened.
-        let e = RegistryWrite::create_key(&reg, &k.join("RerunNeverCreated")).unwrap_err();
-        assert_eq!(e.kind, SysErrorKind::Unsupported, "{e}");
-    }
+        SysErrorKind::Unsupported
+    } else {
+        SysErrorKind::NotFound
+    };
+    assert_eq!(e.kind, want, "{e}");
+    assert!(!reg.key_exists(&parent).unwrap());
 }
 
 /// Pins what ADR 0009 leaves to real Windows (read-only): an explicit `WOW6432Node` in the

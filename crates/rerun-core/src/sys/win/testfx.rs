@@ -104,7 +104,7 @@ use super::WinRegistry;
 use super::reg::{self, OwnedKey};
 use super::status::kind_of_win32;
 use crate::path::RelPath;
-use crate::sys::contract::{Access, DeferredRename, FsFixture, Held, RegFixture, Share};
+use crate::sys::contract::{Access, Deferred, FsFixture, Held, RegFixture, Share};
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, FileLock, Fs, FsKind, Metadata, NewFile,
     ReadSeek, ReparseInfo, Replaced, RootInfo, WriteCap, Written, tag,
@@ -1872,7 +1872,7 @@ impl RegFixture for AppHive {
     }
 
     /// `RegRenameKey` on the guarded parent, which the closure owns.
-    fn rename_later(&self, k: &RegKey, new_name: &str) -> SysResult<Option<DeferredRename>> {
+    fn rename_later(&self, k: &RegKey, new_name: &str) -> SysResult<Option<Deferred>> {
         let what = format!("app hive rename {k} -> {new_name}");
         let Some(parent) = k.parent() else {
             return Err(SysError::new(SysErrorKind::InvalidPath, what));
@@ -1890,6 +1890,59 @@ impl RegFixture for AppHive {
             } else {
                 Err(win32_err(rc, &what))
             }
+        })))
+    }
+
+    /// `NtDeleteKey` on the key itself (opened segment by segment, guarded), then with
+    /// `recreate` a new key of that name below the guarded parent; the closure owns both handles.
+    fn delete_later(&self, k: &RegKey, recreate: bool) -> SysResult<Option<Deferred>> {
+        let what = format!("app hive delete later {k}");
+        let Some(parent) = k.parent() else {
+            return Err(SysError::new(SysErrorKind::InvalidPath, what));
+        };
+        let pkey = self.create(&Self::path_of(&parent), KEY_ALL_ACCESS, false)?;
+        let key = self.walk(
+            &what,
+            &Self::segments(&Self::path_of(k)),
+            DELETE,
+            KeyEnd::Open,
+        )?;
+        let seg = wide(k.path.rsplit('\\').next().unwrap_or_default());
+        Ok(Some(Box::new(move || {
+            // SAFETY: `key` is an open, guarded key of the app hive with DELETE access that the
+            // closure owns until after the call.
+            let status = unsafe { NtDeleteKey(key.raw()) };
+            if status != 0 {
+                return Err(SysError::new(SysErrorKind::Other, what.clone()).with_ntstatus(status));
+            }
+            if recreate {
+                let mut raw: HKEY = ptr::null_mut();
+                let mut disposition: u32 = 0;
+                // SAFETY: `pkey` is an open, guarded key of the app hive owned by the closure;
+                // `seg` is NUL-terminated and outlives the call; class and security attributes
+                // are null; `raw` and `disposition` are valid for writes, and on success `raw`
+                // is a new key handle that `OwnedKey` takes over below.
+                let rc = unsafe {
+                    RegCreateKeyExW(
+                        pkey.raw(),
+                        seg.as_ptr(),
+                        0,
+                        ptr::null(),
+                        REG_OPTION_OPEN_LINK,
+                        KEY_READ,
+                        ptr::null(),
+                        &mut raw,
+                        &mut disposition,
+                    )
+                };
+                if rc != 0 || raw.is_null() {
+                    return Err(win32_err(rc, &what));
+                }
+                // SAFETY: `raw` was just returned by a successful RegCreateKeyExW; nothing else
+                // owns or closes it.
+                drop(unsafe { OwnedKey::from_raw(raw) });
+            }
+            Ok(())
         })))
     }
 

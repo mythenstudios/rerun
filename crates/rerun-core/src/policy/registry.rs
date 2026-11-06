@@ -13,8 +13,8 @@
 //!   (P2-11) brings its token allowlist.
 //! - `GameValue`: `HKCU\Software\<Vendor>\<Product>` plus at most 4 segments, printable ASCII,
 //!   `<Vendor>` not on the deny list (folded); value names printable ASCII without `\ / : %`;
-//!   new values `REG_DWORD`, `REG_QWORD` or a `REG_SZ` without control characters and without
-//!   `\ / : %` (G1: no paths, no environment variables), at most 1,024 UTF-16 units.
+//!   new values `REG_DWORD`, `REG_QWORD` or a `REG_SZ` of printable ASCII (review M1: no best-fit
+//!   or bidi characters) without `\ / : %` (G1: no paths, no variables), at most 1,024 units.
 //! - `GpuPreference`: reserved (phase 4), refused.
 //!
 //! The rules guard what a Topo may ask for (phase 4); they are never loosened for a caller.
@@ -402,8 +402,11 @@ impl RegPolicy {
                 RegValue::String(s) => {
                     if s.encode_utf16().count() > MAX_SZ_UTF16 {
                         Err(denied(what(), "a REG_SZ has at most 1,024 UTF-16 units"))
-                    } else if s.chars().any(char::is_control) {
-                        Err(denied(what(), "no control characters in a REG_SZ"))
+                    } else if !s.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
+                        // M1 (review): best-fit characters (U+FF1A, U+FF3C, U+2215, ...) turn
+                        // into `: \ /` for an ANSI reader, bidi and format characters pass
+                        // `is_control`: printable ASCII only, like the value names.
+                        Err(denied(what(), "a REG_SZ holds printable ASCII only"))
                     } else if path_like(s) {
                         Err(denied(
                             what(),
@@ -476,6 +479,10 @@ fn inside(k: &RegKey, of: &AllowedKey) -> SysResult<()> {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "RegWriter is the one caller of the registry write methods (ADR 0018)"
+)]
 impl RegWriter<'_> {
     /// The state of the key.
     pub fn state(&self, k: &AllowedKey) -> SysResult<KeyState> {

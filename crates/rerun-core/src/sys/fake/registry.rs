@@ -58,7 +58,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::fold::fold;
-use crate::sys::contract::{DeferredRename, RegFixture};
+use crate::sys::contract::{Deferred, RegFixture};
 use crate::sys::registry::{
     Hive, KeyState, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey,
     RegLink, RegValue, RegView, Registry, RegistryWrite, check_key, check_value_name,
@@ -564,7 +564,7 @@ impl Registry for FakeRegistry {
         st.check_access(k, &mk)?;
         let node = st.keys.get(&mk).ok_or_else(|| not_found(k))?;
         Ok(node.link.as_ref().map(|to| RegLink {
-            target: kernel_name(k.hive, &to.shown).encode_utf16().collect(),
+            target: Some(kernel_name(k.hive, &to.shown).encode_utf16().collect()),
         }))
     }
 }
@@ -665,12 +665,26 @@ impl RegFixture for FakeRegistry {
         true
     }
 
-    fn rename_later(&self, k: &RegKey, new_name: &str) -> SysResult<Option<DeferredRename>> {
+    fn rename_later(&self, k: &RegKey, new_name: &str) -> SysResult<Option<Deferred>> {
         let other = Self {
             inner: self.inner.clone(),
         };
         let (k, new_name) = (k.clone(), new_name.to_owned());
         Ok(Some(Box::new(move || other.rename_key(&k, &new_name))))
+    }
+
+    fn delete_later(&self, k: &RegKey, recreate: bool) -> SysResult<Option<Deferred>> {
+        let other = Self {
+            inner: self.inner.clone(),
+        };
+        let k = k.clone();
+        Ok(Some(Box::new(move || {
+            other.remove_key(&k)?;
+            if recreate {
+                other.put_key(&k)?;
+            }
+            Ok(())
+        })))
     }
 
     fn volatile_key(&self, k: &RegKey) -> SysResult<bool> {

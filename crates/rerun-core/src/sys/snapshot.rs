@@ -261,8 +261,8 @@ pub enum SnapEntry {
     RegLink {
         /// Name.
         name: String,
-        /// `SymbolicLinkValue` as stored (UTF-16).
-        target: Vec<u16>,
+        /// `SymbolicLinkValue` as stored (UTF-16); `None` if unreadable.
+        target: Option<Vec<u16>>,
     },
     /// Registry key or value whose name cannot be used to address it (see [`RegWhy`]).
     RegAnomaly {
@@ -390,11 +390,10 @@ impl fmt::Display for SnapEntry {
                 write!(f, "{}", ShowAttrs(attrs))
             }
             Self::Key { name } => write!(f, "key {name:?}"),
-            Self::RegLink { name, target } => write!(
-                f,
-                "link key {name:?} -> {:?}",
-                String::from_utf16_lossy(target)
-            ),
+            Self::RegLink { name, target } => match target {
+                Some(t) => write!(f, "link key {name:?} -> {:?}", String::from_utf16_lossy(t)),
+                None => write!(f, "link key {name:?} -> <unreadable>"),
+            },
             Self::Value { name, value } => write!(f, "value {name:?} = {value}"),
             Self::RegAnomaly {
                 kind,

@@ -438,8 +438,8 @@ impl fmt::Display for RegValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegLink {
     /// Its `SymbolicLinkValue` as stored: the target's kernel name in UTF-16 (raw, untrusted,
-    /// display only).
-    pub target: Vec<u16>,
+    /// display only); `None` if it is missing, not `REG_LINK`, empty or of odd length.
+    pub target: Option<Vec<u16>>,
 }
 
 /// Registry, read side. Key and value names are case-insensitive, the original case is
@@ -502,7 +502,9 @@ pub enum KeyState {
 /// `ReparsePoint` and stays as it is, a volatile key `Unsupported` (S4), a missing segment
 /// `NotFound`. Before a change the walked handle's kernel name must still be the key's
 /// (folded), otherwise `Busy` and nothing is changed; checking and acting run on that one
-/// handle. A key deleted under the handle is `Busy`.
+/// handle. A rename between that check and the write is not prevented: the write follows the
+/// handle, a second check after it reports `Busy` (accepted, ADR 0018). A key deleted under the
+/// handle is `Busy`.
 pub trait RegistryWrite: Registry {
     /// The key's state, without following links (`Missing` if a segment is missing).
     fn key_state(&self, k: &RegKey) -> SysResult<KeyState>;
@@ -513,6 +515,7 @@ pub trait RegistryWrite: Registry {
     /// Creates exactly the last segment of `k` below its existing parent (`NotFound`
     /// otherwise; the hive root is `InvalidPath`). `true` = created by this call, `false` = it
     /// existed (in whatever spelling, which stays). An existing link there is `ReparsePoint`.
+    /// After a failure past the create (its flags) the key may exist: the caller observes it.
     fn create_key(&self, k: &RegKey) -> SysResult<bool>;
 
     /// Sets `name` (`""` = default value) to `new` if its current value is `expected` (`None`:

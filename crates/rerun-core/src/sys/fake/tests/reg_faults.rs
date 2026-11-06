@@ -353,3 +353,145 @@ fn a_link_planted_during_the_walk_is_caught() {
     assert_eq!(e.kind, SysErrorKind::ReparsePoint, "{e}");
     assert_eq!(sys.registry().values(&hkcu(r"Software\Other")).unwrap(), []);
 }
+
+/// Review S1: another program changes the value between the write and its read-back (fake
+/// hook before the `Query` that follows `SetValue` or `DeleteValue`): `Busy`, the caller
+/// observes the foreign value.
+#[test]
+fn a_change_between_the_write_and_its_read_back_is_busy() {
+    for deleting in [false, true] {
+        let sys = system();
+        let reg = sys.fake_registry();
+        let mut written = false;
+        reg.on_step(move |r, call| match call {
+            RegPrim::SetValue | RegPrim::DeleteValue => written = true,
+            RegPrim::Query if written => {
+                written = false;
+                r.put_value(&game(), "Old", &RegValue::Dword(9)).unwrap();
+            }
+            _ => {}
+        });
+        let e = if deleting {
+            RegistryWrite::delete_value(reg, &game(), "Old", &RegValue::Dword(1))
+        } else {
+            RegistryWrite::set(
+                reg,
+                &game(),
+                "Old",
+                Some(&RegValue::Dword(1)),
+                &RegValue::Dword(2),
+            )
+        }
+        .unwrap_err();
+        reg.clear_on_step();
+        assert_eq!(e.kind, SysErrorKind::Busy, "deleting {deleting}: {e}");
+        assert_eq!(reg.read(&game(), "Old").unwrap(), Some(RegValue::Dword(9)));
+    }
+}
+
+/// RF4, the other direction (review S2): a registry value, then a file on `C:` with a flush of
+/// the folder only: the folder flush does not make the hive durable, so a pair of cuts keeps
+/// the file without the value; with `RegFlushKey` after the value there is no such pair. Each
+/// flush leaves the other domain's pending changes as they were.
+#[test]
+fn rf4_a_folder_flush_does_not_make_the_hive_durable() {
+    let bad_pairs = |reg_flush: bool| -> usize {
+        let setup = |sys: &FakeSystem| {
+            run(sys, Op::SetNew).unwrap();
+            if reg_flush {
+                let c = sys.pending(Domain::Volume('C'));
+                run(sys, Op::Flush).unwrap();
+                assert_eq!(
+                    sys.pending(Domain::Volume('C')),
+                    c,
+                    "a hive flush leaves C:"
+                );
+            }
+            let h = sys.pending(Domain::Hive(Hive::CurrentUser));
+            let g = open(sys, r"C:\G");
+            g.create_new(&r("n.bin"), &mut &b"new"[..], &nf(3, b"new"))
+                .unwrap();
+            g.flush().unwrap();
+            drop(g);
+            assert_eq!(
+                sys.pending(Domain::Hive(Hive::CurrentUser)),
+                h,
+                "a folder flush leaves the hive"
+            );
+        };
+        let probe = system();
+        setup(&probe);
+        let (pc, ph) = (
+            probe.pending(Domain::Volume('C')),
+            probe.pending(Domain::Hive(Hive::CurrentUser)),
+        );
+        let mut bad = 0;
+        for c in 0..=pc {
+            for h in 0..=ph {
+                let sys = system();
+                setup(&sys);
+                sys.power_loss(&BTreeMap::from([
+                    (Domain::Volume('C'), c),
+                    (Domain::Hive(Hive::CurrentUser), h),
+                ]));
+                let value = sys.registry().get(&game(), "New").unwrap().is_some();
+                let file = open(&sys, r"C:\G").metadata(&r("n.bin")).unwrap().is_some();
+                if file && !value {
+                    bad += 1;
+                }
+            }
+        }
+        bad
+    };
+    assert!(
+        bad_pairs(false) > 0,
+        "the folder flush must not order the hive"
+    );
+    assert_eq!(
+        bad_pairs(true),
+        0,
+        "after RegFlushKey the value is never lost alone"
+    );
+}
+
+/// RF3b (review S3): several changes in one hive's log (a key created, a value set in it, a
+/// value replaced, a key deleted), nothing flushed: every cut is exactly the state after that
+/// many changes.
+#[test]
+fn rf3b_every_cut_of_a_longer_hive_log_is_the_matching_state() {
+    let steps = |sys: &FakeSystem, upto: usize| {
+        let w: &dyn RegistryWrite = sys.fake_registry();
+        let new = game().join("New");
+        let all: [&dyn Fn() -> SysResult<()>; 4] = [
+            &|| w.create_key(&new).map(drop),
+            &|| w.set(&new, "a", None, &RegValue::Dword(1)),
+            &|| {
+                w.set(
+                    &game(),
+                    "Old",
+                    Some(&RegValue::Dword(1)),
+                    &RegValue::Qword(2),
+                )
+            },
+            &|| w.delete_empty_key(&game().join("Empty")),
+        ];
+        for s in all.iter().take(upto) {
+            s().unwrap();
+        }
+    };
+    let states: Vec<Snapshot> = (0..=4)
+        .map(|n| {
+            let sys = system();
+            steps(&sys, n);
+            snap(&sys)
+        })
+        .collect();
+    for (keep, state) in states.iter().enumerate() {
+        let sys = system();
+        steps(&sys, 4);
+        assert_eq!(sys.pending(Domain::Hive(Hive::CurrentUser)), 4);
+        sys.power_loss(&BTreeMap::from([(Domain::Hive(Hive::CurrentUser), keep)]));
+        let now = snap(&sys);
+        assert_eq!(now, *state, "keep {keep}: {:#?}", state.diff(&now));
+    }
+}

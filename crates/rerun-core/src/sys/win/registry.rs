@@ -45,7 +45,6 @@ use crate::sys::registry::{
 use crate::sys::seq::reg::{self as reg_seq, KeyAccess, KeyFlags, KeySeg, PrimHive, PrimKey};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
-/// Message of every refused write.
 /// Attempts of one read after "buffer too small" (`STATUS_BUFFER_OVERFLOW`).
 pub(super) const MORE_DATA_RETRIES: usize = 16;
 /// Attempts of one enumeration (restart on a change or a duplicate name).
@@ -419,18 +418,22 @@ impl Registry for WinRegistry {
         if flags & reg::REG_FLAG_LINK == 0 {
             return Ok(None);
         }
-        let stored = query(&key, "SymbolicLinkValue", &target)?
+        // Missing, another type, empty or an odd trailing byte: unreadable, shown as such.
+        let target = query(&key, "SymbolicLinkValue", &target)?
             .and_then(|v| v.encode())
-            .map(|(_, data)| data)
-            .unwrap_or_default();
-        Ok(Some(RegLink {
-            target: stored
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|c| u16::from_le_bytes(*c))
-                .collect(),
-        }))
+            .filter(|(kind, data)| {
+                *kind == crate::sys::registry::reg_type::REG_LINK
+                    && !data.is_empty()
+                    && data.len().is_multiple_of(2)
+            })
+            .map(|(_, data)| {
+                data.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| u16::from_le_bytes(*c))
+                    .collect()
+            });
+        Ok(Some(RegLink { target }))
     }
 }
 
