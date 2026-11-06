@@ -441,7 +441,7 @@ pub(super) fn old_state(cx: &ExecCtx<'_>, plan: &Plan, roots: &Roots<'_>) -> Res
                     return Err(mismatch());
                 }
             }
-            Op::CreateKey { .. } | Op::SetValue { .. } => {}
+            Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => {}
         }
         if let Some(ContentRef::Package {
             id,

@@ -281,7 +281,7 @@ pub(super) fn apply_op(
             w.done(k, Some(r.new.file_id), r.old_left.is_some())?;
             Ok(())
         }
-        Op::CreateKey { .. } | Op::SetValue { .. } => Err(not_a_file_op(k)),
+        Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => Err(not_a_file_op(k)),
     }
 }
 
@@ -481,7 +481,7 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
                             len: old.len,
                         }))
             }
-            Op::CreateKey { .. } | Op::SetValue { .. } => false,
+            Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => false,
         }
 }
 
@@ -615,7 +615,7 @@ pub(super) fn observe(
             };
             replace_seen(parent, &name, log, &x, old, content, attrs).map_err(&e)
         }
-        Op::CreateKey { .. } | Op::SetValue { .. } => Err(not_a_file_op(k)),
+        Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => Err(not_a_file_op(k)),
     }
 }
 
@@ -632,7 +632,9 @@ fn trusted(op: &Op, log: &OpLog) -> Seen {
         },
         Op::CreateFile { content, .. } => s.act(Action::DeleteTarget(*content.sha256())),
         Op::ReplaceFile { .. } => Seen { restore: true, ..s },
-        Op::CreateKey { .. } | Op::SetValue { .. } => Seen::new(Observed::Foreign),
+        Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => {
+            Seen::new(Observed::Foreign)
+        }
     }
 }
 

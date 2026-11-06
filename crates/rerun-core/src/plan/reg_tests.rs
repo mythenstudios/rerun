@@ -37,7 +37,7 @@ fn sz(s: &str) -> RegValue {
 
 /// `sample` (two roots, three file ops) plus registry ops: two created keys and a new value
 /// in them, a replaced value of another type in an existing key.
-fn sample_reg() -> Plan {
+pub(crate) fn sample_reg() -> Plan {
     let mut p = sample();
     p.roots[1].main_exe = Some(r("g2.exe"));
     let win = slot("Ubisoft", "AC", &[], "Windowed");
@@ -227,7 +227,7 @@ fn p7_registry_ops_break_no_rule() {
         }),
         "no path or variable characters",
     );
-    // Slots: compatibility layers until P2-11 (N2), the reserved GPU slot.
+    // Slots: a compatibility-layer value is never set (N2, P2-11), the reserved GPU slot.
     refused(
         &with(&|p| {
             p.ops.push(Op::SetValue {
@@ -239,7 +239,7 @@ fn p7_registry_ops_break_no_rule() {
                 new: NewValue::Sz("~ WIN7RTM".to_owned()),
             });
         }),
-        "compatibility layers come with compat_layer",
+        "a compatibility-layer value is never set",
     );
     refused(
         &with(&|p| {

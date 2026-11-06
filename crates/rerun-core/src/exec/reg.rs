@@ -195,6 +195,13 @@ pub(super) fn old_state(w: &RegWriter<'_>, plan: &Plan) -> Result<(), Refusal> {
                     return Err(Refusal::Mismatch { op: k });
                 }
             }
+            // Applied from P2-11 C4 on; until then refused before anything is written.
+            Op::TokenList { .. } => {
+                return Err(reg(SysError::new(
+                    SysErrorKind::Unsupported,
+                    "token lists are not applied yet",
+                )));
+            }
             Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => {}
         }
     }
@@ -290,9 +297,10 @@ pub(super) fn apply_op(
                 }
             }
         }
-        Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => {
-            Err(not_a_registry_op(k))
-        }
+        Op::TokenList { .. }
+        | Op::CreateDir { .. }
+        | Op::CreateFile { .. }
+        | Op::ReplaceFile { .. } => Err(not_a_registry_op(k)),
     }
 }
 
@@ -433,9 +441,10 @@ pub(super) fn observe(
                 },
             )
         }
-        Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => {
-            Err(not_a_registry_op(k))
-        }
+        Op::TokenList { .. }
+        | Op::CreateDir { .. }
+        | Op::CreateFile { .. }
+        | Op::ReplaceFile { .. } => Err(not_a_registry_op(k)),
     }
 }
 
@@ -507,6 +516,9 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
                     None => false,
                 }
             }
-            Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => false,
+            Op::TokenList { .. }
+            | Op::CreateDir { .. }
+            | Op::CreateFile { .. }
+            | Op::ReplaceFile { .. } => false,
         }
 }

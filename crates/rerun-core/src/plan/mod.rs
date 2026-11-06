@@ -14,12 +14,14 @@
 //! [`MAX_PLAN_BYTES`], root indices, package names, one op per object).
 //!
 //! Phase 2 has the file op kinds `CreateDir`, `CreateFile`, `ReplaceFile` and the registry
-//! op kinds `CreateKey`, `SetValue` (P2-10b); INI op kinds are added as further variants with
-//! their primitive (format 1 stays unstable until the first release, ADR 0019 amendment E1).
+//! op kinds `CreateKey`, `SetValue` (P2-10b) and `TokenList` (P2-11); INI op kinds are added as
+//! further variants with their primitive (format 1 stays unstable until the first release, ADR
+//! 0019 amendment E1).
 //!
 //! Registry ops (ADR 0020 amendment P2-10b), checked on encode and decode alike (the journal
-//! head is untrusted): every slot passes `RegPolicy::check` with the plan's roots (a
-//! `CompatLayers` slot is refused until P2-11), every new value `RegPolicy::check_new`; every
+//! head is untrusted): every slot passes `RegPolicy::check` with the plan's roots, every new
+//! value `RegPolicy::check_new` (a `CompatLayers` value is never set: only a `TokenList` names
+//! that slot's value, P2-11); every
 //! registry op comes after every file op (a revert that halts at a file op has then reverted
 //! every registry op, 6b-d); one op per key and per value (folded); a `CreateKey` names its
 //! key by `segs` within its slot, and comes before every key and value below it; an old value
@@ -34,6 +36,14 @@
 //! (`RegPolicy::check_new`), so a rule tightened by a later version never makes an applied
 //! transaction unrevertable. A revert only writes back old values from the journal; it never
 //! writes a new value.
+//!
+//! `TokenList` (P2-11, ADR 0020 amendment P2-11): only on a `CompatLayers` slot; the old value
+//! missing or a `REG_SZ` in the strict grammar of `policy::registry::layers` (at most 1 KiB, so
+//! always inline); 1 to 8 tokens in byte order (unique), none already in the old value
+//! (folded); the new value in the grammar and other than the old one; with an old value not in a
+//! key the plan creates. [`Rules::Current`] adds the token rules (`RegPolicy::check_tokens`:
+//! allowlist, groups, length) and `new` equal to `layers::merge(old, add)`; [`Rules::Recorded`]
+//! keeps the form only (a later allowlist or prefix must not block the revert).
 
 mod preview;
 mod store;
@@ -45,14 +55,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use preview::{
-    NOT_RESTORED, Preview, PreviewOp, PreviewRoot, REGISTRY_NOTE, RegShown, preview,
+    LAYERS_NOTE, NOT_RESTORED, Preview, PreviewOp, PreviewRoot, REGISTRY_NOTE, RegShown, preview,
 };
 pub(crate) use store::load;
 pub use store::store;
 
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
-use crate::policy::registry::{RegPolicy, RegPolicyError, RegSlot};
+use crate::policy::registry::{RegPolicy, RegPolicyError, RegSlot, TokenName, layers};
 use crate::policy::root::{RootError, RootId};
 use crate::sys::SysError;
 use crate::sys::fs::Attrs;
@@ -187,6 +197,19 @@ pub enum Op {
         old: Option<ValueState>,
         /// The new value.
         new: NewValue,
+    },
+    /// Appends `add` to the compatibility-layer value of `slot` (P2-11): the old value keeps its
+    /// bytes, every other token stays; a revert restores the old value exactly, or removes only
+    /// `add` from a value someone changed since.
+    TokenList {
+        /// The value (a `CompatLayers` slot).
+        slot: RegSlot,
+        /// The old value as planned, re-observed before the change (`None`: missing).
+        old: Option<ValueState>,
+        /// The tokens added, in byte order.
+        add: Vec<TokenName>,
+        /// The new value: `old` with `add` appended (`policy::registry::layers::merge`).
+        new: String,
     },
 }
 
@@ -328,33 +351,29 @@ impl Op {
                 }
             }
             Self::CreateKey { slot, segs } => Target::Key { slot, segs: *segs },
-            Self::SetValue { slot, .. } => Target::Value { slot },
+            Self::SetValue { slot, .. } | Self::TokenList { slot, .. } => Target::Value { slot },
         }
     }
 
     /// The content of a file op.
     pub fn content(&self) -> Option<&ContentRef> {
         match self {
-            Self::CreateDir { .. } | Self::CreateKey { .. } | Self::SetValue { .. } => None,
+            Self::CreateDir { .. }
+            | Self::CreateKey { .. }
+            | Self::SetValue { .. }
+            | Self::TokenList { .. } => None,
             Self::CreateFile { content, .. } | Self::ReplaceFile { content, .. } => Some(content),
         }
     }
 }
 
 /// The value or key a registry slot names, by the rules of `policy::registry` and with the
-/// plan's roots (parsed again): what `check`, the objects and `exec` use. A
-/// `CompatLayers` slot is refused until `compat_layer` (P2-11, review N2).
+/// plan's roots (parsed again): what `check`, the objects and `exec` use.
 pub(crate) fn allowed(
     plan: &Plan,
     slot: &RegSlot,
     op: usize,
 ) -> Result<crate::policy::registry::AllowedValue, PlanError> {
-    if matches!(slot, RegSlot::CompatLayers { .. }) {
-        return Err(invalid(
-            Some(op),
-            "compatibility layers come with compat_layer (P2-11)",
-        ));
-    }
     let roots: Vec<RootPath> = plan.roots.iter().map(|r| r.path.clone()).collect();
     RegPolicy
         .check(slot, &roots)
@@ -718,13 +737,26 @@ impl RegSeen {
         rules: Rules,
     ) -> Result<(), PlanError> {
         self.any = true;
-        let Op::SetValue { old, new, .. } = op else {
-            return Err(invalid(Some(k), "a value target of no SetValue"));
-        };
         let av = allowed(plan, slot, k)?;
         let obj = (av.key().key().clone(), fold(av.name()));
         if self.values.contains(&obj) {
             return Err(invalid(Some(k), "a second op on the same object"));
+        }
+        let (old, new) = match op {
+            Op::SetValue { old, new, .. } => (old, new),
+            Op::TokenList { old, add, new, .. } => {
+                self.tokens(k, &av, &obj.0, old.as_ref(), add, new, rules)?;
+                self.values.push(obj);
+                return Ok(());
+            }
+            _ => return Err(invalid(Some(k), "a value target of no value op")),
+        };
+        // Review N2, P2-11: a compatibility-layer value is shared; Rerun only adds tokens.
+        if matches!(slot, RegSlot::CompatLayers { .. }) {
+            return Err(invalid(
+                Some(k),
+                "a compatibility-layer value is never set, only tokens are added",
+            ));
         }
         if rules == Rules::Current {
             RegPolicy
@@ -760,6 +792,92 @@ impl RegSeen {
         self.values.push(obj);
         Ok(())
     }
+}
+
+impl RegSeen {
+    /// The rules of a `TokenList` (module docs).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fields of the op and its context"
+    )]
+    fn tokens(
+        &self,
+        k: usize,
+        av: &crate::policy::registry::AllowedValue,
+        key: &RegKey,
+        old: Option<&ValueState>,
+        add: &[TokenName],
+        new: &str,
+        rules: Rules,
+    ) -> Result<(), PlanError> {
+        if !matches!(av.slot(), RegSlot::CompatLayers { .. }) {
+            return Err(invalid(
+                Some(k),
+                "tokens are only added to a compatibility-layer value",
+            ));
+        }
+        let old = match old {
+            None => None,
+            Some(s) => Some(layers_old(s).ok_or_else(|| {
+                invalid(
+                    Some(k),
+                    "an old compatibility-layer value that is no inline REG_SZ in the grammar",
+                )
+            })?),
+        };
+        if add.is_empty() || add.len() > layers::MAX_ADD || add.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(invalid(Some(k), "1 to 8 tokens, unique and in byte order"));
+        }
+        if let Some(o) = &old {
+            let words: Vec<String> = o.split(' ').map(fold).collect();
+            if add.iter().any(|t| words.contains(&fold(t.as_str()))) {
+                return Err(invalid(Some(k), "a token already in the old value"));
+            }
+            if self.created.iter().any(|c| key_at_or_below(key, c)) {
+                return Err(invalid(
+                    Some(k),
+                    "a value in a created key with an old value",
+                ));
+            }
+        }
+        if layers::parse(new).is_err() || old.as_deref() == Some(new) {
+            return Err(invalid(
+                Some(k),
+                "a new compatibility-layer value outside the grammar or equal to the old one",
+            ));
+        }
+        if rules == Rules::Current {
+            RegPolicy
+                .check_tokens(av, old.as_deref(), add)
+                .map_err(|source| PlanError::Registry { op: k, source })?;
+            if layers::merge(old.as_deref(), add) != new {
+                return Err(invalid(
+                    Some(k),
+                    "a new value other than the old one with the tokens appended",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The old compatibility-layer value of a `TokenList`: a `REG_SZ` with its NUL, inline with
+/// the length and hash it claims, at most `MAX_LAYERS_BYTES`, in the grammar.
+pub(crate) fn layers_old(s: &ValueState) -> Option<String> {
+    let d = s.data.as_ref()?;
+    let len = usize::try_from(s.len).ok()?;
+    if s.kind != crate::sys::registry::reg_type::REG_SZ
+        || len > layers::MAX_LAYERS_BYTES
+        || d.len() != len
+        || <[u8; 32]>::from(Sha256::digest(d)) != s.sha256
+    {
+        return None;
+    }
+    let RegValue::String(t) = RegValue::decode(s.kind, d) else {
+        return None;
+    };
+    layers::parse(&t).ok()?;
+    Some(t)
 }
 
 /// The bounds and rules shared by [`Plan::encode`] and [`decode`] (`rules`: module docs).
@@ -881,7 +999,8 @@ pub(crate) enum Object {
     Key {
         /// The key (compared folded).
         key: RegKey,
-        /// The op creates it: everything below it is its object too.
+        /// Everything below it is its object too: the op creates it, and it is not a shared
+        /// Windows key (`AppCompatFlags`, `Layers`: only the key itself, user decision E7).
         created: bool,
     },
     /// A registry value.
@@ -914,10 +1033,13 @@ impl Object {
                         dir,
                     })
                 }
-                Target::Key { slot, segs } => Ok(Self::Key {
-                    key: created_key(plan, slot, segs, k)?.1,
-                    created: true,
-                }),
+                Target::Key { slot, segs } => {
+                    let (av, key) = created_key(plan, slot, segs, k)?;
+                    Ok(Self::Key {
+                        key,
+                        created: !av.shared_keys(),
+                    })
+                }
                 Target::Value { slot } => {
                     let av = allowed(plan, slot, k)?;
                     Ok(Self::Value {

@@ -9,6 +9,9 @@
 //! strings through `escape::text`; otherwise type, length and SHA-256; `missing`) with a type
 //! change marked (audit nit N6: the one place where old registry data reaches output, ADR 0016),
 //! and the new value; a plan with registry ops adds [`REGISTRY_NOTE`] once.
+//!
+//! An `add tokens` op (P2-11) shows the value name (the executable's path), the old value, the
+//! tokens it adds and the new value; a plan with such an op adds [`LAYERS_NOTE`] once.
 
 use std::fmt;
 
@@ -32,6 +35,15 @@ later (also by writing it with another type), a revert leaves it as it is and th
 is closed with forget; a revert restores keys and values exactly, not the last-write times of \
 registry keys";
 
+/// What a plan with compatibility-layer ops says once (P2-11, ADR 0020 amendment P2-11; review
+/// N3): what a revert of a shared value does.
+pub const LAYERS_NOTE: &str = "compatibility layers: a revert removes only the tokens Rerun \
+added; what you or Windows change in the value afterwards stays, and a value nobody changed is \
+restored exactly. A token already in the value is not added again, also one an earlier Rerun \
+transaction added: reverting that transaction removes it. A token you add yourself after the \
+apply that Rerun added too is removed by the revert. The keys AppCompatFlags and Layers are \
+shared with Windows: a revert deletes one Rerun created only when it is empty";
+
 /// One root of a [`Preview`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewRoot {
@@ -50,7 +62,8 @@ pub struct PreviewRoot {
 pub struct PreviewOp {
     /// Index in the plan.
     pub index: usize,
-    /// What it does: `create folder`, `create file`, `replace file`, `create key`, `set value`.
+    /// What it does: `create folder`, `create file`, `replace file`, `create key`, `set value`,
+    /// `add tokens`.
     pub action: &'static str,
     /// Root index (`None` for a registry op).
     pub root: Option<usize>,
@@ -58,10 +71,12 @@ pub struct PreviewOp {
     pub path: Shown<'static>,
     /// The value name of a `set value` (`(default)` for the default value).
     pub name: Option<Shown<'static>>,
-    /// The old value of a `set value` (kind `missing` if there was none).
+    /// The old value of a `set value` or `add tokens` (kind `missing` if there was none).
     pub old_value: Option<RegShown>,
-    /// The new value of a `set value`.
+    /// The new value of a `set value` or `add tokens`.
     pub new_value: Option<RegShown>,
+    /// The tokens an `add tokens` adds, in order (their form is `[A-Z0-9_]`).
+    pub tokens: Option<String>,
     /// A `set value` changes the value's type.
     pub type_change: bool,
     /// Source: `<package id> <version>: <file>`.
@@ -107,6 +122,8 @@ pub struct Preview {
     pub not_restored: &'static str,
     /// [`REGISTRY_NOTE`], once per plan with registry ops.
     pub registry: Option<&'static str>,
+    /// [`LAYERS_NOTE`], once per plan with `add tokens` ops.
+    pub layers: Option<&'static str>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -240,6 +257,7 @@ pub fn preview(p: &Plan) -> Preview {
                 }
                 Op::CreateKey { .. } => ("create key", None, None),
                 Op::SetValue { .. } => ("set value", None, None),
+                Op::TokenList { .. } => ("add tokens", None, None),
             };
             let (old_value, new_value, type_change) = match op {
                 Op::SetValue { old: o, new, .. } => {
@@ -256,7 +274,27 @@ pub fn preview(p: &Plan) -> Preview {
                         .is_some_and(|o| v.encode().is_some_and(|(k, _)| k != o.kind));
                     (Some(old_value(o.as_ref())), Some(shown), changed)
                 }
+                Op::TokenList { old: o, new, .. } => {
+                    let v = RegValue::String(new.clone());
+                    let shown = ValueState::of(&v).map_or_else(
+                        || RegShown {
+                            kind: "a value without an encoding".to_owned(),
+                            text: None,
+                        },
+                        |s| value_text(&v, &s),
+                    );
+                    (Some(old_value(o.as_ref())), Some(shown), false)
+                }
                 _ => (None, None, false),
+            };
+            let tokens = match op {
+                Op::TokenList { add, .. } => Some(
+                    add.iter()
+                        .map(crate::policy::registry::TokenName::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                _ => None,
             };
             let (source, content, config) = match op.content() {
                 Some(ContentRef::Package {
@@ -292,6 +330,7 @@ pub fn preview(p: &Plan) -> Preview {
                 name,
                 old_value,
                 new_value,
+                tokens,
                 type_change,
                 source,
                 content,
@@ -306,11 +345,17 @@ pub fn preview(p: &Plan) -> Preview {
         .iter()
         .any(|o| o.target().is_registry())
         .then_some(REGISTRY_NOTE);
+    let layers = p
+        .ops
+        .iter()
+        .any(|o| matches!(o, Op::TokenList { .. }))
+        .then_some(LAYERS_NOTE);
     Preview {
         roots,
         ops,
         not_restored: NOT_RESTORED,
         registry,
+        layers,
     }
 }
 
@@ -349,6 +394,9 @@ impl fmt::Display for Preview {
             if let Some((sha, len, a)) = &o.old {
                 writeln!(f, "     old sha256 {sha}, {len} bytes, attributes {a}")?;
             }
+            if let Some(t) = &o.tokens {
+                writeln!(f, "     adds {t}")?;
+            }
             if let (Some(old), Some(new)) = (&o.old_value, &o.new_value) {
                 writeln!(f, "     old {old}")?;
                 writeln!(f, "     new {new}")?;
@@ -366,6 +414,9 @@ impl fmt::Display for Preview {
         writeln!(f, "note: {}", self.not_restored)?;
         if let Some(r) = self.registry {
             writeln!(f, "note: {r}")?;
+        }
+        if let Some(l) = self.layers {
+            writeln!(f, "note: {l}")?;
         }
         Ok(())
     }

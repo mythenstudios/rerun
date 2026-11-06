@@ -272,7 +272,7 @@ fn reroot(op: &mut Op, to: u16) {
         Op::CreateDir { root, .. } | Op::CreateFile { root, .. } | Op::ReplaceFile { root, .. } => {
             *root = RootIx(to);
         }
-        Op::CreateKey { .. } | Op::SetValue { .. } => {}
+        Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => {}
     }
 }
 
