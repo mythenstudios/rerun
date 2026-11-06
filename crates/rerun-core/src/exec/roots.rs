@@ -196,7 +196,7 @@ pub(super) fn old_state(
                     Err(e) => return Err(e.into()),
                 };
                 // A2-B1: the plan holds the stored spelling; another one since is a change.
-                if guard.name().as_str() != name.as_str() || !same_state(&mut *guard, old)? {
+                if !guard.name().same_spelling(&name) || !same_state(&mut *guard, old)? {
                     return Err(mismatch());
                 }
             }

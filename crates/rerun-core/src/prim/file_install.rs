@@ -225,7 +225,8 @@ pub(crate) fn plan_into(
             let p = if b.creates(&key) {
                 // Created by an earlier target of this plan: so is everything below it.
                 creating = true;
-                b.created_path(&key).unwrap_or(asked)
+                b.created_path(&key)
+                    .ok_or_else(|| bad_to("a created folder without its op (internal)"))?
             } else {
                 if !creating {
                     match game.metadata(&asked).map_err(|e| bad_to(&e.to_string()))? {

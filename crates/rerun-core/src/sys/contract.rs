@@ -673,11 +673,20 @@ fn names_and_ancestor_renames(
         .is_none(),
         "Straße and STRASSE are two names (folding is 1:1 per character)",
     )?;
-    // `stored_name`: the spelling the directory holds, whatever the request (A2-B1).
+    // `stored_name`: the spelling the directory holds, whatever the request (A2-B1), also
+    // below an ancestor asked in another spelling; a junction is named itself, never followed.
+    ok(fx.dir(&work.join("jct")), "fixture jct")?;
+    ok(
+        fx.junction(&work.join(r"jct\Link"), &base),
+        "fixture junction",
+    )?;
     for (asked, stored) in [
         (r"spelling\über.TXT", Some("Über.txt")),
         (r"spelling\straße.TXT", Some("Straße.txt")),
         ("spelling", Some("spelling")),
+        ("SPELLING", Some("spelling")),
+        (r"SPELLING\über.TXT", Some("Über.txt")),
+        (r"jct\LINK", Some("Link")),
         (r"spelling\STRASSE.txt", None),
         (r"missing\x.txt", None),
     ] {

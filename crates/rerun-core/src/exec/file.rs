@@ -2,7 +2,8 @@
 //! A3, the P2-8 amendment with user decision D1 and senior-dev conditions B2 and 4).
 //!
 //! Every hash is taken on a guard; a link count other than 1, other R/H/S, a restricted entry
-//! or a reparse point is "other". `h0` is the old state of a replace (`old`), `h1` the new one
+//! or a reparse point is "other", and so is the target of a replace stored in another
+//! spelling than the plan's (A2-B1 review S1). `h0` is the old state of a replace (`old`), `h1` the new one
 //! (content and the op's attributes). Actions happen only after the op's `RevertIntent`; a
 //! foreign op deletes nothing but Rerun's own temp names by the rule of A3 ("`<tmp>` goes if
 //! and only if the target does not hold the new content").
@@ -243,7 +244,7 @@ pub(super) fn apply_op(
             let mut g = parent.guard(&name).map_err(&e)?;
             // Condition 5: the guard holds exactly the old state before backup and intent,
             // under exactly the planned spelling (A2-B1: a recovery renames back onto it).
-            if g.name().as_str() != name.as_str() || !roots::same_state(&mut *g, old).map_err(&e)? {
+            if !g.name().same_spelling(&name) || !roots::same_state(&mut *g, old).map_err(&e)? {
                 return Err(e(SysError::new(
                     SysErrorKind::Mismatch,
                     format!("{}: changed since the preview", op.path()),
@@ -282,6 +283,8 @@ enum FileSeen {
         sha: [u8; 32],
         len: u64,
         attrs: Attrs,
+        /// The guard found it under exactly the asked spelling (A2-B1 review S1).
+        exact: bool,
     },
     /// A folder, link, reparse point, restricted entry or a file with more than one link.
     Other,
@@ -290,12 +293,17 @@ enum FileSeen {
 impl FileSeen {
     /// Exactly this content, length and R/H/S.
     fn is(&self, sha: &[u8; 32], len: u64, attrs: &Attrs) -> bool {
-        matches!(self, Self::File { sha: s, len: l, attrs: a } if s == sha && *l == len && a == attrs)
+        matches!(self, Self::File { sha: s, len: l, attrs: a, .. } if s == sha && *l == len && a == attrs)
     }
 
     /// This content (whatever the attributes).
     fn holds(&self, sha: &[u8; 32]) -> bool {
         matches!(self, Self::File { sha: s, .. } if s == sha)
+    }
+
+    /// A file stored in another spelling than the one asked for.
+    fn respelled(&self) -> bool {
+        matches!(self, Self::File { exact: false, .. })
     }
 }
 
@@ -319,6 +327,7 @@ fn see_file(parent: Option<&dyn DirWrite>, name: &RelPath) -> SysResult<FileSeen
                 sha,
                 len: gm.len,
                 attrs: gm.attrs,
+                exact: g.name().same_spelling(name),
             })
         }
         Err(e) if e.kind == SysErrorKind::NotFound => Ok(FileSeen::Absent),
@@ -600,8 +609,13 @@ fn replace_seen(
     let h0 = old.sha256;
     let h1 = *content.sha256();
     let t = see_file(parent, name)?;
+    // S1 (review of A2-B1): a target someone renamed to another spelling is not the planned
+    // object any more (a phase-B rename back would give it the planned spelling): "other",
+    // so `Foreign`, in `S0` and in every `Si`.
     let target = if t == FileSeen::Absent {
         Is::Absent
+    } else if t.respelled() {
+        Is::Other
     } else if t.is(&h0, old.len, &old.attrs) {
         Is::From
     } else if t.is(&h1, content.len(), attrs) {
@@ -826,6 +840,13 @@ pub(super) fn act<W: Reverting>(
             return Err(e(SysError::new(SysErrorKind::NotFound, op.path().as_str())));
         };
         let g = parent.guard(&name).map_err(&e)?;
+        // The planned spelling, as observed (S1): another one since is a change.
+        if !g.name().same_spelling(&name) {
+            return Err(e(SysError::new(
+                SysErrorKind::Mismatch,
+                format!("{}: renamed since it was observed", op.path()),
+            )));
+        }
         // D4 on the guard before the restore (symmetric to the apply).
         if !g.users().map_err(&e)?.is_empty() {
             return Err(e(SysError::new(

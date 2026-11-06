@@ -155,7 +155,9 @@ pub fn classify(name: &str, case_sensitive: bool) -> Result<RelPath, Anomaly> {
 }
 
 /// Relative, confined path. Internally separated by `\`, case unchanged;
-/// comparisons are case-insensitive.
+/// comparisons are case-insensitive: `==`, `Hash` and the order use the folded form, so two
+/// spellings of one name are equal. Where the spelling itself matters (a name on disk against
+/// the one in a plan, ADR 0020 "Name spelling") compare with [`Self::same_spelling`].
 #[derive(Debug, Clone)]
 pub struct RelPath {
     raw: String,
@@ -193,6 +195,11 @@ impl RelPath {
     /// The path separated by `\`, in its original case.
     pub fn as_str(&self) -> &str {
         &self.raw
+    }
+
+    /// The same path in exactly the same spelling (case included), unlike `==`, which folds.
+    pub fn same_spelling(&self, other: &Self) -> bool {
+        self.raw == other.raw
     }
 
     /// A path of exactly one segment (e.g. Steam's `installdir` or a name from `read_dir`).

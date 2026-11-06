@@ -607,7 +607,7 @@ fn t5_tampering_is_refused_or_left() {
 #[test]
 fn t6_a_foreign_state_is_left_with_its_backup_and_only_forget_closes() {
     type Change = fn(&FakeSystem);
-    let cases: [(&str, u16, Change); 4] = [
+    let cases: [(&str, u16, Change); 5] = [
         ("content", 0, |s| {
             let p = game("d3d9.dll");
             s.fake_fs().remove_abs(Path::new(&p)).unwrap();
@@ -628,6 +628,10 @@ fn t6_a_foreign_state_is_left_with_its_backup_and_only_forget_closes() {
                 .put_file(Path::new(&game(r"mods\a\mine.txt")), b"user")
                 .unwrap();
         }),
+        // A2-B1 review S1: a case-only rename is a change (ADR 0017 D3), not the planned name.
+        ("another spelling", 0, |s| {
+            s.rename_abs(game("d3d9.dll"), game("D3D9.DLL")).unwrap();
+        }),
     ];
     for (what, op, change) in cases {
         let env = Env::new(finish(base()));
@@ -635,6 +639,13 @@ fn t6_a_foreign_state_is_left_with_its_backup_and_only_forget_closes() {
         change(&env.sys);
         let changed = meta_abs(&env.sys, &game(target(op)));
         let user = read_abs(&env.sys, &game(target(op)));
+        let spelled = stored_abs(&env.sys, &game(target(op)));
+        // `verify` names it before the revert meets it (rule 5).
+        let v = env.verify(&t);
+        assert!(
+            v.iter().any(|(k, o)| *k == op && *o == Observed::Foreign),
+            "{what}: verify {v:?}"
+        );
         let rep = env.revert(&t).unwrap();
         assert_eq!(rep.closed, None, "{what}");
         let foreign: Vec<&super::OpReport> = rep
@@ -663,6 +674,11 @@ fn t6_a_foreign_state_is_left_with_its_backup_and_only_forget_closes() {
             (changed.attrs, changed.links, changed.len),
             "{what}: attributes, links and length as the user left them"
         );
+        assert_eq!(
+            stored_abs(&env.sys, &game(target(op))),
+            spelled,
+            "{what}: the name as the user spelled it"
+        );
         // Revert again: still foreign; forget closes.
         let again = env.revert(&t).unwrap();
         assert_eq!(again.closed, None, "{what}");
@@ -681,6 +697,15 @@ fn target(op: u16) -> &'static str {
         4 => "new.dll",
         _ => r"mods\a\mine.txt",
     }
+}
+
+/// The stored spelling of the last segment of the fake entry `abs`.
+pub(crate) fn stored_abs(sys: &FakeSystem, abs: &str) -> String {
+    let p = Path::new(abs);
+    #[expect(clippy::disallowed_methods, reason = "test: read a fixture name")]
+    let d = sys.fake_fs().open_dir(p.parent().unwrap()).unwrap();
+    let name = p.file_name().unwrap().to_str().unwrap();
+    d.stored_name(&rel(name)).unwrap().unwrap()
 }
 
 /// The content of the fake file `abs`.
@@ -1051,6 +1076,49 @@ fn t8_refusals_write_no_transaction() {
             if matches!(&**cause, ExecError::Op { op: 0, source } if source.kind == SysErrorKind::Busy)),
         "{r:?}"
     );
+    same(&before, &env.snap());
+}
+
+/// A2-B1 review S2: a case-only rename between the old-state check and the apply's guard is
+/// caught on the guard itself (pattern of condition 8): rolled back with `Mismatch`, the file
+/// kept as the user named it, nothing else changed.
+#[test]
+fn t8_a_case_only_rename_before_the_apply_guard_is_a_mismatch() {
+    let env = Env::new(finish(base()));
+    let before = env.snap();
+    let h = env.plan(&t1_spec());
+    let guards = std::sync::Arc::new(AtomicU64::new(0));
+    let g2 = std::sync::Arc::clone(&guards);
+    env.sys.fake_fs().on_step(move |f, ev| {
+        if ev.call == Some(Prim::OpenGuard) && ev.name.eq_ignore_ascii_case("d3d9.dll") {
+            // The first guard is the old-state check (step 5), the second the apply's.
+            if g2.fetch_add(1, Ordering::SeqCst) == 1 {
+                f.rename_abs(Path::new(&game("d3d9.dll")), Path::new(&game("D3D9.DLL")))
+                    .unwrap();
+            }
+        }
+    });
+    let r = env.apply(&h);
+    env.sys.fake_fs().clear_on_step();
+    assert!(
+        guards.load(Ordering::SeqCst) >= 2,
+        "the apply's guard was reached"
+    );
+    assert!(
+        matches!(&r, Err(ApplyError::RolledBack { cause, .. })
+            if matches!(&**cause, ExecError::Op { op: 0, source } if source.kind == SysErrorKind::Mismatch)),
+        "{r:?}"
+    );
+    assert_eq!(
+        stored_abs(&env.sys, &game("d3d9.dll")),
+        "D3D9.DLL",
+        "the user's name"
+    );
+    assert_eq!(read_abs(&env.sys, &game("d3d9.dll")), OLD);
+    // Apart from the user's rename, the game folder is as before.
+    env.sys
+        .rename_abs(game("D3D9.DLL"), game("d3d9.dll"))
+        .unwrap();
     same(&before, &env.snap());
 }
 
