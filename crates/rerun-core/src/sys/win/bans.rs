@@ -1083,6 +1083,11 @@ fn banned_registry_items_resolve() {
     let _ = windows_sys::Win32::System::Registry::RegRenameKey;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: RegFlushKey must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Registry::RegFlushKey;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: RegSetKeySecurity must be banned"
     )]
     let _ = windows_sys::Win32::System::Registry::RegSetKeySecurity;

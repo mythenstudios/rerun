@@ -1,6 +1,9 @@
-//! The only registry FFI of `sys::win` (ADR 0009): `RegOpenCurrentUser`, `RegOpenKeyExW`,
-//! `RegEnumKeyExW`, `RegQueryInfoKeyW`, `RegCloseKey`, for values `NtQueryValueKey` and
-//! `NtEnumerateValueKey`, and `NtQueryKey` for the kernel name of a key. `WinRegistry::new`
+//! The only registry FFI of `sys::win` (ADR 0009, ADR 0018): `RegOpenCurrentUser`,
+//! `RegOpenKeyExW`, `RegEnumKeyExW`, `RegQueryInfoKeyW`, `RegCloseKey`, for values
+//! `NtQueryValueKey` and `NtEnumerateValueKey`, `NtQueryKey` for the kernel name and the flags of
+//! a key; for the write side (P2-9) `RegCreateKeyExW` and `RegOpenKeyExW` of one segment with
+//! `REG_OPTION_OPEN_LINK`, `NtSetValueKey`, `NtDeleteValueKey`, `NtDeleteKey` and
+//! `RegFlushKey`. `WinRegistry::new`
 //! refuses an impersonating thread (`OpenThreadToken`) and a current-user key that is not a
 //! user hive (the `.DEFAULT` fallback of `RegOpenCurrentUser`).
 //!
@@ -13,7 +16,8 @@
 //!   handles and serve both.
 //! - Key handles come back as [`OwnedKey`] and are closed on drop, also in every error path.
 //!   `HKEY_LOCAL_MACHINE` is a predefined key and is never closed ([`Root::LocalMachine`]).
-//! - Opens take a [`ReadAccess`], so a write right cannot be expressed here. The view flag is
+//! - Read opens take a [`ReadAccess`], so a write right cannot be expressed there; the write side
+//!   opens with a [`WriteAccess`], always in the native view. The view flag is
 //!   added on every open (`KEY_WOW64_32KEY` for the 32-bit view, `KEY_WOW64_64KEY` for the
 //!   native one, so the native view is the 64-bit one even in a 32-bit build).
 //!   Reads follow symbolic-link keys; only `open_link` (for `Registry::link`) opens the last
@@ -37,17 +41,19 @@ use std::os::windows::io::{FromRawHandle, OwnedHandle};
 
 use windows_sys::Wdk::System::Registry::{
     KeyFlagsInformation, KeyNameInformation, KeyValueFullInformation, KeyValuePartialInformation,
-    NtEnumerateValueKey, NtQueryKey, NtQueryValueKey,
+    NtDeleteKey, NtDeleteValueKey, NtEnumerateValueKey, NtQueryKey, NtQueryValueKey, NtSetValueKey,
 };
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::{FILETIME, UNICODE_STRING};
 use windows_sys::Win32::Security::TOKEN_QUERY;
+use windows_sys::Win32::Storage::FileSystem::{DELETE, READ_CONTROL};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_CONFIG, HKEY_CURRENT_USER,
     HKEY_CURRENT_USER_LOCAL_SETTINGS, HKEY_DYN_DATA, HKEY_LOCAL_MACHINE, HKEY_PERFORMANCE_DATA,
-    HKEY_PERFORMANCE_NLSTEXT, HKEY_PERFORMANCE_TEXT, HKEY_USERS, KEY_ENUMERATE_SUB_KEYS,
-    KEY_QUERY_VALUE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_OPTION_OPEN_LINK, RegCloseKey,
-    RegEnumKeyExW, RegOpenCurrentUser, RegOpenKeyExW, RegQueryInfoKeyW,
+    HKEY_PERFORMANCE_NLSTEXT, HKEY_PERFORMANCE_TEXT, HKEY_USERS, KEY_CREATE_SUB_KEY,
+    KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_32KEY,
+    KEY_WOW64_64KEY, REG_CREATED_NEW_KEY, REG_OPTION_OPEN_LINK, RegCloseKey, RegCreateKeyExW,
+    RegEnumKeyExW, RegFlushKey, RegOpenCurrentUser, RegOpenKeyExW, RegQueryInfoKeyW,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
@@ -58,6 +64,8 @@ use super::status::{
 
 /// winerror.h `ERROR_SUCCESS`.
 const ERROR_SUCCESS: u32 = 0;
+/// winerror.h `ERROR_FILE_NOT_FOUND`.
+const ERROR_FILE_NOT_FOUND: u32 = 2;
 /// winerror.h `ERROR_MORE_DATA`.
 const ERROR_MORE_DATA: u32 = 234;
 /// winerror.h `ERROR_NO_MORE_ITEMS`.
@@ -696,6 +704,200 @@ pub(super) fn info(key: &OwnedKey) -> Result<KeyInfo, u32> {
         max_value_len: len_usize(max_value_len),
         last_write: (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime),
     })
+}
+
+// ---------- Write side (ADR 0018, amendment P2-9) ----------
+
+/// `KEY_FLAGS_INFORMATION.KeyFlags` bit of a volatile key.
+pub(super) const REG_FLAG_VOLATILE: u32 = 0x1;
+
+/// The rights a write-side open asks for (`sys::seq::reg::KeyAccess`); each includes
+/// `KEY_QUERY_VALUE` (flags, values, counts) and `READ_CONTROL` (the kernel name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WriteAccess {
+    /// Query only.
+    Query,
+    /// And `KEY_CREATE_SUB_KEY`.
+    CreateSub,
+    /// And `KEY_SET_VALUE`.
+    SetValue,
+    /// And `DELETE`.
+    Delete,
+}
+
+/// The `samDesired` of a write-side open (pure): always the native view.
+pub(super) fn write_sam(a: WriteAccess) -> u32 {
+    let extra = match a {
+        WriteAccess::Query => 0,
+        WriteAccess::CreateSub => KEY_CREATE_SUB_KEY,
+        WriteAccess::SetValue => KEY_SET_VALUE,
+        WriteAccess::Delete => DELETE,
+    };
+    KEY_QUERY_VALUE | READ_CONTROL | KEY_WOW64_64KEY | extra
+}
+
+/// A new handle to `root` itself (`RegOpenKeyExW(root, "", 0, sam)`), the start of a walk.
+pub(super) fn reopen(root: &Root, a: WriteAccess) -> Result<OwnedKey, u32> {
+    let empty = [0u16];
+    let mut raw: HKEY = ptr::null_mut();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the write-side RegOpenKeyExW of the hive root (ADR 0018)"
+    )]
+    // SAFETY: `root` is HKEY_LOCAL_MACHINE or an open key that `root` keeps alive for the call;
+    // `empty` is a NUL-terminated empty string that outlives the call; `raw` is valid for a
+    // write and on success receives a new key handle owned by the returned `OwnedKey`.
+    let rc = unsafe { RegOpenKeyExW(root.hkey(), empty.as_ptr(), 0, write_sam(a), &mut raw) };
+    owned(rc, raw)
+}
+
+/// `RegOpenKeyExW(parent, seg, REG_OPTION_OPEN_LINK, sam)`: the one segment `seg` itself, a
+/// link opened and never followed. `Ok(None)`: missing.
+pub(super) fn open_segment(
+    parent: &OwnedKey,
+    seg: &str,
+    a: WriteAccess,
+) -> Result<Option<OwnedKey>, u32> {
+    let wide: Vec<u16> = seg.encode_utf16().chain([0]).collect();
+    let mut raw: HKEY = ptr::null_mut();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the write-side RegOpenKeyExW of one segment (ADR 0018)"
+    )]
+    // SAFETY: `parent` is an open key kept alive by the borrow; `wide` is NUL-terminated and
+    // outlives the call; `raw` is valid for a write and on success receives a new key handle
+    // owned by the returned `OwnedKey`.
+    let rc = unsafe {
+        RegOpenKeyExW(
+            parent.0,
+            wide.as_ptr(),
+            REG_OPTION_OPEN_LINK,
+            write_sam(a),
+            &mut raw,
+        )
+    };
+    match rc {
+        ERROR_FILE_NOT_FOUND => Ok(None),
+        _ => owned(rc, raw).map(Some),
+    }
+}
+
+/// `RegCreateKeyExW(parent, seg, REG_OPTION_OPEN_LINK, sam)`: opens or creates the one
+/// segment `seg` itself (non-volatile); `true` if this call created it (the disposition).
+pub(super) fn create_segment(
+    parent: &OwnedKey,
+    seg: &str,
+    a: WriteAccess,
+) -> Result<(OwnedKey, bool), u32> {
+    let wide: Vec<u16> = seg.encode_utf16().chain([0]).collect();
+    let mut raw: HKEY = ptr::null_mut();
+    let mut disposition: u32 = 0;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one RegCreateKeyExW call site (ADR 0018)"
+    )]
+    // SAFETY: `parent` is an open key kept alive by the borrow; `wide` is NUL-terminated and
+    // outlives the call; class and security attributes are null; `raw` and `disposition` are
+    // valid for writes, and on success `raw` is a new key handle owned by the returned
+    // `OwnedKey`.
+    let rc = unsafe {
+        RegCreateKeyExW(
+            parent.0,
+            wide.as_ptr(),
+            0,
+            ptr::null(),
+            REG_OPTION_OPEN_LINK,
+            write_sam(a),
+            ptr::null(),
+            &mut raw,
+            &mut disposition,
+        )
+    };
+    let key = owned(rc, raw)?;
+    Ok((key, disposition == REG_CREATED_NEW_KEY))
+}
+
+/// A value name as a counted `UNICODE_STRING` over `units` (at most 16,383 units, checked by
+/// the caller, so the byte length fits a `u16`).
+fn name_string(units: &[u16]) -> Result<UNICODE_STRING, NtStatus> {
+    let bytes = u16::try_from(units.len() * 2).map_err(|_| STATUS_INVALID_PARAMETER)?;
+    Ok(UNICODE_STRING {
+        Length: bytes,
+        MaximumLength: bytes,
+        Buffer: units.as_ptr().cast_mut(),
+    })
+}
+
+/// `NtSetValueKey(key, name, kind, data)`: stores exactly these bytes (not `RegSetValueExW`,
+/// which may extend a string-typed value by a NUL behind the caller's buffer, ADR 0009).
+pub(super) fn set_value(
+    key: &OwnedKey,
+    name: &str,
+    kind: u32,
+    data: &[u8],
+) -> Result<(), NtStatus> {
+    let units: Vec<u16> = name.encode_utf16().collect();
+    let us = name_string(&units)?;
+    let len = u32::try_from(data.len()).map_err(|_| STATUS_INVALID_PARAMETER)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one NtSetValueKey call site (ADR 0018)"
+    )]
+    // SAFETY: `key` is an open key (KEY_SET_VALUE) kept alive by the borrow; `us` describes
+    // `units` (exactly its byte length, read only) and `data` is readable for `len` bytes;
+    // both outlive the call.
+    let status = unsafe { NtSetValueKey(key.0, &us, 0, kind, data.as_ptr().cast(), len) };
+    if status == STATUS_SUCCESS {
+        Ok(())
+    } else {
+        Err(status)
+    }
+}
+
+/// `NtDeleteValueKey(key, name)`.
+pub(super) fn delete_value(key: &OwnedKey, name: &str) -> Result<(), NtStatus> {
+    let units: Vec<u16> = name.encode_utf16().collect();
+    let us = name_string(&units)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one NtDeleteValueKey call site (ADR 0018)"
+    )]
+    // SAFETY: `key` is an open key (KEY_SET_VALUE) kept alive by the borrow; `us` describes
+    // `units` (exactly its byte length, read only), which outlives the call.
+    let status = unsafe { NtDeleteValueKey(key.0, &us) };
+    if status == STATUS_SUCCESS {
+        Ok(())
+    } else {
+        Err(status)
+    }
+}
+
+/// `NtDeleteKey(key)`: deletes the key the handle refers to (opened with `DELETE`); the
+/// handle stays valid and is closed by `OwnedKey`.
+pub(super) fn delete_key(key: &OwnedKey) -> Result<(), NtStatus> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one NtDeleteKey call site (ADR 0018)"
+    )]
+    // SAFETY: `key` is an open key with DELETE access, kept alive by the borrow until after
+    // the call.
+    let status = unsafe { NtDeleteKey(key.0) };
+    if status == STATUS_SUCCESS {
+        Ok(())
+    } else {
+        Err(status)
+    }
+}
+
+/// `RegFlushKey(key)`: writes the key's hive to disk (any access right suffices, observed).
+pub(super) fn flush(key: &OwnedKey) -> Result<(), u32> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one RegFlushKey call site (ADR 0018)"
+    )]
+    // SAFETY: `key` is an open key kept alive by the borrow until after the call.
+    let rc = unsafe { RegFlushKey(key.0) };
+    if rc == ERROR_SUCCESS { Ok(()) } else { Err(rc) }
 }
 
 #[cfg(test)]

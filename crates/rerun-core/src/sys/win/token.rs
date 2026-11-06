@@ -37,8 +37,8 @@ use windows_sys::Win32::Security::{
     AccessCheck, DACL_SECURITY_INFORMATION, DuplicateToken, GENERIC_MAPPING,
     GROUP_SECURITY_INFORMATION, GetTokenInformation, LABEL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PRIVILEGE_SET, PSECURITY_DESCRIPTOR, SecurityIdentification,
-    TOKEN_DUPLICATE, TOKEN_ELEVATION_TYPE, TOKEN_LINKED_TOKEN, TOKEN_QUERY, TokenElevationType,
-    TokenElevationTypeFull, TokenLinkedToken,
+    TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_LINKED_TOKEN, TOKEN_QUERY,
+    TokenElevation, TokenElevationType, TokenElevationTypeFull, TokenLinkedToken,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_DELETE_CHILD,
@@ -129,6 +129,30 @@ fn elevation_type(token: BorrowedHandle<'_>) -> Result<TOKEN_ELEVATION_TYPE, u32
         return Err(last_error());
     }
     Ok(ty)
+}
+
+/// The process token is elevated (`TokenElevation`): an administrator's full token, also with
+/// UAC off. The registry write side refuses then (ADR 0018, S2).
+pub(super) fn process_elevated() -> Result<bool, u32> {
+    let token = process_token()?;
+    let mut e = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut returned: u32 = 0;
+    // SAFETY: `token` is a live token handle with TOKEN_QUERY, kept alive until after the call;
+    // `e` is a valid, correctly sized output buffer for TokenElevation (one u32); `returned` is
+    // valid for a write.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            ptr::from_mut(&mut e).cast::<c_void>(),
+            len32::<TOKEN_ELEVATION>(),
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    Ok(e.TokenIsElevated != 0)
 }
 
 fn linked_token(token: BorrowedHandle<'_>) -> Result<OwnedHandle, u32> {

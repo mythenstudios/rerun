@@ -1,5 +1,4 @@
-//! [`WinSystem`]: the real [`System`] (ADR 0004); its registry is read-only so far (the
-//! writing methods of `Registry` return `Unsupported`). No `unsafe`.
+//! [`WinSystem`]: the real [`System`] (ADR 0004). No `unsafe`.
 
 use std::fmt;
 use std::sync::Arc;
@@ -8,8 +7,7 @@ use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinTopology};
 use crate::sys::{Fs, Gpu, KnownFolders, Registry, RegistryWrite, SysResult, System, Topology};
 
 /// The real file system, registry, known folders (on that registry), CPU topology and graphics
-/// adapters of this machine. Every writing method of the file system and the registry returns
-/// `Unsupported` in phase 1. Opening it opens the current user's registry root; `dxgi.dll` is
+/// adapters of this machine. Opening it opens the current user's registry root; `dxgi.dll` is
 /// loaded only on the first [`Gpu::adapters`] call, which needs
 /// [`restrict_dll_search`](super::restrict_dll_search) first (else `Unsupported`).
 ///

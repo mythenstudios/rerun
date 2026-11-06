@@ -3,8 +3,8 @@
 //! [`WinFs`]/[`WinDir`] implement [`Fs`](crate::sys::Fs), [`Dir`](crate::sys::Dir) and
 //! [`DirWrite`](crate::sys::DirWrite) (the write side of ADR 0017: the sequences of
 //! `sys::seq` over the primitives in `fs::prim`). [`WinRegistry`] implements
-//! [`Registry`](crate::sys::Registry), read-only in phase 1 ("sys::win is read-only in phase
-//! 1"). [`WinKnownFolders`] implements
+//! [`Registry`](crate::sys::Registry) and [`RegistryWrite`](crate::sys::RegistryWrite) (the
+//! sequences of `sys::seq::reg` over the primitives in `registry`, ADR 0018). [`WinKnownFolders`] implements
 //! [`KnownFolders`](crate::sys::KnownFolders), [`WinTopology`] implements
 //! [`Topology`](crate::sys::Topology) (ADR 0010), [`WinGpu`] implements
 //! [`Gpu`](crate::sys::Gpu) (DXGI, ADR 0008 amendment), and [`WinSystem`] bundles them into

@@ -29,7 +29,8 @@ use crate::sys::contract::{
     FsContractResult, FsFixture, RACE_LEAK, RegFixture, WriteOp, fs_link_read_contract,
     fs_link_write_contract, fs_race_contract, fs_read_contract, fs_volume_contract,
     fs_write_contract, fs_write_race_contract, gpu_contract, known_folders_contract,
-    registry_read_contract, registry_system_contract, snapshot_contract, topology_contract,
+    registry_read_contract, registry_system_contract, registry_write_contract, snapshot_contract,
+    topology_contract,
 };
 use crate::sys::fs::{EntryKind, Fs, WriteCap};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, RegistryWrite, reg_type};
@@ -910,9 +911,53 @@ fn dump_cpu_topology() {
     ));
 }
 
+/// The registry write contract against `sys::win` in a private app hive whose `HKCU` root is a
+/// `KEY_READ` handle, like `RegOpenCurrentUser(KEY_READ)`: every write opens its segments
+/// relative to that read handle (ADR 0018 amendment P2-9).
 #[test]
-fn win_registry_write_methods_are_unsupported() {
-    let Some(h) = HiveRoot::new("reg-read-only") else {
+fn win_fulfils_registry_write_contract() {
+    let Some(h) = HiveRoot::new("reg-write") else {
+        return;
+    };
+    let root = RegKey::new(Hive::CurrentUser, RegView::Native, "RerunWrite");
+    h.hive.key(&root).unwrap();
+    let started = Instant::now();
+    let skips = registry_write_contract(&h.registry, &h.hive, &root)
+        .unwrap_or_else(|e| panic!("registry_write_contract: {e}"));
+    note(&format!(
+        "note: registry_write_contract took {:?}",
+        started.elapsed()
+    ));
+    for s in skips {
+        assert!(
+            !hosted_ci(),
+            "registry_write_contract: {s} skipped on a GitHub runner"
+        );
+        note(&format!("note: registry_write_contract: skipped {s}"));
+    }
+}
+
+/// K-R2 on Windows: without the kernel-name comparison the write lands in the key renamed by
+/// another program (`RegRenameKey`), and the contract fails at RW9.
+#[test]
+fn win_registry_write_contract_catches_a_missing_kernel_name_check() {
+    let Some(h) = HiveRoot::new("reg-write-kr2") else {
+        return;
+    };
+    let root = RegKey::new(Hive::CurrentUser, RegView::Native, "RerunWrite");
+    h.hive.key(&root).unwrap();
+    crate::sys::seq::reg::knob::no_kernel_name(true);
+    let r = registry_write_contract(&h.registry, &h.hive, &root);
+    crate::sys::seq::reg::knob::no_kernel_name(false);
+    let e = r.unwrap_err();
+    assert!(e.contains("renamed key"), "{e}");
+}
+
+/// S2: in an elevated process the write side changes nothing (here forced on an app hive);
+/// reads and the flush still work.
+#[test]
+fn win_registry_write_refuses_an_elevated_process() {
+    let Some(mut h) = HiveRoot::new("reg-write-elevated") else {
         return;
     };
     let k = RegKey::new(Hive::CurrentUser, RegView::Native, "Existing");
@@ -920,13 +965,15 @@ fn win_registry_write_methods_are_unsupported() {
     h.hive
         .raw(&k, "v", reg_type::REG_DWORD, &[1, 0, 0, 0])
         .unwrap();
+    h.registry.set_elevated(true);
     let reg = &h.registry;
-    let new = k.join("New");
     let (one, two) = (RegValue::Dword(1), RegValue::Dword(2));
     for (what, r) in [
-        ("create_key", RegistryWrite::create_key(reg, &new).map(drop)),
+        (
+            "create_key",
+            RegistryWrite::create_key(reg, &k.join("New")).map(drop),
+        ),
         ("set", RegistryWrite::set(reg, &k, "v", Some(&one), &two)),
-        ("set new", RegistryWrite::set(reg, &k, "w", None, &two)),
         (
             "delete_value",
             RegistryWrite::delete_value(reg, &k, "v", &one),
@@ -935,19 +982,28 @@ fn win_registry_write_methods_are_unsupported() {
     ] {
         let e = r.expect_err(what);
         assert_eq!(e.kind, SysErrorKind::Unsupported, "{what}");
-        assert!(e.target.contains("not implemented yet"), "{what}: {e}");
+        assert!(e.target.contains("elevated"), "{what}: {e}");
     }
-    assert!(reg.key_exists(&k).unwrap());
-    assert!(!reg.key_exists(&new).unwrap());
-    assert_eq!(
-        reg.values(&k).unwrap(),
-        [("v".to_owned(), RegValue::Dword(1))]
-    );
-    // The input rules come first.
-    assert_eq!(
-        reg.create_key(&k.join("a\0b")).unwrap_err().kind,
-        SysErrorKind::InvalidPath
-    );
+    assert_eq!(reg.read(&k, "v").unwrap(), Some(one));
+    assert!(!reg.key_exists(&k.join("New")).unwrap());
+    reg.flush(Hive::CurrentUser).unwrap();
+}
+
+/// The real `WinRegistry` knows whether this process is elevated; only reads here (no write
+/// ever reaches the real `HKCU` in a test).
+#[test]
+fn win_registry_reports_elevation_like_the_token() {
+    let reg = WinRegistry::new().unwrap();
+    let k = RegKey::new(Hive::CurrentUser, RegView::Native, "Software");
+    assert!(matches!(
+        reg.key_state(&k).unwrap(),
+        crate::sys::registry::KeyState::Present { .. }
+    ));
+    if super::token::process_elevated().unwrap_or(true) {
+        // Elevated (a GitHub runner): refused before anything is opened.
+        let e = RegistryWrite::create_key(&reg, &k.join("RerunNeverCreated")).unwrap_err();
+        assert_eq!(e.kind, SysErrorKind::Unsupported, "{e}");
+    }
 }
 
 /// Pins what ADR 0009 leaves to real Windows (read-only): an explicit `WOW6432Node` in the

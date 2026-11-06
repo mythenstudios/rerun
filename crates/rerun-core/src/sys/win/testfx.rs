@@ -92,8 +92,8 @@ use windows_sys::Win32::System::Memory::{
 use windows_sys::Win32::System::Registry::{
     HKEY, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_QUERY_VALUE, KEY_READ,
     KEY_SET_VALUE, REG_BINARY, REG_CREATED_NEW_KEY, REG_LINK, REG_OPTION_CREATE_LINK,
-    REG_OPTION_OPEN_LINK, REG_PROCESS_APPKEY, RegCreateKeyExW, RegDeleteValueW, RegLoadAppKeyW,
-    RegOpenKeyExW,
+    REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE, REG_PROCESS_APPKEY, RegCreateKeyExW,
+    RegDeleteValueW, RegLoadAppKeyW, RegOpenKeyExW, RegRenameKey,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetExitCodeProcess, OpenProcess, OpenProcessToken,
@@ -1871,12 +1871,65 @@ impl RegFixture for AppHive {
         self.follows
     }
 
-    fn rename_later(&self, _: &RegKey, _: &str) -> SysResult<Option<DeferredRename>> {
-        Ok(None)
+    /// `RegRenameKey` on the guarded parent, which the closure owns.
+    fn rename_later(&self, k: &RegKey, new_name: &str) -> SysResult<Option<DeferredRename>> {
+        let what = format!("app hive rename {k} -> {new_name}");
+        let Some(parent) = k.parent() else {
+            return Err(SysError::new(SysErrorKind::InvalidPath, what));
+        };
+        let pkey = self.create(&Self::path_of(&parent), KEY_ALL_ACCESS, false)?;
+        let seg = wide(k.path.rsplit('\\').next().unwrap_or_default());
+        let new = wide(new_name);
+        Ok(Some(Box::new(move || {
+            // SAFETY: `pkey` is an open, guarded key of the app hive with KEY_ALL_ACCESS that the
+            // closure owns until after the call; `seg` and `new` are NUL-terminated and outlive
+            // the call.
+            let rc = unsafe { RegRenameKey(pkey.raw(), seg.as_ptr(), new.as_ptr()) };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(win32_err(rc, &what))
+            }
+        })))
     }
 
-    fn volatile_key(&self, _: &RegKey) -> SysResult<bool> {
-        Ok(false)
+    /// `RegCreateKeyExW(REG_OPTION_VOLATILE)` below the guarded parent; `Ok(false)` if the
+    /// hive refuses volatile keys.
+    fn volatile_key(&self, k: &RegKey) -> SysResult<bool> {
+        let what = format!("app hive volatile key {k}");
+        let Some(parent) = k.parent() else {
+            return Err(SysError::new(SysErrorKind::InvalidPath, what));
+        };
+        let pkey = self.create(&Self::path_of(&parent), KEY_CREATE_SUB_KEY, false)?;
+        let seg = wide(k.path.rsplit('\\').next().unwrap_or_default());
+        let mut raw: HKEY = ptr::null_mut();
+        let mut disposition: u32 = 0;
+        // SAFETY: `pkey` is an open, guarded key of the app hive kept alive until after the call;
+        // `seg` is NUL-terminated and outlives the call; class and security attributes are
+        // null; `raw` and `disposition` are valid for writes, and on success `raw` is a new key
+        // handle that `OwnedKey` takes over below.
+        let rc = unsafe {
+            RegCreateKeyExW(
+                pkey.raw(),
+                seg.as_ptr(),
+                0,
+                ptr::null(),
+                REG_OPTION_VOLATILE,
+                KEY_READ,
+                ptr::null(),
+                &mut raw,
+                &mut disposition,
+            )
+        };
+        if rc != 0 || raw.is_null() {
+            note(&format!("note: {what}: not available ({rc})"));
+            return Ok(false);
+        }
+        // SAFETY: `raw` was just returned by a successful RegCreateKeyExW; nothing else owns or
+        // closes it.
+        let key = unsafe { OwnedKey::from_raw(raw) };
+        self.guard(&key, &what)?;
+        Ok(true)
     }
 
     fn utf16_key(&self, parent: &RegKey, units: &[u16]) -> SysResult<bool> {

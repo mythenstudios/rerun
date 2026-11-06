@@ -110,8 +110,10 @@ pub(super) fn win32_error(code: u32, target: &str) -> SysError {
 /// path, and everything not listed is `Other` (with the code attached).
 pub(super) fn kind_of_reg(code: u32) -> SysErrorKind {
     match code {
-        // FILE_NOT_FOUND, PATH_NOT_FOUND, KEY_DELETED
-        2 | 3 | 1018 => SysErrorKind::NotFound,
+        // FILE_NOT_FOUND, PATH_NOT_FOUND
+        2 | 3 => SysErrorKind::NotFound,
+        // KEY_DELETED: the key was deleted under an open handle (concurrent, S3 of ADR 0018)
+        1018 => SysErrorKind::Busy,
         // ACCESS_DENIED
         5 => SysErrorKind::AccessDenied,
         // FILENAME_EXCED_RANGE, INVALID_PARAMETER
@@ -123,8 +125,10 @@ pub(super) fn kind_of_reg(code: u32) -> SysErrorKind {
 /// Classifies an `NTSTATUS` of a registry value call (ADR 0009), like [`kind_of_reg`].
 pub(super) fn kind_of_reg_ntstatus(status: NtStatus) -> SysErrorKind {
     match status.cast_unsigned() {
-        // OBJECT_NAME_NOT_FOUND, OBJECT_PATH_NOT_FOUND, KEY_DELETED
-        0xC000_0034 | 0xC000_003A | 0xC000_017C => SysErrorKind::NotFound,
+        // OBJECT_NAME_NOT_FOUND, OBJECT_PATH_NOT_FOUND
+        0xC000_0034 | 0xC000_003A => SysErrorKind::NotFound,
+        // KEY_DELETED: the key was deleted under an open handle (concurrent, S3 of ADR 0018)
+        0xC000_017C => SysErrorKind::Busy,
         // ACCESS_DENIED
         0xC000_0022 => SysErrorKind::AccessDenied,
         // INVALID_PARAMETER, OBJECT_NAME_INVALID
@@ -228,7 +232,7 @@ mod tests {
         let cases: &[(u32, SysErrorKind)] = &[
             (2, SysErrorKind::NotFound),
             (3, SysErrorKind::NotFound),
-            (1018, SysErrorKind::NotFound),
+            (1018, SysErrorKind::Busy),
             (5, SysErrorKind::AccessDenied),
             (206, SysErrorKind::InvalidPath),
             (87, SysErrorKind::InvalidPath),
@@ -243,11 +247,11 @@ mod tests {
             assert_eq!(kind_of_reg(code), kind, "{code}");
         }
         let e = reg_error(1018, "k");
-        assert_eq!((e.kind, e.win32), (SysErrorKind::NotFound, Some(1018)));
+        assert_eq!((e.kind, e.win32), (SysErrorKind::Busy, Some(1018)));
         let nt: &[(u32, SysErrorKind)] = &[
             (0xC000_0034, SysErrorKind::NotFound),
             (0xC000_003A, SysErrorKind::NotFound),
-            (0xC000_017C, SysErrorKind::NotFound),
+            (0xC000_017C, SysErrorKind::Busy),
             (0xC000_0022, SysErrorKind::AccessDenied),
             (0xC000_000D, SysErrorKind::InvalidPath),
             (0xC000_0033, SysErrorKind::InvalidPath),
@@ -260,7 +264,7 @@ mod tests {
         let e = reg_nt_error(st(0xC000_017C), "k");
         assert_eq!(
             (e.kind, e.ntstatus, e.win32),
-            (SysErrorKind::NotFound, Some(st(0xC000_017C)), None)
+            (SysErrorKind::Busy, Some(st(0xC000_017C)), None)
         );
     }
 

@@ -1,5 +1,5 @@
-//! [`WinRegistry`]: the real [`Registry`], **read-only in phase 1** (ADR 0009). No `unsafe`; the
-//! FFI is in `reg`.
+//! [`WinRegistry`]: the real [`Registry`] (ADR 0009) and [`RegistryWrite`] (ADR 0018). No
+//! `unsafe`; the FFI is in `reg`.
 //!
 //! - `Hive::CurrentUser` is the handle from `RegOpenCurrentUser(KEY_READ)`, taken once in
 //!   [`WinRegistry::new`] (the predefined `HKEY_CURRENT_USER` is cached per process and wrong
@@ -17,26 +17,35 @@
 //!   [`MAX_SUBKEYS`]): beyond one, `TooLarge` with that limit, never a partial result.
 //! - Races: a too-small buffer (`STATUS_BUFFER_OVERFLOW`) grows to the reported size (capped by
 //!   the limit) and the read retries, at most [`MORE_DATA_RETRIES`] times, then `Busy`; type
-//!   and data always come from one successful call. `values` and `subkeys` compare the key's last-write time before and
+//!   and data always come from one successful call. `values` and `subkeys` compare the key's
+//!   last-write time before and
 //!   after the enumeration and restart on a change or a duplicate name, at most
 //!   [`ENUM_ATTEMPTS`] times, then `Busy`.
 //! - Enumerated names are converted lossily (U+FFFD), like `read_dir`.
-//! - `create_key`, `set`, `delete_value` and `delete_key` return `Unsupported` ("sys::win is
-//!   read-only in phase 1") after the input rules and touch nothing.
+//! - Write side (P2-9): the sequences of `sys::seq::reg` over [`WinKey`] (one `OwnedKey`): each
+//!   segment opened or created by itself relative to its parent with `REG_OPTION_OPEN_LINK` and
+//!   `KEY_QUERY_VALUE | READ_CONTROL` plus the one right it needs, in the native view; the walk
+//!   starts from a new handle to the hive root (a `RegOpenKeyExW(root, "")`), the kernel names
+//!   are compared with the root's, taken once in [`WinRegistry::new`]. An elevated process
+//!   (`TokenElevation`, or a token that cannot be asked) changes nothing. `STATUS_KEY_DELETED`
+//!   is `Busy`, `NtDeleteKey` on a key with subkeys `NotEmpty`.
 
 use std::collections::HashSet;
 use std::fmt;
 
-use super::reg::{self, EnumValue, OwnedKey, Read, ReadAccess, Root, UserHiveError, View};
+use super::reg::{
+    self, EnumValue, OwnedKey, Read, ReadAccess, Root, UserHiveError, View, WriteAccess,
+};
 use super::status::{reg_error, reg_nt_error};
+use super::token;
 use crate::sys::registry::{
     Hive, KeyState, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey,
     RegLink, RegValue, RegView, Registry, RegistryWrite, check_key, check_value_name,
 };
+use crate::sys::seq::reg::{self as reg_seq, KeyAccess, KeyFlags, KeySeg, PrimHive, PrimKey};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
 /// Message of every refused write.
-const READ_ONLY: &str = "the sys::win registry write side is not implemented yet";
 /// Attempts of one read after "buffer too small" (`STATUS_BUFFER_OVERFLOW`).
 pub(super) const MORE_DATA_RETRIES: usize = 16;
 /// Attempts of one enumeration (restart on a change or a duplicate name).
@@ -50,6 +59,12 @@ const KEY_NAME_BUFFER: usize = 256;
 pub struct WinRegistry {
     current_user: Root,
     local_machine: Root,
+    /// Kernel name of the `current_user` root (`\REGISTRY\USER\<SID>`; a test: the app hive
+    /// key), the start of every kernel-name check of the write side.
+    user_name: String,
+    /// The process token is elevated (or that could not be told): the write side refuses
+    /// every change (S2).
+    elevated: bool,
 }
 
 impl fmt::Debug for WinRegistry {
@@ -85,19 +100,32 @@ impl WinRegistry {
                 format!("{WHAT}: returned {name:?}, not the user's own hive (profile not loaded?)"),
             ),
         })?;
+        let user_name = reg::key_name(&current_user).map_err(|st| reg_nt_error(st, WHAT))?;
         Ok(Self {
             current_user: Root::Key(current_user),
             local_machine: Root::LocalMachine,
+            user_name,
+            // Fail closed: a token that cannot be asked counts as elevated.
+            elevated: token::process_elevated().unwrap_or(true),
         })
     }
 
     /// Test only: both hives mapped to keys of a private app hive (ADR 0009).
     #[cfg(test)]
     pub(super) fn with_roots(current_user: OwnedKey, local_machine: OwnedKey) -> Self {
+        let user_name = reg::key_name(&current_user).unwrap_or_default();
         Self {
             current_user: Root::Key(current_user),
             local_machine: Root::Key(local_machine),
+            user_name,
+            elevated: false,
         }
+    }
+
+    /// Test only: the write side treats the process as elevated (S2).
+    #[cfg(test)]
+    pub(super) fn set_elevated(&mut self, on: bool) {
+        self.elevated = on;
     }
 
     fn root(&self, hive: Hive) -> &Root {
@@ -406,45 +434,168 @@ impl Registry for WinRegistry {
     }
 }
 
-/// Every write method refuses after the input rules until the write primitives land.
-fn read_only(k: &RegKey) -> SysResult<()> {
-    check_key(k)?;
-    Err(SysError::new(
-        SysErrorKind::Unsupported,
-        format!("{k}: {READ_ONLY}"),
-    ))
+// ---------- Write side: the primitives of `sys::seq::reg` (ADR 0018 amendment P2-9) ----------
+
+/// ntstatus.h `STATUS_CANNOT_DELETE`: `NtDeleteKey` on a key that still has subkeys.
+const STATUS_CANNOT_DELETE: i32 = 0xC000_0121_u32.cast_signed();
+
+/// An open key of the write side, with the path it was walked by (for messages only).
+#[derive(Debug)]
+pub(crate) struct WinKey {
+    key: OwnedKey,
+    shown: String,
+}
+
+fn access(a: KeyAccess) -> WriteAccess {
+    match a {
+        KeyAccess::Query => WriteAccess::Query,
+        KeyAccess::CreateSub => WriteAccess::CreateSub,
+        KeyAccess::SetValue => WriteAccess::SetValue,
+        KeyAccess::Delete => WriteAccess::Delete,
+    }
+}
+
+impl WinKey {
+    fn child(&self, seg: KeySeg<'_>) -> String {
+        format!("{}\\{}", self.shown, seg.as_str())
+    }
+
+    fn at(&self, name: &str) -> String {
+        format!("{} @ {name:?}", self.shown)
+    }
+}
+
+impl PrimKey for WinKey {
+    fn open(&self, seg: KeySeg<'_>, a: KeyAccess) -> SysResult<Option<Self>> {
+        let shown = self.child(seg);
+        let key = reg::open_segment(&self.key, seg.as_str(), access(a))
+            .map_err(|code| reg_error(code, &shown))?;
+        Ok(key.map(|key| Self { key, shown }))
+    }
+
+    fn create(&self, seg: KeySeg<'_>, a: KeyAccess) -> SysResult<(Self, bool)> {
+        let shown = self.child(seg);
+        let (key, created) = reg::create_segment(&self.key, seg.as_str(), access(a))
+            .map_err(|code| reg_error(code, &shown))?;
+        Ok((Self { key, shown }, created))
+    }
+
+    fn flags(&self) -> SysResult<KeyFlags> {
+        let f = reg::key_flags(&self.key).map_err(|st| reg_nt_error(st, &self.shown))?;
+        Ok(KeyFlags {
+            link: f & reg::REG_FLAG_LINK != 0,
+            volatile: f & reg::REG_FLAG_VOLATILE != 0,
+        })
+    }
+
+    fn kernel_name(&self) -> SysResult<String> {
+        reg::key_name(&self.key).map_err(|st| reg_nt_error(st, &self.shown))
+    }
+
+    fn query(&self, name: &str) -> SysResult<Option<RegValue>> {
+        query(&self.key, name, &self.at(name))
+    }
+
+    fn counts(&self) -> SysResult<(u32, u32)> {
+        let i = reg::info(&self.key).map_err(|code| reg_error(code, &self.shown))?;
+        Ok((
+            u32::try_from(i.values).unwrap_or(u32::MAX),
+            u32::try_from(i.subkeys).unwrap_or(u32::MAX),
+        ))
+    }
+
+    fn set_value(&self, name: &str, v: &RegValue) -> SysResult<()> {
+        let target = self.at(name);
+        let (kind, data) = v.encode().ok_or_else(|| {
+            SysError::new(
+                SysErrorKind::Unsupported,
+                format!("{target}: no canonical encoding"),
+            )
+        })?;
+        reg::set_value(&self.key, name, kind, &data).map_err(|st| reg_nt_error(st, &target))
+    }
+
+    fn delete_value(&self, name: &str) -> SysResult<()> {
+        let target = self.at(name);
+        reg::delete_value(&self.key, name).map_err(|st| reg_nt_error(st, &target))
+    }
+
+    fn delete(self) -> SysResult<()> {
+        reg::delete_key(&self.key).map_err(|st| {
+            if st == STATUS_CANNOT_DELETE {
+                SysError::new(
+                    SysErrorKind::NotEmpty,
+                    format!("{}: has subkeys", self.shown),
+                )
+                .with_ntstatus(st)
+            } else {
+                reg_nt_error(st, &self.shown)
+            }
+        })
+    }
+
+    fn flush(&self) -> SysResult<()> {
+        reg::flush(&self.key).map_err(|code| reg_error(code, &self.shown))
+    }
+}
+
+impl PrimHive for WinRegistry {
+    type Key = WinKey;
+
+    fn open_root(&self, h: Hive, a: KeyAccess) -> SysResult<WinKey> {
+        let shown = h.to_string();
+        let key = reg::reopen(self.root(h), access(a)).map_err(|code| reg_error(code, &shown))?;
+        Ok(WinKey { key, shown })
+    }
+
+    fn root_name(&self, h: Hive) -> SysResult<String> {
+        match h {
+            Hive::CurrentUser => Ok(self.user_name.clone()),
+            Hive::LocalMachine => Err(SysError::new(
+                SysErrorKind::Unsupported,
+                "HKLM has no write side (ADR 0018)",
+            )),
+        }
+    }
+
+    fn elevated(&self) -> bool {
+        self.elevated
+    }
 }
 
 impl RegistryWrite for WinRegistry {
     fn key_state(&self, k: &RegKey) -> SysResult<KeyState> {
-        read_only(k).map(|()| KeyState::Missing)
+        reg_seq::key_state(self, k)
     }
 
     fn read(&self, k: &RegKey, name: &str) -> SysResult<Option<RegValue>> {
-        check_value_name(k, name)?;
-        read_only(k).map(|()| None)
+        reg_seq::read(self, k, name)
     }
 
     fn create_key(&self, k: &RegKey) -> SysResult<bool> {
-        read_only(k).map(|()| false)
+        reg_seq::create_key(self, k)
     }
 
-    fn set(&self, k: &RegKey, name: &str, _: Option<&RegValue>, _: &RegValue) -> SysResult<()> {
-        check_value_name(k, name)?;
-        read_only(k)
+    fn set(
+        &self,
+        k: &RegKey,
+        name: &str,
+        expected: Option<&RegValue>,
+        new: &RegValue,
+    ) -> SysResult<()> {
+        reg_seq::set(self, k, name, expected, new)
     }
 
-    fn delete_value(&self, k: &RegKey, name: &str, _: &RegValue) -> SysResult<()> {
-        check_value_name(k, name)?;
-        read_only(k)
+    fn delete_value(&self, k: &RegKey, name: &str, expected: &RegValue) -> SysResult<()> {
+        reg_seq::delete_value(self, k, name, expected)
     }
 
     fn delete_empty_key(&self, k: &RegKey) -> SysResult<()> {
-        read_only(k)
+        reg_seq::delete_empty_key(self, k)
     }
 
     fn flush(&self, hive: Hive) -> SysResult<()> {
-        read_only(&RegKey::new(hive, RegView::Native, ""))
+        reg_seq::flush(self, hive)
     }
 }
 
