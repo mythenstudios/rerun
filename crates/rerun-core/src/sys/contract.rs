@@ -2067,9 +2067,12 @@ pub trait RegFixture: Sync {
     /// number `kind` and `data` (overwriting a value of exactly these units), like
     /// [`Self::raw`]. NUL is `InvalidPath`. `Ok(false)` = not available.
     fn utf16_value(&self, k: &RegKey, units: &[u16], kind: u32, data: &[u8]) -> SysResult<bool>;
-    /// Creates `link` as a symbolic-link key to the existing key `target` (same hive and
-    /// view). `Ok(false)` = not available.
+    /// Creates `link` (a new key) as a symbolic-link key to the existing key `target` (same
+    /// hive and view). `Ok(false)` = not available.
     fn link(&self, link: &RegKey, target: &RegKey) -> SysResult<bool>;
+    /// Reads follow a link key made by [`Self::link`] (in a private app hive Windows refuses
+    /// to follow one, ADR 0018).
+    fn links_followed(&self) -> bool;
     /// Stores the value `name` of the existing key `k` as `REG_BINARY` of `len` bytes (each
     /// `7`). `Ok(false)` = the registry cannot hold one value that large (Windows refuses more
     /// than 1,048,572 bytes, below [`MAX_VALUE_BYTES`]).
@@ -2253,7 +2256,8 @@ fn decode_cases() -> Vec<DecodeCase> {
 /// that the other view sees the same data. The redirection itself is pinned by
 /// [`registry_system_contract`].
 ///
-/// Skipped cases: `"key_link"` (no symbolic-link keys), `"value_at_limit"` and
+/// Skipped cases: `"key_link"` (the fixture cannot make a symbolic-link key, or reads do not
+/// follow one: a private app hive), `"value_at_limit"` and
 /// `"value_over_limit"` (the registry cannot hold one value of [`MAX_VALUE_BYTES`] or more;
 /// Windows stops at 1,048,572 bytes).
 pub fn registry_read_contract(
@@ -2717,9 +2721,46 @@ pub fn registry_read_contract(
         "a deleted key is gone",
     )?;
 
-    // Symbolic-link keys are followed on reads.
+    // A key is never a link by itself; the hive root neither; a missing key is NotFound.
+    ensure(
+        ok(reg.link(&a), "link of a plain key")?.is_none(),
+        "a plain key is no link",
+    )?;
+    ensure(
+        ok(
+            reg.link(&RegKey::new(root.hive, root.view, "")),
+            "link of the hive root",
+        )?
+        .is_none(),
+        "the hive root is no link",
+    )?;
+    err_kind(
+        reg.link(&root.join("Missing")),
+        SysErrorKind::NotFound,
+        "link of a missing key",
+    )?;
+    // Symbolic-link keys: `link` reports one itself (RL), reads follow it.
     let link = root.join("Link");
-    if ok(fx.link(&link, &a), "fixture: link")? {
+    let made = ok(fx.link(&link, &a), "fixture: link")?;
+    if made {
+        let got = ok(reg.link(&link), "link of a link key")?;
+        let target = got.map(|l| String::from_utf16_lossy(&l.target));
+        ensure(
+            target
+                .as_deref()
+                .is_some_and(|t| fold(t).ends_with(&fold(&format!("\\{}", a.path)))),
+            &format!("link reports the link key and its target: {target:?}"),
+        )?;
+        ensure(
+            ok(reg.link(&root.join("LINK")), "link in another spelling")?.is_some(),
+            "link folds the name",
+        )?;
+        ensure(
+            subkey_names(reg, root, "subkeys with a link")?.contains(&"Link".to_owned()),
+            "a link key is listed as a subkey",
+        )?;
+    }
+    if made && fx.links_followed() {
         ensure(
             ok(reg.key_exists(&link), "key_exists link")?,
             "a link key exists",

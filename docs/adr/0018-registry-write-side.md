@@ -94,3 +94,4 @@ impl RegWriter<'_> {
 ## Amendment (P2-9, 2026-11-06; decided by the user after a senior-dev cross-check)
 
 - **Folded keys (A2 should-item 2):** `RegKey` implements `Eq`, `Hash` and `Ord` over hive, view and the folded path; `Display` keeps the spelling. Keys are built with `RegKey::new`/`join`; a struct literal skips their trimming and `check_key` refuses what it leaves.
+- **Link keys in the snapshot (open point closed):** `Registry::link` (ADR 0009 amendment P2-9) on every key of the scope and every subkey; a link is `SnapEntry::RegLink { name, target }` and is not entered. A link replaced by a key with the same content is one difference (snapshot contract, fake and `sys::win`). The fake models link keys and follows them on reads (at most 16 levels, then `Other`); in an app hive Windows refuses to follow one, so link following stays a Windows Sandbox case.

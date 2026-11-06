@@ -39,6 +39,10 @@
 //!   empty) is a `RegAnomaly` too and never opened, so one hostile name does not abort the
 //!   snapshot. The name of a key of the scope itself comes from the caller, not from the
 //!   registry: a change of its case is not seen (like the name of a root on the file side).
+//!   A symbolic-link key (a key of the scope or a subkey, [`Registry::link`]) is a
+//!   [`SnapEntry::RegLink`] with its raw target and is never entered, so a cycle ends there and
+//!   a link replaced by a key with the same content is a difference (P2-9); the segments above
+//!   a key of the scope are followed like every read.
 //!
 //! Shown in a diff but **not compared** (user decision E3): the allowlisted data tag of a
 //! file (WOF, dedup, cloud, [`Shown`]). `wof.sys` hides the WOF tag anyway (ADR 0007), so it
@@ -253,6 +257,13 @@ pub enum SnapEntry {
         /// Typed value.
         value: RegValue,
     },
+    /// Symbolic-link key (P2-9): recorded with its raw target, never entered.
+    RegLink {
+        /// Name.
+        name: String,
+        /// `SymbolicLinkValue` as stored (UTF-16).
+        target: Vec<u16>,
+    },
     /// Registry key or value whose name cannot be used to address it (see [`RegWhy`]).
     RegAnomaly {
         /// Key or value.
@@ -379,6 +390,11 @@ impl fmt::Display for SnapEntry {
                 write!(f, "{}", ShowAttrs(attrs))
             }
             Self::Key { name } => write!(f, "key {name:?}"),
+            Self::RegLink { name, target } => write!(
+                f,
+                "link key {name:?} -> {:?}",
+                String::from_utf16_lossy(target)
+            ),
             Self::Value { name, value } => write!(f, "value {name:?} = {value}"),
             Self::RegAnomaly {
                 kind,
@@ -874,9 +890,26 @@ impl KeyWalk<'_> {
             ));
         }
         let loc = key_loc(key);
-        if !self.reg.key_exists(key)? {
-            self.push(Loc::Key(loc), SnapEntry::Missing);
-            return Ok(());
+        // The key itself is opened without following a link: a link is an entry of its own
+        // and never entered, so a cycle ends here and a link replaced by a key with the same
+        // content is a difference (P2-9).
+        match self.reg.link(key) {
+            Err(e) if e.kind == SysErrorKind::NotFound => {
+                self.push(Loc::Key(loc), SnapEntry::Missing);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+            Ok(Some(link)) => {
+                self.push(
+                    Loc::Key(loc),
+                    SnapEntry::RegLink {
+                        name,
+                        target: link.target,
+                    },
+                );
+                return Ok(());
+            }
+            Ok(None) => {}
         }
         *self.walked += 1;
         if *self.walked > MAX_KEYS_WALKED {

@@ -1558,9 +1558,11 @@ pub(super) struct AppHive {
     hive: OwnedKey,
     /// Kernel name of the hive key (`\REGISTRY\A\{…}`).
     name: String,
-    /// `None` if a symbolic-link key in this hive can be created and followed, else why not
-    /// (probed once at load, outside `HKCU` and `HKLM`).
+    /// `None` if a symbolic-link key in this hive can be created, else why not (probed once at
+    /// load, outside `HKCU` and `HKLM`).
     no_links: Option<String>,
+    /// A link key made by the probe can be followed (Windows refuses it in an app hive).
+    follows: bool,
 }
 
 /// What [`AppHive::walk`] does with the segments of a hive path.
@@ -1605,23 +1607,26 @@ impl AppHive {
             hive,
             name,
             no_links: None,
+            follows: false,
         };
         hive.create("HKCU", KEY_READ, false)?;
         hive.create("HKLM", KEY_READ, false)?;
-        hive.no_links = hive.probe_links().err();
+        match hive.probe_links() {
+            Ok(follows) => hive.follows = follows,
+            Err(why) => hive.no_links = Some(why),
+        }
         Ok(hive)
     }
 
-    /// Creates the link `LinkProbe\Link` → `LinkProbe\Target` and opens it (which follows it).
-    fn probe_links(&self) -> Result<(), String> {
+    /// Creates the link `LinkProbe\Link` → `LinkProbe\Target` (`Err`: why not) and tries to
+    /// open it, which follows it (`Ok(false)`: refused, as in every app hive so far).
+    fn probe_links(&self) -> Result<bool, String> {
         let target = r"LinkProbe\Target";
         self.create(target, KEY_READ, false)
             .map_err(|e| format!("probe target: {e} ({:?})", e.win32))?;
         self.make_link(r"LinkProbe\Link", target)
             .map_err(|e| format!("create: {e} ({:?})", e.win32))?;
-        self.open_following(r"LinkProbe\Link")
-            .map(drop)
-            .map_err(|e| format!("follow: {e} ({:?})", e.win32))
+        Ok(self.open_following(r"LinkProbe\Link").is_ok())
     }
 
     /// Creates `link` (a new key) as a symbolic link to the hive path `target`.
@@ -1860,6 +1865,10 @@ impl RegFixture for AppHive {
         }
         self.make_link(&Self::path_of(link), &Self::path_of(target))?;
         Ok(true)
+    }
+
+    fn links_followed(&self) -> bool {
+        self.follows
     }
 
     fn utf16_key(&self, parent: &RegKey, units: &[u16]) -> SysResult<bool> {

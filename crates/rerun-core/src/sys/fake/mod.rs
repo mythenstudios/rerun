@@ -331,7 +331,7 @@ impl FakeSystemBuilder {
 
     /// Registry key including missing parents.
     pub fn key(self, key: RegKey) -> Self {
-        self.step(move |s| s.registry.create_key_all(&key))
+        self.step(move |s| s.registry.put_key_all(&key))
     }
 
     /// Registry key (created if needed) that refuses every method with `AccessDenied`, like
@@ -339,7 +339,7 @@ impl FakeSystemBuilder {
     /// after the keys and values below it are set up.
     pub fn denied_key(self, key: RegKey) -> Self {
         self.step(move |s| {
-            s.registry.create_key_all(&key)?;
+            s.registry.put_key_all(&key)?;
             s.registry.deny(&key)
         })
     }
@@ -348,8 +348,8 @@ impl FakeSystemBuilder {
     pub fn value(self, key: RegKey, name: &str, value: RegValue) -> Self {
         let name = name.to_owned();
         self.step(move |s| {
-            s.registry.create_key_all(&key)?;
-            s.registry.set(&key, &name, &value)
+            s.registry.put_key_all(&key)?;
+            s.registry.put_value(&key, &name, &value)
         })
     }
 

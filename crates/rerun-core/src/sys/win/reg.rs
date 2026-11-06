@@ -16,7 +16,8 @@
 //! - Opens take a [`ReadAccess`], so a write right cannot be expressed here. The view flag is
 //!   added on every open (`KEY_WOW64_32KEY` for the 32-bit view, `KEY_WOW64_64KEY` for the
 //!   native one, so the native view is the 64-bit one even in a 32-bit build).
-//!   `REG_OPTION_OPEN_LINK` is never used: symbolic-link keys are followed on reads.
+//!   Reads follow symbolic-link keys; only `open_link` (for `Registry::link`) opens the last
+//!   segment itself with `REG_OPTION_OPEN_LINK`, and `key_flags` reads its link flag.
 //! - Every call passes the size of the buffer it hands to the API and reads back at most that
 //!   many units; kernel output is parsed from `Vec<u64>` buffers (8-byte aligned) by bounds-
 //!   checked byte copies, never through a raw structure pointer. The callers in `registry` own
@@ -35,8 +36,8 @@ use std::ptr;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 
 use windows_sys::Wdk::System::Registry::{
-    KeyNameInformation, KeyValueFullInformation, KeyValuePartialInformation, NtEnumerateValueKey,
-    NtQueryKey, NtQueryValueKey,
+    KeyFlagsInformation, KeyNameInformation, KeyValueFullInformation, KeyValuePartialInformation,
+    NtEnumerateValueKey, NtQueryKey, NtQueryValueKey,
 };
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::{FILETIME, UNICODE_STRING};
@@ -45,8 +46,8 @@ use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_CONFIG, HKEY_CURRENT_USER,
     HKEY_CURRENT_USER_LOCAL_SETTINGS, HKEY_DYN_DATA, HKEY_LOCAL_MACHINE, HKEY_PERFORMANCE_DATA,
     HKEY_PERFORMANCE_NLSTEXT, HKEY_PERFORMANCE_TEXT, HKEY_USERS, KEY_ENUMERATE_SUB_KEYS,
-    KEY_QUERY_VALUE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, RegCloseKey, RegEnumKeyExW,
-    RegOpenCurrentUser, RegOpenKeyExW, RegQueryInfoKeyW,
+    KEY_QUERY_VALUE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_OPTION_OPEN_LINK, RegCloseKey,
+    RegEnumKeyExW, RegOpenCurrentUser, RegOpenKeyExW, RegQueryInfoKeyW,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
@@ -303,6 +304,66 @@ pub(super) fn open(
     // REG_OPTION_OPEN_LINK, links are followed.
     let rc = unsafe { RegOpenKeyExW(root.hkey(), wide.as_ptr(), 0, sam(access, view), &mut raw) };
     owned(rc, raw)
+}
+
+/// `RegOpenKeyExW(root, path, REG_OPTION_OPEN_LINK, KEY_QUERY_VALUE | view)`: every segment
+/// but the last is followed like on every read, the last one is opened itself, so a
+/// symbolic-link key comes back as the link (`Registry::link`, ADR 0009 amendment P2-9).
+pub(super) fn open_link(root: &Root, path: &str, view: View) -> Result<OwnedKey, u32> {
+    let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    let mut raw: HKEY = ptr::null_mut();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the RegOpenKeyExW call site of Registry::link (ADR 0009 amendment P2-9)"
+    )]
+    // SAFETY: `root` is HKEY_LOCAL_MACHINE or an open key that `root` keeps alive for the call;
+    // `wide` is NUL-terminated and outlives the call; `raw` is valid for a write and on success
+    // receives a new key handle owned by the returned `OwnedKey`.
+    let rc = unsafe {
+        RegOpenKeyExW(
+            root.hkey(),
+            wide.as_ptr(),
+            REG_OPTION_OPEN_LINK,
+            sam(ReadAccess::Query, view),
+            &mut raw,
+        )
+    };
+    owned(rc, raw)
+}
+
+/// `KEY_FLAGS_INFORMATION.KeyFlags` bit of a symbolic-link key.
+pub(super) const REG_FLAG_LINK: u32 = 0x2;
+
+/// `NtQueryKey(KeyFlagsInformation)`: the `KeyFlags` of an open key (needs `KEY_QUERY_VALUE`;
+/// [`REG_FLAG_LINK`]). `KEY_FLAGS_INFORMATION` is `Wow64Flags`,
+/// `KeyFlags`, `ControlFlags`, three `ULONG`s.
+pub(super) fn key_flags(key: &OwnedKey) -> Result<u32, NtStatus> {
+    let mut buf = [0u64; 2];
+    let cap = len_u32(buf.len() * 8);
+    let mut got: u32 = 0;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the NtQueryKey(KeyFlagsInformation) call site (ADR 0018)"
+    )]
+    // SAFETY: `key` is an open key handle kept alive by the borrow; `buf` is writable for `cap`
+    // bytes (16, more than the 12 of KEY_FLAGS_INFORMATION), 8-byte aligned, and outlives the
+    // call; `got` is valid for a write.
+    let status = unsafe {
+        NtQueryKey(
+            key.0,
+            KeyFlagsInformation,
+            buf.as_mut_ptr().cast(),
+            cap,
+            &mut got,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return Err(status);
+    }
+    if len_usize(got) < 12 {
+        return Err(STATUS_INFO_LENGTH_MISMATCH);
+    }
+    u32_at(&buf, 4).ok_or(STATUS_INFO_LENGTH_MISMATCH)
 }
 
 fn owned(rc: u32, raw: HKEY) -> Result<OwnedKey, u32> {

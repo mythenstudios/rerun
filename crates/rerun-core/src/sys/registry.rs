@@ -434,6 +434,14 @@ impl fmt::Display for RegValue {
     }
 }
 
+/// A symbolic-link key as [`Registry::link`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegLink {
+    /// Its `SymbolicLinkValue` as stored: the target's kernel name in UTF-16 (raw, untrusted,
+    /// display only).
+    pub target: Vec<u16>,
+}
+
 /// Registry. Key and value names are case-insensitive, the original case is preserved.
 ///
 /// An existing empty key is different from a missing one: the revert must restore
@@ -459,6 +467,12 @@ pub trait Registry: Send + Sync {
 
     /// Names of the direct subkeys.
     fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>>;
+
+    /// Is `k` itself a symbolic-link key? Every segment but the last is followed like on every
+    /// read; the last one is opened itself (`REG_OPTION_OPEN_LINK`, ADR 0009 amendment), so a
+    /// link is reported and never entered. `None` for a plain key and the hive root; a missing
+    /// key is `NotFound`.
+    fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>>;
 
     /// Creates exactly one key; the parent key must exist (`NotFound` otherwise).
     /// `true` = newly created, `false` = already existed (important for the journal).

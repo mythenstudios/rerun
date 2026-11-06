@@ -18,7 +18,7 @@ use crate::sys::contract::{
     registry_system_contract, registry_write_contract, snapshot_contract, topology_contract,
 };
 use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, NewFile, TmpName, WriteCap, tag};
-use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
+use crate::sys::registry::{Hive, RegKey, RegLink, RegValue, RegView, Registry, reg_type};
 use crate::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
 use crate::sys::{DriverVersion, GpuAdapter, KnownFolder};
 use crate::sys::{SysErrorKind, SysResult, System, Topology};
@@ -301,8 +301,7 @@ fn fake_fulfils_registry_read_contract_in_both_views() {
     let sys = b.build().unwrap();
     for r in &roots {
         let skips = registry_read_contract(sys.registry(), sys.fake_registry(), r).unwrap();
-        // The fake has no symbolic-link keys.
-        assert_eq!(skips, ["key_link"], "{r}");
+        assert!(skips.is_empty(), "{r}: {skips:?}");
     }
 }
 
@@ -324,6 +323,9 @@ impl Registry for LossyRegistry<'_> {
     }
     fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
         self.0.subkeys(k)
+    }
+    fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>> {
+        self.0.link(k)
     }
     fn create_key(&self, k: &RegKey) -> SysResult<bool> {
         self.0.create_key(k)
@@ -1426,7 +1428,110 @@ fn registry_fixture_stores_exactly_what_it_is_told() {
     );
     RegFixture::delete_value(fx, &root, "n").unwrap();
     assert_eq!(sys.registry().get(&root, "n").unwrap(), None);
-    assert!(!fx.link(&root.join("l"), &root).unwrap());
+}
+
+/// RL (fake): reads follow a link key in every segment, `link` opens the last one itself; a
+/// link to an ancestor ends after `MAX_LINK_HOPS` levels; the snapshot records a link and does
+/// not enter it, so the cycle costs nothing.
+#[test]
+fn fake_link_keys_are_followed_on_reads_and_reported_by_link() {
+    use crate::sys::contract::RegFixture;
+    use crate::sys::fake::registry::MAX_LINK_HOPS;
+    let root = hkcu(r"Software\Fx");
+    let sys = FakeSystem::builder()
+        .value(root.join("Target"), "v", RegValue::Dword(7))
+        .key(root.join(r"Target\Sub"))
+        .build()
+        .unwrap();
+    let (fx, reg) = (sys.fake_registry(), sys.registry());
+    assert!(RegFixture::link(fx, &root.join("L"), &root.join("Target")).unwrap());
+    assert_eq!(
+        reg.get(&root.join("l"), "V").unwrap(),
+        Some(RegValue::Dword(7))
+    );
+    assert!(reg.key_exists(&root.join(r"L\Sub")).unwrap());
+    assert_eq!(reg.subkeys(&root.join("L")).unwrap(), ["Sub"]);
+    let l = reg.link(&root.join("L")).unwrap().unwrap();
+    assert_eq!(
+        String::from_utf16(&l.target).unwrap(),
+        r"\REGISTRY\FAKE\HKCU\Software\Fx\Target"
+    );
+    // Below a link, `link` follows the parent: `L\Sub` is the plain `Target\Sub`.
+    assert_eq!(reg.link(&root.join(r"L\Sub")).unwrap(), None);
+    assert_eq!(reg.link(&root.join("Target")).unwrap(), None);
+    assert_eq!(
+        reg.link(&root.join("Nope")).unwrap_err().kind,
+        SysErrorKind::NotFound
+    );
+    // A second link to the same name is refused; the fixture deletes the link itself.
+    assert_eq!(
+        RegFixture::link(fx, &root.join("L"), &root)
+            .unwrap_err()
+            .kind,
+        SysErrorKind::AlreadyExists
+    );
+    RegFixture::delete_key(fx, &root.join("L")).unwrap();
+    assert!(reg.key_exists(&root.join("Target")).unwrap());
+    // A cycle: reads stop after the hop limit, the snapshot does not enter the link.
+    assert!(RegFixture::link(fx, &root.join("Loop"), &root).unwrap());
+    let deep = (0..=MAX_LINK_HOPS).fold(root.join("Loop"), |k, _| k.join("Loop"));
+    assert_eq!(reg.key_exists(&deep).unwrap_err().kind, SysErrorKind::Other);
+    assert!(reg.key_exists(&root.join(r"Loop\Loop\Target")).unwrap());
+    let snap = crate::sys::snapshot::snapshot(
+        reg,
+        &crate::sys::snapshot::Scope {
+            dirs: vec![],
+            keys: vec![root.clone()],
+        },
+    )
+    .unwrap();
+    let lines = snap.diff(&crate::sys::snapshot::Snapshot::default());
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.contains("link key \"Loop\""))
+            .count(),
+        1,
+        "{lines:#?}"
+    );
+}
+
+/// K-R5: a registry whose `link` never reports a link makes the snapshot follow links, and
+/// the snapshot contract's link case fails.
+#[test]
+fn the_snapshot_contract_catches_a_snapshot_that_follows_links() {
+    struct LinkBlind<'a>(&'a dyn Registry);
+    impl Registry for LinkBlind<'_> {
+        fn key_exists(&self, k: &RegKey) -> SysResult<bool> {
+            self.0.key_exists(k)
+        }
+        fn get(&self, k: &RegKey, name: &str) -> SysResult<Option<RegValue>> {
+            self.0.get(k, name)
+        }
+        fn values(&self, k: &RegKey) -> SysResult<Vec<(String, RegValue)>> {
+            self.0.values(k)
+        }
+        fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
+            self.0.subkeys(k)
+        }
+        fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>> {
+            self.0.link(k).map(|_| None)
+        }
+        fn create_key(&self, k: &RegKey) -> SysResult<bool> {
+            self.0.create_key(k)
+        }
+        fn set(&self, k: &RegKey, name: &str, v: &RegValue) -> SysResult<()> {
+            self.0.set(k, name, v)
+        }
+        fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
+            self.0.delete_value(k, name)
+        }
+        fn delete_key(&self, k: &RegKey) -> SysResult<()> {
+            self.0.delete_key(k)
+        }
+    }
+    let e = run_snapshot_contract_with(|d| d, |r| Box::new(LinkBlind(r))).unwrap_err();
+    assert!(e.contains("link key"), "{e}");
 }
 
 #[test]
@@ -2249,6 +2354,10 @@ impl Registry for SpyRegistry<'_> {
         }
         Ok(v)
     }
+    fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>> {
+        Self::check(k);
+        self.inner.link(k)
+    }
     fn create_key(&self, _: &RegKey) -> SysResult<bool> {
         unreachable!("the snapshot only reads")
     }
@@ -2453,18 +2562,28 @@ fn run_snapshot_contract(
     wrap: impl FnOnce(Box<dyn crate::sys::Dir + '_>) -> Box<dyn crate::sys::Dir + '_>,
     case_blind: bool,
 ) -> crate::sys::contract::FsContractResult {
+    run_snapshot_contract_with(wrap, |r| {
+        if case_blind {
+            Box::new(CaseBlindRegistry(r))
+        } else {
+            Box::new(SpyRegistry {
+                inner: r,
+                doubled: false,
+                extra: None,
+            })
+        }
+    })
+}
+
+/// [`run_snapshot_contract`] with the registry read through `read`.
+fn run_snapshot_contract_with(
+    wrap: impl FnOnce(Box<dyn crate::sys::Dir + '_>) -> Box<dyn crate::sys::Dir + '_>,
+    read: impl FnOnce(&dyn Registry) -> Box<dyn Registry + '_>,
+) -> crate::sys::contract::FsContractResult {
     let sys = snapshot_fake();
     let work = Path::new(SNAP_WORK);
     let dir = wrap(sys.fs().open_dir(work).unwrap());
-    let read: Box<dyn Registry + '_> = if case_blind {
-        Box::new(CaseBlindRegistry(sys.registry()))
-    } else {
-        Box::new(SpyRegistry {
-            inner: sys.registry(),
-            doubled: false,
-            extra: None,
-        })
-    };
+    let read = read(sys.registry());
     snapshot_contract(
         SnapRoot::new(&*dir, SNAP_WORK),
         sys.fake_fs(),
@@ -2586,6 +2705,9 @@ impl Registry for CaseBlindRegistry<'_> {
     }
     fn subkeys(&self, k: &RegKey) -> SysResult<Vec<String>> {
         self.0.subkeys(k)
+    }
+    fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>> {
+        self.0.link(k)
     }
     fn create_key(&self, k: &RegKey) -> SysResult<bool> {
         self.0.create_key(k)

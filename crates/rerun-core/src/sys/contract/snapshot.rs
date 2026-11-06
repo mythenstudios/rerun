@@ -81,7 +81,7 @@ fn sz(s: &str) -> Vec<u8> {
 
 /// Snapshot contract. `root` is the root handle of the existing, empty directory `work`;
 /// `key` an existing key without values and subkeys, read through `reg` and changed through
-/// `rfx`. Leaves its entries behind (the runner cleans up). Skipped cases: `"utf16_name"`,
+/// `rfx`. Leaves its entries behind (the runner cleans up). Skipped cases: `"key_link"`, `"utf16_name"`,
 /// `"case_sensitive_dir"`, `"delete_pending"`, `"wof_compress"`, `"restricted"`.
 pub fn snapshot_contract(
     root: SnapRoot<'_>,
@@ -280,6 +280,41 @@ pub fn snapshot_contract(
     )?;
     ok(rfx.key(&key.join("Child")), "fixture: key back")?;
     t.same(&before, "key back")?;
+
+    // RL: a link key is one entry with its target and is never entered; replaced by a key
+    // with the same content (here: empty, like its target) it is one difference.
+    let target = key.join("LinkTarget");
+    let lk = key.join("LinkKey");
+    ok(rfx.key(&target), "fixture: link target")?;
+    let unlinked = t.take("before the link")?;
+    if ok(rfx.link(&lk, &target), "fixture: link")? {
+        t.one_diff(&unlinked, '+', "link key \"LinkKey\"", "a link key")?;
+        let linked = t.take("with the link")?;
+        ok(
+            rfx.raw(&target, "Behind", reg_type::REG_DWORD, &[1, 0, 0, 0]),
+            "fixture: value behind the link",
+        )?;
+        t.one_diff(
+            &linked,
+            '+',
+            "Behind",
+            "a value behind a link shows only at its target",
+        )?;
+        ok(rfx.delete_value(&target, "Behind"), "fixture: value gone")?;
+        ok(rfx.delete_key(&lk), "fixture: link gone")?;
+        ok(rfx.key(&lk), "fixture: a key instead of the link")?;
+        t.one_diff(
+            &linked,
+            '~',
+            "key \"LinkKey\"",
+            "a link replaced by a key with the same content",
+        )?;
+        ok(rfx.delete_key(&lk), "fixture: key gone")?;
+    } else {
+        skip(&mut skips, "key_link");
+    }
+    ok(rfx.delete_key(&target), "fixture: link target gone")?;
+    t.same(&before, "link case undone")?;
 
     // Names that list alike (unpaired surrogates): anomalies kept as a multiset, a change of
     // one of them is one difference. Last for both sides: the fixtures cannot remove them.

@@ -6,9 +6,11 @@
 //!   under impersonation); `Hive::LocalMachine` is `HKEY_LOCAL_MACHINE`.
 //! - Every method applies [`check_key`] and [`check_value_name`] first, then opens the full
 //!   path from the hive root in one `RegOpenKeyExW`, with the view flag (`KEY_WOW64_32KEY` for
-//!   [`RegView::Wow32`]). Links are followed. `key_exists`, `get` and `values` open with
-//!   `KEY_QUERY_VALUE`, `subkeys` with `KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE`; a denied open
-//!   is `AccessDenied`, also for `key_exists`.
+//!   [`RegView::Wow32`]). Links are followed; `link` opens the last segment itself
+//!   (`REG_OPTION_OPEN_LINK`) and reads its `KeyFlags` and `SymbolicLinkValue`. `key_exists`,
+//!   `get`, `values` and `link` open with `KEY_QUERY_VALUE`, `subkeys` with
+//!   `KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE`; a denied open is `AccessDenied`, also for
+//!   `key_exists`.
 //! - Values come back through [`RegValue::decode`], so a malformed or unknown value is
 //!   [`RegValue::Raw`] with its exact bytes.
 //! - Limits for untrusted data ([`MAX_VALUE_BYTES`], [`MAX_VALUES`], [`MAX_VALUES_TOTAL_BYTES`],
@@ -28,8 +30,8 @@ use std::fmt;
 use super::reg::{self, EnumValue, OwnedKey, Read, ReadAccess, Root, UserHiveError, View};
 use super::status::{reg_error, reg_nt_error};
 use crate::sys::registry::{
-    Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegValue,
-    RegView, Registry, check_key, check_value_name,
+    Hive, MAX_SUBKEYS, MAX_VALUE_BYTES, MAX_VALUES, MAX_VALUES_TOTAL_BYTES, RegKey, RegLink,
+    RegValue, RegView, Registry, check_key, check_value_name,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
@@ -107,16 +109,20 @@ impl WinRegistry {
 
     /// Opens `k` (already checked) with `access` in its view.
     fn open(&self, k: &RegKey, access: ReadAccess) -> SysResult<OwnedKey> {
-        let view = match k.view {
-            RegView::Native => View::Native,
-            RegView::Wow32 => View::Wow32,
-        };
-        reg::open(self.root(k.hive), &k.path, access, view)
+        reg::open(self.root(k.hive), &k.path, access, view_of(k.view))
             .map_err(|code| reg_error(code, &k.to_string()))
     }
 
     fn info(key: &OwnedKey, k: &RegKey) -> SysResult<reg::KeyInfo> {
         reg::info(key).map_err(|code| reg_error(code, &k.to_string()))
+    }
+}
+
+/// The `reg` view of a [`RegView`].
+fn view_of(v: RegView) -> View {
+    match v {
+        RegView::Native => View::Native,
+        RegView::Wow32 => View::Wow32,
     }
 }
 
@@ -195,6 +201,29 @@ impl Tally {
         }
         Ok(self.seen.insert(name.to_vec()))
     }
+}
+
+/// One value of an open key, exactly as stored (`None`: missing), within [`MAX_VALUE_BYTES`];
+/// a value that keeps growing is `Busy`.
+pub(super) fn query(key: &OwnedKey, name: &str, target: &str) -> SysResult<Option<RegValue>> {
+    let mut scratch = Vec::new();
+    let mut cap = FIRST_BUFFER;
+    for _ in 0..MORE_DATA_RETRIES {
+        match reg::query_value(key, name, cap, &mut scratch) {
+            Ok(Read::Value(raw)) => {
+                check_size(raw.data.len(), target)?;
+                return Ok(Some(RegValue::decode(raw.kind, &raw.data)));
+            }
+            Ok(Read::MoreData { needed }) => {
+                check_size(needed, target)?;
+                cap = grown(cap, needed);
+            }
+            // The value is missing (the key was opened, so it exists).
+            Ok(Read::Missing) => return Ok(None),
+            Err(status) => return Err(reg_nt_error(status, target)),
+        }
+    }
+    Err(busy(target, "value kept growing"))
 }
 
 /// One `values` attempt. `Ok(None)`: restart (duplicate name). `cap` is the entry size the
@@ -282,25 +311,7 @@ impl Registry for WinRegistry {
         check_key(k)?;
         check_value_name(k, name)?;
         let key = self.open(k, ReadAccess::Query)?;
-        let target = format!("{k} @ {name:?}");
-        let mut scratch = Vec::new();
-        let mut cap = FIRST_BUFFER;
-        for _ in 0..MORE_DATA_RETRIES {
-            match reg::query_value(&key, name, cap, &mut scratch) {
-                Ok(Read::Value(raw)) => {
-                    check_size(raw.data.len(), &target)?;
-                    return Ok(Some(RegValue::decode(raw.kind, &raw.data)));
-                }
-                Ok(Read::MoreData { needed }) => {
-                    check_size(needed, &target)?;
-                    cap = grown(cap, needed);
-                }
-                // The value is missing (the key was opened, so it exists).
-                Ok(Read::Missing) => return Ok(None),
-                Err(status) => return Err(reg_nt_error(status, &target)),
-            }
-        }
-        Err(busy(&target, "value kept growing"))
+        query(&key, name, &format!("{k} @ {name:?}"))
     }
 
     fn values(&self, k: &RegKey) -> SysResult<Vec<(String, RegValue)>> {
@@ -366,6 +377,32 @@ impl Registry for WinRegistry {
             &target,
             "the key kept changing during the enumeration",
         ))
+    }
+
+    fn link(&self, k: &RegKey) -> SysResult<Option<RegLink>> {
+        check_key(k)?;
+        if k.path.is_empty() {
+            return Ok(None);
+        }
+        let target = k.to_string();
+        let key = reg::open_link(self.root(k.hive), &k.path, view_of(k.view))
+            .map_err(|code| reg_error(code, &target))?;
+        let flags = reg::key_flags(&key).map_err(|st| reg_nt_error(st, &target))?;
+        if flags & reg::REG_FLAG_LINK == 0 {
+            return Ok(None);
+        }
+        let stored = query(&key, "SymbolicLinkValue", &target)?
+            .and_then(|v| v.encode())
+            .map(|(_, data)| data)
+            .unwrap_or_default();
+        Ok(Some(RegLink {
+            target: stored
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
+                .collect(),
+        }))
     }
 
     fn create_key(&self, k: &RegKey) -> SysResult<bool> {
