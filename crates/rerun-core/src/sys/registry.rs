@@ -1,8 +1,11 @@
 //! Registry trait.
 
+use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 use super::{SysError, SysErrorKind, SysResult};
+use crate::fold::fold;
 
 /// Registry hive. Further hives only when a primitive needs them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -41,7 +44,13 @@ impl fmt::Display for RegView {
 }
 
 /// A registry key. `path` without leading or trailing `\`; empty = hive root.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Compared, hashed and ordered by hive, view and the **folded** path (the crate's 1:1 fold,
+/// as for file names, ADR 0018): `Software\Rerun` and `SOFTWARE\rerun` are one key, the two
+/// views are two. `Display` keeps the spelling. Build keys with [`RegKey::new`] or
+/// [`RegKey::join`]; a struct literal skips their trimming, and [`check_key`] refuses the
+/// leading or trailing `\` it may leave.
+#[derive(Debug, Clone)]
 pub struct RegKey {
     /// Hive.
     pub hive: Hive,
@@ -49,6 +58,34 @@ pub struct RegKey {
     pub view: RegView,
     /// Path below the hive, separated by `\`.
     pub path: String,
+}
+
+impl PartialEq for RegKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.hive == other.hive && self.view == other.view && fold(&self.path) == fold(&other.path)
+    }
+}
+
+impl Eq for RegKey {}
+
+impl Hash for RegKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.hive.hash(state);
+        self.view.hash(state);
+        fold(&self.path).hash(state);
+    }
+}
+
+impl PartialOrd for RegKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RegKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.hive, self.view, fold(&self.path)).cmp(&(other.hive, other.view, fold(&other.path)))
+    }
 }
 
 impl RegKey {
@@ -453,6 +490,31 @@ mod tests {
             RegKey::new(Hive::CurrentUser, RegView::Native, "").parent(),
             None
         );
+    }
+
+    /// RK: one key in every spelling, two views stay two (ADR 0018).
+    #[test]
+    fn keys_compare_folded_and_keep_their_spelling() {
+        use std::collections::{BTreeSet, HashSet};
+        let k = |v: RegView, p: &str| RegKey::new(Hive::CurrentUser, v, p);
+        let a = k(RegView::Native, r"Software\Rerun\Ä");
+        let b = k(RegView::Native, r"SOFTWARE\rerun\ä");
+        assert_eq!(a, b);
+        assert_eq!(a.cmp(&b), Ordering::Equal);
+        assert_eq!(HashSet::from([a.clone(), b.clone()]).len(), 1);
+        assert_eq!(BTreeSet::from([a.clone(), b.clone()]).len(), 1);
+        assert_eq!(a.to_string(), r"HKCU[native]\Software\Rerun\Ä");
+        assert_eq!(b.to_string(), r"HKCU[native]\SOFTWARE\rerun\ä");
+        // The view and the hive stay apart; `ß` folds 1:1 only.
+        assert_ne!(a, k(RegView::Wow32, r"Software\Rerun\Ä"));
+        assert_ne!(
+            a,
+            RegKey::new(Hive::LocalMachine, RegView::Native, r"Software\Rerun\Ä")
+        );
+        assert_ne!(k(RegView::Native, "Straße"), k(RegView::Native, "STRASSE"));
+        // The order is that of the folded path.
+        assert!(k(RegView::Native, "a") < k(RegView::Native, "B"));
+        assert!(k(RegView::Native, "B") < k(RegView::Native, "c"));
     }
 
     use super::reg_type::*;

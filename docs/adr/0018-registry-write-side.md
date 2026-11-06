@@ -1,6 +1,6 @@
 # ADR 0018 · Registry write side and `policy::registry`
 
-**Status:** accepted (decided by the user) · 2026-11-05 · amends ADR 0004 (registry allowlist now in phase 2) and ADR 0009 (write side), closes audit A1 B2
+**Status:** accepted (decided by the user) · 2026-11-05 · amends ADR 0004 (registry allowlist now in phase 2) and ADR 0009 (write side), closes audit A1 B2 · amended 2026-11-06, P2-9 (see the amendment at the end; it takes precedence where the two differ)
 
 ## Context
 Phase 2 ships `registry_set` and `compat_layer` (`docs/08-roadmap.md`), but ADR 0004, `docs/01-architecture.md` and `docs/06-security.md` placed the allowlist `policy::registry` in phase 3 (A1 B2, core rule 4). `RegKey` compares and hashes case-sensitively, while the registry folds names, so two spellings of one key would be two journal objects. Enumerated names are converted lossily (ADR 0009, open for phase 2). ADR 0009 follows registry links on reads and defers the write side.
@@ -90,3 +90,7 @@ impl RegWriter<'_> {
 - The `compat_layer` token list, the `~`/`$` prefixes and the junction question: P2-11, in Windows Sandbox.
 - `HKCU` link behaviour on the real hive (a link key planted by same-user malware): Windows Sandbox.
 - **Link keys in the snapshot** (P2-5, senior-dev condition 4): reads follow links (ADR 0009), so `sys::snapshot` sees through a link key and has no entry for "this key is a link". A link replaced by a real key with the same content compares as identical. P2-9 gives the snapshot its own entry for a link key (from `KeyFlags`, the same query as the write side) and pins it; until then the depth and key limits only stop a cycle. Manual case in `docs/09-testing.md` (Windows Sandbox).
+
+## Amendment (P2-9, 2026-11-06; decided by the user after a senior-dev cross-check)
+
+- **Folded keys (A2 should-item 2):** `RegKey` implements `Eq`, `Hash` and `Ord` over hive, view and the folded path; `Display` keeps the spelling. Keys are built with `RegKey::new`/`join`; a struct literal skips their trimming and `check_key` refuses what it leaves.
