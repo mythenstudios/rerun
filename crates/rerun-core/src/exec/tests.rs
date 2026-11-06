@@ -10,11 +10,11 @@ use super::{
 };
 use crate::detect::steam::AppState;
 use crate::journal::{Closing, InstanceTag, Journal, Observed, TxnId, TxnState};
-use crate::path::RelPath;
+
 use crate::plan::{PlanHash, store};
 use crate::policy::root::{GameDir, StoreDir};
 use crate::prim::tests::{GAME, PKG, STEAM_GAME, STEAM_LIB, app, builder, entry, fr, rel, spec};
-use crate::prim::{FileEntry, FileInstallSpec, PlanCtx, Step, plan as plan_steps};
+use crate::prim::{FileInstallSpec, PlanCtx, Step, plan as plan_steps};
 use crate::sys::fake::{FakeSystem, FakeSystemBuilder, Prim};
 use crate::sys::fs::Attrs;
 use crate::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
@@ -592,10 +592,15 @@ fn t5_tampering_is_refused_or_left() {
         .swap_with_junction(game(r"mods\a"), r"C:\out")
         .unwrap();
     let r = env.revert(&t);
-    assert!(
-        matches!(&r, Err(ExecError::Op { source, .. }) if source.kind == SysErrorKind::ReparsePoint),
-        "{r:?}"
-    );
+    // Refused by the game-closed check already (nothing written), or by the op itself.
+    let reparse = match &r {
+        Err(ExecError::Op { source, .. }) => source.kind == SysErrorKind::ReparsePoint,
+        Err(ExecError::Refused(Refusal::Root(e))) => {
+            matches!(&**e, crate::policy::root::RootError::Sys(s) if s.kind == SysErrorKind::ReparsePoint)
+        }
+        _ => false,
+    };
+    assert!(reparse, "{r:?}");
     assert_eq!(read_abs(&env.sys, r"C:\out\x.dll"), b"canary");
 }
 
@@ -628,7 +633,7 @@ fn t6_a_foreign_state_is_left_with_its_backup_and_only_forget_closes() {
         let env = Env::new(finish(base()));
         let t = env.applied(&env.plan(&t1_spec()));
         change(&env.sys);
-        let changed = env.snap();
+        let changed = meta_abs(&env.sys, &game(target(op)));
         let user = read_abs(&env.sys, &game(target(op)));
         let rep = env.revert(&t).unwrap();
         assert_eq!(rep.closed, None, "{what}");
@@ -652,7 +657,12 @@ fn t6_a_foreign_state_is_left_with_its_backup_and_only_forget_closes() {
         }
         // The foreign object is as the user left it.
         assert_eq!(read_abs(&env.sys, &game(target(op))), user, "{what}");
-        let _ = &changed;
+        let now = meta_abs(&env.sys, &game(target(op)));
+        assert_eq!(
+            (now.attrs, now.links, now.len),
+            (changed.attrs, changed.links, changed.len),
+            "{what}: attributes, links and length as the user left them"
+        );
         // Revert again: still foreign; forget closes.
         let again = env.revert(&t).unwrap();
         assert_eq!(again.closed, None, "{what}");
@@ -680,6 +690,16 @@ pub(crate) fn read_abs(sys: &FakeSystem, abs: &str) -> Vec<u8> {
     let d = sys.fake_fs().open_dir(p.parent().unwrap()).unwrap();
     d.read(&rel(&p.file_name().unwrap().to_string_lossy()))
         .unwrap_or_else(|e| panic!("{abs}: {e}"))
+}
+
+/// The metadata of the fake entry `abs`.
+pub(crate) fn meta_abs(sys: &FakeSystem, abs: &str) -> crate::sys::fs::Metadata {
+    let p = Path::new(abs);
+    #[expect(clippy::disallowed_methods, reason = "test: look at a fixture entry")]
+    let d = sys.fake_fs().open_dir(p.parent().unwrap()).unwrap();
+    d.metadata(&rel(&p.file_name().unwrap().to_string_lossy()))
+        .unwrap()
+        .unwrap()
 }
 
 /// The fake entry `abs` exists.
@@ -1026,7 +1046,7 @@ fn t8_refusals_write_no_transaction() {
 }
 
 #[test]
-fn forget_closes_open_and_applied_and_marks_damaged() {
+fn forget_closes_applied_and_open_transactions() {
     let env = Env::new(finish(base()));
     let t = env.applied(&env.plan(&t1_spec()));
     env.forget(&t).unwrap();
@@ -1036,9 +1056,6 @@ fn forget_closes_open_and_applied_and_marks_damaged() {
     let open = interrupted(&env, &spec(vec![entry(r"mods\x.dll", r"mods\x.dll", X)]));
     env.forget(&open).unwrap();
     assert_eq!(env.state(&open), Some(TxnState::Closed(Closing::Forgotten)));
-    let missing: FileEntry = entry("new.dll", "new.dll", N);
-    let _ = missing;
-    let _ = RelPath::parse("x");
 }
 
 /// K1: a revert that trusts the records instead of observing destroys a foreign state; T6's
@@ -1072,4 +1089,32 @@ fn k3_restoring_without_attributes_breaks_t1() {
     super::knob::restore_without_attrs(false);
     assert_eq!(closed(&r), Some(Closing::Reverted));
     assert!(before != env.snap(), "K3 not caught");
+}
+
+/// Review S2: a manual root inside a Steam install folder overlaps that root as a whole.
+#[test]
+fn t7_nested_roots_overlap() {
+    let sub = format!(r"{STEAM_GAME}\sub");
+    let env = Env::new(finish(
+        base()
+            .file(manifest(220), acf(220, 4).into_bytes())
+            .file(format!(r"{STEAM_GAME}\game.exe"), b"MZ".to_vec())
+            .dir(&sub),
+    ));
+    let t1 = env.applied(&steam_plan(
+        &env,
+        220,
+        &spec(vec![entry("new.dll", "new.dll", N)]),
+    ));
+    let fr = fr(&env.sys);
+    let g = GameDir::open_manual(&env.sys, &fr, Path::new(&sub)).unwrap();
+    let h2 = env.plan_for(&g, None, &spec(vec![entry("new.dll", "other.dll", N)]));
+    drop(g);
+    let t2 = env.applied(&h2);
+    assert!(matches!(
+        env.revert(&t1),
+        Err(ExecError::Refused(Refusal::Later { txn })) if txn == t2
+    ));
+    assert!(closed(&env.revert(&t2)).is_some());
+    assert!(closed(&env.revert(&t1)).is_some());
 }

@@ -291,6 +291,7 @@ fn p5_objects_overlap_when_equal_or_below_a_created_directory() {
     let one = |root: u128, path: &str, dir: bool| {
         vec![Object {
             root: root_id(root),
+            root_path: None,
             path: crate::fold::fold(path),
             dir,
         }]

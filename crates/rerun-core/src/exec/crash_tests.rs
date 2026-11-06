@@ -72,6 +72,7 @@ struct At {
     revert: bool,
     call: Prim,
     nth: usize,
+    fault: Fault,
 }
 
 /// What the run got back before it was interrupted.
@@ -83,11 +84,10 @@ struct Got {
     closed: bool,
 }
 
-/// Apply, then revert; crash after `at` if given.
+/// Apply, then revert; the fault of `at` (a crash or a failure) at its call if given.
 fn run(env: &Env, h: &PlanHash, at: Option<At>) -> Got {
     let mut got = Got::default();
-    let crash =
-        |a: At| move |fx: &crate::sys::fake::FakeFs| fx.fault(a.call, a.nth, Fault::CrashAfter);
+    let crash = |a: At| move |fx: &crate::sys::fake::FakeFs| fx.fault(a.call, a.nth, a.fault);
     let none = |_: &crate::sys::fake::FakeFs| {};
     let r = match at {
         Some(a) if !a.revert => env.apply_armed(h, crash(a)),
@@ -142,6 +142,7 @@ fn points(k: Kind) -> Vec<Option<At>> {
                 revert,
                 call: *call,
                 nth,
+                fault: Fault::CrashAfter,
             }));
         }
     }
@@ -580,4 +581,112 @@ fn b2_the_old_state_next_to_its_mapped_dot_old_is_before() {
         "{rep:?}"
     );
     drop(held.lock().unwrap().take());
+}
+
+/// Review M1: a failure at any call (the rollback or the revert ends, `sys::seq` may have
+/// undone itself without a flush), then a power loss at every cut of `D:` (the journal kept
+/// whole): recovery identical, never foreign. And a crash at any call, restart, recovery,
+/// then the same power loss: the recovery's revert is durable before its records.
+#[test]
+fn m1_a_failure_or_a_recovery_then_a_power_loss_on_the_game_volume() {
+    let t = Instant::now();
+    let mut runs = 0;
+    for k in [Kind::Replace, Kind::CreateFile] {
+        for at in points(k) {
+            let Some(at) = at else { continue };
+            for fault in [
+                Fault::Fail(crate::sys::SysErrorKind::Other),
+                Fault::CrashAfter,
+            ] {
+                let at = At { fault, ..at };
+                let prepare = |env: &Env, h: &PlanHash, before: &Snapshot| -> Got {
+                    let got = run(env, h, Some(at));
+                    let fx = env.sys.fake_fs();
+                    fx.clear_faults();
+                    if fx.crashed() {
+                        fx.restart();
+                        let v = recover(env, before);
+                        assert!(v.is_empty(), "{k:?} {at:?}: recovery: {v:?}");
+                        return Got::default();
+                    }
+                    got
+                };
+                let pd = {
+                    let (env, h, before) = setup(k);
+                    prepare(&env, &h, &before);
+                    env.sys.fake_fs().pending('D')
+                };
+                for d in 0..=pd {
+                    let (env, h, before) = setup(k);
+                    let got = prepare(&env, &h, &before);
+                    env.sys
+                        .fake_fs()
+                        .power_loss(&BTreeMap::from([('C', 1 << 20), ('D', d)]));
+                    runs += 1;
+                    let v = violations(&env, &before, got);
+                    assert!(v.is_empty(), "{k:?} {at:?}, cut D {d}: {v:?}");
+                }
+            }
+        }
+    }
+    eprintln!(
+        "M1: {runs} power losses in {:.1} s",
+        t.elapsed().as_secs_f64()
+    );
+}
+
+/// Review S1: the apply's `X.old` (the old content, left mapped) survives a restore that fails
+/// on a damaged backup; the op stays open.
+#[test]
+fn s1_a_damaged_backup_never_costs_the_dot_old() {
+    let (env, h, _) = setup(Kind::Replace);
+    let held = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let slot = std::sync::Arc::clone(&held);
+    env.sys.fake_fs().on_step(move |f, ev| {
+        if ev.call == Some(Prim::Rename) && ev.name.eq_ignore_ascii_case("d3d9.dll") {
+            #[expect(clippy::disallowed_methods, reason = "test: list the fixture folder")]
+            let d = f.open_dir(Path::new(crate::prim::tests::GAME)).unwrap();
+            if let Some(o) = d
+                .read_dir(None)
+                .unwrap()
+                .iter()
+                .find(|e| e.name.ends_with(".tmp.old"))
+            {
+                let mut s = slot.lock().unwrap();
+                if s.is_none() {
+                    let p = Path::new(crate::prim::tests::GAME).join(&o.name);
+                    *s = Some(f.map_image_as(4242, &p).unwrap());
+                }
+            }
+        }
+    });
+    let t = match env.apply(&h) {
+        Ok(Outcome::Applied(t)) => t,
+        other => panic!("{other:?}"),
+    };
+    env.sys.fake_fs().clear_on_step();
+    // The game is closed now: the mapping goes, `X.old` stays (Done.old_left).
+    drop(held.lock().unwrap().take());
+    let old = tmp_names(&env);
+    assert_eq!(old.len(), 1, "{old:?}");
+    let old_abs = format!(r"{}\{}", crate::prim::tests::GAME, old[0]);
+    // The backup damaged (same length).
+    let bin = format!(r"{}\op-0000.bin", env.txn_dir(&t));
+    let mut bad = OLD.to_vec();
+    bad[0] ^= 1;
+    let fx = env.sys.fake_fs();
+    fx.remove_abs(Path::new(&bin)).unwrap();
+    fx.put_file(Path::new(&bin), &bad).unwrap();
+    let r = env.revert(&t);
+    assert!(
+        matches!(&r, Err(super::ExecError::Op { source, .. }) if source.kind == crate::sys::SysErrorKind::Mismatch),
+        "{r:?}"
+    );
+    assert_eq!(read_abs(&env.sys, &old_abs), OLD, "X.old kept");
+    assert_eq!(
+        read_abs(&env.sys, &game("d3d9.dll")),
+        NEW,
+        "the target unchanged"
+    );
+    assert_eq!(env.state(&t), Some(TxnState::Applied), "the op stays open");
 }

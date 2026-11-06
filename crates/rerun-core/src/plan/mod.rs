@@ -521,6 +521,9 @@ fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Object {
     pub(crate) root: RootId,
+    /// Canonical path of the root as planned: roots of which one lies inside the other
+    /// overlap as a whole (fail closed, review S2).
+    pub(crate) root_path: Option<RootPath>,
     pub(crate) path: String,
     pub(crate) dir: bool,
 }
@@ -535,6 +538,7 @@ impl Object {
                 let root = plan.roots.get(usize::from(op.root().0))?;
                 Some(Self {
                     root: root.id,
+                    root_path: Some(root.path.clone()),
                     path: fold(op.path().as_str()),
                     dir: matches!(op, Op::CreateDir { .. }),
                 })
@@ -542,8 +546,16 @@ impl Object {
             .collect()
     }
 
-    /// Same object, or one a created directory with the other below it.
+    /// Same object, or one a created directory with the other below it; any two objects of
+    /// two different roots of which one lies inside the other (a manual root inside a Steam
+    /// install folder): no rebasing of paths, fail closed.
     pub(crate) fn overlaps(&self, other: &Self) -> bool {
+        if self.root != other.root
+            && let (Some(a), Some(b)) = (&self.root_path, &other.root_path)
+            && (a.contains(b) || b.contains(a))
+        {
+            return true;
+        }
         let below = |dir: &Self, p: &Self| {
             dir.dir
                 && p.path

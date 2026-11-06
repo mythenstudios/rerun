@@ -62,6 +62,11 @@ pub struct FileEntry {
     pub config: bool,
 }
 
+/// A path for a message (ADR 0016: untrusted text only through `escape`).
+fn shown(p: &RelPath) -> String {
+    crate::escape::path(p.as_str()).to_string()
+}
+
 fn refuse(what: impl Into<String>) -> PlanError {
     PlanError::Step(what.into())
 }
@@ -83,7 +88,7 @@ pub(crate) fn hash_file(dir: &dyn Dir, p: &RelPath) -> Result<([u8; 32], u64), P
         len = len.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
     }
     if len > MAX_FILE_LEN {
-        return Err(refuse(format!("{p} is larger than 2 GiB")));
+        return Err(refuse(format!("{} is larger than 2 GiB", shown(p))));
     }
     Ok((h.finalize().into(), len))
 }
@@ -111,7 +116,9 @@ pub(crate) fn open_package<'d>(
 
 fn missing(id: &str, version: &str) -> PlanError {
     refuse(format!(
-        "package {id} {version} is not in Rerun's packages folder"
+        "package {} {} is not in Rerun's packages folder",
+        crate::escape::text(id),
+        crate::escape::text(version)
     ))
 }
 
@@ -155,7 +162,7 @@ pub(crate) fn plan_into(
         {
             return Err(refuse(format!(
                 "{} is a target twice or an ancestor of another",
-                f.to
+                shown(&f.to)
             )));
         }
     }
@@ -173,7 +180,7 @@ pub(crate) fn plan_into(
     }
     for f in &spec.files {
         // The source.
-        let bad_src = |why: &str| refuse(format!("source {}: {why}", f.from));
+        let bad_src = |why: &str| refuse(format!("source {}: {why}", shown(&f.from)));
         let meta = src
             .metadata(&f.from)
             .map_err(|e| bad_src(&e.to_string()))?
@@ -184,7 +191,7 @@ pub(crate) fn plan_into(
             return Err(bad_src("does not have the SHA-256 of the step"));
         }
         // The way to the target, top-down.
-        let bad_to = |why: &str| refuse(format!("target {}: {why}", f.to));
+        let bad_to = |why: &str| refuse(format!("target {}: {why}", shown(&f.to)));
         let segs: Vec<&str> = f.to.segments().collect();
         let mut prefix: Option<RelPath> = None;
         let mut creating = false;
@@ -204,11 +211,14 @@ pub(crate) fn plan_into(
                         None => creating = true,
                         Some(m) => {
                             if m.restricted || m.kind != EntryKind::Dir {
-                                return Err(bad_to(&format!("{p} is not a plain folder")));
+                                return Err(bad_to(&format!(
+                                    "{} is not a plain folder",
+                                    shown(&p)
+                                )));
                             }
                             let d = game.open_dir(&p).map_err(|e| bad_to(&e.to_string()))?;
                             if d.info()?.case_sensitive {
-                                return Err(bad_to(&format!("{p} is case-sensitive")));
+                                return Err(bad_to(&format!("{} is case-sensitive", shown(&p))));
                             }
                         }
                     }

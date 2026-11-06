@@ -50,7 +50,9 @@ pub struct ExecCtx<'a> {
     pub fr: &'a ForbiddenRoots,
     /// Rerun's folder (journal, plans, packages).
     pub app: &'a AppDir<'a>,
-    /// The instance tag of this run (transaction names, temp names).
+    /// The instance tag of this run (transaction names, temp names). Fresh per run
+    /// (`InstanceTag::new`): a journal numbers its temp names from 0, so a tag used twice
+    /// could meet a temp name of an earlier run.
     pub tag: InstanceTag,
 }
 
@@ -101,13 +103,28 @@ pub enum Refusal {
         /// The transaction.
         txn: TxnId,
     },
+    /// Whether a file of the game is in use cannot be checked (access denied): fail closed.
+    #[error("{0} cannot be checked for use (access denied)")]
+    Unchecked(Shown<'static>),
     /// The Steam app is not installed or is updating (ADR 0012).
-    #[error("Steam app {app_id} is {state:?}; try again when Steam has finished")]
+    #[error("Steam app {app_id} is {}; try again when Steam has finished", steam_state(*state))]
     Steam {
         /// The app.
         app_id: u32,
         /// Its state.
         state: AppState,
+    },
+    /// The Steam manifest of the app cannot be read now (Steam may be writing it).
+    #[error("the Steam manifest of app {app_id} cannot be read now; try again later")]
+    SteamManifest {
+        /// The app.
+        app_id: u32,
+    },
+    /// The transaction was forgotten: there is nothing to revert.
+    #[error("transaction {txn} was forgotten; there is nothing to revert")]
+    Forgotten {
+        /// The transaction.
+        txn: TxnId,
     },
     /// A root cannot be reopened or is another folder now.
     #[error(transparent)]
@@ -127,6 +144,15 @@ pub enum Refusal {
     /// The journal could not be read or the transaction not begun.
     #[error(transparent)]
     Journal(Box<JournalError>),
+}
+
+/// An app state for a message.
+fn steam_state(s: AppState) -> &'static str {
+    match s {
+        AppState::Installed => "installed",
+        AppState::UpdatePending => "updating",
+        AppState::NotInstalled => "not installed",
+    }
 }
 
 impl From<RootError> for Refusal {
@@ -267,8 +293,7 @@ pub(crate) mod knob {
     pub(crate) enum GameFlush {
         /// Before `Applied`.
         BeforeApplied,
-        /// Before each `RevertDone` of an op that changed something (and so before
-        /// `Closed`).
+        /// Before each `RevertDone` (and so before `Closed`).
         BeforeRevertDone,
     }
 
@@ -387,7 +412,7 @@ fn run(
     hints: &mut BTreeMap<u16, Hint>,
 ) -> Result<(), ExecError> {
     for (k, op) in plan.ops.iter().enumerate() {
-        file::apply_op(cx, plan, w, dirs, op_ix(k), op, hints)?;
+        file::apply_op(cx, w, dirs, op_ix(k), op, hints)?;
     }
     let ops = w.ops().clone();
     for (k, log) in &ops {
@@ -454,7 +479,7 @@ fn close<W: Reverting>(w: W) -> Result<(), ExecError> {
 }
 
 /// Newest op first while one is left: observe, `RevertIntent` (with a temp name only when a
-/// restore starts, B2), act, flush the game folders the act changed, `RevertDone`. A foreign
+/// restore starts, B2), act, flush the op's game folder (always), `RevertDone`. A foreign
 /// op gets its records and is left (R1).
 ///
 /// The flush before `RevertDone` (found by T4): `RevertDone` is not flushed itself, but the
@@ -462,7 +487,8 @@ fn close<W: Reverting>(w: W) -> Result<(), ExecError> {
 /// rename, so a power loss can keep `RevertDone` while the change on the game's volume is
 /// lost; a recovery that then skips the op (the grammar allows no second revert of it) would
 /// trust the record alone. With the flush, a durable `RevertDone` has a durable change; it
-/// also covers `Closed`, which therefore needs no flush of its own.
+/// also covers `Closed`, which therefore needs no flush of its own. It runs for every op, also
+/// one whose act changed nothing (T3 under power loss, review M1).
 fn revert_loop<W: Reverting>(
     cx: &ExecCtx<'_>,
     plan: &Plan,
@@ -482,8 +508,13 @@ fn revert_loop<W: Reverting>(
         let seen: Seen = file::observe(plan, dirs, k, op, &log, mode, hints.get(&k).copied())?;
         let y = seen.restore.then(|| w.tmp());
         w.revert_intent(k, y.clone())?;
-        let done = file::act(plan, w, dirs, k, op, &seen, y)?;
-        if seen.changes() && !flush_skipped(Flush::BeforeRevertDone) {
+        let done = file::act(w, dirs, k, op, &seen, y)?;
+        // Always, also when the act changed nothing: a sequence of `sys::seq` that failed in
+        // the apply undid itself (the guard renamed back, `<tmp>` discarded) without a flush,
+        // and the op's `RevertDone` must not outlive that undo on the game's volume.
+        if !flush_skipped(Flush::BeforeRevertDone) {
+            dirs.parent(op.root().0, op.path(), true)
+                .map_err(|source| ExecError::Op { op: k, source })?;
             dirs.flush()?;
         }
         w.revert_done(k, seen.observed, done.old_left)?;
@@ -491,8 +522,12 @@ fn revert_loop<W: Reverting>(
             op: k,
             observed: seen.observed,
             left: done.left,
-            backup: (seen.observed == Observed::Foreign && log.intent.backup.is_some())
-                .then(|| format!(r"{}\journal\{}\op-{k:04}.bin", cx.app.path(), w.id())),
+            backup: (seen.observed == Observed::Foreign && log.intent.backup.is_some()).then(
+                || {
+                    let p = format!(r"{}\journal\{}\op-{k:04}.bin", cx.app.path(), w.id());
+                    crate::escape::path(&p).to_string()
+                },
+            ),
         });
     }
     Ok(reports)
@@ -508,11 +543,13 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
         .iter()
         .find(|l| l.id == *t)
         .ok_or(JournalError::NotFound(*t))?;
-    let damaged = own.forgotten
-        || own
-            .view
-            .as_ref()
-            .map_or(true, |v| matches!(v.state, TxnState::Damaged(_)));
+    if own.forgotten {
+        return Err(Refusal::Forgotten { txn: *t }.into());
+    }
+    let damaged = own
+        .view
+        .as_ref()
+        .map_or(true, |v| matches!(v.state, TxnState::Damaged(_)));
     if damaged {
         return Err(Refusal::Blocked { txn: *t }.into());
     }

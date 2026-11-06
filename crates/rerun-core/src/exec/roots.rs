@@ -56,7 +56,9 @@ pub(super) fn open_games<'g>(
                 };
                 let app = match app_manifest(store, *app_id) {
                     Ok(Some(a)) => a,
-                    Ok(None) | Err(_) => return Err(not_installed),
+                    Ok(None) => return Err(not_installed),
+                    // Unreadable now (Steam may be rewriting it): transient, not "gone".
+                    Err(_) => return Err(Refusal::SteamManifest { app_id: *app_id }),
                 };
                 if app.install_dir != *installdir {
                     return Err(not_installed);
@@ -69,7 +71,13 @@ pub(super) fn open_games<'g>(
                 }
                 store.game(cx.fr, installdir.as_str())?
             }
-            _ => GameDir::open_manual(cx.sys, cx.fr, r.path.path())?,
+            (PlanOrigin::Manual, None) => GameDir::open_manual(cx.sys, cx.fr, r.path.path())?,
+            (PlanOrigin::Steam { .. }, None) | (PlanOrigin::Manual, Some(_)) => {
+                return Err(Refusal::Plan(crate::plan::PlanError::Invalid {
+                    op: None,
+                    why: "a root without its store",
+                }));
+            }
         };
         game.ensure_id(r.id)?;
         if !game.info().user_writable {
@@ -105,16 +113,21 @@ fn unused(plan: &Plan, games: &[GameDir<'_>], root: usize, p: &RelPath) -> Resul
     let Some(g) = games.get(root) else {
         return Ok(());
     };
+    // Decided from the entry itself, not from the error of `users()` (where a folder and a
+    // restricted file are both `AccessDenied`): no entry, a folder or a link is no file to
+    // ask; a file that cannot be asked refuses (fail closed, review N3).
+    match g.dir().metadata(p)? {
+        None => return Ok(()),
+        Some(m) if m.restricted => return Err(Refusal::Unchecked(shown(plan, root, p))),
+        Some(m) if m.kind != crate::sys::fs::EntryKind::File => return Ok(()),
+        Some(_) => {}
+    }
     match g.dir().users(p) {
         Ok(pids) if pids.is_empty() => Ok(()),
         Ok(_) => Err(Refusal::Busy(shown(plan, root, p))),
-        Err(e)
-            if matches!(
-                e.kind,
-                SysErrorKind::NotFound | SysErrorKind::AccessDenied | SysErrorKind::ReparsePoint
-            ) =>
-        {
-            Ok(())
+        Err(e) if e.kind == SysErrorKind::NotFound => Ok(()),
+        Err(e) if e.kind == SysErrorKind::AccessDenied => {
+            Err(Refusal::Unchecked(shown(plan, root, p)))
         }
         Err(e) => Err(e.into()),
     }
@@ -212,5 +225,17 @@ pub(super) fn same_state(
     old: &crate::plan::FileState,
 ) -> crate::sys::SysResult<bool> {
     let m = g.metadata()?;
-    Ok(m.len == old.len && m.attrs == old.attrs && m.is_single_link() && g.sha256()? == old.sha256)
+    Ok(!is_placeholder(&m)
+        && m.len == old.len
+        && m.attrs == old.attrs
+        && m.is_single_link()
+        && g.sha256()? == old.sha256)
+}
+
+/// A cloud files placeholder (`0x9000_x01A`): never hashed or read here, it would be
+/// downloaded (ADR 0007); a target that became one is `Mismatch` or `Foreign`.
+pub(super) fn is_placeholder(m: &crate::sys::fs::Metadata) -> bool {
+    m.reparse
+        .as_ref()
+        .is_some_and(|r| r.tag & 0xFFFF_0FFF == crate::sys::fs::tag::CLOUD)
 }

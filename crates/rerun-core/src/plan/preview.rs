@@ -1,8 +1,8 @@
 //! The preview of a plan (core rule 5, ADR 0020 "Preview"): every op with its root, path,
 //! content source, SHA-256, length and attributes, the old state of a replace, the hint for a
 //! configuration file, and once per plan what a revert does not restore (ADR 0017, D3). Every
-//! untrusted field is an [`escape::Shown`] (`escape::path` for paths, `escape::text` for
-//! package names), built from the decoded plan, i.e. from the stored bytes.
+//! untrusted field is an [`escape::Shown`] (`escape::path` for paths and for the source,
+//! which joins package ID, version and file), built from the decoded plan, i.e. from the stored bytes.
 
 use std::fmt;
 

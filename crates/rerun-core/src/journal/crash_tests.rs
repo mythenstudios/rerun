@@ -2,8 +2,8 @@
 //!
 //! The script applies two ops and reverts them, the journal on `C:` and the stub changes on
 //! `D:` (op `k` creates `D:\G\c<k>.bin`, its revert deletes it); op 0 takes a backup of
-//! `D:\G\a.bin`. The game folder is flushed before `applied` and before `close`, as `exec`
-//! will (ADR 0019).
+//! `D:\G\a.bin`. The game folder is flushed before `applied` and before each `revert_done`, as
+//! `exec` does (ADR 0019 amendment P2-8: a durable `RevertDone` has a durable change).
 //! - J4 crashes after every call of Rerun the script makes (condition S1), restarts and
 //!   requires: never damaged, a prefix of the full log, the lock free, and `resume` finishes
 //!   and closes.
@@ -40,7 +40,7 @@ fn stub(k: usize) -> String {
 enum Site {
     Journal(FlushSite),
     GameBeforeApplied,
-    GameBeforeClose,
+    GameBeforeRevertDone,
 }
 
 const SITES: [Site; 6] = [
@@ -48,7 +48,7 @@ const SITES: [Site; 6] = [
     Site::GameBeforeApplied,
     Site::Journal(FlushSite::Applied),
     Site::Journal(FlushSite::RevertIntent),
-    Site::GameBeforeClose,
+    Site::GameBeforeRevertDone,
     Site::Journal(FlushSite::Close),
 ];
 
@@ -104,9 +104,9 @@ fn script(
         p.flushed = n;
         let name = r(&stub(usize::from(k)));
         g.guard(&name)?.delete(&sha(C[usize::from(k)]))?;
+        game_flush(Site::GameBeforeRevertDone)?;
         w.revert_done(k, Observed::After, false)?;
     }
-    game_flush(Site::GameBeforeClose)?;
     w.close(Closing::Reverted)?;
     p.flushed = 10;
     Ok(())
@@ -234,6 +234,13 @@ fn violations(s: &Seen, p: Progress) -> Vec<String> {
         });
         if closed && exists {
             v.push(format!("Closed durable, the revert of {k} lost"));
+        }
+        let reverted = has(
+            log,
+            |r| matches!(r, Record::RevertDone { op, .. } if *op == k),
+        );
+        if reverted && exists {
+            v.push(format!("RevertDone durable, the revert of {k} lost"));
         }
     }
     if log.len() < p.flushed {
@@ -409,7 +416,7 @@ fn j6_every_flush_site_is_needed() {
             Site::Journal(FlushSite::RevertIntent),
             "Applied durable, change",
         ),
-        (Site::GameBeforeClose, "Closed durable"),
+        (Site::GameBeforeRevertDone, "durable, the revert of"),
         (
             Site::Journal(FlushSite::Close),
             "returned Ok after their flush",

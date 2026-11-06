@@ -110,6 +110,12 @@ pub enum JournalError {
         /// The entry.
         highest: TxnId,
     },
+    /// A forget marker for another head is in the way (user decision D2).
+    #[error("{path} names another head; remove it and forget again")]
+    MarkerInTheWay {
+        /// The marker, escaped for display.
+        path: String,
+    },
     /// The record would break the grammar (a caller error); nothing was written.
     #[error("journal record refused: {0}")]
     Order(&'static str),

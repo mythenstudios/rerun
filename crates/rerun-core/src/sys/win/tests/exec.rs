@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::super::testfx::TestRoot;
+use super::super::testfx::{TestRoot, note};
 use super::app::{AppTestSys, app_root};
 use crate::exec::tests::{N, NEW, OLD, RH, X, t1_spec};
 use crate::exec::{ApplyError, ExecCtx, Outcome, Refusal, apply, forget, revert, verify};
@@ -38,6 +38,15 @@ fn setup(case: &str) -> Option<Win> {
     fx.file(&game.join("game.exe"), b"MZ").unwrap();
     fx.set_attrs(&game.join("d3d9.dll"), RH).unwrap();
     let sys = AppTestSys::new(&lad);
+    // The fake known folders name another profile: a `target/` inside the real user profile
+    // is then "another user's profile" for the forbidden list. Skip rather than guess.
+    let fr = ForbiddenRoots::resolve(&sys, &install).unwrap_or_else(|e| panic!("{e}"));
+    if let Err(e) = GameDir::open_manual(&sys, &fr, &game) {
+        note(&format!(
+            "exec {case}: skipped, the game folder is refused here: {e}"
+        ));
+        return None;
+    }
     Some(Win {
         root,
         sys,
@@ -176,6 +185,7 @@ fn t8_exec_refuses_while_the_game_runs_on_real_windows() {
         drop(held);
     }
     let Some(mapped) = w.root.fx().mapped_image(&w.game.join("game.exe")).unwrap() else {
+        note("exec T8: no image mapping on this system, the mapped main executable is not checked");
         return;
     };
     let r = w.with(|cx, _| apply(cx, &h));

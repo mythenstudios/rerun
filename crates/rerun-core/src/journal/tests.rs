@@ -1212,10 +1212,12 @@ fn d2_a_forget_marker_covers_the_head_it_names() {
     lock.forget_marker(&id, head.as_ref()).unwrap();
     assert!(listed(&j).forgotten);
     assert_eq!(j.list().unwrap().foreign, 0, "a marker is no foreign entry");
-    assert!(matches!(
-        lock.forget_marker(&id, None),
-        Err(JournalError::Order(_))
-    ));
+    match lock.forget_marker(&id, None) {
+        Err(JournalError::MarkerInTheWay { path }) => {
+            assert!(path.ends_with(&format!("{id}.forgotten")), "{path}");
+        }
+        other => panic!("{other:?}"),
+    }
     // A head swapped in afterwards is not covered.
     fx.remove_abs(Path::new(&format!(r"{}\head.json", txn_dir(&id))))
         .unwrap();

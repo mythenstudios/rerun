@@ -21,7 +21,7 @@
 //!   `Yi.old` exists decides (else `S0`), by the table of A3 for its direction (B2). `After` is
 //!   restored from the backup with the backup's SHA-256 and length as the expected ones and the
 //!   old R/H/S. `X.old` holding `h0` next to a decided state is the pending cleanup of `Done`'s
-//!   `old_left` and deleted with `h0` expected.
+//!   `old_left` and deleted with `h0` expected, after a restore only once it succeeded.
 
 use std::collections::BTreeMap;
 
@@ -57,7 +57,8 @@ pub(super) enum Mode {
 }
 
 /// The write handles of the folders a plan touches, opened handle-relative from their roots
-/// and cached; the folders written into are flushed before `Applied` and `Closed`.
+/// and cached; the folders written into are flushed before `Applied` and before every
+/// `RevertDone`.
 pub(super) struct Dirs<'g> {
     games: &'g [GameDir<'g>],
     open: Vec<(u16, RelPath, Box<dyn DirWrite + 'g>)>,
@@ -155,7 +156,6 @@ fn op_err(op: u16) -> impl Fn(SysError) -> ExecError {
 /// the guard → backup → intent (with `X` and the backup) → replace → done.
 pub(super) fn apply_op(
     cx: &ExecCtx<'_>,
-    _plan: &Plan,
     w: &mut TxnWriter<'_>,
     dirs: &mut Dirs<'_>,
     k: u16,
@@ -223,7 +223,8 @@ pub(super) fn apply_op(
             match parent.create_new(&name, &mut src, &new) {
                 Ok(wr) => Ok(w.done(k, wr.file_id, false)?),
                 Err(x) => {
-                    if x.kind == SysErrorKind::AlreadyExists {
+                    // `Busy` here is a collision at the final rename: someone else's file.
+                    if matches!(x.kind, SysErrorKind::AlreadyExists | SysErrorKind::Busy) {
                         hints.insert(k, Hint::Foreign);
                     }
                     Err(e(x))
@@ -305,7 +306,8 @@ fn see_file(parent: Option<&dyn DirWrite>, name: &RelPath) -> SysResult<FileSeen
     let Some(m) = d.metadata(name)? else {
         return Ok(FileSeen::Absent);
     };
-    if m.kind != EntryKind::File || m.restricted {
+    // A cloud placeholder is never opened for data (it would be downloaded): "other".
+    if m.kind != EntryKind::File || m.restricted || roots::is_placeholder(&m) {
         return Ok(FileSeen::Other);
     }
     match d.guard(name) {
@@ -412,11 +414,6 @@ impl Seen {
             actions: Vec::new(),
             left: Vec::new(),
         }
-    }
-
-    /// The revert changes something on disk (an action or a restore).
-    pub(super) fn changes(&self) -> bool {
-        self.restore || !self.actions.is_empty()
     }
 
     fn act(mut self, a: Action) -> Self {
@@ -711,6 +708,72 @@ fn replace_seen(
     })
 }
 
+/// Carries out one action of a revert.
+fn run_action(
+    dirs: &mut Dirs<'_>,
+    root: u16,
+    op: &Op,
+    a: &Action,
+    done: &mut Done,
+    e: &impl Fn(SysError) -> ExecError,
+) -> Result<(), ExecError> {
+    if let Action::RemoveDir(_) = a {
+        dirs.evict(root, op.path());
+    }
+    let Some((parent, name)) = dirs.parent(root, op.path(), true).map_err(e)? else {
+        return Ok(());
+    };
+    match a {
+        Action::RemoveDir(id) => parent.remove_dir(&name, *id).map_err(e)?,
+        Action::DeleteTarget(h) => parent.guard(&name).and_then(|g| g.delete(h)).map_err(e)?,
+        Action::DeleteTmp(n) => match parent.guard(n) {
+            Ok(mut g) => {
+                let h = g.sha256().map_err(e)?;
+                g.delete(&h).map_err(e)?;
+            }
+            Err(x) if x.kind == SysErrorKind::NotFound => {}
+            Err(x)
+                if matches!(
+                    x.kind,
+                    SysErrorKind::Linked | SysErrorKind::ReparsePoint | SysErrorKind::AccessDenied
+                ) =>
+            {
+                done.left.push(n.clone());
+            }
+            Err(x) => return Err(e(x)),
+        },
+        Action::DeleteOld(n, h) => match parent.guard(n) {
+            Ok(mut g) => {
+                if g.sha256().map_err(e)? != *h {
+                    done.left.push(n.clone());
+                } else {
+                    match g.delete(h) {
+                        Ok(()) => {}
+                        Err(x) if x.kind == SysErrorKind::Busy => {
+                            done.old_left = true;
+                            done.left.push(n.clone());
+                        }
+                        Err(x) => return Err(e(x)),
+                    }
+                }
+            }
+            Err(x) if x.kind == SysErrorKind::NotFound => {}
+            Err(x) => return Err(e(x)),
+        },
+        Action::RenameBack(n, h) => {
+            let mut g = parent.guard(n).map_err(e)?;
+            if g.sha256().map_err(e)? != *h {
+                return Err(e(SysError::new(
+                    SysErrorKind::Mismatch,
+                    format!("{n}: not the expected content"),
+                )));
+            }
+            g.rename_to(&name).map_err(e)?;
+        }
+    }
+    Ok(())
+}
+
 /// What [`act`] did beyond the observation.
 pub(super) struct Done {
     pub(super) old_left: bool,
@@ -719,7 +782,6 @@ pub(super) struct Done {
 
 /// Carries out the actions of `seen` and, if it says so, the restore with temp name `y`.
 pub(super) fn act<W: Reverting>(
-    _plan: &Plan,
     w: &W,
     dirs: &mut Dirs<'_>,
     k: u16,
@@ -733,63 +795,11 @@ pub(super) fn act<W: Reverting>(
         old_left: false,
         left: seen.left.clone(),
     };
-    for a in &seen.actions {
-        if let Action::RemoveDir(_) = a {
-            dirs.evict(root, op.path());
-        }
-        let Some((parent, name)) = dirs.parent(root, op.path(), true).map_err(&e)? else {
-            continue;
-        };
-        match a {
-            Action::RemoveDir(id) => parent.remove_dir(&name, *id).map_err(&e)?,
-            Action::DeleteTarget(h) => parent.guard(&name).and_then(|g| g.delete(h)).map_err(&e)?,
-            Action::DeleteTmp(n) => match parent.guard(n) {
-                Ok(mut g) => {
-                    let h = g.sha256().map_err(&e)?;
-                    g.delete(&h).map_err(&e)?;
-                }
-                Err(x) if x.kind == SysErrorKind::NotFound => {}
-                Err(x)
-                    if matches!(
-                        x.kind,
-                        SysErrorKind::Linked
-                            | SysErrorKind::ReparsePoint
-                            | SysErrorKind::AccessDenied
-                    ) =>
-                {
-                    done.left.push(n.clone());
-                }
-                Err(x) => return Err(e(x)),
-            },
-            Action::DeleteOld(n, h) => match parent.guard(n) {
-                Ok(mut g) => {
-                    if g.sha256().map_err(&e)? != *h {
-                        done.left.push(n.clone());
-                    } else {
-                        match g.delete(h) {
-                            Ok(()) => {}
-                            Err(x) if x.kind == SysErrorKind::Busy => {
-                                done.old_left = true;
-                                done.left.push(n.clone());
-                            }
-                            Err(x) => return Err(e(x)),
-                        }
-                    }
-                }
-                Err(x) if x.kind == SysErrorKind::NotFound => {}
-                Err(x) => return Err(e(x)),
-            },
-            Action::RenameBack(n, h) => {
-                let mut g = parent.guard(n).map_err(&e)?;
-                if g.sha256().map_err(&e)? != *h {
-                    return Err(e(SysError::new(
-                        SysErrorKind::Mismatch,
-                        format!("{n}: not the expected content"),
-                    )));
-                }
-                g.rename_to(&name).map_err(&e)?;
-            }
-        }
+    // S1 (review): with a restore, the `.old` holding `h0` goes only after the restore
+    // succeeded; a damaged backup must not cost the last copy of the old content.
+    let deferred = |a: &&Action| seen.restore && matches!(a, Action::DeleteOld(..));
+    for a in seen.actions.iter().filter(|a| !deferred(a)) {
+        run_action(dirs, root, op, a, &mut done, &e)?;
     }
     if seen.restore {
         let Op::ReplaceFile { old, content, .. } = op else {
@@ -849,6 +859,9 @@ pub(super) fn act<W: Reverting>(
                 done.left.push(t.old());
             }
         }
+    }
+    for a in seen.actions.iter().filter(|a| deferred(a)) {
+        run_action(dirs, root, op, a, &mut done, &e)?;
     }
     Ok(done)
 }

@@ -132,9 +132,14 @@ impl<'j> JournalLock<'j> {
             Err(e) if e.kind == SysErrorKind::AlreadyExists => {
                 let have = self.dir.read_limited(&names::marker_name(id), 64)?;
                 if have != content.as_bytes() {
-                    return Err(JournalError::Order(
-                        "a forget marker for another head is in the way; remove it",
-                    ));
+                    return Err(JournalError::MarkerInTheWay {
+                        path: crate::escape::path(&format!(
+                            r"{}\journal\{}",
+                            self.app,
+                            names::marker_name(id)
+                        ))
+                        .to_string(),
+                    });
                 }
             }
             Err(e) => return Err(e.into()),
