@@ -141,7 +141,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
 }
 
 /// `m` is a plain file of the game folder (not missing, not a folder, link or other reparse
-/// point).
+/// point, not restricted: D4 could not ask it, security N-3).
 fn main_exe_is_a_file(game: &GameDir<'_>, m: &RelPath) -> Result<(), PlanError> {
     let bad = || {
         PlanError::Step(format!(
@@ -150,7 +150,9 @@ fn main_exe_is_a_file(game: &GameDir<'_>, m: &RelPath) -> Result<(), PlanError> 
         ))
     };
     match game.dir().metadata(m) {
-        Ok(Some(md)) if md.kind == EntryKind::File && md.reparse.is_none() => Ok(()),
+        Ok(Some(md)) if md.kind == EntryKind::File && md.reparse.is_none() && !md.restricted => {
+            Ok(())
+        }
         Ok(_) => Err(bad()),
         Err(e) if matches!(e.kind, SysErrorKind::NotFound | SysErrorKind::ReparsePoint) => {
             Err(bad())

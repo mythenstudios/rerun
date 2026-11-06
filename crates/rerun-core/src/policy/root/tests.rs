@@ -795,8 +795,9 @@ fn game_whose_common_was_swapped_during_the_open_is_refused() {
     let r = store.game(&fr, "Game");
     sys.fake_fs().clear_on_step();
     assert!(events.load(Ordering::SeqCst) >= 4, "swap happened");
+    // A race, not a missing folder (P2-10a review: only a missing path is "gone").
     assert!(
-        matches!(&r, Err(RootError::Sys(e)) if e.kind == SysErrorKind::NotFound),
+        matches!(&r, Err(RootError::Sys(e)) if e.kind == SysErrorKind::Busy),
         "{r:?}"
     );
 }

@@ -21,10 +21,9 @@ pub(crate) fn rel(s: &str) -> RelPath {
     RelPath::parse(s).unwrap()
 }
 
-/// The fake Windows layout, Rerun's install folder and the game folder.
-/// The fake system of the planner and `exec` tests: Rerun installed, the game folder
-/// [`GAME`] with its main executable `game.exe` (a plan names it, and it must be a file
-/// there, audit A2 should-item 8).
+/// The fake Windows layout, Rerun's install folder and the game folder [`GAME`] with its main
+/// executable `game.exe` (a plan names it, and it must be a file there, audit A2 should-item
+/// 8).
 pub(crate) fn builder() -> FakeSystemBuilder {
     FakeSystem::builder()
         .windows_layout()
@@ -394,9 +393,15 @@ fn t9_refusals() {
         let e = plan_manual(&sys, &spec(files)).expect_err(what).to_string();
         assert!(e.contains(want), "{what}: {e}");
     }
-    // A2 should-item 8: the main executable is missing, a folder or a link.
+    // A2 should-item 8: the main executable is restricted, missing, a folder or a link.
     type Exe = fn(&FakeSystem);
-    let exes: [(&str, Exe); 3] = [
+    let exes: [(&str, Exe); 4] = [
+        // Security N-3: D4 could not ask it.
+        ("restricted", |s| {
+            s.fake_fs()
+                .set_restricted(Path::new(&game("game.exe")), true)
+                .unwrap();
+        }),
         ("missing", |s| {
             s.fake_fs()
                 .remove_abs(Path::new(&game("game.exe")))

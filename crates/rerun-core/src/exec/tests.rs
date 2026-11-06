@@ -367,7 +367,38 @@ fn t2_verify_names_exactly_the_op_someone_changed() {
     }
 }
 
-// Reverts every transaction that is not closed; each must close.
+/// T2, review S-a (the senior-dev probe): after the apply, `mods\a` holds the temp name `X`
+/// of op 3 instead of `x.dll` (a crash between `create_new`'s steps looks the same). The
+/// revert deletes `X` (op 3 `Before`) and then finds the folders empty; `verify` must say the
+/// same, not `Foreign`: the temp names later ops delete count as gone.
+#[test]
+fn t2_verify_counts_a_temp_name_a_later_op_deletes_as_gone() {
+    let env = Env::new(finish(base()));
+    let before = env.snap();
+    let t = env.applied(&env.plan(&t1_spec()));
+    let x = {
+        let a = app(&env.sys);
+        let j = Journal::new(&a, InstanceTag::fixed(5));
+        let v = j.load(&t, crate::journal::VerifyBackups::Length).unwrap();
+        v.ops[&3].intent.tmp.clone().unwrap()
+    };
+    env.sys
+        .rename_abs(
+            game(r"mods\a\x.dll"),
+            game(&format!(r"mods\a\{}", x.to_rel())),
+        )
+        .unwrap();
+    let v = env.verify(&t);
+    let rep = env.revert(&t).unwrap();
+    let mut met: Vec<(u16, Observed)> = rep.ops.iter().map(|o| (o.op, o.observed)).collect();
+    met.sort_unstable_by_key(|(k, _)| *k);
+    assert_eq!(v, met, "verify shows what the revert meets");
+    assert!(v.iter().all(|(_, o)| *o != Observed::Foreign), "{v:?}");
+    assert_eq!(rep.closed, Some(Closing::Reverted));
+    same(&before, &env.snap());
+}
+
+/// Reverts every transaction that is not closed; each must close.
 pub(crate) fn finish_open(env: &Env, what: &str) {
     for (t, s) in env.states() {
         match s {
@@ -1238,13 +1269,20 @@ fn t8_refusals_write_no_transaction() {
     same(&before, &env.snap());
 }
 
-/// A2 should-item 8: the main executable of a root is missing, a folder or a link: refused
+/// A2 should-item 8: the main executable of a root is restricted, missing, a folder or a
+/// link: refused
 /// as `MainExe` before anything is written (D4 would ask nothing about it); a revert
 /// tolerates a missing one.
 #[test]
 fn t8_a_main_executable_that_is_no_file_is_refused() {
     type Make = fn(&Env);
-    let cases: [(&str, Make); 3] = [
+    let cases: [(&str, Make); 4] = [
+        ("restricted", |env| {
+            env.sys
+                .fake_fs()
+                .set_restricted(Path::new(&game("game.exe")), true)
+                .unwrap();
+        }),
         ("deleted", |env| {
             env.sys
                 .fake_fs()

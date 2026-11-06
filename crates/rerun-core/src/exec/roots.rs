@@ -12,10 +12,12 @@
 //!   volume lacks POSIX semantics), its file ops cannot run; D4 still asks it.
 //! - **absent**: gone. A manual folder or a Steam library whose path is not found, a Steam app
 //!   without manifest, installed in another folder, not installed, or whose folder is not
-//!   found. No D4 for it; its file ops cannot run.
+//!   found. Only a `NotFound` of the open itself: `policy::root` reports a folder that changes
+//!   while it is opened as `Busy` (review S-1). No D4 for it; its file ops cannot run.
 //! - **undecided**: anything else (an update pending, a manifest that cannot be read now, a
-//!   folder that is another one now (`IdentityMismatch`, rebind D5), busy, access denied, a
-//!   reparse point, forbidden): the revert is refused before any change.
+//!   folder that is another one now (`IdentityMismatch`; after a reinstall too, until a rebind,
+//!   D5), busy, access denied, a reparse point, forbidden): the revert is refused before any
+//!   change.
 //!
 //! The revert loop halts at the newest file op whose root cannot run file ops, without a
 //! record (`exec::Halt`).
@@ -55,10 +57,12 @@ pub(super) fn open_stores<'s>(
 pub(super) enum NoFiles {
     /// The root cannot be opened, is gone, or cannot be written (POSIX semantics).
     Root(Box<RootError>),
-    /// The Steam app is not installed (no manifest, another folder, not installed).
+    /// The Steam app is gone: no manifest, installed in another folder, or not installed.
     Steam {
         /// The app.
         app_id: u32,
+        /// Which of the three.
+        gone: super::SteamGone,
     },
     /// The current user cannot write the root (phase 3: the elevated helper).
     NeedsHelper,
@@ -69,9 +73,16 @@ impl NoFiles {
     pub(super) fn refusal(&self) -> Refusal {
         match self {
             Self::Root(e) => Refusal::Root(e.clone()),
-            Self::Steam { app_id } => Refusal::Steam {
+            Self::Steam {
+                app_id,
+                gone: super::SteamGone::NotInstalled,
+            } => Refusal::Steam {
                 app_id: *app_id,
                 state: AppState::NotInstalled,
+            },
+            Self::Steam { app_id, gone } => Refusal::SteamGone {
+                app_id: *app_id,
+                gone: *gone,
             },
             Self::NeedsHelper => Refusal::NeedsHelper,
         }
@@ -204,15 +215,18 @@ fn has_file_ops(plan: &Plan, i: usize) -> bool {
 }
 
 /// A2 should-item 8, for an apply: the main executable of every root is a plain file there
-/// (not missing, not a folder, link or other reparse point); else D4 would ask nothing about
-/// it. A revert does not ask this (the game may be gone).
+/// (not missing, not a folder, link or other reparse point, not restricted); else D4 would
+/// ask nothing about it. A revert does not ask this (the game may be gone).
 pub(super) fn main_exe_present(plan: &Plan, roots: &Roots<'_>) -> Result<(), Refusal> {
     for (i, r) in plan.roots.iter().enumerate() {
         let (Some(m), Some(g)) = (&r.main_exe, roots.game(i)) else {
             continue;
         };
         match g.dir().metadata(m) {
-            Ok(Some(md)) if md.kind == crate::sys::fs::EntryKind::File && md.reparse.is_none() => {}
+            Ok(Some(md))
+                if md.kind == crate::sys::fs::EntryKind::File
+                    && md.reparse.is_none()
+                    && !md.restricted => {}
             Ok(_) => return Err(Refusal::MainExe(shown(plan, i, m))),
             Err(e) if matches!(e.kind, SysErrorKind::NotFound | SysErrorKind::ReparsePoint) => {
                 return Err(Refusal::MainExe(shown(plan, i, m)));
@@ -242,6 +256,8 @@ fn open_root<'g>(
     r: &PlanRoot,
     store: Option<&'g Result<StoreDir<'g>, RootError>>,
 ) -> Result<GameDir<'g>, Failed> {
+    // `NotFound` here is the open of a missing path; `policy::root` turns the races after
+    // an open into `Busy` (review S-1).
     let by_root = |e: RootError| {
         if matches!(&e, RootError::Sys(s) if s.kind == SysErrorKind::NotFound) {
             Failed::Absent(NoFiles::Root(Box::new(e)))
@@ -257,10 +273,15 @@ fn open_root<'g>(
             Some(store),
         ) => {
             let store = store.as_ref().map_err(|e| by_root(e.clone()))?;
-            let gone = || Failed::Absent(NoFiles::Steam { app_id: *app_id });
+            let gone = |gone| {
+                Failed::Absent(NoFiles::Steam {
+                    app_id: *app_id,
+                    gone,
+                })
+            };
             let app = match app_manifest(store, *app_id) {
                 Ok(Some(a)) => a,
-                Ok(None) => return Err(gone()),
+                Ok(None) => return Err(gone(super::SteamGone::NoManifest)),
                 // Unreadable now (Steam may be rewriting it): transient, not "gone".
                 Err(_) => {
                     return Err(Failed::Undecided(Refusal::SteamManifest {
@@ -269,11 +290,11 @@ fn open_root<'g>(
                 }
             };
             if app.install_dir != *installdir {
-                return Err(gone());
+                return Err(gone(super::SteamGone::OtherFolder));
             }
             match app.state() {
                 AppState::Installed => {}
-                AppState::NotInstalled => return Err(gone()),
+                AppState::NotInstalled => return Err(gone(super::SteamGone::NotInstalled)),
                 state @ AppState::UpdatePending => {
                     return Err(Failed::Undecided(Refusal::Steam {
                         app_id: *app_id,

@@ -474,39 +474,41 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
         }
 }
 
-/// The folded names of the direct children of `dir` that later file ops of `plan` (after
-/// `k`, in the same root) create and that will be gone when the revert reaches `k`: observed
-/// `After` (the revert removes them) or `Before` (not there) in `later` (review S3; a later
-/// op not observed, or `Foreign`, stays).
+/// The folded names in `dir` that later file ops of `plan` (after `k`, in the same root) put
+/// there and that will be gone when the revert reaches `k`, by what they observed in `later`
+/// (reviews S3, S-a): the target of an op observed `After` (the revert removes it) or
+/// `Before` (not there), and every temp name a later op deletes (`DeleteTmp`). A later op not
+/// observed, or a target left `Foreign`, stays.
 fn later_children(
     plan: &Plan,
     k: u16,
     root: u16,
     dir: &RelPath,
-    later: &BTreeMap<u16, Observed>,
+    later: &BTreeMap<u16, super::Seen>,
 ) -> Vec<String> {
-    plan.ops
-        .iter()
-        .enumerate()
-        .skip(usize::from(k) + 1)
-        .filter_map(|(j, o)| {
-            let gone = later
-                .get(&super::op_ix(j))
-                .is_some_and(|s| matches!(s, Observed::After | Observed::Before));
-            match o.target() {
-                Target::File { root: r, path, .. }
-                    if gone && r.0 == root && path.parent().as_ref() == Some(dir) =>
-                {
-                    Some(fold(path.file_name()))
-                }
-                Target::File { .. } => None,
+    let mut names = Vec::new();
+    for (j, o) in plan.ops.iter().enumerate().skip(usize::from(k) + 1) {
+        let Some(super::Seen::File(s)) = later.get(&super::op_ix(j)) else {
+            continue;
+        };
+        let Target::File { root: r, path, .. } = o.target();
+        if r.0 != root || path.parent().as_ref() != Some(dir) {
+            continue;
+        }
+        if matches!(s.observed, Observed::After | Observed::Before) {
+            names.push(fold(path.file_name()));
+        }
+        for a in &s.actions {
+            if let Action::DeleteTmp(n) = a {
+                names.push(fold(n.as_str()));
             }
-        })
-        .collect()
+        }
+    }
+    names
 }
 
 /// Observes op `k` (module docs; read only: guards are opened and dropped, nothing changes).
-/// `later`: what the later ops observed ([`Mode::Verify`] only).
+/// `later`: what the later ops observed and will do ([`Mode::Verify`] only).
 #[expect(
     clippy::too_many_arguments,
     reason = "the observation of every file op kind"
@@ -519,7 +521,7 @@ pub(super) fn observe(
     log: &OpLog,
     mode: Mode,
     hint: Option<Hint>,
-    later: &BTreeMap<u16, Observed>,
+    later: &BTreeMap<u16, super::Seen>,
 ) -> Result<Seen, ExecError> {
     if super::trusting_records() {
         return Ok(trusted(op, log));

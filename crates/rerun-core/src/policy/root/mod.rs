@@ -156,6 +156,22 @@ fn open_abs_write<'s>(sys: &'s dyn System, abs: &Path) -> SysResult<Box<dyn DirW
 }
 
 /// Opens a root by absolute path: lexical check, open, canonical check.
+/// A `NotFound` after the open itself succeeded (`Dir::info` of a handle whose folder was
+/// deleted or renamed meanwhile, a folder that changed while it was opened) is a race, not a
+/// missing path: `Busy`, like the other swap races. Only the open of the path itself reports
+/// a missing folder as `NotFound` (P2-10a review: `exec` takes only that as "gone").
+fn raced(e: SysError) -> SysError {
+    // The codes of the original error stay; its target is already shown-safe.
+    if e.kind == SysErrorKind::NotFound {
+        SysError {
+            kind: SysErrorKind::Busy,
+            ..e
+        }
+    } else {
+        e
+    }
+}
+
 fn open_checked<'s>(
     sys: &'s dyn System,
     fr: &ForbiddenRoots,
@@ -167,7 +183,7 @@ fn open_checked<'s>(
         reason,
     })?;
     let dir = open_abs_write(sys, lexical.path())?;
-    let info = dir.info()?;
+    let info = dir.info().map_err(raced)?;
     let path = RootPath::from_final_path(&info.final_path)?;
     check_canonical(fr, &path, &info)?;
     Ok((dir, path, info))
@@ -235,7 +251,7 @@ impl<'s> StoreDir<'s> {
         };
         // The store handle stays valid when the store is renamed; then the expected path
         // below would be stale. Report that as its own error, not as `Escaped`.
-        let store_now = RootPath::from_final_path(&self.dir.info()?.final_path)?;
+        let store_now = RootPath::from_final_path(&self.dir.info().map_err(raced)?.final_path)?;
         if store_now != self.path {
             return Err(RootError::StoreMoved {
                 was: self.path.clone(),
@@ -245,21 +261,24 @@ impl<'s> StoreDir<'s> {
 
         let rel = common.child(seg.as_str())?;
         let dir = self.dir.open_dir_write(&rel).map_err(reparse(&rel))?;
-        let info = dir.info()?;
+        let info = dir.info().map_err(raced)?;
 
         // Case-sensitive `common` is an anomaly. Checked after the game is open, on the
         // `common` that holds this very game folder (same file ID under the same name), so
         // swapping `common` between check and open cannot slip through.
-        let common_dir = self.dir.open_dir(&common).map_err(reparse(&common))?;
-        if common_dir.info()?.case_sensitive {
+        let common_dir = self
+            .dir
+            .open_dir(&common)
+            .map_err(|e| reparse(&common)(raced(e)))?;
+        if common_dir.info().map_err(raced)?.case_sensitive {
             classify(installdir, true)?;
         }
         let entry = common_dir
             .metadata(&RelPath::from_segment(seg.as_str())?)
-            .map_err(reparse(&rel))?;
+            .map_err(|e| reparse(&rel)(raced(e)))?;
         if entry.is_none_or(|m| m.file_id != info.file_id) {
             return Err(RootError::Sys(SysError::new(
-                SysErrorKind::NotFound,
+                SysErrorKind::Busy,
                 format!("{rel} changed while opening"),
             )));
         }

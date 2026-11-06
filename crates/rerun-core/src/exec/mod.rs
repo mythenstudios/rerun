@@ -125,6 +125,14 @@ pub enum Refusal {
         /// Its state.
         state: AppState,
     },
+    /// The Steam app has no manifest in its library, or is installed in another folder.
+    #[error("Steam app {app_id} {}", steam_gone(*gone))]
+    SteamGone {
+        /// The app.
+        app_id: u32,
+        /// Why it is gone.
+        gone: SteamGone,
+    },
     /// The Steam manifest of the app cannot be read now (Steam may be writing it).
     #[error("the Steam manifest of app {app_id} cannot be read now; try again later")]
     SteamManifest {
@@ -159,6 +167,26 @@ pub enum Refusal {
     /// The journal could not be read or the transaction not begun.
     #[error(transparent)]
     Journal(Box<JournalError>),
+}
+
+/// Why a Steam app counts as gone for its root (E3 "absent").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteamGone {
+    /// No `appmanifest_<id>.acf` in the library.
+    NoManifest,
+    /// The manifest names another install folder.
+    OtherFolder,
+    /// The manifest says not installed.
+    NotInstalled,
+}
+
+/// A [`SteamGone`] for a message.
+fn steam_gone(g: SteamGone) -> &'static str {
+    match g {
+        SteamGone::NoManifest => "has no manifest in its library (uninstalled)",
+        SteamGone::OtherFolder => "is installed in another folder now",
+        SteamGone::NotInstalled => "is not installed",
+    }
 }
 
 /// An app state for a message.
@@ -287,7 +315,9 @@ pub struct OpReport {
 
 /// Where a revert stopped (6b-d): at file op `op`, whose root `root` cannot run file ops now
 /// (gone, or not writable). Nothing was recorded for it; the transaction stays open and a
-/// later revert goes on from there (after a reinstall, or a rebind, D5).
+/// later revert goes on from there once the folder itself is back or the update finished. A
+/// reinstall makes a new folder with a new identity: `IdentityMismatch`, refused until a
+/// rebind (D5).
 #[derive(Debug)]
 pub struct Halt {
     /// Op index.
@@ -315,7 +345,9 @@ pub struct RevertReport {
 /// What [`verify`] observed.
 #[derive(Debug)]
 pub struct Verified {
-    /// Each intended op observed, by index (ascending); the ops below a halt are missing.
+    /// The intended ops by index (ascending): observed now, or `Foreign` as recorded for an
+    /// op left foreign on a root that cannot run file ops. Missing: the ops below a halt and
+    /// the cleanly reverted ops of such a root.
     pub ops: Vec<(u16, Observed)>,
     /// Where a revert would halt now.
     pub halted: Option<Halt>,
@@ -497,8 +529,8 @@ fn apply_op(
     }
 }
 
-/// Observes op `k` in its domain (read only). `later`: what the later ops observed
-/// ([`Mode::Verify`], newest first: review S3).
+/// Observes op `k` in its domain (read only). `later`: what the later ops observed and will
+/// do ([`Mode::Verify`], newest first: review S3).
 #[expect(
     clippy::too_many_arguments,
     reason = "the one dispatch of an observation"
@@ -511,7 +543,7 @@ fn observe(
     log: &OpLog,
     mode: Mode,
     hint: Option<Hint>,
-    later: &BTreeMap<u16, Observed>,
+    later: &BTreeMap<u16, Seen>,
 ) -> Result<Seen, ExecError> {
     match op.target() {
         Target::File { .. } => {
@@ -532,8 +564,10 @@ fn halt(roots: &roots::Roots<'_>, k: u16, op: &Op) -> Option<Halt> {
 }
 
 /// Observes the intended ops `ops` newest first, as `verify` (review S3: a created directory
-/// counts only the later targets observed `Before` or `After` as gone), halting where a revert
-/// would; an op already reverted whose root cannot run file ops is skipped.
+/// counts only what the later ops will remove or never made: a target observed `Before` or
+/// `After`, a temp name a later op deletes), halting where a revert would. An op whose root
+/// cannot run file ops is skipped if it was reverted cleanly, shown `Foreign` as recorded if
+/// its revert left it foreign.
 fn verify_ops(
     plan: &Plan,
     t: &mut Touched<'_>,
@@ -541,21 +575,32 @@ fn verify_ops(
     ops: &BTreeMap<u16, OpLog>,
 ) -> Result<Verified, ExecError> {
     let mut seen = BTreeMap::new();
+    let mut out = BTreeMap::new();
     let mut halted = None;
     for (k, log) in ops.iter().rev() {
         let op = op_of(plan, *k)?;
         if let Some(h) = halt(roots, *k, op) {
-            if log.reverted.is_some() {
-                continue;
+            match log.reverted {
+                // Reverted cleanly: the revert never comes back to it.
+                Some(r) if r.observed != Observed::Foreign => continue,
+                // Left foreign: shown as recorded (its root cannot be read for file ops),
+                // so the user sees why the transaction stays open (security N-5).
+                Some(_) => {
+                    out.insert(*k, Observed::Foreign);
+                    continue;
+                }
+                None => {
+                    halted = Some(h);
+                    break;
+                }
             }
-            halted = Some(h);
-            break;
         }
         let s = observe(plan, t, *k, op, log, Mode::Verify, None, &seen)?;
-        seen.insert(*k, s.observed());
+        out.insert(*k, s.observed());
+        seen.insert(*k, s);
     }
     Ok(Verified {
-        ops: seen.into_iter().collect(),
+        ops: out.into_iter().collect(),
         halted,
     })
 }
