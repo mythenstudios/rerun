@@ -137,7 +137,7 @@ pub const MAX_PATH_UTF16: usize = 32_767;
 pub const MAX_VALUE_NAME_UTF16: usize = 16_383;
 
 /// Largest value a read returns, in bytes. Registry data is untrusted: anything larger is
-/// `Unsupported`, never truncated.
+/// `TooLarge` (with this limit), never truncated.
 pub const MAX_VALUE_BYTES: usize = 1 << 20;
 /// Most values `values` returns for one key.
 pub const MAX_VALUES: usize = 16_384;
@@ -405,10 +405,11 @@ impl fmt::Display for RegValue {
 /// Every method applies [`check_key`] and, where a value name is given, [`check_value_name`]
 /// first (`InvalidPath`). Registry data is untrusted: reads return values through
 /// [`RegValue::decode`] (so [`RegValue::Raw`] keeps whatever is stored) and refuse, with
-/// `Unsupported` and never a partial result, a value above [`MAX_VALUE_BYTES`], more than
-/// [`MAX_VALUES`] values or [`MAX_VALUES_TOTAL_BYTES`] bytes in `values`, and more than
-/// [`MAX_SUBKEYS`] names in `subkeys`. A value that [`RegValue::encode`] cannot encode is
-/// refused by `set` with `Unsupported`.
+/// `TooLarge` (the exceeded limit in [`SysError::limit`]) and never a partial result, a value
+/// above [`MAX_VALUE_BYTES`], more than [`MAX_VALUES`] values or [`MAX_VALUES_TOTAL_BYTES`]
+/// bytes in `values`, and more than [`MAX_SUBKEYS`] names in `subkeys`: the same kind as every
+/// other bound of `sys` (ADR 0011). A value that [`RegValue::encode`] cannot encode is refused
+/// by `set` with `Unsupported`.
 pub trait Registry: Send + Sync {
     /// Does the key exist?
     fn key_exists(&self, k: &RegKey) -> SysResult<bool>;

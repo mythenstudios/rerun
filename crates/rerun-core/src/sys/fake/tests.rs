@@ -1564,6 +1564,16 @@ fn raw_values_are_kept_exactly_and_snapshotted() {
     assert_eq!(before.diff(&snapshot(&sys, &scope).unwrap()).len(), 1);
 }
 
+/// `r` is `TooLarge` with the bound `limit` (registry read limits, ADR 0009).
+fn assert_too_large<T: std::fmt::Debug>(r: SysResult<T>, limit: u64) {
+    let e = r.unwrap_err();
+    assert_eq!(
+        (e.kind, e.limit),
+        (SysErrorKind::TooLarge, Some(limit)),
+        "{e}"
+    );
+}
+
 #[test]
 fn reads_refuse_hostile_amounts_of_data() {
     let key = hkcu(r"Software\Big");
@@ -1581,14 +1591,8 @@ fn reads_refuse_hostile_amounts_of_data() {
     sys.registry()
         .set(&key, "over", &RegValue::decode(3, &over))
         .unwrap();
-    assert_eq!(
-        sys.registry().get(&key, "over").unwrap_err().kind,
-        SysErrorKind::Unsupported
-    );
-    assert_eq!(
-        sys.registry().values(&key).unwrap_err().kind,
-        SysErrorKind::Unsupported
-    );
+    assert_too_large(sys.registry().get(&key, "over"), 1 << 20);
+    assert_too_large(sys.registry().values(&key), 1 << 20);
     // Other values stay readable one by one.
     assert!(sys.registry().get(&key, "ok").unwrap().is_some());
 
@@ -1610,10 +1614,7 @@ fn reads_refuse_hostile_amounts_of_data() {
     sys.registry()
         .set(&key, "v16", &RegValue::decode(3, &[0]))
         .unwrap();
-    assert_eq!(
-        sys.registry().values(&key).unwrap_err().kind,
-        SysErrorKind::Unsupported
-    );
+    assert_too_large(sys.registry().values(&key), 16 << 20);
 
     // Count: 16,384 values are fine, one more is not.
     let mut b = FakeSystem::builder();
@@ -1625,10 +1626,7 @@ fn reads_refuse_hostile_amounts_of_data() {
     sys.registry()
         .set(&key, "one more", &RegValue::Dword(1))
         .unwrap();
-    assert_eq!(
-        sys.registry().values(&key).unwrap_err().kind,
-        SysErrorKind::Unsupported
-    );
+    assert_too_large(sys.registry().values(&key), 16_384);
 
     // Subkeys: 65,536 are fine, one more is not.
     let sys = FakeSystem::builder().key(key.clone()).build().unwrap();
@@ -1639,10 +1637,7 @@ fn reads_refuse_hostile_amounts_of_data() {
     }
     assert_eq!(sys.registry().subkeys(&key).unwrap().len(), 65_536);
     sys.registry().create_key(&key.join("one more")).unwrap();
-    assert_eq!(
-        sys.registry().subkeys(&key).unwrap_err().kind,
-        SysErrorKind::Unsupported
-    );
+    assert_too_large(sys.registry().subkeys(&key), 65_536);
 }
 
 // ---------- Snapshot ----------
@@ -2135,10 +2130,7 @@ fn the_values_total_counts_long_names() {
         parts * (data + 1) < MAX_VALUES_TOTAL_BYTES,
         "data alone is below"
     );
-    assert_eq!(
-        sys.registry().values(&root).unwrap_err().kind,
-        SysErrorKind::Unsupported
-    );
+    assert_too_large(sys.registry().values(&root), 16 << 20);
 }
 
 // ---------- Write side ----------

@@ -288,6 +288,22 @@ fn err_kind<T>(r: SysResult<T>, kind: SysErrorKind, what: &str) -> ContractResul
     }
 }
 
+/// `r` is `TooLarge` and names `limit` as its bound.
+fn too_large_at<T>(r: SysResult<T>, limit: usize, what: &str) -> ContractResult {
+    match r {
+        Err(e) if e.kind == SysErrorKind::TooLarge => ensure(
+            e.limit == u64::try_from(limit).ok(),
+            &format!("{what}: limit {limit}, got {:?}", e.limit),
+        ),
+        Err(e) => Err(format!(
+            "contract violated: {what}: expected too large, got error {e}"
+        )),
+        Ok(_) => Err(format!(
+            "contract violated: {what}: expected too large, got success"
+        )),
+    }
+}
+
 fn rel(s: &str) -> Result<RelPath, String> {
     RelPath::parse(s).map_err(|e| format!("contract setup: {e}"))
 }
@@ -2377,7 +2393,7 @@ pub fn registry_read_contract(
         "a value name of 16,383 units is valid",
     )?;
 
-    // Limits for untrusted data: Unsupported, never a partial result.
+    // Limits for untrusted data: TooLarge with the limit, never a partial result.
     let blob = |n: usize| vec![7_u8; n];
     let big = root.join("Big");
     ok(fx.key(&big), "fixture: Big")?;
@@ -2410,14 +2426,14 @@ pub fn registry_read_contract(
         fx.large(&big, "over", MAX_VALUE_BYTES + 1),
         "fixture: value over the limit",
     )? {
-        err_kind(
+        too_large_at(
             reg.get(&big, "over"),
-            SysErrorKind::Unsupported,
+            MAX_VALUE_BYTES,
             "get of a value over the limit",
         )?;
-        err_kind(
+        too_large_at(
             reg.values(&big),
-            SysErrorKind::Unsupported,
+            MAX_VALUE_BYTES,
             "values with a value over the limit",
         )?;
         ensure(
@@ -2462,9 +2478,9 @@ pub fn registry_read_contract(
         fx.raw(&total, "one more", reg_type::REG_BINARY, &[1]),
         "fixture: one byte more",
     )?;
-    err_kind(
+    too_large_at(
         reg.values(&total),
-        SysErrorKind::Unsupported,
+        MAX_VALUES_TOTAL_BYTES,
         "values over the total limit",
     )?;
 
@@ -2484,11 +2500,7 @@ pub fn registry_read_contract(
         fx.raw(&many, "one more", reg_type::REG_DWORD, &[1, 0, 0, 0]),
         "fixture: one value more",
     )?;
-    err_kind(
-        reg.values(&many),
-        SysErrorKind::Unsupported,
-        "values over 16,384 values",
-    )?;
+    too_large_at(reg.values(&many), MAX_VALUES, "values over 16,384 values")?;
 
     let subs = root.join("Subs");
     ok(fx.key(&subs), "fixture: Subs")?;
@@ -2503,11 +2515,7 @@ pub fn registry_read_contract(
         "subkeys with 65,536 names",
     )?;
     ok(fx.key(&subs.join("one more")), "fixture: one subkey more")?;
-    err_kind(
-        reg.subkeys(&subs),
-        SysErrorKind::Unsupported,
-        "subkeys over 65,536 names",
-    )?;
+    too_large_at(reg.subkeys(&subs), MAX_SUBKEYS, "subkeys over 65,536 names")?;
 
     // Symbolic-link keys are followed on reads.
     let link = root.join("Link");

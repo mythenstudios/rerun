@@ -12,7 +12,7 @@
 //! - Values come back through [`RegValue::decode`], so a malformed or unknown value is
 //!   [`RegValue::Raw`] with its exact bytes.
 //! - Limits for untrusted data ([`MAX_VALUE_BYTES`], [`MAX_VALUES`], [`MAX_VALUES_TOTAL_BYTES`],
-//!   [`MAX_SUBKEYS`]): beyond one, `Unsupported`, never a partial result.
+//!   [`MAX_SUBKEYS`]): beyond one, `TooLarge` with that limit, never a partial result.
 //! - Races: a too-small buffer (`STATUS_BUFFER_OVERFLOW`) grows to the reported size (capped by
 //!   the limit) and the read retries, at most [`MORE_DATA_RETRIES`] times, then `Busy`; type
 //!   and data always come from one successful call. `values` and `subkeys` compare the key's last-write time before and
@@ -120,8 +120,12 @@ impl WinRegistry {
     }
 }
 
-fn too_large(target: &str, why: &str) -> SysError {
-    SysError::new(SysErrorKind::Unsupported, format!("{target}: {why}"))
+/// A read over one of the limits for untrusted data: `TooLarge` with that limit.
+fn too_large(target: &str, why: &str, limit: usize) -> SysError {
+    SysError::too_large(
+        format!("{target}: {why}"),
+        u64::try_from(limit).unwrap_or(u64::MAX),
+    )
 }
 
 fn busy(target: &str, why: &str) -> SysError {
@@ -134,6 +138,7 @@ fn check_size(needed: usize, target: &str) -> SysResult<()> {
         Err(too_large(
             target,
             &format!("value of {needed} bytes is over the limit of {MAX_VALUE_BYTES}"),
+            MAX_VALUE_BYTES,
         ))
     } else {
         Ok(())
@@ -174,13 +179,18 @@ impl Tally {
     ) -> SysResult<bool> {
         self.count += 1;
         if self.count > max_count {
-            return Err(too_large(target, &format!("more than {max_count} entries")));
+            return Err(too_large(
+                target,
+                &format!("more than {max_count} entries"),
+                max_count,
+            ));
         }
         self.bytes = self.bytes.saturating_add(bytes);
         if self.bytes > max_bytes {
             return Err(too_large(
                 target,
                 &format!("more than {max_bytes} bytes of names and values"),
+                max_bytes,
             ));
         }
         Ok(self.seen.insert(name.to_vec()))
@@ -305,6 +315,7 @@ impl Registry for WinRegistry {
                 return Err(too_large(
                     &target,
                     &format!("{} values, over the limit of {MAX_VALUES}", before.values),
+                    MAX_VALUES,
                 ));
             }
             // The largest value size is only a hint: Windows does not lower it on delete.
@@ -340,6 +351,7 @@ impl Registry for WinRegistry {
                         "{} subkeys, over the limit of {MAX_SUBKEYS}",
                         before.subkeys
                     ),
+                    MAX_SUBKEYS,
                 ));
             }
             let got = subkeys_once(&key, &target)?;
@@ -403,10 +415,8 @@ mod tests {
         assert_eq!(grown(512, 512), 513);
         assert_eq!(grown(MAX_VALUE_BYTES, MAX_VALUE_BYTES), MAX_VALUE_BYTES);
         assert!(check_size(MAX_VALUE_BYTES, "t").is_ok());
-        assert_eq!(
-            check_size(MAX_VALUE_BYTES + 1, "t").unwrap_err().kind,
-            SysErrorKind::Unsupported
-        );
+        let e = check_size(MAX_VALUE_BYTES + 1, "t").unwrap_err();
+        assert_eq!((e.kind, e.limit), (SysErrorKind::TooLarge, Some(1 << 20)));
     }
 
     #[test]
@@ -427,15 +437,11 @@ mod tests {
         );
         let mut t = Tally::new();
         assert!(t.add(&A, 1, 1, 10, "t").unwrap());
-        assert_eq!(
-            t.add(&B, 1, 1, 10, "t").unwrap_err().kind,
-            SysErrorKind::Unsupported
-        );
+        let e = t.add(&B, 1, 1, 10, "t").unwrap_err();
+        assert_eq!((e.kind, e.limit), (SysErrorKind::TooLarge, Some(1)));
         let mut t = Tally::new();
         assert!(t.add(&A, 10, 5, 10, "t").unwrap());
-        assert_eq!(
-            t.add(&B, 1, 5, 10, "t").unwrap_err().kind,
-            SysErrorKind::Unsupported
-        );
+        let e = t.add(&B, 1, 5, 10, "t").unwrap_err();
+        assert_eq!((e.kind, e.limit), (SysErrorKind::TooLarge, Some(10)));
     }
 }

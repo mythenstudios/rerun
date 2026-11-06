@@ -89,6 +89,14 @@ fn unsupported(k: &RegKey, why: &str) -> SysError {
     SysError::new(SysErrorKind::Unsupported, format!("{k}: {why}"))
 }
 
+/// A read over one of the limits for untrusted data: `TooLarge` with that limit.
+fn too_large(k: &RegKey, why: &str, limit: usize) -> SysError {
+    SysError::too_large(
+        format!("{k}: {why}"),
+        u64::try_from(limit).unwrap_or(u64::MAX),
+    )
+}
+
 /// Size of a value as stored; a typed value without a canonical encoding has none.
 fn data_len(v: &RegValue) -> usize {
     v.encode().map_or(0, |(_, d)| d.len())
@@ -186,7 +194,7 @@ impl Registry for FakeRegistry {
             .as_ref()
             .is_some_and(|v| data_len(v) > MAX_VALUE_BYTES)
         {
-            return Err(unsupported(k, "value larger than 1 MiB"));
+            return Err(too_large(k, "value larger than 1 MiB", MAX_VALUE_BYTES));
         }
         Ok(value)
     }
@@ -203,21 +211,22 @@ impl Registry for FakeRegistry {
             .map(|n| n.values.values().cloned().collect())
             .unwrap_or_default();
         if values.len() > MAX_VALUES {
-            return Err(unsupported(k, "too many values"));
+            return Err(too_large(k, "too many values", MAX_VALUES));
         }
         let mut total = 0_usize;
         for (name, v) in &values {
             let len = data_len(v);
             if len > MAX_VALUE_BYTES {
-                return Err(unsupported(k, "value larger than 1 MiB"));
+                return Err(too_large(k, "value larger than 1 MiB", MAX_VALUE_BYTES));
             }
             // Names count too (UTF-16 bytes), as in `sys::win`.
             total += len + 2 * name.encode_utf16().count();
         }
         if total > MAX_VALUES_TOTAL_BYTES {
-            return Err(unsupported(
+            return Err(too_large(
                 k,
                 "names and values larger than 16 MiB in total",
+                MAX_VALUES_TOTAL_BYTES,
             ));
         }
         Ok(values)
@@ -234,7 +243,7 @@ impl Registry for FakeRegistry {
             .map(|n| n.name.clone())
             .collect();
         if names.len() > MAX_SUBKEYS {
-            return Err(unsupported(k, "too many subkeys"));
+            return Err(too_large(k, "too many subkeys", MAX_SUBKEYS));
         }
         Ok(names)
     }
