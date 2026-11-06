@@ -3,8 +3,10 @@
 //! game closed (`users()` of every existing target and each main executable, user decision
 //! D4), and the old state of every op and every source re-observed (`Mismatch`).
 //!
-//! Roots (P2-10a, user decisions 6b-d and E3): an apply needs every root open
-//! ([`Roots::all`]). A revert and `verify` open each root on its own ([`Roots::each`]) and
+//! Roots (P2-10a, user decisions 6b-d and E3): an apply needs every root open, and writable
+//! if it has file ops (S1: D4 needs read access only), and the main executable of every root
+//! a plain file there (audit A2 should-item 8; a revert tolerates a missing one)
+//! ([`Roots::all`], [`main_exe_present`]). A revert and `verify` open each root on its own ([`Roots::each`]) and
 //! sort it:
 //! - **open**: reopened and checked by identity. If the current user cannot write it (or its
 //!   volume lacks POSIX semantics), its file ops cannot run; D4 still asks it.
@@ -103,8 +105,8 @@ enum Failed {
 }
 
 impl<'g> Roots<'g> {
-    /// Apply: every root open, checked by identity and writable (else its refusal, stores
-    /// first, then the roots in order).
+    /// Apply: every root open and checked by identity, and writable if a file op targets it
+    /// (S1); else its refusal, stores first, then the roots in order.
     pub(super) fn all(
         cx: &ExecCtx<'g>,
         plan: &Plan,
@@ -116,18 +118,18 @@ impl<'g> Roots<'g> {
             }
         }
         let mut slots = Vec::with_capacity(plan.roots.len());
-        for (r, store) in plan.roots.iter().zip(stores) {
+        for (i, (r, store)) in plan.roots.iter().zip(stores).enumerate() {
             let game = open_root(cx, r, store.as_ref()).map_err(|f| match f {
                 Failed::Absent(n) => n.refusal(),
                 Failed::Undecided(r) => r,
             })?;
-            if let Some(n) = no_files(&game) {
+            let no_files = no_files(&game);
+            if let Some(n) = &no_files
+                && has_file_ops(plan, i)
+            {
                 return Err(n.refusal());
             }
-            slots.push(Slot::Open {
-                game,
-                no_files: None,
-            });
+            slots.push(Slot::Open { game, no_files });
         }
         Ok(Self { slots })
     }
@@ -192,6 +194,33 @@ impl<'g> Roots<'g> {
             )))),
         }
     }
+}
+
+/// A file op of `plan` targets root `i`.
+fn has_file_ops(plan: &Plan, i: usize) -> bool {
+    plan.ops
+        .iter()
+        .any(|o| matches!(o.target(), Target::File { root, .. } if usize::from(root.0) == i))
+}
+
+/// A2 should-item 8, for an apply: the main executable of every root is a plain file there
+/// (not missing, not a folder, link or other reparse point); else D4 would ask nothing about
+/// it. A revert does not ask this (the game may be gone).
+pub(super) fn main_exe_present(plan: &Plan, roots: &Roots<'_>) -> Result<(), Refusal> {
+    for (i, r) in plan.roots.iter().enumerate() {
+        let (Some(m), Some(g)) = (&r.main_exe, roots.game(i)) else {
+            continue;
+        };
+        match g.dir().metadata(m) {
+            Ok(Some(md)) if md.kind == crate::sys::fs::EntryKind::File && md.reparse.is_none() => {}
+            Ok(_) => return Err(Refusal::MainExe(shown(plan, i, m))),
+            Err(e) if matches!(e.kind, SysErrorKind::NotFound | SysErrorKind::ReparsePoint) => {
+                return Err(Refusal::MainExe(shown(plan, i, m)));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
 }
 
 /// Why the file ops of an opened root cannot run: the current user cannot write it, or its

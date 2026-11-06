@@ -167,6 +167,17 @@ pub enum Target<'a> {
     },
 }
 
+impl Target<'_> {
+    /// An op on this target needs the main executable of every root of its plan (user
+    /// decision E2, review M1): a registry op has no file target, so without `main_exe` the
+    /// game-closed check (D4) would ask nothing. File ops do not (their targets are asked).
+    pub fn needs_main_exe(&self) -> bool {
+        match self {
+            Self::File { .. } => false,
+        }
+    }
+}
+
 impl Op {
     /// What the op targets.
     pub fn target(&self) -> Target<'_> {
@@ -474,6 +485,16 @@ fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
     }
     if plan.roots.len() > MAX_ROOTS {
         return Err(invalid(None, "more roots than allowed"));
+    }
+    // E2, review M1: ops that need it (registry ops, P2-10b) need at least one root and a
+    // main executable for every root.
+    if plan.ops.iter().any(|o| o.target().needs_main_exe())
+        && (plan.roots.is_empty() || plan.roots.iter().any(|r| r.main_exe.is_none()))
+    {
+        return Err(invalid(
+            None,
+            "registry ops need the main executable of every root",
+        ));
     }
     for (i, r) in plan.roots.iter().enumerate() {
         if plan.roots[..i].iter().any(|o| o.id == r.id) {

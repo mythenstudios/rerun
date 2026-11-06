@@ -174,3 +174,8 @@ D4 runs on the open roots (targets and `main_exe`; a missing `main_exe` is fine 
 
 ### `verify` of a created directory (review S3)
 `verify` observes newest op first, as a revert does. A created directory counts a later target of the plan as gone only if that op observed `After` (the revert removes it) or `Before` (not there). A later target observed `Foreign` stays, so the directories above it are `Foreign` too, as the revert will find them. Before, `verify` called them `After` (T2 changed accordingly).
+
+### The main executable and write access (user decision E2, review M1, S1; audit A2 should-item 8)
+- A `main_exe` that is given must be a plain file of its root (not missing, not a folder, link or other reparse point), checked by the planner (`PlanError::Step`) and again by the apply (`Refusal::MainExe`, before anything is written), since D4 would otherwise ask nothing about it. A revert tolerates a missing one. A file plan may still have none (its targets are asked; open point P2-8).
+- Registry ops (P2-10b) need at least one root and a `main_exe` for every root: `check` refuses other plans on encode and decode, and the planner refuses a registry step without one. The hook is `Target::needs_main_exe` (false for files), so both rules apply as soon as the registry targets exist.
+- Write access only for a root that file ops target (S1), in the planner and in the apply; D4 needs read access only, so a root without file ops may be read-only to the user.

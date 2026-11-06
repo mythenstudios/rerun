@@ -22,11 +22,15 @@ pub(crate) fn rel(s: &str) -> RelPath {
 }
 
 /// The fake Windows layout, Rerun's install folder and the game folder.
+/// The fake system of the planner and `exec` tests: Rerun installed, the game folder
+/// [`GAME`] with its main executable `game.exe` (a plan names it, and it must be a file
+/// there, audit A2 should-item 8).
 pub(crate) fn builder() -> FakeSystemBuilder {
     FakeSystem::builder()
         .windows_layout()
         .dir(INSTALL)
         .dir(GAME)
+        .file(format!(r"{GAME}\game.exe"), b"MZ".to_vec())
 }
 
 pub(crate) fn fr(sys: &FakeSystem) -> ForbiddenRoots {
@@ -390,6 +394,40 @@ fn t9_refusals() {
         let e = plan_manual(&sys, &spec(files)).expect_err(what).to_string();
         assert!(e.contains(want), "{what}: {e}");
     }
+    // A2 should-item 8: the main executable is missing, a folder or a link.
+    type Exe = fn(&FakeSystem);
+    let exes: [(&str, Exe); 3] = [
+        ("missing", |s| {
+            s.fake_fs()
+                .remove_abs(Path::new(&game("game.exe")))
+                .unwrap();
+        }),
+        ("a folder", |s| {
+            s.fake_fs()
+                .remove_abs(Path::new(&game("game.exe")))
+                .unwrap();
+            s.fake_fs().mkdir_all(Path::new(&game("game.exe"))).unwrap();
+        }),
+        ("a link", |s| {
+            s.fake_fs()
+                .remove_abs(Path::new(&game("game.exe")))
+                .unwrap();
+            s.fake_fs()
+                .put_link(Path::new(&game("game.exe")), tag::SYMLINK, r"C:\x.exe")
+                .unwrap();
+        }),
+    ];
+    for (what, make) in exes {
+        let sys = base(builder()).build().unwrap();
+        make(&sys);
+        let e = plan_manual(&sys, &spec(vec![ok.clone()]))
+            .expect_err(what)
+            .to_string();
+        assert!(
+            e.contains(r"the main executable game.exe is not a file"),
+            "{what}: {e}"
+        );
+    }
     // Package names.
     let sys = base(builder()).build().unwrap();
     for (id, version) in [("Fix", "1"), ("fix", "1..2"), ("fix", ".1"), ("con", "1")] {
@@ -408,6 +446,11 @@ fn t9_refusals() {
         plan_manual(&sys, &spec(vec![ok.clone()])),
         Err(PlanError::NeedsHelper)
     ));
+    // S1: only a plan with file ops needs write access (D4 reads); here every file is there
+    // with its content, so the plan is empty and no helper is needed.
+    sys_put_file(&sys, &game("a.dll"), b"a");
+    let p = plan_manual(&sys, &spec(vec![ok.clone()])).unwrap();
+    assert!(p.ops.is_empty(), "{:?}", p.ops);
     // 129 ops.
     let sys = base(builder()).build().unwrap();
     let many: Vec<FileEntry> = (0..129)
@@ -440,4 +483,9 @@ fn t9_backups_over_4_gib_are_refused() {
     assert!(e.contains("4 GiB"), "{e}");
     p.ops.truncate(2);
     p.encode().unwrap();
+}
+
+/// Puts a fixture file (another program's write).
+fn sys_put_file(sys: &FakeSystem, abs: &str, data: &[u8]) {
+    sys.fake_fs().put_file(Path::new(abs), data).unwrap();
 }

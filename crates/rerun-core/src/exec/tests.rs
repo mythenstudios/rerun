@@ -38,14 +38,14 @@ pub(crate) fn game(name: &str) -> String {
     format!(r"{GAME}\{name}")
 }
 
-/// Package files and a game folder with a read-only, hidden `d3d9.dll` and `game.exe`.
+/// Package files and a game folder with a read-only, hidden `d3d9.dll` (and `game.exe`, from
+/// [`builder`]).
 pub(crate) fn base() -> FakeSystemBuilder {
     builder()
         .file(pkg("d3d9.dll"), NEW.to_vec())
         .file(pkg(r"mods\x.dll"), X.to_vec())
         .file(pkg("new.dll"), N.to_vec())
         .file(game("d3d9.dll"), OLD.to_vec())
-        .file(game("game.exe"), b"MZ".to_vec())
 }
 
 pub(crate) fn finish(b: FakeSystemBuilder) -> FakeSystem {
@@ -1238,6 +1238,99 @@ fn t8_refusals_write_no_transaction() {
     same(&before, &env.snap());
 }
 
+/// A2 should-item 8: the main executable of a root is missing, a folder or a link: refused
+/// as `MainExe` before anything is written (D4 would ask nothing about it); a revert
+/// tolerates a missing one.
+#[test]
+fn t8_a_main_executable_that_is_no_file_is_refused() {
+    type Make = fn(&Env);
+    let cases: [(&str, Make); 3] = [
+        ("deleted", |env| {
+            env.sys
+                .fake_fs()
+                .remove_abs(Path::new(&game("game.exe")))
+                .unwrap();
+        }),
+        ("a folder", |env| {
+            let fx = env.sys.fake_fs();
+            fx.remove_abs(Path::new(&game("game.exe"))).unwrap();
+            fx.mkdir_all(Path::new(&game("game.exe"))).unwrap();
+        }),
+        ("a link", |env| {
+            let fx = env.sys.fake_fs();
+            fx.remove_abs(Path::new(&game("game.exe"))).unwrap();
+            fx.put_link(
+                Path::new(&game("game.exe")),
+                crate::sys::fs::tag::SYMLINK,
+                r"C:\Windows\notepad.exe",
+            )
+            .unwrap();
+        }),
+    ];
+    for (what, make) in cases {
+        let env = Env::new(finish(base()));
+        let h = env.plan(&t1_spec());
+        make(&env);
+        let before = env.snap();
+        match env.apply(&h) {
+            Err(ApplyError::Refused(Refusal::MainExe(s))) => {
+                assert!(s.as_str().ends_with(r"G\game.exe"), "{what}: {s}");
+            }
+            other => panic!("{what}: {other:?}"),
+        }
+        assert!(env.states().is_empty(), "{what}: no transaction folder");
+        same(&before, &env.snap());
+    }
+    // A revert tolerates a missing main executable (the game may have been uninstalled).
+    let env = Env::new(finish(base()));
+    let t = env.applied(&env.plan(&t1_spec()));
+    env.sys
+        .fake_fs()
+        .remove_abs(Path::new(&game("game.exe")))
+        .unwrap();
+    assert_eq!(closed(&env.revert(&t)), Some(Closing::Reverted));
+}
+
+/// S1: a root without file ops needs no write access, only read access for D4. A hand-made
+/// plan over two roots with ops only in the first applies while the second is not writable;
+/// its main executable is still asked (a mapped image refuses).
+#[test]
+fn t8_a_root_without_file_ops_needs_no_write_access() {
+    use crate::plan::{self, Plan};
+    const H: &str = r"D:\Games\H";
+    let env = Env::new(finish(
+        base().file(format!(r"{H}\game.exe"), b"MZ".to_vec()),
+    ));
+    let before = env.snap();
+    let a = app(&env.sys);
+    let load = |h| -> Plan { plan::decode(plan::load(&a, &h).unwrap().bytes()).unwrap() };
+    let mut p = load(env.plan(&t1_spec()));
+    let other = {
+        let fr = fr(&env.sys);
+        let dir = GameDir::open_manual(&env.sys, &fr, Path::new(H)).unwrap();
+        load(env.plan_for(&dir, None, &spec(vec![entry("new.dll", "new.dll", N)])))
+    };
+    p.roots.push(other.roots[0].clone());
+    let h = store(&a, &p.encode().unwrap()).unwrap();
+    env.sys
+        .fake_fs()
+        .set_user_writable(Path::new(H), false)
+        .unwrap();
+    let held = env
+        .sys
+        .fake_fs()
+        .map_image_as(4242, Path::new(&format!(r"{H}\game.exe")))
+        .unwrap();
+    assert!(
+        matches!(env.apply(&h), Err(ApplyError::Refused(Refusal::Busy(s))) if s.as_str().ends_with(r"H\game.exe")),
+        "D4 asks the root without file ops"
+    );
+    drop(held);
+    let t = env.applied(&h);
+    assert_eq!(closed(&env.revert(&t)), Some(Closing::Reverted));
+    same(&before, &env.snap());
+}
+
 /// A2-B1 review S2: a case-only rename between the old-state check and the apply's guard is
 /// caught on the guard itself (pattern of condition 8): rolled back with `Mismatch`, the file
 /// kept as the user named it, nothing else changed.
@@ -1366,7 +1459,7 @@ fn t7_nested_roots_overlap() {
         base()
             .file(manifest(220), acf(220, 4).into_bytes())
             .file(format!(r"{STEAM_GAME}\game.exe"), b"MZ".to_vec())
-            .dir(&sub),
+            .file(format!(r"{sub}\game.exe"), b"MZ".to_vec()),
     ));
     let t1 = env.applied(&steam_plan(
         &env,

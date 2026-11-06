@@ -17,8 +17,10 @@ pub use file_install::{FileEntry, FileInstallSpec};
 
 use crate::fold::fold;
 use crate::path::RelPath;
-use crate::plan::{FORMAT, Op, Plan, PlanError, PlanOrigin, PlanRoot, RootKind};
+use crate::plan::{FORMAT, Op, Plan, PlanError, PlanOrigin, PlanRoot, RootKind, Target};
 use crate::policy::root::{AppDir, GameDir, GameOrigin};
+use crate::sys::SysErrorKind;
+use crate::sys::fs::EntryKind;
 
 /// One step: an object with exactly one key (ADR 0020, D7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +41,8 @@ pub struct PlanCtx<'a> {
     /// The Steam app of a game folder from a Steam library (required for such a root, its
     /// state is checked before apply and revert).
     pub steam_app: Option<u32>,
-    /// The game's main executable below the game folder, asked by `users()` (D4).
+    /// The game's main executable below the game folder, asked by `users()` (D4). If given,
+    /// it must be a file there (audit A2 should-item 8); registry steps need it (E2).
     pub main_exe: Option<&'a RelPath>,
 }
 
@@ -96,14 +99,30 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
             ));
         }
     };
-    if !ctx.game.info().user_writable {
-        return Err(PlanError::NeedsHelper);
+    // A2 should-item 8: a main executable that is no file of the game folder (a typo, a
+    // link) would leave D4 asking nothing about it.
+    if let Some(m) = ctx.main_exe {
+        main_exe_is_a_file(ctx.game, m)?;
     }
     let mut b = Builder::default();
     for step in steps {
         match step {
             Step::FileInstall(spec) => file_install::plan_into(spec, ctx, &mut b)?,
         }
+    }
+    // E2: ops that need it (registry ops, P2-10b) need the main executable.
+    if ctx.main_exe.is_none() && b.ops.iter().any(|o| o.target().needs_main_exe()) {
+        return Err(PlanError::Step(
+            "registry fixes need the game's main executable".to_owned(),
+        ));
+    }
+    // S1: write access only for a root with file ops; D4 needs read access only.
+    let file_ops = b
+        .ops
+        .iter()
+        .any(|o| matches!(o.target(), Target::File { .. }));
+    if file_ops && !ctx.game.info().user_writable {
+        return Err(PlanError::NeedsHelper);
     }
     let plan = Plan {
         format: FORMAT,
@@ -119,6 +138,25 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
     // The bounds of the format (ops, op size, backups): the same check as when applied.
     plan.encode()?;
     Ok(plan)
+}
+
+/// `m` is a plain file of the game folder (not missing, not a folder, link or other reparse
+/// point).
+fn main_exe_is_a_file(game: &GameDir<'_>, m: &RelPath) -> Result<(), PlanError> {
+    let bad = || {
+        PlanError::Step(format!(
+            "the main executable {} is not a file in the game folder",
+            crate::escape::path(m.as_str())
+        ))
+    };
+    match game.dir().metadata(m) {
+        Ok(Some(md)) if md.kind == EntryKind::File && md.reparse.is_none() => Ok(()),
+        Ok(_) => Err(bad()),
+        Err(e) if matches!(e.kind, SysErrorKind::NotFound | SysErrorKind::ReparsePoint) => {
+            Err(bad())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// `p` folded, for comparisons between targets.

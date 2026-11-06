@@ -149,6 +149,10 @@ pub enum Refusal {
     /// A root the current user cannot write (phase 3: the elevated helper).
     #[error("the game folder needs administrator rights (not supported yet)")]
     NeedsHelper,
+    /// The main executable of a root is missing or no plain file (audit A2 should-item 8):
+    /// the game-closed check would ask nothing about it.
+    #[error("the main executable {0} is missing or not a file; plan again")]
+    MainExe(Shown<'static>),
     /// The stored plan is missing, changed or invalid.
     #[error(transparent)]
     Plan(PlanError),
@@ -596,6 +600,7 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     let stores = roots::open_stores(cx, &plan);
     let roots = roots::Roots::all(cx, &plan, &stores)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
+    roots::main_exe_present(&plan, &roots)?;
     roots::game_closed(&plan, &roots, &all)?;
     roots::old_state(cx, &plan, &roots)?;
     let mut w = lock.begin(bytes.bytes()).map_err(Refusal::from)?;
