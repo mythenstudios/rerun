@@ -1,0 +1,41 @@
+<!--
+  Windows Sandbox configuration for the Rerun sandbox tests (docs/09-testing.md, tier 3).
+
+  Do not double-click this file as it is: Windows Sandbox needs absolute host paths and has no
+  variables. Run scripts/sandbox-launch.ps1, which builds the test binary, fills in the three
+  paths below (the placeholders @REPO@) and starts the Sandbox. To use the file by hand,
+  replace @REPO@ with the absolute path of your checkout, after `scripts/sandbox-launch.ps1
+  -StageOnly` has put the test binary into target\sandbox\bin.
+
+  No network, no clipboard, no audio/video, no GPU: the tests need none of it. Only the test
+  binary and the runner are mapped (read-only); results go to target\sandbox\out (writable).
+  Nothing of the repository beyond these folders is visible inside the Sandbox.
+-->
+<Configuration>
+  <VGpu>Disable</VGpu>
+  <Networking>Disable</Networking>
+  <AudioInput>Disable</AudioInput>
+  <VideoInput>Disable</VideoInput>
+  <PrinterRedirection>Disable</PrinterRedirection>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>@REPO@\scripts</HostFolder>
+      <SandboxFolder>C:\sandbox\scripts</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>@REPO@\target\sandbox\bin</HostFolder>
+      <SandboxFolder>C:\sandbox\bin</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>@REPO@\target\sandbox\out</HostFolder>
+      <SandboxFolder>C:\sandbox\out</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\sandbox\scripts\sandbox-run.ps1</Command>
+  </LogonCommand>
+</Configuration>

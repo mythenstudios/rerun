@@ -93,7 +93,7 @@ use windows_sys::Win32::System::Registry::{
     HKEY, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_QUERY_VALUE, KEY_READ,
     KEY_SET_VALUE, REG_BINARY, REG_CREATED_NEW_KEY, REG_LINK, REG_OPTION_CREATE_LINK,
     REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE, REG_PROCESS_APPKEY, RegCreateKeyExW,
-    RegDeleteValueW, RegLoadAppKeyW, RegOpenKeyExW, RegRenameKey,
+    RegDeleteValueW, RegLoadAppKeyW, RegOpenCurrentUser, RegOpenKeyExW, RegRenameKey,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetExitCodeProcess, OpenProcess, OpenProcessToken,
@@ -150,6 +150,57 @@ pub(super) fn hosted_ci() -> bool {
     is("GITHUB_ACTIONS", "true")
         && is("RUNNER_ENVIRONMENT", "github-hosted")
         && is("RERUN_FS_MACHINE_FIXTURES", "1")
+}
+
+/// Account name of the Windows Sandbox user.
+const SANDBOX_ACCOUNT: &str = "WDAGUtilityAccount";
+
+/// The decision behind [`sandbox_guard`], on injected values (the process environment is read
+/// in one place only): all of `RERUN_SANDBOX=1`, `USERNAME` = the Sandbox account and
+/// `USERPROFILE` ending in that account's name must hold. `Err` says what is missing.
+pub(super) fn sandbox_decision(
+    flag: Option<&str>,
+    username: Option<&str>,
+    profile: Option<&str>,
+) -> Result<(), String> {
+    if flag != Some("1") {
+        return Err("RERUN_SANDBOX is not 1".to_owned());
+    }
+    if !username.is_some_and(|u| u.eq_ignore_ascii_case(SANDBOX_ACCOUNT)) {
+        return Err(format!("USERNAME is {username:?}, not {SANDBOX_ACCOUNT}"));
+    }
+    let in_profile = profile.is_some_and(|p| {
+        p.rsplit(['\\', '/'])
+            .find(|s| !s.is_empty())
+            .is_some_and(|last| last.eq_ignore_ascii_case(SANDBOX_ACCOUNT))
+    });
+    if !in_profile {
+        return Err(format!(
+            "USERPROFILE is {profile:?}, not the profile of {SANDBOX_ACCOUNT}"
+        ));
+    }
+    Ok(())
+}
+
+/// The safety net of every Windows Sandbox test: call it first. Panics, before anything is
+/// touched, unless this process runs in the Windows Sandbox ([`sandbox_decision`]). An
+/// `--ignored` run on a developer machine or a CI runner therefore changes nothing.
+pub(super) fn sandbox_guard() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the sandbox gate is an environment check by design, not a path source"
+    )]
+    let var = |k: &str| std::env::var(k).ok();
+    if let Err(why) = sandbox_decision(
+        var("RERUN_SANDBOX").as_deref(),
+        var("USERNAME").as_deref(),
+        var("USERPROFILE").as_deref(),
+    ) {
+        panic!(
+            "refusing to run: this test changes the machine and runs only in Windows Sandbox \
+             (scripts/sandbox-test.wsb): {why}"
+        );
+    }
 }
 
 /// A note that `cargo test` does not capture (written to the real stderr, not via `eprintln!`),
@@ -215,7 +266,7 @@ fn process_token(access: u32) -> Result<OwnedHandle, u32> {
 }
 
 /// The process runs elevated (`TokenElevation`).
-fn is_elevated() -> bool {
+pub(super) fn is_elevated() -> bool {
     let Ok(token) = process_token(TOKEN_QUERY) else {
         return false;
     };
@@ -1563,6 +1614,9 @@ pub(super) struct AppHive {
     no_links: Option<String>,
     /// A link key made by the probe can be followed (Windows refuses it in an app hive).
     follows: bool,
+    /// The fixture of the real `HKCU` in the Windows Sandbox ([`Self::real_user`]), not a
+    /// private app hive.
+    real: bool,
 }
 
 /// What [`AppHive::walk`] does with the segments of a hive path.
@@ -1608,6 +1662,7 @@ impl AppHive {
             name,
             no_links: None,
             follows: false,
+            real: false,
         };
         hive.create("HKCU", KEY_READ, false)?;
         hive.create("HKLM", KEY_READ, false)?;
@@ -1616,6 +1671,37 @@ impl AppHive {
             Err(why) => hive.no_links = Some(why),
         }
         Ok(hive)
+    }
+
+    /// The fixture of the real `HKCU` (`RegOpenCurrentUser(KEY_ALL_ACCESS)`), for the Windows
+    /// Sandbox tests (`docs/09-testing.md`, tier 3). Refuses unless [`sandbox_guard`] passes,
+    /// before any registry call. Links are followed there, as in every real hive.
+    pub(super) fn real_user() -> SysResult<Self> {
+        sandbox_guard();
+        let what = "real HKCU fixture";
+        let mut raw: HKEY = ptr::null_mut();
+        // SAFETY: `raw` is valid for a write and on success receives a new key handle that
+        // `OwnedKey` takes over below.
+        let rc = unsafe { RegOpenCurrentUser(KEY_ALL_ACCESS, &mut raw) };
+        if rc != 0 || raw.is_null() {
+            return Err(win32_err(rc, what));
+        }
+        // SAFETY: `raw` was just returned by a successful RegOpenCurrentUser; nothing else owns
+        // or closes it.
+        let hive = unsafe { OwnedKey::from_raw(raw) };
+        let name = key_name(&hive, what)?;
+        let upper = name.to_ascii_uppercase();
+        assert!(
+            upper.starts_with(r"\REGISTRY\USER\S-") && !upper.contains(".DEFAULT"),
+            "{what}: not the user's own hive: {name}"
+        );
+        Ok(Self {
+            hive,
+            name,
+            no_links: None,
+            follows: true,
+            real: true,
+        })
     }
 
     /// Creates the link `LinkProbe\Link` → `LinkProbe\Target` (`Err`: why not) and tries to
@@ -1641,6 +1727,9 @@ impl AppHive {
 
     /// A [`WinRegistry`] whose hives are this hive's keys `HKCU` and `HKLM` (read handles).
     pub(super) fn registry(&self) -> SysResult<WinRegistry> {
+        if self.real {
+            return WinRegistry::new();
+        }
         Ok(WinRegistry::with_roots(
             self.create("HKCU", KEY_READ, false)?,
             self.create("HKLM", KEY_READ, false)?,
@@ -1648,7 +1737,15 @@ impl AppHive {
     }
 
     /// Path of `k` inside the hive.
-    fn path_of(k: &RegKey) -> String {
+    fn path_of(&self, k: &RegKey) -> String {
+        if self.real {
+            // The real user hive: a path is relative to the hive key, `HKCU` is the key itself.
+            assert!(
+                k.hive == Hive::CurrentUser,
+                "the sandbox fixture writes HKCU only: {k}"
+            );
+            return k.path.clone();
+        }
         let hive = match k.hive {
             Hive::CurrentUser => "HKCU",
             Hive::LocalMachine => "HKLM",
@@ -1833,18 +1930,18 @@ impl AppHive {
 
 impl RegFixture for AppHive {
     fn key(&self, k: &RegKey) -> SysResult<()> {
-        self.create(&Self::path_of(k), KEY_READ, false).map(drop)
+        self.create(&self.path_of(k), KEY_READ, false).map(drop)
     }
 
     fn raw(&self, k: &RegKey, name: &str, kind: u32, data: &[u8]) -> SysResult<()> {
         let what = format!("app hive {k} @ {name:?}");
-        let key = self.create(&Self::path_of(k), KEY_SET_VALUE, false)?;
+        let key = self.create(&self.path_of(k), KEY_SET_VALUE, false)?;
         Self::set_raw(&key, name, kind, data, &what)
     }
 
     fn delete_value(&self, k: &RegKey, name: &str) -> SysResult<()> {
         let what = format!("app hive {k} @ {name:?}");
-        let key = self.create(&Self::path_of(k), KEY_SET_VALUE, false)?;
+        let key = self.create(&self.path_of(k), KEY_SET_VALUE, false)?;
         let w = wide(name);
         // SAFETY: `key` is an open key with KEY_SET_VALUE, kept alive by the borrow; `w` is
         // NUL-terminated and outlives the call.
@@ -1863,7 +1960,7 @@ impl RegFixture for AppHive {
             ));
             return Ok(false);
         }
-        self.make_link(&Self::path_of(link), &Self::path_of(target))?;
+        self.make_link(&self.path_of(link), &self.path_of(target))?;
         Ok(true)
     }
 
@@ -1877,7 +1974,7 @@ impl RegFixture for AppHive {
         let Some(parent) = k.parent() else {
             return Err(SysError::new(SysErrorKind::InvalidPath, what));
         };
-        let pkey = self.create(&Self::path_of(&parent), KEY_ALL_ACCESS, false)?;
+        let pkey = self.create(&self.path_of(&parent), KEY_ALL_ACCESS, false)?;
         let seg = wide(k.path.rsplit('\\').next().unwrap_or_default());
         let new = wide(new_name);
         Ok(Some(Box::new(move || {
@@ -1900,10 +1997,10 @@ impl RegFixture for AppHive {
         let Some(parent) = k.parent() else {
             return Err(SysError::new(SysErrorKind::InvalidPath, what));
         };
-        let pkey = self.create(&Self::path_of(&parent), KEY_ALL_ACCESS, false)?;
+        let pkey = self.create(&self.path_of(&parent), KEY_ALL_ACCESS, false)?;
         let key = self.walk(
             &what,
-            &Self::segments(&Self::path_of(k)),
+            &Self::segments(&self.path_of(k)),
             DELETE,
             KeyEnd::Open,
         )?;
@@ -1953,7 +2050,7 @@ impl RegFixture for AppHive {
         let Some(parent) = k.parent() else {
             return Err(SysError::new(SysErrorKind::InvalidPath, what));
         };
-        let pkey = self.create(&Self::path_of(&parent), KEY_CREATE_SUB_KEY, false)?;
+        let pkey = self.create(&self.path_of(&parent), KEY_CREATE_SUB_KEY, false)?;
         let seg = wide(k.path.rsplit('\\').next().unwrap_or_default());
         let mut raw: HKEY = ptr::null_mut();
         let mut disposition: u32 = 0;
@@ -1993,7 +2090,7 @@ impl RegFixture for AppHive {
         if units.is_empty() || units.iter().any(|&u| u == 0 || u == u16::from(b'\\')) {
             return Err(SysError::new(SysErrorKind::InvalidPath, what));
         }
-        let mut segs = Self::segments(&Self::path_of(parent));
+        let mut segs = Self::segments(&self.path_of(parent));
         segs.push(units.to_vec());
         self.walk(&what, &segs, KEY_READ, KeyEnd::Create)?;
         Ok(true)
@@ -2004,7 +2101,7 @@ impl RegFixture for AppHive {
         if units.contains(&0) {
             return Err(SysError::new(SysErrorKind::InvalidPath, what));
         }
-        let key = self.create(&Self::path_of(k), KEY_SET_VALUE, false)?;
+        let key = self.create(&self.path_of(k), KEY_SET_VALUE, false)?;
         Self::set_raw_units(&key, units, kind, data, &what)?;
         Ok(true)
     }
@@ -2018,7 +2115,7 @@ impl RegFixture for AppHive {
         }
         let key = self.walk(
             &what,
-            &Self::segments(&Self::path_of(k)),
+            &Self::segments(&self.path_of(k)),
             DELETE,
             KeyEnd::Open,
         )?;
@@ -2034,7 +2131,7 @@ impl RegFixture for AppHive {
 
     fn large(&self, k: &RegKey, name: &str, len: usize) -> SysResult<bool> {
         let what = format!("app hive {k} @ {name:?} ({len} bytes)");
-        let key = self.create(&Self::path_of(k), KEY_SET_VALUE, false)?;
+        let key = self.create(&self.path_of(k), KEY_SET_VALUE, false)?;
         match Self::set_raw(&key, name, REG_BINARY, &vec![7; len], &what) {
             Ok(()) => Ok(true),
             // Windows refuses a value over 1,048,572 bytes (found 2026-11-04).
