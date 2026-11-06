@@ -5,8 +5,9 @@
 //!
 //! - [`path`]: re-export of [`crate::path`] (lexical rules for relative paths and roots).
 //! - [`root`]: the only way to open a store or game folder; forbidden roots, root identity.
-//! - `registry` (phase 3): the registry allowlist.
+//! - [`registry`]: the registry allowlist and the only way to the registry write side (ADR 0018).
 
+pub mod registry;
 pub mod root;
 
 /// Lexical path rules; see [`crate::path`].
