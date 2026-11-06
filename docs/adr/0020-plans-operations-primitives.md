@@ -158,3 +158,8 @@ pub fn forget(cx: &ExecCtx, t: &TxnId) -> Result<(), ExecError>;
 - **`create_key` errors (review S5):** after a failure past the create (its flags), the key may exist; `exec` treats an `Err` as "observe", never as foreign and never as "not created".
 - **`RegWriter::delete_empty_key`** also deletes an empty key that existed before Rerun: `exec` deletes only keys it created itself (`Done` written after `create_key == true`), with a test.
 - **Deserialising a `RegSlot`** (plan or journal) goes through `AsciiSeg::parse`, `AsciiName::parse` and `GameKey::new`, never through raw fields, so a manipulated journal cannot name a key the rules refuse.
+
+## Amendment (P2-10a, 2026-11-06; decided by the user after a senior-dev cross-check)
+
+### Dispatch by target (audit A2 should-item 3)
+`Op::target() -> Target` replaces `Op::root()`/`Op::path()`: `Target::File { root, path, dir }` now, `Key` and `Value` with the registry op kinds (P2-10b). Every generic path matches on it: objects (`Object` is an enum by target, `root_path` always set) and "one op per object" in `plan`; in `exec` apply, observe, act, the record check, the game-closed check and the flushes (`Touched`: the game folders now, the hives with P2-10b; `flush_all` before `Applied`, `flush_for` the op's domain before each `RevertDone`). `exec::file` is the file domain behind it, unchanged; the revert loop stays one for every domain. The flush knobs of J6 are named by domain and place (`Flush::GameBeforeApplied`, `Flush::GameBeforeRevertDone`).

@@ -12,8 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Instant;
 
+use super::Flush;
 use super::Outcome;
-use super::knob::{self as exec_knob, GameFlush};
+use super::knob as exec_knob;
 use super::tests::{Env, NEW, OLD, X, base, finish, game, read_abs};
 use crate::journal::{FlushSite, TxnState, knob as journal_knob};
 use crate::plan::{self, Plan, PlanHash, store};
@@ -322,7 +323,7 @@ fn violations(env: &Env, before: &Snapshot, got: Got) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Site {
     Journal(FlushSite),
-    Game(GameFlush),
+    Game(Flush),
 }
 
 fn knobs(skip: Option<Site>) {
@@ -413,7 +414,7 @@ fn j6_every_flush_site_is_needed_by_exec() {
             "not identical after recovery",
         ),
         (
-            Site::Game(GameFlush::BeforeApplied),
+            Site::Game(Flush::GameBeforeApplied),
             "Applied durable, change lost",
         ),
         (Site::Journal(FlushSite::Applied), "Ok lost"),
@@ -422,7 +423,7 @@ fn j6_every_flush_site_is_needed_by_exec() {
             "Applied durable, change lost",
         ),
         (
-            Site::Game(GameFlush::BeforeRevertDone),
+            Site::Game(Flush::GameBeforeRevertDone),
             "Closed durable, revert lost",
         ),
         (Site::Journal(FlushSite::Close), "Ok lost"),

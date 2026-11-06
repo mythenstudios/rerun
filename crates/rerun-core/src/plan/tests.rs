@@ -288,10 +288,16 @@ fn p5_objects_overlap_when_equal_or_below_a_created_directory() {
     let p = sample();
     let objs = Object::of(&p);
     assert_eq!(objs.len(), 3);
+    // The root paths of `sample` (7, 8) and one beside them (9).
     let one = |root: u128, path: &str, dir: bool| {
-        vec![Object {
+        let root_path = match root {
+            7 => r"D:\Games\G",
+            8 => r"D:\SteamLibrary\steamapps\common\G2",
+            _ => r"D:\Games\H",
+        };
+        vec![Object::File {
             root: root_id(root),
-            root_path: None,
+            root_path: RootPath::new(root_path).unwrap(),
             path: crate::fold::fold(path),
             dir,
         }]
@@ -313,7 +319,8 @@ fn p5_objects_overlap_when_equal_or_below_a_created_directory() {
         &one(8, "", true)
             .into_iter()
             .map(|mut o| {
-                o.path = "D3D9.DLL".into();
+                let Object::File { path, .. } = &mut o;
+                *path = "D3D9.DLL".into();
                 o
             })
             .collect::<Vec<_>>()

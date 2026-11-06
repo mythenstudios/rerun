@@ -21,6 +21,12 @@
 //!
 //! Observing never trusts a record alone (`file`): every hash is taken on a guard, a link
 //! count other than 1 or other R/H/S is "other".
+//!
+//! Dispatch (audit A2 should-item 3): apply, observe, act, the record check, the flushes and
+//! the game-closed check match on [`Op::target`] and hand the op to the module of its domain
+//! (`file` for files and directories); the revert loop is one for every domain. A new domain
+//! (registry keys and values, P2-10b) adds a [`Target`] variant, a variant of [`Seen`] (and
+//! of [`Hint`] where it needs one) and its part of [`Touched`].
 
 mod file;
 mod roots;
@@ -28,7 +34,7 @@ mod stack;
 
 use std::collections::BTreeMap;
 
-use file::{Dirs, Hint, Mode, Seen};
+use file::Mode;
 
 use crate::detect::steam::AppState;
 use crate::escape::Shown;
@@ -37,9 +43,10 @@ use crate::journal::{
     TxnWriter,
 };
 use crate::path::RelPath;
-use crate::plan::{self, Object, Op, Plan, PlanError, PlanHash};
-use crate::policy::root::{AppDir, ForbiddenRoots, RootError};
-use crate::sys::{SysError, System};
+use crate::plan::{self, Object, Op, Plan, PlanError, PlanHash, Target};
+use crate::policy::root::{AppDir, ForbiddenRoots, GameDir, RootError};
+use crate::sys::fs::TmpName;
+use crate::sys::{SysError, SysResult, System};
 
 /// What `exec` works with.
 #[derive(Clone, Copy)]
@@ -283,30 +290,23 @@ pub struct RevertReport {
 
 #[cfg(test)]
 pub(crate) mod knob {
-    //! Test knobs of this thread: J6 switches off a game-folder flush; the controls K1 and K3
-    //! break the revert on purpose, and the tests that must notice fail.
+    //! Test knobs of this thread: J6 switches off a flush of `exec`; the controls K1 and K3
+    //! break the revert on purpose, and the check functions of T6 and T1 must report it.
 
     use std::cell::Cell;
 
-    /// A flush of the game folders by `exec`.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum GameFlush {
-        /// Before `Applied`.
-        BeforeApplied,
-        /// Before each `RevertDone` (and so before `Closed`).
-        BeforeRevertDone,
-    }
+    use super::Flush;
 
     thread_local! {
-        static SKIP: Cell<Option<GameFlush>> = const { Cell::new(None) };
+        static SKIP: Cell<Option<Flush>> = const { Cell::new(None) };
         static TRUST_RECORDS: Cell<bool> = const { Cell::new(false) };
         static RESTORE_WITHOUT_ATTRS: Cell<bool> = const { Cell::new(false) };
     }
 
-    pub(crate) fn skip(f: Option<GameFlush>) {
+    pub(crate) fn skip(f: Option<Flush>) {
         SKIP.with(|s| s.set(f));
     }
-    pub(crate) fn skipped(f: GameFlush) -> bool {
+    pub(crate) fn skipped(f: Flush) -> bool {
         SKIP.with(|s| s.get() == Some(f))
     }
     /// K1: observe from the records instead of the disk.
@@ -341,24 +341,162 @@ fn restoring_without_attrs() -> bool {
     false
 }
 
-/// J6 (tests): this game-folder flush is switched off.
+/// A flush of `exec` (ADR 0019 amendments P2-7 S2 and P2-8), named by domain and place; J6
+/// switches each off in turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flush {
+    /// The game folders an apply wrote into, before `Applied`.
+    GameBeforeApplied,
+    /// The game folder of an op, before its `RevertDone` (and so before `Closed`).
+    GameBeforeRevertDone,
+}
+
+/// J6 (tests): this flush is switched off.
 fn flush_skipped(
     #[cfg_attr(not(test), expect(unused_variables, reason = "test knob"))] at: Flush,
 ) -> bool {
     #[cfg(test)]
-    return knob::skipped(match at {
-        Flush::BeforeApplied => knob::GameFlush::BeforeApplied,
-        Flush::BeforeRevertDone => knob::GameFlush::BeforeRevertDone,
-    });
+    return knob::skipped(at);
     #[cfg(not(test))]
     false
 }
 
-/// A flush of the game folders by `exec` (ADR 0019 amendment, S2).
-#[derive(Debug, Clone, Copy)]
-enum Flush {
-    BeforeApplied,
-    BeforeRevertDone,
+/// The in-process result of a call of the apply, for its rollback (senior-dev condition 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hint {
+    /// `create_dir` created the directory with this file ID.
+    Dir(u128),
+    /// `create_dir` or `create_new` found the name taken: someone else's.
+    Foreign,
+}
+
+/// What an op observes and what its revert does, by the domain of its target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seen {
+    /// A file or directory.
+    File(file::Seen),
+}
+
+impl Seen {
+    /// What the op observed.
+    fn observed(&self) -> Observed {
+        match self {
+            Self::File(s) => s.observed,
+        }
+    }
+
+    /// A restore follows its actions (a `RevertIntent` with a temp name).
+    fn restore(&self) -> bool {
+        match self {
+            Self::File(s) => s.restore,
+        }
+    }
+}
+
+/// What the act of a revert left behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Acted {
+    /// A `<tmp>.old` was left (mapped as an image).
+    old_left: bool,
+    /// Names Rerun left in the op's folder: a `.old` still mapped, a temp name that is not
+    /// Rerun's any more.
+    left: Vec<RelPath>,
+}
+
+/// What a run touches, per domain, for the flushes (ADR 0019): the game folders written into.
+struct Touched<'g> {
+    dirs: file::Dirs<'g>,
+}
+
+impl<'g> Touched<'g> {
+    fn new(games: &'g [GameDir<'g>]) -> Self {
+        Self {
+            dirs: file::Dirs::new(games),
+        }
+    }
+
+    /// Before `Applied`: every domain the apply changed (the game folders, after every guard
+    /// is dropped: a POSIX delete through a guard reaches the volume log when it closes).
+    fn flush_all(&mut self) -> SysResult<()> {
+        if !flush_skipped(Flush::GameBeforeApplied) {
+            self.dirs.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Before the `RevertDone` of op `k`: the domain of its target, always, also when the
+    /// revert changed nothing (a `sys::seq` sequence that failed in the apply undid itself
+    /// without a flush, and the `RevertDone` must not outlive that undo; review M1).
+    fn flush_for(&mut self, k: u16, t: Target<'_>) -> Result<(), ExecError> {
+        match t {
+            Target::File { root, path, .. } => {
+                if !flush_skipped(Flush::GameBeforeRevertDone) {
+                    self.dirs
+                        .parent(root.0, path, true)
+                        .map_err(|source| ExecError::Op { op: k, source })?;
+                    self.dirs.flush()?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Applies op `k` in its domain.
+fn apply_op(
+    cx: &ExecCtx<'_>,
+    w: &mut TxnWriter<'_>,
+    t: &mut Touched<'_>,
+    k: u16,
+    op: &Op,
+    hints: &mut BTreeMap<u16, Hint>,
+) -> Result<(), ExecError> {
+    match op.target() {
+        Target::File { .. } => file::apply_op(cx, w, &mut t.dirs, k, op, hints),
+    }
+}
+
+/// Observes op `k` in its domain (read only).
+fn observe(
+    plan: &Plan,
+    t: &mut Touched<'_>,
+    k: u16,
+    op: &Op,
+    log: &OpLog,
+    mode: Mode,
+    hint: Option<Hint>,
+) -> Result<Seen, ExecError> {
+    match op.target() {
+        Target::File { .. } => {
+            file::observe(plan, &mut t.dirs, k, op, log, mode, hint).map(Seen::File)
+        }
+    }
+}
+
+/// Carries out what `seen` says for op `k`, after its `RevertIntent`.
+fn act<W: Reverting>(
+    w: &W,
+    t: &mut Touched<'_>,
+    k: u16,
+    op: &Op,
+    seen: &Seen,
+    y: Option<TmpName>,
+) -> Result<Acted, ExecError> {
+    match seen {
+        Seen::File(s) => file::act(w, &mut t.dirs, k, op, s, y),
+    }
+}
+
+/// The records fit the head (ADR 0019: the journal is op-agnostic; condition 5): every
+/// intended op exists, and its records have the form of its kind.
+fn records_fit(plan: &Plan, ops: &BTreeMap<u16, OpLog>) -> bool {
+    ops.iter()
+        .all(|(k, log)| match plan.ops.get(usize::from(*k)) {
+            None => false,
+            Some(op) => match op.target() {
+                Target::File { .. } => file::records_fit(op, log),
+            },
+        })
 }
 
 /// Applies the stored plan `h` (module docs).
@@ -379,13 +517,13 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     roots::old_state(cx, &plan, &games)?;
     let mut w = lock.begin(bytes.bytes()).map_err(Refusal::from)?;
     let txn = *w.id();
-    let mut dirs = Dirs::new(&games);
+    let mut touched = Touched::new(&games);
     let mut hints = BTreeMap::new();
-    let cause = match run(cx, &plan, &mut w, &mut dirs, &mut hints) {
+    let cause = match run(cx, &plan, &mut w, &mut touched, &mut hints) {
         Ok(()) => return Ok(Outcome::Applied(txn)),
         Err(e) => e,
     };
-    match rollback(cx, &plan, w, &mut dirs, &hints) {
+    match rollback(cx, &plan, w, &mut touched, &hints) {
         Ok(()) => Err(ApplyError::RolledBack {
             txn,
             cause: Box::new(cause),
@@ -403,31 +541,29 @@ fn op_ix(k: usize) -> u16 {
     u16::try_from(k).unwrap_or(u16::MAX)
 }
 
-/// The ops, `After` for each, the flush of the game folders, `Applied`.
+/// The ops, `After` for each, the flushes, `Applied`.
 fn run(
     cx: &ExecCtx<'_>,
     plan: &Plan,
     w: &mut TxnWriter<'_>,
-    dirs: &mut Dirs<'_>,
+    t: &mut Touched<'_>,
     hints: &mut BTreeMap<u16, Hint>,
 ) -> Result<(), ExecError> {
     for (k, op) in plan.ops.iter().enumerate() {
-        file::apply_op(cx, w, dirs, op_ix(k), op, hints)?;
+        apply_op(cx, w, t, op_ix(k), op, hints)?;
     }
     let ops = w.ops().clone();
     for (k, log) in &ops {
         let op = op_of(plan, *k)?;
-        let seen = file::observe(plan, dirs, *k, op, log, Mode::Verify, None)?;
-        if seen.observed != Observed::After {
+        let seen = observe(plan, t, *k, op, log, Mode::Verify, None)?;
+        if seen.observed() != Observed::After {
             return Err(ExecError::Verify {
                 op: *k,
-                observed: seen.observed,
+                observed: seen.observed(),
             });
         }
     }
-    if !flush_skipped(Flush::BeforeApplied) {
-        dirs.flush()?;
-    }
+    t.flush_all()?;
     w.applied(op_ix(plan.ops.len()))?;
     Ok(())
 }
@@ -445,10 +581,10 @@ fn rollback(
     cx: &ExecCtx<'_>,
     plan: &Plan,
     mut w: TxnWriter<'_>,
-    dirs: &mut Dirs<'_>,
+    t: &mut Touched<'_>,
     hints: &BTreeMap<u16, Hint>,
 ) -> Result<(), ExecError> {
-    revert_loop(cx, plan, &mut w, dirs, Mode::Rollback, hints)?;
+    revert_loop(cx, plan, &mut w, t, Mode::Rollback, hints)?;
     let foreign = foreign_ops(&w);
     if !foreign.is_empty() {
         return Err(ExecError::Foreign { ops: foreign });
@@ -479,7 +615,7 @@ fn close<W: Reverting>(w: W) -> Result<(), ExecError> {
 }
 
 /// Newest op first while one is left: observe, `RevertIntent` (with a temp name only when a
-/// restore starts, B2), act, flush the op's game folder (always), `RevertDone`. A foreign
+/// restore starts, B2), act, flush the domain of the op (always), `RevertDone`. A foreign
 /// op gets its records and is left (R1).
 ///
 /// The flush before `RevertDone` (found by T4): `RevertDone` is not flushed itself, but the
@@ -493,7 +629,7 @@ fn revert_loop<W: Reverting>(
     cx: &ExecCtx<'_>,
     plan: &Plan,
     w: &mut W,
-    dirs: &mut Dirs<'_>,
+    t: &mut Touched<'_>,
     mode: Mode,
     hints: &BTreeMap<u16, Hint>,
 ) -> Result<Vec<OpReport>, ExecError> {
@@ -505,29 +641,22 @@ fn revert_loop<W: Reverting>(
             .cloned()
             .ok_or(JournalError::Order("an op to revert without its intent"))?;
         let op = op_of(plan, k)?;
-        let seen: Seen = file::observe(plan, dirs, k, op, &log, mode, hints.get(&k).copied())?;
-        let y = seen.restore.then(|| w.tmp());
+        let seen = observe(plan, t, k, op, &log, mode, hints.get(&k).copied())?;
+        let observed = seen.observed();
+        let y = seen.restore().then(|| w.tmp());
         w.revert_intent(k, y.clone())?;
-        let done = file::act(w, dirs, k, op, &seen, y)?;
-        // Always, also when the act changed nothing: a sequence of `sys::seq` that failed in
-        // the apply undid itself (the guard renamed back, `<tmp>` discarded) without a flush,
-        // and the op's `RevertDone` must not outlive that undo on the game's volume.
-        if !flush_skipped(Flush::BeforeRevertDone) {
-            dirs.parent(op.root().0, op.path(), true)
-                .map_err(|source| ExecError::Op { op: k, source })?;
-            dirs.flush()?;
-        }
-        w.revert_done(k, seen.observed, done.old_left)?;
+        let done = act(w, t, k, op, &seen, y)?;
+        // Always, also when the act changed nothing (`Touched::flush_for`).
+        t.flush_for(k, op.target())?;
+        w.revert_done(k, observed, done.old_left)?;
         reports.push(OpReport {
             op: k,
-            observed: seen.observed,
+            observed,
             left: done.left,
-            backup: (seen.observed == Observed::Foreign && log.intent.backup.is_some()).then(
-                || {
-                    let p = format!(r"{}\journal\{}\op-{k:04}.bin", cx.app.path(), w.id());
-                    crate::escape::path(&p).to_string()
-                },
-            ),
+            backup: (observed == Observed::Foreign && log.intent.backup.is_some()).then(|| {
+                let p = format!(r"{}\journal\{}\op-{k:04}.bin", cx.app.path(), w.id());
+                crate::escape::path(&p).to_string()
+            }),
         });
     }
     Ok(reports)
@@ -555,7 +684,7 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     }
     let mut w = lock.resume(t)?;
     let plan = plan::decode(w.head()).map_err(|_| Refusal::Blocked { txn: *t })?;
-    if !file::records_fit(&plan, w.ops()) {
+    if !records_fit(&plan, w.ops()) {
         return Err(Refusal::Blocked { txn: *t }.into());
     }
     stack::for_revert(&j, &listing, t, &Object::of(&plan))?;
@@ -563,12 +692,12 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     let games = roots::open_games(cx, &plan, &stores)?;
     let intended: Vec<u16> = w.ops().keys().copied().collect();
     roots::game_closed(&plan, &games, &intended)?;
-    let mut dirs = Dirs::new(&games);
+    let mut touched = Touched::new(&games);
     let ops = revert_loop(
         cx,
         &plan,
         &mut w,
-        &mut dirs,
+        &mut touched,
         Mode::Recovery,
         &BTreeMap::new(),
     )?;
@@ -601,17 +730,17 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Vec<(u16, Observed)>, ExecE
         return Err(blocked());
     }
     let plan = plan::decode(v.head.as_deref().unwrap_or_default()).map_err(|_| blocked())?;
-    if !file::records_fit(&plan, &v.ops) {
+    if !records_fit(&plan, &v.ops) {
         return Err(blocked());
     }
     let stores = roots::open_stores(cx, &plan)?;
     let games = roots::open_games(cx, &plan, &stores)?;
-    let mut dirs = Dirs::new(&games);
+    let mut touched = Touched::new(&games);
     let mut out = Vec::with_capacity(v.ops.len());
     for (k, log) in &v.ops {
         let op = op_of(&plan, *k)?;
-        let seen = file::observe(&plan, &mut dirs, *k, op, log, Mode::Verify, None)?;
-        out.push((*k, seen.observed));
+        let seen = observe(&plan, &mut touched, *k, op, log, Mode::Verify, None)?;
+        out.push((*k, seen.observed()));
     }
     Ok(out)
 }

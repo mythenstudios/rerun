@@ -182,7 +182,13 @@ fn t9_plans_folders_top_down_new_files_and_replaces() {
     // A2-B1 (`==` on a path folds, so the spelling is compared on its own): an existing
     // segment in its stored spelling whatever the step says, a segment the plan creates in
     // the spelling of the first step that creates it, a new file as the step spells it.
-    let spelled: Vec<&str> = p.ops.iter().map(|o| o.path().as_str()).collect();
+    let spelled: Vec<&str> = p
+        .ops
+        .iter()
+        .map(|o| match o.target() {
+            crate::plan::Target::File { path, .. } => path.as_str(),
+        })
+        .collect();
     assert_eq!(
         spelled,
         [

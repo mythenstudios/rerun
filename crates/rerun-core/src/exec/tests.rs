@@ -165,8 +165,11 @@ impl Env {
     }
 
     pub(crate) fn verify(&self, t: &TxnId) -> Vec<(u16, Observed)> {
+        self.try_verify(t).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    pub(crate) fn try_verify(&self, t: &TxnId) -> Result<Vec<(u16, Observed)>, ExecError> {
         self.with(|cx| verify(cx, t))
-            .unwrap_or_else(|e| panic!("{e}"))
     }
 
     pub(crate) fn forget(&self, t: &TxnId) -> Result<(), ExecError> {
@@ -228,32 +231,67 @@ fn ops_of(v: &[(u16, Observed)]) -> Vec<Observed> {
     v.iter().map(|(_, o)| *o).collect()
 }
 
-#[test]
-fn t1_round_trip_restores_the_game_folder_exactly() {
+/// T1 as a check (audit A2 should-item 7, review N1): the scenario and its checks in one
+/// function, each finding with its name (`T1 <check>: …`); empty if T1 holds. The test asks
+/// for no finding, the control K3 for its finding.
+pub(crate) fn t1_check() -> Vec<String> {
+    let mut f = Vec::new();
     let env = Env::new(finish(base()));
     let before = env.snap();
     let h = env.plan(&t1_spec());
-    let t = env.applied(&h);
-    assert_eq!(env.state(&t), Some(TxnState::Applied));
-    assert_eq!(ops_of(&env.verify(&t)), vec![Observed::After; 5]);
-    let d3d9 = read_abs(&env.sys, &game("d3d9.dll"));
-    assert_eq!(d3d9, NEW);
-    let rep = env.revert(&t).unwrap();
-    assert_eq!(rep.closed, Some(Closing::Reverted));
-    assert_eq!(rep.ops.len(), 5);
-    assert!(
-        rep.ops
+    let t = match env.apply(&h) {
+        Ok(Outcome::Applied(t)) => t,
+        other => return vec![format!("T1 apply: {other:?}")],
+    };
+    if env.state(&t) != Some(TxnState::Applied) {
+        f.push(format!("T1 applied: {:?}", env.state(&t)));
+    }
+    let v = env.try_verify(&t);
+    if v.as_deref().ok().map(ops_of) != Some(vec![Observed::After; 5]) {
+        f.push(format!("T1 verify after apply: {v:?}"));
+    }
+    if try_read_abs(&env.sys, &game("d3d9.dll")).as_deref() != Some(NEW) {
+        f.push("T1 new content: d3d9.dll".to_owned());
+    }
+    let rep = match env.revert(&t) {
+        Ok(r) => r,
+        Err(e) => {
+            f.push(format!("T1 revert: {e}"));
+            return f;
+        }
+    };
+    if rep.closed != Some(Closing::Reverted) {
+        f.push(format!("T1 closed: {:?}", rep.closed));
+    }
+    if rep.ops.len() != 5
+        || !rep
+            .ops
             .iter()
             .all(|o| o.observed == Observed::After && o.left.is_empty())
-    );
-    assert_eq!(
-        rep.ops.iter().map(|o| o.op).collect::<Vec<_>>(),
-        [4, 3, 2, 1, 0],
-        "newest first"
-    );
-    same(&before, &env.snap());
-    assert_eq!(env.plan(&t1_spec()), h, "planned again: the same hash");
-    assert_eq!(ops_of(&env.verify(&t)), vec![Observed::Before; 5]);
+    {
+        f.push(format!("T1 reverted ops: {:?}", rep.ops));
+    }
+    if rep.ops.iter().map(|o| o.op).collect::<Vec<_>>() != [4, 3, 2, 1, 0] {
+        f.push(format!("T1 newest first: {:?}", rep.ops));
+    }
+    let now = env.snap();
+    if before != now {
+        f.push(format!("T1 snapshot: {:#?}", before.diff(&now)));
+    }
+    if env.plan(&t1_spec()) != h {
+        f.push("T1 planned again: another hash".to_owned());
+    }
+    let v = env.try_verify(&t);
+    if v.as_deref().ok().map(ops_of) != Some(vec![Observed::Before; 5]) {
+        f.push(format!("T1 verify after revert: {v:?}"));
+    }
+    f
+}
+
+#[test]
+fn t1_round_trip_restores_the_game_folder_exactly() {
+    let f = t1_check();
+    assert!(f.is_empty(), "{f:#?}");
 }
 
 #[test]
@@ -604,90 +642,119 @@ fn t5_tampering_is_refused_or_left() {
     assert_eq!(read_abs(&env.sys, r"C:\out\x.dll"), b"canary");
 }
 
+/// A change of T6: its name, the op it makes foreign, the change.
+type T6Case = (&'static str, u16, fn(&FakeSystem));
+
+/// The cases of T6.
+const T6_CASES: [T6Case; 5] = [
+    ("content", 0, |s| {
+        let p = game("d3d9.dll");
+        s.fake_fs().remove_abs(Path::new(&p)).unwrap();
+        s.fake_fs().put_file(Path::new(&p), b"user's own").unwrap();
+    }),
+    ("R/H/S", 4, |s| {
+        s.fake_fs()
+            .set_attrs(Path::new(&game("new.dll")), RH)
+            .unwrap();
+    }),
+    ("hard link", 0, |s| {
+        s.fake_fs()
+            .put_hardlink(Path::new(&game("d3d9.dll")), Path::new(&game("vortex.dll")))
+            .unwrap();
+    }),
+    ("a file in a created folder", 2, |s| {
+        s.fake_fs()
+            .put_file(Path::new(&game(r"mods\a\mine.txt")), b"user")
+            .unwrap();
+    }),
+    // A2-B1 review S1: a case-only rename is a change (ADR 0017 D3), not the planned name.
+    ("another spelling", 0, |s| {
+        s.rename_abs(game("d3d9.dll"), game("D3D9.DLL")).unwrap();
+    }),
+];
+
+/// T6 for one case as a check (audit A2 should-item 7, review N1): the findings, each with
+/// its name (`T6 <case> <check>: …`); empty if T6 holds. The control K1 asks for its finding.
+pub(crate) fn t6_check(case: &T6Case) -> Vec<String> {
+    let (what, op, change) = *case;
+    let mut f = Vec::new();
+    let env = Env::new(finish(base()));
+    let t = match env.apply(&env.plan(&t1_spec())) {
+        Ok(Outcome::Applied(t)) => t,
+        other => return vec![format!("T6 {what} apply: {other:?}")],
+    };
+    change(&env.sys);
+    let p = game(target(op));
+    let changed = try_meta_abs(&env.sys, &p);
+    let user = try_read_abs(&env.sys, &p);
+    let spelled = try_stored_abs(&env.sys, &p);
+    // `verify` names it before the revert meets it (rule 5).
+    let v = env.try_verify(&t);
+    if !v
+        .as_ref()
+        .is_ok_and(|v| v.iter().any(|(k, o)| *k == op && *o == Observed::Foreign))
+    {
+        f.push(format!("T6 {what} verify: {v:?}"));
+    }
+    let rep = match env.revert(&t) {
+        Ok(r) => r,
+        Err(e) => {
+            f.push(format!("T6 {what} revert: {e}"));
+            return f;
+        }
+    };
+    if rep.closed.is_some() {
+        f.push(format!("T6 {what} closed: {:?}", rep.closed));
+    }
+    let foreign: Vec<&super::OpReport> = rep
+        .ops
+        .iter()
+        .filter(|o| o.observed == Observed::Foreign)
+        .collect();
+    // R1: the foreign op (and a folder above it) is left, every other op reverted.
+    if !foreign.iter().any(|o| o.op == op) {
+        f.push(format!("T6 {what} foreign op: {rep:?}"));
+    }
+    if !rep
+        .ops
+        .iter()
+        .all(|o| o.observed == Observed::After || o.observed == Observed::Foreign)
+    {
+        f.push(format!("T6 {what} lower ops: {rep:?}"));
+    }
+    if op == 0 {
+        let b = foreign.first().and_then(|o| o.backup.as_deref());
+        if !b.is_some_and(|b| b.ends_with(r"\op-0000.bin") && exists_abs(&env.sys, b)) {
+            f.push(format!("T6 {what} backup kept: {b:?}"));
+        }
+    }
+    // The foreign object is as the user left it.
+    let now = try_meta_abs(&env.sys, &p);
+    let attrs =
+        |m: &Option<crate::sys::fs::Metadata>| m.as_ref().map(|m| (m.attrs, m.links, m.len));
+    if try_read_abs(&env.sys, &p) != user || attrs(&now) != attrs(&changed) {
+        f.push(format!(
+            "T6 {what} object: content, attributes, links or length not as the user left them"
+        ));
+    }
+    if try_stored_abs(&env.sys, &p) != spelled {
+        f.push(format!("T6 {what} spelling: not as the user named it"));
+    }
+    // Revert again: still foreign; forget closes.
+    if !env.revert(&t).is_ok_and(|r| r.closed.is_none()) {
+        f.push(format!("T6 {what} revert again"));
+    }
+    if env.forget(&t).is_err() || env.state(&t) != Some(TxnState::Closed(Closing::Forgotten)) {
+        f.push(format!("T6 {what} forget: {:?}", env.state(&t)));
+    }
+    f
+}
+
 #[test]
 fn t6_a_foreign_state_is_left_with_its_backup_and_only_forget_closes() {
-    type Change = fn(&FakeSystem);
-    let cases: [(&str, u16, Change); 5] = [
-        ("content", 0, |s| {
-            let p = game("d3d9.dll");
-            s.fake_fs().remove_abs(Path::new(&p)).unwrap();
-            s.fake_fs().put_file(Path::new(&p), b"user's own").unwrap();
-        }),
-        ("R/H/S", 4, |s| {
-            s.fake_fs()
-                .set_attrs(Path::new(&game("new.dll")), RH)
-                .unwrap();
-        }),
-        ("hard link", 0, |s| {
-            s.fake_fs()
-                .put_hardlink(Path::new(&game("d3d9.dll")), Path::new(&game("vortex.dll")))
-                .unwrap();
-        }),
-        ("a file in a created folder", 2, |s| {
-            s.fake_fs()
-                .put_file(Path::new(&game(r"mods\a\mine.txt")), b"user")
-                .unwrap();
-        }),
-        // A2-B1 review S1: a case-only rename is a change (ADR 0017 D3), not the planned name.
-        ("another spelling", 0, |s| {
-            s.rename_abs(game("d3d9.dll"), game("D3D9.DLL")).unwrap();
-        }),
-    ];
-    for (what, op, change) in cases {
-        let env = Env::new(finish(base()));
-        let t = env.applied(&env.plan(&t1_spec()));
-        change(&env.sys);
-        let changed = meta_abs(&env.sys, &game(target(op)));
-        let user = read_abs(&env.sys, &game(target(op)));
-        let spelled = stored_abs(&env.sys, &game(target(op)));
-        // `verify` names it before the revert meets it (rule 5).
-        let v = env.verify(&t);
-        assert!(
-            v.iter().any(|(k, o)| *k == op && *o == Observed::Foreign),
-            "{what}: verify {v:?}"
-        );
-        let rep = env.revert(&t).unwrap();
-        assert_eq!(rep.closed, None, "{what}");
-        let foreign: Vec<&super::OpReport> = rep
-            .ops
-            .iter()
-            .filter(|o| o.observed == Observed::Foreign)
-            .collect();
-        // R1: the foreign op (and a folder above it) is left, every other op reverted.
-        assert!(foreign.iter().any(|o| o.op == op), "{what}: {rep:?}");
-        assert!(
-            rep.ops
-                .iter()
-                .all(|o| o.observed == Observed::After || o.observed == Observed::Foreign),
-            "{what}: {rep:?}"
-        );
-        if op == 0 {
-            let b = foreign[0].backup.as_deref().unwrap();
-            assert!(b.ends_with(r"\op-0000.bin"), "{b}");
-            assert!(exists_abs(&env.sys, b), "{what}: backup kept");
-        }
-        // The foreign object is as the user left it.
-        assert_eq!(read_abs(&env.sys, &game(target(op))), user, "{what}");
-        let now = meta_abs(&env.sys, &game(target(op)));
-        assert_eq!(
-            (now.attrs, now.links, now.len),
-            (changed.attrs, changed.links, changed.len),
-            "{what}: attributes, links and length as the user left them"
-        );
-        assert_eq!(
-            stored_abs(&env.sys, &game(target(op))),
-            spelled,
-            "{what}: the name as the user spelled it"
-        );
-        // Revert again: still foreign; forget closes.
-        let again = env.revert(&t).unwrap();
-        assert_eq!(again.closed, None, "{what}");
-        env.forget(&t).unwrap();
-        assert_eq!(
-            env.state(&t),
-            Some(TxnState::Closed(Closing::Forgotten)),
-            "{what}"
-        );
+    for case in &T6_CASES {
+        let f = t6_check(case);
+        assert!(f.is_empty(), "{f:#?}");
     }
 }
 
@@ -708,6 +775,32 @@ pub(crate) fn stored_abs(sys: &FakeSystem, abs: &str) -> String {
     d.stored_name(&rel(name)).unwrap().unwrap()
 }
 
+/// The content of the fake file `abs`, `None` if it cannot be read.
+pub(crate) fn try_read_abs(sys: &FakeSystem, abs: &str) -> Option<Vec<u8>> {
+    let p = Path::new(abs);
+    #[expect(clippy::disallowed_methods, reason = "test: read a fixture file")]
+    let d = sys.fake_fs().open_dir(p.parent()?).ok()?;
+    d.read(&rel(&p.file_name()?.to_string_lossy())).ok()
+}
+
+/// The metadata of the fake entry `abs`, `None` if it is missing.
+pub(crate) fn try_meta_abs(sys: &FakeSystem, abs: &str) -> Option<crate::sys::fs::Metadata> {
+    let p = Path::new(abs);
+    #[expect(clippy::disallowed_methods, reason = "test: look at a fixture entry")]
+    let d = sys.fake_fs().open_dir(p.parent()?).ok()?;
+    d.metadata(&rel(&p.file_name()?.to_string_lossy()))
+        .ok()
+        .flatten()
+}
+
+/// The stored spelling of the fake entry `abs`, `None` if it is missing.
+pub(crate) fn try_stored_abs(sys: &FakeSystem, abs: &str) -> Option<String> {
+    let p = Path::new(abs);
+    #[expect(clippy::disallowed_methods, reason = "test: read a fixture name")]
+    let d = sys.fake_fs().open_dir(p.parent()?).ok()?;
+    d.stored_name(&rel(p.file_name()?.to_str()?)).ok().flatten()
+}
+
 /// The content of the fake file `abs`.
 pub(crate) fn read_abs(sys: &FakeSystem, abs: &str) -> Vec<u8> {
     let p = Path::new(abs);
@@ -715,16 +808,6 @@ pub(crate) fn read_abs(sys: &FakeSystem, abs: &str) -> Vec<u8> {
     let d = sys.fake_fs().open_dir(p.parent().unwrap()).unwrap();
     d.read(&rel(&p.file_name().unwrap().to_string_lossy()))
         .unwrap_or_else(|e| panic!("{abs}: {e}"))
-}
-
-/// The metadata of the fake entry `abs`.
-pub(crate) fn meta_abs(sys: &FakeSystem, abs: &str) -> crate::sys::fs::Metadata {
-    let p = Path::new(abs);
-    #[expect(clippy::disallowed_methods, reason = "test: look at a fixture entry")]
-    let d = sys.fake_fs().open_dir(p.parent().unwrap()).unwrap();
-    d.metadata(&rel(&p.file_name().unwrap().to_string_lossy()))
-        .unwrap()
-        .unwrap()
 }
 
 /// The fake entry `abs` exists.
@@ -1170,37 +1253,33 @@ fn forget_closes_applied_and_open_transactions() {
     assert_eq!(env.state(&open), Some(TxnState::Closed(Closing::Forgotten)));
 }
 
-/// K1: a revert that trusts the records instead of observing destroys a foreign state; T6's
-/// property ("the foreign object is as the user left it") catches it.
+/// K1: a revert that trusts the records instead of observing deletes a file the user changed
+/// (T6's "R/H/S" case: the user made our new file read-only and hidden); T6's check reports
+/// the object and the closing.
 #[test]
 fn k1_trusting_the_records_breaks_t6() {
-    // T6's "R/H/S" case: the user made our new file read-only and hidden.
-    let env = Env::new(finish(base()));
-    let t = env.applied(&env.plan(&t1_spec()));
-    env.sys
-        .fake_fs()
-        .set_attrs(Path::new(&game("new.dll")), RH)
-        .unwrap();
+    let case = T6_CASES.iter().find(|c| c.0 == "R/H/S").unwrap();
     super::knob::trust_records(true);
-    let r = env.revert(&t);
+    let f = t6_check(case);
     super::knob::trust_records(false);
-    // T6 requires the file as the user left it and the transaction open; trusting `Done`
-    // deletes it and closes.
-    assert!(!exists_abs(&env.sys, &game("new.dll")), "K1 not caught");
-    assert_eq!(closed(&r), Some(Closing::Reverted), "K1 not caught");
+    for want in ["T6 R/H/S object:", "T6 R/H/S closed:"] {
+        assert!(
+            f.iter().any(|x| x.starts_with(want)),
+            "K1 not caught ({want}): {f:#?}"
+        );
+    }
 }
 
-/// K3: a restore without the old R/H/S; T1's snapshot comparison catches it.
+/// K3: a restore without the old R/H/S; T1's check reports the snapshot.
 #[test]
 fn k3_restoring_without_attributes_breaks_t1() {
-    let env = Env::new(finish(base()));
-    let before = env.snap();
-    let t = env.applied(&env.plan(&t1_spec()));
     super::knob::restore_without_attrs(true);
-    let r = env.revert(&t);
+    let f = t1_check();
     super::knob::restore_without_attrs(false);
-    assert_eq!(closed(&r), Some(Closing::Reverted));
-    assert!(before != env.snap(), "K3 not caught");
+    assert!(
+        f.iter().any(|x| x.starts_with("T1 snapshot:")),
+        "K3 not caught: {f:#?}"
+    );
 }
 
 /// Review S2: a manual root inside a Steam install folder overlaps that root as a whole.

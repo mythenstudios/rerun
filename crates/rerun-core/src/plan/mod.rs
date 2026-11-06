@@ -150,22 +150,39 @@ pub enum Op {
     },
 }
 
-impl Op {
-    /// The root of the op.
-    pub fn root(&self) -> RootIx {
-        match self {
-            Self::CreateDir { root, .. }
-            | Self::CreateFile { root, .. }
-            | Self::ReplaceFile { root, .. } => *root,
-        }
-    }
+/// What an op targets (audit A2 should-item 3): the generic paths of `plan` and `exec`
+/// (objects and "one op per object", records, flushes, the game-closed check) go through
+/// this, never through an op kind, so a new kind of target (registry keys and values,
+/// P2-10b) is one more variant whose every use the compiler names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target<'a> {
+    /// A file or directory below a root.
+    File {
+        /// Root.
+        root: RootIx,
+        /// Path below the root.
+        path: &'a RelPath,
+        /// The op creates a directory.
+        dir: bool,
+    },
+}
 
-    /// The path of the op below its root.
-    pub fn path(&self) -> &RelPath {
+impl Op {
+    /// What the op targets.
+    pub fn target(&self) -> Target<'_> {
         match self {
-            Self::CreateDir { path, .. }
-            | Self::CreateFile { path, .. }
-            | Self::ReplaceFile { path, .. } => path,
+            Self::CreateDir { root, path } => Target::File {
+                root: *root,
+                path,
+                dir: true,
+            },
+            Self::CreateFile { root, path, .. } | Self::ReplaceFile { root, path, .. } => {
+                Target::File {
+                    root: *root,
+                    path,
+                    dir: false,
+                }
+            }
         }
     }
 
@@ -480,14 +497,18 @@ fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
                 limit: lim.op_bytes,
             });
         }
-        if usize::from(op.root().0) >= plan.roots.len() {
-            return Err(invalid(Some(k), "root index outside the plan's roots"));
+        match op.target() {
+            Target::File { root, path, .. } => {
+                if usize::from(root.0) >= plan.roots.len() {
+                    return Err(invalid(Some(k), "root index outside the plan's roots"));
+                }
+                let key = (root, fold(path.as_str()));
+                if seen.contains(&key) {
+                    return Err(invalid(Some(k), "a second op on the same object"));
+                }
+                seen.push(key);
+            }
         }
-        let key = (op.root(), fold(op.path().as_str()));
-        if seen.contains(&key) {
-            return Err(invalid(Some(k), "a second op on the same object"));
-        }
-        seen.push(key);
         if let Some(ContentRef::Package {
             id, version, len, ..
         }) = op.content()
@@ -515,17 +536,23 @@ fn check(plan: &Plan, len: usize, lim: &Limits) -> Result<(), PlanError> {
     Ok(())
 }
 
-/// An object a plan's op touches, for stacking (ADR 0019, B-2): a file or directory as root
-/// identity and folded path. Two objects overlap if they are the same, or if one is a
-/// directory an op creates and the other lies below it.
+/// An object a plan's op touches, for stacking (ADR 0019, B-2), by [`Target`]: a file or
+/// directory as root identity and folded path. Two objects overlap if they are the same, or
+/// if one is a directory an op creates and the other lies below it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Object {
-    pub(crate) root: RootId,
-    /// Canonical path of the root as planned: roots of which one lies inside the other
-    /// overlap as a whole (fail closed, review S2).
-    pub(crate) root_path: Option<RootPath>,
-    pub(crate) path: String,
-    pub(crate) dir: bool,
+pub(crate) enum Object {
+    /// A file or directory.
+    File {
+        /// Identity of the root.
+        root: RootId,
+        /// Canonical path of the root as planned: roots of which one lies inside the other
+        /// overlap as a whole (fail closed, review S2).
+        root_path: RootPath,
+        /// Folded path below the root.
+        path: String,
+        /// A directory the op creates.
+        dir: bool,
+    },
 }
 
 impl Object {
@@ -534,14 +561,16 @@ impl Object {
     pub(crate) fn of(plan: &Plan) -> Vec<Self> {
         plan.ops
             .iter()
-            .filter_map(|op| {
-                let root = plan.roots.get(usize::from(op.root().0))?;
-                Some(Self {
-                    root: root.id,
-                    root_path: Some(root.path.clone()),
-                    path: fold(op.path().as_str()),
-                    dir: matches!(op, Op::CreateDir { .. }),
-                })
+            .filter_map(|op| match op.target() {
+                Target::File { root, path, dir } => {
+                    let r = plan.roots.get(usize::from(root.0))?;
+                    Some(Self::File {
+                        root: r.id,
+                        root_path: r.path.clone(),
+                        path: fold(path.as_str()),
+                        dir,
+                    })
+                }
             })
             .collect()
     }
@@ -550,20 +579,31 @@ impl Object {
     /// two different roots of which one lies inside the other (a manual root inside a Steam
     /// install folder): no rebasing of paths, fail closed.
     pub(crate) fn overlaps(&self, other: &Self) -> bool {
-        if self.root != other.root
-            && let (Some(a), Some(b)) = (&self.root_path, &other.root_path)
-            && (a.contains(b) || b.contains(a))
-        {
-            return true;
+        match (self, other) {
+            (
+                Self::File {
+                    root: ra,
+                    root_path: pa,
+                    path: a,
+                    dir: da,
+                },
+                Self::File {
+                    root: rb,
+                    root_path: pb,
+                    path: b,
+                    dir: db,
+                },
+            ) => {
+                if ra != rb {
+                    return pa.contains(pb) || pb.contains(pa);
+                }
+                let below = |dir: &str, p: &str| {
+                    p.strip_prefix(dir)
+                        .is_some_and(|rest| rest.starts_with('\\'))
+                };
+                a == b || (*da && below(a, b)) || (*db && below(b, a))
+            }
         }
-        let below = |dir: &Self, p: &Self| {
-            dir.dir
-                && p.path
-                    .strip_prefix(&dir.path)
-                    .is_some_and(|rest| rest.starts_with('\\'))
-        };
-        self.root == other.root
-            && (self.path == other.path || below(self, other) || below(other, self))
     }
 }
 

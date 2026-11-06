@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use super::{ContentRef, FileState, Op, Plan, PlanOrigin};
+use super::{ContentRef, FileState, Op, Plan, PlanOrigin, Target};
 use crate::escape::{self, Shown};
 use crate::sys::fs::Attrs;
 use crate::wire::hex32;
@@ -124,11 +124,14 @@ pub fn preview(p: &Plan) -> Preview {
                 ),
                 None => (None, None, false),
             };
+            let (root, path) = match op.target() {
+                Target::File { root, path, .. } => (usize::from(root.0), path),
+            };
             PreviewOp {
                 index,
                 action,
-                root: usize::from(op.root().0),
-                path: escape::path(op.path().as_str()).into_owned(),
+                root,
+                path: escape::path(path.as_str()).into_owned(),
                 source,
                 content,
                 attrs,

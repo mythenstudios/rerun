@@ -7,7 +7,7 @@ use super::{ExecCtx, Refusal, op_ix};
 use crate::detect::steam::{AppState, app_manifest};
 use crate::escape;
 use crate::path::RelPath;
-use crate::plan::{ContentRef, Op, Plan, PlanOrigin};
+use crate::plan::{ContentRef, Op, Plan, PlanOrigin, Target};
 use crate::policy::root::{AppSub, GameDir, StoreDir};
 use crate::prim::file_install::{hash_file, open_package};
 use crate::sys::fs::FileGuard;
@@ -133,14 +133,20 @@ fn unused(plan: &Plan, games: &[GameDir<'_>], root: usize, p: &RelPath) -> Resul
     }
 }
 
-/// D4: the game is closed: no existing target of the file ops `ops` and no main executable
+/// D4: the game is closed: no existing file target of the ops `ops` and no main executable
 /// is in use.
 pub(super) fn game_closed(plan: &Plan, games: &[GameDir<'_>], ops: &[u16]) -> Result<(), Refusal> {
     for k in ops {
-        if let Some(op @ (Op::CreateFile { .. } | Op::ReplaceFile { .. })) =
-            plan.ops.get(usize::from(*k))
-        {
-            unused(plan, games, usize::from(op.root().0), op.path())?;
+        let Some(op) = plan.ops.get(usize::from(*k)) else {
+            continue;
+        };
+        match op.target() {
+            Target::File {
+                root,
+                path,
+                dir: false,
+            } => unused(plan, games, usize::from(root.0), path)?,
+            Target::File { dir: true, .. } => {}
         }
     }
     for (i, r) in plan.roots.iter().enumerate() {
@@ -162,7 +168,8 @@ pub(super) fn old_state(
     let packages = cx.app.sub(AppSub::Packages)?;
     for (k, op) in plan.ops.iter().enumerate() {
         let mismatch = || Refusal::Mismatch { op: op_ix(k) };
-        let g = games.get(usize::from(op.root().0)).ok_or_else(mismatch)?;
+        let Target::File { root, .. } = op.target();
+        let g = games.get(usize::from(root.0)).ok_or_else(mismatch)?;
         match op {
             Op::CreateDir { path, .. } | Op::CreateFile { path, .. } => {
                 if g.dir().metadata(path)?.is_some() {

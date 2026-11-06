@@ -26,23 +26,21 @@
 
 use std::collections::BTreeMap;
 
-use super::{ExecCtx, ExecError, roots};
+use super::{Acted, ExecCtx, ExecError, Hint, roots};
 use crate::fold::fold;
 use crate::journal::{BackupRef, Observed, OpLog, Reverting, TxnWriter};
 use crate::path::RelPath;
-use crate::plan::{ContentRef, Op, Plan, RootIx};
+use crate::plan::{ContentRef, Op, Plan, Target};
 use crate::policy::root::{AppSub, GameDir};
 use crate::prim::file_install::open_package;
 use crate::sys::fs::{Attrs, EntryKind, NewFile, TmpName};
 use crate::sys::{DirWrite, SysError, SysErrorKind, SysResult};
 
-/// The in-process result of a call of the apply, for its rollback (senior-dev condition 4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Hint {
-    /// `create_dir` created the directory with this file ID.
-    Dir(u128),
-    /// `create_dir` or `create_new` found the name taken: someone else's.
-    Foreign,
+/// The root index and path of a file op (the dispatch of `exec` hands only file ops here).
+fn file_target(op: &Op) -> (u16, &RelPath) {
+    match op.target() {
+        Target::File { root, path, .. } => (root.0, path),
+    }
 }
 
 /// Who observes.
@@ -164,11 +162,11 @@ pub(super) fn apply_op(
     hints: &mut BTreeMap<u16, Hint>,
 ) -> Result<(), ExecError> {
     let e = op_err(k);
-    let RootIx(root) = op.root();
-    let Some((parent, name)) = dirs.parent(root, op.path(), true).map_err(&e)? else {
+    let (root, path) = file_target(op);
+    let Some((parent, name)) = dirs.parent(root, path, true).map_err(&e)? else {
         return Err(e(SysError::new(
             SysErrorKind::NotFound,
-            format!("the folder of {}", op.path()),
+            format!("the folder of {path}"),
         )));
     };
     let packages = match op {
@@ -247,14 +245,14 @@ pub(super) fn apply_op(
             if !g.name().same_spelling(&name) || !roots::same_state(&mut *g, old).map_err(&e)? {
                 return Err(e(SysError::new(
                     SysErrorKind::Mismatch,
-                    format!("{}: changed since the preview", op.path()),
+                    format!("{path}: changed since the preview"),
                 )));
             }
             // D4 again, on the guard itself (condition 8).
             if !g.users().map_err(&e)?.is_empty() {
                 return Err(e(SysError::new(
                     SysErrorKind::Busy,
-                    format!("{} is in use", op.path()),
+                    format!("{path} is in use"),
                 )));
             }
             let pkg = source(content)?;
@@ -445,38 +443,40 @@ impl Seen {
     }
 }
 
-/// The records fit the head (ADR 0019: the journal is op-agnostic; condition 5): every
-/// intended op exists, a `CreateDir` has neither temp name nor backup, a `CreateFile` a temp
-/// name and no backup, a `ReplaceFile` a temp name and the backup of exactly its old state;
-/// no revert of a non-replace names a temp file.
-pub(super) fn records_fit(plan: &Plan, ops: &BTreeMap<u16, OpLog>) -> bool {
-    ops.iter().all(|(k, log)| {
-        let i = &log.intent;
-        let no_restore = log.reverts.iter().all(Option::is_none);
-        match plan.ops.get(usize::from(*k)) {
-            None => false,
-            Some(Op::CreateDir { .. }) => i.tmp.is_none() && i.backup.is_none() && no_restore,
-            Some(Op::CreateFile { .. }) => i.tmp.is_some() && i.backup.is_none() && no_restore,
-            Some(Op::ReplaceFile { old, .. }) => {
-                i.tmp.is_some()
-                    && i.backup
-                        == Some(BackupRef {
-                            sha256: old.sha256,
-                            len: old.len,
-                        })
-            }
+/// The records of a file op fit its kind (condition 5): a `CreateDir` has neither temp name
+/// nor backup, a `CreateFile` a temp name and no backup, a `ReplaceFile` a temp name and the
+/// backup of exactly its old state; no revert of a non-replace names a temp file.
+pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
+    let i = &log.intent;
+    let no_restore = log.reverts.iter().all(Option::is_none);
+    match op {
+        Op::CreateDir { .. } => i.tmp.is_none() && i.backup.is_none() && no_restore,
+        Op::CreateFile { .. } => i.tmp.is_some() && i.backup.is_none() && no_restore,
+        Op::ReplaceFile { old, .. } => {
+            i.tmp.is_some()
+                && i.backup
+                    == Some(BackupRef {
+                        sha256: old.sha256,
+                        len: old.len,
+                    })
         }
-    })
+    }
 }
 
-/// The folded names of the direct children of `dir` that later ops of `plan` (after `k`, in
-/// the same root) create.
-fn later_children(plan: &Plan, k: u16, root: RootIx, dir: &RelPath) -> Vec<String> {
+/// The folded names of the direct children of `dir` that later file ops of `plan` (after
+/// `k`, in the same root) create.
+fn later_children(plan: &Plan, k: u16, root: u16, dir: &RelPath) -> Vec<String> {
     plan.ops
         .iter()
         .skip(usize::from(k) + 1)
-        .filter(|o| o.root() == root && o.path().parent().as_ref() == Some(dir))
-        .map(|o| fold(o.path().file_name()))
+        .filter_map(|o| match o.target() {
+            Target::File { root: r, path, .. }
+                if r.0 == root && path.parent().as_ref() == Some(dir) =>
+            {
+                Some(fold(path.file_name()))
+            }
+            Target::File { .. } => None,
+        })
         .collect()
 }
 
@@ -494,20 +494,20 @@ pub(super) fn observe(
         return Ok(trusted(op, log));
     }
     let e = op_err(k);
-    let RootIx(root) = op.root();
-    let found = dirs.parent(root, op.path(), false).map_err(&e)?;
+    let (root, path) = file_target(op);
+    let found = dirs.parent(root, path, false).map_err(&e)?;
     let (parent, name) = match &found {
         Some((d, n)) => (Some(*d), n.clone()),
         None => (
             None,
-            RelPath::from_segment(op.path().file_name())
-                .map_err(|_| e(SysError::new(SysErrorKind::InvalidPath, op.path().as_str())))?,
+            RelPath::from_segment(path.file_name())
+                .map_err(|_| e(SysError::new(SysErrorKind::InvalidPath, path.as_str())))?,
         ),
     };
     match op {
-        Op::CreateDir { path, .. } => {
+        Op::CreateDir { .. } => {
             let allowed = if mode == Mode::Verify {
-                later_children(plan, k, op.root(), path)
+                later_children(plan, k, root, path)
             } else {
                 Vec::new()
             };
@@ -729,15 +729,15 @@ fn replace_seen(
 fn run_action(
     dirs: &mut Dirs<'_>,
     root: u16,
-    op: &Op,
+    path: &RelPath,
     a: &Action,
-    done: &mut Done,
+    done: &mut Acted,
     e: &impl Fn(SysError) -> ExecError,
 ) -> Result<(), ExecError> {
     if let Action::RemoveDir(_) = a {
-        dirs.evict(root, op.path());
+        dirs.evict(root, path);
     }
-    let Some((parent, name)) = dirs.parent(root, op.path(), true).map_err(e)? else {
+    let Some((parent, name)) = dirs.parent(root, path, true).map_err(e)? else {
         return Ok(());
     };
     match a {
@@ -791,12 +791,6 @@ fn run_action(
     Ok(())
 }
 
-/// What [`act`] did beyond the observation.
-pub(super) struct Done {
-    pub(super) old_left: bool,
-    pub(super) left: Vec<RelPath>,
-}
-
 /// Carries out the actions of `seen` and, if it says so, the restore with temp name `y`.
 pub(super) fn act<W: Reverting>(
     w: &W,
@@ -805,10 +799,10 @@ pub(super) fn act<W: Reverting>(
     op: &Op,
     seen: &Seen,
     y: Option<TmpName>,
-) -> Result<Done, ExecError> {
+) -> Result<Acted, ExecError> {
     let e = op_err(k);
-    let RootIx(root) = op.root();
-    let mut done = Done {
+    let (root, path) = file_target(op);
+    let mut done = Acted {
         old_left: false,
         left: seen.left.clone(),
     };
@@ -816,7 +810,7 @@ pub(super) fn act<W: Reverting>(
     // succeeded; a damaged backup must not cost the last copy of the old content.
     let deferred = |a: &&Action| seen.restore && matches!(a, Action::DeleteOld(..));
     for a in seen.actions.iter().filter(|a| !deferred(a)) {
-        run_action(dirs, root, op, a, &mut done, &e)?;
+        run_action(dirs, root, path, a, &mut done, &e)?;
     }
     if seen.restore {
         let Op::ReplaceFile { old, content, .. } = op else {
@@ -836,22 +830,22 @@ pub(super) fn act<W: Reverting>(
                 "a restore without its temp name",
             ))
         })?;
-        let Some((parent, name)) = dirs.parent(root, op.path(), true).map_err(&e)? else {
-            return Err(e(SysError::new(SysErrorKind::NotFound, op.path().as_str())));
+        let Some((parent, name)) = dirs.parent(root, path, true).map_err(&e)? else {
+            return Err(e(SysError::new(SysErrorKind::NotFound, path.as_str())));
         };
         let g = parent.guard(&name).map_err(&e)?;
         // The planned spelling, as observed (S1): another one since is a change.
         if !g.name().same_spelling(&name) {
             return Err(e(SysError::new(
                 SysErrorKind::Mismatch,
-                format!("{}: renamed since it was observed", op.path()),
+                format!("{path}: renamed since it was observed"),
             )));
         }
         // D4 on the guard before the restore (symmetric to the apply).
         if !g.users().map_err(&e)?.is_empty() {
             return Err(e(SysError::new(
                 SysErrorKind::Busy,
-                format!("{} is in use", op.path()),
+                format!("{path} is in use"),
             )));
         }
         let attrs = if super::restoring_without_attrs() {
@@ -885,7 +879,7 @@ pub(super) fn act<W: Reverting>(
         }
     }
     for a in seen.actions.iter().filter(|a| deferred(a)) {
-        run_action(dirs, root, op, a, &mut done, &e)?;
+        run_action(dirs, root, path, a, &mut done, &e)?;
     }
     Ok(done)
 }
