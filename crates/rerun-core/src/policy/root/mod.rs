@@ -6,6 +6,10 @@
 //!   (`steamapps\common\<installdir>`), so a junction at the game level is reported as
 //!   [`RootError::Reparse`] and never becomes a root. A manually added folder is opened by
 //!   absolute path like a store ([`GameOrigin::Manual`]).
+//! - [`AppDir`]: Rerun's own folder `<LocalAppData>\Rerun` (ADR 0019): `LocalAppData` by
+//!   absolute path, `Rerun` and its sub folders handle-relative (a reparse point there is
+//!   [`RootError::Reparse`]), created one level at a time on request ([`Create`]). Not
+//!   checked against the forbidden list.
 //! - [`ForbiddenRoots`]: the forbidden-root list, resolved from known folders. Every root is
 //!   checked lexically before it is opened and canonically after; the canonical check is the
 //!   one that counts.
@@ -19,13 +23,21 @@
 //! Capabilities (ADR 0017): [`StoreDir::dir`] and [`GameDir::dir`] hand out the read side
 //! only ([`Dir`]). A store is never written. The write handle of a game folder
 //! ([`DirWrite`]) is crate-internal (`GameDir::dir_write`), for the executor and the journal
-//! only (ADR 0020), and refused on a volume without POSIX delete and rename semantics.
+//! only (ADR 0020), and refused on a volume without POSIX delete and rename semantics; the
+//! same holds for `AppDir::dir_write` (journal and plan storage).
 
+mod app;
 mod forbidden;
 
 use std::fmt;
 use std::path::Path;
 
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "first caller is the journal (P2-7)")
+)]
+pub(crate) use app::AppSub;
+pub use app::{AppDir, Create};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
 
 use crate::path::{Anomaly, PathError, RelPath, RootPath, classify};

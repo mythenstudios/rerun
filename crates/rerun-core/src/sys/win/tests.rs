@@ -36,6 +36,8 @@ use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, reg_type};
 use crate::sys::snapshot::SnapRoot;
 use crate::sys::{Gpu, KnownFolder, KnownFolders, SysErrorKind, System, Topology};
 
+mod app;
+
 /// A [`TestRoot`] for the smoke tests; `.0` is its verbatim path (`\\?\X:\…`), as
 /// `final_path` reports it.
 struct Fixture(
