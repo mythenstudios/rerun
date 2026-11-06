@@ -293,6 +293,8 @@ struct LinkData {
     tag: u32,
     target: String,
     restricted: bool,
+    /// Read-only, hidden and system of the link itself.
+    attrs: Attrs,
 }
 
 #[derive(Debug, Clone)]
@@ -647,7 +649,7 @@ impl State {
             Body::Link(l) => Metadata {
                 kind: EntryKind::Reparse,
                 len: 0,
-                attrs: Attrs::default(),
+                attrs: l.attrs,
                 links: Some(1),
                 file_id: u128::from(id),
                 reparse: Some(ReparseInfo {
@@ -1587,6 +1589,7 @@ impl FakeFs {
             tag: reparse_tag,
             target: target.to_owned(),
             restricted: false,
+            attrs: Attrs::default(),
         });
         st.insert(parent, &name, body, &shown).map(|_| ())
     }
@@ -1613,7 +1616,7 @@ impl FakeFs {
         Ok(())
     }
 
-    /// Sets the attributes of a file (shared by its hard links) or directory.
+    /// Sets the attributes of a file (shared by its hard links), a directory or a link itself.
     pub fn set_attrs(&self, abs: &Path, attrs: Attrs) -> SysResult<()> {
         let _flushed = self.fixture_scope(abs);
         let mut st = self.lock();
@@ -1624,7 +1627,11 @@ impl FakeFs {
                 return Ok(());
             }
             Some(Body::File(ino)) => *ino,
-            _ => return Err(SysError::path(SysErrorKind::ReparsePoint, abs)),
+            Some(Body::Link(l)) => {
+                l.attrs = attrs;
+                return Ok(());
+            }
+            None => return Err(SysError::path(SysErrorKind::NotFound, abs)),
         };
         if let Some(i) = st.inodes.get_mut(&ino) {
             i.attrs = attrs;
@@ -1736,6 +1743,7 @@ impl FakeFs {
             tag: tag::MOUNT_POINT,
             target: target.to_owned(),
             restricted: false,
+            attrs: Attrs::default(),
         });
         st.insert(parent, &name, body, &shown)?;
         Ok(hidden)

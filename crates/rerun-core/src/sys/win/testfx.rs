@@ -1231,8 +1231,9 @@ impl FsFixture for WinFixture {
 
     /// `SetFileInformationByHandle(FileBasicInfo)` on a handle with `FILE_WRITE_ATTRIBUTES`;
     /// times 0 stay unchanged, attributes other than R/H/S are kept.
+    /// `FILE_FLAG_OPEN_REPARSE_POINT` (`open_entry`): a link gets its own attributes.
     fn set_attrs(&self, p: &Path, attrs: Attrs) -> SysResult<()> {
-        self.guard(p, Last::Plain)?;
+        self.guard(p, Last::Link)?;
         let f = open_entry(p, FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES)?;
         let current = f.metadata().map_err(|e| io_err(&e, p))?.file_attributes();
         let mut bits =

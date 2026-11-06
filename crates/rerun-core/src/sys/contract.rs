@@ -141,9 +141,9 @@ pub trait FsFixture: Sync {
     /// (`DeleteFileW`/`RemoveDirectoryW`: an open for delete, so a handle that does not share
     /// delete makes it `Busy`).
     fn remove(&self, p: &Path) -> SysResult<()>;
-    /// Sets read-only, hidden and system of the file or directory `p` like another program
-    /// (an open with `FILE_WRITE_ATTRIBUTES` only, which no share mode blocks; the other
-    /// attributes stay).
+    /// Sets read-only, hidden and system of the file, directory or link `p` itself (never
+    /// following a link) like another program (an open with `FILE_WRITE_ATTRIBUTES` only,
+    /// which no share mode blocks; the other attributes stay).
     fn set_attrs(&self, p: &Path, attrs: Attrs) -> SysResult<()>;
     /// Creates the file `p` with content of the fixture's choice and maps it as an image
     /// section of this process without keeping a handle (a running exe, a loaded DLL), until
@@ -1442,6 +1442,35 @@ pub fn fs_link_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> Fs
     refused_at(&*root, "link", "the junction itself")?;
     refused_through(&*root, r"link\canary.txt", "through a junction")?;
     canary_intact("after reads through the junction")?;
+    // The fixture sets the attributes of the junction itself, never of its target, and
+    // `metadata` reports them on the reparse point.
+    let hidden = Attrs {
+        hidden: true,
+        ..Attrs::default()
+    };
+    ok(
+        fx.set_attrs(&root_abs.join("link"), hidden),
+        "fixture hides the junction",
+    )?;
+    let link_attrs = |what: &str| -> Result<(Attrs, Attrs), String> {
+        let l = ok(root.metadata(&rel("link")?), what)?
+            .ok_or(format!("contract violated: {what}: link missing"))?;
+        let o = ok(w.metadata(&outside), what)?
+            .ok_or(format!("contract violated: {what}: outside missing"))?;
+        Ok((l.attrs, o.attrs))
+    };
+    ensure(
+        link_attrs("attributes of a hidden junction")? == (hidden, Attrs::default()),
+        "a junction carries its own attributes, its target keeps its own",
+    )?;
+    ok(
+        fx.set_attrs(&root_abs.join("link"), Attrs::default()),
+        "fixture shows the junction",
+    )?;
+    ensure(
+        link_attrs("attributes of a plain junction again")? == (Attrs::default(), Attrs::default()),
+        "the junction's attributes are cleared again",
+    )?;
 
     // `Fs::open_dir` follows reparse points above the root.
     let via = ok(fs.open_dir(&root_abs.join("link")), "open via junction")?;
