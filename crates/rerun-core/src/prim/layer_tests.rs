@@ -243,7 +243,7 @@ fn t9l_a_game_folder_reached_through_a_link_is_refused() {
     let main = rel("game.exe");
     let via = GameDir::open_manual(&sys, &fr, Path::new(r"D:\Links\G")).unwrap();
     assert_eq!(via.path().to_string(), GAME);
-    assert_eq!(via.launch_path().to_string(), r"D:\Links\G");
+    assert_eq!(via.launch_path().unwrap().to_string(), r"D:\Links\G");
     let ctx = |g| PlanCtx {
         game: g,
         app: &app,
@@ -404,4 +404,38 @@ fn t9l_a_steam_library_reached_through_a_junction_is_refused() {
             assert!(format!("{r:?}").contains("reached through a link"), "{r:?}");
         }
     }
+}
+
+/// Review S-a: a library reached through a junction whose path is so long that the launch path
+/// of the game is no `RootPath` still opens the game (for every primitive); only
+/// `compat_layer` refuses it, as reached through a link.
+#[test]
+fn t9l_a_long_launch_path_opens_the_game_and_refuses_only_compat_layer() {
+    use super::tests::{STEAM_GAME, STEAM_LIB};
+    let parent = format!(r"D:\{}\{}", "a".repeat(100), "b".repeat(100));
+    let lib = format!(r"{parent}\{}", "l".repeat(20));
+    assert!(lib.len() - 3 <= crate::path::RelPath::MAX_LEN);
+    assert!(format!(r"{lib}\steamapps\common\G").len() - 3 > crate::path::RelPath::MAX_LEN);
+    let sys = layer_builder()
+        .file(format!(r"{STEAM_GAME}\game.exe"), b"MZ".to_vec())
+        .dir(&parent)
+        .junction(&lib, STEAM_LIB)
+        .build()
+        .unwrap();
+    let fr = fr(&sys);
+    let app = app(&sys);
+    let main = rel("game.exe");
+    let store = crate::policy::root::StoreDir::open(&sys, &fr, Path::new(&lib)).unwrap();
+    let g = store.game(&fr, "G").unwrap();
+    assert_eq!(g.path().to_string(), STEAM_GAME);
+    assert_eq!(g.launch_path(), None);
+    let ctx = PlanCtx {
+        game: &g,
+        app: &app,
+        steam_app: Some(220),
+        main_exe: Some(&main),
+        reg: RegPolicy.reader(&sys),
+    };
+    let e = plan(&[layer_step("game.exe", &["ZZ_OS_A"])], &ctx).unwrap_err();
+    assert!(e.to_string().contains("reached through a link"), "{e}");
 }

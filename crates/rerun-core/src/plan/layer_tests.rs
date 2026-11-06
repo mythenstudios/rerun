@@ -261,9 +261,34 @@ fn p_l2_token_lists_break_no_rule() {
         }),
         "two tokens of one group",
     );
-    refused_now(
+    // Both rule sets (security review S-1): `new` is the old value with the tokens appended,
+    // so a recorded head cannot make the restore of `After` add a word.
+    refused(
         &with(&merge, &|p| {
             *last_tokens(p).2 = "~ ZZ_DPI_A RUNASADMIN".to_owned();
+        }),
+        "not the old one with the tokens appended",
+    );
+    refused(
+        &with(&merge, &|p| {
+            *last_tokens(p).2 = "~ RUNASADMIN RUNASHIGHEST ZZ_DPI_A".to_owned();
+        }),
+        "not the old one with the tokens appended",
+    );
+    refused(
+        &with(&base, &|p| *last_tokens(p).2 = "~ ZZ_FLAG_A".to_owned()),
+        "not the old one with the tokens appended",
+    );
+    refused(
+        &with(&base, &|p| {
+            *last_tokens(p).2 = "~ ZZ_FLAG_A ZZ_OS_A X".to_owned()
+        }),
+        "not the old one with the tokens appended",
+    );
+    // Without an old value the prefix is the current rules' business only.
+    refused_now(
+        &with(&base, &|p| {
+            *last_tokens(p).2 = "$ ZZ_FLAG_A ZZ_OS_A".to_owned()
         }),
         "other than the old one with the tokens appended",
     );
@@ -275,29 +300,50 @@ fn p_l2_token_lists_break_no_rule() {
     );
 }
 
-/// The worst case of one `TokenList` (the longest relative path, 240 characters; an old value
-/// of 511 quote characters inline; a new value of 511 backslashes, escaped to 2 bytes each; 8
-/// tokens of 40 characters) fits the op budget. The executable path is the only variable size
-/// besides the values, and `RelPath` bounds it, so no `TokenList` can break the budget (the
-/// root's path is not part of the op).
+/// The worst case of one `TokenList` fits the op budget: the longest relative path (240
+/// characters, each outside the BMP: 4 bytes of UTF-8, review N-a), the longest old value (509
+/// quote characters: 4 hex digits per UTF-16 byte pair inline, and again in `new`, escaped to 2
+/// bytes each) and one token (a character of a token costs 2 bytes, one of the old value 6, so
+/// fewer tokens is worse). `RelPath` bounds the path and the grammar both values, so no
+/// `TokenList` can break the budget (the root's path is not part of the op).
 #[test]
 fn p_l3_the_worst_case_token_list_fits_the_op_budget() {
     let mut p = sample();
     p.roots[1].main_exe = Some(r("g2.exe"));
-    let exe = format!(r"{}\{}.exe", "a".repeat(120), "b".repeat(115));
-    assert_eq!(exe.len(), crate::path::RelPath::MAX_LEN);
-    let tokens: Vec<String> = (0..8).map(|i| format!("{i}{}", "Z".repeat(39))).collect();
-    let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let exe = format!(
+        r"{}\{}.exe",
+        "\u{20000}".repeat(120),
+        "\u{20000}".repeat(115)
+    );
+    assert_eq!(exe.chars().count(), crate::path::RelPath::MAX_LEN);
+    let old = "\"".repeat(509);
     p.ops.push(Op::TokenList {
         slot: layers_slot(0, &exe),
-        old: old_sz(&"\"".repeat(511)),
-        add: ts(&tokens),
-        new: "\\".repeat(511),
+        old: old_sz(&old),
+        add: ts(&["A"]),
+        new: format!("{old} A"),
     });
     let size = serde_json::to_vec(&p.ops[3]).unwrap().len();
     eprintln!("P-L3: worst-case TokenList is {size} bytes");
-    assert!(size < MAX_OP_BYTES / 2, "{size}");
-    assert!(size > 3_700, "{size}: the worst case is the worst case");
+    assert!(size < MAX_OP_BYTES, "{size}");
+    assert!(size > 4_000, "{size}: the worst case is the worst case");
+    // Eight tokens of 40 characters instead cost less.
+    let tokens: Vec<String> = (0..8).map(|i| format!("{i}{}", "Z".repeat(39))).collect();
+    let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let short = "\"".repeat(511 - 328);
+    let mut q = p.clone();
+    q.ops[3] = Op::TokenList {
+        slot: layers_slot(0, &exe),
+        old: old_sz(&short),
+        add: ts(&tokens),
+        new: format!("{short} {}", tokens.join(" ")),
+    };
+    let other = serde_json::to_vec(&q.ops[3]).unwrap().len();
+    assert!(other < size, "{other} < {size}");
+    assert_eq!(
+        decode_recorded(&serde_json::to_vec(&q).unwrap()).unwrap(),
+        q
+    );
     let bytes = serde_json::to_vec(&p).unwrap();
     assert_eq!(decode_recorded(&bytes).unwrap(), p);
 }
@@ -337,6 +383,7 @@ fn p_l5_the_preview_shows_tokens_old_new_and_the_layers_note() {
         "     new REG_SZ: ~ ZZ_FLAG_A ZZ_OS_A\n",
         "note: compatibility layers: a revert removes only the tokens Rerun added",
         "reverting that transaction removes it",
+        "another order than newest first can leave them empty for good",
     ] {
         assert!(text.contains(want), "{want:?} not in\n{text}");
     }

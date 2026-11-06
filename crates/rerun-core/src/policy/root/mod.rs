@@ -309,11 +309,14 @@ impl<'s> StoreDir<'s> {
                 child: path,
             });
         }
+        // Review S-a: the launch path is only a name for `compat_layer`; one that is no
+        // `RootPath` (longer than the canonical path allows) never fails the opening.
         let opened_as = self
             .opened_as
-            .child("steamapps")?
-            .child("common")?
-            .child(seg.as_str())?;
+            .child("steamapps")
+            .and_then(|p| p.child("common"))
+            .and_then(|p| p.child(seg.as_str()))
+            .ok();
         Ok(GameDir {
             dir,
             path,
@@ -375,7 +378,8 @@ pub struct GameDir<'a> {
     dir: Box<dyn DirWrite + 'a>,
     path: RootPath,
     info: RootInfo,
-    opened_as: RootPath,
+    /// `None`: the launch path is no `RootPath` (too long).
+    opened_as: Option<RootPath>,
     origin: GameOrigin,
 }
 
@@ -391,7 +395,7 @@ impl<'a> GameDir<'a> {
             dir,
             path,
             info,
-            opened_as,
+            opened_as: Some(opened_as),
             origin: GameOrigin::Manual,
         })
     }
@@ -410,10 +414,11 @@ impl<'a> GameDir<'a> {
     /// manual folder, `<library>\steamapps\common\<installdir>` with the library's path as
     /// Steam names it. Other than [`Self::path`] (compared folded) when a link, a junctioned
     /// library or an 8.3 name lies on the way (P2-11: `compat_layer` refuses such a folder
-    /// until the Sandbox shows which name Windows matches, user decision E3). Read only; never
-    /// used to reach a file.
-    pub fn launch_path(&self) -> &RootPath {
-        &self.opened_as
+    /// until the Sandbox shows which name Windows matches, user decision E3). `None` if that
+    /// path is no `RootPath` (a library path that makes it longer than allowed, review S-a).
+    /// Read only; never used to reach a file.
+    pub fn launch_path(&self) -> Option<&RootPath> {
+        self.opened_as.as_ref()
     }
 
     /// Canonical path as of opening.

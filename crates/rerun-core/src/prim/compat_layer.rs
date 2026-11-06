@@ -153,7 +153,7 @@ fn stored_exe(game: &GameDir<'_>, exe: &RelPath) -> Result<RelPath, PlanError> {
 /// The open Rerun transaction whose `TokenList` on the value of `av` added `token` (review N2),
 /// for the message only: anything unreadable is "none".
 fn added_by_rerun(ctx: &PlanCtx<'_>, av: &AllowedValue, token: &str) -> Option<TxnId> {
-    let j = Journal::new(ctx.app, InstanceTag::fixed(0));
+    let j = Journal::new(ctx.app, InstanceTag::new());
     let listing = j.list().ok()?;
     let name = fold(av.name());
     listing.txns.iter().rev().find_map(|l| {
@@ -185,12 +185,16 @@ pub(crate) fn plan_into(
     let game = ctx.game;
     // E3 a: the value name is the canonical path; whether Windows matches it when the game is
     // started through a link is open until SB-L2.
-    if game.launch_path() != game.path() {
+    // A launch path that is no `RootPath` (too long, review S-a) is refused the same way.
+    if game.launch_path() != Some(game.path()) {
         return Err(refuse(format!(
             "compat_layer: the game folder {} is reached through a link or another name ({}); \
              compatibility layers are not supported there yet",
             shown(&game.path().to_string()),
-            shown(&game.launch_path().to_string()),
+            game.launch_path().map_or_else(
+                || "a path too long to compare".to_owned(),
+                |l| shown(&l.to_string())
+            ),
         )));
     }
     if game.info().case_sensitive {

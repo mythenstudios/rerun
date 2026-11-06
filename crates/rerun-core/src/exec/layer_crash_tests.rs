@@ -509,3 +509,33 @@ fn j6_the_hive_flush_before_revert_done_covers_the_semantic_revert() {
         "{found:#?}"
     );
 }
+
+/// K-L1 against R-L4 (review nit): a value without any of Rerun's tokens taken as `Foreign`
+/// (E2 a) makes the recovery after a crash between the semantic revert's write and its
+/// `RevertDone` meet a foreign op; without the knob that state is `Drifted` (E8: no `from`/`to`
+/// needed).
+#[test]
+fn k_l1_no_token_left_as_foreign_breaks_rl4_on_the_drift() {
+    let _r = super::reg_tests::Reset(|| {
+        super::reg::KNOB_UNTOUCHED_FOREIGN.with(|c| c.set(false));
+    });
+    super::reg::KNOB_UNTOUCHED_FOREIGN.with(|c| c.set(true));
+    let mut hit = None;
+    for at in points(Kind::LayersDrift, Fault::CrashAfter) {
+        let Some(a) = at else { continue };
+        if !a.revert {
+            continue;
+        }
+        let c = setup(Kind::LayersDrift);
+        let got = run(&c, at);
+        c.env.sys.restart();
+        if recover(&c, got.drifted)
+            .iter()
+            .any(|x| x.starts_with("Foreign"))
+        {
+            hit = Some(a);
+            break;
+        }
+    }
+    assert!(hit.is_some(), "the control did not bite");
+}

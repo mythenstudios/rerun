@@ -607,7 +607,13 @@ pub(super) fn act<W: Reverting>(
             };
             reg.remove_tokens(av, expected, add).map_err(|x| match x {
                 RegWriteError::Sys(s) => e(s),
-                RegWriteError::Policy(p) => e(SysError::new(SysErrorKind::Mismatch, p.to_string())),
+                // Review N-d: a refusal of `policy` (the value seen is no state Rerun can
+                // remove its words from), never reported as a registry `Mismatch`; the op stays
+                // open after its `RevertIntent` and the revert can be repeated.
+                RegWriteError::Policy(p) => e(SysError::new(
+                    SysErrorKind::Other,
+                    format!("policy::registry refused to remove the tokens: {p}"),
+                )),
             })?;
         }
         Some(Action::Restore { av, expected }) => {

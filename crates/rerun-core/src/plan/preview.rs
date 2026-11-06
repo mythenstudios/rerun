@@ -42,7 +42,8 @@ added; what you or Windows change in the value afterwards stays, and a value nob
 restored exactly. A token already in the value is not added again, also one an earlier Rerun \
 transaction added: reverting that transaction removes it. A token you add yourself after the \
 apply that Rerun added too is removed by the revert. The keys AppCompatFlags and Layers are \
-shared with Windows: a revert deletes one Rerun created only when it is empty";
+shared with Windows: a revert deletes one Rerun created only when it is empty, so reverting \
+transactions in another order than newest first can leave them empty for good";
 
 /// One root of a [`Preview`].
 #[derive(Debug, Clone, PartialEq, Eq)]

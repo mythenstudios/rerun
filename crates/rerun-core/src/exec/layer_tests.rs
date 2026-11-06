@@ -95,7 +95,13 @@ pub(crate) fn l1_check() -> Vec<String> {
         let env = Env::new(finish(b));
         let before = snap_all(&env);
         let steps = [Step::FileInstall(t1_spec()), two_tokens()];
-        let h = plan_all(&env, &steps);
+        let h = match try_plan(&env, &steps) {
+            Ok(h) => h,
+            Err(e) => {
+                f.push(format!("{what} plan: {e}"));
+                continue;
+            }
+        };
         let t = match env.apply(&h) {
             Ok(Outcome::Applied(t)) => t,
             other => {
@@ -123,7 +129,7 @@ pub(crate) fn l1_check() -> Vec<String> {
         if before != now {
             f.push(format!("{what} snapshot: {:#?}", before.diff(&now)));
         }
-        if plan_all(&env, &steps) != h {
+        if try_plan(&env, &steps).ok() != Some(h) {
             f.push(format!("{what} planned again: another hash"));
         }
         match env.try_verify(&t) {
@@ -140,14 +146,39 @@ fn r_l1_compat_layer_round_trips_exactly() {
     assert!(f.is_empty(), "{f:#?}");
 }
 
-/// K-L4: `merge` normalising the old value fails R-L1 (the applied value of R-L1b).
+/// Plans `steps` for the manual game folder and stores the plan, or the planner's refusal.
+fn try_plan(env: &Env, steps: &[Step]) -> Result<PlanHash, plan::PlanError> {
+    let fr = crate::prim::tests::fr(&env.sys);
+    let g = crate::policy::root::GameDir::open_manual(
+        &env.sys,
+        &fr,
+        Path::new(crate::prim::tests::GAME),
+    )?;
+    let a = app(&env.sys);
+    let main = crate::prim::tests::rel("game.exe");
+    let p = crate::prim::plan(
+        steps,
+        &crate::prim::PlanCtx {
+            game: &g,
+            app: &a,
+            steam_app: None,
+            main_exe: Some(&main),
+            reg: crate::policy::registry::RegPolicy.reader(&env.sys),
+        },
+    )?;
+    store(&a, &p.encode()?)
+}
+
+/// K-L4: `merge` normalising the old value fails R-L1 (R-L1b: since review S-1 the plan
+/// format itself refuses a new value that is not the old one with the tokens appended).
 #[test]
 fn k_l4_merge_normalising_the_old_value_breaks_rl1() {
     let _r = Reset(|| layers_knob::normalise_old(false));
     layers_knob::normalise_old(true);
     let f = l1_check();
     assert!(
-        f.iter().any(|x| x.starts_with("RL1b value after apply")),
+        f.iter().any(|x| x.starts_with("RL1b plan: ")
+            && x.contains("not the old one with the tokens appended")),
         "{f:#?}"
     );
 }
@@ -555,6 +586,38 @@ fn r_l6_tampering_is_refused_or_only_removes() {
         same(&after, &snap_all(&env));
         assert_eq!(records(&env, &t), n, "{what}: no record written");
     }
+
+    // Security review S-1: the old value and `Intent.before` rewritten consistently to hold an
+    // elevation token, `new` left: the restore of `After` would add it. The plan format binds
+    // `new` to `old` under the recorded rules too: `Blocked`, nothing written.
+    let env = Env::new(finish(layer_base_with("~ X1")));
+    let t = applied(&env, &[layer_step("game.exe", &["ZZ_OS_A"])], "S-1").unwrap();
+    let dir = env.txn_dir(&t);
+    let head = super::tests::read_abs(&env.sys, &format!(r"{dir}\head.json"));
+    let mut p: Plan = serde_json::from_slice(&head).unwrap();
+    let forged = sz("~ X1 RUNASADMIN");
+    match p.ops.last_mut() {
+        Some(Op::TokenList { old, .. }) => *old = crate::plan::ValueState::of(&forged),
+        other => panic!("{other:?}"),
+    }
+    let bytes = serde_json::to_vec(&p).unwrap();
+    let data = forged.encode().unwrap().1;
+    let n = rewrite(env.sys.fake_fs(), &dir, Some(&bytes), |e| {
+        e.intent_inline(0, &data)
+    });
+    let after = snap_all(&env);
+    assert!(matches!(
+        env.try_verify(&t),
+        Err(ExecError::Refused(Refusal::Blocked { .. }))
+    ));
+    let r = env.revert(&t);
+    assert!(
+        matches!(&r, Err(ExecError::Refused(Refusal::Blocked { .. }))),
+        "{r:?}"
+    );
+    same(&after, &snap_all(&env));
+    assert_eq!(records(&env, &t), usize::from(n), "S-1: no record written");
+    assert_eq!(layer_value(&env.sys), Some(sz("~ X1 ZZ_OS_A")));
 
     // A stored plan adding an elevation token (written around `encode`): refused by the apply.
     let env = Env::new(finish(layer_base_with("~ X1")));
