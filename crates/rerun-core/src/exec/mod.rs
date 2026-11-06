@@ -278,7 +278,6 @@ pub(crate) mod knob {
         static RESTORE_WITHOUT_ATTRS: Cell<bool> = const { Cell::new(false) };
     }
 
-    #[expect(dead_code, reason = "J6 against exec (crash_tests, next commit)")]
     pub(crate) fn skip(f: Option<GameFlush>) {
         SKIP.with(|s| s.set(f));
     }
@@ -618,5 +617,7 @@ pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
     Ok(())
 }
 
+#[cfg(test)]
+mod crash_tests;
 #[cfg(test)]
 pub(crate) mod tests;
