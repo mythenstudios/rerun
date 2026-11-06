@@ -422,3 +422,110 @@ fn r_h1_exec_reverts_the_registry_when_the_game_folder_is_gone_on_real_windows()
     let after = w.snap_with(software());
     assert!(before == after, "{:#?}", before.diff(&after));
 }
+
+/// The value name of the game folder's `game.exe` (its canonical path).
+fn layer_name(w: &Win) -> String {
+    w.with(|_, fr| {
+        let g = GameDir::open_manual(&w.sys, fr, &w.game).unwrap_or_else(|e| panic!("{e}"));
+        format!(r"{}\game.exe", g.path())
+    })
+}
+
+/// [`setup_reg`] with `CurrentVersion`, the anchor of `AppCompatFlags\Layers`.
+fn setup_layers(case: &str) -> Option<WinReg> {
+    let r = setup_reg(case)?;
+    r.h.hive
+        .key(&hkcu(crate::prim::layer_tests::CURRENT_VERSION))
+        .unwrap();
+    Some(r)
+}
+
+/// R-L1 on Windows (P2-11): `file_install` and `compat_layer` (synthetic tokens) in one plan
+/// on an app hive without `AppCompatFlags`: the value exactly as merged, `verify` all `After`,
+/// the revert closes, the game folder and `HKCU\Software` identical (the shared keys deleted
+/// again, they were empty).
+#[test]
+fn r_l1_exec_compat_layer_round_trip_on_real_windows() {
+    let Some(r) = setup_layers("exec-rl1") else {
+        return;
+    };
+    let w = &r.w;
+    let before = w.snap_with(software());
+    let steps = [
+        Step::FileInstall(t1_spec()),
+        crate::exec::layer_tests::two_tokens(),
+    ];
+    let h = w.plan_steps(&steps);
+    let t = match w.with(|cx, _| apply(cx, &h)) {
+        Ok(Outcome::Applied(t)) => t,
+        other => panic!("{other:?}"),
+    };
+    let layers = hkcu(crate::prim::layer_tests::LAYERS_KEY);
+    assert_eq!(
+        w.sys.registry().get(&layers, &layer_name(w)).unwrap(),
+        Some(RegValue::String("~ ZZ_FLAG_A ZZ_OS_A".into()))
+    );
+    let v = w.with(|cx, _| verify(cx, &t)).unwrap();
+    assert!(v.ops.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    let after = w.snap_with(software());
+    assert!(before == after, "{:#?}", before.diff(&after));
+    assert_eq!(w.plan_steps(&steps), h, "planned again: the same hash");
+}
+
+/// R-L3 on Windows: another program appends a token and sets a layer for another executable
+/// below the created `Layers`; the revert removes only Rerun's tokens, leaves the shared keys
+/// (E6 b) and closes.
+#[test]
+fn r_l3_exec_compat_layer_drift_on_real_windows() {
+    let Some(r) = setup_layers("exec-rl3") else {
+        return;
+    };
+    let w = &r.w;
+    let h = w.plan_steps(&[crate::exec::layer_tests::two_tokens()]);
+    let t = match w.with(|cx, _| apply(cx, &h)) {
+        Ok(Outcome::Applied(t)) => t,
+        other => panic!("{other:?}"),
+    };
+    let layers = hkcu(crate::prim::layer_tests::LAYERS_KEY);
+    let name = layer_name(w);
+    let sz = |s: &str| RegValue::String(s.into()).encode().unwrap().1;
+    r.h.hive
+        .raw(
+            &layers,
+            &name,
+            reg_type::REG_SZ,
+            &sz("~ ZZ_FLAG_A ZZ_OS_A X1"),
+        )
+        .unwrap();
+    r.h.hive
+        .raw(
+            &layers,
+            r"C:\Other\other.exe",
+            reg_type::REG_SZ,
+            &sz("~ X2"),
+        )
+        .unwrap();
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    assert!(
+        rep.ops.iter().all(|o| o.observed == Observed::Drifted),
+        "{rep:?}"
+    );
+    assert_eq!(
+        w.sys.registry().get(&layers, &name).unwrap(),
+        Some(RegValue::String("~ X1".into()))
+    );
+    assert_eq!(
+        w.sys
+            .registry()
+            .get(&layers, r"C:\Other\other.exe")
+            .unwrap(),
+        Some(RegValue::String("~ X2".into()))
+    );
+}

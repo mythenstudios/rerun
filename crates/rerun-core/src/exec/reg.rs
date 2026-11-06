@@ -31,6 +31,25 @@
 //!   (`NotWritten`) is left only by the rollback of the same run; after a crash before its
 //!   `RevertDone`, a recovery cannot tell another program's write of exactly `new` from Rerun's
 //!   and restores the old value over it (the class of 6a, `docs/06-security.md` scenario 10).
+//! - `TokenList` (P2-11; user decisions E1 a, E2 b, E6 b, E8; senior-dev conditions S2, S3, S5,
+//!   N1): apply like `SetValue` (the old bytes always inline, at most 1 KiB), but the write is
+//!   `RegWriter::add_tokens(expected = the value read, add)`: `policy` forms the new value.
+//!   Observed, in this order: a link, volatile key or a value too large on the way →
+//!   `Foreign`; exactly `new` (and no `NotWritten`) → `After`, the old value restored exactly
+//!   from the journal (or deleted); the old value (missing for none) → `Before`; with
+//!   `NotWritten` anything else is `Foreign` (N1); missing although there was an old value →
+//!   `Drifted`, nothing written (S3); a `REG_SZ` whose `layers::unmerge` keeps some of
+//!   Rerun's tokens → `Drifted`, `RegWriter::remove_tokens(expected = the value seen, add)`
+//!   (S5; deleted when only prefix words are left, S2); one with none of them → `Drifted`,
+//!   nothing written (E2 b); anything else (another type, no NUL, the grammar, one of Rerun's
+//!   tokens twice or in another case) → `Foreign`. No `from`/`to` in the `RevertIntent`
+//!   (E8): a crash after `remove_tokens` leaves a value without Rerun's tokens, which the next
+//!   run observes as `Before`, `Drifted` (none left) or `Drifted` (missing), never `Foreign`.
+//! - `CreateKey` of a shared Windows key (`AppCompatFlags`, `Layers`; `AllowedValue::shared_keys`,
+//!   E6 b, E7): a key that is not empty, or that existed (`Existed`), is `Drifted` and left, the
+//!   transaction still closes; a game key keeps 6a (`Foreign`). `verify` counts a value of a
+//!   later `TokenList` as gone when its revert deletes it (`After` or `Before` with no old
+//!   value, `Drifted` with a rest of prefix words or already missing), not when it stays.
 
 use std::collections::BTreeMap;
 
@@ -41,7 +60,9 @@ use crate::journal::{
     Before, BeforeArg, Digest, INLINE_MAX, Observed, OpLog, Reverting, TxnWriter,
 };
 use crate::plan::{self, Op, Plan, Target, ValueState};
-use crate::policy::registry::{AllowedKey, AllowedValue, RegWriteError, RegWriter};
+use crate::policy::registry::{
+    AllowedKey, AllowedValue, RegWriteError, RegWriter, TokenName, Unmerged, layers,
+};
 use crate::sys::registry::{KeyState, MAX_VALUE_BYTES, RegKey, RegValue};
 use crate::sys::{SysError, SysErrorKind, System};
 
@@ -66,15 +87,26 @@ enum Action {
         av: AllowedValue,
         expected: RegValue,
     },
+    /// Remove Rerun's tokens from a value someone changed since the apply, `expected` the value
+    /// seen (P2-11, S5).
+    RemoveTokens {
+        av: AllowedValue,
+        expected: RegValue,
+    },
 }
 
 /// What a registry op observes and what its revert does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Seen {
     pub(super) observed: Observed,
-    action: Option<Action>,
-    /// `verify` (S3): the key a `CreateKey` creates, and the value of a `SetValue`.
+    action: Option<Box<Action>>,
+    /// `verify` (S3): the key a `CreateKey` creates, and the value of a `SetValue` or
+    /// `TokenList`.
     object: Object,
+    /// A value that will be gone after the revert of this op (`verify` of a created key above
+    /// it): observed `After` or `Before` (in a created key there is no old value), or a
+    /// `Drifted` token list whose rest is deleted or which is missing already.
+    gone: bool,
 }
 
 /// The object of a registry op, for the verify of a created key above it.
@@ -90,11 +122,17 @@ impl Seen {
             observed,
             action: None,
             object,
+            gone: matches!(observed, Observed::After | Observed::Before),
         }
     }
 
     fn act(mut self, a: Action) -> Self {
-        self.action = Some(a);
+        self.action = Some(Box::new(a));
+        self
+    }
+
+    fn gone(mut self, gone: bool) -> Self {
+        self.gone = gone;
         self
     }
 }
@@ -168,6 +206,30 @@ fn existed_as_own() -> bool {
     false
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Control K-L2: every drift of a token list is `Foreign` (as `SetValue`).
+    pub(crate) static KNOB_DRIFT_FOREIGN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Control K-L1: a token list without any of Rerun's tokens left is `Foreign` (E2 a).
+    pub(crate) static KNOB_UNTOUCHED_FOREIGN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// K-L2 (tests): a drift is `Foreign`.
+fn drift_foreign() -> bool {
+    #[cfg(test)]
+    return KNOB_DRIFT_FOREIGN.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    false
+}
+
+/// K-L1 (tests): no token of Rerun's left is `Foreign`.
+fn untouched_foreign() -> bool {
+    #[cfg(test)]
+    return KNOB_UNTOUCHED_FOREIGN.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    false
+}
+
 /// Step 5 of the apply for the registry ops, before anything is written: a created key is
 /// still missing, a value still has its planned old state (`Mismatch`); a link, volatile key or
 /// unreadable value on the way is `Refusal::Registry`.
@@ -188,19 +250,12 @@ pub(super) fn old_state(w: &RegWriter<'_>, plan: &Plan) -> Result<(), Refusal> {
                     Err(e) => return Err(reg(e)),
                 }
             }
-            Op::SetValue { old, .. } => {
+            Op::SetValue { old, .. } | Op::TokenList { old, .. } => {
                 let av = value_of(plan, k, op).map_err(to_refusal)?;
                 let cur = current(w, &av).map_err(reg)?;
                 if !ValueState::is(old.as_ref(), cur.as_ref()) {
                     return Err(Refusal::Mismatch { op: k });
                 }
-            }
-            // Applied from P2-11 C4 on; until then refused before anything is written.
-            Op::TokenList { .. } => {
-                return Err(reg(SysError::new(
-                    SysErrorKind::Unsupported,
-                    "token lists are not applied yet",
-                )));
             }
             Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => {}
         }
@@ -248,7 +303,7 @@ pub(super) fn apply_op(
                 }
             }
         }
-        Op::SetValue { old, new, .. } => {
+        Op::SetValue { old, .. } | Op::TokenList { old, .. } => {
             let av = value_of(plan, k, op)?;
             let cur = current(reg, &av).map_err(&e)?;
             if !ValueState::is(old.as_ref(), cur.as_ref()) {
@@ -278,7 +333,13 @@ pub(super) fn apply_op(
                 }
             };
             w.intent(k, None, before)?;
-            match reg.set(&av, cur.as_ref(), &new.value()) {
+            let r = match op {
+                Op::SetValue { new, .. } => reg.set(&av, cur.as_ref(), &new.value()),
+                // `policy` forms the new value from the value read (P2-11, S5).
+                Op::TokenList { add, .. } => reg.add_tokens(&av, cur.as_ref(), add),
+                _ => return Err(not_a_registry_op(k)),
+            };
+            match r {
                 Ok(()) => {
                     w.done(k, None, false)?;
                     Ok(())
@@ -297,16 +358,16 @@ pub(super) fn apply_op(
                 }
             }
         }
-        Op::TokenList { .. }
-        | Op::CreateDir { .. }
-        | Op::CreateFile { .. }
-        | Op::ReplaceFile { .. } => Err(not_a_registry_op(k)),
+        Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => {
+            Err(not_a_registry_op(k))
+        }
     }
 }
 
 /// The names in `key` that later registry ops of `plan` (after `k`) put there and that will be
 /// gone when the revert reaches `k` (S3: observed `After` or `Before`): direct subkeys created
-/// by a later `CreateKey`, values set by a later `SetValue`.
+/// by a later `CreateKey`, values of a later `SetValue` or `TokenList` that will be gone
+/// (`Seen::gone`; a drifted token list that stays is not, E7).
 fn later_names(
     k: u16,
     key: &RegKey,
@@ -318,14 +379,14 @@ fn later_names(
         let super::Seen::Reg(s) = s else {
             continue;
         };
-        if !matches!(s.observed, Observed::After | Observed::Before) {
-            continue;
-        }
         match &s.object {
-            Object::Key(c) if c.parent().as_ref() == Some(key) => {
+            Object::Key(c)
+                if c.parent().as_ref() == Some(key)
+                    && matches!(s.observed, Observed::After | Observed::Before) =>
+            {
                 keys.push(fold(c.path.rsplit('\\').next().unwrap_or_default()));
             }
-            Object::Value(v, name) if v == key => values.push(name.clone()),
+            Object::Value(v, name) if v == key && s.gone => values.push(name.clone()),
             Object::Key(_) | Object::Value(..) => {}
         }
     }
@@ -408,6 +469,10 @@ pub(super) fn observe(
             let ours = log.done.is_some() || hint != Some(Hint::Key(KeyHint::Existed));
             Ok(if empty && ours {
                 Seen::new(Observed::After, object).act(delete)
+            } else if av.shared_keys() {
+                // E6 b: a shared Windows key holding other programs' values (or one that
+                // existed) stays, and the transaction closes.
+                Seen::new(Observed::Drifted, object)
             } else {
                 Seen::new(Observed::Foreign, object)
             })
@@ -441,10 +506,86 @@ pub(super) fn observe(
                 },
             )
         }
-        Op::TokenList { .. }
-        | Op::CreateDir { .. }
-        | Op::CreateFile { .. }
-        | Op::ReplaceFile { .. } => Err(not_a_registry_op(k)),
+        Op::TokenList { old, add, new, .. } => {
+            let av = value_of(plan, k, op)?;
+            let object = Object::Value(av.key().key().clone(), fold(av.name()));
+            let new = RegValue::String(new.clone());
+            let restore = Action::Restore {
+                av: av.clone(),
+                expected: new.clone(),
+            };
+            if super::trusting_records() {
+                return Ok(match log.done {
+                    Some(_) => Seen::new(Observed::After, object).act(restore),
+                    None => Seen::new(Observed::Before, object),
+                });
+            }
+            let cur = match current(reg, &av) {
+                Ok(v) => v,
+                Err(x) if not_ours(&x) => return Ok(Seen::new(Observed::Foreign, object)),
+                Err(x) => return Err(e(x)),
+            };
+            Ok(token_list_seen(
+                &av,
+                object,
+                old.as_ref(),
+                add,
+                &new,
+                cur,
+                hint,
+                restore,
+            ))
+        }
+        Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => {
+            Err(not_a_registry_op(k))
+        }
+    }
+}
+
+/// The observation of a `TokenList` from the current value `cur` (module docs).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the fields of the op, the value seen and the action"
+)]
+fn token_list_seen(
+    av: &AllowedValue,
+    object: Object,
+    old: Option<&ValueState>,
+    add: &[TokenName],
+    new: &RegValue,
+    cur: Option<RegValue>,
+    hint: Option<Hint>,
+    restore: Action,
+) -> Seen {
+    let written = hint != Some(Hint::NotWritten);
+    if cur.as_ref() == Some(new) && written {
+        return Seen::new(Observed::After, object)
+            .act(restore)
+            .gone(old.is_none());
+    }
+    if ValueState::is(old, cur.as_ref()) {
+        return Seen::new(Observed::Before, object).gone(old.is_none());
+    }
+    // N1: after a refused write in this run, nothing there is Rerun's to remove.
+    if !written || drift_foreign() {
+        return Seen::new(Observed::Foreign, object);
+    }
+    match cur {
+        // S3: someone deleted the value; nothing of Rerun's is left.
+        None => Seen::new(Observed::Drifted, object).gone(true),
+        Some(RegValue::String(s)) => match layers::unmerge(&s, add) {
+            Unmerged::Foreign => Seen::new(Observed::Foreign, object),
+            Unmerged::Untouched if untouched_foreign() => Seen::new(Observed::Foreign, object),
+            // E2 b: none of Rerun's tokens is left.
+            Unmerged::Untouched => Seen::new(Observed::Drifted, object),
+            Unmerged::Rest(rest) => Seen::new(Observed::Drifted, object)
+                .act(Action::RemoveTokens {
+                    av: av.clone(),
+                    expected: RegValue::String(s.clone()),
+                })
+                .gone(rest.is_none()),
+        },
+        Some(_) => Seen::new(Observed::Foreign, object),
     }
 }
 
@@ -457,11 +598,20 @@ pub(super) fn act<W: Reverting>(
     seen: &Seen,
 ) -> Result<Acted, ExecError> {
     let e = op_err(k);
-    match &seen.action {
+    match seen.action.as_deref() {
         None => {}
         Some(Action::DeleteKey { key, of }) => reg.delete_empty_key(key, of).map_err(&e)?,
+        Some(Action::RemoveTokens { av, expected }) => {
+            let Op::TokenList { add, .. } = op else {
+                return Err(not_a_registry_op(k));
+            };
+            reg.remove_tokens(av, expected, add).map_err(|x| match x {
+                RegWriteError::Sys(s) => e(s),
+                RegWriteError::Policy(p) => e(SysError::new(SysErrorKind::Mismatch, p.to_string())),
+            })?;
+        }
         Some(Action::Restore { av, expected }) => {
-            let Op::SetValue { old, .. } = op else {
+            let (Op::SetValue { old, .. } | Op::TokenList { old, .. }) = op else {
                 return Err(not_a_registry_op(k));
             };
             let old = match old {
@@ -480,9 +630,11 @@ pub(super) fn act<W: Reverting>(
 }
 
 /// The records of a registry op fit its kind (record form of P2-10a, checklist P2-10b): no
-/// temp name anywhere, no file ID, no `.old` left, no `from`/`to`; a `CreateKey` keeps no old
-/// state; a `SetValue` keeps exactly its planned old value: inline up to 16 KiB with its length
-/// and hash, else the digest of `op-NNNN.bin`; none for a new value.
+/// temp name anywhere, no file ID, no `.old` left, no `from`/`to` (also not for a `TokenList`,
+/// E8: they stay reserved for P2-12); a `CreateKey` keeps no old state; a `SetValue` keeps
+/// exactly its planned old value: inline up to 16 KiB with its length and hash, else the digest
+/// of `op-NNNN.bin`; none for a new value; a `TokenList` its old value inline (at most 1 KiB),
+/// never a `.bin`.
 pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
     let i = &log.intent;
     let plain = i.tmp.is_none()
@@ -516,9 +668,15 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
                     None => false,
                 }
             }
-            Op::TokenList { .. }
-            | Op::CreateDir { .. }
-            | Op::CreateFile { .. }
-            | Op::ReplaceFile { .. } => false,
+            Op::TokenList { old: None, .. } => i.before.is_none(),
+            Op::TokenList { old: Some(s), .. } => {
+                let len = usize::try_from(s.len).unwrap_or(usize::MAX);
+                matches!(&i.before, Some(Before::Inline(v))
+                    if len <= layers::MAX_LAYERS_BYTES
+                        && v.len() == len
+                        && <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(v))
+                            == s.sha256)
+            }
+            Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => false,
         }
 }

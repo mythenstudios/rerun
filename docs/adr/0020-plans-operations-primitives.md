@@ -255,3 +255,23 @@ pub enum Op { /* … */
 - The current value is read through `RegReader` (no link followed): missing → no old value; a `REG_SZ` in the strict grammar → the old value; anything else is refused ("unusual, Rerun leaves it alone"). A token already there is left out (all there: no op); in another case only it is refused (S4); a token of the same group as one already there is refused (E5 a), naming the Rerun transaction that added it if there is one (N2: the planner reads the journal listing and the recorded heads, read only, for the message), else pointing to the Compatibility tab. `RegPolicy::check_tokens` runs on the result. The missing keys below `CurrentVersion` become `CreateKey`s (top-down, once over all steps), then one `TokenList` with `new = layers::merge(old, add)`.
 - **Path form (E3 a):** `GameDir::launch_path` (new, read only: the path a manual folder was opened by, or `<library as Steam names it>\steamapps\common\<installdir>`) must equal the canonical path (folded); otherwise the step is refused ("reached through a link") until SB-L2 has shown which value name Windows matches for a game started through a junction or an 8.3 name.
 - Refused besides: a case-sensitive game folder or folder on the way, a link or volatile key on the way, two steps for one executable (folded), a plan without the main executable (E2 of P2-10). The builder puts the registry ops after every file op as before.
+
+### `exec` for `TokenList` (`exec::reg`; user decisions E2 b, E6 b, E8; senior-dev conditions S2, S3, S5, N1)
+- **Apply** as a `SetValue`: the old state re-observed before `begin` (`Mismatch`), read again before the intent, the old bytes inline in the intent (at most 1 KiB, never a `.bin`), then `RegWriter::add_tokens(expected = the value read, add)`: `policy` forms the new value, `exec` never writes a string to `Layers` itself (S5). A refused write (`Mismatch`, policy) is hint `NotWritten`. D4 asks the executable of every compatibility-layer op as well (it is not always the main executable).
+- **Observation (replaces the `TokenList` row of the table above; first matching row wins):**
+
+| # | Seen | Observed / act |
+|---|---|---|
+| 1 | a link or volatile key on the way, a value too large | `Foreign` |
+| 2 | exactly `new` (a `REG_SZ`), no hint `NotWritten` | `After` / `restore(expected new, old)`: the old bytes from the journal (hashed first), or the value deleted if there was none |
+| 3 | the old value (missing for none) | `Before` |
+| 4 | anything else after a refused write in this run (`NotWritten`, N1) | `Foreign` |
+| 5 | missing, while there was an old value (S3) | `Drifted`, nothing written |
+| 6 | a `REG_SZ` in the grammar holding some of Rerun's tokens, each once and exactly (E2 b) | `Drifted` / `RegWriter::remove_tokens(expected = the value seen, add)`: those words removed, the rest in its order; deleted if only prefix words are left (S2) |
+| 7 | a `REG_SZ` in the grammar holding none of them (E2 b) | `Drifted`, nothing written |
+| 8 | another type, no NUL, outside the grammar or over 1 KiB, one of Rerun's tokens twice or in another case only (S4) | `Foreign` |
+
+- **No `from`/`to` (E8):** the `RevertIntent` of a token list carries neither; the fields stay reserved for P2-12. A crash after `remove_tokens` and before `RevertDone` leaves a value without Rerun's tokens: the next run sees row 3, 5 or 7, never `Foreign`. `records_fit` keeps refusing `from`/`to` on every registry op and requires the old value inline, exactly the planned one.
+- **Shared keys (E6 b, E7):** a `CreateKey` of `AppCompatFlags` or `Layers` that is empty is `After` and deleted as before; one that holds anything else, or existed when `create_key` ran, is `Drifted` and left, and the transaction closes (a game key keeps 6a: `Foreign`). `verify` counts a value of a later token list as gone only when its revert deletes it (`After` or `Before` without an old value, `Drifted` with only prefix words left, or missing), never one that stays.
+- What a revert after a drift restores is "the current value minus Rerun's tokens", not the state before the first change: deliberate (D10 for a shared value), and the preview says so (`LAYERS_NOTE`). Indistinguishable and accepted: a token the user adds after the apply that Rerun added too is removed by the revert.
+- **Tests:** `exec/layer_tests.rs` (R-L1 to R-L3, R-L6 to R-L8, D4, N2; controls K-L1, K-L2, K-L4), `sys/win/tests/exec.rs` (R-L1, R-L3 on an app hive), `docs/09-testing.md`.

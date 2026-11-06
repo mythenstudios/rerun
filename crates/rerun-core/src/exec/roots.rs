@@ -27,6 +27,7 @@ use crate::detect::steam::{AppState, app_manifest};
 use crate::escape;
 use crate::path::RelPath;
 use crate::plan::{ContentRef, Op, Plan, PlanOrigin, PlanRoot, Target};
+use crate::policy::registry::RegSlot;
 use crate::policy::root::{AppSub, GameDir, RootError, StoreDir};
 use crate::prim::file_install::{hash_file, open_package};
 use crate::sys::fs::FileGuard;
@@ -367,8 +368,8 @@ fn unused(plan: &Plan, roots: &Roots<'_>, root: usize, p: &RelPath) -> Result<()
     }
 }
 
-/// D4: the game is closed: no existing file target of the ops `ops` and no main executable
-/// of an open root is in use.
+/// D4: the game is closed: no existing file target of the ops `ops`, no executable of a
+/// compatibility layer (P2-11) and no main executable of an open root is in use.
 pub(super) fn game_closed(plan: &Plan, roots: &Roots<'_>, ops: &[u16]) -> Result<(), Refusal> {
     for k in ops {
         let Some(op) = plan.ops.get(usize::from(*k)) else {
@@ -380,6 +381,10 @@ pub(super) fn game_closed(plan: &Plan, roots: &Roots<'_>, ops: &[u16]) -> Result
                 path,
                 dir: false,
             } => unused(plan, roots, usize::from(root.0), path)?,
+            // P2-11: the executable a compatibility layer is for (not always the main one).
+            Target::Value {
+                slot: RegSlot::CompatLayers { root, exe },
+            } => unused(plan, roots, usize::from(root.0), exe)?,
             // A registry op has no file to ask: the main executables below are (E2).
             Target::File { dir: true, .. } | Target::Key { .. } | Target::Value { .. } => {}
         }
