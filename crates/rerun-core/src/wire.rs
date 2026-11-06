@@ -4,11 +4,18 @@
 //!   ID as lower-case hex strings of exactly 64 and 32 digits (no JSON number above 2^53,
 //!   ADR 0020). Parsing accepts exactly what is written.
 //! - [`TmpName`] serialises as its name and parses back only through [`TmpName::parse`].
+//! - [`RelPath`] and [`RootPath`] serialise as their backslash-separated string and parse back
+//!   through [`RelPath::parse`] and [`RootPath::new`] (every lexical rule again); a plan's
+//!   one-form check (re-encoding gives the same bytes) refuses a non-normalised spelling.
+//! - [`RootId`] serialises as its `Display` form `<16 hex>-<32 hex>`, [`Attrs`] as
+//!   `{"readonly":…,"hidden":…,"system":…}`.
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::sys::fs::TmpName;
+use crate::path::{RelPath, RootPath};
+use crate::policy::root::RootId;
+use crate::sys::fs::{Attrs, TmpName};
 
 /// Exactly `n` lower-case hex digits.
 fn parse_hex(s: &str, n: usize) -> Option<u128> {
@@ -84,6 +91,87 @@ impl<'de> Deserialize<'de> for TmpName {
     }
 }
 
+impl Serialize for RelPath {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RelPath {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Self::parse(&s).map_err(D::Error::custom)
+    }
+}
+
+impl Serialize for RootPath {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.path().to_str() {
+            Some(p) => s.serialize_str(p),
+            None => Err(serde::ser::Error::custom("a root path is valid Unicode")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RootPath {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Self::new(&s).map_err(D::Error::custom)
+    }
+}
+
+impl Serialize for RootId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for RootId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let bad = || D::Error::custom("expected <16 hex digits>-<32 hex digits>");
+        let (serial, id) = s.split_once('-').ok_or_else(bad)?;
+        let volume_serial =
+            u64::try_from(parse_hex(serial, 16).ok_or_else(bad)?).map_err(|_| bad())?;
+        let file_id = parse_hex(id, 32).ok_or_else(bad)?;
+        Ok(Self {
+            volume_serial,
+            file_id,
+        })
+    }
+}
+
+/// [`Attrs`] on the wire.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttrsWire {
+    readonly: bool,
+    hidden: bool,
+    system: bool,
+}
+
+impl Serialize for Attrs {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        AttrsWire {
+            readonly: self.readonly,
+            hidden: self.hidden,
+            system: self.system,
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Attrs {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let w = AttrsWire::deserialize(d)?;
+        Ok(Self {
+            readonly: w.readonly,
+            hidden: w.hidden,
+            system: w.system,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{hex32, parse_hex};
@@ -108,5 +196,50 @@ mod tests {
             assert_eq!(parse_hex(bad, bad.len()), None, "{bad}");
         }
         assert_eq!(parse_hex(&"f".repeat(32), 32), Some(u128::MAX));
+    }
+
+    #[test]
+    fn root_ids_paths_and_attrs_parse_exactly_what_is_written() {
+        use crate::path::{RelPath, RootPath};
+        use crate::policy::root::RootId;
+        use crate::sys::fs::Attrs;
+        let id = RootId {
+            volume_serial: 0x1234,
+            file_id: u128::MAX - 1,
+        };
+        let s = serde_json::to_string(&id).unwrap();
+        assert_eq!(s, format!("\"{:016x}-{:032x}\"", 0x1234, u128::MAX - 1));
+        assert_eq!(serde_json::from_str::<RootId>(&s).unwrap(), id);
+        for bad in [
+            "\"1234-00\"",
+            "\"0000000000001234\"",
+            &s.to_uppercase(),
+            &s.replace('-', "+"),
+        ] {
+            assert!(serde_json::from_str::<RootId>(bad).is_err(), "{bad}");
+        }
+        let p: RelPath = serde_json::from_str(r#""a/B\\c.dll""#).unwrap();
+        assert_eq!(serde_json::to_string(&p).unwrap(), r#""a\\B\\c.dll""#);
+        for bad in [r#""..\\x""#, r#""C:\\x""#, r#""""#, r#""a\\CON""#] {
+            assert!(serde_json::from_str::<RelPath>(bad).is_err(), "{bad}");
+        }
+        let r: RootPath = serde_json::from_str(r#""d:\\Games\\G""#).unwrap();
+        assert_eq!(serde_json::to_string(&r).unwrap(), r#""D:\\Games\\G""#);
+        assert!(serde_json::from_str::<RootPath>(r#""D:\\""#).is_err());
+        let a = Attrs {
+            readonly: true,
+            hidden: false,
+            system: true,
+        };
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, r#"{"readonly":true,"hidden":false,"system":true}"#);
+        assert_eq!(serde_json::from_str::<Attrs>(&s).unwrap(), a);
+        assert!(serde_json::from_str::<Attrs>(r#"{"readonly":true,"hidden":false}"#).is_err());
+        assert!(
+            serde_json::from_str::<Attrs>(
+                r#"{"readonly":true,"hidden":false,"system":true,"archive":true}"#
+            )
+            .is_err()
+        );
     }
 }

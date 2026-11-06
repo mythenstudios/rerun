@@ -114,3 +114,12 @@ Sources are files below `<AppDir>\packages\<id>\<version>\` (`id` and `version` 
 - Exit codes of the new commands (refused before any change vs. rolled back vs. left open): fixed with the CLI step.
 - The INI editor's accepted encodings and syntax (UTF-8, ANSI, UTF-16 with BOM; comments, duplicate keys, keys outside a section): P2-12, failing closed on anything ambiguous.
 - `compat_layer` token list: P2-11 (ADR 0018).
+
+## Amendment (P2-8, 2026-11-06; decided by the user after a senior-dev cross-check)
+
+### Wire form of format 1 (`rerun-core::plan`)
+- `{"format":1,"roots":[…],"ops":[…]}` exactly as `serde_json::to_vec` writes it: no whitespace, fields in declaration order, `deny_unknown_fields` everywhere, no maps. Enums are externally tagged in `snake_case` (`{"create_file":{…}}`; a unit variant is its name, `"origin":"manual"`). A SHA-256 is 64 lower-case hex digits, a `RootId` the string `<16 hex>-<32 hex>`, `Attrs` `{"readonly":…,"hidden":…,"system":…}`, paths are strings with `\` (`RelPath::parse` and `RootPath::new` again on read). Lengths are JSON numbers (at most 2 GiB).
+- `ContentRef::Package` carries `config` (the step's `config: true`, shown by the preview), so the preview needs nothing but the plan.
+- **One form:** `decode` checks `format` first (another value is `PlanError::Format`), parses strictly, and accepts the bytes only if re-encoding the result gives the same bytes; so `/`, a lower-case drive letter, whitespace or another field order is refused (`NotOneForm`), not normalised. Then the bounds of `encode`: at most 128 ops, 8 KiB per op serialised, 1 MiB per plan, 16 roots (no root listed twice, a Steam app ID ≥ 1), every `RootIx` inside `roots`, one op per object (root index and folded path), package ID and version by `docs/02-topo-format.md` and a valid segment, contents and old files at most 2 GiB, old files at most 4 GiB together, no `ReplaceFile` whose new hash equals the old one (ADR 0017 A2).
+- `store` writes `plans\<hash>.json` with `create_new` and flushes `plans\`; the same bytes again are `Ok`, other bytes under the name are `HashMismatch`. `load` reads at most 1 MiB and refuses bytes that do not hash to the name.
+- **Objects** (stacking, ADR 0019 B-2): `(RootId, folded path, created directory?)` per op; two overlap if equal, or if one is a directory an op creates and the other lies below it. Root identity, not the root index or app ID, so two Steam apps sharing one install folder overlap.

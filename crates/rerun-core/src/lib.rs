@@ -12,6 +12,7 @@
 //! - [`hw`]: the system profile above `sys` (GPU, CPU, OS build, GPU architecture table,
 //!   ADR 0015).
 //! - [`journal`]: the file-based journal below `AppDir` (ADR 0019).
+//! - [`plan`]: plans, their one serialisation, hash, storage and preview (ADR 0020).
 //!
 //! See `docs/01-architecture.md`, ADR 0004, ADR 0007 and ADR 0011.
 
@@ -21,6 +22,7 @@ mod fold;
 pub mod hw;
 pub mod journal;
 pub mod path;
+pub mod plan;
 pub mod policy;
 pub mod sys;
 mod wire;
