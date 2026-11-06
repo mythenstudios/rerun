@@ -8,7 +8,8 @@
   -StageOnly` has put the test binary into target\sandbox\bin.
 
   No network, no clipboard, no audio/video, no GPU: the tests need none of it. Only the test
-  binary and the runner are mapped (read-only); results go to target\sandbox\out (writable).
+  binary, the runner and an optional tools folder (Procmon64.exe, supplied by you; the
+  launcher creates it) are mapped (read-only); results go to target\sandbox\out (writable).
   Nothing of the repository beyond these folders is visible inside the Sandbox.
 -->
 <Configuration>
@@ -27,6 +28,11 @@
     <MappedFolder>
       <HostFolder>@REPO@\target\sandbox\bin</HostFolder>
       <SandboxFolder>C:\sandbox\bin</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>@REPO@\target\sandbox\tools</HostFolder>
+      <SandboxFolder>C:\sandbox\tools</SandboxFolder>
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
     <MappedFolder>

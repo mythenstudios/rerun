@@ -156,12 +156,14 @@ pub(super) fn hosted_ci() -> bool {
 const SANDBOX_ACCOUNT: &str = "WDAGUtilityAccount";
 
 /// The decision behind [`sandbox_guard`], on injected values (the process environment is read
-/// in one place only): all of `RERUN_SANDBOX=1`, `USERNAME` = the Sandbox account and
-/// `USERPROFILE` ending in that account's name must hold. `Err` says what is missing.
+/// in one place only): all of `RERUN_SANDBOX=1`, `USERNAME` = the Sandbox account,
+/// `USERPROFILE` ending in that account's name and the account the process token belongs to
+/// (`account`, not an environment variable) must hold. `Err` says what is missing.
 pub(super) fn sandbox_decision(
     flag: Option<&str>,
     username: Option<&str>,
     profile: Option<&str>,
+    account: Option<&str>,
 ) -> Result<(), String> {
     if flag != Some("1") {
         return Err("RERUN_SANDBOX is not 1".to_owned());
@@ -179,7 +181,29 @@ pub(super) fn sandbox_decision(
             "USERPROFILE is {profile:?}, not the profile of {SANDBOX_ACCOUNT}"
         ));
     }
+    if !account.is_some_and(|a| a.eq_ignore_ascii_case(SANDBOX_ACCOUNT)) {
+        return Err(format!(
+            "the process runs as {account:?}, not {SANDBOX_ACCOUNT}"
+        ));
+    }
     Ok(())
+}
+
+/// The name of the account this process runs as (`GetUserNameW`), which an environment
+/// variable cannot fake.
+fn process_account() -> Option<String> {
+    let mut buf = [0u16; 257];
+    let mut len = u32::try_from(buf.len()).ok()?;
+    // SAFETY: `buf` is writable for `len` UTF-16 units and lives across the call; `len` is
+    // valid for a read and a write and on success receives the length including the NUL.
+    let ok = unsafe {
+        windows_sys::Win32::System::WindowsProgramming::GetUserNameW(buf.as_mut_ptr(), &mut len)
+    };
+    if ok == 0 {
+        return None;
+    }
+    let n = usize::try_from(len).ok()?.checked_sub(1)?;
+    Some(String::from_utf16_lossy(buf.get(..n)?))
 }
 
 /// The safety net of every Windows Sandbox test: call it first. Panics, before anything is
@@ -195,6 +219,7 @@ pub(super) fn sandbox_guard() {
         var("RERUN_SANDBOX").as_deref(),
         var("USERNAME").as_deref(),
         var("USERPROFILE").as_deref(),
+        process_account().as_deref(),
     ) {
         panic!(
             "refusing to run: this test changes the machine and runs only in Windows Sandbox \

@@ -48,7 +48,7 @@ const OK_PROFILE: &str = r"C:\Users\WDAGUtilityAccount";
 
 #[test]
 fn sandbox_gate_needs_all_three_conditions() {
-    let ok = |f, u, p| sandbox_decision(f, u, p).is_ok();
+    let ok = |f, u, p| sandbox_decision(f, u, p, Some("WDAGUtilityAccount")).is_ok();
     assert!(ok(Some("1"), Some("WDAGUtilityAccount"), Some(OK_PROFILE)));
     assert!(ok(
         Some("1"),
@@ -72,6 +72,12 @@ fn sandbox_gate_needs_all_three_conditions() {
         Some("WDAGUtilityAccount"),
         Some(r"C:\Users\developer")
     ));
+    // The environment says Sandbox but the process token belongs to another account (or none).
+    for who in [Some("developer"), None] {
+        assert!(
+            sandbox_decision(Some("1"), Some("WDAGUtilityAccount"), Some(OK_PROFILE), who).is_err()
+        );
+    }
     // The flag alone, or the account name alone (a developer who sets one by habit), refuses.
     assert!(!ok(Some("1"), Some("developer"), Some(r"C:\Users\developer")));
     assert!(!ok(None, Some("WDAGUtilityAccount"), Some(OK_PROFILE)));
@@ -105,7 +111,8 @@ fn sandbox_guard_refuses_outside_the_sandbox() {
 }
 
 /// Every `#[ignore]` test of this file calls `sandbox_guard()` as its first statement, and the
-/// file has no other ignored attribute form.
+/// file has no other ignored attribute form. Sandbox tests belong in this file only: the check
+/// reads this file's source, so a sandbox test elsewhere would escape it.
 #[test]
 fn every_ignored_sandbox_test_starts_with_the_guard() {
     const IGNORED: &str = r##"#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]"##;
@@ -114,9 +121,13 @@ fn every_ignored_sandbox_test_starts_with_the_guard() {
     let mut seen = 0;
     for (i, l) in lines.iter().enumerate() {
         if l.trim() != IGNORED {
+            // Built from parts so that this check does not match its own source.
+            let bad = [format!("{}{}", "#[", "ignore"), format!("cfg_{}", "attr")];
+            let code =
+                !l.trim_start().starts_with("//") && !l.trim_start().starts_with("const IGNORED");
             assert!(
-                !l.trim_start().starts_with("#[ignore"),
-                "line {}: use the one ignore attribute with the Sandbox hint",
+                !code || bad.iter().all(|b| !l.contains(b.as_str())),
+                "line {}: use the one ignore attribute with the Sandbox hint, on its own line                  (no conditional ignore, no second attribute on the line)",
                 i + 1
             );
             continue;

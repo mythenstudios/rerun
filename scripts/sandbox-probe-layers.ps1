@@ -5,18 +5,24 @@
 # Writes HKCU\...\AppCompatFlags\Layers values for test copies of cmd.exe under
 # C:\RerunSandbox\probe and removes them again.
 #   SB-L2  which value-name path form Windows applies: canonical / junction / 8.3 path
-#          (matrix: name form x launch form)
+#          (matrix: name form x launch form), and whether the effect outlasts the removal of
+#          the value (shim cache)
 #   SB-L3  whether a value without the "~" prefix (or with "$") takes effect
 #   SB-L4  whether the 32-bit registry view sees the same Layers value
 # "Takes effect" is observed two ways in the launched copy of cmd.exe: `ver` (the WINXPSP3
 # layer lies about the OS version) and whether __COMPAT_LAYER is in its environment.
-# SB-L1 (what the Explorer tab writes) is manual: sandbox-layers-dump.ps1.
+# Optional: C:\sandbox\tools\Procmon64.exe (Sysinternals, supplied by you, mapped read-only)
+# records which Layers value name is queried at CreateProcess; the filtered CSV goes to
+# procmon-layers.csv. SB-L1 (what the Explorer tab writes) is manual: sandbox-layers-dump.ps1.
+#
+# Windows PowerShell 5.1: native stderr is never redirected under $ErrorActionPreference =
+# 'Stop'; native calls go through Run-Native, which judges only the exit code.
 
 param([string]$Out = 'C:\sandbox\out')
 
 $ErrorActionPreference = 'Stop'
-if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $env:RERUN_SANDBOX -ne '1') {
-    Write-Error 'refusing to run: Windows Sandbox only (WDAGUtilityAccount and RERUN_SANDBOX=1)'
+if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $env:USERPROFILE -notmatch '\\WDAGUtilityAccount\\?$' -or $env:RERUN_SANDBOX -ne '1') {
+    Write-Error 'refusing to run: Windows Sandbox only (WDAGUtilityAccount, its profile and RERUN_SANDBOX=1)'
     exit 2
 }
 Remove-Item Env:\__COMPAT_LAYER -ErrorAction SilentlyContinue
@@ -25,22 +31,36 @@ $layers = 'HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Laye
 $base = 'C:\RerunSandbox\probe'
 $real = Join-Path $base 'real'
 $junc = Join-Path $base 'junc'
+$procmon = 'C:\sandbox\tools\Procmon64.exe'
 $report = New-Object System.Collections.Generic.List[string]
 function Say([string]$s) { $report.Add($s) }
 
-function Reg-Add([string]$name, [string]$data, [string]$view = '64') {
-    & reg.exe add $layers /v $name /t REG_SZ /d $data /f "/reg:$view" | Out-Null
+# Runs a native command, stderr merged as plain text; $script:NativeExit holds the exit code.
+function Run-Native {
+    $ErrorActionPreference = 'Continue'
+    $cmd = $args[0]
+    $rest = @($args | Select-Object -Skip 1)
+    & $cmd @rest 2>&1 | ForEach-Object { "$_" }
+    $script:NativeExit = $LASTEXITCODE
 }
+function Reg-Add([string]$name, [string]$data, [string]$view = '64') {
+    Run-Native reg.exe add $layers /v $name /t REG_SZ /d $data /f "/reg:$view" | Out-Null
+}
+# A missing value is not an error.
 function Reg-Del([string]$name, [string]$view = '64') {
-    & reg.exe delete $layers /v $name /f "/reg:$view" 2>&1 | Out-Null
+    Run-Native reg.exe delete $layers /v $name /f "/reg:$view" | Out-Null
 }
 function Reg-Query([string]$name, [string]$view = '64') {
-    $r = & reg.exe query $layers /v $name "/reg:$view" 2>&1
-    if ($LASTEXITCODE -ne 0) { return '<absent>' }
+    $r = Run-Native reg.exe query $layers /v $name "/reg:$view"
+    if ($script:NativeExit -ne 0) { return '<absent>' }
     return (($r | Where-Object { $_ -match 'REG_SZ' }) -join '; ').Trim()
 }
 function Observe([string]$exe) {
-    $o = & $exe /c 'ver & set __COMPAT_LAYER' 2>&1 | Out-String
+    try {
+        $o = (Run-Native $exe /c 'ver & set __COMPAT_LAYER') | Out-String
+    } catch {
+        return "launch failed: $_"
+    }
     $ver = ([regex]::Match($o, 'Version [0-9.]+')).Value
     $seen = if ($o -match '__COMPAT_LAYER=(.*)') { "set: $($Matches[1].Trim())" } else { 'not set' }
     return "$ver; __COMPAT_LAYER $seen"
@@ -52,32 +72,50 @@ Say ('Build: ' + (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentV
 Say 'Facts only. Observation = `ver` output and `__COMPAT_LAYER` in the launched cmd.exe copy.'
 Say ''
 
-New-Item -ItemType Directory -Force -Path $real | Out-Null
-if (Test-Path -LiteralPath $junc) { cmd /c rmdir "`"$junc`"" | Out-Null }
-cmd /c mklink /J "`"$junc`"" "`"$real`"" | Out-Null
-Copy-Item -LiteralPath "$env:SystemRoot\System32\cmd.exe" -Destination (Join-Path $real 'probe.exe') -Force
-Copy-Item -LiteralPath "$env:SystemRoot\SysWOW64\cmd.exe" -Destination (Join-Path $real 'probe32.exe') -Force
-$short = (New-Object -ComObject Scripting.FileSystemObject).GetFile((Join-Path $real 'probe.exe')).ShortPath
-$forms = [ordered]@{
-    canonical = (Join-Path $real 'probe.exe')
-    junction  = (Join-Path $junc 'probe.exe')
-    short83   = $short
-}
-Say '## Path forms'
-foreach ($k in $forms.Keys) { Say ('- ' + $k + ': `' + $forms[$k] + '`') }
-if ($short -eq $forms.canonical) { Say '- NOTE: no 8.3 name exists for the probe folder (short form equals the long one)' }
-Say ''
-
-Say '## Control (no value)'
-Say ('- canonical launch: ' + (Observe $forms.canonical))
-Say ''
-
+$forms = $null
 function Cleanup {
-    foreach ($f in $forms.Values) { Reg-Del $f }
-    Reg-Del (Join-Path $real 'probe32.exe')
+    # Never throws: it runs in `finally`.
+    try {
+        if ($forms) { foreach ($f in $forms.Values) { Reg-Del $f } }
+        Reg-Del (Join-Path $real 'probe32.exe')
+    } catch { }
 }
 
+$pmlFile = Join-Path $Out 'procmon.pml'
+$procmonOn = $false
 try {
+    New-Item -ItemType Directory -Force -Path $real | Out-Null
+    if (Test-Path -LiteralPath $junc) { Run-Native cmd.exe /c rmdir $junc | Out-Null }
+    Run-Native cmd.exe /c mklink /J $junc $real | Out-Null
+    Copy-Item -LiteralPath "$env:SystemRoot\System32\cmd.exe" -Destination (Join-Path $real 'probe.exe') -Force
+    Copy-Item -LiteralPath "$env:SystemRoot\SysWOW64\cmd.exe" -Destination (Join-Path $real 'probe32.exe') -Force
+    $short = (New-Object -ComObject Scripting.FileSystemObject).GetFile((Join-Path $real 'probe.exe')).ShortPath
+    $forms = [ordered]@{
+        canonical = (Join-Path $real 'probe.exe')
+        junction  = (Join-Path $junc 'probe.exe')
+        short83   = $short
+    }
+    Say '## Path forms'
+    foreach ($k in $forms.Keys) { Say ('- ' + $k + ': `' + $forms[$k] + '`') }
+    if ($short -eq $forms.canonical) { Say '- NOTE: no 8.3 name exists for the probe folder (short form equals the long one)' }
+    Say ''
+
+    Say '## Control (no value)'
+    Say ('- canonical launch: ' + (Observe $forms.canonical))
+    Say ''
+
+    if (Test-Path -LiteralPath $procmon) {
+        try {
+            Remove-Item -LiteralPath $pmlFile -ErrorAction SilentlyContinue
+            Start-Process -FilePath $procmon -ArgumentList '/AcceptEula', '/Quiet', '/Minimized', '/BackingFile', "`"$pmlFile`"" | Out-Null
+            Start-Sleep -Seconds 8
+            $procmonOn = $true
+        } catch { Say ("- Process Monitor could not be started: $_"); Say '' }
+    } else {
+        Say '- Process Monitor not used: C:\sandbox\tools\Procmon64.exe is absent (put Procmon64.exe into target/sandbox/tools on the host to record which Layers value name is queried).'
+        Say ''
+    }
+
     Say '## SB-L2: value name form x launch form (data `~ WINXPSP3`)'
     Say ''
     Say '| value name | launched via | observation |'
@@ -90,6 +128,16 @@ try {
         }
     }
     Cleanup
+    Say ''
+
+    Say '## SB-L2: after the value is removed (shim cache)'
+    Say ''
+    Reg-Add $forms.canonical '~ WINXPSP3'
+    Say ('- value set, canonical launch: ' + (Observe $forms.canonical))
+    Reg-Del $forms.canonical
+    Say ('- value removed, canonical launch at once: ' + (Observe $forms.canonical))
+    Start-Sleep -Seconds 5
+    Say ('- value removed, canonical launch 5 s later: ' + (Observe $forms.canonical))
     Say ''
 
     Say '## SB-L3: prefix of the data (canonical name, canonical launch)'
@@ -130,11 +178,31 @@ catch {
 }
 finally {
     Cleanup
+    if ($procmonOn) {
+        try {
+            Run-Native $procmon /Terminate | Out-Null
+            Start-Sleep -Seconds 3
+            $csvFull = Join-Path $Out 'procmon-all.csv'
+            Start-Process -FilePath $procmon -ArgumentList '/AcceptEula', '/Quiet', '/Minimized', '/OpenLog', "`"$pmlFile`"", '/SaveAs', "`"$csvFull`"" -Wait | Out-Null
+            Run-Native $procmon /Terminate | Out-Null
+            if (Test-Path -LiteralPath $csvFull) {
+                $rows = Import-Csv -LiteralPath $csvFull | Where-Object { $_.Path -like '*AppCompatFlags\Layers*' -and $_.'Process Name' -match 'probe|cmd' }
+                $rows | Export-Csv -LiteralPath (Join-Path $Out 'procmon-layers.csv') -NoTypeInformation -Encoding UTF8
+                Remove-Item -LiteralPath $csvFull -ErrorAction SilentlyContinue
+                Say "## Process Monitor: $(@($rows).Count) Layers queries by probe/cmd processes in procmon-layers.csv"
+                Say '(the value name is the last path segment; compare it with the launch form of each SB-L2 row)'
+                Say ''
+            } else {
+                Say '## Process Monitor: the CSV export failed; the raw log is procmon.pml'
+                Say ''
+            }
+        } catch { Say ("## Process Monitor: post-processing failed: $_"); Say '' }
+    }
 }
 
 Say '## Left behind in the Layers key (should list nothing of ours)'
 Say '```'
-Say ((& reg.exe query $layers 2>&1 | Out-String).Trim())
+Say ((Run-Native reg.exe query $layers | Out-String).Trim())
 Say '```'
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $report | Set-Content -LiteralPath (Join-Path $Out 'probe-layers.md') -Encoding UTF8

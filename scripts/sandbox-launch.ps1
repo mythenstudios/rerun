@@ -5,35 +5,58 @@
 #   powershell -File scripts/sandbox-launch.ps1 -StageOnly  # build and stage only
 #
 # This builds only; it never runs the ignored tests on the host (they refuse here anyway).
+# Optional: put Procmon64.exe (Sysinternals, downloaded by you; nothing is committed) into
+# target\sandbox\tools; the layer probes use it when present.
 
 param([switch]$StageOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$bin = Join-Path $repo 'target\sandbox\bin'
-$out = Join-Path $repo 'target\sandbox\out'
+$root = Join-Path $repo 'target\sandbox'
+$bin = Join-Path $root 'bin'
+$out = Join-Path $root 'out'
+$tools = Join-Path $root 'tools'
 
+function Assert-Plain([string]$path) {
+    if ((Test-Path -LiteralPath $path) -and ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "refusing: $path is a reparse point (junction or link)"
+    }
+}
+
+# Windows PowerShell 5.1 throws on native stderr under 'Stop': judge only the exit code.
 Push-Location $repo
 try {
-    $json = cargo test -p rerun-core --lib --no-run --message-format=json 2>$null
-    if ($LASTEXITCODE -ne 0) { throw 'cargo test --no-run failed' }
+    $ErrorActionPreference = 'Continue'
+    $json = & cargo test -p rerun-core --lib --no-run --message-format=json 2>$null
+    $exit = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($exit -ne 0) { throw 'cargo test --no-run failed (run it by hand to see why)' }
 } finally { Pop-Location }
 $exe = $json | ForEach-Object { try { $_ | ConvertFrom-Json } catch { $null } } |
     Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.target.name -eq 'rerun-core' -and $_.target.kind -contains 'lib' -and $_.executable } |
     Select-Object -Last 1 -ExpandProperty executable
 if (-not $exe) { throw 'could not locate the rerun-core lib test executable' }
 
-New-Item -ItemType Directory -Force -Path $bin, $out | Out-Null
-Get-ChildItem -LiteralPath $out -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+foreach ($p in @($root, $bin, $out, $tools)) { Assert-Plain $p }
+New-Item -ItemType Directory -Force -Path $bin, $out, $tools | Out-Null
+# Clear the old results without a recursive delete: files only; a reparse point or a folder
+# in there stops the script.
+foreach ($item in Get-ChildItem -LiteralPath $out -Force) {
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "refusing: $($item.FullName) is a reparse point" }
+    if ($item.PSIsContainer) { throw "unexpected folder in the output folder: $($item.FullName) (remove it by hand)" }
+    Remove-Item -LiteralPath $item.FullName -Force
+}
 Copy-Item -LiteralPath $exe -Destination (Join-Path $bin 'rerun-core-tests.exe') -Force
 Write-Host "staged $exe -> $bin\rerun-core-tests.exe"
+if (Test-Path -LiteralPath (Join-Path $tools 'Procmon64.exe')) { Write-Host 'Procmon64.exe found: the probes will use it' }
 if ($StageOnly) { return }
 
-$wsb = (Get-Content -LiteralPath (Join-Path $repo 'scripts\sandbox-test.wsb') -Raw).Replace('@REPO@', $repo)
-$resolved = Join-Path $repo 'target\sandbox\sandbox-test.resolved.wsb'
+$template = Get-Content -LiteralPath (Join-Path $repo 'scripts\sandbox-test.wsb') -Raw
+$wsb = $template.Replace('@REPO@', [Security.SecurityElement]::Escape($repo))
+$resolved = Join-Path $root 'sandbox-test.resolved.wsb'
 Set-Content -LiteralPath $resolved -Value $wsb -Encoding UTF8
 if (-not (Get-Command WindowsSandbox.exe -ErrorAction SilentlyContinue)) {
     throw 'Windows Sandbox is not installed (Windows Features: Windows Sandbox, then reboot)'
 }
-Write-Host "starting the Sandbox; results appear in $out (sandbox-test.log, result.json)"
+Write-Host "starting the Sandbox; results appear in $out (sandbox-test.log, result.json, probe-layers.md)"
 Start-Process WindowsSandbox.exe -ArgumentList "`"$resolved`""
