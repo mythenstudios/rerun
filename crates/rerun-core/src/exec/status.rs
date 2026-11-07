@@ -6,7 +6,9 @@
 //! (with the recorded rules and without registry data, `plan::preview_head`), and per op
 //! (newest first) how far it got, where its old state is kept ([`Backup`]) and the `.old`
 //! files a step left next to its target (pending cleanup: a `.old` still mapped as an image
-//! when the step ended; audit A2, "later").
+//! when the step ended; P2-15: exactly the sequences the journal names, none for a transaction
+//! closed `Reverted` or `RolledBack`, which a revert closes only once they are gone; for a
+//! forgotten one they may remain).
 
 use super::Backup;
 use crate::escape::{self, Shown};
@@ -85,6 +87,10 @@ pub enum TxnLine {
     Open,
     /// Applied, not closed (a revert may have begun: see its ops).
     Applied,
+    /// Every op reverted, none foreign, but the journal still names a `.old` of Rerun's
+    /// (P2-15): not closed; `rerun revert <txn>` deletes it once it is free and closes. An
+    /// applied transaction or a rolled-back apply alike.
+    CleanupPending,
     /// Closed.
     Closed(Closing),
     /// Not a valid journal; only `forget` closes it.
@@ -102,7 +108,8 @@ pub struct OpStatus {
     pub state: OpState,
     /// Where its old state is kept, if it has one.
     pub backup: Option<Backup>,
-    /// `.old` files a step of it left next to its target (relative to its root, escaped).
+    /// `.old` files the journal says a step of it left next to its target (relative to its
+    /// root, escaped; P2-15: none once closed `Reverted` or `RolledBack`).
     pub cleanup: Vec<Shown<'static>>,
 }
 
@@ -166,20 +173,27 @@ fn one(j: &Journal<'_>, app: &AppDir<'_>, l: &Listed, always: bool) -> TxnStatus
     };
     let state = match &v.state {
         TxnState::Empty => TxnLine::Empty,
+        TxnState::Open | TxnState::Applied if cleanup_pending(&v.ops) => TxnLine::CleanupPending,
         TxnState::Open => TxnLine::Open,
         TxnState::Applied => TxnLine::Applied,
         TxnState::Closed(c) => TxnLine::Closed(*c),
         TxnState::Damaged(d) => TxnLine::Damaged(d.clone()),
     };
     let settled = l.forgotten || matches!(state, TxnLine::Closed(_) | TxnLine::Empty);
-    let leftover = v.ops.values().any(|o| old_left(o).next().is_some());
+    // P2-15: closed as reverted, nothing of Rerun's is left (a revert closes only then).
+    let exact = !l.forgotten
+        && matches!(
+            state,
+            TxnLine::Closed(Closing::Reverted | Closing::RolledBack)
+        );
+    let leftover = !exact && v.ops.values().any(|o| old_left(o).next().is_some());
     let head = (always || !settled || leftover).then(|| head(j, l, v.head_sha256.as_ref()));
     let plan = head.as_ref().and_then(|h| h.as_ref().ok()).map(|(p, _)| p);
     let ops = v
         .ops
         .iter()
         .rev()
-        .map(|(k, o)| op_status(app, &l.id, *k, o, plan))
+        .map(|(k, o)| op_status(app, &l.id, *k, o, plan, exact))
         .collect();
     let rebinds = v
         .rebinds
@@ -236,7 +250,24 @@ fn old_left(o: &OpLog) -> impl Iterator<Item = RelPath> + '_ {
     o.pending_old().into_iter().map(|(_, t)| t.old())
 }
 
-fn op_status(app: &AppDir<'_>, t: &TxnId, k: u16, o: &OpLog, plan: Option<&Plan>) -> OpStatus {
+/// Every op reverted, none foreign, and a `.old` left by the journal (P2-15).
+pub(super) fn cleanup_pending(ops: &std::collections::BTreeMap<u16, OpLog>) -> bool {
+    let all = ops.values().all(|o| {
+        o.reverted
+            .as_ref()
+            .is_some_and(|r| r.observed != Observed::Foreign)
+    });
+    all && ops.values().any(|o| !o.pending_old().is_empty())
+}
+
+fn op_status(
+    app: &AppDir<'_>,
+    t: &TxnId,
+    k: u16,
+    o: &OpLog,
+    plan: Option<&Plan>,
+    exact: bool,
+) -> OpStatus {
     let state = match (&o.reverted, o.reverts.is_empty(), &o.done) {
         (Some(r), _, _) => OpState::Reverted(r.observed),
         (None, false, _) => OpState::RevertInterrupted,
@@ -251,6 +282,7 @@ fn op_status(app: &AppDir<'_>, t: &TxnId, k: u16, o: &OpLog, plan: Option<&Plan>
             Target::Key { .. } | Target::Value { .. } => None,
         });
     let cleanup = old_left(o)
+        .filter(|_| !exact)
         .map(|name| {
             let full = match &folder {
                 Some(Some(f)) => f.child(name.as_str()).unwrap_or(name),

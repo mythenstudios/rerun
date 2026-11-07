@@ -70,6 +70,7 @@ fn txn_text(st: &TxnStatus) -> TxnText<'_> {
             TxnText::Reverting
         }
         TxnLine::Applied => TxnText::Applied,
+        TxnLine::CleanupPending => TxnText::Reverting,
         TxnLine::Closed(c) => TxnText::Closed(*c),
         TxnLine::Damaged(d) => TxnText::Damaged(shown(d)),
         TxnLine::Unreadable(why) => TxnText::Unreadable(why.clone()),

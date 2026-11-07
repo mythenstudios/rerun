@@ -23,6 +23,10 @@
 //! (`cargo test -p rerun-core --lib combo_tests -- --ignored`). Measured numbers and the
 //! reduction rules: `docs/09-testing.md`.
 //!
+//! P2-15 over every run: `Closed` means the game folder is the one before (the checks above), and
+//! a journal that names a `.old` left ([`cleanup_named`]) appears only where a mapping was
+//! injected, never in these runs (the control maps one).
+//!
 //! Controls (each one bites): the J6 flush sites switched off ([`CONTROLS`]) and, applied
 //! temporarily to `exec` and not checked in, a flush deduplicated per folder, a recovery that
 //! renames back in another spelling, the parent folder of a revert not marked for the flush.
@@ -443,6 +447,27 @@ fn reverting(env: &Env, t: &TxnId) -> bool {
         })
 }
 
+/// P2-15: every transaction whose journal names a `.old` left (`OpLog::pending_old`). Without an
+/// injected mapping there is none: each one is a violation.
+fn cleanup_named(env: &Env) -> Vec<String> {
+    let a = app(&env.sys);
+    let j = crate::journal::Journal::new(&a, crate::journal::InstanceTag::fixed(5));
+    let Ok(l) = j.list() else {
+        return Vec::new();
+    };
+    l.txns
+        .iter()
+        .filter_map(|t| t.view.as_ref().ok())
+        .filter(|v| v.ops.values().any(|o| !o.pending_old().is_empty()))
+        .map(|v| {
+            format!(
+                "open with cleanup items without a mapping: {} {:?}",
+                v.id, v.state
+            )
+        })
+        .collect()
+}
+
 /// The J5 properties of what is on disk after a power loss, before the recovery (the
 /// properties of `crash_tests::violations`, with T1 of a stacked kind untouched), then the
 /// recovery.
@@ -508,10 +533,33 @@ fn violations(w: &World, got: Got, nested: bool) -> Vec<String> {
             "Ok lost: revert returned Closed, now {run_state:?}"
         ));
     }
+    v.extend(cleanup_named(env));
     if v.is_empty() {
         v.extend(recover(w));
+        v.extend(cleanup_named(env));
     }
     v
+}
+
+/// The control of [`cleanup_named`]: a `.old` mapped during the restore of the revert is seen.
+#[test]
+fn cm_control_a_mapped_dot_old_is_seen_by_the_cleanup_property() {
+    let w = setup(Kind::TwoReplaceCased);
+    let t = match w.env.apply(&w.h) {
+        Ok(Outcome::Applied(t)) => t,
+        other => panic!("{other:?}"),
+    };
+    let m = super::cleanup_tests::Mapper::game(&w.env);
+    let r = w.env.revert(&t).unwrap();
+    super::cleanup_tests::Mapper::stop(&w.env);
+    assert!(r.closed.is_none(), "{r:?}");
+    let v = violations(&w, Got::default(), false);
+    assert!(
+        v.iter()
+            .any(|x| x.contains("open with cleanup items without a mapping")),
+        "{v:?}"
+    );
+    m.release();
 }
 
 /// A flush J6 switches off.

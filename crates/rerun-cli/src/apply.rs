@@ -103,7 +103,7 @@ fn run<W: Write, E: Write>(
 pub fn failed_apply<E: Write>(e: &ApplyError, err: &mut Out<E>) -> Exit {
     match e {
         ApplyError::Refused(r) => note(err, TxnMsg::Error { error: shown(r) }),
-        ApplyError::RolledBack { txn, cause } => {
+        ApplyError::RolledBack { txn, cause, .. } => {
             note(err, TxnMsg::RolledBack { txn: *txn });
             note(
                 err,

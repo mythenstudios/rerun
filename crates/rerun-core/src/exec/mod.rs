@@ -56,6 +56,19 @@
 //! bind its roots (`bind`), checked against the head on every revert, `verify` and stacking
 //! (`Blocked` otherwise). A binding acts only where a root is opened: the file ops, D4 and the
 //! file objects of stacking; registry locations come from the head.
+//!
+//! Pending cleanup (P2-15, user decisions E-C1 to E-C4): a `.old` a process still maps when a
+//! step ends stays, and the journal names it by sequence (`RevertDone.old_left`). After the
+//! revert loop of a revert or a rollback, the cleanup pass ([`cleanup_pass`]) observes every
+//! `.old` the journal says is left: gone is done; Rerun's own content is deleted with its known
+//! hash when the target still holds the reverted state; a mapped one stays ([`OldSeen::InUse`]),
+//! and so does one next to a target that changed since ([`OldSeen::Kept`]); anything else at the
+//! name is not Rerun's and is never touched ([`OldSeen::Foreign`], reported). The game folders
+//! are flushed before `Closed` (the tenth flush site), and a transaction is closed only when
+//! nothing of Rerun's is left, so `Closed { Reverted | RolledBack }` means Rerun's changes are
+//! undone exactly. Otherwise it stays open (stacking: `Refusal::CleanupPending`), and only a
+//! later `revert` of the same transaction cleans up: nothing in the background, at start or on
+//! reboot.
 
 mod bind;
 mod file;
@@ -153,6 +166,18 @@ pub enum Refusal {
     /// A later transaction touches an object of the one to revert (LIFO).
     #[error("transaction {txn} changed the same files later; revert it first")]
     Later {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// A transaction on an object of this plan is reverted, but a file Rerun replaced is still
+    /// in use, so it stays open until a revert deletes that file (P2-15): it blocks applies on
+    /// its objects and, newest first, the revert of earlier transactions on them.
+    #[error(
+        "transaction {txn} is reverted, but a file Rerun replaced is still in use and stays \
+         until then; close the game and any window showing its folder, then run rerun revert \
+         {txn}"
+    )]
+    CleanupPending {
         /// The transaction.
         txn: TxnId,
     },
@@ -360,6 +385,24 @@ pub enum ApplyError {
         txn: TxnId,
         /// The failure.
         cause: Box<ExecError>,
+        /// What the cleanup pass observed (P2-15): only what was deleted, gone, or is not
+        /// Rerun's (`OldSeen::Foreign`, reported and never touched).
+        cleanup: Vec<PendingOld>,
+    },
+    /// Failed and rolled back, but a file Rerun replaced is still in use (or kept next to a
+    /// target that changed since), so the transaction stays open until a later revert deletes
+    /// it (P2-15, senior-dev B1): not `Closed`.
+    #[error(
+        "apply failed and was rolled back ({txn}): {cause}; a file Rerun replaced is still in \
+         use, the transaction stays open until rerun revert {txn} deletes it"
+    )]
+    CleanupPending {
+        /// The transaction.
+        txn: TxnId,
+        /// The failure.
+        cause: Box<ExecError>,
+        /// What the cleanup pass observed; at least one item holds the transaction open.
+        cleanup: Vec<PendingOld>,
     },
     /// Failed, and the rollback failed too or met a foreign state: the transaction stays
     /// open; `revert` finishes it later (or `forget` closes it).
@@ -504,13 +547,17 @@ pub struct Halt {
 pub struct RevertReport {
     /// The transaction.
     pub txn: TxnId,
-    /// How it was closed; `None` if an op was foreign (it stays open, `forget` closes it) or
-    /// the revert halted.
+    /// How it was closed; `None` if an op was foreign (it stays open, `forget` closes it), the
+    /// revert halted, or a `.old` of Rerun's is still left ([`Self::cleanup`], P2-15).
     pub closed: Option<Closing>,
     /// The ops reverted in this run, newest first.
     pub ops: Vec<OpReport>,
     /// Where the revert halted, if it did (review N4: also at its first op, an `Ok`).
     pub halted: Option<Halt>,
+    /// What the cleanup pass observed of every `.old` the journal names (P2-15), by op
+    /// ascending; one that holds the transaction open ([`OldSeen::holds_open`]) means
+    /// `closed == None`.
+    pub cleanup: Vec<PendingOld>,
 }
 
 /// What [`verify`] observed.
@@ -524,6 +571,53 @@ pub struct Verified {
     pub halted: Option<Halt>,
     /// What the observed ops saw beyond their state, by op index.
     pub details: BTreeMap<u16, Detail>,
+    /// The `.old` files the journal names for the ops reverted already, as a revert's cleanup
+    /// pass would find them now (P2-15, rule 5: `OldSeen::Ours` is what it deletes).
+    pub cleanup: Vec<PendingOld>,
+}
+
+/// A `.old` the journal says a step of Rerun left (P2-15), as observed now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOld {
+    /// Op index.
+    pub op: u16,
+    /// Root index of the op.
+    pub root: u16,
+    /// The file, relative to the root (the target's folder and the `.old` name).
+    pub path: RelPath,
+    /// The content Rerun put there (the start state of its sequence): deleted only with it.
+    pub sha256: [u8; 32],
+    /// What is there now.
+    pub seen: OldSeen,
+}
+
+/// What is at the name of a pending `.old` (P2-15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OldSeen {
+    /// Nothing (the user deleted it, or a run before): done.
+    Gone,
+    /// Rerun's content, and the target holds the reverted state: a revert deletes it
+    /// (`verify` only).
+    Ours,
+    /// Deleted by this run, with its known hash expected.
+    Deleted,
+    /// Rerun's content, but deleting it is refused (a process maps it as an image): it stays,
+    /// and so does the transaction.
+    InUse,
+    /// Rerun's content, but the target is not in the reverted state any more (it changed
+    /// since the revert): kept, as it may be the last copy on disk of a state, and the
+    /// transaction stays open (senior-dev S2); deleting it by hand or `forget` ends it.
+    Kept,
+    /// Another content, a link, a folder or a reparse point: not Rerun's, never touched, only
+    /// reported (user decision E-C4).
+    Foreign,
+}
+
+impl OldSeen {
+    /// It keeps the transaction open (E-C1: `Closed` only when nothing of Rerun's is left).
+    pub fn holds_open(self) -> bool {
+        matches!(self, Self::InUse | Self::Kept)
+    }
 }
 
 #[cfg(test)]
@@ -546,6 +640,32 @@ pub(crate) mod knob {
         static REWRITE_HEAD: Cell<bool> = const { Cell::new(false) };
         static OBJECTS_FROM_BINDING_ONLY: Cell<bool> = const { Cell::new(false) };
         static DIR_FOUND_AFTER_RECORD: Cell<bool> = const { Cell::new(false) };
+        static CLOSE_DESPITE_CLEANUP: Cell<bool> = const { Cell::new(false) };
+        static CLEANUP_WITHOUT_HASH: Cell<bool> = const { Cell::new(false) };
+        static FLUSH_ONLY_AFTER_DELETE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// K-CL2b (P2-15, senior-dev S1): the cleanup pass flushes only after a deletion of its own.
+    pub(crate) fn flush_only_after_delete(on: bool) {
+        FLUSH_ONLY_AFTER_DELETE.with(|s| s.set(on));
+    }
+    pub(crate) fn flushing_only_after_delete() -> bool {
+        FLUSH_ONLY_AFTER_DELETE.with(Cell::get)
+    }
+
+    /// K-CL1 (P2-15): a transaction is closed although a `.old` of Rerun's is left.
+    pub(crate) fn close_despite_cleanup(on: bool) {
+        CLOSE_DESPITE_CLEANUP.with(|s| s.set(on));
+    }
+    pub(crate) fn closing_despite_cleanup() -> bool {
+        CLOSE_DESPITE_CLEANUP.with(Cell::get)
+    }
+    /// K-CL3 (P2-15): the cleanup deletes whatever is at the name, without its known hash.
+    pub(crate) fn cleanup_without_hash(on: bool) {
+        CLEANUP_WITHOUT_HASH.with(|s| s.set(on));
+    }
+    pub(crate) fn cleaning_without_hash() -> bool {
+        CLEANUP_WITHOUT_HASH.with(Cell::get)
     }
 
     pub(crate) fn skip(f: Option<Flush>) {
@@ -663,6 +783,30 @@ fn knob_dir_found_after_record() -> bool {
     false
 }
 
+/// K-CL1 (tests): closed although a `.old` of Rerun's is left.
+fn knob_close_despite_cleanup() -> bool {
+    #[cfg(test)]
+    return knob::closing_despite_cleanup();
+    #[cfg(not(test))]
+    false
+}
+
+/// K-CL2b (tests): the cleanup pass flushes only after a deletion of its own.
+fn knob_flush_only_after_delete() -> bool {
+    #[cfg(test)]
+    return knob::flushing_only_after_delete();
+    #[cfg(not(test))]
+    false
+}
+
+/// K-CL3 (tests): the cleanup deletes whatever is at the name.
+fn knob_cleanup_without_hash() -> bool {
+    #[cfg(test)]
+    return knob::cleaning_without_hash();
+    #[cfg(not(test))]
+    false
+}
+
 /// K-RB2 (tests): a created folder of a rebound root proven by `Done.file_id` only.
 fn knob_dir_proof_from_done() -> bool {
     #[cfg(test)]
@@ -710,6 +854,10 @@ pub(crate) enum Flush {
     GameBeforeRevertDone,
     /// `HKCU`, before the `RevertDone` of a registry op.
     HiveBeforeRevertDone,
+    /// The game folders of the `.old` files the cleanup pass looked at, before `Closed`
+    /// (P2-15, senior-dev S1: always, also when every one was gone, so a deletion of an earlier
+    /// run that crashed before its flush is durable before `Closed`).
+    GameBeforeClosed,
 }
 
 /// J6 (tests): this flush is switched off.
@@ -966,6 +1114,7 @@ fn verify_seen(
             ops: out.into_iter().collect(),
             halted,
             details,
+            cleanup: Vec::new(),
         },
         seen,
     ))
@@ -1084,9 +1233,17 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
         Err(e) => e,
     };
     match rollback(cx, &plan, w, &mut touched, &roots, &hints) {
-        Ok(()) => Err(ApplyError::RolledBack {
+        Ok(cleanup) if cleanup.iter().any(|p| p.seen.holds_open()) => {
+            Err(ApplyError::CleanupPending {
+                txn,
+                cause: Box::new(cause),
+                cleanup,
+            })
+        }
+        Ok(cleanup) => Err(ApplyError::RolledBack {
             txn,
             cause: Box::new(cause),
+            cleanup,
         }),
         Err(rollback) => Err(ApplyError::LeftOpen {
             txn,
@@ -1136,7 +1293,9 @@ fn op_of(plan: &Plan, k: u16) -> Result<&Op, ExecError> {
 }
 
 /// The rollback of a failed apply: the revert loop on the apply's own writer, with the
-/// in-process results of the calls (`hints`, senior-dev condition 4).
+/// in-process results of the calls (`hints`, senior-dev condition 4), then the cleanup pass
+/// (P2-15, senior-dev B1: a rollback closes only when nothing of Rerun's is left, as a revert).
+/// `Ok`: what the cleanup pass observed; closed `RolledBack` unless one item holds it open.
 fn rollback(
     cx: &ExecCtx<'_>,
     plan: &Plan,
@@ -1144,7 +1303,7 @@ fn rollback(
     t: &mut Touched<'_>,
     roots: &roots::Roots<'_>,
     hints: &BTreeMap<u16, Hint>,
-) -> Result<(), ExecError> {
+) -> Result<Vec<PendingOld>, ExecError> {
     // Every root opened for the apply, so the rollback never halts; if it did, it is open.
     let (_, halted) = revert_loop(cx, plan, &mut w, t, roots, Mode::Rollback, hints)?;
     if let Some(h) = halted {
@@ -1154,7 +1313,57 @@ fn rollback(
     if !foreign.is_empty() {
         return Err(ExecError::Foreign { ops: foreign });
     }
-    close(w)
+    let mut deleted = false;
+    let ops = w.ops().clone();
+    let (cleanup, halted) = cleanup_pass(plan, t, roots, &ops, Mode::Recovery, &mut deleted)?;
+    if let Some(h) = halted {
+        return Err(ExecError::Refused(*h.why));
+    }
+    if cleanup.iter().any(|p| p.seen.holds_open()) && !knob_close_despite_cleanup() {
+        return Ok(cleanup);
+    }
+    close(w)?;
+    Ok(cleanup)
+}
+
+/// The cleanup pass (P2-15; module docs): every `.old` the journal names for the ops `ops`
+/// whose `RevertDone` is not `Foreign` (`OpLog::pending_old`), by op ascending, through
+/// `file::cleanup_op`; `Mode::Verify` reads only. An op whose root cannot run file ops halts
+/// the pass before anything of it is touched (no record is written by the pass at all). After
+/// a pass that looked at a `.old`, every game folder it looked in is flushed (the tenth flush
+/// site, always: senior-dev S1). `deleted`: a deletion happened (a change, never "nothing
+/// changed", senior-dev B2), also when the pass then fails.
+fn cleanup_pass(
+    plan: &Plan,
+    t: &mut Touched<'_>,
+    roots: &roots::Roots<'_>,
+    ops: &BTreeMap<u16, OpLog>,
+    mode: Mode,
+    deleted: &mut bool,
+) -> Result<(Vec<PendingOld>, Option<Halt>), ExecError> {
+    let act = mode != Mode::Verify;
+    let mut out = Vec::new();
+    let mut looked = false;
+    for (k, log) in ops {
+        let reverted = log
+            .reverted
+            .as_ref()
+            .is_some_and(|r| r.observed != Observed::Foreign);
+        if !reverted || log.pending_old().is_empty() {
+            continue;
+        }
+        let op = op_of(plan, *k)?;
+        if let Some(h) = halt(roots, *k, op) {
+            return Ok((out, Some(h)));
+        }
+        looked = true;
+        out.extend(file::cleanup_op(&mut t.dirs, *k, op, log, act, deleted)?);
+    }
+    let flush = !knob_flush_only_after_delete() || *deleted;
+    if act && looked && flush && !flush_skipped(Flush::GameBeforeClosed) {
+        t.dirs.flush()?;
+    }
+    Ok((out, None))
 }
 
 /// The ops whose `RevertDone` recorded `Foreign`, in this run or an earlier one: the
@@ -1172,7 +1381,8 @@ fn foreign_ops<W: Reverting>(w: &W) -> Vec<u16> {
 }
 
 /// `Closed` by how far the transaction got. Every change of the revert was flushed before its
-/// `RevertDone` (in [`revert_loop`]), so the game folders need no flush here.
+/// `RevertDone` (in [`revert_loop`]), and every deletion of the cleanup pass by its own flush
+/// ([`cleanup_pass`]), so the game folders need no flush here.
 fn close<W: Reverting>(w: W) -> Result<(), ExecError> {
     let how = if w.is_applied() {
         Closing::Reverted
@@ -1455,13 +1665,43 @@ fn revert_run<W: Reverting>(
         }
         Err(e) => return Err(e),
     };
-    drop(touched);
     if halted.is_some() || !foreign_ops(&w).is_empty() {
         return Ok(RevertReport {
             txn: *t,
             closed: None,
             ops,
             halted,
+            cleanup: Vec::new(),
+        });
+    }
+    // P2-15: the cleanup pass; a deletion is a change of this run (senior-dev B2), so an error
+    // after one is never a refusal.
+    let mut deleted = false;
+    let logs = w.ops().clone();
+    let cleaned = cleanup_pass(
+        plan,
+        &mut touched,
+        roots,
+        &logs,
+        Mode::Recovery,
+        &mut deleted,
+    );
+    let (cleanup, halted) = match cleaned {
+        Ok(x) => x,
+        Err(e) if early && !deleted && revert_records(w.ops()) == written => {
+            return Err(refused_early(e).into());
+        }
+        Err(e) => return Err(e),
+    };
+    drop(touched);
+    let open = cleanup.iter().any(|p| p.seen.holds_open()) && !knob_close_despite_cleanup();
+    if halted.is_some() || open {
+        return Ok(RevertReport {
+            txn: *t,
+            closed: None,
+            ops,
+            halted,
+            cleanup,
         });
     }
     let how = if w.is_applied() {
@@ -1469,9 +1709,9 @@ fn revert_run<W: Reverting>(
     } else {
         Closing::RolledBack
     };
-    // Nothing reverted in this run (every op was before): a `Closed` that did not reach the
-    // journal wrote nothing at all.
-    let first = early && ops.is_empty();
+    // Nothing reverted or deleted in this run (every op was before): a `Closed` that did not
+    // reach the journal wrote nothing at all.
+    let first = early && ops.is_empty() && !deleted;
     if let Err(e) = close(w) {
         return Err(match e {
             ExecError::Journal(e) if closed_now(j, t) => ExecError::Unconfirmed(e),
@@ -1484,6 +1724,7 @@ fn revert_run<W: Reverting>(
         closed: Some(how),
         ops,
         halted: None,
+        cleanup,
     })
 }
 
@@ -1510,7 +1751,21 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     let stores = roots::open_stores(cx, &b);
     let roots = roots::Roots::each(cx, &b, &stores)?;
     let mut touched = Touched::new(cx.sys, &roots);
-    verify_ops(&plan, &mut touched, &roots, &v.ops)
+    let mut out = verify_ops(&plan, &mut touched, &roots, &v.ops)?;
+    // P2-15 (rule 5): what the cleanup pass of a revert would find now, unless it halts first.
+    if out.halted.is_none() {
+        let (cleanup, halted) = cleanup_pass(
+            &plan,
+            &mut touched,
+            &roots,
+            &v.ops,
+            Mode::Verify,
+            &mut false,
+        )?;
+        out.cleanup = cleanup;
+        out.halted = halted;
+    }
+    Ok(out)
 }
 
 /// Forgets transaction `t` (module docs). Backups stay. Every error before its record or
@@ -1558,6 +1813,8 @@ pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
         .map_err(|e| closing_failed(&j, t, e))
 }
 
+#[cfg(test)]
+mod cleanup_crash_tests;
 #[cfg(test)]
 pub(crate) mod cleanup_tests;
 #[cfg(test)]

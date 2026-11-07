@@ -48,6 +48,7 @@ fn c12_every_row_of_the_exit_table() {
         exit_for_apply(&ApplyError::RolledBack {
             txn: txn(),
             cause: Box::new(op_error()),
+            cleanup: Vec::new(),
         }),
         Exit::RolledBack
     );

@@ -1167,3 +1167,162 @@ pub(super) fn retry_old(
         }
     }
 }
+
+/// `S0` and the sequences `Si` of a replace or an `IniValue` from its records (`None` for any
+/// other op: no other op leaves a `.old`, `records_fit`).
+fn seqs_of(op: &Op, log: &OpLog) -> Option<(Seq, Vec<Seq>)> {
+    let (h0, h1) = match op {
+        Op::ReplaceFile {
+            old,
+            content,
+            attrs,
+            ..
+        } => (
+            State {
+                sha256: old.sha256,
+                len: old.len,
+                attrs: Some(old.attrs),
+            },
+            State {
+                sha256: *content.sha256(),
+                len: content.len(),
+                attrs: Some(*attrs),
+            },
+        ),
+        Op::IniValue { old, new, .. } => (
+            State {
+                sha256: old.sha256,
+                len: old.len,
+                attrs: Some(old.attrs),
+            },
+            State {
+                sha256: new.sha256,
+                len: new.len,
+                attrs: Some(old.attrs),
+            },
+        ),
+        _ => return None,
+    };
+    let s0 = Seq {
+        kind: SeqKind::Apply,
+        ix: 0,
+        tmp: log.intent.tmp.clone()?,
+        from: h0,
+        to: h1,
+    };
+    Some((s0, sequences(log, h0, h1)))
+}
+
+/// The expected content of the `.old` of sequence `ix` of op `k` (P2-15): the start state of
+/// that sequence (`S0`: the old content; a restore: Rerun's new content; a rewrite: its recorded
+/// `from`). `None`: the op has no such sequence (the reader refused that already).
+pub(super) fn expected_old(op: &Op, log: &OpLog, ix: u16) -> Option<[u8; 32]> {
+    let (s0, si) = seqs_of(op, log)?;
+    match ix {
+        0 => Some(s0.from.sha256),
+        i => si.get(usize::from(i) - 1).map(|s| s.from.sha256),
+    }
+}
+
+/// The cleanup of op `k` (P2-15, senior-dev S2): every `.old` the journal says is left
+/// (`OpLog::pending_old`), observed on the disk. Gone is done; another content, a link, a folder
+/// or a reparse point is not Rerun's and never touched (`Foreign`, user decision E-C4); Rerun's
+/// own content is deleted (with its known hash expected, `DeleteOld` and nothing else) only if
+/// the target still holds the state the revert left (the end state of the op's newest sequence,
+/// the old content when the revert ran none), else it is kept (`Kept`: it may be the last copy
+/// on disk of a state, and the target changed since the revert). `act == false`: read only, as
+/// `verify` (`Ours` for what a revert would delete, `InUse` if a process uses it now, by
+/// `users()` on its guard). `deleted` is set by the first deletion.
+pub(super) fn cleanup_op(
+    dirs: &mut Dirs<'_>,
+    k: u16,
+    op: &Op,
+    log: &OpLog,
+    act: bool,
+    deleted: &mut bool,
+) -> Result<Vec<super::PendingOld>, ExecError> {
+    use super::{OldSeen, PendingOld};
+    let pending = log.pending_old();
+    let Some((s0, si)) = seqs_of(op, log).filter(|_| !pending.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let e = op_err(k);
+    let (root, path) = file_target(k, op)?;
+    let want = si.last().map_or(s0.from, |s| s.to);
+    let found = dirs.parent(root, path, act).map_err(&e)?;
+    let (parent, name) = match &found {
+        Some((d, n)) => (Some(*d), n.clone()),
+        None => (
+            None,
+            RelPath::from_segment(path.file_name())
+                .map_err(|_| e(SysError::new(SysErrorKind::InvalidPath, path.as_str())))?,
+        ),
+    };
+    let t = see_file(parent, &name).map_err(&e)?;
+    let reverted = want.seen_in(&t) && !t.respelled();
+    let mut out = Vec::new();
+    for (ix, tmp) in pending {
+        let Some(h) = expected_old(op, log, ix) else {
+            continue;
+        };
+        let n = tmp.old();
+        let seen = match see_file(parent, &n).map_err(&e)? {
+            FileSeen::Absent => OldSeen::Gone,
+            s if !s.holds(&h) && !super::knob_cleanup_without_hash() => OldSeen::Foreign,
+            FileSeen::Other => OldSeen::Foreign,
+            _ if !reverted => OldSeen::Kept,
+            // Read only: a process that maps it shows on the guard (`users()`).
+            _ if !act => match parent.map(|d| d.guard(&n)) {
+                Some(Ok(g)) if !g.users().map_err(&e)?.is_empty() => OldSeen::InUse,
+                _ => OldSeen::Ours,
+            },
+            _ => match parent.map(|d| d.guard(&n)) {
+                None
+                | Some(Err(SysError {
+                    kind: SysErrorKind::NotFound,
+                    ..
+                })) => OldSeen::Gone,
+                Some(Err(x))
+                    if matches!(
+                        x.kind,
+                        SysErrorKind::Linked
+                            | SysErrorKind::ReparsePoint
+                            | SysErrorKind::AccessDenied
+                    ) =>
+                {
+                    OldSeen::Foreign
+                }
+                Some(Err(x)) => return Err(e(x)),
+                Some(Ok(mut g)) => {
+                    let h = if super::knob_cleanup_without_hash() {
+                        g.sha256().map_err(&e)?
+                    } else {
+                        h
+                    };
+                    match g.delete(&h) {
+                        Ok(()) => {
+                            *deleted = true;
+                            OldSeen::Deleted
+                        }
+                        Err(x) if x.kind == SysErrorKind::Busy => OldSeen::InUse,
+                        Err(x) if x.kind == SysErrorKind::Mismatch => OldSeen::Foreign,
+                        Err(x) if x.kind == SysErrorKind::NotFound => OldSeen::Gone,
+                        Err(x) => return Err(e(x)),
+                    }
+                }
+            },
+        };
+        let rel = match path.parent() {
+            Some(p) => p.child(n.as_str()).unwrap_or_else(|_| n.clone()),
+            None => n.clone(),
+        };
+        out.push(PendingOld {
+            op: k,
+            root,
+            path: rel,
+            sha256: h,
+            seen,
+        });
+    }
+    Ok(out)
+}

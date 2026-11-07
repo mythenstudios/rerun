@@ -695,7 +695,7 @@ fn r_t3_the_rollback_uses_the_result_of_create_key() {
         let before = snap_all(&env);
         let h = plan_all(&env, &rt1_steps());
         let r = env.apply_armed(&h, |fx| fx.fail_at(call, nth, SysErrorKind::Other));
-        let Err(ApplyError::RolledBack { txn, cause }) = &r else {
+        let Err(ApplyError::RolledBack { txn, cause, .. }) = &r else {
             panic!("{what}: {r:?}");
         };
         // Review nit 4: the failure is op 5's (its call, or its `Done` record).

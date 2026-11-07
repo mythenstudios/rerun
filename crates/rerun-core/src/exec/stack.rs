@@ -3,6 +3,11 @@
 //! starts from it; the head of a transaction that matters is then loaded once, and its state
 //! and head come from that one load, whose head hash must equal the listing's.
 //!
+//! Pending cleanup (P2-15, user decision E-C1 A): a transaction whose every op is reverted but
+//! whose journal still names a `.old` of Rerun's is open too, with its own refusal
+//! (`Refusal::CleanupPending`) for an apply on its objects and for the revert of an earlier
+//! transaction on them (LIFO).
+//!
 //! Rebinds (P2-14, user decisions E-R3 and E-R6): a transaction with a `Rebind` counts as open
 //! (a revert has begun), its objects lie at the head's roots and at the bound folders until it
 //! is closed, and rebinds that do not fit the head make it `Blocked` (`Bindings::of`).
@@ -23,6 +28,8 @@ enum Class {
     Active(Vec<Object>),
     /// Open, or applied with a revert begun (condition 3) or a rebind recorded (P2-14).
     Open(Vec<Object>),
+    /// Every op reverted, but a `.old` of Rerun's is left (P2-15): open, with its own text.
+    Cleanup(Vec<Object>),
     /// Damaged with a usable head (P2-13 review S-A/S-d): only forget closes it, so it blocks
     /// every apply and every earlier revert on its objects as `Blocked` (one text for all of
     /// them); applies on other objects go on.
@@ -65,6 +72,9 @@ fn classify(j: &Journal<'_>, l: &Listed) -> Class {
         TxnState::Damaged(_) if !full.head_usable() => Class::Blocked,
         _ if damaged => Class::Damaged(objs),
         TxnState::Damaged(_) => Class::Damaged(objs),
+        TxnState::Open | TxnState::Applied if super::status::cleanup_pending(&full.ops) => {
+            Class::Cleanup(objs)
+        }
         TxnState::Open => Class::Open(objs),
         TxnState::Applied
             if full.ops.values().any(|o| !o.reverts.is_empty()) || !full.rebinds.is_empty() =>
@@ -83,7 +93,14 @@ pub(super) fn for_apply(j: &Journal<'_>, l: &Listing, mine: &[Object]) -> Result
             Class::Blocked => return Err(Refusal::Blocked { txn: t.id }),
             Class::Damaged(o) if overlap(&o, mine) => return Err(Refusal::Blocked { txn: t.id }),
             Class::Open(o) if overlap(&o, mine) => return Err(Refusal::Interrupted { txn: t.id }),
-            Class::Ignore | Class::Active(_) | Class::Open(_) | Class::Damaged(_) => {}
+            Class::Cleanup(o) if overlap(&o, mine) => {
+                return Err(Refusal::CleanupPending { txn: t.id });
+            }
+            Class::Ignore
+            | Class::Active(_)
+            | Class::Open(_)
+            | Class::Cleanup(_)
+            | Class::Damaged(_) => {}
         }
     }
     Ok(())
@@ -103,7 +120,14 @@ pub(super) fn for_revert(
             Class::Open(o) | Class::Active(o) if overlap(&o, mine) => {
                 return Err(Refusal::Later { txn: t.id });
             }
-            Class::Ignore | Class::Active(_) | Class::Open(_) | Class::Damaged(_) => {}
+            Class::Cleanup(o) if overlap(&o, mine) => {
+                return Err(Refusal::CleanupPending { txn: t.id });
+            }
+            Class::Ignore
+            | Class::Active(_)
+            | Class::Open(_)
+            | Class::Cleanup(_)
+            | Class::Damaged(_) => {}
         }
     }
     Ok(())

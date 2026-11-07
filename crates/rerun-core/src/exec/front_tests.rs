@@ -233,8 +233,9 @@ fn status_shows_rolled_back_open_empty_damaged_unreadable_and_marked() {
     assert!(!st.is_settled());
 }
 
-/// A `.old` the apply left mapped (`Done.old_left`): named as a pending cleanup, also once the
-/// transaction is reverted and closed (audit A2, "later").
+/// A `.old` the apply left mapped (`Done.old_left`): named as a pending cleanup while the
+/// transaction is applied (once it is closed `Reverted`, nothing of Rerun's is left, P2-15:
+/// `cleanup_tests.rs`).
 #[test]
 fn status_names_a_pending_cleanup() {
     let env = Env::new(finish(base()));

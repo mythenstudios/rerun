@@ -516,7 +516,9 @@ fn b2_a_restore_intent_without_its_restore_falls_back_to_the_replace() {
 
 /// B2, second scenario: the apply's `.old` stays mapped (`Done.old_left`), the recovery
 /// restores the old content and crashes before `RevertDone`: the target holds `h0` next to
-/// `X.old` holding `h0`; the next recovery finds `Before` (cleanup pending), never `Foreign`.
+/// `X.old` holding `h0`; the next recovery finds `Before` (cleanup pending), never `Foreign`,
+/// and leaves the transaction open while `X.old` is mapped; once it is not, a revert deletes it
+/// and closes (P2-15).
 #[test]
 fn b2_the_old_state_next_to_its_mapped_dot_old_is_before() {
     let (env, h, _) = setup(Kind::Replace);
@@ -578,8 +580,9 @@ fn b2_the_old_state_next_to_its_mapped_dot_old_is_before() {
         crate::journal::Observed::Before,
         "{rep:?}"
     );
-    assert!(rep.closed.is_some(), "{rep:?}");
-    // Mapped: a pending cleanup the report names (open point: not cleaned later yet).
+    // Mapped: a pending cleanup the report names, and the transaction stays open (P2-15,
+    // senior-dev S4: `Closed` only once nothing of Rerun's is left).
+    assert!(rep.closed.is_none(), "{rep:?}");
     assert!(
         rep.ops[0]
             .left
@@ -587,7 +590,23 @@ fn b2_the_old_state_next_to_its_mapped_dot_old_is_before() {
             .any(|n| n.as_str().ends_with(".tmp.old")),
         "{rep:?}"
     );
+    assert!(
+        matches!(&rep.cleanup[..], [p] if p.seen == super::OldSeen::InUse),
+        "{rep:?}"
+    );
+    // The game is closed: the next revert deletes it (its known hash) and closes.
     drop(held.lock().unwrap().take());
+    let rep = env.revert(&t).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        rep.closed,
+        Some(crate::journal::Closing::Reverted),
+        "{rep:?}"
+    );
+    assert!(
+        matches!(&rep.cleanup[..], [p] if p.seen == super::OldSeen::Deleted),
+        "{rep:?}"
+    );
+    assert!(tmp_names(&env).is_empty(), "{:?}", tmp_names(&env));
 }
 
 /// Review M1: a failure at any call (the rollback or the revert ends, `sys::seq` may have

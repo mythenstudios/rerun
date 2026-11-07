@@ -324,6 +324,7 @@ fn what_a_revert_does_now_and_its_report() {
             why: Box::new(Refusal::NeedsHelper),
         }),
         details: BTreeMap::from([(1, ini.clone())]),
+        cleanup: Vec::new(),
     };
     let t4 = txn(4);
     assert_eq!(
@@ -361,6 +362,7 @@ the revert stops at op 0: the game folder needs administrator rights (not suppor
             },
         ],
         halted: None,
+        cleanup: Vec::new(),
     };
     assert_eq!(
         shown(&report_lines(
