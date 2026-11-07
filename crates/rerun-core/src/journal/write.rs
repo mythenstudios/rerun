@@ -16,7 +16,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::names::{self, HEAD, LOCK, MAX_SEQ};
 use super::read;
-use super::record::{self, Before, Closing, Digest, Observed, Record};
+use super::record::{self, Before, Closing, Digest, Observed, Record, Semantic};
 use super::replay::Machine;
 use super::{Journal, JournalError, Limits, OpLog, TxnId, TxnState, VerifyBackups, reparse};
 use crate::path::RootPath;
@@ -429,17 +429,22 @@ impl<'l> Txn<'l> {
         Ok(())
     }
 
-    fn revert_intent(&mut self, op: u16, tmp: Option<TmpName>) -> Result<(), JournalError> {
+    fn revert_intent(
+        &mut self,
+        op: u16,
+        tmp: Option<TmpName>,
+        sem: Option<Semantic>,
+    ) -> Result<(), JournalError> {
         if self.pending.is_some() {
             // The orphan backup of an op that never got its intent stays allowed (B1).
             self.pending = None;
         }
-        // `from`/`to` (semantic reverts) come with P2-11; no op kind of P2-10 has them.
+        // `from`/`to`: a semantic revert (P2-12, `IniValue` only; `exec` checks the op kind).
         let rec = Record::RevertIntent {
             op,
             tmp,
-            from: None,
-            to: None,
+            from: sem.map(|s| s.from),
+            to: sem.map(|s| s.to),
         };
         self.write(&rec, Some(FlushSite::RevertIntent))
     }
@@ -532,13 +537,15 @@ macro_rules! common {
             }
 
             /// Before the revert of `op` changes anything; flushed. Repeatable until
-            /// [`Self::revert_done`].
+            /// [`Self::revert_done`]. `sem`: a semantic revert, the content it starts from and
+            /// the content it writes (P2-12), durable with the record before the first change.
             pub(crate) fn revert_intent(
                 &mut self,
                 op: u16,
                 tmp: Option<TmpName>,
+                sem: Option<Semantic>,
             ) -> Result<(), JournalError> {
-                self.t.revert_intent(op, tmp)
+                self.t.revert_intent(op, tmp, sem)
             }
 
             /// The revert of `op` is done (not flushed; the next flush covers it).
@@ -598,8 +605,13 @@ macro_rules! common {
             fn is_applied(&self) -> bool {
                 $ty::is_applied(self)
             }
-            fn revert_intent(&mut self, op: u16, tmp: Option<TmpName>) -> Result<(), JournalError> {
-                $ty::revert_intent(self, op, tmp)
+            fn revert_intent(
+                &mut self,
+                op: u16,
+                tmp: Option<TmpName>,
+                sem: Option<Semantic>,
+            ) -> Result<(), JournalError> {
+                $ty::revert_intent(self, op, tmp, sem)
             }
             fn revert_done(
                 &mut self,
@@ -635,8 +647,13 @@ pub(crate) trait Reverting {
     fn next_revert(&self) -> Option<u16>;
     /// `Applied` is recorded.
     fn is_applied(&self) -> bool;
-    /// `RevertIntent`; flushed.
-    fn revert_intent(&mut self, op: u16, tmp: Option<TmpName>) -> Result<(), JournalError>;
+    /// `RevertIntent` (with `sem` for a semantic revert); flushed.
+    fn revert_intent(
+        &mut self,
+        op: u16,
+        tmp: Option<TmpName>,
+        sem: Option<Semantic>,
+    ) -> Result<(), JournalError>;
     /// `RevertDone`.
     fn revert_done(
         &mut self,

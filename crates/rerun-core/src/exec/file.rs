@@ -23,6 +23,12 @@
 //!   restored from the backup with the backup's SHA-256 and length as the expected ones and the
 //!   old R/H/S. `X.old` holding `h0` next to a decided state is the pending cleanup of `Done`'s
 //!   `old_left` and deleted with `h0` expected, after a restore only once it succeeded.
+//!
+//! The table of B2 is generic over the sequences of an op ([`phases`], P2-12): `S0` from its
+//! start to its end state, and each `Si` from its recorded `from` to its `to` when its
+//! `RevertIntent` names them (a semantic rewrite, `IniValue` only, `exec::ini`), else back from
+//! `h1` to `h0`. A `.old` is compared with the start state of its own sequence, so every
+//! action on a `.old` expects a known hash (A2, S1).
 
 use std::collections::BTreeMap;
 
@@ -287,7 +293,7 @@ pub(super) fn apply_op(
 
 /// What a file looks like to a guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FileSeen {
+pub(super) enum FileSeen {
     Absent,
     File {
         sha: [u8; 32],
@@ -401,7 +407,7 @@ fn see_dir(
 
 /// An action of a revert, after its `RevertIntent`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Action {
+pub(super) enum Action {
     /// Remove the created directory by this file ID.
     RemoveDir(u128),
     /// Delete the target, expected hash.
@@ -638,9 +644,9 @@ fn trusted(op: &Op, log: &OpLog) -> Seen {
     }
 }
 
-/// How a target or a `.old` compares with the two states of a replace.
+/// How a target or a `.old` compares with the two states of a replace sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Is {
+pub(super) enum Is {
     Absent,
     /// The state the sequence starts from.
     From,
@@ -649,32 +655,123 @@ enum Is {
     Other,
 }
 
-/// The replace observation (module docs, B2).
-fn replace_seen(
+/// A state a replace sequence starts from or ends in (ADR 0017 B2): content and length, and
+/// for an exact state its R/H/S (`None`: whatever the attributes; the content a semantic revert
+/// writes keeps the current ones, P2-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct State {
+    pub(super) sha256: [u8; 32],
+    pub(super) len: u64,
+    pub(super) attrs: Option<Attrs>,
+}
+
+impl State {
+    /// `s` is exactly this state.
+    pub(super) fn seen_in(&self, s: &FileSeen) -> bool {
+        matches!(s, FileSeen::File { sha, len, attrs, .. }
+            if *sha == self.sha256 && *len == self.len && self.attrs.is_none_or(|a| a == *attrs))
+    }
+}
+
+/// One replace sequence of an op (ADR 0017 B2, P2-12): its temp name and the states it goes
+/// from and to. `S0` is the apply (`X`, `h0` → `h1`); each `RevertIntent` with a temp name is
+/// one `Si` (`Yi`): a restore (`h1` → `h0`) or, with `from`/`to` recorded, a semantic rewrite.
+#[derive(Debug, Clone)]
+pub(super) struct Seq {
+    pub(super) tmp: TmpName,
+    pub(super) from: State,
+    pub(super) to: State,
+}
+
+/// Where the deciding sequence stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stood {
+    /// At its start: phase A, or phase B once the rename back is done.
+    Start,
+    /// At its end: phase C (its `.old` deleted) or D.
+    End,
+    /// Neither: something else is there.
+    Other,
+}
+
+/// What the table of B2 decides for one target, read only.
+#[derive(Debug, Clone)]
+pub(super) struct Settled {
+    /// The deciding sequence: `None` is `S0`, `Some(i)` the `i`-th of `si`.
+    pub(super) seq: Option<usize>,
+    /// Where it stands.
+    pub(super) stood: Stood,
+    /// The actions, in order: a rename back, its temp name deleted, its `.old` and the `.old`
+    /// of every earlier sequence holding its known start state deleted (cleanup).
+    pub(super) actions: Vec<Action>,
+    /// Temp names that are not Rerun's any more.
+    pub(super) left: Vec<RelPath>,
+}
+
+impl Settled {
+    fn act_if(&mut self, on: bool, a: Action) {
+        if on {
+            self.actions.push(a);
+        }
+    }
+}
+
+/// The sequences `Si` of an op from its records: one per `RevertIntent` with a temp name, a
+/// semantic one with its recorded `from` and `to` (any R/H/S), else `to0` → `from0`.
+pub(super) fn sequences(log: &OpLog, from0: State, to0: State) -> Vec<Seq> {
+    log.reverts
+        .iter()
+        .filter_map(|r| {
+            let tmp = r.tmp.clone()?;
+            Some(match (r.from, r.to) {
+                (Some(f), Some(t)) => Seq {
+                    tmp,
+                    from: State {
+                        sha256: f.sha256,
+                        len: f.len,
+                        attrs: None,
+                    },
+                    to: State {
+                        sha256: t.sha256,
+                        len: t.len,
+                        attrs: None,
+                    },
+                },
+                _ => Seq {
+                    tmp,
+                    from: to0,
+                    to: from0,
+                },
+            })
+        })
+        .collect()
+}
+
+/// The table of B2 over `S0` and the sequences `si` (module docs): the newest `Si` whose `Yi`
+/// or `Yi.old` exists decides, else `S0`. `t` is the target as seen. `restored_once`: a restore
+/// was started or `Done` left the `.old` of `S0` (its leftover next to the old state is then
+/// cleaned up).
+pub(super) fn phases(
     parent: Option<&dyn DirWrite>,
-    name: &RelPath,
-    log: &OpLog,
-    x: &TmpName,
-    old: &crate::plan::FileState,
-    content: &ContentRef,
-    attrs: &Attrs,
-) -> SysResult<Seen> {
-    let h0 = old.sha256;
-    let h1 = *content.sha256();
-    let t = see_file(parent, name)?;
-    // S1 (review of A2-B1): a target someone renamed to another spelling is not the planned
-    // object any more (a phase-B rename back would give it the planned spelling): "other",
-    // so `Foreign`, in `S0` and in every `Si`.
-    let target = if t == FileSeen::Absent {
-        Is::Absent
-    } else if t.respelled() {
-        Is::Other
-    } else if t.is(&h0, old.len, &old.attrs) {
-        Is::From
-    } else if t.is(&h1, content.len(), attrs) {
-        Is::To
-    } else {
-        Is::Other
+    t: &FileSeen,
+    s0: &Seq,
+    si: &[Seq],
+    restored_once: bool,
+) -> SysResult<Settled> {
+    let class = |s: &Seq| {
+        if *t == FileSeen::Absent {
+            Is::Absent
+        } else if t.respelled() {
+            // S1 (review of A2-B1): a target renamed to another spelling is not the planned
+            // object any more (a phase-B rename back would give it the planned spelling).
+            Is::Other
+        } else if s.from.seen_in(t) {
+            Is::From
+        } else if s.to.seen_in(t) {
+            Is::To
+        } else {
+            Is::Other
+        }
     };
     // A `.old` by hash only: it is the renamed guard of its sequence.
     let dot_old = |n: &RelPath, from: &[u8; 32]| -> SysResult<Is> {
@@ -684,97 +781,137 @@ fn replace_seen(
             _ => Is::Other,
         })
     };
-    let x_old = dot_old(&x.old(), &h0)?;
-    let x_rel = x.to_rel();
-    let x_exists = exists(parent, &x_rel)?;
-    // The restores, newest first; the first one with a trace decides (B2).
-    let restores: Vec<&TmpName> = log.reverts.iter().filter_map(|r| r.tmp.as_ref()).collect();
     let mut decided: Option<(usize, bool, Is)> = None;
-    for (i, y) in restores.iter().enumerate().rev() {
-        let ys = exists(parent, &y.to_rel())?;
-        let yo = dot_old(&y.old(), &h1)?;
+    for (i, y) in si.iter().enumerate().rev() {
+        let ys = exists(parent, &y.tmp.to_rel())?;
+        let yo = dot_old(&y.tmp.old(), &y.from.sha256)?;
         if ys || yo != Is::Absent {
             decided = Some((i, ys, yo));
             break;
         }
     }
-    let Some((i, ys, yo)) = decided else {
-        // S0: h0 → h1 with X.
-        let del_x = |s: Seen, on: bool| s.act_if(x_exists && on, Action::DeleteTmp(x_rel.clone()));
-        let restored_once = !restores.is_empty() || log.done.is_some_and(|d| d.old_left);
-        return Ok(match (target, x_old) {
-            (Is::From, Is::Absent) => del_x(Seen::new(Observed::Before), true),
-            (Is::Absent, Is::From) => del_x(
-                Seen::new(Observed::Before).act(Action::RenameBack(x.old(), h0)),
-                true,
-            ),
-            (Is::To, Is::From) => Seen {
-                restore: true,
-                ..Seen::new(Observed::After).act(Action::DeleteOld(x.old(), h0))
-            }
-            .leave_if(x_exists, x_rel.clone()),
-            (Is::To, Is::Absent) => Seen {
-                restore: true,
-                ..Seen::new(Observed::After)
-            }
-            .leave_if(x_exists, x_rel.clone()),
-            // B2: the leftover `.old` of a completed sequence next to the old state.
-            (Is::From, Is::From) if restored_once => del_x(
-                Seen::new(Observed::Before).act(Action::DeleteOld(x.old(), h0)),
-                true,
-            ),
-            _ => {
-                let holds = t.holds(&h1);
-                del_x(Seen::new(Observed::Foreign), !holds)
-                    .leave_if(x_exists && holds, x_rel.clone())
-            }
-        });
-    };
-    // Si: h1 → h0 with Yi. Every earlier sequence completed (the ordered log of the volume
-    // put Yi after them), so X and older Yj are no temp files of Rerun any more.
-    let y = restores[i];
-    let y_rel = y.to_rel();
-    let y_old = y.old();
-    let cleanup = |mut s: Seen| -> SysResult<Seen> {
-        if x_old == Is::From {
-            s = s.act(Action::DeleteOld(x.old(), h0));
+    let (seq, s, tmp_exists, old) = match decided {
+        Some((i, ys, yo)) => (Some(i), &si[i], ys, yo),
+        None => {
+            let xs = exists(parent, &s0.tmp.to_rel())?;
+            let xo = dot_old(&s0.tmp.old(), &s0.from.sha256)?;
+            (None, s0, xs, xo)
         }
-        for older in &restores[..i] {
-            if dot_old(&older.old(), &h1)? == Is::From {
-                s = s.act(Action::DeleteOld(older.old(), h1));
+    };
+    let mut out = Settled {
+        seq,
+        stood: Stood::Other,
+        actions: Vec::new(),
+        left: Vec::new(),
+    };
+    let tmp = s.tmp.to_rel();
+    let old_name = s.tmp.old();
+    let f = s.from.sha256;
+    match (class(s), old) {
+        (Is::From, Is::Absent) => {
+            out.stood = Stood::Start;
+            out.act_if(tmp_exists, Action::DeleteTmp(tmp));
+        }
+        (Is::Absent, Is::From) => {
+            out.stood = Stood::Start;
+            out.actions.push(Action::RenameBack(old_name, f));
+            out.act_if(tmp_exists, Action::DeleteTmp(tmp));
+        }
+        (Is::To, Is::From) => {
+            out.stood = Stood::End;
+            out.actions.push(Action::DeleteOld(old_name, f));
+            if tmp_exists {
+                out.left.push(tmp);
             }
         }
-        Ok(s)
-    };
-    // In Si, "from" is h1 and "to" is h0.
-    let target_i = match target {
-        Is::From => Is::To,
-        Is::To => Is::From,
-        o => o,
-    };
-    Ok(match (target_i, yo) {
-        (Is::From, Is::Absent) => cleanup(Seen {
-            restore: true,
-            ..Seen::new(Observed::After).act_if(ys, Action::DeleteTmp(y_rel.clone()))
-        })?,
-        (Is::Absent, Is::From) => cleanup(Seen {
-            restore: true,
-            ..Seen::new(Observed::After)
-                .act(Action::RenameBack(y_old, h1))
-                .act_if(ys, Action::DeleteTmp(y_rel.clone()))
-        })?,
-        (Is::To, Is::From) => cleanup(
-            Seen::new(Observed::Before)
-                .act(Action::DeleteOld(y_old, h1))
-                .leave_if(ys, y_rel.clone()),
-        )?,
-        (Is::To, Is::Absent) => cleanup(Seen::new(Observed::Before).leave_if(ys, y_rel.clone()))?,
+        (Is::To, Is::Absent) => {
+            out.stood = Stood::End;
+            if tmp_exists {
+                out.left.push(tmp);
+            }
+        }
+        // B2: the leftover `.old` of a completed `S0` next to the old state.
+        (Is::From, Is::From) if seq.is_none() && restored_once => {
+            out.stood = Stood::Start;
+            out.actions.push(Action::DeleteOld(old_name, f));
+            out.act_if(tmp_exists, Action::DeleteTmp(tmp));
+        }
         _ => {
-            let holds = t.holds(&h0);
-            Seen::new(Observed::Foreign)
-                .act_if(ys && !holds, Action::DeleteTmp(y_rel.clone()))
-                .leave_if(ys && holds, y_rel.clone())
+            // A3: the temp name goes if and only if the target does not hold the content the
+            // sequence writes.
+            let holds = t.holds(&s.to.sha256);
+            out.act_if(tmp_exists && !holds, Action::DeleteTmp(tmp.clone()));
+            if tmp_exists && holds {
+                out.left.push(tmp);
+            }
+            return Ok(out);
         }
+    }
+    // Every earlier sequence completed (the ordered log of the volume put this one after
+    // them), so `X` and older `Yj` are no temp files of Rerun any more; their `.old` holding
+    // their known start state is cleaned up.
+    if let Some(i) = seq {
+        out.actions.extend(cleanup(parent, s0, &si[..i])?);
+    }
+    Ok(out)
+}
+
+/// The `.old` of `S0` and of every sequence in `older` that holds its known start state: the
+/// cleanup once a later sequence decides.
+pub(super) fn cleanup(
+    parent: Option<&dyn DirWrite>,
+    s0: &Seq,
+    older: &[Seq],
+) -> SysResult<Vec<Action>> {
+    let mut v = Vec::new();
+    for s in std::iter::once(s0).chain(older) {
+        if see_file(parent, &s.tmp.old())?.holds(&s.from.sha256) {
+            v.push(Action::DeleteOld(s.tmp.old(), s.from.sha256));
+        }
+    }
+    Ok(v)
+}
+
+/// The replace observation (module docs, B2): `S0` from `h0` to `h1`, every `Si` a restore.
+fn replace_seen(
+    parent: Option<&dyn DirWrite>,
+    name: &RelPath,
+    log: &OpLog,
+    x: &TmpName,
+    old: &crate::plan::FileState,
+    content: &ContentRef,
+    attrs: &Attrs,
+) -> SysResult<Seen> {
+    let h0 = State {
+        sha256: old.sha256,
+        len: old.len,
+        attrs: Some(old.attrs),
+    };
+    let h1 = State {
+        sha256: *content.sha256(),
+        len: content.len(),
+        attrs: Some(*attrs),
+    };
+    let s0 = Seq {
+        tmp: x.clone(),
+        from: h0,
+        to: h1,
+    };
+    let si = sequences(log, h0, h1);
+    let restored_once = !si.is_empty() || log.done.is_some_and(|d| d.old_left);
+    let t = see_file(parent, name)?;
+    let s = phases(parent, &t, &s0, &si, restored_once)?;
+    // `S0` at its start is the old state, at its end the new one; a restore the other way.
+    let (observed, restore) = match (s.seq, s.stood) {
+        (_, Stood::Other) => (Observed::Foreign, false),
+        (None, Stood::Start) | (Some(_), Stood::End) => (Observed::Before, false),
+        (None, Stood::End) | (Some(_), Stood::Start) => (Observed::After, true),
+    };
+    Ok(Seen {
+        observed,
+        restore,
+        actions: s.actions,
+        left: s.left,
     })
 }
 

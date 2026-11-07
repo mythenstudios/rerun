@@ -223,3 +223,11 @@ A name in legacy delete-pending state cannot be opened at all, not even attribut
 
 ### A8 · Names in tests
 The fake's fixture and fault names (`hold_open`, `mapped_image`, `delete_pending`, faults on primitive calls, crash and power loss) are fixed by the P2-3 commits that introduce them; each such commit updates "Consequences" above and `docs/09-testing.md` to the final names.
+
+## Amendment (P2-12, 2026-11-07; decided by the user after a senior-dev cross-check)
+
+### B2 over recorded start and end states
+The recovery of a replaced file (P2-8, condition B2) decides by the newest sequence with a trace, each read with the table of A3 for its direction. Until P2-12 every sequence after the apply was a restore, so its states were known from the plan (`h1` → `h0`). From P2-12 a sequence may be a **semantic rewrite** (`IniValue`, ADR 0020 amendment P2-12): the content it starts from (observed) and the content it writes are recorded in its `RevertIntent` as `from` and `to` (ADR 0019 amendment P2-12) before the first change, and the table reads that sequence with `from` and `to` in place of `h1` and `h0`.
+- `exec::file::phases` is the table, generic over the sequences of an op: `S0` (`X`, from its start to its end state) and every `Si` (`Yi`; `from` → `to` when recorded, else `h1` → `h0`). The rows of A3 are unchanged; a `.old` is compared with the start state of its own sequence, so every action on a `.old` (delete, rename back) expects a known hash, also the cleanup of the `.old` of an earlier sequence.
+- An exact state (the old and new state of an op) compares content, length and R/H/S; the states of a rewrite compare content and length only (a rewrite keeps the current R/H/S).
+- `ReplaceFile` reads exactly as before (its `RevertIntent`s never carry `from`/`to`; `records_fit` refuses them); the T3/T4 matrices are unchanged.

@@ -891,7 +891,7 @@ fn revert_loop<W: Reverting>(
         let seen = observe(plan, t, k, op, &log, mode, hints.get(&k).copied(), &none)?;
         let observed = seen.observed();
         let y = seen.restore().then(|| w.tmp());
-        w.revert_intent(k, y.clone())?;
+        w.revert_intent(k, y.clone(), None)?;
         let done = act(w, t, k, op, &seen, y)?;
         // Always, also when the act changed nothing (`Touched::flush_for`).
         t.flush_for(k, op.target())?;

@@ -10,8 +10,8 @@
 //! The record form of P2-10a (ADR 0019 amendment), fixed once for P2-10 to P2-12: an intent
 //! keeps the old state its revert needs in [`Before`] (a file or a large old value in
 //! `op-NNNN.bin`, a small old value inline); `Done.file_id` is only for what has a file ID;
-//! `RevertIntent { from, to }` names the digests of a semantic revert (P2-11), both or
-//! neither, and is never written yet.
+//! `RevertIntent { from, to }` names the digests of a semantic revert, both or neither: written
+//! since P2-12, for `IniValue` only ([`Semantic`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +58,17 @@ pub struct Digest {
     pub sha256: [u8; 32],
     /// Length in bytes.
     pub len: u64,
+}
+
+/// A semantic revert (P2-12, ADR 0019 amendment): the whole content it starts from (as observed)
+/// and the whole content it writes. Recorded as `RevertIntent { from, to }` before the first
+/// change, so the replace sequence of the revert has known start and end states (ADR 0017 B2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Semantic {
+    /// The content observed.
+    pub from: Digest,
+    /// The content written.
+    pub to: Digest,
 }
 
 /// Most bytes of an old state kept inline in an intent (ADR 0019 budgets); more go to
@@ -108,9 +119,9 @@ pub(crate) enum Record {
         op: u16,
         /// Temp name the revert uses (a restore creates `<tmp>`).
         tmp: Option<TmpName>,
-        /// A semantic revert (P2-11): the content it starts from; with `to`, or neither.
+        /// A semantic revert (P2-12): the content it starts from; with `to`, or neither.
         from: Option<Digest>,
-        /// A semantic revert (P2-11): the content it writes; with `from`, or neither.
+        /// A semantic revert (P2-12): the content it writes; with `from`, or neither.
         to: Option<Digest>,
     },
     /// The revert of op `op` is done.

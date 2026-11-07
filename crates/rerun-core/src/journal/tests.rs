@@ -113,10 +113,21 @@ pub(crate) fn j1_round_trip(app: &AppDir<'_>, src: &dyn DirWrite, old: &[u8]) ->
     w.done(1, Some(8), true).unwrap();
     w.applied(2).unwrap();
     assert_eq!(state(&j, &id), TxnState::Applied);
-    w.revert_intent(1, Some(t1.clone())).unwrap();
-    w.revert_intent(1, None).unwrap();
+    w.revert_intent(1, Some(t1.clone()), None).unwrap();
+    w.revert_intent(1, None, None).unwrap();
     w.revert_done(1, Observed::After, true).unwrap();
-    w.revert_intent(0, Some(t2.clone())).unwrap();
+    // A semantic revert (P2-12): `from` and `to` written with the record.
+    let sem = record::Semantic {
+        from: record::Digest {
+            sha256: [1; 32],
+            len: 5,
+        },
+        to: record::Digest {
+            sha256: [2; 32],
+            len: 0,
+        },
+    };
+    w.revert_intent(0, Some(t2.clone()), Some(sem)).unwrap();
     w.revert_done(0, Observed::Drifted, false).unwrap();
     w.close(Closing::Reverted).unwrap();
 
@@ -173,8 +184,8 @@ pub(crate) fn j1_round_trip(app: &AppDir<'_>, src: &dyn DirWrite, old: &[u8]) ->
             Record::RevertIntent {
                 op: 0,
                 tmp: Some(t2),
-                from: None,
-                to: None,
+                from: Some(sem.from),
+                to: Some(sem.to),
             },
             Record::RevertDone {
                 op: 0,
@@ -248,9 +259,9 @@ fn j1_rollback_and_forget_paths() {
     assert_eq!(w.next_revert(), Some(1));
     assert!(!w.is_applied());
     assert_eq!(w.ops()[&1].done, None);
-    w.revert_intent(1, None).unwrap();
+    w.revert_intent(1, None, None).unwrap();
     w.revert_done(1, Observed::Before, false).unwrap();
-    w.revert_intent(0, None).unwrap();
+    w.revert_intent(0, None, None).unwrap();
     w.revert_done(0, Observed::After, false).unwrap();
     assert_eq!(w.next_revert(), None);
     w.close(Closing::RolledBack).unwrap();
@@ -258,16 +269,16 @@ fn j1_rollback_and_forget_paths() {
     // A Foreign op: only Forgotten closes (D10).
     let mut w = apply2(&lock, &*g);
     let id = *w.id();
-    w.revert_intent(1, None).unwrap();
+    w.revert_intent(1, None, None).unwrap();
     w.revert_done(1, Observed::Foreign, false).unwrap();
-    w.revert_intent(0, None).unwrap();
+    w.revert_intent(0, None, None).unwrap();
     w.revert_done(0, Observed::After, false).unwrap();
     drop(w);
     let mut w = lock.resume(&id).unwrap();
     assert!(w.is_applied());
     assert_eq!((w.id(), w.ops().len()), (&id, 2));
     assert_eq!(w.tmp().tag(), TAG);
-    let e = w.revert_intent(0, None).unwrap_err();
+    let e = w.revert_intent(0, None, None).unwrap_err();
     assert!(matches!(e, JournalError::Order(_)), "{e}");
     w.close(Closing::Forgotten).unwrap();
     assert_eq!(state(&j, &id), TxnState::Closed(Closing::Forgotten));
@@ -286,7 +297,7 @@ fn j1_the_writer_refuses_what_the_reader_would_call_damaged() {
     assert!(order(w.done(0, Some(1), false)));
     assert!(order(w.intent(1, None, None)));
     assert!(order(w.applied(0)));
-    assert!(order(w.revert_intent(0, None)));
+    assert!(order(w.revert_intent(0, None, None)));
     let mut guard = g.guard(&r("a.bin")).unwrap();
     let b = w.backup(&mut *guard).unwrap();
     assert!(matches!(w.backup(&mut *guard), Err(JournalError::Order(_))));
@@ -1027,7 +1038,7 @@ fn j9_writer_budgets_refuse_before_writing() {
         "op 1 would need 10 records"
     );
     // What is left is always enough to roll back and close.
-    w.revert_intent(0, None).unwrap();
+    w.revert_intent(0, None, None).unwrap();
     w.revert_done(0, Observed::After, false).unwrap();
     let id = *w.id();
     w.close(Closing::RolledBack).unwrap();
@@ -1044,9 +1055,9 @@ fn j9_writer_budgets_refuse_before_writing() {
     w.intent(0, None, None).unwrap();
     w.done(0, Some(1), false).unwrap();
     w.applied(1).unwrap();
-    w.revert_intent(0, None).unwrap();
-    w.revert_intent(0, None).unwrap();
-    assert!(too_large(w.revert_intent(0, None)));
+    w.revert_intent(0, None, None).unwrap();
+    w.revert_intent(0, None, None).unwrap();
+    assert!(too_large(w.revert_intent(0, None, None)));
     let id = *w.id();
     w.close(Closing::Forgotten).unwrap();
     drop(lock);

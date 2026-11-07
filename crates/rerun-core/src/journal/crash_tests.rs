@@ -104,7 +104,7 @@ fn script(
     w.applied(2)?;
     p.flushed = 5;
     for (k, n) in [(1u16, 6), (0, 8)] {
-        w.revert_intent(k, None)?;
+        w.revert_intent(k, None, None)?;
         p.flushed = n;
         let name = r(&stub(usize::from(k)));
         g.guard(&name)?.delete(&sha(C[usize::from(k)]))?;
@@ -352,7 +352,7 @@ fn j4_a_crash_after_any_call_leaves_a_valid_prefix_that_resume_closes() {
             .unwrap_or_else(|e| panic!("{what}: {e}"));
         let g = game(&sys, r"D:\G");
         while let Some(k) = w.next_revert() {
-            w.revert_intent(k, Some(w.tmp())).unwrap();
+            w.revert_intent(k, Some(w.tmp()), None).unwrap();
             let name = r(&stub(usize::from(k)));
             let observed = match g.guard(&name) {
                 Ok(guard) => {

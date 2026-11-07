@@ -34,7 +34,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 
 pub use names::{InstanceTag, TxnId};
-pub use record::{Before, Closing, Digest, FORMAT, INLINE_MAX, Observed};
+pub use record::{Before, Closing, Digest, FORMAT, INLINE_MAX, Observed, Semantic};
 pub use write::JournalLock;
 pub(crate) use write::{BeforeArg, Reverting, TxnWriter};
 #[cfg(test)]
@@ -438,9 +438,9 @@ impl IntentRec {
 pub struct RevertRec {
     /// Temp name of a restore.
     pub tmp: Option<TmpName>,
-    /// A semantic revert's start (P2-11).
+    /// A semantic revert's start (P2-12, [`Semantic`]).
     pub from: Option<Digest>,
-    /// A semantic revert's end (P2-11).
+    /// A semantic revert's end (P2-12).
     pub to: Option<Digest>,
 }
 
