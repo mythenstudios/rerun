@@ -10,8 +10,8 @@
 //! binding that changes something, a library path from which the game folder
 //! `<store>\steamapps\common\<installdir>` (the head's install folder) is a root path, proofs
 //! only for `CreateDir` ops of that root, and no `RevertIntent` of a file op of that root before
-//! the record (user decision E-R3). Any violation: `None`, which the caller turns into
-//! `Blocked`.
+//! the record (user decision E-R3), and no rebound root on the folder of another root or inside or around
+//! one (review S1). Any violation: `None`, which the caller turns into `Blocked`.
 
 use std::collections::BTreeMap;
 
@@ -153,8 +153,23 @@ impl Bindings {
             let new = Binding::steam(head, &r.store, r.store_id, r.id, Proof::Rebound(dirs))?;
             *b.roots.get_mut(i)? = new;
             b.rebound = true;
+            if b.clashes(i) {
+                return None;
+            }
         }
         Some(b)
+    }
+
+    /// Root `i` is bound to the folder of another root of the head, or to a folder inside or
+    /// around one (P2-14 security review S1: apps sharing an install folder, `Half-Life` of the
+    /// GoldSrc apps; two ops on one file would revert each other's state).
+    pub(super) fn clashes(&self, i: usize) -> bool {
+        let Some(x) = self.roots.get(i) else {
+            return true;
+        };
+        self.roots.iter().enumerate().any(|(j, y)| {
+            j != i && (y.id == x.id || x.path.contains(&y.path) || y.path.contains(&x.path))
+        })
     }
 
     /// Root `i`.
@@ -185,6 +200,10 @@ impl Bindings {
     /// always from the head.
     pub(super) fn objects(&self, plan: &Plan) -> Result<Vec<Object>, PlanError> {
         let mut objs = Object::of(plan)?;
+        if self.rebound && super::knob_objects_from_binding_only() {
+            // K-RB4 (tests): the objects at the old identity dropped (what E-R3 forbids).
+            objs.retain(|o| !matches!(o, Object::File { .. }));
+        }
         if self.rebound && !super::knob_objects_from_head() {
             let roots: Vec<FileRoot> = self
                 .roots

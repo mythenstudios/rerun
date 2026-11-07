@@ -297,10 +297,11 @@ pub(crate) fn rb_t1_check() -> Vec<String> {
     if snap_app(&env.sys) != app_before || env.records(&t) != n {
         f.push("RB-T1 rebind_check wrote something".to_owned());
     }
-    if p.from.path != rp(STEAM_GAME) || p.from.store != rp(STEAM_LIB) || p.path != rp(GAME_E) {
+    if p.to.from.path != rp(STEAM_GAME) || p.to.from.store != rp(STEAM_LIB) || p.path != rp(GAME_E)
+    {
         f.push(format!("RB-T1 old and new folder: {p:?}"));
     }
-    if p.to.store != rp(LIB_E) || p.to.id == p.from.id {
+    if p.to.store != rp(LIB_E) || p.to.id == p.to.from.id {
         f.push(format!("RB-T1 binding: {:?}", p.to));
     }
     let not_found = |r: &Refusal| matches!(r, Refusal::Root(e) if matches!(&**e, RootError::Sys(s) if s.kind == SysErrorKind::NotFound));
@@ -463,6 +464,11 @@ fn k_rb1_rewriting_the_head_breaks_rb_t3() {
     assert!(
         f.iter().any(|x| x.starts_with("RB-T3 registry")),
         "K-RB1 not caught: {f:#?}"
+    );
+    // The revert itself closes: only the registry location is wrong (review nit).
+    assert!(
+        !f.iter().any(|x| x.starts_with("RB-T3 revert_rebound")),
+        "{f:#?}"
     );
 }
 
@@ -637,6 +643,31 @@ fn rb_t5_every_refusal_writes_nothing() {
             LIB_E,
             |r| matches!(r, Err(Refusal::MainExe(_))),
         ),
+        (
+            "a library in a forbidden folder",
+            |rb| move_tree(&rb.env.sys, STEAM_LIB, FORBIDDEN_LIB),
+            FORBIDDEN_LIB,
+            |r| {
+                refused(r, |x| {
+                    matches!(x, RebindRefusal::Candidate(e)
+                    if matches!(&**e, Refusal::Root(e) if matches!(**e, RootError::Forbidden { .. })))
+                })
+            },
+        ),
+        (
+            "an unreadable manifest there",
+            |rb| {
+                move_tree(&rb.env.sys, STEAM_LIB, LIB_E);
+                garbage_manifest(rb);
+            },
+            LIB_E,
+            |r| {
+                refused(r, |x| {
+                    matches!(x, RebindRefusal::Candidate(e)
+                    if matches!(**e, Refusal::SteamManifest { .. }))
+                })
+            },
+        ),
     ];
     for (what, change, lib, want) in cases {
         let rb = applied(false);
@@ -648,29 +679,6 @@ fn rb_t5_every_refusal_writes_nothing() {
         assert!(
             snap_app(&rb.env.sys) == before,
             "{what}: rebind_check wrote"
-        );
-        // The same refusal from the rebind itself, before its record.
-        let to = RebindTo {
-            root: 0,
-            store: rp(lib),
-            store_id: crate::policy::root::RootId {
-                volume_serial: 1,
-                file_id: 1,
-            },
-            id: crate::policy::root::RootId {
-                volume_serial: 1,
-                file_id: 2,
-            },
-            dirs: Vec::new(),
-        };
-        let r = rb.env.revert_rebound(&rb.t, &to);
-        assert!(
-            matches!(&r, Err(ExecError::Refused(_))),
-            "{what}: revert_rebound {r:?}"
-        );
-        assert!(
-            snap_app(&rb.env.sys) == before,
-            "{what}: revert_rebound wrote"
         );
     }
 }
@@ -1133,7 +1141,10 @@ fn rb_t9_a_crash_after_the_record_resumes_without_and_with_the_rebind() {
     env.sys.fake_fs().restart();
     move_tree(&env.sys, LIB_E, r"F:\SteamLibrary");
     let p2 = env.rebind_check(&t, r"F:\SteamLibrary").unwrap();
-    assert_eq!(p2.from.id, p.to.id, "the chain starts at the last binding");
+    assert_eq!(
+        p2.to.from.id, p.to.id,
+        "the chain starts at the last binding"
+    );
     let r = env.revert_rebound(&t, &p2.to);
     assert_eq!(closed(&r), Some(Closing::Reverted), "{r:?}");
     assert_eq!(
@@ -1175,4 +1186,507 @@ fn rb_t9_a_change_after_the_record_is_foreign_and_the_binding_stays() {
     let r = env.revert_rebound(&t, &p.to);
     assert!(r.is_ok_and(|r| r.closed.is_none()));
     assert_eq!(env.records(&t), n);
+}
+
+// ---------- P2-14a review follow-ups ----------
+
+/// A library in a forbidden folder (below `Windows`).
+const FORBIDDEN_LIB: &str = r"C:\Windows\SteamLibrary";
+
+/// The manifest of app 220 in [`LIB_E`] made unreadable.
+fn garbage_manifest(rb: &Rb) {
+    let m = format!(r"{LIB_E}\steamapps\appmanifest_220.acf");
+    rb.env.sys.fake_fs().remove_abs(Path::new(&m)).unwrap();
+    super::tests::sys_put(&rb.env.sys, &m, b"\"AppState\"\n{\n");
+}
+
+/// Puts `data` at `abs`, creating its folder.
+fn put(sys: &FakeSystem, abs: &str, data: &[u8]) {
+    let p = Path::new(abs);
+    sys.fake_fs().mkdir_all(p.parent().unwrap()).unwrap();
+    super::tests::sys_put(sys, abs, data);
+}
+
+/// A plan over two roots: the Steam root of [`rb_steps`] and `g2` with the file ops of `s`
+/// (root 1, before the registry ops).
+fn two_roots(
+    env: &Env,
+    g2: &crate::policy::root::GameDir<'_>,
+    app2: Option<u32>,
+    s: &crate::prim::FileInstallSpec,
+) -> PlanHash {
+    let a = app(&env.sys);
+    let load = |h| plan::decode(plan::load(&a, &h).unwrap().bytes()).unwrap();
+    let mut p: plan::Plan = load(rb_plan(env, &rb_steps(false)));
+    let other: plan::Plan = load(env.plan_for(g2, app2, s));
+    let at = p
+        .ops
+        .iter()
+        .position(|o| !matches!(o.target(), plan::Target::File { .. }))
+        .unwrap();
+    let ops: Vec<plan::Op> = other
+        .ops
+        .into_iter()
+        .map(|mut o| {
+            if let plan::Op::CreateDir { root, .. }
+            | plan::Op::CreateFile { root, .. }
+            | plan::Op::ReplaceFile { root, .. }
+            | plan::Op::IniValue { root, .. } = &mut o
+            {
+                *root = plan::RootIx(1);
+            }
+            o
+        })
+        .collect();
+    p.ops.splice(at..at, ops);
+    p.roots.push(other.roots[0].clone());
+    store(&a, &p.encode().unwrap()).unwrap()
+}
+
+/// A second root: the manual folder `D:\Games\H` with its main executable.
+const H: &str = r"D:\Games\H";
+
+/// A system with app 221 installed in `G` of [`LIB_E`] (as the GoldSrc apps share `Half-Life`).
+fn with_221_in_e(env: &Env) {
+    put(
+        &env.sys,
+        &format!(r"{LIB_E}\steamapps\appmanifest_221.acf"),
+        acf(221, 4).as_bytes(),
+    );
+    put(&env.sys, &format!(r"{GAME_E}\game.exe"), b"MZ");
+    env.sys.sync_all();
+}
+
+/// A transaction over app 220 in `D:` and app 221 in `E:`, both in an install folder `G`.
+fn shared_txn() -> (Env, TxnId) {
+    let env = Env::new(rb_sys());
+    with_221_in_e(&env);
+    let fr = fr(&env.sys);
+    let st = StoreDir::open(&env.sys, &fr, Path::new(LIB_E)).unwrap();
+    let g2 = st.game(&fr, "G").unwrap();
+    let h = two_roots(
+        &env,
+        &g2,
+        Some(221),
+        &spec(vec![entry("new.dll", "other.dll", super::tests::N)]),
+    );
+    drop(g2);
+    drop(st);
+    let t = env.applied(&h);
+    (env, t)
+}
+
+/// Security review S1, natural: app 220 moved into the library of app 221, whose install folder
+/// has the same name: the candidate is the folder of the other root. Refused before any record.
+#[test]
+fn rb_t5_a_candidate_that_is_another_root_of_the_transaction_is_refused() {
+    let (env, t) = shared_txn();
+    env.sys
+        .fake_fs()
+        .remove_abs(Path::new(&manifest(220)))
+        .unwrap();
+    put(
+        &env.sys,
+        &format!(r"{LIB_E}\steamapps\appmanifest_220.acf"),
+        acf(220, 4).as_bytes(),
+    );
+    env.sys.sync_all();
+    let n = env.records(&t);
+    let r = env.rebind_check(&t, LIB_E);
+    assert!(
+        refused(&r, |x| matches!(x, RebindRefusal::SharedFolder)),
+        "{r:?}"
+    );
+    assert_eq!(env.records(&t), n);
+}
+
+/// Review S3: a rebind checked on a clean state, then the state changes before the rebind under
+/// the lock: the exact refusal, and no record (the real TOCTOU case).
+#[test]
+fn rb_t5_refusals_under_the_lock_after_a_valid_preview() {
+    type LockCase = (&'static str, fn(&Rb), fn(&Refusal) -> bool);
+    let cases: Vec<LockCase> = vec![
+        (
+            "not writable",
+            |rb| {
+                rb.env
+                    .sys
+                    .fake_fs()
+                    .set_user_writable(Path::new(GAME_E), false)
+                    .unwrap();
+            },
+            |r| matches!(r, Refusal::Rebind(RebindRefusal::NotWritable)),
+        ),
+        (
+            "a file changed",
+            |rb| {
+                let p = format!(r"{GAME_E}\new.dll");
+                rb.env.sys.fake_fs().remove_abs(Path::new(&p)).unwrap();
+                super::tests::sys_put(&rb.env.sys, &p, b"changed by someone");
+            },
+            |r| matches!(r, Refusal::Rebind(RebindRefusal::Foreign { .. })),
+        ),
+        (
+            "the main executable removed",
+            |rb| {
+                rb.env
+                    .sys
+                    .fake_fs()
+                    .remove_abs(Path::new(&format!(r"{GAME_E}\game.exe")))
+                    .unwrap();
+            },
+            |r| matches!(r, Refusal::MainExe(_)),
+        ),
+        (
+            "the game started there",
+            |rb| {
+                std::mem::forget(
+                    rb.env
+                        .sys
+                        .fake_fs()
+                        .hold_open_as(
+                            4242,
+                            Path::new(&format!(r"{GAME_E}\game.exe")),
+                            crate::sys::contract::Access::READ,
+                            crate::sys::contract::Share::RWD,
+                        )
+                        .unwrap(),
+                );
+            },
+            |r| matches!(r, Refusal::Busy(_)),
+        ),
+        ("the manifest there unreadable", garbage_manifest, |r| {
+            matches!(r, Refusal::Rebind(RebindRefusal::Candidate(e))
+                if matches!(**e, Refusal::SteamManifest { .. }))
+        }),
+        (
+            "the old library back, access denied",
+            |rb| {
+                let fx = rb.env.sys.fake_fs();
+                fx.mkdir_all(Path::new(STEAM_LIB)).unwrap();
+                fx.set_restricted(Path::new(STEAM_LIB), true).unwrap();
+            },
+            |r| matches!(r, Refusal::Rebind(RebindRefusal::Undecided(_))),
+        ),
+        ("the journal full", fill_journal, |r| {
+            matches!(r, Refusal::Rebind(RebindRefusal::NoRoom))
+        }),
+    ];
+    for (what, change, want) in cases {
+        let rb = applied(false);
+        move_tree(&rb.env.sys, STEAM_LIB, LIB_E);
+        let p = rb
+            .env
+            .rebind_check(&rb.t, LIB_E)
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        change(&rb);
+        rb.env.sys.sync_all();
+        let n = rb.env.records(&rb.t);
+        let r = rb.env.revert_rebound(&rb.t, &p.to);
+        assert!(
+            matches!(&r, Err(ExecError::Refused(x)) if want(x)),
+            "{what}: {r:?}"
+        );
+        assert_eq!(rb.env.records(&rb.t), n, "{what}: a record");
+        // `rebind_check` sees the same now.
+        let r = rb.env.rebind_check(&rb.t, LIB_E);
+        assert!(matches!(&r, Err(x) if want(x)), "{what}: check {r:?}");
+    }
+}
+
+/// Fills the record budget of the transaction with repeated revert intents of its newest op (a
+/// registry op): one record short of the room a rebind needs.
+fn fill_journal(rb: &Rb) {
+    let a = app(&rb.env.sys);
+    let j = Journal::new(&a, InstanceTag::fixed(0x78));
+    let lock = j.lock().unwrap();
+    let mut w = lock.resume(&rb.t).unwrap();
+    let ops = w.ops().len();
+    let k = w.next_revert().unwrap();
+    let have = rb.env.records(&rb.t);
+    // A rebind needs `records + 1 + 2 * open + 1 <= 1024`.
+    for _ in have..(1024 - 2 * ops) {
+        w.revert_intent(k, None, None).unwrap();
+    }
+}
+
+/// Review nit: a halt the revert would meet at another root is its own refusal.
+#[test]
+fn rb_t5_a_halt_at_another_root_refuses_the_rebind() {
+    let env = Env::new(rb_sys());
+    put(&env.sys, &format!(r"{H}\game.exe"), b"MZ");
+    let fr = fr(&env.sys);
+    let g2 = crate::policy::root::GameDir::open_manual(&env.sys, &fr, Path::new(H)).unwrap();
+    let h = two_roots(
+        &env,
+        &g2,
+        None,
+        &spec(vec![entry("new.dll", "new.dll", super::tests::N)]),
+    );
+    drop(g2);
+    let t = env.applied(&h);
+    move_tree(&env.sys, STEAM_LIB, LIB_E);
+    let p = env.rebind_check(&t, LIB_E).unwrap();
+    env.sys
+        .fake_fs()
+        .set_user_writable(Path::new(H), false)
+        .unwrap();
+    let n = env.records(&t);
+    let r = env.revert_rebound(&t, &p.to);
+    assert!(
+        matches!(
+            &r,
+            Err(ExecError::Refused(Refusal::Rebind(RebindRefusal::Halts(_))))
+        ),
+        "{r:?}"
+    );
+    assert_eq!(env.records(&t), n);
+}
+
+#[test]
+fn rb_t8_more_rebinds_that_do_not_fit_the_head_are_blocked() {
+    // Security review S1, planted: root 0 bound to the folder of root 1.
+    let (env, t) = shared_txn();
+    let roots = fr(&env.sys);
+    let st = StoreDir::open(&env.sys, &roots, Path::new(LIB_E)).unwrap();
+    let mut p = planted(&env, &t);
+    p.store_id = st.id();
+    p.id = head_of(&env, &t).roots[1].id;
+    drop(st);
+    plant(&env, &t, &p);
+    let f = blocked_everywhere(&env, &t);
+    assert!(f.is_empty(), "another root's folder: {f:#?}");
+
+    // A directory proof for a `CreateDir` of another root.
+    let env = Env::new(rb_sys());
+    put(&env.sys, &format!(r"{H}\game.exe"), b"MZ");
+    let roots2 = fr(&env.sys);
+    let g2 = crate::policy::root::GameDir::open_manual(&env.sys, &roots2, Path::new(H)).unwrap();
+    let h = two_roots(
+        &env,
+        &g2,
+        None,
+        &spec(vec![entry(r"mods\x.dll", r"mods2\x.dll", super::tests::X)]),
+    );
+    drop(g2);
+    let t = env.applied(&h);
+    let head = head_of(&env, &t);
+    let other_dir = head
+        .ops
+        .iter()
+        .position(|o| matches!(o, plan::Op::CreateDir { root, .. } if root.0 == 1))
+        .unwrap();
+    let mut p = planted(&env, &t);
+    p.dirs = vec![DirProof {
+        op: u16::try_from(other_dir).unwrap(),
+        file_id: 9,
+    }];
+    plant(&env, &t, &p);
+    let f = blocked_everywhere(&env, &t);
+    assert!(f.is_empty(), "a proof for another root: {f:#?}");
+
+    // A library path from which no game path can be formed.
+    let Rb { env, t, .. } = applied(false);
+    let long = format!(
+        r"E:\{}\{}\{}\{}",
+        "a".repeat(60),
+        "b".repeat(60),
+        "c".repeat(60),
+        "d".repeat(50)
+    );
+    let mut p = planted(&env, &t);
+    p.store = rp(&long);
+    plant(&env, &t, &p);
+    let f = blocked_everywhere(&env, &t);
+    assert!(f.is_empty(), "no game path: {f:#?}");
+}
+
+/// Review S4: a library renamed on its volume keeps the game folder's file ID; the rebind
+/// records `old == id`, the bindings accept it, and the transaction closes.
+#[test]
+fn rb_t1_a_library_renamed_on_its_volume_is_rebound() {
+    const LIB: &str = r"D:\Games\SteamLibrary";
+    let Rb { env, t, keys: k0 } = applied(false);
+    env.sys.rename_abs(STEAM_LIB, LIB).unwrap();
+    env.sys.sync_all();
+    let p = env.rebind_check(&t, LIB).unwrap();
+    assert_eq!(p.to.id, p.to.from.id, "the same folder");
+    assert_eq!(p.to.dirs.len(), 2);
+    let r = env.revert_rebound(&t, &p.to).unwrap();
+    assert_eq!(r.closed, Some(Closing::Reverted), "{r:?}");
+    let a = app(&env.sys);
+    let v = Journal::new(&a, InstanceTag::fixed(9))
+        .load(&t, crate::journal::VerifyBackups::Length)
+        .unwrap();
+    assert_eq!(v.rebinds[0].old, v.rebinds[0].id);
+    assert_eq!(
+        content_diff(&env.sys, REF, &format!(r"{LIB}\steamapps\common\G")),
+        Vec::<String>::new()
+    );
+    assert!(keys(&env.sys) == k0);
+}
+
+/// Review S4: E-R1 at the library level: the library recreated at the same path (another
+/// identity); the revert refused, the rebind to the same path closes.
+#[test]
+fn rb_t2_a_library_recreated_at_its_path_is_rebound() {
+    let Rb { env, t, keys: k0 } = applied(false);
+    env.sys.rename_abs(STEAM_LIB, r"D:\OldLib").unwrap();
+    copy_tree(&env.sys, r"D:\OldLib", STEAM_LIB);
+    remove_tree(&env.sys, r"D:\OldLib");
+    env.sys.sync_all();
+    let r = env.revert(&t);
+    assert!(
+        matches!(&r, Err(ExecError::Refused(Refusal::Root(e)))
+            if matches!(&**e, RootError::IdentityMismatch { path, .. } if *path == rp(STEAM_LIB))),
+        "{r:?}"
+    );
+    let p = env.rebind_check(&t, STEAM_LIB).unwrap();
+    assert!(
+        matches!(&*p.why, Refusal::Root(e)
+            if matches!(&**e, RootError::IdentityMismatch { path, .. } if *path == rp(STEAM_LIB))),
+        "{:?}",
+        p.why
+    );
+    assert_ne!(p.to.store_id, p.to.from.store_id);
+    let r = env.revert_rebound(&t, &p.to).unwrap();
+    assert_eq!(r.closed, Some(Closing::Reverted), "{r:?}");
+    assert_eq!(
+        content_diff(&env.sys, REF, STEAM_GAME),
+        Vec::<String>::new()
+    );
+    assert!(keys(&env.sys) == k0);
+}
+
+/// Review S2 as a check: after the record, a created folder is proven by the recorded file ID
+/// only. A folder swapped for another one (a new ID) after the record is `Foreign` and stays;
+/// a folder missing at the preview (no proof) that appears after the record is `Foreign`.
+pub(crate) fn rb_t9_dir_check() -> Vec<String> {
+    let mut f = Vec::new();
+    let crash_after_record = |rb: &Rb, p: &RebindPreview| {
+        let r = rb.env.revert_rebound_armed(&rb.t, &p.to, |fx| {
+            fx.fault(Prim::FlushDir, 1, crate::sys::fake::Fault::CrashAfter);
+        });
+        assert!(r.is_err(), "{r:?}");
+        rb.env.sys.fake_fs().restart();
+    };
+    // Swapped.
+    let rb = applied(false);
+    move_tree(&rb.env.sys, STEAM_LIB, LIB_E);
+    let p = rb.env.rebind_check(&rb.t, LIB_E).unwrap();
+    crash_after_record(&rb, &p);
+    let a = format!(r"{GAME_E}\mods\a");
+    move_tree(&rb.env.sys, &a, r"E:\Tmp\a");
+    move_tree(&rb.env.sys, r"E:\Tmp\a", &a);
+    let dirs = created_dirs(&rb.env, &rb.t);
+    match rb.env.revert(&rb.t) {
+        Ok(r)
+            if r.closed.is_none()
+                && r.ops
+                    .iter()
+                    .any(|o| o.op == dirs[1] && o.observed == Observed::Foreign) => {}
+        r => f.push(format!("RB-T9 swapped: {r:?}")),
+    }
+    if super::tests::try_meta_abs(&rb.env.sys, &a).is_none() {
+        f.push("RB-T9 swapped: the folder removed".to_owned());
+    }
+    // No proof.
+    let rb = applied(false);
+    move_tree(&rb.env.sys, STEAM_LIB, LIB_E);
+    remove_tree(&rb.env.sys, &format!(r"{GAME_E}\mods"));
+    rb.env.sys.sync_all();
+    let p = rb.env.rebind_check(&rb.t, LIB_E).unwrap();
+    if !p.to.dirs.is_empty() {
+        f.push(format!("RB-T9 no proof: {:?}", p.to.dirs));
+    }
+    crash_after_record(&rb, &p);
+    let mods = format!(r"{GAME_E}\mods");
+    rb.env.sys.fake_fs().mkdir_all(Path::new(&mods)).unwrap();
+    rb.env.sys.sync_all();
+    match rb.env.revert(&rb.t) {
+        Ok(r)
+            if r.closed.is_none()
+                && r.ops
+                    .iter()
+                    .any(|o| o.op == dirs[0] && o.observed == Observed::Foreign) => {}
+        r => f.push(format!("RB-T9 no proof: {r:?}")),
+    }
+    if super::tests::try_meta_abs(&rb.env.sys, &mods).is_none() {
+        f.push("RB-T9 no proof: the folder removed".to_owned());
+    }
+    f
+}
+
+#[test]
+fn rb_t9_a_created_folder_is_proven_by_the_recorded_id_only() {
+    let f = rb_t9_dir_check();
+    assert!(f.is_empty(), "{f:#?}");
+}
+
+/// K-RB2b (review S2): after the record, the folder found counts as before it: both cases of
+/// the check remove a folder that is not provably Rerun's.
+#[test]
+fn k_rb2b_a_folder_found_after_the_record_breaks_rb_t9() {
+    super::knob::dir_found_after_record(true);
+    let f = rb_t9_dir_check();
+    super::knob::dir_found_after_record(false);
+    for what in ["RB-T9 swapped", "RB-T9 no proof"] {
+        assert!(
+            f.iter().any(|x| x.starts_with(what)),
+            "K-RB2b not caught ({what}): {f:#?}"
+        );
+    }
+}
+
+/// E-R3: the objects of a rebound transaction still count at the old identity. The library
+/// copied (not moved) to `E:`, the app's manifest gone from `D:`: rebound and left open, an
+/// apply on its objects in the old folder (still there) is refused.
+pub(crate) fn rb_t7b_check() -> Vec<String> {
+    let mut f = Vec::new();
+    let Rb { env, t, .. } = applied(false);
+    copy_tree(&env.sys, STEAM_LIB, LIB_E);
+    env.sys
+        .fake_fs()
+        .remove_abs(Path::new(&manifest(220)))
+        .unwrap();
+    env.sys.sync_all();
+    let p = env.rebind_check(&t, LIB_E).unwrap();
+    let r = env.revert_rebound_armed(&t, &p.to, |fx| {
+        fx.fault(Prim::FlushDir, 1, crate::sys::fake::Fault::CrashAfter);
+    });
+    assert!(r.is_err(), "{r:?}");
+    env.sys.fake_fs().restart();
+    super::tests::sys_put(&env.sys, &super::tests::pkg("y.dll"), b"y of the package");
+    let fr = fr(&env.sys);
+    let old =
+        crate::policy::root::GameDir::open_manual(&env.sys, &fr, Path::new(STEAM_GAME)).unwrap();
+    let h = env.plan_for(
+        &old,
+        None,
+        &spec(vec![entry("y.dll", r"mods\a\y.dll", b"y of the package")]),
+    );
+    drop(old);
+    match env.apply(&h) {
+        Err(ApplyError::Refused(Refusal::Interrupted { txn })) if txn == t => {}
+        r => f.push(format!("RB-T7b apply in the old folder: {r:?}")),
+    }
+    f
+}
+
+#[test]
+fn rb_t7b_objects_still_count_at_the_old_identity() {
+    let f = rb_t7b_check();
+    assert!(f.is_empty(), "{f:#?}");
+}
+
+/// K-RB4: the objects at the old identity dropped: RB-T7b's apply goes through.
+#[test]
+fn k_rb4_objects_from_the_binding_only_break_rb_t7b() {
+    super::knob::objects_from_binding_only(true);
+    let f = rb_t7b_check();
+    super::knob::objects_from_binding_only(false);
+    assert!(
+        f.iter().any(|x| x.starts_with("RB-T7b apply")),
+        "K-RB4 not caught: {f:#?}"
+    );
 }

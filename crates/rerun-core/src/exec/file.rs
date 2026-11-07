@@ -593,6 +593,7 @@ pub(super) fn observe(
             let (proven, find) = match dirs.proof(root) {
                 _ if super::knob_dir_proof_from_done() => (done, mode != Mode::Rollback),
                 Proof::Done => (done, mode != Mode::Rollback),
+                Proof::Rebound(_) if super::knob_dir_found_after_record() => (None, true),
                 Proof::Rebound(ids) => (ids.get(&k).copied(), false),
                 Proof::Found => (None, true),
             };

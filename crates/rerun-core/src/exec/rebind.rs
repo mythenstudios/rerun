@@ -34,7 +34,9 @@ use super::{
     load_resumable, op_ix, refused_early, revert_listed, revert_plan, revert_run, stack,
     standard_user, verify_seen,
 };
-use crate::journal::{DirProof, Journal, JournalError, Listing, OpLog, RebindArgs, TxnId};
+use crate::journal::{
+    DirProof, Journal, JournalError, Listing, OpLog, RebindArgs, RebindRec, TxnId,
+};
 use crate::path::RootPath;
 use crate::plan::{Op, Plan};
 use crate::policy::root::{RootError, RootId, StoreDir};
@@ -52,6 +54,8 @@ pub struct RebindTo {
     pub id: RootId,
     /// The created folders by the file ID found there, by op ascending (E-R2 a).
     pub dirs: Vec<DirProof>,
+    /// The binding before, as the preview showed it (compared under the lock, review N2).
+    pub from: RebindFrom,
 }
 
 /// The binding before a rebind (the head's, or the last rebind's).
@@ -74,8 +78,6 @@ pub struct RebindPreview {
     pub to: RebindTo,
     /// The game folder it names.
     pub path: RootPath,
-    /// The binding before.
-    pub from: RebindFrom,
     /// Why the binding before does not open.
     pub why: Box<Refusal>,
     /// What each op observes with the new binding (newest first, as `verify`); a created folder
@@ -115,6 +117,16 @@ pub enum RebindRefusal {
     /// The library or the folder in it cannot be opened.
     #[error("the folder in that library cannot be opened: {0}")]
     Candidate(Box<Refusal>),
+    /// The folder there is the folder of another root of the transaction, or lies inside or
+    /// around one (apps sharing an install folder; P2-14 security review S1).
+    #[error("the folder in that library is another folder of the transaction already")]
+    SharedFolder,
+    /// The revert would halt at another folder of the transaction (it is gone or cannot be
+    /// written): it must be available before the rebind.
+    #[error(
+        "the revert would stop at another folder of the transaction ({0}); make it available first"
+    )]
+    Halts(Box<Refusal>),
     /// The current user cannot write the folder there (phase 3: the elevated helper), or its
     /// volume lacks POSIX semantics.
     #[error("the folder in that library cannot be written by Rerun")]
@@ -134,6 +146,9 @@ pub enum RebindRefusal {
     /// The folder changed since the preview.
     #[error("the folder changed since the preview; check it again")]
     Changed,
+    /// The rebind record would be larger than a record may be.
+    #[error("the rebind record would be too large for the journal")]
+    TooLarge,
     /// The journal of the transaction has no room for the rebind and the rest of the revert.
     #[error("the journal of the transaction has no room for a rebind; only forget closes it")]
     NoRoom,
@@ -161,6 +176,7 @@ impl Target {
         self.root == to.root
             && self.new.store() == Some((&to.store, to.store_id))
             && self.new.id == to.id
+            && self.from == to.from
     }
 }
 
@@ -213,6 +229,9 @@ fn target(
         return Err(RebindRefusal::NotNeeded.into());
     }
     let overlay = b.with(i, new.clone()).ok_or(RebindRefusal::NotNeeded)?;
+    if overlay.clashes(i) {
+        return Err(RebindRefusal::SharedFolder.into());
+    }
     Ok(Target {
         root,
         overlay,
@@ -273,7 +292,7 @@ fn checked<'g>(
         verify_seen(plan, &mut touched, &roots, ops).map_err(refused_early)?
     };
     if let Some(h) = verified.halted.take() {
-        return Err(RebindRefusal::Undecided(h.why).into());
+        return Err(RebindRefusal::Halts(h.why).into());
     }
     let mut dirs = Vec::new();
     for k in file_ops(plan, tg.root) {
@@ -329,19 +348,20 @@ pub fn rebind_check(cx: &ExecCtx<'_>, t: &TxnId, lib: &RootPath) -> Result<Rebin
             store_id,
             id: tg.new.id,
             dirs: c.dirs,
+            from: tg.from,
         },
         path: tg.new.path.clone(),
-        from: tg.from,
         why: Box::new(tg.why),
         verified: c.verified,
     })
 }
 
-/// Whether `t` holds more than `n` rebinds on disk now; a journal that cannot be read counts as
-/// "maybe" (true): never claim "nothing changed" then.
-fn rebound_now(j: &Journal<'_>, t: &TxnId, n: usize) -> bool {
+/// Whether `t` holds more than `n` rebinds on disk now; `None` if the journal cannot be read
+/// (never claim "nothing changed" then).
+fn rebound_now(j: &Journal<'_>, t: &TxnId, n: usize) -> Option<bool> {
     j.load(t, crate::journal::VerifyBackups::Length)
-        .map_or(true, |v| v.rebinds.len() > n)
+        .ok()
+        .map(|v| v.rebinds.len() > n)
 }
 
 /// Binds transaction `t` as the user confirmed (`to`, from [`rebind_check`]) and reverts it in
@@ -365,6 +385,12 @@ pub fn revert_rebound(
         x.store() == Some((&to.store, to.store_id)) && x.id == to.id && x.proof != Proof::Done
     });
     if bound {
+        // Exactly the binding shown: the same folder proofs and the same binding before it
+        // (review N1, N2); anything else is another decision than the one confirmed.
+        let last = w.rebinds().iter().rev().find(|r| r.root == to.root);
+        if last.is_none_or(|r| r.dirs != to.dirs || r.old != to.from.id) {
+            return Err(Refusal::from(RebindRefusal::Changed).into());
+        }
         drop(w);
         drop(lock);
         return super::revert(cx, t);
@@ -390,26 +416,50 @@ pub fn revert_rebound(
         id: to.id,
         dirs: &c.dirs,
     };
+    // The record as the next run will read it must fit the head (`Bindings::of`), checked before
+    // it is written (review nit): a rebind exec would call `Blocked` is never written.
+    let mut next = w.rebinds().to_vec();
+    next.push(RebindRec {
+        root: to.root,
+        old,
+        store: to.store.clone(),
+        store_id: to.store_id,
+        id: to.id,
+        dirs: c.dirs.clone(),
+        reverting: ops
+            .iter()
+            .find(|(_, o)| !o.reverts.is_empty())
+            .map(|(k, _)| *k),
+    });
+    let Some(rebound) = Bindings::of(&plan, &next) else {
+        return Err(
+            Refusal::from(JournalError::Order("a rebind that does not fit its head")).into(),
+        );
+    };
     if let Err(e) = w.rebind(&args) {
         // On disk although the call failed (its flush, or a failure after its rename): the
         // transaction is bound now. Decided by the writer, else by reading the journal again
-        // under the lock (as a closing entry, security review N1); unreadable counts as bound.
-        if w.rebinds().len() > n || rebound_now(&j, t, n) {
+        // under the lock (as a closing entry, security review N1); a journal that cannot be read
+        // again is `Unconfirmed` (review N3).
+        if w.rebinds().len() > n {
             return Err(ExecError::Journal(e));
         }
-        return Err(match e {
-            JournalError::TooLarge { .. } => Refusal::from(RebindRefusal::NoRoom),
-            e => Refusal::from(e),
-        }
-        .into());
+        return Err(match rebound_now(&j, t, n) {
+            Some(true) => ExecError::Journal(e),
+            None => ExecError::Unconfirmed(e),
+            Some(false) => match e {
+                JournalError::TooLarge {
+                    what: "a record", ..
+                } => Refusal::from(RebindRefusal::TooLarge).into(),
+                JournalError::TooLarge { .. } => Refusal::from(RebindRefusal::NoRoom).into(),
+                e => Refusal::from(e).into(),
+            },
+        });
     }
     // From the record on, the created folders are proven by its file IDs (the folder stays the
     // one opened and checked above).
     let ids: BTreeMap<u16, u128> = c.dirs.iter().map(|d| (d.op, d.file_id)).collect();
     c.roots.set_proof(to.root, Proof::Rebound(ids));
-    let rebound = Bindings::of(&plan, w.rebinds()).ok_or(ExecError::Journal(
-        JournalError::Order("a rebind that does not fit its head"),
-    ))?;
     let plan = knob_rewrite_head(&plan, &rebound).unwrap_or(plan);
     revert_run(cx, &j, t, &plan, w, &c.roots, false)
 }

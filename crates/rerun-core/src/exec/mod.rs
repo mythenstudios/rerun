@@ -330,8 +330,10 @@ pub enum ExecError {
     Sys(#[from] SysError),
     /// Closing (a revert's `Closed`, forget's record or marker) failed after the closing entry
     /// reached the journal (its flush failed): the transaction may count as closed now; `status`
-    /// shows what the journal holds (P2-13, security review N1).
-    #[error("the transaction may have been closed, but its closing entry may not be durable: {0}")]
+    /// shows what the journal holds (P2-13, security review N1). Also a `Rebind` whose call failed
+    /// while the journal cannot be read again to tell whether it is on disk (P2-14 review N3): the
+    /// transaction may be bound now.
+    #[error("the last journal entry may have been written, but it may not be durable: {0}")]
     Unconfirmed(JournalError),
 }
 
@@ -539,6 +541,8 @@ pub(crate) mod knob {
         static OBJECTS_FROM_HEAD: Cell<bool> = const { Cell::new(false) };
         static DIR_PROOF_FROM_DONE: Cell<bool> = const { Cell::new(false) };
         static REWRITE_HEAD: Cell<bool> = const { Cell::new(false) };
+        static OBJECTS_FROM_BINDING_ONLY: Cell<bool> = const { Cell::new(false) };
+        static DIR_FOUND_AFTER_RECORD: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(crate) fn skip(f: Option<Flush>) {
@@ -597,6 +601,21 @@ pub(crate) mod knob {
     pub(crate) fn rewriting_head() -> bool {
         REWRITE_HEAD.with(Cell::get)
     }
+    /// K-RB4 (P2-14 review): the objects at the old identity of a rebound transaction dropped.
+    pub(crate) fn objects_from_binding_only(on: bool) {
+        OBJECTS_FROM_BINDING_ONLY.with(|s| s.set(on));
+    }
+    pub(crate) fn taking_objects_from_binding_only() -> bool {
+        OBJECTS_FROM_BINDING_ONLY.with(Cell::get)
+    }
+    /// K-RB2b (P2-14 review S2): after the record, a created folder of a rebound root proven by
+    /// the folder found (as before the record), not by the recorded file ID.
+    pub(crate) fn dir_found_after_record(on: bool) {
+        DIR_FOUND_AFTER_RECORD.with(|s| s.set(on));
+    }
+    pub(crate) fn finding_dirs_after_record() -> bool {
+        DIR_FOUND_AFTER_RECORD.with(Cell::get)
+    }
 }
 
 /// A recorded head (revert, `verify`, stacking) with `plan::Rules::Recorded` (E4: a rule
@@ -621,6 +640,22 @@ fn trusting_records() -> bool {
 fn knob_objects_from_head() -> bool {
     #[cfg(test)]
     return knob::taking_objects_from_head();
+    #[cfg(not(test))]
+    false
+}
+
+/// K-RB4 (tests): the objects at the old identity of a rebound transaction dropped.
+fn knob_objects_from_binding_only() -> bool {
+    #[cfg(test)]
+    return knob::taking_objects_from_binding_only();
+    #[cfg(not(test))]
+    false
+}
+
+/// K-RB2b (tests): after the record, a created folder proven by the folder found.
+fn knob_dir_found_after_record() -> bool {
+    #[cfg(test)]
+    return knob::finding_dirs_after_record();
     #[cfg(not(test))]
     false
 }

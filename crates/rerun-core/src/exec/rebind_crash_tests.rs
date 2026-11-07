@@ -1,13 +1,14 @@
 //! Rebind under failures, crashes and power losses (P2-14a; ADR 0020 amendment P2-14, the
 //! senior-dev matrix condition):
-//! - RB-C1 a failure and a crash after every call (file system and registry) of
-//!   `revert_rebound`, before, in and after its record: refused without a record, or left open
-//!   and bound; after a restart the recovery (`revert`, and when the rebind did not reach the
+//! - RB-C1 a failure and a crash after the calls (file system and registry) of `revert_rebound`,
+//!   before, in and after its record (a failure after every call for `Moved`; a crash, and a
+//!   failure for the other kinds, after every call that changes state, see [`points`]): refused
+//!   without a record, or left open and bound; after a restart the recovery (`revert`, and when the rebind did not reach the
 //!   journal, `rebind_check` and `revert_rebound` again) ends with the bound folder identical
 //!   by content to the folder before the apply and `HKCU\Software` identical, never `Damaged`,
 //!   never `Foreign`.
-//! - RB-C2 a power loss after every call and after the end at every cut of `C:` (the journal),
-//!   the volume of the bound folder (`E:` for a moved library, on another volume than the old
+//! - RB-C2 a power loss after every call that changes state and after the end at every cut of
+//!   `C:` (the journal), the volume of the bound folder (`E:` for a moved library, on another volume than the old
 //!   one; `D:` for a reinstall) and `HKCU`: before the recovery never damaged; a durable change
 //!   in the bound folder or the registry has a durable `Rebind`; a `Rebind` whose call
 //!   returned `Ok` survives every cut; a durable `Closed` has the state of the end; then the
@@ -120,6 +121,11 @@ fn setup(k: Kind) -> Case {
         .rebind_check(&rb.t, lib)
         .unwrap_or_else(|e| panic!("{k:?}: {e:?}"))
         .to;
+    // `OpenLock` counts as read-only (`changes_state`) only with the lock file in place.
+    assert!(super::tests::exists_abs(
+        sys,
+        &format!(r"{}\Rerun\journal\lock", crate::journal::tests::LAD)
+    ));
     let start = super::tests::snap_at(sys, game);
     let start_keys = keys(sys);
     Case {
@@ -175,9 +181,10 @@ fn trace(k: Kind, skipped: bool) -> (Vec<Prim>, usize) {
     (calls, done)
 }
 
-/// A call that changes persistent state (a file, folder, attribute, content, rename, delete,
-/// flush, or a registry key or value). Every other call only reads or opens a handle that a
-/// restart closes, and arms no pending delete.
+/// A call that changes persistent state by itself (a file, folder, attribute, content, rename,
+/// flush, the delete of a POSIX delete, or a registry key or value). `OpenLock` counts as
+/// read-only only because every case runs with `journal\lock` in place ([`points`] asserts it):
+/// a missing lock file would be created by it.
 fn changes_state(p: Prim) -> bool {
     use crate::sys::fake::RegPrim as R;
     match p {
@@ -191,19 +198,38 @@ fn changes_state(p: Prim) -> bool {
         | Prim::PosixDelete
         | Prim::Reg(R::Create | R::SetValue | R::DeleteValue | R::Delete | R::Flush) => true,
         Prim::Reg(_) => false,
-        // Read side: Support, VolumeName, OpenGuard, Lookup, OpenLock, OpenDirDelete (the
-        // delete comes with `PosixDelete`), State, Name, ReadAt, Users, ReadSide.
+        // Read side: Support, VolumeName, OpenGuard, Lookup, OpenLock (see above),
+        // OpenDirDelete, State, Name, ReadAt, Users, ReadSide.
         _ => false,
     }
 }
 
-/// The interruption points: after each call of the run (`every`), or (`!every`) after each call
-/// that changes persistent state and after the last read-only call before the record, and the
-/// end. The reduction is exact for a crash and a power loss (S5): after a read-only call the
-/// persistent state, the pending changes of every domain and so every cut are those after the
-/// last call that changed state before it, so a crash or power loss there is the same case. A
-/// failure differs per call (another error path) and keeps every call.
+/// `RERUN_UNREDUCED=1`: every point for every fault (the reduction checked by measurement).
+fn unreduced() -> bool {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test gate: a switch, never a path"
+    )]
+    std::env::var_os("RERUN_UNREDUCED").is_some_and(|v| v == "1")
+}
+
+/// The interruption points: after each call of the run (`every`, or `RERUN_UNREDUCED=1`), else
+/// after each call that changes state, after the last read-only call before the record, and the
+/// end.
+///
+/// Why the reduction loses no case (S5; corrected after the P2-14a review, senior-dev S1): a
+/// read-only call changes nothing by itself, but in the fake the unlink of a POSIX delete (and
+/// its entry in the volume log) happens when its handle closes, and that close is applied at the
+/// start of the next primitive call, which may be a read-only one. So the state after a
+/// read-only call is the state after the last call that changed state, possibly plus such a
+/// completed delete. A crash there and a crash right after that call end alike: the restart
+/// closes Rerun's handles and completes the pending deletes. A power loss there may keep or drop
+/// the delete (the cuts are prefixes of the log): dropping it is the case of the point before,
+/// keeping it is a prefix of the cuts at the next point that changes state, which is cut too. A
+/// failure differs per call (another error path) and keeps every call where asked. Measured
+/// once without the reduction (all four kinds green, review S1).
 fn points(k: Kind, fault: Fault, skipped: bool, every: bool) -> (Vec<Option<At>>, usize) {
+    let every = every || unreduced();
     let (calls, flush) = trace(k, skipped);
     let first_write = calls.iter().position(|c| changes_state(*c));
     let mut v: Vec<Option<At>> = calls
