@@ -28,6 +28,9 @@ pub(super) enum Proof {
     /// A rebound root: the file ID its `Rebind` record names for the op; without one only a
     /// missing folder is accepted (`Before`), anything else is `Foreign` (E-R2 a).
     Rebound(BTreeMap<u16, u128>),
+    /// Read only, before a rebind is recorded: the folder found there counts, if it is empty but
+    /// for what later ops remove (E-R2 a: exactly what the preview shows, "not provably Rerun's").
+    Found,
 }
 
 /// Where root `i` of a head is bound.
@@ -154,6 +157,19 @@ impl Bindings {
         Some(b)
     }
 
+    /// Root `i`.
+    pub(super) fn get(&self, i: usize) -> Option<&Binding> {
+        self.roots.get(i)
+    }
+
+    /// With root `i` bound to `b` (the observation before a rebind).
+    pub(super) fn with(&self, i: usize, b: Binding) -> Option<Self> {
+        let mut out = self.clone();
+        *out.roots.get_mut(i)? = b;
+        out.rebound = true;
+        Some(out)
+    }
+
     /// Every root, by index.
     pub(super) fn iter(&self) -> impl Iterator<Item = &Binding> {
         self.roots.iter()
@@ -169,7 +185,7 @@ impl Bindings {
     /// always from the head.
     pub(super) fn objects(&self, plan: &Plan) -> Result<Vec<Object>, PlanError> {
         let mut objs = Object::of(plan)?;
-        if self.rebound {
+        if self.rebound && !super::knob_objects_from_head() {
             let roots: Vec<FileRoot> = self
                 .roots
                 .iter()

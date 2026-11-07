@@ -589,10 +589,12 @@ pub(super) fn observe(
                 _ => None,
             });
             // P2-14 (E-R2 a): in a rebound root the file ID of the `Rebind` record is the proof
-            // (none: only a missing folder fits).
+            // (none: only a missing folder fits); before a rebind, the folder found there.
             let (proven, find) = match dirs.proof(root) {
+                _ if super::knob_dir_proof_from_done() => (done, mode != Mode::Rollback),
                 Proof::Done => (done, mode != Mode::Rollback),
                 Proof::Rebound(ids) => (ids.get(&k).copied(), false),
+                Proof::Found => (None, true),
             };
             Ok(match seen {
                 DirSeen::Absent => Seen::new(Observed::Before),

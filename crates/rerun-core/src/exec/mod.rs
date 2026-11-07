@@ -60,6 +60,7 @@
 mod bind;
 mod file;
 mod ini;
+mod rebind;
 mod reg;
 mod roots;
 mod stack;
@@ -67,6 +68,9 @@ mod status;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use rebind::{
+    RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,
+};
 pub use status::{OpState, OpStatus, Status, TxnLine, TxnStatus, status, txn_status};
 
 use bind::Bindings;
@@ -228,6 +232,9 @@ pub enum Refusal {
     /// The stored plan is missing, changed or invalid.
     #[error(transparent)]
     Plan(PlanError),
+    /// A rebind is refused (P2-14).
+    #[error(transparent)]
+    Rebind(RebindRefusal),
     /// The journal could not be read or the transaction not begun.
     #[error(transparent)]
     Journal(Box<JournalError>),
@@ -529,6 +536,9 @@ pub(crate) mod knob {
         static RESTORE_WITHOUT_ATTRS: Cell<bool> = const { Cell::new(false) };
         static EAGER_ROOTS: Cell<bool> = const { Cell::new(false) };
         static CURRENT_FOR_RECORDED: Cell<bool> = const { Cell::new(false) };
+        static OBJECTS_FROM_HEAD: Cell<bool> = const { Cell::new(false) };
+        static DIR_PROOF_FROM_DONE: Cell<bool> = const { Cell::new(false) };
+        static REWRITE_HEAD: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(crate) fn skip(f: Option<Flush>) {
@@ -565,6 +575,28 @@ pub(crate) mod knob {
     pub(crate) fn decoding_recorded_as_current() -> bool {
         CURRENT_FOR_RECORDED.with(Cell::get)
     }
+    /// K-RB3 (P2-14): stacking takes the objects of a rebound transaction from the head only.
+    pub(crate) fn objects_from_head(on: bool) {
+        OBJECTS_FROM_HEAD.with(|s| s.set(on));
+    }
+    pub(crate) fn taking_objects_from_head() -> bool {
+        OBJECTS_FROM_HEAD.with(Cell::get)
+    }
+    /// K-RB2 (P2-14): a created folder of a rebound root is proven by `Done.file_id` only.
+    pub(crate) fn dir_proof_from_done(on: bool) {
+        DIR_PROOF_FROM_DONE.with(|s| s.set(on));
+    }
+    pub(crate) fn proving_dirs_from_done() -> bool {
+        DIR_PROOF_FROM_DONE.with(Cell::get)
+    }
+    /// K-RB1 (P2-14, senior-dev B2): the revert rewrites the head's roots with the bindings, so
+    /// the registry locations are built from the bound folder.
+    pub(crate) fn rewrite_head(on: bool) {
+        REWRITE_HEAD.with(|s| s.set(on));
+    }
+    pub(crate) fn rewriting_head() -> bool {
+        REWRITE_HEAD.with(Cell::get)
+    }
 }
 
 /// A recorded head (revert, `verify`, stacking) with `plan::Rules::Recorded` (E4: a rule
@@ -583,6 +615,41 @@ fn trusting_records() -> bool {
     return knob::trusting_records();
     #[cfg(not(test))]
     false
+}
+
+/// K-RB3 (tests): the objects of a rebound transaction from the head only.
+fn knob_objects_from_head() -> bool {
+    #[cfg(test)]
+    return knob::taking_objects_from_head();
+    #[cfg(not(test))]
+    false
+}
+
+/// K-RB2 (tests): a created folder of a rebound root proven by `Done.file_id` only.
+fn knob_dir_proof_from_done() -> bool {
+    #[cfg(test)]
+    return knob::proving_dirs_from_done();
+    #[cfg(not(test))]
+    false
+}
+
+/// K-RB1 (tests): the head's roots rewritten with the bindings for the revert loop (what E-R4 a
+/// forbids: the registry locations would follow the bound folder).
+fn knob_rewrite_head(
+    #[cfg_attr(not(test), expect(unused_variables, reason = "test knob"))] plan: &Plan,
+    #[cfg_attr(not(test), expect(unused_variables, reason = "test knob"))] b: &Bindings,
+) -> Option<Plan> {
+    #[cfg(test)]
+    if knob::rewriting_head() {
+        let mut p = plan.clone();
+        for (r, x) in p.roots.iter_mut().zip(b.iter()) {
+            r.path = x.path.clone();
+            r.id = x.id;
+            r.origin = x.origin.clone();
+        }
+        return Some(p);
+    }
+    None
 }
 
 /// K3 (tests): restore without the old R/H/S.
@@ -816,6 +883,17 @@ fn verify_ops(
     roots: &roots::Roots<'_>,
     ops: &BTreeMap<u16, OpLog>,
 ) -> Result<Verified, ExecError> {
+    verify_seen(plan, t, roots, ops).map(|(v, _)| v)
+}
+
+/// [`verify_ops`] with what each observed op saw and will do (a rebind takes the file IDs of the
+/// created folders from it, P2-14).
+fn verify_seen(
+    plan: &Plan,
+    t: &mut Touched<'_>,
+    roots: &roots::Roots<'_>,
+    ops: &BTreeMap<u16, OpLog>,
+) -> Result<(Verified, BTreeMap<u16, Seen>), ExecError> {
     let mut seen = BTreeMap::new();
     let mut out = BTreeMap::new();
     let mut details = BTreeMap::new();
@@ -845,11 +923,14 @@ fn verify_ops(
         }
         seen.insert(*k, s);
     }
-    Ok(Verified {
-        ops: out.into_iter().collect(),
-        halted,
-        details,
-    })
+    Ok((
+        Verified {
+            ops: out.into_iter().collect(),
+            halted,
+            details,
+        },
+        seen,
+    ))
 }
 
 /// Carries out what `seen` says for op `k`, after its `RevertIntent`.
@@ -1231,26 +1312,35 @@ pub fn revert_check(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), Refusal> {
     let hold = j.hold()?;
     let listing = j.list()?;
     revert_listed(&listing, t)?;
-    let v = j.load(t, crate::journal::VerifyBackups::Length)?;
-    // As `JournalLock::resume`: `Empty`, `Open` or `Applied`, with a head.
-    let resumable = matches!(
-        v.state,
-        TxnState::Empty | TxnState::Open | TxnState::Applied
-    );
-    let Some(head) = v.head.as_deref().filter(|_| resumable) else {
-        return Err(JournalError::NotResumable {
-            id: *t,
-            state: v.state.clone(),
-        }
-        .into());
-    };
+    let (v, head) = load_resumable(&j, t)?;
     let before = |k: u16, d: &crate::journal::Digest, max: u64| j.read_backup(t, k, d, max);
-    let (plan, b) = revert_plan(t, head, &v.ops, &v.rebinds, &before)?;
+    let (plan, b) = revert_plan(t, &head, &v.ops, &v.rebinds, &before)?;
     let stores = roots::open_stores(cx, &b);
     let roots = revert_roots(cx, &plan, &b, &j, &listing, t, &v.ops, &stores)?;
     drop(roots);
     drop(hold);
     Ok(())
+}
+
+/// Transaction `t` read without the lock, as `JournalLock::resume` would accept it: `Empty`,
+/// `Open` or `Applied`, with a head (its bytes).
+fn load_resumable(
+    j: &Journal<'_>,
+    t: &TxnId,
+) -> Result<(crate::journal::TxnView, Vec<u8>), Refusal> {
+    let mut v = j.load(t, crate::journal::VerifyBackups::Length)?;
+    let resumable = matches!(
+        v.state,
+        TxnState::Empty | TxnState::Open | TxnState::Applied
+    );
+    match v.head.take().filter(|_| resumable) {
+        Some(head) => Ok((v, head)),
+        None => Err(JournalError::NotResumable {
+            id: *t,
+            state: v.state.clone(),
+        }
+        .into()),
+    }
 }
 
 /// Whether `t` counts as closed in the journal now (a `Closed` record or a forget marker); a
@@ -1286,28 +1376,44 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
     revert_listed(&listing, t)?;
-    let mut w = lock.resume(t).map_err(Refusal::from)?;
+    let w = lock.resume(t).map_err(Refusal::from)?;
     let before = |k: u16, _: &crate::journal::Digest, max: u64| w.before_bytes(k, max);
     let (plan, b) = revert_plan(t, w.head(), w.ops(), w.rebinds(), &before)?;
     let stores = roots::open_stores(cx, &b);
     let roots = revert_roots(cx, &plan, &b, &j, &listing, t, w.ops(), &stores)?;
-    let mut touched = Touched::new(cx.sys, &roots);
+    let plan = knob_rewrite_head(&plan, &b).unwrap_or(plan);
+    revert_run(cx, &j, t, &plan, w, &roots, true)
+}
+
+/// The revert loop of [`revert`] and [`revert_rebound`] and the close. `early`: no record of
+/// this run is written yet, so an error before the loop's first record is a refusal (review S4).
+fn revert_run<W: Reverting>(
+    cx: &ExecCtx<'_>,
+    j: &Journal<'_>,
+    t: &TxnId,
+    plan: &Plan,
+    mut w: W,
+    roots: &roots::Roots<'_>,
+    early: bool,
+) -> Result<RevertReport, ExecError> {
+    let mut touched = Touched::new(cx.sys, roots);
     let written = revert_records(w.ops());
     let (ops, halted) = match revert_loop(
         cx,
-        &plan,
+        plan,
         &mut w,
         &mut touched,
-        &roots,
+        roots,
         Mode::Recovery,
         &BTreeMap::new(),
     ) {
         Ok(x) => x,
-        Err(e) if revert_records(w.ops()) == written => {
+        Err(e) if early && revert_records(w.ops()) == written => {
             return Err(refused_early(e).into());
         }
         Err(e) => return Err(e),
     };
+    drop(touched);
     if halted.is_some() || !foreign_ops(&w).is_empty() {
         return Ok(RevertReport {
             txn: *t,
@@ -1323,10 +1429,10 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     };
     // Nothing reverted in this run (every op was before): a `Closed` that did not reach the
     // journal wrote nothing at all.
-    let first = ops.is_empty();
+    let first = early && ops.is_empty();
     if let Err(e) = close(w) {
         return Err(match e {
-            ExecError::Journal(e) if closed_now(&j, t) => ExecError::Unconfirmed(e),
+            ExecError::Journal(e) if closed_now(j, t) => ExecError::Unconfirmed(e),
             ExecError::Journal(e) if first => Refusal::from(e).into(),
             e => e,
         });
@@ -1424,6 +1530,8 @@ pub(crate) mod ini_tests;
 mod layer_crash_tests;
 #[cfg(test)]
 pub(crate) mod layer_tests;
+#[cfg(test)]
+pub(crate) mod rebind_tests;
 #[cfg(test)]
 mod reg_crash_tests;
 #[cfg(test)]

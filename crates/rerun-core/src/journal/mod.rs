@@ -39,10 +39,6 @@ pub use record::{
     Before, Closing, Digest, DirProof, FORMAT, INLINE_MAX, MAX_DIRS, Observed, Semantic,
 };
 pub use write::JournalLock;
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "P2-14: exec uses it from the next commit on")
-)]
 pub(crate) use write::RebindArgs;
 pub(crate) use write::{BeforeArg, Reverting, TxnWriter};
 #[cfg(test)]
@@ -312,6 +308,13 @@ impl<'a> Journal<'a> {
             None => Err(JournalError::NotFound(*id)),
             Some(d) => read::load(&*d, id, v, &self.lim, self.app.path()),
         }
+    }
+
+    /// A rebind of `v` (as read) would fit the record budget with room for the rest of the
+    /// revert and `Closed`: the rule [`RevertWriter::rebind`](write::RevertWriter) checks
+    /// again under the lock (P2-14).
+    pub(crate) fn rebind_fits(&self, v: &TxnView) -> bool {
+        write::room_for_rebind(v.log.len(), &v.ops, &self.lim)
     }
 
     /// The backup `op-NNNN.bin` of transaction `id` read whole, without the lock (`verify`, the

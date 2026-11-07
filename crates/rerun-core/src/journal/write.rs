@@ -512,27 +512,9 @@ impl RevertWriter<'_> {
     /// `RevertIntent` and `RevertDone` for every op not reverted yet, and `Closed`), checked
     /// before anything is written; then the record, and the transaction folder flushed, so a
     /// rebind whose call returned `Ok` survives every cut.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "P2-14: exec writes and reads rebinds from the next commit on"
-        )
-    )]
     pub(crate) fn rebind(&mut self, r: &RebindArgs<'_>) -> Result<(), JournalError> {
-        let open = self
-            .t
-            .m
-            .ops()
-            .values()
-            .filter(|o| o.reverted.is_none())
-            .count();
-        let open = u32::try_from(open).unwrap_or(u32::MAX);
-        let need = u32::from(self.t.m.records())
-            .saturating_add(1)
-            .saturating_add(open.saturating_mul(2))
-            .saturating_add(1);
-        if need > u32::from(self.t.lock.lim.records) {
+        let records = usize::from(self.t.m.records());
+        if !room_for_rebind(records, self.t.m.ops(), &self.t.lock.lim) {
             return Err(JournalError::TooLarge {
                 what: "the records of a transaction",
                 limit: u64::from(self.t.lock.lim.records),
@@ -550,15 +532,19 @@ impl RevertWriter<'_> {
     }
 }
 
+/// The room rule of a rebind: after `records` records, the rebind, a `RevertIntent` and
+/// `RevertDone` for every op of `ops` without `RevertDone`, and `Closed` fit the record budget.
+pub(super) fn room_for_rebind(records: usize, ops: &BTreeMap<u16, OpLog>, lim: &Limits) -> bool {
+    let open = ops.values().filter(|o| o.reverted.is_none()).count();
+    records
+        .saturating_add(1)
+        .saturating_add(open.saturating_mul(2))
+        .saturating_add(1)
+        <= usize::from(lim.records)
+}
+
 /// What [`RevertWriter::rebind`] records.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "P2-14: exec writes and reads rebinds from the next commit on"
-    )
-)]
 pub(crate) struct RebindArgs<'a> {
     /// Root index in the head.
     pub(crate) root: u16,

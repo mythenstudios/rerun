@@ -201,6 +201,14 @@ impl<'g> Roots<'g> {
         self.proofs.get(usize::from(i)).unwrap_or(&Proof::Done)
     }
 
+    /// From now on, the created folders of root `i` are proven by `p` (a rebind once its record
+    /// is written: the folder stays the one opened, its proofs the recorded file IDs).
+    pub(super) fn set_proof(&mut self, i: u16, p: Proof) {
+        if let Some(x) = self.proofs.get_mut(usize::from(i)) {
+            *x = p;
+        }
+    }
+
     /// `<root>\<path>` for a message, with the bound path of the root.
     pub(super) fn shown(&self, root: usize, p: &RelPath) -> escape::Shown<'static> {
         let base = self
@@ -250,23 +258,132 @@ fn has_file_ops(plan: &Plan, i: usize) -> bool {
 /// (not missing, not a folder, link or other reparse point, not restricted); else D4 would
 /// ask nothing about it. A revert does not ask this (the game may be gone).
 pub(super) fn main_exe_present(plan: &Plan, roots: &Roots<'_>) -> Result<(), Refusal> {
-    for (i, r) in plan.roots.iter().enumerate() {
-        let (Some(m), Some(g)) = (&r.main_exe, roots.game(i)) else {
-            continue;
-        };
-        match g.dir().metadata(m) {
-            Ok(Some(md))
-                if md.kind == crate::sys::fs::EntryKind::File
-                    && md.reparse.is_none()
-                    && !md.restricted => {}
-            Ok(_) => return Err(Refusal::MainExe(roots.shown(i, m))),
-            Err(e) if matches!(e.kind, SysErrorKind::NotFound | SysErrorKind::ReparsePoint) => {
-                return Err(Refusal::MainExe(roots.shown(i, m)));
-            }
-            Err(e) => return Err(e.into()),
-        }
+    for i in 0..plan.roots.len() {
+        main_exe_at(plan, roots, i)?;
     }
     Ok(())
+}
+
+/// A2 should-item 8 for root `i` alone (also the folder a rebind binds, P2-14: a cheap hint that
+/// it is the game, and D4 asks it).
+pub(super) fn main_exe_at(plan: &Plan, roots: &Roots<'_>, i: usize) -> Result<(), Refusal> {
+    let Some(r) = plan.roots.get(i) else {
+        return Ok(());
+    };
+    let (Some(m), Some(g)) = (&r.main_exe, roots.game(i)) else {
+        return Ok(());
+    };
+    match g.dir().metadata(m) {
+        Ok(Some(md))
+            if md.kind == crate::sys::fs::EntryKind::File
+                && md.reparse.is_none()
+                && !md.restricted =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(Refusal::MainExe(roots.shown(i, m))),
+        Err(e) if matches!(e.kind, SysErrorKind::NotFound | SysErrorKind::ReparsePoint) => {
+            Err(Refusal::MainExe(roots.shown(i, m)))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// How the folder a binding names opens now (P2-14, user decision E-R1), opened and dropped.
+#[derive(Debug)]
+pub(super) enum Probe {
+    /// Opened and checked by identity.
+    Opens,
+    /// Gone (the library or the folder not found, no manifest, not installed) or another folder
+    /// now (`IdentityMismatch` of the library or of the game folder): a rebind may bind it.
+    Gone(Refusal),
+    /// Anything else (an update pending, installed in another folder, a manifest that cannot
+    /// be read, busy, access denied, a reparse point, forbidden): not now.
+    Undecided(Refusal),
+}
+
+/// [`Probe`] of binding `b` (a Steam root through its library, a manual one by path).
+pub(super) fn probe(cx: &ExecCtx<'_>, b: &Binding) -> Probe {
+    let store = match &b.origin {
+        PlanOrigin::Steam {
+            store, store_id, ..
+        } => Some(StoreDir::open(cx.sys, cx.fr, store.path()).and_then(|s| {
+            s.ensure_id(*store_id)?;
+            Ok(s)
+        })),
+        PlanOrigin::Manual => None,
+    };
+    let mismatch = |r: &Refusal| matches!(r, Refusal::Root(e) if matches!(**e, RootError::IdentityMismatch { .. }));
+    match open_root(cx, b, store.as_ref()) {
+        Ok(_) => Probe::Opens,
+        Err(Failed::Absent(NoFiles::Steam {
+            app_id,
+            gone: super::SteamGone::OtherFolder,
+        })) => Probe::Undecided(Refusal::SteamGone {
+            app_id,
+            gone: super::SteamGone::OtherFolder,
+        }),
+        Err(Failed::Absent(n)) => Probe::Gone(n.refusal()),
+        Err(Failed::Undecided(r)) if mismatch(&r) => Probe::Gone(r),
+        Err(Failed::Undecided(r)) => Probe::Undecided(r),
+    }
+}
+
+/// The game folder of the head's Steam root `head` in the library at `lib` (P2-14): the library
+/// opened by its path, the head's app installed there with the head's install folder, the
+/// folder opened through the library (no reparse point, the forbidden roots), with the
+/// identities found. Opened and dropped; the caller opens it again by these identities.
+pub(super) fn candidate(
+    cx: &ExecCtx<'_>,
+    head: &crate::plan::PlanRoot,
+    lib: &RootPath,
+) -> Result<Binding, super::RebindRefusal> {
+    use super::RebindRefusal as R;
+    let PlanOrigin::Steam {
+        app_id, installdir, ..
+    } = &head.origin
+    else {
+        return Err(R::Manual);
+    };
+    let not_found =
+        |e: &RootError| matches!(e, RootError::Sys(s) if s.kind == SysErrorKind::NotFound);
+    let store = StoreDir::open(cx.sys, cx.fr, lib.path()).map_err(|e| {
+        if not_found(&e) {
+            R::NoCandidate
+        } else {
+            R::Candidate(Box::new(e.into()))
+        }
+    })?;
+    let app = match app_manifest(&store, *app_id) {
+        Ok(Some(a)) => a,
+        Ok(None) => return Err(R::NoCandidate),
+        Err(_) => {
+            return Err(R::Candidate(Box::new(Refusal::SteamManifest {
+                app_id: *app_id,
+            })));
+        }
+    };
+    if app.install_dir != *installdir {
+        return Err(R::OtherInstallDir);
+    }
+    match app.state() {
+        AppState::Installed => {}
+        AppState::NotInstalled => return Err(R::NoCandidate),
+        AppState::UpdatePending => return Err(R::UpdatePending),
+    }
+    let game = store.game(cx.fr, installdir.as_str()).map_err(|e| {
+        if not_found(&e) {
+            R::NoCandidate
+        } else {
+            R::Candidate(Box::new(e.into()))
+        }
+    })?;
+    Binding::steam(head, store.path(), store.id(), game.id(), Proof::Found).ok_or(R::Candidate(
+        Box::new(Refusal::Plan(crate::plan::PlanError::Invalid {
+            op: None,
+            why: "a game folder path that is no root path",
+        })),
+    ))
 }
 
 /// Why the file ops of an opened root cannot run: the current user cannot write it, or its
