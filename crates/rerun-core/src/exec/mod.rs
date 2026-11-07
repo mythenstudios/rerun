@@ -1555,6 +1555,8 @@ pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
 }
 
 #[cfg(test)]
+mod combo_tests;
+#[cfg(test)]
 mod crash_tests;
 #[cfg(test)]
 mod front_tests;

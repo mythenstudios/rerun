@@ -182,7 +182,7 @@ fn trace(k: Kind, skipped: bool) -> (Vec<Prim>, usize) {
 /// flush, the delete of a POSIX delete, or a registry key or value). `OpenLock` counts as
 /// read-only only because every case runs with `journal\lock` in place ([`points`] asserts it):
 /// a missing lock file would be created by it.
-fn changes_state(p: Prim) -> bool {
+pub(super) fn changes_state(p: Prim) -> bool {
     use crate::sys::fake::RegPrim as R;
     match p {
         Prim::CreateTmp
