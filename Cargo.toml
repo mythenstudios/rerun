@@ -72,3 +72,13 @@ opt-level = "s"
 
 [profile.release.package.rerun-cpu]
 opt-level = "s"
+
+# CI test profile (docs/09-testing.md): the dev profile with optimisation, so the heavy crash
+# matrices run several times faster. Debug assertions and overflow checks stay on (inherited).
+[profile.ci]
+inherits = "dev"
+opt-level = 2
+debug = "line-tables-only"
+
+[profile.ci.package."*"]
+opt-level = 2

@@ -88,7 +88,8 @@ jobs:
           RERUN_RELEASE_LAUNCH_EXE: ${{ github.workspace }}/target/release/rerun-launch.exe
           # The release rerun.exe built above, checked by crates/rerun-cli/tests/hardening.rs.
           RERUN_RELEASE_CLI_EXE: ${{ github.workspace }}/target/release/rerun.exe
-        run: cargo test --workspace --all-features --locked
+        # --profile ci: dev with optimisation (Cargo.toml), debug assertions stay on (docs/09-testing.md).
+        run: cargo test --workspace --all-features --locked --profile ci
       - name: rerun-core fake feature never in shipped binaries
         # ADR 0007: the in-memory fake and its TOCTOU hooks stay out of release builds.
         # Features do not depend on the profile; -e normal skips dev-dependencies.
