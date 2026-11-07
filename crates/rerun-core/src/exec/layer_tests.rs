@@ -5,7 +5,8 @@
 //! D4 for the layer executable, N2 in the planner. Controls (through the check functions):
 //! K-L1 (no token of Rerun's left counted `Foreign`, E2 a) and the `unmerge` control fail
 //! R-L3; K-L2 (every drift `Foreign`) fails R-L3; K-L4 (`merge` normalising the old value)
-//! fails R-L1. Crashes and power losses: `layer_crash_tests.rs`. Synthetic tokens only.
+//! fails R-L1. Crashes and power losses: `layer_crash_tests.rs`. Synthetic tokens, except
+//! R-L1-P, R-L3-P and R-L8-P (P2-11b) with the production tables.
 
 use std::path::Path;
 
@@ -323,7 +324,7 @@ type L3Case = (
     bool,
 );
 
-const L3_CASES: [L3Case; 10] = [
+const L3_CASES: [L3Case; 12] = [
     (
         "a foreign token appended, keys created",
         None,
@@ -333,10 +334,26 @@ const L3_CASES: [L3Case; 10] = [
         true,
     ),
     (
-        "reordered with $ (as the tab might)",
+        "reordered as the tab writes (its tokens first, the foreign one last)",
         Some("~ RUNASADMIN"),
-        Some(|| sz("$ ~ ZZ_OS_A RUNASADMIN ZZ_FLAG_A")),
-        Some("$ ~ RUNASADMIN"),
+        Some(|| sz("~ ZZ_OS_A ZZ_FLAG_A RUNASADMIN")),
+        Some("~ RUNASADMIN"),
+        true,
+        true,
+    ),
+    (
+        "a $ prefix left (an ordinary word, P2-11b B4.1): kept",
+        None,
+        Some(|| sz("$ ZZ_FLAG_A ZZ_OS_A")),
+        Some("$"),
+        true,
+        true,
+    ),
+    (
+        "a lone ~ (P2-11b B4.2): left",
+        None,
+        Some(|| sz("~")),
+        Some("~"),
         true,
         true,
     ),
@@ -819,4 +836,119 @@ fn r_l_n2_a_conflict_with_an_active_transaction_names_it() {
         "{e}"
     );
     assert_eq!(closed(&env.revert(&t)), Some(Closing::Reverted));
+}
+
+// --- P2-11b: the production tokens ------------------------------------------------------------
+
+/// The step with every production token for `game.exe`.
+fn production_step() -> Step {
+    layer_step("game.exe", crate::policy::registry::layers::LAYER_TOKENS)
+}
+
+/// R-L1-P (P2-11b): `compat_layer` with the production tokens, `Layers` missing and old
+/// `~ RUNASINVOKER` (the foreign token of SB-L1): the value exactly, `verify` all `After`,
+/// the revert closes, the snapshot identical, planned again the same hash.
+#[test]
+fn r_l1_p_the_production_tokens_round_trip_exactly() {
+    use crate::policy::registry::layers::LAYER_TOKENS;
+    let _r = Reset(|| layers_knob::production(false));
+    layers_knob::production(true);
+    let tail = LAYER_TOKENS.join(" ");
+    for (b, want) in [
+        (layer_base(), format!("~ {tail}")),
+        (
+            layer_base_with("~ RUNASINVOKER"),
+            format!("~ RUNASINVOKER {tail}"),
+        ),
+    ] {
+        let env = Env::new(finish(b));
+        let before = snap_all(&env);
+        let steps = [production_step()];
+        let h = try_plan(&env, &steps).unwrap();
+        let t = env.applied(&h);
+        assert_eq!(layer_value(&env.sys), Some(sz(&want)));
+        assert!(env.verify(&t).iter().all(|(_, o)| *o == Observed::After));
+        assert_eq!(closed(&env.revert(&t)), Some(Closing::Reverted), "{want}");
+        same(&before, &snap_all(&env));
+        assert_eq!(
+            try_plan(&env, &steps).ok(),
+            Some(h),
+            "{want}: the same hash"
+        );
+    }
+}
+
+/// R-L3-P (P2-11b): drift the way the tab writes (its tokens in its order first, a foreign
+/// token at the end, SB-L1; the order on a value of Rerun's is derived, not observed: SB-L1b),
+/// reverted to exactly the old value; a lone `~` is left (user decision B4.2), the
+/// transaction closes.
+#[test]
+fn r_l3_p_tab_drift_on_production_tokens() {
+    let _r = Reset(|| layers_knob::production(false));
+    layers_knob::production(true);
+    const D: &str = "DISABLEDXMAXIMIZEDWINDOWEDMODE";
+    const H: &str = "HIGHDPIAWARE";
+    let cases: [(&str, Option<&str>, String, Option<&str>); 5] = [
+        (
+            "tab order, the foreign token moved to the end",
+            Some("~ RUNASINVOKER"),
+            format!("~ {D} {H} RUNASINVOKER"),
+            Some("~ RUNASINVOKER"),
+        ),
+        (
+            "the user checked 640 x 480 in the tab",
+            None,
+            format!("~ {D} 640X480 {H}"),
+            Some("~ 640X480"),
+        ),
+        (
+            "the user unchecked one of ours in the tab",
+            Some("~ RUNASINVOKER"),
+            format!("~ {H} RUNASINVOKER"),
+            Some("~ RUNASINVOKER"),
+        ),
+        (
+            "a lone ~, no old value (B4.2: left)",
+            None,
+            "~".into(),
+            Some("~"),
+        ),
+        (
+            "a lone ~, an old value (B4.2: left)",
+            Some("~ RUNASINVOKER"),
+            "~".into(),
+            Some("~"),
+        ),
+    ];
+    for (what, old, drift, want) in cases {
+        let b = match old {
+            None => layer_base(),
+            Some(o) => layer_base_with(o),
+        };
+        let env = Env::new(finish(b));
+        let t = env.applied(&try_plan(&env, &[production_step()]).unwrap());
+        put_layer(&env.sys, &sz(&drift));
+        assert_eq!(closed(&env.revert(&t)), Some(Closing::Reverted), "{what}");
+        assert_eq!(layer_value(&env.sys), want.map(sz), "{what}");
+    }
+}
+
+/// R-L8 with the production tables (P2-11b): a production token taken off the allowlist after
+/// the apply does not block the revert.
+#[test]
+fn r_l8_p_a_production_token_taken_off_never_blocks_the_revert() {
+    use crate::policy::registry::layers::LAYER_TOKENS;
+    let _r = Reset(|| {
+        layers_knob::production(false);
+        layers_knob::drop_token(None);
+    });
+    layers_knob::production(true);
+    let env = Env::new(finish(layer_base_with("~ RUNASINVOKER")));
+    let before = snap_all(&env);
+    let h = try_plan(&env, &[production_step()]).unwrap();
+    let t = env.applied(&h);
+    layers_knob::drop_token(Some(LAYER_TOKENS[0]));
+    assert!(env.verify(&t).iter().all(|(_, o)| *o == Observed::After));
+    assert_eq!(closed(&env.revert(&t)), Some(Closing::Reverted));
+    same(&before, &snap_all(&env));
 }

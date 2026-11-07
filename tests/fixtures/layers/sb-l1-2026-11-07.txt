@@ -1,0 +1,26 @@
+# SB-L1: Explorer's compatibility tab in Windows Sandbox, build 26100, 2026-11-07 (P2-11b).
+# One line per dump layers-<label>.txt of scripts/sandbox-layers-dump.ps1: the label, the hive,
+# then the value exactly as the dump's raw-data section quotes it (name = data). The session
+# was elevated with UAC off; the exe was a 32-bit copy at C:\RerunSandbox\l1\game.exe.
+# 01-foreign was planted with reg add (a foreign token); every other HKCU value was written by
+# the tab. 15-allusers is the HKLM value of "Change settings for all users", from the dump's
+# reg query view (the raw-data section lists HKCU only). Not listed: 00-before, 20-none and
+# 24-cleared (no value), 11-dpi-sysenh (taken 2 s after 10-dpi-app, it repeats it; 21 and 22 are
+# the System and System (Enhanced) dumps). Own observation, no third-party file (docs/05).
+01-foreign HKCU "C:\RerunSandbox\l1\game.exe" = "~ RUNASINVOKER"
+02-xpsp3 HKCU "C:\RerunSandbox\l1\game.exe" = "~ WINXPSP3 RUNASINVOKER"
+03-win7 HKCU "C:\RerunSandbox\l1\game.exe" = "~ WIN7RTM RUNASINVOKER"
+04-color16 HKCU "C:\RerunSandbox\l1\game.exe" = "~ 16BITCOLOR RUNASINVOKER"
+05-640x480 HKCU "C:\RerunSandbox\l1\game.exe" = "~ 640X480 RUNASINVOKER"
+06-nofso HKCU "C:\RerunSandbox\l1\game.exe" = "~ DISABLEDXMAXIMIZEDWINDOWEDMODE RUNASINVOKER"
+07-admin HKCU "C:\RerunSandbox\l1\game.exe" = "~ RUNASADMIN RUNASINVOKER"
+08-restart HKCU "C:\RerunSandbox\l1\game.exe" = "~ REGISTERAPPRESTART RUNASINVOKER"
+09-icc HKCU "C:\RerunSandbox\l1\game.exe" = "~ TRANSFORMLEGACYCOLORMANAGED RUNASINVOKER"
+10-dpi-app HKCU "C:\RerunSandbox\l1\game.exe" = "~ HIGHDPIAWARE RUNASINVOKER"
+12-combined HKCU "C:\RerunSandbox\l1\game.exe" = "~ DISABLEDXMAXIMIZEDWINDOWEDMODE RUNASADMIN 640X480 HIGHDPIAWARE 256COLOR WINXPSP3 RUNASINVOKER"
+13-resave HKCU "C:\RerunSandbox\l1\game.exe" = "~ DISABLEDXMAXIMIZEDWINDOWEDMODE RUNASADMIN 640X480 HIGHDPIAWARE 256COLOR WINXPSP3 RUNASINVOKER"
+14-cleared HKCU "C:\RerunSandbox\l1\game.exe" = "~ RUNASINVOKER"
+15-allusers HKLM "C:\RerunSandbox\l1\game.exe" = "~ WINXPSP3"
+21-dpi-system HKCU "C:\RerunSandbox\l1\game.exe" = "~ DPIUNAWARE"
+22-dpi-sysenh HKCU "C:\RerunSandbox\l1\game.exe" = "~ GDIDPISCALING DPIUNAWARE"
+23-xpsp3-plus HKCU "C:\RerunSandbox\l1\game.exe" = "~ GDIDPISCALING DPIUNAWARE WINXPSP3"

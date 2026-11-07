@@ -7,8 +7,8 @@
 //! folder (not missing, no folder, no link or other reparse point, not restricted, every folder
 //! on the way plain) ending in `.exe` (folded); the plan names it in the stored spelling of
 //! every segment (A2-B1), so the value name is the canonical path as Windows writes it; 1 to 8
-//! `layers`, each a `TokenName` on the add allowlist (`policy::registry::layers`; empty until
-//! the Sandbox probes SB-L1 and SB-L3, review S8, so today every token is refused), unique.
+//! `layers`, each a `TokenName` on the add allowlist (`policy::registry::layers::LAYER_TOKENS`,
+//! spelled as the compatibility tab writes it, P2-11b), unique.
 //!
 //! The planner reads the current value through `policy::registry` without following links:
 //! missing → `old` none; a `REG_SZ` in the strict grammar → `old` with its bytes; anything else
@@ -24,8 +24,9 @@
 //! the tokens in byte order and the new value (`layers::merge`).
 //!
 //! Refused besides: a game folder reached by another path than its canonical one (a link, a
-//! junctioned library, an 8.3 name: user decision E3 a, until SB-L2 shows which name Windows
-//! matches), a case-sensitive folder, a link or volatile key on the way, two steps for the same
+//! junctioned library, an 8.3 name; user decision E3 a, final after SB-L2: Windows applies a
+//! layer only when the value name is the path the program is started by, and the value name is
+//! the canonical path; 8.3 is not measured and refused the same way), a case-sensitive folder, a link or volatile key on the way, two steps for the same
 //! executable, a plan without the game's main executable (user decision E2 of P2-10).
 
 use serde::{Deserialize, Serialize};
@@ -183,13 +184,14 @@ pub(crate) fn plan_into(
     b: &mut Builder,
 ) -> Result<(), PlanError> {
     let game = ctx.game;
-    // E3 a: the value name is the canonical path; whether Windows matches it when the game is
-    // started through a link is open until SB-L2.
+    // E3 a (final, SB-L2): the value name is the canonical path, and Windows applies a layer
+    // only to a launch by exactly that path, so a game started through a link would not get it.
     // A launch path that is no `RootPath` (too long, review S-a) is refused the same way.
     if game.launch_path() != Some(game.path()) {
         return Err(refuse(format!(
             "compat_layer: the game folder {} is reached through a link or another name ({}); \
-             compatibility layers are not supported there yet",
+             Windows applies a compatibility layer only to the path a program is started by, \
+             and this game is started through a link",
             shown(&game.path().to_string()),
             game.launch_path().map_or_else(
                 || "a path too long to compare".to_owned(),
@@ -251,7 +253,7 @@ pub(crate) fn plan_into(
             )));
         }
         // E5 a: a token of the same group already there is never replaced.
-        if let Some(g) = layers::group_of(t.as_str()).filter(|g| *g != layers::Group::Flag)
+        if let Some(g) = layers::group_of(t.as_str())
             && let Some(w) = words.iter().find(|w| layers::group_of(w) == Some(g))
         {
             return Err(match added_by_rerun(ctx, &av, w) {

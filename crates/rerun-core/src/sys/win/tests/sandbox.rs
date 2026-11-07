@@ -12,9 +12,13 @@
 //! checkout to build in). The tests share one VM session, run with `--test-threads=1`, and
 //! undo what they leave in shared registry keys.
 //!
-//! Open (placeholders, `docs/09-testing.md` manual list): the `compat_layer` cases come with
-//! P2-11; an exFAT volume and a third party holding the folder need admin tooling or a second
-//! process.
+//! SB-L5 (P2-11b): `compat_layer` with the production tokens on the real `HKCU`, drift by
+//! `reg add`, a link key at `AppCompatFlags\Layers`. The facts it builds on (the tab's
+//! spelling, which path name Windows matches) came from the probes SB-L1 to SB-L4 and SB-L6
+//! (`scripts/sandbox-probe-layers.ps1`, `docs/09-testing.md`).
+//!
+//! Open (`docs/09-testing.md` manual list): an exFAT volume and a third party holding the
+//! folder need admin tooling or a second process.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -653,14 +657,156 @@ fn sandbox_r_t6_leaves_a_value_another_program_changed() {
     wipe(&h);
 }
 
-// ---------- P2-11 placeholders ----------
-//
-// TODO(P2-11), no behaviour invented here; each becomes an `#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]` test with the
-// guard first, when `compat_layer` exists (A2 sandbox list):
-// - the token list and the `~` / `$` prefixes exactly as Windows writes them from the file
-//   Properties dialog (set the layer in the Sandbox UI, read the value, compare with the
-//   planner's format);
-// - a game reached through a junctioned library: whether the layer matches the canonical path
-//   or the launch path (ADR 0018);
-// - a link key planted at `AppCompatFlags\Layers` (absent in a fresh Sandbox) is refused
-//   with `ReparsePoint` for `compat_layer`, nothing at the link target.
+// ---------- SB-L5: compatibility layers on the real HKCU (P2-11b) ----------
+
+/// `HKCU\...\AppCompatFlags\Layers`.
+fn layers_key() -> RegKey {
+    hkcu(crate::prim::layer_tests::LAYERS_KEY)
+}
+
+/// The production tables of `policy::registry::layers` while alive (the test binary uses the
+/// synthetic ones by default).
+struct Production;
+
+impl Production {
+    fn on() -> Self {
+        crate::policy::registry::layers::knob::production(true);
+        Self
+    }
+}
+
+impl Drop for Production {
+    fn drop(&mut self) {
+        crate::policy::registry::layers::knob::production(false);
+    }
+}
+
+/// The value name of the game folder's `game.exe` (its canonical path).
+fn layer_name(w: &Sb) -> String {
+    w.with(|_, fr| {
+        let g = GameDir::open_manual(&w.sys, fr, &w.game).unwrap_or_else(|e| panic!("{e}"));
+        format!(r"{}\game.exe", g.path())
+    })
+}
+
+/// Another program writing the value: `reg.exe add` (a real writer outside Rerun).
+fn reg_add_layer(name: &str, data: &str) {
+    let key = format!(r"HKCU\{}", crate::prim::layer_tests::LAYERS_KEY);
+    let st = Command::new("reg")
+        .args(["add", &key, "/v", name, "/t", "REG_SZ", "/d", data, "/f"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("reg add: {e}"));
+    assert!(st.success(), "reg add {name} = {data}: {st}");
+}
+
+/// The step with every production token for `game.exe`.
+fn production_layers() -> Vec<Step> {
+    vec![crate::prim::layer_tests::layer_step(
+        "game.exe",
+        crate::policy::registry::layers::LAYER_TOKENS,
+    )]
+}
+
+/// SB-L5 (P2-11b): `compat_layer` with the production tokens on the real `HKCU`. A round trip
+/// without a value (the `Layers` key as before, the value gone, the same hash planned again);
+/// then a drift: `reg add` appends `RUNASINVOKER` after the apply, the revert leaves exactly
+/// `~ RUNASINVOKER` and closes. The value is removed again at the end.
+#[test]
+#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
+fn sandbox_sb_l5_compat_layer_round_trip_on_the_real_hkcu() {
+    sandbox_guard();
+    let _p = Production::on();
+    let w = Sb::new("sb-l5");
+    let h = AppHive::real_user().unwrap_or_else(|e| panic!("{e}"));
+    let name = layer_name(&w);
+    let layers = layers_key();
+    let _ = h.delete_value(&layers, &name);
+    let tail = crate::policy::registry::layers::LAYER_TOKENS.join(" ");
+    let reg = w.sys.registry();
+
+    // Round trip.
+    let before = w.snap(vec![layers.clone()]);
+    let hash = w.plan_steps(&production_layers());
+    let t = w.apply_ok(&hash);
+    assert_eq!(
+        reg.get(&layers, &name).unwrap(),
+        Some(RegValue::String(format!("~ {tail}")))
+    );
+    let v = w.with(|cx, _| verify(cx, &t)).unwrap();
+    assert!(v.ops.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    let after = w.snap(vec![layers.clone()]);
+    assert!(before == after, "{:#?}", before.diff(&after));
+    assert_eq!(
+        w.plan_steps(&production_layers()),
+        hash,
+        "planned again: the same hash"
+    );
+
+    // Drift by another program.
+    let t = w.apply_ok(&w.plan_steps(&production_layers()));
+    reg_add_layer(&name, &format!("~ {tail} RUNASINVOKER"));
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    assert_eq!(
+        rep.ops.last().map(|o| o.observed),
+        Some(Observed::Drifted),
+        "{rep:?}"
+    );
+    assert_eq!(
+        reg.get(&layers, &name).unwrap(),
+        Some(RegValue::String("~ RUNASINVOKER".into()))
+    );
+    h.delete_value(&layers, &name).unwrap();
+}
+
+/// SB-L5, the link key (P2-11b): a link key planted at `AppCompatFlags\Layers` pointing
+/// elsewhere in `HKCU`, before the plan: the planner refuses it (a symbolic-link key on the
+/// way), nothing appears at the target. Needs `Layers` absent (a fresh Sandbox); otherwise
+/// it notes that and checks nothing.
+#[test]
+#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
+fn sandbox_sb_l5_link_key_at_layers() {
+    sandbox_guard();
+    let _p = Production::on();
+    let w = Sb::new("sb-l5-link");
+    let h = AppHive::real_user().unwrap_or_else(|e| panic!("{e}"));
+    let layers = layers_key();
+    let reg = w.sys.registry();
+    if reg.key_exists(&layers).unwrap_or_else(|e| panic!("{e}")) {
+        super::super::testfx::note("sandbox sb-l5-link: Layers exists, the link case is skipped");
+        return;
+    }
+    let target = hkcu(r"Software\RerunSandbox\LayersTarget");
+    h.key(&target).unwrap();
+    assert!(
+        h.link(&layers, &target).unwrap(),
+        "real HKCU makes link keys"
+    );
+    let before = w.snap(vec![target.clone()]);
+    let planned = w.try_plan(&production_layers());
+    let refused = match &planned {
+        Err(why) => why.contains("symbolic-link key"),
+        Ok(hash) => !matches!(w.with(|cx, _| apply(cx, hash)), Ok(Outcome::Applied(_))),
+    };
+    // The link goes first, whatever the result.
+    h.delete_key(&layers).unwrap();
+    assert!(
+        refused,
+        "compat_layer through a link key at Layers: {planned:?}"
+    );
+    let after = w.snap(vec![target.clone()]);
+    assert!(before == after, "{:#?}", before.diff(&after));
+    assert!(
+        reg.values(&target).unwrap().is_empty(),
+        "a value appeared at the link target"
+    );
+    h.delete_key(&target).unwrap();
+}

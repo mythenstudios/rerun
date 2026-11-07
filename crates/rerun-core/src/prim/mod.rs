@@ -8,8 +8,8 @@
 //! - [`registry_set`]: values below `HKCU\Software\<Vendor>\<Product>[\…]` (P2-10b), read
 //!   through [`PlanCtx::reg`].
 //! - [`compat_layer`]: compatibility-layer tokens of an executable of the game folder in
-//!   `HKCU\…\AppCompatFlags\Layers` (P2-11; no token is allowlisted until the Sandbox probes,
-//!   review S8).
+//!   `HKCU\…\AppCompatFlags\Layers` (P2-11; the token allowlist from the Sandbox probes,
+//!   P2-11b).
 //!
 //! - [`ini_set`]: keys of an existing INI file of the game folder (P2-12, ADR 0021): one
 //!   `IniValue` per file with its edits.

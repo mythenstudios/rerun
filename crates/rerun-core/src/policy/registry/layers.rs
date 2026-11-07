@@ -13,20 +13,49 @@
 //! - **Tokens** ([`TokenName`]): `[A-Z0-9_]`, 1 to 40 characters; the form only. Whether a
 //!   token may be added is [`allowed`]: exactly on the add allowlist [`LAYER_TOKENS`], never
 //!   an elevation token (`RUNAS…`, ADR 0018 S6), whatever the list says.
-//! - **Groups** ([`LAYER_GROUPS`], separate from the add allowlist, review N5): at most one
-//!   token of an exclusive group (operating-system mode, DPI, colour, resolution) per value,
-//!   compared folded (review S4), Rerun's and the value's together.
+//! - **Groups** ([`LAYER_GROUPS`], separate from the add allowlist, review N5): Rerun adds no
+//!   token of a group (operating-system mode, DPI, colour, resolution) that another added
+//!   token or a word of the value already holds, compared folded (review S4). A word not
+//!   listed has no group and excludes nothing.
 //! - **Revert** ([`unmerge`]): a word equal to one of Rerun's tokens only when folded, or one
 //!   of Rerun's tokens twice, is not Rerun's state: `Foreign`. A rest without a word other
-//!   than a prefix word ([`PREFIX_WORDS`]) deletes the value (review S2).
+//!   than a prefix word ([`PREFIX_WORDS`]) deletes the value (review S2). A value of nothing
+//!   but prefix words holds none of Rerun's tokens: `Untouched`, a revert leaves it (P2-11b,
+//!   user decision B4.2; the tab never writes a lone `~`, it deletes the value).
 //!
-//! **No token is allowlisted yet (review S8).** [`LAYER_TOKENS`] and [`LAYER_GROUPS`] stay
-//! empty, so the planner refuses every token, until the Windows Sandbox probes SB-L1 and SB-L3
-//! have shown how the compatibility tab spells each token and which prefix a value needs; the
-//! commit that fills them names a source for every token (`docs/05-sources-policy.md`,
-//! reference data). Tests use synthetic tokens (`ZZ_…`, `#[cfg(test)]`). [`PREFIX_NEW`] and
-//! [`PREFIX_WORDS`] are provisional for the same reason: they decide nothing while no token
-//! can be added.
+//! **Source (P2-11b, ADR 0018 amendment P2-11b, `docs/05-sources-policy.md` "Reference
+//! data").** Every word of [`LAYER_TOKENS`] and [`LAYER_GROUPS`] is spelled as Explorer's
+//! compatibility tab wrote it in the Windows Sandbox (SB-L1, build 26100, 2026-11-07; the raw
+//! values are the fixture `tests/fixtures/layers/sb-l1-2026-11-07.txt`, and a test binds
+//! every listed word to it). A token is addable only if SB-L6 also saw it launch without Win32
+//! 740 in a non-elevated session, on a 32-bit and a 64-bit image, with `__COMPAT_LAYER`
+//! holding it: the elevation rule below sees only names. [`LAYER_TOKENS`] is the one place
+//! the add allowlist lives; taking a token off never blocks a revert (R-L8).
+//!
+//! Never added, whatever the list says or a Topo asks:
+//! - `RUNAS…` (`RUNASADMIN`, `RUNASHIGHEST`, `RUNASINVOKER`): elevation tokens (ADR 0018 S6;
+//!   an elevated game loads the DLLs Rerun puts in a user-writable folder).
+//! - `REGISTERAPPRESTART`: Windows starts the program again by itself after a restart (rule 1:
+//!   nothing runs in the background, no autostart).
+//! - The operating-system modes (`WINXPSP3`, `WIN7RTM` and the ones not observed): `WINXPSP3`
+//!   makes a 32-bit image need elevation in a non-elevated session (SB-L3) and has no effect on
+//!   a 64-bit one; the others are not measured (P2-11b, user decision B5 a). They are in the
+//!   group table all the same, so a mode the user set is seen.
+//! - Anything SB-L1 did not observe (never invent, `docs/05-sources-policy.md`).
+//!
+//! The tab has three DPI options: Application `HIGHDPIAWARE`, System `DPIUNAWARE`, System
+//! (Enhanced) the pair `GDIDPISCALING DPIUNAWARE`. Only `HIGHDPIAWARE` is addable: the model
+//! is one word per token, so the pair cannot be added as one option, and a lone `DPIUNAWARE`
+//! of Rerun's would become half of the pair when the user picks "System (Enhanced)" in the
+//! tab (user decision B3 a). All three words are in the DPI group.
+//!
+//! The current rules ([`check`]) refuse an old value with a prefix character joined to a word
+//! (`~X`, `$X`) or a lone `~` or `$` after another word (P2-11b, B4.3): Windows applies `~X`
+//! like `X` (SB-L3), but it is another word for the duplicate and group checks. The grammar
+//! and the revert take such a value as any other.
+//!
+//! The logic is tested with synthetic tokens (`ZZ_…`, `#[cfg(test)]`), the production tables
+//! (`knob::production`) against the SB-L1 fixture.
 
 use std::fmt;
 
@@ -42,20 +71,80 @@ pub const MAX_ADD: usize = 8;
 pub const MAX_LAYERS_BYTES: usize = 1 << 10;
 const _: () = assert!(MAX_LAYERS_BYTES <= crate::plan::OLD_INLINE);
 
-/// The add allowlist: the tokens a `compat_layer` step may add. Empty until SB-L1 and SB-L3
-/// (module docs, review S8).
-pub const LAYER_TOKENS: &[&str] = &[];
+/// The add allowlist: the tokens a `compat_layer` step may add, in byte order, each with the
+/// compatibility tab's label and its SB-L1 dump (module docs). The one place the list lives:
+/// a token that SB-L6 or a later probe contradicts is taken off here.
+pub const LAYER_TOKENS: &[&str] = &[
+    // "Disable fullscreen optimizations"; SB-L1 dump 06-nofso, build 26100, 2026-11-07.
+    "DISABLEDXMAXIMIZEDWINDOWEDMODE",
+    // "Override high DPI scaling behavior", scaling performed by "Application"; SB-L1 dump
+    // 10-dpi-app, build 26100, 2026-11-07.
+    "HIGHDPIAWARE",
+];
 
-/// The group of every token that excludes others (review N5): a token not listed has no
-/// group. Empty until SB-L1 (module docs).
-pub const LAYER_GROUPS: &[(&str, Group)] = &[];
+/// The group of every observed word that excludes others (review N5), addable or not: a word
+/// not listed has no group. Each as SB-L1 saw it (build 26100, 2026-11-07, dump named).
+pub const LAYER_GROUPS: &[(&str, Group)] = &[
+    // Reduced colour mode 16-bit (04-color16) and 8-bit (12-combined).
+    ("16BITCOLOR", Group::Color),
+    ("256COLOR", Group::Color),
+    // Run in 640 x 480 (05-640x480), the only resolution the tab offers.
+    ("640X480", Group::Res),
+    // High DPI override: System (21-dpi-system), System (Enhanced) the pair `GDIDPISCALING
+    // DPIUNAWARE` (22-dpi-sysenh), Application (10-dpi-app).
+    ("DPIUNAWARE", Group::Dpi),
+    ("GDIDPISCALING", Group::Dpi),
+    ("HIGHDPIAWARE", Group::Dpi),
+    // Compatibility mode Windows 7 (03-win7) and Windows XP (Service Pack 3) (02-xpsp3).
+    // Incomplete: the other modes of the list are not observed (SB-L1b); none is addable.
+    ("WIN7RTM", Group::OsMode),
+    ("WINXPSP3", Group::OsMode),
+];
 
-/// Prefix words a value may begin with (ADR 0018 names `~` and `$`); a value of nothing else is
-/// empty. Provisional until SB-L1 (module docs).
-pub const PREFIX_WORDS: &[&str] = &["~", "$"];
+/// Prefix words a value may begin with: `~`, what the tab writes (SB-L1); a rest of nothing
+/// else is empty (review S2). `$` has no source and is an ordinary word (P2-11b, B4.1).
+pub const PREFIX_WORDS: &[&str] = &["~"];
 
-/// What a new value begins with, before the tokens. Provisional until SB-L3 (module docs).
+/// What a new value begins with, before the tokens: what the tab writes (SB-L1) and Windows
+/// applies (SB-L3).
 pub const PREFIX_NEW: &str = "~ ";
+
+/// The SB-L1 fixture (module docs): the raw values the compatibility tab wrote.
+#[cfg(test)]
+const SB_L1_FIXTURE: &str =
+    include_str!("../../../../../tests/fixtures/layers/sb-l1-2026-11-07.txt");
+
+/// The values of the SB-L1 fixture as (label, hive, data), in the fixture's order; the fixture
+/// is ours, so a malformed line is a test failure.
+#[cfg(test)]
+pub(crate) fn sb_l1_tab() -> Vec<(&'static str, &'static str, &'static str)> {
+    SB_L1_FIXTURE
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let mut it = l.splitn(3, ' ');
+            let (Some(label), Some(hive), Some(rest)) = (it.next(), it.next(), it.next()) else {
+                panic!("SB-L1 fixture: {l:?}");
+            };
+            let data = rest
+                .split_once("\" = \"")
+                .and_then(|(_, d)| d.strip_suffix('"'))
+                .unwrap_or_else(|| panic!("SB-L1 fixture: {l:?}"));
+            (label, hive, data)
+        })
+        .collect()
+}
+
+/// Words never on the add allowlist (module docs); a test holds [`LAYER_TOKENS`] against it.
+#[cfg(test)]
+pub(crate) const NEVER_ADD: &[&str] = &[
+    "RUNASADMIN",
+    "RUNASHIGHEST",
+    "RUNASINVOKER",
+    "REGISTERAPPRESTART",
+    "WINXPSP3",
+    "WIN7RTM",
+];
 
 /// Every token beginning with this is an elevation token and is never added (ADR 0018 S6).
 const ELEVATION: &str = "RUNAS";
@@ -71,15 +160,6 @@ pub enum Group {
     Color,
     /// A reduced resolution.
     Res,
-    /// A flag: no exclusion.
-    Flag,
-}
-
-impl Group {
-    /// At most one token of this group per value.
-    fn exclusive(self) -> bool {
-        !matches!(self, Self::Flag)
-    }
 }
 
 /// Synthetic tokens of the tests: no real token spelling is assumed (review S8).
@@ -100,7 +180,7 @@ pub(crate) const TEST_TOKENS: &[&str] = &[
 ];
 
 /// The groups of the synthetic tokens; `ZZ_OS_C` and `ZZ_DPI_B` stand for tokens of the
-/// compatibility tab that Rerun does not add.
+/// compatibility tab that Rerun does not add; the `ZZ_FLAG_…` tokens have no group.
 #[cfg(test)]
 pub(crate) const TEST_GROUPS: &[(&str, Group)] = &[
     ("ZZ_OS_A", Group::OsMode),
@@ -110,7 +190,6 @@ pub(crate) const TEST_GROUPS: &[(&str, Group)] = &[
     ("ZZ_DPI_B", Group::Dpi),
     ("ZZ_COLOR_A", Group::Color),
     ("ZZ_RES_A", Group::Res),
-    ("ZZ_FLAG_A", Group::Flag),
 ];
 
 #[cfg(test)]
@@ -128,7 +207,7 @@ pub(crate) mod knob {
         static FIRST_ONLY: Cell<bool> = const { Cell::new(false) };
     }
 
-    /// The production tables (empty) instead of the synthetic ones.
+    /// The production tables instead of the synthetic ones.
     pub(crate) fn production(on: bool) {
         PRODUCTION.with(|c| c.set(on));
     }
@@ -169,10 +248,12 @@ pub(crate) mod knob {
 fn tokens() -> Vec<&'static str> {
     #[cfg(test)]
     {
-        if knob::is_production() {
-            return LAYER_TOKENS.to_vec();
-        }
-        let mut t: Vec<&'static str> = TEST_TOKENS
+        let base = if knob::is_production() {
+            LAYER_TOKENS
+        } else {
+            TEST_TOKENS
+        };
+        let mut t: Vec<&'static str> = base
             .iter()
             .copied()
             .filter(|t| Some(*t) != knob::dropped())
@@ -400,12 +481,18 @@ pub(super) fn check(old: Option<&str>, add: &[TokenName]) -> Result<(), RegPolic
             .words()
             .to_vec(),
     };
+    if let Some(w) = joined_prefix(&old_words) {
+        return Err(denied(
+            format!("the Layers word {w:?}"),
+            "a prefix joined to a word or after a word is an unusual value; Rerun leaves it alone",
+        ));
+    }
     for t in add {
         let f = fold(t.as_str());
         if old_words.iter().any(|w| fold(w) == f) {
             return Err(denied(t.as_str(), "the token is already in the value"));
         }
-        if let Some(g) = group_of(t.as_str()).filter(|g| g.exclusive()) {
+        if let Some(g) = group_of(t.as_str()) {
             let other = add
                 .iter()
                 .map(TokenName::as_str)
@@ -424,6 +511,24 @@ pub(super) fn check(old: Option<&str>, add: &[TokenName]) -> Result<(), RegPolic
         return Err(denied("the new Layers value", "longer than 511 characters"));
     }
     Ok(())
+}
+
+/// The first word of `words` that is a prefix character (`~`, `$`) joined to a word, or a lone
+/// one after another word (P2-11b, B4.3; module docs). Lone ones at the start (`~`, `$ ~`)
+/// are fine.
+fn joined_prefix<'w>(words: &[&'w str]) -> Option<&'w str> {
+    let mut leading = true;
+    words.iter().copied().find(|w| {
+        let prefix = w.starts_with(['~', '$']);
+        if prefix && w.len() > 1 {
+            return true;
+        }
+        if prefix {
+            return !leading;
+        }
+        leading = false;
+        false
+    })
 }
 
 #[cfg(test)]

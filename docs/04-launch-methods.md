@@ -46,6 +46,10 @@ Apply and revert ask `users()` of every file a plan touches and of the game's **
 
 Launch option `"<path>\rerun-launch.exe" %command%`. Written to `localconfig.vdf` only while Steam is closed, previous value to the Journal. Otherwise: copy + instructions.
 
+## Compatibility layers and the start path (phase 3 condition)
+
+A compatibility layer (`compat_layer`, `AppCompatFlags\Layers`) applies only when Windows starts the program by exactly the path of the value name, the game's canonical path (SB-L2, ADR 0018 amendment P2-11b): a start through a junction, or through another spelling, gets no layer, silently. So `rerun-launch` and the IFEO launcher must start the game by that path as the plan names it: no `\\?\` prefix, no path taken from a handle, no junctioned library path. 8.3 names are not measured. The Sandbox probes (`scripts/sandbox-probe-layers.ps1`) can check a start form before phase 3 relies on it.
+
 ## IFEO details
 
 - Key: `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\<exe-name>`, value `Debugger`. Applies to **all** exes with this name → additionally set `UseFilter` + `FilterFullPath` so that only the game's path is affected.

@@ -8,6 +8,9 @@
 //! R-T6 a value another program changed, R-T8 a pure registry plan while a handle on the main
 //! executable is held, R-H1 the game folder renamed away and back.
 //!
+//! Compatibility layers (P2-11, P2-11b): R-L1 and R-L3 with synthetic tokens, R-L1-P with the
+//! production ones.
+//!
 //! INI ops (P2-12): R-I1 `file_install` and `ini_set` per encoding, R-I3 a file the game
 //! rewrote, R-I6 a swapped backup (the binding of head and backup).
 
@@ -531,6 +534,77 @@ fn r_l3_exec_compat_layer_drift_on_real_windows() {
             .unwrap(),
         Some(RegValue::String("~ X2".into()))
     );
+}
+
+/// R-L1-P on Windows (P2-11b): `compat_layer` with the production tokens on an app hive, once
+/// without `AppCompatFlags` and once below an old `~ RUNASINVOKER` (the foreign token of
+/// SB-L1): the value exactly as merged, `verify` all `After`, the revert closes, `HKCU\Software`
+/// identical, planned again the same hash.
+#[test]
+fn r_l1_p_exec_production_tokens_round_trip_on_real_windows() {
+    use crate::policy::registry::layers::{LAYER_TOKENS, knob};
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            knob::production(false);
+        }
+    }
+    let _off = Off;
+    knob::production(true);
+    let tail = LAYER_TOKENS.join(" ");
+    for (case, old) in [
+        ("exec-rl1p-new", None),
+        ("exec-rl1p-merge", Some("~ RUNASINVOKER")),
+    ] {
+        let Some(r) = setup_layers(case) else {
+            return;
+        };
+        let w = &r.w;
+        let layers = hkcu(crate::prim::layer_tests::LAYERS_KEY);
+        if let Some(o) = old {
+            r.h.hive.key(&layers).unwrap();
+            r.h.hive
+                .raw(
+                    &layers,
+                    &layer_name(w),
+                    reg_type::REG_SZ,
+                    &RegValue::String(o.into()).encode().unwrap().1,
+                )
+                .unwrap();
+        }
+        let before = w.snap_with(software());
+        let steps = [crate::prim::layer_tests::layer_step(
+            "game.exe",
+            LAYER_TOKENS,
+        )];
+        let h = w.plan_steps(&steps);
+        let t = match w.with(|cx, _| apply(cx, &h)) {
+            Ok(Outcome::Applied(t)) => t,
+            other => panic!("{case}: {other:?}"),
+        };
+        let want = old.map_or_else(|| format!("~ {tail}"), |o| format!("{o} {tail}"));
+        assert_eq!(
+            w.sys.registry().get(&layers, &layer_name(w)).unwrap(),
+            Some(RegValue::String(want)),
+            "{case}"
+        );
+        let v = w.with(|cx, _| verify(cx, &t)).unwrap();
+        assert!(
+            v.ops.iter().all(|(_, o)| *o == Observed::After),
+            "{case}: {v:?}"
+        );
+        let rep = w
+            .with(|cx, _| revert(cx, &t))
+            .unwrap_or_else(|e| panic!("{case}: {e}"));
+        assert_eq!(rep.closed, Some(Closing::Reverted), "{case}: {rep:?}");
+        let after = w.snap_with(software());
+        assert!(before == after, "{case}: {:#?}", before.diff(&after));
+        assert_eq!(
+            w.plan_steps(&steps),
+            h,
+            "{case}: planned again, the same hash"
+        );
+    }
 }
 
 /// [`setup`] with the INI file of the `ini_set` tests holding `text`.

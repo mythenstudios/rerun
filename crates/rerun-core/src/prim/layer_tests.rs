@@ -2,9 +2,9 @@
 //! a merge with foreign tokens, tokens present (omitted, all present: no op), a conflict of a
 //! group, a token in another case, unusual old values, the executable (missing, a folder, no
 //! `.exe`, a link on the way, restricted, the stored spelling), a game folder reached through
-//! a link (E3), two steps for one executable, every token refusal, the empty production
-//! allowlist (S8), a link or volatile key on the way, the step's wire form. Synthetic tokens
-//! only (review S8).
+//! a link (E3), two steps for one executable, every token refusal, a link or volatile key on
+//! the way, the step's wire form, with synthetic tokens; T9-L-P (P2-11b) the production tokens
+//! on every value of the SB-L1 fixture.
 
 use std::path::Path;
 
@@ -276,7 +276,7 @@ fn t9l_every_token_refusal() {
     ] {
         refused(&sys, layer_step("game.exe", tokens), want);
     }
-    // S8: the production allowlist is empty, so every token is refused.
+    // The production allowlist knows no synthetic token.
     let _r = Reset;
     knob::production(true);
     refused(
@@ -284,6 +284,73 @@ fn t9l_every_token_refusal() {
         layer_step("game.exe", &["ZZ_OS_A"]),
         "not on the allowlist",
     );
+}
+
+/// T9-L-P (P2-11b): the planner with the production tables on every value of the SB-L1 fixture
+/// as the old value: each token of the allowlist alone and all together, planned as a merge,
+/// left out when present, refused with a DPI setting of the tab. The never-list is refused,
+/// and so is an old value with a joined prefix (B4.3).
+#[test]
+fn t9l_p_the_production_tokens_on_every_tab_value() {
+    use crate::policy::registry::layers::{LAYER_TOKENS, sb_l1_tab};
+    let _r = Reset;
+    knob::production(true);
+    let dpi = ["DPIUNAWARE", "GDIDPISCALING", "HIGHDPIAWARE"];
+    for (label, _, old) in sb_l1_tab() {
+        let words: Vec<&str> = old.split(' ').collect();
+        let sys = with_value(RegValue::String(old.to_owned()));
+        let mut asks: Vec<Vec<&str>> = LAYER_TOKENS.iter().map(|t| vec![*t]).collect();
+        asks.push(LAYER_TOKENS.to_vec());
+        for ask in asks {
+            let missing: Vec<&str> = ask.iter().copied().filter(|t| !words.contains(t)).collect();
+            let conflict = missing
+                .iter()
+                .any(|t| dpi.contains(t) && words.iter().any(|w| dpi.contains(w)));
+            let r = plan_one(&sys, layer_step("game.exe", &ask));
+            if conflict {
+                let e = r.expect_err(label).to_string();
+                assert!(
+                    e.contains("remove it in the Compatibility tab"),
+                    "{label}: {e}"
+                );
+            } else if missing.is_empty() {
+                assert!(r.unwrap().ops.is_empty(), "{label} {ask:?}: no op");
+            } else {
+                let (_, o, add, new) = token_list(&r.unwrap());
+                assert!(ValueState::is(
+                    o.as_ref(),
+                    Some(&RegValue::String(old.to_owned()))
+                ));
+                assert_eq!(add, missing, "{label}");
+                assert_eq!(new, format!("{old} {}", missing.join(" ")), "{label}");
+            }
+        }
+    }
+    // A new value: the prefix of the tab and the tokens in byte order.
+    let sys = layer_builder().build().unwrap();
+    let p = plan_one(&sys, layer_step("game.exe", LAYER_TOKENS)).unwrap();
+    assert_eq!(token_list(&p).3, format!("~ {}", LAYER_TOKENS.join(" ")));
+    for never in [
+        "WINXPSP3",
+        "WIN7RTM",
+        "RUNASADMIN",
+        "RUNASINVOKER",
+        "REGISTERAPPRESTART",
+    ] {
+        refused(
+            &sys,
+            layer_step("game.exe", &[never]),
+            "not on the allowlist",
+        );
+    }
+    for old in ["~HIGHDPIAWARE", "~ RUNASINVOKER ~"] {
+        let sys = with_value(RegValue::String(old.to_owned()));
+        refused(
+            &sys,
+            layer_step("game.exe", LAYER_TOKENS),
+            "a prefix joined to a word",
+        );
+    }
 }
 
 #[test]

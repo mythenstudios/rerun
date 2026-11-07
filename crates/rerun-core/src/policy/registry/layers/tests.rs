@@ -1,6 +1,7 @@
 //! L (P2-11, pure): the grammar, the token form, the allowlist and groups, `merge` and
 //! `unmerge` exhaustively over a small alphabet, and the controls K-L1 and K-L4 through
-//! [`l1_check`]. Synthetic tokens only (review S8).
+//! [`l1_check`], all with synthetic tokens. L-P1 to L-P7 (P2-11b): the production tables
+//! against the SB-L1 fixture, with the control K-L5 through [`unobserved`].
 
 use super::super::{AllowedValue, RegPolicy, RegSlot};
 use super::{
@@ -89,10 +90,9 @@ fn l_the_allowlist_and_the_groups() {
     assert!(!allowed(&t("RUNASADMIN")));
     assert!(!allowed(&t("RUNASHIGHEST")));
     assert_eq!(group_of("zz_os_c"), Some(Group::OsMode), "folded (S4)");
-    assert_eq!(group_of("ZZ_FLAG_B"), None);
-    // S8: the production tables are empty, so nothing is addable.
+    assert_eq!(group_of("ZZ_FLAG_A"), None, "not listed: no group");
+    // The production tables know no synthetic token.
     knob::production(true);
-    assert!(super::LAYER_TOKENS.is_empty() && super::LAYER_GROUPS.is_empty());
     assert!(!allowed(&t("ZZ_OS_A")));
     assert!(check(None, &ts(&["ZZ_OS_A"])).is_err());
     knob::production(false);
@@ -238,7 +238,9 @@ pub(crate) fn l1_check() -> Vec<String> {
                     f.push(format!("L1 merge {old:?} + {tail:?}: {new:?}"));
                 }
                 // Nothing but prefix words left: deleted (S2), also when there was an old value.
-                let want = if fw.is_empty() { None } else { old.clone() };
+                let want = old
+                    .clone()
+                    .filter(|o| !o.split(' ').all(|w| super::PREFIX_WORDS.contains(&w)));
                 let got = unmerge(&new, &add);
                 if got != Unmerged::Rest(want.clone()) {
                     f.push(format!("L1 unmerge {new:?} - {tail:?}: {got:?}"));
@@ -276,7 +278,9 @@ fn l_unmerge_finds_foreign_and_untouched_values() {
         // S2: only prefix words left, also when there was an old value.
         ("~ ZZ_OS_A", Unmerged::Rest(None)),
         ("ZZ_OS_A ZZ_FLAG_A", Unmerged::Rest(None)),
-        ("~ $ ZZ_OS_A", Unmerged::Rest(None)),
+        // `$` is an ordinary word (P2-11b, B4.1): it stays.
+        ("~ $ ZZ_OS_A", Unmerged::Rest(Some("~ $".into()))),
+        ("$ ZZ_OS_A", Unmerged::Rest(Some("$".into()))),
         // None of ours left.
         ("~ X", Unmerged::Untouched),
         ("~", Unmerged::Untouched),
@@ -310,4 +314,259 @@ fn k_l1_unmerge_removing_only_the_first_token_breaks_l1() {
     knob::first_only(true);
     let f = l1_check();
     assert!(f.iter().any(|x| x.starts_with("L1 unmerge")), "{f:#?}");
+}
+
+// --- P2-11b: the production tables against the SB-L1 fixture ---------------------------------
+
+/// The words of `list` that no value the compatibility tab wrote in `tab` holds (the planted
+/// `01-foreign` does not count): what a list may not contain (L-P2; never invent,
+/// `docs/05-sources-policy.md`).
+pub(crate) fn unobserved(list: &[&str], tab: &[(&str, &str, &str)]) -> Vec<String> {
+    list.iter()
+        .filter(|w| {
+            !tab.iter()
+                .filter(|(label, _, _)| *label != "01-foreign")
+                .any(|(_, _, d)| d.split(' ').any(|x| x == **w))
+        })
+        .map(|w| (*w).to_owned())
+        .collect()
+}
+
+fn group_words() -> Vec<&'static str> {
+    super::LAYER_GROUPS.iter().map(|(w, _)| *w).collect()
+}
+
+/// L-P1: the add allowlist is in byte order, unique, of the token form, allowed, never an
+/// elevation token and nothing of the never-list; the group table is unique (folded).
+#[test]
+fn l_p1_the_production_lists_are_clean() {
+    let _r = Reset;
+    knob::production(true);
+    let list = super::LAYER_TOKENS;
+    assert!(!list.is_empty());
+    assert!(list.windows(2).all(|w| w[0] < w[1]), "byte order, unique");
+    for x in list {
+        assert!(allowed(&t(x)), "{x}");
+        assert!(!super::NEVER_ADD.contains(x), "{x}");
+        assert!(!x.starts_with(super::ELEVATION), "{x}");
+    }
+    for x in super::NEVER_ADD {
+        assert!(!allowed(&t(x)), "{x}");
+    }
+    let mut folded: Vec<String> = group_words()
+        .iter()
+        .map(|w| {
+            assert!(TokenName::parse(w).is_ok(), "{w}");
+            crate::fold::fold(w)
+        })
+        .collect();
+    let n = folded.len();
+    folded.sort();
+    folded.dedup();
+    assert_eq!(folded.len(), n, "the group table is unique");
+    // The groups of the observed options (B3 a: all three DPI words; the modes seen).
+    for (w, g) in [
+        ("HIGHDPIAWARE", Some(Group::Dpi)),
+        ("DPIUNAWARE", Some(Group::Dpi)),
+        ("GDIDPISCALING", Some(Group::Dpi)),
+        ("16BITCOLOR", Some(Group::Color)),
+        ("256COLOR", Some(Group::Color)),
+        ("640X480", Some(Group::Res)),
+        ("WINXPSP3", Some(Group::OsMode)),
+        ("WIN7RTM", Some(Group::OsMode)),
+        ("DISABLEDXMAXIMIZEDWINDOWEDMODE", None),
+        ("RUNASADMIN", None),
+    ] {
+        assert_eq!(group_of(w), g, "{w}");
+    }
+}
+
+/// L-P2: every word of both production tables is in a value the tab wrote (SB-L1). K-L5: a
+/// planted unobserved word is reported.
+#[test]
+fn l_p2_every_listed_word_was_observed() {
+    let tab = super::sb_l1_tab();
+    assert_eq!(tab.len(), 17);
+    let mut labels: Vec<&str> = tab.iter().map(|(l, _, _)| *l).collect();
+    labels.dedup();
+    assert_eq!(labels.len(), tab.len(), "labels unique");
+    assert!(tab.iter().all(|(_, h, _)| *h == "HKCU" || *h == "HKLM"));
+    assert_eq!(unobserved(super::LAYER_TOKENS, &tab), Vec::<String>::new());
+    assert_eq!(unobserved(&group_words(), &tab), Vec::<String>::new());
+    // K-L5: the check bites.
+    let mut planted = super::LAYER_TOKENS.to_vec();
+    planted.push("WIN8RTM");
+    assert_eq!(unobserved(&planted, &tab), ["WIN8RTM"]);
+    // A word only the planted value holds is not observed either.
+    let only_planted = [("01-foreign", "HKCU", "~ ZZ_PLANTED")];
+    assert_eq!(unobserved(&["ZZ_PLANTED"], &only_planted), ["ZZ_PLANTED"]);
+}
+
+/// L-P3: the strict grammar takes every value the tab wrote, each begins with `PREFIX_NEW`,
+/// and every word after it has the token form.
+#[test]
+fn l_p3_the_grammar_takes_every_tab_value() {
+    for (label, _, d) in super::sb_l1_tab() {
+        let l = parse(d).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(d.starts_with(PREFIX_NEW), "{label}");
+        assert!(super::PREFIX_WORDS.contains(&l.words()[0]), "{label}");
+        for w in &l.words()[1..] {
+            assert!(TokenName::parse(w).is_ok(), "{label}: {w}");
+        }
+    }
+}
+
+/// What `check` says to one token on one tab value (L-P4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Says {
+    Ok,
+    Already,
+    Group,
+}
+
+/// The tokens of the columns of [`L_P4`]: a token taken off the allowlist keeps its column,
+/// whose rows then all expect "not on the allowlist".
+const L_P4_COLS: [&str; 2] = ["DISABLEDXMAXIMIZEDWINDOWEDMODE", "HIGHDPIAWARE"];
+
+/// L-P4: every tab value of the fixture x every token, fixed.
+const L_P4: [(&str, [Says; 2]); 17] = [
+    ("01-foreign", [Says::Ok, Says::Ok]),
+    ("02-xpsp3", [Says::Ok, Says::Ok]),
+    ("03-win7", [Says::Ok, Says::Ok]),
+    ("04-color16", [Says::Ok, Says::Ok]),
+    ("05-640x480", [Says::Ok, Says::Ok]),
+    ("06-nofso", [Says::Already, Says::Ok]),
+    ("07-admin", [Says::Ok, Says::Ok]),
+    ("08-restart", [Says::Ok, Says::Ok]),
+    ("09-icc", [Says::Ok, Says::Ok]),
+    ("10-dpi-app", [Says::Ok, Says::Already]),
+    ("12-combined", [Says::Already, Says::Already]),
+    ("13-resave", [Says::Already, Says::Already]),
+    ("14-cleared", [Says::Ok, Says::Ok]),
+    ("15-allusers", [Says::Ok, Says::Ok]),
+    ("21-dpi-system", [Says::Ok, Says::Group]),
+    ("22-dpi-sysenh", [Says::Ok, Says::Group]),
+    ("23-xpsp3-plus", [Says::Ok, Says::Group]),
+];
+
+#[test]
+fn l_p4_the_conflicts_with_every_tab_value() {
+    let _r = Reset;
+    knob::production(true);
+    let tab = super::sb_l1_tab();
+    assert_eq!(
+        tab.iter().map(|(l, _, _)| *l).collect::<Vec<_>>(),
+        L_P4.iter().map(|(l, _)| *l).collect::<Vec<_>>(),
+        "a row for every tab value"
+    );
+    assert!(
+        super::LAYER_TOKENS.iter().all(|x| L_P4_COLS.contains(x)),
+        "a column for every token"
+    );
+    for ((label, _, d), (_, says)) in tab.iter().zip(L_P4) {
+        for (col, want) in L_P4_COLS.iter().zip(says) {
+            let got = check(Some(d), &ts(&[col]));
+            let has = |s: &str| got.as_ref().is_err_and(|e| e.to_string().contains(s));
+            let ok = match (super::LAYER_TOKENS.contains(col), want) {
+                (false, _) => has("not on the allowlist"),
+                (true, Says::Ok) => got.is_ok(),
+                (true, Says::Already) => has("already in the value"),
+                (true, Says::Group) => has("two tokens of one group"),
+            };
+            assert!(ok, "{label} + {col}: {got:?}, want {want:?}");
+        }
+    }
+    // All tokens together: on a new value and after the foreign token.
+    let all = ts(super::LAYER_TOKENS);
+    assert!(check(None, &all).is_ok());
+    assert!(check(Some("~ RUNASINVOKER"), &all).is_ok());
+}
+
+/// L-P5: `merge` in byte order, appended (B8 a: not the tab's order).
+#[test]
+fn l_p5_merge_is_pinned() {
+    let four = ts(&[
+        "256COLOR",
+        "640X480",
+        "DISABLEDXMAXIMIZEDWINDOWEDMODE",
+        "HIGHDPIAWARE",
+    ]);
+    assert_eq!(
+        merge(None, &four),
+        "~ 256COLOR 640X480 DISABLEDXMAXIMIZEDWINDOWEDMODE HIGHDPIAWARE"
+    );
+    assert_eq!(
+        merge(Some("~ RUNASINVOKER"), &ts(&["HIGHDPIAWARE"])),
+        "~ RUNASINVOKER HIGHDPIAWARE"
+    );
+}
+
+/// L-P6: `unmerge` after the tab reordered a value (derived from the order SB-L1 saw in
+/// 12-combined, not observed on a value of Rerun's: SB-L1b): the old value exactly.
+#[test]
+fn l_p6_unmerge_after_the_tab_reordered() {
+    let four = ts(&[
+        "256COLOR",
+        "640X480",
+        "DISABLEDXMAXIMIZEDWINDOWEDMODE",
+        "HIGHDPIAWARE",
+    ]);
+    assert_eq!(
+        unmerge(
+            "~ DISABLEDXMAXIMIZEDWINDOWEDMODE 640X480 HIGHDPIAWARE 256COLOR",
+            &four
+        ),
+        Unmerged::Rest(None)
+    );
+    let h = ts(&["HIGHDPIAWARE"]);
+    assert_eq!(
+        unmerge("~ HIGHDPIAWARE RUNASINVOKER", &h),
+        Unmerged::Rest(Some("~ RUNASINVOKER".into()))
+    );
+    assert_eq!(
+        unmerge("~ RUNASADMIN HIGHDPIAWARE RUNASINVOKER", &h),
+        Unmerged::Rest(Some("~ RUNASADMIN RUNASINVOKER".into()))
+    );
+}
+
+/// L-P7: the prefixes. A lone `~` holds none of ours (B4.2 as decided: left); `$` is an
+/// ordinary word (B4.1); a prefix joined to a word or after a word is refused by `check`
+/// only (B4.3), at the start it is fine.
+#[test]
+fn l_p7_prefixes() {
+    let _r = Reset;
+    knob::production(true);
+    let ours = ts(&["DISABLEDXMAXIMIZEDWINDOWEDMODE", "HIGHDPIAWARE"]);
+    assert_eq!(super::PREFIX_WORDS, ["~"]);
+    assert_eq!(unmerge("~", &ours), Unmerged::Untouched);
+    assert_eq!(unmerge("$", &ours), Unmerged::Untouched);
+    assert_eq!(
+        unmerge("$ HIGHDPIAWARE", &ours),
+        Unmerged::Rest(Some("$".into()))
+    );
+    let h = ts(&["HIGHDPIAWARE"]);
+    let d = ts(&["DISABLEDXMAXIMIZEDWINDOWEDMODE"]);
+    for old in [
+        "~HIGHDPIAWARE",
+        "~ ~HIGHDPIAWARE",
+        "$HIGHDPIAWARE",
+        "~ X $Y",
+        "WIN7RTM ~",
+        "~ WIN7RTM $",
+        "~~",
+    ] {
+        for add in [&h, &d] {
+            let e = check(Some(old), add).expect_err(old).to_string();
+            assert!(e.contains("a prefix joined to a word"), "{old}: {e}");
+        }
+    }
+    for old in ["~", "$", "$ ~", "~ $ RUNASADMIN", "$ RUNASADMIN", "X~ Y$"] {
+        assert!(check(Some(old), &h).is_ok(), "{old}");
+    }
+    // The grammar and the revert take such a value as any other.
+    assert!(parse("WIN7RTM ~").is_ok());
+    assert_eq!(
+        unmerge("~HIGHDPIAWARE HIGHDPIAWARE", &h),
+        Unmerged::Rest(Some("~HIGHDPIAWARE".into()))
+    );
 }
