@@ -269,6 +269,47 @@ impl<'a> Journal<'a> {
             Some(d) => read::load(&*d, id, v, &self.lim, self.app.path()),
         }
     }
+
+    /// The backup `op-NNNN.bin` of transaction `id` read whole, without the lock (`verify`, the
+    /// binding of a recorded INI head, P2-12): at most `max` and the digest's length, checked
+    /// against `digest` (else `BackupMismatch`); the bytes returned are the bytes checked.
+    pub(crate) fn backup_bytes(
+        &self,
+        id: &TxnId,
+        op: u16,
+        digest: &Digest,
+        max: u64,
+    ) -> Result<Vec<u8>, JournalError> {
+        if digest.len > max {
+            return Err(JournalError::TooLarge {
+                what: "an old state",
+                limit: max,
+            });
+        }
+        let j = self
+            .app
+            .sub(AppSub::Journal)?
+            .ok_or(JournalError::NotFound(*id))?;
+        let rel = id.rel();
+        let d = j.open_dir(&rel).map_err(|e| match e.kind {
+            SysErrorKind::NotFound => JournalError::NotFound(*id),
+            SysErrorKind::ReparsePoint => reparse(self.app.path(), &rel),
+            _ => JournalError::Sys(e),
+        })?;
+        let bytes = match d.read_limited(&names::backup_name(op), digest.len) {
+            Ok(b) => b,
+            Err(e) if matches!(e.kind, SysErrorKind::TooLarge | SysErrorKind::NotFound) => {
+                return Err(JournalError::BackupMismatch(op));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let sha: [u8; 32] =
+            sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(&bytes)).into();
+        if sha != digest.sha256 || u64::try_from(bytes.len()).ok() != Some(digest.len) {
+            return Err(JournalError::BackupMismatch(op));
+        }
+        Ok(bytes)
+    }
 }
 
 /// `RootError::Reparse` for `journal\<rel>` below `app`.

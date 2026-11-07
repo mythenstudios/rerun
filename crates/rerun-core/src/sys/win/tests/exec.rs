@@ -7,6 +7,9 @@
 //! ([`HiveRoot`], `HKCU` a `KEY_READ` handle; never the real `HKCU`): R-T1 a mixed round trip,
 //! R-T6 a value another program changed, R-T8 a pure registry plan while a handle on the main
 //! executable is held, R-H1 the game folder renamed away and back.
+//!
+//! INI ops (P2-12): R-I1 `file_install` and `ini_set` per encoding, R-I3 a file the game
+//! rewrote, R-I6 a swapped backup (the binding of head and backup).
 
 use std::path::{Path, PathBuf};
 
@@ -528,4 +531,134 @@ fn r_l3_exec_compat_layer_drift_on_real_windows() {
             .unwrap(),
         Some(RegValue::String("~ X2".into()))
     );
+}
+
+/// [`setup`] with the INI file of the `ini_set` tests holding `text`.
+fn setup_ini(case: &str, text: &[u8]) -> Option<Win> {
+    let w = setup(case)?;
+    w.root
+        .fx()
+        .file(&w.game.join(crate::prim::ini_tests::INI), text)
+        .unwrap();
+    Some(w)
+}
+
+/// R-I1 on Windows (P2-12): `file_install` and `ini_set` in one plan, per encoding (ANSI with
+/// CRLF, UTF-8 with BOM and LF, mixed line endings): the content exactly as edited, `verify`
+/// all `After`, the revert closes, the game folder identical, planned again the same hash. The
+/// real replace sequence of NTFS writes the INI file.
+#[test]
+fn r_i1_exec_ini_set_round_trip_on_real_windows() {
+    use crate::exec::ini_tests::{edits3, encodings};
+    for (i, (what, text)) in encodings().into_iter().enumerate() {
+        let Some(w) = setup_ini(&format!("exec-ri1-{i}"), &text) else {
+            return;
+        };
+        let before = w.snap();
+        let steps = [
+            Step::FileInstall(t1_spec()),
+            crate::prim::ini_tests::three(),
+        ];
+        let h = w.plan_steps(&steps);
+        let t = match w.with(|cx, _| apply(cx, &h)) {
+            Ok(Outcome::Applied(t)) => t,
+            other => panic!("{what}: {other:?}"),
+        };
+        let ini = w.game.join(crate::prim::ini_tests::INI);
+        assert_eq!(
+            read(&ini),
+            crate::policy::ini::edit(&text, &edits3()).unwrap(),
+            "{what}"
+        );
+        let v = w.with(|cx, _| verify(cx, &t)).unwrap();
+        assert!(
+            v.ops.iter().all(|(_, o)| *o == Observed::After),
+            "{what}: {v:?}"
+        );
+        let rep = w
+            .with(|cx, _| revert(cx, &t))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(rep.closed, Some(Closing::Reverted), "{what}: {rep:?}");
+        let after = w.snap();
+        assert!(before == after, "{what}: {:#?}", before.diff(&after));
+        assert_eq!(
+            w.plan_steps(&steps),
+            h,
+            "{what}: planned again, the same hash"
+        );
+    }
+}
+
+/// R-I3 on Windows: the game rewrites the file (a foreign key and one of Rerun's keys changed):
+/// the revert is the semantic rewrite through the real replace sequence; the changed key and
+/// everything else stay, Rerun's other keys go back exactly.
+#[test]
+fn r_i3_exec_ini_set_drift_on_real_windows() {
+    use crate::exec::ini_tests::APPLIED;
+    use crate::prim::ini_tests::{INI, INI_TEXT, three};
+    let Some(w) = setup_ini("exec-ri3", INI_TEXT) else {
+        return;
+    };
+    let h = w.plan_steps(&[three()]);
+    let t = match w.with(|cx, _| apply(cx, &h)) {
+        Ok(Outcome::Applied(t)) => t,
+        other => panic!("{other:?}"),
+    };
+    let ini = w.game.join(INI);
+    assert_eq!(read(&ini), APPLIED.as_bytes());
+    let drift = APPLIED
+        .replace("Volume=5", "Volume=9")
+        .replace("Width=1920", "Width=1600");
+    std::fs::write(&ini, drift.as_bytes()).unwrap();
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    assert!(
+        rep.ops.iter().all(|o| o.observed == Observed::Drifted),
+        "{rep:?}"
+    );
+    assert_eq!(
+        String::from_utf8(read(&ini)).unwrap(),
+        String::from_utf8_lossy(INI_TEXT)
+            .replace("Volume=5", "Volume=9")
+            .replace("Width=1280", "Width=1600")
+    );
+}
+
+/// R-I6 on Windows: a backup swapped for another content of the same length breaks the binding
+/// of head and backup: the revert fails with `BackupMismatch` and writes nothing.
+#[test]
+fn r_i6_exec_ini_set_swapped_backup_on_real_windows() {
+    use crate::exec::ini_tests::APPLIED;
+    use crate::prim::ini_tests::{INI, INI_TEXT, three};
+    let Some(w) = setup_ini("exec-ri6", INI_TEXT) else {
+        return;
+    };
+    let h = w.plan_steps(&[three()]);
+    let t = match w.with(|cx, _| apply(cx, &h)) {
+        Ok(Outcome::Applied(t)) => t,
+        other => panic!("{other:?}"),
+    };
+    let ini = w.game.join(INI);
+    let drift = APPLIED.replace("Volume=5", "Volume=9");
+    std::fs::write(&ini, drift.as_bytes()).unwrap();
+    let app = w.with(|cx, _| cx.app.path().to_string());
+    let bin = PathBuf::from(format!(r"{app}\journal\{t}\op-0000.bin"));
+    let swapped = String::from_utf8_lossy(INI_TEXT).replace("1280", "1281");
+    std::fs::write(&bin, swapped.as_bytes()).unwrap();
+    let before = w.snap();
+    let r = w.with(|cx, _| revert(cx, &t));
+    assert!(
+        matches!(
+            &r,
+            Err(crate::exec::ExecError::Journal(
+                crate::journal::JournalError::BackupMismatch(0)
+            ))
+        ),
+        "{r:?}"
+    );
+    let after = w.snap();
+    assert!(before == after, "{:#?}", before.diff(&after));
+    assert_eq!(read(&ini), drift.as_bytes());
 }

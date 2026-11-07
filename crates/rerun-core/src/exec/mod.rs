@@ -38,8 +38,16 @@
 //! is flushed before `Applied` (after the game folders) and before the `RevertDone` of every
 //! registry op. Registry ops need no root: they never halt a revert, and `plan::check` puts them
 //! after every file op, so a halt comes after every registry op is reverted (6b-d).
+//!
+//! INI ops (P2-12): an `IniValue` is a file op (its target, flushes, halts and stacking are a
+//! file's), but apply, observe and the record check go to `ini` (`policy::ini` edits the bytes;
+//! the revert of a file the game rewrote is a semantic rewrite with `from`/`to` in its
+//! `RevertIntent`). Before a revert and `verify`, a recorded head is bound to its backups
+//! (`ini::binds`: `Blocked` otherwise). `verify` and the report carry the state of each of
+//! Rerun's keys ([`Detail`]).
 
 mod file;
+mod ini;
 mod reg;
 mod roots;
 mod stack;
@@ -51,11 +59,12 @@ use file::Mode;
 use crate::detect::steam::AppState;
 use crate::escape::Shown;
 use crate::journal::{
-    Closing, InstanceTag, Journal, JournalError, Observed, OpLog, Reverting, TxnId, TxnState,
-    TxnWriter,
+    Closing, InstanceTag, Journal, JournalError, Observed, OpLog, Reverting, Semantic, TxnId,
+    TxnState, TxnWriter,
 };
 use crate::path::RelPath;
 use crate::plan::{self, Object, Op, Plan, PlanError, PlanHash, Target};
+use crate::policy::ini::{IniName, KeyState};
 use crate::policy::registry::{RegPolicy, RegWriter};
 use crate::policy::root::{AppDir, ForbiddenRoots, RootError};
 use crate::sys::fs::TmpName;
@@ -338,6 +347,36 @@ pub struct OpReport {
     pub left: Vec<RelPath>,
     /// Where the backup of a foreign op stays (`journal\<txn>\op-NNNN.bin` below `AppDir`).
     pub backup: Option<String>,
+    /// What the op observed beyond its state (an `IniValue`: its keys).
+    pub detail: Option<Detail>,
+}
+
+/// What an op observed beyond its [`Observed`] state, for `verify` and the report (P2-12; review
+/// nit: per op, not a field per op kind).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Detail {
+    /// An `IniValue`: the state of each of Rerun's keys, in the op's order (user decision E1 b:
+    /// a key someone changed stays and is named); and, for an op left `Foreign` next to a `.old`
+    /// that holds the file as it was before a step of Rerun, that file (review S6: the user's
+    /// previous INI file, kept and named, never deleted).
+    Ini {
+        /// The keys.
+        keys: Vec<IniKey>,
+        /// The `.rerun-….tmp.old` holding the previous file, in the INI file's folder.
+        previous: Option<RelPath>,
+    },
+}
+
+/// One of Rerun's keys in an INI file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IniKey {
+    /// The section.
+    pub section: IniName,
+    /// The key.
+    pub key: IniName,
+    /// Its state.
+    pub state: KeyState,
 }
 
 /// Where a revert stopped (6b-d): at file op `op`, whose root `root` cannot run file ops now
@@ -378,6 +417,8 @@ pub struct Verified {
     pub ops: Vec<(u16, Observed)>,
     /// Where a revert would halt now.
     pub halted: Option<Halt>,
+    /// What the observed ops saw beyond their state, by op index.
+    pub details: BTreeMap<u16, Detail>,
 }
 
 #[cfg(test)]
@@ -522,6 +563,22 @@ impl Seen {
             Self::Reg(_) => false,
         }
     }
+
+    /// A semantic rewrite follows its actions (`IniValue`).
+    fn rewrite(&self) -> Option<Semantic> {
+        match self {
+            Self::File(s) => s.rewrite,
+            Self::Reg(_) => None,
+        }
+    }
+
+    /// What it observed beyond its state.
+    fn detail(&self) -> Option<Detail> {
+        match self {
+            Self::File(s) => s.detail.clone(),
+            Self::Reg(_) => None,
+        }
+    }
 }
 
 /// What the act of a revert left behind.
@@ -602,6 +659,9 @@ fn apply_op(
     hints: &mut BTreeMap<u16, Hint>,
 ) -> Result<(), ExecError> {
     match op.target() {
+        Target::File { .. } if matches!(op, Op::IniValue { .. }) => {
+            ini::apply_op(w, &mut t.dirs, k, op, hints)
+        }
         Target::File { .. } => file::apply_op(cx, w, &mut t.dirs, k, op, hints),
         Target::Key { .. } | Target::Value { .. } => {
             t.hives.insert(Hive::CurrentUser);
@@ -627,6 +687,9 @@ fn observe(
     later: &BTreeMap<u16, Seen>,
 ) -> Result<Seen, ExecError> {
     match op.target() {
+        Target::File { .. } if matches!(op, Op::IniValue { .. }) => {
+            ini::observe(&mut t.dirs, k, op, log, hint).map(Seen::File)
+        }
         Target::File { .. } => {
             file::observe(plan, &mut t.dirs, k, op, log, mode, hint, later).map(Seen::File)
         }
@@ -662,6 +725,7 @@ fn verify_ops(
 ) -> Result<Verified, ExecError> {
     let mut seen = BTreeMap::new();
     let mut out = BTreeMap::new();
+    let mut details = BTreeMap::new();
     let mut halted = None;
     for (k, log) in ops.iter().rev() {
         let op = op_of(plan, *k)?;
@@ -683,11 +747,15 @@ fn verify_ops(
         }
         let s = observe(plan, t, *k, op, log, Mode::Verify, None, &seen)?;
         out.insert(*k, s.observed());
+        if let Some(d) = s.detail() {
+            details.insert(*k, d);
+        }
         seen.insert(*k, s);
     }
     Ok(Verified {
         ops: out.into_iter().collect(),
         halted,
+        details,
     })
 }
 
@@ -713,6 +781,9 @@ fn records_fit(plan: &Plan, ops: &BTreeMap<u16, OpLog>) -> bool {
         .all(|(k, log)| match plan.ops.get(usize::from(*k)) {
             None => false,
             Some(op) => match op.target() {
+                Target::File { .. } if matches!(op, Op::IniValue { .. }) => {
+                    ini::records_fit(op, log)
+                }
                 Target::File { .. } => file::records_fit(op, log),
                 Target::Key { .. } | Target::Value { .. } => reg::records_fit(op, log),
             },
@@ -890,8 +961,11 @@ fn revert_loop<W: Reverting>(
         let none = BTreeMap::new();
         let seen = observe(plan, t, k, op, &log, mode, hints.get(&k).copied(), &none)?;
         let observed = seen.observed();
-        let y = seen.restore().then(|| w.tmp());
-        w.revert_intent(k, y.clone(), None)?;
+        let sem = seen.rewrite();
+        let y = (seen.restore() || sem.is_some()).then(|| w.tmp());
+        // P2-12: a rewrite records where it starts and ends, before its first change (K-I1
+        // switches that off).
+        w.revert_intent(k, y.clone(), sem.filter(|_| !ini::unrecorded()))?;
         let done = act(w, t, k, op, &seen, y)?;
         // Always, also when the act changed nothing (`Touched::flush_for`).
         t.flush_for(k, op.target())?;
@@ -904,6 +978,7 @@ fn revert_loop<W: Reverting>(
                 let p = format!(r"{}\journal\{}\op-{k:04}.bin", cx.app.path(), w.id());
                 crate::escape::path(&p).to_string()
             }),
+            detail: seen.detail(),
         });
     }
     Ok((reports, None))
@@ -932,6 +1007,11 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     let mut w = lock.resume(t)?;
     let plan = decode_head(w.head()).map_err(|_| Refusal::Blocked { txn: *t })?;
     if !records_fit(&plan, w.ops()) {
+        return Err(Refusal::Blocked { txn: *t }.into());
+    }
+    // P2-12: a recorded `IniValue` edits its backup to exactly its new content.
+    let before = |k: u16, _: &crate::journal::Digest, max: u64| w.before_bytes(k, max);
+    if !ini::binds(&plan, w.ops(), &before)? {
         return Err(Refusal::Blocked { txn: *t }.into());
     }
     let objects = Object::of(&plan).map_err(|_| Refusal::Blocked { txn: *t })?;
@@ -986,6 +1066,10 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     if !records_fit(&plan, &v.ops) {
         return Err(blocked());
     }
+    let before = |k: u16, d: &crate::journal::Digest, max: u64| j.backup_bytes(t, k, d, max);
+    if !ini::binds(&plan, &v.ops, &before)? {
+        return Err(blocked());
+    }
     let stores = roots::open_stores(cx, &plan);
     let roots = roots::Roots::each(cx, &plan, &stores)?;
     let mut touched = Touched::new(cx.sys, &roots);
@@ -1034,6 +1118,8 @@ pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
 mod crash_tests;
 #[cfg(test)]
 mod halt_tests;
+#[cfg(test)]
+pub(crate) mod ini_tests;
 #[cfg(test)]
 mod layer_crash_tests;
 #[cfg(test)]

@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 
 use super::{Acted, ExecCtx, ExecError, Hint, roots};
 use crate::fold::fold;
-use crate::journal::{Before, BeforeArg, Digest, Observed, OpLog, Reverting, TxnWriter};
+use crate::journal::{Before, BeforeArg, Digest, Observed, OpLog, Reverting, Semantic, TxnWriter};
 use crate::path::RelPath;
 use crate::plan::{ContentRef, Op, Plan, Target};
 use crate::policy::root::AppSub;
@@ -320,13 +320,13 @@ impl FileSeen {
     }
 
     /// A file stored in another spelling than the one asked for.
-    fn respelled(&self) -> bool {
+    pub(super) fn respelled(&self) -> bool {
         matches!(self, Self::File { exact: false, .. })
     }
 }
 
 /// Observes the file `name` of `parent` (absent if the parent is missing) on a guard.
-fn see_file(parent: Option<&dyn DirWrite>, name: &RelPath) -> SysResult<FileSeen> {
+pub(super) fn see_file(parent: Option<&dyn DirWrite>, name: &RelPath) -> SysResult<FileSeen> {
     let Some(d) = parent else {
         return Ok(FileSeen::Absent);
     };
@@ -361,7 +361,7 @@ fn see_file(parent: Option<&dyn DirWrite>, name: &RelPath) -> SysResult<FileSeen
     }
 }
 
-fn exists(parent: Option<&dyn DirWrite>, name: &RelPath) -> SysResult<bool> {
+pub(super) fn exists(parent: Option<&dyn DirWrite>, name: &RelPath) -> SysResult<bool> {
     match parent {
         None => Ok(false),
         Some(d) => Ok(d.metadata(name)?.is_some()),
@@ -431,16 +431,23 @@ pub(super) struct Seen {
     pub(super) observed: Observed,
     /// A restore from the backup follows the actions (a `RevertIntent` with a temp name).
     pub(super) restore: bool,
-    actions: Vec<Action>,
+    /// A semantic rewrite follows the actions (`IniValue`, P2-12): the content observed and the
+    /// content written, recorded in the `RevertIntent` with a temp name.
+    pub(super) rewrite: Option<Semantic>,
+    /// What a revert observed beyond the state (`IniValue`: its keys).
+    pub(super) detail: Option<super::Detail>,
+    pub(super) actions: Vec<Action>,
     /// Temp names that are not Rerun's any more (left and reported).
-    left: Vec<RelPath>,
+    pub(super) left: Vec<RelPath>,
 }
 
 impl Seen {
-    fn new(observed: Observed) -> Self {
+    pub(super) fn new(observed: Observed) -> Self {
         Self {
             observed,
             restore: false,
+            rewrite: None,
+            detail: None,
             actions: Vec::new(),
             left: Vec::new(),
         }
@@ -633,7 +640,7 @@ pub(super) fn observe(
 }
 
 /// K1: what an observation would be if it trusted the records (`Done` means `After`).
-fn trusted(op: &Op, log: &OpLog) -> Seen {
+pub(super) fn trusted(op: &Op, log: &OpLog) -> Seen {
     let Some(done) = log.done else {
         return Seen::new(Observed::Before);
     };
@@ -644,8 +651,8 @@ fn trusted(op: &Op, log: &OpLog) -> Seen {
             None => Seen::new(Observed::Foreign),
         },
         Op::CreateFile { content, .. } => s.act(Action::DeleteTarget(*content.sha256())),
-        Op::ReplaceFile { .. } => Seen { restore: true, ..s },
-        Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } | Op::IniValue { .. } => {
+        Op::ReplaceFile { .. } | Op::IniValue { .. } => Seen { restore: true, ..s },
+        Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => {
             Seen::new(Observed::Foreign)
         }
     }
@@ -708,6 +715,10 @@ pub(super) struct Settled {
     pub(super) seq: Option<usize>,
     /// Where it stands.
     pub(super) stood: Stood,
+    /// Its temp name exists.
+    pub(super) tmp_exists: bool,
+    /// Its `.old` compared with its start state.
+    pub(super) old: Is,
     /// The actions, in order: a rename back, its temp name deleted, its `.old` and the `.old`
     /// of every earlier sequence holding its known start state deleted (cleanup).
     pub(super) actions: Vec<Action>,
@@ -808,6 +819,8 @@ pub(super) fn phases(
     let mut out = Settled {
         seq,
         stood: Stood::Other,
+        tmp_exists,
+        old,
         actions: Vec::new(),
         left: Vec::new(),
     };
@@ -915,15 +928,15 @@ fn replace_seen(
         (None, Stood::End) | (Some(_), Stood::Start) => (Observed::After, true),
     };
     Ok(Seen {
-        observed,
         restore,
         actions: s.actions,
         left: s.left,
+        ..Seen::new(observed)
     })
 }
 
 /// Carries out one action of a revert.
-fn run_action(
+pub(super) fn run_action(
     dirs: &mut Dirs<'_>,
     root: u16,
     path: &RelPath,
@@ -1004,17 +1017,27 @@ pub(super) fn act<W: Reverting>(
         left: seen.left.clone(),
     };
     // S1 (review): with a restore, the `.old` holding `h0` goes only after the restore
-    // succeeded; a damaged backup must not cost the last copy of the old content.
-    let deferred = |a: &&Action| seen.restore && matches!(a, Action::DeleteOld(..));
+    // succeeded; a damaged backup must not cost the last copy of the old content. The same
+    // for a rewrite (P2-12): every `.old` goes once it succeeded.
+    let writes = seen.restore || seen.rewrite.is_some();
+    let deferred = |a: &&Action| writes && matches!(a, Action::DeleteOld(..));
     for a in seen.actions.iter().filter(|a| !deferred(a)) {
         run_action(dirs, root, path, a, &mut done, &e)?;
     }
+    if let Some(sem) = &seen.rewrite {
+        super::ini::rewrite(dirs, k, op, sem, y.clone(), &mut done)?;
+    }
     if seen.restore {
-        let Op::ReplaceFile { old, content, .. } = op else {
-            return Err(e(SysError::new(
-                SysErrorKind::Other,
-                "a restore of no replace",
-            )));
+        // The old R/H/S and the new content expected at the target.
+        let (old_attrs, expected) = match op {
+            Op::ReplaceFile { old, content, .. } => (old.attrs, *content.sha256()),
+            Op::IniValue { old, new, .. } => (old.attrs, new.sha256),
+            _ => {
+                return Err(e(SysError::new(
+                    SysErrorKind::Other,
+                    "a restore of no replace",
+                )));
+            }
         };
         let b = w
             .ops()
@@ -1048,7 +1071,7 @@ pub(super) fn act<W: Reverting>(
         let attrs = if super::restoring_without_attrs() {
             Attrs::default()
         } else {
-            old.attrs
+            old_attrs
         };
         let mut src = w.backup_reader(k)?;
         // The backup's hash and length are the expected ones: what is written is checked
@@ -1059,13 +1082,13 @@ pub(super) fn act<W: Reverting>(
             sha256: b.sha256,
             max_len: b.len,
         };
-        let r = g.replace(content.sha256(), &mut src, &new).map_err(&e)?;
+        let r = g.replace(&expected, &mut src, &new).map_err(&e)?;
         drop(src);
         if let Some(t) = r.old_left {
             // Step 8 failed: one more try on a fresh guard (expected `h1`); still `Busy` (the
             // file is mapped) leaves it as a pending cleanup the report names.
             let again = parent.guard(&t.old()).and_then(|mut g| match g.sha256() {
-                Ok(h) if h == *content.sha256() => g.delete(&h),
+                Ok(h) if h == expected => g.delete(&h),
                 Ok(_) => Err(SysError::new(SysErrorKind::Mismatch, t.as_str())),
                 Err(x) => Err(x),
             });

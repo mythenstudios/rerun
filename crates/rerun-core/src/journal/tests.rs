@@ -1398,6 +1398,22 @@ impl RecordEdit {
 /// Appends a `RevertIntent` of `op` with `from` and `to` (a semantic revert, P2-11) as the
 /// next record of the transaction folder `dir`, consistent with its head.
 pub(crate) fn append_semantic_revert_intent(fx: &crate::sys::fake::FakeFs, dir: &str, op: u16) {
+    let d = super::Digest {
+        sha256: [1; 32],
+        len: 1,
+    };
+    append_revert_intent(fx, dir, op, None, Some((d, d)));
+}
+
+/// Appends a `RevertIntent` of `op` with `tmp` and `sem` (`from`, `to`) as the next record (a
+/// state an interrupted revert leaves, or a forged one).
+pub(crate) fn append_revert_intent(
+    fx: &crate::sys::fake::FakeFs,
+    dir: &str,
+    op: u16,
+    tmp: Option<crate::sys::fs::TmpName>,
+    sem: Option<(super::Digest, super::Digest)>,
+) {
     let read = |name: &str| -> Option<Vec<u8>> {
         #[expect(clippy::disallowed_methods, reason = "test: read a fixture file")]
         let d = fx.open_dir(Path::new(dir)).ok()?;
@@ -1410,15 +1426,11 @@ pub(crate) fn append_semantic_revert_intent(fx: &crate::sys::fake::FakeFs, dir: 
     while read(&format!("{n:04}.json")).is_some() {
         n += 1;
     }
-    let d = super::Digest {
-        sha256: [1; 32],
-        len: 1,
-    };
     let rec = Record::RevertIntent {
         op,
-        tmp: None,
-        from: Some(d),
-        to: Some(d),
+        tmp,
+        from: sem.map(|s| s.0),
+        to: sem.map(|s| s.1),
     };
     fx.put_file(
         &Path::new(dir).join(format!("{n:04}.json")),
