@@ -49,7 +49,7 @@ pub enum Step { FileInstall(FileInstallSpec), RegistrySet(RegistrySetSpec),
 pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError>; // GameDir, AppDir, RegPolicy; reads only
 ```
 
-Phase 2: `file_install` (local package files under `<AppDir>\packages`; `prim::file_install`, done in P2-8: `PlanCtx { game, app, steam_app, main_exe }`, the `RegPolicy` joins with P2-9), `registry_set` (`prim::registry_set`, P2-10b: values below `HKCU\Software\<Vendor>\<Product>`, read through `PlanCtx::reg`, a `RegReader` of `policy::registry`; the builder puts every registry op after every file op), `compat_layer` (`prim::compat_layer`, P2-11: tokens for an executable of the game folder in `AppCompatFlags\Layers` as a `TokenList` op; the executable in its stored spelling, a game folder reached through a link refused through `GameDir::launch_path`; the token allowlist stays empty until the Sandbox probes), `ini_set`. Until the Topo engine (phase 4) `rerun plan` reads a JSON step file whose step objects are the durable spec types (ADR 0020, D7).
+Phase 2: `file_install` (local package files under `<AppDir>\packages`; `prim::file_install`, done in P2-8: `PlanCtx { game, app, steam_app, main_exe }`, the `RegPolicy` joins with P2-9), `registry_set` (`prim::registry_set`, P2-10b: values below `HKCU\Software\<Vendor>\<Product>`, read through `PlanCtx::reg`, a `RegReader` of `policy::registry`; the builder puts every registry op after every file op), `compat_layer` (`prim::compat_layer`, P2-11: tokens for an executable of the game folder in `AppCompatFlags\Layers` as a `TokenList` op; the executable in its stored spelling, a game folder reached through a link refused through `GameDir::launch_path`; the token allowlist stays empty until the Sandbox probes), `ini_set` (`prim::ini_set`, P2-12: keys of an existing `.ini` file of the game folder as one `IniValue` op per file with its edits, read and edited through `policy::ini`, ADR 0021; the file in its stored spelling, a missing file refused, the main executable required). Until the Topo engine (phase 4) `rerun plan` reads a JSON step file whose step objects are the durable spec types (ADR 0020, D7).
 
 | Primitive | Effect | Admin |
 |---|---|---|
@@ -57,7 +57,7 @@ Phase 2: `file_install` (local package files under `<AppDir>\packages`; `prim::f
 | `priority` | `IFEO\<exe>\PerfOptions\CpuPriorityClass` | yes |
 | `firewall_rule` | Outbound block for the exe only (INetFwPolicy2) | yes |
 | `file_install` | Files from a package into the game folder, occupy slots, backups | no* |
-| `ini_set` | Set individual values in INI/CFG | no* |
+| `ini_set` | Set individual keys of an existing `.ini` file (ANSI or UTF-8; UTF-16 from phase 4) | no* |
 | `registry_set` | Values under allowed game keys | depends on hive |
 | `launch_option` | Steam launch option (localconfig.vdf, only while Steam is closed) | no |
 | `launch_method` | `direct` / `watch` / `hold` / `ifeo` / `inproc` + CPU rule (see `04`) | ifeo: yes |

@@ -11,18 +11,23 @@
 //!   `HKCU\…\AppCompatFlags\Layers` (P2-11; no token is allowlisted until the Sandbox probes,
 //!   review S8).
 //!
-//! The builder orders the ops: every file op first, then every registry op, whatever the
-//! order of the steps (6b-d; `plan::check` refuses anything else). `ini_set` follows with
-//! P2-12.
+//! - [`ini_set`]: keys of an existing INI file of the game folder (P2-12, ADR 0021): one
+//!   `IniValue` per file with its edits.
+//!
+//! The builder orders the ops: every file op first (an `IniValue` is one), then every registry
+//! op, whatever the order of the steps (6b-d; `plan::check` refuses anything else). An
+//! `ini_set` and a `file_install` of the same file in one plan are refused.
 
 pub mod compat_layer;
 pub mod file_install;
+pub mod ini_set;
 pub mod registry_set;
 
 use serde::{Deserialize, Serialize};
 
 pub use compat_layer::CompatLayerSpec;
 pub use file_install::{FileEntry, FileInstallSpec};
+pub use ini_set::{IniSetSpec, IniSetValue};
 pub use registry_set::{RegValueEntry, RegistrySetSpec};
 
 use crate::fold::fold;
@@ -44,6 +49,8 @@ pub enum Step {
     RegistrySet(RegistrySetSpec),
     /// [`compat_layer`].
     CompatLayer(CompatLayerSpec),
+    /// [`ini_set`].
+    IniSet(IniSetSpec),
 }
 
 /// What a planner reads: the game folder, Rerun's folder (packages), and what identifies the
@@ -78,6 +85,8 @@ pub(crate) struct Builder {
     pub(crate) reg_keys: Vec<RegKey>,
     /// Key and folded name of every value of a step (also of the omitted ones).
     pub(crate) reg_values: Vec<(RegKey, String)>,
+    /// Folded paths of the files of the `ini_set` steps.
+    pub(crate) ini_files: Vec<String>,
 }
 
 impl Builder {
@@ -134,7 +143,17 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
             Step::FileInstall(spec) => file_install::plan_into(spec, ctx, &mut b)?,
             Step::RegistrySet(spec) => registry_set::plan_into(spec, ctx, &mut b)?,
             Step::CompatLayer(spec) => compat_layer::plan_into(spec, ctx, &mut b)?,
+            Step::IniSet(spec) => ini_set::plan_into(spec, ctx, &mut b)?,
         }
+    }
+    // One file is either installed or edited in one plan (the plan format allows one op per
+    // object; this says why).
+    if let Some(f) = b.ini_files.iter().find(|f| b.targets.contains(f)) {
+        return Err(PlanError::Step(format!(
+            "ini_set and file_install for the same file {}; ship the file with the values set, \
+             or set them in a second plan",
+            crate::escape::path(f)
+        )));
     }
     // 6b-d: every registry op after every file op.
     let reg_ops = std::mem::take(&mut b.reg_ops);
@@ -195,6 +214,8 @@ pub(crate) fn folded(p: &RelPath) -> String {
     fold(p.as_str())
 }
 
+#[cfg(test)]
+pub(crate) mod ini_tests;
 #[cfg(test)]
 pub(crate) mod layer_tests;
 #[cfg(test)]

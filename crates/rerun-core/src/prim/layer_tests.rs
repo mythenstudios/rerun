@@ -324,7 +324,7 @@ fn t9l_two_steps_keys_once_and_no_main_executable() {
     let e = plan_steps(&sys, &[layer_step("game.exe", &["ZZ_OS_A"])], None).unwrap_err();
     assert!(
         e.to_string()
-            .contains("registry fixes need the game's main executable"),
+            .contains("fixes need the game's main executable"),
         "{e}"
     );
 }

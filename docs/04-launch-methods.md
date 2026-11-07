@@ -34,6 +34,10 @@ The same applies to EA App, Rockstar Launcher, Battle.net. In addition: games th
 
 The app shows this the next time it is opened. Failures become suggestions for the Topo (GitHub issue template).
 
+## The main executable and the game-closed check
+
+Apply and revert ask `users()` of every file a plan touches and of the game's **main executable** (user decision D4). A plan with registry ops or `ini_set` needs the main executable (user decisions E2 of P2-10b and E5 of P2-12): a registry value has no file to ask, and a running game holds no INI file open, it writes it when it exits, so asking the INI file itself proves nothing. The main executable must therefore be the process that writes the INI file on exit: with a launcher chain (above), the game, not the launcher or a stub that exits. Otherwise an apply or revert can run while the game is still running, and the game overwrites the change when it quits (a revert then finds `Drifted` or `Foreign`).
+
 ## Steam integration
 
 Launch option `"<path>\rerun-launch.exe" %command%`. Written to `localconfig.vdf` only while Steam is closed, previous value to the Journal. Otherwise: copy + instructions.

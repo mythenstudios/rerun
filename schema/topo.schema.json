@@ -561,8 +561,67 @@
         },
         "compat_layer": {
           "$ref": "#/$defs/compatLayer"
+        },
+        "ini_set": {
+          "$ref": "#/$defs/iniSet"
         }
       }
+    },
+    "iniSet": {
+      "description": "Keys of an existing INI file of the game folder (docs/02-topo-format.md, ADR 0021, ADR 0020 amendment P2-12). The schema checks the form; the rule for new values (none of \\ / : % ; #, no ..), unique sections and keys, desktop.ini and the file itself are checked by the loader and the planner.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "values"
+      ],
+      "properties": {
+        "file": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/relPath"
+            },
+            {
+              "pattern": "\\.[Ii][Nn][Ii]$"
+            }
+          ]
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/iniValue"
+          }
+        }
+      }
+    },
+    "iniValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section",
+        "key",
+        "value"
+      ],
+      "properties": {
+        "section": {
+          "$ref": "#/$defs/iniName"
+        },
+        "key": {
+          "$ref": "#/$defs/iniName"
+        },
+        "value": {
+          "description": "1 to 128 printable ASCII characters, no space at either end.",
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]([\\x20-\\x7e]{0,126}[\\x21-\\x7e])?$"
+        }
+      }
+    },
+    "iniName": {
+      "description": "A section or key name: A-Z a-z 0-9 _ . - and space, 1 to 64 characters, no space at either end.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]([A-Za-z0-9_. -]{0,62}[A-Za-z0-9_.-])?$"
     },
     "compatLayer": {
       "description": "Compatibility-layer tokens for an executable of the game folder in HKCU\\...\\AppCompatFlags\\Layers (docs/02-topo-format.md, ADR 0018 amendment P2-11). The schema checks the form; the token allowlist (empty until the Windows Sandbox probes), the groups and the executable itself are checked by the loader and the planner.",
