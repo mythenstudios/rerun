@@ -1,9 +1,12 @@
-//! Every user-facing string of `rerun` (ADR 0016), English only in phase 1.
+//! Every user-facing string of `rerun` (ADR 0016), English only (German with Fluent in phase
+//! 5). The phase 2 commands have their lines in `txn` ([`TxnMsg`]).
 //!
 //! One [`Message`] is one output line. Parameters are named; counts are parameters (so Fluent
 //! plurals can follow) and a sentence is never assembled from other messages. Static text is
 //! ASCII; untrusted fields enter only as [`Shown`], which only `rerun_core::escape` creates.
 //! Untrusted text stands last on its line where possible, so a name cannot pose as a marker.
+
+mod txn;
 
 use std::fmt;
 use std::io;
@@ -13,6 +16,8 @@ use rerun_core::detect::pe::Machine;
 use rerun_core::detect::steam::{AppState, RootSource};
 use rerun_core::escape::Shown;
 use rerun_core::hw::GpuVendor;
+
+pub use txn::{At, OpRef, SteamWhy, TxnMsg};
 
 /// A section heading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,6 +396,8 @@ pub enum Message<'a> {
     /// Not on Windows.
     #[cfg(not(windows))]
     WindowsOnly,
+    /// A line of the phase 2 commands.
+    Txn(TxnMsg<'a>),
     /// Writing the report failed.
     WriteFailed {
         /// The kind of the I/O error.
@@ -807,6 +814,7 @@ impl fmt::Display for Message<'_> {
             }
             #[cfg(not(windows))]
             Self::WindowsOnly => f.write_str("rerun: runs on Windows only"),
+            Self::Txn(m) => write!(f, "{m}"),
             Self::WriteFailed { kind } => write!(f, "rerun: cannot write the output: {kind}"),
         }
     }

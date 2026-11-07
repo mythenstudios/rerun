@@ -49,6 +49,19 @@ fn version_matches_package_version() {
 }
 
 #[test]
+fn help_lists_the_phase_2_commands_and_their_flags() {
+    let out = rerun(&["--help"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("\n  plan "), "{stdout}");
+    let out = rerun(&["plan", "--help"]);
+    assert!(out.status.success());
+    let help = String::from_utf8(out.stdout).unwrap();
+    assert!(help.contains("--dry-run"), "{help}");
+}
+
+/// Never a step file that exists here: this binary runs on the real machine (project rule: no
+/// writing command against it), so every argument fails clap's parse.
+#[test]
 fn usage_errors_exit_2_without_a_report() {
     for args in [
         &[][..],
@@ -59,6 +72,7 @@ fn usage_errors_exit_2_without_a_report() {
         &["scan", "-1"],
         &["scan", "4294967296"],
         &["scan", "--nope"],
+        &["plan"],
     ] {
         let out = rerun(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");

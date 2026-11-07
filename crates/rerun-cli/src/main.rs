@@ -1,13 +1,17 @@
-//! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system` and `rerun scan`.
+//! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system` and `rerun scan`;
+//! phase 2 (P2-13): `rerun plan`.
 //!
 //! Order in `main`: `restrict_dll_search` first (ADR 0008), then clap parses (`--help`,
 //! `--version` and usage errors end there, before any registry or file system access), then
-//! `WinSystem::new`. The commands take a `&dyn System` and two line writers, so the tests run
-//! them against the fake system layer with in-memory output.
+//! `WinSystem::new`. The commands take a [`Host`] (`&dyn System` and the install folder) and two
+//! line writers, so the tests run them against the fake system layer with in-memory output.
 
 mod cli;
+mod host;
 mod messages;
 mod out;
+mod plan;
+mod preview;
 mod scan;
 mod system;
 
@@ -20,6 +24,7 @@ use clap::Parser;
 use rerun_core::escape;
 
 use crate::cli::{Cli, Command, Exit};
+use crate::host::Host;
 use crate::messages::Message;
 use crate::out::Out;
 
@@ -51,7 +56,11 @@ fn main() -> ExitCode {
             return Exit::Fatal.into();
         }
     };
-    run(&sys, cli.command, &mut out, &mut err).into()
+    let host = Host {
+        sys: &sys,
+        install: install_dir(),
+    };
+    run(&host, cli.command, &mut out, &mut err).into()
 }
 
 #[cfg(not(windows))]
@@ -78,22 +87,23 @@ fn parse() -> Result<Cli, Exit> {
 
 /// Runs a command.
 fn run<W: io::Write, E: io::Write>(
-    sys: &dyn rerun_core::sys::System,
+    host: &Host<'_>,
     command: Command,
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Exit {
     match command {
-        Command::System => system::system(sys, out, err),
-        Command::Scan { app_ids, hashes } => match install_dir() {
-            Ok(dir) => scan::scan(sys, &dir, &app_ids, hashes, out, err),
+        Command::System => system::system(host.sys, out, err),
+        Command::Scan { app_ids, hashes } => match &host.install {
+            Ok(dir) => scan::scan(host.sys, dir, &app_ids, hashes, out, err),
             Err(error) => {
                 let _ = err.line(&Message::CurrentExe {
-                    error: escape::text(&error),
+                    error: escape::text(error),
                 });
                 Exit::Fatal
             }
         },
+        Command::Plan { steps, dry_run } => plan::plan(host, &steps, dry_run, out, err),
     }
 }
 
@@ -104,3 +114,6 @@ fn install_dir() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .ok_or_else(|| "the executable path has no parent folder".to_owned())
 }
+
+#[cfg(test)]
+mod tests;
