@@ -654,7 +654,7 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
             .iter()
             .all(|r| r.tmp.is_none() && r.from.is_none() && r.to.is_none())
         && log.done.is_none_or(|d| d.file_id.is_none() && !d.old_left)
-        && log.reverted.is_none_or(|r| !r.old_left);
+        && log.reverted.as_ref().is_none_or(|r| r.old_left.is_empty());
     plain
         && match op {
             Op::CreateKey { .. } => i.before.is_none(),

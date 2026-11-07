@@ -441,6 +441,7 @@ pub(super) fn observe(
     };
     let s0 = Seq {
         kind: SeqKind::Apply,
+        ix: 0,
         tmp: x,
         from: h0,
         to: h1,
@@ -511,7 +512,7 @@ pub(super) fn observe(
                 // If stage 2 then finds `Foreign`, `X.old` is gone all the same: it held the old
                 // content, which the backup keeps (security review nit 8).
                 let mut p = pre;
-                p.actions = vec![Action::DeleteOld(s0.tmp.old(), s0.from.sha256)];
+                p.actions = vec![Action::DeleteOld(s0.tmp.old(), s0.from.sha256, 0)];
                 stage2(op, &target, hint, p)
             } else if s.old != Is::Absent {
                 // A `.old` next to something else: never touched (S6: named if it holds the
@@ -550,6 +551,7 @@ pub(super) fn rewrite(
     op: &Op,
     sem: &Semantic,
     y: Option<TmpName>,
+    ix: u16,
     done: &mut Acted,
 ) -> Result<(), ExecError> {
     let e = op_err(k);
@@ -607,16 +609,9 @@ pub(super) fn rewrite(
         .replace(&sem.from.sha256, &mut &u.bytes[..], &nf)
         .map_err(&e)?;
     if let Some(t) = r.old_left {
-        // As after a restore: one more try on a fresh guard, else a pending cleanup.
-        let again = parent.guard(&t.old()).and_then(|mut g| match g.sha256() {
-            Ok(h) if h == sem.from.sha256 => g.delete(&h),
-            Ok(_) => Err(SysError::new(SysErrorKind::Mismatch, t.as_str())),
-            Err(x) => Err(x),
-        });
-        if again.is_err() {
-            done.old_left = true;
-            done.left.push(t.old());
-        }
+        // As after a restore: one more try on a fresh guard, else a pending cleanup of this
+        // run's sequence `ix`.
+        file::retry_old(parent, &t, &sem.from.sha256, ix, done);
     }
     Ok(())
 }

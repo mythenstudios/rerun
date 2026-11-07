@@ -230,19 +230,10 @@ fn head(
     Ok((plan, preview))
 }
 
-/// The `.old` names a step of `o` left (its `Done`, its `RevertDone`).
+/// The `.old` names the journal says a step of `o` left (P2-15: exactly
+/// [`OpLog::pending_old`], the list of its `RevertDone` once it has one).
 fn old_left(o: &OpLog) -> impl Iterator<Item = RelPath> + '_ {
-    let done = o
-        .done
-        .filter(|d| d.old_left)
-        .and(o.intent.tmp.as_ref())
-        .map(crate::sys::fs::TmpName::old);
-    let reverted = o
-        .reverted
-        .filter(|r| r.old_left)
-        .and_then(|_| o.reverts.iter().rev().find_map(|r| r.tmp.as_ref()))
-        .map(crate::sys::fs::TmpName::old);
-    done.into_iter().chain(reverted)
+    o.pending_old().into_iter().map(|(_, t)| t.old())
 }
 
 fn op_status(app: &AppDir<'_>, t: &TxnId, k: u16, o: &OpLog, plan: Option<&Plan>) -> OpStatus {

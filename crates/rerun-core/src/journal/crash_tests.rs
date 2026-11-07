@@ -128,7 +128,7 @@ fn script(
         let name = r(&stub(usize::from(k)));
         g.guard(&name)?.delete(&sha(C[usize::from(k)]))?;
         game_flush(Site::GameBeforeRevertDone)?;
-        w.revert_done(k, Observed::After, false)?;
+        w.revert_done(k, Observed::After, &[])?;
     }
     w.close(Closing::Reverted)?;
     p.flushed = 11;
@@ -384,7 +384,7 @@ fn j4_a_crash_after_any_call_leaves_a_valid_prefix_that_resume_closes() {
                 }
                 Err(_) => Observed::Before,
             };
-            w.revert_done(k, observed, false).unwrap();
+            w.revert_done(k, observed, &[]).unwrap();
         }
         g.flush().unwrap();
         let how = if w.is_applied() {

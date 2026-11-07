@@ -40,7 +40,7 @@ fn rdo(op: u16, observed: Observed) -> Record {
     Record::RevertDone {
         op,
         observed,
-        old_left: false,
+        old_left: Vec::new(),
     }
 }
 fn c(how: Closing) -> Record {
@@ -284,7 +284,10 @@ fn j2_replay_keeps_the_records_of_each_op() {
             .collect::<Vec<_>>(),
         vec![None, None]
     );
-    assert_eq!(op1.reverted.map(|x| x.observed), Some(Observed::After));
+    assert_eq!(
+        op1.reverted.as_ref().map(|x| x.observed),
+        Some(Observed::After)
+    );
     assert_eq!(
         m.ops()[&0].intent.before,
         Some(Before::Bin(Digest {
@@ -482,4 +485,79 @@ fn j2_replay_keeps_rebinds_with_the_revert_that_had_begun() {
     assert_eq!(m.rebinds()[0].dirs[0].file_id, 10);
     assert_eq!(m.next_revert(), Some(1));
     assert_eq!(m.state(), TxnState::Applied);
+}
+
+/// A `RevertDone` of `op` that left the `.old` of the sequences `old`.
+fn rdl(op: u16, old: &[u16]) -> Record {
+    Record::RevertDone {
+        op,
+        observed: Observed::After,
+        old_left: old.to_vec(),
+    }
+}
+
+/// A `RevertIntent` of `op` with a temp name (a restore).
+fn rit(op: u16, n: u64) -> Record {
+    Record::RevertIntent {
+        op,
+        tmp: Some(TmpName::new(2, n)),
+        from: None,
+        to: None,
+    }
+}
+
+/// J2 for `RevertDone.old_left` (P2-15): each index names a sequence of its op with a temp name
+/// (0 the intent's, `i` the `i`-th `RevertIntent` with one), strictly ascending; whether such a
+/// transaction may close is `exec`'s business, the grammar allows `Closed` after it.
+#[test]
+fn j2_revert_done_names_only_sequences_of_its_op() {
+    use Closing::Reverted;
+    let pre = || vec![i(0), d(0), i(1), d(1), a(2)];
+    let with = |tail: Vec<Record>| {
+        let mut v = pre();
+        v.extend(tail);
+        v
+    };
+    // Valid: none, the apply's, the restore's, both; the newest restore of three; Closed after.
+    for tail in [
+        vec![ri(1), rdl(1, &[])],
+        vec![ri(1), rdl(1, &[0])],
+        vec![rit(1, 1), rdl(1, &[1])],
+        vec![rit(1, 1), rdl(1, &[0, 1])],
+        vec![rit(1, 1), ri(1), rit(1, 2), rit(1, 3), rdl(1, &[0, 2, 3])],
+        vec![ri(1), rdl(1, &[0]), ri(0), rd(0), c(Reverted)],
+    ] {
+        let rs = with(tail);
+        assert!(replay(&rs).is_ok(), "{rs:?}");
+    }
+    let n = pre().len();
+    let named = "a revert done names a .old the op has no temp name for";
+    let order = "a revert done's .old files out of order";
+    let no_tmp = Record::Intent {
+        op: 0,
+        tmp: None,
+        before: None,
+    };
+    for (tail, at, why) in [
+        // A sequence the op does not have.
+        (vec![ri(1), rdl(1, &[1])], 1, named),
+        (vec![rit(1, 1), rdl(1, &[2])], 1, named),
+        (vec![rit(1, 1), rdl(1, &[0, 1, 7])], 1, named),
+        (vec![ri(1), rdl(1, &[u16::MAX])], 1, named),
+        // Out of order or twice.
+        (vec![rit(1, 1), rdl(1, &[1, 0])], 1, order),
+        (vec![rit(1, 1), rdl(1, &[0, 0])], 1, order),
+        (vec![rit(1, 1), rit(1, 2), rdl(1, &[2, 1])], 2, order),
+    ] {
+        let rs = with(tail);
+        assert_eq!(replay(&rs), Err((n + at, why)), "{rs:?}");
+    }
+    // An op whose intent has no temp name has no sequence 0.
+    let rs = vec![no_tmp, d(0), a(1), ri(0), rdl(0, &[0])];
+    assert_eq!(replay(&rs), Err((4, named)));
+    // The index of another op's sequence is not this op's.
+    let rs = with(vec![ri(1), rd(1), rit(0, 1), rdl(0, &[1]), ri(0)]);
+    assert!(replay(&rs[..rs.len() - 1]).is_ok());
+    let rs = with(vec![rit(1, 1), rd(1), ri(0), rdl(0, &[1])]);
+    assert_eq!(replay(&rs), Err((n + 3, named)));
 }

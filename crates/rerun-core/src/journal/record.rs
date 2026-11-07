@@ -13,6 +13,9 @@
 //! `RevertIntent { from, to }` names the digests of a semantic revert, both or neither: written
 //! since P2-12, for `IniValue` only ([`Semantic`]).
 //!
+//! `RevertDone.old_left` (P2-15; format 1 stays unstable until A6): the sequence indices of the
+//! `.old` files the revert left, not a flag; the grammar bounds them by the op's records.
+//!
 //! `Rebind` (P2-14, additive; format 1 stays unstable until A6): root `root` of the head is bound
 //! from here on to the game folder `steamapps\common\<installdir>` of the Steam library `store`,
 //! with the identities seen when the user confirmed it, and the file IDs of the folders the plan
@@ -154,8 +157,11 @@ pub(crate) enum Record {
         op: u16,
         /// What the revert observed before it acted.
         observed: Observed,
-        /// `<tmp>.old` was left behind.
-        old_left: bool,
+        /// The sequences of the op whose `.old` this revert left (mapped as an image), by
+        /// index: 0 the apply's (`Intent.tmp`), `i` the `i`-th `RevertIntent` with a temp name;
+        /// strictly ascending (P2-15). Never a name or a path: the name and its expected
+        /// content follow from the records.
+        old_left: Vec<u16>,
     },
     /// From here on, root `root` of the head is the game folder of the head's install folder in
     /// the Steam library `store` (P2-14). Only after `Applied`; repeatable, the last one of a
@@ -315,7 +321,17 @@ mod tests {
             Record::RevertDone {
                 op: 1,
                 observed: Observed::Foreign,
-                old_left: false,
+                old_left: Vec::new(),
+            },
+            Record::RevertDone {
+                op: 1,
+                observed: Observed::Before,
+                old_left: vec![0],
+            },
+            Record::RevertDone {
+                op: 1,
+                observed: Observed::After,
+                old_left: vec![0, 2],
             },
             rebind(Vec::new()),
             rebind(vec![
@@ -380,9 +396,18 @@ mod tests {
             wire(&all[7]),
             r#"{"revert_intent":{"op":1,"tmp":".rerun-00000000000000ab-2.tmp","from":null,"to":null}}"#
         );
-        // P2-14: no game path, the library by its canonical path.
+        // P2-15: the sequence indices, never a name.
+        assert_eq!(
+            wire(&all[9]),
+            r#"{"revert_done":{"op":1,"observed":"foreign","old_left":[]}}"#
+        );
         assert_eq!(
             wire(&all[11]),
+            r#"{"revert_done":{"op":1,"observed":"after","old_left":[0,2]}}"#
+        );
+        // P2-14: no game path, the library by its canonical path.
+        assert_eq!(
+            wire(&all[13]),
             format!(
                 r#"{{"rebind":{{"root":0,"old":"0000000000000044-{:032x}","store":"E:\\SteamLibrary","store_id":"0000000000000045-{:032x}","id":"0000000000000045-{:032x}","dirs":[{{"op":0,"file_id":"{:032x}"}},{{"op":3,"file_id":"{}"}}]}}}}"#,
                 7,
@@ -443,6 +468,42 @@ mod tests {
             assert_eq!(
                 decode(bad.as_bytes(), 4, &head),
                 Err(Damage::Unparsable { n: 4 }),
+                "{bad}"
+            );
+        }
+    }
+
+    /// J3 for `RevertDone.old_left` (P2-15): one form, numbers only, never a name or a flag.
+    #[test]
+    fn j3_edited_old_left_lists_are_unparsable() {
+        let head = [9u8; 32];
+        let rec = Record::RevertDone {
+            op: 1,
+            observed: Observed::After,
+            old_left: vec![0, 2],
+        };
+        let good = String::from_utf8(encode(5, &head, &rec).unwrap()).unwrap();
+        assert_eq!(decode(good.as_bytes(), 5, &head), Ok(rec));
+        for bad in [
+            good.replace("[0,2]", "[0, 2]"),
+            good.replace("[0,2]", "[0,2,]"),
+            good.replace("[0,2]", r#"["0",2]"#),
+            good.replace("[0,2]", "[-1,2]"),
+            good.replace("[0,2]", "[0.0,2]"),
+            good.replace("[0,2]", "[00,2]"),
+            good.replace("[0,2]", "[0,65536]"),
+            good.replace("[0,2]", "true"),
+            good.replace("[0,2]", "null"),
+            good.replace("[0,2]", "2"),
+            good.replace("[0,2]", r#"[".rerun-00000000000000ab-1.tmp"]"#),
+            good.replace("[0,2]", r#"[".rerun-00000000000000ab-1.tmp.old"]"#),
+            good.replace(r#""old_left":[0,2]"#, r#""old_left":[0,2],"x":0"#),
+            good.replace(r#","old_left":[0,2]"#, ""),
+        ] {
+            assert_ne!(bad, good);
+            assert_eq!(
+                decode(bad.as_bytes(), 5, &head),
+                Err(Damage::Unparsable { n: 5 }),
                 "{bad}"
             );
         }

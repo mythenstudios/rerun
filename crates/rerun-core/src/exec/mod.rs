@@ -782,8 +782,8 @@ impl Seen {
 /// What the act of a revert left behind.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Acted {
-    /// A `<tmp>.old` was left (mapped as an image).
-    old_left: bool,
+    /// The sequences whose `<tmp>.old` was left (mapped as an image), by index (P2-15).
+    old_left: Vec<u16>,
     /// Names Rerun left in the op's folder: a `.old` still mapped, a temp name that is not
     /// Rerun's any more.
     left: Vec<RelPath>,
@@ -939,7 +939,7 @@ fn verify_seen(
     for (k, log) in ops.iter().rev() {
         let op = op_of(plan, *k)?;
         if let Some(h) = halt(roots, *k, op) {
-            match log.reverted {
+            match &log.reverted {
                 // Reverted cleanly: the revert never comes back to it.
                 Some(r) if r.observed != Observed::Foreign => continue,
                 // Left foreign: shown as recorded (its root cannot be read for file ops),
@@ -1162,7 +1162,11 @@ fn rollback(
 fn foreign_ops<W: Reverting>(w: &W) -> Vec<u16> {
     w.ops()
         .iter()
-        .filter(|(_, o)| o.reverted.is_some_and(|r| r.observed == Observed::Foreign))
+        .filter(|(_, o)| {
+            o.reverted
+                .as_ref()
+                .is_some_and(|r| r.observed == Observed::Foreign)
+        })
         .map(|(k, _)| *k)
         .collect()
 }
@@ -1232,7 +1236,7 @@ fn revert_loop<W: Reverting>(
         let done = act(w, t, k, op, &seen, y)?;
         // Always, also when the act changed nothing (`Touched::flush_for`).
         t.flush_for(k, op.target())?;
-        w.revert_done(k, observed, done.old_left)?;
+        w.revert_done(k, observed, &done.old_left)?;
         reports.push(OpReport {
             op: k,
             observed,
@@ -1554,6 +1558,8 @@ pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
         .map_err(|e| closing_failed(&j, t, e))
 }
 
+#[cfg(test)]
+pub(crate) mod cleanup_tests;
 #[cfg(test)]
 mod combo_tests;
 #[cfg(test)]

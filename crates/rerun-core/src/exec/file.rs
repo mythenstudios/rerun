@@ -425,8 +425,8 @@ pub(super) enum Action {
     /// Delete one of Rerun's temp names (whatever its content: ours by the journal).
     DeleteTmp(RelPath),
     /// Delete a `.old` if it holds the expected hash (else leave it); `Busy` is a pending
-    /// cleanup.
-    DeleteOld(RelPath, [u8; 32]),
+    /// cleanup of the sequence with this index (P2-15: `RevertDone.old_left`).
+    DeleteOld(RelPath, [u8; 32], u16),
     /// Rename a `.old` holding the expected hash back onto the target name (phase B): the
     /// name as the plan spells it, which is the stored spelling the planner saw and the apply
     /// checked on its guard (A2-B1).
@@ -491,11 +491,14 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
         .iter()
         .all(|r| r.from.is_none() && r.to.is_none());
     let file_id = log.done.is_none_or(|d| d.file_id.is_some());
+    // P2-15: only a replace can leave a `.old` (the cleanup looks nowhere else).
+    let no_old = log.done.is_none_or(|d| !d.old_left)
+        && log.reverted.as_ref().is_none_or(|r| r.old_left.is_empty());
     not_semantic
         && file_id
         && match op {
-            Op::CreateDir { .. } => i.tmp.is_none() && i.before.is_none() && no_restore,
-            Op::CreateFile { .. } => i.tmp.is_some() && i.before.is_none() && no_restore,
+            Op::CreateDir { .. } => i.tmp.is_none() && i.before.is_none() && no_restore && no_old,
+            Op::CreateFile { .. } => i.tmp.is_some() && i.before.is_none() && no_restore && no_old,
             Op::ReplaceFile { old, .. } => {
                 i.tmp.is_some()
                     && i.before
@@ -710,6 +713,8 @@ impl State {
 #[derive(Debug, Clone)]
 pub(super) struct Seq {
     pub(super) kind: SeqKind,
+    /// Its index (P2-15): 0 for `S0`, `i` for the `i`-th `RevertIntent` with a temp name.
+    pub(super) ix: u16,
     pub(super) tmp: TmpName,
     pub(super) from: State,
     pub(super) to: State,
@@ -768,11 +773,14 @@ impl Settled {
 pub(super) fn sequences(log: &OpLog, from0: State, to0: State) -> Vec<Seq> {
     log.reverts
         .iter()
-        .filter_map(|r| {
-            let tmp = r.tmp.clone()?;
-            Some(match (r.from, r.to) {
+        .filter_map(|r| r.tmp.clone().map(|t| (r, t)))
+        .enumerate()
+        .map(|(i, (r, tmp))| {
+            let ix = u16::try_from(i + 1).unwrap_or(u16::MAX);
+            match (r.from, r.to) {
                 (Some(f), Some(t)) => Seq {
                     kind: SeqKind::Rewrite,
+                    ix,
                     tmp,
                     from: State {
                         sha256: f.sha256,
@@ -787,11 +795,12 @@ pub(super) fn sequences(log: &OpLog, from0: State, to0: State) -> Vec<Seq> {
                 },
                 _ => Seq {
                     kind: SeqKind::Restore,
+                    ix,
                     tmp,
                     from: to0,
                     to: from0,
                 },
-            })
+            }
         })
         .collect()
 }
@@ -870,7 +879,7 @@ pub(super) fn phases(
         }
         (Is::To, Is::From) => {
             out.stood = Stood::End;
-            out.actions.push(Action::DeleteOld(old_name, f));
+            out.actions.push(Action::DeleteOld(old_name, f, s.ix));
             if tmp_exists {
                 out.left.push(tmp);
             }
@@ -884,7 +893,7 @@ pub(super) fn phases(
         // B2: the leftover `.old` of a completed `S0` next to the old state.
         (Is::From, Is::From) if seq.is_none() && restored_once => {
             out.stood = Stood::Start;
-            out.actions.push(Action::DeleteOld(old_name, f));
+            out.actions.push(Action::DeleteOld(old_name, f, s.ix));
             out.act_if(tmp_exists, Action::DeleteTmp(tmp));
         }
         _ => {
@@ -917,7 +926,7 @@ pub(super) fn cleanup(
     let mut v = Vec::new();
     for s in std::iter::once(s0).chain(older) {
         if see_file(parent, &s.tmp.old())?.holds(&s.from.sha256) {
-            v.push(Action::DeleteOld(s.tmp.old(), s.from.sha256));
+            v.push(Action::DeleteOld(s.tmp.old(), s.from.sha256, s.ix));
         }
     }
     Ok(v)
@@ -945,6 +954,7 @@ fn replace_seen(
     };
     let s0 = Seq {
         kind: SeqKind::Apply,
+        ix: 0,
         tmp: x.clone(),
         from: h0,
         to: h1,
@@ -1001,7 +1011,7 @@ pub(super) fn run_action(
             }
             Err(x) => return Err(e(x)),
         },
-        Action::DeleteOld(n, h) => match parent.guard(n) {
+        Action::DeleteOld(n, h, ix) => match parent.guard(n) {
             Ok(mut g) => {
                 if g.sha256().map_err(e)? != *h {
                     done.left.push(n.clone());
@@ -1009,7 +1019,7 @@ pub(super) fn run_action(
                     match g.delete(h) {
                         Ok(()) => {}
                         Err(x) if x.kind == SysErrorKind::Busy => {
-                            done.old_left = true;
+                            done.old_left.push(*ix);
                             done.left.push(n.clone());
                         }
                         Err(x) => return Err(e(x)),
@@ -1045,9 +1055,11 @@ pub(super) fn act<W: Reverting>(
     let e = op_err(k);
     let (root, path) = file_target(k, op)?;
     let mut done = Acted {
-        old_left: false,
+        old_left: Vec::new(),
         left: seen.left.clone(),
     };
+    // The index of this run's sequence, if it starts one (its `RevertIntent` is written).
+    let newest = w.ops().get(&k).map_or(0, crate::journal::OpLog::newest_seq);
     // S1 (review): with a restore, the `.old` holding `h0` goes only after the restore
     // succeeded; a damaged backup must not cost the last copy of the old content. The same
     // for a rewrite (P2-12): every `.old` goes once it succeeded.
@@ -1057,7 +1069,7 @@ pub(super) fn act<W: Reverting>(
         run_action(dirs, root, path, a, &mut done, &e)?;
     }
     if let Some(sem) = &seen.rewrite {
-        super::ini::rewrite(dirs, k, op, sem, y.clone(), &mut done)?;
+        super::ini::rewrite(dirs, k, op, sem, y.clone(), newest, &mut done)?;
     }
     if seen.restore {
         // The old R/H/S and the new content expected at the target.
@@ -1119,19 +1131,39 @@ pub(super) fn act<W: Reverting>(
         if let Some(t) = r.old_left {
             // Step 8 failed: one more try on a fresh guard (expected `h1`); still `Busy` (the
             // file is mapped) leaves it as a pending cleanup the report names.
-            let again = parent.guard(&t.old()).and_then(|mut g| match g.sha256() {
-                Ok(h) if h == expected => g.delete(&h),
-                Ok(_) => Err(SysError::new(SysErrorKind::Mismatch, t.as_str())),
-                Err(x) => Err(x),
-            });
-            if again.is_err() {
-                done.old_left = true;
-                done.left.push(t.old());
-            }
+            retry_old(parent, &t, &expected, newest, &mut done);
         }
     }
     for a in seen.actions.iter().filter(|a| deferred(a)) {
         run_action(dirs, root, path, a, &mut done, &e)?;
     }
+    done.old_left.sort_unstable();
+    done.old_left.dedup();
     Ok(done)
+}
+
+/// One more delete of the `.old` of sequence `ix` (temp name `t`) that step 8 left, on a fresh
+/// guard, expected `h`: gone is done, another content is no file of Rerun's (left and named);
+/// any other error (`Busy`: mapped) is a pending cleanup the journal records (P2-15).
+pub(super) fn retry_old(
+    parent: &dyn DirWrite,
+    t: &TmpName,
+    h: &[u8; 32],
+    ix: u16,
+    done: &mut Acted,
+) {
+    let again = parent.guard(&t.old()).and_then(|mut g| match g.sha256() {
+        Ok(x) if x == *h => g.delete(&x),
+        Ok(_) => Err(SysError::new(SysErrorKind::Mismatch, t.as_str())),
+        Err(x) => Err(x),
+    });
+    match again {
+        Ok(()) => {}
+        Err(x) if x.kind == SysErrorKind::NotFound => {}
+        Err(x) if x.kind == SysErrorKind::Mismatch => done.left.push(t.old()),
+        Err(_) => {
+            done.old_left.push(ix);
+            done.left.push(t.old());
+        }
+    }
 }

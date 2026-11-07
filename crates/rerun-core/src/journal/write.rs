@@ -201,6 +201,16 @@ pub(crate) mod knob {
 
     thread_local! {
         static SKIP: Cell<Option<FlushSite>> = const { Cell::new(None) };
+        static NO_REVERT_ROOM: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The control of J9 (P2-15): `RevertIntent` without its room rule.
+    pub(crate) fn no_revert_room_rule(on: bool) {
+        NO_REVERT_ROOM.with(|s| s.set(on));
+    }
+
+    pub(super) fn no_revert_room() -> bool {
+        NO_REVERT_ROOM.with(Cell::get)
     }
 
     /// From now on, the flush at `site` does nothing (on this thread).
@@ -458,6 +468,16 @@ impl<'l> Txn<'l> {
             from: sem.map(|s| s.from),
             to: sem.map(|s| s.to),
         };
+        // P2-15 (nit N1): a revert that starts must be able to record its end. Checked after
+        // the grammar (a caller error stays `Order`) and before anything is written.
+        self.m.check(&rec).map_err(JournalError::Order)?;
+        let records = usize::from(self.m.records());
+        if !room_for_revert_intent(records, self.m.ops(), &self.lock.lim) {
+            return Err(JournalError::TooLarge {
+                what: "the records of a transaction",
+                limit: u64::from(self.lock.lim.records),
+            });
+        }
         self.write(&rec, Some(FlushSite::RevertIntent))
     }
 
@@ -543,6 +563,29 @@ pub(super) fn room_for_rebind(records: usize, ops: &BTreeMap<u16, OpLog>, lim: &
         <= usize::from(lim.records)
 }
 
+/// The room rule of a `RevertIntent` (P2-15, nit N1): after `records` records, the
+/// `RevertIntent` and its `RevertDone`, a `RevertIntent` and `RevertDone` for every other op of
+/// `ops` without `RevertDone`, and `Closed` fit the record budget:
+/// `records + 2·open + 1 ≤ limit`, with `open` counting the op itself. Without it a repeated
+/// `RevertIntent` could take the last slot before `Closed`, the act would run and its
+/// `RevertDone` would be refused. After an apply of `n` ops this leaves `1022 − 4n` failed
+/// attempts (rebinds count too); `Closed { Forgotten }` always fits.
+pub(super) fn room_for_revert_intent(
+    records: usize,
+    ops: &BTreeMap<u16, OpLog>,
+    lim: &Limits,
+) -> bool {
+    #[cfg(test)]
+    if knob::no_revert_room() {
+        return true;
+    }
+    let open = ops.values().filter(|o| o.reverted.is_none()).count();
+    records
+        .saturating_add(open.saturating_mul(2))
+        .saturating_add(1)
+        <= usize::from(lim.records)
+}
+
 /// What [`RevertWriter::rebind`] records.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RebindArgs<'a> {
@@ -600,17 +643,19 @@ macro_rules! common {
                 self.t.revert_intent(op, tmp, sem)
             }
 
-            /// The revert of `op` is done (not flushed; the next flush covers it).
+            /// The revert of `op` is done (not flushed; the next flush covers it). `old_left`:
+            /// the sequences whose `.old` the revert left, by index, strictly ascending
+            /// (P2-15; the grammar refuses anything else).
             pub(crate) fn revert_done(
                 &mut self,
                 op: u16,
                 observed: Observed,
-                old_left: bool,
+                old_left: &[u16],
             ) -> Result<(), JournalError> {
                 let rec = Record::RevertDone {
                     op,
                     observed,
-                    old_left,
+                    old_left: old_left.to_vec(),
                 };
                 self.t.write(&rec, None)
             }
@@ -669,7 +714,7 @@ macro_rules! common {
                 &mut self,
                 op: u16,
                 observed: Observed,
-                old_left: bool,
+                old_left: &[u16],
             ) -> Result<(), JournalError> {
                 $ty::revert_done(self, op, observed, old_left)
             }
@@ -706,12 +751,12 @@ pub(crate) trait Reverting {
         tmp: Option<TmpName>,
         sem: Option<Semantic>,
     ) -> Result<(), JournalError>;
-    /// `RevertDone`.
+    /// `RevertDone`, with the sequences whose `.old` the revert left (P2-15).
     fn revert_done(
         &mut self,
         op: u16,
         observed: Observed,
-        old_left: bool,
+        old_left: &[u16],
     ) -> Result<(), JournalError>;
     /// The backup of `op`.
     fn backup_reader(&self, op: u16) -> Result<Box<dyn Read + '_>, JournalError>;

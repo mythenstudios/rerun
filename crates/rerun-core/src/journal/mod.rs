@@ -576,12 +576,49 @@ pub struct DoneRec {
 }
 
 /// A `RevertDone` record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevertDoneRec {
     /// What the revert observed.
     pub observed: Observed,
-    /// `<tmp>.old` was left behind.
-    pub old_left: bool,
+    /// The sequences whose `.old` the revert left, by index, strictly ascending (P2-15; 0 the
+    /// apply's, `i` the `i`-th `RevertIntent` with a temp name).
+    pub old_left: Vec<u16>,
+}
+
+impl OpLog {
+    /// The temp name of sequence `ix` of the op (P2-15): 0 the intent's, `i` the temp name of
+    /// the `i`-th `RevertIntent` that has one; `None` if there is no such sequence.
+    pub fn seq_tmp(&self, ix: u16) -> Option<&TmpName> {
+        match ix {
+            0 => self.intent.tmp.as_ref(),
+            i => self
+                .reverts
+                .iter()
+                .filter_map(|r| r.tmp.as_ref())
+                .nth(usize::from(i) - 1),
+        }
+    }
+
+    /// The number of sequences of the op with a temp name after the apply's: the index of the
+    /// newest one (0 if none).
+    pub fn newest_seq(&self) -> u16 {
+        u16::try_from(self.reverts.iter().filter(|r| r.tmp.is_some()).count()).unwrap_or(u16::MAX)
+    }
+
+    /// The `.old` files the journal says are left (P2-15), by sequence index with the temp name
+    /// of the sequence: after `RevertDone` its list (it replaces `Done.old_left` for the
+    /// bookkeeping), else the apply's `X` if `Done` left its `.old`, else none. Whether such a
+    /// file is still there, and whose content it holds, only an observation says.
+    pub fn pending_old(&self) -> Vec<(u16, &TmpName)> {
+        let ixs: Vec<u16> = match (&self.reverted, &self.done) {
+            (Some(r), _) => r.old_left.clone(),
+            (None, Some(d)) if d.old_left => vec![0],
+            (None, _) => Vec::new(),
+        };
+        ixs.into_iter()
+            .filter_map(|i| self.seq_tmp(i).map(|t| (i, t)))
+            .collect()
+    }
 }
 
 #[cfg(test)]

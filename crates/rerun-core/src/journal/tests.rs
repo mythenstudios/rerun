@@ -115,7 +115,7 @@ pub(crate) fn j1_round_trip(app: &AppDir<'_>, src: &dyn DirWrite, old: &[u8]) ->
     assert_eq!(state(&j, &id), TxnState::Applied);
     w.revert_intent(1, Some(t1.clone()), None).unwrap();
     w.revert_intent(1, None, None).unwrap();
-    w.revert_done(1, Observed::After, true).unwrap();
+    w.revert_done(1, Observed::After, &[1]).unwrap();
     // A semantic revert (P2-12): `from` and `to` written with the record.
     let sem = record::Semantic {
         from: record::Digest {
@@ -128,7 +128,7 @@ pub(crate) fn j1_round_trip(app: &AppDir<'_>, src: &dyn DirWrite, old: &[u8]) ->
         },
     };
     w.revert_intent(0, Some(t2.clone()), Some(sem)).unwrap();
-    w.revert_done(0, Observed::Drifted, false).unwrap();
+    w.revert_done(0, Observed::Drifted, &[]).unwrap();
     w.close(Closing::Reverted).unwrap();
 
     let v = load(&j, &id);
@@ -179,7 +179,7 @@ pub(crate) fn j1_round_trip(app: &AppDir<'_>, src: &dyn DirWrite, old: &[u8]) ->
             Record::RevertDone {
                 op: 1,
                 observed: Observed::After,
-                old_left: true,
+                old_left: vec![1],
             },
             Record::RevertIntent {
                 op: 0,
@@ -190,7 +190,7 @@ pub(crate) fn j1_round_trip(app: &AppDir<'_>, src: &dyn DirWrite, old: &[u8]) ->
             Record::RevertDone {
                 op: 0,
                 observed: Observed::Drifted,
-                old_left: false,
+                old_left: Vec::new(),
             },
             Record::Closed {
                 how: Closing::Reverted,
@@ -260,9 +260,9 @@ fn j1_rollback_and_forget_paths() {
     assert!(!w.is_applied());
     assert_eq!(w.ops()[&1].done, None);
     w.revert_intent(1, None, None).unwrap();
-    w.revert_done(1, Observed::Before, false).unwrap();
+    w.revert_done(1, Observed::Before, &[]).unwrap();
     w.revert_intent(0, None, None).unwrap();
-    w.revert_done(0, Observed::After, false).unwrap();
+    w.revert_done(0, Observed::After, &[]).unwrap();
     assert_eq!(w.next_revert(), None);
     w.close(Closing::RolledBack).unwrap();
     assert_eq!(state(&j, &id), TxnState::Closed(Closing::RolledBack));
@@ -270,9 +270,9 @@ fn j1_rollback_and_forget_paths() {
     let mut w = apply2(&lock, &*g);
     let id = *w.id();
     w.revert_intent(1, None, None).unwrap();
-    w.revert_done(1, Observed::Foreign, false).unwrap();
+    w.revert_done(1, Observed::Foreign, &[]).unwrap();
     w.revert_intent(0, None, None).unwrap();
-    w.revert_done(0, Observed::After, false).unwrap();
+    w.revert_done(0, Observed::After, &[]).unwrap();
     drop(w);
     let mut w = lock.resume(&id).unwrap();
     assert!(w.is_applied());
@@ -356,7 +356,7 @@ fn j1_a_backup_that_reads_back_differently_is_refused_and_its_orphan_allowed() {
     assert_eq!(state(&j, &id), TxnState::Empty);
     let mut w = lock.resume(&id).unwrap();
     assert_eq!(w.next_revert(), None);
-    w.revert_done(0, Observed::Before, false).unwrap_err();
+    w.revert_done(0, Observed::Before, &[]).unwrap_err();
     w.close(Closing::RolledBack).unwrap();
     assert_eq!(state(&j, &id), TxnState::Closed(Closing::RolledBack));
 }
@@ -1051,7 +1051,7 @@ fn j9_writer_budgets_refuse_before_writing() {
     );
     // What is left is always enough to roll back and close.
     w.revert_intent(0, None, None).unwrap();
-    w.revert_done(0, Observed::After, false).unwrap();
+    w.revert_done(0, Observed::After, &[]).unwrap();
     let id = *w.id();
     w.close(Closing::RolledBack).unwrap();
     drop(lock);
@@ -1060,14 +1060,14 @@ fn j9_writer_budgets_refuse_before_writing() {
         TxnState::Closed(Closing::RolledBack)
     );
 
-    // The last slot is only for Closed: repeated revert intents cannot take it.
+    // The last slot is only for Closed, and a revert intent needs room for its done (P2-15,
+    // N1): a repeated one cannot take either.
     let j = Journal::with_limits(&app, InstanceTag::fixed(7), small(|l| l.records = 6));
     let lock = j.lock().unwrap();
     let mut w = lock.begin(HEAD).unwrap();
     w.intent(0, None, None).unwrap();
     w.done(0, Some(1), false).unwrap();
     w.applied(1).unwrap();
-    w.revert_intent(0, None, None).unwrap();
     w.revert_intent(0, None, None).unwrap();
     assert!(too_large(w.revert_intent(0, None, None)));
     let id = *w.id();
@@ -1076,7 +1076,7 @@ fn j9_writer_budgets_refuse_before_writing() {
     let v = j.load(&id, VerifyBackups::Length).unwrap();
     assert_eq!(
         (v.state, v.log.len()),
-        (TxnState::Closed(Closing::Forgotten), 6)
+        (TxnState::Closed(Closing::Forgotten), 5)
     );
 
     let j = Journal::with_limits(&app, InstanceTag::fixed(3), small(|l| l.record = 80));
@@ -1600,7 +1600,7 @@ fn j1_rebinds_round_trip_and_chain() {
     assert_eq!(w.rebinds().len(), 2);
     for k in [1, 0] {
         w.revert_intent(k, None, None).unwrap();
-        w.revert_done(k, Observed::After, false).unwrap();
+        w.revert_done(k, Observed::After, &[]).unwrap();
     }
     w.close(Closing::Reverted).unwrap();
     assert_eq!(state(&j, &id), TxnState::Closed(Closing::Reverted));
@@ -1653,8 +1653,95 @@ fn j9_a_rebind_needs_room_for_the_rest_of_the_revert() {
         let mut w = lock.resume(&id).unwrap();
         for k in [1, 0] {
             w.revert_intent(k, None, None).unwrap();
-            w.revert_done(k, Observed::After, false).unwrap();
+            w.revert_done(k, Observed::After, &[]).unwrap();
         }
         w.close(Closing::Reverted).unwrap();
+    }
+}
+
+/// J9 (P2-15, nit N1): a `RevertIntent` needs room for its `RevertDone`, the two revert records
+/// of every other op not reverted yet, and `Closed` (`records + 2·open + 1`); the next one is
+/// refused before anything is written, and `Closed { Forgotten }` always fits. Control: without
+/// the rule a repeated `RevertIntent` takes a slot its `RevertDone` then cannot follow.
+#[test]
+fn j9_a_revert_intent_needs_room_for_its_done_and_the_rest() {
+    let sys = system();
+    let app = open_app(&sys);
+    let g = game(&sys, r"D:\G");
+    // `apply2` writes 5 records; with a budget of 14 the first `RevertIntent` of op 1 needs
+    // 5 + 2·2 + 1 = 10, so 4 failed attempts and a fifth that succeeds fit (14 - 2 - 4·2 = 4,
+    // the formula of ADR 0019), then the revert finishes.
+    let run = |tag: u64, rule: bool| -> (usize, bool) {
+        let j = Journal::with_limits(&app, InstanceTag::fixed(tag), small(|l| l.records = 14));
+        let lock = j.lock().unwrap();
+        let id = *apply2(&lock, &*g).id();
+        let mut w = lock.resume(&id).unwrap();
+        super::knob::no_revert_room_rule(!rule);
+        let mut tries = 0;
+        let refused = loop {
+            match w.revert_intent(1, None, None) {
+                Ok(()) => tries += 1,
+                Err(JournalError::TooLarge { .. }) => break true,
+                Err(e) => panic!("{e}"),
+            }
+            if tries > 20 {
+                break false;
+            }
+        };
+        super::knob::no_revert_room_rule(false);
+        let before = load(&j, &id).log.len();
+        // The act would run now; can its end be recorded?
+        let done = w.revert_done(1, Observed::After, &[]).is_ok();
+        if rule {
+            assert!(refused && done, "{tries}");
+            assert_eq!(before, 5 + tries, "nothing written by the refusal");
+            w.revert_intent(0, None, None).unwrap();
+            w.revert_done(0, Observed::After, &[]).unwrap();
+            w.close(Closing::Reverted).unwrap();
+        } else {
+            // Forget always closes.
+            drop(w);
+            let w = lock.resume(&id).unwrap();
+            w.close(Closing::Forgotten).unwrap();
+        }
+        (tries, done)
+    };
+    assert_eq!(run(0x91, true), (5, true));
+    // Control: without the rule a `RevertIntent` lands where its `RevertDone` does not fit.
+    let (tries, done) = run(0x92, false);
+    assert!(tries > 5 && !done, "{tries} {done}");
+    // The budget of ADR 0019: after an apply of n ops, 1022 - 4n failed attempts.
+    let lim = Limits::default();
+    for n in [1u16, 128] {
+        let ops: std::collections::BTreeMap<u16, super::OpLog> = (0..n)
+            .map(|k| {
+                let mut o = super::OpLog {
+                    intent: super::IntentRec {
+                        tmp: None,
+                        before: None,
+                    },
+                    done: None,
+                    reverts: Vec::new(),
+                    reverted: None,
+                };
+                o.done = Some(super::DoneRec {
+                    file_id: None,
+                    old_left: false,
+                });
+                (k, o)
+            })
+            .collect();
+        let applied = 2 * usize::from(n) + 1;
+        let f = 1022 - 4 * usize::from(n);
+        assert!(super::write::room_for_revert_intent(
+            applied + f,
+            &ops,
+            &lim
+        ));
+        assert!(!super::write::room_for_revert_intent(
+            applied + f + 1,
+            &ops,
+            &lim
+        ));
     }
 }

@@ -12,7 +12,9 @@
 //!   intents and every intent done.
 //! - `RevertIntent(k)` for the highest intended op without `RevertDone` (descending, the op
 //!   whose intent came last first); repeatable (after a crash) until `RevertDone(k)`.
-//! - `RevertDone(k)` directly after `RevertIntent(k)`.
+//! - `RevertDone(k)` directly after `RevertIntent(k)`; its `old_left` strictly ascending, each
+//!   index a sequence of `k` with a temp name (0: the intent's; `i`: the `i`-th `RevertIntent`
+//!   of `k` with one, P2-15).
 //! - Record contents (P2-10a): an inline old state at most [`INLINE_MAX`] bytes; a
 //!   `RevertIntent` names both `from` and `to` or neither.
 //! - `Closed { RolledBack }` only without `Applied`, `Closed { Reverted }` only after it; both
@@ -171,9 +173,18 @@ impl Machine {
                     return Err("a revert intent out of order");
                 }
             }
-            Record::RevertDone { op, .. } => {
+            Record::RevertDone {
+                op, ref old_left, ..
+            } => {
                 if self.last != Some(Last::RevertIntent(op)) {
                     return Err("revert done not directly after its revert intent");
+                }
+                if old_left.windows(2).any(|w| w[0] >= w[1]) {
+                    return Err("a revert done's .old files out of order");
+                }
+                let named = |i: &u16| self.ops.get(&op).is_some_and(|o| o.seq_tmp(*i).is_some());
+                if !old_left.iter().all(named) {
+                    return Err("a revert done names a .old the op has no temp name for");
                 }
             }
             Record::Rebind { root, ref dirs, .. } => {
@@ -257,7 +268,7 @@ impl Machine {
                 if let Some(o) = self.ops.get_mut(op) {
                     o.reverted = Some(RevertDoneRec {
                         observed: *observed,
-                        old_left: *old_left,
+                        old_left: old_left.clone(),
                     });
                 }
             }
