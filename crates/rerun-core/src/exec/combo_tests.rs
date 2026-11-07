@@ -13,9 +13,15 @@
 //!   or of the revert of T2), the cuts of `C:` times the cuts of `D:`, and the moment of the
 //!   cut: right after the run ("direct"), or after a full recovery of the run ("recovered": the
 //!   recovery's own writes are cut).
+//! - CM3 nested probes: a crash at a call, a restart, the recovery (it reverts T2, then T1)
+//!   crashing at one of its calls, then (power-loss form) a power loss at the cuts of `C:` and
+//!   `D:`, then the complete recovery.
 //!
-//! Size and cost: reduced by default ([`Mode`]); `RERUN_UNREDUCED=1` runs every call, every cut
-//! and every kind. Measured numbers and the reduction rules: `docs/09-testing.md`.
+//! Size and cost: reduced by default ([`Mode`], [`nested`]); `RERUN_UNREDUCED=1` runs every call
+//! and every cut of CM1 and CM2, and the full nested probes (every state-changing call of the run
+//! and of the recovery, both faults for the recovery, every cut) are `#[ignore]`
+//! (`cargo test -p rerun-core --lib combo_tests -- --ignored`). Measured numbers and the
+//! reduction rules: `docs/09-testing.md`.
 //!
 //! Controls (each one bites): the J6 flush sites switched off ([`CONTROLS`]) and, applied
 //! temporarily to `exec` and not checked in, a flush deduplicated per folder, a recovery that
@@ -736,4 +742,229 @@ fn cm_controls_without_a_flush_the_combinations_fail() {
             "{k:?}: {found:?}"
         );
     }
+}
+
+/// The calls to interrupt in a list of calls: all, or the ones that change state and the last
+/// read-only call before the first of those (`points`).
+fn select(calls: &[Prim], mode: Mode) -> Vec<(Prim, usize)> {
+    let first_write = calls.iter().position(|c| changes_state(*c));
+    calls
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| mode == Mode::Full || changes_state(**c) || first_write == Some(i + 1))
+        .map(|(i, c)| (*c, calls[..=i].iter().filter(|x| *x == c).count()))
+        .collect()
+}
+
+/// A recovery that may be interrupted: every transaction not closed is reverted, newest first,
+/// and its errors are ignored (the next recovery looks at the result). `arm` runs right before
+/// the first revert (so the calls it counts are those of the recovery alone).
+fn attempt(w: &World, arm: impl FnOnce(&crate::sys::fake::FakeFs)) {
+    let todo: Vec<TxnId> = {
+        let mut s = w.env.states();
+        s.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+        s.into_iter()
+            .filter(|(_, s)| {
+                matches!(
+                    s,
+                    Some(TxnState::Empty | TxnState::Open | TxnState::Applied)
+                )
+            })
+            .map(|(t, _)| t)
+            .collect()
+    };
+    let fx = w.env.sys.fake_fs();
+    fx.clear_faults();
+    arm(fx);
+    for t in todo {
+        let r = w.env.revert(&t);
+        if fx.crashed() || r.is_err() {
+            break;
+        }
+    }
+}
+
+/// The world of `k` after the run at `at`, restarted if it crashed.
+fn interrupted(k: Kind, at: Option<At>) -> World {
+    let w = setup(k);
+    run(&w, at);
+    let fx = w.env.sys.fake_fs();
+    fx.clear_faults();
+    if fx.crashed() {
+        fx.restart();
+    }
+    w
+}
+
+/// The calls of a recovery after the run at `at`.
+fn recovery_calls(k: Kind, at: Option<At>) -> Vec<Prim> {
+    let w = interrupted(k, at);
+    let fx = w.env.sys.fake_fs();
+    attempt(&w, |f| f.record_calls(true));
+    fx.record_calls(false);
+    fx.take_calls()
+}
+
+/// The nested probes of `k` (CM3): the run interrupted at a point `p`, a restart, a recovery
+/// interrupted at one of its calls `q` (`power`: then a power loss at every pair of cuts;
+/// else none), then the complete recovery must close everything and restore the floor.
+/// With `want`, stops at the first violation containing it.
+fn nested(k: Kind, power: bool, sampled: bool, want: Option<&str>) -> (Vec<String>, Size) {
+    let mut found = Vec::new();
+    let mut size = Size::default();
+    let mode = Mode::Reduced;
+    let fault = Fault::CrashAfter;
+    {
+        let mut ps = points(k, fault, mode);
+        if sampled {
+            // Every rename is a step of a replace sequence (ADR 0017): each one is a point.
+            ps = first_and_last(ps, |p| {
+                p.map(|a| {
+                    (
+                        a.revert,
+                        a.call,
+                        if a.call == Prim::Rename { a.nth } else { 0 },
+                    )
+                })
+            });
+        }
+        for p in ps {
+            let calls = recovery_calls(k, p);
+            let mut qs = select(&calls, mode);
+            if sampled {
+                qs = first_and_last(qs, |q| Some(q.0));
+            }
+            let qfaults: &[Fault] = if sampled { &[fault] } else { &FAULTS };
+            for &qfault in qfaults {
+                for (call, nth) in qs.iter().copied() {
+                    size.points += 1;
+                    let label = format!(
+                        "{k:?} {fault:?} after {p:?}, recovery {qfault:?} at {call:?}#{nth}"
+                    );
+                    let after_q = |w: &World| {
+                        attempt(w, |f| f.fault(call, nth, qfault));
+                        let fx = w.env.sys.fake_fs();
+                        fx.clear_faults();
+                        if fx.crashed() {
+                            fx.restart();
+                        }
+                    };
+                    let hit = |x: &str| want.is_some_and(|s| x.contains(s));
+                    if !power {
+                        let w = interrupted(k, p);
+                        after_q(&w);
+                        size.runs += 1;
+                        for x in recover(&w) {
+                            found.push(format!("{label}: {x}"));
+                            if hit(&x) {
+                                return (found, size);
+                            }
+                        }
+                        continue;
+                    }
+                    // The first world measures the cuts and is then the one cut at (0, 0).
+                    let w0 = interrupted(k, p);
+                    after_q(&w0);
+                    let (pc, pd) = (
+                        w0.env.sys.pending(Domain::Volume('C')),
+                        w0.env.sys.pending(Domain::Volume('D')),
+                    );
+                    let mut first = Some(w0);
+                    size.max_c = size.max_c.max(pc);
+                    size.max_d = size.max_d.max(pd);
+                    let nested_cuts = |n: usize| {
+                        if sampled {
+                            let mut v = vec![0, n];
+                            v.dedup();
+                            v
+                        } else {
+                            cuts(n, mode)
+                        }
+                    };
+                    for c in nested_cuts(pc) {
+                        for d in nested_cuts(pd) {
+                            let w = first.take().unwrap_or_else(|| {
+                                let w = interrupted(k, p);
+                                after_q(&w);
+                                w
+                            });
+                            w.env.sys.power_loss(&BTreeMap::from([
+                                (Domain::Volume('C'), c),
+                                (Domain::Volume('D'), d),
+                            ]));
+                            size.runs += 1;
+                            for x in violations(&w, Got::default(), true) {
+                                found.push(format!("{label}, cut C {c} D {d}: {x}"));
+                                if hit(&x) {
+                                    return (found, size);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (found, size)
+}
+
+/// The first and the last element of every key, in order, and the elements with no key.
+fn first_and_last<T: Copy, K: PartialEq>(v: Vec<T>, key: impl Fn(&T) -> Option<K>) -> Vec<T> {
+    let keys: Vec<Option<K>> = v.iter().map(&key).collect();
+    (0..v.len())
+        .filter(|&i| {
+            keys[i].is_none()
+                || keys[..i].iter().all(|k| *k != keys[i])
+                || keys[i + 1..].iter().all(|k| *k != keys[i])
+        })
+        .map(|i| v[i])
+        .collect()
+}
+
+fn nested_clear(all: &[Kind], power: bool, sampled: bool, label: &str) {
+    for k in all {
+        let t = Instant::now();
+        let (found, size) = nested(*k, power, sampled, None);
+        eprintln!(
+            "{label} {k:?} sampled {sampled}: {size:?} in {:.1} s",
+            t.elapsed().as_secs_f64()
+        );
+        assert!(
+            found.is_empty(),
+            "{k:?}: {} violations: {:#?}",
+            found.len(),
+            found.iter().take(5).collect::<Vec<_>>()
+        );
+        assert!(size.runs > 100, "{k:?}: {size:?}");
+    }
+}
+
+/// The reduced nested probes run on one multi-op kind and one stacked kind; the others (and
+/// every call) are the `#[ignore]` ones.
+const NESTED: [Kind; 2] = [Kind::TwoReplaceCased, Kind::StackSameCased];
+
+#[test]
+fn cm3_a_crash_during_the_recovery_of_a_crash_still_recovers() {
+    nested_clear(&NESTED, false, true, "CM3");
+}
+
+#[test]
+fn cm3_a_power_loss_after_a_crash_during_the_recovery_still_recovers() {
+    // One kind: the stacked one, whose recovery also reverts T1.
+    nested_clear(&NESTED[1..], true, true, "CM3 power");
+}
+
+/// The full nested probes: every kind, every call, both faults, every cut. Minutes.
+#[test]
+#[ignore = "minutes; the full form of cm3 (cargo test -p rerun-core --lib combo_tests -- --ignored)"]
+fn cm3_full_nested_crash() {
+    let all: Vec<Kind> = MULTI.iter().chain(&STACKED).copied().collect();
+    nested_clear(&all, false, false, "CM3 full");
+}
+
+#[test]
+#[ignore = "minutes; the full form of cm3 (cargo test -p rerun-core --lib combo_tests -- --ignored)"]
+fn cm3_full_nested_power_loss() {
+    let all: Vec<Kind> = MULTI.iter().chain(&STACKED).copied().collect();
+    nested_clear(&all, true, false, "CM3 full power");
 }
