@@ -9,8 +9,9 @@
 #          the value (shim cache)
 #   SB-L3  whether a value without the "~" prefix (or with "$") takes effect
 #   SB-L4  whether the 32-bit registry view sees the same Layers value
-# "Takes effect" is observed two ways in the launched copy of cmd.exe: `ver` (the WINXPSP3
-# layer lies about the OS version) and whether __COMPAT_LAYER is in its environment.
+# "Takes effect" is observed two ways: whether the launch of the 32-bit cmd.exe copy needs
+# elevation (WINXPSP3 in a non-elevated session: Win32 740) and whether __COMPAT_LAYER is in
+# the environment of the launched copy.
 # Optional: C:\sandbox\tools\Procmon64.exe (Sysinternals, supplied by you, mapped read-only)
 # records which Layers value name is queried at CreateProcess; the filtered CSV goes to
 # procmon-layers.csv. SB-L1 (what the Explorer tab writes) is manual: sandbox-layers-dump.ps1.
@@ -55,26 +56,26 @@ function Reg-Query([string]$name, [string]$view = '64') {
     if ($script:NativeExit -ne 0) { return '<absent>' }
     return (($r | Where-Object { $_ -match 'REG_SZ' }) -join '; ').Trim()
 }
+# `ver` cannot be used: a cmd.exe copy outside System32 finds no MUI file and prints only
+# "no message text for 0x2350" (seen in the first runs). The effect of WINXPSP3 on the
+# 32-bit copy in a non-elevated session is that the launch needs elevation (Win32 740).
 function Observe([string]$exe) {
     try {
-        $o = (Run-Native $exe /c 'ver & set __COMPAT_LAYER') | Out-String
+        $o = (Run-Native $exe /c 'set __COMPAT_LAYER') | Out-String
     } catch {
-        return "launch failed: $_"
-    }
-    $ver = ([regex]::Match($o, '[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?')).Value
-    if (-not $ver) {
-        # The first run (build 26100) matched nothing here: keep the raw first line to see why.
-        $first = ($o -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
-        $ver = 'no version (first line: `' + "$first".Trim() + '`)'
+        $w = $_.Exception
+        while ($w -and -not ($w -is [ComponentModel.Win32Exception])) { $w = $w.InnerException }
+        if ($w) { return "launch refused, Win32 $($w.NativeErrorCode)" }
+        return 'launch failed: ' + ("$_" -split "`r?`n")[0]
     }
     $seen = if ($o -match '__COMPAT_LAYER=(.*)') { "set: $($Matches[1].Trim())" } else { 'not set' }
-    return "$ver; __COMPAT_LAYER $seen"
+    return "launched; __COMPAT_LAYER $seen"
 }
 
 Say '# Layers probes (SB-L2 to SB-L4)'
 Say ''
 Say ('Build: ' + (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber + ', date ' + (Get-Date -Format o))
-Say 'Facts only. Observation = `ver` output and `__COMPAT_LAYER` in the launched cmd.exe copy.'
+Say 'Facts only. Observation = launched or refused (Win32 code; 740 = needs elevation) and `__COMPAT_LAYER` in the launched cmd.exe copy.'
 Say ''
 
 $forms = $null
@@ -151,7 +152,7 @@ try {
     Say ''
     Say '| data | observation |'
     Say '|---|---|'
-    foreach ($data in @('~ WINXPSP3', 'WINXPSP3', '$ WINXPSP3', '~WINXPSP3', '~ RUNASINVOKER')) {
+    foreach ($data in @('~ WINXPSP3', 'WINXPSP3', '$ WINXPSP3', '~WINXPSP3', '~ RUNASINVOKER', '~ WINXPSP3 RUNASINVOKER')) {
         Cleanup
         Reg-Add $forms.canonical $data
         Say ('| `' + $data + '` | ' + (Observe $forms.canonical) + ' |')
