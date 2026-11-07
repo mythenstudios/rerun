@@ -1,12 +1,18 @@
 //! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system` and `rerun scan`;
-//! phase 2 (P2-13): `rerun plan`.
+//! phase 2 (P2-13): `rerun plan` and `rerun apply`.
 //!
 //! Order in `main`: `restrict_dll_search` first (ADR 0008), then clap parses (`--help`,
-//! `--version` and usage errors end there, before any registry or file system access), then
-//! `WinSystem::new`. The commands take a [`Host`] (`&dyn System` and the install folder) and two
-//! line writers, so the tests run them against the fake system layer with in-memory output.
+//! `--version` and usage errors, a malformed plan hash included, end there,
+//! before any registry or file system access), then `WinSystem::new`. The commands take a
+//! [`Host`] (`&dyn System`, the install folder, the confirmation) and two line writers, so the
+//! tests run them against the fake system layer with in-memory output and a fake console.
+//!
+//! No console control handler: Ctrl+C during an apply or a revert ends the process like a
+//! crash, which the journal is built for; the next revert finishes it (docs/04).
 
+mod apply;
 mod cli;
+mod confirm;
 mod host;
 mod messages;
 mod out;
@@ -56,11 +62,13 @@ fn main() -> ExitCode {
             return Exit::Fatal.into();
         }
     };
-    let host = Host {
+    let mut console = confirm::Console;
+    let mut host = Host {
         sys: &sys,
         install: install_dir(),
+        confirm: &mut console,
     };
-    run(&host, cli.command, &mut out, &mut err).into()
+    run(&mut host, cli.command, &mut out, &mut err).into()
 }
 
 #[cfg(not(windows))]
@@ -87,7 +95,7 @@ fn parse() -> Result<Cli, Exit> {
 
 /// Runs a command.
 fn run<W: io::Write, E: io::Write>(
-    host: &Host<'_>,
+    host: &mut Host<'_>,
     command: Command,
     out: &mut Out<W>,
     err: &mut Out<E>,
@@ -104,6 +112,7 @@ fn run<W: io::Write, E: io::Write>(
             }
         },
         Command::Plan { steps, dry_run } => plan::plan(host, &steps, dry_run, out, err),
+        Command::Apply { hash, dry_run, yes } => apply::apply(host, &hash, dry_run, yes, out, err),
     }
 }
 

@@ -52,14 +52,23 @@ fn version_matches_package_version() {
 fn help_lists_the_phase_2_commands_and_their_flags() {
     let out = rerun(&["--help"]);
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("\n  plan "), "{stdout}");
-    let out = rerun(&["plan", "--help"]);
-    assert!(out.status.success());
-    let help = String::from_utf8(out.stdout).unwrap();
-    assert!(help.contains("--dry-run"), "{help}");
+    for c in ["plan", "apply"] {
+        assert!(stdout.contains(&format!("\n  {c} ")), "{c}: {stdout}");
+    }
+    for (c, flags) in [
+        ("plan", &["--dry-run"][..]),
+        ("apply", &["--dry-run", "--yes"]),
+    ] {
+        let out = rerun(&[c, "--help"]);
+        assert!(out.status.success(), "{c}");
+        let help = String::from_utf8(out.stdout).unwrap();
+        for f in flags {
+            assert!(help.contains(f), "{c} {f}: {help}");
+        }
+    }
 }
 
-/// Never a step file that exists here: this binary runs on the real machine (project rule: no
+/// Never a well-formed plan hash here: this binary runs on the real machine (project rule: no
 /// writing command against it), so every argument fails clap's parse.
 #[test]
 fn usage_errors_exit_2_without_a_report() {
@@ -73,6 +82,9 @@ fn usage_errors_exit_2_without_a_report() {
         &["scan", "4294967296"],
         &["scan", "--nope"],
         &["plan"],
+        &["apply"],
+        &["apply", "abc", "--yes"],
+        &["apply", "ABCDEF", "--dry-run"],
     ] {
         let out = rerun(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");

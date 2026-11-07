@@ -54,6 +54,19 @@ impl<W: Write> Out<W> {
         Ok(())
     }
 
+    /// Writes one message as a question: followed by a space, not a line end, and flushed
+    /// (the answer is typed on the same line).
+    pub fn prompt(&mut self, m: &Message<'_>) -> Result<(), OutError> {
+        let text = m.to_string();
+        let shown = escape::text(&text);
+        if shown.as_str() != text {
+            net_hit(&text);
+        }
+        write!(self.w, "{shown} ")?;
+        self.w.flush()?;
+        Ok(())
+    }
+
     /// Writes every message, stopping at the first error.
     pub fn lines(&mut self, ms: &[Message<'_>]) -> Result<(), OutError> {
         ms.iter().try_for_each(|m| self.line(m))

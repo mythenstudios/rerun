@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use rerun_core::plan::PlanHash;
+
 /// Rerun by Mythen Studios – detects old PC games and applies (and cleanly removes)
 /// the compatibility fixes they need.
 #[derive(Debug, Parser)]
@@ -39,21 +41,43 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Applies a stored plan after showing it again.
+    Apply {
+        /// The plan hash `rerun plan` printed.
+        #[arg(value_parser = plan_hash)]
+        hash: PlanHash,
+        /// Run every check, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask before applying (needed when not run from a console).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// A plan hash: exactly 64 lower-case hex digits, checked before any system access.
+fn plan_hash(s: &str) -> Result<PlanHash, String> {
+    s.parse()
+        .map_err(|_| "not a plan hash (64 lower-case hex digits)".to_owned())
 }
 
 /// Exit codes (ADR 0016 and its phase 2 amendment). Only additive changes: scripts may rely
 /// on them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
-    /// Done, or a report was printed (also with partial failures, or the output ended by a
-    /// closed pipe after the change).
+    /// Done, or a report was printed (also with partial failures, open transactions, or the
+    /// output ended by a closed pipe after the change).
     Report = 0,
     /// Fatal, no report.
     Fatal = 1,
-    /// Usage error (clap).
+    /// Usage error (clap, a malformed hash or transaction, no console without `--yes`).
     Usage = 2,
-    /// Nothing was changed: refused, or the preview could not be written.
+    /// Nothing was changed: refused, declined, or the preview could not be written.
     Refused = 3,
+    /// The apply failed and was rolled back completely.
+    RolledBack = 4,
+    /// A transaction stays open and needs attention.
+    Open = 5,
 }
 
 impl From<Exit> for std::process::ExitCode {
@@ -64,12 +88,29 @@ impl From<Exit> for std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
-    use super::Cli;
+    use super::{Cli, Command};
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn plan_hashes_are_checked_by_form() {
+        let h = "a".repeat(64);
+        assert!(matches!(
+            Cli::try_parse_from(["rerun", "apply", &h, "--yes"]).map(|c| c.command),
+            Ok(Command::Apply {
+                yes: true,
+                dry_run: false,
+                ..
+            })
+        ));
+        for bad in [&"A".repeat(64), &"a".repeat(63), "x", ""] {
+            let e = Cli::try_parse_from(["rerun", "apply", bad]).unwrap_err();
+            assert!(e.use_stderr(), "{bad}");
+        }
     }
 }

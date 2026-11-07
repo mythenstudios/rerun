@@ -202,3 +202,41 @@ Run by the user on the developer machine (Ryzen 9 5950X, Radeon RX 9070 XT, Wind
 - **Why:** core rule 5 (preview before apply) asks that the user sees the value Rerun overwrites, not only its hash; a 1 KiB limit keeps a plan within its op budget and covers the settings values Topos replace. Larger and non-text old values are shown by type, length and SHA-256 only.
 - **How:** the type and numbers are built by Rerun; string data goes through `escape::text` as a `Shown`, last on its line with nothing after it (`RegShown { kind, text }`, review S3), so a `"` or control character in it cannot pose as preview text.
 - **Bound:** the preview shows only values a Topo step replaces, never other values of the key. A Topo review must not let a step replace a value that may hold a secret (a token, a password, a licence key): such a value would be shown in the preview and kept in the stored plan and the journal (user-readable `LocalAppData`).
+
+## Amendment (P2-13, 2026-11-07): phase 2 commands
+
+Plan `P2-13` with the user decisions E1 to E7 and the senior-dev conditions S1 to S8. Replaces the open "exit codes are fixed with their step" above.
+
+### Commands
+- `rerun plan <steps.json> [--dry-run]`: reads the step file (`docs/02-topo-format.md`, "Phase 2 step file"), shows the preview of exactly the bytes it stores (`plan::preview_stored` of the encoded plan), stores them as `<AppDir>\plans\<hash>.json` and prints `apply with: rerun apply <hash>`. A plan without ops is not stored. `--dry-run` creates nothing, not even Rerun's folder (review S6: the planners take `PlanCtx::app` as an `Option`; Rerun's folder is created only right before the plan is stored). No lock.
+- `rerun apply <hash> [--dry-run] [--yes]`: shows the stored plan again, from the bytes that are applied, then runs every check of the apply without writing (`exec::check`: the same `preflight` chain the apply runs under the lock, review S1), asks, and applies (`exec::apply` loads the same bytes by hash and runs every check again under the lock). A plan the checks refuse is not asked about. `--dry-run` stops after the checks: no journal folder, no lock file, no record (user decision E2 a); an existing `journal\lock` is held read side while it checks, so an apply in progress makes it `JournalBusy` like the apply itself (review S2). It holds short read guards on the game files, as the apply does.
+- A plan hash is parsed by clap (64 lower-case hex digits): a malformed one is a usage error before any system access.
+
+### Confirmation (user decision E1 a, sharpened by the senior-dev review)
+The preview goes to stdout, then the question (`Apply these 8 changes? [y/N]`) to stderr, followed by a space and flushed, no console mode changed. It is asked only when stdin and stdout are both consoles (`IsTerminal`): a preview piped away was not seen. Otherwise `--yes` is required (exit 2). The answer is one line of at most 256 bytes; `y` or `yes` (ASCII, any case, surrounding whitespace ignored) is yes, anything else, a longer line and the end of input are no (exit 3, "nothing done").
+
+### Elevated (user decision E3)
+Elevated, or when elevation cannot be determined (fail closed), only `system`, `scan` and `status` run. `plan` (also with `--dry-run`), every dry run and every writing command exit 3 with the message that Rerun changes nothing then and that an administrator account always runs elevated with UAC turned off. The guard is in the core as well: `exec::apply`, `exec::check`, `exec::revert` and `exec::forget` refuse an elevated process for every plan, before the first record (`exec::standard_user`), not only plans with registry ops. Why: an elevated planner would check `user_writable` against the administrator's linked token (ADR 0007) and an apply would write under `Program Files` past the phase 3 helper; the journal and the plans would land in the profile of the administrator account (over-the-shoulder UAC). The phase 3 helper never reads the journal and does not use these functions (ADR 0019, `docs/06-security.md`).
+
+### Exit codes
+Only additive changes: scripts may rely on them.
+
+| Code | Meaning | Cases |
+|---|---|---|
+| 0 | done, or a report | plan stored or shown (`--dry-run`), nothing to do; apply applied or nothing to do; `apply --dry-run` without objection; `system`, `scan` |
+| 1 | fatal, no report | the DLL search path, `WinSystem::new`, `current_exe`, `ForbiddenRoots::resolve`, Rerun's folder cannot be opened, a write error other than a closed pipe before the change |
+| 2 | usage | clap, a malformed plan hash, no console without `--yes` |
+| 3 | nothing changed | every `Refusal` (the game runs or cannot be checked, `JournalBusy`, Steam updating, gone or its manifest unreadable, `Mismatch`, `Blocked`, `Interrupted`, `Elevated`, `NeedsHelper`, `MainExe`, `Registry`, `Root`, `Plan`), a step file or planner error, the user said no, the preview could not be written (closed pipe before the change) |
+| 4 | rolled back | the apply failed and was rolled back completely (`Closed { RolledBack }`, everything as before) |
+| 5 | open, needs attention | the apply failed and its rollback did not finish (`LeftOpen`); `rerun status` shows it |
+
+One function per error kind maps the codes (`exit_for_apply`); the `#[non_exhaustive]` catch-all counts as 5, since an unknown error may come after the first change. Every refusal has the same code (user decision E6 a); its text says whether to try again later.
+
+### A closed pipe (deviation from "Output" above for the writing commands)
+Before the change, a write of the preview that fails with `BrokenPipe` ends the command with nothing changed and exit 3 (core rule 5: a preview that did not arrive does not count); any other write error before the change is exit 1. After the change the report ends silently and the exit code of the operation stays (another write error is named on stderr).
+
+### Output
+Unchanged rules: English only, every string in `messages` (the phase 2 lines in `messages::txn`), untrusted text only as `escape::Shown` and last on its line, an INI key's old and new value on lines of their own; no `--json` (the app calls the core directly). The `Display` texts of `Refusal` and `PlanError` stay the accepted localisation leftover (amendment of step 16). Failures go to stderr as `rerun: <error>`, a hint on a line of its own.
+
+### Ctrl+C
+No console control handler: Ctrl+C during an apply ends the process like a crash, which the journal is built for (ADR 0019); the transaction is open and the next revert finishes it (`docs/04-launch-methods.md`).

@@ -1,5 +1,5 @@
 //! The messages of the phase 2 commands (P2-13, ADR 0016 amendment "phase 2 commands"): so far
-//! `plan`. One [`TxnMsg`] is one line. Static text is
+//! `plan` and `apply`. One [`TxnMsg`] is one line. Static text is
 //! ASCII; untrusted fields are [`Shown`] and stand last on their line. Registry text appears
 //! only in the plan preview (ADR 0016 amendment P2-10b); a recorded head comes masked from the
 //! core (`plan::preview_head`).
@@ -7,7 +7,7 @@
 use std::fmt;
 
 use rerun_core::escape::Shown;
-
+use rerun_core::journal::TxnId;
 use rerun_core::plan::{IniOldShown, PlanHash, RegShown};
 
 use super::Count;
@@ -162,12 +162,72 @@ pub enum TxnMsg<'a> {
         hash: PlanHash,
     },
 
+    // ---------- apply ----------
+    /// The head of the apply preview.
+    PlanHead {
+        /// Its hash.
+        hash: PlanHash,
+        /// Ops.
+        ops: usize,
+    },
+    /// `apply --dry-run` found nothing to refuse.
+    ChecksPassed,
+    /// The question.
+    AskApply {
+        /// Ops.
+        ops: usize,
+    },
+    /// The user said no.
+    NothingDone,
+    /// Applied.
+    Applied {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// How to revert it.
+    RevertWith {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// The apply failed and was rolled back.
+    RolledBack {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// The apply failed and its rollback did not finish.
+    LeftOpen {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// Why the apply failed.
+    Cause {
+        /// The error, escaped.
+        error: Shown<'a>,
+    },
+    /// Why the rollback did not finish.
+    RollbackCause {
+        /// The error, escaped.
+        error: Shown<'a>,
+    },
+    /// What finishes a transaction left open.
+    FinishWithRevert {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// A transaction left open with changes left as found: forget closes it.
+    FinishWithForget {
+        /// The transaction.
+        txn: TxnId,
+    },
+
     // ---------- errors (stderr) ----------
     /// A refusal or another error that changed nothing, escaped.
     Error {
         /// The error.
         error: Shown<'a>,
     },
+    /// No console to ask.
+    NoConsole,
     /// Rerun's folder does not exist yet.
     NoAppDir,
     /// Rerun's folder cannot be opened.
@@ -273,7 +333,35 @@ impl fmt::Display for TxnMsg<'_> {
             }
             Self::ApplyWith { hash } => write!(f, "apply with: rerun apply {hash}"),
 
+            Self::PlanHead { hash, ops } => write!(f, "plan {hash}: {}", changes(*ops)),
+            Self::ChecksPassed => f.write_str("dry run: every check passed; nothing was written"),
+            Self::AskApply { ops: 1 } => f.write_str("Apply this change? [y/N]"),
+            Self::AskApply { ops } => write!(f, "Apply these {ops} changes? [y/N]"),
+            Self::NothingDone => f.write_str("nothing done"),
+            Self::Applied { txn } => write!(f, "applied as transaction {txn}"),
+            Self::RevertWith { txn } => write!(f, "revert with: rerun revert {txn}"),
+            Self::RolledBack { txn } => write!(
+                f,
+                "the apply failed and was rolled back; nothing changed (transaction {txn})"
+            ),
+            Self::LeftOpen { txn } => write!(
+                f,
+                "the apply failed and its rollback did not finish: transaction {txn} stays open"
+            ),
+            Self::Cause { error } => write!(f, "  cause: {error}"),
+            Self::RollbackCause { error } => write!(f, "  rollback: {error}"),
+            Self::FinishWithRevert { txn } => {
+                write!(f, "rerun status shows it; rerun revert {txn} finishes it")
+            }
+            Self::FinishWithForget { txn } => write!(
+                f,
+                "changes were left as found; rerun forget {txn} closes it (backups stay)"
+            ),
+
             Self::Error { error } => write!(f, "rerun: {error}"),
+            Self::NoConsole => f.write_str(
+                "rerun: stdin or stdout is not a console, so nothing can be asked; pass --yes",
+            ),
             Self::NoAppDir => f.write_str(
                 "rerun: Rerun has no folder yet, so there is no plan or transaction; run rerun \
                  plan first",
