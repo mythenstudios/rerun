@@ -340,7 +340,7 @@ pub struct FileHash { pub sha256: [u8; 32], pub len: u64 }   // the new content;
 - **A front end shows `before_step` and the backup before `forget`** (open point P2-12): `rerun forget` shows every backup with its path (or "kept in the journal record") and, from `verify`, every `.old` that holds a file as it was before a step of Rerun ("never call it the original; the backup is"); `rerun revert` shows both for an op left `Foreign`.
 
 ### Rebind (user decision E5 a)
-Not in P2-13. Its own step P2-14 before audit A3: a `Rebind` record (additive; format 1 stays unstable until A6), its grammar, `exec`, the flag `--rebind` and crash tests. **Core done (P2-14a, amendment below);** until P2-14b (the Steam scan, the flag) a root that is another folder now (`IdentityMismatch`) refuses the revert, and the CLI names `forget`.
+Not in P2-13. Its own step P2-14 before audit A3: a `Rebind` record (additive; format 1 stays unstable until A6), its grammar, `exec`, the flag `--rebind` and crash tests. **Done (P2-14a, the core; P2-14b, the Steam scan and the flag `--rebind`; amendment below and ADR 0016 amendment P2-14).**
 
 ## Amendment (P2-14, 2026-11-07; plan `P2-14` with the user decisions E-R1 to E-R6 and the senior-dev conditions; this is the core cut P2-14a)
 
@@ -391,3 +391,9 @@ After a move, "the state before the first change" is that of the old folder, whi
 - **Status (condition d):** `TxnStatus::rebinds` (`RebindLine`: root, library, the game folder with the head's install folder, the identity bound and the one before), journal only.
 - **Created folders in the preview (condition e):** `RebindPreview::created` (`CreatedDir`): every folder the plan created in that root, with its path in the new folder and whether it was found there (bound by the file ID found, "not provably Rerun's") or is missing; `preview_head` alone does not have the new folder's path.
 - Tests: RB-T10 (the scan: `Ambiguous` naming both libraries, the old library still listed and gone, no Steam), RB-T11 (under the lock: a second library since the preview `Ambiguous`, the library moved on `Changed`, no record; checked again it closes), RB-T12 (`AlreadyBound` with the bound folder, the created folders of the preview, the status line). The existing rebind tests and the crash matrix run with a Steam root and a library list that each move rewrites (as Steam does).
+
+### Open points after P2-14
+- Rebind for other stores (GOG, Epic), for `UserData` roots (phase 4), for roots only the elevated helper can write (phase 3), and of more than one root in one run: not now.
+- What Steam keeps when it moves a library (senior-dev S2): not measured; any difference refuses the rebind (fail closed).
+- The reading of "every listed library readable" (E-R1) is the one of the P2-14b section above; a problem of another app's manifest does not refuse.
+- Windows tests RB-W1 and RB-W2: done (`sys/win/tests/exec.rs`, a Steam layout in a `TestRoot`, the fake registry naming its Steam folder).

@@ -363,7 +363,11 @@ the revert stops at op 0: the game folder needs administrator rights (not suppor
         halted: None,
     };
     assert_eq!(
-        shown(&report_lines(&rep, &v)),
+        shown(&report_lines(
+            &st(t4, TxnLine::Applied, None, Vec::new()),
+            &rep,
+            &v
+        )),
         format!(
             r"  op 2: was already as before (changed since the preview)
   op 1: left as found (changed by someone else)

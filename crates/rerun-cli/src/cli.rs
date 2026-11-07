@@ -69,6 +69,10 @@ pub enum Command {
         /// Do not ask before reverting (needed when not run from a console).
         #[arg(long)]
         yes: bool,
+        /// Bind the transaction to the folder Steam lists now for the game, after a preview, then
+        /// revert it there (only at a console; not with --yes).
+        #[arg(long, conflicts_with = "yes")]
+        rebind: bool,
     },
     /// Transactions with their state, backups and pending cleanups.
     Status {

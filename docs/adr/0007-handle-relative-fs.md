@@ -119,6 +119,6 @@ The read contracts now run against `sys::win` locally and on GitHub runners (`do
 Where the points left open for phase 2 went:
 - **Write side** (the "Replace", "Revert" and hard-link rules, the phase 2 renames and deletes by handle, `FileNameInformation` before each rename, share modes on the write path): ADR 0017. `FileGuard` holds hash and action on one handle; replace and delete take an expected SHA-256; hard-linked targets are refused, not only "never changed in place" (user decision D1); POSIX delete and rename are required, a volume without them gets no write handle; renames only by a single segment relative to a checked handle (observed: a rename target with `\` follows junctions).
 - **`AppDir`** (`<LocalAppData>\Rerun`, the third root kind named in "Only policy hands out roots"): ADR 0019. Its own opening rules; it is not checked against the forbidden list, whose `LocalAppData\Rerun` entry keeps game and store roots out of it.
-- **Root identity after a moved library or a reinstall** (`IdentityMismatch` on revert): strict `--rebind`, ADR 0020 (user decision D5).
+- **Root identity after a moved library or a reinstall** (`IdentityMismatch` on revert): strict `--rebind`, ADR 0020 (user decision D5). **Done (P2-14):** ADR 0020 amendment P2-14, ADR 0016 amendment P2-14.
 - **`UserData` root kind** (`Documents`, `My Games`): phase 4 (user decision D6), with its own allowlist instead of the forbidden list; the plan format already carries a root kind per root (ADR 0020).
 - **VirtualStore warning:** phase 3.

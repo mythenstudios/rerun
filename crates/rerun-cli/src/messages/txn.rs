@@ -10,6 +10,7 @@ use rerun_core::escape::Shown;
 use rerun_core::journal::{Closing, Observed, TxnId};
 use rerun_core::plan::{IniOldShown, PlanHash, RegShown};
 use rerun_core::policy::ini::KeyState;
+use rerun_core::policy::root::RootId;
 
 use super::Count;
 
@@ -614,6 +615,86 @@ pub enum TxnMsg<'a> {
         /// How it was closed.
         how: Closing,
     },
+
+    // ---------- revert --rebind (P2-14b) ----------
+    /// The rebind block of a preview.
+    RebindHeading {
+        /// Root index.
+        root: u16,
+    },
+    /// The folder the root is bound to now.
+    RebindNow {
+        /// Its identity.
+        id: RootId,
+        /// Its path, escaped.
+        path: Shown<'a>,
+    },
+    /// The library of the line above.
+    RebindLibrary {
+        /// The library, escaped.
+        library: Shown<'a>,
+    },
+    /// Why the folder bound now does not open.
+    RebindWhy {
+        /// The reason, escaped.
+        why: Shown<'a>,
+    },
+    /// The folder the rebind binds the root to.
+    RebindTo {
+        /// Its identity.
+        id: RootId,
+        /// Its path, escaped.
+        path: Shown<'a>,
+    },
+    /// A folder the plan created, found in the new folder: bound by the file ID found.
+    CreatedFound {
+        /// Its path, escaped.
+        path: Shown<'a>,
+    },
+    /// A folder the plan created, missing in the new folder.
+    CreatedMissing {
+        /// Its path, escaped.
+        path: Shown<'a>,
+    },
+    /// Heading of what the revert does in the new folder.
+    RebindNowHeading,
+    /// Registry ops stay where Rerun wrote them.
+    RebindRegistryNote,
+    /// A binding is permanent.
+    RebindPermanentNote,
+    /// The question of a rebind.
+    AskRebind {
+        /// The transaction.
+        txn: TxnId,
+        /// Ops the revert observes.
+        ops: usize,
+    },
+    /// A rebind needs the question.
+    RebindNeedsConsole,
+    /// The transaction is bound already: the revert runs as it is.
+    AlreadyBound {
+        /// The bound folder, escaped.
+        path: Shown<'a>,
+    },
+    /// A rebind may have reached the journal although it failed.
+    MayBeBound {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// A revert halted at a Steam root that is gone: a rebind may bind it.
+    HaltRebindHint {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// A rebind of a transaction (`status`).
+    StatusRebind {
+        /// Root index.
+        root: u16,
+        /// The identity bound.
+        id: RootId,
+        /// The game folder bound (or the library), escaped.
+        path: Shown<'a>,
+    },
 }
 
 /// What is wrong with the Steam app of a step file.
@@ -874,8 +955,9 @@ impl fmt::Display for TxnMsg<'_> {
             Self::StoreFailed { error } => write!(f, "rerun: cannot store the plan: {error}"),
             Self::IdentityHint { txn } => write!(
                 f,
-                "the game folder is another folder now (a moved library or a reinstall); rerun \
-                 forget {txn} closes the transaction, a rebind is not supported yet"
+                "the game folder is another folder now (a moved library or a reinstall); if Steam \
+                 moved or reinstalled it, rerun revert {txn} --rebind shows the folder Steam lists \
+                 now; a folder you chose: rerun forget {txn} closes the transaction"
             ),
             Self::EmptyCloses { txn } => write!(
                 f,
@@ -886,6 +968,55 @@ impl fmt::Display for TxnMsg<'_> {
                 "transaction {txn} may have been closed although the command failed; rerun \
                  status shows what the journal holds"
             ),
+            Self::RebindHeading { root } => write!(f, "rebind of root {root}:"),
+            Self::RebindNow { id, path } => write!(f, "  bound now (identity {id}): {path}"),
+            Self::RebindLibrary { library } => write!(f, "    in library: {library}"),
+            Self::RebindWhy { why } => write!(f, "    does not open: {why}"),
+            Self::RebindTo { id, path } => {
+                write!(f, "  the folder Steam lists now (identity {id}): {path}")
+            }
+            Self::CreatedFound { path } => write!(
+                f,
+                "  a folder the plan created, found there and not provably Rerun's (removed only if empty): {path}"
+            ),
+            Self::CreatedMissing { path } => {
+                write!(f, "  a folder the plan created, missing there: {path}")
+            }
+            Self::RebindNowHeading => f.write_str("what the revert does there:"),
+            Self::RebindRegistryNote => f.write_str(
+                "Registry changes are reverted where Rerun made them, also a compatibility-layer \
+                 value under the old program path; a value under the new program path is not \
+                 touched.",
+            ),
+            Self::RebindPermanentNote => f.write_str(
+                "The binding is permanent: every later revert of this transaction uses the new \
+                 folder.",
+            ),
+            Self::AskRebind { txn, ops: 1 } => {
+                write!(f, "Bind transaction {txn} to this folder and revert this op? [y/N]")
+            }
+            Self::AskRebind { txn, ops } => write!(
+                f,
+                "Bind transaction {txn} to this folder and revert these {ops} ops? [y/N]"
+            ),
+            Self::RebindNeedsConsole => f.write_str(
+                "rerun: a rebind is only confirmed at a console; --yes is not accepted with \
+                 --rebind",
+            ),
+            Self::AlreadyBound { path } => write!(f, "already bound to: {path}"),
+            Self::MayBeBound { txn } => write!(
+                f,
+                "transaction {txn} may be bound to the new folder although the command failed; \
+                 rerun status shows what the journal holds"
+            ),
+            Self::HaltRebindHint { txn } => write!(
+                f,
+                "if Steam moved or reinstalled the game: rerun revert {txn} --rebind shows the \
+                 folder Steam lists now"
+            ),
+            Self::StatusRebind { root, id, path } => {
+                write!(f, "  root {root} rebound (identity {id}): {path}")
+            }
             Self::NothingToForget { txn, how } => write!(
                 f,
                 "rerun: transaction {txn} is closed ({}); nothing to forget",

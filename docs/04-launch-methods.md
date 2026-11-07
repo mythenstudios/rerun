@@ -46,6 +46,10 @@ Apply and revert ask `users()` of every file a plan touches and of the game's **
 
 Launch option `"<path>\rerun-launch.exe" %command%`. Written to `localconfig.vdf` only while Steam is closed, previous value to the Journal. Otherwise: copy + instructions.
 
+## A game that Steam moved or reinstalled
+
+After Steam moved a library (or the app into another library) or reinstalled the game, a revert halts at the game folder or is refused ("another folder now"). `rerun revert <txn> --rebind` (P2-14) shows the folder Steam lists for the app now (found by the Steam scan: exactly one library, every listed library readable), what the revert does there and that the registry changes are reverted where Rerun made them (a compatibility-layer value under the old program path; none is written under the new one), asks at a console, then binds the transaction to that folder for good and reverts it there. A folder the user chose is never rebound; `forget` closes such a transaction. The game must be closed in the new folder too, and its main executable must be there.
+
 ## Compatibility layers and the start path (phase 3 condition)
 
 A compatibility layer (`compat_layer`, `AppCompatFlags\Layers`) applies only when Windows starts the program by exactly the path of the value name, the game's canonical path (SB-L2, ADR 0018 amendment P2-11b): a start through a junction, or through another spelling, gets no layer, silently. So `rerun-launch` and the IFEO launcher must start the game by that path as the plan names it: no `\\?\` prefix, no path taken from a handle, no junctioned library path. 8.3 names are not measured. The Sandbox probes (`scripts/sandbox-probe-layers.ps1`) can check a start form before phase 3 relies on it.

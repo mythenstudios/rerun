@@ -8,16 +8,22 @@
 //! - `revert` shows the transaction, then what a revert does now (`exec::verify`, newest op
 //!   first, with each INI key and where it would halt), asks, reverts, and reports per op.
 //!   Exit 0 closed or nothing to do, 3 refused (nothing written in the run), 5 open.
+//! - `revert --rebind` (P2-14b, ADR 0016 amendment P2-14): `exec::rebind_check` as the preview
+//!   (the folder bound now and why it does not open, the folder Steam lists now, the folders the
+//!   plan created there, what the revert does there, where the registry changes are reverted,
+//!   that the binding is permanent), the question at a console only (never `--yes`, user
+//!   decision E-R5), `exec::revert_rebound`. A transaction bound already reverts as it is.
 //! - `forget` shows the transaction with every backup and pending cleanup, what is on disk now
 //!   and every `.old` that holds a file as it was before a step of Rerun, says what forget does
 //!   not do, asks, forgets. Exit 0 forgotten, 3 refused.
 
 use std::io::Write;
 
+use rerun_core::detect::steam::AppState;
 use rerun_core::escape;
 use rerun_core::exec::{
-    self, Backup, Detail, ExecCtx, ExecError, OpState, OpStatus, Refusal, RerunStep, RevertReport,
-    TxnLine, TxnStatus, Verified,
+    self, Backup, Detail, ExecCtx, ExecError, Halt, OpState, OpStatus, RebindPreview,
+    RebindRefusal, Refusal, RerunStep, RevertReport, TxnLine, TxnStatus, Verified,
 };
 use rerun_core::journal::{Closing, InstanceTag, JournalError, Observed, TxnId};
 use rerun_core::plan::Preview;
@@ -25,6 +31,7 @@ use rerun_core::policy::root::{AppDir, Create, RootError};
 use rerun_core::sys::System;
 
 use crate::cli::Exit;
+use crate::confirm::Answer;
 use crate::host::{
     Host, after_change, before_change, confirm, existing_app, exit_for_exec, fail, forbidden, note,
     shown, standard_user,
@@ -168,6 +175,7 @@ pub fn render_status(s: &exec::Status, all: bool) -> Vec<Message<'_>> {
                 state: txn_text(st),
             }));
             out.extend(head_lines(st));
+            out.extend(rebind_lines(st));
             for o in &st.ops {
                 out.extend(op_lines(st, o, true));
             }
@@ -289,6 +297,7 @@ fn now_lines<'a>(st: &'a TxnStatus, v: &'a Verified) -> Vec<Message<'a>> {
             op: h.op,
             why: shown(&h.why),
         }));
+        out.extend(halt_hint(st, h));
     }
     out
 }
@@ -320,7 +329,7 @@ fn detail_lines(d: Option<&Detail>) -> Vec<Message<'_>> {
 }
 
 /// The report of a revert.
-fn report_lines<'a>(rep: &'a RevertReport, v: &Verified) -> Vec<Message<'a>> {
+fn report_lines<'a>(st: &TxnStatus, rep: &'a RevertReport, v: &Verified) -> Vec<Message<'a>> {
     let mut out = Vec::new();
     for o in &rep.ops {
         let seen = v.ops.iter().find(|(k, _)| *k == o.op).map(|(_, s)| *s);
@@ -342,6 +351,7 @@ fn report_lines<'a>(rep: &'a RevertReport, v: &Verified) -> Vec<Message<'a>> {
             op: h.op,
             why: shown(&h.why),
         }));
+        out.extend(halt_hint(st, h));
     }
     out
 }
@@ -352,10 +362,11 @@ pub fn revert<W: Write, E: Write>(
     txn: &TxnId,
     dry_run: bool,
     yes: bool,
+    rebind: bool,
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Exit {
-    match run_revert(host, *txn, dry_run, yes, out, err) {
+    match run_revert(host, *txn, dry_run, yes, rebind, out, err) {
         Ok(e) | Err(e) => e,
     }
 }
@@ -365,6 +376,7 @@ fn run_revert<W: Write, E: Write>(
     txn: TxnId,
     dry_run: bool,
     yes: bool,
+    rebind: bool,
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
@@ -398,6 +410,17 @@ fn run_revert<W: Write, E: Write>(
         app: &app,
         tag: InstanceTag::new(),
     };
+    if rebind {
+        match exec::rebind_check(&cx, &txn) {
+            Ok(p) => return rebind_run(host, &cx, &st, &p, dry_run, out, err),
+            // Bound already: the revert goes on there as it is (a binding is permanent).
+            Err(Refusal::Rebind(RebindRefusal::AlreadyBound { path, .. })) => {
+                out.line(&m(TxnMsg::AlreadyBound { path }))
+                    .map_err(|e| before_change(err, e))?;
+            }
+            Err(r) => return Err(refusal(&r, txn, err)),
+        }
+    }
     // Senior-dev S-a: every check of the revert first, so neither the preview nor the question
     // offers a revert that is refused anyway.
     if let Err(r) = exec::revert_check(&cx, &txn) {
@@ -453,7 +476,143 @@ fn run_revert<W: Write, E: Write>(
     } else {
         (Exit::Open, TxnMsg::StaysOpenForeign { txn })
     };
-    let mut lines = report_lines(&rep, &v);
+    let mut lines = report_lines(&st, &rep, &v);
+    lines.push(m(last));
+    Ok(out
+        .lines(&lines)
+        .and_then(|()| out.flush())
+        .map_or_else(|e| after_change(err, e, exit), |()| exit))
+}
+
+/// The rebinds of a transaction (`status`, P2-14b): the folder each root is bound to now.
+fn rebind_lines(st: &TxnStatus) -> Vec<Message<'_>> {
+    st.rebinds
+        .iter()
+        .map(|r| {
+            m(TxnMsg::StatusRebind {
+                root: r.root,
+                id: r.id,
+                path: r.folder.clone().unwrap_or_else(|| r.library.clone()),
+            })
+        })
+        .collect()
+}
+
+/// After a halt at a Steam root that is gone: a rebind may bind it (P2-14b).
+fn halt_hint<'a>(st: &TxnStatus, h: &Halt) -> Option<Message<'a>> {
+    let steam = head(st)
+        .and_then(|p| p.roots.get(usize::from(h.root)))
+        .is_some_and(|r| r.steam.is_some());
+    let gone = match &*h.why {
+        Refusal::SteamGone { .. }
+        | Refusal::Steam {
+            state: AppState::NotInstalled,
+            ..
+        } => true,
+        Refusal::Root(e) => matches!(&**e, RootError::Sys(s)
+            if s.kind == rerun_core::sys::SysErrorKind::NotFound),
+        _ => false,
+    };
+    (steam && gone).then(|| m(TxnMsg::HaltRebindHint { txn: st.id }))
+}
+
+/// The preview of a rebind (rule 5): the transaction, the folder bound now and why it does not
+/// open, the folder Steam lists now, the folders the plan created there, what the revert does
+/// there, and the two notes.
+fn rebind_lines_of<'a>(st: &'a TxnStatus, p: &'a RebindPreview) -> Vec<Message<'a>> {
+    let path = |r: &rerun_core::path::RootPath| escape::path(&r.to_string()).into_owned();
+    let mut out = vec![m(TxnMsg::Txn {
+        txn: st.id,
+        state: txn_text(st),
+    })];
+    out.extend(head_lines(st));
+    out.extend(rebind_lines(st));
+    out.push(m(TxnMsg::RebindHeading { root: p.to.root }));
+    out.push(m(TxnMsg::RebindNow {
+        id: p.to.from.id,
+        path: path(&p.to.from.path),
+    }));
+    out.push(m(TxnMsg::RebindLibrary {
+        library: path(&p.to.from.store),
+    }));
+    out.push(m(TxnMsg::RebindWhy { why: shown(&p.why) }));
+    out.push(m(TxnMsg::RebindTo {
+        id: p.to.id,
+        path: path(&p.path),
+    }));
+    out.push(m(TxnMsg::RebindLibrary {
+        library: path(&p.to.store),
+    }));
+    for d in &p.created {
+        out.push(m(if d.found {
+            TxnMsg::CreatedFound {
+                path: d.path.clone(),
+            }
+        } else {
+            TxnMsg::CreatedMissing {
+                path: d.path.clone(),
+            }
+        }));
+    }
+    out.push(m(TxnMsg::RebindNowHeading));
+    out.extend(now_lines(st, &p.verified).into_iter().skip(1));
+    out.push(m(TxnMsg::RebindRegistryNote));
+    out.push(m(TxnMsg::RebindPermanentNote));
+    out.push(Message::Blank);
+    out
+}
+
+/// `rerun revert <txn> --rebind` after its checks: the preview, the question (at a console
+/// only, user decision E-R5), the rebind and the revert, the report.
+fn rebind_run<W: Write, E: Write>(
+    host: &mut Host<'_>,
+    cx: &ExecCtx<'_>,
+    st: &TxnStatus,
+    p: &RebindPreview,
+    dry_run: bool,
+    out: &mut Out<W>,
+    err: &mut Out<E>,
+) -> Result<Exit, Exit> {
+    let txn = st.id;
+    out.lines(&rebind_lines_of(st, p))
+        .and_then(|()| out.flush())
+        .map_err(|e| before_change(err, e))?;
+    if dry_run {
+        return Ok(out
+            .line(&m(TxnMsg::DryRunDone))
+            .map_or_else(|e| before_change(err, e), |()| Exit::Report));
+    }
+    let q = TxnMsg::AskRebind {
+        txn,
+        ops: p.verified.ops.len(),
+    };
+    match host.confirm.ask(&Message::Txn(q)) {
+        Answer::Yes => {}
+        Answer::No => return Err(fail(err, TxnMsg::NothingDone, Exit::Refused)),
+        Answer::NoConsole => return Err(fail(err, TxnMsg::RebindNeedsConsole, Exit::Usage)),
+    }
+    let rep = match exec::revert_rebound(cx, &txn, &p.to) {
+        Ok(rep) => rep,
+        Err(ExecError::Refused(r)) => return Err(refusal(&r, txn, err)),
+        Err(e @ ExecError::Unconfirmed(_)) => {
+            note(err, TxnMsg::Error { error: shown(&e) });
+            note(err, TxnMsg::MayBeBound { txn });
+            return Err(exit_for_exec(&e));
+        }
+        Err(e) => {
+            note(err, TxnMsg::Error { error: shown(&e) });
+            note(err, TxnMsg::RevertFailed { txn });
+            return Err(exit_for_exec(&e));
+        }
+    };
+    let (exit, last) = if rep.closed.is_some() {
+        (Exit::Report, TxnMsg::Reverted { txn })
+    } else if rep.halted.is_some() {
+        (Exit::Open, TxnMsg::StaysOpenHalted { txn })
+    } else {
+        (Exit::Open, TxnMsg::StaysOpenForeign { txn })
+    };
+    let mut lines = report_lines(st, &rep, &p.verified);
     lines.push(m(last));
     Ok(out
         .lines(&lines)

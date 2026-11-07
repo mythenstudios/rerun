@@ -122,7 +122,12 @@ fn run<W: io::Write, E: io::Write>(
         },
         Command::Plan { steps, dry_run } => plan::plan(host, &steps, dry_run, out, err),
         Command::Apply { hash, dry_run, yes } => apply::apply(host, &hash, dry_run, yes, out, err),
-        Command::Revert { txn, dry_run, yes } => txn::revert(host, &txn, dry_run, yes, out, err),
+        Command::Revert {
+            txn,
+            dry_run,
+            yes,
+            rebind,
+        } => txn::revert(host, &txn, dry_run, yes, rebind, out, err),
         Command::Status { all } => txn::status(host.sys, all, out, err),
         Command::Forget { txn, yes } => txn::forget(host, &txn, yes, out, err),
     }

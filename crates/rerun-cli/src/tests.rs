@@ -1266,3 +1266,262 @@ fn c4_an_empty_transaction_is_closed_without_a_question() {
         r.stdout
     );
 }
+
+// ---------- C-RB: rerun revert --rebind (P2-14b) ----------
+
+/// The library the rebind tests move to.
+const LIB_E: &str = r"E:\SteamLibrary";
+
+/// `libraryfolders.vdf` listing the Steam folder and `libs`.
+fn lib_vdf(libs: &[&str]) -> String {
+    let mut out = String::from("\"libraryfolders\"\n{\n");
+    for (i, p) in std::iter::once(STEAM)
+        .chain(libs.iter().copied())
+        .enumerate()
+    {
+        out.push_str(&format!(
+            "\t\"{i}\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n",
+            p.replace('\\', r"\\")
+        ));
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn lib_file() -> String {
+    format!(r"{STEAM}\steamapps\libraryfolders.vdf")
+}
+
+/// Steam with app 220 in `G` of [`LIB`], and steps for it: a new file in a new folder and a
+/// registry value.
+fn steam_rebind() -> FakeSystem {
+    let steps = format!(
+        r#"{{"format":1,"game":{{"steam":220}},"main_exe":"game.exe","steps":[{{"file_install":{{"package":"fix-pack","version":"1.0.2","files":[{{"from":"new.dll","to":"mods\\new.dll","sha256":"{N_SHA}"}}]}}}},{{"registry_set":{{"key":"HKCU\\Software\\Vendor\\Game","values":[{{"name":"Width","dword":1920}}]}}}}]}}"#
+    );
+    let acf = "\"AppState\"\n{\n\t\"appid\"\t\t\"220\"\n\t\"name\"\t\t\"G\"\n\t\"StateFlags\"\t\t\"4\"\n\t\"installdir\"\t\t\"G\"\n}\n";
+    let b = with_package()
+        .value(
+            RootSource::CurrentUser.key(),
+            RootSource::CurrentUser.value_name(),
+            RegValue::String(STEAM.to_owned()),
+        )
+        .file(lib_file(), lib_vdf(&[LIB]).into_bytes())
+        .file(
+            format!(r"{LIB}\steamapps\appmanifest_220.acf"),
+            acf.as_bytes().to_vec(),
+        )
+        .file(
+            format!(r"{LIB}\steamapps\common\G\game.exe"),
+            b"MZ".to_vec(),
+        );
+    build(b, &steps)
+}
+
+/// Copies the tree `from` to `to` (new file IDs, as Steam copies to another volume).
+fn copy_tree(sys: &FakeSystem, from: &str, to: &str) {
+    use rerun_core::path::RelPath;
+    let fx = sys.fake_fs();
+    fx.mkdir_all(Path::new(to)).unwrap();
+    #[expect(clippy::disallowed_methods, reason = "test: copy a fixture tree")]
+    let d = sys.fs().open_dir(Path::new(from)).unwrap();
+    for e in d.read_dir(None).unwrap() {
+        let name = RelPath::parse(&e.name).unwrap();
+        let (src, dst) = (format!(r"{from}\{}", e.name), format!(r"{to}\{}", e.name));
+        match d.metadata(&name).unwrap().unwrap().kind {
+            rerun_core::sys::fs::EntryKind::Dir => copy_tree(sys, &src, &dst),
+            _ => fx
+                .put_file(Path::new(&dst), &d.read(&name).unwrap())
+                .unwrap(),
+        }
+    }
+}
+
+/// Removes the tree `abs`.
+fn remove_tree(sys: &FakeSystem, abs: &str) {
+    use rerun_core::path::RelPath;
+    let entries: Vec<(String, bool)> = {
+        #[expect(clippy::disallowed_methods, reason = "test: remove a fixture tree")]
+        let d = sys.fs().open_dir(Path::new(abs)).unwrap();
+        d.read_dir(None)
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                let dir = d
+                    .metadata(&RelPath::parse(&e.name).unwrap())
+                    .unwrap()
+                    .unwrap()
+                    .kind
+                    == rerun_core::sys::fs::EntryKind::Dir;
+                (e.name, dir)
+            })
+            .collect()
+    };
+    for (n, dir) in entries {
+        let p = format!(r"{abs}\{n}");
+        if dir {
+            remove_tree(sys, &p);
+        } else {
+            sys.fake_fs().remove_abs(Path::new(&p)).unwrap();
+        }
+    }
+    sys.fake_fs().remove_abs(Path::new(abs)).unwrap();
+}
+
+/// Steam moves the library to `E:` (a copy, the source removed, the list rewritten).
+fn move_library(sys: &FakeSystem) {
+    copy_tree(sys, LIB, LIB_E);
+    remove_tree(sys, LIB);
+    let fx = sys.fake_fs();
+    fx.remove_abs(Path::new(&lib_file())).unwrap();
+    fx.put_file(Path::new(&lib_file()), lib_vdf(&[LIB_E]).as_bytes())
+        .unwrap();
+    sys.fake_fs().sync_all();
+}
+
+/// C-RB1: apply, the library moved, the revert halts with the hint, `--rebind --dry-run` shows
+/// the rebind and writes nothing, `--rebind` at a console binds and reverts.
+#[test]
+fn c_rb1_a_moved_library_is_rebound_through_the_cli() {
+    let sys = steam_rebind();
+    let t = applied(&sys);
+    move_library(&sys);
+    let r = expect(&sys, &["revert", &t, "--yes"], Answer::No, Exit::Open);
+    assert!(
+        r.stdout.contains(&format!(
+            "rerun revert {t} --rebind shows the folder Steam lists now"
+        )),
+        "{}",
+        r.stdout
+    );
+    let before = snap_dirs(&sys, &[LAD, LIB_E]);
+    let r = expect(
+        &sys,
+        &["revert", &t, "--rebind", "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    let game_e = format!(r"{LIB_E}\steamapps\common\G");
+    for want in [
+        "rebind of root 0:".to_owned(),
+        "bound now (identity ".to_owned(),
+        format!(r"): {LIB}\steamapps\common\G"),
+        "does not open:".to_owned(),
+        "the folder Steam lists now (identity ".to_owned(),
+        format!("): {game_e}"),
+        format!("    in library: {LIB_E}"),
+        format!(
+            r"a folder the plan created, found there and not provably Rerun's (removed only if empty): {game_e}\mods"
+        ),
+        "what the revert does there:".to_owned(),
+        "Registry changes are reverted where Rerun made them".to_owned(),
+        "The binding is permanent".to_owned(),
+        "dry run: nothing was written".to_owned(),
+    ] {
+        assert!(r.stdout.contains(&want), "{want:?} in:\n{}", r.stdout);
+    }
+    assert!(r.asked.is_empty());
+    same(&before, &snap_dirs(&sys, &[LAD, LIB_E]));
+    let r = expect(&sys, &["revert", &t, "--rebind"], Answer::Yes, Exit::Report);
+    assert!(
+        r.asked
+            .iter()
+            .any(|q| q.starts_with(&format!("Bind transaction {t} to this folder"))),
+        "{:?}",
+        r.asked
+    );
+    assert!(
+        r.stdout
+            .contains(&format!("transaction {t} reverted and closed")),
+        "{}",
+        r.stdout
+    );
+    #[expect(clippy::disallowed_methods, reason = "test: look into the fake")]
+    let gone = sys
+        .fs()
+        .open_dir(Path::new(&format!(r"{game_e}\mods")))
+        .is_err();
+    assert!(gone, "the created folder is removed");
+}
+
+/// C-RB2 to C-RB5: no at the question (3, no record), no console (2, never `--yes`),
+/// `--rebind --yes` a usage error, `--rebind` without need (3).
+#[test]
+fn c_rb2_the_question_the_console_and_refusals() {
+    let sys = steam_rebind();
+    let t = applied(&sys);
+    // Not needed: nothing moved.
+    let r = expect(
+        &sys,
+        &["revert", &t, "--rebind"],
+        Answer::Yes,
+        Exit::Refused,
+    );
+    assert!(r.stderr.contains("opens as recorded"), "{}", r.stderr);
+    move_library(&sys);
+    let before = snap_dirs(&sys, &[LAD, LIB_E]);
+    let r = expect(&sys, &["revert", &t, "--rebind"], Answer::No, Exit::Refused);
+    assert_eq!(r.asked.len(), 1, "{:?}", r.asked);
+    same(&before, &snap_dirs(&sys, &[LAD, LIB_E]));
+    let r = expect(
+        &sys,
+        &["revert", &t, "--rebind"],
+        Answer::NoConsole,
+        Exit::Usage,
+    );
+    assert!(
+        r.stderr.contains("--yes is not accepted with --rebind"),
+        "{}",
+        r.stderr
+    );
+    same(&before, &snap_dirs(&sys, &[LAD, LIB_E]));
+    let e = Cli::try_parse_from(["rerun", "revert", &t, "--rebind", "--yes"])
+        .err()
+        .map(|e| e.kind());
+    assert_eq!(e, Some(clap::error::ErrorKind::ArgumentConflict));
+}
+
+/// C-RB6: a reinstall at the same path: the revert is refused with the hint that names
+/// `--rebind`; a rebind left open by a crash right after its record shows in `status`, and
+/// `--rebind` again reverts it as it is ("already bound").
+#[test]
+fn c_rb6_the_hint_the_status_line_and_already_bound() {
+    let sys = steam_rebind();
+    let t = applied(&sys);
+    let game = format!(r"{LIB}\steamapps\common\G");
+    copy_tree(&sys, &game, r"D:\Tmp\G");
+    remove_tree(&sys, &game);
+    copy_tree(&sys, r"D:\Tmp\G", &game);
+    sys.fake_fs().sync_all();
+    let r = expect(&sys, &["revert", &t, "--yes"], Answer::No, Exit::Refused);
+    assert!(
+        r.stderr.contains(&format!(
+            "rerun revert {t} --rebind shows the folder Steam lists"
+        )),
+        "{}",
+        r.stderr
+    );
+    // The first flush of the run is the rebind's record (the checks write nothing).
+    sys.fake_fs().clear_faults();
+    sys.fake_fs().fault(Prim::FlushDir, 1, Fault::CrashAfter);
+    let r = cli(&sys, &["revert", &t, "--rebind"], Answer::Yes);
+    assert_eq!(r.exit, Exit::Open, "{}\n{}", r.stdout, r.stderr);
+    sys.fake_fs().restart();
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout.contains("  root 0 rebound (identity ") && s.stdout.contains(&game),
+        "{}",
+        s.stdout
+    );
+    let r = expect(&sys, &["revert", &t, "--rebind"], Answer::Yes, Exit::Report);
+    assert!(
+        r.stdout.contains(&format!("already bound to: {game}")),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout
+            .contains(&format!("transaction {t} reverted and closed")),
+        "{}",
+        r.stdout
+    );
+}
