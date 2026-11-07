@@ -66,9 +66,12 @@ Status "start: account $env:USERNAME, elevated=$elevated, build $build"
 
 # Elevated session with UAC off: turn UAC on and restart the Sandbox (see the header).
 $uacKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+# The marker lives on the Sandbox's own disk: it survives the restart from inside, and every
+# fresh Sandbox starts without it (a copy in out\ is only for the record; a stale copy there
+# from an earlier session blocked the restart once).
+$marker = 'C:\RerunSandbox\uac-restart.txt'
 if ($elevated) {
     $lua = (Get-ItemProperty -LiteralPath $uacKey -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
-    $marker = Join-Path $out 'uac-restart.txt'
     if ($lua -ne 1 -and (Test-Path -LiteralPath $marker)) {
         # Restarted once already and UAC is still off: never loop.
         $note = 'the UAC restart did not take effect (EnableLUA is still off); running elevated, the writing tests are expected to fail'
@@ -76,7 +79,10 @@ if ($elevated) {
     } elseif ($lua -ne 1) {
         if (-not (Test-SandboxGuard)) { Write-Error 'refusing: guard failed before the HKLM write'; exit 2 }
         Set-ItemProperty -LiteralPath $uacKey -Name EnableLUA -Value 1 -Type DWord
-        Set-Content -LiteralPath (Join-Path $out 'uac-restart.txt') -Value "EnableLUA was $lua; set to 1 and restarted at $(Get-Date -Format o)"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $marker) | Out-Null
+        $line = "EnableLUA was $lua; set to 1 and restarted at $(Get-Date -Format o)"
+        Set-Content -LiteralPath $marker -Value $line
+        Set-Content -LiteralPath (Join-Path $out 'uac-restart.txt') -Value $line
         Status 'elevated and UAC off: UAC turned on, the Sandbox restarts in 10 s and runs again (without a visible window; follow status.txt)'
         Run-Native shutdown.exe /r /t 10 | Out-Null
         exit 0
@@ -144,7 +150,7 @@ if ($cli) { Write-Host "CLI round trip: expected=$($cli.expected) (details in cl
 if ($passed -eq 0 -and $code -eq 0) { Write-Host 'WARNING: no test ran' }
 # After the restart from inside there is no visible window to wait in (the Explorer window
 # shows the end); only the first, visible run pauses.
-if (-not (Test-Path -LiteralPath (Join-Path $out 'uac-restart.txt'))) {
+if (-not (Test-Path -LiteralPath $marker)) {
     Read-Host 'Done. Press Enter to leave this window (close the Sandbox yourself)'
 }
 exit $code
