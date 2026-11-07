@@ -161,6 +161,11 @@ fn p2_decode_refuses_every_other_form_and_every_broken_rule() {
             "listed twice",
         ),
         (good.replace(r#""app_id":220"#, r#""app_id":0"#), "app ID"),
+        // P2-15 (N2): root 0 is the library that holds root 1.
+        (
+            good.replace(r#""path":"D:\\Games\\G""#, r#""path":"D:\\SteamLibrary""#),
+            "a root inside another root",
+        ),
         (good.replace(r#""len":3,"#, r#""len":3000000000,"#), "2 GiB"),
     ];
     for (bytes, want) in cases {
@@ -275,6 +280,19 @@ fn p4_preview_shows_every_op_and_what_is_not_restored() {
     ] {
         assert!(text.contains(want), "{want:?} not in\n{text}");
     }
+    // P2-15 (N4, rule 5): every part of "exact" that a revert does not restore (ADR 0017 D3).
+    for part in [
+        "timestamps",
+        "file IDs",
+        "permissions",
+        "alternate data streams",
+        "extended attributes",
+        "short names",
+        "compression or encryption",
+        "the archive attribute",
+    ] {
+        assert!(super::NOT_RESTORED.contains(part), "{part}");
+    }
     assert_eq!(text.matches("note:").count(), 1);
     let empty = Plan {
         ops: Vec::new(),
@@ -338,3 +356,21 @@ mod layer_tests;
 #[cfg(test)]
 #[path = "reg_tests.rs"]
 pub(crate) mod reg_tests;
+
+/// P2-15 (audit A2 nit N2): nested roots in one plan are refused on encode and decode; a
+/// recorded head keeps the rules it was applied with (E4), so its decode does not add the rule.
+#[test]
+fn p2_nested_roots_are_refused_for_a_new_plan() {
+    let mut p = sample();
+    p.roots[0].path = RootPath::new(r"D:\SteamLibrary").unwrap();
+    let e = p.encode().expect_err("nested");
+    assert!(e.to_string().contains("a root inside another root"), "{e}");
+    let bytes = serde_json::to_vec(&p).unwrap();
+    let e = decode(&bytes).expect_err("nested");
+    assert!(e.to_string().contains("a root inside another root"), "{e}");
+    assert!(super::decode_recorded(&bytes).is_ok());
+    // The same folder twice (with another identity) is nested too.
+    let mut p = sample();
+    p.roots[0].path = p.roots[1].path.clone();
+    assert!(p.encode().is_err());
+}

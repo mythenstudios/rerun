@@ -31,8 +31,8 @@ use crate::wire::hex32;
 
 /// What a revert does not restore (ADR 0017, "What exact means", user decision D3).
 pub const NOT_RESTORED: &str = "a revert restores existence, content, length, read-only, \
-hidden and system; not timestamps, file IDs, permissions, alternate data streams, short names \
-or the archive attribute";
+hidden and system; not timestamps, file IDs, permissions, alternate data streams, extended \
+attributes, short names, compression or encryption, or the archive attribute";
 
 /// What a plan with registry ops says once (ADR 0020 amendment P2-10b, review S4): the normal
 /// case of a game that writes its own key, and what a revert does not restore there.

@@ -1015,6 +1015,15 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
         if plan.roots[..i].iter().any(|o| o.id == r.id) {
             return Err(invalid(None, "a root is listed twice"));
         }
+        // P2-15 (audit A2 nit N2): the rule of `Object::overlaps` and `Bindings::of` for the
+        // roots of one plan. A recorded head keeps the rules it was applied with (E4).
+        if rules == Rules::Current
+            && plan.roots[..i]
+                .iter()
+                .any(|o| o.path.contains(&r.path) || r.path.contains(&o.path))
+        {
+            return Err(invalid(None, "a root inside another root"));
+        }
         if let PlanOrigin::Steam { app_id, .. } = r.origin
             && app_id == 0
         {

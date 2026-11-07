@@ -416,6 +416,12 @@ After a move, "the state before the first change" is that of the old folder, whi
 - **`records_fit`:** `Done.old_left` and a non-empty `RevertDone.old_left` only on a `ReplaceFile` or an `IniValue` (`Blocked` otherwise): the pass looks only where a `.old` can come from.
 - **Tests** (`exec/cleanup_tests.rs`, `exec/cleanup_crash_tests.rs`, fake): CL-T1 to CL-T9 (`docs/09-testing.md`), the controls K-CL1 (closed despite the cleanup), K-CL2 and K-CL2b (the tenth flush site), K-CL3 (a cleanup without the hash); `exec/combo_tests.rs` checks over every run that a journal names a pending `.old` only where a mapping was injected. Windows: no own test; that the deletion of a mapped `.old` is `Busy` and succeeds once it is unmapped is W19 (the logic is the same in `exec` for the fake and Windows).
 
+### Nits of audit A2 (P2-15)
+- **N2, nested roots:** `plan::check` refuses a plan with a root inside another root (`RootPath::contains` both ways, also the same folder twice) under `Rules::Current` (planning, encode, apply): the rule of `Object::overlaps` and `Bindings::of` (`SharedFolder`) for the roots of one plan. A recorded head keeps the rules it was applied with (user decision E4, `Rules::Recorded` adds no rule); such a head is only reachable by tampering, and stacking and rebind already treat overlapping roots as one folder. The step file has one root, so no real plan loses anything.
+- **N3, `verify` and its guards (documentation only):** since P2-13 `verify` holds `journal\lock` read side, so no writer of Rerun runs meanwhile; a guard lives per file only while it is hashed (`file::see_file`), and the cleanup part asks `users()` on it. A write of the game in that window gets a sharing violation; a second, guard-free read path would double the one observation table (`verify` is the revert, read only), which costs more than a short conflict with a game that D4 says is closed anyway.
+- **N4, the preview's "not restored":** `NOT_RESTORED` names every part of ADR 0017 D3 that a revert does not restore, now with extended attributes, compression and encryption (rule 5).
+- **N5, `Object::root_path`:** closed without a change; it is a `RootPath` since P2-10a.
+
 ### Open points (P2-15)
 - **Deferred by the user (A2 ranks 4 and 5, after A3 / phase 5):** `X.old` as a source of a restore (a new sequence with two guards, optional) and a total budget of the snapshot.
 - A launcher, an overlay or an Explorer window that keeps an image of a `.old` mapped keeps the transaction open; the texts say what to do.
