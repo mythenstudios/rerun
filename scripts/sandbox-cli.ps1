@@ -1,7 +1,7 @@
 # Runs inside Windows Sandbox only, called by sandbox-run.ps1 (P2-13, user decision E7 a): the
 # CLI round trip with the release rerun.exe on the Sandbox account's real LocalAppData and
 # HKCU: plan, apply --dry-run, apply --yes, status, revert --yes, status --all, on a game
-# folder C:\RerunSandbox\cli\game with a copy of notepad.exe as its main executable, a local
+# folder C:\RerunSandbox\cli\game with a copy of cmd.exe as its main executable, a local
 # package, two registry values and an INI key. Before and after are compared (files with
 # length, SHA-256 and attributes; the registry key). Never on the host: it refuses anywhere but
 # the Sandbox account, and it writes the real HKCU and LocalAppData of whoever runs it.
@@ -61,10 +61,11 @@ function Invoke-Rerun {
 if (-not (Test-Path -LiteralPath $rerun)) { throw "rerun.exe missing: $rerun (run scripts/sandbox-launch.ps1 on the host)" }
 Set-Content -LiteralPath $log -Value "CLI round trip, elevated=$Elevated" -Encoding UTF8
 
-# The fixture: a game with notepad.exe as its main executable, an old d3d9.dll and an INI file;
-# the package with a new d3d9.dll and a new file.
+# The fixture: a game with a copy of cmd.exe as its main executable (the Sandbox of build
+# 26100 has no System32\notepad.exe), an old d3d9.dll and an INI file; the package with a new
+# d3d9.dll and a new file.
 New-Item -ItemType Directory -Force -Path $game, $pkg | Out-Null
-Copy-Item -LiteralPath "$env:WINDIR\System32\notepad.exe" -Destination (Join-Path $game 'game.exe') -Force
+Copy-Item -LiteralPath "$env:WINDIR\System32\cmd.exe" -Destination (Join-Path $game 'game.exe') -Force
 Write-Plain (Join-Path $game 'd3d9.dll') 'old d3d9 of the game'
 Write-Plain (Join-Path $game 'game.ini') "[Display]`r`nWidth=1280`r`nHeight=720`r`n"
 Write-Plain (Join-Path $pkg 'd3d9.dll') 'new d3d9 of the package'

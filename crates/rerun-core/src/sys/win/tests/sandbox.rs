@@ -17,7 +17,7 @@
 //! process.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use super::super::testfx::{AppHive, is_elevated, sandbox_decision, sandbox_guard};
@@ -150,7 +150,8 @@ fn every_ignored_sandbox_test_starts_with_the_guard() {
 
 // ---------- Harness ----------
 
-/// A game folder `C:\RerunSandbox\<case>\game` with a copy of `notepad.exe` as `game.exe`, the
+/// A game folder `C:\RerunSandbox\<case>\game` with a copy of `cmd.exe` as `game.exe` (the
+/// Sandbox of build 26100 has no `System32\notepad.exe`: Notepad is a Store app there), the
 /// real `WinSystem` (real `LocalAppData`, real `HKCU`), and the package files of
 /// `t1_spec` in the real `LocalAppData\Rerun\packages`.
 struct Sb {
@@ -193,13 +194,13 @@ impl Sb {
         perm.set_readonly(true);
         std::fs::set_permissions(game.join("d3d9.dll"), perm).unwrap();
         // A real PE image: users() and Busy see a real mapped image, with Defender watching.
-        let notepad = sys
+        let image = sys
             .known_folders()
             .get(KnownFolder::Windows)
             .unwrap()
-            .join(r"System32\notepad.exe");
-        std::fs::copy(&notepad, game.join("game.exe"))
-            .unwrap_or_else(|e| panic!("{}: {e}", notepad.display()));
+            .join(r"System32\cmd.exe");
+        std::fs::copy(&image, game.join("game.exe"))
+            .unwrap_or_else(|e| panic!("{}: {e}", image.display()));
         Self { sys, game, install }
     }
 
@@ -353,18 +354,24 @@ fn sandbox_t6_leaves_a_file_the_user_edited() {
 }
 
 fn start_game(w: &Sb) -> Child {
+    // `cmd /d /q /k` reads commands from its stdin: with a pipe that stays open (held by the
+    // returned `Child`) it waits until it is killed. No console window, no AutoRun.
     let mut c = Command::new(w.game.join("game.exe"))
+        .args(["/d", "/q", "/k"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
-        .unwrap_or_else(|e| panic!("cannot start the notepad copy: {e}"));
+        .unwrap_or_else(|e| panic!("cannot start the cmd copy: {e}"));
     std::thread::sleep(Duration::from_millis(1500));
     assert!(
         c.try_wait().unwrap().is_none(),
-        "the notepad copy exited at once; no running image to test with"
+        "the cmd copy exited at once; no running image to test with"
     );
     c
 }
 
-/// T8 with a real running process: a copy of `notepad.exe` is the main executable and runs.
+/// T8 with a real running process: a copy of `cmd.exe` is the main executable and runs.
 /// `apply` is refused as `Busy` (a real image mapped, real `users()`), nothing is written;
 /// after the process ended, the same plan applies and reverts.
 #[test]

@@ -61,7 +61,12 @@ function Observe([string]$exe) {
     } catch {
         return "launch failed: $_"
     }
-    $ver = ([regex]::Match($o, 'Version [0-9.]+')).Value
+    $ver = ([regex]::Match($o, '[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?')).Value
+    if (-not $ver) {
+        # The first run (build 26100) matched nothing here: keep the raw first line to see why.
+        $first = ($o -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+        $ver = 'no version (first line: `' + "$first".Trim() + '`)'
+    }
     $seen = if ($o -match '__COMPAT_LAYER=(.*)') { "set: $($Matches[1].Trim())" } else { 'not set' }
     return "$ver; __COMPAT_LAYER $seen"
 }
@@ -77,7 +82,7 @@ function Cleanup {
     # Never throws: it runs in `finally`.
     try {
         if ($forms) { foreach ($f in $forms.Values) { Reg-Del $f } }
-        Reg-Del (Join-Path $real 'probe32.exe')
+        Reg-Del (Join-Path $real 'probe64.exe')
     } catch { }
 }
 
@@ -87,8 +92,10 @@ try {
     New-Item -ItemType Directory -Force -Path $real | Out-Null
     if (Test-Path -LiteralPath $junc) { Run-Native cmd.exe /c rmdir $junc | Out-Null }
     Run-Native cmd.exe /c mklink /J $junc $real | Out-Null
-    Copy-Item -LiteralPath "$env:SystemRoot\System32\cmd.exe" -Destination (Join-Path $real 'probe.exe') -Force
-    Copy-Item -LiteralPath "$env:SystemRoot\SysWOW64\cmd.exe" -Destination (Join-Path $real 'probe32.exe') -Force
+    # The matrix uses the 32-bit cmd.exe: the first run (build 26100) showed that WINXPSP3 has
+    # no effect on the 64-bit copy (RUNASINVOKER has). The 64-bit copy is the control row.
+    Copy-Item -LiteralPath "$env:SystemRoot\SysWOW64\cmd.exe" -Destination (Join-Path $real 'probe.exe') -Force
+    Copy-Item -LiteralPath "$env:SystemRoot\System32\cmd.exe" -Destination (Join-Path $real 'probe64.exe') -Force
     $short = (New-Object -ComObject Scripting.FileSystemObject).GetFile((Join-Path $real 'probe.exe')).ShortPath
     $forms = [ordered]@{
         canonical = (Join-Path $real 'probe.exe')
@@ -166,10 +173,13 @@ try {
     Reg-Del $name '64'
     Say ('- after deleting through /reg:32 and /reg:64: ' + (Reg-Query $name '64'))
     Say ''
-    $p32 = Join-Path $real 'probe32.exe'
-    Reg-Add $p32 '~ WINXPSP3'
-    Say ('- 32-bit cmd.exe copy, value written natively: ' + (Observe $p32))
-    Reg-Del $p32
+    $p64 = Join-Path $real 'probe64.exe'
+    Reg-Add $p64 '~ WINXPSP3'
+    Say ('- 64-bit cmd.exe copy, `~ WINXPSP3`: ' + (Observe $p64))
+    Reg-Del $p64
+    Reg-Add $p64 '~ RUNASINVOKER'
+    Say ('- 64-bit cmd.exe copy, `~ RUNASINVOKER`: ' + (Observe $p64))
+    Reg-Del $p64
     Say ''
 }
 catch {

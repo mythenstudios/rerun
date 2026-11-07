@@ -9,10 +9,13 @@
 # fails. The Sandbox closes when the last window closes; the script ends with the result
 # on screen and a pause, so close the Sandbox yourself.
 #
-# Rerun refuses every apply, revert and forget in an elevated process (S2, P2-13 E3). If this
-# session is elevated, the
-# script starts itself again as a scheduled task with the limited run level (-Worker) and waits
-# for it; if that fails it runs the tests elevated and result.json says so.
+# Rerun refuses every apply, revert and forget in an elevated process (S2, P2-13 E3). The
+# Sandbox account is an administrator without a split UAC token, so the LogonCommand is
+# elevated and a scheduled task with the limited run level stays elevated (seen in the first
+# run, build 26100). The script therefore starts itself again with
+# `runas /trustlevel:0x20000` (SAFER "Basic User": the Administrators group deny-only, the
+# admin privileges removed, medium integrity) as the -Worker and waits for it. If the worker
+# is still elevated, or does not finish, result.json says so in "note".
 #
 # Windows PowerShell 5.1: native stderr is never redirected under $ErrorActionPreference =
 # 'Stop' (that throws NativeCommandError); native calls go through Run-Native.
@@ -45,16 +48,16 @@ $build = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion')
 $started = Get-Date
 $note = ''
 
-# Elevated session: try the tests de-elevated through a limited scheduled task.
+# Elevated session: run the tests as a SAFER Basic User (runas /trustlevel, see the header).
 if (-not $Worker -and $elevated) {
     Remove-Item -LiteralPath $done -ErrorAction SilentlyContinue
     try {
-        $task = 'RerunSandboxTests'
-        $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Worker"
-        $pr = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-        Register-ScheduledTask -TaskName $task -Action $act -Principal $pr -Force | Out-Null
-        Start-ScheduledTask -TaskName $task
-        Write-Host 'session is elevated: tests run de-elevated in a scheduled task, waiting (up to 30 minutes)'
+        # runas takes the whole command line as one quoted argument; the script path has no
+        # spaces (C:\sandbox\scripts), so no quotes are nested inside it.
+        if ($PSCommandPath -match '\s') { throw "script path has spaces: $PSCommandPath" }
+        $inner = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Worker"
+        Start-Process -FilePath "$env:SystemRoot\System32\runas.exe" -ArgumentList '/trustlevel:0x20000', "`"$inner`"" -WindowStyle Minimized
+        Write-Host 'session is elevated: tests run as a Basic User (runas /trustlevel:0x20000), waiting (up to 30 minutes)'
         $deadline = (Get-Date).AddMinutes(30)
         while (-not (Test-Path -LiteralPath $done) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 3 }
         if (Test-Path -LiteralPath $done) {
@@ -67,6 +70,9 @@ if (-not $Worker -and $elevated) {
         $note = "elevated session; de-elevation failed ($_); running elevated"
     }
     Write-Host $note
+}
+if ($Worker -and $elevated) {
+    $note = 'the de-elevated worker (runas /trustlevel:0x20000) is still elevated; the writing tests are expected to fail'
 }
 if ($elevated -and -not $note) {
     $note = 'elevated -> Rerun refuses every apply, revert and forget (and the CLI also plan and every dry run); the writing tests are expected to fail'
