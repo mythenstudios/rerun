@@ -736,3 +736,206 @@ fn r_i6_exec_ini_set_swapped_backup_on_real_windows() {
     assert!(before == after, "{:#?}", before.diff(&after));
     assert_eq!(read(&ini), drift.as_bytes());
 }
+
+// ---------- P2-14: rebind on real NTFS (RB-W1, RB-W2) ----------
+
+/// A Steam layout in the [`TestRoot`]: the Steam folder `steam` (library 0) and the library
+/// `lib` with app 220 in `G` (`game.exe`, a read-only, hidden `d3d9.dll`), the library list
+/// naming `libs`; the fake registry's `SteamPath` names `steam` (never the real `HKCU`).
+struct WinSteam {
+    w: Win,
+    steam: PathBuf,
+    lib: PathBuf,
+}
+
+fn vdf(steam: &Path, libs: &[&Path]) -> String {
+    let mut out = String::from("\"libraryfolders\"\n{\n");
+    for (i, p) in std::iter::once(steam)
+        .chain(libs.iter().copied())
+        .enumerate()
+    {
+        out.push_str(&format!(
+            "\t\"{i}\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n",
+            p.display().to_string().replace('\\', r"\\")
+        ));
+    }
+    out.push_str("}\n");
+    out
+}
+
+const ACF: &[u8] = b"\"AppState\"\n{\n\t\"appid\"\t\t\"220\"\n\t\"name\"\t\t\"G\"\n\t\"StateFlags\"\t\t\"4\"\n\t\"installdir\"\t\t\"G\"\n}\n";
+
+/// The game folder `<lib>\steamapps\common\G` with its files.
+fn put_game(w: &Win, lib: &Path) {
+    let fx = w.root.fx();
+    let g = lib.join(r"steamapps\common\G");
+    fx.file(&lib.join(r"steamapps\appmanifest_220.acf"), ACF)
+        .unwrap();
+    fx.file(&g.join("game.exe"), b"MZ").unwrap();
+    fx.file(&g.join("d3d9.dll"), OLD).unwrap();
+    fx.set_attrs(&g.join("d3d9.dll"), RH).unwrap();
+}
+
+/// Writes the library list naming `libs` (the old one renamed away first, if any).
+fn list_libs(s: &WinSteam, libs: &[&Path], n: usize) {
+    let file = s.steam.join(r"steamapps\libraryfolders.vdf");
+    let fx = s.w.root.fx();
+    if n > 0 {
+        fx.rename(&file, &s.steam.join(format!(r"steamapps\old-{n}.vdf")))
+            .unwrap();
+    }
+    fx.file(&file, vdf(&s.steam, libs).as_bytes()).unwrap();
+}
+
+fn setup_steam(case: &str) -> Option<WinSteam> {
+    let w = setup_with(case, |lad| {
+        let reg = crate::sys::fake::FakeRegistry::default();
+        let steam = lad.with_file_name("steam");
+        let k = crate::detect::steam::RootSource::CurrentUser.key();
+        reg.put_key_all(&k).unwrap();
+        reg.put_value(
+            &k,
+            crate::detect::steam::RootSource::CurrentUser.value_name(),
+            &RegValue::String(steam.display().to_string()),
+        )
+        .unwrap();
+        AppTestSys::with_registry(lad, Box::new(reg))
+    })?;
+    let steam = w.root.work("steam");
+    let lib = w.root.work("lib");
+    put_game(&w, &lib);
+    let s = WinSteam { w, steam, lib };
+    list_libs(&s, &[&s.lib], 0);
+    Some(s)
+}
+
+impl WinSteam {
+    /// Plans `t1_spec` for the Steam root of app 220 in `lib`, stores it and applies it.
+    fn applied(&self, lib: &Path, spec: &crate::prim::FileInstallSpec) -> crate::journal::TxnId {
+        let w = &self.w;
+        let h = w.with(|cx, fr| {
+            let st = crate::policy::root::StoreDir::open(&w.sys, fr, lib)
+                .unwrap_or_else(|e| panic!("{e}"));
+            let g = st.game(fr, "G").unwrap_or_else(|e| panic!("{e}"));
+            let main = rel("game.exe");
+            let p = plan(
+                &[Step::FileInstall(spec.clone())],
+                &PlanCtx {
+                    game: &g,
+                    app: Some(cx.app),
+                    steam_app: Some(220),
+                    main_exe: Some(&main),
+                    reg: crate::policy::registry::RegPolicy.reader(&w.sys),
+                },
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+            store(cx.app, &p.encode().unwrap()).unwrap()
+        });
+        match w.with(|cx, _| apply(cx, &h)) {
+            Ok(Outcome::Applied(t)) => t,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The game folder of `lib` as a snapshot (by content: the label only names it).
+    fn snap(&self, lib: &Path) -> Snapshot {
+        self.w.with(|_, fr| {
+            let g =
+                GameDir::open_manual(&self.w.sys, fr, &lib.join(r"steamapps\common\G")).unwrap();
+            snapshot(
+                self.w.sys.registry(),
+                &Scope {
+                    dirs: vec![SnapRoot::new(g.dir(), "game")],
+                    keys: Vec::new(),
+                },
+            )
+            .unwrap()
+        })
+    }
+}
+
+/// The differences of two snapshots by content (another folder has another identity).
+fn by_content(a: &Snapshot, b: &Snapshot) -> Vec<String> {
+    a.diff(b)
+        .into_iter()
+        .filter(|l| !l.starts_with("~ root "))
+        .collect()
+}
+
+/// RB-W1: a reinstall on real NTFS. The game folder renamed away and created again with the
+/// original files has a new file ID: the revert is refused (`IdentityMismatch`), the rebind
+/// finds every file op `Before` there and closes; the folder is as before the apply.
+#[test]
+fn rb_w1_a_reinstall_is_rebound_on_real_windows() {
+    let Some(s) = setup_steam("exec-rbw1") else {
+        return;
+    };
+    let lib = s.lib.clone();
+    let before = s.snap(&lib);
+    let t = s.applied(&lib, &t1_spec());
+    let g = lib.join(r"steamapps\common\G");
+    s.w.root
+        .fx()
+        .rename(&g, &lib.join(r"steamapps\common\G-old"))
+        .unwrap();
+    put_game(&s.w, &lib);
+    let r = s.w.with(|cx, _| revert(cx, &t));
+    assert!(
+        matches!(&r, Err(crate::exec::ExecError::Refused(Refusal::Root(e)))
+            if matches!(**e, crate::policy::root::RootError::IdentityMismatch { .. })),
+        "{r:?}"
+    );
+    let p =
+        s.w.with(|cx, _| crate::exec::rebind_check(cx, &t))
+            .unwrap_or_else(|e| panic!("{e}"));
+    assert_ne!(p.to.id, p.to.from.id, "a new file ID");
+    assert!(p.to.dirs.is_empty(), "{:?}", p.to);
+    let rep =
+        s.w.with(|cx, _| crate::exec::revert_rebound(cx, &t, &p.to))
+            .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    assert!(
+        rep.ops.iter().all(|o| o.observed == Observed::Before),
+        "{rep:?}"
+    );
+    let d = by_content(&before, &s.snap(&lib));
+    assert!(d.is_empty(), "{d:#?}");
+}
+
+/// RB-W2: a library copied to another folder of the same volume (as a copy, not a rename): every
+/// folder there, also the ones the plan created, has a new file ID on NTFS; the rebind records
+/// the IDs found and removes those folders by them; the folder is as before the apply.
+#[test]
+fn rb_w2_a_copied_library_is_rebound_by_the_folder_ids_found_on_real_windows() {
+    let Some(s) = setup_steam("exec-rbw2") else {
+        return;
+    };
+    let lib = s.lib.clone();
+    let before = s.snap(&lib);
+    // Two created folders with a file, and a new file (no R/H/S on new files).
+    let spec = crate::prim::tests::spec(vec![
+        crate::prim::tests::entry(r"mods\x.dll", r"mods\a\x.dll", X),
+        crate::prim::tests::entry("new.dll", "new.dll", N),
+    ]);
+    let t = s.applied(&lib, &spec);
+    // Steam copies the library: the files as they are now (with Rerun's changes), new IDs.
+    let lib2 = s.w.root.work("lib2");
+    put_game(&s.w, &lib2);
+    let g2 = lib2.join(r"steamapps\common\G");
+    let fx = s.w.root.fx();
+    fx.file(&g2.join(r"mods\a\x.dll"), X).unwrap();
+    fx.file(&g2.join("new.dll"), N).unwrap();
+    fx.rename(&lib, &lib.with_file_name("lib-away")).unwrap();
+    list_libs(&s, &[&lib2], 1);
+    let p =
+        s.w.with(|cx, _| crate::exec::rebind_check(cx, &t))
+            .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(p.to.dirs.len(), 2, "{:?}", p.to);
+    assert!(p.created.iter().all(|d| d.found), "{:?}", p.created);
+    let rep =
+        s.w.with(|cx, _| crate::exec::revert_rebound(cx, &t, &p.to))
+            .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    let d = by_content(&before, &s.snap(&lib2));
+    assert!(d.is_empty(), "{d:#?}");
+}

@@ -44,7 +44,7 @@ impl AppTestSys {
         Self::with_registry(lad, Box::new(h.hive.registry().unwrap()))
     }
 
-    fn with_registry(lad: &Path, reg: Box<dyn RegistryWrite>) -> Self {
+    pub(super) fn with_registry(lad: &Path, reg: Box<dyn RegistryWrite>) -> Self {
         let target = std::fs::canonicalize(target_dir()).unwrap();
         let canon = std::fs::canonicalize(lad).unwrap();
         assert!(
