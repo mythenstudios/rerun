@@ -4,8 +4,9 @@
 # this script.
 #
 # Results: C:\sandbox\out\sandbox-test.log (full output) and result.json (exit code, account,
-# elevation, OS build, per-test counts, note). result.json is always written, also when the
-# run fails. The Sandbox closes when the last window closes; the script ends with the result
+# elevation, OS build, per-test counts, note, and under "cli" the CLI round trip of
+# sandbox-cli.ps1 with its log cli.log). result.json is always written, also when the run
+# fails. The Sandbox closes when the last window closes; the script ends with the result
 # on screen and a pause, so close the Sandbox yourself.
 #
 # The registry write side refuses an elevated process (S2). If this session is elevated, the
@@ -74,6 +75,15 @@ $code = -1
 $passed = 0
 $failed = 0
 $err = ''
+# P2-13 (user decision E7 a): the CLI round trip with the release rerun.exe, before the tests
+# (its own game folder and registry key; a test that fails cannot block it).
+$cli = $null
+try {
+    $cli = & 'C:\sandbox\scripts\sandbox-cli.ps1' -Out $out -Elevated $elevated
+} catch {
+    $cli = [ordered]@{ error = "$_"; expected = $false }
+    Write-Host "CLI round trip failed: $_"
+}
 try {
     if (-not (Test-Path -LiteralPath $exe)) { throw "test binary missing: $exe (run scripts/sandbox-launch.ps1 on the host)" }
     $env:RERUN_SANDBOX = '1'
@@ -101,14 +111,16 @@ try {
         os_build  = $build
         started   = $started.ToString('o')
         finished  = (Get-Date).ToString('o')
+        cli       = $cli
     }
-    $result | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'result.json') -Encoding UTF8
+    $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'result.json') -Encoding UTF8
 }
 
 # Facts for the compatibility layer (P2-11): a failure here never changes the test result.
 try { & 'C:\sandbox\scripts\sandbox-probe-layers.ps1' -Out $out } catch { Write-Host "probe failed: $_" }
 Write-Host ''
 Write-Host "exit code $code, $passed passed, $failed failed, elevated=$elevated $note (results in C:\sandbox\out)"
+if ($cli) { Write-Host "CLI round trip: expected=$($cli.expected) (details in cli.log)" }
 if ($passed -eq 0 -and $code -eq 0) { Write-Host 'WARNING: no test ran' }
 if ($Worker) {
     Set-Content -LiteralPath $done -Value 'done'

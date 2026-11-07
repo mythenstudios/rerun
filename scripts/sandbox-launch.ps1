@@ -1,5 +1,6 @@
 # Host side of the Windows Sandbox tests (docs/09-testing.md, tier 3): builds the test binary
-# (the Sandbox has no toolchain), stages it, and starts the Sandbox with sandbox-test.wsb.
+# and the release rerun.exe (the Sandbox has no toolchain), stages them, and starts the Sandbox
+# with sandbox-test.wsb.
 #
 #   powershell -File scripts/sandbox-launch.ps1             # build, stage, start the Sandbox
 #   powershell -File scripts/sandbox-launch.ps1 -StageOnly  # build and stage only
@@ -31,7 +32,15 @@ try {
     $exit = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($exit -ne 0) { throw 'cargo test --no-run failed (run it by hand to see why)' }
+    # The release rerun.exe for the CLI round trip (P2-13, sandbox-cli.ps1); built only.
+    $ErrorActionPreference = 'Continue'
+    & cargo build -p rerun-cli --release 2>$null | Out-Null
+    $exit = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($exit -ne 0) { throw 'cargo build -p rerun-cli --release failed (run it by hand to see why)' }
 } finally { Pop-Location }
+$cliExe = Join-Path $repo 'target\release\rerun.exe'
+if (-not (Test-Path -LiteralPath $cliExe)) { throw "release rerun.exe missing: $cliExe" }
 $exe = $json | ForEach-Object { try { $_ | ConvertFrom-Json } catch { $null } } |
     Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.target.name -eq 'rerun-core' -and $_.target.kind -contains 'lib' -and $_.executable } |
     Select-Object -Last 1 -ExpandProperty executable
@@ -48,6 +57,8 @@ foreach ($item in Get-ChildItem -LiteralPath $out -Force) {
 }
 Copy-Item -LiteralPath $exe -Destination (Join-Path $bin 'rerun-core-tests.exe') -Force
 Write-Host "staged $exe -> $bin\rerun-core-tests.exe"
+Copy-Item -LiteralPath $cliExe -Destination (Join-Path $bin 'rerun.exe') -Force
+Write-Host "staged $cliExe -> $bin\rerun.exe"
 if (Test-Path -LiteralPath (Join-Path $tools 'Procmon64.exe')) { Write-Host 'Procmon64.exe found: the probes will use it' }
 if ($StageOnly) { return }
 
