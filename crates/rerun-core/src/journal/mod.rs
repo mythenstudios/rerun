@@ -33,6 +33,7 @@ use std::fmt;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 
+use names::LOCK;
 pub use names::{InstanceTag, TxnId};
 pub use record::{Before, Closing, Digest, FORMAT, INLINE_MAX, Observed, Semantic};
 pub use write::JournalLock;
@@ -42,7 +43,7 @@ pub(crate) use write::{FlushSite, knob};
 
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{AppDir, AppSub, Create, RootError};
-use crate::sys::fs::TmpName;
+use crate::sys::fs::{ReadSeek, TmpName};
 use crate::sys::{DirWrite, SysError, SysErrorKind};
 
 /// Budgets of the journal (ADR 0019, condition S1). Crate-internal so tests can shrink them.
@@ -207,6 +208,16 @@ pub struct Listing {
     pub foreign: usize,
 }
 
+/// An existing `journal\lock` held read side by a check ([`Journal::hold`]); released when it
+/// drops. Empty when there was no lock file.
+pub(crate) struct LockHold<'a>(Option<Box<dyn ReadSeek + 'a>>);
+
+impl fmt::Debug for LockHold<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("LockHold").field(&self.0.is_some()).finish()
+    }
+}
+
 /// The journal of an [`AppDir`].
 #[derive(Debug)]
 pub struct Journal<'a> {
@@ -252,6 +263,29 @@ impl<'a> Journal<'a> {
     /// Rerun holds it; the kernel releases it when the process ends.
     pub fn lock(&self) -> Result<JournalLock<'_>, JournalError> {
         JournalLock::take(self.dir_write()?, self)
+    }
+
+    /// Holds an existing `journal\lock` for a check that writes nothing (`exec::check`, the
+    /// `verify` before a revert or forget; P2-13 review S2): opened read side, never created,
+    /// sharing read only. Held, it keeps any writer out ([`Self::lock`] opens with share 0,
+    /// so it is `Busy` meanwhile), and a writer that holds it makes this `Busy`; two checks
+    /// do not block each other. No `journal\` or no `lock` yet: nothing to hold, nobody writes.
+    pub(crate) fn hold(&self) -> Result<LockHold<'a>, JournalError> {
+        let p = match RelPath::parse(&format!(r"journal\{LOCK}")) {
+            Ok(p) => p,
+            Err(e) => unreachable!("journal\\lock is a fixed valid path: {e}"),
+        };
+        match self.app.dir().open_read(&p) {
+            Ok(r) => Ok(LockHold(Some(r))),
+            Err(e) if e.kind == SysErrorKind::NotFound => Ok(LockHold(None)),
+            Err(e) if e.kind == SysErrorKind::Busy => Err(JournalError::Busy),
+            Err(e) if e.kind == SysErrorKind::ReparsePoint => Err(RootError::Reparse {
+                store: self.app.path().clone(),
+                at: p,
+            }
+            .into()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Every transaction, without the lock (`status`).

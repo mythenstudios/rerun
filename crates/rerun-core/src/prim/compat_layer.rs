@@ -153,7 +153,7 @@ fn stored_exe(game: &GameDir<'_>, exe: &RelPath) -> Result<RelPath, PlanError> {
 /// The open Rerun transaction whose `TokenList` on the value of `av` added `token` (review N2),
 /// for the message only: anything unreadable is "none".
 fn added_by_rerun(ctx: &PlanCtx<'_>, av: &AllowedValue, token: &str) -> Option<TxnId> {
-    let j = Journal::new(ctx.app, InstanceTag::new());
+    let j = Journal::new(ctx.app?, InstanceTag::new());
     let listing = j.list().ok()?;
     let name = fold(av.name());
     listing.txns.iter().rev().find_map(|l| {

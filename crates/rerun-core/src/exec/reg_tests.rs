@@ -72,7 +72,7 @@ pub(crate) fn plan_for(
         steps,
         &PlanCtx {
             game: g,
-            app: &app,
+            app: Some(&app),
             steam_app,
             main_exe: Some(&main),
             reg: RegPolicy.reader(&env.sys),
@@ -871,8 +871,17 @@ fn r_t8_refusals_write_no_transaction() {
         let h = plan_all(&env, &steps());
         make(&env);
         let before = snap_keys(&env.sys);
+        // P2-13 (review S1): `check` refuses alike.
+        let c = env.check(&h);
         match env.apply(&h) {
-            Err(ApplyError::Refused(r)) => assert!(want(&r), "{what}: {r:?}"),
+            Err(ApplyError::Refused(r)) => {
+                assert!(want(&r), "{what}: {r:?}");
+                assert_eq!(
+                    c.as_ref().err().map(ToString::to_string),
+                    Some(r.to_string()),
+                    "{what}: check"
+                );
+            }
             other => panic!("{what}: {other:?}"),
         }
         assert!(env.states().is_empty(), "{what}: no transaction folder");

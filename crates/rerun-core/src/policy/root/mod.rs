@@ -13,6 +13,8 @@
 //! - [`ForbiddenRoots`]: the forbidden-root list, resolved from known folders. Every root is
 //!   checked lexically before it is opened and canonically after; the canonical check is the
 //!   one that counts.
+//! - [`read_input`]: a file the user names (the step file of `rerun plan`, P2-13): its folder
+//!   opened read side by absolute path, the file one plain segment below it, bounded.
 //! - [`RootId`]: volume serial and file ID. Plans store it; apply and revert reopen the root
 //!   and abort on a mismatch ([`StoreDir::ensure_id`], [`GameDir::ensure_id`]).
 //!
@@ -28,6 +30,7 @@
 
 mod app;
 mod forbidden;
+mod input;
 
 use std::fmt;
 use std::path::Path;
@@ -35,6 +38,7 @@ use std::path::Path;
 pub(crate) use app::AppSub;
 pub use app::{AppDir, Create};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
+pub use input::read_input;
 
 use crate::path::{Anomaly, PathError, RelPath, RootPath, classify};
 use crate::sys::fs::RootInfo;

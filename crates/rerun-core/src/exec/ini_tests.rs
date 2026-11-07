@@ -107,7 +107,7 @@ fn try_plan(env: &Env, steps: &[Step]) -> Result<PlanHash, plan::PlanError> {
         steps,
         &crate::prim::PlanCtx {
             game: &g,
-            app: &a,
+            app: Some(&a),
             steam_app: None,
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(&env.sys),
@@ -607,12 +607,12 @@ pub(crate) fn i6_check() -> Vec<String> {
             ) {
                 f.push(format!("RI6 bin: verify {v:?}"));
             }
+            // P2-13, review S4: before the first record of the run, so a refusal.
             let r = env.revert(&t);
             if !matches!(
                 &r,
-                Err(ExecError::Journal(
-                    crate::journal::JournalError::BackupMismatch(0)
-                ))
+                Err(ExecError::Refused(Refusal::Journal(e)))
+                    if matches!(**e, crate::journal::JournalError::BackupMismatch(0))
             ) {
                 f.push(format!("RI6 bin: revert {r:?}"));
             }

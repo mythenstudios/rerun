@@ -67,10 +67,9 @@ use sha2::{Digest, Sha256};
 
 pub use preview::{
     INI_NOTE, IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, Preview, PreviewOp, PreviewRoot,
-    REGISTRY_NOTE, RegShown, preview,
+    REGISTRY_NOTE, RegShown, preview, preview_head, preview_stored,
 };
-pub(crate) use store::load;
-pub use store::store;
+pub use store::{load, store};
 
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
@@ -650,6 +649,9 @@ pub enum PlanError {
         /// The rule.
         source: IniError,
     },
+    /// The step file of `rerun plan` (P2-13).
+    #[error(transparent)]
+    StepFile(#[from] crate::prim::StepFileError),
     /// A step the planner refuses (`file_install`, `registry_set`).
     #[error("{0}")]
     Step(String),

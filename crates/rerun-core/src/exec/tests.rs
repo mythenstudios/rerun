@@ -110,7 +110,7 @@ impl Env {
             &[Step::FileInstall(s.clone())],
             &PlanCtx {
                 game: g,
-                app: &app,
+                app: Some(&app),
                 steam_app,
                 main_exe: Some(&main),
                 reg: crate::policy::registry::RegPolicy.reader(&self.sys),
@@ -122,6 +122,11 @@ impl Env {
 
     pub(crate) fn apply(&self, h: &PlanHash) -> Result<Outcome, ApplyError> {
         self.with(|cx| apply(cx, h))
+    }
+
+    /// `exec::check` (P2-13).
+    pub(crate) fn check(&self, h: &PlanHash) -> Result<usize, Refusal> {
+        self.with(|cx| super::check(cx, h))
     }
 
     /// `apply` with `arm` run on the fake right before it (after `AppDir` and the forbidden
@@ -223,6 +228,19 @@ pub(crate) fn snap_at(sys: &FakeSystem, abs: &str) -> Snapshot {
         sys.registry(),
         &Scope {
             dirs: vec![SnapRoot::new(g.dir(), abs)],
+            keys: Vec::new(),
+        },
+    )
+    .unwrap()
+}
+
+/// Rerun's folder (`plans\`, `journal\`, the lock file) as a snapshot.
+pub(crate) fn snap_app(sys: &FakeSystem) -> Snapshot {
+    let app = app(sys);
+    snapshot(
+        sys.registry(),
+        &Scope {
+            dirs: vec![SnapRoot::new(app.dir(), app.path().to_string())],
             keys: Vec::new(),
         },
     )
@@ -780,7 +798,10 @@ pub(crate) fn t6_check(case: &T6Case) -> Vec<String> {
         f.push(format!("T6 {what} lower ops: {rep:?}"));
     }
     if op == 0 {
-        let b = foreign.first().and_then(|o| o.backup.as_deref());
+        let b = foreign.first().and_then(|o| match &o.backup {
+            Some(super::Backup::Bin { path, .. }) => Some(path.as_str()),
+            _ => None,
+        });
         if !b.is_some_and(|b| b.ends_with(r"\op-0000.bin") && exists_abs(&env.sys, b)) {
             f.push(format!("T6 {what} backup kept: {b:?}"));
         }
@@ -1210,14 +1231,27 @@ fn t8_refusals_write_no_transaction() {
         let h = env.plan(&t1_spec());
         make(&env);
         let before = env.snap();
+        // P2-13 (review S1): `check` gives the same refusal and writes nothing, not even the
+        // journal folder or its lock.
+        let app_before = snap_app(&env.sys);
+        let c = env.check(&h);
+        same(&app_before, &snap_app(&env.sys));
         match env.apply(&h) {
-            Err(ApplyError::Refused(r)) => assert!(want(&r), "{what}: {r:?}"),
+            Err(ApplyError::Refused(r)) => {
+                assert!(want(&r), "{what}: {r:?}");
+                assert_eq!(
+                    c.as_ref().err().map(ToString::to_string),
+                    Some(r.to_string()),
+                    "{what}: check"
+                );
+            }
             other => panic!("{what}: {other:?}"),
         }
         assert!(env.states().is_empty(), "{what}: no transaction folder");
         same(&before, &env.snap());
     }
-    // The lock is taken.
+    // The lock is taken: `check` is busy too, while holding the lock read side keeps a writer
+    // out (review S2).
     let env = Env::new(finish(base()));
     let h = env.plan(&t1_spec());
     let app = app(&env.sys);
@@ -1227,7 +1261,16 @@ fn t8_refusals_write_no_transaction() {
         env.apply(&h),
         Err(ApplyError::Refused(Refusal::JournalBusy))
     ));
+    assert!(matches!(env.check(&h), Err(Refusal::JournalBusy)));
     drop(held);
+    let hold = j.hold().unwrap();
+    assert!(matches!(
+        env.apply(&h),
+        Err(ApplyError::Refused(Refusal::JournalBusy))
+    ));
+    assert_eq!(env.check(&h).unwrap(), 5, "two checks share the lock");
+    drop(hold);
+    assert!(matches!(env.apply(&h), Ok(Outcome::Applied(_))));
     // The Steam app updates or is gone.
     for (flags, state) in [
         (4 | 2, AppState::UpdatePending),

@@ -160,7 +160,7 @@ fn try_plan(env: &Env, steps: &[Step]) -> Result<PlanHash, plan::PlanError> {
         steps,
         &crate::prim::PlanCtx {
             game: &g,
-            app: &a,
+            app: Some(&a),
             steam_app: None,
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(&env.sys),
@@ -681,7 +681,7 @@ fn good_plan(env: &Env, g: &crate::policy::root::GameDir<'_>) -> Plan {
         &[layer_step("game.exe", &["ZZ_OS_A"])],
         &crate::prim::PlanCtx {
             game: g,
-            app: &a,
+            app: Some(&a),
             steam_app: None,
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(&env.sys),

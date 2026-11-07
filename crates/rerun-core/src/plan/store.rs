@@ -54,7 +54,7 @@ pub fn store(app: &AppDir<'_>, b: &PlanBytes) -> Result<PlanHash, PlanError> {
 }
 
 /// The stored bytes of plan `h`: at most [`MAX_PLAN_BYTES`], and only if they hash to `h`.
-pub(crate) fn load(app: &AppDir<'_>, h: &PlanHash) -> Result<PlanBytes, PlanError> {
+pub fn load(app: &AppDir<'_>, h: &PlanHash) -> Result<PlanBytes, PlanError> {
     let Some(dir) = app.sub(AppSub::Plans)? else {
         return Err(PlanError::NotFound(*h));
     };

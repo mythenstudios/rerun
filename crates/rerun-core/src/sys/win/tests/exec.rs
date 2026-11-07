@@ -92,7 +92,7 @@ impl Win {
                 &[Step::FileInstall(t1_spec())],
                 &PlanCtx {
                     game: &g,
-                    app: cx.app,
+                    app: Some(cx.app),
                     steam_app: None,
                     main_exe: Some(&main),
                     reg: crate::policy::registry::RegPolicy.reader(&self.sys),
@@ -131,7 +131,7 @@ impl Win {
                 steps,
                 &PlanCtx {
                     game: &g,
-                    app: cx.app,
+                    app: Some(cx.app),
                     steam_app: None,
                     main_exe: Some(&main),
                     reg: crate::policy::registry::RegPolicy.reader(&self.sys),
@@ -649,12 +649,12 @@ fn r_i6_exec_ini_set_swapped_backup_on_real_windows() {
     std::fs::write(&bin, swapped.as_bytes()).unwrap();
     let before = w.snap();
     let r = w.with(|cx, _| revert(cx, &t));
+    // P2-13, review S4: before the first record of the run, so a refusal.
     assert!(
         matches!(
             &r,
-            Err(crate::exec::ExecError::Journal(
-                crate::journal::JournalError::BackupMismatch(0)
-            ))
+            Err(crate::exec::ExecError::Refused(Refusal::Journal(e)))
+                if matches!(**e, crate::journal::JournalError::BackupMismatch(0))
         ),
         "{r:?}"
     );

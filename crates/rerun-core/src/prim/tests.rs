@@ -73,7 +73,7 @@ pub(crate) fn plan_manual(sys: &FakeSystem, s: &FileInstallSpec) -> Result<Plan,
         &[Step::FileInstall(s.clone())],
         &PlanCtx {
             game: &game,
-            app: &app,
+            app: Some(&app),
             steam_app: None,
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(sys),
@@ -234,7 +234,7 @@ fn t9_a_steam_root_needs_its_app_and_a_manual_root_has_none() {
     let app = app(&sys);
     let ctx = |steam_app| PlanCtx {
         game: &game,
-        app: &app,
+        app: Some(&app),
         steam_app,
         main_exe: None,
         reg: crate::policy::registry::RegPolicy.reader(&sys),
@@ -251,7 +251,7 @@ fn t9_a_steam_root_needs_its_app_and_a_manual_root_has_none() {
     let manual = GameDir::open_manual(&sys, &fr, Path::new(GAME)).unwrap();
     let c = PlanCtx {
         game: &manual,
-        app: &app,
+        app: Some(&app),
         steam_app: Some(220),
         main_exe: None,
         reg: crate::policy::registry::RegPolicy.reader(&sys),

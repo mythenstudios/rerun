@@ -229,7 +229,7 @@ impl Sb {
                 steps,
                 &PlanCtx {
                     game: &g,
-                    app: cx.app,
+                    app: Some(cx.app),
                     steam_app: None,
                     main_exe: Some(&main),
                     reg: crate::policy::registry::RegPolicy.reader(&self.sys),

@@ -82,7 +82,7 @@ pub(crate) fn plan_steps(
         steps,
         &PlanCtx {
             game: &game,
-            app: &app,
+            app: Some(&app),
             steam_app: None,
             main_exe: main.as_ref(),
             reg: RegPolicy.reader(sys),

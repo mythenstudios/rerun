@@ -171,8 +171,12 @@ pub(crate) fn plan_into(
     if spec.files.is_empty() {
         return Ok(());
     }
-    let packages = ctx
-        .app
+    // Without Rerun's folder (`plan --dry-run` before the first plan) there are no local
+    // packages either (review S6).
+    let Some(app) = ctx.app else {
+        return Err(missing(&spec.package, &spec.version));
+    };
+    let packages = app
         .sub(AppSub::Packages)?
         .ok_or_else(|| missing(&spec.package, &spec.version))?;
     let src = open_package(&*packages, &spec.package, &spec.version)?;

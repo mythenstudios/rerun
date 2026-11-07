@@ -246,7 +246,7 @@ fn t9l_a_game_folder_reached_through_a_link_is_refused() {
     assert_eq!(via.launch_path().unwrap().to_string(), r"D:\Links\G");
     let ctx = |g| PlanCtx {
         game: g,
-        app: &app,
+        app: Some(&app),
         steam_app: None,
         main_exe: Some(&main),
         reg: RegPolicy.reader(&sys),
@@ -393,7 +393,7 @@ fn t9l_a_steam_library_reached_through_a_junction_is_refused() {
         assert_eq!(g.path().to_string(), STEAM_GAME);
         let ctx = PlanCtx {
             game: &g,
-            app: &app,
+            app: Some(&app),
             steam_app: Some(220),
             main_exe: Some(&main),
             reg: RegPolicy.reader(&sys),
@@ -431,7 +431,7 @@ fn t9l_a_long_launch_path_opens_the_game_and_refuses_only_compat_layer() {
     assert_eq!(g.launch_path(), None);
     let ctx = PlanCtx {
         game: &g,
-        app: &app,
+        app: Some(&app),
         steam_app: Some(220),
         main_exe: Some(&main),
         reg: RegPolicy.reader(&sys),

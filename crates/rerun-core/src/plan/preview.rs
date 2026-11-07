@@ -20,7 +20,8 @@
 use std::fmt;
 
 use super::{
-    ContentRef, FileState, Op, Plan, PlanOrigin, Target, ValueState, allowed, created_key,
+    ContentRef, FileState, Op, Plan, PlanBytes, PlanError, PlanOrigin, Target, ValueState, allowed,
+    created_key,
 };
 use crate::escape::{self, Shown};
 use crate::policy::ini::Old;
@@ -510,5 +511,42 @@ impl fmt::Display for Preview {
             writeln!(f, "note: {i}")?;
         }
         Ok(())
+    }
+}
+
+/// The preview of stored plan bytes ([`super::load`]), decoded with the rules in force now as
+/// the apply decodes them: what `rerun plan` and `rerun apply` show is built from exactly the
+/// bytes that are applied (ADR 0020, "Preview").
+pub fn preview_stored(b: &PlanBytes) -> Result<Preview, PlanError> {
+    Ok(preview(&super::decode(b.bytes())?))
+}
+
+/// The preview of a recorded head (`status`, `revert`, `forget`), decoded with the recorded
+/// rules (a tightened rule never hides an applied transaction). Registry data stays out of it
+/// (ADR 0016 amendment P2-10b; review S3): every old value, and the new value of an
+/// `add tokens` op (it holds the old one), by type, length and SHA-256 only.
+pub fn preview_head(b: &[u8]) -> Result<Preview, PlanError> {
+    let p = super::decode_recorded(b)?;
+    let mut v = preview(&p);
+    for (op, shown) in p.ops.iter().zip(v.ops.iter_mut()) {
+        match op {
+            Op::SetValue { old, .. } => shown.old_value = Some(masked(old.as_ref())),
+            Op::TokenList { old, new, .. } => {
+                shown.old_value = Some(masked(old.as_ref()));
+                shown.new_value = Some(masked(
+                    ValueState::of(&RegValue::String(new.clone())).as_ref(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(v)
+}
+
+/// A registry value by type, length and SHA-256 only (`missing` without one).
+fn masked(s: Option<&ValueState>) -> RegShown {
+    RegShown {
+        kind: s.map_or_else(|| "missing".to_owned(), opaque),
+        text: None,
     }
 }

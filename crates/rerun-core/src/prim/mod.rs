@@ -13,6 +13,8 @@
 //!
 //! - [`ini_set`]: keys of an existing INI file of the game folder (P2-12, ADR 0021): one
 //!   `IniValue` per file with its edits.
+//! - [`StepFile`]: the phase 2 step file `rerun plan` reads (P2-13), a throwaway wrapper until
+//!   the Topo engine (phase 4 removes it).
 //!
 //! The builder orders the ops: every file op first (an `IniValue` is one), then every registry
 //! op, whatever the order of the steps (6b-d; `plan::check` refuses anything else). An
@@ -22,6 +24,7 @@ pub mod compat_layer;
 pub mod file_install;
 pub mod ini_set;
 pub mod registry_set;
+mod step_file;
 
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +32,9 @@ pub use compat_layer::CompatLayerSpec;
 pub use file_install::{FileEntry, FileInstallSpec};
 pub use ini_set::{IniSetSpec, IniSetValue};
 pub use registry_set::{RegValueEntry, RegistrySetSpec};
+pub use step_file::{
+    GameRef, MAX_STEP_FILE, ParseClass, STEP_FILE_FORMAT, StepFile, StepFileError,
+};
 
 use crate::fold::fold;
 use crate::path::RelPath;
@@ -59,8 +65,10 @@ pub enum Step {
 pub struct PlanCtx<'a> {
     /// The game folder (its root becomes the plan's root 0).
     pub game: &'a GameDir<'a>,
-    /// Rerun's folder.
-    pub app: &'a AppDir<'a>,
+    /// Rerun's folder; `None` if it does not exist yet (`rerun plan --dry-run` creates nothing,
+    /// review S6): a `file_install` step is refused then (no local packages), `compat_layer`
+    /// looks up no transaction.
+    pub app: Option<&'a AppDir<'a>>,
     /// The Steam app of a game folder from a Steam library (required for such a root, its
     /// state is checked before apply and revert).
     pub steam_app: Option<u32>,

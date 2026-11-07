@@ -933,3 +933,77 @@ fn the_default_forms_follow_a_junctioned_appdata_local() {
     );
     assert_eq!(check(&fr, r"D:\L\Games"), Ok(()));
 }
+
+// ---------- read_input (P2-13) ----------
+
+#[test]
+fn read_input_reads_a_plain_file_within_its_limit() {
+    use super::read_input;
+    let sys = base()
+        .file(r"D:\Work\steps.json", b"{}".to_vec())
+        .file(r"D:\Work\big.json", vec![b' '; 11])
+        .file(r"D:\Work\exact.json", vec![b' '; 10])
+        .dir(r"D:\Work\folder.json")
+        .file_symlink(r"D:\Work\link.json", r"D:\Work\steps.json")
+        .file(r"D:\steps.json", b"{}".to_vec())
+        .build()
+        .unwrap();
+    assert_eq!(
+        read_input(&sys, Path::new(r"D:\Work\steps.json"), 10).unwrap(),
+        b"{}"
+    );
+    assert_eq!(
+        read_input(&sys, Path::new(r"D:\Work\exact.json"), 10)
+            .unwrap()
+            .len(),
+        10
+    );
+    assert_eq!(
+        sys_kind(read_input(&sys, Path::new(r"D:\Work\big.json"), 10)),
+        SysErrorKind::TooLarge
+    );
+    for not_plain in [r"D:\Work\folder.json", r"D:\Work\link.json"] {
+        assert_eq!(
+            sys_kind(read_input(&sys, Path::new(not_plain), 10)),
+            SysErrorKind::InvalidPath,
+            "{not_plain}"
+        );
+    }
+    assert_eq!(
+        sys_kind(read_input(&sys, Path::new(r"D:\Work\missing.json"), 10)),
+        SysErrorKind::NotFound
+    );
+    // A drive root, a share, a relative path: refused by name, with their own reason.
+    match read_input(&sys, Path::new(r"D:\steps.json"), 10) {
+        Err(RootError::InvalidPath(e)) => assert!(e.reason.contains("drive root"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+    for bad in [
+        r"\\server\share\steps.json",
+        r"\\?\UNC\server\share\steps.json",
+        r"steps.json",
+        r"D:\Work\..\x.json",
+    ] {
+        assert!(
+            matches!(
+                read_input(&sys, Path::new(bad), 10),
+                Err(RootError::InvalidPath(_))
+            ),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn read_input_follows_a_link_above_the_folder_only() {
+    use super::read_input;
+    let sys = base()
+        .file(r"E:\Real\steps.json", b"{}".to_vec())
+        .junction(r"D:\Linked", r"E:\Real")
+        .build()
+        .unwrap();
+    assert_eq!(
+        read_input(&sys, Path::new(r"D:\Linked\steps.json"), 10).unwrap(),
+        b"{}"
+    );
+}

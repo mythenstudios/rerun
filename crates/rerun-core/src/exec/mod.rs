@@ -17,9 +17,9 @@
 //!   `Foreign` and left; the lower ops are still reverted (user decision D3, R1), and only
 //!   `forget` closes. A file op whose root cannot run file ops halts the revert without a
 //!   record (6b-d, [`Halt`]): the transaction stays open and resumable.
-//! - [`verify`]: what each op of a transaction observes now, read only, without the lock,
-//!   newest first and halting where the revert would; also the preview before a revert
-//!   (rule 5).
+//! - [`verify`]: what each op of a transaction observes now, read only (an existing lock file
+//!   held read side, never taken), newest first and halting where the revert would; also the
+//!   preview before a revert (rule 5).
 //! - [`forget`]: closes an empty, open or applied transaction with `Closed { Forgotten }`, a
 //!   damaged or unreadable one with the marker `journal\<txn>.forgotten` (user decision D2).
 //!
@@ -32,8 +32,14 @@
 //! loop is one for every domain. A new domain adds a [`Target`] variant, a variant of [`Seen`]
 //! (and of [`Hint`] where it needs one) and its part of [`Touched`].
 //!
-//! Registry ops (P2-10b): a plan with registry ops is refused in an elevated process before
-//! anything is written, by an apply and by a revert (`Refusal::Elevated`, S2); the old state of
+//! Front end (P2-13): [`check`] runs every check of an apply without writing (`preflight` is
+//! the one chain both use); [`status`] and [`txn_status`] show the journal without observing
+//! anything. [`standard_user`] (user decision E3) is the first call of `apply`, `check`,
+//! `revert` and `forget`: an elevated process, or one whose elevation cannot be determined,
+//! changes nothing, whatever the plan (`Refusal::Elevated`). A revert reports every error
+//! before its first record of the run as a refusal (review S4).
+//!
+//! Registry ops (P2-10b): the old state of
 //! every key and value is re-observed with the files (`Mismatch`, `Refusal::Registry`); `HKCU`
 //! is flushed before `Applied` (after the game folders) and before the `RevertDone` of every
 //! registry op. Registry ops need no root: they never halt a revert, and `plan::check` puts them
@@ -51,22 +57,25 @@ mod ini;
 mod reg;
 mod roots;
 mod stack;
+mod status;
 
 use std::collections::{BTreeMap, BTreeSet};
+
+pub use status::{OpState, OpStatus, Status, TxnLine, TxnStatus, status, txn_status};
 
 use file::Mode;
 
 use crate::detect::steam::AppState;
 use crate::escape::Shown;
 use crate::journal::{
-    Closing, InstanceTag, Journal, JournalError, Observed, OpLog, Reverting, Semantic, TxnId,
-    TxnState, TxnWriter,
+    Before, Closing, InstanceTag, IntentRec, Journal, JournalError, Listing, Observed, OpLog,
+    Reverting, Semantic, TxnId, TxnState, TxnWriter,
 };
 use crate::path::RelPath;
 use crate::plan::{self, Object, Op, Plan, PlanError, PlanHash, Target};
 use crate::policy::ini::{IniName, KeyState};
 use crate::policy::registry::{RegPolicy, RegWriter};
-use crate::policy::root::{AppDir, ForbiddenRoots, RootError};
+use crate::policy::root::{AppDir, ForbiddenRoots, RootError, StoreDir};
 use crate::sys::fs::TmpName;
 use crate::sys::registry::Hive;
 use crate::sys::{SysError, SysResult, System};
@@ -189,14 +198,23 @@ pub enum Refusal {
         /// The error, with its Win32 or NTSTATUS code.
         source: SysError,
     },
-    /// Rerun runs elevated, or whether it does cannot be determined (fail closed): it never
-    /// writes the registry then (ADR 0018, S2).
+    /// Rerun runs elevated, or whether it does cannot be determined (fail closed): it changes
+    /// nothing then, whatever the plan (ADR 0018, S2; P2-13, user decision E3).
     #[error(
-        "Rerun runs as administrator, or whether it does cannot be determined, and does not \
-         change the registry then; run it as a standard user (with UAC turned off, an \
-         administrator account always runs elevated)"
+        "Rerun runs as administrator, or whether it does cannot be determined, and changes \
+         nothing then; run it as a standard user (with UAC turned off, an administrator \
+         account always runs elevated)"
     )]
     Elevated,
+    /// Op `op` of a revert cannot be observed now: the system layer failed before the revert
+    /// wrote anything (P2-13, review S4).
+    #[error("op {op} cannot be checked now: {source}")]
+    Observe {
+        /// Op index.
+        op: u16,
+        /// The error, with its Win32 or NTSTATUS code.
+        source: SysError,
+    },
     /// The stored plan is missing, changed or invalid.
     #[error(transparent)]
     Plan(PlanError),
@@ -345,10 +363,46 @@ pub struct OpReport {
     /// Names Rerun left in the op's folder: a `.old` still mapped (pending cleanup), a temp
     /// name that is not Rerun's any more.
     pub left: Vec<RelPath>,
-    /// Where the backup of a foreign op stays (`journal\<txn>\op-NNNN.bin` below `AppDir`).
-    pub backup: Option<String>,
+    /// Where the old state of a foreign op stays (`journal\<txn>\op-NNNN.bin` below `AppDir`,
+    /// or the record itself for a small old value).
+    pub backup: Option<Backup>,
     /// What the op observed beyond its state (an `IniValue`: its keys).
     pub detail: Option<Detail>,
+}
+
+/// Where the old state of an op is kept (P2-13; audit A2, P2-12 open point: a front end names
+/// it before `forget`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Backup {
+    /// The backup file `<AppDir>\journal\<txn>\op-NNNN.bin` (escaped for display) and its
+    /// length.
+    Bin {
+        /// The file.
+        path: Shown<'static>,
+        /// Its length in bytes.
+        len: u64,
+    },
+    /// In the op's journal record (a small old value; its content is never shown).
+    Inline,
+}
+
+impl Backup {
+    /// The backup of op `k` of transaction `t` by its intent, if the op has an old state.
+    pub(crate) fn of(app: &AppDir<'_>, t: &TxnId, k: u16, intent: &IntentRec) -> Option<Self> {
+        match &intent.before {
+            Some(Before::Bin(d)) => Some(Self::Bin {
+                path: crate::escape::path(&format!(
+                    r"{}\journal\{t}\{}",
+                    app.path(),
+                    crate::journal::names::backup_name(k)
+                ))
+                .into_owned(),
+                len: d.len,
+            }),
+            Some(Before::Inline(_)) => Some(Self::Inline),
+            None => None,
+        }
+    }
 }
 
 /// What an op observed beyond its [`Observed`] state, for `verify` and the report (P2-12; review
@@ -814,8 +868,69 @@ fn records_fit(plan: &Plan, ops: &BTreeMap<u16, OpLog>) -> bool {
         })
 }
 
+/// The front-end and core guard of every write (P2-13, user decision E3): Rerun runs as a
+/// standard user. Elevated, or undeterminable (fail closed): `Refusal::Elevated`. `apply`,
+/// `revert` and `forget` ask it first, for every plan; a front end also asks it before it
+/// stores a plan and before a dry run, so an elevated process neither writes nor checks as an
+/// administrator (`user_writable` is the linked token's, ADR 0007; the journal and the plans
+/// would land in the administrator's profile).
+pub fn standard_user(sys: &dyn System) -> Result<(), Refusal> {
+    RegPolicy
+        .writer(sys)
+        .writable()
+        .map_err(|_| Refusal::Elevated)
+}
+
+/// Every check of [`apply`] before its transaction begins, read only (P2-13, user decision
+/// E2 a; review S1, S2): the stored plan and its hash, then (if it has ops) the stacking on the
+/// listing, every root reopened by identity, the main executables, the game closed and the old
+/// state of every op, by the same `preflight` as `apply`. No `journal\` and no lock file is
+/// created and no record written; an existing `journal\lock` is held read side meanwhile, so
+/// an apply that holds it makes this `JournalBusy`, as it would the apply. The game files are
+/// read under guards, as by the apply. `Ok(0)`: nothing to do.
+pub fn check(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<usize, Refusal> {
+    standard_user(cx.sys)?;
+    let bytes = plan::load(cx.app, h).map_err(Refusal::Plan)?;
+    let plan = plan::decode(bytes.bytes()).map_err(Refusal::Plan)?;
+    if plan.ops.is_empty() {
+        return Ok(0);
+    }
+    let j = Journal::new(cx.app, cx.tag);
+    let hold = j.hold().map_err(Refusal::from)?;
+    let listing = j.list().map_err(Refusal::from)?;
+    let stores = roots::open_stores(cx, &plan);
+    let roots = preflight(cx, &plan, &j, &listing, &stores)?;
+    drop(roots);
+    drop(hold);
+    Ok(plan.ops.len())
+}
+
+/// The checks of an apply before `begin`, in this order (review S1: one chain for [`apply`]
+/// under the lock and [`check`] without it): stacking on the listing, every root reopened by
+/// identity (writable where it has file ops), the main executable of every root a file, the
+/// game closed, the old state of every op and source, the old registry state. The roots stay
+/// open for the apply.
+fn preflight<'g>(
+    cx: &ExecCtx<'g>,
+    plan: &Plan,
+    j: &Journal<'_>,
+    listing: &Listing,
+    stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
+) -> Result<roots::Roots<'g>, Refusal> {
+    let objects = Object::of(plan).map_err(Refusal::Plan)?;
+    stack::for_apply(j, listing, &objects)?;
+    let roots = roots::Roots::all(cx, plan, stores)?;
+    let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
+    roots::main_exe_present(plan, &roots)?;
+    roots::game_closed(plan, &roots, &all)?;
+    roots::old_state(cx, plan, &roots)?;
+    reg::old_state(&RegPolicy.writer(cx.sys), plan)?;
+    Ok(roots)
+}
+
 /// Applies the stored plan `h` (module docs).
 pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
+    standard_user(cx.sys)?;
     let bytes = plan::load(cx.app, h).map_err(Refusal::Plan)?;
     let plan = plan::decode(bytes.bytes()).map_err(Refusal::Plan)?;
     if plan.ops.is_empty() {
@@ -824,16 +939,8 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
-    let objects = Object::of(&plan).map_err(Refusal::Plan)?;
-    stack::for_apply(&j, &listing, &objects)?;
     let stores = roots::open_stores(cx, &plan);
-    let roots = roots::Roots::all(cx, &plan, &stores)?;
-    writable(cx, &plan)?;
-    let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
-    roots::main_exe_present(&plan, &roots)?;
-    roots::game_closed(&plan, &roots, &all)?;
-    roots::old_state(cx, &plan, &roots)?;
-    reg::old_state(&RegPolicy.writer(cx.sys), &plan)?;
+    let roots = preflight(cx, &plan, &j, &listing, &stores)?;
     let mut w = lock.begin(bytes.bytes()).map_err(Refusal::from)?;
     let txn = *w.id();
     let mut touched = Touched::new(cx.sys, &roots);
@@ -853,18 +960,6 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
             rollback: Box::new(rollback),
         }),
     }
-}
-
-/// S2: a plan with registry ops is refused in an elevated process, before the first record
-/// (apply and revert alike).
-fn writable(cx: &ExecCtx<'_>, plan: &Plan) -> Result<(), Refusal> {
-    if plan.ops.iter().any(|o| o.target().is_registry()) {
-        RegPolicy
-            .writer(cx.sys)
-            .writable()
-            .map_err(|_| Refusal::Elevated)?;
-    }
-    Ok(())
 }
 
 /// `k` as an op index of the journal (a plan has at most 128 ops).
@@ -1008,18 +1103,40 @@ fn revert_loop<W: Reverting>(
             op: k,
             observed,
             left: done.left,
-            backup: (observed == Observed::Foreign && log.intent.bin().is_some()).then(|| {
-                let p = format!(r"{}\journal\{}\op-{k:04}.bin", cx.app.path(), w.id());
-                crate::escape::path(&p).to_string()
-            }),
+            backup: (observed == Observed::Foreign)
+                .then(|| Backup::of(cx.app, w.id(), k, &log.intent))
+                .flatten(),
             detail: seen.detail(),
         });
     }
     Ok((reports, None))
 }
 
-/// Reverts transaction `t` (module docs): also the recovery of an interrupted apply.
+/// An error of a revert before it wrote anything in this run, as the refusal it is (P2-13,
+/// review S4): a front end can then say "nothing changed" for every error of this kind.
+fn refused_early(e: ExecError, t: &TxnId) -> Refusal {
+    match e {
+        ExecError::Refused(r) => r,
+        ExecError::Journal(e) => e.into(),
+        ExecError::Sys(e) => e.into(),
+        ExecError::Op { op, source } => Refusal::Observe { op, source },
+        // The records do not fit the head: a damaged transaction.
+        _ => Refusal::Blocked { txn: *t },
+    }
+}
+
+/// The revert records of `ops` (`RevertIntent` and `RevertDone`): whether this run wrote one.
+fn revert_records(ops: &BTreeMap<u16, OpLog>) -> usize {
+    ops.values()
+        .map(|o| o.reverts.len() + usize::from(o.reverted.is_some()))
+        .sum()
+}
+
+/// Reverts transaction `t` (module docs): also the recovery of an interrupted apply. Every
+/// error before this run's first record is an [`ExecError::Refused`] (review S4: nothing
+/// changed); any other error came after a record of this run.
 pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
+    standard_user(cx.sys)?;
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
@@ -1027,7 +1144,7 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
         .txns
         .iter()
         .find(|l| l.id == *t)
-        .ok_or(JournalError::NotFound(*t))?;
+        .ok_or_else(|| Refusal::from(JournalError::NotFound(*t)))?;
     if own.forgotten {
         return Err(Refusal::Forgotten { txn: *t }.into());
     }
@@ -1038,14 +1155,14 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     if damaged {
         return Err(Refusal::Blocked { txn: *t }.into());
     }
-    let mut w = lock.resume(t)?;
+    let mut w = lock.resume(t).map_err(Refusal::from)?;
     let plan = decode_head(w.head()).map_err(|_| Refusal::Blocked { txn: *t })?;
     if !records_fit(&plan, w.ops()) {
         return Err(Refusal::Blocked { txn: *t }.into());
     }
     // P2-12: a recorded `IniValue` edits its backup to exactly its new content.
     let before = |k: u16, _: &crate::journal::Digest, max: u64| w.before_bytes(k, max);
-    if !ini::binds(&plan, w.ops(), &before)? {
+    if !ini::binds(&plan, w.ops(), &before).map_err(Refusal::from)? {
         return Err(Refusal::Blocked { txn: *t }.into());
     }
     let objects = Object::of(&plan).map_err(|_| Refusal::Blocked { txn: *t })?;
@@ -1054,9 +1171,9 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     let roots = roots::Roots::each(cx, &plan, &stores)?;
     let intended: Vec<u16> = w.ops().keys().copied().collect();
     roots::game_closed(&plan, &roots, &intended)?;
-    writable(cx, &plan)?;
     let mut touched = Touched::new(cx.sys, &roots);
-    let (ops, halted) = revert_loop(
+    let written = revert_records(w.ops());
+    let (ops, halted) = match revert_loop(
         cx,
         &plan,
         &mut w,
@@ -1064,7 +1181,13 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
         &roots,
         Mode::Recovery,
         &BTreeMap::new(),
-    )?;
+    ) {
+        Ok(x) => x,
+        Err(e) if revert_records(w.ops()) == written => {
+            return Err(refused_early(e, t).into());
+        }
+        Err(e) => return Err(e),
+    };
     if halted.is_some() || !foreign_ops(&w).is_empty() {
         return Ok(RevertReport {
             txn: *t,
@@ -1078,7 +1201,9 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     } else {
         Closing::RolledBack
     };
-    close(w)?;
+    // Nothing reverted in this run (every op was before): a failed `Closed` wrote nothing.
+    let first = ops.is_empty();
+    close(w).map_err(|e| if first { refused_early(e, t).into() } else { e })?;
     Ok(RevertReport {
         txn: *t,
         closed: Some(how),
@@ -1088,9 +1213,11 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
 }
 
 /// What each intended op of `t` observes now, newest first and halting where a revert would
-/// (read only, no lock).
+/// (read only; an existing `journal\lock` is held read side meanwhile, so no apply, revert or
+/// forget runs while it observes: P2-13, review S2).
 pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     let j = Journal::new(cx.app, cx.tag);
+    let _hold = j.hold().map_err(Refusal::from)?;
     let v = j.load(t, crate::journal::VerifyBackups::Length)?;
     let blocked = || ExecError::Refused(Refusal::Blocked { txn: *t });
     if !v.head_usable() {
@@ -1112,6 +1239,7 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
 
 /// Forgets transaction `t` (module docs). Backups stay.
 pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
+    standard_user(cx.sys)?;
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list()?;
@@ -1150,6 +1278,8 @@ pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
 
 #[cfg(test)]
 mod crash_tests;
+#[cfg(test)]
+mod front_tests;
 #[cfg(test)]
 mod halt_tests;
 #[cfg(test)]
