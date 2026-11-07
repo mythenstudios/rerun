@@ -868,8 +868,10 @@ fn sandbox_sb_l5_a_link_key_at_layers_is_refused() {
     };
     // The link goes first, whatever the result.
     drop(guard);
+    // `key_exists` follows a link, so a link left behind (its target exists) counts as present;
+    // `link()` on the then missing key is `NotFound`, not `None` (seen in the first run).
     assert!(
-        reg.link(&layers).unwrap().is_none() && !reg.key_exists(&layers).unwrap(),
+        !reg.key_exists(&layers).unwrap_or_else(|e| panic!("{e}")),
         "the link key is removed"
     );
     assert!(
