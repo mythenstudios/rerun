@@ -1,0 +1,43 @@
+name: Full probes
+
+# The unreduced crash / power-loss matrices (docs/09-testing.md). The normal CI runs the reduced
+# suite, a sample; the claim rests on these runs. Mandatory before every audit.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+# Actions are pinned by commit SHA (docs/06-security.md). Comment = release tag.
+jobs:
+  full-probes:
+    name: unreduced matrices + cm3_full (windows)
+    runs-on: windows-latest
+    # Release-like cost is about 7 minutes of test time on a fast machine, the ci profile on a
+    # hosted runner several times that; the limit is generous on purpose.
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows-full-probes
+      - name: rerun-core lib, unreduced
+        env:
+          RERUN_UNREDUCED: "1"
+        run: cargo test -p rerun-core --lib --profile ci --locked
+      - name: rerun-core lib, cm3_full (ignored)
+        # cm3_full_nested_crash (50,894 runs) and cm3_full_nested_power_loss (127,344 runs).
+        run: cargo test -p rerun-core --lib --profile ci --locked -- --ignored cm3_full
