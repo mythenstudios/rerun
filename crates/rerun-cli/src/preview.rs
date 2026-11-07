@@ -30,6 +30,11 @@ pub fn op_ref(o: &PreviewOp) -> OpRef<'_> {
     }
 }
 
+/// The op with index `k` of `p`, as [`op_ref`].
+pub fn op_at(p: Option<&Preview>, k: u16) -> Option<OpRef<'_>> {
+    p.and_then(|p| p.ops.get(usize::from(k))).map(op_ref)
+}
+
 /// The roots of `p`.
 pub fn roots(p: &Preview) -> Vec<Message<'_>> {
     let mut out = Vec::new();

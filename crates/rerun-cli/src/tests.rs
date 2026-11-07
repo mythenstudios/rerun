@@ -9,10 +9,11 @@ use std::path::Path;
 
 use clap::Parser;
 
+use rerun_core::detect::steam::RootSource;
 use rerun_core::journal::{InstanceTag, Journal};
 use rerun_core::policy::root::{AppDir, Create};
 use rerun_core::sys::System;
-use rerun_core::sys::fake::{FakeSystem, FakeSystemBuilder, Prim};
+use rerun_core::sys::fake::{FakeSystem, FakeSystemBuilder, Fault, Prim, RegPrim};
 use rerun_core::sys::registry::{Hive, RegKey, RegValue, RegView};
 use rerun_core::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
 
@@ -29,6 +30,8 @@ pub const LAD: &str = r"C:\Users\Player\AppData\Local";
 pub const RERUN: &str = r"C:\Users\Player\AppData\Local\Rerun";
 pub const GAME: &str = r"D:\Games\G";
 pub const STEPS: &str = r"D:\Work\steps.json";
+const STEAM: &str = r"C:\Program Files (x86)\Steam";
+const LIB: &str = r"D:\SteamLibrary";
 
 pub const OLD: &[u8] = b"old d3d9 of the game";
 pub const NEW: &[u8] = b"new d3d9 of the package";
@@ -230,6 +233,18 @@ fn journal_exists(sys: &FakeSystem) -> bool {
     r.is_ok()
 }
 
+/// Plans `steps` and applies the plan with `--yes`: the transaction.
+pub fn applied(sys: &FakeSystem) -> String {
+    let p = expect(sys, &["plan", STEPS], Answer::No, Exit::Report);
+    let a = expect(
+        sys,
+        &["apply", &hash_of(&p), "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
+    txn_of(&a)
+}
+
 // ---------- C1: plan stores what it shows ----------
 
 #[test]
@@ -295,6 +310,102 @@ fn c1_apply_applies_the_stored_plan() {
     );
 }
 
+// ---------- C1: the round trip ----------
+
+#[test]
+fn c1_plan_apply_status_revert_status_round_trip() {
+    let sys = build(with_package(), &all_steps());
+    let before = snap_game(&sys);
+    let p = expect(&sys, &["plan", STEPS], Answer::No, Exit::Report);
+    let hash = hash_of(&p);
+    assert!(
+        p.stdout
+            .contains(&format!("plan {hash} stored: 8 changes\n")),
+        "{}",
+        p.stdout
+    );
+    // The hash names the stored file.
+    #[expect(clippy::disallowed_methods, reason = "test: look into the fake")]
+    let plans = sys
+        .fs()
+        .open_dir(Path::new(&format!(r"{RERUN}\plans")))
+        .unwrap();
+    let names: Vec<String> = plans
+        .read_dir(None)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, vec![format!("{hash}.json")]);
+    assert!(p.asked.is_empty() && p.stderr.is_empty(), "{}", p.stderr);
+
+    let a = expect(&sys, &["apply", &hash], Answer::Yes, Exit::Report);
+    assert_eq!(a.asked, vec!["Apply these 8 changes? [y/N]".to_owned()]);
+    let txn = txn_of(&a);
+    assert!(
+        a.stdout
+            .contains(&format!("applied as transaction {txn}\n"))
+    );
+    assert_eq!(
+        sys.registry()
+            .get(&hkcu(r"Software\Vendor\Game"), "Width")
+            .unwrap(),
+        Some(RegValue::Dword(1920))
+    );
+
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout
+            .starts_with(&format!("transaction {txn}: applied\n")),
+        "{}",
+        s.stdout
+    );
+    assert!(
+        s.stdout
+            .contains(&format!("  revert with: rerun revert {txn}\n"))
+    );
+    assert!(
+        s.stdout
+            .contains(r"    backup (20 bytes): C:\Users\Player\AppData\Local\Rerun\journal\")
+    );
+    assert!(
+        s.stdout
+            .contains("1 transaction: 1 not closed, 0 closed, 0 forgotten\n"),
+        "{}",
+        s.stdout
+    );
+
+    let r = expect(&sys, &["revert", &txn, "--yes"], Answer::No, Exit::Report);
+    assert!(r.asked.is_empty());
+    assert!(
+        r.stdout
+            .contains(&format!("transaction {txn} reverted and closed\n")),
+        "{}",
+        r.stdout
+    );
+    same(&before, &snap_game(&sys));
+
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert_eq!(
+        s.stdout,
+        "1 transaction: 0 not closed, 1 closed, 0 forgotten (rerun status --all lists the closed ones)\n"
+    );
+    let s = expect(&sys, &["status", "--all"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout
+            .starts_with(&format!("transaction {txn}: reverted\n")),
+        "{}",
+        s.stdout
+    );
+    // A second revert: already closed.
+    let r = expect(&sys, &["revert", &txn, "--yes"], Answer::No, Exit::Report);
+    assert!(
+        r.stdout.contains("is already closed (reverted)"),
+        "{}",
+        r.stdout
+    );
+}
+
 // ---------- C2: plan --dry-run writes nothing ----------
 
 #[test]
@@ -338,10 +449,10 @@ fn c2_plan_dry_run_creates_nothing() {
     assert!(!journal_exists(&sys), "plan takes no lock");
 }
 
-// ---------- C3: apply --dry-run writes nothing ----------
+// ---------- C3: apply --dry-run and revert --dry-run write nothing ----------
 
 #[test]
-fn c3_apply_dry_run_writes_nothing_and_refuses_alike() {
+fn c3_dry_runs_write_nothing_and_refuse_alike() {
     let sys = build(with_package(), &all_steps());
     let p = expect(&sys, &["plan", STEPS], Answer::No, Exit::Report);
     let hash = hash_of(&p);
@@ -376,6 +487,34 @@ fn c3_apply_dry_run_writes_nothing_and_refuses_alike() {
     assert_eq!(d.stderr, a.stderr);
     assert!(a.stderr.contains("game.exe is in use"), "{}", a.stderr);
     drop(image);
+    // revert --dry-run of an applied transaction.
+    let txn = txn_of(&expect(
+        &sys,
+        &["apply", &hash, "--yes"],
+        Answer::No,
+        Exit::Report,
+    ));
+    let before = snap_all(&sys);
+    let r = expect(
+        &sys,
+        &["revert", &txn, "--dry-run"],
+        Answer::Yes,
+        Exit::Report,
+    );
+    assert!(r.asked.is_empty());
+    assert!(
+        r.stdout.contains("on disk now, newest op first:\n"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout
+            .contains("  op 0, will be undone: replace file in root 0: d3d9.dll\n"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.ends_with("dry run: nothing was written\n"));
+    same(&before, &snap_all(&sys));
 }
 
 // ---------- C4: the confirmation ----------
@@ -399,6 +538,14 @@ fn c4_no_and_no_console_change_nothing() {
     let r = expect(&sys, &["apply", &hash], Answer::Yes, Exit::Refused);
     assert!(r.asked.is_empty());
     drop(image);
+    let txn = txn_of(&expect(&sys, &["apply", &hash], Answer::Yes, Exit::Report));
+    // revert and forget ask too.
+    let before = snap_all(&sys);
+    let r = expect(&sys, &["revert", &txn], Answer::No, Exit::Refused);
+    assert_eq!(r.asked, vec!["Revert this op? [y/N]".to_owned()]);
+    let f = expect(&sys, &["forget", &txn], Answer::NoConsole, Exit::Usage);
+    assert_eq!(f.asked, vec![format!("Forget transaction {txn}? [y/N]")]);
+    same(&before, &snap_all(&sys));
 }
 
 // ---------- C5: the plan hash ----------
@@ -470,9 +617,15 @@ fn c6_refusals_change_nothing() {
 }
 
 #[test]
-fn c6_elevated_plan_and_apply_are_refused() {
+fn c6_elevated_only_status_runs() {
     let sys = build(with_package(), &file_steps());
     let hash = hash_of(&expect(&sys, &["plan", STEPS], Answer::No, Exit::Report));
+    let txn = txn_of(&expect(
+        &sys,
+        &["apply", &hash, "--yes"],
+        Answer::No,
+        Exit::Report,
+    ));
     let before = snap_all(&sys);
     sys.fake_registry().set_elevated(true);
     for args in [
@@ -480,6 +633,9 @@ fn c6_elevated_plan_and_apply_are_refused() {
         &["plan", STEPS, "--dry-run"],
         &["apply", &hash, "--yes"],
         &["apply", &hash, "--dry-run"],
+        &["revert", &txn, "--yes"],
+        &["revert", &txn, "--dry-run"],
+        &["forget", &txn, "--yes"],
     ] {
         let r = expect(&sys, args, Answer::Yes, Exit::Refused);
         assert!(r.stdout.is_empty(), "{args:?}: {}", r.stdout);
@@ -489,13 +645,163 @@ fn c6_elevated_plan_and_apply_are_refused() {
             r.stderr
         );
     }
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(s.stdout.contains(&format!("transaction {txn}: applied")));
     same(&before, &snap_all(&sys));
 }
 
-// ---------- C7: rolled back ----------
+#[test]
+fn c6_steam_updating_damaged_interrupted_and_later() {
+    // Steam is updating the app: plan refuses.
+    let steam_steps = format!(
+        r#"{{"format":1,"game":{{"steam":220}},"main_exe":"game.exe","steps":[{{"file_install":{{"package":"fix-pack","version":"1.0.2","files":[{{"from":"new.dll","to":"new.dll","sha256":"{N_SHA}"}}]}}}}]}}"#
+    );
+    let lib_vdf = format!(
+        "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
+        STEAM.replace('\\', r"\\"),
+        LIB.replace('\\', r"\\")
+    );
+    let acf = |flags: u32| {
+        format!(
+            "\"AppState\"\n{{\n\t\"appid\"\t\t\"220\"\n\t\"name\"\t\t\"G\"\n\t\"StateFlags\"\t\t\"{flags}\"\n\t\"installdir\"\t\t\"G\"\n}}\n"
+        )
+    };
+    let manifest = format!(r"{LIB}\steamapps\appmanifest_220.acf");
+    let steam = with_package()
+        .value(
+            RootSource::CurrentUser.key(),
+            RootSource::CurrentUser.value_name(),
+            RegValue::String(STEAM.to_owned()),
+        )
+        .file(
+            format!(r"{STEAM}\steamapps\libraryfolders.vdf"),
+            lib_vdf.into_bytes(),
+        )
+        .file(manifest.clone(), acf(4 | 2).into_bytes())
+        .file(
+            format!(r"{LIB}\steamapps\common\G\game.exe"),
+            b"MZ".to_vec(),
+        );
+    let sys = build(steam, &steam_steps);
+    let r = expect(&sys, &["plan", STEPS], Answer::No, Exit::Refused);
+    assert!(
+        r.stderr.contains("Steam app 220 is being updated by Steam"),
+        "{}",
+        r.stderr
+    );
+    sys.fake_fs().remove_abs(Path::new(&manifest)).unwrap();
+    sys.fake_fs()
+        .put_file(Path::new(&manifest), acf(4).as_bytes())
+        .unwrap();
+    let p = expect(&sys, &["plan", STEPS], Answer::No, Exit::Report);
+    assert!(
+        p.stdout
+            .contains(r"  Steam app 220, library: D:\SteamLibrary"),
+        "{}",
+        p.stdout
+    );
+    let hash = hash_of(&p);
+    // Steam starts an update between plan and apply.
+    sys.fake_fs().remove_abs(Path::new(&manifest)).unwrap();
+    sys.fake_fs()
+        .put_file(Path::new(&manifest), acf(4 | 2).as_bytes())
+        .unwrap();
+    let r = expect(&sys, &["apply", &hash, "--yes"], Answer::Yes, Exit::Refused);
+    assert!(
+        r.stderr.contains("Steam app 220 is updating"),
+        "{}",
+        r.stderr
+    );
+
+    // Interrupted: an apply that crashed after its first change blocks a plan on its objects.
+    let sys = build(with_package(), &file_steps());
+    let hash = hash_of(&expect(&sys, &["plan", STEPS], Answer::No, Exit::Report));
+    sys.fake_fs().clear_faults();
+    sys.fake_fs().fault(Prim::Rename, 3, Fault::CrashAfter);
+    let crashed = cli(&sys, &["apply", &hash, "--yes"], Answer::Yes);
+    assert_ne!(crashed.exit, Exit::Report, "{}", crashed.stderr);
+    sys.fake_fs().restart();
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    let open = after(&s.stdout, "transaction ")
+        .split(':')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert!(
+        s.stdout.contains(": open (in progress or interrupted)\n"),
+        "{}",
+        s.stdout
+    );
+    let r = expect(&sys, &["apply", &hash, "--yes"], Answer::Yes, Exit::Refused);
+    assert!(
+        r.stderr.contains(&format!(
+            "transaction {open} is interrupted; revert it first"
+        )),
+        "{}",
+        r.stderr
+    );
+    // The revert finishes it (a recovery).
+    expect(&sys, &["revert", &open, "--yes"], Answer::No, Exit::Report);
+
+    // Later: a later transaction on the same file blocks the revert of the earlier one.
+    let ini = |key: &str, value: &str| {
+        format!(
+            r#"{{"format":1,"game":{{"folder":"D:\\Games\\G"}},"main_exe":"game.exe","steps":[{{"ini_set":{{"file":"game.ini","values":[{{"section":"Display","key":"{key}","value":"{value}"}}]}}}}]}}"#
+        )
+    };
+    let sys = build(bare(), &ini("Width", "1920"));
+    let t1 = applied(&sys);
+    put_steps(&sys, &ini("Height", "1080"));
+    let t2 = applied(&sys);
+    let r = expect(&sys, &["revert", &t1, "--yes"], Answer::Yes, Exit::Refused);
+    assert!(
+        r.stderr
+            .contains(&format!("transaction {t2} changed the same files later")),
+        "{}",
+        r.stderr
+    );
+
+    // Damaged: blocks every apply; revert refuses, forget closes it.
+    let sys = build(with_package(), &file_steps());
+    let hash = hash_of(&expect(&sys, &["plan", STEPS], Answer::No, Exit::Report));
+    let t = applied(&sys);
+    // Another head: no record confirms it (a head that cannot be trusted blocks everything).
+    let head = format!(r"{RERUN}\journal\{t}\head.json");
+    sys.fake_fs().remove_abs(Path::new(&head)).unwrap();
+    sys.fake_fs().put_file(Path::new(&head), b"{}").unwrap();
+    let r = expect(&sys, &["apply", &hash, "--yes"], Answer::Yes, Exit::Refused);
+    assert!(
+        r.stderr.contains(&format!(
+            "transaction {t} is damaged or unreadable; forget it first"
+        )),
+        "{}",
+        r.stderr
+    );
+    let r = expect(&sys, &["revert", &t, "--yes"], Answer::Yes, Exit::Refused);
+    assert!(r.stderr.contains("only rerun forget"), "{}", r.stderr);
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout
+            .contains(&format!("transaction {t}: damaged: record 99 is missing"))
+            || s.stdout.contains(&format!("transaction {t}: damaged")),
+        "{}",
+        s.stdout
+    );
+    assert!(s.stdout.contains("only forget closes it"), "{}", s.stdout);
+    expect(&sys, &["forget", &t, "--yes"], Answer::No, Exit::Report);
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout.contains(&format!("transaction {t}: forgotten\n")),
+        "{}",
+        s.stdout
+    );
+    assert!(s.stdout.contains("  its backups stay in: "), "{}", s.stdout);
+}
+
+// ---------- C7: rolled back and left open ----------
 
 #[test]
-fn c7_a_failed_apply_rolls_back() {
+fn c7_a_failed_apply_rolls_back_or_stays_open() {
     let sys = build(with_package(), &all_steps());
     let before = snap_game(&sys);
     let hash = hash_of(&expect(&sys, &["plan", STEPS], Answer::No, Exit::Report));
@@ -516,6 +822,155 @@ fn c7_a_failed_apply_rolls_back() {
     );
     assert!(r.stderr.contains("  cause: "), "{}", r.stderr);
     sys.fake_fs().clear_faults();
+    same(&before, &snap_game(&sys));
+    let s = expect(&sys, &["status", "--all"], Answer::No, Exit::Report);
+    assert!(s.stdout.contains(": rolled back\n"), "{}", s.stdout);
+
+    // The rollback fails too: open, revert finishes it.
+    // A registry value fails; the rollback cannot remove the folder the apply created.
+    sys.fake_registry()
+        .fail_at(RegPrim::SetValue, 1, rerun_core::sys::SysErrorKind::Other);
+    for n in 1..=4 {
+        sys.fake_fs().fail_at(
+            Prim::OpenDirDelete,
+            n,
+            rerun_core::sys::SysErrorKind::AccessDenied,
+        );
+    }
+    let r = expect(&sys, &["apply", &hash, "--yes"], Answer::No, Exit::Open);
+    sys.fake_fs().clear_faults();
+    let open = after(&r.stderr, "rerun status shows it; rerun revert ")
+        .trim_end_matches(" finishes it")
+        .to_owned();
+    assert!(
+        r.stderr.contains(&format!("transaction {open} stays open")),
+        "{}",
+        r.stderr
+    );
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout.contains(&format!("transaction {open}: open")),
+        "{}",
+        s.stdout
+    );
+    expect(&sys, &["revert", &open, "--yes"], Answer::No, Exit::Report);
+    same(&before, &snap_game(&sys));
+}
+
+// ---------- C8: foreign, forget ----------
+
+#[test]
+fn c8_a_file_changed_after_the_apply_is_left_and_forget_closes() {
+    let sys = build(with_package(), &all_steps());
+    let txn = applied(&sys);
+    // The user replaces the patched d3d9.dll.
+    let fx = sys.fake_fs();
+    fx.remove_abs(Path::new(&game("d3d9.dll"))).unwrap();
+    fx.put_file(Path::new(&game("d3d9.dll")), b"the user's own")
+        .unwrap();
+    fx.sync_all();
+    let r = expect(&sys, &["revert", &txn, "--yes"], Answer::No, Exit::Open);
+    assert!(
+        r.stdout
+            .contains("  op 0: left as found (changed by someone else)\n"),
+        "{}",
+        r.stdout
+    );
+    let bin = format!(r"{RERUN}\journal\{txn}\op-0000.bin");
+    assert!(
+        r.stdout
+            .contains(&format!("    backup (20 bytes): {bin}\n")),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout
+            .contains(&format!("rerun forget {txn} closes it (backups stay)"))
+    );
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout.contains("forget closes it: rerun forget"),
+        "{}",
+        s.stdout
+    );
+    // The forget preview names the backup and what forget does not do.
+    let game_now = snap_game(&sys);
+    let f = expect(&sys, &["forget", &txn], Answer::Yes, Exit::Report);
+    assert!(
+        f.stdout
+            .contains(&format!("    backup (20 bytes): {bin}\n")),
+        "{}",
+        f.stdout
+    );
+    assert!(
+        f.stdout
+            .contains("Forget changes nothing in the game folder or the registry.\n")
+    );
+    assert!(!f.stdout.contains("finishes this cleanly"), "{}", f.stdout);
+    assert!(f.stdout.contains(&format!("transaction {txn} forgotten\n")));
+    same(&game_now, &snap_game(&sys));
+    #[expect(clippy::disallowed_methods, reason = "test: look into the fake")]
+    let jd = sys
+        .fs()
+        .open_dir(Path::new(&format!(r"{RERUN}\journal\{txn}")))
+        .unwrap();
+    assert!(
+        jd.read_dir(None)
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "op-0000.bin"),
+        "the backup stays"
+    );
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout
+            .contains(&format!("transaction {txn}: forgotten\n")),
+        "{}",
+        s.stdout
+    );
+    assert!(
+        s.stdout
+            .contains(&format!("    backup (20 bytes): {bin}\n")),
+        "{}",
+        s.stdout
+    );
+    let f = expect(&sys, &["forget", &txn, "--yes"], Answer::No, Exit::Report);
+    assert!(f.stdout.contains("is already forgotten"));
+    let r = expect(&sys, &["revert", &txn, "--yes"], Answer::No, Exit::Refused);
+    assert!(r.stderr.contains("was forgotten"), "{}", r.stderr);
+}
+
+#[test]
+fn c8_forget_of_a_clean_transaction_says_revert_finishes_it() {
+    let sys = build(with_package(), &file_steps());
+    let txn = applied(&sys);
+    let f = expect(&sys, &["forget", &txn], Answer::No, Exit::Refused);
+    assert!(
+        f.stdout
+            .contains(&format!("rerun revert {txn} finishes this cleanly")),
+        "{}",
+        f.stdout
+    );
+    assert!(f.stdout.contains("the change stays\n"), "{}", f.stdout);
+}
+
+// ---------- C9: a halt ----------
+
+#[test]
+fn c9_a_game_folder_gone_halts_the_revert_until_it_is_back() {
+    let sys = build(with_package(), &all_steps());
+    let before = snap_game(&sys);
+    let txn = applied(&sys);
+    sys.rename_abs(GAME, r"D:\Games\Away").unwrap();
+    let r = expect(&sys, &["revert", &txn, "--yes"], Answer::No, Exit::Open);
+    assert!(r.stdout.contains("the revert stops at op "), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("goes on once the folder is back"),
+        "{}",
+        r.stdout
+    );
+    sys.rename_abs(r"D:\Games\Away", GAME).unwrap();
+    expect(&sys, &["revert", &txn, "--yes"], Answer::No, Exit::Report);
     same(&before, &snap_game(&sys));
 }
 
@@ -663,4 +1118,26 @@ fn hostile_text_in_errors_is_escaped() {
         "{}",
         r.stderr
     );
+}
+
+// ---------- status without Rerun's folder ----------
+
+#[test]
+fn status_without_rerun_s_folder_and_unknown_transactions() {
+    let sys = build(bare(), &no_package_steps());
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert_eq!(s.stdout, "no transactions\n");
+    assert!(!rerun_exists(&sys));
+    let t = "00000009-00000000000000ab";
+    let r = expect(&sys, &["revert", t, "--yes"], Answer::No, Exit::Refused);
+    assert!(r.stderr.contains("Rerun has no folder yet"), "{}", r.stderr);
+    expect(&sys, &["plan", STEPS], Answer::No, Exit::Report);
+    let r = expect(&sys, &["forget", t, "--yes"], Answer::No, Exit::Refused);
+    assert!(
+        r.stderr.contains(&format!("transaction {t} not found")),
+        "{}",
+        r.stderr
+    );
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert_eq!(s.stdout, "no transactions\n");
 }

@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use rerun_core::escape::{self, Shown};
-use rerun_core::exec::{self, ApplyError};
+use rerun_core::exec::{self, ApplyError, ExecError};
 use rerun_core::policy::root::{AppDir, Create, ForbiddenRoots};
 use rerun_core::sys::System;
 
@@ -115,6 +115,15 @@ pub fn exit_for_apply(e: &ApplyError) -> Exit {
     match e {
         ApplyError::Refused(_) => Exit::Refused,
         ApplyError::RolledBack { .. } => Exit::RolledBack,
+        _ => Exit::Open,
+    }
+}
+
+/// The exit code of a failed revert: refused (nothing written in this run, review S4) 3,
+/// anything else 5 (it may come after the run's first record; the transaction stays open).
+pub fn exit_for_exec(e: &ExecError) -> Exit {
+    match e {
+        ExecError::Refused(_) => Exit::Refused,
         _ => Exit::Open,
     }
 }

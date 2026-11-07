@@ -17,7 +17,7 @@ use rerun_core::detect::steam::{AppState, RootSource};
 use rerun_core::escape::Shown;
 use rerun_core::hw::GpuVendor;
 
-pub use txn::{At, OpRef, SteamWhy, TxnMsg};
+pub use txn::{At, OpRef, OpText, SteamWhy, StepText, TxnMsg, TxnText};
 
 /// A section heading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -111,7 +111,7 @@ Sources are files below `<AppDir>\packages\<id>\<version>\` (`id` and `version` 
 - Core rules: rule 4 (no op kind runs code; content only from pinned hashes; roots and registry slots through policy), rule 5 (preview from the stored bytes), rule 2 (`Observed`, D10, LIFO), rule 6 (`NeedsHelper` refused in phase 2).
 
 ## Open points
-- Exit codes of the new commands (refused before any change vs. rolled back vs. left open): fixed with the CLI step.
+- Exit codes of the new commands (refused before any change vs. rolled back vs. left open): fixed with the CLI step. **Closed (P2-13):** ADR 0016 amendment P2-13.
 - The INI editor's accepted encodings and syntax (UTF-8, ANSI, UTF-16 with BOM; comments, duplicate keys, keys outside a section): P2-12, failing closed on anything ambiguous.
 - `compat_layer` token list: P2-11 (ADR 0018).
 
@@ -148,7 +148,7 @@ pub fn forget(cx: &ExecCtx, t: &TxnId) -> Result<(), ExecError>;
 
 ### Open points (P2-8)
 - A `.old` left mapped after a revert (`RevertDone.old_left`) is not cleaned up by a later run yet (cleaning up other transactions' `.old`, phase 5); the report names it.
-- `main_exe` is `None` for a manual root without a chosen executable (then only the targets are asked); fixed with the CLI step.
+- `main_exe` is `None` for a manual root without a chosen executable (then only the targets are asked); fixed with the CLI step. **Closed (P2-13):** the step file requires `main_exe` (user decision E4 a).
 
 ## Amendment (P2-9, 2026-11-06; decided by the user after a senior-dev cross-check; conditions for P2-10)
 - **Op form of registry slots (M2):** a registry op names a `RegSlot` whose executable is `{ root: RootIx, exe: RelPath }`, never a free-form path; `RegPolicy::check` builds the value name from `Plan::roots[root].path` (parsed again) on plan, apply and revert (ADR 0018 amendment P2-9).
@@ -321,3 +321,22 @@ pub struct FileHash { pub sha256: [u8; 32], pub len: u64 }   // the new content;
 - **Why `from`/`to` are recorded (rewritten after senior-dev S1):** a convergent variant (recompute `unedit` from whatever is found) would be possible. They are recorded so that every action on a `.old` expects a known hash (A2/S1), so that the `.old` of an earlier rewrite is cleaned up with its known hash once a later sequence decides, and so that the recovery never parses a `.old` and never needs the parser to agree with an earlier run. The control K-I1 (a rewrite recorded without them) shows what the recovery loses: a crash in phase B or C of the rewrite then reads that sequence as a restore (`h1` to `h0`), finds its `.old` with an unknown hash and leaves the file `Foreign` or missing.
 - **Open points (P2-12):** a front end (CLI `status`, `revert`, `forget`, the app) must show `Detail::Ini::before_step` and the backup (`OpReport::backup`) of a `Foreign` INI op before it offers `forget` (S6 is in `rerun-core` only so far; senior-dev S3); UTF-16 and INI files below `Documents\My Games` with `UserData` (phase 4); a game folder under `Program Files` whose game reads its INI from the `VirtualStore` (the change has no effect; a warning with phase 3, ADR 0020 "Moved"); a revert after a crash in the middle of a rewrite, then a game start, then the revert: the traces next to a foreign file are `Foreign` (rare, `forget`; the `.old` is named); after a `Drifted` revert the backup is deleted with the close, so no copy of the old file stays (retention open, ADR 0019).
 - **Tests:** `policy/ini/tests.rs` (dialect, I1, I2, golden vectors, random bytes), `plan/ini_tests.rs` (P-I1 to P-I6), `prim/ini_tests.rs` (T9-I), `exec/ini_tests.rs` (R-I1 to R-I3, R-I5 on constructed states, R-I6 to R-I8, S2/S6, D4; controls K-I2 to K-I5), `sys/win/tests/exec.rs` (R-I1, R-I3, R-I6 on NTFS), `exec/ini_crash_tests.rs` (R-I4 a failure and a crash after every call; R-I5 a power loss after every call at every cut of `C:` and `D:` for `IniEdit`, `IniDrift` and `IniStacked`: 1,509 runs, and the M1 matrix with the game running after every cut of the apply; about 9 s wall clock in a debug build, no reduction; K-I1, K-I5), `docs/09-testing.md`.
+
+## Amendment (P2-13, 2026-11-07; plan `P2-13` with the user decisions E1 to E7 and the senior-dev conditions S1 to S8)
+
+### Front-end API (`rerun-core`, no change to what `exec` writes)
+- `exec::check(cx, hash) -> Result<usize, Refusal>`: every check of `apply` before `begin`, read only. `apply` and `check` share one chain, `preflight` (stacking on the listing, every root reopened by identity, the main executables, the game closed, the old state of every op and source, the old registry state; review S1); `check` holds an existing lock file read side meanwhile (review S2, ADR 0019 amendment). A test gives `check` every refusal fixture of `apply` and asks for the same refusal and an unchanged `AppDir`.
+- `exec::standard_user` (user decision E3): `apply`, `check`, `revert` and `forget` refuse an elevated or undeterminable process for every plan, not only plans with registry ops, before anything is written (`Refusal::Elevated`, its text no longer about the registry only). The phase 3 helper does not use these functions and never reads the journal.
+- `exec::status`, `exec::txn_status` (ADR 0019 amendment P2-13); `OpReport::backup` is a `Backup` (`Bin { path, len }`, `Inline`), set for every op a revert leaves `Foreign` that has an old state.
+- `exec::revert` reports every error before its first record of the run as `ExecError::Refused` (review S4; `Refusal::Observe` for a failed observation).
+- `plan::load` is public; `plan::preview_stored(&PlanBytes)` (current rules: the preview of exactly the bytes `apply` applies) and `plan::preview_head(&[u8])` (recorded rules; every old registry value and the new value of a `TokenList` by type, length and SHA-256 only, review S3).
+- `PlanCtx::app` is an `Option` (review S6): `rerun plan --dry-run` creates no `AppDir`; without it `file_install` is refused (no local packages) and `compat_layer` looks up no transaction for its message.
+- `prim::StepFile` (`format`, `game: GameRef::{Steam, Folder}`, `main_exe`, `steps`), the throwaway input of `rerun plan` until the Topo engine (D7; `docs/02-topo-format.md`), read through `policy::root::read_input`.
+
+### Open points closed
+- **Exit codes** (open point above): fixed in ADR 0016, amendment P2-13 (0 done, 1 fatal, 2 usage, 3 nothing changed, 4 rolled back, 5 open).
+- **`main_exe` of a manual root** (open point P2-8): the step file requires it (user decision E4 a), so every plan `rerun plan` makes names its main executable.
+- **A front end shows `before_step` and the backup before `forget`** (open point P2-12): `rerun forget` shows every backup with its path (or "kept in the journal record") and, from `verify`, every `.old` that holds a file as it was before a step of Rerun ("never call it the original; the backup is"); `rerun revert` shows both for an op left `Foreign`.
+
+### Rebind (user decision E5 a)
+Not in P2-13. Its own step P2-14 before audit A3: a `Rebind` record (additive; format 1 stays unstable until A6), its grammar, `exec`, the flag `--rebind` and crash tests. Until then a root that is another folder now (`IdentityMismatch`) refuses the revert, and the CLI names `forget`.

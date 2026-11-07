@@ -52,12 +52,15 @@ fn version_matches_package_version() {
 fn help_lists_the_phase_2_commands_and_their_flags() {
     let out = rerun(&["--help"]);
     let stdout = String::from_utf8(out.stdout).unwrap();
-    for c in ["plan", "apply"] {
+    for c in ["plan", "apply", "revert", "status", "forget"] {
         assert!(stdout.contains(&format!("\n  {c} ")), "{c}: {stdout}");
     }
     for (c, flags) in [
         ("plan", &["--dry-run"][..]),
         ("apply", &["--dry-run", "--yes"]),
+        ("revert", &["--dry-run", "--yes"]),
+        ("status", &["--all"]),
+        ("forget", &["--yes"]),
     ] {
         let out = rerun(&[c, "--help"]);
         assert!(out.status.success(), "{c}");
@@ -68,8 +71,8 @@ fn help_lists_the_phase_2_commands_and_their_flags() {
     }
 }
 
-/// Never a well-formed plan hash here: this binary runs on the real machine (project rule: no
-/// writing command against it), so every argument fails clap's parse.
+/// Never a well-formed plan hash or transaction here: this binary runs on the real machine
+/// (project rule: no writing command against it), so every argument fails clap's parse.
 #[test]
 fn usage_errors_exit_2_without_a_report() {
     for args in [
@@ -85,6 +88,11 @@ fn usage_errors_exit_2_without_a_report() {
         &["apply"],
         &["apply", "abc", "--yes"],
         &["apply", "ABCDEF", "--dry-run"],
+        &["revert", "abc", "--yes"],
+        &["revert", "1-2", "--dry-run"],
+        &["forget", "abc", "--yes"],
+        &["forget"],
+        &["status", "--nope"],
     ] {
         let out = rerun(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");

@@ -1,14 +1,14 @@
 //! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system` and `rerun scan`;
-//! phase 2 (P2-13): `rerun plan` and `rerun apply`.
+//! phase 2 (P2-13): `rerun plan`, `apply`, `revert`, `status` and `forget`.
 //!
 //! Order in `main`: `restrict_dll_search` first (ADR 0008), then clap parses (`--help`,
-//! `--version` and usage errors, a malformed plan hash included, end there,
+//! `--version` and usage errors, a malformed plan hash or transaction included, end there,
 //! before any registry or file system access), then `WinSystem::new`. The commands take a
 //! [`Host`] (`&dyn System`, the install folder, the confirmation) and two line writers, so the
 //! tests run them against the fake system layer with in-memory output and a fake console.
 //!
 //! No console control handler: Ctrl+C during an apply or a revert ends the process like a
-//! crash, which the journal is built for; the next revert finishes it (docs/04).
+//! crash, which the journal is built for; `rerun revert <txn>` finishes it (docs/04).
 
 mod apply;
 mod cli;
@@ -20,6 +20,7 @@ mod plan;
 mod preview;
 mod scan;
 mod system;
+mod txn;
 
 use std::io;
 use std::path::PathBuf;
@@ -113,6 +114,9 @@ fn run<W: io::Write, E: io::Write>(
         },
         Command::Plan { steps, dry_run } => plan::plan(host, &steps, dry_run, out, err),
         Command::Apply { hash, dry_run, yes } => apply::apply(host, &hash, dry_run, yes, out, err),
+        Command::Revert { txn, dry_run, yes } => txn::revert(host, &txn, dry_run, yes, out, err),
+        Command::Status { all } => txn::status(host.sys, all, out, err),
+        Command::Forget { txn, yes } => txn::forget(host, &txn, yes, out, err),
     }
 }
 

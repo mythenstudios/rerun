@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use rerun_core::journal::TxnId;
 use rerun_core::plan::PlanHash;
 
 /// Rerun by Mythen Studios – detects old PC games and applies (and cleanly removes)
@@ -53,12 +54,45 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Reverts a transaction after showing what the revert does now.
+    Revert {
+        /// The transaction `rerun apply` printed.
+        #[arg(value_parser = txn_id)]
+        txn: TxnId,
+        /// Show what the revert would do, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask before reverting (needed when not run from a console).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Transactions with their state, backups and pending cleanups.
+    Status {
+        /// Also list every closed transaction.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Closes a transaction without reverting it; changes nothing on disk.
+    Forget {
+        /// The transaction.
+        #[arg(value_parser = txn_id)]
+        txn: TxnId,
+        /// Do not ask before forgetting (needed when not run from a console).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// A plan hash: exactly 64 lower-case hex digits, checked before any system access.
 fn plan_hash(s: &str) -> Result<PlanHash, String> {
     s.parse()
         .map_err(|_| "not a plan hash (64 lower-case hex digits)".to_owned())
+}
+
+/// A transaction name: 8 digits, `-`, 16 lower-case hex digits.
+fn txn_id(s: &str) -> Result<TxnId, String> {
+    s.parse()
+        .map_err(|_| "not a transaction name (8 digits, '-', 16 lower-case hex digits)".to_owned())
 }
 
 /// Exit codes (ADR 0016 and its phase 2 amendment). Only additive changes: scripts may rely
@@ -98,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_hashes_are_checked_by_form() {
+    fn hashes_and_transactions_are_checked_by_form() {
         let h = "a".repeat(64);
         assert!(matches!(
             Cli::try_parse_from(["rerun", "apply", &h, "--yes"]).map(|c| c.command),
@@ -111,6 +145,17 @@ mod tests {
         for bad in [&"A".repeat(64), &"a".repeat(63), "x", ""] {
             let e = Cli::try_parse_from(["rerun", "apply", bad]).unwrap_err();
             assert!(e.use_stderr(), "{bad}");
+        }
+        assert!(Cli::try_parse_from(["rerun", "revert", "00000001-00000000000000ab"]).is_ok());
+        for bad in ["abc", "1-00000000000000ab", "00000001-00000000000000AB"] {
+            assert!(
+                Cli::try_parse_from(["rerun", "revert", bad]).is_err(),
+                "{bad}"
+            );
+            assert!(
+                Cli::try_parse_from(["rerun", "forget", bad]).is_err(),
+                "{bad}"
+            );
         }
     }
 }

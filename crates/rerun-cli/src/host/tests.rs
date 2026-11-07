@@ -2,10 +2,10 @@
 //! the table each.
 
 use rerun_core::exec::{ApplyError, ExecError, Refusal};
-use rerun_core::journal::TxnId;
+use rerun_core::journal::{JournalError, TxnId};
 use rerun_core::sys::{SysError, SysErrorKind};
 
-use super::exit_for_apply;
+use super::{exit_for_apply, exit_for_exec};
 use crate::cli::Exit;
 
 fn txn() -> TxnId {
@@ -39,6 +39,10 @@ fn c12_every_row_of_the_exit_table() {
             "{text}"
         );
     }
+    assert_eq!(
+        exit_for_exec(&ExecError::Refused(Refusal::JournalBusy)),
+        Exit::Refused
+    );
     // 4: rolled back.
     assert_eq!(
         exit_for_apply(&ApplyError::RolledBack {
@@ -47,7 +51,7 @@ fn c12_every_row_of_the_exit_table() {
         }),
         Exit::RolledBack
     );
-    // 5: left open.
+    // 5: left open; and every revert error after its first record.
     assert_eq!(
         exit_for_apply(&ApplyError::LeftOpen {
             txn: txn(),
@@ -56,6 +60,15 @@ fn c12_every_row_of_the_exit_table() {
         }),
         Exit::Open
     );
+    for e in [
+        op_error(),
+        ExecError::Journal(JournalError::Busy),
+        ExecError::Foreign { ops: vec![0] },
+        ExecError::Sys(SysError::new(SysErrorKind::Other, "flush")),
+    ] {
+        let text = e.to_string();
+        assert_eq!(exit_for_exec(&e), Exit::Open, "{text}");
+    }
     // The numbers are an interface: only additive changes.
     let codes = [
         Exit::Report,

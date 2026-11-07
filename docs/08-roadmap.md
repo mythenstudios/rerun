@@ -22,7 +22,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - File write side (`DirWrite`, `FileGuard`, ADR 0017) and registry write side with `policy::registry` (`HKCU` only, ADR 0018); write contracts against the fake and `sys::win` (under `target/`, private app hives)
 - Journal: file-based under `AppDir` (`<LocalAppData>\Rerun\journal`, immutable records, write-ahead, backups, flushes before the closing record, lock, LIFO revert; ADR 0019)
 - Plans and op kinds (ADR 0020): primitives `file_install` (local package files under `AppDir`, test fixtures only), `registry_set`, `compat_layer`, `ini_set`; preview output, plan hash; apply and revert only with the game closed (`users()`), refused while Steam updates the game; a foreign change is never overwritten (`forget`)
-- CLI: `rerun plan <steps.json> [--dry-run]` (JSON step file until the Topo engine), `apply`, `revert [--rebind]`, `status`, `forget`
+- CLI: `rerun plan <steps.json> [--dry-run]` (JSON step file until the Topo engine), `apply [--dry-run] [--yes]`, `revert [--dry-run] [--yes]`, `status [--all]`, `forget [--yes]` (P2-13); the rebind of a transaction whose game folder moved (`revert --rebind`, P2-14, before audit A3)
 - Moved out: `gpu_preference` and `UserData` roots to phase 4, the VirtualStore warning to phase 3
 
 **Acceptance:** Round-trip tests of all primitives green against `sys::fake`; crash (every intermediate state), power-loss and tampering tests green; write contracts green against `sys::win`; the sandbox run (`scripts/sandbox-test.wsb`, real `HKCU`, a game folder fixture) green in Windows Sandbox; audits A2 (after `file_install`) and A3 passed.
