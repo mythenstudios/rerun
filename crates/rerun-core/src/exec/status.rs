@@ -15,8 +15,8 @@ use crate::journal::{
     VerifyBackups,
 };
 use crate::path::RelPath;
-use crate::plan::{self, Plan, Preview, Target};
-use crate::policy::root::AppDir;
+use crate::plan::{self, Plan, PlanOrigin, Preview, Target};
+use crate::policy::root::{AppDir, RootId};
 
 /// Every transaction of the journal.
 #[derive(Debug)]
@@ -43,6 +43,24 @@ pub struct TxnStatus {
     pub preview: Option<Result<Preview, Shown<'static>>>,
     /// Its ops, newest first.
     pub ops: Vec<OpStatus>,
+    /// Its `Rebind` records, in order (P2-14b condition d; the last one of a root holds).
+    pub rebinds: Vec<RebindLine>,
+}
+
+/// A `Rebind` of a transaction as `status` shows it (journal only, never observed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebindLine {
+    /// Root index.
+    pub root: u16,
+    /// The Steam library, escaped.
+    pub library: Shown<'static>,
+    /// The game folder `<library>\steamapps\common\<installdir>` with the head's install folder
+    /// (`None` if the head cannot be read).
+    pub folder: Option<Shown<'static>>,
+    /// Identity of the game folder bound.
+    pub id: RootId,
+    /// Identity of the game folder bound before.
+    pub old: RootId,
 }
 
 impl TxnStatus {
@@ -142,6 +160,7 @@ fn one(j: &Journal<'_>, app: &AppDir<'_>, l: &Listed, always: bool) -> TxnStatus
                 folder,
                 preview: None,
                 ops: Vec::new(),
+                rebinds: Vec::new(),
             };
         }
     };
@@ -162,6 +181,23 @@ fn one(j: &Journal<'_>, app: &AppDir<'_>, l: &Listed, always: bool) -> TxnStatus
         .rev()
         .map(|(k, o)| op_status(app, &l.id, *k, o, plan))
         .collect();
+    let rebinds = v
+        .rebinds
+        .iter()
+        .map(|r| RebindLine {
+            root: r.root,
+            library: escape::path(&r.store.to_string()).into_owned(),
+            folder: plan
+                .and_then(|p| p.roots.get(usize::from(r.root)))
+                .and_then(|h| match &h.origin {
+                    PlanOrigin::Steam { installdir, .. } => Some(installdir),
+                    PlanOrigin::Manual => None,
+                })
+                .map(|d| escape::path(&format!(r"{}\steamapps\common\{d}", r.store)).into_owned()),
+            id: r.id,
+            old: r.old,
+        })
+        .collect();
     TxnStatus {
         id: l.id,
         state,
@@ -169,6 +205,7 @@ fn one(j: &Journal<'_>, app: &AppDir<'_>, l: &Listed, always: bool) -> TxnStatus
         folder,
         preview: head.map(|h| h.map(|(_, p)| p)),
         ops,
+        rebinds,
     }
 }
 

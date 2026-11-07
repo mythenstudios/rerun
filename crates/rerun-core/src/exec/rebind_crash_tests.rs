@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use super::RebindTo;
 use super::rebind_tests::{
-    GAME_E, LIB_E, REF, Rb, applied, content_diff, copy_tree, keys, move_tree, remove_tree,
+    GAME_E, LIB_E, REF, Rb, applied, content_diff, copy_tree, keys, move_lib, remove_tree,
 };
 use super::tests::{read_abs, sys_put};
 use crate::journal::{Closing, FlushSite, InstanceTag, Journal, Observed, TxnState};
@@ -57,8 +57,6 @@ struct Case {
     rb: Rb,
     /// The binding the preview showed.
     to: RebindTo,
-    /// The library to bind to.
-    lib: &'static str,
     /// The bound folder.
     game: &'static str,
     /// The volume of the bound folder.
@@ -74,14 +72,14 @@ struct Case {
 fn setup(k: Kind) -> Case {
     let rb = applied(k == Kind::Ini);
     let sys = &rb.env.sys;
-    let (lib, game, drive) = match k {
-        Kind::Reinstall => (STEAM_LIB, STEAM_GAME, 'D'),
-        _ => (LIB_E, GAME_E, 'E'),
+    let (game, drive) = match k {
+        Kind::Reinstall => (STEAM_GAME, 'D'),
+        _ => (GAME_E, 'E'),
     };
     match k {
-        Kind::Moved | Kind::Ini => move_tree(sys, STEAM_LIB, LIB_E),
+        Kind::Moved | Kind::Ini => move_lib(sys, STEAM_LIB, LIB_E),
         Kind::Halted => {
-            move_tree(sys, STEAM_LIB, LIB_E);
+            move_lib(sys, STEAM_LIB, LIB_E);
             let r = rb.env.revert(&rb.t);
             assert!(
                 r.as_ref().is_ok_and(|r| r.halted.is_some()),
@@ -118,7 +116,7 @@ fn setup(k: Kind) -> Case {
     sys.sync_all();
     let to = rb
         .env
-        .rebind_check(&rb.t, lib)
+        .rebind_check(&rb.t)
         .unwrap_or_else(|e| panic!("{k:?}: {e:?}"))
         .to;
     // `OpenLock` counts as read-only (`changes_state`) only with the lock file in place.
@@ -131,7 +129,6 @@ fn setup(k: Kind) -> Case {
     Case {
         rb,
         to,
-        lib,
         game,
         drive,
         want,
@@ -301,7 +298,7 @@ fn recover(c: &Case) -> Vec<String> {
                 Ok(r) if r.closed.is_some() => {}
                 Ok(r) if foreign(r) => v.push(format!("Foreign: {r:?}")),
                 // The rebind lost: halted (gone) or refused (another folder).
-                Ok(_) | Err(super::ExecError::Refused(_)) => match env.rebind_check(t, c.lib) {
+                Ok(_) | Err(super::ExecError::Refused(_)) => match env.rebind_check(t) {
                     Ok(p) => match env.revert_rebound(t, &p.to) {
                         Ok(r) if r.closed.is_some() => {}
                         r => v.push(format!("rebound again: {r:?}")),
@@ -592,8 +589,8 @@ fn rb_c3_a_halt_after_a_rebind_resumes_and_a_second_rebind_needs_no_revert_of_th
     });
     assert!(r.is_err(), "{r:?}");
     env.sys.fake_fs().clear_faults();
-    move_tree(&env.sys, LIB_E, r"F:\SteamLibrary");
-    let r = env.rebind_check(t, r"F:\SteamLibrary");
+    move_lib(&env.sys, LIB_E, r"F:\SteamLibrary");
+    let r = env.rebind_check(t);
     assert!(
         matches!(
             &r,

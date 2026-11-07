@@ -34,11 +34,12 @@ use super::{
     load_resumable, op_ix, refused_early, revert_listed, revert_plan, revert_run, stack,
     standard_user, verify_seen,
 };
+use crate::escape::{self, Shown};
 use crate::journal::{
     DirProof, Journal, JournalError, Listing, OpLog, RebindArgs, RebindRec, TxnId,
 };
 use crate::path::RootPath;
-use crate::plan::{Op, Plan};
+use crate::plan::{Op, Plan, PlanOrigin};
 use crate::policy::root::{RootError, RootId, StoreDir};
 
 /// The binding a user confirmed (rule 5, like `PlanHash`): from the preview to the revert.
@@ -83,6 +84,20 @@ pub struct RebindPreview {
     /// What each op observes with the new binding (newest first, as `verify`); a created folder
     /// that counts there is "not provably Rerun's" (its file ID is the one found, `to.dirs`).
     pub verified: Verified,
+    /// Every folder the plan created in that root, with its path there (P2-14b condition e).
+    pub created: Vec<CreatedDir>,
+}
+
+/// A folder the plan created, as a rebind meets it in the new folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedDir {
+    /// Op index.
+    pub op: u16,
+    /// `<new folder><path>`, escaped.
+    pub path: Shown<'static>,
+    /// Found there and bound by the file ID found (`RebindTo::dirs`): not provably Rerun's, removed
+    /// by the revert only if empty; `false`: missing there (only a missing folder fits later).
+    pub found: bool,
 }
 
 /// Why a rebind is refused (nothing written).
@@ -92,6 +107,15 @@ pub enum RebindRefusal {
     /// Every folder of the transaction opens as bound: revert it without a rebind.
     #[error("every folder of the transaction opens as recorded; revert it without a rebind")]
     NotNeeded,
+    /// Every folder opens, and root `root` is bound to `path` by an earlier rebind: the revert
+    /// goes on there without a new one (P2-14b condition c).
+    #[error("the transaction is bound to {path} already; revert it without a rebind")]
+    AlreadyBound {
+        /// Root index.
+        root: u16,
+        /// The bound game folder, escaped.
+        path: Shown<'static>,
+    },
     /// The folder that does not open is one the user chose: never rebound (D5).
     #[error("a folder you chose is never rebound; only forget closes the transaction")]
     Manual,
@@ -105,17 +129,28 @@ pub enum RebindRefusal {
     /// More than one folder of the transaction does not open.
     #[error("more than one folder of the transaction does not open; a rebind binds one")]
     MoreThanOne,
-    /// The library does not hold the app installed.
-    #[error("the app is not installed in that Steam library")]
+    /// No Steam library holds the app (or Steam is not found).
+    #[error("no Steam library holds the app now")]
     NoCandidate,
+    /// More than one Steam library holds the app (E-R1: `DuplicateApp`).
+    #[error("the app is in more than one Steam library: {}", list(.0))]
+    Ambiguous(Vec<Shown<'static>>),
+    /// A listed Steam library (or the library list) cannot be read: it could hold the app
+    /// (E-R1: every listed library readable, also the old one; P2-14b condition b).
+    #[error(
+        "a Steam library cannot be read now ({0}); try again when it is back, or remove it in Steam"
+    )]
+    LibraryUnreadable(Shown<'static>),
     /// Steam is updating the app in that library.
-    #[error("Steam is updating the app in that library; try again when it has finished")]
+    #[error(
+        "Steam is updating the app in the library that holds it; try again when it has finished"
+    )]
     UpdatePending,
     /// The app is installed in another folder in that library.
-    #[error("the app is installed in another folder in that library")]
+    #[error("the app is installed in another folder in the library that holds it")]
     OtherInstallDir,
     /// The library or the folder in it cannot be opened.
-    #[error("the folder in that library cannot be opened: {0}")]
+    #[error("the folder in the library that holds the app cannot be opened: {0}")]
     Candidate(Box<Refusal>),
     /// The folder there is the folder of another root of the transaction, or lies inside or
     /// around one (apps sharing an install folder; P2-14 security review S1).
@@ -154,6 +189,14 @@ pub enum RebindRefusal {
     NoRoom,
 }
 
+/// The libraries of an [`RebindRefusal::Ambiguous`], for its text.
+fn list(v: &[Shown<'_>]) -> String {
+    v.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl From<RebindRefusal> for Refusal {
     fn from(r: RebindRefusal) -> Self {
         Self::Rebind(r)
@@ -180,14 +223,14 @@ impl Target {
     }
 }
 
-/// Which root needs the rebind, and the folder of the head's install folder in `lib`.
+/// Which root needs the rebind, and the folder of the head's install folder in the one Steam
+/// library that holds the head's app now ([`steam_library`]).
 fn target(
     cx: &ExecCtx<'_>,
     plan: &Plan,
     b: &Bindings,
     ops: &BTreeMap<u16, OpLog>,
     applied: bool,
-    lib: &RootPath,
 ) -> Result<Target, Refusal> {
     if !applied {
         return Err(RebindRefusal::NotApplied.into());
@@ -204,6 +247,14 @@ fn target(
         return Err(RebindRefusal::MoreThanOne.into());
     }
     let Some((i, why)) = gone.pop() else {
+        // Condition c: a root bound by an earlier rebind that opens there is not "not needed".
+        if let Some((i, x)) = b.iter().enumerate().find(|(_, x)| x.proof != Proof::Done) {
+            return Err(RebindRefusal::AlreadyBound {
+                root: op_ix(i),
+                path: escape::path(&x.path.to_string()).into_owned(),
+            }
+            .into());
+        }
         return Err(RebindRefusal::NotNeeded.into());
     };
     let (Some(head), Some(cur)) = (plan.roots.get(i), b.get(i)) else {
@@ -224,7 +275,11 @@ fn target(
     {
         return Err(RebindRefusal::RevertPending { op }.into());
     }
-    let new = roots::candidate(cx, head, lib)?;
+    let PlanOrigin::Steam { app_id, .. } = &head.origin else {
+        return Err(RebindRefusal::Manual.into());
+    };
+    let lib = steam_library(cx, *app_id)?;
+    let new = roots::candidate(cx, head, &lib)?;
     if new.store() == cur.store() && new.id == cur.id {
         return Err(RebindRefusal::NotNeeded.into());
     }
@@ -239,6 +294,56 @@ fn target(
         from,
         why,
     })
+}
+
+/// E-R1 (P2-14b): the one Steam library that holds `app_id` now, from the Steam scan. Refused:
+/// no Steam or no library with the app (`NoCandidate`); the app in more than one library, also
+/// a `DuplicateApp` of the scan (`Ambiguous`); and every problem of a listed library or of the
+/// library list (missing, unreadable, case-sensitive, too many entries, condition b: the old
+/// library too), of a manifest of this app, and another Steam folder the scan does not cover
+/// (`RootsDisagree`) (`LibraryUnreadable`, naming it). Problems of another app's manifest, and of
+/// a registry candidate that is no Steam folder, are not this app's and do not refuse.
+fn steam_library(cx: &ExecCtx<'_>, app_id: u32) -> Result<RootPath, RebindRefusal> {
+    use crate::detect::steam::{IssueKind, Location, scan};
+    let s = scan(cx.sys, cx.fr);
+    if s.root.is_none() {
+        return Err(RebindRefusal::NoCandidate);
+    }
+    let ours = format!("appmanifest_{app_id}.acf");
+    let mut dup = false;
+    for i in &s.issues {
+        let unreadable = match (&i.at, &i.kind) {
+            (Location::Registry(_), IssueKind::RootsDisagree { .. }) => true,
+            (Location::Registry(_), _) => false,
+            (Location::Manifest { .. }, IssueKind::DuplicateApp { app_id: a, .. }) => {
+                dup |= *a == app_id;
+                false
+            }
+            (Location::Manifest { name, .. }, _) => name.eq_ignore_ascii_case(&ours),
+            // The library list, a listed library, a library itself, and anything new: fail closed.
+            _ => true,
+        };
+        if unreadable {
+            return Err(RebindRefusal::LibraryUnreadable(
+                escape::text(&i.to_string()).into_owned(),
+            ));
+        }
+    }
+    let holders: Vec<&RootPath> = s
+        .libraries
+        .iter()
+        .filter(|l| l.app(app_id).is_some())
+        .map(|l| l.path())
+        .collect();
+    match holders.as_slice() {
+        [] => Err(RebindRefusal::NoCandidate),
+        [one] if !dup => Ok((*one).clone()),
+        many => Err(RebindRefusal::Ambiguous(
+            many.iter()
+                .map(|p| escape::path(&p.to_string()).into_owned())
+                .collect(),
+        )),
+    }
 }
 
 /// The checks with the new binding opened (it stays open for the revert), and the file IDs of
@@ -318,9 +423,10 @@ fn checked<'g>(
 }
 
 /// Every check of [`revert_rebound`] before its record, read only (an existing lock file held
-/// read side): the binding of root `root` to the head's install folder in the Steam library
-/// `lib`, and what the revert meets there. P2-14b finds `lib` by the Steam scan.
-pub fn rebind_check(cx: &ExecCtx<'_>, t: &TxnId, lib: &RootPath) -> Result<RebindPreview, Refusal> {
+/// read side): the binding of the one root that does not open to the head's install folder in
+/// the one Steam library the Steam scan finds holding the app (E-R1), and what the revert meets
+/// there.
+pub fn rebind_check(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RebindPreview, Refusal> {
     standard_user(cx.sys)?;
     let j = Journal::new(cx.app, cx.tag);
     let hold = j.hold()?;
@@ -330,7 +436,7 @@ pub fn rebind_check(cx: &ExecCtx<'_>, t: &TxnId, lib: &RootPath) -> Result<Rebin
     let before = |k: u16, d: &crate::journal::Digest, max: u64| j.read_backup(t, k, d, max);
     let (plan, b) = revert_plan(t, &head, &v.ops, &v.rebinds, &before)?;
     let applied = v.state == crate::journal::TxnState::Applied;
-    let tg = target(cx, &plan, &b, &v.ops, applied, lib)?;
+    let tg = target(cx, &plan, &b, &v.ops, applied)?;
     let stores = roots::open_stores(cx, &tg.overlay);
     let c = checked(cx, &plan, &b, &tg, &j, &listing, t, &v.ops, &stores)?;
     if !j.rebind_fits(&v) {
@@ -341,7 +447,18 @@ pub fn rebind_check(cx: &ExecCtx<'_>, t: &TxnId, lib: &RootPath) -> Result<Rebin
     let Some((store, store_id)) = tg.new.store() else {
         return Err(RebindRefusal::Manual.into());
     };
+    let created = file_ops(&plan, tg.root)
+        .filter_map(|k| match plan.ops.get(usize::from(k)) {
+            Some(Op::CreateDir { path, .. }) => Some(CreatedDir {
+                op: k,
+                path: escape::path(&format!(r"{}\{path}", tg.new.path)).into_owned(),
+                found: c.dirs.iter().any(|d| d.op == k),
+            }),
+            _ => None,
+        })
+        .collect();
     Ok(RebindPreview {
+        created,
         to: RebindTo {
             root: tg.root,
             store: store.clone(),
@@ -396,8 +513,9 @@ pub fn revert_rebound(
         return super::revert(cx, t);
     }
     let ops = w.ops().clone();
-    let tg = target(cx, &plan, &b, &ops, w.is_applied(), &to.store)?;
-    // Rule 5: the binding written is the binding shown, derived again under the lock.
+    // Condition a: the Steam scan again, under the lock; rule 5: the binding written is the
+    // binding shown, derived again.
+    let tg = target(cx, &plan, &b, &ops, w.is_applied())?;
     if !tg.is(to) {
         return Err(Refusal::from(RebindRefusal::Changed).into());
     }

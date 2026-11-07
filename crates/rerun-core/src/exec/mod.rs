@@ -69,9 +69,9 @@ mod status;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use rebind::{
-    RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,
+    CreatedDir, RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,
 };
-pub use status::{OpState, OpStatus, Status, TxnLine, TxnStatus, status, txn_status};
+pub use status::{OpState, OpStatus, RebindLine, Status, TxnLine, TxnStatus, status, txn_status};
 
 use bind::Bindings;
 use file::Mode;

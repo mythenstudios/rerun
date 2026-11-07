@@ -109,6 +109,7 @@ fn st(
         folder: folder(id),
         preview: preview.map(|p| p.map_err(|e| escape::text(e).into_owned())),
         ops,
+        rebinds: Vec::new(),
     }
 }
 
