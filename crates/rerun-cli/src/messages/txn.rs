@@ -686,6 +686,23 @@ pub enum TxnMsg<'a> {
         /// The transaction.
         txn: TxnId,
     },
+    /// A rebind is recorded, then the revert failed: the transaction is bound now.
+    BoundNow {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// A rebind is recorded and the revert ran, but its closing may not be durable.
+    BoundMayHaveClosed {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// What `root <i>` means below the rebind: the folder Steam lists now.
+    RebindRootIs {
+        /// Root index.
+        root: u16,
+        /// The folder, escaped.
+        path: Shown<'a>,
+    },
     /// A rebind of a transaction (`status`).
     StatusRebind {
         /// Root index.
@@ -1014,6 +1031,17 @@ impl fmt::Display for TxnMsg<'_> {
                 "if Steam moved or reinstalled the game: rerun revert {txn} --rebind shows the \
                  folder Steam lists now"
             ),
+            Self::BoundNow { txn } => write!(
+                f,
+                "transaction {txn} is bound to the new folder now; rerun revert {txn} goes on \
+                 there"
+            ),
+            Self::BoundMayHaveClosed { txn } => write!(
+                f,
+                "transaction {txn} is bound to the new folder and may have been closed; rerun \
+                 status shows what the journal holds"
+            ),
+            Self::RebindRootIs { root, path } => write!(f, "  (root {root} there: {path})"),
             Self::StatusRebind { root, id, path } => {
                 write!(f, "  root {root} rebound (identity {id}): {path}")
             }

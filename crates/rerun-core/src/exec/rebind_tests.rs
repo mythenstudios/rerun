@@ -1872,3 +1872,140 @@ fn rb_t12_status_shows_the_binding() {
     );
     assert_eq!((l.id, l.old), (p.to.id, p.to.from.id));
 }
+
+// ---------- P2-14b review follow-ups ----------
+
+/// Sets the registry candidate `src` of the Steam root to `value`.
+fn candidate(sys: &FakeSystem, src: crate::detect::steam::RootSource, value: &str) {
+    let r = sys.fake_registry();
+    r.put_key_all(&src.key()).unwrap();
+    r.put_value(
+        &src.key(),
+        src.value_name(),
+        &crate::sys::registry::RegValue::String(value.to_owned()),
+    )
+    .unwrap();
+}
+
+/// Review S1 and S3: registry candidates before the chosen Steam root refuse with any problem
+/// (the real Steam may be on an unplugged drive while a later candidate names an old copy);
+/// after it only a missing folder or a value that is no path is harmless; another Steam folder
+/// refuses; a broken manifest of another app does not.
+#[test]
+fn rb_t10_registry_candidates_and_other_apps_in_the_scan() {
+    use crate::detect::steam::RootSource::{CurrentUser, Machine32};
+    type Change = fn(&FakeSystem);
+    let cases: [(&str, Change, bool); 6] = [
+        (
+            "HKCU not found, HKLM names an old copy",
+            |sys| {
+                candidate(sys, CurrentUser, r"D:\GoneSteam");
+                candidate(sys, Machine32, STEAM);
+            },
+            false,
+        ),
+        (
+            "HKCU access denied, HKLM names another Steam",
+            |sys| {
+                let fx = sys.fake_fs();
+                fx.mkdir_all(Path::new(r"D:\SteamR")).unwrap();
+                fx.set_restricted(Path::new(r"D:\SteamR"), true).unwrap();
+                candidate(sys, CurrentUser, r"D:\SteamR");
+                candidate(sys, Machine32, STEAM);
+            },
+            false,
+        ),
+        (
+            "HKLM after a working HKCU: a folder not found",
+            |sys| candidate(sys, Machine32, r"D:\OldSteam"),
+            true,
+        ),
+        (
+            "HKLM after a working HKCU: a value that is no path",
+            |sys| candidate(sys, Machine32, ""),
+            true,
+        ),
+        (
+            "HKLM after a working HKCU: another Steam folder",
+            |sys| {
+                sys.fake_fs().mkdir_all(Path::new(r"D:\Steam2")).unwrap();
+                candidate(sys, Machine32, r"D:\Steam2");
+            },
+            false,
+        ),
+        (
+            "a broken manifest of another app",
+            |sys| {
+                super::tests::sys_put(
+                    sys,
+                    &format!(r"{LIB_E}\steamapps\appmanifest_999.acf"),
+                    b"\"AppState\"\n{\n",
+                );
+            },
+            true,
+        ),
+    ];
+    for (what, change, ok) in cases {
+        let Rb { env, t, .. } = applied(false);
+        move_lib(&env.sys, STEAM_LIB, LIB_E);
+        change(&env.sys);
+        env.sys.sync_all();
+        let r = env.rebind_check(&t);
+        if ok {
+            assert!(r.is_ok(), "{what}: {r:?}");
+        } else {
+            assert!(
+                refused(&r, |x| matches!(x, RebindRefusal::LibraryUnreadable(_))),
+                "{what}: {r:?}"
+            );
+        }
+    }
+}
+
+/// Review S3 (senior) and N3: a failed rebind call is told apart. Its record's temp file not
+/// renamed: refused, no record. Its flush failed with the record on disk: a plain error, bound.
+/// A crash right after the rename (the journal cannot be read again): `RebindUnconfirmed`.
+#[test]
+fn rb_t9_a_failed_rebind_call_is_refused_bound_or_unconfirmed() {
+    use crate::sys::fake::Fault;
+    let cases: [(&str, Prim, Fault); 3] = [
+        (
+            "rename failed",
+            Prim::Rename,
+            Fault::Fail(SysErrorKind::Other),
+        ),
+        (
+            "flush failed",
+            Prim::FlushDir,
+            Fault::Fail(SysErrorKind::Other),
+        ),
+        ("crash after the rename", Prim::Rename, Fault::CrashAfter),
+    ];
+    for (what, call, fault) in cases {
+        let Rb { env, t, .. } = applied(false);
+        move_lib(&env.sys, STEAM_LIB, LIB_E);
+        let p = env.rebind_check(&t).unwrap();
+        let n = env.records(&t);
+        let r = env.revert_rebound_armed(&t, &p.to, |fx| fx.fault(call, 1, fault));
+        let fx = env.sys.fake_fs();
+        fx.clear_faults();
+        if fx.crashed() {
+            fx.restart();
+        }
+        let bound = env.records(&t) > n;
+        match what {
+            "rename failed" => assert!(
+                matches!(&r, Err(ExecError::Refused(_))) && !bound,
+                "{what}: {r:?}"
+            ),
+            "flush failed" => assert!(
+                matches!(&r, Err(ExecError::Journal(_))) && bound,
+                "{what}: {r:?}"
+            ),
+            _ => assert!(
+                matches!(&r, Err(ExecError::RebindUnconfirmed(_))) && bound,
+                "{what}: {r:?}"
+            ),
+        }
+    }
+}

@@ -1518,10 +1518,43 @@ fn c_rb6_the_hint_the_status_line_and_already_bound() {
         "{}",
         r.stdout
     );
+    // One question: the plain revert's (security review nit N1).
+    assert_eq!(r.asked.len(), 1, "{:?}", r.asked);
     assert!(
         r.stdout
             .contains(&format!("transaction {t} reverted and closed")),
         "{}",
         r.stdout
     );
+}
+
+/// C-RB7 (review S3, N3): a rebind whose record may not be on disk (a crash right after its
+/// rename) exits 5 with "may be bound"; one whose record is on disk although its call failed
+/// (its flush) exits 5 and says the transaction is bound now.
+#[test]
+fn c_rb7_a_failed_rebind_says_whether_the_transaction_is_bound() {
+    for (call, fault, want) in [
+        (
+            Prim::Rename,
+            Fault::CrashAfter,
+            "may be bound to the new folder although the command failed",
+        ),
+        (
+            Prim::FlushDir,
+            Fault::Fail(rerun_core::sys::SysErrorKind::Other),
+            "is bound to the new folder now",
+        ),
+    ] {
+        let sys = steam_rebind();
+        let t = applied(&sys);
+        move_library(&sys);
+        sys.fake_fs().clear_faults();
+        // The first rename and flush of the run are the rebind record's.
+        sys.fake_fs().fault(call, 1, fault);
+        let r = cli(&sys, &["revert", &t, "--rebind"], Answer::Yes);
+        assert_eq!(r.exit, Exit::Open, "{}\n{}", r.stdout, r.stderr);
+        assert!(r.stderr.contains(want), "{want:?} in:\n{}", r.stderr);
+        sys.fake_fs().clear_faults();
+        sys.fake_fs().restart();
+    }
 }

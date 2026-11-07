@@ -504,6 +504,11 @@ fn halt_hint<'a>(st: &TxnStatus, h: &Halt) -> Option<Message<'a>> {
         .and_then(|p| p.roots.get(usize::from(h.root)))
         .is_some_and(|r| r.steam.is_some());
     let gone = match &*h.why {
+        // Installed in another folder of its library: no rebind binds that (E-R1).
+        Refusal::SteamGone {
+            gone: exec::SteamGone::OtherFolder,
+            ..
+        } => false,
         Refusal::SteamGone { .. }
         | Refusal::Steam {
             state: AppState::NotInstalled,
@@ -555,8 +560,15 @@ fn rebind_lines_of<'a>(st: &'a TxnStatus, p: &'a RebindPreview) -> Vec<Message<'
         }));
     }
     out.push(m(TxnMsg::RebindNowHeading));
+    out.push(m(TxnMsg::RebindRootIs {
+        root: p.to.root,
+        path: path(&p.path),
+    }));
     out.extend(now_lines(st, &p.verified).into_iter().skip(1));
-    out.push(m(TxnMsg::RebindRegistryNote));
+    // Only where the head has registry ops (a registry op has no root in the preview).
+    if head(st).is_some_and(|h| h.ops.iter().any(|o| o.root.is_none())) {
+        out.push(m(TxnMsg::RebindRegistryNote));
+    }
     out.push(m(TxnMsg::RebindPermanentNote));
     out.push(Message::Blank);
     out
@@ -594,14 +606,21 @@ fn rebind_run<W: Write, E: Write>(
     let rep = match exec::revert_rebound(cx, &txn, &p.to) {
         Ok(rep) => rep,
         Err(ExecError::Refused(r)) => return Err(refusal(&r, txn, err)),
-        Err(e @ ExecError::Unconfirmed(_)) => {
+        // The record may not be on disk, and the journal could not be read again.
+        Err(e @ ExecError::RebindUnconfirmed(_)) => {
             note(err, TxnMsg::Error { error: shown(&e) });
             note(err, TxnMsg::MayBeBound { txn });
             return Err(exit_for_exec(&e));
         }
+        // Every other error comes after the record (review N3): bound now.
+        Err(e @ ExecError::Unconfirmed(_)) => {
+            note(err, TxnMsg::Error { error: shown(&e) });
+            note(err, TxnMsg::BoundMayHaveClosed { txn });
+            return Err(exit_for_exec(&e));
+        }
         Err(e) => {
             note(err, TxnMsg::Error { error: shown(&e) });
-            note(err, TxnMsg::RevertFailed { txn });
+            note(err, TxnMsg::BoundNow { txn });
             return Err(exit_for_exec(&e));
         }
     };

@@ -330,11 +330,14 @@ pub enum ExecError {
     Sys(#[from] SysError),
     /// Closing (a revert's `Closed`, forget's record or marker) failed after the closing entry
     /// reached the journal (its flush failed): the transaction may count as closed now; `status`
-    /// shows what the journal holds (P2-13, security review N1). Also a `Rebind` whose call failed
-    /// while the journal cannot be read again to tell whether it is on disk (P2-14 review N3): the
-    /// transaction may be bound now.
-    #[error("the last journal entry may have been written, but it may not be durable: {0}")]
+    /// shows what the journal holds (P2-13, security review N1). After a rebind the transaction
+    /// is bound in any case; only its closing is uncertain.
+    #[error("the transaction may have been closed, but its closing entry may not be durable: {0}")]
     Unconfirmed(JournalError),
+    /// A `Rebind` whose call failed while the journal cannot be read again to tell whether it is
+    /// on disk (P2-14 reviews N3 and S3): the transaction may be bound now; `status` shows it.
+    #[error("the rebind may have been written, but whether it is on disk cannot be read: {0}")]
+    RebindUnconfirmed(JournalError),
 }
 
 impl From<Refusal> for ExecError {

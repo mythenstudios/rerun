@@ -11,8 +11,9 @@
 //! same run on the folder it opened and checked. The head is never rewritten; registry ops stay
 //! on the head's locations (E-R4 a).
 //!
-//! In this cut the library is passed by the caller; the Steam scan that finds it (exactly one
-//! library with the app installed, E-R1) comes with P2-14b.
+//! The library comes from the Steam scan only (P2-14b, E-R1): exactly one library with the app
+//! installed, every listed library and every registry candidate that could name another Steam
+//! folder readable ([`steam_library`]).
 //!
 //! The conditions (refused without a record, [`RebindRefusal`]): the transaction applied;
 //! exactly one root does not open, and it is a Steam root; every other root opens; no file op of
@@ -138,7 +139,8 @@ pub enum RebindRefusal {
     /// A listed Steam library (or the library list) cannot be read: it could hold the app
     /// (E-R1: every listed library readable, also the old one; P2-14b condition b).
     #[error(
-        "a Steam library cannot be read now ({0}); try again when it is back, or remove it in Steam"
+        "a rebind needs every library Steam lists, and this app's manifest, readable ({0}); try \
+         again later"
     )]
     LibraryUnreadable(Shown<'static>),
     /// Steam is updating the app in that library.
@@ -301,20 +303,28 @@ fn target(
 /// a `DuplicateApp` of the scan (`Ambiguous`); and every problem of a listed library or of the
 /// library list (missing, unreadable, case-sensitive, too many entries, condition b: the old
 /// library too), of a manifest of this app, and another Steam folder the scan does not cover
-/// (`RootsDisagree`) (`LibraryUnreadable`, naming it). Problems of another app's manifest, and of
-/// a registry candidate that is no Steam folder, are not this app's and do not refuse.
+/// (`RootsDisagree`) (`LibraryUnreadable`, naming it). Problems of another app's manifest are not
+/// this app's and do not refuse.
+///
+/// Registry candidates (P2-14b review S1): a candidate that ranks before the chosen root in
+/// `RootSource::ALL` (all of them when no root was found) refuses with any problem (its folder
+/// not found may be an unplugged drive with the real Steam on it, while a later candidate names
+/// an old copy); "no value" reports no problem. A candidate after the chosen root is ignored only
+/// when it has no value, a value that is no path, or a folder that is not found; anything else
+/// (access denied, busy, a reparse point, forbidden, `RootsDisagree`) refuses.
 fn steam_library(cx: &ExecCtx<'_>, app_id: u32) -> Result<RootPath, RebindRefusal> {
-    use crate::detect::steam::{IssueKind, Location, scan};
+    use crate::detect::steam::{IssueKind, Location, RootSource, scan};
     let s = scan(cx.sys, cx.fr);
-    if s.root.is_none() {
-        return Err(RebindRefusal::NoCandidate);
-    }
+    let rank = |r: RootSource| RootSource::ALL.iter().position(|x| *x == r);
+    let chosen = s.root.and_then(rank);
     let ours = format!("appmanifest_{app_id}.acf");
     let mut dup = false;
     for i in &s.issues {
         let unreadable = match (&i.at, &i.kind) {
-            (Location::Registry(_), IssueKind::RootsDisagree { .. }) => true,
-            (Location::Registry(_), _) => false,
+            (Location::Registry(r), kind) => match (rank(*r), chosen) {
+                (Some(a), Some(c)) if a > c => !harmless_after_root(kind),
+                _ => true,
+            },
             (Location::Manifest { .. }, IssueKind::DuplicateApp { app_id: a, .. }) => {
                 dup |= *a == app_id;
                 false
@@ -328,6 +338,9 @@ fn steam_library(cx: &ExecCtx<'_>, app_id: u32) -> Result<RootPath, RebindRefusa
                 escape::text(&i.to_string()).into_owned(),
             ));
         }
+    }
+    if s.root.is_none() {
+        return Err(RebindRefusal::NoCandidate);
     }
     let holders: Vec<&RootPath> = s
         .libraries
@@ -343,6 +356,19 @@ fn steam_library(cx: &ExecCtx<'_>, app_id: u32) -> Result<RootPath, RebindRefusa
                 .map(|p| escape::path(&p.to_string()).into_owned())
                 .collect(),
         )),
+    }
+}
+
+/// A problem of a registry candidate after the chosen Steam root that cannot hide another Steam
+/// folder: a value that is no path, or a folder that is not found.
+fn harmless_after_root(kind: &crate::detect::steam::IssueKind) -> bool {
+    use crate::detect::steam::IssueKind;
+    match kind {
+        IssueKind::RegistryValue(_) => true,
+        IssueKind::Root(e) => {
+            matches!(&**e, RootError::Sys(s) if s.kind == crate::sys::SysErrorKind::NotFound)
+        }
+        _ => false,
     }
 }
 
@@ -564,7 +590,7 @@ pub fn revert_rebound(
         }
         return Err(match rebound_now(&j, t, n) {
             Some(true) => ExecError::Journal(e),
-            None => ExecError::Unconfirmed(e),
+            None => ExecError::RebindUnconfirmed(e),
             Some(false) => match e {
                 JournalError::TooLarge {
                     what: "a record", ..
