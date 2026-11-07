@@ -622,6 +622,9 @@ pub(crate) mod knob {
         static LOOSE_M1: Cell<bool> = const { Cell::new(false) };
     }
 
+    pub(crate) fn unrecorded(on: bool) {
+        UNRECORDED.with(|c| c.set(on));
+    }
     pub(crate) fn is_unrecorded() -> bool {
         UNRECORDED.with(Cell::get)
     }

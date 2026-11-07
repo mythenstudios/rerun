@@ -1119,6 +1119,8 @@ mod crash_tests;
 #[cfg(test)]
 mod halt_tests;
 #[cfg(test)]
+mod ini_crash_tests;
+#[cfg(test)]
 pub(crate) mod ini_tests;
 #[cfg(test)]
 mod layer_crash_tests;
