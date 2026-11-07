@@ -433,7 +433,8 @@ fn sandbox_registry_read_contract_on_the_real_hkcu() {
     let h = AppHive::real_user().unwrap_or_else(|e| panic!("{e}"));
     let reg = WinRegistry::new().unwrap();
     // A fresh root per run: the contract wants it empty, and a Sandbox restarted from inside
-    // keeps the keys of an earlier run (seen in the first run). The Sandbox is disposable.
+    // keeps the keys of an earlier run (seen in the first run). The root is never removed, on
+    // purpose: the Sandbox is disposable.
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());

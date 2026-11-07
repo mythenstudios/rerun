@@ -26,8 +26,16 @@ $ErrorActionPreference = 'Stop'
 $out = 'C:\sandbox\out'
 $exe = 'C:\sandbox\bin\rerun-core-tests.exe'
 
-if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $env:USERPROFILE -notmatch '\\WDAGUtilityAccount\\?$') {
-    Write-Error "refusing to run: this is not the Windows Sandbox account (USERNAME=$env:USERNAME, USERPROFILE=$env:USERPROFILE)"
+# The guard: the environment, the account of the process token (not spoofable through the
+# environment) and the script's own path in the read-only mapped folder of the .wsb. It
+# runs before every write; this script writes HKLM and restarts the machine.
+function Test-SandboxGuard {
+    $tokenUser = ([Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\')[-1]
+    return ($env:USERNAME -eq 'WDAGUtilityAccount' -and $env:USERPROFILE -match '\\WDAGUtilityAccount\\?$' -and
+        $tokenUser -eq 'WDAGUtilityAccount' -and $PSCommandPath -eq 'C:\sandbox\scripts\sandbox-run.ps1')
+}
+if (-not (Test-SandboxGuard)) {
+    Write-Error "refusing to run: not the Windows Sandbox account and its mapped LogonCommand (USERNAME=$env:USERNAME, script $PSCommandPath)"
     exit 2
 }
 New-Item -ItemType Directory -Force -Path $out | Out-Null
@@ -60,15 +68,22 @@ Status "start: account $env:USERNAME, elevated=$elevated, build $build"
 $uacKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 if ($elevated) {
     $lua = (Get-ItemProperty -LiteralPath $uacKey -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
-    if ($lua -ne 1) {
+    $marker = Join-Path $out 'uac-restart.txt'
+    if ($lua -ne 1 -and (Test-Path -LiteralPath $marker)) {
+        # Restarted once already and UAC is still off: never loop.
+        $note = 'the UAC restart did not take effect (EnableLUA is still off); running elevated, the writing tests are expected to fail'
+        Status $note
+    } elseif ($lua -ne 1) {
+        if (-not (Test-SandboxGuard)) { Write-Error 'refusing: guard failed before the HKLM write'; exit 2 }
         Set-ItemProperty -LiteralPath $uacKey -Name EnableLUA -Value 1 -Type DWord
         Set-Content -LiteralPath (Join-Path $out 'uac-restart.txt') -Value "EnableLUA was $lua; set to 1 and restarted at $(Get-Date -Format o)"
         Status 'elevated and UAC off: UAC turned on, the Sandbox restarts in 10 s and runs again (without a visible window; follow status.txt)'
         Run-Native shutdown.exe /r /t 10 | Out-Null
         exit 0
+    } else {
+        $note = 'elevated although UAC is on -> Rerun refuses every apply, revert and forget (and the CLI also plan and every dry run); the writing tests are expected to fail'
+        Write-Host $note
     }
-    $note = 'elevated although UAC is on -> Rerun refuses every apply, revert and forget (and the CLI also plan and every dry run); the writing tests are expected to fail'
-    Write-Host $note
 }
 
 $code = -1
@@ -127,5 +142,9 @@ Status "done: exit code $code, $passed passed, $failed failed, elevated=$elevate
 try { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList $out } catch { }
 if ($cli) { Write-Host "CLI round trip: expected=$($cli.expected) (details in cli.log)" }
 if ($passed -eq 0 -and $code -eq 0) { Write-Host 'WARNING: no test ran' }
-Read-Host 'Done. Press Enter to leave this window (close the Sandbox yourself)'
+# After the restart from inside there is no visible window to wait in (the Explorer window
+# shows the end); only the first, visible run pauses.
+if (-not (Test-Path -LiteralPath (Join-Path $out 'uac-restart.txt'))) {
+    Read-Host 'Done. Press Enter to leave this window (close the Sandbox yourself)'
+}
 exit $code

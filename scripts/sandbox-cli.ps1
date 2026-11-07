@@ -17,8 +17,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $env:USERPROFILE -notmatch '\\WDAGUtilityAccount\\?$') {
-    throw "refusing to run: this is not the Windows Sandbox account (USERNAME=$env:USERNAME)"
+# The account of the process token too (not spoofable through the environment), and the
+# script's own path in the read-only mapped folder of the .wsb.
+$tokenUser = ([Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\')[-1]
+if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $env:USERPROFILE -notmatch '\\WDAGUtilityAccount\\?$' -or
+    $tokenUser -ne 'WDAGUtilityAccount' -or $PSCommandPath -ne 'C:\sandbox\scripts\sandbox-cli.ps1') {
+    throw "refusing to run: not the Windows Sandbox account and its mapped scripts (USERNAME=$env:USERNAME, token $tokenUser, script $PSCommandPath)"
 }
 
 $source = 'C:\sandbox\bin\rerun.exe'

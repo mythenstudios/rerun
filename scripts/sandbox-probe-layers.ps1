@@ -22,8 +22,12 @@
 param([string]$Out = 'C:\sandbox\out')
 
 $ErrorActionPreference = 'Stop'
-if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $env:USERPROFILE -notmatch '\\WDAGUtilityAccount\\?$' -or $env:RERUN_SANDBOX -ne '1') {
-    Write-Error 'refusing to run: Windows Sandbox only (WDAGUtilityAccount, its profile and RERUN_SANDBOX=1)'
+# The account of the process token too (not spoofable through the environment), and the
+# script's own path in the read-only mapped folder of the .wsb.
+$tokenUser = ([Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\')[-1]
+if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $env:USERPROFILE -notmatch '\\WDAGUtilityAccount\\?$' -or $env:RERUN_SANDBOX -ne '1' -or
+    $tokenUser -ne 'WDAGUtilityAccount' -or $PSCommandPath -ne 'C:\sandbox\scripts\sandbox-probe-layers.ps1') {
+    Write-Error 'refusing to run: Windows Sandbox only (WDAGUtilityAccount token and profile, RERUN_SANDBOX=1, the mapped script folder)'
     exit 2
 }
 Remove-Item Env:\__COMPAT_LAYER -ErrorAction SilentlyContinue
@@ -84,6 +88,7 @@ function Cleanup {
     try {
         if ($forms) { foreach ($f in $forms.Values) { Reg-Del $f } }
         Reg-Del (Join-Path $real 'probe64.exe')
+        Reg-Del (Join-Path $real 'probe32.exe')  # name of earlier harness versions
     } catch { }
 }
 
