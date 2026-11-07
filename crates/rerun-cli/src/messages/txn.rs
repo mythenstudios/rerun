@@ -341,8 +341,18 @@ pub enum TxnMsg<'a> {
         /// The transaction.
         txn: TxnId,
     },
-    /// What finishes a transaction whose cleanup is pending (P2-15).
+    /// What finishes a transaction whose cleanup is pending because a file is in use (P2-15).
     FinishCleanup {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// What finishes a transaction whose copy is kept next to a file that changed (P2-15).
+    FinishKept {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// The journal of a transaction has no room for another revert attempt (P2-15, N1).
+    JournalFull {
         /// The transaction.
         txn: TxnId,
     },
@@ -520,8 +530,10 @@ pub enum TxnMsg<'a> {
     },
     /// The question of a revert that only cleans up (P2-15).
     AskCleanup {
-        /// Files to delete.
+        /// Files to delete (Rerun's copies, also those in use now).
         n: usize,
+        /// Of them, in use now (they may stay).
+        in_use: usize,
     },
     /// One op of the revert's report.
     Did {
@@ -886,8 +898,18 @@ impl fmt::Display for TxnMsg<'_> {
             Self::RollbackCause { error } => write!(f, "  rollback: {error}"),
             Self::RolledBackCleanup { txn } => write!(
                 f,
-                "the apply failed and was rolled back, but a file Rerun replaced is still in use: \
+                "the apply failed and was rolled back, but a file Rerun left is still there: \
                  transaction {txn} stays open until it is deleted"
+            ),
+            Self::FinishKept { txn } => write!(
+                f,
+                "a file next to Rerun's copy changed since, so the copy stays; delete it yourself \
+                 and run rerun revert {txn}, or rerun forget {txn}"
+            ),
+            Self::JournalFull { txn } => write!(
+                f,
+                "the journal of transaction {txn} has no room for another revert attempt; only \
+                 rerun forget {txn} closes it (backups stay)"
             ),
             Self::FinishCleanup { txn } => write!(
                 f,
@@ -927,8 +949,8 @@ impl fmt::Display for TxnMsg<'_> {
             ),
             Self::HintCleanup { txn } => write!(
                 f,
-                "  a file Rerun replaced is still in use; close the game and any window showing \
-                 its folder, then: rerun revert {txn}"
+                "  a file Rerun left is still there; rerun revert {txn} deletes it or says why it \
+                 stays (close the game and any window showing its folder first)"
             ),
             Self::ForeignEntries { n } => write!(
                 f,
@@ -986,7 +1008,7 @@ impl fmt::Display for TxnMsg<'_> {
             ),
             Self::OldForeign { path } => write!(
                 f,
-                "  not Rerun's file (another content or a link), left as it is: {path}"
+                "  not Rerun's file, or it cannot be checked as Rerun's; left as it is: {path}"
             ),
             Self::OldDeleted { path } => write!(f, "  deleted Rerun's copy: {path}"),
             Self::Halted { op, why } => write!(f, "the revert stops at op {op}: {why}"),
@@ -996,13 +1018,19 @@ impl fmt::Display for TxnMsg<'_> {
             Self::DryRunDone => f.write_str("dry run: nothing was written"),
             Self::AskRevert { ops: 1 } => f.write_str("Revert this op? [y/N]"),
             Self::AskRevert { ops } => write!(f, "Revert these {ops} ops? [y/N]"),
-            Self::AskCleanup { n: 1 } => {
-                f.write_str("Everything is reverted. Delete the file Rerun left? [y/N]")
+            Self::AskCleanup { n, in_use } => {
+                match n {
+                    1 => f.write_str("Everything is reverted. Delete the file Rerun left")?,
+                    n => write!(f, "Everything is reverted. Delete the {n} files Rerun left")?,
+                }
+                match in_use {
+                    0 => {}
+                    1 if *n == 1 => f.write_str(" (it is in use now and may stay)")?,
+                    1 => f.write_str(" (one is in use now and may stay)")?,
+                    k => write!(f, " ({k} are in use now and may stay)")?,
+                }
+                f.write_str("? [y/N]")
             }
-            Self::AskCleanup { n } => write!(
-                f,
-                "Everything is reverted. Delete the {n} files Rerun left? [y/N]"
-            ),
             Self::Did {
                 op,
                 observed,

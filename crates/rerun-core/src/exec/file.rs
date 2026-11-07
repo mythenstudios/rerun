@@ -1228,11 +1228,17 @@ pub(super) fn expected_old(op: &Op, log: &OpLog, ix: u16) -> Option<[u8; 32]> {
 /// (`OpLog::pending_old`), observed on the disk. Gone is done; another content, a link, a folder
 /// or a reparse point is not Rerun's and never touched (`Foreign`, user decision E-C4); Rerun's
 /// own content is deleted (with its known hash expected, `DeleteOld` and nothing else) only if
-/// the target still holds the state the revert left (the end state of the op's newest sequence,
-/// the old content when the revert ran none), else it is kept (`Kept`: it may be the last copy
-/// on disk of a state, and the target changed since the revert). `act == false`: read only, as
-/// `verify` (`Ours` for what a revert would delete, `InUse` if a process uses it now, by
-/// `users()` on its guard). `deleted` is set by the first deletion.
+/// the target holds the end state of the op's newest sequence with a temp name (the old content
+/// when the op has none), else it is kept (`Kept`: it may be the last copy on disk of a state).
+/// That is the state the revert left, except when the newest sequence was recorded but never
+/// ran (its `RevertIntent` was followed by one without a temp name): then the copy is kept too,
+/// conservatively, and only deleting it by hand or `forget` ends the transaction (pinned by
+/// `cl_t10_a_newest_sequence_that_never_ran_keeps_the_copy`). Something at the name that cannot
+/// be checked as Rerun's (another content, a link, a folder, a reparse point, a cloud
+/// placeholder, access denied) is `Foreign`. A sharing violation on the guard or on the delete
+/// is `InUse`. `act == false`: read only, as `verify` (`Ours` for what a revert would delete,
+/// `InUse` if a process uses it now, by `users()` on its guard). `deleted` is set by the first
+/// deletion.
 pub(super) fn cleanup_op(
     dirs: &mut Dirs<'_>,
     k: u16,
@@ -1259,7 +1265,7 @@ pub(super) fn cleanup_op(
         ),
     };
     let t = see_file(parent, &name).map_err(&e)?;
-    let reverted = want.seen_in(&t) && !t.respelled();
+    let reverted = super::knob_ignore_target() || (want.seen_in(&t) && !t.respelled());
     let mut out = Vec::new();
     for (ix, tmp) in pending {
         let Some(h) = expected_old(op, log, ix) else {
@@ -1274,6 +1280,7 @@ pub(super) fn cleanup_op(
             // Read only: a process that maps it shows on the guard (`users()`).
             _ if !act => match parent.map(|d| d.guard(&n)) {
                 Some(Ok(g)) if !g.users().map_err(&e)?.is_empty() => OldSeen::InUse,
+                Some(Err(x)) if x.kind == SysErrorKind::Busy => OldSeen::InUse,
                 _ => OldSeen::Ours,
             },
             _ => match parent.map(|d| d.guard(&n)) {
@@ -1292,6 +1299,8 @@ pub(super) fn cleanup_op(
                 {
                     OldSeen::Foreign
                 }
+                // A sharing violation on the open: someone holds it now (review N2).
+                Some(Err(x)) if x.kind == SysErrorKind::Busy => OldSeen::InUse,
                 Some(Err(x)) => return Err(e(x)),
                 Some(Ok(mut g)) => {
                     let h = if super::knob_cleanup_without_hash() {

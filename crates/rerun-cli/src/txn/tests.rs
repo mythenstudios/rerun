@@ -431,7 +431,7 @@ fn c_cl2_pending_cleanup_in_the_preview_the_report_and_status() {
   will delete Rerun's copy (known content, SHA-256 {sha}): .rerun-00000000000000ab-3.tmp.old
   in use, stays for now (Rerun's copy; the transaction stays open): .rerun-00000000000000ab-4.tmp.old
   kept: the file next to it changed since the revert, so Rerun's copy stays (delete it yourself, or forget the transaction): cfg\.rerun-00000000000000ab-5.tmp.old
-  not Rerun's file (another content or a link), left as it is: .rerun-00000000000000ab-6.tmp.old
+  not Rerun's file, or it cannot be checked as Rerun's; left as it is: .rerun-00000000000000ab-6.tmp.old
 "
         )
     );
@@ -468,7 +468,7 @@ fn c_cl2_pending_cleanup_in_the_preview_the_report_and_status() {
     );
     assert!(
         all.contains(&format!(
-            "  a file Rerun replaced is still in use; close the game and any window showing its folder, then: rerun revert {t}\n"
+            "  a file Rerun left is still there; rerun revert {t} deletes it or says why it stays (close the game and any window showing its folder first)\n"
         )),
         "{all}"
     );
@@ -487,5 +487,25 @@ fn c_cl2_pending_cleanup_in_the_preview_the_report_and_status() {
             "  will delete Rerun's copy (known content, SHA-256 {sha}): "
         )),
         "{evil}"
+    );
+}
+
+/// Review N5: a revert refused because the journal has no room for another attempt says that
+/// only forget closes it.
+#[test]
+fn a_full_journal_names_forget() {
+    let t = txn(6);
+    let r = Refusal::Journal(Box::new(rerun_core::journal::JournalError::TooLarge {
+        what: "the records of a transaction",
+        limit: 1024,
+    }));
+    let mut err = Out::new(Vec::new());
+    assert_eq!(super::refusal(&r, t, &mut err), crate::cli::Exit::Refused);
+    let text = String::from_utf8(err.into_inner()).unwrap();
+    assert!(
+        text.ends_with(&format!(
+            "the journal of transaction {t} has no room for another revert attempt; only rerun forget {t} closes it (backups stay)\n"
+        )),
+        "{text}"
     );
 }

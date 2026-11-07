@@ -292,9 +292,9 @@ fn trace(k: Kind) -> (Vec<Prim>, Vec<Prim>) {
 
 /// The points of a fault: [`Mode::Full`] after every call; [`Mode::Reduced`] after every call
 /// that changes state, and the last read-only call before the first one, and the end. The
-/// reasoning of `rebind_crash_tests::points` (S5) holds as it is for a crash and a power loss; a
-/// failure at a read-only call takes another error path, which the unreduced run (measured
-/// once, `docs/09-testing.md`) covers.
+/// reasoning of `rebind_crash_tests::points` (S5) holds for the points; a failure at a read-only
+/// call takes another error path, and together with the reduced cuts ([`cuts`]) the reduced
+/// matrix is a sample: the unreduced run (measured, `docs/09-testing.md`) is the claim.
 fn points(k: Kind, fault: Fault, mode: Mode) -> Vec<Option<At>> {
     let (a, r) = trace(k);
     let mut v = Vec::new();
@@ -317,8 +317,9 @@ fn points(k: Kind, fault: Fault, mode: Mode) -> Vec<Option<At>> {
 }
 
 /// The cuts of a domain with `pending` droppable changes: all of them, or (reduced) none, the
-/// first one only, and all. The unreduced run (every cut) is `RERUN_UNREDUCED=1`; it was green
-/// where the reduced one is (`docs/09-testing.md`).
+/// first one only, and all. The reduced cuts are a sample, not an equivalence (a middle cut can
+/// keep a state no other cut keeps); the claim rests on the unreduced run (`RERUN_UNREDUCED=1`,
+/// every cut: 16,212 runs, green, `docs/09-testing.md`), as for the nested probes (review N1).
 fn cuts(pending: usize, mode: Mode) -> Vec<usize> {
     match mode {
         Mode::Full => (0..=pending).collect(),

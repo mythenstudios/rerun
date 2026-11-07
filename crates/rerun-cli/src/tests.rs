@@ -1652,8 +1652,8 @@ fn c_cl1_a_mapped_dot_old_keeps_the_transaction_open_until_it_is_free() {
     );
     assert!(
         s.stdout.contains(&format!(
-            "  a file Rerun replaced is still in use; close the game and any window showing its \
-             folder, then: rerun revert {txn}\n"
+            "  a file Rerun left is still there; rerun revert {txn} deletes it or says why it \
+             stays (close the game and any window showing its folder first)\n"
         )),
         "{}",
         s.stdout
@@ -1669,7 +1669,8 @@ fn c_cl1_a_mapped_dot_old_keeps_the_transaction_open_until_it_is_free() {
     );
     assert!(
         a.stderr.contains(&format!(
-            "transaction {txn} is reverted, but a file Rerun replaced is still in use"
+            "transaction {txn} is reverted, but a file Rerun left is still there; run rerun \
+             revert {txn}, it deletes the file or says why it stays"
         )),
         "{}",
         a.stderr
@@ -1760,7 +1761,7 @@ fn c_cl1_a_rollback_with_a_mapped_dot_old_exits_5() {
     .to_owned();
     assert!(
         r.stderr.contains(&format!(
-            "the apply failed and was rolled back, but a file Rerun replaced is still in use: \
+            "the apply failed and was rolled back, but a file Rerun left is still there: \
              transaction {open} stays open until it is deleted\n"
         )),
         "{}",
@@ -1769,5 +1770,119 @@ fn c_cl1_a_rollback_with_a_mapped_dot_old_exits_5() {
     assert!(r.stderr.contains("  in use, stays for now"), "{}", r.stderr);
     held.lock().unwrap().clear();
     expect(&sys, &["revert", &open, "--yes"], Answer::No, Exit::Report);
+    same(&before, &snap_game(&sys));
+}
+
+/// Review S1 (security, E-C4): a rollback whose `.old` is not Rerun's any more by the time the
+/// cleanup looks (mapped during step 8, then replaced) closes `RolledBack` (exit 4) and reports
+/// it.
+#[test]
+fn c_cl_a_rollback_reports_a_foreign_dot_old() {
+    let sys = build(with_package(), &replace_steps());
+    let hash = hash_of(&expect(&sys, &["plan", STEPS], Answer::No, Exit::Report));
+    let copy = build(with_package(), &replace_steps());
+    let h2 = hash_of(&expect(&copy, &["plan", STEPS], Answer::No, Exit::Report));
+    copy.fake_fs().clear_faults();
+    copy.fake_fs().record_calls(true);
+    expect(&copy, &["apply", &h2, "--yes"], Answer::No, Exit::Report);
+    copy.fake_fs().record_calls(false);
+    let n = copy
+        .fake_fs()
+        .take_calls()
+        .iter()
+        .filter(|c| **c == Prim::FlushDir)
+        .count()
+        - 1;
+    sys.fake_fs().clear_faults();
+    // Mapped at the restore's step 7; at the next flush (the game folder before `RevertDone`)
+    // the mapping goes and someone else's file takes the name.
+    let held: Held = std::sync::Arc::default();
+    let slot = std::sync::Arc::clone(&held);
+    let mut flushes = 0;
+    let mut planted = false;
+    sys.fake_fs().on_step(move |f, ev| {
+        if ev.call == Some(Prim::FlushDir) {
+            flushes += 1;
+            let mut h = slot.lock().unwrap();
+            if !planted && let Some((name, _)) = h.first() {
+                let p = Path::new(GAME).join(name);
+                h.clear();
+                f.remove_abs(&p).unwrap();
+                f.put_file(&p, b"someone else's file").unwrap();
+                planted = true;
+            }
+            return;
+        }
+        if ev.call != Some(Prim::Rename) || flushes < n || planted {
+            return;
+        }
+        #[expect(clippy::disallowed_methods, reason = "test: list the fixture folder")]
+        let Ok(d) = rerun_core::sys::Fs::open_dir(f, Path::new(GAME)) else {
+            return;
+        };
+        let mut h = slot.lock().unwrap();
+        for e in d.read_dir(None).unwrap_or_default() {
+            if e.name.ends_with(".tmp.old") && h.is_empty() {
+                let x = f
+                    .map_image_as(4242, &Path::new(GAME).join(&e.name))
+                    .unwrap();
+                h.push((e.name.clone(), x));
+            }
+        }
+    });
+    sys.fake_fs()
+        .fail_at(Prim::FlushDir, n, rerun_core::sys::SysErrorKind::Other);
+    let r = expect(
+        &sys,
+        &["apply", &hash, "--yes"],
+        Answer::No,
+        Exit::RolledBack,
+    );
+    sys.fake_fs().clear_on_step();
+    sys.fake_fs().clear_faults();
+    assert!(
+        r.stderr
+            .contains("  not Rerun's file, or it cannot be checked as Rerun's; left as it is: "),
+        "{}",
+        r.stderr
+    );
+}
+
+/// Review S1 (senior) / N2 (security): a copy `verify` sees in use (a process holds it with
+/// delete sharing) is asked for, and the revert deletes it.
+#[test]
+fn c_cl_a_copy_in_use_is_asked_for_before_it_may_be_deleted() {
+    let sys = build(with_package(), &replace_steps());
+    let before = snap_game(&sys);
+    let txn = applied(&sys);
+    let held = map_olds(&sys, None);
+    expect(&sys, &["revert", &txn, "--yes"], Answer::No, Exit::Open);
+    sys.fake_fs().clear_on_step();
+    let old = held.lock().unwrap()[0].0.clone();
+    held.lock().unwrap().clear();
+    let scanner = sys
+        .fake_fs()
+        .hold_open_as(
+            4243,
+            &Path::new(GAME).join(&old),
+            rerun_core::sys::contract::Access::READ,
+            rerun_core::sys::contract::Share::RWD,
+        )
+        .unwrap();
+    let r = expect(&sys, &["revert", &txn], Answer::Yes, Exit::Report);
+    drop(scanner);
+    assert_eq!(
+        r.asked,
+        vec![
+            "Everything is reverted. Delete the file Rerun left (it is in use now and may stay)? [y/N]"
+                .to_owned()
+        ]
+    );
+    assert!(
+        r.stdout
+            .contains(&format!("  deleted Rerun's copy: {old}\n")),
+        "{}",
+        r.stdout
+    );
     same(&before, &snap_game(&sys));
 }

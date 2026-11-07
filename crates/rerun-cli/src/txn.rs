@@ -130,7 +130,7 @@ fn hex(sha: &[u8; 32]) -> String {
 
 /// The pending `.old` files as a preview shows them (P2-15, rule 5): what a revert deletes and
 /// what stays; a file already gone is not shown.
-fn cleanup_lines(items: &[PendingOld]) -> Vec<Message<'_>> {
+pub(crate) fn cleanup_lines(items: &[PendingOld]) -> Vec<Message<'_>> {
     items
         .iter()
         .filter_map(|p| {
@@ -151,7 +151,7 @@ fn cleanup_lines(items: &[PendingOld]) -> Vec<Message<'_>> {
 }
 
 /// The `.old` files of `items` that keep the transaction open, by what keeps it.
-fn holding(items: &[PendingOld]) -> (usize, usize) {
+pub(crate) fn holding(items: &[PendingOld]) -> (usize, usize) {
     let n = |s: OldSeen| items.iter().filter(|p| p.seen == s).count();
     (n(OldSeen::InUse), n(OldSeen::Kept))
 }
@@ -314,6 +314,18 @@ fn refusal<E: Write>(r: &Refusal, txn: TxnId, err: &mut Out<E>) -> Exit {
         && matches!(**e, RootError::IdentityMismatch { .. })
     {
         note(err, TxnMsg::IdentityHint { txn });
+    }
+    // P2-15 (N1): no room for another `RevertIntent`; forget always fits.
+    if let Refusal::Journal(e) = r
+        && matches!(
+            **e,
+            JournalError::TooLarge {
+                what: "the records of a transaction",
+                ..
+            }
+        )
+    {
+        note(err, TxnMsg::JournalFull { txn });
     }
     Exit::Refused
 }
@@ -507,11 +519,22 @@ fn run_revert<W: Write, E: Write>(
             .map_or_else(|e| before_change(err, e), |()| Exit::Report));
     }
     // An empty transaction changed nothing: closing it is nothing to ask about.
-    // P2-15: a revert that only cleans up asks before it deletes (nothing to delete: no question).
-    let deletes = v.cleanup.iter().filter(|p| p.seen == OldSeen::Ours).count();
+    // P2-15: a revert that only cleans up asks before it deletes (nothing to delete: no
+    // question). A copy `verify` sees in use may still be deleted (a process holding it with
+    // delete sharing, review S1): it counts too.
+    let ours = v.cleanup.iter().filter(|p| p.seen == OldSeen::Ours).count();
+    let in_use = v
+        .cleanup
+        .iter()
+        .filter(|p| p.seen == OldSeen::InUse)
+        .count();
     if st.state == TxnLine::CleanupPending {
-        if deletes > 0 {
-            confirm(host, yes, TxnMsg::AskCleanup { n: deletes }, err)?;
+        if ours + in_use > 0 {
+            let q = TxnMsg::AskCleanup {
+                n: ours + in_use,
+                in_use,
+            };
+            confirm(host, yes, q, err)?;
         }
     } else if !empty {
         confirm(host, yes, TxnMsg::AskRevert { ops: v.ops.len() }, err)?;
@@ -780,10 +803,10 @@ fn run_forget<W: Write, E: Write>(
         && v.ops.iter().all(|(_, o)| *o != Observed::Foreign)
         && !left_foreign(&st)
     {
-        lines.push(m(if holding(&v.cleanup) == (0, 0) {
-            TxnMsg::RevertIsClean { txn }
-        } else {
-            TxnMsg::FinishCleanup { txn }
+        lines.push(m(match holding(&v.cleanup) {
+            (0, 0) => TxnMsg::RevertIsClean { txn },
+            (0, _) => TxnMsg::FinishKept { txn },
+            _ => TxnMsg::FinishCleanup { txn },
         }));
     }
     lines.push(Message::Blank);

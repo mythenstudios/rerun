@@ -1,7 +1,7 @@
 //! P2-15: the `.old` files a step of Rerun leaves while a process maps them as an image: the
 //! journal names them by sequence (`RevertDone.old_left`), `status` names exactly those, and a
-//! transaction closes only once nothing of Rerun's is left (CL-T1 to CL-T9, the controls K-CL1
-//! and K-CL3; crashes and power losses: `cleanup_crash_tests.rs`).
+//! transaction closes only once nothing of Rerun's is left (CL-T1 to CL-T10, the controls
+//! K-CL1, K-CL3 and K-CL4; crashes and power losses: `cleanup_crash_tests.rs`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -546,4 +546,161 @@ fn cl_b2_a_cleanup_deletion_is_a_change() {
     );
     // Retried, it closes.
     assert_eq!(env.revert(&t).unwrap().closed, Some(Closing::Reverted));
+}
+
+/// CL-T10 (a) as a check (review M1; the control K-CL4 must make it report "deleted next to a
+/// changed file"): `Y.old` mapped, then an update writes another content into the target and
+/// the mapping goes: `verify` and the revert show `Kept`, the transaction stays open, the `.old`
+/// is untouched; deleted by hand it is `Gone` and the transaction closes.
+pub(crate) fn cl_t10_check() -> Vec<String> {
+    let mut v = Vec::new();
+    let (env, _, t, m, _, _) = open_y();
+    let y = Path::new(GAME).join(&m.names()[0]);
+    let target = Path::new(GAME).join("d3d9.dll");
+    let fx = env.sys.fake_fs();
+    fx.remove_abs(&target).unwrap();
+    fx.put_file(&target, b"d3d9 of a game update").unwrap();
+    m.release();
+    let kept = super::tests::read_abs(&env.sys, &y.to_string_lossy());
+    match env.verified(&t) {
+        Ok(x) if matches!(&x.cleanup[..], [p] if p.seen == OldSeen::Kept) => {}
+        other => v.push(format!("CL-T10 verify: {other:?}")),
+    }
+    match env.revert(&t) {
+        Ok(r) if r.closed.is_none() && only(&r, OldSeen::Kept) => {}
+        Ok(r) if r.cleanup.iter().any(|p| p.seen == OldSeen::Deleted) => {
+            v.push(format!("CL-T10 deleted next to a changed file: {r:?}"));
+        }
+        other => v.push(format!("CL-T10 revert: {other:?}")),
+    }
+    if super::tests::try_read_abs(&env.sys, &y.to_string_lossy()).as_deref() != Some(&kept[..]) {
+        v.push("CL-T10 deleted next to a changed file: the .old is gone".to_owned());
+        return v;
+    }
+    if txn_line(&env, &t) != TxnLine::CleanupPending {
+        v.push(format!("CL-T10 status: {:?}", txn_line(&env, &t)));
+    }
+    env.sys.fake_fs().remove_abs(&y).unwrap();
+    match env.revert(&t) {
+        Ok(r) if r.closed == Some(Closing::Reverted) && only(&r, OldSeen::Gone) => {}
+        other => v.push(format!("CL-T10 after the user deleted it: {other:?}")),
+    }
+    v
+}
+
+#[test]
+fn cl_t10_a_copy_next_to_a_target_that_changed_is_kept() {
+    let v = cl_t10_check();
+    assert!(v.is_empty(), "{v:#?}");
+}
+
+/// K-CL4: a cleanup that ignores the target deletes Rerun's copy next to a changed file.
+#[test]
+fn k_cl4_ignoring_the_target_breaks_cl_t10() {
+    super::knob::ignore_target(true);
+    let v = cl_t10_check();
+    super::knob::ignore_target(false);
+    assert!(
+        v.iter()
+            .any(|x| x.contains("deleted next to a changed file")),
+        "{v:#?}"
+    );
+}
+
+/// CL-T10 (b): the INI restore's `.old` mapped, then the game rewrites the INI: kept, open.
+#[test]
+fn cl_t10_an_ini_the_game_rewrote_after_the_revert_keeps_the_copy() {
+    use crate::prim::ini_tests::{INI_TEXT, three};
+    let env = super::ini_tests::ini_env(INI_TEXT);
+    let h = super::reg_tests::plan_all(&env, &[three()]);
+    let t = env.applied(&h);
+    let cfg = super::tests::game(r"cfg");
+    let m = Mapper::arm(&env, &cfg);
+    let r = env.revert(&t).unwrap();
+    Mapper::stop(&env);
+    assert_eq!(r.ops[0].observed, Observed::After, "{r:?}");
+    assert!(r.closed.is_none() && only(&r, OldSeen::InUse), "{r:?}");
+    super::ini_tests::put_ini(&env, b"[Display]\r\nWidth=800\r\n");
+    m.release();
+    let r = env.revert(&t).unwrap();
+    assert!(r.closed.is_none() && only(&r, OldSeen::Kept), "{r:?}");
+    assert_eq!(tmp_in(&env, &cfg).len(), 1, "{:?}", tmp_in(&env, &cfg));
+    assert_eq!(txn_line(&env, &t), TxnLine::CleanupPending);
+}
+
+/// Review N3/N4, pinned: the newest sequence with a temp name decides what the target must hold,
+/// also when it was recorded but never ran (an INI rewrite whose act failed before any change,
+/// then a revert that observed `Before`): Rerun's copy is kept, conservatively, and only a
+/// deletion by hand (or `forget`) ends the transaction.
+#[test]
+fn cl_t10_a_newest_sequence_that_never_ran_keeps_the_copy() {
+    use crate::journal::{Digest, InstanceTag, Journal, Semantic, VerifyBackups};
+    use crate::prim::ini_tests::{INI_TEXT, three};
+    use sha2::Digest as _;
+    let env = super::ini_tests::ini_env(INI_TEXT);
+    let h = super::reg_tests::plan_all(&env, &[three()]);
+    let t = env.applied(&h);
+    let a = app(&env.sys);
+    let j = Journal::new(&a, InstanceTag::fixed(0x77));
+    let x = j.load(&t, VerifyBackups::Length).unwrap().ops[&0]
+        .intent
+        .tmp
+        .clone()
+        .unwrap();
+    // The target holds the old content again, and `X.old` holds it too (left mapped once).
+    super::ini_tests::put_ini(&env, INI_TEXT);
+    let cfg = super::tests::game(r"cfg");
+    let x_old = Path::new(&cfg).join(x.old().as_str());
+    env.sys.fake_fs().put_file(&x_old, INI_TEXT).unwrap();
+    let d = |b: &[u8]| Digest {
+        sha256: sha2::Sha256::digest(b).into(),
+        len: u64::try_from(b.len()).unwrap(),
+    };
+    {
+        let lock = j.lock().unwrap();
+        let mut w = lock.resume(&t).unwrap();
+        let y = w.tmp();
+        let sem = Semantic {
+            from: d(b"the file the game wrote"),
+            to: d(b"the file minus Rerun's keys"),
+        };
+        w.revert_intent(0, Some(y), Some(sem)).unwrap();
+        w.revert_intent(0, None, None).unwrap();
+        w.revert_done(0, Observed::Before, &[0]).unwrap();
+    }
+    let r = env.revert(&t).unwrap();
+    assert!(r.closed.is_none() && only(&r, OldSeen::Kept), "{r:?}");
+    env.sys.fake_fs().remove_abs(&x_old).unwrap();
+    let r = env.revert(&t).unwrap();
+    assert_eq!(r.closed, Some(Closing::Reverted), "{r:?}");
+}
+
+/// Review S1 (senior) and N2 (security): a process that holds the `.old` open with delete
+/// sharing (an indexer, a scanner) shows in `verify` as `InUse` (`users()`), yet the revert's
+/// delete succeeds: the preview must not promise that it stays.
+#[test]
+fn cl_a_dot_old_held_with_delete_sharing_is_in_use_for_verify_and_deleted_by_the_revert() {
+    let (env, _, t, m, before, _) = open_y();
+    let y = Path::new(GAME).join(&m.names()[0]);
+    m.release();
+    let held = env
+        .sys
+        .fake_fs()
+        .hold_open_as(
+            4243,
+            &y,
+            crate::sys::contract::Access::READ,
+            crate::sys::contract::Share::RWD,
+        )
+        .unwrap();
+    let v = env.verified(&t).unwrap();
+    assert!(
+        matches!(&v.cleanup[..], [p] if p.seen == OldSeen::InUse),
+        "{v:?}"
+    );
+    let r = env.revert(&t).unwrap();
+    drop(held);
+    assert_eq!(r.closed, Some(Closing::Reverted), "{r:?}");
+    assert!(only(&r, OldSeen::Deleted), "{r:?}");
+    super::tests::same(&before, &env.snap());
 }

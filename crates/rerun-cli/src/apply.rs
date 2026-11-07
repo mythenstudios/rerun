@@ -10,8 +10,7 @@
 
 use std::io::Write;
 
-use rerun_core::escape;
-use rerun_core::exec::{self, ApplyError, ExecCtx, ExecError, OldSeen, Outcome};
+use rerun_core::exec::{self, ApplyError, ExecCtx, ExecError, Outcome};
 use rerun_core::journal::InstanceTag;
 use rerun_core::plan::{self, PlanHash};
 
@@ -23,6 +22,7 @@ use crate::host::{
 use crate::messages::{Message, TxnMsg};
 use crate::out::Out;
 use crate::preview;
+use crate::txn::{cleanup_lines, holding};
 
 /// Applies and prints (module docs).
 pub fn apply<W: Write, E: Write>(
@@ -105,7 +105,11 @@ fn run<W: Write, E: Write>(
 pub fn failed_apply<E: Write>(e: &ApplyError, err: &mut Out<E>) -> Exit {
     match e {
         ApplyError::Refused(r) => note(err, TxnMsg::Error { error: shown(r) }),
-        ApplyError::RolledBack { txn, cause, .. } => {
+        ApplyError::RolledBack {
+            txn,
+            cause,
+            cleanup,
+        } => {
             note(err, TxnMsg::RolledBack { txn: *txn });
             note(
                 err,
@@ -113,6 +117,10 @@ pub fn failed_apply<E: Write>(e: &ApplyError, err: &mut Out<E>) -> Exit {
                     error: shown(cause),
                 },
             );
+            // P2-15 (E-C4, review S1): what the cleanup deleted or found not Rerun's.
+            for l in cleanup_lines(cleanup) {
+                let _ = err.line(&l);
+            }
         }
         ApplyError::LeftOpen {
             txn,
@@ -151,21 +159,16 @@ pub fn failed_apply<E: Write>(e: &ApplyError, err: &mut Out<E>) -> Exit {
                     error: shown(cause),
                 },
             );
-            for p in cleanup
-                .iter()
-                .filter(|p| matches!(p.seen, OldSeen::InUse | OldSeen::Kept))
-            {
-                let path = escape::path(p.path.as_str());
-                note(
-                    err,
-                    if p.seen == OldSeen::InUse {
-                        TxnMsg::OldInUse { path }
-                    } else {
-                        TxnMsg::OldKept { path }
-                    },
-                );
+            for l in cleanup_lines(cleanup) {
+                let _ = err.line(&l);
             }
-            note(err, TxnMsg::FinishCleanup { txn: *txn });
+            note(
+                err,
+                match holding(cleanup) {
+                    (0, _) => TxnMsg::FinishKept { txn: *txn },
+                    _ => TxnMsg::FinishCleanup { txn: *txn },
+                },
+            );
         }
         other => note(
             err,

@@ -169,13 +169,14 @@ pub enum Refusal {
         /// The transaction.
         txn: TxnId,
     },
-    /// A transaction on an object of this plan is reverted, but a file Rerun replaced is still
-    /// in use, so it stays open until a revert deletes that file (P2-15): it blocks applies on
-    /// its objects and, newest first, the revert of earlier transactions on them.
+    /// A transaction on an object of this plan is reverted, but its journal still names a file
+    /// Rerun left (in use, or kept next to a file that changed: the journal does not say which),
+    /// so it stays open until a revert deletes that file (P2-15): it blocks applies on its
+    /// objects and, newest first, the revert of earlier transactions on them.
     #[error(
-        "transaction {txn} is reverted, but a file Rerun replaced is still in use and stays \
-         until then; close the game and any window showing its folder, then run rerun revert \
-         {txn}"
+        "transaction {txn} is reverted, but a file Rerun left is still there; run rerun revert \
+         {txn}, it deletes the file or says why it stays (close the game and any window showing \
+         its folder first)"
     )]
     CleanupPending {
         /// The transaction.
@@ -393,8 +394,8 @@ pub enum ApplyError {
     /// target that changed since), so the transaction stays open until a later revert deletes
     /// it (P2-15, senior-dev B1): not `Closed`.
     #[error(
-        "apply failed and was rolled back ({txn}): {cause}; a file Rerun replaced is still in \
-         use, the transaction stays open until rerun revert {txn} deletes it"
+        "apply failed and was rolled back ({txn}): {cause}; a file Rerun left is still there, \
+         the transaction stays open until rerun revert {txn} deletes it"
     )]
     CleanupPending {
         /// The transaction.
@@ -643,6 +644,16 @@ pub(crate) mod knob {
         static CLOSE_DESPITE_CLEANUP: Cell<bool> = const { Cell::new(false) };
         static CLEANUP_WITHOUT_HASH: Cell<bool> = const { Cell::new(false) };
         static FLUSH_ONLY_AFTER_DELETE: Cell<bool> = const { Cell::new(false) };
+        static IGNORE_TARGET: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// K-CL4 (P2-15 review M1): the cleanup pass ignores the target (deletes Rerun's copy also
+    /// next to a file that changed since the revert).
+    pub(crate) fn ignore_target(on: bool) {
+        IGNORE_TARGET.with(|s| s.set(on));
+    }
+    pub(crate) fn ignoring_target() -> bool {
+        IGNORE_TARGET.with(Cell::get)
     }
 
     /// K-CL2b (P2-15, senior-dev S1): the cleanup pass flushes only after a deletion of its own.
@@ -795,6 +806,14 @@ fn knob_close_despite_cleanup() -> bool {
 fn knob_flush_only_after_delete() -> bool {
     #[cfg(test)]
     return knob::flushing_only_after_delete();
+    #[cfg(not(test))]
+    false
+}
+
+/// K-CL4 (tests): the cleanup pass ignores the target.
+fn knob_ignore_target() -> bool {
+    #[cfg(test)]
+    return knob::ignoring_target();
     #[cfg(not(test))]
     false
 }
