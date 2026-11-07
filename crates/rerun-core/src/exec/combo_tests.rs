@@ -27,9 +27,10 @@
 //! a journal that names a `.old` left ([`cleanup_named`]) appears only where a mapping was
 //! injected, never in these runs (the control maps one).
 //!
-//! Controls (each one bites): the J6 flush sites switched off ([`CONTROLS`]) and, applied
-//! temporarily to `exec` and not checked in, a flush deduplicated per folder, a recovery that
-//! renames back in another spelling, the parent folder of a revert not marked for the flush.
+//! Controls (each one bites): the J6 flush sites switched off ([`CONTROLS`]) and three test
+//! knobs of `exec::knob` like K1 and K3 (`cm_control_*`): K-CM1 a flush deduplicated per folder,
+//! K-CM2 a recovery that renames back in another spelling, K-CM3 the parent folder of a revert
+//! not marked for the flush.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -39,6 +40,7 @@ use super::Flush;
 use super::Outcome;
 use super::knob as exec_knob;
 use super::rebind_crash_tests::changes_state;
+use super::reg_tests::Reset;
 use super::tests::{Env, NEW, base, finish, game, pkg};
 use crate::journal::{FlushSite, Observed, TxnId, TxnState, knob as journal_knob};
 use crate::path::RelPath;
@@ -791,6 +793,70 @@ fn cm_controls_without_a_flush_the_combinations_fail() {
             "{k:?}: {found:?}"
         );
     }
+}
+
+/// K-CM1: a folder flushed once per run, not before every `RevertDone` of an op in it. The second
+/// op of a folder is then lost by a power loss after `Closed`.
+#[test]
+fn cm_control_k_cm1_a_flush_once_per_folder_loses_the_second_revert() {
+    let _r = Reset(|| exec_knob::flush_once_per_folder(false));
+    exec_knob::flush_once_per_folder(true);
+    let (found, _) = matrix(
+        Kind::TwoReplaceCased,
+        &FAULTS,
+        Moment::Direct,
+        Mode::Reduced,
+        None,
+        Some("Closed durable, revert lost"),
+    );
+    let last = found.last().map_or("", String::as_str);
+    assert!(last.contains("Closed durable, revert lost"), "{found:?}");
+}
+
+/// K-CM2 (A2-B1): a recovery that renames back in another spelling leaves the folder different
+/// from the one before (the snapshot compares names with their case; `differs` adds the spelling
+/// check for the lists of names).
+#[test]
+fn cm_control_k_cm2_a_rename_back_in_another_spelling_is_seen() {
+    let _r = Reset(|| exec_knob::rename_back_upcased(false));
+    exec_knob::rename_back_upcased(true);
+    let (found, _) = matrix(
+        Kind::TwoReplaceCased,
+        &FAULTS,
+        Moment::Direct,
+        Mode::Reduced,
+        None,
+        Some("not identical after recovery"),
+    );
+    let last = found.last().map_or("", String::as_str);
+    assert!(last.contains("not identical after recovery"), "{last}");
+}
+
+/// K-CM3 (review M1 of P2-8): the parent folder of an op's target not marked for the flush
+/// before its `RevertDone`.
+#[test]
+fn cm_control_k_cm3_an_unmarked_parent_loses_a_revert() {
+    let _r = Reset(|| exec_knob::parent_not_marked(false));
+    exec_knob::parent_not_marked(true);
+    let mut found = Vec::new();
+    for k in [
+        Kind::TwoReplaceCased,
+        Kind::StackSameCased,
+        Kind::ReplaceDeep,
+    ] {
+        for moment in [Moment::Direct, Moment::Recovered] {
+            let (f, _) = matrix(k, &FAULTS, moment, Mode::Reduced, None, None);
+            found.extend(f);
+        }
+    }
+    assert!(
+        found
+            .iter()
+            .any(|x| x.contains("Closed durable, revert lost")),
+        "K-CM3 does not bite in the combinations: {} violations",
+        found.len()
+    );
+    eprintln!("K-CM3: {}", found[0]);
 }
 
 /// The calls to interrupt in a list of calls: all, or the ones that change state and the last

@@ -80,6 +80,9 @@ pub(super) struct Dirs<'g> {
     roots: &'g roots::Roots<'g>,
     open: Vec<(u16, RelPath, Box<dyn DirWrite + 'g>)>,
     touched: Vec<(u16, Option<RelPath>)>,
+    /// K-CM1 (tests): the folders flushed already.
+    #[cfg(test)]
+    flushed: Vec<(u16, Option<RelPath>)>,
 }
 
 impl<'g> Dirs<'g> {
@@ -88,6 +91,8 @@ impl<'g> Dirs<'g> {
             roots,
             open: Vec::new(),
             touched: Vec::new(),
+            #[cfg(test)]
+            flushed: Vec::new(),
         }
     }
 
@@ -163,6 +168,13 @@ impl<'g> Dirs<'g> {
     pub(super) fn flush(&mut self) -> SysResult<()> {
         let keys = self.touched.clone();
         for (r, p) in keys {
+            #[cfg(test)]
+            if super::knob::flushing_once_per_folder() {
+                if self.flushed.contains(&(r, p.clone())) {
+                    continue;
+                }
+                self.flushed.push((r, p.clone()));
+            }
             if let Some(d) = self.dir(r, p.as_ref())? {
                 d.flush()?;
             }
@@ -1036,6 +1048,12 @@ pub(super) fn run_action(
                     SysErrorKind::Mismatch,
                     format!("{n}: not the expected content"),
                 )));
+            }
+            #[cfg(test)]
+            if super::knob::renaming_back_upcased() {
+                let up = RelPath::from_segment(&name.as_str().to_ascii_uppercase())
+                    .map_err(|_| e(SysError::new(SysErrorKind::InvalidPath, name.as_str())))?;
+                return g.rename_to(&up).map_err(e);
             }
             g.rename_to(&name).map_err(e)?;
         }

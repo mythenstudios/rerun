@@ -645,6 +645,36 @@ pub(crate) mod knob {
         static CLEANUP_WITHOUT_HASH: Cell<bool> = const { Cell::new(false) };
         static FLUSH_ONLY_AFTER_DELETE: Cell<bool> = const { Cell::new(false) };
         static IGNORE_TARGET: Cell<bool> = const { Cell::new(false) };
+        static FLUSH_ONCE_PER_FOLDER: Cell<bool> = const { Cell::new(false) };
+        static RENAME_BACK_UPCASED: Cell<bool> = const { Cell::new(false) };
+        static PARENT_NOT_MARKED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// K-CM1 (audit A2/A3, `combo_tests`): a folder is flushed once per run, not before every
+    /// `RevertDone` of an op in it.
+    pub(crate) fn flush_once_per_folder(on: bool) {
+        FLUSH_ONCE_PER_FOLDER.with(|s| s.set(on));
+    }
+    pub(crate) fn flushing_once_per_folder() -> bool {
+        FLUSH_ONCE_PER_FOLDER.with(Cell::get)
+    }
+
+    /// K-CM2 (A2-B1, `combo_tests`): a `.old` is renamed back onto the target name in upper
+    /// case instead of the stored spelling.
+    pub(crate) fn rename_back_upcased(on: bool) {
+        RENAME_BACK_UPCASED.with(|s| s.set(on));
+    }
+    pub(crate) fn renaming_back_upcased() -> bool {
+        RENAME_BACK_UPCASED.with(Cell::get)
+    }
+
+    /// K-CM3 (review M1 of P2-8, `combo_tests`): the parent folder of an op's target is not
+    /// marked for the flush before its `RevertDone`.
+    pub(crate) fn parent_not_marked(on: bool) {
+        PARENT_NOT_MARKED.with(|s| s.set(on));
+    }
+    pub(crate) fn leaving_parent_unmarked() -> bool {
+        PARENT_NOT_MARKED.with(Cell::get)
     }
 
     /// K-CL4 (P2-15 review M1): the cleanup pass ignores the target (deletes Rerun's copy also
@@ -806,6 +836,14 @@ fn knob_close_despite_cleanup() -> bool {
 fn knob_flush_only_after_delete() -> bool {
     #[cfg(test)]
     return knob::flushing_only_after_delete();
+    #[cfg(not(test))]
+    false
+}
+
+/// K-CM3 (tests): the parent folder of an op's target is not marked for the flush.
+fn knob_parent_not_marked() -> bool {
+    #[cfg(test)]
+    return knob::leaving_parent_unmarked();
     #[cfg(not(test))]
     false
 }
@@ -996,7 +1034,7 @@ impl<'g> Touched<'g> {
             Target::File { root, path, .. } => {
                 if !flush_skipped(Flush::GameBeforeRevertDone) {
                     self.dirs
-                        .parent(root.0, path, true)
+                        .parent(root.0, path, !knob_parent_not_marked())
                         .map_err(|source| ExecError::Op { op: k, source })?;
                     self.dirs.flush()?;
                 }
