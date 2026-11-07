@@ -337,6 +337,13 @@ pub fn rebind_check(cx: &ExecCtx<'_>, t: &TxnId, lib: &RootPath) -> Result<Rebin
     })
 }
 
+/// Whether `t` holds more than `n` rebinds on disk now; a journal that cannot be read counts as
+/// "maybe" (true): never claim "nothing changed" then.
+fn rebound_now(j: &Journal<'_>, t: &TxnId, n: usize) -> bool {
+    j.load(t, crate::journal::VerifyBackups::Length)
+        .map_or(true, |v| v.rebinds.len() > n)
+}
+
 /// Binds transaction `t` as the user confirmed (`to`, from [`rebind_check`]) and reverts it in
 /// the same run (module docs). Every refusal comes before the `Rebind` record; after it, the
 /// errors of a revert (the transaction stays open and bound). A transaction already bound to
@@ -384,8 +391,10 @@ pub fn revert_rebound(
         dirs: &c.dirs,
     };
     if let Err(e) = w.rebind(&args) {
-        // On disk although its flush failed: the transaction is bound now.
-        if w.rebinds().len() > n {
+        // On disk although the call failed (its flush, or a failure after its rename): the
+        // transaction is bound now. Decided by the writer, else by reading the journal again
+        // under the lock (as a closing entry, security review N1); unreadable counts as bound.
+        if w.rebinds().len() > n || rebound_now(&j, t, n) {
             return Err(ExecError::Journal(e));
         }
         return Err(match e {
