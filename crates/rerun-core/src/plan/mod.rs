@@ -1091,6 +1091,15 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
     Ok(())
 }
 
+/// Where the file ops of a root lie, for [`Object::of_bound`]: its identity and canonical path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileRoot {
+    /// Identity of the folder.
+    pub(crate) id: RootId,
+    /// Its canonical path.
+    pub(crate) path: RootPath,
+}
+
 /// An object a plan's op touches, for stacking (ADR 0019, B-2), by [`Target`]: a file or
 /// directory as root identity and folded path. Two objects overlap if they are the same, or
 /// if one is a directory an op creates and the other lies below it.
@@ -1130,13 +1139,27 @@ impl Object {
     /// outside the plan, is an error, never a missing object (`decode` refuses such a plan
     /// anyway; the caller fails closed).
     pub(crate) fn of(plan: &Plan) -> Result<Vec<Self>, PlanError> {
+        let roots: Vec<FileRoot> = plan
+            .roots
+            .iter()
+            .map(|r| FileRoot {
+                id: r.id,
+                path: r.path.clone(),
+            })
+            .collect();
+        Self::of_bound(plan, &roots)
+    }
+
+    /// As [`Self::of`], but the objects of a file op of root `i` lie in `file_roots[i]` (P2-14:
+    /// a root bound to another folder by a `Rebind`); registry objects always from the plan's
+    /// roots (the values Rerun wrote, user decision E-R4 a).
+    pub(crate) fn of_bound(plan: &Plan, file_roots: &[FileRoot]) -> Result<Vec<Self>, PlanError> {
         plan.ops
             .iter()
             .enumerate()
             .map(|(k, op)| match op.target() {
                 Target::File { root, path, dir } => {
-                    let r = plan
-                        .roots
+                    let r = file_roots
                         .get(usize::from(root.0))
                         .ok_or_else(|| invalid(Some(k), "root index outside the plan's roots"))?;
                     Ok(Self::File {

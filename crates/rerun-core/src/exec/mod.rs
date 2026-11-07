@@ -51,7 +51,13 @@
 //! `RevertIntent`). Before a revert and `verify`, a recorded head is bound to its backups
 //! (`ini::binds`: `Blocked` otherwise). `verify` and the report carry the state of each of
 //! Rerun's keys ([`Detail`]).
+//!
+//! Rebinds (P2-14): a recorded head is never rewritten; the `Rebind` records of a transaction
+//! bind its roots (`bind`), checked against the head on every revert, `verify` and stacking
+//! (`Blocked` otherwise). A binding acts only where a root is opened: the file ops, D4 and the
+//! file objects of stacking; registry locations come from the head.
 
+mod bind;
 mod file;
 mod ini;
 mod reg;
@@ -63,13 +69,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub use status::{OpState, OpStatus, Status, TxnLine, TxnStatus, status, txn_status};
 
+use bind::Bindings;
 use file::Mode;
 
 use crate::detect::steam::AppState;
 use crate::escape::Shown;
 use crate::journal::{
     Before, Closing, InstanceTag, IntentRec, Journal, JournalError, Listing, Observed, OpLog,
-    Reverting, Semantic, TxnId, TxnState, TxnWriter,
+    RebindRec, Reverting, Semantic, TxnId, TxnState, TxnWriter,
 };
 use crate::path::RelPath;
 use crate::plan::{self, Object, Op, Plan, PlanError, PlanHash, Target};
@@ -906,7 +913,7 @@ pub fn check(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<usize, Refusal> {
     let j = Journal::new(cx.app, cx.tag);
     let hold = j.hold().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
-    let stores = roots::open_stores(cx, &plan);
+    let stores = roots::open_stores(cx, &Bindings::head(&plan));
     let roots = preflight(cx, &plan, &j, &listing, &stores)?;
     drop(roots);
     drop(hold);
@@ -927,7 +934,7 @@ fn preflight<'g>(
 ) -> Result<roots::Roots<'g>, Refusal> {
     let objects = Object::of(plan).map_err(Refusal::Plan)?;
     stack::for_apply(j, listing, &objects)?;
-    let roots = roots::Roots::all(cx, plan, stores)?;
+    let roots = roots::Roots::all(cx, plan, &Bindings::head(plan), stores)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
     roots::main_exe_present(plan, &roots)?;
     roots::game_closed(plan, &roots, &all)?;
@@ -947,7 +954,7 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
-    let stores = roots::open_stores(cx, &plan);
+    let stores = roots::open_stores(cx, &Bindings::head(&plan));
     let roots = preflight(cx, &plan, &j, &listing, &stores)?;
     let mut w = lock.begin(bytes.bytes()).map_err(Refusal::from)?;
     let txn = *w.id();
@@ -1169,13 +1176,14 @@ fn revert_listed(listing: &Listing, t: &TxnId) -> Result<(), Refusal> {
 }
 
 /// The head part of a revert's checks: the recorded head decodes (recorded rules), the records
-/// fit it, and every recorded `IniValue` binds to its backup.
+/// fit it, every recorded `IniValue` binds to its backup, and the rebinds fit the head (P2-14).
 fn revert_plan(
     t: &TxnId,
     head: &[u8],
     ops: &BTreeMap<u16, OpLog>,
+    rebinds: &[RebindRec],
     before: &ini::BeforeBytes<'_>,
-) -> Result<Plan, Refusal> {
+) -> Result<(Plan, Bindings), Refusal> {
     let blocked = || Refusal::Blocked { txn: *t };
     let plan = decode_head(head).map_err(|_| blocked())?;
     if !records_fit(&plan, ops) {
@@ -1185,23 +1193,29 @@ fn revert_plan(
     if !ini::binds(&plan, ops, before).map_err(Refusal::from)? {
         return Err(blocked());
     }
-    Ok(plan)
+    let b = Bindings::of(&plan, rebinds).ok_or_else(blocked)?;
+    Ok((plan, b))
 }
 
 /// The rest of a revert's checks before its first record: LIFO against later transactions,
 /// each root on its own, the game closed. The roots stay open for the revert.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the one chain of a revert's checks"
+)]
 fn revert_roots<'g>(
     cx: &ExecCtx<'g>,
     plan: &Plan,
+    b: &Bindings,
     j: &Journal<'_>,
     listing: &Listing,
     t: &TxnId,
     ops: &BTreeMap<u16, OpLog>,
     stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
 ) -> Result<roots::Roots<'g>, Refusal> {
-    let objects = Object::of(plan).map_err(|_| Refusal::Blocked { txn: *t })?;
+    let objects = b.objects(plan).map_err(|_| Refusal::Blocked { txn: *t })?;
     stack::for_revert(j, listing, t, &objects)?;
-    let roots = roots::Roots::each(cx, plan, stores)?;
+    let roots = roots::Roots::each(cx, b, stores)?;
     let intended: Vec<u16> = ops.keys().copied().collect();
     roots::game_closed(plan, &roots, &intended)?;
     Ok(roots)
@@ -1231,9 +1245,9 @@ pub fn revert_check(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), Refusal> {
         .into());
     };
     let before = |k: u16, d: &crate::journal::Digest, max: u64| j.read_backup(t, k, d, max);
-    let plan = revert_plan(t, head, &v.ops, &before)?;
-    let stores = roots::open_stores(cx, &plan);
-    let roots = revert_roots(cx, &plan, &j, &listing, t, &v.ops, &stores)?;
+    let (plan, b) = revert_plan(t, head, &v.ops, &v.rebinds, &before)?;
+    let stores = roots::open_stores(cx, &b);
+    let roots = revert_roots(cx, &plan, &b, &j, &listing, t, &v.ops, &stores)?;
     drop(roots);
     drop(hold);
     Ok(())
@@ -1274,9 +1288,9 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     revert_listed(&listing, t)?;
     let mut w = lock.resume(t).map_err(Refusal::from)?;
     let before = |k: u16, _: &crate::journal::Digest, max: u64| w.before_bytes(k, max);
-    let plan = revert_plan(t, w.head(), w.ops(), &before)?;
-    let stores = roots::open_stores(cx, &plan);
-    let roots = revert_roots(cx, &plan, &j, &listing, t, w.ops(), &stores)?;
+    let (plan, b) = revert_plan(t, w.head(), w.ops(), w.rebinds(), &before)?;
+    let stores = roots::open_stores(cx, &b);
+    let roots = revert_roots(cx, &plan, &b, &j, &listing, t, w.ops(), &stores)?;
     let mut touched = Touched::new(cx.sys, &roots);
     let written = revert_records(w.ops());
     let (ops, halted) = match revert_loop(
@@ -1344,8 +1358,9 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     if !ini::binds(&plan, &v.ops, &before)? {
         return Err(blocked());
     }
-    let stores = roots::open_stores(cx, &plan);
-    let roots = roots::Roots::each(cx, &plan, &stores)?;
+    let b = Bindings::of(&plan, &v.rebinds).ok_or_else(blocked)?;
+    let stores = roots::open_stores(cx, &b);
+    let roots = roots::Roots::each(cx, &b, &stores)?;
     let mut touched = Touched::new(cx.sys, &roots);
     verify_ops(&plan, &mut touched, &roots, &v.ops)
 }

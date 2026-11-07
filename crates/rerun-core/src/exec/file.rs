@@ -13,7 +13,9 @@
 //!   (`create_dir` returned an ID: that ID; `AlreadyExists`: foreign, never removed), the
 //!   recovery removes an empty directory by its current ID (D1; a foreign empty directory of
 //!   the same name created in the window between the intent and the crash is the accepted
-//!   rest risk, `docs/06-security.md`); anything else `Foreign`.
+//!   rest risk, `docs/06-security.md`); anything else `Foreign`. In a root a `Rebind` bound to
+//!   another folder (P2-14), the file ID its record names for the op is the proof (none: only a
+//!   missing folder is `Before`, anything else `Foreign`; user decision E-R2 a).
 //! - `CreateFile` (`X` its temp name): target missing → `Before`, `X` deleted; target `h1` →
 //!   `After`, deleted (expected `h1`), `X` left; anything else `Foreign`, `X` deleted unless the
 //!   target holds `h1`. `AlreadyExists` from `create_new` in the same run is foreign.
@@ -32,6 +34,7 @@
 
 use std::collections::BTreeMap;
 
+use super::bind::Proof;
 use super::{Acted, ExecCtx, ExecError, Hint, roots};
 use crate::fold::fold;
 use crate::journal::{Before, BeforeArg, Digest, Observed, OpLog, Reverting, Semantic, TxnWriter};
@@ -86,6 +89,11 @@ impl<'g> Dirs<'g> {
             open: Vec::new(),
             touched: Vec::new(),
         }
+    }
+
+    /// How the created folders of `root` are proven (P2-14).
+    fn proof(&self, root: u16) -> &'g Proof {
+        self.roots.proof(root)
     }
 
     /// The write handle of `root`; the revert halted before any file op of a root that
@@ -576,16 +584,22 @@ pub(super) fn observe(
                 Vec::new()
             };
             let seen = see_dir(parent, &name, &allowed).map_err(&e)?;
-            let proven = log.done.and_then(|d| d.file_id).or(match hint {
+            let done = log.done.and_then(|d| d.file_id).or(match hint {
                 Some(Hint::Dir(id)) => Some(id),
                 _ => None,
             });
+            // P2-14 (E-R2 a): in a rebound root the file ID of the `Rebind` record is the proof
+            // (none: only a missing folder fits).
+            let (proven, find) = match dirs.proof(root) {
+                Proof::Done => (done, mode != Mode::Rollback),
+                Proof::Rebound(ids) => (ids.get(&k).copied(), false),
+            };
             Ok(match seen {
                 DirSeen::Absent => Seen::new(Observed::Before),
                 DirSeen::Dir { .. } if hint == Some(Hint::Foreign) => Seen::new(Observed::Foreign),
                 DirSeen::Dir { id, empty } => {
                     // D1: without proof, the recovery takes the directory it finds.
-                    let want = proven.or((mode != Mode::Rollback).then_some(id));
+                    let want = proven.or(find.then_some(id));
                     if want == Some(id) && empty {
                         Seen::new(Observed::After).act(Action::RemoveDir(id))
                     } else {

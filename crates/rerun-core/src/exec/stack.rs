@@ -2,8 +2,13 @@
 //! senior-dev conditions 3 and 6). Only the listing sees a duplicate `seq`, so every decision
 //! starts from it; the head of a transaction that matters is then loaded once, and its state
 //! and head come from that one load, whose head hash must equal the listing's.
+//!
+//! Rebinds (P2-14, user decisions E-R3 and E-R6): a transaction with a `Rebind` counts as open
+//! (a revert has begun), its objects lie at the head's roots and at the bound folders until it
+//! is closed, and rebinds that do not fit the head make it `Blocked` (`Bindings::of`).
 
 use super::Refusal;
+use super::bind::Bindings;
 use crate::journal::{Journal, Listed, Listing, TxnId, TxnState, VerifyBackups};
 use crate::plan::{Object, overlap};
 
@@ -16,7 +21,7 @@ enum Class {
     Blocked,
     /// Applied and not reverting: later applies may stack on it.
     Active(Vec<Object>),
-    /// Open, or applied with a revert begun (condition 3).
+    /// Open, or applied with a revert begun (condition 3) or a rebind recorded (P2-14).
     Open(Vec<Object>),
     /// Damaged with a usable head (P2-13 review S-A/S-d): only forget closes it, so it blocks
     /// every apply and every earlier revert on its objects as `Blocked` (one text for all of
@@ -50,7 +55,10 @@ fn classify(j: &Journal<'_>, l: &Listed) -> Class {
     let Ok(p) = super::decode_head(head) else {
         return Class::Blocked;
     };
-    let Ok(objs) = Object::of(&p) else {
+    let Some(b) = Bindings::of(&p, &full.rebinds) else {
+        return Class::Blocked;
+    };
+    let Ok(objs) = b.objects(&p) else {
         return Class::Blocked;
     };
     match &full.state {
@@ -58,7 +66,11 @@ fn classify(j: &Journal<'_>, l: &Listed) -> Class {
         _ if damaged => Class::Damaged(objs),
         TxnState::Damaged(_) => Class::Damaged(objs),
         TxnState::Open => Class::Open(objs),
-        TxnState::Applied if full.ops.values().any(|o| !o.reverts.is_empty()) => Class::Open(objs),
+        TxnState::Applied
+            if full.ops.values().any(|o| !o.reverts.is_empty()) || !full.rebinds.is_empty() =>
+        {
+            Class::Open(objs)
+        }
         TxnState::Applied => Class::Active(objs),
         TxnState::Closed(_) | TxnState::Empty => Class::Ignore,
     }

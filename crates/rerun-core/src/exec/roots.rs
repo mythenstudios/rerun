@@ -21,26 +21,29 @@
 //!
 //! The revert loop halts at the newest file op whose root cannot run file ops, without a
 //! record (`exec::Halt`).
+//!
+//! Every root is opened where it is bound (`exec::bind`, P2-14): the head's root, or the folder
+//! the last `Rebind` of that root names; messages name the bound path.
 
+use super::bind::{Binding, Bindings, Proof};
 use super::{ExecCtx, Refusal, op_ix};
 use crate::detect::steam::{AppState, app_manifest};
 use crate::escape;
-use crate::path::RelPath;
-use crate::plan::{ContentRef, Op, Plan, PlanOrigin, PlanRoot, Target};
+use crate::path::{RelPath, RootPath};
+use crate::plan::{ContentRef, Op, Plan, PlanOrigin, Target};
 use crate::policy::registry::RegSlot;
 use crate::policy::root::{AppSub, GameDir, RootError, StoreDir};
 use crate::prim::file_install::{hash_file, open_package};
 use crate::sys::fs::FileGuard;
 use crate::sys::{DirWrite, SysErrorKind};
 
-/// The store of each Steam root (`None` for a manual one), reopened and checked by identity;
-/// an error stays with its root.
+/// The store of each Steam root as bound (`None` for a manual one), reopened and checked by
+/// identity; an error stays with its root.
 pub(super) fn open_stores<'s>(
     cx: &ExecCtx<'s>,
-    plan: &Plan,
+    b: &Bindings,
 ) -> Vec<Option<Result<StoreDir<'s>, RootError>>> {
-    plan.roots
-        .iter()
+    b.iter()
         .map(|r| match &r.origin {
             PlanOrigin::Steam {
                 store, store_id, ..
@@ -105,9 +108,13 @@ enum Slot<'g> {
     Absent(NoFiles),
 }
 
-/// The roots of a plan as reopened, by index.
+/// The roots of a plan as reopened, by index, where they are bound (P2-14).
 pub(super) struct Roots<'g> {
     slots: Vec<Slot<'g>>,
+    /// The bound path of each root (messages).
+    paths: Vec<RootPath>,
+    /// How the created folders of each root are proven.
+    proofs: Vec<Proof>,
 }
 
 /// Why a root did not open: gone, or undecided (E3).
@@ -122,6 +129,7 @@ impl<'g> Roots<'g> {
     pub(super) fn all(
         cx: &ExecCtx<'g>,
         plan: &Plan,
+        b: &Bindings,
         stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
     ) -> Result<Self, Refusal> {
         for s in stores.iter().flatten() {
@@ -129,8 +137,8 @@ impl<'g> Roots<'g> {
                 return Err(e.clone().into());
             }
         }
-        let mut slots = Vec::with_capacity(plan.roots.len());
-        for (i, (r, store)) in plan.roots.iter().zip(stores).enumerate() {
+        let mut slots = Vec::with_capacity(b.len());
+        for (i, (r, store)) in b.iter().zip(stores).enumerate() {
             let game = open_root(cx, r, store.as_ref()).map_err(|f| match f {
                 Failed::Absent(n) => n.refusal(),
                 Failed::Undecided(r) => r,
@@ -143,17 +151,17 @@ impl<'g> Roots<'g> {
             }
             slots.push(Slot::Open { game, no_files });
         }
-        Ok(Self { slots })
+        Ok(Self::new(slots, b))
     }
 
     /// Revert and verify: each root on its own (module docs, E3); an undecided one refuses.
     pub(super) fn each(
         cx: &ExecCtx<'g>,
-        plan: &Plan,
+        b: &Bindings,
         stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
     ) -> Result<Self, Refusal> {
-        let mut slots = Vec::with_capacity(plan.roots.len());
-        for (r, store) in plan.roots.iter().zip(stores) {
+        let mut slots = Vec::with_capacity(b.len());
+        for (r, store) in b.iter().zip(stores) {
             let slot = match open_root(cx, r, store.as_ref()) {
                 Ok(game) => Slot::Open {
                     no_files: no_files(&game),
@@ -177,7 +185,30 @@ impl<'g> Roots<'g> {
                 }
             }
         }
-        Ok(Self { slots })
+        Ok(Self::new(slots, b))
+    }
+
+    fn new(slots: Vec<Slot<'g>>, b: &Bindings) -> Self {
+        Self {
+            slots,
+            paths: b.iter().map(|r| r.path.clone()).collect(),
+            proofs: b.iter().map(|r| r.proof.clone()).collect(),
+        }
+    }
+
+    /// How the created folders of root `i` are proven (P2-14).
+    pub(super) fn proof(&self, i: u16) -> &Proof {
+        self.proofs.get(usize::from(i)).unwrap_or(&Proof::Done)
+    }
+
+    /// `<root>\<path>` for a message, with the bound path of the root.
+    pub(super) fn shown(&self, root: usize, p: &RelPath) -> escape::Shown<'static> {
+        let base = self
+            .paths
+            .get(root)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        escape::path(&format!(r"{base}\{p}")).into_owned()
     }
 
     /// The open root `i` (D4 asks it), `None` if it is absent.
@@ -228,9 +259,9 @@ pub(super) fn main_exe_present(plan: &Plan, roots: &Roots<'_>) -> Result<(), Ref
                 if md.kind == crate::sys::fs::EntryKind::File
                     && md.reparse.is_none()
                     && !md.restricted => {}
-            Ok(_) => return Err(Refusal::MainExe(shown(plan, i, m))),
+            Ok(_) => return Err(Refusal::MainExe(roots.shown(i, m))),
             Err(e) if matches!(e.kind, SysErrorKind::NotFound | SysErrorKind::ReparsePoint) => {
-                return Err(Refusal::MainExe(shown(plan, i, m)));
+                return Err(Refusal::MainExe(roots.shown(i, m)));
             }
             Err(e) => return Err(e.into()),
         }
@@ -254,7 +285,7 @@ fn no_files(game: &GameDir<'_>) -> Option<NoFiles> {
 /// absent or undecided (module docs).
 fn open_root<'g>(
     cx: &ExecCtx<'g>,
-    r: &PlanRoot,
+    r: &Binding,
     store: Option<&'g Result<StoreDir<'g>, RootError>>,
 ) -> Result<GameDir<'g>, Failed> {
     // `NotFound` here is the open of a missing path; `policy::root` turns the races after
@@ -332,19 +363,9 @@ pub(super) fn write_handle<'g>(game: &'g GameDir<'_>) -> crate::sys::SysResult<&
     game.dir_write()
 }
 
-/// `<root>\<path>` for a message.
-fn shown(plan: &Plan, root: usize, p: &RelPath) -> escape::Shown<'static> {
-    let base = plan
-        .roots
-        .get(root)
-        .map(|r| r.path.to_string())
-        .unwrap_or_default();
-    escape::path(&format!(r"{base}\{p}")).into_owned()
-}
-
 /// `p` has no users, or does not exist (a directory or reparse point is no file to ask); an
 /// absent root has nothing to ask.
-fn unused(plan: &Plan, roots: &Roots<'_>, root: usize, p: &RelPath) -> Result<(), Refusal> {
+fn unused(roots: &Roots<'_>, root: usize, p: &RelPath) -> Result<(), Refusal> {
     let Some(g) = roots.game(root) else {
         return Ok(());
     };
@@ -353,16 +374,16 @@ fn unused(plan: &Plan, roots: &Roots<'_>, root: usize, p: &RelPath) -> Result<()
     // ask; a file that cannot be asked refuses (fail closed, review N3).
     match g.dir().metadata(p)? {
         None => return Ok(()),
-        Some(m) if m.restricted => return Err(Refusal::Unchecked(shown(plan, root, p))),
+        Some(m) if m.restricted => return Err(Refusal::Unchecked(roots.shown(root, p))),
         Some(m) if m.kind != crate::sys::fs::EntryKind::File => return Ok(()),
         Some(_) => {}
     }
     match g.dir().users(p) {
         Ok(pids) if pids.is_empty() => Ok(()),
-        Ok(_) => Err(Refusal::Busy(shown(plan, root, p))),
+        Ok(_) => Err(Refusal::Busy(roots.shown(root, p))),
         Err(e) if e.kind == SysErrorKind::NotFound => Ok(()),
         Err(e) if e.kind == SysErrorKind::AccessDenied => {
-            Err(Refusal::Unchecked(shown(plan, root, p)))
+            Err(Refusal::Unchecked(roots.shown(root, p)))
         }
         Err(e) => Err(e.into()),
     }
@@ -380,18 +401,18 @@ pub(super) fn game_closed(plan: &Plan, roots: &Roots<'_>, ops: &[u16]) -> Result
                 root,
                 path,
                 dir: false,
-            } => unused(plan, roots, usize::from(root.0), path)?,
+            } => unused(roots, usize::from(root.0), path)?,
             // P2-11: the executable a compatibility layer is for (not always the main one).
             Target::Value {
                 slot: RegSlot::CompatLayers { root, exe },
-            } => unused(plan, roots, usize::from(root.0), exe)?,
+            } => unused(roots, usize::from(root.0), exe)?,
             // A registry op has no file to ask: the main executables below are (E2).
             Target::File { dir: true, .. } | Target::Key { .. } | Target::Value { .. } => {}
         }
     }
     for (i, r) in plan.roots.iter().enumerate() {
         if let Some(m) = &r.main_exe {
-            unused(plan, roots, i, m)?;
+            unused(roots, i, m)?;
         }
     }
     Ok(())

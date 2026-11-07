@@ -503,13 +503,6 @@ impl RevertWriter<'_> {
     }
 
     /// The `Rebind` records so far, in order (P2-14).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "P2-14: exec writes and reads rebinds from the next commit on"
-        )
-    )]
     pub(crate) fn rebinds(&self) -> &[RebindRec] {
         self.t.m.rebinds()
     }
