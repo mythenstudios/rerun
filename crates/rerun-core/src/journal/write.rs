@@ -439,6 +439,13 @@ impl<'l> Txn<'l> {
             // The orphan backup of an op that never got its intent stays allowed (B1).
             self.pending = None;
         }
+        // The writer refuses what `exec` would refuse on reading (J1): a semantic revert names
+        // its temp name, and `from` differs from `to` (security review S-1).
+        if sem.is_some_and(|s| tmp.is_none() || s.from == s.to) {
+            return Err(JournalError::Order(
+                "a semantic revert without its temp name or with from equal to to",
+            ));
+        }
         // `from`/`to`: a semantic revert (P2-12, `IniValue` only; `exec` checks the op kind).
         let rec = Record::RevertIntent {
             op,
@@ -465,24 +472,7 @@ impl<'l> Txn<'l> {
                 }
                 Ok(v.clone())
             }
-            Some(Before::Bin(d)) => {
-                if d.len > max {
-                    return Err(too_large());
-                }
-                let bytes = match self.dir.read_limited(&names::backup_name(op), d.len) {
-                    Ok(b) => b,
-                    Err(e) if e.kind == SysErrorKind::TooLarge => {
-                        return Err(JournalError::BackupMismatch(op));
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                let sha: [u8; 32] = Sha256::digest(&bytes).into();
-                let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                if sha != d.sha256 || len != d.len {
-                    return Err(JournalError::BackupMismatch(op));
-                }
-                Ok(bytes)
-            }
+            Some(Before::Bin(d)) => super::read_backup(&*self.dir, op, d, max),
         }
     }
 }

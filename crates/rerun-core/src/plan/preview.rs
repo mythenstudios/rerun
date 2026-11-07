@@ -59,6 +59,28 @@ same value as Rerun is set back too. A file that is gone at the time of the reve
 The main executable must be the program that writes the file when it exits (with a launcher, \
 the game itself)";
 
+/// The old state of a key for display (senior-dev nit): the untrusted value as `Shown`, or a word
+/// of Rerun's, never mixed in one string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IniOldShown {
+    /// The value (through `escape::text`).
+    Value(Shown<'static>),
+    /// The key was missing.
+    Missing,
+    /// The section was missing.
+    NewSection,
+}
+
+impl fmt::Display for IniOldShown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Value(v) => write!(f, "{v}"),
+            Self::Missing => f.write_str("missing"),
+            Self::NewSection => f.write_str("missing (new section)"),
+        }
+    }
+}
+
 /// One key of an `edit ini` op for display: every part through `escape::text`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IniShown {
@@ -66,8 +88,8 @@ pub struct IniShown {
     pub section: Shown<'static>,
     /// The key.
     pub key: Shown<'static>,
-    /// The old value, or `missing` / `new section` (built by Rerun).
-    pub old: String,
+    /// The old value.
+    pub old: IniOldShown,
     /// The new value.
     pub new: Shown<'static>,
 }
@@ -356,9 +378,11 @@ pub fn preview(p: &Plan) -> Preview {
                         section: escape::text(e.section.as_str()).into_owned(),
                         key: escape::text(e.key.as_str()).into_owned(),
                         old: match &e.old {
-                            Old::Value(v) => escape::text(v.as_str()).to_string(),
-                            Old::NoKey => "missing".to_owned(),
-                            Old::NoSection => "missing (new section)".to_owned(),
+                            Old::Value(v) => {
+                                IniOldShown::Value(escape::text(v.as_str()).into_owned())
+                            }
+                            Old::NoKey => IniOldShown::Missing,
+                            Old::NoSection => IniOldShown::NewSection,
                         },
                         new: escape::text(e.new.as_str()).into_owned(),
                     })

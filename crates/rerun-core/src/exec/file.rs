@@ -692,9 +692,21 @@ impl State {
 /// one `Si` (`Yi`): a restore (`h1` → `h0`) or, with `from`/`to` recorded, a semantic rewrite.
 #[derive(Debug, Clone)]
 pub(super) struct Seq {
+    pub(super) kind: SeqKind,
     pub(super) tmp: TmpName,
     pub(super) from: State,
     pub(super) to: State,
+}
+
+/// What a sequence is (senior-dev nit: explicit, not derived from the attributes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SeqKind {
+    /// `S0`, the apply.
+    Apply,
+    /// A restore from the backup.
+    Restore,
+    /// A semantic rewrite with recorded `from`/`to`.
+    Rewrite,
 }
 
 /// Where the deciding sequence stands.
@@ -743,6 +755,7 @@ pub(super) fn sequences(log: &OpLog, from0: State, to0: State) -> Vec<Seq> {
             let tmp = r.tmp.clone()?;
             Some(match (r.from, r.to) {
                 (Some(f), Some(t)) => Seq {
+                    kind: SeqKind::Rewrite,
                     tmp,
                     from: State {
                         sha256: f.sha256,
@@ -756,6 +769,7 @@ pub(super) fn sequences(log: &OpLog, from0: State, to0: State) -> Vec<Seq> {
                     },
                 },
                 _ => Seq {
+                    kind: SeqKind::Restore,
                     tmp,
                     from: to0,
                     to: from0,
@@ -913,6 +927,7 @@ fn replace_seen(
         attrs: Some(*attrs),
     };
     let s0 = Seq {
+        kind: SeqKind::Apply,
         tmp: x.clone(),
         from: h0,
         to: h1,

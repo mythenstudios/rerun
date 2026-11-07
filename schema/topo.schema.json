@@ -568,7 +568,7 @@
       }
     },
     "iniSet": {
-      "description": "Keys of an existing INI file of the game folder (docs/02-topo-format.md, ADR 0021, ADR 0020 amendment P2-12). The schema checks the form; the rule for new values (none of \\ / : % ; #, no ..), unique sections and keys, desktop.ini and the file itself are checked by the loader and the planner.",
+      "description": "Keys of an existing INI file of the game folder (docs/02-topo-format.md, ADR 0021, ADR 0020 amendment P2-12). The schema checks the form; the rule for new values (none of \\ / : % ; # [ ], no ..), unique sections and keys, desktop.ini and the file itself are checked by the loader and the planner.",
       "type": "object",
       "additionalProperties": false,
       "required": [

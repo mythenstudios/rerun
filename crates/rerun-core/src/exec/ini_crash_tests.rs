@@ -595,7 +595,7 @@ fn m1_check() -> Vec<String> {
                         Ok(r) => {
                             let kept = r.ops.iter().any(|o| {
                                 o.observed == Observed::Foreign
-                                    && matches!(&o.detail, Some(Detail::Ini { previous: Some(p), .. })
+                                    && matches!(&o.detail, Some(Detail::Ini { before_step: Some(super::BeforeStep { step: super::RerunStep::Apply, file: p }), .. })
                                         if try_read_abs(&env.sys, &super::tests::game(&format!(r"cfg\{p}")))
                                             .as_deref() == Some(INI_TEXT))
                             });

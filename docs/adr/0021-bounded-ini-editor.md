@@ -14,7 +14,7 @@ No crate offers a byte-preserving, bounded editor with a documented dialect (`ru
 - Every byte `exec` writes into an INI file comes from `edit`, `unedit` or the hashed backup; `exec` never forms INI text itself.
 
 ### Dialect (fail closed at Rerun's targets, tolerant elsewhere)
-- **Size:** at most 1 MiB (`MAX_INI_BYTES`), read bounded.
+- **Size:** at most 1 MiB (`MAX_INI_BYTES`), read bounded, and at most 65,536 lines (`MAX_LINES`: the memory of a scan, about 64 bytes per line; security review nit 1). What `edit` and `unedit` return is bounded the same way: putting long old values back over a file the game filled up can pass 1 MiB, and such a result is `TooLarge` (security review S-1: the revert then finds `Foreign` and records no rewrite the reader would refuse).
 - **Encoding:** `EF BB BF` is a UTF-8 BOM, kept as a prefix. Anything else without a NUL byte is ASCII-compatible text (UTF-8 or an ANSI code page) handled byte by byte; the structure is ASCII only (`[ ] = ; #`, CR, LF, space, tab). Refused: a UTF-16 BOM (`FF FE`, `FE FF`; user decision E3 b: UTF-16 LE comes with `UserData` in phase 4), any NUL byte (BOM-less UTF-16, UTF-32, binary). With a DBCS code page a trail byte can equal `[` or `]`; that only affects non-ASCII section names, never Rerun's targets (ASCII names).
 - **Lines:** CRLF and LF, mixed too; a CR without LF is refused. A file that ends with a line ending has no empty last line.
 - **Kinds**, after optional spaces and tabs: blank; comment (`;` or `#`); header: `[` and a `]` later on the line, always a section boundary, its name the text up to the first `]` (senior-dev S3); key line (holds `=`: key = the trimmed text before the first `=`, value = the trimmed rest; no inline comments, quotes not interpreted, as `GetPrivateProfileString`); anything else an "other" line. A line starting with `[` without `]` is refused anywhere: section boundaries would be unclear.
@@ -23,7 +23,7 @@ No crate offers a byte-preserving, bounded editor with a documented dialect (`ru
 
 ### Names and values
 - `IniName`: `[A-Za-z0-9_. -]`, 1 to 64, no space at either end. `IniText`: printable ASCII `0x20`–`0x7E`, 0 to 128 characters, no space at either end; serde only through the parsers (the form).
-- `IniText::check_new` (a rule in force now, `plan::Rules::Current` only): none of `\ / : % ; #` and no `..`. Syntactic only: whether a value is sensible for a game is curation (`docs/06-security.md`, row 1).
+- `IniText::check_new` (a rule in force now, `plan::Rules::Current` only): none of `\ / : % ; # [ ]` and no `..`. Syntactic only: whether a value is sensible for a game is curation (`docs/06-security.md`, row 1).
 - An edit list (`check_edits`, both rule sets): 1 to 8 edits, in canonical order (folded section, then folded key, byte by byte) without a folded duplicate; a section spelled one way, its edits all `NoSection` or none; every new value not empty (an empty value has no span to find again) and other than its old one.
 - `IniEdit { section, key, old: Old::{Value, NoKey, NoSection}, new }` on the wire `{"section":"Display","key":"Width","old":{"value":"1280"},"new":"1920"}` (`"old":"no_key"`, `"old":"no_section"`).
 
@@ -41,10 +41,10 @@ Per edit by `KeyState`: `New` (the value is exactly Rerun's) puts the old value 
 ### Properties (tests)
 - **I1:** `unedit(edit(f)).bytes == f` and every key `New`, exhaustively over a small alphabet (line kinds × line endings × BOM × last line with or without a line ending × every edit set the planner could make); `edit` changes only value spans and inserts lines.
 - **I2:** a change of someone else outside Rerun's targets stays: `unedit(g(edit(f))) == g(f)`.
-- **S5:** random bytes (many of them `[ ] = ; CR LF`) never panic; whatever `edit` accepts comes back exactly; `unedit` changes no line but Rerun's.
+- **S5:** random bytes (many of them `[ ] = ; CR LF`) never panic; whatever `edit` accepts comes back exactly; every result of `unedit` equals an independent reference assembled from the lines (security review S-2), also with old and new values of unequal length.
 
 ### Narrowing is a format change
-The dialect decides which recorded edits can be reverted. A narrower dialect (refusing more) in a later version would make applied transactions unrevertable: it is a format change with a migration, never silent. Widening (UTF-16 LE, inline comments) is additive.
+The dialect decides which recorded edits can be reverted. A narrower dialect (refusing more) in a later version would make applied transactions unrevertable: it is a format change with a migration, never silent. Widening is additive only where it changes nothing for an input accepted now: UTF-16 LE (refused today) is; inline comments are not (`Width=1280 ; px` has the old value `1280 ; px` today), so they need a versioned editor like any change of `edit` (senior-dev S1).
 
 ## Consequences
 - A file Rerun refuses is reported, never guessed; the planner names the reason. A revert meeting such a file (the game rewrote it as UTF-16, a duplicate of Rerun's key) finds it `Foreign`.

@@ -25,7 +25,8 @@
 //!   Rerun's own temp name and no `.old` next to another target: the temp name is deleted and
 //!   stage 2 follows. Any other `.old`, a link, folder, reparse point or another spelling at the
 //!   target is `Foreign` (S6: a `.old` holding the file as it was before a step of Rerun is
-//!   named in the report, `previous`).
+//!   named in the report as the file before that step, `Detail::Ini::before_step`; only
+//!   before the apply is it the user's file as Rerun found it, which the backup holds anyway).
 //! - **Stage 2** (`st` the content at the target after stage 1; first matching row):
 //!
 //! | # | `st` | Observed / act |
@@ -53,8 +54,8 @@ use std::io::Read;
 
 use sha2::{Digest as _, Sha256};
 
-use super::file::{self, Action, Dirs, FileSeen, Is, Seq, State, Stood};
-use super::{Acted, Detail, ExecError, Hint, IniKey, roots};
+use super::file::{self, Action, Dirs, FileSeen, Is, Seq, SeqKind, State, Stood};
+use super::{Acted, BeforeStep, Detail, ExecError, Hint, IniKey, RerunStep, roots};
 use crate::journal::{
     Before, BeforeArg, Digest, JournalError, Observed, OpLog, Semantic, TxnWriter,
 };
@@ -196,13 +197,20 @@ pub(super) fn apply_op(
     }
 }
 
+/// A rewrite's digests are what [`records_fit`] allows (security review S-1): both at most
+/// 1 MiB and different. `unedit` bounds its result, so this holds for every rewrite stage 2
+/// decides; the revert loop checks it again before the `RevertIntent` is written.
+pub(super) fn semantic_fits(s: &Semantic) -> bool {
+    let max = max_ini();
+    s.from != s.to && s.from.len <= max && s.to.len <= max
+}
+
 /// The records of an `IniValue` fit it (module docs).
 pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
     let Op::IniValue { old, .. } = op else {
         return false;
     };
     let i = &log.intent;
-    let max = max_ini();
     i.tmp.is_some()
         && i.before
             == Some(Before::Bin(Digest {
@@ -212,7 +220,7 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
         && log.done.is_none_or(|d| d.file_id.is_some())
         && log.reverts.iter().all(|r| match (r.from, r.to) {
             (None, None) => true,
-            (Some(f), Some(t)) => r.tmp.is_some() && f != t && f.len <= max && t.len <= max,
+            (Some(f), Some(t)) => r.tmp.is_some() && semantic_fits(&Semantic { from: f, to: t }),
             _ => false,
         })
 }
@@ -271,18 +279,15 @@ fn see_ini(
         Ok(mut g) => {
             let gm = g.metadata()?;
             let exact = g.name().same_spelling(name);
+            // Over 1 MiB no state of the op can match (every one is at most 1 MiB) and stage
+            // 2 refuses it: "other", never hashed (security review nit 2).
             let bytes = match read_guard(&mut *g, max_ini()) {
-                Ok(b) => Some(b),
-                Err(e) if e.kind == SysErrorKind::TooLarge => None,
+                Ok(b) => b,
+                Err(e) if e.kind == SysErrorKind::TooLarge => return Ok((FileSeen::Other, None)),
                 Err(e) => return Err(e),
             };
-            let (sha, len) = match &bytes {
-                Some(b) => {
-                    let dg = digest(b);
-                    (dg.sha256, dg.len)
-                }
-                None => (g.sha256()?, gm.len),
-            };
+            let dg = digest(&bytes);
+            let (sha, len, bytes) = (dg.sha256, dg.len, Some(bytes));
             Ok((
                 FileSeen::File {
                     sha,
@@ -313,7 +318,7 @@ struct St {
 }
 
 /// The detail of an op from the key states (in the order of its edits).
-fn detail(edits: &[IniEdit], keys: &[KeyState], previous: Option<RelPath>) -> Option<Detail> {
+fn detail(edits: &[IniEdit], keys: &[KeyState], before_step: Option<BeforeStep>) -> Option<Detail> {
     Some(Detail::Ini {
         keys: edits
             .iter()
@@ -324,7 +329,7 @@ fn detail(edits: &[IniEdit], keys: &[KeyState], previous: Option<RelPath>) -> Op
                 state: *s,
             })
             .collect(),
-        previous,
+        before_step,
     })
 }
 
@@ -435,6 +440,7 @@ pub(super) fn observe(
         attrs: Some(old.attrs),
     };
     let s0 = Seq {
+        kind: SeqKind::Apply,
         tmp: x,
         from: h0,
         to: h1,
@@ -446,7 +452,7 @@ pub(super) fn observe(
     let mut pre = file::Seen::new(Observed::Foreign);
     pre.actions.clone_from(&s.actions);
     pre.left.clone_from(&s.left);
-    let semantic = |i: usize| si.get(i).is_some_and(|q| q.from.attrs.is_none());
+    let semantic = |i: usize| si.get(i).is_some_and(|q| q.kind == SeqKind::Rewrite);
     let target = St { seen: t, bytes };
     Ok(match (s.seq, s.stood) {
         (_, Stood::Start | Stood::End) => {
@@ -464,7 +470,7 @@ pub(super) fn observe(
                     out
                 }
                 // A rewrite at its start: rows 3 to 9 on `from` (in phase B the `.old`).
-                (Some(_), Stood::Start) if seq.from.attrs.is_none() => {
+                (Some(_), Stood::Start) if seq.kind == SeqKind::Rewrite => {
                     let st = if target.seen == FileSeen::Absent {
                         let (seen, bytes) = see_ini(parent, &seq.tmp.old()).map_err(&e)?;
                         St { seen, bytes }
@@ -502,6 +508,8 @@ pub(super) fn observe(
                 pre
             } else if m1 {
                 // M1: the cleanup of a completed apply the game rewrote since.
+                // If stage 2 then finds `Foreign`, `X.old` is gone all the same: it held the old
+                // content, which the backup keeps (security review nit 8).
                 let mut p = pre;
                 p.actions = vec![Action::DeleteOld(s0.tmp.old(), s0.from.sha256)];
                 stage2(op, &target, hint, p)
@@ -510,9 +518,14 @@ pub(super) fn observe(
                 // file as it was before a step of Rerun).
                 let mut p = pre;
                 if s.old == Is::From {
-                    let prev = deciding.tmp.old();
-                    p.left.push(prev.clone());
-                    p.detail = detail(edits, &[], Some(prev));
+                    let file = deciding.tmp.old();
+                    p.left.push(file.clone());
+                    let step = match deciding.kind {
+                        SeqKind::Apply => RerunStep::Apply,
+                        SeqKind::Restore => RerunStep::Restore,
+                        SeqKind::Rewrite => RerunStep::Rewrite,
+                    };
+                    p.detail = detail(edits, &[], Some(BeforeStep { step, file }));
                 }
                 p
             } else {

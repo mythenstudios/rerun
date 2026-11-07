@@ -311,6 +311,18 @@ fn j1_the_writer_refuses_what_the_reader_would_call_damaged() {
     w.done(0, Some(1), false).unwrap();
     w.applied(1).unwrap();
     assert!(order(w.intent(1, None, None)));
+    // A semantic revert without its temp name, or with `from` equal to `to` (P2-12, S-1).
+    let d = record::Digest {
+        sha256: [3; 32],
+        len: 4,
+    };
+    let sem = |to| record::Semantic { from: d, to };
+    assert!(order(w.revert_intent(
+        0,
+        None,
+        Some(sem(record::Digest { len: 5, ..d }))
+    )));
+    assert!(order(w.revert_intent(0, Some(w.tmp()), Some(sem(d)))));
     drop(w);
     assert_eq!(
         state(&j, &id),

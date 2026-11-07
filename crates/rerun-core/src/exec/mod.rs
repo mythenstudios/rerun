@@ -358,14 +358,38 @@ pub struct OpReport {
 pub enum Detail {
     /// An `IniValue`: the state of each of Rerun's keys, in the op's order (user decision E1 b:
     /// a key someone changed stays and is named); and, for an op left `Foreign` next to a `.old`
-    /// that holds the file as it was before a step of Rerun, that file (review S6: the user's
-    /// previous INI file, kept and named, never deleted).
+    /// that holds the file as it was before a step of Rerun, that file (review S6: kept and
+    /// named, never deleted).
     Ini {
         /// The keys.
         keys: Vec<IniKey>,
-        /// The `.rerun-….tmp.old` holding the previous file, in the INI file's folder.
-        previous: Option<RelPath>,
+        /// The `.rerun-….tmp.old` holding the file as it was before a step of Rerun.
+        before_step: Option<BeforeStep>,
     },
+}
+
+/// A file as it was before a step of Rerun, left in a `.old` next to a foreign file (review S6,
+/// senior-dev S3). Only before the apply is it the user's file as Rerun found it; before a
+/// restore it is Rerun's edited file, before a rewrite the file the game had written. The
+/// state before the first change is always the backup (`OpReport::backup`); a front end shows
+/// both before `forget`, and never calls this file the original.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeforeStep {
+    /// The step it was before.
+    pub step: RerunStep,
+    /// The `.old`, in the INI file's folder.
+    pub file: RelPath,
+}
+
+/// A step of Rerun on a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RerunStep {
+    /// The apply.
+    Apply,
+    /// A restore from the backup.
+    Restore,
+    /// A rewrite of a file the game rewrote.
+    Rewrite,
 }
 
 /// One of Rerun's keys in an INI file.
@@ -965,6 +989,16 @@ fn revert_loop<W: Reverting>(
         let y = (seen.restore() || sem.is_some()).then(|| w.tmp());
         // P2-12: a rewrite records where it starts and ends, before its first change (K-I1
         // switches that off).
+        if sem.is_some_and(|s| !ini::semantic_fits(&s)) {
+            // Never written: the reader would refuse the record (security review S-1).
+            return Err(ExecError::Op {
+                op: k,
+                source: crate::sys::SysError::new(
+                    crate::sys::SysErrorKind::TooLarge,
+                    "a rewrite outside the bounds of its record",
+                ),
+            });
+        }
         w.revert_intent(k, y.clone(), sem.filter(|_| !ini::unrecorded()))?;
         let done = act(w, t, k, op, &seen, y)?;
         // Always, also when the act changed nothing (`Touched::flush_for`).
@@ -1066,7 +1100,7 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     if !records_fit(&plan, &v.ops) {
         return Err(blocked());
     }
-    let before = |k: u16, d: &crate::journal::Digest, max: u64| j.backup_bytes(t, k, d, max);
+    let before = |k: u16, d: &crate::journal::Digest, max: u64| j.read_backup(t, k, d, max);
     if !ini::binds(&plan, &v.ops, &before)? {
         return Err(blocked());
     }

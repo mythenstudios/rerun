@@ -10,7 +10,9 @@
 //! - **Encoding**: `EF BB BF` is a UTF-8 BOM, kept as a prefix; anything else without NUL is
 //!   ASCII-compatible text (UTF-8 or an ANSI code page), handled byte by byte. Refused: a
 //!   UTF-16 BOM (`FF FE`, `FE FF`; user decision E3 b: UTF-16 comes with phase 4), any NUL byte
-//!   (BOM-less UTF-16 and UTF-32), more than [`MAX_INI_BYTES`].
+//!   (BOM-less UTF-16 and UTF-32), more than [`MAX_INI_BYTES`] or [`MAX_LINES`] lines. What `edit`
+//!   and `unedit` return is bounded the same way (`TooLarge`).
+
 //! - **Lines** end in CRLF or LF, mixed too; a CR without LF is refused. A file that ends with
 //!   a line ending has no empty last line.
 //! - **Kinds**, after optional spaces and tabs: blank; a comment (`;` or `#`); a header: `[`
@@ -42,6 +44,8 @@
 //! old value back into the span, or removes the line Rerun inserted (with its own line ending;
 //! the last line without one takes the line ending of the line before it along); a section
 //! Rerun created whose lines are all gone loses its header too. `Old` and `Changed` are left.
+//! Putting long old values back can grow a file: a result over [`MAX_INI_BYTES`] is `TooLarge`
+//! (security review S-1; the revert then finds `Foreign` and writes nothing).
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +57,9 @@ pub const MAX_EDITS: usize = 8;
 pub const MAX_NAME: usize = 64;
 /// Longest value.
 pub const MAX_TEXT: usize = 128;
+/// Most lines of a file (a bound on the memory of a scan: a line costs about 64 bytes, so 1 MiB
+/// of line feeds alone would cost 64 MiB; security review nit 1).
+pub const MAX_LINES: usize = 1 << 16;
 /// The one file extension `ini_set` writes (folded; review S4: no `.cfg` yet).
 pub const INI_EXTENSION: &str = "ini";
 
@@ -60,8 +67,9 @@ pub const INI_EXTENSION: &str = "ini";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum IniError {
-    /// More than [`MAX_INI_BYTES`].
-    #[error("the INI file is larger than 1 MiB")]
+    /// More than [`MAX_INI_BYTES`] (also as the result of `edit` or `unedit`), or more than
+    /// [`MAX_LINES`] lines.
+    #[error("the INI file is larger than 1 MiB or has more than 65,536 lines")]
     TooLarge,
     /// A UTF-16 BOM (UTF-16 is not supported yet).
     #[error("the INI file is UTF-16 text, which Rerun does not edit yet")]
@@ -182,8 +190,9 @@ impl std::fmt::Display for IniName {
 pub struct IniText(String);
 
 /// Characters a new value never holds (rules in force now): path and environment
-/// characters, and comment characters a game may strip.
-const NEW_FORBIDDEN: &[u8] = b"\\/:%;#";
+/// characters, comment characters a game may strip, and brackets (no value that looks like a
+/// header to a reader that trims differently; security review nit 5).
+const NEW_FORBIDDEN: &[u8] = b"\\/:%;#[]";
 
 impl IniText {
     /// Parses the form.
@@ -206,12 +215,12 @@ impl IniText {
     }
 
     /// The rule for a value Rerun writes now (planning and apply, never a revert): none of
-    /// `\ / : % ; #` and no `..` (no paths, no environment references, nothing a game may
+    /// `\ / : % ; # [ ]` and no `..` (no paths, no environment references, nothing a game may
     /// read as a comment). Syntactic only; what a value means is curation (`docs/06`).
     pub fn check_new(&self) -> Result<(), IniError> {
         if self.0.bytes().any(|c| NEW_FORBIDDEN.contains(&c)) || knob::forbidden(&self.0) {
             return Err(IniError::Rule(
-                "a new INI value holds one of \\ / : % ; # (no paths, environment references or comments)",
+                "a new INI value holds one of \\ / : % ; # [ ] (no paths, environment references, comments or brackets)",
             ));
         }
         if self.0.contains("..") {
@@ -303,7 +312,7 @@ pub fn check_edits(edits: &[IniEdit]) -> Result<(), IniError> {
 
 /// The encoding of a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Encoding {
+pub(crate) enum Encoding {
     /// ASCII-compatible text without BOM (UTF-8 or ANSI), byte by byte.
     Plain,
     /// The same with a UTF-8 BOM, kept as a prefix.
@@ -419,6 +428,9 @@ pub fn scan(b: &[u8]) -> Result<Doc<'_>, IniError> {
                     i
                 };
                 lines.push(line(b, start, content_end, i + 1)?);
+                if lines.len() > MAX_LINES {
+                    return Err(IniError::TooLarge);
+                }
                 start = i + 1;
             }
             _ => {}
@@ -427,6 +439,9 @@ pub fn scan(b: &[u8]) -> Result<Doc<'_>, IniError> {
     }
     if start < b.len() {
         lines.push(line(b, start, b.len(), b.len())?);
+    }
+    if lines.len() > MAX_LINES {
+        return Err(IniError::TooLarge);
     }
     Ok(Doc {
         bytes: b,
@@ -478,13 +493,8 @@ fn line(b: &[u8], start: usize, content_end: usize, end: usize) -> Result<Line, 
 }
 
 impl<'a> Doc<'a> {
-    /// The encoding.
-    pub fn encoding(&self) -> Encoding {
-        self.encoding
-    }
-
     /// The file has at least one header.
-    pub fn has_header(&self) -> bool {
+    pub(crate) fn has_header(&self) -> bool {
         self.lines
             .iter()
             .any(|l| matches!(l.kind, Kind::Header { .. }))
@@ -653,6 +663,16 @@ impl<'d, 'a> Rebuild<'d, 'a> {
     }
 }
 
+/// `b` if it is at most [`MAX_INI_BYTES`], else `TooLarge`: what `edit` and `unedit` return is
+/// what `scan` would accept.
+fn bounded(b: Vec<u8>) -> Result<Vec<u8>, IniError> {
+    if b.len() > MAX_INI_BYTES {
+        Err(IniError::TooLarge)
+    } else {
+        Ok(b)
+    }
+}
+
 /// Edits `old` (module docs): every edit's old state must be exactly what the file holds
 /// (`NotOld`), its section and key unambiguous. The output for an accepted input is frozen
 /// (review M2).
@@ -689,7 +709,7 @@ pub fn edit(old: &[u8], edits: &[IniEdit]) -> Result<Vec<u8>, IniError> {
         }
     }
     if sections.is_empty() {
-        return Ok(r.bytes());
+        return bounded(r.bytes());
     }
     if !doc.has_header() {
         return Err(IniError::NoHeader);
@@ -707,7 +727,7 @@ pub fn edit(old: &[u8], edits: &[IniEdit]) -> Result<Vec<u8>, IniError> {
     }
     // After the new keys of an existing section ending at the same line.
     r.inserts.push((last, ins));
-    Ok(r.bytes())
+    bounded(r.bytes())
 }
 
 /// The state of one of Rerun's keys in a file (`unedit`, `verify`).
@@ -786,8 +806,10 @@ pub fn unedit(cur: &[u8], edits: &[IniEdit]) -> Result<Unedit, IniError> {
             r.removed[header] = true;
         }
     }
+    // S-1 (security review): putting long old values back can grow the file past the bound;
+    // such a result is refused like an input of that size (the revert then finds `Foreign`).
     let bytes = if keys.contains(&KeyState::New) {
-        r.bytes()
+        bounded(r.bytes())?
     } else {
         cur.to_vec()
     };

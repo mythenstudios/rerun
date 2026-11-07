@@ -42,9 +42,9 @@ fn get(b: &[u8], section: &str, key: &str) -> Result<String, IniError> {
 
 #[test]
 fn i_dialect_encodings_and_refusals() {
-    assert_eq!(scan(b"a=1").unwrap().encoding(), Encoding::Plain);
+    assert_eq!(scan(b"a=1").unwrap().encoding, Encoding::Plain);
     assert_eq!(
-        scan(b"\xEF\xBB\xBF[S]\r\na=1").unwrap().encoding(),
+        scan(b"\xEF\xBB\xBF[S]\r\na=1").unwrap().encoding,
         Encoding::Utf8Bom
     );
     assert_eq!(scan(b"").unwrap().lines.len(), 0);
@@ -705,6 +705,81 @@ Width=",
     );
 }
 
+/// An independent reference for `unedit` (review S-2), assembled from the lines of `g`: every
+/// line that is not Rerun's copied with its own line ending; a line holding exactly Rerun's
+/// value either dropped (Rerun inserted it) or copied with only its value span replaced by the
+/// old value; the header of a section Rerun created dropped when every line of the section is;
+/// the documented exception: when the last line is dropped and has no line ending, the line
+/// ending of the last line kept goes too. `None` where `unedit` must refuse.
+fn reference(g: &[u8], edits: &[IniEdit]) -> Option<Vec<u8>> {
+    let d = scan(g).ok()?;
+    let n = d.lines.len();
+    let mut dropped = vec![false; n];
+    let mut replaced: Vec<Option<&[u8]>> = vec![None; n];
+    let mut created = Vec::new();
+    let mut any = false;
+    for (i, e) in edits.iter().enumerate() {
+        let loc = d.locate(u8::try_from(i).ok()?, &e.section, &e.key).ok()?;
+        let Loc::Section {
+            header,
+            from,
+            to,
+            key,
+        } = loc
+        else {
+            continue;
+        };
+        if e.old == Old::NoSection {
+            created.push((header, from, to));
+        }
+        let Some(l) = key else { continue };
+        let (s, t) = d.value(l);
+        if &g[s..t] != e.new.as_str().as_bytes() {
+            continue;
+        }
+        any = true;
+        match &e.old {
+            Old::Value(o) => replaced[l] = Some(o.as_str().as_bytes()),
+            Old::NoKey | Old::NoSection => dropped[l] = true,
+        }
+    }
+    if !any {
+        return Some(g.to_vec());
+    }
+    for (h, f, t) in created {
+        if t > f && dropped[f..t].iter().all(|x| *x) {
+            dropped[h] = true;
+        }
+    }
+    let mut out = Vec::new();
+    if g.starts_with(b"\xEF\xBB\xBF") {
+        out.extend_from_slice(b"\xEF\xBB\xBF");
+    }
+    let mut last_eol = 0;
+    for (i, l) in d.lines.iter().enumerate() {
+        if dropped[i] {
+            continue;
+        }
+        let content = &g[l.start..l.content_end];
+        match replaced[i] {
+            Some(old) => {
+                let (s, t) = d.value(i);
+                out.extend_from_slice(&g[l.start..s]);
+                out.extend_from_slice(old);
+                out.extend_from_slice(&g[t..l.content_end]);
+            }
+            None => out.extend_from_slice(content),
+        }
+        out.extend_from_slice(&g[l.content_end..l.end]);
+        last_eol = l.end - l.content_end;
+    }
+    let last = d.lines.last()?;
+    if dropped[n - 1] && last.end == last.content_end {
+        out.truncate(out.len() - last_eol);
+    }
+    (out.len() <= super::MAX_INI_BYTES).then_some(out)
+}
+
 /// xorshift64*, so the loops are the same on every machine.
 struct Rng(u64);
 
@@ -722,8 +797,9 @@ impl Rng {
 }
 
 /// S5: random bytes, many of them structure (`[ ] = ; CR LF`), never panic `scan`, `edit` or
-/// `unedit`; whatever `edit` accepts comes back exactly (I1); `unedit` changes no line but
-/// Rerun's (the value lines of its keys and the headers of sections it created).
+/// `unedit`; whatever `edit` accepts comes back exactly (I1); `unedit` of the edited file,
+/// changed at a random place, or of the random file itself equals [`reference`] (review S-2),
+/// also with old and new values of unequal length.
 #[test]
 fn i_s5_random_bytes() {
     const ALPHABET: &[u8] = b"[]=;# \t\r\n\r\nkjSTkjST12\xEF\xBB\xBF\x00\xFF\xE9";
@@ -733,15 +809,19 @@ fn i_s5_random_bytes() {
         ed("T", "k", Old::NoSection, "4"),
         ed("S", "k", Old::NoKey, "2"),
         ed("T", "k", val("2"), "4"),
+        // Old and new values of unequal length (review S-2).
+        ed("S", "k", val("1"), "22"),
+        ed("T", "j", val("long value"), "x"),
+        ed("S", "m", val("abc"), "z"),
     ];
     let mut rng = Rng(0x1d2c_3b4a_5968_7786);
     let mut stats = [0usize; 4];
-    for _ in 0..40_000 {
+    for _ in 0..60_000 {
         let len = rng.below(48);
         let mut f: Vec<u8> = (0..len)
             .map(|_| ALPHABET[rng.below(ALPHABET.len())])
             .collect();
-        if rng.below(4) == 0 {
+        if rng.below(2) == 0 {
             f.splice(0..0, *b"[S]\n");
         }
         let mut edits: Vec<IniEdit> = Vec::new();
@@ -778,54 +858,20 @@ fn i_s5_random_bytes() {
                 f
             }
         };
-        match unedit(&g, &edits) {
-            Ok(u) if u.writes() => {
-                stats[2] += 1;
-                assert!(u.bytes.len() <= g.len());
-                // Every line that is not Rerun's is kept, in order.
-                let d = scan(&g).unwrap();
-                let mut ours = Vec::new();
-                for (i, e) in edits.iter().enumerate() {
-                    if let Ok(Loc::Section { header, key, .. }) =
-                        d.locate(u8::try_from(i).unwrap(), &e.section, &e.key)
-                    {
-                        ours.extend(key);
-                        if e.old == Old::NoSection {
-                            ours.push(header);
-                        }
-                    }
-                }
-                let mut theirs: Vec<Vec<u8>> = d
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| !ours.contains(i))
-                    .map(|(_, l)| g[l.start..l.content_end].to_vec())
-                    .collect();
-                // The documented exception: a last line of Rerun's without a line ending takes
-                // the line ending of the line before it along; a blank line is then gone.
-                let last = d.lines.len() - 1;
-                if ours.contains(&last)
-                    && d.lines[last].end == d.lines[last].content_end
-                    && theirs.last().is_some_and(Vec::is_empty)
-                {
-                    theirs.pop();
-                }
-                let out = contents(&u.bytes);
-                let mut j = 0;
-                for x in &theirs {
-                    while out.get(j).is_some_and(|y| y != x) {
-                        j += 1;
-                    }
-                    assert!(j < out.len(), "{g:?} {edits:?}: lost {x:?}");
-                    j += 1;
-                }
+        // S-2 (review): an independent reference for every result of `unedit`.
+        let got = unedit(&g, &edits);
+        let want = reference(&g, &edits);
+        match (&got, &want) {
+            (Ok(u), Some(w)) => {
+                assert_eq!(
+                    String::from_utf8_lossy(&u.bytes),
+                    String::from_utf8_lossy(w),
+                    "{g:?} {edits:?}"
+                );
+                stats[if u.writes() { 2 } else { 3 }] += 1;
             }
-            Ok(u) => {
-                stats[3] += 1;
-                assert_eq!(u.bytes, g);
-            }
-            Err(_) => {}
+            (Err(_), None) => {}
+            _ => panic!("{g:?} {edits:?}: unedit {got:?}, reference {want:?}"),
         }
     }
     assert!(stats.iter().all(|s| *s > 100), "{stats:?}");
@@ -847,4 +893,86 @@ fn i_knobs_bite() {
     super::knob::forbid(None);
     assert!(rule.is_err());
     assert!(t("2").check_new().is_ok());
+}
+
+/// S-1 (security review): `unedit` that would grow a file past 1 MiB (long old values put back
+/// over a file the game filled up to the bound) is `TooLarge`, as is an `edit` past it.
+#[test]
+fn i_s1_results_are_bounded() {
+    let long = "x".repeat(128);
+    let edits = [ed("S", "k", val(&long), "1")];
+    let applied = "[S]\nk=1\n;".to_owned();
+    let mut g = applied.clone().into_bytes();
+    g.resize(MAX_INI_BYTES - 10, b'p');
+    assert!(scan(&g).is_ok());
+    assert_eq!(
+        unedit(&g, &edits).map(|u| u.bytes.len()),
+        Err(IniError::TooLarge)
+    );
+    // Just inside the bound it is fine.
+    let mut g = applied.into_bytes();
+    g.resize(MAX_INI_BYTES - 127, b'p');
+    assert_eq!(unedit(&g, &edits).map(|u| u.bytes.len()), Ok(MAX_INI_BYTES));
+    // `edit` the other way round.
+    let mut f = format!("[S]\nk={long}\n;").into_bytes();
+    f.resize(MAX_INI_BYTES - 2, b'p');
+    let grow = [ed("S", "j", Old::NoKey, "1")];
+    assert_eq!(edit(&f, &grow), Err(IniError::TooLarge));
+}
+
+/// Nit 1 (security review): the lines of a scan are bounded (memory), so 1 MiB of line feeds
+/// or of empty headers is `TooLarge`; 65,536 lines are scanned.
+#[test]
+fn i_the_number_of_lines_is_bounded() {
+    let feeds = vec![b'\n'; MAX_INI_BYTES];
+    assert_eq!(scan(&feeds).map(|_| ()), Err(IniError::TooLarge));
+    let headers = b"[a]\n".repeat(MAX_INI_BYTES / 4);
+    assert_eq!(scan(&headers).map(|_| ()), Err(IniError::TooLarge));
+    let ok = vec![b'\n'; super::MAX_LINES];
+    assert_eq!(scan(&ok).map(|d| d.lines.len()), Ok(super::MAX_LINES));
+    let over = vec![b'\n'; super::MAX_LINES + 1];
+    assert_eq!(scan(&over).map(|_| ()), Err(IniError::TooLarge));
+}
+
+/// Nit 5 (security review): brackets are refused in new values (rules in force now only).
+#[test]
+fn i_brackets_are_no_new_value() {
+    for bad in ["[Display]", "a]", "[", "x[1]"] {
+        assert!(t(bad).check_new().is_err(), "{bad}");
+    }
+}
+
+/// M2 (senior-dev nit): the fallbacks for the line ending of inserted lines are frozen too: a
+/// header as the last line without a line ending (the first line ending of the file), a file
+/// without any line ending (CRLF), and a new section after a last line without one.
+#[test]
+fn i_m2_line_ending_fallbacks_are_frozen() {
+    let vectors: [(&[u8], Vec<IniEdit>, &[u8]); 4] = [
+        (
+            b"a=1\n[S]",
+            vec![ed("S", "k", Old::NoKey, "5")],
+            b"a=1\n[S]\nk=5",
+        ),
+        (
+            b"a=1\r\n[S]",
+            vec![ed("S", "k", Old::NoKey, "5")],
+            b"a=1\r\n[S]\r\nk=5",
+        ),
+        (b"[S]", vec![ed("S", "k", Old::NoKey, "5")], b"[S]\r\nk=5"),
+        (
+            b"[S]\nk=1",
+            vec![ed("New", "a", Old::NoSection, "2")],
+            b"[S]\nk=1\n[New]\na=2",
+        ),
+    ];
+    for (f, edits, want) in vectors {
+        let e = edit(f, &edits).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&e),
+            String::from_utf8_lossy(want),
+            "{:?}",
+            String::from_utf8_lossy(f)
+        );
+        assert_eq!(unedit(&e, &edits).unwrap().bytes, f);
+    }
 }

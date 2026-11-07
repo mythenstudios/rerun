@@ -597,6 +597,16 @@ pub(crate) fn i6_check() -> Vec<String> {
                 swapped.as_bytes(),
             );
             let after = env.snap();
+            // `verify` reads the same backup (senior-dev nit).
+            let v = env.try_verify(&t);
+            if !matches!(
+                &v,
+                Err(ExecError::Journal(
+                    crate::journal::JournalError::BackupMismatch(0)
+                ))
+            ) {
+                f.push(format!("RI6 bin: verify {v:?}"));
+            }
             let r = env.revert(&t);
             if !matches!(
                 &r,
@@ -808,7 +818,7 @@ pub(crate) fn i5_check() -> Vec<String> {
                 if rep.closed.is_none()
                     && rep.ops.iter().any(|o| {
                         o.observed == Observed::Foreign
-                            && matches!(&o.detail, Some(Detail::Ini { previous: Some(p), .. })
+                            && matches!(&o.detail, Some(Detail::Ini { before_step: Some(super::BeforeStep { step: super::RerunStep::Apply, file: p }), .. })
                                 if p.as_str() == x.old().as_str())
                     }) => {}
             r => f.push(format!("RI5 {what}: revert {r:?}")),
@@ -938,7 +948,7 @@ fn r_i_s2_s6_traces_of_a_rewrite() {
         "{op:?}"
     );
     assert!(
-        matches!(&op.detail, Some(Detail::Ini { previous: Some(p), .. }) if *p == y.old()),
+        matches!(&op.detail, Some(Detail::Ini { before_step: Some(super::BeforeStep { step: super::RerunStep::Rewrite, file: p }), .. }) if *p == y.old()),
         "{op:?}"
     );
     assert_eq!(
@@ -974,4 +984,36 @@ fn r_i_d4_the_game_must_be_closed() {
         env.revert(&t),
         Err(ExecError::Refused(Refusal::Busy(_)))
     ));
+}
+
+/// S-1 (security review): a file the game filled up to just below 1 MiB, over which putting
+/// Rerun's long old value back would pass the bound: `Foreign`, nothing written, no
+/// `from`/`to` recorded (a record the reader refuses would block the transaction for good).
+#[test]
+fn r_i_s1_a_rewrite_past_the_bound_is_foreign() {
+    let long = "x".repeat(128);
+    let env = ini_env(format!("[S]\r\nk={long}\r\n").as_bytes());
+    let t = applied(&env, &[ini_step(INI, &[("S", "k", "1")])], "S-1").unwrap();
+    let mut g = b"[S]\r\nk=1\r\n;".to_vec();
+    g.resize(ini::MAX_INI_BYTES - 10, b'p');
+    put_ini(&env, &g);
+    let r = env.revert(&t).unwrap();
+    assert_eq!(r.closed, None, "{r:?}");
+    assert_eq!(r.ops[0].observed, Observed::Foreign);
+    assert_eq!(ini_now(&env).as_deref(), Some(&g[..]));
+    let a = crate::prim::tests::app(&env.sys);
+    let j = crate::journal::Journal::new(&a, crate::journal::InstanceTag::fixed(3));
+    let v = j.load(&t, crate::journal::VerifyBackups::Length).unwrap();
+    assert!(
+        v.ops[&0]
+            .reverts
+            .iter()
+            .all(|r| r.from.is_none() && r.tmp.is_none()),
+        "{v:?}"
+    );
+    assert!(
+        matches!(v.state, crate::journal::TxnState::Applied),
+        "{:?}",
+        v.state
+    );
 }
