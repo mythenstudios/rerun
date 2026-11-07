@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: full-probes
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
@@ -39,5 +43,7 @@ jobs:
           RERUN_UNREDUCED: "1"
         run: cargo test -p rerun-core --lib --profile ci --locked
       - name: rerun-core lib, cm3_full (ignored)
+        # Also when step 1 found a failure: one run shows both results.
+        if: success() || failure()
         # cm3_full_nested_crash (50,894 runs) and cm3_full_nested_power_loss (127,344 runs).
         run: cargo test -p rerun-core --lib --profile ci --locked -- --ignored cm3_full

@@ -122,7 +122,7 @@ jobs:
             fi
           done
       - name: phase 0 acceptance - rerun --help
-        run: cargo run -p rerun-cli --locked -- --help
+        run: cargo run -p rerun-cli --locked --profile ci -- --help
       - name: rerun-launch - allowed dependencies
         run: |
           deps=$(cargo tree -p rerun-launch -e normal --depth 1 --prefix none --locked \

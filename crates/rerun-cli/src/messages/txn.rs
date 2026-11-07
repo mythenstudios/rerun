@@ -741,6 +741,8 @@ pub enum TxnMsg<'a> {
     RebindNowHeading,
     /// Registry ops stay where Rerun wrote them.
     RebindRegistryNote,
+    /// Only the bound folder is reverted (ADR 0020 table X9).
+    RebindScopeNote,
     /// A binding is permanent.
     RebindPermanentNote,
     /// The question of a rebind.
@@ -1160,6 +1162,9 @@ impl fmt::Display for TxnMsg<'_> {
                 "Registry changes are reverted where Rerun made them, also a compatibility-layer \
                  value under the old program path; a value under the new program path is not \
                  touched.",
+            ),
+            Self::RebindScopeNote => f.write_str(
+                "Only the folder bound now is reverted; a copy of the game elsewhere (a renamed                  old folder, a library removed from Steam while its drive was away) keeps                  Rerun's files.",
             ),
             Self::RebindPermanentNote => f.write_str(
                 "The binding is permanent: every later revert of this transaction uses the new \

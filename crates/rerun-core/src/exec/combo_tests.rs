@@ -814,8 +814,8 @@ fn cm_control_k_cm1_a_flush_once_per_folder_loses_the_second_revert() {
 }
 
 /// K-CM2 (A2-B1): a recovery that renames back in another spelling leaves the folder different
-/// from the one before (the snapshot compares names with their case; `differs` adds the spelling
-/// check for the lists of names).
+/// from the one before: the snapshot compares names with their case, so this bites through the
+/// snapshot diff ("not identical after recovery"), not through `same_names` in `differs`.
 #[test]
 fn cm_control_k_cm2_a_rename_back_in_another_spelling_is_seen() {
     let _r = Reset(|| exec_knob::rename_back_upcased(false));
@@ -830,6 +830,17 @@ fn cm_control_k_cm2_a_rename_back_in_another_spelling_is_seen() {
     );
     let last = found.last().map_or("", String::as_str);
     assert!(last.contains("not identical after recovery"), "{last}");
+}
+
+/// K-CM2 in the nested probes (CM3): the same mutation fails the reduced probe of a stacked kind
+/// whose recovery crashes and restarts.
+#[test]
+fn cm_control_k_cm2_a_rename_back_in_another_spelling_fails_the_nested_probe() {
+    let _r = Reset(|| exec_knob::rename_back_upcased(false));
+    exec_knob::rename_back_upcased(true);
+    let (found, _) = nested(Kind::StackSameCased, false, true, Some("not identical"));
+    let last = found.last().map_or("", String::as_str);
+    assert!(last.contains("not identical"), "{} violations", found.len());
 }
 
 /// K-CM3 (review M1 of P2-8): the parent folder of an op's target not marked for the flush

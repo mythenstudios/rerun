@@ -79,6 +79,3 @@ opt-level = "s"
 inherits = "dev"
 opt-level = 2
 debug = "line-tables-only"
-
-[profile.ci.package."*"]
-opt-level = 2

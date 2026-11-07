@@ -665,6 +665,7 @@ fn rebind_lines_of<'a>(st: &'a TxnStatus, p: &'a RebindPreview) -> Vec<Message<'
     if head(st).is_some_and(|h| h.ops.iter().any(|o| o.root.is_none())) {
         out.push(m(TxnMsg::RebindRegistryNote));
     }
+    out.push(m(TxnMsg::RebindScopeNote));
     out.push(m(TxnMsg::RebindPermanentNote));
     out.push(Message::Blank);
     out

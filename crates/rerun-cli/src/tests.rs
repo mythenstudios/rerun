@@ -1414,6 +1414,7 @@ fn c_rb1_a_moved_library_is_rebound_through_the_cli() {
         ),
         "what the revert does there:".to_owned(),
         "Registry changes are reverted where Rerun made them".to_owned(),
+        "Only the folder bound now is reverted; a copy of the game elsewhere".to_owned(),
         "The binding is permanent".to_owned(),
         "dry run: nothing was written".to_owned(),
     ] {
