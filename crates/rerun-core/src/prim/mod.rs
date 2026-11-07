@@ -139,10 +139,10 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
     // 6b-d: every registry op after every file op.
     let reg_ops = std::mem::take(&mut b.reg_ops);
     b.ops.extend(reg_ops);
-    // E2: ops that need it (registry ops, P2-10b) need the main executable.
-    if ctx.main_exe.is_none() && b.ops.iter().any(|o| o.target().needs_main_exe()) {
+    // E2, E5 of P2-12: ops that need it (registry and INI ops) need the main executable.
+    if ctx.main_exe.is_none() && b.ops.iter().any(Op::needs_main_exe) {
         return Err(PlanError::Step(
-            "registry fixes need the game's main executable".to_owned(),
+            "registry and INI fixes need the game's main executable".to_owned(),
         ));
     }
     // S1: write access only for a root with file ops; D4 needs read access only.

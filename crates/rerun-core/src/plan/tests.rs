@@ -330,6 +330,9 @@ fn p5_objects_overlap_when_equal_or_below_a_created_directory() {
 }
 
 #[cfg(test)]
+#[path = "ini_tests.rs"]
+mod ini_tests;
+#[cfg(test)]
 #[path = "layer_tests.rs"]
 mod layer_tests;
 #[cfg(test)]

@@ -13,10 +13,9 @@
 //! spelling), then the same bounds as `encode` ([`MAX_OPS`], [`MAX_OP_BYTES`],
 //! [`MAX_PLAN_BYTES`], root indices, package names, one op per object).
 //!
-//! Phase 2 has the file op kinds `CreateDir`, `CreateFile`, `ReplaceFile` and the registry
-//! op kinds `CreateKey`, `SetValue` (P2-10b) and `TokenList` (P2-11); INI op kinds are added as
-//! further variants with their primitive (format 1 stays unstable until the first release, ADR
-//! 0019 amendment E1).
+//! Phase 2 has the file op kinds `CreateDir`, `CreateFile`, `ReplaceFile`, `IniValue` (P2-12) and
+//! the registry op kinds `CreateKey`, `SetValue` (P2-10b) and `TokenList` (P2-11) (format 1
+//! stays unstable until the first release, ADR 0019 amendment E1).
 //!
 //! Registry ops (ADR 0020 amendment P2-10b), checked on encode and decode alike (the journal
 //! head is untrusted): every slot passes `RegPolicy::check` with the plan's roots, every new
@@ -46,6 +45,16 @@
 //! keeps the form and the version-independent relation (an old value: `new` is it, one space
 //! and the tokens; none: `new` ends with the tokens), not the allowlist, the groups or the
 //! prefix of a new value (a later allowlist or prefix must not block the revert).
+//!
+//! `IniValue` (P2-12, ADR 0020 amendment P2-12, ADR 0021): a file op on an existing `.ini` file
+//! (`policy::ini::path_ok`: not `desktop.ini`); its edits pass `policy::ini::check_edits` (1 to
+//! 8, canonical order, unique, a section new or existing as a whole, every new value not empty
+//! and other than its old one); old and new content at most 1 MiB and different. The new
+//! content is [`FileHash`] (its R/H/S are the old ones). [`Rules::Current`] adds
+//! `IniText::check_new` for every new value; [`Rules::Recorded`] keeps the form, the extension
+//! and the dialect (a narrower dialect is a format change, never silent). An `IniValue`, like a
+//! registry op, needs the main executable of every root ([`Op::needs_main_exe`], user decision
+//! E5: the game holds no INI open while it runs).
 
 mod preview;
 mod store;
@@ -57,13 +66,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use preview::{
-    LAYERS_NOTE, NOT_RESTORED, Preview, PreviewOp, PreviewRoot, REGISTRY_NOTE, RegShown, preview,
+    INI_NOTE, IniShown, LAYERS_NOTE, NOT_RESTORED, Preview, PreviewOp, PreviewRoot, REGISTRY_NOTE,
+    RegShown, preview,
 };
 pub(crate) use store::load;
 pub use store::store;
 
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
+use crate::policy::ini::{self, IniEdit, IniError};
 use crate::policy::registry::{RegPolicy, RegPolicyError, RegSlot, TokenName, layers};
 use crate::policy::root::{RootError, RootId};
 use crate::sys::SysError;
@@ -213,6 +224,34 @@ pub enum Op {
         /// The new value: `old` with `add` appended (`policy::registry::layers::merge`).
         new: String,
     },
+    /// Sets keys of an existing INI file whose state was `old` when planned (P2-12): only the
+    /// edits change (`policy::ini::edit`); a revert restores the old content exactly, or puts
+    /// back only Rerun's keys in a file the game rewrote since.
+    IniValue {
+        /// Root.
+        root: RootIx,
+        /// Path below the root (a `.ini` file).
+        path: RelPath,
+        /// The old state, re-observed on the guard before the change.
+        old: FileState,
+        /// The new content: `edit(old content, edits)`, with the old R/H/S.
+        new: FileHash,
+        /// The keys, in canonical order.
+        edits: Vec<IniEdit>,
+    },
+}
+
+/// The new content of an `IniValue` (P2-12): SHA-256 and length; its R/H/S are the old ones.
+/// Deliberately its own type, not `journal::Digest` of the same shape: the plan format does not
+/// borrow the journal's wire types, so the two formats can change apart (review nit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileHash {
+    /// SHA-256 of the content.
+    #[serde(with = "crate::wire::hex32")]
+    pub sha256: [u8; 32],
+    /// Length in bytes.
+    pub len: u64,
 }
 
 /// Largest old registry value whose bytes a plan carries inline (for the preview only; the
@@ -320,16 +359,6 @@ pub enum Target<'a> {
 }
 
 impl Target<'_> {
-    /// An op on this target needs the main executable of every root of its plan (user
-    /// decision E2, review M1): a registry op has no file target, so without `main_exe` the
-    /// game-closed check (D4) would ask nothing. File ops do not (their targets are asked).
-    pub fn needs_main_exe(&self) -> bool {
-        match self {
-            Self::File { .. } => false,
-            Self::Key { .. } | Self::Value { .. } => true,
-        }
-    }
-
     /// A registry key or value.
     pub fn is_registry(&self) -> bool {
         matches!(self, Self::Key { .. } | Self::Value { .. })
@@ -345,22 +374,31 @@ impl Op {
                 path,
                 dir: true,
             },
-            Self::CreateFile { root, path, .. } | Self::ReplaceFile { root, path, .. } => {
-                Target::File {
-                    root: *root,
-                    path,
-                    dir: false,
-                }
-            }
+            Self::CreateFile { root, path, .. }
+            | Self::ReplaceFile { root, path, .. }
+            | Self::IniValue { root, path, .. } => Target::File {
+                root: *root,
+                path,
+                dir: false,
+            },
             Self::CreateKey { slot, segs } => Target::Key { slot, segs: *segs },
             Self::SetValue { slot, .. } | Self::TokenList { slot, .. } => Target::Value { slot },
         }
+    }
+
+    /// The op needs the main executable of every root of its plan: a registry op (user decision
+    /// E2 of P2-10b, review M1: no file target, so without `main_exe` the game-closed check D4
+    /// would ask nothing) and an `IniValue` (user decision E5 of P2-12: a running game holds no
+    /// INI file open and writes it when it exits, so asking the file itself proves nothing).
+    pub fn needs_main_exe(&self) -> bool {
+        self.target().is_registry() || matches!(self, Self::IniValue { .. })
     }
 
     /// The content of a file op.
     pub fn content(&self) -> Option<&ContentRef> {
         match self {
             Self::CreateDir { .. }
+            | Self::IniValue { .. }
             | Self::CreateKey { .. }
             | Self::SetValue { .. }
             | Self::TokenList { .. } => None,
@@ -603,6 +641,14 @@ pub enum PlanError {
         op: usize,
         /// The rule.
         source: RegPolicyError,
+    },
+    /// The edits of an `IniValue` break a rule of `policy::ini`.
+    #[error("op {op}: {source}")]
+    Ini {
+        /// Op index.
+        op: usize,
+        /// The rule.
+        source: IniError,
     },
     /// A step the planner refuses (`file_install`, `registry_set`).
     #[error("{0}")]
@@ -901,6 +947,39 @@ pub(crate) fn layers_old(s: &ValueState) -> Option<String> {
     Some(t)
 }
 
+/// The rules of an `IniValue` (module docs).
+fn ini_rules(
+    k: usize,
+    path: &RelPath,
+    old: &FileState,
+    new: &FileHash,
+    edits: &[IniEdit],
+    rules: Rules,
+) -> Result<(), PlanError> {
+    if !ini::path_ok(path) {
+        return Err(invalid(
+            Some(k),
+            "INI values only in a .ini file other than desktop.ini",
+        ));
+    }
+    ini::check_edits(edits).map_err(|source| PlanError::Ini { op: k, source })?;
+    let max = u64::try_from(ini::MAX_INI_BYTES).unwrap_or(u64::MAX);
+    if old.len > max || new.len > max {
+        return Err(invalid(Some(k), "an INI file larger than 1 MiB"));
+    }
+    if old.sha256 == new.sha256 {
+        return Err(invalid(Some(k), "INI values that do not change the file"));
+    }
+    if rules == Rules::Current {
+        for e in edits {
+            e.new
+                .check_new()
+                .map_err(|source| PlanError::Ini { op: k, source })?;
+        }
+    }
+    Ok(())
+}
+
 /// The bounds and rules shared by [`Plan::encode`] and [`decode`] (`rules`: module docs).
 fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), PlanError> {
     if plan.format != FORMAT {
@@ -920,14 +999,14 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
     if plan.roots.len() > MAX_ROOTS {
         return Err(invalid(None, "more roots than allowed"));
     }
-    // E2, review M1: ops that need it (registry ops, P2-10b) need at least one root and a
-    // main executable for every root.
-    if plan.ops.iter().any(|o| o.target().needs_main_exe())
+    // E2, review M1, E5 of P2-12: ops that need it (registry ops, INI ops) need at least one
+    // root and a main executable for every root.
+    if plan.ops.iter().any(Op::needs_main_exe)
         && (plan.roots.is_empty() || plan.roots.iter().any(|r| r.main_exe.is_none()))
     {
         return Err(invalid(
             None,
-            "registry ops need the main executable of every root",
+            "registry and INI ops need the main executable of every root",
         ));
     }
     for (i, r) in plan.roots.iter().enumerate() {
@@ -990,6 +1069,17 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
             if old.len > MAX_FILE_LEN {
                 return Err(invalid(Some(k), "old content larger than 2 GiB"));
             }
+            backups = backups.saturating_add(old.len);
+        }
+        if let Op::IniValue {
+            path,
+            old,
+            new,
+            edits,
+            ..
+        } = op
+        {
+            ini_rules(k, path, old, new, edits, rules)?;
             backups = backups.saturating_add(old.len);
         }
     }

@@ -257,7 +257,10 @@ pub(super) fn old_state(w: &RegWriter<'_>, plan: &Plan) -> Result<(), Refusal> {
                     return Err(Refusal::Mismatch { op: k });
                 }
             }
-            Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => {}
+            Op::CreateDir { .. }
+            | Op::CreateFile { .. }
+            | Op::ReplaceFile { .. }
+            | Op::IniValue { .. } => {}
         }
     }
     Ok(())
@@ -358,9 +361,10 @@ pub(super) fn apply_op(
                 }
             }
         }
-        Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => {
-            Err(not_a_registry_op(k))
-        }
+        Op::CreateDir { .. }
+        | Op::CreateFile { .. }
+        | Op::ReplaceFile { .. }
+        | Op::IniValue { .. } => Err(not_a_registry_op(k)),
     }
 }
 
@@ -536,9 +540,10 @@ pub(super) fn observe(
                 restore,
             ))
         }
-        Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => {
-            Err(not_a_registry_op(k))
-        }
+        Op::CreateDir { .. }
+        | Op::CreateFile { .. }
+        | Op::ReplaceFile { .. }
+        | Op::IniValue { .. } => Err(not_a_registry_op(k)),
     }
 }
 
@@ -683,6 +688,9 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
                         && <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(v))
                             == s.sha256)
             }
-            Op::CreateDir { .. } | Op::CreateFile { .. } | Op::ReplaceFile { .. } => false,
+            Op::CreateDir { .. }
+            | Op::CreateFile { .. }
+            | Op::ReplaceFile { .. }
+            | Op::IniValue { .. } => false,
         }
 }

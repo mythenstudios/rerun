@@ -12,6 +12,10 @@
 //!
 //! An `add tokens` op (P2-11) shows the value name (the executable's path), the old value, the
 //! tokens it adds and the new value; a plan with such an op adds [`LAYERS_NOTE`] once.
+//!
+//! An `edit ini` op (P2-12) shows the file with its old and new hash, length and R/H/S (kept),
+//! and per key `[section] key`, the old value (`missing`, `new section`) and the new one, every
+//! name and value through `escape::text`; a plan with such an op adds [`INI_NOTE`] once.
 
 use std::fmt;
 
@@ -19,6 +23,7 @@ use super::{
     ContentRef, FileState, Op, Plan, PlanOrigin, Target, ValueState, allowed, created_key,
 };
 use crate::escape::{self, Shown};
+use crate::policy::ini::Old;
 use crate::sys::fs::Attrs;
 use crate::sys::registry::{RegValue, reg_type};
 use crate::wire::hex32;
@@ -44,6 +49,28 @@ transaction added: reverting that transaction removes it. A token you add yourse
 apply that Rerun added too is removed by the revert. The keys AppCompatFlags and Layers are \
 shared with Windows: a revert deletes one Rerun created only when it is empty, so reverting \
 transactions in another order than newest first can leave them empty for good";
+
+/// What a plan with INI ops says once (P2-12, ADR 0020 amendment P2-12; user decisions E1 b, E2
+/// a, E5 a).
+pub const INI_NOTE: &str = "INI files: a file nobody changed is restored exactly by the revert. \
+If the game rewrote it, the revert sets back only the keys that still hold Rerun's value; keys \
+the game or you changed, and everything else in the file, stay. A key the game sets to the \
+same value as Rerun is set back too. A file that is gone at the time of the revert stays gone. \
+The main executable must be the program that writes the file when it exits (with a launcher, \
+the game itself)";
+
+/// One key of an `edit ini` op for display: every part through `escape::text`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IniShown {
+    /// The section.
+    pub section: Shown<'static>,
+    /// The key.
+    pub key: Shown<'static>,
+    /// The old value, or `missing` / `new section` (built by Rerun).
+    pub old: String,
+    /// The new value.
+    pub new: Shown<'static>,
+}
 
 /// One root of a [`Preview`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +117,8 @@ pub struct PreviewOp {
     pub old: Option<(String, u64, String)>,
     /// A configuration file: a revert after the user edited it leaves it.
     pub config: bool,
+    /// The keys of an `edit ini` op.
+    pub ini: Vec<IniShown>,
 }
 
 /// A registry value for display (review S3: the `Shown` guarantee kept): `kind` is built by
@@ -125,6 +154,8 @@ pub struct Preview {
     pub registry: Option<&'static str>,
     /// [`LAYERS_NOTE`], once per plan with `add tokens` ops.
     pub layers: Option<&'static str>,
+    /// [`INI_NOTE`], once per plan with `edit ini` ops.
+    pub ini: Option<&'static str>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -259,6 +290,7 @@ pub fn preview(p: &Plan) -> Preview {
                 Op::CreateKey { .. } => ("create key", None, None),
                 Op::SetValue { .. } => ("set value", None, None),
                 Op::TokenList { .. } => ("add tokens", None, None),
+                Op::IniValue { old: o, .. } => ("edit ini", Some(rhs(&o.attrs)), Some(old(o))),
             };
             let (old_value, new_value, type_change) = match op {
                 Op::SetValue { old: o, new, .. } => {
@@ -310,7 +342,28 @@ pub fn preview(p: &Plan) -> Preview {
                     Some((hex32::to_string(sha256), *len)),
                     *config,
                 ),
-                None => (None, None, false),
+                None => match op {
+                    Op::IniValue { new, .. } => {
+                        (None, Some((hex32::to_string(&new.sha256), new.len)), false)
+                    }
+                    _ => (None, None, false),
+                },
+            };
+            let ini = match op {
+                Op::IniValue { edits, .. } => edits
+                    .iter()
+                    .map(|e| IniShown {
+                        section: escape::text(e.section.as_str()).into_owned(),
+                        key: escape::text(e.key.as_str()).into_owned(),
+                        old: match &e.old {
+                            Old::Value(v) => escape::text(v.as_str()).to_string(),
+                            Old::NoKey => "missing".to_owned(),
+                            Old::NoSection => "missing (new section)".to_owned(),
+                        },
+                        new: escape::text(e.new.as_str()).into_owned(),
+                    })
+                    .collect(),
+                _ => Vec::new(),
             };
             let (root, path, name) = match op.target() {
                 Target::File { root, path, .. } => (
@@ -338,6 +391,7 @@ pub fn preview(p: &Plan) -> Preview {
                 attrs,
                 old: old_state,
                 config,
+                ini,
             }
         })
         .collect();
@@ -351,12 +405,18 @@ pub fn preview(p: &Plan) -> Preview {
         .iter()
         .any(|o| matches!(o, Op::TokenList { .. }))
         .then_some(LAYERS_NOTE);
+    let ini = p
+        .ops
+        .iter()
+        .any(|o| matches!(o, Op::IniValue { .. }))
+        .then_some(INI_NOTE);
     Preview {
         roots,
         ops,
         not_restored: NOT_RESTORED,
         registry,
         layers,
+        ini,
     }
 }
 
@@ -405,6 +465,9 @@ impl fmt::Display for Preview {
                     writeln!(f, "     the type of the value changes")?;
                 }
             }
+            for k in &o.ini {
+                writeln!(f, "     [{}] {}: {} -> {}", k.section, k.key, k.old, k.new)?;
+            }
             if o.config {
                 writeln!(
                     f,
@@ -418,6 +481,9 @@ impl fmt::Display for Preview {
         }
         if let Some(l) = self.layers {
             writeln!(f, "note: {l}")?;
+        }
+        if let Some(i) = self.ini {
+            writeln!(f, "note: {i}")?;
         }
         Ok(())
     }

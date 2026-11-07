@@ -269,7 +269,10 @@ fn h_a_manual_root_refuses_when_replaced_and_halts_when_not_writable() {
 /// Sets the root index of a file op.
 fn reroot(op: &mut Op, to: u16) {
     match op {
-        Op::CreateDir { root, .. } | Op::CreateFile { root, .. } | Op::ReplaceFile { root, .. } => {
+        Op::CreateDir { root, .. }
+        | Op::CreateFile { root, .. }
+        | Op::ReplaceFile { root, .. }
+        | Op::IniValue { root, .. } => {
             *root = RootIx(to);
         }
         Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => {}

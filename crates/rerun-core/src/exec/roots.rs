@@ -415,7 +415,7 @@ pub(super) fn old_state(cx: &ExecCtx<'_>, plan: &Plan, roots: &Roots<'_>) -> Res
                     return Err(mismatch());
                 }
             }
-            Op::ReplaceFile { path, old, .. } => {
+            Op::ReplaceFile { path, old, .. } | Op::IniValue { path, old, .. } => {
                 let base = write_handle(g)?;
                 let name = RelPath::from_segment(path.file_name()).map_err(|_| mismatch())?;
                 let parent;
