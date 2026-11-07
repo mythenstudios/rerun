@@ -2,9 +2,11 @@
 # CLI round trip with the release rerun.exe on the Sandbox account's real LocalAppData and
 # HKCU: plan, apply --dry-run, apply --yes, status, revert --yes, status --all, on a game
 # folder C:\RerunSandbox\cli\game with a copy of cmd.exe as its main executable, a local
-# package, two registry values and an INI key. Before and after are compared (files with
-# length, SHA-256 and attributes; the registry key). Never on the host: it refuses anywhere but
-# the Sandbox account, and it writes the real HKCU and LocalAppData of whoever runs it.
+# package, two registry values, an INI key and the compatibility-layer tokens of the add
+# allowlist for game.exe (P2-11b). Before and after are compared (files with length, SHA-256
+# and attributes; the registry key; the Layers value of game.exe). Never on the host: it
+# refuses anywhere but the Sandbox account, and it writes the real HKCU and LocalAppData of
+# whoever runs it.
 #
 # Returns an ordered hashtable for result.json (key "cli"): every command with its exit code,
 # whether the folder and the registry are as before, and whether the result is as expected.
@@ -34,6 +36,10 @@ $game = Join-Path $root 'game'
 $steps = Join-Path $root 'steps.json'
 $pkg = Join-Path $env:LOCALAPPDATA 'Rerun\packages\cli-pack\1.0.0'
 $regKey = 'HKCU:\Software\RerunSandboxCli'
+# The compatibility-layer value of game.exe: its name is the canonical path (no junction here).
+$layersKey = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers'
+$layerName = Join-Path $game 'game.exe'
+$layerTokens = 'DISABLEDXMAXIMIZEDWINDOWEDMODE', 'HIGHDPIAWARE'
 $log = Join-Path $Out 'cli.log'
 $utf8 = New-Object Text.UTF8Encoding $false
 
@@ -41,7 +47,8 @@ function Write-Plain([string]$path, [string]$text) {
     [IO.File]::WriteAllText($path, $text, $utf8)
 }
 
-# Files of the game folder (relative path, length, SHA-256, attributes) and the registry key.
+# Files of the game folder (relative path, length, SHA-256, attributes), the registry key and
+# the Layers value of game.exe (type and data; absent when the value or the key is).
 function Get-State {
     $files = Get-ChildItem -LiteralPath $game -Recurse -Force | Sort-Object FullName | ForEach-Object {
         $rel = $_.FullName.Substring($game.Length)
@@ -51,7 +58,13 @@ function Get-State {
     $reg = if (Test-Path -LiteralPath $regKey) {
         Get-ChildItem -LiteralPath $regKey -Recurse | ForEach-Object { $_.Name; ($_ | Get-ItemProperty | Out-String).Trim() }
     } else { 'registry key absent' }
-    (@($files) + @($reg)) -join "`n"
+    $layer = 'layer value absent'
+    if (Test-Path -LiteralPath $layersKey) {
+        $k = Get-Item -LiteralPath $layersKey
+        $v = $k.GetValue($layerName, $null, 'DoNotExpandEnvironmentNames')
+        if ($null -ne $v) { $layer = "layer $($k.GetValueKind($layerName)) [$v]" }
+    }
+    (@($files) + @($reg) + @($layer)) -join "`n"
 }
 
 # One rerun command: its output into cli.log, its exit code back.
@@ -89,7 +102,8 @@ $json = @"
 {"from":"d3d9.dll","to":"d3d9.dll","sha256":"$(& $sha 'd3d9.dll')"},
 {"from":"new.dll","to":"mods\\new.dll","sha256":"$(& $sha 'new.dll')"}]}},
 {"registry_set":{"key":"HKCU\\Software\\RerunSandboxCli\\Game","values":[{"name":"Width","dword":1920},{"name":"Lang","sz":"en"}]}},
-{"ini_set":{"file":"game.ini","values":[{"section":"Display","key":"Width","value":"1920"}]}}]}
+{"ini_set":{"file":"game.ini","values":[{"section":"Display","key":"Width","value":"1920"}]}},
+{"compat_layer":{"exe":"game.exe","layers":["$($layerTokens -join '","')"]}}]}
 "@
 Write-Plain $steps $json
 $before = Get-State
@@ -112,12 +126,15 @@ if ($Elevated) {
     if ($a.Code -eq 0 -and $a.Text -match 'revert with: rerun revert ([0-9]{8}-[0-9a-f]{16})') {
         $txn = $Matches[1]
         $applied = Get-State
+        # The tokens appended to a missing value: the prefix of the tab and the tokens in byte
+        # order (P2-11b).
+        $layerApplied = $applied.Contains("layer String [~ $($layerTokens -join ' ')]")
         $runs.status = (Invoke-Rerun status).Code
         $r = Invoke-Rerun revert $txn --yes
         $runs.revert = $r.Code
         $runs.status_all = (Invoke-Rerun status --all).Code
         $closed = $r.Text -match "transaction $txn reverted and closed"
-        $expected = $dryUnchanged -and ($applied -ne $before) -and $closed -and
+        $expected = $dryUnchanged -and ($applied -ne $before) -and $closed -and $layerApplied -and
             (@($runs.Values) | Where-Object { $_ -ne 0 }).Count -eq 0
     }
 }

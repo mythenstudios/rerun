@@ -50,8 +50,8 @@ transaction added: reverting that transaction removes it. A token you add yourse
 apply that Rerun added too is removed by the revert. The keys AppCompatFlags and Layers are \
 shared with Windows: a revert deletes one Rerun created only when it is empty, so reverting \
 transactions in another order than newest first can leave them empty for good. A layer applies \
-only when Windows starts the game by exactly the path shown as the value name (not through a \
-shortcut into a link or junction); a revert takes effect from the next start";
+only when Windows starts the game by exactly the path shown as the value name (not by a path \
+through a link or junction); a revert takes effect from the next start";
 
 /// What a plan with INI ops says once (P2-12, ADR 0020 amendment P2-12; user decisions E1 b, E2
 /// a, E5 a).

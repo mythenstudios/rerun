@@ -261,6 +261,17 @@ fn p_l2_token_lists_break_no_rule() {
         }),
         "two tokens of one group",
     );
+    // A joined prefix in the old value (P2-11b, B4.3): refused by the current rules only, so a
+    // recorded head with such an old value still decodes and reverts.
+    refused_now(
+        &with(&merge, &|p| {
+            let (old, add, new) = last_tokens(p);
+            *old = old_sz("~ZZ_DPI_B X");
+            *add = ts(&["ZZ_OS_A"]);
+            *new = "~ZZ_DPI_B X ZZ_OS_A".to_owned();
+        }),
+        "a prefix joined to a word",
+    );
     // Both rule sets (security review S-1): `new` is the old value with the tokens appended,
     // so a recorded head cannot make the restore of `After` add a word.
     refused(

@@ -41,7 +41,7 @@
 //! always inline); 1 to 8 tokens in byte order (unique), none already in the old value
 //! (folded); the new value in the grammar and other than the old one; with an old value not in a
 //! key the plan creates. [`Rules::Current`] adds the token rules (`RegPolicy::check_tokens`:
-//! allowlist, groups, length) and `new` equal to `layers::merge(old, add)`; [`Rules::Recorded`]
+//! allowlist, groups of the added tokens, an old value without a joined prefix, length) and `new` equal to `layers::merge(old, add)`; [`Rules::Recorded`]
 //! keeps the form and the version-independent relation (an old value: `new` is it, one space
 //! and the tokens; none: `new` ends with the tokens), not the allowlist, the groups or the
 //! prefix of a new value (a later allowlist or prefix must not block the revert).

@@ -709,10 +709,32 @@ fn production_layers() -> Vec<Step> {
     )]
 }
 
+/// `HKCU\...\AppCompatFlags`.
+fn appcompat_key() -> RegKey {
+    hkcu(crate::exec::layer_tests::APPCOMPAT)
+}
+
+/// `k` exists as a plain key (not a link) with no value and no subkey.
+fn empty_plain_key(reg: &dyn Registry, k: &RegKey) -> bool {
+    reg.key_exists(k).unwrap_or_else(|e| panic!("{k}: {e}"))
+        && reg.link(k).unwrap_or_else(|e| panic!("{k}: {e}")).is_none()
+        && reg
+            .values(k)
+            .unwrap_or_else(|e| panic!("{k}: {e}"))
+            .is_empty()
+        && reg
+            .subkeys(k)
+            .unwrap_or_else(|e| panic!("{k}: {e}"))
+            .is_empty()
+}
+
 /// SB-L5 (P2-11b): `compat_layer` with the production tokens on the real `HKCU`. A round trip
-/// without a value (the `Layers` key as before, the value gone, the same hash planned again);
-/// then a drift: `reg add` appends `RUNASINVOKER` after the apply, the revert leaves exactly
-/// `~ RUNASINVOKER` and closes. The value is removed again at the end.
+/// without a value (the `Layers` key as before: when it was absent, Rerun creates it and the
+/// revert deletes it again, empty (E6 b); the value gone, the same hash planned again); then a
+/// drift: `reg add` appends `RUNASINVOKER` after the apply, the revert leaves exactly
+/// `~ RUNASINVOKER` and closes. At the end the value goes, and `Layers` (and `AppCompatFlags`)
+/// if they were absent at the start and are empty plain keys now. Nothing is created to look
+/// (no `AppHive` write before the plan).
 #[test]
 #[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
 fn sandbox_sb_l5_compat_layer_round_trip_on_the_real_hkcu() {
@@ -722,9 +744,14 @@ fn sandbox_sb_l5_compat_layer_round_trip_on_the_real_hkcu() {
     let h = AppHive::real_user().unwrap_or_else(|e| panic!("{e}"));
     let name = layer_name(&w);
     let layers = layers_key();
-    let _ = h.delete_value(&layers, &name);
+    let flags = appcompat_key();
     let tail = crate::policy::registry::layers::LAYER_TOKENS.join(" ");
     let reg = w.sys.registry();
+    let flags_existed = reg.key_exists(&flags).unwrap_or_else(|e| panic!("{e}"));
+    let layers_existed = reg.key_exists(&layers).unwrap_or_else(|e| panic!("{e}"));
+    if layers_existed && reg.get(&layers, &name).unwrap().is_some() {
+        h.delete_value(&layers, &name).unwrap();
+    }
 
     // Round trip.
     let before = w.snap(vec![layers.clone()]);
@@ -742,6 +769,12 @@ fn sandbox_sb_l5_compat_layer_round_trip_on_the_real_hkcu() {
     assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
     let after = w.snap(vec![layers.clone()]);
     assert!(before == after, "{:#?}", before.diff(&after));
+    if !layers_existed {
+        assert!(
+            !reg.key_exists(&layers).unwrap(),
+            "Layers created by Rerun and empty: the revert deletes it (E6 b)"
+        );
+    }
     assert_eq!(
         w.plan_steps(&production_layers()),
         hash,
@@ -755,25 +788,54 @@ fn sandbox_sb_l5_compat_layer_round_trip_on_the_real_hkcu() {
         .with(|cx, _| revert(cx, &t))
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
-    assert_eq!(
-        rep.ops.last().map(|o| o.observed),
-        Some(Observed::Drifted),
-        "{rep:?}"
-    );
+    // The token list is the newest op (after the `CreateKey`s); the report runs newest first.
+    let list = rep.ops.iter().max_by_key(|o| o.op).map(|o| o.observed);
+    assert_eq!(list, Some(Observed::Drifted), "{rep:?}");
     assert_eq!(
         reg.get(&layers, &name).unwrap(),
         Some(RegValue::String("~ RUNASINVOKER".into()))
     );
+    if !layers_existed {
+        assert!(
+            reg.key_exists(&layers).unwrap(),
+            "Layers holding another value stays (E6 b)"
+        );
+    }
+
+    // Clean up: the value, then the keys that were absent at the start, if empty and plain.
     h.delete_value(&layers, &name).unwrap();
+    if !layers_existed && empty_plain_key(reg, &layers) {
+        h.delete_key(&layers).unwrap();
+    }
+    if !flags_existed && empty_plain_key(reg, &flags) {
+        h.delete_key(&flags).unwrap();
+    }
+}
+
+/// Removes the link key planted at `Layers` when dropped (also after a panic), so nothing
+/// later in the Sandbox session (the probe script) follows it.
+struct LinkAtLayers<'h> {
+    h: &'h AppHive,
+    reg: WinRegistry,
+}
+
+impl Drop for LinkAtLayers<'_> {
+    fn drop(&mut self) {
+        let layers = layers_key();
+        if matches!(self.reg.link(&layers), Ok(Some(_))) {
+            let _ = self.h.delete_key(&layers);
+        }
+    }
 }
 
 /// SB-L5, the link key (P2-11b): a link key planted at `AppCompatFlags\Layers` pointing
 /// elsewhere in `HKCU`, before the plan: the planner refuses it (a symbolic-link key on the
-/// way), nothing appears at the target. Needs `Layers` absent (a fresh Sandbox); otherwise
-/// it notes that and checks nothing.
+/// way) or the apply does, nothing appears at the target. `Layers` must be absent or an empty
+/// plain key (then it is removed first); anything else fails the test. Named so that it runs
+/// before the round trip (libtest orders by name).
 #[test]
 #[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
-fn sandbox_sb_l5_link_key_at_layers() {
+fn sandbox_sb_l5_a_link_key_at_layers_is_refused() {
     sandbox_guard();
     let _p = Production::on();
     let w = Sb::new("sb-l5-link");
@@ -781,11 +843,19 @@ fn sandbox_sb_l5_link_key_at_layers() {
     let layers = layers_key();
     let reg = w.sys.registry();
     if reg.key_exists(&layers).unwrap_or_else(|e| panic!("{e}")) {
-        super::super::testfx::note("sandbox sb-l5-link: Layers exists, the link case is skipped");
-        return;
+        assert!(
+            empty_plain_key(reg, &layers),
+            "Layers exists and is not an empty plain key: the link case cannot run"
+        );
+        h.delete_key(&layers).unwrap();
     }
+    let flags_existed = reg.key_exists(&appcompat_key()).unwrap();
     let target = hkcu(r"Software\RerunSandbox\LayersTarget");
     h.key(&target).unwrap();
+    let guard = LinkAtLayers {
+        h: &h,
+        reg: WinRegistry::new().unwrap(),
+    };
     assert!(
         h.link(&layers, &target).unwrap(),
         "real HKCU makes link keys"
@@ -797,7 +867,11 @@ fn sandbox_sb_l5_link_key_at_layers() {
         Ok(hash) => !matches!(w.with(|cx, _| apply(cx, hash)), Ok(Outcome::Applied(_))),
     };
     // The link goes first, whatever the result.
-    h.delete_key(&layers).unwrap();
+    drop(guard);
+    assert!(
+        reg.link(&layers).unwrap().is_none() && !reg.key_exists(&layers).unwrap(),
+        "the link key is removed"
+    );
     assert!(
         refused,
         "compat_layer through a link key at Layers: {planned:?}"
@@ -809,4 +883,7 @@ fn sandbox_sb_l5_link_key_at_layers() {
         "a value appeared at the link target"
     );
     h.delete_key(&target).unwrap();
+    if !flags_existed && empty_plain_key(reg, &appcompat_key()) {
+        h.delete_key(&appcompat_key()).unwrap();
+    }
 }

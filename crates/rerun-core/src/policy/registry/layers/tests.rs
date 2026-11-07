@@ -26,6 +26,7 @@ impl Drop for Reset {
     fn drop(&mut self) {
         knob::production(false);
         knob::drop_token(None);
+        knob::plant(None);
         knob::reverse(false);
         knob::normalise_old(false);
         knob::first_only(false);
@@ -388,6 +389,7 @@ fn l_p2_every_listed_word_was_observed() {
     let tab = super::sb_l1_tab();
     assert_eq!(tab.len(), 17);
     let mut labels: Vec<&str> = tab.iter().map(|(l, _, _)| *l).collect();
+    labels.sort_unstable();
     labels.dedup();
     assert_eq!(labels.len(), tab.len(), "labels unique");
     assert!(tab.iter().all(|(_, h, _)| *h == "HKCU" || *h == "HKLM"));
@@ -569,4 +571,27 @@ fn l_p7_prefixes() {
         unmerge("~HIGHDPIAWARE HIGHDPIAWARE", &h),
         Unmerged::Rest(Some("~HIGHDPIAWARE".into()))
     );
+}
+
+/// The hard exclusions of `allowed` hold whatever the list says (review S2, N3): an elevation
+/// token and the restart token planted on the allowlist in force are refused; a planted
+/// ordinary token is allowed (the control: planting works).
+#[test]
+fn l_p8_allowed_refuses_elevation_and_restart_whatever_the_list_says() {
+    let _r = Reset;
+    for prod in [false, true] {
+        knob::production(prod);
+        knob::plant(Some("ZZ_PLANTED"));
+        assert!(allowed(&t("ZZ_PLANTED")), "the control");
+        for never in ["REGISTERAPPRESTART", "RUNASADMIN", "RUNASINVOKER"] {
+            knob::plant(Some(never));
+            assert!(!allowed(&t(never)), "{never}");
+            assert!(
+                check(None, &ts(&[never]))
+                    .is_err_and(|e| e.to_string().contains("not on the allowlist")),
+                "{never}"
+            );
+        }
+        knob::plant(None);
+    }
 }

@@ -32,6 +32,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - CPU rule selection against all fixtures
 - Primitive `launch_option` (Steam closed) and `launch_method`
 - Elevated helper + primitives `priority`, `firewall_rule`
+- Preconditions from `compat_layer` (P2-11b, ADR 0018 amendment P2-11b): `rerun-launch` and the IFEO launcher start the game by exactly the path of its `Layers` value name (`docs/04-launch-methods.md`); the `HKLM` "all users" layer of the same executable (written by the compatibility tab, an `HKLM` `~ DPIUNAWARE` next to Rerun's `HKCU` `HIGHDPIAWARE`: how they combine is not measured) is decided before the helper touches `HKLM` layers: read it (read only) in the planner and refuse a group conflict, or measure it first
 - `verify` warns about UAC VirtualStore shadow copies of managed files (moved from phase 2)
 
 **Acceptance:** A Steam game launches via `rerun-launch` with 8 threads on one CCD, the check reports `ok`. A Ubisoft game via Steam with `watch` as well. The elevated helper (ADR 0008, H2, security review of step 10): its `System` has no GPU (a separate type, or a GPU part that returns `Unsupported` without touching DXGI); the helper binary never links `sys::win::loader`'s DLL loading or `sys::win::dxgi`, checked by an import allowlist test on the built helper with `tests/support/hardening.rs` (`detect::pe`, ADR 0013); and a source rule test refuses `WinGpu` and `WinSystem` in the helper's sources.

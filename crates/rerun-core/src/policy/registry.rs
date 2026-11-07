@@ -535,9 +535,14 @@ impl RegPolicy {
 
     /// May `add` be appended to a `CompatLayers` value holding `old` (`None`: missing)? `add`
     /// has 1 to 8 tokens, unique and in byte order, each on the add allowlist and none an
-    /// elevation token, none already in `old` (folded); `old` in the strict grammar; at most
-    /// one token of an exclusive group in `old` and `add` together (folded); the merged value at
-    /// most [`layers::MAX_LAYERS_BYTES`] (module [`layers`]).
+    /// elevation token or `REGISTERAPPRESTART` ([`layers::allowed`]), none already in `old`
+    /// (folded); `old` in the strict grammar, without a prefix character joined to a word
+    /// (`~X`, `$X`) or a lone `~`/`$` after another word (P2-11b); no added token of a group
+    /// that another added token or a word of `old` holds (folded). Only the added tokens are
+    /// checked against the groups: `old` itself may hold two words of one group (the tab
+    /// writes System (Enhanced) as `GDIDPISCALING DPIUNAWARE`). The merged value at most
+    /// [`layers::MAX_LAYERS_BYTES`] (module [`layers`]). Current rules only: a recorded head
+    /// is never checked against it (ADR 0018 amendment P2-11, E4).
     pub fn check_tokens(
         &self,
         v: &AllowedValue,

@@ -32,16 +32,21 @@
 //! holding it: the elevation rule below sees only names. [`LAYER_TOKENS`] is the one place
 //! the add allowlist lives; taking a token off never blocks a revert (R-L8).
 //!
-//! Never added, whatever the list says or a Topo asks:
+//! What is kept out, and how:
 //! - `RUNAS…` (`RUNASADMIN`, `RUNASHIGHEST`, `RUNASINVOKER`): elevation tokens (ADR 0018 S6;
-//!   an elevated game loads the DLLs Rerun puts in a user-writable folder).
+//!   an elevated game loads the DLLs Rerun puts in a user-writable folder). Refused by
+//!   [`allowed`] by prefix, whatever the list says.
 //! - `REGISTERAPPRESTART`: Windows starts the program again by itself after a restart (rule 1:
-//!   nothing runs in the background, no autostart).
+//!   nothing runs in the background, no autostart). Refused by [`allowed`] by name, whatever
+//!   the list says.
 //! - The operating-system modes (`WINXPSP3`, `WIN7RTM` and the ones not observed): `WINXPSP3`
 //!   makes a 32-bit image need elevation in a non-elevated session (SB-L3) and has no effect on
-//!   a 64-bit one; the others are not measured (P2-11b, user decision B5 a). They are in the
-//!   group table all the same, so a mode the user set is seen.
-//! - Anything SB-L1 did not observe (never invent, `docs/05-sources-policy.md`).
+//!   a 64-bit one; the others are not measured (P2-11b, user decision B5 a). Not on the list,
+//!   and a compile-time check keeps every word of [`NEVER_ADD`] (these two included) off it;
+//!   whether a mode may ever be added is a later decision with its own measurement. They are
+//!   in the group table all the same, so a mode the user set is seen.
+//! - Anything SB-L1 did not observe (never invent, `docs/05-sources-policy.md`): not on the
+//!   list, held by a test against the SB-L1 fixture.
 //!
 //! The tab has three DPI options: Application `HIGHDPIAWARE`, System `DPIUNAWARE`, System
 //! (Enhanced) the pair `GDIDPISCALING DPIUNAWARE`. Only `HIGHDPIAWARE` is addable: the model
@@ -135,9 +140,9 @@ pub(crate) fn sb_l1_tab() -> Vec<(&'static str, &'static str, &'static str)> {
         .collect()
 }
 
-/// Words never on the add allowlist (module docs); a test holds [`LAYER_TOKENS`] against it.
-#[cfg(test)]
-pub(crate) const NEVER_ADD: &[&str] = &[
+/// Words never on the add allowlist (module docs); a compile-time check below holds
+/// [`LAYER_TOKENS`] against it, in every build.
+pub const NEVER_ADD: &[&str] = &[
     "RUNASADMIN",
     "RUNASHIGHEST",
     "RUNASINVOKER",
@@ -148,6 +153,65 @@ pub(crate) const NEVER_ADD: &[&str] = &[
 
 /// Every token beginning with this is an elevation token and is never added (ADR 0018 S6).
 const ELEVATION: &str = "RUNAS";
+
+/// The token that makes Windows restart the program by itself; never added (rule 1).
+const RESTART: &str = "REGISTERAPPRESTART";
+
+/// `a` equals `b` byte for byte (`const`).
+const fn same(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// `a` begins with `p` (`const`).
+const fn begins(a: &[u8], p: &[u8]) -> bool {
+    if a.len() < p.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < p.len() {
+        if a[i] != p[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+// No word of the add allowlist is on the never-list, an elevation token or the restart token,
+// in every build (review S2, N3).
+const _: () = {
+    let mut i = 0;
+    while i < LAYER_TOKENS.len() {
+        let t = LAYER_TOKENS[i].as_bytes();
+        assert!(
+            !begins(t, ELEVATION.as_bytes()),
+            "an elevation token on LAYER_TOKENS"
+        );
+        assert!(
+            !same(t, RESTART.as_bytes()),
+            "REGISTERAPPRESTART on LAYER_TOKENS"
+        );
+        let mut j = 0;
+        while j < NEVER_ADD.len() {
+            assert!(
+                !same(t, NEVER_ADD[j].as_bytes()),
+                "a NEVER_ADD word on LAYER_TOKENS"
+            );
+            j += 1;
+        }
+        i += 1;
+    }
+};
 
 /// A group of tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +266,7 @@ pub(crate) mod knob {
     thread_local! {
         static PRODUCTION: Cell<bool> = const { Cell::new(false) };
         static DROPPED: Cell<Option<&'static str>> = const { Cell::new(None) };
+        static PLANTED: Cell<Option<&'static str>> = const { Cell::new(None) };
         static REVERSED: Cell<bool> = const { Cell::new(false) };
         static NORMALISE_OLD: Cell<bool> = const { Cell::new(false) };
         static FIRST_ONLY: Cell<bool> = const { Cell::new(false) };
@@ -220,6 +285,13 @@ pub(crate) mod knob {
     }
     pub(crate) fn dropped() -> Option<&'static str> {
         DROPPED.with(Cell::get)
+    }
+    /// A token planted on the allowlist in force (the hard exclusions of `allowed`).
+    pub(crate) fn plant(t: Option<&'static str>) {
+        PLANTED.with(|c| c.set(t));
+    }
+    pub(crate) fn planted() -> Option<&'static str> {
+        PLANTED.with(Cell::get)
     }
     /// R-L8 (M1): the allowlist in reverse order.
     pub(crate) fn reverse(on: bool) {
@@ -257,6 +329,7 @@ fn tokens() -> Vec<&'static str> {
             .iter()
             .copied()
             .filter(|t| Some(*t) != knob::dropped())
+            .chain(knob::planted())
             .collect();
         if knob::is_reversed() {
             t.reverse();
@@ -328,9 +401,11 @@ impl fmt::Display for TokenName {
     }
 }
 
-/// `t` may be added: exactly on the add allowlist, and no elevation token.
+/// `t` may be added: exactly on the add allowlist, no elevation token and not the restart
+/// token (module docs).
 pub fn allowed(t: &TokenName) -> bool {
-    !t.as_str().starts_with(ELEVATION) && tokens().contains(&t.as_str())
+    let s = t.as_str();
+    !s.starts_with(ELEVATION) && s != RESTART && tokens().contains(&s)
 }
 
 /// The group of a word of a value, compared folded (review S4); `None` for a word without one.

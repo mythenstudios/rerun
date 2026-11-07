@@ -190,8 +190,8 @@ pub(crate) fn plan_into(
     if game.launch_path() != Some(game.path()) {
         return Err(refuse(format!(
             "compat_layer: the game folder {} is reached through a link or another name ({}); \
-             Windows applies a compatibility layer only to the path a program is started by, \
-             and this game is started through a link",
+             Windows applies a compatibility layer only when a program is started by exactly \
+             the path of the value name, and the game would be started by another path",
             shown(&game.path().to_string()),
             game.launch_path().map_or_else(
                 || "a path too long to compare".to_owned(),

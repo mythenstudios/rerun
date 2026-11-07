@@ -72,7 +72,8 @@ fn help_lists_the_phase_2_commands_and_their_flags() {
 }
 
 /// Never a well-formed plan hash or transaction here: this binary runs on the real machine
-/// (project rule: no writing command against it), so every argument fails clap's parse.
+/// (the project rule: never a writing command against the developer machine), so every
+/// argument fails clap's parse.
 #[test]
 fn usage_errors_exit_2_without_a_report() {
     for args in [
