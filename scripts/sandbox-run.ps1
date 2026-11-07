@@ -41,11 +41,20 @@ function Run-Native {
     $script:NativeExit = $LASTEXITCODE
 }
 
+# Every stage with its time in C:\sandbox\out\status.txt (visible on the host at once): after
+# the restart from inside, Windows starts the LogonCommand without a visible window.
+$status = Join-Path $out 'status.txt'
+function Status([string]$s) {
+    Add-Content -LiteralPath $status -Value "$(Get-Date -Format 'HH:mm:ss') $s"
+    Write-Host $s
+}
+
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 $elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $build = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
 $started = Get-Date
 $note = ''
+Status "start: account $env:USERNAME, elevated=$elevated, build $build"
 
 # Elevated session with UAC off: turn UAC on and restart the Sandbox (see the header).
 $uacKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
@@ -54,7 +63,7 @@ if ($elevated) {
     if ($lua -ne 1) {
         Set-ItemProperty -LiteralPath $uacKey -Name EnableLUA -Value 1 -Type DWord
         Set-Content -LiteralPath (Join-Path $out 'uac-restart.txt') -Value "EnableLUA was $lua; set to 1 and restarted at $(Get-Date -Format o)"
-        Write-Host 'session is elevated and UAC is off: UAC turned on, the Sandbox restarts in 10 s and runs the tests again'
+        Status 'elevated and UAC off: UAC turned on, the Sandbox restarts in 10 s and runs again (without a visible window; follow status.txt)'
         Run-Native shutdown.exe /r /t 10 | Out-Null
         exit 0
     }
@@ -69,8 +78,9 @@ $err = ''
 # P2-13 (user decision E7 a): the CLI round trip with the release rerun.exe, before the tests
 # (its own game folder and registry key; a test that fails cannot block it).
 $cli = $null
+Status 'CLI round trip (cli.log)'
 try {
-    $cli = & 'C:\sandbox\scripts\sandbox-cli.ps1' -Out $out -Elevated $elevated
+    $cli = &'C:\sandbox\scripts\sandbox-cli.ps1' -Out $out -Elevated $elevated
 } catch {
     $cli = [ordered]@{ error = "$_"; expected = $false }
     Write-Host "CLI round trip failed: $_"
@@ -82,6 +92,7 @@ try {
     # One thread: the tests share the real HKCU keys of the VM. `sandbox_` selects the ignored
     # sandbox tests (module sys::win::tests::sandbox); `--ignored` is what makes them run.
     $log = Join-Path $out 'sandbox-test.log'
+    Status 'sandbox tests (sandbox-test.log)'
     Run-Native $exe --ignored --test-threads=1 --nocapture 'sandbox_' | Tee-Object -FilePath $log
     $code = $script:NativeExit
     $text = Get-Content -LiteralPath $log -Raw
@@ -108,9 +119,12 @@ try {
 }
 
 # Facts for the compatibility layer (P2-11): a failure here never changes the test result.
+Status 'layer probes (probe-layers.md)'
 try { & 'C:\sandbox\scripts\sandbox-probe-layers.ps1' -Out $out } catch { Write-Host "probe failed: $_" }
 Write-Host ''
-Write-Host "exit code $code, $passed passed, $failed failed, elevated=$elevated $note (results in C:\sandbox\out)"
+Status "done: exit code $code, $passed passed, $failed failed, elevated=$elevated $note"
+# A visible end in the Sandbox too: an Explorer window on the results.
+try { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList $out } catch { }
 if ($cli) { Write-Host "CLI round trip: expected=$($cli.expected) (details in cli.log)" }
 if ($passed -eq 0 -and $code -eq 0) { Write-Host 'WARNING: no test ran' }
 Read-Host 'Done. Press Enter to leave this window (close the Sandbox yourself)'
