@@ -187,6 +187,27 @@ try {
     Say ('- 64-bit cmd.exe copy, `~ RUNASINVOKER`: ' + (Observe $p64))
     Reg-Del $p64
     Say ''
+
+    # SB-L6 (P2-11b, user decision B7): every token Rerun may add must take effect without
+    # elevation, on a 32-bit and a 64-bit image: launched (no 740) and __COMPAT_LAYER holds it.
+    # Meaningful only in a non-elevated session; the header line says which one this was.
+    Say '## SB-L6: tokens Rerun may add (no elevation, x86 and x64)'
+    Say ''
+    $sessionElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Say ("- session elevated: $sessionElevated (the result counts only when False)")
+    Say ''
+    Say '| data | image | observation |'
+    Say '|---|---|---|'
+    $l6 = @('~ HIGHDPIAWARE', '~ DISABLEDXMAXIMIZEDWINDOWEDMODE', '~ DISABLEDXMAXIMIZEDWINDOWEDMODE HIGHDPIAWARE', '~ RUNASINVOKER DISABLEDXMAXIMIZEDWINDOWEDMODE HIGHDPIAWARE')
+    foreach ($data in $l6) {
+        foreach ($img in @(@('x86', $forms.canonical), @('x64', $p64))) {
+            Cleanup
+            Reg-Add $img[1] $data
+            Say ('| `' + $data + '` | ' + $img[0] + ' | ' + (Observe $img[1]) + ' |')
+        }
+    }
+    Cleanup
+    Say ''
 }
 catch {
     Say ''
