@@ -337,3 +337,172 @@ fn s6_planning_without_rerun_s_folder() {
     assert_eq!(p.ops.len(), 6);
     same(&app0, &snap_app(&env.sys));
 }
+
+/// Review S3 for `add tokens`: the old and the new value of a recorded `TokenList` (the new one
+/// holds the old) by type, length and SHA-256 only.
+#[test]
+fn s3_a_recorded_token_list_shows_no_registry_text() {
+    use super::layer_tests::{layer_base_with, two_tokens};
+    use super::reg_tests::plan_all;
+    let env = Env::new(finish(layer_base_with("~ RUNASADMIN")));
+    let h = plan_all(&env, &[two_tokens()]);
+    let a = app(&env.sys);
+    let b = crate::plan::load(&a, &h).unwrap();
+    let stored = crate::plan::preview_stored(&b).unwrap();
+    let head = crate::plan::preview_head(b.bytes()).unwrap();
+    let k = stored
+        .ops
+        .iter()
+        .position(|o| o.action == "add tokens")
+        .unwrap();
+    assert_eq!(
+        stored.ops[k].new_value.as_ref().unwrap().to_string(),
+        "REG_SZ: ~ RUNASADMIN ZZ_FLAG_A ZZ_OS_A"
+    );
+    for v in [&head.ops[k].old_value, &head.ops[k].new_value] {
+        let v = v.as_ref().unwrap();
+        assert!(v.text.is_none(), "{v:?}");
+        assert!(v.kind.starts_with("REG_SZ, "), "{v:?}");
+        assert!(v.kind.contains(" bytes, sha256 "), "{v:?}");
+    }
+    assert_eq!(head.ops[k].tokens, stored.ops[k].tokens);
+}
+
+/// Senior-dev S-a: `revert_check` runs the revert's chain without writing and refuses as the
+/// revert does: a later transaction on the same objects, the game running, forgotten.
+#[test]
+fn revert_check_refuses_as_the_revert_does() {
+    let env = Env::new(finish(base()));
+    let t = env.applied(&env.plan(&t1_spec()));
+    assert!(env.with(|cx| super::revert_check(cx, &t)).is_ok());
+    // The game runs.
+    let image = env
+        .sys
+        .fake_fs()
+        .map_image_as(4242, Path::new(&format!(r"{GAME}\game.exe")))
+        .unwrap();
+    let app0 = snap_app(&env.sys);
+    let c = env.with(|cx| super::revert_check(cx, &t));
+    let r = env.revert(&t);
+    match (&c, &r) {
+        (Err(c), Err(ExecError::Refused(r))) => assert_eq!(c.to_string(), r.to_string()),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(c, Err(Refusal::Busy(_))));
+    same(&app0, &snap_app(&env.sys));
+    drop(image);
+    // A later transaction on the same file: `Later` for both.
+    let t2 = env.applied(&env.plan(&spec(vec![entry(
+        "new.dll",
+        r"mods\a\y.dll",
+        super::tests::N,
+    )])));
+    let c = env.with(|cx| super::revert_check(cx, &t));
+    assert!(
+        matches!(&c, Err(Refusal::Later { txn }) if *txn == t2),
+        "{c:?}"
+    );
+    assert!(matches!(
+        env.revert(&t),
+        Err(ExecError::Refused(Refusal::Later { txn })) if txn == t2
+    ));
+    // Closed by forget, not found.
+    env.forget(&t2).unwrap();
+    assert!(matches!(
+        env.with(|cx| super::revert_check(cx, &t2)),
+        Err(Refusal::Journal(_))
+    ));
+    let gone: TxnId = "00000077-00000000000000ab".parse().unwrap();
+    assert!(matches!(
+        env.with(|cx| super::revert_check(cx, &gone)),
+        Err(Refusal::Journal(e)) if matches!(*e, JournalError::NotFound(_))
+    ));
+}
+
+/// Review S2 / senior-dev S-b: while the lock is held, `verify` and `revert_check` are
+/// `JournalBusy`; while a check holds the lock file read side, the lock is `Busy`.
+#[test]
+fn checks_and_the_lock_exclude_each_other() {
+    let env = Env::new(finish(base()));
+    let t = env.applied(&env.plan(&t1_spec()));
+    let a = app(&env.sys);
+    let j = Journal::new(&a, InstanceTag::fixed(0x77));
+    let held = j.lock().unwrap();
+    assert!(matches!(
+        env.verified(&t),
+        Err(ExecError::Refused(Refusal::JournalBusy))
+    ));
+    assert!(matches!(
+        env.with(|cx| super::revert_check(cx, &t)),
+        Err(Refusal::JournalBusy)
+    ));
+    drop(held);
+    let hold = j.hold().unwrap();
+    assert!(matches!(j.lock(), Err(JournalError::Busy)));
+    assert!(env.verified(&t).is_ok(), "two readers share the lock file");
+    drop(hold);
+    assert!(j.lock().is_ok());
+}
+
+/// Security review N1: a `Closed` that did not reach the journal is a refusal (nothing written,
+/// the `first` branch); one that reached it but whose flush failed is `Unconfirmed`. Forget
+/// alike.
+#[test]
+fn a_failed_close_is_a_refusal_or_unconfirmed() {
+    let env = Env::new(finish(base()));
+    let h = env.plan(&t1_spec());
+    let a = app(&env.sys);
+    let bytes = crate::plan::load(&a, &h).unwrap();
+    let j = Journal::new(&a, InstanceTag::fixed(0x52));
+    let empty = |n: u64| {
+        let j = Journal::new(&a, InstanceTag::fixed(n));
+        let lock = j.lock().unwrap();
+        let w = lock.begin(bytes.bytes()).unwrap();
+        *w.id()
+    };
+    // The record is never written: refused, still empty.
+    let t = empty(0x61);
+    let r = env.revert_armed(&t, |fx| fx.fail_at(Prim::CreateTmp, 1, SysErrorKind::Other));
+    assert!(matches!(r, Err(ExecError::Refused(_))), "{r:?}");
+    assert_eq!(env.state(&t), Some(crate::journal::TxnState::Empty));
+    // The record is written, its flush fails: unconfirmed, closed on disk.
+    let r = env.revert_armed(&t, |fx| fx.fail_at(Prim::FlushDir, 1, SysErrorKind::Other));
+    env.sys.fake_fs().clear_faults();
+    assert!(matches!(r, Err(ExecError::Unconfirmed(_))), "{r:?}");
+    assert_eq!(
+        env.state(&t),
+        Some(crate::journal::TxnState::Closed(Closing::RolledBack))
+    );
+    // Forget: before its record a refusal, after it unconfirmed.
+    let t = empty(0x62);
+    let r = env.with(|cx| {
+        env.sys.fake_fs().clear_faults();
+        env.sys
+            .fake_fs()
+            .fail_at(Prim::CreateTmp, 1, SysErrorKind::Other);
+        super::forget(cx, &t)
+    });
+    assert!(matches!(r, Err(ExecError::Refused(_))), "{r:?}");
+    let r = env.with(|cx| {
+        env.sys.fake_fs().clear_faults();
+        env.sys
+            .fake_fs()
+            .fail_at(Prim::FlushDir, 1, SysErrorKind::Other);
+        super::forget(cx, &t)
+    });
+    env.sys.fake_fs().clear_faults();
+    assert!(matches!(r, Err(ExecError::Unconfirmed(_))), "{r:?}");
+    assert_eq!(
+        env.state(&t),
+        Some(crate::journal::TxnState::Closed(Closing::Forgotten))
+    );
+    // Errors before forget writes: refusals.
+    let gone: TxnId = "00000077-00000000000000ab".parse().unwrap();
+    assert!(matches!(env.forget(&gone), Err(ExecError::Refused(_))));
+    let held = j.lock().unwrap();
+    assert!(matches!(
+        env.forget(&t),
+        Err(ExecError::Refused(Refusal::JournalBusy))
+    ));
+    drop(held);
+}

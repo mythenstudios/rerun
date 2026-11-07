@@ -84,8 +84,16 @@ fn main() -> ExitCode {
 /// Parses the command line; help, version and usage errors are printed by clap and end here.
 fn parse() -> Result<Cli, Exit> {
     Cli::try_parse().map_err(|e| {
-        // A closed pipe while printing help changes nothing.
-        let _ = e.print();
+        let help = !e.use_stderr()
+            || e.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand;
+        if help {
+            // Help and version: clap's own text, no user input in it. A closed pipe while
+            // printing it changes nothing.
+            let _ = e.print();
+        } else {
+            // Review N5: never clap's rendering, which repeats the arguments raw.
+            let _ = Out::new(io::stderr().lock()).lines(&cli::usage_lines(&e));
+        }
         if e.use_stderr() {
             Exit::Usage
         } else {

@@ -59,7 +59,7 @@ fn txn_text(st: &TxnStatus) -> TxnText<'_> {
     match &st.state {
         TxnLine::Empty => TxnText::Empty,
         TxnLine::Open => TxnText::Open,
-        TxnLine::Applied if st.ops.iter().any(|o| o.state == OpState::RevertInterrupted) => {
+        TxnLine::Applied if st.ops.iter().any(|o| o.state != OpState::Applied) => {
             TxnText::Reverting
         }
         TxnLine::Applied => TxnText::Applied,
@@ -386,7 +386,10 @@ fn run_revert<W: Write, E: Write>(
             let _ = out.line(&m(TxnMsg::NothingToRevert { txn }));
             return Ok(Exit::Report);
         }
-        _ if blocked(&st) => return Err(fail(err, TxnMsg::Damaged { txn }, Exit::Refused)),
+        // Only forget closes these; one text with the core (`Refusal::Blocked`).
+        TxnLine::Damaged(_) | TxnLine::Unreadable(_) => {
+            return Err(refusal(&Refusal::Blocked { txn }, txn, err));
+        }
         _ => {}
     }
     let cx = ExecCtx {
@@ -395,17 +398,27 @@ fn run_revert<W: Write, E: Write>(
         app: &app,
         tag: InstanceTag::new(),
     };
+    // Senior-dev S-a: every check of the revert first, so neither the preview nor the question
+    // offers a revert that is refused anyway.
+    if let Err(r) = exec::revert_check(&cx, &txn) {
+        return Err(refusal(&r, txn, err));
+    }
     let v = match exec::verify(&cx, &txn) {
         Ok(v) => v,
         Err(ExecError::Refused(r)) => return Err(refusal(&r, txn, err)),
         Err(e) => return Err(fail(err, TxnMsg::Error { error: shown(&e) }, Exit::Refused)),
     };
+    let empty = st.state == TxnLine::Empty;
     let mut lines = vec![m(TxnMsg::Txn {
         txn,
         state: txn_text(&st),
     })];
     lines.extend(head_lines(&st));
-    lines.extend(now_lines(&st, &v));
+    if empty {
+        lines.push(m(TxnMsg::EmptyCloses { txn }));
+    } else {
+        lines.extend(now_lines(&st, &v));
+    }
     lines.push(Message::Blank);
     out.lines(&lines)
         .and_then(|()| out.flush())
@@ -415,10 +428,18 @@ fn run_revert<W: Write, E: Write>(
             .line(&m(TxnMsg::DryRunDone))
             .map_or_else(|e| before_change(err, e), |()| Exit::Report));
     }
-    confirm(host, yes, TxnMsg::AskRevert { ops: v.ops.len() }, err)?;
+    // An empty transaction changed nothing: closing it is nothing to ask about.
+    if !empty {
+        confirm(host, yes, TxnMsg::AskRevert { ops: v.ops.len() }, err)?;
+    }
     let rep = match exec::revert(&cx, &txn) {
         Ok(rep) => rep,
         Err(ExecError::Refused(r)) => return Err(refusal(&r, txn, err)),
+        Err(e @ ExecError::Unconfirmed(_)) => {
+            note(err, TxnMsg::Error { error: shown(&e) });
+            note(err, TxnMsg::MayHaveClosed { txn });
+            return Err(exit_for_exec(&e));
+        }
         Err(e) => {
             note(err, TxnMsg::Error { error: shown(&e) });
             note(err, TxnMsg::RevertFailed { txn });
@@ -516,9 +537,16 @@ fn run_forget<W: Write, E: Write>(
         .and_then(|()| out.flush())
         .map_err(|e| before_change(err, e))?;
     confirm(host, yes, TxnMsg::AskForget { txn }, err)?;
-    if let Err(e) = exec::forget(&cx, &txn) {
-        // Forget writes one record or one marker or nothing.
-        return Err(fail(err, TxnMsg::Error { error: shown(&e) }, Exit::Refused));
+    match exec::forget(&cx, &txn) {
+        Ok(()) => {}
+        // Nothing written.
+        Err(ExecError::Refused(r)) => return Err(refusal(&r, txn, err)),
+        // The record or marker may be on disk (security review N1).
+        Err(e) => {
+            note(err, TxnMsg::Error { error: shown(&e) });
+            note(err, TxnMsg::MayHaveClosed { txn });
+            return Err(Exit::Open);
+        }
     }
     Ok(out
         .line(&m(TxnMsg::Forgot { txn }))

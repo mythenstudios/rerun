@@ -16,8 +16,12 @@ enum Class {
     Blocked,
     /// Applied and not reverting: later applies may stack on it.
     Active(Vec<Object>),
-    /// Open, applied with a revert begun (condition 3), or damaged with a usable head.
+    /// Open, or applied with a revert begun (condition 3).
     Open(Vec<Object>),
+    /// Damaged with a usable head (P2-13 review S-A/S-d): only forget closes it, so it blocks
+    /// every apply and every earlier revert on its objects as `Blocked` (one text for all of
+    /// them); applies on other objects go on.
+    Damaged(Vec<Object>),
 }
 
 fn classify(j: &Journal<'_>, l: &Listed) -> Class {
@@ -51,8 +55,9 @@ fn classify(j: &Journal<'_>, l: &Listed) -> Class {
     };
     match &full.state {
         TxnState::Damaged(_) if !full.head_usable() => Class::Blocked,
-        _ if damaged => Class::Open(objs),
-        TxnState::Damaged(_) | TxnState::Open => Class::Open(objs),
+        _ if damaged => Class::Damaged(objs),
+        TxnState::Damaged(_) => Class::Damaged(objs),
+        TxnState::Open => Class::Open(objs),
         TxnState::Applied if full.ops.values().any(|o| !o.reverts.is_empty()) => Class::Open(objs),
         TxnState::Applied => Class::Active(objs),
         TxnState::Closed(_) | TxnState::Empty => Class::Ignore,
@@ -64,8 +69,9 @@ pub(super) fn for_apply(j: &Journal<'_>, l: &Listing, mine: &[Object]) -> Result
     for t in &l.txns {
         match classify(j, t) {
             Class::Blocked => return Err(Refusal::Blocked { txn: t.id }),
+            Class::Damaged(o) if overlap(&o, mine) => return Err(Refusal::Blocked { txn: t.id }),
             Class::Open(o) if overlap(&o, mine) => return Err(Refusal::Interrupted { txn: t.id }),
-            Class::Ignore | Class::Active(_) | Class::Open(_) => {}
+            Class::Ignore | Class::Active(_) | Class::Open(_) | Class::Damaged(_) => {}
         }
     }
     Ok(())
@@ -81,10 +87,11 @@ pub(super) fn for_revert(
     for t in l.txns.iter().filter(|t| t.id > *own) {
         match classify(j, t) {
             Class::Blocked => return Err(Refusal::Blocked { txn: t.id }),
+            Class::Damaged(o) if overlap(&o, mine) => return Err(Refusal::Blocked { txn: t.id }),
             Class::Open(o) | Class::Active(o) if overlap(&o, mine) => {
                 return Err(Refusal::Later { txn: t.id });
             }
-            Class::Ignore | Class::Active(_) | Class::Open(_) => {}
+            Class::Ignore | Class::Active(_) | Class::Open(_) | Class::Damaged(_) => {}
         }
     }
     Ok(())

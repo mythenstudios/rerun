@@ -203,3 +203,32 @@ fn j1_j3_j7_journal_on_real_windows() {
     );
     assert_eq!(listing(&out), ["canary.txt"]);
 }
+
+/// P2-13 review S2 (senior-dev S-b) on real NTFS: `Journal::hold` (an existing lock file read
+/// side, sharing read only) and `Journal::lock` (share 0) exclude each other; two holds do not;
+/// without a lock file a hold creates nothing.
+#[test]
+fn journal_hold_and_lock_exclude_each_other_on_real_windows() {
+    let Some((root, lad, _out)) = app_root("journal-hold") else {
+        return;
+    };
+    let sys = AppTestSys::new(&lad);
+    let app = AppDir::open(&sys, Create::IfMissing).unwrap().unwrap();
+    let j = Journal::new(&app, InstanceTag::fixed(0x5e));
+    drop(j.hold().unwrap());
+    assert!(
+        listing(&lad.join("Rerun")).is_empty(),
+        "a hold creates nothing"
+    );
+    drop(j.lock().unwrap());
+    let other = Journal::new(&app, InstanceTag::fixed(0x5f));
+    let hold = j.hold().unwrap();
+    let second = other.hold().unwrap();
+    assert!(matches!(other.lock(), Err(JournalError::Busy)));
+    drop((hold, second));
+    let lock = other.lock().unwrap();
+    assert!(matches!(j.hold(), Err(JournalError::Busy)));
+    drop(lock);
+    assert!(j.hold().is_ok());
+    drop(root);
+}

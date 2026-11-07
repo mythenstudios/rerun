@@ -93,14 +93,23 @@ fn usage_errors_exit_2_without_a_report() {
         &["forget", "abc", "--yes"],
         &["forget"],
         &["status", "--nope"],
+        // Review N5: a value or command with ESC and U+202E reaches stderr escaped.
+        &["scan", "\u{1b}[2J\u{202e}x"],
+        &["apply", "\u{1b}]0;title\u{7}"],
+        &["no\u{1b}[31mcommand"],
+        &["status", "--\u{1b}x"],
     ] {
         let out = rerun(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
         assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
         let stderr = String::from_utf8(out.stderr).unwrap();
-        // Without a command clap shows the help on stderr; otherwise an error line.
         assert!(
-            stderr.starts_with("error: ")
+            !stderr.contains('\u{1b}') && !stderr.contains('\u{202e}') && !stderr.contains('\u{7}'),
+            "{args:?}: {stderr}"
+        );
+        // Without a command clap shows the help on stderr; otherwise Rerun's own error line.
+        assert!(
+            stderr.starts_with("rerun: ")
                 || stderr.contains(
                     "
 Usage: rerun <COMMAND>"

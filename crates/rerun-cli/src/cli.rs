@@ -6,8 +6,12 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use rerun_core::escape;
+
 use rerun_core::journal::TxnId;
 use rerun_core::plan::PlanHash;
+
+use crate::messages::Message;
 
 /// Rerun by Mythen Studios – detects old PC games and applies (and cleanly removes)
 /// the compatibility fixes they need.
@@ -95,6 +99,48 @@ fn txn_id(s: &str) -> Result<TxnId, String> {
         .map_err(|_| "not a transaction name (8 digits, '-', 16 lower-case hex digits)".to_owned())
 }
 
+/// The lines of a usage error (security review N5): Rerun's words for the kind, the expected
+/// form from Rerun's own value parsers, and the value the user gave through `escape::text`,
+/// last on its line. clap's own rendering would repeat the arguments raw.
+pub fn usage_lines(e: &clap::Error) -> Vec<Message<'static>> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let what = match e.kind() {
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation => "invalid value",
+        ErrorKind::UnknownArgument => "unknown argument",
+        ErrorKind::InvalidSubcommand => "unknown command",
+        ErrorKind::MissingRequiredArgument => "a required argument is missing",
+        ErrorKind::MissingSubcommand => "a command is missing",
+        ErrorKind::TooManyValues | ErrorKind::TooFewValues | ErrorKind::WrongNumberOfValues => {
+            "wrong number of values"
+        }
+        ErrorKind::ArgumentConflict => "arguments that cannot be used together",
+        _ => "invalid command line",
+    };
+    let value = [
+        ContextKind::InvalidValue,
+        ContextKind::InvalidArg,
+        ContextKind::InvalidSubcommand,
+    ]
+    .into_iter()
+    .find_map(|k| match e.get(k) {
+        Some(ContextValue::String(s)) => Some(s.clone()),
+        Some(ContextValue::Strings(v)) => Some(v.join(" ")),
+        _ => None,
+    });
+    let why = match e.kind() {
+        ErrorKind::ValueValidation => std::error::Error::source(e).map(ToString::to_string),
+        _ => None,
+    };
+    vec![
+        Message::Usage {
+            what,
+            why: why.map(|w| escape::text(&w).into_owned()),
+            value: value.map(|v| escape::text(&v).into_owned()),
+        },
+        Message::UsageHelp,
+    ]
+}
+
 /// Exit codes (ADR 0016 and its phase 2 amendment). Only additive changes: scripts may rely
 /// on them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +175,29 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn usage_errors_are_rerun_s_lines_with_the_value_escaped() {
+        let text = |args: &[&str]| {
+            let e = Cli::try_parse_from(args).unwrap_err();
+            let mut out = crate::out::Out::new(Vec::new());
+            out.lines(&super::usage_lines(&e)).unwrap();
+            String::from_utf8(out.into_inner()).unwrap()
+        };
+        assert_eq!(
+            text(&["rerun", "apply", "abc"]),
+            "rerun: invalid value (not a plan hash (64 lower-case hex digits)): abc\n\
+             rerun --help lists the commands, rerun <command> --help their arguments\n"
+        );
+        let evil = text(&["rerun", "scan", "x\u{1b}[2J"]);
+        assert!(
+            evil.starts_with(
+                "rerun: invalid value (invalid digit found in string): \"x\\u{1b}[2J\"\n"
+            ),
+            "{evil}"
+        );
+        assert!(text(&["rerun", "nope"]).starts_with("rerun: unknown command: nope\n"));
     }
 
     #[test]

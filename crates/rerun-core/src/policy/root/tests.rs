@@ -978,9 +978,18 @@ fn read_input_reads_a_plain_file_within_its_limit() {
         Err(RootError::InvalidPath(e)) => assert!(e.reason.contains("drive root"), "{e}"),
         other => panic!("{other:?}"),
     }
-    for bad in [
+    for share in [
         r"\\server\share\steps.json",
         r"\\?\UNC\server\share\steps.json",
+        "//server/share/steps.json",
+    ] {
+        match read_input(&sys, Path::new(share), 10) {
+            Err(RootError::InvalidPath(e)) => assert!(e.reason.contains("network share"), "{e}"),
+            other => panic!("{share}: {other:?}"),
+        }
+    }
+    for bad in [
+        r"\\?\D:\Work\steps.json",
         r"steps.json",
         r"D:\Work\..\x.json",
     ] {

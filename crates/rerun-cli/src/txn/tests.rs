@@ -228,7 +228,7 @@ root 0: D:\Games\G
     backup (20 bytes): {APP}\journal\{t5}\op-0000.bin
   revert with: rerun revert {t5}
 
-transaction {t6}: applied
+transaction {t6}: applied; a revert began and did not finish
 root 0: D:\Games\G
   main executable: game.exe
   op 1, reverted: edit ini in root 0: game.ini

@@ -125,7 +125,10 @@ pub enum Refusal {
     JournalBusy,
     /// A transaction is damaged, unreadable or has a head that cannot be parsed: nothing is
     /// applied (and no earlier one reverted) until it is forgotten (fail closed, E2).
-    #[error("transaction {txn} is damaged or unreadable; forget it first")]
+    #[error(
+        "transaction {txn} is damaged; rerun status shows what it left; only rerun forget {txn} \
+         closes it"
+    )]
     Blocked {
         /// The transaction.
         txn: TxnId,
@@ -311,6 +314,11 @@ pub enum ExecError {
     /// The system layer outside an op (a flush of a game folder).
     #[error(transparent)]
     Sys(#[from] SysError),
+    /// Closing (a revert's `Closed`, forget's record or marker) failed after the closing entry
+    /// reached the journal (its flush failed): the transaction may count as closed now; `status`
+    /// shows what the journal holds (P2-13, security review N1).
+    #[error("the transaction may have been closed, but its closing entry may not be durable: {0}")]
+    Unconfirmed(JournalError),
 }
 
 impl From<Refusal> for ExecError {
@@ -1114,14 +1122,22 @@ fn revert_loop<W: Reverting>(
 
 /// An error of a revert before it wrote anything in this run, as the refusal it is (P2-13,
 /// review S4): a front end can then say "nothing changed" for every error of this kind.
-fn refused_early(e: ExecError, t: &TxnId) -> Refusal {
+fn refused_early(e: ExecError) -> Refusal {
     match e {
         ExecError::Refused(r) => r,
         ExecError::Journal(e) => e.into(),
         ExecError::Sys(e) => e.into(),
         ExecError::Op { op, source } => Refusal::Observe { op, source },
-        // The records do not fit the head: a damaged transaction.
-        _ => Refusal::Blocked { txn: *t },
+        ExecError::Verify { op, .. } => Refusal::Observe {
+            op,
+            source: SysError::new(
+                crate::sys::SysErrorKind::Other,
+                "the op is in another state than its records say",
+            ),
+        },
+        _ => Refusal::Journal(Box::new(JournalError::Order(
+            "an error before the first record of the revert",
+        ))),
     }
 }
 
@@ -1132,45 +1148,135 @@ fn revert_records(ops: &BTreeMap<u16, OpLog>) -> usize {
         .sum()
 }
 
-/// Reverts transaction `t` (module docs): also the recovery of an interrupted apply. Every
-/// error before this run's first record is an [`ExecError::Refused`] (review S4: nothing
-/// changed); any other error came after a record of this run.
-pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
-    standard_user(cx.sys)?;
-    let j = Journal::new(cx.app, cx.tag);
-    let lock = j.lock().map_err(Refusal::from)?;
-    let listing = j.list().map_err(Refusal::from)?;
+/// The listing part of a revert's checks: `t` exists, is not forgotten, not damaged.
+fn revert_listed(listing: &Listing, t: &TxnId) -> Result<(), Refusal> {
     let own = listing
         .txns
         .iter()
         .find(|l| l.id == *t)
         .ok_or_else(|| Refusal::from(JournalError::NotFound(*t)))?;
     if own.forgotten {
-        return Err(Refusal::Forgotten { txn: *t }.into());
+        return Err(Refusal::Forgotten { txn: *t });
     }
     let damaged = own
         .view
         .as_ref()
         .map_or(true, |v| matches!(v.state, TxnState::Damaged(_)));
     if damaged {
-        return Err(Refusal::Blocked { txn: *t }.into());
+        return Err(Refusal::Blocked { txn: *t });
     }
-    let mut w = lock.resume(t).map_err(Refusal::from)?;
-    let plan = decode_head(w.head()).map_err(|_| Refusal::Blocked { txn: *t })?;
-    if !records_fit(&plan, w.ops()) {
-        return Err(Refusal::Blocked { txn: *t }.into());
+    Ok(())
+}
+
+/// The head part of a revert's checks: the recorded head decodes (recorded rules), the records
+/// fit it, and every recorded `IniValue` binds to its backup.
+fn revert_plan(
+    t: &TxnId,
+    head: &[u8],
+    ops: &BTreeMap<u16, OpLog>,
+    before: &ini::BeforeBytes<'_>,
+) -> Result<Plan, Refusal> {
+    let blocked = || Refusal::Blocked { txn: *t };
+    let plan = decode_head(head).map_err(|_| blocked())?;
+    if !records_fit(&plan, ops) {
+        return Err(blocked());
     }
     // P2-12: a recorded `IniValue` edits its backup to exactly its new content.
-    let before = |k: u16, _: &crate::journal::Digest, max: u64| w.before_bytes(k, max);
-    if !ini::binds(&plan, w.ops(), &before).map_err(Refusal::from)? {
-        return Err(Refusal::Blocked { txn: *t }.into());
+    if !ini::binds(&plan, ops, before).map_err(Refusal::from)? {
+        return Err(blocked());
     }
-    let objects = Object::of(&plan).map_err(|_| Refusal::Blocked { txn: *t })?;
-    stack::for_revert(&j, &listing, t, &objects)?;
+    Ok(plan)
+}
+
+/// The rest of a revert's checks before its first record: LIFO against later transactions,
+/// each root on its own, the game closed. The roots stay open for the revert.
+fn revert_roots<'g>(
+    cx: &ExecCtx<'g>,
+    plan: &Plan,
+    j: &Journal<'_>,
+    listing: &Listing,
+    t: &TxnId,
+    ops: &BTreeMap<u16, OpLog>,
+    stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
+) -> Result<roots::Roots<'g>, Refusal> {
+    let objects = Object::of(plan).map_err(|_| Refusal::Blocked { txn: *t })?;
+    stack::for_revert(j, listing, t, &objects)?;
+    let roots = roots::Roots::each(cx, plan, stores)?;
+    let intended: Vec<u16> = ops.keys().copied().collect();
+    roots::game_closed(plan, &roots, &intended)?;
+    Ok(roots)
+}
+
+/// Every check of [`revert`] before its first record, read only (P2-13, senior-dev S-a): the
+/// same chain (`revert_listed`, `revert_plan`, `revert_roots`), on the transaction as read
+/// without the lock, holding an existing lock file read side (review S2). A front end runs it
+/// before its preview and its question, so neither offers a revert that is refused anyway.
+pub fn revert_check(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), Refusal> {
+    standard_user(cx.sys)?;
+    let j = Journal::new(cx.app, cx.tag);
+    let hold = j.hold()?;
+    let listing = j.list()?;
+    revert_listed(&listing, t)?;
+    let v = j.load(t, crate::journal::VerifyBackups::Length)?;
+    // As `JournalLock::resume`: `Empty`, `Open` or `Applied`, with a head.
+    let resumable = matches!(
+        v.state,
+        TxnState::Empty | TxnState::Open | TxnState::Applied
+    );
+    let Some(head) = v.head.as_deref().filter(|_| resumable) else {
+        return Err(JournalError::NotResumable {
+            id: *t,
+            state: v.state.clone(),
+        }
+        .into());
+    };
+    let before = |k: u16, d: &crate::journal::Digest, max: u64| j.read_backup(t, k, d, max);
+    let plan = revert_plan(t, head, &v.ops, &before)?;
     let stores = roots::open_stores(cx, &plan);
-    let roots = roots::Roots::each(cx, &plan, &stores)?;
-    let intended: Vec<u16> = w.ops().keys().copied().collect();
-    roots::game_closed(&plan, &roots, &intended)?;
+    let roots = revert_roots(cx, &plan, &j, &listing, t, &v.ops, &stores)?;
+    drop(roots);
+    drop(hold);
+    Ok(())
+}
+
+/// Whether `t` counts as closed in the journal now (a `Closed` record or a forget marker); a
+/// journal that cannot be read counts as "maybe" (true): never claim "nothing changed" then.
+fn closed_now(j: &Journal<'_>, t: &TxnId) -> bool {
+    j.list().map_or(true, |l| {
+        l.txns.iter().find(|x| x.id == *t).is_none_or(|x| {
+            x.forgotten
+                || x.view
+                    .as_ref()
+                    .map_or(true, |v| matches!(v.state, TxnState::Closed(_)))
+        })
+    })
+}
+
+/// A failed closing entry (security review N1): on disk now (its flush failed) is
+/// [`ExecError::Unconfirmed`]; not on disk, nothing was written: a refusal.
+fn closing_failed(j: &Journal<'_>, t: &TxnId, e: JournalError) -> ExecError {
+    if closed_now(j, t) {
+        ExecError::Unconfirmed(e)
+    } else {
+        Refusal::from(e).into()
+    }
+}
+
+/// Reverts transaction `t` (module docs): also the recovery of an interrupted apply. Every
+/// error before this run's first record is an [`ExecError::Refused`] (review S4: nothing
+/// changed); a `Closed` that may be on disk is [`ExecError::Unconfirmed`]; any other error
+/// came after a record of this run.
+pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
+    standard_user(cx.sys)?;
+    let j = Journal::new(cx.app, cx.tag);
+    let lock = j.lock().map_err(Refusal::from)?;
+    let listing = j.list().map_err(Refusal::from)?;
+    revert_listed(&listing, t)?;
+    let mut w = lock.resume(t).map_err(Refusal::from)?;
+    let before = |k: u16, _: &crate::journal::Digest, max: u64| w.before_bytes(k, max);
+    let plan = revert_plan(t, w.head(), w.ops(), &before)?;
+    let stores = roots::open_stores(cx, &plan);
+    let roots = revert_roots(cx, &plan, &j, &listing, t, w.ops(), &stores)?;
     let mut touched = Touched::new(cx.sys, &roots);
     let written = revert_records(w.ops());
     let (ops, halted) = match revert_loop(
@@ -1184,7 +1290,7 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     ) {
         Ok(x) => x,
         Err(e) if revert_records(w.ops()) == written => {
-            return Err(refused_early(e, t).into());
+            return Err(refused_early(e).into());
         }
         Err(e) => return Err(e),
     };
@@ -1201,9 +1307,16 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     } else {
         Closing::RolledBack
     };
-    // Nothing reverted in this run (every op was before): a failed `Closed` wrote nothing.
+    // Nothing reverted in this run (every op was before): a `Closed` that did not reach the
+    // journal wrote nothing at all.
     let first = ops.is_empty();
-    close(w).map_err(|e| if first { refused_early(e, t).into() } else { e })?;
+    if let Err(e) = close(w) {
+        return Err(match e {
+            ExecError::Journal(e) if closed_now(&j, t) => ExecError::Unconfirmed(e),
+            ExecError::Journal(e) if first => Refusal::from(e).into(),
+            e => e,
+        });
+    }
     Ok(RevertReport {
         txn: *t,
         closed: Some(how),
@@ -1237,43 +1350,49 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     verify_ops(&plan, &mut touched, &roots, &v.ops)
 }
 
-/// Forgets transaction `t` (module docs). Backups stay.
+/// Forgets transaction `t` (module docs). Backups stay. Every error before its record or
+/// marker is a refusal; a record or marker that reached the journal but whose flush failed is
+/// [`ExecError::Unconfirmed`] (security review N1).
 pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
     standard_user(cx.sys)?;
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
-    let listing = j.list()?;
+    let listing = j.list().map_err(Refusal::from)?;
     let l = listing
         .txns
         .iter()
         .find(|l| l.id == *t)
-        .ok_or(JournalError::NotFound(*t))?;
+        .ok_or_else(|| Refusal::from(JournalError::NotFound(*t)))?;
     if l.forgotten {
         return Ok(());
     }
     let head = match &l.view {
         Ok(v) => match v.state {
             TxnState::Closed(_) => {
-                return Err(JournalError::NotResumable {
+                return Err(Refusal::from(JournalError::NotResumable {
                     id: *t,
                     state: v.state.clone(),
-                }
+                })
                 .into());
             }
             TxnState::Empty | TxnState::Open | TxnState::Applied => {
                 match lock.resume(t) {
-                    Ok(w) => return Ok(w.close(Closing::Forgotten)?),
+                    Ok(w) => {
+                        return w
+                            .close(Closing::Forgotten)
+                            .map_err(|e| closing_failed(&j, t, e));
+                    }
                     // Damaged since the listing: the marker below.
                     Err(JournalError::NotResumable { .. }) => v.head_sha256,
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(Refusal::from(e).into()),
                 }
             }
             TxnState::Damaged(_) => v.head_sha256,
         },
         Err(_) => None,
     };
-    lock.forget_marker(t, head.as_ref())?;
-    Ok(())
+    lock.forget_marker(t, head.as_ref())
+        .map_err(|e| closing_failed(&j, t, e))
 }
 
 #[cfg(test)]

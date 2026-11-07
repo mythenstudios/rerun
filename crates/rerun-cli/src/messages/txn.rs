@@ -597,8 +597,13 @@ pub enum TxnMsg<'a> {
         /// The transaction.
         txn: TxnId,
     },
-    /// A damaged or unreadable transaction cannot be reverted.
-    Damaged {
+    /// An empty transaction with a readable head: the revert only closes it.
+    EmptyCloses {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// Closing may have reached the journal although it failed.
+    MayHaveClosed {
         /// The transaction.
         txn: TxnId,
     },
@@ -872,10 +877,14 @@ impl fmt::Display for TxnMsg<'_> {
                 "the game folder is another folder now (a moved library or a reinstall); rerun \
                  forget {txn} closes the transaction, a rebind is not supported yet"
             ),
-            Self::Damaged { txn } => write!(
+            Self::EmptyCloses { txn } => write!(
                 f,
-                "rerun: transaction {txn} is damaged or unreadable; only rerun forget {txn} \
-                 closes it"
+                "transaction {txn} changed nothing; rerun revert {txn} only closes it"
+            ),
+            Self::MayHaveClosed { txn } => write!(
+                f,
+                "transaction {txn} may have been closed although the command failed; rerun \
+                 status shows what the journal holds"
             ),
             Self::NothingToForget { txn, how } => write!(
                 f,

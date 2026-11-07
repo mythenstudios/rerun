@@ -398,6 +398,18 @@ pub enum Message<'a> {
     WindowsOnly,
     /// A line of the phase 2 commands.
     Txn(TxnMsg<'a>),
+    /// A usage error, formatted by Rerun (security review N5): the user's own value only
+    /// through `escape::text`, last on the line.
+    Usage {
+        /// What is wrong (Rerun's words).
+        what: &'static str,
+        /// The expected form, from Rerun's own value parser.
+        why: Option<Shown<'a>>,
+        /// The value or argument concerned.
+        value: Option<Shown<'a>>,
+    },
+    /// Where to look after a usage error.
+    UsageHelp,
     /// Writing the report failed.
     WriteFailed {
         /// The kind of the I/O error.
@@ -815,6 +827,19 @@ impl fmt::Display for Message<'_> {
             #[cfg(not(windows))]
             Self::WindowsOnly => f.write_str("rerun: runs on Windows only"),
             Self::Txn(m) => write!(f, "{m}"),
+            Self::Usage { what, why, value } => {
+                write!(f, "rerun: {what}")?;
+                if let Some(why) = why {
+                    write!(f, " ({why})")?;
+                }
+                match value {
+                    Some(v) => write!(f, ": {v}"),
+                    None => Ok(()),
+                }
+            }
+            Self::UsageHelp => f.write_str(
+                "rerun --help lists the commands, rerun <command> --help their arguments",
+            ),
             Self::WriteFailed { kind } => write!(f, "rerun: cannot write the output: {kind}"),
         }
     }

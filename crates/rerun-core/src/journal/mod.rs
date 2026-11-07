@@ -269,7 +269,8 @@ impl<'a> Journal<'a> {
     /// `verify` before a revert or forget; P2-13 review S2): opened read side, never created,
     /// sharing read only. Held, it keeps any writer out ([`Self::lock`] opens with share 0,
     /// so it is `Busy` meanwhile), and a writer that holds it makes this `Busy`; two checks
-    /// do not block each other. No `journal\` or no `lock` yet: nothing to hold, nobody writes.
+    /// do not block each other. No `journal\` or no `lock` yet: nothing to hold; a writer that
+    /// starts meanwhile creates the lock and checks everything again under it.
     pub(crate) fn hold(&self) -> Result<LockHold<'a>, JournalError> {
         let p = match RelPath::parse(&format!(r"journal\{LOCK}")) {
             Ok(p) => p,

@@ -94,7 +94,9 @@ if ($Elevated) {
 } elseif ($p.Code -eq 0 -and $p.Text -match 'apply with: rerun apply ([0-9a-f]{64})') {
     $hash = $Matches[1]
     $runs.apply_dry_run = (Invoke-Rerun apply $hash --dry-run).Code
-    $dryUnchanged = ((Get-State) -eq $before)
+    # Nothing written, not even the journal folder or its lock (security review N3).
+    $dryUnchanged = ((Get-State) -eq $before) -and
+        (-not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'Rerun\journal')))
     $a = Invoke-Rerun apply $hash --yes
     $runs.apply = $a.Code
     if ($a.Code -eq 0 -and $a.Text -match 'revert with: rerun revert ([0-9]{8}-[0-9a-f]{16})') {

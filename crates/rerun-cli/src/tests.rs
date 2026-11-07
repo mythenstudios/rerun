@@ -744,14 +744,9 @@ fn c6_steam_updating_damaged_interrupted_and_later() {
     expect(&sys, &["revert", &open, "--yes"], Answer::No, Exit::Report);
 
     // Later: a later transaction on the same file blocks the revert of the earlier one.
-    let ini = |key: &str, value: &str| {
-        format!(
-            r#"{{"format":1,"game":{{"folder":"D:\\Games\\G"}},"main_exe":"game.exe","steps":[{{"ini_set":{{"file":"game.ini","values":[{{"section":"Display","key":"{key}","value":"{value}"}}]}}}}]}}"#
-        )
-    };
-    let sys = build(bare(), &ini("Width", "1920"));
+    let sys = build(bare(), &ini_steps("Width", "1920"));
     let t1 = applied(&sys);
-    put_steps(&sys, &ini("Height", "1080"));
+    put_steps(&sys, &ini_steps("Height", "1080"));
     let t2 = applied(&sys);
     let r = expect(&sys, &["revert", &t1, "--yes"], Answer::Yes, Exit::Refused);
     assert!(
@@ -761,29 +756,72 @@ fn c6_steam_updating_damaged_interrupted_and_later() {
         r.stderr
     );
 
-    // Damaged: blocks every apply; revert refuses, forget closes it.
+    // Damaged with a usable head (review S-A/S-d): a record planted after a valid prefix. It
+    // blocks an apply on its objects and the revert of an earlier transaction on them, with
+    // one text; an apply on other objects goes on.
+    let sys = build(with_package(), &ini_steps("Width", "1920"));
+    let t0 = applied(&sys);
+    put_steps(&sys, &ini_steps("Height", "1080"));
+    let t1 = applied(&sys);
+    sys.fake_fs()
+        .put_file(
+            Path::new(&format!(r"{RERUN}\journal\{t1}\0004.json")),
+            b"{}",
+        )
+        .unwrap();
+    let damaged = format!(
+        "rerun: transaction {t1} is damaged; rerun status shows what it left; only rerun \
+         forget {t1} closes it\n"
+    );
+    put_steps(&sys, &ini_steps("Width", "800"));
+    let r = expect(&sys, &["plan", STEPS], Answer::No, Exit::Report);
+    let hash = hash_of(&r);
+    let r = expect(&sys, &["apply", &hash, "--yes"], Answer::Yes, Exit::Refused);
+    assert_eq!(r.stderr, damaged);
+    let r = expect(&sys, &["revert", &t0, "--yes"], Answer::Yes, Exit::Refused);
+    assert_eq!(r.stderr, damaged);
+    assert!(r.asked.is_empty() && r.stdout.is_empty(), "{}", r.stdout);
+    let r = expect(&sys, &["revert", &t1, "--yes"], Answer::Yes, Exit::Refused);
+    assert_eq!(r.stderr, damaged);
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout.contains(&format!(
+            "transaction {t1}: damaged: record 4 cannot be parsed\n"
+        )),
+        "{}",
+        s.stdout
+    );
+    assert!(
+        s.stdout
+            .contains("op 0, applied: edit ini in root 0: game.ini"),
+        "{}",
+        s.stdout
+    );
+    put_steps(&sys, &file_steps());
+    applied(&sys);
+    expect(&sys, &["forget", &t1, "--yes"], Answer::No, Exit::Report);
+    // Forgotten, it blocks nothing any more: the earlier one reverts (its key only).
+    expect(&sys, &["revert", &t0, "--yes"], Answer::No, Exit::Report);
+
+    // A head no record confirms (another head.json): blocks every apply; revert refuses,
+    // forget closes it with a marker.
     let sys = build(with_package(), &file_steps());
     let hash = hash_of(&expect(&sys, &["plan", STEPS], Answer::No, Exit::Report));
     let t = applied(&sys);
-    // Another head: no record confirms it (a head that cannot be trusted blocks everything).
     let head = format!(r"{RERUN}\journal\{t}\head.json");
     sys.fake_fs().remove_abs(Path::new(&head)).unwrap();
     sys.fake_fs().put_file(Path::new(&head), b"{}").unwrap();
-    let r = expect(&sys, &["apply", &hash, "--yes"], Answer::Yes, Exit::Refused);
-    assert!(
-        r.stderr.contains(&format!(
-            "transaction {t} is damaged or unreadable; forget it first"
-        )),
-        "{}",
-        r.stderr
+    let damaged = format!(
+        "rerun: transaction {t} is damaged; rerun status shows what it left; only rerun \
+         forget {t} closes it\n"
     );
+    let r = expect(&sys, &["apply", &hash, "--yes"], Answer::Yes, Exit::Refused);
+    assert_eq!(r.stderr, damaged);
     let r = expect(&sys, &["revert", &t, "--yes"], Answer::Yes, Exit::Refused);
-    assert!(r.stderr.contains("only rerun forget"), "{}", r.stderr);
+    assert_eq!(r.stderr, damaged);
     let s = expect(&sys, &["status"], Answer::No, Exit::Report);
     assert!(
-        s.stdout
-            .contains(&format!("transaction {t}: damaged: record 99 is missing"))
-            || s.stdout.contains(&format!("transaction {t}: damaged")),
+        s.stdout.contains(&format!("transaction {t}: damaged: ")),
         "{}",
         s.stdout
     );
@@ -797,7 +835,6 @@ fn c6_steam_updating_damaged_interrupted_and_later() {
     );
     assert!(s.stdout.contains("  its backups stay in: "), "{}", s.stdout);
 }
-
 // ---------- C7: rolled back and left open ----------
 
 #[test]
@@ -1021,7 +1058,10 @@ fn c10_step_file_problems_are_refused_without_their_content() {
         .unwrap();
     for (path, want) in [
         (r"D:\Work\link.json", "not a plain file"),
-        (r"\\server\share\steps.json", "invalid path"),
+        (
+            r"\\server\share\steps.json",
+            "on a network share is not read",
+        ),
         (r"D:\steps.json", "directly on a drive root"),
     ] {
         let r = expect(
@@ -1140,4 +1180,89 @@ fn status_without_rerun_s_folder_and_unknown_transactions() {
     );
     let s = expect(&sys, &["status"], Answer::No, Exit::Report);
     assert_eq!(s.stdout, "no transactions\n");
+}
+
+/// One INI key of `game.ini` as the only step.
+fn ini_steps(key: &str, value: &str) -> String {
+    format!(
+        r#"{{"format":1,"game":{{"folder":"D:\\Games\\G"}},"main_exe":"game.exe","steps":[{{"ini_set":{{"file":"game.ini","values":[{{"section":"Display","key":"{key}","value":"{value}"}}]}}}}]}}"#
+    )
+}
+
+// ---------- C3/C4: revert runs every check before its preview and question ----------
+
+#[test]
+fn c4_revert_checks_before_its_preview_and_question() {
+    let sys = build(bare(), &ini_steps("Width", "1920"));
+    let t0 = applied(&sys);
+    put_steps(&sys, &ini_steps("Height", "1080"));
+    let t1 = applied(&sys);
+    // A later transaction on the same file: the dry run refuses as the revert would.
+    let r = expect(
+        &sys,
+        &["revert", &t0, "--dry-run"],
+        Answer::Yes,
+        Exit::Refused,
+    );
+    assert!(r.stdout.is_empty() && r.asked.is_empty(), "{}", r.stdout);
+    assert!(
+        r.stderr
+            .contains(&format!("transaction {t1} changed the same files later")),
+        "{}",
+        r.stderr
+    );
+    // The game runs: refused before any preview or question.
+    let image = sys
+        .fake_fs()
+        .map_image_as(4242, Path::new(&game("game.exe")))
+        .unwrap();
+    let before = snap_all(&sys);
+    for args in [&["revert", &t1][..], &["revert", &t1, "--dry-run"]] {
+        let r = expect(&sys, args, Answer::Yes, Exit::Refused);
+        assert!(r.stdout.is_empty() && r.asked.is_empty(), "{}", r.stdout);
+        assert!(r.stderr.contains("game.exe is in use"), "{}", r.stderr);
+    }
+    drop(image);
+    same(&before, &snap_all(&sys));
+}
+
+#[test]
+fn c4_an_empty_transaction_is_closed_without_a_question() {
+    let sys = build(with_package(), &file_steps());
+    let hash = hash_of(&expect(&sys, &["plan", STEPS], Answer::No, Exit::Report));
+    // A crash right after the head was written: a transaction with its head only.
+    sys.fake_fs().clear_faults();
+    sys.fake_fs()
+        .fault(Prim::Rename, 1, rerun_core::sys::fake::Fault::CrashAfter);
+    let crashed = cli(&sys, &["apply", &hash, "--yes"], Answer::Yes);
+    assert_ne!(crashed.exit, Exit::Report);
+    sys.fake_fs().restart();
+    let s = expect(&sys, &["status", "--all"], Answer::No, Exit::Report);
+    let t = after(&s.stdout, "transaction ")
+        .split(':')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert!(
+        s.stdout.contains(": empty (it changed nothing)\n"),
+        "{}",
+        s.stdout
+    );
+    let d = expect(&sys, &["revert", &t, "--dry-run"], Answer::No, Exit::Report);
+    assert!(
+        d.stdout.contains(&format!(
+            "transaction {t} changed nothing; rerun revert {t} only closes it\n"
+        )),
+        "{}",
+        d.stdout
+    );
+    assert!(!d.stdout.contains("Revert"), "{}", d.stdout);
+    let r = expect(&sys, &["revert", &t], Answer::No, Exit::Report);
+    assert!(r.asked.is_empty(), "no question for an empty transaction");
+    assert!(
+        r.stdout
+            .contains(&format!("transaction {t} reverted and closed\n")),
+        "{}",
+        r.stdout
+    );
 }

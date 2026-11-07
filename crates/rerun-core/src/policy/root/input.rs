@@ -24,6 +24,19 @@ pub fn read_input(sys: &dyn System, abs: &Path, max: u64) -> Result<Vec<u8>, Roo
             reason,
         })
     };
+    // A share (`\\server\share`, `\\?\UNC\…`): say so, not just "no drive letter".
+    let raw = abs.to_string_lossy();
+    let share = raw
+        .get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case(r"\\?\UNC\"))
+        || ((raw.starts_with(r"\\") || raw.starts_with("//"))
+            && !raw.starts_with(r"\\?\")
+            && !raw.starts_with(r"\\.\"));
+    if share {
+        return Err(bad(
+            "an input file on a network share is not read; copy it to a local folder",
+        ));
+    }
     let (Some(parent), Some(name)) = (abs.parent(), abs.file_name()) else {
         return Err(bad("not a file path"));
     };

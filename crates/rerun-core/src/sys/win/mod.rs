@@ -83,6 +83,7 @@ compile_error!(
      Program Files folders and redirected system paths"
 );
 
+mod console;
 mod cpu;
 mod dxgi;
 mod fs;
@@ -109,6 +110,7 @@ mod testfx;
 #[cfg(test)]
 mod tests;
 
+pub use console::discard_console_input;
 pub use fs::{WinDir, WinFs};
 pub use gpu::WinGpu;
 pub use known_folders::WinKnownFolders;

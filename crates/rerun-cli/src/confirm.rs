@@ -60,6 +60,10 @@ impl Confirm for Console {
         if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
             return Answer::NoConsole;
         }
+        // Review N4: keystrokes typed ahead never answer a question not seen yet (no console
+        // mode changes; `rerun` has read nothing from stdin before).
+        #[cfg(windows)]
+        rerun_core::sys::win::discard_console_input();
         let mut err = Out::new(io::stderr().lock());
         if err.prompt(q).is_err() {
             return Answer::No;

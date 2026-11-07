@@ -9,7 +9,8 @@
 # fails. The Sandbox closes when the last window closes; the script ends with the result
 # on screen and a pause, so close the Sandbox yourself.
 #
-# The registry write side refuses an elevated process (S2). If this session is elevated, the
+# Rerun refuses every apply, revert and forget in an elevated process (S2, P2-13 E3). If this
+# session is elevated, the
 # script starts itself again as a scheduled task with the limited run level (-Worker) and waits
 # for it; if that fails it runs the tests elevated and result.json says so.
 #
@@ -68,7 +69,7 @@ if (-not $Worker -and $elevated) {
     Write-Host $note
 }
 if ($elevated -and -not $note) {
-    $note = 'elevated -> the registry write side refuses; the writing tests are expected to fail'
+    $note = 'elevated -> Rerun refuses every apply, revert and forget (and the CLI also plan and every dry run); the writing tests are expected to fail'
 }
 
 $code = -1

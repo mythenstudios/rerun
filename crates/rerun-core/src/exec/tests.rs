@@ -1037,7 +1037,8 @@ fn t7_stacking_and_lifo() {
         env.apply(&on_it),
         Err(ApplyError::Refused(Refusal::Interrupted { .. }))
     ));
-    // Damaged with a usable head: open with its objects.
+    // Damaged with a usable head (P2-13 review S-A): blocked on its objects, with the text of
+    // `Blocked`; beside them an apply goes on.
     let env = Env::new(finish(base()));
     let t = env.applied(&env.plan(&t1_spec()));
     let fx = env.sys.fake_fs();
@@ -1047,7 +1048,7 @@ fn t7_stacking_and_lifo() {
     let on_it = env.plan(&spec(vec![entry("new.dll", r"mods\a\y.dll", N)]));
     assert!(matches!(
         env.apply(&on_it),
-        Err(ApplyError::Refused(Refusal::Interrupted { .. }))
+        Err(ApplyError::Refused(Refusal::Blocked { txn })) if txn == t
     ));
     let beside = env.plan(&spec(vec![entry("new.dll", "beside.dll", N)]));
     let t2 = env.applied(&beside);
