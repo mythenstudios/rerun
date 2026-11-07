@@ -21,8 +21,11 @@ if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $env:USERPROFILE -notmatch '\\WDA
     throw "refusing to run: this is not the Windows Sandbox account (USERNAME=$env:USERNAME)"
 }
 
-$rerun = 'C:\sandbox\bin\rerun.exe'
+$source = 'C:\sandbox\bin\rerun.exe'
 $root = 'C:\RerunSandbox\cli'
+# rerun.exe runs from a local copy: the mapped folder C:\sandbox\bin gives no usable directory
+# handle, so Rerun cannot resolve its install folder there and refuses (seen in the first run).
+$rerun = Join-Path $root 'bin\rerun.exe'
 $game = Join-Path $root 'game'
 $steps = Join-Path $root 'steps.json'
 $pkg = Join-Path $env:LOCALAPPDATA 'Rerun\packages\cli-pack\1.0.0'
@@ -58,7 +61,9 @@ function Invoke-Rerun {
     [pscustomobject]@{ Code = $code; Text = ($text -join "`n") }
 }
 
-if (-not (Test-Path -LiteralPath $rerun)) { throw "rerun.exe missing: $rerun (run scripts/sandbox-launch.ps1 on the host)" }
+if (-not (Test-Path -LiteralPath $source)) { throw "rerun.exe missing: $source (run scripts/sandbox-launch.ps1 on the host)" }
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $rerun) | Out-Null
+Copy-Item -LiteralPath $source -Destination $rerun -Force
 Set-Content -LiteralPath $log -Value "CLI round trip, elevated=$Elevated" -Encoding UTF8
 
 # The fixture: a game with a copy of cmd.exe as its main executable (the Sandbox of build

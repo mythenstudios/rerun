@@ -432,7 +432,15 @@ fn sandbox_registry_read_contract_on_the_real_hkcu() {
     sandbox_guard();
     let h = AppHive::real_user().unwrap_or_else(|e| panic!("{e}"));
     let reg = WinRegistry::new().unwrap();
-    let root = hkcu(r"Software\RerunSandbox\ReadContract");
+    // A fresh root per run: the contract wants it empty, and a Sandbox restarted from inside
+    // keeps the keys of an earlier run (seen in the first run). The Sandbox is disposable.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let root = hkcu(format!(
+        r"Software\RerunSandbox\ReadContract-{}-{stamp}",
+        std::process::id()
+    ));
     h.key(&root).unwrap();
     let skips = registry_read_contract(&reg, &h, &root).unwrap_or_else(|e| panic!("{e}"));
     for s in skips {
@@ -504,12 +512,11 @@ fn vendor_link_case(case: &str, link_before_plan: bool) {
     let after = w.snap(vec![target.clone()]);
     assert!(before == after, "{:#?}", before.diff(&after));
     assert!(
-        w.sys
+        !w.sys
             .registry()
-            .get(&target.join("Prod"), "A")
-            .unwrap()
-            .is_none(),
-        "a value appeared at the link target"
+            .key_exists(&target.join("Prod"))
+            .unwrap_or_else(|e| panic!("{e}")),
+        "a key appeared at the link target"
     );
     // The link key itself is removed again (a link is deleted by its own handle).
     h.delete_key(&vendor).unwrap();

@@ -10,22 +10,21 @@
 # on screen and a pause, so close the Sandbox yourself.
 #
 # Rerun refuses every apply, revert and forget in an elevated process (S2, P2-13 E3). The
-# Sandbox account is an administrator without a split UAC token, so the LogonCommand is
-# elevated and a scheduled task with the limited run level stays elevated (seen in the first
-# run, build 26100). The script therefore starts itself again with
-# `runas /trustlevel:0x20000` (SAFER "Basic User": the Administrators group deny-only, the
-# admin privileges removed, medium integrity) as the -Worker and waits for it. If the worker
-# is still elevated, or does not finish, result.json says so in "note".
+# Sandbox starts with UAC off (EnableLUA = 0): its administrator account has no split token,
+# so the LogonCommand is elevated, and neither a scheduled task with the limited run level nor
+# `runas /trustlevel:0x20000` gives a token that is not elevated (seen in the first runs,
+# build 26100: the Basic User token keeps the high integrity label). So, when the session is
+# elevated and UAC is off, the script turns UAC on (HKLM of the Sandbox) and restarts the
+# Sandbox from inside; the Sandbox keeps its state across that restart and runs the
+# LogonCommand again, now with the filtered token. If the session is still elevated with UAC
+# on, the tests run elevated and result.json says so in "note".
 #
 # Windows PowerShell 5.1: native stderr is never redirected under $ErrorActionPreference =
 # 'Stop' (that throws NativeCommandError); native calls go through Run-Native.
 
-param([switch]$Worker)
-
 $ErrorActionPreference = 'Stop'
 $out = 'C:\sandbox\out'
 $exe = 'C:\sandbox\bin\rerun-core-tests.exe'
-$done = Join-Path $out 'worker.done'
 
 if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $env:USERPROFILE -notmatch '\\WDAGUtilityAccount\\?$') {
     Write-Error "refusing to run: this is not the Windows Sandbox account (USERNAME=$env:USERNAME, USERPROFILE=$env:USERPROFILE)"
@@ -48,34 +47,19 @@ $build = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion')
 $started = Get-Date
 $note = ''
 
-# Elevated session: run the tests as a SAFER Basic User (runas /trustlevel, see the header).
-if (-not $Worker -and $elevated) {
-    Remove-Item -LiteralPath $done -ErrorAction SilentlyContinue
-    try {
-        # runas takes the whole command line as one quoted argument; the script path has no
-        # spaces (C:\sandbox\scripts), so no quotes are nested inside it.
-        if ($PSCommandPath -match '\s') { throw "script path has spaces: $PSCommandPath" }
-        $inner = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Worker"
-        Start-Process -FilePath "$env:SystemRoot\System32\runas.exe" -ArgumentList '/trustlevel:0x20000', "`"$inner`"" -WindowStyle Minimized
-        Write-Host 'session is elevated: tests run as a Basic User (runas /trustlevel:0x20000), waiting (up to 30 minutes)'
-        $deadline = (Get-Date).AddMinutes(30)
-        while (-not (Test-Path -LiteralPath $done) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 3 }
-        if (Test-Path -LiteralPath $done) {
-            Get-Content -LiteralPath (Join-Path $out 'result.json') | ForEach-Object { Write-Host $_ }
-            Read-Host 'Done. Press Enter to leave this window (close the Sandbox yourself)'
-            exit 0
-        }
-        $note = 'elevated session; the de-elevated task did not finish in time; running elevated'
-    } catch {
-        $note = "elevated session; de-elevation failed ($_); running elevated"
+# Elevated session with UAC off: turn UAC on and restart the Sandbox (see the header).
+$uacKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+if ($elevated) {
+    $lua = (Get-ItemProperty -LiteralPath $uacKey -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
+    if ($lua -ne 1) {
+        Set-ItemProperty -LiteralPath $uacKey -Name EnableLUA -Value 1 -Type DWord
+        Set-Content -LiteralPath (Join-Path $out 'uac-restart.txt') -Value "EnableLUA was $lua; set to 1 and restarted at $(Get-Date -Format o)"
+        Write-Host 'session is elevated and UAC is off: UAC turned on, the Sandbox restarts in 10 s and runs the tests again'
+        Run-Native shutdown.exe /r /t 10 | Out-Null
+        exit 0
     }
+    $note = 'elevated although UAC is on -> Rerun refuses every apply, revert and forget (and the CLI also plan and every dry run); the writing tests are expected to fail'
     Write-Host $note
-}
-if ($Worker -and $elevated) {
-    $note = 'the de-elevated worker (runas /trustlevel:0x20000) is still elevated; the writing tests are expected to fail'
-}
-if ($elevated -and -not $note) {
-    $note = 'elevated -> Rerun refuses every apply, revert and forget (and the CLI also plan and every dry run); the writing tests are expected to fail'
 }
 
 $code = -1
@@ -129,9 +113,5 @@ Write-Host ''
 Write-Host "exit code $code, $passed passed, $failed failed, elevated=$elevated $note (results in C:\sandbox\out)"
 if ($cli) { Write-Host "CLI round trip: expected=$($cli.expected) (details in cli.log)" }
 if ($passed -eq 0 -and $code -eq 0) { Write-Host 'WARNING: no test ran' }
-if ($Worker) {
-    Set-Content -LiteralPath $done -Value 'done'
-    exit $code
-}
 Read-Host 'Done. Press Enter to leave this window (close the Sandbox yourself)'
 exit $code
