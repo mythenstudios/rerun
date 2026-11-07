@@ -35,14 +35,21 @@ use std::sync::atomic::AtomicU64;
 
 use names::LOCK;
 pub use names::{InstanceTag, TxnId};
-pub use record::{Before, Closing, Digest, FORMAT, INLINE_MAX, Observed, Semantic};
+pub use record::{
+    Before, Closing, Digest, DirProof, FORMAT, INLINE_MAX, MAX_DIRS, Observed, Semantic,
+};
 pub use write::JournalLock;
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "P2-14: exec uses it from the next commit on")
+)]
+pub(crate) use write::RebindArgs;
 pub(crate) use write::{BeforeArg, Reverting, TxnWriter};
 #[cfg(test)]
 pub(crate) use write::{FlushSite, knob};
 
 use crate::path::{RelPath, RootPath};
-use crate::policy::root::{AppDir, AppSub, Create, RootError};
+use crate::policy::root::{AppDir, AppSub, Create, RootError, RootId};
 use crate::sys::fs::{ReadSeek, TmpName};
 use crate::sys::{DirWrite, SysError, SysErrorKind};
 
@@ -168,6 +175,8 @@ pub struct TxnView {
     pub anomaly: Option<Damage>,
     /// The records of each op with an intent (of the valid prefix).
     pub ops: BTreeMap<u16, OpLog>,
+    /// The `Rebind` records of the valid prefix, in order (P2-14).
+    pub rebinds: Vec<RebindRec>,
     /// The records of the valid prefix, in order.
     pub(crate) log: Vec<record::Record>,
     /// The folder holds at least one record file.
@@ -530,6 +539,28 @@ pub struct RevertRec {
     pub from: Option<Digest>,
     /// A semantic revert's end (P2-12).
     pub to: Option<Digest>,
+}
+
+/// A `Rebind` record (P2-14): root `root` of the head is bound to the install folder of the
+/// head in the Steam library `store` from here on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebindRec {
+    /// Root index in the head.
+    pub root: u16,
+    /// The identity of the game folder as bound before.
+    pub old: RootId,
+    /// The Steam library.
+    pub store: RootPath,
+    /// Identity of the library.
+    pub store_id: RootId,
+    /// Identity of the game folder.
+    pub id: RootId,
+    /// The folders the plan created, by their file ID in that folder.
+    pub dirs: Vec<DirProof>,
+    /// Not on the wire: the lowest op that had a `RevertIntent` when the record was replayed
+    /// (every op from it upwards had one); `exec` refuses a rebind after a `RevertIntent` of an
+    /// op of its root (user decision E-R3).
+    pub reverting: Option<u16>,
 }
 
 /// A `Done` record.

@@ -2,7 +2,8 @@
 //!
 //! - [`hex32`] and [`hex128_opt`]: `#[serde(with = …)]` modules for a SHA-256 and an optional
 //!   128-bit file ID as lower-case hex strings of exactly 64 and 32 digits (or `null`; no JSON
-//!   number above 2^53, ADR 0020); [`hex_bytes`] a byte string as lower-case hex, two digits
+//!   number above 2^53, ADR 0020); [`hex128`] the same for a file ID that is always there (a
+//!   `Rebind`'s directory proofs, P2-14); [`hex_bytes`] a byte string as lower-case hex, two digits
 //!   per byte. Parsing accepts exactly what is written.
 //! - [`TmpName`] serialises as its name and parses back only through [`TmpName::parse`].
 //! - [`RelPath`] and [`RootPath`] serialise as their backslash-separated string and parse back
@@ -82,6 +83,25 @@ pub(crate) mod hex128_opt {
                     .ok_or_else(|| D::Error::custom("expected 32 lower-case hex digits"))
             })
             .transpose()
+    }
+}
+
+/// A 128-bit file ID: exactly 32 lower-case hex digits.
+pub(crate) mod hex128 {
+    use serde::de::Error as _;
+
+    use super::{Deserialize, Deserializer, Serializer};
+
+    /// Serialises `v` as 32 lower-case hex digits.
+    pub(crate) fn serialize<S: Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("{v:032x}"))
+    }
+
+    /// Parses exactly 32 lower-case hex digits.
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u128, D::Error> {
+        let s = String::deserialize(d)?;
+        super::parse_hex(&s, 32)
+            .ok_or_else(|| D::Error::custom("expected 32 lower-case hex digits"))
     }
 }
 

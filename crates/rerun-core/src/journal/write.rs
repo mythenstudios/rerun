@@ -5,7 +5,7 @@
 //! `Empty`, `Open` or `Applied` one as a [`RevertWriter`], which by its type can only revert
 //! and close (condition S4). Every record is checked against the grammar before it is
 //! written ([`Machine`]), written with `create_new` (temp name, flush, rename without
-//! replace), and, for `intent`, `applied`, `revert_intent` and `close`, followed by a flush
+//! replace), and, for `intent`, `applied`, `revert_intent`, `rebind` and `close`, followed by a flush
 //! of the transaction folder.
 
 use std::collections::BTreeMap;
@@ -16,10 +16,13 @@ use sha2::{Digest as _, Sha256};
 
 use super::names::{self, HEAD, LOCK, MAX_SEQ};
 use super::read;
-use super::record::{self, Before, Closing, Digest, Observed, Record, Semantic};
+use super::record::{self, Before, Closing, Digest, DirProof, Observed, Record, Semantic};
 use super::replay::Machine;
-use super::{Journal, JournalError, Limits, OpLog, TxnId, TxnState, VerifyBackups, reparse};
+use super::{
+    Journal, JournalError, Limits, OpLog, RebindRec, TxnId, TxnState, VerifyBackups, reparse,
+};
 use crate::path::RootPath;
+use crate::policy::root::RootId;
 use crate::sys::fs::{Attrs, FileGuard, FileLock, NewFile, TmpName};
 use crate::sys::{DirWrite, SysError, SysErrorKind};
 
@@ -183,6 +186,8 @@ pub(crate) enum FlushSite {
     Intent,
     Applied,
     RevertIntent,
+    /// P2-14: a confirmed rebind survives every cut once its call returned `Ok`.
+    Rebind,
     Close,
 }
 
@@ -496,6 +501,84 @@ impl RevertWriter<'_> {
     pub(crate) fn head(&self) -> &[u8] {
         &self.head
     }
+
+    /// The `Rebind` records so far, in order (P2-14).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "P2-14: exec writes and reads rebinds from the next commit on"
+        )
+    )]
+    pub(crate) fn rebinds(&self) -> &[RebindRec] {
+        self.t.m.rebinds()
+    }
+
+    /// Binds root `root` to the head's install folder in the library `store` from here on
+    /// (P2-14): the grammar, the record budget, and room for the rest of the revert (a
+    /// `RevertIntent` and `RevertDone` for every op not reverted yet, and `Closed`), checked
+    /// before anything is written; then the record, and the transaction folder flushed, so a
+    /// rebind whose call returned `Ok` survives every cut.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "P2-14: exec writes and reads rebinds from the next commit on"
+        )
+    )]
+    pub(crate) fn rebind(&mut self, r: &RebindArgs<'_>) -> Result<(), JournalError> {
+        let open = self
+            .t
+            .m
+            .ops()
+            .values()
+            .filter(|o| o.reverted.is_none())
+            .count();
+        let open = u32::try_from(open).unwrap_or(u32::MAX);
+        let need = u32::from(self.t.m.records())
+            .saturating_add(1)
+            .saturating_add(open.saturating_mul(2))
+            .saturating_add(1);
+        if need > u32::from(self.t.lock.lim.records) {
+            return Err(JournalError::TooLarge {
+                what: "the records of a transaction",
+                limit: u64::from(self.t.lock.lim.records),
+            });
+        }
+        let rec = Record::Rebind {
+            root: r.root,
+            old: r.old,
+            store: r.store.clone(),
+            store_id: r.store_id,
+            id: r.id,
+            dirs: r.dirs.to_vec(),
+        };
+        self.t.write(&rec, Some(FlushSite::Rebind))
+    }
+}
+
+/// What [`RevertWriter::rebind`] records.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "P2-14: exec writes and reads rebinds from the next commit on"
+    )
+)]
+pub(crate) struct RebindArgs<'a> {
+    /// Root index in the head.
+    pub(crate) root: u16,
+    /// The identity of the game folder as bound before.
+    pub(crate) old: RootId,
+    /// The Steam library.
+    pub(crate) store: &'a RootPath,
+    /// Identity of the library.
+    pub(crate) store_id: RootId,
+    /// Identity of the game folder.
+    pub(crate) id: RootId,
+    /// The folders the plan created, by their file ID there, by op ascending.
+    pub(crate) dirs: &'a [DirProof],
 }
 
 macro_rules! common {

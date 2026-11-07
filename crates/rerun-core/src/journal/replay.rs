@@ -18,12 +18,21 @@
 //! - `Closed { RolledBack }` only without `Applied`, `Closed { Reverted }` only after it; both
 //!   only when every intended op has its `RevertDone` and none observed `Foreign` (ADR 0020,
 //!   D10). `Closed { Forgotten }` at any time.
+//! - `Rebind` (P2-14) only after `Applied`: a root index below 16, at most 128 directory
+//!   proofs, by op strictly ascending, each naming an intended op. Repeatable (the last one of a
+//!   root holds). Which root and op kinds it may name, and that no op of its root has a
+//!   `RevertIntent` before it, is `exec`'s business (the journal does not parse the head). It
+//!   ends a pending `RevertIntent`'s claim to the next record, so `RevertDone` cannot follow it
+//!   directly.
 //! - Nothing after `Closed`.
 
 use std::collections::BTreeMap;
 
-use super::record::{Before, Closing, INLINE_MAX, Observed, Record};
-use super::{DoneRec, IntentRec, OpLog, RevertDoneRec, RevertRec, TxnState};
+use super::record::{Before, Closing, INLINE_MAX, MAX_DIRS, Observed, Record};
+use super::{DoneRec, IntentRec, OpLog, RebindRec, RevertDoneRec, RevertRec, TxnState};
+
+/// Most roots of a head (`plan::MAX_ROOTS`; the journal does not parse the head).
+const MAX_ROOTS: u16 = 16;
 
 /// The record before the next one, as far as the grammar needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +52,7 @@ pub(crate) struct Machine {
     closed: Option<Closing>,
     last: Option<Last>,
     records: u16,
+    rebinds: Vec<RebindRec>,
 }
 
 impl Machine {
@@ -64,6 +74,20 @@ impl Machine {
     /// How the transaction was closed, if it was.
     pub(crate) fn closed(&self) -> Option<Closing> {
         self.closed
+    }
+
+    /// The `Rebind` records, in order (P2-14).
+    pub(crate) fn rebinds(&self) -> &[RebindRec] {
+        &self.rebinds
+    }
+
+    /// The lowest op with a `RevertIntent` so far: every op from it upwards has one (a revert
+    /// goes newest first).
+    fn reverting_from(&self) -> Option<u16> {
+        self.ops
+            .iter()
+            .find(|(_, o)| !o.reverts.is_empty())
+            .map(|(k, _)| *k)
     }
 
     /// `Applied` was recorded.
@@ -152,6 +176,23 @@ impl Machine {
                     return Err("revert done not directly after its revert intent");
                 }
             }
+            Record::Rebind { root, ref dirs, .. } => {
+                if !self.applied {
+                    return Err("a rebind before Applied");
+                }
+                if root >= MAX_ROOTS {
+                    return Err("a rebind of a root outside a head");
+                }
+                if dirs.len() > MAX_DIRS {
+                    return Err("a rebind with too many directories");
+                }
+                if dirs.windows(2).any(|w| w[0].op >= w[1].op) {
+                    return Err("a rebind's directories out of order");
+                }
+                if dirs.iter().any(|d| !self.ops.contains_key(&d.op)) {
+                    return Err("a rebind names an op without intent");
+                }
+            }
             Record::Closed { how } => match how {
                 Closing::Forgotten => {}
                 Closing::RolledBack | Closing::Reverted => {
@@ -219,6 +260,25 @@ impl Machine {
                         old_left: *old_left,
                     });
                 }
+            }
+            Record::Rebind {
+                root,
+                old,
+                store,
+                store_id,
+                id,
+                dirs,
+            } => {
+                let reverting = self.reverting_from();
+                self.rebinds.push(RebindRec {
+                    root: *root,
+                    old: *old,
+                    store: store.clone(),
+                    store_id: *store_id,
+                    id: *id,
+                    dirs: dirs.clone(),
+                    reverting,
+                });
             }
             Record::Closed { how } => self.closed = Some(*how),
         }

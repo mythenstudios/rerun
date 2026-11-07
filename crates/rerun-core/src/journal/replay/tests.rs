@@ -343,3 +343,143 @@ fn j2_inline_old_states_and_semantic_revert_intents() {
     .unwrap();
     assert_eq!(m.ops()[&0].reverts[0].from, Some(dg));
 }
+
+/// A `Rebind` of `root` with directory proofs for `dirs` (P2-14).
+fn rb(root: u16, dirs: &[u16]) -> Record {
+    let id = |f: u128| crate::policy::root::RootId {
+        volume_serial: 0x45,
+        file_id: f,
+    };
+    Record::Rebind {
+        root,
+        old: id(1),
+        store: crate::path::RootPath::new(r"E:\SteamLibrary").unwrap(),
+        store_id: id(2),
+        id: id(3),
+        dirs: dirs
+            .iter()
+            .map(|op| crate::journal::DirProof {
+                op: *op,
+                file_id: u128::from(*op) + 10,
+            })
+            .collect(),
+    }
+}
+
+/// J2 for `Rebind` (P2-14, user decision E-R3): only after `Applied` and before `Closed`, also
+/// after the revert of other ops (the journal does not know their roots) and after an open
+/// `RevertIntent` that is repeated afterwards; repeatable; `RevertDone` never directly after it.
+#[test]
+fn j2_rebind_only_after_applied_and_never_between_a_revert_intent_and_its_done() {
+    use Closing::{Forgotten, Reverted};
+    let applied = || vec![i(0), d(0), i(1), d(1), a(2)];
+    let with = |tail: Vec<Record>| {
+        let mut v = applied();
+        v.extend(tail);
+        v
+    };
+    let ok: Vec<(Vec<Record>, TxnState)> = vec![
+        (with(vec![rb(0, &[])]), TxnState::Applied),
+        (with(vec![rb(0, &[0, 1])]), TxnState::Applied),
+        (with(vec![rb(0, &[]), rb(0, &[1])]), TxnState::Applied),
+        (with(vec![rb(15, &[])]), TxnState::Applied),
+        // After the revert of a later op (a registry op of another root, in `exec`'s terms).
+        (with(vec![ri(1), rd(1), rb(0, &[0])]), TxnState::Applied),
+        // After an open revert intent, which is repeated before its done.
+        (
+            with(vec![
+                ri(1),
+                rb(0, &[]),
+                ri(1),
+                rd(1),
+                ri(0),
+                rd(0),
+                c(Reverted),
+            ]),
+            TxnState::Closed(Reverted),
+        ),
+        (
+            with(vec![rb(0, &[]), ri(1), rd(1), ri(0), rd(0), c(Reverted)]),
+            TxnState::Closed(Reverted),
+        ),
+        (
+            with(vec![rb(0, &[]), c(Forgotten)]),
+            TxnState::Closed(Forgotten),
+        ),
+    ];
+    for (rs, want) in ok {
+        assert_eq!(replay(&rs), Ok(want), "{rs:?}");
+    }
+    let many: Vec<u16> = (0..129).collect();
+    let bad: Vec<(Vec<Record>, usize, &str)> = vec![
+        (vec![rb(0, &[])], 0, "a rebind before Applied"),
+        (vec![i(0), d(0), rb(0, &[])], 2, "a rebind before Applied"),
+        (
+            vec![i(0), ri(0), rd(0), rb(0, &[])],
+            3,
+            "a rebind before Applied",
+        ),
+        (
+            with(vec![rb(16, &[])]),
+            5,
+            "a rebind of a root outside a head",
+        ),
+        (
+            with(vec![rb(0, &[1, 0])]),
+            5,
+            "a rebind's directories out of order",
+        ),
+        (
+            with(vec![rb(0, &[1, 1])]),
+            5,
+            "a rebind's directories out of order",
+        ),
+        (
+            with(vec![rb(0, &many)]),
+            5,
+            "a rebind with too many directories",
+        ),
+        (
+            with(vec![rb(0, &[2])]),
+            5,
+            "a rebind names an op without intent",
+        ),
+        (
+            with(vec![ri(1), rb(0, &[]), rd(1)]),
+            7,
+            "revert done not directly after its revert intent",
+        ),
+        (
+            with(vec![ri(1), rd(1), ri(0), rd(0), c(Reverted), rb(0, &[])]),
+            10,
+            "a record after Closed",
+        ),
+    ];
+    for (rs, at, why) in bad {
+        assert_eq!(replay(&rs), Err((at, why)), "{rs:?}");
+    }
+}
+
+/// The replay keeps every `Rebind` in order, and for each the lowest op that had a revert
+/// intent before it (`exec` refuses a rebind after a revert intent of an op of its root).
+#[test]
+fn j2_replay_keeps_rebinds_with_the_revert_that_had_begun() {
+    let mut m = Machine::default();
+    for r in [i(0), d(0), i(1), d(1), i(2), d(2), a(3)] {
+        m.step(&r).unwrap();
+    }
+    m.step(&rb(0, &[0])).unwrap();
+    for r in [ri(2), rd(2), ri(1)] {
+        m.step(&r).unwrap();
+    }
+    m.step(&rb(1, &[])).unwrap();
+    let got: Vec<(u16, Option<u16>, usize)> = m
+        .rebinds()
+        .iter()
+        .map(|r| (r.root, r.reverting, r.dirs.len()))
+        .collect();
+    assert_eq!(got, vec![(0, None, 1), (1, Some(1), 0)]);
+    assert_eq!(m.rebinds()[0].dirs[0].file_id, 10);
+    assert_eq!(m.next_revert(), Some(1));
+    assert_eq!(m.state(), TxnState::Applied);
+}

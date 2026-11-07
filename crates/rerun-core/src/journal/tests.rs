@@ -1493,3 +1493,168 @@ fn d2_a_forget_marker_covers_the_head_it_names() {
         .unwrap();
     assert_eq!(j.list().unwrap().foreign, 1);
 }
+
+// ---------- P2-14: Rebind ----------
+
+fn root_id(f: u128) -> crate::policy::root::RootId {
+    crate::policy::root::RootId {
+        volume_serial: 0x45,
+        file_id: f,
+    }
+}
+
+/// J1 (P2-14): a `Rebind` written after `Applied` reads back in order, with and without
+/// directory proofs, also as a chain of two; the writer refuses what the grammar refuses and
+/// writes nothing then.
+#[test]
+fn j1_rebinds_round_trip_and_chain() {
+    let sys = system();
+    let app = open_app(&sys);
+    let g = game(&sys, r"D:\G");
+    let j = Journal::new(&app, InstanceTag::fixed(TAG));
+    let lock = j.lock().unwrap();
+    let id = *apply2(&lock, &*g).id();
+    let store = crate::path::RootPath::new(r"E:\SteamLibrary").unwrap();
+    let lib2 = crate::path::RootPath::new(r"F:\Games\Steam").unwrap();
+    let mut w = lock.resume(&id).unwrap();
+    assert!(w.rebinds().is_empty());
+    let dirs = [super::DirProof {
+        op: 0,
+        file_id: 0x77,
+    }];
+    let args = super::RebindArgs {
+        root: 0,
+        old: root_id(1),
+        store: &store,
+        store_id: root_id(2),
+        id: root_id(3),
+        dirs: &dirs,
+    };
+    w.rebind(&args).unwrap();
+    // A refused one writes nothing: unsorted proofs, an op without intent, root 16.
+    let bad = [
+        super::DirProof { op: 1, file_id: 1 },
+        super::DirProof { op: 0, file_id: 2 },
+    ];
+    for a in [
+        super::RebindArgs { dirs: &bad, ..args },
+        super::RebindArgs {
+            dirs: &[super::DirProof { op: 5, file_id: 1 }],
+            ..args
+        },
+        super::RebindArgs { root: 16, ..args },
+    ] {
+        assert!(matches!(w.rebind(&a), Err(JournalError::Order(_))), "{a:?}");
+    }
+    w.rebind(&super::RebindArgs {
+        old: root_id(3),
+        store: &lib2,
+        store_id: root_id(4),
+        id: root_id(5),
+        dirs: &[],
+        ..args
+    })
+    .unwrap();
+    assert_eq!(w.rebinds().len(), 2);
+    drop(w);
+    let v = load(&j, &id);
+    assert_eq!(v.state, TxnState::Applied);
+    assert_eq!(v.log.len(), 7);
+    let got: Vec<_> = v
+        .rebinds
+        .iter()
+        .map(|r| {
+            (
+                r.root,
+                r.old,
+                r.store.to_string(),
+                r.store_id,
+                r.id,
+                r.dirs.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (
+                0,
+                root_id(1),
+                store.to_string(),
+                root_id(2),
+                root_id(3),
+                dirs.to_vec()
+            ),
+            (
+                0,
+                root_id(3),
+                lib2.to_string(),
+                root_id(4),
+                root_id(5),
+                Vec::new()
+            ),
+        ]
+    );
+    // The revert goes on after the rebind and closes.
+    let mut w = lock.resume(&id).unwrap();
+    assert_eq!(w.rebinds().len(), 2);
+    for k in [1, 0] {
+        w.revert_intent(k, None, None).unwrap();
+        w.revert_done(k, Observed::After, false).unwrap();
+    }
+    w.close(Closing::Reverted).unwrap();
+    assert_eq!(state(&j, &id), TxnState::Closed(Closing::Reverted));
+    // Not before `Applied`: an open transaction cannot be rebound.
+    let mut w = lock.begin(HEAD).unwrap();
+    let open = *w.id();
+    w.intent(0, None, None).unwrap();
+    drop(w);
+    let mut w = lock.resume(&open).unwrap();
+    assert!(matches!(w.rebind(&args), Err(JournalError::Order(_))));
+    drop(w);
+    assert_eq!(load(&j, &open).log.len(), 1);
+}
+
+/// J9 (P2-14): a rebind needs room for the rest of the revert (a revert intent and done for
+/// every op not reverted yet) and `Closed`; refused before anything is written.
+#[test]
+fn j9_a_rebind_needs_room_for_the_rest_of_the_revert() {
+    let sys = system();
+    let app = open_app(&sys);
+    let g = game(&sys, r"D:\G");
+    let store = crate::path::RootPath::new(r"E:\SteamLibrary").unwrap();
+    let args = super::RebindArgs {
+        root: 0,
+        old: root_id(1),
+        store: &store,
+        store_id: root_id(2),
+        id: root_id(3),
+        dirs: &[],
+    };
+    // `apply2` writes 5 records (and needs a budget of 10); a rebind, 2 x 2 revert records and
+    // Closed need 6 more.
+    for (records, ok) in [(10u16, false), (11, true)] {
+        let j = Journal::with_limits(
+            &app,
+            InstanceTag::fixed(u64::from(records)),
+            small(|l| l.records = records),
+        );
+        let lock = j.lock().unwrap();
+        let id = *apply2(&lock, &*g).id();
+        let mut w = lock.resume(&id).unwrap();
+        let r = w.rebind(&args);
+        assert_eq!(r.is_ok(), ok, "{records}: {r:?}");
+        if !ok {
+            assert!(matches!(r, Err(JournalError::TooLarge { .. })), "{r:?}");
+        }
+        drop(w);
+        assert_eq!(load(&j, &id).log.len(), if ok { 6 } else { 5 });
+        // The revert still fits after it.
+        let mut w = lock.resume(&id).unwrap();
+        for k in [1, 0] {
+            w.revert_intent(k, None, None).unwrap();
+            w.revert_done(k, Observed::After, false).unwrap();
+        }
+        w.close(Closing::Reverted).unwrap();
+    }
+}

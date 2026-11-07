@@ -12,10 +12,18 @@
 //! `op-NNNN.bin`, a small old value inline); `Done.file_id` is only for what has a file ID;
 //! `RevertIntent { from, to }` names the digests of a semantic revert, both or neither: written
 //! since P2-12, for `IniValue` only ([`Semantic`]).
+//!
+//! `Rebind` (P2-14, additive; format 1 stays unstable until A6): root `root` of the head is bound
+//! from here on to the game folder `steamapps\common\<installdir>` of the Steam library `store`,
+//! with the identities seen when the user confirmed it, and the file IDs of the folders the plan
+//! created as found there ([`DirProof`]). No game path: the install folder is always the head's
+//! (senior-dev S3).
 
 use serde::{Deserialize, Serialize};
 
 use super::Damage;
+use crate::path::RootPath;
+use crate::policy::root::RootId;
 use crate::sys::fs::TmpName;
 
 /// The one record format.
@@ -85,6 +93,22 @@ pub enum Before {
     Inline(#[serde(with = "crate::wire::hex_bytes")] Vec<u8>),
 }
 
+/// A folder a `CreateDir` op created, by the file ID it has in the folder a `Rebind` binds (a
+/// copy of the library gives every folder a new file ID; P2-14, user decision E-R2 a). The revert
+/// takes it as it takes `Done.file_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirProof {
+    /// Op index (a `CreateDir` of the rebound root; `exec` checks the kind).
+    pub op: u16,
+    /// File ID of the folder.
+    #[serde(with = "crate::wire::hex128")]
+    pub file_id: u128,
+}
+
+/// Most [`DirProof`]s of one `Rebind` (a plan has at most 128 ops).
+pub const MAX_DIRS: usize = 128;
+
 /// One record (ADR 0019 amendment). `op` is the index of the op in the head.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -132,6 +156,23 @@ pub(crate) enum Record {
         observed: Observed,
         /// `<tmp>.old` was left behind.
         old_left: bool,
+    },
+    /// From here on, root `root` of the head is the game folder of the head's install folder in
+    /// the Steam library `store` (P2-14). Only after `Applied`; repeatable, the last one of a
+    /// root holds.
+    Rebind {
+        /// Root index in the head.
+        root: u16,
+        /// The identity of the game folder as bound before (the head's, or the last rebind's).
+        old: RootId,
+        /// The Steam library (canonical path), parsed again on read.
+        store: RootPath,
+        /// Identity of the library.
+        store_id: RootId,
+        /// Identity of the game folder.
+        id: RootId,
+        /// The folders the plan created, by their file ID there, by op ascending.
+        dirs: Vec<DirProof>,
     },
     /// The transaction is closed; nothing follows.
     Closed {
@@ -192,9 +233,30 @@ pub(crate) fn decode(bytes: &[u8], n: u16, head: &[u8; 32]) -> Result<Record, Da
 
 #[cfg(test)]
 mod tests {
-    use super::{Before, Closing, Digest, Observed, Record, decode, encode};
+    use super::{Before, Closing, Digest, DirProof, Observed, Record, decode, encode};
     use crate::journal::Damage;
+    use crate::path::RootPath;
+    use crate::policy::root::RootId;
     use crate::sys::fs::TmpName;
+
+    fn id(serial: u64, file: u128) -> RootId {
+        RootId {
+            volume_serial: serial,
+            file_id: file,
+        }
+    }
+
+    /// A `Rebind` of root 0 into `E:\SteamLibrary` with `dirs`.
+    pub(crate) fn rebind(dirs: Vec<DirProof>) -> Record {
+        Record::Rebind {
+            root: 0,
+            old: id(0x44, 7),
+            store: RootPath::new(r"E:\SteamLibrary").unwrap(),
+            store_id: id(0x45, 1),
+            id: id(0x45, 9),
+            dirs,
+        }
+    }
 
     pub(crate) fn every_kind() -> Vec<Record> {
         vec![
@@ -255,6 +317,14 @@ mod tests {
                 observed: Observed::Foreign,
                 old_left: false,
             },
+            rebind(Vec::new()),
+            rebind(vec![
+                DirProof { op: 0, file_id: 5 },
+                DirProof {
+                    op: 3,
+                    file_id: u128::MAX,
+                },
+            ]),
             Record::Closed {
                 how: Closing::RolledBack,
             },
@@ -310,6 +380,72 @@ mod tests {
             wire(&all[7]),
             r#"{"revert_intent":{"op":1,"tmp":".rerun-00000000000000ab-2.tmp","from":null,"to":null}}"#
         );
+        // P2-14: no game path, the library by its canonical path.
+        assert_eq!(
+            wire(&all[11]),
+            format!(
+                r#"{{"rebind":{{"root":0,"old":"0000000000000044-{:032x}","store":"E:\\SteamLibrary","store_id":"0000000000000045-{:032x}","id":"0000000000000045-{:032x}","dirs":[{{"op":0,"file_id":"{:032x}"}},{{"op":3,"file_id":"{}"}}]}}}}"#,
+                7,
+                1,
+                9,
+                5,
+                "f".repeat(32)
+            )
+        );
+    }
+
+    /// J3 for `Rebind` (P2-14): one form only; every field parsed again.
+    #[test]
+    fn edited_rebind_records_are_unparsable() {
+        let head = [9u8; 32];
+        let good = String::from_utf8(
+            encode(
+                4,
+                &head,
+                &rebind(vec![DirProof {
+                    op: 2,
+                    file_id: 0xab,
+                }]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            decode(good.as_bytes(), 4, &head),
+            Ok(rebind(vec![DirProof {
+                op: 2,
+                file_id: 0xab
+            }]))
+        );
+        let ab = format!("{:032x}", 0xab);
+        for bad in [
+            // Another path style or spelling of the drive.
+            good.replace(r"E:\\SteamLibrary", "E:/SteamLibrary"),
+            good.replace(r"E:\\SteamLibrary", r"e:\\SteamLibrary"),
+            good.replace(r"E:\\SteamLibrary", r"E:\\SteamLibrary\\"),
+            // Not a root path at all.
+            good.replace(r"E:\\SteamLibrary", r"\\\\server\\lib"),
+            good.replace(r"E:\\SteamLibrary", r"E:\\"),
+            good.replace(r"E:\\SteamLibrary", r"E:\\a\\..\\b"),
+            // Upper-case hex, a short ID, a number.
+            good.replace(&ab, &ab.to_uppercase()),
+            good.replace(&ab, "ab"),
+            good.replace(&format!(r#""{ab}""#), "171"),
+            good.replace("0000000000000045-", "0000000000000045_"),
+            // An unknown field, a missing one, a game path.
+            good.replace(r#""dirs":"#, r#""x":1,"dirs":"#),
+            good.replace(&format!(r#","dirs":[{{"op":2,"file_id":"{ab}"}}]"#), ""),
+            good.replace(r#""root":0,"#, ""),
+            good.replace(r#""store":"#, r#""path":"E:\\x","store":"#),
+            good.replace(r#""op":2,"#, r#""op":2,"x":0,"#),
+        ] {
+            assert_ne!(bad, good);
+            assert_eq!(
+                decode(bad.as_bytes(), 4, &head),
+                Err(Damage::Unparsable { n: 4 }),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

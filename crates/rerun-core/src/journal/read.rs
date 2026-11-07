@@ -189,6 +189,7 @@ pub(super) fn read_txn(
         state: TxnState::Empty,
         anomaly: None,
         ops: BTreeMap::new(),
+        rebinds: Vec::new(),
         log: Vec::new(),
         has_records: false,
     };
@@ -263,6 +264,7 @@ pub(super) fn read_txn(
         damage = check_backups(dir, &m, &found.backups, v)?;
     }
     view.ops = m.ops().clone();
+    view.rebinds = m.rebinds().to_vec();
     view.state = m.state();
     if let Some(d) = damage {
         if m.closed().is_some() {

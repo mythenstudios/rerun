@@ -1,7 +1,7 @@
 //! J4 to J6: the journal under crashes and power losses (ADR 0019 amendment, P2-7).
 //!
-//! The script applies two ops and reverts them, the journal on `C:` and the stub changes on
-//! `D:` (op `k` creates `D:\G\c<k>.bin`, its revert deletes it); op 0 takes a backup of
+//! The script applies two ops, rebinds root 0 (P2-14) and reverts them, the journal on `C:` and
+//! the stub changes on `D:` (op `k` creates `D:\G\c<k>.bin`, its revert deletes it); op 0 takes a backup of
 //! `D:\G\a.bin`. The game folder is flushed before `applied` and before each `revert_done`, as
 //! `exec` does (ADR 0019 amendment P2-8: a durable `RevertDone` has a durable change).
 //! - J4 crashes after every call of Rerun the script makes (condition S1), restarts and
@@ -43,10 +43,11 @@ enum Site {
     GameBeforeRevertDone,
 }
 
-const SITES: [Site; 6] = [
+const SITES: [Site; 7] = [
     Site::Journal(FlushSite::Intent),
     Site::GameBeforeApplied,
     Site::Journal(FlushSite::Applied),
+    Site::Journal(FlushSite::Rebind),
     Site::Journal(FlushSite::RevertIntent),
     Site::GameBeforeRevertDone,
     Site::Journal(FlushSite::Close),
@@ -67,6 +68,7 @@ fn script(
     let j = Journal::new(app, InstanceTag::fixed(TAG));
     let lock = j.lock()?;
     let mut w = lock.begin(HEAD)?;
+    let id = *w.id();
     let game_flush = |site: Site| -> Result<(), JournalError> {
         if skip == Some(site) {
             Ok(())
@@ -103,7 +105,24 @@ fn script(
     game_flush(Site::GameBeforeApplied)?;
     w.applied(2)?;
     p.flushed = 5;
-    for (k, n) in [(1u16, 6), (0, 8)] {
+    drop(w);
+    // P2-14: the revert runs on a resumed writer after a rebind, as `exec` does.
+    let mut w = lock.resume(&id)?;
+    let store = crate::path::RootPath::new(r"E:\SteamLibrary").unwrap_or_else(|e| panic!("{e}"));
+    let rid = |f: u128| crate::policy::root::RootId {
+        volume_serial: 0x45,
+        file_id: f,
+    };
+    w.rebind(&super::RebindArgs {
+        root: 0,
+        old: rid(1),
+        store: &store,
+        store_id: rid(2),
+        id: rid(3),
+        dirs: &[],
+    })?;
+    p.flushed = 6;
+    for (k, n) in [(1u16, 7), (0, 9)] {
         w.revert_intent(k, None, None)?;
         p.flushed = n;
         let name = r(&stub(usize::from(k)));
@@ -112,7 +131,7 @@ fn script(
         w.revert_done(k, Observed::After, false)?;
     }
     w.close(Closing::Reverted)?;
-    p.flushed = 10;
+    p.flushed = 11;
     Ok(())
 }
 
@@ -174,7 +193,7 @@ fn trace(skip: Option<Site>) -> (Vec<Prim>, Vec<Record>) {
     let j = Journal::new(&app, InstanceTag::fixed(2));
     let listing = j.list().unwrap();
     let log = listing.txns[0].view.as_ref().unwrap().log.clone();
-    assert_eq!(log.len(), 10);
+    assert_eq!(log.len(), 11);
     (calls, log)
 }
 
@@ -245,6 +264,10 @@ fn violations(s: &Seen, p: Progress) -> Vec<String> {
         );
         if reverted && exists {
             v.push(format!("RevertDone durable, the revert of {k} lost"));
+        }
+        let rebound = has(log, |r| matches!(r, Record::Rebind { .. }));
+        if applied && !exists && !rebound {
+            v.push(format!("the revert of {k} durable without its rebind"));
         }
     }
     if log.len() < p.flushed {
@@ -416,6 +439,12 @@ fn j6_every_flush_site_is_needed() {
         (Site::GameBeforeApplied, "Applied durable, change"),
         (
             Site::Journal(FlushSite::Applied),
+            "returned Ok after their flush",
+        ),
+        // P2-14: the next flush (the first revert intent) would cover it for correctness, but
+        // a rebind whose call returned `Ok` must survive on its own.
+        (
+            Site::Journal(FlushSite::Rebind),
             "returned Ok after their flush",
         ),
         (
