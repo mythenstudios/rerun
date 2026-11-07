@@ -16,14 +16,19 @@
 //! - `forget` shows the transaction with every backup and pending cleanup, what is on disk now
 //!   and every `.old` that holds a file as it was before a step of Rerun, says what forget does
 //!   not do, asks, forgets. Exit 0 forgotten, 3 refused.
+//! - Pending cleanup (P2-15, ADR 0016 amendment P2-15): a transaction whose ops are all reverted
+//!   but whose journal still names a `.old` of Rerun's is "everything reverted, only cleanup
+//!   pending"; `revert --dry-run` lists what the revert deletes (Rerun's copy, by its known
+//!   SHA-256) and what stays; the revert asks before it deletes, reports each file, and exits 5
+//!   while one is still in use (or kept next to a file that changed).
 
 use std::io::Write;
 
 use rerun_core::detect::steam::AppState;
 use rerun_core::escape;
 use rerun_core::exec::{
-    self, Backup, Detail, ExecCtx, ExecError, Halt, OpState, OpStatus, RebindPreview,
-    RebindRefusal, Refusal, RerunStep, RevertReport, TxnLine, TxnStatus, Verified,
+    self, Backup, Detail, ExecCtx, ExecError, Halt, OldSeen, OpState, OpStatus, PendingOld,
+    RebindPreview, RebindRefusal, Refusal, RerunStep, RevertReport, TxnLine, TxnStatus, Verified,
 };
 use rerun_core::journal::{Closing, InstanceTag, JournalError, Observed, TxnId};
 use rerun_core::plan::Preview;
@@ -70,7 +75,7 @@ fn txn_text(st: &TxnStatus) -> TxnText<'_> {
             TxnText::Reverting
         }
         TxnLine::Applied => TxnText::Applied,
-        TxnLine::CleanupPending => TxnText::Reverting,
+        TxnLine::CleanupPending => TxnText::CleanupPending,
         TxnLine::Closed(c) => TxnText::Closed(*c),
         TxnLine::Damaged(d) => TxnText::Damaged(shown(d)),
         TxnLine::Unreadable(why) => TxnText::Unreadable(why.clone()),
@@ -107,9 +112,48 @@ fn op_lines<'a>(st: &'a TxnStatus, o: &'a OpStatus, with_backup: bool) -> Vec<Me
         out.extend(backup(o.backup.as_ref()));
     }
     for c in &o.cleanup {
-        out.push(m(TxnMsg::Cleanup { path: c.clone() }));
+        let path = c.clone();
+        // P2-15: a forgotten transaction's `.old` comes from its records only.
+        out.push(m(if st.is_forgotten() {
+            TxnMsg::MayRemain { path }
+        } else {
+            TxnMsg::Cleanup { path }
+        }));
     }
     out
+}
+
+/// The SHA-256 of Rerun's content, hex.
+fn hex(sha: &[u8; 32]) -> String {
+    sha.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The pending `.old` files as a preview shows them (P2-15, rule 5): what a revert deletes and
+/// what stays; a file already gone is not shown.
+fn cleanup_lines(items: &[PendingOld]) -> Vec<Message<'_>> {
+    items
+        .iter()
+        .filter_map(|p| {
+            let path = escape::path(p.path.as_str());
+            Some(m(match p.seen {
+                OldSeen::Gone => return None,
+                OldSeen::Ours => TxnMsg::WillDelete {
+                    sha256: hex(&p.sha256),
+                    path,
+                },
+                OldSeen::Deleted => TxnMsg::OldDeleted { path },
+                OldSeen::InUse => TxnMsg::OldInUse { path },
+                OldSeen::Kept => TxnMsg::OldKept { path },
+                OldSeen::Foreign => TxnMsg::OldForeign { path },
+            }))
+        })
+        .collect()
+}
+
+/// The `.old` files of `items` that keep the transaction open, by what keeps it.
+fn holding(items: &[PendingOld]) -> (usize, usize) {
+    let n = |s: OldSeen| items.iter().filter(|p| p.seen == s).count();
+    (n(OldSeen::InUse), n(OldSeen::Kept))
 }
 
 /// The roots of the transaction's head, or why it cannot be shown.
@@ -184,6 +228,8 @@ pub fn render_status(s: &exec::Status, all: bool) -> Vec<Message<'_>> {
                 m(TxnMsg::HintForgetOnly { txn })
             } else if left_foreign(st) {
                 m(TxnMsg::HintForgetForeign { txn })
+            } else if st.state == TxnLine::CleanupPending {
+                m(TxnMsg::HintCleanup { txn })
             } else {
                 m(TxnMsg::HintRevert { txn })
             });
@@ -293,6 +339,7 @@ fn now_lines<'a>(st: &'a TxnStatus, v: &'a Verified) -> Vec<Message<'a>> {
             out.extend(backup(b));
         }
     }
+    out.extend(cleanup_lines(&v.cleanup));
     if let Some(h) = &v.halted {
         out.push(m(TxnMsg::Halted {
             op: h.op,
@@ -341,12 +388,19 @@ fn report_lines<'a>(st: &TxnStatus, rep: &'a RevertReport, v: &Verified) -> Vec<
         }));
         out.extend(detail_lines(o.detail.as_ref()));
         out.extend(backup(o.backup.as_ref()));
-        for l in &o.left {
+        // A `.old` the cleanup pass reports below is not repeated here (P2-15).
+        let reported = |l: &rerun_core::path::RelPath| {
+            rep.cleanup
+                .iter()
+                .any(|p| p.op == o.op && p.path.file_name() == l.as_str())
+        };
+        for l in o.left.iter().filter(|l| !reported(l)) {
             out.push(m(TxnMsg::Left {
                 path: escape::path(l.as_str()),
             }));
         }
     }
+    out.extend(cleanup_lines(&rep.cleanup));
     if let Some(h) = &rep.halted {
         out.push(m(TxnMsg::Halted {
             op: h.op,
@@ -453,7 +507,13 @@ fn run_revert<W: Write, E: Write>(
             .map_or_else(|e| before_change(err, e), |()| Exit::Report));
     }
     // An empty transaction changed nothing: closing it is nothing to ask about.
-    if !empty {
+    // P2-15: a revert that only cleans up asks before it deletes (nothing to delete: no question).
+    let deletes = v.cleanup.iter().filter(|p| p.seen == OldSeen::Ours).count();
+    if st.state == TxnLine::CleanupPending {
+        if deletes > 0 {
+            confirm(host, yes, TxnMsg::AskCleanup { n: deletes }, err)?;
+        }
+    } else if !empty {
         confirm(host, yes, TxnMsg::AskRevert { ops: v.ops.len() }, err)?;
     }
     let rep = match exec::revert(&cx, &txn) {
@@ -470,19 +530,31 @@ fn run_revert<W: Write, E: Write>(
             return Err(exit_for_exec(&e));
         }
     };
-    let (exit, last) = if rep.closed.is_some() {
-        (Exit::Report, TxnMsg::Reverted { txn })
-    } else if rep.halted.is_some() {
-        (Exit::Open, TxnMsg::StaysOpenHalted { txn })
-    } else {
-        (Exit::Open, TxnMsg::StaysOpenForeign { txn })
-    };
+    let (exit, last) = closing_line(&rep);
     let mut lines = report_lines(&st, &rep, &v);
     lines.push(m(last));
     Ok(out
         .lines(&lines)
         .and_then(|()| out.flush())
         .map_or_else(|e| after_change(err, e, exit), |()| exit))
+}
+
+/// The last line of a revert's report and its exit code: closed 0; halted, foreign, or a file of
+/// Rerun's still left (P2-15) 5.
+fn closing_line(rep: &RevertReport) -> (Exit, TxnMsg<'static>) {
+    let txn = rep.txn;
+    let (in_use, kept) = holding(&rep.cleanup);
+    if rep.closed.is_some() {
+        (Exit::Report, TxnMsg::Reverted { txn })
+    } else if rep.halted.is_some() {
+        (Exit::Open, TxnMsg::StaysOpenHalted { txn })
+    } else if in_use > 0 {
+        (Exit::Open, TxnMsg::StaysOpenInUse { txn, n: in_use })
+    } else if kept > 0 {
+        (Exit::Open, TxnMsg::StaysOpenKept { txn })
+    } else {
+        (Exit::Open, TxnMsg::StaysOpenForeign { txn })
+    }
 }
 
 /// The rebinds of a transaction (`status`, P2-14b): the folder each root is bound to now.
@@ -625,13 +697,7 @@ fn rebind_run<W: Write, E: Write>(
             return Err(exit_for_exec(&e));
         }
     };
-    let (exit, last) = if rep.closed.is_some() {
-        (Exit::Report, TxnMsg::Reverted { txn })
-    } else if rep.halted.is_some() {
-        (Exit::Open, TxnMsg::StaysOpenHalted { txn })
-    } else {
-        (Exit::Open, TxnMsg::StaysOpenForeign { txn })
-    };
+    let (exit, last) = closing_line(&rep);
     let mut lines = report_lines(st, &rep, &p.verified);
     lines.push(m(last));
     Ok(out
@@ -698,7 +764,12 @@ fn run_forget<W: Write, E: Write>(
         None => {}
     }
     lines.push(m(TxnMsg::ForgetChangesNothing));
-    lines.push(m(TxnMsg::ForgetStays));
+    // P2-15 (senior-dev S3): with only the cleanup pending, no change of Rerun's stays.
+    lines.push(m(if st.state == TxnLine::CleanupPending {
+        TxnMsg::ForgetOnlyCleanup
+    } else {
+        TxnMsg::ForgetStays
+    }));
     lines.push(m(TxnMsg::ForgetKeeps));
     if st.state == TxnLine::Applied && st.ops.iter().all(|o| o.state == OpState::Applied) {
         lines.push(m(TxnMsg::AllStay { ops: st.ops.len() }));
@@ -709,7 +780,11 @@ fn run_forget<W: Write, E: Write>(
         && v.ops.iter().all(|(_, o)| *o != Observed::Foreign)
         && !left_foreign(&st)
     {
-        lines.push(m(TxnMsg::RevertIsClean { txn }));
+        lines.push(m(if holding(&v.cleanup) == (0, 0) {
+            TxnMsg::RevertIsClean { txn }
+        } else {
+            TxnMsg::FinishCleanup { txn }
+        }));
     }
     lines.push(Message::Blank);
     out.lines(&lines)

@@ -64,6 +64,8 @@ pub enum TxnText<'a> {
     Applied,
     /// Applied, and a revert began and did not finish.
     Reverting,
+    /// Every op reverted, but a file Rerun replaced is still left (P2-15).
+    CleanupPending,
     /// Closed.
     Closed(Closing),
     /// Damaged (the reason, escaped).
@@ -87,6 +89,7 @@ impl fmt::Display for TxnText<'_> {
             Self::Open => f.write_str("open (in progress or interrupted)"),
             Self::Applied => f.write_str("applied"),
             Self::Reverting => f.write_str("applied; a revert began and did not finish"),
+            Self::CleanupPending => f.write_str("everything reverted, only cleanup pending"),
             Self::Closed(c) => f.write_str(closing(*c)),
             Self::Damaged(why) => write!(f, "damaged: {why}"),
             Self::Unreadable(why) => write!(f, "unreadable: {why}"),
@@ -333,6 +336,16 @@ pub enum TxnMsg<'a> {
         /// The error, escaped.
         error: Shown<'a>,
     },
+    /// The apply failed and was rolled back, but a file Rerun replaced is still in use (P2-15).
+    RolledBackCleanup {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// What finishes a transaction whose cleanup is pending (P2-15).
+    FinishCleanup {
+        /// The transaction.
+        txn: TxnId,
+    },
     /// What finishes a transaction left open.
     FinishWithRevert {
         /// The transaction.
@@ -382,6 +395,11 @@ pub enum TxnMsg<'a> {
         /// Relative to the op's root, escaped.
         path: Shown<'a>,
     },
+    /// A `.old` a forgotten transaction may have left (P2-15: from the records, not observed).
+    MayRemain {
+        /// Relative to the op's root, escaped.
+        path: Shown<'a>,
+    },
     /// Where the backups of a forgotten transaction stay.
     BackupsIn {
         /// The transaction folder, escaped.
@@ -399,6 +417,11 @@ pub enum TxnMsg<'a> {
     },
     /// The transaction above has changes left as found; forget closes it.
     HintForgetForeign {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// Everything of the transaction above is reverted; only its cleanup is pending (P2-15).
+    HintCleanup {
         /// The transaction.
         txn: TxnId,
     },
@@ -449,6 +472,33 @@ pub enum TxnMsg<'a> {
         /// The file, relative to the INI file's folder, escaped.
         file: Shown<'a>,
     },
+    /// A `.old` of Rerun's the revert deletes (P2-15, rule 5): its known content.
+    WillDelete {
+        /// SHA-256 of Rerun's content, hex.
+        sha256: String,
+        /// Relative to the op's root, escaped.
+        path: Shown<'a>,
+    },
+    /// A `.old` of Rerun's still in use: it stays, and so does the transaction (P2-15).
+    OldInUse {
+        /// Relative to the op's root, escaped.
+        path: Shown<'a>,
+    },
+    /// A `.old` of Rerun's next to a file that changed since the revert: kept (P2-15).
+    OldKept {
+        /// Relative to the op's root, escaped.
+        path: Shown<'a>,
+    },
+    /// Something at the name of a `.old` that is not Rerun's: left as it is (P2-15, E-C4).
+    OldForeign {
+        /// Relative to the op's root, escaped.
+        path: Shown<'a>,
+    },
+    /// A `.old` of Rerun's the revert deleted (P2-15).
+    OldDeleted {
+        /// Relative to the op's root, escaped.
+        path: Shown<'a>,
+    },
     /// Where the revert halts.
     Halted {
         /// Index.
@@ -467,6 +517,11 @@ pub enum TxnMsg<'a> {
     AskRevert {
         /// Ops to act on.
         ops: usize,
+    },
+    /// The question of a revert that only cleans up (P2-15).
+    AskCleanup {
+        /// Files to delete.
+        n: usize,
     },
     /// One op of the revert's report.
     Did {
@@ -509,6 +564,18 @@ pub enum TxnMsg<'a> {
         /// The transaction.
         txn: TxnId,
     },
+    /// Reverted, but files Rerun replaced are still in use; the transaction stays open (P2-15).
+    StaysOpenInUse {
+        /// The transaction.
+        txn: TxnId,
+        /// How many.
+        n: usize,
+    },
+    /// Reverted, but a file Rerun replaced is kept next to a file that changed (P2-15).
+    StaysOpenKept {
+        /// The transaction.
+        txn: TxnId,
+    },
     /// The revert failed after it wrote.
     RevertFailed {
         /// The transaction.
@@ -518,6 +585,8 @@ pub enum TxnMsg<'a> {
     ForgetChangesNothing,
     /// What forget does not revert.
     ForgetStays,
+    /// Forget of a transaction whose cleanup is pending (P2-15, senior-dev S3).
+    ForgetOnlyCleanup,
     /// What forget does not delete.
     ForgetKeeps,
     /// An applied transaction: every change stays.
@@ -815,6 +884,15 @@ impl fmt::Display for TxnMsg<'_> {
             ),
             Self::Cause { error } => write!(f, "  cause: {error}"),
             Self::RollbackCause { error } => write!(f, "  rollback: {error}"),
+            Self::RolledBackCleanup { txn } => write!(
+                f,
+                "the apply failed and was rolled back, but a file Rerun replaced is still in use: \
+                 transaction {txn} stays open until it is deleted"
+            ),
+            Self::FinishCleanup { txn } => write!(
+                f,
+                "close the game and any window showing its folder, then run: rerun revert {txn}"
+            ),
             Self::FinishWithRevert { txn } => write!(
                 f,
                 "rerun status shows it; rerun revert {txn} finishes it"
@@ -836,6 +914,7 @@ impl fmt::Display for TxnMsg<'_> {
             }
             Self::BackupInline => f.write_str("    backup: kept in the journal record"),
             Self::Cleanup { path } => write!(f, "    pending cleanup: {path}"),
+            Self::MayRemain { path } => write!(f, "    may remain (pending cleanup): {path}"),
             Self::BackupsIn { folder } => write!(f, "  its backups stay in: {folder}"),
             Self::HintRevert { txn } => write!(f, "  revert with: rerun revert {txn}"),
             Self::HintForgetOnly { txn } => write!(
@@ -845,6 +924,11 @@ impl fmt::Display for TxnMsg<'_> {
             Self::HintForgetForeign { txn } => write!(
                 f,
                 "  changes were left as found; forget closes it: rerun forget {txn}"
+            ),
+            Self::HintCleanup { txn } => write!(
+                f,
+                "  a file Rerun replaced is still in use; close the game and any window showing \
+                 its folder, then: rerun revert {txn}"
             ),
             Self::ForeignEntries { n } => write!(
                 f,
@@ -887,6 +971,24 @@ impl fmt::Display for TxnMsg<'_> {
                 "    the file as it was before Rerun's {step} is kept next to it (never call it \
                  the original; the backup is): {file}"
             ),
+            Self::WillDelete { sha256, path } => write!(
+                f,
+                "  will delete Rerun's copy (known content, SHA-256 {sha256}): {path}"
+            ),
+            Self::OldInUse { path } => write!(
+                f,
+                "  in use, stays for now (Rerun's copy; the transaction stays open): {path}"
+            ),
+            Self::OldKept { path } => write!(
+                f,
+                "  kept: the file next to it changed since the revert, so Rerun's copy stays \
+                 (delete it yourself, or forget the transaction): {path}"
+            ),
+            Self::OldForeign { path } => write!(
+                f,
+                "  not Rerun's file (another content or a link), left as it is: {path}"
+            ),
+            Self::OldDeleted { path } => write!(f, "  deleted Rerun's copy: {path}"),
             Self::Halted { op, why } => write!(f, "the revert stops at op {op}: {why}"),
             Self::CannotObserve { error } => {
                 write!(f, "  what is on disk cannot be observed now: {error}")
@@ -894,6 +996,13 @@ impl fmt::Display for TxnMsg<'_> {
             Self::DryRunDone => f.write_str("dry run: nothing was written"),
             Self::AskRevert { ops: 1 } => f.write_str("Revert this op? [y/N]"),
             Self::AskRevert { ops } => write!(f, "Revert these {ops} ops? [y/N]"),
+            Self::AskCleanup { n: 1 } => {
+                f.write_str("Everything is reverted. Delete the file Rerun left? [y/N]")
+            }
+            Self::AskCleanup { n } => write!(
+                f,
+                "Everything is reverted. Delete the {n} files Rerun left? [y/N]"
+            ),
             Self::Did {
                 op,
                 observed,
@@ -925,6 +1034,21 @@ impl fmt::Display for TxnMsg<'_> {
                 "transaction {txn} stays open: changes were left as found; rerun forget {txn} \
                  closes it (backups stay)"
             ),
+            Self::StaysOpenInUse { txn, n } => write!(
+                f,
+                "transaction {txn} is reverted; {} Rerun replaced {} still in use and {} for \
+                 now; close the game and any window showing its folder, then run rerun revert \
+                 {txn} again",
+                Count(*n, "file", "files"),
+                if *n == 1 { "is" } else { "are" },
+                if *n == 1 { "stays" } else { "stay" }
+            ),
+            Self::StaysOpenKept { txn } => write!(
+                f,
+                "transaction {txn} is reverted, but a file next to Rerun's copy changed since, so \
+                 the copy stays; delete it yourself and run rerun revert {txn}, or rerun forget \
+                 {txn}"
+            ),
             Self::RevertFailed { txn } => write!(
                 f,
                 "the revert failed after it began: transaction {txn} stays open; rerun status \
@@ -936,6 +1060,10 @@ impl fmt::Display for TxnMsg<'_> {
             Self::ForgetStays => {
                 f.write_str("Changes still in place stay, and Rerun will not revert them.")
             }
+            Self::ForgetOnlyCleanup => f.write_str(
+                "Everything is reverted; only the files listed as pending cleanup stay, and \
+                 Rerun will not delete them.",
+            ),
             Self::ForgetKeeps => {
                 f.write_str("Backups and files Rerun left are not deleted.")
             }

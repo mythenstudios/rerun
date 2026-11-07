@@ -5,11 +5,13 @@
 //!
 //! Nothing is asked for a plan that is refused anyway. `--dry-run` stops after the checks: no
 //! journal folder, no lock file, no record (user decision E2 a). Exit codes: 0 applied or
-//! nothing to do, 3 refused or declined, 4 rolled back, 5 left open (ADR 0016 amendment).
+//! nothing to do, 3 refused or declined, 4 rolled back, 5 left open, also rolled back with a
+//! file Rerun replaced still in use (P2-15; ADR 0016 amendments).
 
 use std::io::Write;
 
-use rerun_core::exec::{self, ApplyError, ExecCtx, ExecError, Outcome};
+use rerun_core::escape;
+use rerun_core::exec::{self, ApplyError, ExecCtx, ExecError, OldSeen, Outcome};
 use rerun_core::journal::InstanceTag;
 use rerun_core::plan::{self, PlanHash};
 
@@ -136,6 +138,34 @@ pub fn failed_apply<E: Write>(e: &ApplyError, err: &mut Out<E>) -> Exit {
             } else {
                 note(err, TxnMsg::FinishWithRevert { txn: *txn });
             }
+        }
+        ApplyError::CleanupPending {
+            txn,
+            cause,
+            cleanup,
+        } => {
+            note(err, TxnMsg::RolledBackCleanup { txn: *txn });
+            note(
+                err,
+                TxnMsg::Cause {
+                    error: shown(cause),
+                },
+            );
+            for p in cleanup
+                .iter()
+                .filter(|p| matches!(p.seen, OldSeen::InUse | OldSeen::Kept))
+            {
+                let path = escape::path(p.path.as_str());
+                note(
+                    err,
+                    if p.seen == OldSeen::InUse {
+                        TxnMsg::OldInUse { path }
+                    } else {
+                        TxnMsg::OldKept { path }
+                    },
+                );
+            }
+            note(err, TxnMsg::FinishCleanup { txn: *txn });
         }
         other => note(
             err,

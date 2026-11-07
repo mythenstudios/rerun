@@ -52,6 +52,15 @@ fn c12_every_row_of_the_exit_table() {
         }),
         Exit::RolledBack
     );
+    // 5: rolled back, but a file Rerun replaced is still in use (P2-15): not closed.
+    assert_eq!(
+        exit_for_apply(&ApplyError::CleanupPending {
+            txn: txn(),
+            cause: Box::new(op_error()),
+            cleanup: Vec::new(),
+        }),
+        Exit::Open
+    );
     // 5: left open; and every revert error after its first record.
     assert_eq!(
         exit_for_apply(&ApplyError::LeftOpen {

@@ -382,3 +382,110 @@ the revert stops at op 0: the game folder needs administrator rights (not suppor
         )
     );
 }
+
+/// C-CL2 (P2-15, rule 5): the preview of a revert names every pending `.old` by what it does
+/// (delete Rerun's copy by its known SHA-256, or why it stays), the report what it did, and the
+/// status line of a transaction with only its cleanup pending. A path is always escaped: one
+/// from the journal cannot hold a control or bidi character (`RelPath`), and the line escapes
+/// whatever it gets.
+#[test]
+fn c_cl2_pending_cleanup_in_the_preview_the_report_and_status() {
+    use rerun_core::exec::{OldSeen, PendingOld};
+    let t = txn(5);
+    let item = |op: u16, p: &str, seen: OldSeen| PendingOld {
+        op,
+        root: 0,
+        path: RelPath::parse(p).unwrap(),
+        sha256: [0xab; 32],
+        seen,
+    };
+    let s = st(
+        t,
+        TxnLine::CleanupPending,
+        Some(Ok(head())),
+        vec![op(
+            0,
+            OpState::Reverted(Observed::After),
+            bin(t, 0, 20),
+            &[".rerun-00000000000000ab-3.tmp.old"],
+        )],
+    );
+    let v = Verified {
+        ops: vec![(0, Observed::Before)],
+        halted: None,
+        details: BTreeMap::new(),
+        cleanup: vec![
+            item(0, ".rerun-00000000000000ab-3.tmp.old", OldSeen::Ours),
+            item(0, ".rerun-00000000000000ab-4.tmp.old", OldSeen::InUse),
+            item(0, r"cfg\.rerun-00000000000000ab-5.tmp.old", OldSeen::Kept),
+            item(0, ".rerun-00000000000000ab-6.tmp.old", OldSeen::Foreign),
+            item(0, ".rerun-00000000000000ab-7.tmp.old", OldSeen::Gone),
+        ],
+    };
+    let sha = "ab".repeat(32);
+    assert_eq!(
+        shown(&now_lines(&s, &v)),
+        format!(
+            r"on disk now, newest op first:
+  op 0, nothing to do (as before): replace file in root 0: d3d9.dll
+  will delete Rerun's copy (known content, SHA-256 {sha}): .rerun-00000000000000ab-3.tmp.old
+  in use, stays for now (Rerun's copy; the transaction stays open): .rerun-00000000000000ab-4.tmp.old
+  kept: the file next to it changed since the revert, so Rerun's copy stays (delete it yourself, or forget the transaction): cfg\.rerun-00000000000000ab-5.tmp.old
+  not Rerun's file (another content or a link), left as it is: .rerun-00000000000000ab-6.tmp.old
+"
+        )
+    );
+    let rep = RevertReport {
+        txn: t,
+        closed: None,
+        ops: Vec::new(),
+        halted: None,
+        cleanup: vec![
+            item(0, ".rerun-00000000000000ab-3.tmp.old", OldSeen::Deleted),
+            item(0, ".rerun-00000000000000ab-4.tmp.old", OldSeen::InUse),
+        ],
+    };
+    assert_eq!(
+        shown(&report_lines(&s, &rep, &v)),
+        "  deleted Rerun's copy: .rerun-00000000000000ab-3.tmp.old\n  in use, stays for now (Rerun's copy; the transaction stays open): .rerun-00000000000000ab-4.tmp.old\n"
+    );
+    let all = shown(&render_status(
+        &Status {
+            txns: vec![s],
+            foreign_entries: 0,
+        },
+        false,
+    ));
+    assert!(
+        all.starts_with(&format!(
+            "transaction {t}: everything reverted, only cleanup pending\n"
+        )),
+        "{all}"
+    );
+    assert!(
+        all.contains("    pending cleanup: .rerun-00000000000000ab-3.tmp.old\n"),
+        "{all}"
+    );
+    assert!(
+        all.contains(&format!(
+            "  a file Rerun replaced is still in use; close the game and any window showing its folder, then: rerun revert {t}\n"
+        )),
+        "{all}"
+    );
+    // The line escapes what it gets (ESC, U+202E).
+    let evil = Message::Txn(crate::messages::TxnMsg::WillDelete {
+        sha256: sha.clone(),
+        path: escape::path("cfg\\a\u{1b}[31m\u{202e}lld.tmp.old"),
+    })
+    .to_string();
+    assert!(
+        !evil.contains('\u{1b}') && !evil.contains('\u{202e}'),
+        "{evil:?}"
+    );
+    assert!(
+        evil.starts_with(&format!(
+            "  will delete Rerun's copy (known content, SHA-256 {sha}): "
+        )),
+        "{evil}"
+    );
+}

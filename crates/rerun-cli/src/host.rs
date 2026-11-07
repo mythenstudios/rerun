@@ -115,6 +115,8 @@ pub fn exit_for_apply(e: &ApplyError) -> Exit {
     match e {
         ApplyError::Refused(_) => Exit::Refused,
         ApplyError::RolledBack { .. } => Exit::RolledBack,
+        // P2-15: rolled back, but a file Rerun replaced is still in use: open.
+        ApplyError::CleanupPending { .. } => Exit::Open,
         _ => Exit::Open,
     }
 }
