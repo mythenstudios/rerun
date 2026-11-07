@@ -1531,6 +1531,8 @@ mod layer_crash_tests;
 #[cfg(test)]
 pub(crate) mod layer_tests;
 #[cfg(test)]
+mod rebind_crash_tests;
+#[cfg(test)]
 pub(crate) mod rebind_tests;
 #[cfg(test)]
 mod reg_crash_tests;
