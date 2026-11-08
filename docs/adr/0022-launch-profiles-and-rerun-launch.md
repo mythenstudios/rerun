@@ -176,3 +176,13 @@ The primary group is no longer set at creation. On a multi-group machine the rea
 
 ### Reader (`rerun status`)
 `rerun_core::exec::launch_results` lists `Rerun\launch` handle-relative through `AppDir` (`AppSub::Launch`, read side only; a reparse point at `launch` is `RootError::Reparse`), at most 4,096 entries (more refused as a whole), and reads each `<32 hex>.result` with `Dir::read_limited` (1 KiB) and decodes it as untrusted input. A file that is a link, a folder or restricted, larger than 1 KiB, undecodable, or names another profile than its file name is one "unreadable" line with the reason (escaped, ADR 0016), never acted on and never an abort; the shim's temp files (`<id>.<…>.tmp`) are skipped, other names only counted. `rerun status` shows the results after the journal, one line per profile with its time in UTC; a folder that cannot be read is one line, the exit code stays that of the report. Nothing is written.
+
+## Amendment (2026-11-08): [DEV] measurement on the developer machine
+
+Stronghold 2 (Steam app 40960, 32-bit), 5950X, build 26300, release shim; rows in docs/09, "Launch shim on the developer machine".
+
+- **Launcher entry.** Steam's only launch entry is `FFLauncher.exe`; it starts `Stronghold2.exe` with `ShellExecute`. A profile whose start path is the game exe records `skipped:path_mismatch` and starts unchanged (D3 as designed). With the launcher as start path the game inherits the job and its limit. P3-3 therefore takes the start path from the exe of Steam's launch entry (appinfo), not from the game exe the topo names; the post-launch check then covers the launcher, not the game.
+- **B4, `KILL_ON_JOB_CLOSE`: stays off.** Steam's "Stop" ended the game after the shim had already exited with the launcher: Steam tracks the game itself, so the flag is not needed for "Stop" and would only add the risk named in B4.
+- **B3 / R1.** The shim exiting before the game (it waits for its direct child, the launcher) did not break Steam's running state, "Stop" or the overlay. The wait stays as decided; playtime, Steam Input and cloud sync are still open.
+- **D2: unchanged.** Warm start delay 31 ms; the cold measurement is still open.
+- **M2.** Steam passes the exe path quoted when it contains spaces.
