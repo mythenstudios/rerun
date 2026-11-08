@@ -186,7 +186,7 @@ pub fn txn_of(r: &Ran) -> String {
 }
 
 /// Opens an absolute folder of the fake for a snapshot.
-fn snap_dirs(sys: &FakeSystem, dirs: &[&str]) -> Snapshot {
+pub fn snap_dirs(sys: &FakeSystem, dirs: &[&str]) -> Snapshot {
     #[expect(
         clippy::disallowed_methods,
         reason = "test: snapshot fixture folders of the fake"

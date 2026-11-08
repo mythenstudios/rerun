@@ -562,3 +562,201 @@ fn a_halt_at_the_profiles_root_and_a_moved_profiles_folder_are_explained() {
     v.profiles_moved = None;
     assert!(!shown(&now_lines(&s, &v)).contains("profiles"));
 }
+
+/// A head with a launch profile op 0 (`replace`: it replaced a profile) and a game file op 1.
+fn profile_head(replace: bool) -> Preview {
+    let mut p = head();
+    let mut prof = file_op(
+        0,
+        if replace {
+            "replace file"
+        } else {
+            "create file"
+        },
+        "323ad79fbc93ca3e73b0b152a5d44616.profile",
+    );
+    prof.root = Some(1);
+    // The decoded form is not needed here: the ID comes from the file name.
+    prof.profile = Some(rerun_core::plan::ProfilePreview::Unreadable("x".to_owned()));
+    p.ops = vec![prof, file_op(1, "create file", "new.dll")];
+    p.roots.push(PreviewRoot {
+        index: 1,
+        kind: RootKind::Profiles,
+        path: escape::path(r"C:\Users\Player\AppData\Local\Rerun\profiles").into_owned(),
+        steam: None,
+        main_exe: None,
+    });
+    p
+}
+
+fn verified(ops: Vec<(u16, Observed)>, halted: Option<(u16, u16)>) -> Verified {
+    Verified {
+        ops,
+        halted: halted.map(|(op, root)| Halt {
+            op,
+            root,
+            why: Box::new(Refusal::NeedsHelper),
+        }),
+        details: BTreeMap::new(),
+        cleanup: Vec::new(),
+        profiles_moved: None,
+    }
+}
+
+fn report(ops: Vec<(u16, Observed)>, halted: Option<(u16, u16)>) -> RevertReport {
+    RevertReport {
+        txn: txn(4),
+        closed: None,
+        ops: ops
+            .into_iter()
+            .map(|(op, observed)| OpReport {
+                op,
+                observed,
+                left: Vec::new(),
+                backup: None,
+                detail: None,
+            })
+            .collect(),
+        halted: halted.map(|(op, root)| Halt {
+            op,
+            root,
+            why: Box::new(Refusal::NeedsHelper),
+        }),
+        cleanup: Vec::new(),
+        profiles_moved: None,
+    }
+}
+
+const INSTALL: &str = r"C:\Rerun";
+const GONE: &str = "finds no profile";
+const STAYS: &str = "stays and keeps applying";
+const BACK: &str = "from before this transaction is back";
+
+fn says(lines: &[Message<'_>], want: &str, what: &str) {
+    let text = shown(lines);
+    for other in [GONE, STAYS, BACK] {
+        assert_eq!(
+            text.contains(other),
+            other == want,
+            "{what}: {other}\n{text}"
+        );
+    }
+}
+
+/// X12 (review M1/B1): the text follows what becomes of the profile.
+#[test]
+fn x12_says_what_becomes_of_the_profile() {
+    use super::{x12_after, x12_before, x12_forget};
+    let install = Ok(std::path::PathBuf::from(INSTALL));
+    let applied = |replace| {
+        st(
+            txn(4),
+            TxnLine::Applied,
+            Some(Ok(profile_head(replace))),
+            vec![
+                op(1, OpState::Applied, None, &[]),
+                op(0, OpState::Applied, None, &[]),
+            ],
+        )
+    };
+    // A created profile reverted: gone; a replaced one: the previous profile is back.
+    let both = vec![(0, Observed::After), (1, Observed::After)];
+    says(
+        &x12_before(&install, &applied(false), &verified(both.clone(), None)),
+        GONE,
+        "create, before",
+    );
+    says(
+        &x12_after(&install, &applied(false), &report(both.clone(), None)),
+        GONE,
+        "create, after",
+    );
+    says(
+        &x12_before(&install, &applied(true), &verified(both.clone(), None)),
+        BACK,
+        "replace, before",
+    );
+    says(
+        &x12_after(&install, &applied(true), &report(both, None)),
+        BACK,
+        "replace, after",
+    );
+    let back = shown(&x12_after(
+        &install,
+        &applied(true),
+        &report(vec![(1, Observed::After), (0, Observed::After)], None),
+    ));
+    assert!(!back.contains("remove this launch option"), "{back}");
+    // The game folder gone: a halt at the game op before the profile is reached: it stays.
+    says(
+        &x12_before(
+            &install,
+            &applied(false),
+            &verified(Vec::new(), Some((1, 0))),
+        ),
+        STAYS,
+        "halt at the game, before",
+    );
+    says(
+        &x12_after(&install, &applied(false), &report(Vec::new(), Some((1, 0)))),
+        STAYS,
+        "halt at the game, after",
+    );
+    // `profiles` gone: a halt at the profile op itself: no profile.
+    says(
+        &x12_after(
+            &install,
+            &applied(false),
+            &report(vec![(1, Observed::After)], Some((0, 1))),
+        ),
+        GONE,
+        "profiles gone",
+    );
+    // Changed by someone else: left, it keeps applying.
+    says(
+        &x12_after(
+            &install,
+            &applied(false),
+            &report(vec![(1, Observed::After), (0, Observed::Foreign)], None),
+        ),
+        STAYS,
+        "foreign",
+    );
+    // Forget: as it is now. Applied: it stays.
+    let now = verified(vec![(0, Observed::After), (1, Observed::After)], None);
+    says(
+        &x12_forget(&install, &applied(false), Some(&now)),
+        STAYS,
+        "forget, applied",
+    );
+    says(
+        &x12_forget(&install, &applied(false), None),
+        STAYS,
+        "forget, not observable",
+    );
+    // Forget with only the cleanup pending: the profile op was reverted already.
+    let cleanup = |replace| {
+        st(
+            txn(4),
+            TxnLine::CleanupPending,
+            Some(Ok(profile_head(replace))),
+            vec![
+                op(1, OpState::Reverted(Observed::After), None, &[]),
+                op(0, OpState::Reverted(Observed::After), None, &[]),
+            ],
+        )
+    };
+    says(
+        &x12_forget(&install, &cleanup(false), Some(&now)),
+        GONE,
+        "forget at cleanup pending, create",
+    );
+    says(
+        &x12_forget(&install, &cleanup(true), Some(&now)),
+        BACK,
+        "forget at cleanup pending, replace",
+    );
+    // A head without a profile: nothing.
+    let plain = st(txn(4), TxnLine::Applied, Some(Ok(head())), Vec::new());
+    assert!(x12_forget(&install, &plain, None).is_empty());
+}

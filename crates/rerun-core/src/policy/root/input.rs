@@ -78,11 +78,23 @@ pub fn read_input(sys: &dyn System, abs: &Path, max: u64) -> Result<Vec<u8>, Roo
 }
 
 /// Whether `<install>\<name>` is a plain file (P3-3d: the shim the launch option names), read
-/// side only: `install` opened by absolute path like [`read_input`]'s folder (a drive root
-/// too), the file one segment below it, never followed through a link. `Ok(false)` if it is
-/// missing, a folder, a link or restricted.
+/// side only. `install` is opened by absolute path (a link above it is followed) and its final
+/// path must be on a drive letter: not a network share, not a volume without a drive letter
+/// (security review L1); unlike [`read_input`] a drive root is allowed (Rerun may be installed
+/// at `C:\`). The file is one segment below it, never followed through a link. `Ok(false)` if
+/// it is missing, a folder, a link or restricted.
 pub fn file_present(sys: &dyn System, install: &Path, name: &str) -> Result<bool, RootError> {
     let dir = open_abs(sys, install)?;
+    let fin = dir.info().map_err(raced)?.final_path;
+    let fin = fin.to_string_lossy();
+    let rest = fin.strip_prefix(r"\\?\").unwrap_or(&fin);
+    let b = rest.as_bytes();
+    if !(b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\') {
+        return Err(RootError::InvalidPath(PathError {
+            path: fin.to_string(),
+            reason: "not on a drive letter (a network share or a volume without one)",
+        }));
+    }
     let file: RelPath = classify(name, false)?;
     Ok(matches!(
         dir.metadata(&file)?,

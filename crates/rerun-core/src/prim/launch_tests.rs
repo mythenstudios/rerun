@@ -771,7 +771,7 @@ fn lp7_the_step_parses_from_a_step_file_and_refuses_unknown_fields() {
 #[test]
 fn c_lm1_the_launch_option_is_shown_as_it_is_or_not_at_all() {
     let id = profile_id(220);
-    let o = super::launch_option(
+    let o = super::steam_option_text(
         Path::new(r"C:\Users\Player\AppData\Local\Programs\Rerun"),
         id,
     )
@@ -781,7 +781,7 @@ fn c_lm1_the_launch_option_is_shown_as_it_is_or_not_at_all() {
         r#""C:\Users\Player\AppData\Local\Programs\Rerun\rerun-launch.exe" --profile 323ad79fbc93ca3e73b0b152a5d44616 %command%"#
     );
     // An install folder on a drive root (review of P3-3c): one backslash.
-    let o = super::launch_option(Path::new(r"C:\"), id).unwrap();
+    let o = super::steam_option_text(Path::new(r"C:\"), id).unwrap();
     assert_eq!(
         o.as_str(),
         r#""C:\rerun-launch.exe" --profile 323ad79fbc93ca3e73b0b152a5d44616 %command%"#
@@ -793,7 +793,7 @@ fn c_lm1_the_launch_option_is_shown_as_it_is_or_not_at_all() {
         "C:\\R\u{200b}erun",
     ] {
         assert!(
-            super::launch_option(Path::new(bad), id).is_none(),
+            super::steam_option_text(Path::new(bad), id).is_none(),
             "{bad:?}"
         );
     }

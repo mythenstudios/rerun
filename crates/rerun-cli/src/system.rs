@@ -135,7 +135,7 @@ impl Group {
 }
 
 /// Sorted numbers as inclusive ranges.
-fn ranges(nums: impl IntoIterator<Item = u32>) -> Vec<(u32, u32)> {
+pub(crate) fn ranges(nums: impl IntoIterator<Item = u32>) -> Vec<(u32, u32)> {
     let mut out: Vec<(u32, u32)> = Vec::new();
     for n in nums {
         match out.last_mut() {

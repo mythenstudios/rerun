@@ -214,7 +214,7 @@ pub const SHIM: &str = "rerun-launch.exe";
 /// 0016). `None` if the path cannot be shown as it is (not Unicode, a quote, or a character
 /// `escape::path` escapes): the escaped form would not be the path, so no option is offered. A
 /// preview line; Rerun never writes it.
-pub fn launch_option(install: &std::path::Path, id: ProfileId) -> Option<Shown<'static>> {
+pub fn steam_option_text(install: &std::path::Path, id: ProfileId) -> Option<Shown<'static>> {
     let shim = install.join(SHIM);
     let shim = shim.to_str()?;
     if shim.contains('"') {

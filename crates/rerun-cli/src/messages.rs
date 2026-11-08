@@ -21,6 +21,8 @@ use rerun_core::escape::Shown;
 use rerun_core::hw::GpuVendor;
 
 pub use launch::{LaunchMsg, Utc};
+#[cfg(test)]
+pub(crate) use profile::size as size_text;
 pub use profile::{ProfileMsg, ranges};
 pub use txn::{At, OpRef, OpText, SteamWhy, StepText, TxnMsg, TxnText};
 

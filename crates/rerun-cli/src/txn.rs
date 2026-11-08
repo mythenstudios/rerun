@@ -46,7 +46,7 @@ use crate::host::{
 };
 use crate::messages::{LaunchMsg, Message, OpText, ProfileMsg, StepText, TxnMsg, TxnText, Utc};
 use crate::out::{Out, failed as failed_out};
-use crate::preview::{op_at, option_stays, profile_id_of, profile_of, roots};
+use crate::preview::{Fate, op_at, profile_id_of, profile_of, roots, x12_lines};
 use rerun_core::exec::ProfilesMoved;
 use rerun_core::exec::launch_result::{ProfileId, SkipReason};
 use rerun_core::plan::RootKind;
@@ -268,7 +268,7 @@ pub fn render_status(s: &exec::Status, all: bool) -> Vec<Message<'_>> {
 /// the folder `launch` does not exist or holds nothing.
 pub fn launch_lines<'a>(
     r: &'a Result<Option<LaunchResults>, RootError>,
-    launchers: &'a [(ProfileId, rerun_core::escape::Shown<'static>)],
+    holders: &'a [Holder],
 ) -> Vec<Message<'a>> {
     let l = |m| Message::Launch(m);
     let r = match r {
@@ -288,7 +288,7 @@ pub fn launch_lines<'a>(
             &e.result,
             Ok(res) if matches!(res.outcome, Outcome::Skipped { reason: SkipReason::ProfileMissing, .. })
         );
-        let launcher = launchers.iter().find(|(id, _)| *id == e.id);
+        let holder = holders.iter().find(|h| h.id == e.id);
         out.push(l(match &e.result {
             Err(why) => LaunchMsg::Unreadable {
                 id: e.id,
@@ -324,8 +324,17 @@ pub fn launch_lines<'a>(
         }));
         // A7: after a revert or forget the option still starts the game through the shim.
         if missing {
-            out.push(l(LaunchMsg::OptionStillSet { id: e.id }));
-        } else if let (Some((_, start)), Ok(res)) = (launcher, &e.result)
+            out.push(l(LaunchMsg::OptionStillSet {
+                id: e.id,
+                held: holder.map(|h| h.txn),
+            }));
+        } else if let (
+            Some(Holder {
+                launcher: Some(start),
+                ..
+            }),
+            Ok(res),
+        ) = (holder, &e.result)
             && matches!(res.outcome, Outcome::Applied { .. })
         {
             // A6: the check covered the launcher Steam starts, not the game.
@@ -340,20 +349,65 @@ pub fn launch_lines<'a>(
     out
 }
 
-/// The profiles whose start is a launcher (A6), from the heads of the transactions that are
-/// neither closed nor forgotten.
-fn launchers(s: &exec::Status) -> Vec<(ProfileId, rerun_core::escape::Shown<'static>)> {
-    s.txns
-        .iter()
-        .filter(|st| !st.is_forgotten() && !st.is_settled())
-        .filter_map(|st| {
-            let p = head(st)?;
-            let prof = profile_of(p)?;
-            (prof.launcher)
-                .then(|| Some((profile_id_of(p)?, prof.start.clone())))
-                .flatten()
-        })
-        .collect()
+/// A transaction whose launch profile op is not reverted (A6, A7): it holds the profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Holder {
+    /// The profile.
+    pub id: ProfileId,
+    /// The transaction.
+    pub txn: TxnId,
+    /// The start, if it is a launcher (not the game).
+    pub launcher: Option<rerun_core::escape::Shown<'static>>,
+}
+
+/// The op index of the launch profile op of `p`, and whether it replaces a profile.
+fn profile_op(p: &Preview) -> Option<(u16, bool)> {
+    p.ops.iter().find(|o| o.profile.is_some()).map(|o| {
+        (
+            u16::try_from(o.index).unwrap_or(u16::MAX),
+            o.action == "replace file",
+        )
+    })
+}
+
+/// Per profile ID the newest transaction whose profile op is not reverted, forgotten included
+/// (review S2; a head the status did not build is read on its own).
+fn holders(app: &AppDir<'_>, s: &exec::Status) -> Vec<Holder> {
+    let mut out: Vec<Holder> = Vec::new();
+    for st in &s.txns {
+        let read;
+        let p = match head(st) {
+            Some(p) => p,
+            None if st.is_forgotten() => {
+                read = exec::txn_status(app, &st.id).ok();
+                match read.as_ref().and_then(head) {
+                    Some(p) => p,
+                    None => continue,
+                }
+            }
+            None => continue,
+        };
+        let (Some((k, _)), Some(id), Some(prof)) = (profile_op(p), profile_id_of(p), profile_of(p))
+        else {
+            continue;
+        };
+        let reverted = st
+            .ops
+            .iter()
+            .any(|o| o.op == k && matches!(o.state, OpState::Reverted(_)));
+        if reverted {
+            continue;
+        }
+        let h = Holder {
+            id,
+            txn: st.id,
+            launcher: prof.launcher.then(|| prof.start.clone()),
+        };
+        // The listing is in order: a later transaction replaces an earlier one.
+        out.retain(|x| x.id != id);
+        out.push(h);
+    }
+    out
 }
 
 /// `rerun status` (module docs). Runs elevated too (it only reads the journal and the launch
@@ -386,8 +440,8 @@ pub fn status<W: Write, E: Write>(
     };
     let launch = exec::launch_results(&app);
     let mut lines = render_status(&s, all);
-    let launchers = launchers(&s);
-    lines.extend(launch_lines(&launch, &launchers));
+    let holders = holders(&app, &s);
+    lines.extend(launch_lines(&launch, &holders));
     match out.lines(&lines).and_then(|()| out.flush()) {
         Ok(()) => Exit::Report,
         Err(e) => failed_out(err, e),
@@ -486,12 +540,94 @@ fn profiles_halt<'a>(st: &TxnStatus, h: &Halt) -> Option<Message<'a>> {
         .then_some(Message::Profile(ProfileMsg::ProfilesHalt))
 }
 
-/// X12 (B7): the launch option of the head's profile, which Rerun does not remove.
-fn x12_lines(host: &Host<'_>, st: &TxnStatus) -> Vec<Message<'static>> {
-    head(st)
-        .and_then(profile_id_of)
-        .map(|id| option_stays(&host.install, id))
-        .unwrap_or_default()
+/// What a revert's observation of the profile op means for the profile (X12).
+fn fate_of(replace: bool, o: Observed) -> Fate {
+    match o {
+        Observed::Before | Observed::After if replace => Fate::PreviousBack,
+        Observed::Before | Observed::After => Fate::Gone,
+        Observed::Drifted | Observed::Foreign => Fate::Stays,
+    }
+}
+
+/// The fate of the profile op `k` from the journal (an earlier run reverted it), else `None`.
+fn recorded_fate(st: &TxnStatus, k: u16, replace: bool) -> Option<Fate> {
+    st.ops
+        .iter()
+        .find(|o| o.op == k)
+        .and_then(|o| match o.state {
+            OpState::Reverted(obs) => Some(fate_of(replace, obs)),
+            _ => None,
+        })
+}
+
+/// A revert's halt: at the profile op (its folder is missing: no profile) or before it.
+fn halted_fate(h: &Halt, k: u16) -> Fate {
+    if h.op == k { Fate::Gone } else { Fate::Stays }
+}
+
+/// The profile op of the head and its ID.
+fn profile_of_head(st: &TxnStatus) -> Option<(u16, bool, ProfileId)> {
+    let p = head(st)?;
+    let (k, replace) = profile_op(p)?;
+    Some((k, replace, profile_id_of(p)?))
+}
+
+/// X12 before a revert (review M1/B1): what the revert `verify` describes will leave.
+fn x12_before(
+    install: &Result<std::path::PathBuf, String>,
+    st: &TxnStatus,
+    v: &Verified,
+) -> Vec<Message<'static>> {
+    let Some((k, replace, id)) = profile_of_head(st) else {
+        return Vec::new();
+    };
+    let fate = if let Some((_, o)) = v.ops.iter().find(|(x, _)| *x == k) {
+        // A halt is newest first: the profile op is observed only if it is reached.
+        fate_of(replace, *o)
+    } else if let Some(h) = &v.halted {
+        halted_fate(h, k)
+    } else {
+        recorded_fate(st, k, replace).unwrap_or(Fate::Stays)
+    };
+    x12_lines(install, id, fate, true)
+}
+
+/// X12 after a revert: what its report says became of the profile.
+fn x12_after(
+    install: &Result<std::path::PathBuf, String>,
+    st: &TxnStatus,
+    rep: &RevertReport,
+) -> Vec<Message<'static>> {
+    let Some((k, replace, id)) = profile_of_head(st) else {
+        return Vec::new();
+    };
+    let fate = if let Some(o) = rep.ops.iter().find(|o| o.op == k) {
+        fate_of(replace, o.observed)
+    } else if let Some(h) = &rep.halted {
+        halted_fate(h, k)
+    } else {
+        recorded_fate(st, k, replace).unwrap_or(Fate::Stays)
+    };
+    x12_lines(install, id, fate, false)
+}
+
+/// X12 before `forget`: the profile as it is now (forget changes nothing).
+fn x12_forget(
+    install: &Result<std::path::PathBuf, String>,
+    st: &TxnStatus,
+    v: Option<&Verified>,
+) -> Vec<Message<'static>> {
+    let Some((k, replace, id)) = profile_of_head(st) else {
+        return Vec::new();
+    };
+    let fate = recorded_fate(st, k, replace).unwrap_or_else(|| {
+        match v.and_then(|v| v.ops.iter().find(|(x, _)| *x == k)) {
+            Some((_, Observed::Before)) if replace => Fate::PreviousBack,
+            Some((_, Observed::Before)) => Fate::Gone,
+            _ => Fate::Stays,
+        }
+    });
+    x12_lines(install, id, fate, false)
 }
 
 /// The keys of an INI op and the `.old` before a step of Rerun (P2-12 open point: shown
@@ -643,8 +779,10 @@ fn run_revert<W: Write, E: Write>(
     } else {
         lines.extend(now_lines(&st, &v));
     }
-    // X12 (B7, C-LM3): the launch option Rerun does not remove, said before the question.
-    lines.extend(x12_lines(host, &st));
+    // X12 (B7, C-LM3): the launch option Rerun does not change, said before the question.
+    if !empty {
+        lines.extend(x12_before(&host.install, &st, &v));
+    }
     lines.push(Message::Blank);
     out.lines(&lines)
         .and_then(|()| out.flush())
@@ -692,7 +830,7 @@ fn run_revert<W: Write, E: Write>(
     let (exit, last) = closing_line(&rep);
     let mut lines = report_lines(&st, &rep, &v);
     lines.push(m(last));
-    lines.extend(x12_lines(host, &st));
+    lines.extend(x12_after(&host.install, &st, &rep));
     Ok(out
         .lines(&lines)
         .and_then(|()| out.flush())
@@ -861,7 +999,7 @@ fn rebind_run<W: Write, E: Write>(
     let (exit, last) = closing_line(&rep);
     let mut lines = report_lines(st, &rep, &p.verified);
     lines.push(m(last));
-    lines.extend(x12_lines(host, st));
+    lines.extend(x12_after(&host.install, st, &rep));
     Ok(out
         .lines(&lines)
         .and_then(|()| out.flush())
@@ -933,11 +1071,12 @@ fn run_forget<W: Write, E: Write>(
         TxnMsg::ForgetStays
     }));
     lines.push(m(TxnMsg::ForgetKeeps));
-    // C-LM4 (A3, X12): the profile stays and keeps applying through the launch option.
-    if let Some(id) = head(&st).and_then(profile_id_of) {
-        lines.push(Message::Profile(ProfileMsg::ForgetProfileStays { id }));
-        lines.extend(option_stays(&host.install, id));
-    }
+    // C-LM4 (A3, X12): what forget leaves of the profile, as it is now.
+    lines.extend(x12_forget(
+        &host.install,
+        &st,
+        verified.as_ref().and_then(|r| r.as_ref().ok()),
+    ));
     if st.state == TxnLine::Applied && st.ops.iter().all(|o| o.state == OpState::Applied) {
         lines.push(m(TxnMsg::AllStay { ops: st.ops.len() }));
     }

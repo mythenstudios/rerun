@@ -186,7 +186,7 @@ fn every_outcome_has_its_line() {
         ),
         // A7: the launch option still starts the game through the shim.
         format!(
-            "    the launch option with --profile {} is still set in Steam; remove it (the game starts unchanged through it)",
+            "    the launch option with --profile {} was still set in Steam at that start; remove it (the game starts unchanged through it)",
             p(12)
         ),
         format!(

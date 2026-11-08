@@ -167,3 +167,278 @@ fn hostile_fields_are_escaped_and_stand_last() {
         );
     }
 }
+
+// ---------- P3-3d: launch profiles (review S3) ----------
+
+use rerun_core::exec::launch_result::ProfileId;
+use rerun_core::prim::launch_method::{RuleMode, SelectStep};
+use rerun_core::prim::{MachineView, MachineWhy, SelectionShown};
+
+use super::{LaunchView, OptionText, launch_lines};
+use crate::messages::{ProfileMsg, ranges};
+
+/// Every `ProfileMsg` has its line (a table, like `every_outcome_has_its_line`).
+#[test]
+fn every_profile_line_has_its_text() {
+    let id = ProfileId::from_hex("323ad79fbc93ca3e73b0b152a5d44616").unwrap();
+    let p = |s: &str| escape::path(s).into_owned();
+    let cases: Vec<(ProfileMsg<'_>, &str)> = vec![
+        (
+            ProfileMsg::ProfilesRoot,
+            "  Rerun's launch profiles: written by apply, read by rerun-launch at a game start",
+        ),
+        (
+            ProfileMsg::InlineSource,
+            "  content: the launch profile, carried by the plan (no package)",
+        ),
+        (
+            ProfileMsg::Profile {
+                id: "ab",
+                method: "direct",
+                bitness: "x64",
+            },
+            "     launch profile ab: method direct, x64",
+        ),
+        (
+            ProfileMsg::Rule {
+                words: "max_threads 8",
+            },
+            "     cpu max_threads 8",
+        ),
+        (ProfileMsg::Priority { class: "high" }, "     priority high"),
+        (
+            ProfileMsg::Start {
+                path: p(r"D:\G\g.exe"),
+            },
+            r"     start D:\G\g.exe",
+        ),
+        (
+            ProfileMsg::Unreadable { why: p("bad") },
+            "     not a launch profile of this version: bad",
+        ),
+        (
+            ProfileMsg::MachineHeading,
+            "on this computer now (not part of the plan; rerun-launch selects again at every start):",
+        ),
+        (
+            ProfileMsg::Selection {
+                threads: 4,
+                of: 22,
+                group: 1,
+                mask: 0x55,
+                cores: "0-3".to_owned(),
+                llc: None,
+            },
+            "  4 of 22 logical processors, group 1, mask 0x0000000000000055, cores 0-3",
+        ),
+        (
+            ProfileMsg::Selection {
+                threads: 2,
+                of: 8,
+                group: 0,
+                mask: 0x3,
+                cores: "0, 2".to_owned(),
+                llc: Some((1, 2, 512 << 10)),
+            },
+            "  2 of 8 logical processors, group 0, mask 0x0000000000000003, cores 0, 2, L2 #1 (512 KiB)",
+        ),
+        (
+            ProfileMsg::Mode {
+                mode: RuleMode::Hard,
+            },
+            "  hard: job affinity, inherited by the programs the started program starts",
+        ),
+        (
+            ProfileMsg::Mode {
+                mode: RuleMode::Soft,
+            },
+            "  soft: default CPU Sets of the started program only, not of its children; Windows may override them",
+        ),
+        (
+            ProfileMsg::MachineUnknown {
+                why: p("no topology"),
+            },
+            "  unknown here, rerun-launch decides at every start; the topology: no topology",
+        ),
+        (
+            ProfileMsg::MachineEmpty {
+                after: SelectStep::Bitness,
+            },
+            "  the rule selects nothing here (emptied by the 32-bit limit (processors 0 to 31)); the game would start unchanged",
+        ),
+        (ProfileMsg::MachineNoRule, "  no CPU rule (priority only)"),
+        (
+            ProfileMsg::MultiGroup,
+            "  hint: this computer has more than one processor group; a hard rule may start the game unchanged here (ADR 0022, multi-group case unmeasured)",
+        ),
+        (
+            ProfileMsg::X86Capped,
+            "  hint: a 32-bit game gets processors 0 to 31 of its group only",
+        ),
+        (
+            ProfileMsg::LauncherGame {
+                main: p("game.exe"),
+            },
+            "  the game: game.exe",
+        ),
+        (
+            ProfileMsg::PriorityNote { class: "high" },
+            "  priority high is set only when Steam starts the game through the launch option (not from a shortcut or the exe), and only on the start program; the check reads it",
+        ),
+        (
+            ProfileMsg::OptionHeading,
+            "launch option for Steam (copy it):",
+        ),
+        (ProfileMsg::Option { option: p("opt") }, "  opt"),
+        (
+            ProfileMsg::InstallUnknown,
+            "  no launch option shown: Rerun's install folder is unknown",
+        ),
+        (
+            ProfileMsg::OptionNotShowable,
+            "  no launch option shown: the path of Rerun's install folder holds characters that cannot be shown as they are; move Rerun to a path without them",
+        ),
+        (
+            ProfileMsg::ShimUnchecked { why: p("denied") },
+            "  warning: whether rerun-launch.exe is in Rerun's install folder could not be checked: denied",
+        ),
+        (
+            ProfileMsg::PasteNow,
+            "now paste the launch option shown in the preview into Steam (the game > Properties > General > Launch options)",
+        ),
+        (
+            ProfileMsg::PasteNotYet,
+            "the launch option could not be offered or would not start the game (see the preview); fix that before you set a launch option in Steam",
+        ),
+        (ProfileMsg::AfterRevert, "once the revert completes:"),
+        (
+            ProfileMsg::OptionAny { id },
+            "  (and any launch option with --profile 323ad79fbc93ca3e73b0b152a5d44616)",
+        ),
+        (
+            ProfileMsg::ProfilePreviousBack { id },
+            "launch option: the launch profile 323ad79fbc93ca3e73b0b152a5d44616 from before this transaction is back and keeps applying through the launch option; leave the option set for it",
+        ),
+        (
+            ProfileMsg::ProfileStays { id },
+            "launch option: the launch profile 323ad79fbc93ca3e73b0b152a5d44616 stays and keeps applying through the launch option until the option is removed",
+        ),
+        (
+            ProfileMsg::ProfilesMovedTo { now: p(r"C:\B") },
+            r"  now C:\B",
+        ),
+        (
+            ProfileMsg::ProfilesHalt,
+            "  Rerun's profiles folder is missing: the revert stops at the launch profile after everything else is reverted; forget closes the transaction then",
+        ),
+    ];
+    for (m, want) in cases {
+        assert_eq!(m.to_string(), want);
+    }
+}
+
+#[test]
+fn ranges_and_sizes() {
+    assert_eq!(ranges(&[0, 1, 2, 3, 5, 7, 8]), "0-3, 5, 7-8");
+    assert_eq!(ranges(&[4]), "4");
+    assert_eq!(ranges(&[]), "");
+    assert_eq!(crate::messages::size_text(32 << 20), "32 MiB");
+    assert_eq!(crate::messages::size_text(1536 << 10), "1536 KiB");
+}
+
+fn view(
+    selection: Result<SelectionShown, MachineWhy>,
+    groups: u16,
+    x86_capped: bool,
+) -> LaunchView {
+    LaunchView {
+        machine: MachineView {
+            selection,
+            groups,
+            x86_capped,
+        },
+        option: OptionText::InstallUnknown,
+        shim: None,
+    }
+}
+
+fn sel(mode: RuleMode) -> SelectionShown {
+    SelectionShown {
+        threads: 32,
+        of: 128,
+        group: 0,
+        mask: 0xffff_ffff,
+        cores: (0..16).collect(),
+        llc: None,
+        mode,
+    }
+}
+
+/// `launch_lines` on hand-built views: two groups with a hard rule, the x86 cap, soft (no
+/// multi-group hint), empty, unknown (escaped), no rule.
+#[test]
+fn launch_lines_cover_every_machine_view() {
+    let p = preview(r"D:\Games\G", Vec::new());
+    let text = |v: &LaunchView| shown(&launch_lines(&p, v));
+    let t = text(&view(Ok(sel(RuleMode::Hard)), 2, true));
+    assert!(
+        t.contains(
+            "  32 of 128 logical processors, group 0, mask 0x00000000ffffffff, cores 0-15\n"
+        ),
+        "{t}"
+    );
+    assert!(
+        t.contains("hint: this computer has more than one processor group"),
+        "{t}"
+    );
+    assert!(
+        t.contains("hint: a 32-bit game gets processors 0 to 31"),
+        "{t}"
+    );
+    assert!(
+        t.contains("no launch option shown: Rerun's install folder is unknown"),
+        "{t}"
+    );
+    let t = text(&view(Ok(sel(RuleMode::Soft)), 2, false));
+    assert!(!t.contains("more than one processor group"), "{t}");
+    assert!(t.contains("  soft: default CPU Sets"), "{t}");
+    let t = text(&view(
+        Err(MachineWhy::Empty {
+            after: SelectStep::L3,
+        }),
+        1,
+        false,
+    ));
+    assert!(t.contains("emptied by single_l3 / prefer_l3"), "{t}");
+    let t = text(&view(
+        Err(MachineWhy::Topology("bad \u{1b}[2J \u{202e}x".to_owned())),
+        0,
+        false,
+    ));
+    assert!(!t.contains('\u{1b}') && !t.contains('\u{202e}'), "{t}");
+    assert!(t.contains("unknown here"), "{t}");
+    let t = text(&view(Err(MachineWhy::NoRule), 1, false));
+    assert!(t.contains("no CPU rule (priority only)"), "{t}");
+}
+
+/// Hostile paths (ESC, U+202E) in profile lines are escaped, never raw.
+#[test]
+fn hostile_profile_paths_are_escaped() {
+    let bad = "D:\\G\u{202e}exe.\\x\u{1b}[2J.exe";
+    let lines = vec![
+        Message::Profile(ProfileMsg::Start {
+            path: escape::path(bad),
+        }),
+        Message::Profile(ProfileMsg::LauncherStarts {
+            start: escape::path(bad),
+        }),
+        Message::Profile(ProfileMsg::ShimMissing {
+            path: escape::path(bad),
+        }),
+        Message::Profile(ProfileMsg::ProfilesMovedFrom {
+            planned: escape::path(bad),
+        }),
+    ];
+    let t = shown(&lines);
+    assert!(!t.contains('\u{1b}') && !t.contains('\u{202e}'), "{t}");
+}

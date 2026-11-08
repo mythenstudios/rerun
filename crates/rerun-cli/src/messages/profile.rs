@@ -15,6 +15,8 @@ use rerun_core::prim::launch_method::{RuleMode as Mode, SelectStep};
 pub enum ProfileMsg<'a> {
     /// After the root line of the profiles root.
     ProfilesRoot,
+    /// The content of a profile op: carried by the plan, not a package.
+    InlineSource,
     /// The profile an op writes.
     Profile {
         /// Its ID (32 lower-case hex digits, from the file name).
@@ -112,19 +114,45 @@ pub enum ProfileMsg<'a> {
     OptionCombine,
     /// The shim must stay where it is.
     OptionShimStays,
-    /// The install folder is unknown, or its path cannot be shown as it is: no option offered.
-    OptionUnavailable,
+    /// Rerun's install folder is unknown: no option offered.
+    InstallUnknown,
+    /// The path of the install folder cannot be shown as it is: no option offered.
+    OptionNotShowable,
     /// `rerun-launch.exe` is not in Rerun's install folder.
     ShimMissing {
         /// The path checked.
         path: Shown<'a>,
     },
+    /// Whether `rerun-launch.exe` is there could not be checked.
+    ShimUnchecked {
+        /// Why (escaped).
+        why: Shown<'a>,
+    },
     /// After an apply: paste the option now.
     PasteNow,
-    /// X12 (revert, `forget`): remove the launch option by hand.
+    /// After an apply whose option could not be offered or whose shim is missing.
+    PasteNotYet,
+    /// X12 (revert preview): what follows holds once the revert completes.
+    AfterRevert,
+    /// X12 (the profile is gone): remove the launch option by hand.
     OptionRemove {
         /// The option as it would be built now.
         option: Shown<'a>,
+    },
+    /// X12 (the profile stays): removing the option stops it.
+    OptionToStop {
+        /// The option as it would be built now.
+        option: Shown<'a>,
+    },
+    /// X12: the profile from before this transaction is back (a replace reverted).
+    ProfilePreviousBack {
+        /// The profile.
+        id: ProfileId,
+    },
+    /// X12: the profile stays (not reverted, changed by someone else, a halt before it, forget).
+    ProfileStays {
+        /// The profile.
+        id: ProfileId,
     },
     /// X12: any option with this profile ID.
     OptionAny {
@@ -133,11 +161,6 @@ pub enum ProfileMsg<'a> {
     },
     /// X12: what happens until it is removed.
     OptionUntilRemoved,
-    /// `forget` leaves the profile in place.
-    ForgetProfileStays {
-        /// The profile.
-        id: ProfileId,
-    },
     /// The profiles folder is at another path than the plan names (A1): the path named.
     ProfilesMovedFrom {
         /// The plan's path.
@@ -164,7 +187,7 @@ fn step(s: SelectStep) -> &'static str {
 }
 
 /// `32 MiB` or `512 KiB`.
-fn size(b: u64) -> String {
+pub(crate) fn size(b: u64) -> String {
     if b >= 1 << 20 && b.is_multiple_of(1 << 20) {
         format!("{} MiB", b >> 20)
     } else {
@@ -178,6 +201,9 @@ impl fmt::Display for ProfileMsg<'_> {
             Self::ProfilesRoot => f.write_str(
                 "  Rerun's launch profiles: written by apply, read by rerun-launch at a game start",
             ),
+            Self::InlineSource => {
+                f.write_str("  content: the launch profile, carried by the plan (no package)")
+            }
             Self::Profile {
                 id,
                 method,
@@ -250,8 +276,31 @@ impl fmt::Display for ProfileMsg<'_> {
             Self::OptionShimStays => f.write_str(
                 "  moving or deleting rerun-launch.exe breaks the start through Steam until the option is removed",
             ),
-            Self::OptionUnavailable => f.write_str(
-                "  no launch option shown: Rerun's install folder is unknown or its path cannot be shown as it is",
+            Self::InstallUnknown => f.write_str(
+                "  no launch option shown: Rerun's install folder is unknown",
+            ),
+            Self::OptionNotShowable => f.write_str(
+                "  no launch option shown: the path of Rerun's install folder holds characters that cannot be shown as they are; move Rerun to a path without them",
+            ),
+            Self::ShimUnchecked { why } => write!(
+                f,
+                "  warning: whether rerun-launch.exe is in Rerun's install folder could not be checked: {why}"
+            ),
+            Self::PasteNotYet => f.write_str(
+                "the launch option could not be offered or would not start the game (see the preview); fix that before you set a launch option in Steam",
+            ),
+            Self::AfterRevert => f.write_str("once the revert completes:"),
+            Self::OptionToStop { option } => write!(
+                f,
+                "  to stop it, remove this launch option of the game in Steam by hand (Rerun does not change Steam's settings): {option}"
+            ),
+            Self::ProfilePreviousBack { id } => write!(
+                f,
+                "launch option: the launch profile {id} from before this transaction is back and keeps applying through the launch option; leave the option set for it"
+            ),
+            Self::ProfileStays { id } => write!(
+                f,
+                "launch option: the launch profile {id} stays and keeps applying through the launch option until the option is removed"
             ),
             Self::ShimMissing { path } => write!(
                 f,
@@ -271,10 +320,6 @@ impl fmt::Display for ProfileMsg<'_> {
             Self::OptionUntilRemoved => f.write_str(
                 "  until it is removed, Steam starts the game through rerun-launch, which finds no profile and starts it unchanged (rerun status: profile_missing); if rerun-launch.exe is moved or deleted, the game does not start through Steam",
             ),
-            Self::ForgetProfileStays { id } => write!(
-                f,
-                "forget leaves the launch profile {id} where it is: it keeps applying through the launch option until you remove the option"
-            ),
             Self::ProfilesMovedFrom { planned } => write!(
                 f,
                 "Rerun's profiles folder is at another path than the transaction names (its hashes decide): named {planned}"
@@ -287,23 +332,17 @@ impl fmt::Display for ProfileMsg<'_> {
     }
 }
 
-/// Ascending numbers as ranges: `0-7, 16, 18-19`.
+/// Ascending numbers as ranges: `0-7, 16, 18-19` (`system::ranges`, review N5).
 pub fn ranges(v: &[u32]) -> String {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < v.len() {
-        let start = v[i];
-        let mut end = start;
-        while i + 1 < v.len() && end.checked_add(1) == Some(v[i + 1]) {
-            i += 1;
-            end = v[i];
-        }
-        out.push(if start == end {
-            start.to_string()
-        } else {
-            format!("{start}-{end}")
-        });
-        i += 1;
-    }
-    out.join(", ")
+    crate::system::ranges(v.iter().copied())
+        .into_iter()
+        .map(|(a, b)| {
+            if a == b {
+                a.to_string()
+            } else {
+                format!("{a}-{b}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

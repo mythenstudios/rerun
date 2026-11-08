@@ -12,7 +12,7 @@ use rerun_core::exec::launch_result::ProfileId;
 use rerun_core::plan::{Preview, PreviewOp, ProfilePreview, ProfileShown, RootKind};
 use rerun_core::policy::root::file_present;
 use rerun_core::prim::launch_method::RuleMode;
-use rerun_core::prim::{MachineView, MachineWhy, SHIM, launch_option, on_this_machine};
+use rerun_core::prim::{MachineView, MachineWhy, SHIM, on_this_machine, steam_option_text};
 use rerun_core::sys::System;
 
 use crate::messages::{At, Message, OpRef, ProfileMsg, TxnMsg, ranges};
@@ -75,7 +75,10 @@ pub fn op(o: &PreviewOp) -> Vec<Message<'_>> {
     if let Some(name) = &o.name {
         out.push(m(TxnMsg::ValueName { name: name.clone() }));
     }
-    if let Some(source) = &o.source {
+    if o.profile.is_some() {
+        // Not a package: the plan carries the bytes (P3-3).
+        out.push(Message::Profile(ProfileMsg::InlineSource));
+    } else if let Some(source) = &o.source {
         out.push(m(TxnMsg::Source {
             source: source.clone(),
         }));
@@ -185,17 +188,52 @@ pub fn profile_id_of(p: &Preview) -> Option<ProfileId> {
     })
 }
 
+/// The launch option for a front end: shown, or why not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptionText {
+    /// The option, as it is.
+    Shown(Shown<'static>),
+    /// Rerun's install folder is unknown.
+    InstallUnknown,
+    /// The install folder's path cannot be shown as it is.
+    NotShowable,
+}
+
+/// The launch option of profile `id` with Rerun's install folder `install`.
+pub fn option_text(install: &Result<PathBuf, String>, id: ProfileId) -> OptionText {
+    match install {
+        Err(_) => OptionText::InstallUnknown,
+        Ok(dir) => steam_option_text(dir, id).map_or(OptionText::NotShowable, OptionText::Shown),
+    }
+}
+
+/// The line of an option that cannot be shown.
+fn option_missing(o: &OptionText) -> Option<Message<'static>> {
+    match o {
+        OptionText::Shown(_) => None,
+        OptionText::InstallUnknown => Some(Message::Profile(ProfileMsg::InstallUnknown)),
+        OptionText::NotShowable => Some(Message::Profile(ProfileMsg::OptionNotShowable)),
+    }
+}
+
 /// What the preview of a launch profile shows beyond the plan (P3-3d): the selection on this
 /// computer now, the launch option and whether the shim is there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchView {
     /// The rule on this computer.
     pub machine: MachineView,
-    /// The launch option (`None`: install folder unknown, or not showable as it is).
-    pub option: Option<Shown<'static>>,
-    /// `rerun-launch.exe` in the install folder: its path and whether it is a plain file
-    /// (`None`: unknown).
-    pub shim: Option<(Shown<'static>, bool)>,
+    /// The launch option.
+    pub option: OptionText,
+    /// `rerun-launch.exe` in the install folder: its path and whether it is a plain file, or
+    /// why that could not be checked (`None`: the install folder is unknown).
+    pub shim: Option<(Shown<'static>, Result<bool, Shown<'static>>)>,
+}
+
+impl LaunchView {
+    /// The option can be pasted and the shim is there (review L3: only then "paste it now").
+    pub fn ready(&self) -> bool {
+        matches!(self.option, OptionText::Shown(_)) && matches!(self.shim, Some((_, Ok(true))))
+    }
 }
 
 /// The [`LaunchView`] of `p`, if it writes a launch profile.
@@ -207,21 +245,15 @@ pub fn launch_view(
     let s = profile_of(p)?;
     let id = ProfileId::from_hex(&s.id)?;
     let machine = on_this_machine(sys.topology().read(), &s.decoded);
-    let (option, shim) = match install {
-        Ok(dir) => (
-            launch_option(dir, id),
-            file_present(sys, dir, SHIM).ok().map(|ok| {
-                (
-                    escape::path(&dir.join(SHIM).display().to_string()).into_owned(),
-                    ok,
-                )
-            }),
-        ),
-        Err(_) => (None, None),
-    };
+    let shim = install.as_ref().ok().map(|dir| {
+        (
+            escape::path(&dir.join(SHIM).display().to_string()).into_owned(),
+            file_present(sys, dir, SHIM).map_err(|e| escape::text(&e.to_string()).into_owned()),
+        )
+    });
     Some(LaunchView {
         machine,
-        option,
+        option: option_text(install, id),
         shim,
     })
 }
@@ -273,11 +305,13 @@ pub fn launch_lines<'a>(p: &'a Preview, v: &'a LaunchView) -> Vec<Message<'a>> {
     }
     out.push(pm(ProfileMsg::OptionHeading));
     match &v.option {
-        Some(o) => out.push(pm(ProfileMsg::Option { option: o.clone() })),
-        None => out.push(pm(ProfileMsg::OptionUnavailable)),
+        OptionText::Shown(o) => out.push(pm(ProfileMsg::Option { option: o.clone() })),
+        other => out.extend(option_missing(other)),
     }
-    if let Some((path, false)) = &v.shim {
-        out.push(pm(ProfileMsg::ShimMissing { path: path.clone() }));
+    match &v.shim {
+        Some((path, Ok(false))) => out.push(pm(ProfileMsg::ShimMissing { path: path.clone() })),
+        Some((_, Err(why))) => out.push(pm(ProfileMsg::ShimUnchecked { why: why.clone() })),
+        Some((_, Ok(true))) | None => {}
     }
     out.push(pm(ProfileMsg::OptionWhere));
     out.push(pm(ProfileMsg::OptionByHand));
@@ -286,17 +320,52 @@ pub fn launch_lines<'a>(p: &'a Preview, v: &'a LaunchView) -> Vec<Message<'a>> {
     out
 }
 
-/// X12 (revert, `forget`): the launch option Rerun does not remove, as it would be built now,
-/// and any option with the profile's ID.
-pub fn option_stays(install: &Result<PathBuf, String>, id: ProfileId) -> Vec<Message<'static>> {
+/// What becomes of a transaction's launch profile (X12, review M1/B1): the text depends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fate {
+    /// No profile at the name any more (a created profile reverted, or `profiles` gone): the
+    /// shim finds none, the option should go.
+    Gone,
+    /// A replaced profile reverted: the profile from before is back and applies.
+    PreviousBack,
+    /// The profile stays and applies (not reverted, changed by someone else, a halt before it,
+    /// `forget`).
+    Stays,
+}
+
+/// X12 (revert, `forget`): the launch option Rerun does not change, by what becomes of the
+/// profile; `after_revert`: said before a revert ("once the revert completes").
+pub fn x12_lines(
+    install: &Result<PathBuf, String>,
+    id: ProfileId,
+    fate: Fate,
+    after_revert: bool,
+) -> Vec<Message<'static>> {
     let pm = Message::Profile;
     let mut out = Vec::new();
-    match install.as_ref().ok().and_then(|d| launch_option(d, id)) {
-        Some(option) => out.push(pm(ProfileMsg::OptionRemove { option })),
-        None => out.push(pm(ProfileMsg::OptionUnavailable)),
+    if after_revert {
+        out.push(pm(ProfileMsg::AfterRevert));
     }
-    out.push(pm(ProfileMsg::OptionAny { id }));
-    out.push(pm(ProfileMsg::OptionUntilRemoved));
+    let option = option_text(install, id);
+    match fate {
+        Fate::Gone => {
+            match option {
+                OptionText::Shown(option) => out.push(pm(ProfileMsg::OptionRemove { option })),
+                other => out.extend(option_missing(&other)),
+            }
+            out.push(pm(ProfileMsg::OptionAny { id }));
+            out.push(pm(ProfileMsg::OptionUntilRemoved));
+        }
+        Fate::PreviousBack => out.push(pm(ProfileMsg::ProfilePreviousBack { id })),
+        Fate::Stays => {
+            out.push(pm(ProfileMsg::ProfileStays { id }));
+            match option {
+                OptionText::Shown(option) => out.push(pm(ProfileMsg::OptionToStop { option })),
+                other => out.extend(option_missing(&other)),
+            }
+            out.push(pm(ProfileMsg::OptionAny { id }));
+        }
+    }
     out
 }
 

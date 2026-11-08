@@ -98,8 +98,13 @@ fn run<W: Write, E: Write>(
                 Message::Txn(TxnMsg::RevertWith { txn }),
             ];
             // C-LM5: the launch option is the user's step now.
-            if lv.is_some() {
-                done.push(Message::Profile(ProfileMsg::PasteNow));
+            // Review L3: only an option that can be pasted, with the shim there.
+            if let Some(lv) = &lv {
+                done.push(Message::Profile(if lv.ready() {
+                    ProfileMsg::PasteNow
+                } else {
+                    ProfileMsg::PasteNotYet
+                }));
             }
             Ok(out
                 .lines(&done)

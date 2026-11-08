@@ -9,6 +9,8 @@ use rerun_core::exec::launch_result::{
     AppliedCpu, Check, Ended, Mode, Priority, ProfileId, SkipReason, Start,
 };
 
+use rerun_core::journal::TxnId;
+
 use super::Count;
 
 /// Seconds since 1970-01-01 UTC, shown as `YYYY-MM-DD hh:mm:ss UTC`.
@@ -98,6 +100,8 @@ pub enum LaunchMsg<'a> {
     OptionStillSet {
         /// Profile.
         id: ProfileId,
+        /// A transaction not reverted holds a profile with this ID (the result may be older).
+        held: Option<TxnId>,
     },
     /// The check covered a launcher, not the game (A6, from the journal head).
     CheckedLauncher {
@@ -227,9 +231,13 @@ impl fmt::Display for LaunchMsg<'_> {
                 "  {} in the launch folder not Rerun's (not read)",
                 Count(*n, "other entry", "other entries")
             ),
-            Self::OptionStillSet { id } => write!(
+            Self::OptionStillSet { id, held: None } => write!(
                 f,
-                "    the launch option with --profile {id} is still set in Steam; remove it (the game starts unchanged through it)"
+                "    the launch option with --profile {id} was still set in Steam at that start; remove it (the game starts unchanged through it)"
+            ),
+            Self::OptionStillSet { id, held: Some(t) } => write!(
+                f,
+                "    the launch option with --profile {id} was still set in Steam at that start; transaction {t} holds this profile now (rerun revert {t} --dry-run shows its state)"
             ),
             Self::CheckedLauncher { start } => write!(
                 f,
