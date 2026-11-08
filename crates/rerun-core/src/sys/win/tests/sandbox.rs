@@ -232,10 +232,11 @@ impl Sb {
         std::fs::create_dir_all(&install).unwrap();
         let sys = WinSystem::new().unwrap_or_else(|e| panic!("{e}"));
         let lad = sys.known_folders().get(KnownFolder::LocalAppData).unwrap();
+        let account = process_account().expect("the guard passed, so the account is known");
         assert!(
             lad.to_string_lossy()
                 .to_ascii_lowercase()
-                .contains(&process_account().unwrap_or_default().to_ascii_lowercase()),
+                .contains(&format!(r"\users\{}\", account.to_ascii_lowercase())),
             "LocalAppData is {}, not the profile of the account the guard accepted",
             lad.display()
         );

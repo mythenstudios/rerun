@@ -42,7 +42,7 @@ $exe = 'C:\sandbox\bin\rerun-core-tests.exe'
 # spoofable through the environment) and the script's own path in the mapped (Sandbox) or
 # staged (CI) folder. It runs before every write; without -Ci this script writes HKLM and
 # restarts the machine.
-. 'C:\sandbox\scripts\sandbox-guard.ps1'
+. (Join-Path $PSScriptRoot 'sandbox-guard.ps1')  # the script's own copy: run from the repo on a host, its guard refuses
 function Test-Here { Test-SandboxGuard -Script $PSCommandPath -Expected 'C:\sandbox\scripts\sandbox-run.ps1' -Ci ([bool]$Ci) }
 if (-not (Test-Here)) {
     Write-Error "refusing to run: not the Windows Sandbox account and its mapped LogonCommand, nor the CI accounts with -Ci (USERNAME=$env:USERNAME, script $PSCommandPath, ci=$Ci)"

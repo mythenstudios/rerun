@@ -23,7 +23,7 @@ $ErrorActionPreference = 'Stop'
 # The shared guard (sandbox-guard.ps1): the account of the process token (not spoofable through
 # the environment), the environment, the script's own path in the mapped (Sandbox) or staged
 # (CI) folder, and with -Ci the CI marker.
-. 'C:\sandbox\scripts\sandbox-guard.ps1'
+. (Join-Path $PSScriptRoot 'sandbox-guard.ps1')  # the script's own copy: run from the repo on a host, its guard refuses
 if (-not (Test-SandboxGuard -Script $PSCommandPath -Expected 'C:\sandbox\scripts\sandbox-cli.ps1' -Ci ([bool]$Ci))) {
     throw "refusing to run: not the Windows Sandbox account and its mapped scripts, nor the CI accounts with -Ci (USERNAME=$env:USERNAME, script $PSCommandPath, ci=$Ci)"
 }

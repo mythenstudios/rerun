@@ -8,8 +8,9 @@
 #    scripts/ci-sandbox.ps1 creates for the non-elevated pass);
 #  - USERNAME and USERPROFILE name that same account;
 #  - the script itself runs from the mapped (Sandbox) or staged (CI) folder C:\sandbox\scripts;
-#  - with -Ci also the marker C:\sandbox\ci-host.txt, which only ci-sandbox.ps1 writes (it
-#    checks GITHUB_ACTIONS=true and RUNNER_ENVIRONMENT=github-hosted first).
+#  - with -Ci also the marker C:\sandbox\ci-host.txt, written by ci-sandbox.ps1 (it checks
+#    GITHUB_ACTIONS=true and RUNNER_ENVIRONMENT=github-hosted first). The marker states intent; it is
+#    no lock (any user may create a folder in C:\). The lock is the account of the process token.
 
 function Test-SandboxGuard {
     param(
