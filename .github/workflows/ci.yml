@@ -57,7 +57,9 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: windows
+          # The cache key hashes Cargo.lock and dependency sections, not [profile.*]: bump the
+          # suffix when a profile changes, otherwise an exact hit never saves the new artifacts.
+          key: windows-p2
       - name: clippy (x64, all features)
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: clippy (i686, without workspace tests)
