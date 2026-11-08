@@ -428,6 +428,19 @@ fn c_lm7_status_names_the_launcher_and_the_launch_option() {
     result(&sys, APPLIED);
     let s = expect(&sys, &["status"], Answer::No, Exit::Report);
     assert!(s.stdout.contains(LAUNCHER), "{}", s.stdout);
+    // Review L-b: a forgotten holder cannot be reverted: no "rerun revert" hint, remove the option.
+    result(&sys, MISSING);
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout.contains("a forgotten transaction left a profile of this ID and it was missing then: remove the launch option"),
+        "{}",
+        s.stdout
+    );
+    assert!(
+        !s.stdout.contains("--dry-run shows its state"),
+        "{}",
+        s.stdout
+    );
 }
 
 #[test]

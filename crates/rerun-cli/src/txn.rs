@@ -324,9 +324,12 @@ pub fn launch_lines<'a>(
         }));
         // A7: after a revert or forget the option still starts the game through the shim.
         if missing {
-            out.push(l(LaunchMsg::OptionStillSet {
-                id: e.id,
-                held: holder.map(|h| h.txn),
+            out.push(l(match holder {
+                Some(h) if h.forgotten => LaunchMsg::OptionStillSetForgotten { id: e.id },
+                h => LaunchMsg::OptionStillSet {
+                    id: e.id,
+                    held: h.map(|h| h.txn),
+                },
             }));
         } else if let (
             Some(Holder {
@@ -356,18 +359,18 @@ pub struct Holder {
     pub id: ProfileId,
     /// The transaction.
     pub txn: TxnId,
+    /// It is forgotten (it cannot be reverted any more).
+    pub forgotten: bool,
     /// The start, if it is a launcher (not the game).
     pub launcher: Option<rerun_core::escape::Shown<'static>>,
 }
 
 /// The op index of the launch profile op of `p`, and whether it replaces a profile.
 fn profile_op(p: &Preview) -> Option<(u16, bool)> {
-    p.ops.iter().find(|o| o.profile.is_some()).map(|o| {
-        (
-            u16::try_from(o.index).unwrap_or(u16::MAX),
-            o.action == "replace file",
-        )
-    })
+    p.ops
+        .iter()
+        .find(|o| o.profile.is_some())
+        .map(|o| (u16::try_from(o.index).unwrap_or(u16::MAX), o.replaces))
 }
 
 /// Per profile ID the newest transaction whose profile op is not reverted, forgotten included
@@ -391,16 +394,18 @@ fn holders(app: &AppDir<'_>, s: &exec::Status) -> Vec<Holder> {
         else {
             continue;
         };
-        let reverted = st
+        // Only an applied profile op holds a profile (an interrupted one may have no file).
+        let applied = st
             .ops
             .iter()
-            .any(|o| o.op == k && matches!(o.state, OpState::Reverted(_)));
-        if reverted {
+            .any(|o| o.op == k && o.state == OpState::Applied);
+        if !applied {
             continue;
         }
         let h = Holder {
             id,
             txn: st.id,
+            forgotten: st.is_forgotten(),
             launcher: prof.launcher.then(|| prof.start.clone()),
         };
         // The listing is in order: a later transaction replaces an earlier one.
@@ -549,6 +554,14 @@ fn fate_of(replace: bool, o: Observed) -> Fate {
     }
 }
 
+/// The op `k` was left as found by an earlier revert (`verify` shows it as recorded when its
+/// folder cannot be read, review L-a).
+fn left_earlier(st: &TxnStatus, k: u16) -> bool {
+    st.ops
+        .iter()
+        .any(|o| o.op == k && o.state == OpState::Reverted(Observed::Foreign))
+}
+
 /// The fate of the profile op `k` from the journal (an earlier run reverted it), else `None`.
 fn recorded_fate(st: &TxnStatus, k: u16, replace: bool) -> Option<Fate> {
     st.ops
@@ -581,7 +594,9 @@ fn x12_before(
     let Some((k, replace, id)) = profile_of_head(st) else {
         return Vec::new();
     };
-    let fate = if let Some((_, o)) = v.ops.iter().find(|(x, _)| *x == k) {
+    let fate = if left_earlier(st, k) {
+        Fate::Left
+    } else if let Some((_, o)) = v.ops.iter().find(|(x, _)| *x == k) {
         // A halt is newest first: the profile op is observed only if it is reached.
         fate_of(replace, *o)
     } else if let Some(h) = &v.halted {
@@ -603,6 +618,8 @@ fn x12_after(
     };
     let fate = if let Some(o) = rep.ops.iter().find(|o| o.op == k) {
         fate_of(replace, o.observed)
+    } else if left_earlier(st, k) {
+        Fate::Left
     } else if let Some(h) = &rep.halted {
         halted_fate(h, k)
     } else {
@@ -620,13 +637,20 @@ fn x12_forget(
     let Some((k, replace, id)) = profile_of_head(st) else {
         return Vec::new();
     };
-    let fate = recorded_fate(st, k, replace).unwrap_or_else(|| {
-        match v.and_then(|v| v.ops.iter().find(|(x, _)| *x == k)) {
-            Some((_, Observed::Before)) if replace => Fate::PreviousBack,
-            Some((_, Observed::Before)) => Fate::Gone,
-            _ => Fate::Stays,
-        }
-    });
+    let halted_here = v.and_then(|v| v.halted.as_ref()).is_some_and(|h| h.op == k);
+    let fate = if left_earlier(st, k) {
+        Fate::Left
+    } else {
+        recorded_fate(st, k, replace).unwrap_or_else(|| {
+            match v.and_then(|v| v.ops.iter().find(|(x, _)| *x == k)) {
+                Some((_, Observed::Before)) if replace => Fate::PreviousBack,
+                Some((_, Observed::Before)) => Fate::Gone,
+                // `profiles` missing: `verify` halts at the profile op itself (review L-a).
+                None if halted_here => Fate::Gone,
+                _ => Fate::Stays,
+            }
+        })
+    };
     x12_lines(install, id, fate, false)
 }
 
@@ -895,7 +919,11 @@ fn halt_hint<'a>(st: &TxnStatus, h: &Halt) -> Option<Message<'a>> {
 /// The preview of a rebind (rule 5): the transaction, the folder bound now and why it does not
 /// open, the folder Steam lists now, the folders the plan created there, what the revert does
 /// there, and the two notes.
-fn rebind_lines_of<'a>(st: &'a TxnStatus, p: &'a RebindPreview) -> Vec<Message<'a>> {
+fn rebind_lines_of<'a>(
+    install: &Result<std::path::PathBuf, String>,
+    st: &'a TxnStatus,
+    p: &'a RebindPreview,
+) -> Vec<Message<'a>> {
     let path = |r: &rerun_core::path::RootPath| escape::path(&r.to_string()).into_owned();
     let mut out = vec![m(TxnMsg::Txn {
         txn: st.id,
@@ -942,6 +970,8 @@ fn rebind_lines_of<'a>(st: &'a TxnStatus, p: &'a RebindPreview) -> Vec<Message<'
     }
     out.push(m(TxnMsg::RebindScopeNote));
     out.push(m(TxnMsg::RebindPermanentNote));
+    // X12 in the rebind preview too (review of P3-3d): what the revert there leaves.
+    out.extend(x12_before(install, st, &p.verified));
     out.push(Message::Blank);
     out
 }
@@ -958,7 +988,7 @@ fn rebind_run<W: Write, E: Write>(
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
     let txn = st.id;
-    out.lines(&rebind_lines_of(st, p))
+    out.lines(&rebind_lines_of(&host.install, st, p))
         .and_then(|()| out.flush())
         .map_err(|e| before_change(err, e))?;
     if dry_run {

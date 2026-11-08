@@ -248,7 +248,8 @@ pub fn launch_view(
     let shim = install.as_ref().ok().map(|dir| {
         (
             escape::path(&dir.join(SHIM).display().to_string()).into_owned(),
-            file_present(sys, dir, SHIM).map_err(|e| escape::text(&e.to_string()).into_owned()),
+            // The error names a path (ADR 0016: `escape::path`).
+            file_present(sys, dir, SHIM).map_err(|e| escape::path(&e.to_string()).into_owned()),
         )
     });
     Some(LaunchView {
@@ -331,6 +332,9 @@ pub enum Fate {
     /// The profile stays and applies (not reverted, changed by someone else, a halt before it,
     /// `forget`).
     Stays,
+    /// An earlier run left it as found (changed by someone else); whether it is still there is
+    /// not known now (its folder may be gone: `verify` shows such an op as recorded).
+    Left,
 }
 
 /// X12 (revert, `forget`): the launch option Rerun does not change, by what becomes of the
@@ -357,6 +361,14 @@ pub fn x12_lines(
             out.push(pm(ProfileMsg::OptionUntilRemoved));
         }
         Fate::PreviousBack => out.push(pm(ProfileMsg::ProfilePreviousBack { id })),
+        Fate::Left => {
+            out.push(pm(ProfileMsg::ProfileLeft { id }));
+            match option {
+                OptionText::Shown(option) => out.push(pm(ProfileMsg::OptionToStop { option })),
+                other => out.extend(option_missing(&other)),
+            }
+            out.push(pm(ProfileMsg::OptionAny { id }));
+        }
         Fate::Stays => {
             out.push(pm(ProfileMsg::ProfileStays { id }));
             match option {

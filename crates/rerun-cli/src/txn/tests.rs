@@ -59,6 +59,7 @@ fn file_op(index: usize, action: &'static str, path: &str) -> PreviewOp {
         config: false,
         ini: Vec::new(),
         profile: None,
+        replaces: false,
     }
 }
 
@@ -576,6 +577,7 @@ fn profile_head(replace: bool) -> Preview {
         "323ad79fbc93ca3e73b0b152a5d44616.profile",
     );
     prof.root = Some(1);
+    prof.replaces = replace;
     // The decoded form is not needed here: the ID comes from the file name.
     prof.profile = Some(rerun_core::plan::ProfilePreview::Unreadable("x".to_owned()));
     p.ops = vec![prof, file_op(1, "create file", "new.dll")];
@@ -631,10 +633,11 @@ const INSTALL: &str = r"C:\Rerun";
 const GONE: &str = "finds no profile";
 const STAYS: &str = "stays and keeps applying";
 const BACK: &str = "from before this transaction is back";
+const LEFT: &str = "was left as found by an earlier revert";
 
 fn says(lines: &[Message<'_>], want: &str, what: &str) {
     let text = shown(lines);
-    for other in [GONE, STAYS, BACK] {
+    for other in [GONE, STAYS, BACK, LEFT] {
         assert_eq!(
             text.contains(other),
             other == want,
@@ -755,6 +758,43 @@ fn x12_says_what_becomes_of_the_profile() {
         &x12_forget(&install, &cleanup(true), Some(&now)),
         BACK,
         "forget at cleanup pending, replace",
+    );
+    // Review L-a: `profiles` missing, forget: `verify` halts at the profile op itself.
+    says(
+        &x12_forget(
+            &install,
+            &applied(false),
+            Some(&verified(vec![(1, Observed::After)], Some((0, 1)))),
+        ),
+        GONE,
+        "forget, profiles missing",
+    );
+    // Review L-a: an earlier revert left the profile foreign; `verify` shows it as recorded
+    // (its folder may be gone): whether it is there is not known.
+    let left = st(
+        txn(4),
+        TxnLine::Applied,
+        Some(Ok(profile_head(false))),
+        vec![
+            op(1, OpState::Applied, None, &[]),
+            op(0, OpState::Reverted(Observed::Foreign), None, &[]),
+        ],
+    );
+    let v = verified(vec![(0, Observed::Foreign), (1, Observed::After)], None);
+    says(
+        &x12_before(&install, &left, &v),
+        LEFT,
+        "left earlier, before",
+    );
+    says(
+        &x12_after(&install, &left, &report(vec![(1, Observed::After)], None)),
+        LEFT,
+        "left earlier, after",
+    );
+    says(
+        &x12_forget(&install, &left, Some(&v)),
+        LEFT,
+        "left earlier, forget",
     );
     // A head without a profile: nothing.
     let plain = st(txn(4), TxnLine::Applied, Some(Ok(head())), Vec::new());

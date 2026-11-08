@@ -83,6 +83,11 @@ pub fn read_input(sys: &dyn System, abs: &Path, max: u64) -> Result<Vec<u8>, Roo
 /// (security review L1); unlike [`read_input`] a drive root is allowed (Rerun may be installed
 /// at `C:\`). The file is one segment below it, never followed through a link. `Ok(false)` if
 /// it is missing, a folder, a link or restricted.
+///
+/// Precondition (security review of P3-3d): call it only for a path that passed
+/// `ForbiddenRoots::resolve` (the CLI's `forbidden()`) for the same folder. The final-path
+/// check runs after `open_abs`, so for a network drive letter or a link to a share the
+/// connection may already be made when the share is refused.
 pub fn file_present(sys: &dyn System, install: &Path, name: &str) -> Result<bool, RootError> {
     let dir = open_abs(sys, install)?;
     let fin = dir.info().map_err(raced)?.final_path;

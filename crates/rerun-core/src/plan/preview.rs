@@ -201,6 +201,9 @@ pub struct PreviewOp {
     pub ini: Vec<IniShown>,
     /// The launch profile a profile op writes (P3-3).
     pub profile: Option<ProfilePreview>,
+    /// The op replaces an existing file (`ReplaceFile`): a front end need not compare `action`
+    /// (review of P3-3d).
+    pub replaces: bool,
 }
 
 /// A registry value for display (review S3: the `Shown` guarantee kept): `kind` is built by
@@ -553,6 +556,7 @@ pub fn preview(p: &Plan) -> Preview {
                 config,
                 ini,
                 profile,
+                replaces: matches!(op, Op::ReplaceFile { .. }),
             }
         })
         .collect();

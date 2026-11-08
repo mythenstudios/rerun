@@ -35,6 +35,7 @@ fn op(index: usize, action: &'static str, root: Option<usize>, path: &str) -> Pr
         config: false,
         ini: Vec::new(),
         profile: None,
+        replaces: false,
     }
 }
 

@@ -1016,3 +1016,35 @@ fn read_input_follows_a_link_above_the_folder_only() {
         b"{}"
     );
 }
+
+// ---------- file_present (P3-3d) ----------
+
+/// `file_present`: a plain file, missing, a folder, a link; an install folder on a drive root
+/// (allowed, unlike `read_input`); a missing folder is an error. The refusal of a final path
+/// that is no drive letter (`\\?\UNC\...`, `\\?\Volume{...}`) cannot be expressed in the fake
+/// (it has drive letters only): it is the same `RootPath`-style rule `read_input` uses, covered
+/// on Windows by the `sys::win` final-path contract.
+#[test]
+fn file_present_finds_only_a_plain_file() {
+    use super::file_present;
+    let sys = base()
+        .file(format!(r"{INSTALL}\rerun-launch.exe"), b"MZ".to_vec())
+        .dir(format!(r"{INSTALL}\dir.exe"))
+        .file(r"E:\rerun-launch.exe", b"MZ".to_vec())
+        .build()
+        .unwrap();
+    sys.fake_fs()
+        .put_link(
+            Path::new(&format!(r"{INSTALL}\link.exe")),
+            tag::SYMLINK,
+            r"C:\x.exe",
+        )
+        .unwrap();
+    let at = Path::new(INSTALL);
+    assert!(file_present(&sys, at, "rerun-launch.exe").unwrap());
+    assert!(!file_present(&sys, at, "missing.exe").unwrap());
+    assert!(!file_present(&sys, at, "dir.exe").unwrap());
+    assert!(!file_present(&sys, at, "link.exe").unwrap());
+    assert!(file_present(&sys, Path::new(r"E:\"), "rerun-launch.exe").unwrap());
+    assert!(file_present(&sys, Path::new(r"C:\Nowhere"), "rerun-launch.exe").is_err());
+}

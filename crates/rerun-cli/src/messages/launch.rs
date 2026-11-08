@@ -103,6 +103,13 @@ pub enum LaunchMsg<'a> {
         /// A transaction not reverted holds a profile with this ID (the result may be older).
         held: Option<TxnId>,
     },
+    /// A start without a profile although a forgotten transaction left one of this ID (it is
+    /// missing now): the option should go (review L-b: a forgotten transaction cannot be
+    /// reverted).
+    OptionStillSetForgotten {
+        /// Profile.
+        id: ProfileId,
+    },
     /// The check covered a launcher, not the game (A6, from the journal head).
     CheckedLauncher {
         /// The launcher.
@@ -238,6 +245,10 @@ impl fmt::Display for LaunchMsg<'_> {
             Self::OptionStillSet { id, held: Some(t) } => write!(
                 f,
                 "    the launch option with --profile {id} was still set in Steam at that start; transaction {t} holds this profile now (rerun revert {t} --dry-run shows its state)"
+            ),
+            Self::OptionStillSetForgotten { id } => write!(
+                f,
+                "    the launch option with --profile {id} was still set in Steam at that start; a forgotten transaction left a profile of this ID and it was missing then: remove the launch option"
             ),
             Self::CheckedLauncher { start } => write!(
                 f,

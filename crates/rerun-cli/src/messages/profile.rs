@@ -154,6 +154,11 @@ pub enum ProfileMsg<'a> {
         /// The profile.
         id: ProfileId,
     },
+    /// X12: an earlier revert left the profile as found; whether it is still there is unknown.
+    ProfileLeft {
+        /// The profile.
+        id: ProfileId,
+    },
     /// X12: any option with this profile ID.
     OptionAny {
         /// The profile.
@@ -297,6 +302,10 @@ impl fmt::Display for ProfileMsg<'_> {
             Self::ProfilePreviousBack { id } => write!(
                 f,
                 "launch option: the launch profile {id} from before this transaction is back and keeps applying through the launch option; leave the option set for it"
+            ),
+            Self::ProfileLeft { id } => write!(
+                f,
+                "launch option: the launch profile {id} was left as found by an earlier revert (changed by someone else); if it is still in Rerun's profiles folder it keeps applying through the launch option until the option is removed, if it is gone the game starts unchanged through the option"
             ),
             Self::ProfileStays { id } => write!(
                 f,
