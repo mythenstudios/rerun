@@ -5,7 +5,7 @@
 #
 # Optional: -Threads 8 (default), -Smt, -Mode hard|soft, -Priority none|normal|above_normal|high,
 # -Launcher <path of rerun-launch.exe> (default: builds the release shim and copies it to
-# C:\RerunTest\rerun-launch.exe, a fixed place for the launch option), -WaitMinutes 15.
+# %LOCALAPPDATA%\RerunTest\rerun-launch.exe, a fixed place for the launch option), -WaitMinutes 15.
 #
 # What it does, without a single question (the current instruction is in the window title):
 #  1. checks itself: its profile writer against its copy of the codec golden (a Rust test binds
@@ -155,8 +155,9 @@ try {
         } finally { Pop-Location }
         if ($exit -ne 0) { Fail 'cargo build -p rerun-launch --release failed (run it by hand to see why)' }
         $built = Join-Path $repo 'target\release\rerun-launch.exe'
-        # A fixed place, so the launch option stays valid across rebuilds and checkouts.
-        $fixed = 'C:\RerunTest'
+        # A fixed place, so the launch option stays valid across rebuilds and checkouts; under
+        # LocalAppData because a standard user may not create folders in the root of C:.
+        $fixed = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'RerunTest'
         Assert-Plain $fixed
         New-Item -ItemType Directory -Force -Path $fixed | Out-Null
         $Launcher = Join-Path $fixed 'rerun-launch.exe'
