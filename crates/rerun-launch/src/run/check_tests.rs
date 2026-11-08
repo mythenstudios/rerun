@@ -3,7 +3,7 @@
 use rerun_proto::cpu::CpuTopology;
 use rerun_proto::cpu::rule::{Bitness, Mode};
 use rerun_proto::launch::{self as result, AppliedCpu, Check, Ended, Outcome, SkipReason};
-use rerun_proto::profile::{Method, Priority, encode};
+use rerun_proto::profile::{Priority, encode};
 
 use super::tests::{CCD0_FIRST_THREADS, ID, fake, id, line_with, profile, rule, tail, zen3};
 use super::*;
@@ -178,7 +178,7 @@ type Case = (fn(&mut FakeOs), SkipReason);
 
 #[test]
 fn every_skip_with_an_id_writes_its_reason_before_the_wait() {
-    let cases: [Case; 18] = [
+    let cases: [Case; 17] = [
         (
             |os| os.profile = Err(OsError::Win32(2)),
             SkipReason::ProfileMissing,
@@ -206,14 +206,6 @@ fn every_skip_with_an_id_writes_its_reason_before_the_wait() {
         (
             |os| os.profile = Ok(b"rerun-profile 2\n".to_vec()),
             SkipReason::ProfileInvalid,
-        ),
-        (
-            |os| {
-                let mut p = profile(Some(rule(Mode::Hard)), None);
-                p.method = Method::Watch;
-                os.profile = Ok(encode(&p).unwrap());
-            },
-            SkipReason::MethodUnsupported,
         ),
         (
             |os| {
@@ -347,6 +339,7 @@ fn starts_and_ends_are_recorded() {
             reason: SkipReason::ProfileMissing,
             start: result::Start::Failed { code: 2 },
             ended: None,
+            priority_restore: None,
         }
     );
     // 740 to ShellExecuteExW without a process, and with a non-.exe argv[0].

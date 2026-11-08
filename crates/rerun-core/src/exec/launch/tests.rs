@@ -62,6 +62,7 @@ fn results_are_read_by_id_and_temps_skipped() {
             reason: SkipReason::PathMismatch,
             start: Start::Created,
             ended: None,
+            priority_restore: None,
         },
     };
     let sys = base()

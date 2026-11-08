@@ -9,7 +9,7 @@ use crate::fake::{Call, FakeOs};
 use crate::os::{GroupAffinity, OsError, ReadBack, Spawn, Terminated};
 
 pub(super) const ID: &str = "0123456789abcdef0123456789abcdef";
-const GAME: &str = r"C:\Games\My Game\game.exe";
+pub(super) const GAME: &str = r"C:\Games\My Game\game.exe";
 const OWN: &str = r#""C:\Program Files\Rerun\rerun-launch.exe" --profile "#;
 
 /// Steam's quoted command with arguments.
@@ -104,6 +104,7 @@ fn ran(rule: Rule, start: Start, exit: u32) -> Report {
         exit,
         terminated: None,
         check: None,
+        priority_restore: None,
         written: Written::No,
     }
 }
@@ -359,14 +360,6 @@ fn unquoted_path_with_spaces_is_a_mismatch_and_never_resolved_piece_by_piece() {
         os.calls()[1],
         spawn_call(r"C:\Games\My", &format!("{GAME} -x"), Spawn::UNCHANGED)
     );
-}
-
-#[test]
-fn watch_method_is_not_applied_yet() {
-    let mut p = profile(Some(rule(Mode::Hard)), None);
-    p.method = Method::Watch;
-    let os = fake(&p);
-    assert_eq!(core(run(&os)), skipped(Skip::Method(Method::Watch)));
 }
 
 #[test]

@@ -104,6 +104,7 @@ fn every_outcome_has_its_line() {
                     reason: SkipReason::PathMismatch,
                     start: Start::Created,
                     ended: None,
+                    priority_restore: None,
                 },
             ),
             entry(
@@ -112,6 +113,7 @@ fn every_outcome_has_its_line() {
                     reason: SkipReason::JobFailed { code: 87 },
                     start: Start::Created,
                     ended: Some(Ended::Ended),
+                    priority_restore: None,
                 },
             ),
             entry(
@@ -120,6 +122,7 @@ fn every_outcome_has_its_line() {
                     reason: SkipReason::ElevationRequired,
                     start: Start::Shell,
                     ended: None,
+                    priority_restore: None,
                 },
             ),
             entry(
@@ -128,6 +131,7 @@ fn every_outcome_has_its_line() {
                     reason: SkipReason::ProfileMissing,
                     start: Start::Failed { code: 2 },
                     ended: None,
+                    priority_restore: None,
                 },
             ),
             LaunchEntry {

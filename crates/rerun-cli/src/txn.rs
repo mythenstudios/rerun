@@ -308,10 +308,12 @@ pub fn launch_lines<'a>(
                         priority: *priority,
                         check: *check,
                     },
+                    // `priority_restore` (watch, P3-4 A4) gets its status line with P3-4c.
                     Outcome::Skipped {
                         reason,
                         start,
                         ended,
+                        ..
                     } => LaunchMsg::Skipped {
                         id: e.id,
                         at,

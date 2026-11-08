@@ -16,6 +16,10 @@
 //!   start, after a failed start. With the rule applied it is written after the check, so
 //!   ending the shim (Steam's "Stop") within the first 5 s loses it; later it is on disk. A
 //!   failed write changes nothing else: not the start, not the exit code.
+//! - `watch` (P3-4, [`watch`]): Steam's command starts unchanged; the rule is set on the game
+//!   process found after it, checked there, and recorded once before the wait for the command.
+
+use std::borrow::Borrow;
 
 use rerun_proto::cpu::rule::{Mode, SelectError, select};
 use rerun_proto::launch::{self, AppliedCpu, Check, Ended, LaunchResult, Outcome, SkipReason};
@@ -53,8 +57,6 @@ pub(crate) enum Skip {
     ProfileUnreadable(OsError),
     /// The profile is too large or does not decode.
     ProfileInvalid(Option<ProfileError>),
-    /// The profile's method is not `direct` (`watch` arrives in P3-4).
-    Method(Method),
     /// Steam's `argv[0]` is not the profile's `start` (`path_mismatch`).
     PathMismatch,
     /// The live topology could not be read.
@@ -77,6 +79,18 @@ pub(crate) enum Skip {
     Resume(u32),
     /// `CreateProcessW` reported 740 (`elevation_required`).
     ElevationRequired,
+    /// `watch`: no new process of the target appeared before the timeout.
+    TargetNotFound,
+    /// `watch`: the target runs at a higher integrity level than the shim (M1).
+    TargetElevated,
+    /// `watch`: the target could not be opened with the rights to set the rule or read back,
+    /// or (search end) the only candidates could not be opened or read.
+    TargetDenied(u32),
+    /// `watch`: no process snapshot during the whole search, or the shim's own facts could
+    /// not be read before the start.
+    SearchFailed(u32),
+    /// `watch`: the target's priority class could not be read or set; nothing was set.
+    Priority(u32),
 }
 
 impl Skip {
@@ -98,7 +112,6 @@ impl Skip {
                 _ => SkipReason::ProfileUnreadable { code: 0 },
             },
             Self::ProfileInvalid(_) => SkipReason::ProfileInvalid,
-            Self::Method(_) => SkipReason::MethodUnsupported,
             Self::PathMismatch => SkipReason::PathMismatch,
             Self::Topology(_) => SkipReason::TopologyUnavailable,
             Self::Select(SelectError::Invalid(_)) => SkipReason::TopologyInvalid,
@@ -111,6 +124,11 @@ impl Skip {
             Self::CpuSets(code) => SkipReason::CpuSetsFailed { code: *code },
             Self::Resume(code) => SkipReason::ResumeFailed { code: *code },
             Self::ElevationRequired => SkipReason::ElevationRequired,
+            Self::TargetNotFound => SkipReason::TargetNotFound,
+            Self::TargetElevated => SkipReason::TargetElevated,
+            Self::TargetDenied(code) => SkipReason::TargetDenied { code: *code },
+            Self::SearchFailed(code) => SkipReason::SearchFailed { code: *code },
+            Self::Priority(code) => SkipReason::PriorityFailed { code: *code },
         })
     }
 }
@@ -209,6 +227,8 @@ pub(crate) enum Report {
         terminated: Option<Terminated>,
         /// The post-launch check (only with the rule applied).
         check: Option<Check>,
+        /// `watch`: putting the target's priority class back failed with this code (A4).
+        priority_restore: Option<u32>,
         /// The result file.
         written: Written,
     },
@@ -231,12 +251,14 @@ enum Plan {
         limit: Option<(Limit, Applied)>,
         priority: Option<Priority>,
     },
+    /// `watch`: start unchanged, then find the target and set the rule there.
+    Watch(watch::Watch),
     /// Start unchanged.
     Unchanged(Skip),
 }
 
 /// The CPU limit of a plan.
-enum Limit {
+pub(crate) enum Limit {
     Hard(GroupAffinity),
     Soft(Vec<u32>),
 }
@@ -260,6 +282,8 @@ struct Done<C> {
     child: Option<C>,
     /// The exit code without a child.
     exit: u32,
+    /// `watch`: putting the target's priority class back failed with this code (A4).
+    restore: Option<u32>,
 }
 
 /// The shim's whole run on `os`.
@@ -282,6 +306,7 @@ pub(crate) fn run<O: Os>(os: &O) -> Report {
     let done = match plan {
         Plan::Unchanged(skip) => unchanged(os, &cmd, skip, None),
         Plan::Rule { limit, priority } => with_rule(os, &cmd, limit, priority),
+        Plan::Watch(w) => watch::start(os, &cmd, &w),
     };
     finish(os, ctx, done)
 }
@@ -303,6 +328,7 @@ fn finish<O: Os>(os: &O, ctx: Ctx, done: Done<O::Child>) -> Report {
         exit,
         terminated: done.terminated,
         check: done.check,
+        priority_restore: done.restore,
         written,
     }
 }
@@ -334,6 +360,7 @@ fn record<O: Os, C>(os: &O, ctx: Ctx, done: &Done<C>) -> Written {
                 reason,
                 start: done.start.recorded(),
                 ended: done.terminated.map(ended),
+                priority_restore: done.restore,
             }
         }
     };
@@ -367,18 +394,19 @@ fn decide<O: Os>(os: &O, cmd: &Command<'_>, id: Option<ProfileId>) -> Plan {
         Ok(p) => p,
         Err(e) => return Plan::Unchanged(Skip::ProfileInvalid(Some(e))),
     };
-    if profile.method != Method::Direct {
-        return Plan::Unchanged(Skip::Method(profile.method));
-    }
     if !os.same_path(cmd.app, &profile.start) {
         return Plan::Unchanged(Skip::PathMismatch);
     }
-    match limit_of(os, &profile) {
-        Ok(limit) => Plan::Rule {
+    let limit = match limit_of(os, &profile) {
+        Ok(limit) => limit,
+        Err(skip) => return Plan::Unchanged(skip),
+    };
+    match profile.method {
+        Method::Direct => Plan::Rule {
             limit,
             priority: profile.priority,
         },
-        Err(skip) => Plan::Unchanged(skip),
+        Method::Watch => Plan::Watch(watch::Watch::new(&profile, limit)),
     }
 }
 
@@ -454,7 +482,7 @@ fn with_rule<O: Os>(
     let prepared = match &limit {
         None => Ok(()),
         Some((Limit::Hard(ga), _)) => hard(os, &child, *ga),
-        Some((Limit::Soft(ids), _)) => os.set_cpu_sets(&child, ids).map_err(Skip::CpuSets),
+        Some((Limit::Soft(ids), _)) => os.set_cpu_sets(child.borrow(), ids).map_err(Skip::CpuSets),
     };
     let resumed = prepared.and_then(|()| {
         if spawn.suspended {
@@ -467,7 +495,7 @@ fn with_rule<O: Os>(
         let ended = os.terminate(child);
         return unchanged(os, cmd, skip, Some(ended));
     }
-    let check = check(os, &child, limit.as_ref().map(|(l, _)| l), priority);
+    let check = check(os, child.borrow(), limit.as_ref().map(|(l, _)| l), priority);
     Done {
         rule: Rule::Applied {
             cpu: applied,
@@ -478,6 +506,7 @@ fn with_rule<O: Os>(
         check: Some(check),
         child: Some(child),
         exit: 0,
+        restore: None,
     }
 }
 
@@ -496,7 +525,7 @@ fn hard<O: Os>(os: &O, child: &O::Child, ga: GroupAffinity) -> Result<(), Skip> 
 /// named, docs/04); a failed read is `Failed`.
 fn check<O: Os>(
     os: &O,
-    child: &O::Child,
+    child: &O::Proc,
     limit: Option<&Limit>,
     priority: Option<Priority>,
 ) -> Check {
@@ -578,6 +607,7 @@ fn unchanged<O: Os>(
             check: None,
             child: Some(child),
             exit: 0,
+            restore: None,
         },
         Err(ERROR_ELEVATION_REQUIRED) => shell(os, cmd, rule, terminated),
         Err(code) => Done {
@@ -587,6 +617,7 @@ fn unchanged<O: Os>(
             check: None,
             child: None,
             exit: EXIT_NOT_STARTED,
+            restore: None,
         },
     }
 }
@@ -614,10 +645,15 @@ fn shell<O: Os>(
         check: None,
         child,
         exit,
+        restore: None,
     }
 }
+
+mod watch;
 
 #[cfg(test)]
 mod check_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod watch_tests;

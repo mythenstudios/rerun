@@ -10,7 +10,15 @@
 //! The post-launch check (P3-2) waits on the child without consuming it ([`Os::wait_for`]) and
 //! reads what Windows reports now ([`Os::job_affinity`], [`Os::process_affinity`],
 //! [`Os::cpu_sets`], [`Os::priority_class`]); [`Os::write_result`] records the outcome.
+//!
+//! `watch` (P3-4) finds the game after the unchanged start: [`Os::processes`] lists names
+//! (a pre-filter only), [`Os::open_process`] opens a candidate as an [`Os::Target`],
+//! [`Os::facts`] reads what its handle reports (raw token facts; `run` decides the trust, A3),
+//! [`Os::set_priority`] and [`Os::attach_job`] set the rule. A target is a type of its own
+//! with no way to [`Os::terminate`] (A2); the reads of the check take the shared read view
+//! [`Os::Proc`] that both a started child and a target lend.
 
+use std::borrow::Borrow;
 use std::fmt;
 
 use rerun_proto::cpu::{CpuTopology, TopologyError};
@@ -57,6 +65,74 @@ pub(crate) enum Terminated {
     /// `TerminateProcess` succeeded, but the child had not ended after the wait (or the wait
     /// failed with this Win32 error code; `WAIT_TIMEOUT` = 258 for the timeout).
     NotConfirmed(u32),
+}
+
+/// Most entries [`Os::processes`] returns from one snapshot; more is
+/// `ERROR_BUFFER_OVERFLOW` for that poll.
+#[expect(
+    dead_code,
+    reason = "the Toolhelp32 snapshot of WinOs arrives in P3-4a2"
+)]
+pub(crate) const MAX_LISTED: usize = 16_384;
+
+/// winnt.h `JOB_OBJECT_LIMIT_BREAKAWAY_OK` (B4): the only limit flag of a job Rerun creates.
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is never set (A1: closing the shim's job handle must
+/// not end the game).
+pub(crate) const JOB_LIMIT_BREAKAWAY_OK: u32 = 0x0000_0800;
+
+/// An entry of a process snapshot (Toolhelp32): a pre-filter only, never trusted: the PID may
+/// be reused before it is opened; every decision uses what the opened handle reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Listed {
+    /// Process ID.
+    pub(crate) pid: u32,
+    /// `szExeFile`: the image's file name, without the folder.
+    pub(crate) name: Vec<u16>,
+}
+
+/// Rights [`Os::open_process`] asks for besides `PROCESS_QUERY_LIMITED_INFORMATION |
+/// SYNCHRONIZE` (W7): only what the profile sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Access {
+    /// `PROCESS_SET_QUOTA | PROCESS_TERMINATE` (`AssignProcessToJobObject` requires both;
+    /// `TerminateProcess` is never called on a target, A2).
+    pub(crate) job: bool,
+    /// `PROCESS_SET_LIMITED_INFORMATION` (`SetProcessDefaultCpuSets`).
+    pub(crate) cpu_sets: bool,
+    /// `PROCESS_SET_INFORMATION` (`SetPriorityClass`).
+    pub(crate) priority: bool,
+}
+
+/// Raw facts of a process token (A3): `run::watch::trust` compares them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Token {
+    /// `TokenUser`: the user's SID, as bytes.
+    pub(crate) user: Vec<u8>,
+    /// `TokenSessionId`.
+    pub(crate) session: u32,
+    /// `TokenIntegrityLevel`: the last sub-authority (RID) of the label SID
+    /// (`0x2000` medium, `0x2100` medium plus, `0x3000` high, `0x4000` system).
+    pub(crate) integrity: u32,
+}
+
+/// The shim's own facts, read once before the unchanged start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Own {
+    /// `GetProcessTimes` creation time of the shim (FILETIME, 100 ns since 1601).
+    pub(crate) created: u64,
+    /// The shim's token.
+    pub(crate) token: Token,
+}
+
+/// What an opened process is, read through its handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Facts {
+    /// `QueryFullProcessImageNameW(0)`: the Win32 path of the image, at most 32,768 units.
+    pub(crate) image: Vec<u16>,
+    /// `GetProcessTimes` creation time (FILETIME).
+    pub(crate) created: u64,
+    /// The process token.
+    pub(crate) token: Token,
 }
 
 /// What [`Os::read_back`] found.
@@ -117,9 +193,17 @@ impl std::error::Error for OsError {}
 
 /// The shim's system layer.
 pub(crate) trait Os {
+    /// The read view of a process the shim holds (process handle and, with a hard limit, its
+    /// job): what the post-launch check reads and what `SetProcessDefaultCpuSets` takes.
+    type Proc;
+
     /// A started process. Owns its handles (process, initial thread, job); dropping it closes
     /// them. The job handle stays open as long as the child value lives (B3).
-    type Child;
+    type Child: Borrow<Self::Proc>;
+
+    /// A process `watch` found and opened (P3-4). Owns its handle and the job `attach_job`
+    /// created. No call takes it to end the process (A2): [`Os::terminate`] takes a child.
+    type Target: Borrow<Self::Proc>;
 
     /// The raw command line of this process (`GetCommandLineW`), without the NUL.
     fn command_line(&self) -> Vec<u16>;
@@ -145,8 +229,8 @@ pub(crate) trait Os {
     /// The job's group affinity and the initial thread's.
     fn read_back(&self, child: &Self::Child) -> Result<ReadBack, u32>;
 
-    /// `SetProcessDefaultCpuSets` on the (suspended) child.
-    fn set_cpu_sets(&self, child: &Self::Child, ids: &[u32]) -> Result<(), u32>;
+    /// `SetProcessDefaultCpuSets` on the (suspended) child or on a found target.
+    fn set_cpu_sets(&self, p: &Self::Proc, ids: &[u32]) -> Result<(), u32>;
 
     /// `ResumeThread` on the initial thread.
     fn resume(&self, child: &Self::Child) -> Result<(), u32>;
@@ -172,20 +256,57 @@ pub(crate) trait Os {
 
     /// Waits up to `ms` milliseconds for the child to end, without consuming it: `true` if it
     /// ended (the post-launch check, P3-2).
-    fn wait_for(&self, child: &Self::Child, ms: u32) -> Result<bool, u32>;
+    fn wait_for(&self, p: &Self::Proc, ms: u32) -> Result<bool, u32>;
 
     /// The job's `JobObjectGroupInformationEx` now, every entry (hard limit only).
-    fn job_affinity(&self, child: &Self::Child) -> Result<Vec<GroupAffinity>, u32>;
+    fn job_affinity(&self, p: &Self::Proc) -> Result<Vec<GroupAffinity>, u32>;
 
     /// The process's affinity mask now (`GetProcessAffinityMask`: its primary group's; 0 when
     /// its threads span more than one group).
-    fn process_affinity(&self, child: &Self::Child) -> Result<u64, u32>;
+    fn process_affinity(&self, p: &Self::Proc) -> Result<u64, u32>;
 
     /// The process's default CPU Sets now (`GetProcessDefaultCpuSets`), in any order.
-    fn cpu_sets(&self, child: &Self::Child) -> Result<Vec<u32>, u32>;
+    fn cpu_sets(&self, p: &Self::Proc) -> Result<Vec<u32>, u32>;
 
     /// The process's priority class now (`GetPriorityClass`).
-    fn priority_class(&self, child: &Self::Child) -> Result<u32, u32>;
+    fn priority_class(&self, p: &Self::Proc) -> Result<u32, u32>;
+
+    /// The shim's own creation time and token (`watch`, read once before the start).
+    fn own(&self) -> Result<Own, u32>;
+
+    /// `GetProcessId` of a child the shim holds (its PID cannot be reused while it is held).
+    fn pid(&self, child: &Self::Child) -> u32;
+
+    /// `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` + `Process32FirstW/NextW`: at most
+    /// [`MAX_LISTED`] entries (more: `Err(ERROR_BUFFER_OVERFLOW)` for this poll).
+    fn processes(&self) -> Result<Vec<Listed>, u32>;
+
+    /// `OpenProcess(pid)` with `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` plus `access`;
+    /// never inheritable.
+    fn open_process(&self, pid: u32, access: Access) -> Result<Self::Target, u32>;
+
+    /// Image path, creation time and token facts of an opened process.
+    fn facts(&self, t: &Self::Target) -> Result<Facts, u32>;
+
+    /// Creates a job with exactly `limit_flags` as its basic limit flags (`run` passes
+    /// [`JOB_LIMIT_BREAKAWAY_OK`], A1), sets `JobObjectGroupInformationEx` with exactly this one
+    /// entry on the still empty job, then `AssignProcessToJobObject(t)`; the job is kept in `t`.
+    fn attach_job(
+        &self,
+        t: &mut Self::Target,
+        affinity: GroupAffinity,
+        limit_flags: u32,
+    ) -> Result<(), u32>;
+
+    /// `SetPriorityClass(t, class)`: to set the profile's class and to put back the one read
+    /// before.
+    fn set_priority(&self, t: &Self::Target, class: u32) -> Result<(), u32>;
+
+    /// Monotonic milliseconds (the search's clock).
+    fn now_ms(&self) -> u64;
+
+    /// Sleeps `ms` milliseconds (paces the search once the started child has ended).
+    fn sleep_ms(&self, ms: u32);
 
     /// Seconds since 1970-01-01 UTC (0 if the clock is before it).
     fn now_unix_s(&self) -> u64;

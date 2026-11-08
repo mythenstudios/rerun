@@ -57,6 +57,7 @@ fn skipped() -> LaunchResult {
             reason: SkipReason::JobFailed { code: 87 },
             start: Start::Created,
             ended: Some(Ended::NotConfirmed { code: 258 }),
+            priority_restore: None,
         },
     }
 }
@@ -99,6 +100,8 @@ fn all_reasons() -> Vec<SkipReason> {
         R::MaskTooWide,
         R::Mismatch,
         R::ElevationRequired,
+        R::TargetNotFound,
+        R::TargetElevated,
     ];
     for code in [0, 5, u32::MAX] {
         v.extend([
@@ -108,6 +111,9 @@ fn all_reasons() -> Vec<SkipReason> {
             R::ReadBackFailed { code },
             R::CpuSetsFailed { code },
             R::ResumeFailed { code },
+            R::TargetDenied { code },
+            R::SearchFailed { code },
+            R::PriorityFailed { code },
         ]);
     }
     v
@@ -182,8 +188,23 @@ fn all_outcomes() -> Vec<Outcome> {
                     reason,
                     start,
                     ended,
+                    priority_restore: None,
                 });
             }
+        }
+    }
+    // A failed priority restore (watch, A4) after either CPU step that can follow it.
+    for reason in [
+        SkipReason::JobFailed { code: 5 },
+        SkipReason::CpuSetsFailed { code: 87 },
+    ] {
+        for code in [0, 6, u32::MAX] {
+            out.push(Outcome::Skipped {
+                reason,
+                start: Start::Created,
+                ended: None,
+                priority_restore: Some(code),
+            });
         }
     }
     out
@@ -192,7 +213,7 @@ fn all_outcomes() -> Vec<Outcome> {
 #[test]
 fn every_outcome_round_trips() {
     let outcomes = all_outcomes();
-    assert_eq!(outcomes.len(), 75 + 30 * 5 * 4);
+    assert_eq!(outcomes.len(), 75 + 41 * 5 * 4 + 6);
     for outcome in outcomes {
         for unix_s in [0, 1, 1_762_600_000, u64::MAX] {
             let r = LaunchResult {
@@ -511,4 +532,144 @@ fn mutated_results_never_panic_and_never_decode_to_something_else() {
         }
     }
     assert!(accepted > 0, "no mutation decoded");
+}
+
+const GOLDEN_RESTORE: &str = "rerun-result 1
+profile=0123456789abcdef0123456789abcdef
+time=0
+rule=skipped:job_failed:5
+cpu=none
+priority=none
+check=none
+start=created
+rule_child=none
+priority_restore=failed:6
+";
+
+fn watch_skipped(reason: SkipReason, priority_restore: Option<u32>) -> LaunchResult {
+    LaunchResult {
+        profile: id(),
+        unix_s: 0,
+        outcome: Outcome::Skipped {
+            reason,
+            start: Start::Created,
+            ended: None,
+            priority_restore,
+        },
+    }
+}
+
+#[test]
+fn watch_reasons_golden_and_round_trip() {
+    for (reason, line) in [
+        (SkipReason::TargetNotFound, "rule=skipped:target_not_found"),
+        (SkipReason::TargetElevated, "rule=skipped:target_elevated"),
+        (
+            SkipReason::TargetDenied { code: 5 },
+            "rule=skipped:target_denied:5",
+        ),
+        (
+            SkipReason::SearchFailed { code: 50 },
+            "rule=skipped:search_failed:50",
+        ),
+        (
+            SkipReason::PriorityFailed { code: 5 },
+            "rule=skipped:priority_failed:5",
+        ),
+        (
+            SkipReason::SpawnFailed { code: 2 },
+            "rule=skipped:spawn_failed:2",
+        ),
+    ] {
+        let golden = with_line(GOLDEN_SKIPPED, 4, line)
+            .replace("rule_child=not_confirmed:258", "rule_child=none");
+        let r = watch_skipped(reason, None);
+        assert_eq!(encode(&r).unwrap(), golden.as_bytes(), "{reason}");
+        assert_eq!(decode(golden.as_bytes()).unwrap(), r, "{reason}");
+    }
+    let r = watch_skipped(SkipReason::JobFailed { code: 5 }, Some(6));
+    assert_eq!(encode(&r).unwrap(), GOLDEN_RESTORE.as_bytes());
+    assert_eq!(decode(GOLDEN_RESTORE.as_bytes()).unwrap(), r);
+}
+
+#[test]
+fn watch_reasons_take_exactly_their_code_form() {
+    let bad = at(4, ResultErrorKind::BadValue { key: "rule" });
+    for l in [
+        "rule=skipped:target_not_found:5",
+        "rule=skipped:target_elevated:0",
+        "rule=skipped:target_denied",
+        "rule=skipped:search_failed",
+        "rule=skipped:priority_failed",
+        "rule=skipped:target_denied:05",
+        "rule=skipped:target_denied:4294967296",
+    ] {
+        assert_eq!(err(with_line(GOLDEN_SKIPPED, 4, l).as_bytes()), bad, "{l}");
+    }
+}
+
+#[test]
+fn method_unsupported_of_an_earlier_shim_still_reads() {
+    let old = with_line(GOLDEN_SKIPPED, 4, "rule=skipped:method_unsupported");
+    assert!(matches!(
+        decode(old.as_bytes()).unwrap().outcome,
+        Outcome::Skipped {
+            reason: SkipReason::MethodUnsupported,
+            priority_restore: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_priority_restore_line_is_strict() {
+    let inconsistent = at(0, ResultErrorKind::Inconsistent);
+    // Only after job_failed or cpu_sets_failed; never on an applied rule.
+    let cpu_sets = GOLDEN_RESTORE.replace("job_failed:5", "cpu_sets_failed:87");
+    assert!(decode(cpu_sets.as_bytes()).is_ok());
+    for other in [
+        SkipReason::TargetDenied { code: 5 },
+        SkipReason::PriorityFailed { code: 5 },
+        SkipReason::PathMismatch,
+    ] {
+        let s = GOLDEN_RESTORE.replace("job_failed:5", &other.to_string());
+        assert_eq!(err(s.as_bytes()), inconsistent, "{other}");
+        let r = watch_skipped(other, Some(6));
+        assert_eq!(encode(&r).unwrap_err(), inconsistent, "{other}");
+    }
+    let applied = format!(
+        "{GOLDEN}priority_restore=failed:6
+"
+    );
+    assert_eq!(err(applied.as_bytes()), inconsistent);
+    // Only `failed:<code>`, canonical; `none` is never written (the line is absent instead).
+    let bad = at(
+        10,
+        ResultErrorKind::BadValue {
+            key: "priority_restore",
+        },
+    );
+    for v in [
+        "priority_restore=none",
+        "priority_restore=failed:",
+        "priority_restore=failed:06",
+        "priority_restore=failed:-1",
+        "priority_restore=ok",
+        "priority_restore=",
+    ] {
+        assert_eq!(err(with_line(GOLDEN_RESTORE, 10, v).as_bytes()), bad, "{v}");
+    }
+    // Another tenth key, or an eleventh line, is trailing.
+    assert_eq!(
+        err(with_line(GOLDEN_RESTORE, 10, "restore=failed:6").as_bytes()),
+        at(10, ResultErrorKind::TrailingLine)
+    );
+    let eleven = format!(
+        "{GOLDEN_RESTORE}priority_restore=failed:6
+"
+    );
+    assert_eq!(
+        err(eleven.as_bytes()),
+        at(11, ResultErrorKind::TrailingLine)
+    );
 }

@@ -3,8 +3,9 @@
 //! `rerun status` reads back.
 //!
 //! One grammar for the writer (`rerun-launch`, without serde, ADR 0006) and the reader
-//! (`rerun-core`, untrusted input). UTF-8 text of at most [`MAX_RESULT_BYTES`], nine lines in a
-//! fixed order, each `key=value` ending in LF, every key always present:
+//! (`rerun-core`, untrusted input). UTF-8 text of at most [`MAX_RESULT_BYTES`], nine lines
+//! (ten with `priority_restore`) in a fixed order, each `key=value` ending in LF, the first
+//! nine always present:
 //!
 //! ```text
 //! rerun-result 1
@@ -16,13 +17,17 @@
 //! check=ok                                   none | ok | narrowed | reset:<what> | exited_early | failed:<code>
 //! start=created                              created | shell | shell_no_process | not_exe | failed:<code>
 //! rule_child=none                            none | ended | failed:<code> | not_confirmed:<code>
+//! priority_restore=failed:<code>              optional tenth line (below)
 //! ```
 //!
 //! `rule=applied` carries `cpu`, `priority` and `check` and always `start=created`,
 //! `rule_child=none`; `rule=skipped:…` carries `start` and `rule_child` (a child created with
 //! the rule and ended before the unchanged start) and always `cpu=none`,
-//! `priority=none`, `check=none`. `<code>` is a Win32 error code (or an `HRESULT` as an
-//! unsigned number where Windows gave one) in canonical decimal. The reader is strict like the
+//! `priority=none`, `check=none`. The tenth line `priority_restore=failed:<code>` is present
+//! only when `rerun-launch watch` set the priority class on the found game, the CPU step
+//! after it failed (`skipped:job_failed:…` or `skipped:cpu_sets_failed:…`) and putting the
+//! class back failed too (P3-4 A4); absent otherwise, so a file of an earlier shim reads
+//! unchanged. `<code>` is a Win32 error code (or an `HRESULT` as an unsigned number where Windows gave one) in canonical decimal. The reader is strict like the
 //! profile reader: no other key, order or spelling, no leading zero, no empty line, no CR, no
 //! control character; a file decodes to one [`LaunchResult`] and encodes back to the same
 //! bytes. Errors name the line and the key, never the content.
@@ -72,6 +77,9 @@ pub enum Outcome {
         start: Start,
         /// A child created with the rule that had to be ended first.
         ended: Option<Ended>,
+        /// `watch` only: the priority class set on the found game could not be put back after
+        /// the CPU step failed (Win32 error code). Only with `job_failed` or `cpu_sets_failed`.
+        priority_restore: Option<u32>,
     },
 }
 
@@ -130,7 +138,7 @@ pub enum SkipReason {
     ProfileNotAFile,
     /// `profile_invalid`: too large, or it does not decode.
     ProfileInvalid,
-    /// `method_unsupported`: `watch` before P3-4.
+    /// `method_unsupported`: written by shims before P3-4 for `watch`; read, never written again.
     MethodUnsupported,
     /// `path_mismatch`: Steam's first argument is not the profile's `start`.
     PathMismatch,
@@ -142,7 +150,8 @@ pub enum SkipReason {
     SelectionEmpty,
     /// `mask_too_wide`: the selection does not fit this build's affinity mask.
     MaskTooWide,
-    /// `spawn_failed:<code>`: the job or the suspended child could not be created.
+    /// `spawn_failed:<code>`: the job or the suspended child could not be created (`direct`), or
+    /// Steam's command could not be started at all (`watch`, then `start=failed:<code>`).
     SpawnFailed {
         /// Win32 error code.
         code: u32,
@@ -171,6 +180,30 @@ pub enum SkipReason {
     },
     /// `elevation_required`: error 740, started through `ShellExecuteExW` without a rule.
     ElevationRequired,
+    /// `target_not_found` (`watch`): no new process of the target appeared before the timeout.
+    TargetNotFound,
+    /// `target_elevated` (`watch`): the target runs at a higher integrity level than the shim
+    /// (M1); left untouched.
+    TargetElevated,
+    /// `target_denied:<code>` (`watch`): the target could not be opened with the rights to set
+    /// the rule, or its facts could not be read (a protected or anti-cheat process, …); also
+    /// the end of a search in which only such candidates were seen. Left untouched.
+    TargetDenied {
+        /// Win32 error code.
+        code: u32,
+    },
+    /// `search_failed:<code>` (`watch`): no process snapshot could be taken during the whole
+    /// search (or the shim could not read its own creation time or token before it).
+    SearchFailed {
+        /// Win32 error code.
+        code: u32,
+    },
+    /// `priority_failed:<code>` (`watch`): the priority class of the target could not be read
+    /// or set; nothing was set.
+    PriorityFailed {
+        /// Win32 error code.
+        code: u32,
+    },
 }
 
 /// How Steam's command was started on a skipped rule.
@@ -285,6 +318,9 @@ impl fmt::Display for ResultError {
 
 impl std::error::Error for ResultError {}
 
+/// The optional tenth key (P3-4 A4).
+const RESTORE_KEY: &str = "priority_restore";
+
 const KEYS: [&str; 8] = [
     "profile",
     "time",
@@ -318,6 +354,11 @@ impl SkipReason {
             Self::CpuSetsFailed { .. } => "cpu_sets_failed",
             Self::ResumeFailed { .. } => "resume_failed",
             Self::ElevationRequired => "elevation_required",
+            Self::TargetNotFound => "target_not_found",
+            Self::TargetElevated => "target_elevated",
+            Self::TargetDenied { .. } => "target_denied",
+            Self::SearchFailed { .. } => "search_failed",
+            Self::PriorityFailed { .. } => "priority_failed",
         }
     }
 
@@ -329,7 +370,10 @@ impl SkipReason {
             | Self::JobFailed { code }
             | Self::ReadBackFailed { code }
             | Self::CpuSetsFailed { code }
-            | Self::ResumeFailed { code } => Some(code),
+            | Self::ResumeFailed { code }
+            | Self::TargetDenied { code }
+            | Self::SearchFailed { code }
+            | Self::PriorityFailed { code } => Some(code),
             _ => None,
         }
     }
@@ -348,6 +392,8 @@ impl SkipReason {
             "mask_too_wide" => Some(Self::MaskTooWide),
             "mismatch" => Some(Self::Mismatch),
             "elevation_required" => Some(Self::ElevationRequired),
+            "target_not_found" => Some(Self::TargetNotFound),
+            "target_elevated" => Some(Self::TargetElevated),
             _ => None,
         };
         if let Some(r) = plain {
@@ -361,6 +407,9 @@ impl SkipReason {
             "read_back_failed" => Self::ReadBackFailed { code },
             "cpu_sets_failed" => Self::CpuSetsFailed { code },
             "resume_failed" => Self::ResumeFailed { code },
+            "target_denied" => Self::TargetDenied { code },
+            "search_failed" => Self::SearchFailed { code },
+            "priority_failed" => Self::PriorityFailed { code },
             _ => return None,
         })
     }
@@ -451,6 +500,7 @@ fn values(r: &LaunchResult) -> [String; 8] {
             reason,
             start,
             ended,
+            ..
         } => (
             format!("skipped:{reason}"),
             cpu_str(None),
@@ -472,8 +522,19 @@ fn values(r: &LaunchResult) -> [String; 8] {
     ]
 }
 
+/// The optional tenth line of `r`, without its LF.
+fn restore_line(r: &LaunchResult) -> Option<String> {
+    match &r.outcome {
+        Outcome::Skipped {
+            priority_restore: Some(code),
+            ..
+        } => Some(format!("{RESTORE_KEY}=failed:{code}")),
+        _ => None,
+    }
+}
+
 /// The invariants a value must meet: `1 <= threads <= of <= 4096`; a reset names at least one
-/// thing and only things that were set.
+/// thing and only things that were set; a failed priority restore only after a failed CPU step.
 fn valid(r: &LaunchResult) -> bool {
     match &r.outcome {
         Outcome::Applied {
@@ -494,12 +555,23 @@ fn valid(r: &LaunchResult) -> bool {
             };
             cpu_ok && check_ok
         }
-        Outcome::Skipped { .. } => true,
+        Outcome::Skipped {
+            reason,
+            priority_restore,
+            ..
+        } => {
+            priority_restore.is_none()
+                || matches!(
+                    reason,
+                    SkipReason::JobFailed { .. } | SkipReason::CpuSetsFailed { .. }
+                )
+        }
     }
 }
 
 /// Encodes `r`. Fails (`Inconsistent`) for a value no file may hold (threads 0 or above `of`,
-/// a reset of nothing or of something not set, `narrowed` without a hard limit), and checks its output with [`decode`].
+/// a reset of nothing or of something not set, `narrowed` without a hard limit, a priority
+/// restore after another reason), and checks its output with [`decode`].
 pub fn encode(r: &LaunchResult) -> Result<Vec<u8>, ResultError> {
     if !valid(r) {
         return Err(ResultError {
@@ -512,6 +584,10 @@ pub fn encode(r: &LaunchResult) -> Result<Vec<u8>, ResultError> {
         s.push_str(k);
         s.push('=');
         s.push_str(&v);
+        s.push('\n');
+    }
+    if let Some(line) = restore_line(r) {
+        s.push_str(&line);
         s.push('\n');
     }
     let bytes = s.into_bytes();
@@ -579,9 +655,33 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchResult, ResultError> {
                 kind: ResultErrorKind::UnexpectedKey { expected: key },
             })?;
     }
-    if lines.len() > KEYS.len() + 1 {
+    // The optional tenth line: only `priority_restore=…`; anything else, or more, is trailing.
+    let restore_at = KEYS.len() + 1;
+    let restore = match lines.get(restore_at) {
+        None => None,
+        Some(l) => {
+            let Some(v) = l
+                .strip_prefix(RESTORE_KEY)
+                .and_then(|r| r.strip_prefix('='))
+            else {
+                return Err(ResultError {
+                    line: restore_at + 1,
+                    kind: ResultErrorKind::TrailingLine,
+                });
+            };
+            Some(
+                v.strip_prefix("failed:")
+                    .and_then(code)
+                    .ok_or(ResultError {
+                        line: restore_at + 1,
+                        kind: ResultErrorKind::BadValue { key: RESTORE_KEY },
+                    })?,
+            )
+        }
+    };
+    if lines.len() > restore_at + 1 {
         return Err(ResultError {
-            line: KEYS.len() + 2,
+            line: restore_at + 2,
             kind: ResultErrorKind::TrailingLine,
         });
     }
@@ -607,6 +707,7 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchResult, ResultError> {
             reason,
             start,
             ended,
+            priority_restore: restore,
         },
     };
     let r = LaunchResult {
@@ -615,7 +716,11 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchResult, ResultError> {
         outcome,
     };
     // Every value parsed; the combination must be one a writer emits: the same bytes back.
-    if !valid(&r) || values(&r) != v.map(str::to_owned) {
+    // A restore line on an applied rule is lost above: compare its presence too.
+    if !valid(&r)
+        || values(&r) != v.map(str::to_owned)
+        || restore_line(&r).is_some() != restore.is_some()
+    {
         return Err(whole(ResultErrorKind::Inconsistent));
     }
     Ok(r)

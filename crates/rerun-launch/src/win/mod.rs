@@ -15,6 +15,7 @@ mod cpu;
 pub(crate) mod launch;
 mod result;
 
+use std::borrow::Borrow;
 use std::ffi::{OsString, c_void};
 use std::io::Read;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -22,10 +23,12 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use rerun_proto::cpu::CpuTopology;
 use rerun_proto::profile::{MAX_PROFILE_BYTES, ProfileId};
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{ERROR_NOT_SUPPORTED, HANDLE};
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Security::{
     CheckTokenMembership, GetTokenInformation, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE,
@@ -43,7 +46,9 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::core::PWSTR;
 
-use crate::os::{GroupAffinity, Os, OsError, ReadBack, Spawn, Terminated};
+use crate::os::{
+    Access, Facts, GroupAffinity, Listed, Os, OsError, Own, ReadBack, Spawn, Terminated,
+};
 
 /// `CompareStringOrdinal(a, b, TRUE) == CSTR_EQUAL`: the ordinal, case-insensitive comparison
 /// Windows uses for file names (its upper-case table, one unit for one unit, so `ß` and `SS`
@@ -246,8 +251,28 @@ const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
 /// The real system layer.
 pub(crate) struct WinOs;
 
+/// A process `watch` found. P3-4a2: none exists yet (`own`, `processes` and `open_process`
+/// answer `ERROR_NOT_SUPPORTED`, so a real `watch` start records `search_failed:50` and starts
+/// Steam's command unchanged); the type cannot be constructed.
+#[derive(Debug)]
+pub(crate) enum Target {}
+
+impl Borrow<launch::Child> for Target {
+    fn borrow(&self) -> &launch::Child {
+        match *self {}
+    }
+}
+
+/// The start of the shim's monotonic clock (`now_ms`).
+fn epoch() -> Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
 impl Os for WinOs {
+    type Proc = launch::Child;
     type Child = launch::Child;
+    type Target = Target;
 
     fn command_line(&self) -> Vec<u16> {
         // SAFETY: no arguments; the returned pointer is the process's command line, valid for
@@ -385,6 +410,56 @@ impl Os for WinOs {
         }
         let base: Vec<u16> = local_app_data()?.encode_wide().collect();
         result::write(&base, id, bytes)
+    }
+
+    // P3-4a2: `GetProcessTimes` and the token facts of the shim. Until then `watch` stops
+    // here, before the start: `search_failed:50`, Steam's command starts unchanged.
+    fn own(&self) -> Result<Own, u32> {
+        Err(ERROR_NOT_SUPPORTED)
+    }
+
+    // P3-4a2: `GetProcessId`. Not reached while `own` fails.
+    fn pid(&self, _child: &launch::Child) -> u32 {
+        0
+    }
+
+    // P3-4a2: Toolhelp32 snapshot in `win::process`.
+    fn processes(&self) -> Result<Vec<Listed>, u32> {
+        Err(ERROR_NOT_SUPPORTED)
+    }
+
+    // P3-4a2: `OpenProcess` in `win::process`.
+    fn open_process(&self, _pid: u32, _access: Access) -> Result<Target, u32> {
+        Err(ERROR_NOT_SUPPORTED)
+    }
+
+    // P3-4a2: image path, creation time, token facts.
+    fn facts(&self, t: &Target) -> Result<Facts, u32> {
+        match *t {}
+    }
+
+    // P3-4a2: new job, `JobObjectGroupInformationEx`, `AssignProcessToJobObject` in
+    // `win::launch`.
+    fn attach_job(
+        &self,
+        t: &mut Target,
+        _affinity: GroupAffinity,
+        _limit_flags: u32,
+    ) -> Result<(), u32> {
+        match *t {}
+    }
+
+    // P3-4a2: `SetPriorityClass` in `win::launch`.
+    fn set_priority(&self, t: &Target, _class: u32) -> Result<(), u32> {
+        match *t {}
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(epoch().elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn sleep_ms(&self, ms: u32) {
+        std::thread::sleep(Duration::from_millis(u64::from(ms)));
     }
 }
 
