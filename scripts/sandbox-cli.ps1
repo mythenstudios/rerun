@@ -181,7 +181,9 @@ function Get-Tree([string]$dir) {
 }
 # The profile files only (the folder itself is created by the apply and stays, plan P3-3).
 function Get-Profiles {
-    if (-not (Test-Path -LiteralPath $profiles)) { return 'none' }
+    # No folder and an empty folder both mean "no profile files": apply creates `profiles` and a
+    # revert leaves it (Rerun-owned state, plan LM-T2); its existence is checked on its own.
+    if (-not (Test-Path -LiteralPath $profiles)) { return '' }
     (@(Get-ChildItem -LiteralPath $profiles -Force | Sort-Object Name | ForEach-Object {
         "$($_.Name) $($_.Length) $((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash) $($_.Attributes)"
     }) -join "`n")
