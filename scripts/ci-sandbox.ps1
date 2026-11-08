@@ -109,7 +109,7 @@ Set-Content -LiteralPath $cfg -Value $inf -Encoding Unicode
 & secedit /configure /db $db /cfg $cfg /areas USER_RIGHTS | Out-Null
 Write-Host "granted SeBatchLogonRight to $user (secedit exit $LASTEXITCODE)"
 $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $argList -WorkingDirectory $out1
-Register-ScheduledTask -TaskName 'RerunCiSandbox' -Action $action -User ".\$user" -Password $plain -RunLevel Limited -Force | Out-Null
+Register-ScheduledTask -TaskName 'RerunCiSandbox' -Action $action -User "$env:COMPUTERNAME\$user" -Password $plain -RunLevel Limited -Force | Out-Null
 $t0 = Get-Date
 Start-ScheduledTask -TaskName 'RerunCiSandbox'
 Write-Host "started the pass with: $how"
