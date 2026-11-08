@@ -6,6 +6,10 @@
 //! what a failure or a difference means (B-2): [`Os::spawn`] creates the job and the suspended
 //! child inside it, [`Os::limit_job`] sets the job's group affinity, [`Os::read_back`] reads
 //! the job and the initial thread back, [`Os::resume`] lets the child run.
+//!
+//! The post-launch check (P3-2) waits on the child without consuming it ([`Os::wait_for`]) and
+//! reads what Windows reports now ([`Os::job_affinity`], [`Os::process_affinity`],
+//! [`Os::cpu_sets`], [`Os::priority_class`]); [`Os::write_result`] records the outcome.
 
 use std::fmt;
 
@@ -71,9 +75,11 @@ pub(crate) enum OsError {
     Win32(u32),
     /// The call failed with this `HRESULT`.
     HResult(i32),
-    /// The profile is a reparse point (refused, D2).
+    /// The profile, or for the result file `Rerun`, `launch` or the file itself, is a reparse
+    /// point (refused, D2, P3-2).
     ReparsePoint,
-    /// The profile is not a regular file.
+    /// The profile is not a regular file (for the result file: `Rerun` or `launch` is not a
+    /// folder, or the file is not a file).
     NotAFile,
     /// The topology from Windows is inconsistent or malformed (ADR 0010, fail closed).
     #[cfg_attr(
@@ -83,6 +89,12 @@ pub(crate) enum OsError {
     Topology(TopologyError),
     /// Not available in this build (the topology in a 32-bit shim, ADR 0010).
     Unsupported,
+    /// The new result file is not in the `launch` folder that was checked (P3-2).
+    Escaped,
+    /// The result could not be encoded (never for a correct codec).
+    Encode,
+    /// An elevated shim writes nothing (B13).
+    Elevated,
 }
 
 impl fmt::Display for OsError {
@@ -94,6 +106,9 @@ impl fmt::Display for OsError {
             Self::NotAFile => f.write_str("the profile is not a file"),
             Self::Topology(e) => write!(f, "topology: {e}"),
             Self::Unsupported => f.write_str("not supported in this build"),
+            Self::Escaped => f.write_str("the result file is not in the launch folder"),
+            Self::Encode => f.write_str("the result could not be encoded"),
+            Self::Elevated => f.write_str("an elevated shim writes nothing"),
         }
     }
 }
@@ -154,4 +169,40 @@ pub(crate) trait Os {
 
     /// Waits for the child to exit and returns its exit code.
     fn wait(&self, child: Self::Child) -> Result<u32, u32>;
+
+    /// Waits up to `ms` milliseconds for the child to end, without consuming it: `true` if it
+    /// ended (the post-launch check, P3-2).
+    fn wait_for(&self, child: &Self::Child, ms: u32) -> Result<bool, u32>;
+
+    /// The job's `JobObjectGroupInformationEx` now, every entry (hard limit only).
+    fn job_affinity(&self, child: &Self::Child) -> Result<Vec<GroupAffinity>, u32>;
+
+    /// The process's affinity mask now (`GetProcessAffinityMask`: its primary group's; 0 when
+    /// its threads span more than one group).
+    fn process_affinity(&self, child: &Self::Child) -> Result<u64, u32>;
+
+    /// The process's default CPU Sets now (`GetProcessDefaultCpuSets`), in any order.
+    fn cpu_sets(&self, child: &Self::Child) -> Result<Vec<u32>, u32>;
+
+    /// The process's priority class now (`GetPriorityClass`).
+    fn priority_class(&self, child: &Self::Child) -> Result<u32, u32>;
+
+    /// Seconds since 1970-01-01 UTC (0 if the clock is before it).
+    fn now_unix_s(&self) -> u64;
+
+    /// Writes `<LocalAppData>\Rerun\launch\<id>.result` (P3-2): `Rerun` must exist, `launch`
+    /// is created if missing, a reparse point at `Rerun`, `launch` or the file is refused,
+    /// temp file + rename inside `launch`. Refused when elevated (B13; `run` never asks then).
+    fn write_result(&self, id: &ProfileId, bytes: &[u8]) -> Result<(), OsError>;
+}
+
+/// The priority class `GetPriorityClass` reports for a class Rerun sets (winbase.h
+/// `NORMAL_PRIORITY_CLASS`, `ABOVE_NORMAL_PRIORITY_CLASS`, `HIGH_PRIORITY_CLASS`: the same
+/// values as the creation flags; checked against `windows-sys` in `win::launch`).
+pub(crate) fn priority_class(p: Priority) -> u32 {
+    match p {
+        Priority::Normal => 0x0000_0020,
+        Priority::AboveNormal => 0x0000_8000,
+        Priority::High => 0x0000_0080,
+    }
 }

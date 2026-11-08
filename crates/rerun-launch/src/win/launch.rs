@@ -1,7 +1,10 @@
 //! The one wrapper module of the shim's banned process calls (ADR 0010 amendment, ADR 0022):
 //! `CreateProcessW`, `SetInformationJobObject`, `UpdateProcThreadAttribute`,
 //! `SetProcessDefaultCpuSets`, `GetThreadGroupAffinity`, `ShellExecuteExW` and
-//! `CoInitializeEx` are called here and nowhere else in `rerun-launch`.
+//! `CoInitializeEx` are called here and nowhere else in `rerun-launch`; so are the reads of
+//! the post-launch check (P3-2): `GetProcessAffinityMask` and `GetProcessDefaultCpuSets`
+//! (banned as topology sources, ADR 0010; here they read the shim's own child), the job's
+//! group affinity, `GetPriorityClass` and a bounded wait that does not consume the child.
 //!
 //! The hard limit follows the order of ADR 0022 (B-2): [`spawn`] creates the job with its
 //! limit flags (B4: `JOB_OBJECT_LIMIT_BREAKAWAY_OK` only) and the child suspended **inside**
@@ -18,7 +21,9 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
 
 use rerun_proto::profile::Priority;
-use windows_sys::Win32::Foundation::{ERROR_INVALID_HANDLE, HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    ERROR_INVALID_HANDLE, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
 };
@@ -30,11 +35,12 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::SystemInformation::GROUP_AFFINITY;
 use windows_sys::Win32::System::Threading::{
     ABOVE_NORMAL_PRIORITY_CLASS, CREATE_SUSPENDED, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, GetThreadGroupAffinity, HIGH_PRIORITY_CLASS,
-    INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-    NORMAL_PRIORITY_CLASS, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread,
-    STARTUPINFOEXW, STARTUPINFOW, SetProcessDefaultCpuSets, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject,
+    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, GetPriorityClass, GetProcessAffinityMask,
+    GetProcessDefaultCpuSets, GetThreadGroupAffinity, HIGH_PRIORITY_CLASS, INFINITE,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, NORMAL_PRIORITY_CLASS,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread, STARTUPINFOEXW,
+    STARTUPINFOW, SetProcessDefaultCpuSets, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::{
     SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
@@ -324,8 +330,31 @@ pub(crate) fn limit_job(child: &Child, affinity: GroupAffinity) -> Result<(), u3
 
 /// Step 4 of B-2: the job's `JobObjectGroupInformationEx` and the initial thread's affinity.
 pub(crate) fn read_back(child: &Child) -> Result<ReadBack, u32> {
-    let job = child.job.as_ref().ok_or(ERROR_INVALID_HANDLE)?;
+    let job = job_affinity(child)?;
     let thread = child.thread.as_ref().ok_or(ERROR_INVALID_HANDLE)?;
+    let mut ga = GROUP_AFFINITY::default();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "rerun-launch's read-back of the suspended child's initial thread (ADR 0022, \
+                  B-2), not a topology source"
+    )]
+    // SAFETY: `thread` is the live initial-thread handle from CreateProcessW
+    // (THREAD_ALL_ACCESS); `ga` is valid for a write.
+    let ok = unsafe { GetThreadGroupAffinity(thread.as_raw_handle(), &mut ga) };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    Ok(ReadBack {
+        job,
+        thread: from_raw(&ga),
+    })
+}
+
+/// The job's `JobObjectGroupInformationEx`, every entry (at most [`READ_BACK_ENTRIES`]; more
+/// fails the call, which the callers treat as a difference). Step 4 of B-2 and the post-launch
+/// check (P3-2).
+pub(crate) fn job_affinity(child: &Child) -> Result<Vec<GroupAffinity>, u32> {
+    let job = child.job.as_ref().ok_or(ERROR_INVALID_HANDLE)?;
     let mut entries = [GROUP_AFFINITY::default(); READ_BACK_ENTRIES];
     let mut returned: u32 = 0;
     let cap = u32::try_from(size_of::<[GROUP_AFFINITY; READ_BACK_ENTRIES]>())
@@ -346,22 +375,90 @@ pub(crate) fn read_back(child: &Child) -> Result<ReadBack, u32> {
     }
     let n = usize::try_from(returned).unwrap_or(usize::MAX) / size_of::<GROUP_AFFINITY>();
     let job = entries.get(..n).ok_or(ERROR_INVALID_PARAMETER)?;
-    let mut ga = GROUP_AFFINITY::default();
+    Ok(job.iter().map(from_raw).collect())
+}
+
+/// The post-launch check (P3-2): waits up to `ms` for the child to end, without consuming it.
+pub(crate) fn wait_for(child: &Child, ms: u32) -> Result<bool, u32> {
+    // SAFETY: `child.process` is a live process handle with SYNCHRONIZE (from CreateProcessW
+    // or ShellExecuteExW), kept alive by the borrow.
+    let r = unsafe { WaitForSingleObject(child.process.as_raw_handle(), ms) };
+    match r {
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => Ok(false),
+        r => Err(wait_error(r)),
+    }
+}
+
+/// The post-launch check (P3-2): the process's affinity mask (of its primary group).
+pub(crate) fn process_affinity(child: &Child) -> Result<u64, u32> {
+    let mut process: usize = 0;
+    let mut system: usize = 0;
     #[expect(
         clippy::disallowed_methods,
-        reason = "rerun-launch's read-back of the suspended child's initial thread (ADR 0022, \
-                  B-2), not a topology source"
+        reason = "rerun-launch's post-launch check of its own child's affinity (ADR 0022, P3-2), \
+                  not a topology source"
     )]
-    // SAFETY: `thread` is the live initial-thread handle from CreateProcessW
-    // (THREAD_ALL_ACCESS); `ga` is valid for a write.
-    let ok = unsafe { GetThreadGroupAffinity(thread.as_raw_handle(), &mut ga) };
+    // SAFETY: `child.process` is a live process handle with PROCESS_QUERY_LIMITED_INFORMATION
+    // (PROCESS_ALL_ACCESS from CreateProcessW); both outputs are valid for a write.
+    let ok =
+        unsafe { GetProcessAffinityMask(child.process.as_raw_handle(), &mut process, &mut system) };
     if ok == 0 {
         return Err(last_error());
     }
-    Ok(ReadBack {
-        job: job.iter().map(from_raw).collect(),
-        thread: from_raw(&ga),
-    })
+    u64::try_from(process).map_err(|_| ERROR_INVALID_PARAMETER)
+}
+
+/// Most CPU Set IDs the check reads (the topology's limit, ADR 0010).
+const MAX_CPU_SET_IDS: u32 = 4096;
+/// winerror.h `ERROR_INSUFFICIENT_BUFFER`.
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+/// The post-launch check (P3-2): the process's default CPU Sets; one retry with the size
+/// Windows asks for, at most [`MAX_CPU_SET_IDS`].
+pub(crate) fn cpu_sets(child: &Child) -> Result<Vec<u32>, u32> {
+    let mut cap: u32 = 64;
+    for _ in 0..2 {
+        let mut ids = vec![0u32; usize::try_from(cap).map_err(|_| ERROR_INVALID_PARAMETER)?];
+        let mut required: u32 = 0;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "rerun-launch's post-launch check of the CPU Sets it set on its own child \
+                      (ADR 0022, P3-2), not a topology source"
+        )]
+        // SAFETY: `child.process` is a live process handle with
+        // PROCESS_QUERY_LIMITED_INFORMATION; `ids` is a writable array of `cap` u32 alive for
+        // the call; `required` is valid for a write.
+        let ok = unsafe {
+            GetProcessDefaultCpuSets(
+                child.process.as_raw_handle(),
+                ids.as_mut_ptr(),
+                cap,
+                &mut required,
+            )
+        };
+        if ok != 0 {
+            ids.truncate(usize::try_from(required).map_err(|_| ERROR_INVALID_PARAMETER)?);
+            return Ok(ids);
+        }
+        let code = last_error();
+        if code != ERROR_INSUFFICIENT_BUFFER || required <= cap || required > MAX_CPU_SET_IDS {
+            return Err(code);
+        }
+        cap = required;
+    }
+    Err(ERROR_INSUFFICIENT_BUFFER)
+}
+
+/// The post-launch check (P3-2, D6 addition): the process's priority class.
+pub(crate) fn priority_class(child: &Child) -> Result<u32, u32> {
+    // SAFETY: `child.process` is a live process handle with
+    // PROCESS_QUERY_LIMITED_INFORMATION, kept alive by the borrow.
+    let class = unsafe { GetPriorityClass(child.process.as_raw_handle()) };
+    if class == 0 {
+        return Err(last_error());
+    }
+    Ok(class)
 }
 
 /// Soft mode: `SetProcessDefaultCpuSets` on the suspended child.
@@ -628,8 +725,71 @@ mod tests {
             )
         };
         let code = last_error();
+        // The check's own read agrees (P3-2).
+        let read = cpu_sets(&child);
         assert_eq!(terminate(child), Terminated::Ended);
         assert_ne!(ok, 0, "GetProcessDefaultCpuSets failed: {code}");
         assert_eq!(&ids[..usize::try_from(n).unwrap()], [id]);
+        assert_eq!(read, Ok(vec![id]));
+    }
+
+    /// The classes the check compares are the creation flags the shim sets.
+    #[test]
+    fn priority_classes_are_the_creation_flags() {
+        use crate::os::priority_class as class;
+        assert_eq!(class(Priority::Normal), NORMAL_PRIORITY_CLASS);
+        assert_eq!(class(Priority::AboveNormal), ABOVE_NORMAL_PRIORITY_CLASS);
+        assert_eq!(class(Priority::High), HIGH_PRIORITY_CLASS);
+        for p in [Priority::Normal, Priority::AboveNormal, Priority::High] {
+            assert_eq!(priority_flag(Some(p)), class(p));
+        }
+    }
+
+    /// What the post-launch check reads (P3-2) on a suspended `cmd.exe` in its job with one
+    /// processor: the job's one entry, the process's mask equal to it (the job narrows the
+    /// process itself), the priority class of the creation flag, no default CPU Sets, and a
+    /// bounded wait that times out without consuming the child.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn check_reads_on_a_limited_child() {
+        let topology = crate::win::cpu::topology().unwrap();
+        let cpu = &topology.cpus[0];
+        let ga = GroupAffinity {
+            group: cpu.group,
+            mask: 1u64 << cpu.index,
+        };
+        let app = cmd_exe();
+        let s = Spawn {
+            in_job: true,
+            suspended: true,
+            priority: Some(Priority::High),
+        };
+        let child = spawn(&app, &app, &s).unwrap();
+        let before = process_affinity(&child);
+        let limited = limit_job(&child, ga);
+        let job = job_affinity(&child);
+        let mask = process_affinity(&child);
+        let class = priority_class(&child);
+        let sets = cpu_sets(&child);
+        let waited = wait_for(&child, 0);
+        assert_eq!(terminate(child), Terminated::Ended);
+        limited.unwrap();
+        assert_eq!(job, Ok(vec![ga]));
+        assert_eq!(mask, Ok(ga.mask), "before the limit: {before:?}");
+        assert_eq!(class, Ok(HIGH_PRIORITY_CLASS));
+        assert_eq!(sets, Ok(vec![]));
+        assert_eq!(waited, Ok(false));
+    }
+
+    /// `wait_for` sees a child that ended, and the later `wait` still gets its exit code.
+    #[test]
+    fn wait_for_sees_an_ended_child_and_wait_still_reads_its_code() {
+        let app = cmd_exe();
+        let mut line = vec![u16::from(b'"')];
+        line.extend_from_slice(&app);
+        line.extend("\" /c exit 5".encode_utf16());
+        let child = spawn(&app, &line, &Spawn::UNCHANGED).unwrap();
+        assert_eq!(wait_for(&child, 30_000), Ok(true));
+        assert_eq!(wait(child), Ok(5));
     }
 }

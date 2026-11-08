@@ -2,9 +2,10 @@
 //!
 //! `rerun-launch.exe --profile <id> %command%`: reads the profile, selects the processors on
 //! the live topology and starts Steam's command in a Job Object with that limit (or with
-//! default CPU Sets), then waits for it and exits with its exit code. Any problem with the
-//! rule starts the command unchanged (D3). No console (B1): the shim reports through its exit
-//! code only (the result file follows in P3-2):
+//! default CPU Sets), checks the rule about 5 s later, records the outcome in
+//! `<LocalAppData>\Rerun\launch\<id>.result` (P3-2; never when elevated), then waits for the
+//! command and exits with its exit code. Any problem with the rule starts the command unchanged
+//! (D3). No console (B1): the shim reports through the result file and its exit code:
 //!
 //! - the started command's exit code, if it started;
 //! - 1: the DLL search path could not be restricted (ADR 0008, fail closed; nothing started);

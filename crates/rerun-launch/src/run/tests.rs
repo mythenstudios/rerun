@@ -8,25 +8,25 @@ use super::*;
 use crate::fake::{Call, FakeOs};
 use crate::os::{GroupAffinity, OsError, ReadBack, Spawn, Terminated};
 
-const ID: &str = "0123456789abcdef0123456789abcdef";
+pub(super) const ID: &str = "0123456789abcdef0123456789abcdef";
 const GAME: &str = r"C:\Games\My Game\game.exe";
 const OWN: &str = r#""C:\Program Files\Rerun\rerun-launch.exe" --profile "#;
 
 /// Steam's quoted command with arguments.
-fn tail() -> String {
+pub(super) fn tail() -> String {
     format!(r#""{GAME}" -window +set name "a b" 100%"#)
 }
 
-fn line_with(id: &str, tail: &str) -> String {
+pub(super) fn line_with(id: &str, tail: &str) -> String {
     format!("{OWN}{id} {tail}")
 }
 
-fn id() -> ProfileId {
+pub(super) fn id() -> ProfileId {
     ProfileId::from_hex(ID).unwrap()
 }
 
 /// A 5950X-shaped machine: group 0, 2 L3 x 8 cores x 2 threads, SMT siblings adjacent.
-fn zen3() -> CpuTopology {
+pub(super) fn zen3() -> CpuTopology {
     let cpus = (0u8..32)
         .map(|i| LogicalCpu {
             cpu_set_id: 0x100 + u32::from(i),
@@ -47,7 +47,7 @@ fn zen3() -> CpuTopology {
     }
 }
 
-fn rule(mode: Mode) -> CpuRule {
+pub(super) fn rule(mode: Mode) -> CpuRule {
     CpuRule {
         max_threads: Some(8),
         prefer: Prefer::Performance,
@@ -58,7 +58,7 @@ fn rule(mode: Mode) -> CpuRule {
     }
 }
 
-fn profile(cpu: Option<CpuRule>, priority: Option<Priority>) -> LaunchProfile {
+pub(super) fn profile(cpu: Option<CpuRule>, priority: Option<Priority>) -> LaunchProfile {
     LaunchProfile {
         method: Method::Direct,
         start: GAME.to_owned(),
@@ -71,7 +71,7 @@ fn profile(cpu: Option<CpuRule>, priority: Option<Priority>) -> LaunchProfile {
 }
 
 /// A machine with a valid profile for `GAME` and the zen3 topology.
-fn fake(p: &LaunchProfile) -> FakeOs {
+pub(super) fn fake(p: &LaunchProfile) -> FakeOs {
     let mut os = FakeOs::new(&line_with(ID, &tail()));
     os.profile = Ok(encode(p).unwrap());
     os.topology = Ok(zen3());
@@ -79,7 +79,7 @@ fn fake(p: &LaunchProfile) -> FakeOs {
 }
 
 /// CCD 0, first thread of each of its 8 cores (B5).
-const CCD0_FIRST_THREADS: GroupAffinity = GroupAffinity {
+pub(super) const CCD0_FIRST_THREADS: GroupAffinity = GroupAffinity {
     group: 0,
     mask: 0x5555,
 };
@@ -103,10 +103,13 @@ fn ran(rule: Rule, start: Start, exit: u32) -> Report {
         start,
         exit,
         terminated: None,
+        check: None,
+        written: Written::No,
     }
 }
 
-/// The report without the profile ID and the termination outcome (checked separately).
+/// The report without the profile ID, the termination outcome, the check and the result file
+/// (checked separately).
 fn core(r: Report) -> Report {
     match r {
         Report::Ran {
@@ -154,6 +157,11 @@ fn hard_rule_follows_the_b2_order() {
             Call::LimitJob(1, CCD0_FIRST_THREADS),
             Call::ReadBack(1),
             Call::Resume(1),
+            Call::WaitFor(1, CHECK_DELAY_MS),
+            Call::JobAffinity(1),
+            Call::ProcessAffinity(1),
+            Call::PriorityClass(1),
+            Call::WriteResult(id()),
             Call::Wait(1),
         ]
     );
@@ -193,6 +201,9 @@ fn soft_rule_sets_cpu_sets_on_the_suspended_child() {
             spawn_call(GAME, &tail(), spawn),
             Call::CpuSets(1, ids),
             Call::Resume(1),
+            Call::WaitFor(1, CHECK_DELAY_MS),
+            Call::ReadCpuSets(1),
+            Call::WriteResult(id()),
             Call::Wait(1),
         ]
     );
@@ -223,6 +234,9 @@ fn priority_without_cpu_rule_reads_no_topology() {
         [
             Call::ReadProfile(id()),
             spawn_call(GAME, &tail(), spawn),
+            Call::WaitFor(1, CHECK_DELAY_MS),
+            Call::PriorityClass(1),
+            Call::WriteResult(id()),
             Call::Wait(1),
         ]
     );
@@ -255,7 +269,12 @@ fn profile_missing_starts_unchanged() {
     );
     assert_eq!(
         os.calls(),
-        [Call::ReadProfile(id()), unchanged_spawn(), Call::Wait(1)]
+        [
+            Call::ReadProfile(id()),
+            unchanged_spawn(),
+            Call::WriteResult(id()),
+            Call::Wait(1)
+        ]
     );
     os.calls.borrow_mut().clear();
     os.profile = Err(OsError::ReparsePoint);
@@ -316,7 +335,12 @@ fn path_mismatch_starts_unchanged() {
     assert_eq!(core(run(&os)), skipped(Skip::PathMismatch));
     assert_eq!(
         os.calls(),
-        [Call::ReadProfile(id()), unchanged_spawn(), Call::Wait(1)]
+        [
+            Call::ReadProfile(id()),
+            unchanged_spawn(),
+            Call::WriteResult(id()),
+            Call::Wait(1)
+        ]
     );
 }
 
@@ -436,6 +460,7 @@ fn read_back_difference_ends_the_child_and_starts_unchanged() {
                 Call::ReadBack(1),
                 Call::Terminate(1),
                 unchanged_spawn(),
+                Call::WriteResult(id()),
                 Call::Wait(2),
             ]
         );
@@ -455,6 +480,7 @@ fn every_failure_after_the_spawn_ends_the_child_and_starts_unchanged() {
             Call::LimitJob(1, CCD0_FIRST_THREADS),
             Call::Terminate(1),
             unchanged_spawn(),
+            Call::WriteResult(id()),
             Call::Wait(2)
         ]
     );
@@ -473,6 +499,7 @@ fn every_failure_after_the_spawn_ends_the_child_and_starts_unchanged() {
             Call::Resume(1),
             Call::Terminate(1),
             unchanged_spawn(),
+            Call::WriteResult(id()),
             Call::Wait(2)
         ]
     );
@@ -482,7 +509,12 @@ fn every_failure_after_the_spawn_ends_the_child_and_starts_unchanged() {
     assert_eq!(core(run(&os)), skipped(Skip::CpuSets(87)));
     assert_eq!(
         os.calls()[4..],
-        [Call::Terminate(1), unchanged_spawn(), Call::Wait(2)]
+        [
+            Call::Terminate(1),
+            unchanged_spawn(),
+            Call::WriteResult(id()),
+            Call::Wait(2)
+        ]
     );
 }
 
@@ -491,7 +523,10 @@ fn spawn_failure_with_the_rule_retries_unchanged_once() {
     let os = fake(&profile(Some(rule(Mode::Hard)), None));
     os.spawns.borrow_mut().extend([Err(1450), Ok(())]);
     assert_eq!(core(run(&os)), skipped(Skip::Spawn(1450)));
-    assert_eq!(os.calls()[3..], [unchanged_spawn(), Call::Wait(1)]);
+    assert_eq!(
+        os.calls()[3..],
+        [unchanged_spawn(), Call::WriteResult(id()), Call::Wait(1)]
+    );
 
     let os = fake(&profile(Some(rule(Mode::Hard)), None));
     os.spawns.borrow_mut().extend([Err(2), Err(2)]);
@@ -529,6 +564,7 @@ fn elevation_required_goes_to_shell_execute_without_a_rule() {
                 file: GAME.to_owned(),
                 parameters: Some(r#"-window +set name "a b" 100%"#.to_owned()),
             },
+            Call::WriteResult(id()),
             Call::Wait(1),
         ]
     );
@@ -610,7 +646,8 @@ fn shell_execute_quoting_cases() {
                 ),
                 "{t}"
             );
-            assert_eq!(os.calls().len(), 2, "{t}");
+            assert_eq!(os.calls().len(), 3, "{t}");
+            assert_eq!(os.calls()[2], Call::WriteResult(id()), "{t}");
         }
     }
 }

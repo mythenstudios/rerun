@@ -5,9 +5,9 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use rerun_proto::cpu::CpuTopology;
-use rerun_proto::profile::ProfileId;
+use rerun_proto::profile::{Priority, ProfileId};
 
-use crate::os::{GroupAffinity, Os, OsError, ReadBack, Spawn, Terminated};
+use crate::os::{GroupAffinity, Os, OsError, ReadBack, Spawn, Terminated, priority_class};
 
 /// One recorded call. Paths and command lines as `String` (the tests use valid UTF-16).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +29,13 @@ pub(crate) enum Call {
         parameters: Option<String>,
     },
     Wait(u32),
+    WaitFor(u32, u32),
+    JobAffinity(u32),
+    ProcessAffinity(u32),
+    ReadCpuSets(u32),
+    PriorityClass(u32),
+    /// The bytes are in [`FakeOs::written`].
+    WriteResult(ProfileId),
 }
 
 pub(crate) struct FakeOs {
@@ -47,9 +54,25 @@ pub(crate) struct FakeOs {
     pub(crate) shell: Result<bool, u32>,
     pub(crate) wait: Result<u32, u32>,
     pub(crate) terminated: Terminated,
+    /// The post-launch check's wait: `Ok(false)` = still running after the delay.
+    pub(crate) wait_for: Result<bool, u32>,
+    /// `None`: what `limit_job` set (one entry, or none without a call).
+    pub(crate) job_affinity: Option<Result<Vec<GroupAffinity>, u32>>,
+    /// `None`: the mask `limit_job` set (all 32 bits without a call).
+    pub(crate) process_affinity: Option<Result<u64, u32>>,
+    /// `None`: what `set_cpu_sets` set (none without a call).
+    pub(crate) read_cpu_sets: Option<Result<Vec<u32>, u32>>,
+    /// `None`: the class of the last spawn's priority (normal without one).
+    pub(crate) priority_class: Option<Result<u32, u32>>,
+    pub(crate) now: u64,
+    pub(crate) write: Result<(), OsError>,
+    /// Every result file written, in order.
+    pub(crate) written: RefCell<Vec<Vec<u8>>>,
     pub(crate) calls: RefCell<Vec<Call>>,
     next: RefCell<u32>,
     last_limit: RefCell<Option<GroupAffinity>>,
+    last_sets: RefCell<Vec<u32>>,
+    last_priority: RefCell<Option<Priority>>,
 }
 
 fn s(u: &[u16]) -> String {
@@ -58,8 +81,8 @@ fn s(u: &[u16]) -> String {
 
 impl FakeOs {
     /// A non-elevated machine with the given command line, no profile file
-    /// (`ERROR_FILE_NOT_FOUND`), no topology (`Unsupported`), every other call succeeding and
-    /// the child exiting with 42.
+    /// (`ERROR_FILE_NOT_FOUND`), no topology (`Unsupported`), every other call succeeding,
+    /// the child still running at the check and exiting with 42, the clock at 1,762,600,000.
     pub(crate) fn new(line: &str) -> Self {
         Self {
             line: line.encode_utf16().collect(),
@@ -74,9 +97,19 @@ impl FakeOs {
             shell: Ok(true),
             wait: Ok(42),
             terminated: Terminated::Ended,
+            wait_for: Ok(false),
+            job_affinity: None,
+            process_affinity: None,
+            read_cpu_sets: None,
+            priority_class: None,
+            now: 1_762_600_000,
+            write: Ok(()),
+            written: RefCell::new(Vec::new()),
             calls: RefCell::new(Vec::new()),
             next: RefCell::new(0),
             last_limit: RefCell::new(None),
+            last_sets: RefCell::new(Vec::new()),
+            last_priority: RefCell::new(None),
         }
     }
 
@@ -117,6 +150,7 @@ impl Os for FakeOs {
             spawn: *spawn,
         });
         self.spawns.borrow_mut().pop_front().unwrap_or(Ok(()))?;
+        *self.last_priority.borrow_mut() = spawn.priority;
         let mut n = self.next.borrow_mut();
         *n += 1;
         Ok(*n)
@@ -147,6 +181,7 @@ impl Os for FakeOs {
 
     fn set_cpu_sets(&self, child: &u32, ids: &[u32]) -> Result<(), u32> {
         self.record(Call::CpuSets(*child, ids.to_vec()));
+        *self.last_sets.borrow_mut() = ids.to_vec();
         self.cpu_sets
     }
 
@@ -183,5 +218,54 @@ impl Os for FakeOs {
     fn wait(&self, child: u32) -> Result<u32, u32> {
         self.record(Call::Wait(child));
         self.wait
+    }
+
+    fn wait_for(&self, child: &u32, ms: u32) -> Result<bool, u32> {
+        self.record(Call::WaitFor(*child, ms));
+        self.wait_for
+    }
+
+    fn job_affinity(&self, child: &u32) -> Result<Vec<GroupAffinity>, u32> {
+        self.record(Call::JobAffinity(*child));
+        match &self.job_affinity {
+            Some(r) => r.clone(),
+            None => Ok(self.last_limit.borrow().iter().copied().collect()),
+        }
+    }
+
+    fn process_affinity(&self, child: &u32) -> Result<u64, u32> {
+        self.record(Call::ProcessAffinity(*child));
+        match self.process_affinity {
+            Some(r) => r,
+            None => Ok(self.last_limit.borrow().map_or(0xFFFF_FFFF, |ga| ga.mask)),
+        }
+    }
+
+    fn cpu_sets(&self, child: &u32) -> Result<Vec<u32>, u32> {
+        self.record(Call::ReadCpuSets(*child));
+        match &self.read_cpu_sets {
+            Some(r) => r.clone(),
+            None => Ok(self.last_sets.borrow().clone()),
+        }
+    }
+
+    fn priority_class(&self, child: &u32) -> Result<u32, u32> {
+        self.record(Call::PriorityClass(*child));
+        match self.priority_class {
+            Some(r) => r,
+            None => Ok(priority_class(
+                self.last_priority.borrow().unwrap_or(Priority::Normal),
+            )),
+        }
+    }
+
+    fn now_unix_s(&self) -> u64 {
+        self.now
+    }
+
+    fn write_result(&self, id: &ProfileId, bytes: &[u8]) -> Result<(), OsError> {
+        self.record(Call::WriteResult(*id));
+        self.written.borrow_mut().push(bytes.to_vec());
+        self.write.clone()
     }
 }

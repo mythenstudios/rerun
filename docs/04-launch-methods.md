@@ -26,12 +26,18 @@ The same applies to EA App, Rockstar Launcher, Battle.net. In addition: games th
 
 ## Post-launch check (required)
 
-`rerun-launch` checks the actual affinity (and priority class) of the target process about 5 s after the start, while it waits, and writes the outcome of the last start to `<LocalAppData>\Rerun\launch\<id>.result` (P3-2, ADR 0022 D5), never to the journal: the journal has one writer, and a game start during an `apply` must neither block nor write records. An elevated shim writes nothing (B13). Core reads the file as untrusted input.
+`rerun-launch` checks the actual affinity (and priority class) of the target process about 5 s after the start, while it waits, and writes the outcome of the last start to `<LocalAppData>\Rerun\launch\<id>.result` (ADR 0022 D5 and amendment P3-2), never to the journal: the journal has one writer, and a game start during an `apply` must neither block nor write records. Core reads the file as untrusted input.
+
+What is checked (rule applied, once, after waiting up to 5 s on the running game): hard limit – the job still holds exactly the selected group affinity and the game's process affinity equals it; soft limit – the game's default CPU Sets are exactly the selected ones; priority – the game's priority class is the one set (not checked if the profile sets none).
 
 - `ok` – "Affinity active · 8 of 32 threads · verified"
-- `reset` – the affinity was changed after the start (no culprit is named: the shim cannot tell who did it) · method hold/ifeo recommended
-- `target_not_found` – timeout, target exe never seen
-- `path_mismatch`, `profile_invalid`, `elevation_required`, … – the rule was not applied and the game started unchanged (below)
+- `reset` (`cpu`, `priority` or both) – changed after the start (no culprit is named: the shim cannot tell who did it) · method hold/ifeo recommended
+- `exited_early` – the started process ended before the check (a launcher stub that hands over to the real game: the Topo needs `watch`)
+- `failed:<code>` – the check itself could not read the process
+- `target_not_found` – `watch` only (P3-4): timeout, target exe never seen
+- `rule_skipped` with a reason – the rule was not applied and the game started unchanged (below): `profile_missing`, `profile_unreadable`, `profile_reparse_point`, `profile_invalid`, `method_unsupported`, `path_mismatch`, `topology_unavailable`, `topology_invalid`, `selection_empty`, `spawn_failed`, `job_failed`, `read_back_failed`, `mismatch` (the read-back before the resume differed), `cpu_sets_failed`, `resume_failed`, `elevation_required`, … (the full list and the file format in ADR 0022 amendment P3-2)
+
+The record is written once per start, before the shim waits for the game, so ending the shim (Steam's "Stop") does not lose it; a failed write changes nothing else. Nothing is written by an elevated shim (B13), for a token that is no profile ID, or when `<LocalAppData>\Rerun` does not exist; the folder `launch` is created if missing. The writer refuses a reparse point at `Rerun`, `launch` or the file. The file is Rerun's own state like the journal: revert and `forget` leave it, the next start replaces it.
 
 The app shows this the next time it is opened. Failures become suggestions for the Topo (GitHub issue template).
 
@@ -53,7 +59,7 @@ Launch option `"<path>\rerun-launch.exe" --profile <id> %command%` (`<id>`: 32 l
 - **Path only.** The rule applies only if `argv[0]` equals the profile's `start` (ordinal, case-insensitive); the game is started by Steam's spelling of the path. Otherwise `path_mismatch`. The exe's hash is checked when planning, not at the start.
 - **Fail open for the start.** A missing, unreadable or invalid profile, another path, a topology or selection error, or any failure while setting and reading back the limit starts Steam's command unchanged (no job, no limit, no priority). Error 740 (`requireAdministrator`) starts it through `ShellExecuteExW` without a rule (`.exe` only). A shim that runs elevated (Steam as administrator, or UAC off) never reads the profile and starts the command unchanged.
 - **Hard limit.** A Job Object with one `GROUP_AFFINITY` (`JobObjectGroupInformationEx`), the child created suspended inside it, the job and the initial thread read back, then resumed; a difference ends the suspended child and starts the command unchanged. **Soft limit.** `SetProcessDefaultCpuSets` on the suspended child (the started process only, not its children).
-- **Lifetime.** The shim waits for the process it started and exits with its exit code, so Steam keeps tracking the game (playtime, overlay, "Stop"). Before a start: exit 1 (DLL hardening failed) or 2 (the shim's own command line is unusable: no `--profile`, nothing after it, or `argv[0]` not absolute); 3: the command could not be started. No console window.
+- **Lifetime.** The shim waits for the process it started and exits with its exit code, so Steam keeps tracking the game (playtime, overlay, "Stop"); the post-launch check and the result file (above) happen while it waits. Before a start: exit 1 (DLL hardening failed) or 2 (the shim's own command line is unusable: no `--profile`, nothing after it, or `argv[0]` not absolute); 3: the command could not be started. No console window.
 
 ## A game that Steam moved or reinstalled
 

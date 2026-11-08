@@ -58,15 +58,18 @@ fn rerun_launch_exe_runs_with_the_restricted_search_path() {
     assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
 }
 
-/// End to end with a harmless system binary: an unknown profile ID starts Steam's command
-/// unchanged and passes its exit code on (D3, B3). Reads only the (missing) profile file.
+/// End to end with a harmless system binary: a token that is no profile ID starts Steam's
+/// command unchanged and passes its exit code on (D3, B3). It reads no profile and writes no
+/// result file (no ID, no file name), so the test never touches `LocalAppDataRerun` (a
+/// valid but unknown ID would write `launch<id>.result` there on a non-elevated machine that
+/// has the folder, P3-2).
 #[test]
 fn rerun_launch_exe_starts_the_command_and_passes_its_exit_code() {
     let system32 = Path::new(&std::env::var_os("SystemRoot").unwrap()).join("System32");
     let cmd = system32.join("cmd.exe");
     let out = Command::new(env!("CARGO_BIN_EXE_rerun-launch"))
         .arg("--profile")
-        .arg("fefefefefefefefefefefefefefefefe")
+        .arg("FEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFE")
         .arg(&cmd)
         .args(["/c", "exit", "7"])
         .output()

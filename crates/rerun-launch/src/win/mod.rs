@@ -1,6 +1,8 @@
 //! `WinOs`: the real [`Os`] of the shim. The command line, the token check (M1) and the
-//! profile read (D2) live here; process, job and shell calls in [`launch`] (the one wrapper
-//! module of the banned setters, ADR 0010 and ADR 0022); the topology in `cpu` (64-bit only).
+//! profile read (D2) live here; process, job and shell calls and the reads of the post-launch
+//! check in [`launch`] (the one wrapper module of the banned setters, ADR 0010 and ADR 0022);
+//! the result file writer in `result` (the one wrapper module of the shim's file writes,
+//! P3-2); the topology in `cpu` (64-bit only).
 
 #![allow(
     unsafe_code,
@@ -11,10 +13,11 @@
 #[cfg(target_pointer_width = "64")]
 mod cpu;
 pub(crate) mod launch;
+mod result;
 
 use std::ffi::{OsString, c_void};
 use std::io::Read;
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::PathBuf;
@@ -347,6 +350,41 @@ impl Os for WinOs {
 
     fn wait(&self, child: launch::Child) -> Result<u32, u32> {
         launch::wait(child)
+    }
+
+    fn wait_for(&self, child: &launch::Child, ms: u32) -> Result<bool, u32> {
+        launch::wait_for(child, ms)
+    }
+
+    fn job_affinity(&self, child: &launch::Child) -> Result<Vec<GroupAffinity>, u32> {
+        launch::job_affinity(child)
+    }
+
+    fn process_affinity(&self, child: &launch::Child) -> Result<u64, u32> {
+        launch::process_affinity(child)
+    }
+
+    fn cpu_sets(&self, child: &launch::Child) -> Result<Vec<u32>, u32> {
+        launch::cpu_sets(child)
+    }
+
+    fn priority_class(&self, child: &launch::Child) -> Result<u32, u32> {
+        launch::priority_class(child)
+    }
+
+    fn now_unix_s(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    }
+
+    fn write_result(&self, id: &ProfileId, bytes: &[u8]) -> Result<(), OsError> {
+        // B13, the same determination as for the profile (M1); `run` never asks then.
+        if self.elevated() {
+            return Err(OsError::Elevated);
+        }
+        let base: Vec<u16> = local_app_data()?.encode_wide().collect();
+        result::write(&base, id, bytes)
     }
 }
 
