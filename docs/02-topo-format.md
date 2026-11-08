@@ -43,6 +43,8 @@ launch:
   chain: [steam, upc]    # steam | upc | ea-app | rockstar | battlenet | epic | gog-galaxy
   method: auto           # auto | direct | watch | hold | ifeo | inproc
   fallback: inproc       # like method, without auto
+  # start: "<exe of Steam's launch entry>"  # relative to the game folder (below)
+  # priority: above_normal                   # normal | above_normal | high (below)
 
 issues:
   - id: controller
@@ -73,6 +75,8 @@ links:
 
 - `steam_appid` (in `match`, optional): the Steam app ID as an integer from 1 to 4294967295 (`u32`), the same range `detect::steam::files::AppManifest` accepts for `appid` in `appmanifest_<appid>.acf` (ADR 0011).
 - `api` (in `match.exes`): `ddraw | d3d8 | d3d9 | d3d10 | d3d11 | opengl`. Detection also recognises `d3d12`, `vulkan` and `glide` (ADR 0014); these spellings are reserved for an additive extension of `$defs/api` in both schemas, made with the first Topo or package that needs them (phase 4 at the latest) and before the first release.
+- `launch.start`: the program of **Steam's launch entry**, what Steam starts on Play (a launcher such as `FFLauncher.exe` may start the game itself), relative to the game folder, a `.exe`. `rerun-launch` applies a rule only when Steam's first argument is exactly this program (else `path_mismatch`, an unchanged start). Rerun does not read Steam's `appinfo.vdf` (ADR 0022 amendment P3-3, E2 a): find the entry in Steam's process tree while the game runs, or start it once through a profile and read `rerun status` (`path_mismatch` names the case); never guess, unknown is `TODO` with status `draft`. Required for `direct` and `watch` by the Topo loader (phase 4); the phase 3 step `launch_method` names it itself (below).
+- `launch.priority`: `normal`, `above_normal` or `high` (never realtime), set by `rerun-launch` at the start and checked about 5 s later. Only when `launch.start` is the game itself: a launcher does not pass a priority class on to the game it starts (ADR 0022 amendment P3-3); `watch` (P3-4) sets it on the game.
 - `variants`: may be empty = "no known fix", a valid answer.
 - `status` per variant: `verified` (tested ourselves, with hardware in the changelog), `reported` (several independent reports), `unverified` (single statement).
 - `kind` (required): `fix` (game runs as intended) or `enhancement`.
@@ -142,7 +146,19 @@ Until the Topo engine exists, `rerun plan <steps.json>` reads the steps from a J
 - `format`: `1`; read first, any other number is refused before anything else is parsed.
 - `game`: exactly one of `{"steam": <app id>}` (the installed app found in exactly one Steam library; listed twice, updating or not installed is refused) or `{"folder": "<absolute path>"}` (a drive-letter folder, opened like a manually added game folder, never on the forbidden list).
 - `main_exe`: required (user decision E4 a), a relative path to a plain file of the game folder: the program apply and revert ask `users()` about (`04-launch-methods.md`).
-- `steps`: the step objects of this section (`file_install`, `registry_set`, `compat_layer`, `ini_set`), in the order they are planned (the plan puts every registry op after every file op).
+- `steps`: the step objects of this section (`file_install`, `registry_set`, `compat_layer`, `ini_set`, `launch_method`), in the order they are planned (the plan puts the launch profile first, then every other file op, then every registry op).
+
+`launch_method` (P3-3c, ADR 0020 and ADR 0022 amendments P3-3), at most one per plan: the launch profile `rerun-launch` reads, written by `apply` to `<LocalAppData>\Rerun\profiles\<id>.profile` (nothing in the game folder, no administrator rights). Stronghold 2 (app 40960), whose Steam entry is a launcher:
+
+```json
+{"format":1,"game":{"steam":40960},"main_exe":"Stronghold2.exe","steps":[
+  {"launch_method":{"method":"direct","start":"FFLauncher.exe","cpu":{"max_threads":8,"single_l3":true,"smt":false}}}]}
+```
+
+- `method`: `direct` (`auto` is refused until the Topo engine, phase 4; `watch` comes with P3-4).
+- `start`: as `launch.start` above, relative; `main_exe` stays the game (the program apply and revert ask, D4). `start` and `main_exe` must both be x86 or x64 images; the profile says `x86` if either is i386 (a .NET launcher is i386 on disk), which limits the game to processors 0 to 31 of a group (ADR 0022 B6).
+- `cpu`: a CPU rule (below); `priority`: as `launch.priority`. At least one of the two. With `start` other than `main_exe` (a launcher) only a hard rule: `mode: soft` and `priority` are refused, they would reach the launcher only.
+- Only for a Steam game in a library at its canonical path (not through a junction); the start path is at most 259 characters. The profile's ID comes from the Steam app ID, so the launch option stays valid across plans. The same rule planned again is "nothing to do"; another rule replaces Rerun's profile (a revert restores the earlier one). `watch_timeout_s` in a `direct` profile is always 120 (unused by `direct`).
 - The file is untrusted input: at most 1 MiB, UTF-8 without BOM, `deny_unknown_fields` at every level, read through `policy::root::read_input` (its folder by absolute path, read side only; the file one plain segment below it, never a link; not directly on a drive root, not on a network share). An error names its class, line and column, never the text.
 
 ### CPU rules (in `launch.cpu` or as a step)
@@ -157,6 +173,8 @@ cpu:
   mode: hard              # hard (affinity) | soft (CPU Sets)
   report_cores: 8         # only in launch.cpu and only with method: inproc
 ```
+
+Every field is optional, at least one is given (`cpu: {}` is refused). A missing field does not restrict: `max_threads` none, `prefer: any`, `single_l3: false`, `prefer_l3` none, `smt: true`, `mode: hard` (ADR 0022 amendment P3-3, F8). `report_cores` is refused outside `method: inproc` (phase 6). `mode: soft` sets the default CPU Sets of the started program only, a preference Windows may override, and never reaches programs it starts.
 
 Never concrete thread numbers in Topos. See `03-cpu-topology.md`. `single_l3` keeps the game on the LLC with the most threads, which is not always the one with full-size cores: on CPUs with compact cores (Zen 5c next to Zen 5, Ryzen AI 300) it picks the larger Zen 5c cluster. For full-size cores (or the V-Cache CCD) write `prefer_l3: largest`. `shim_single` (`04-launch-methods.md`) enters the enum `method` only with Phase 6.
 

@@ -86,6 +86,7 @@ pub(crate) fn plan_steps(
             steam_app: None,
             main_exe: main.as_ref(),
             reg: RegPolicy.reader(sys),
+            app_path: None,
         },
     )
 }

@@ -89,8 +89,13 @@ fn tokens(spec: &CompatLayerSpec) -> Result<Vec<TokenName>, PlanError> {
 
 /// `exe` in the stored spelling of every segment, if it is a plain `.exe` file of the game
 /// folder below plain folders (module docs).
-fn stored_exe(game: &GameDir<'_>, exe: &RelPath) -> Result<RelPath, PlanError> {
-    let bad = |why: &str| refuse(format!("compat_layer: {}: {why}", shown(exe.as_str())));
+/// `step` names the step in messages (`compat_layer`, `launch_method`).
+pub(crate) fn stored_exe(
+    game: &GameDir<'_>,
+    exe: &RelPath,
+    step: &str,
+) -> Result<RelPath, PlanError> {
+    let bad = |why: &str| refuse(format!("{step}: {}: {why}", shown(exe.as_str())));
     if !fold(exe.file_name()).ends_with(&fold(".exe")) {
         return Err(bad("not an .exe file"));
     }
@@ -203,7 +208,7 @@ pub(crate) fn plan_into(
         return Err(refuse("compat_layer: the game folder is case-sensitive"));
     }
     let wanted = tokens(spec)?;
-    let exe = stored_exe(game, &spec.exe)?;
+    let exe = stored_exe(game, &spec.exe, "compat_layer")?;
     let slot = RegSlot::CompatLayers {
         root: RootIx(0),
         exe: exe.clone(),

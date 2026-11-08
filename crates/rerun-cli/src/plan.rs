@@ -56,6 +56,9 @@ fn run<W: Write, E: Write>(
         .map_err(|e| fail(err, TxnMsg::StepFile { error: shown(&e) }, Exit::Refused))?;
     let app = AppDir::open(sys, Create::Never)
         .map_err(|e| fail(err, TxnMsg::AppDir { error: shown(&e) }, Exit::Fatal))?;
+    // P3-3c: the path of Rerun's folder without creating it (a launch profile names its
+    // profiles root by path); unknown only fails a `launch_method` step.
+    let app_path = AppDir::path_of(sys).ok();
     let (bytes, view) = with_game(sys, &fr, &sf.game, err, |game, steam_app| {
         let ctx = PlanCtx {
             game,
@@ -63,6 +66,7 @@ fn run<W: Write, E: Write>(
             steam_app,
             main_exe: Some(&sf.main_exe),
             reg: RegPolicy.reader(sys),
+            app_path: app_path.as_ref(),
         };
         let p = prim::plan(&sf.steps, &ctx)?;
         let b = p.encode()?;

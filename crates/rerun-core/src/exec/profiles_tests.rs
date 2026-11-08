@@ -110,6 +110,7 @@ fn game_plan(env: &Env, app_id: u32, steps: &[Step]) -> Plan {
             steam_app: Some(app_id),
             main_exe: Some(&main),
             reg: RegPolicy.reader(&env.sys),
+            app_path: None,
         },
     )
     .unwrap_or_else(|e| panic!("{e}"))

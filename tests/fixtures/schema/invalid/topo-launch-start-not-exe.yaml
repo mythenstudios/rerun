@@ -1,0 +1,13 @@
+# Invalid: launch.start not-exe
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+launch:
+  method: direct
+  start: "launcher.bat"
+issues: []

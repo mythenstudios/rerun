@@ -326,6 +326,7 @@ fn s6_planning_without_rerun_s_folder() {
         steam_app: None,
         main_exe: Some(&main),
         reg: RegPolicy.reader(&env.sys),
+        app_path: None,
     };
     let app0 = snap_app(&env.sys);
     let e = plan(&[Step::FileInstall(t1_spec())], &ctx).unwrap_err();

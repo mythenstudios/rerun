@@ -1,0 +1,15 @@
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  steam_appid: 40960
+  exes:
+    - { path: "Stronghold2.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+launch:
+  chain: [steam]
+  method: direct
+  start: "FFLauncher.exe"
+  cpu: { max_threads: 8, single_l3: true, smt: false }
+issues: []

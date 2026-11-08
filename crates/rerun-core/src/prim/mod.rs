@@ -13,6 +13,9 @@
 //!
 //! - [`ini_set`]: keys of an existing INI file of the game folder (P2-12, ADR 0021): one
 //!   `IniValue` per file with its edits.
+//! - [`launch_method`]: the launch profile of a Steam game for `rerun-launch` (P3-3c, ADR 0022
+//!   amendment P3-3): one `CreateFile`/`ReplaceFile` with inline content on the plan root
+//!   `<LocalAppData>\Rerun\profiles` (root 1), op 0 of the plan.
 //! - [`StepFile`]: the phase 2 step file `rerun plan` reads (P2-13), a throwaway wrapper until
 //!   the Topo engine (phase 4 removes it).
 //!
@@ -23,6 +26,7 @@
 pub mod compat_layer;
 pub mod file_install;
 pub mod ini_set;
+pub mod launch_method;
 pub mod registry_set;
 mod step_file;
 
@@ -31,14 +35,20 @@ use serde::{Deserialize, Serialize};
 pub use compat_layer::CompatLayerSpec;
 pub use file_install::{FileEntry, FileInstallSpec};
 pub use ini_set::{IniSetSpec, IniSetValue};
+pub use launch_method::{
+    CpuRuleSpec, LaunchMethodSpec, MachineView, MachineWhy, MethodSpec, ModeSpec, PreferL3Spec,
+    PreferSpec, PrioritySpec, SelectionShown, launch_option, on_this_machine,
+};
 pub use registry_set::{RegValueEntry, RegistrySetSpec};
 pub use step_file::{
     GameRef, MAX_STEP_FILE, ParseClass, STEP_FILE_FORMAT, StepFile, StepFileError,
 };
 
 use crate::fold::fold;
-use crate::path::RelPath;
-use crate::plan::{FORMAT, Op, Plan, PlanError, PlanOrigin, PlanRoot, RootKind, Target};
+use crate::path::{RelPath, RootPath};
+use crate::plan::{
+    FORMAT, Op, PROFILES_ROOT_ID, Plan, PlanError, PlanOrigin, PlanRoot, RootKind, Target,
+};
 use crate::policy::registry::RegReader;
 use crate::policy::root::{AppDir, GameDir, GameOrigin};
 use crate::sys::SysErrorKind;
@@ -57,6 +67,8 @@ pub enum Step {
     CompatLayer(CompatLayerSpec),
     /// [`ini_set`].
     IniSet(IniSetSpec),
+    /// [`launch_method`] (at most one per plan).
+    LaunchMethod(LaunchMethodSpec),
 }
 
 /// What a planner reads: the game folder, Rerun's folder (packages), and what identifies the
@@ -77,6 +89,11 @@ pub struct PlanCtx<'a> {
     pub main_exe: Option<&'a RelPath>,
     /// The registry as `registry_set` reads it (`RegPolicy::reader`: no link followed).
     pub reg: RegReader<'a>,
+    /// The canonical path of `<LocalAppData>\Rerun` (`AppDir::path_of`) when [`Self::app`] is
+    /// `None` (a dry run before the first run creates nothing); with an `app`, its path counts,
+    /// and this, if given, must be the same. Only `launch_method` needs it (the path of the
+    /// profiles root, so a plan's bytes are the same with and without `--dry-run`).
+    pub app_path: Option<&'a RootPath>,
 }
 
 /// The ops planned so far, shared by the steps of one plan.
@@ -95,6 +112,11 @@ pub(crate) struct Builder {
     pub(crate) reg_values: Vec<(RegKey, String)>,
     /// Folded paths of the files of the `ini_set` steps.
     pub(crate) ini_files: Vec<String>,
+    /// The profile op of the one `launch_method` step and the path of the profiles root
+    /// (`None`: no such step, or its profile is there already: nothing to do).
+    pub(crate) profile: Option<(Op, RootPath)>,
+    /// A `launch_method` step was planned (F9: at most one).
+    pub(crate) launch_method: bool,
 }
 
 impl Builder {
@@ -152,6 +174,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
             Step::RegistrySet(spec) => registry_set::plan_into(spec, ctx, &mut b)?,
             Step::CompatLayer(spec) => compat_layer::plan_into(spec, ctx, &mut b)?,
             Step::IniSet(spec) => ini_set::plan_into(spec, ctx, &mut b)?,
+            Step::LaunchMethod(spec) => launch_method::plan_into(spec, ctx, &mut b)?,
         }
     }
     // One file is either installed or edited in one plan (the plan format allows one op per
@@ -181,16 +204,29 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
     if file_ops && !ctx.game.info().user_writable {
         return Err(PlanError::NeedsHelper);
     }
+    let mut roots = vec![PlanRoot {
+        kind: RootKind::Game,
+        path: ctx.game.path().clone(),
+        id: ctx.game.id(),
+        origin,
+        main_exe: ctx.main_exe.cloned(),
+    }];
+    let mut ops = b.ops;
+    // P3-3 (F3): the profile is op 0 on root 1, so a revert reaches it last.
+    if let Some((op, path)) = b.profile {
+        roots.push(PlanRoot {
+            kind: RootKind::Profiles,
+            path,
+            id: PROFILES_ROOT_ID,
+            origin: PlanOrigin::AppDir,
+            main_exe: None,
+        });
+        ops.insert(0, op);
+    }
     let plan = Plan {
         format: FORMAT,
-        roots: vec![PlanRoot {
-            kind: RootKind::Game,
-            path: ctx.game.path().clone(),
-            id: ctx.game.id(),
-            origin,
-            main_exe: ctx.main_exe.cloned(),
-        }],
-        ops: b.ops,
+        roots,
+        ops,
     };
     // The bounds of the format (ops, op size, backups): the same check as when applied.
     plan.encode()?;
@@ -225,6 +261,8 @@ pub(crate) fn folded(p: &RelPath) -> String {
 
 #[cfg(test)]
 pub(crate) mod ini_tests;
+#[cfg(test)]
+pub(crate) mod launch_tests;
 #[cfg(test)]
 pub(crate) mod layer_tests;
 #[cfg(test)]

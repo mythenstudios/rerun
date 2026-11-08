@@ -111,6 +111,7 @@ fn try_plan(env: &Env, steps: &[Step]) -> Result<PlanHash, plan::PlanError> {
             steam_app: None,
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(&env.sys),
+            app_path: None,
         },
     )?;
     plan::store(&a, &p.encode()?)

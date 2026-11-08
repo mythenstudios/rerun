@@ -16,7 +16,8 @@
 //!   SHA-256 of its bytes.
 //! - [`Rules::Current`] only (planning, encode, apply): the bytes decode as a launch profile
 //!   (`rerun_proto::profile`), its `start` and `target` lie below the path of root 0 (folded),
-//!   `start` has at most [`MAX_START_UNITS`] UTF-16 units, and the file name is
+//!   `start` has at most [`MAX_START_UNITS`] UTF-16 units, root 0 names its main executable
+//!   (D4 asks it, also for a plan whose only op is the profile; review S2), and the file name is
 //!   [`profile_id`] of root 0's Steam app. A recorded head keeps only the form, so a rule a
 //!   later version adds never blocks a revert (user decision E4 of P2-11); the revert only
 //!   observes hashes and never reads the profile.
@@ -245,6 +246,14 @@ fn current(plan: &Plan, k: usize, path: &RelPath, bytes: &[u8]) -> Result<(), Pl
     let PlanOrigin::Steam { app_id, .. } = &game.origin else {
         return Err(invalid(Some(k), "a profile without its game root"));
     };
+    // P3-3c review S2: the game-closed check (D4) of a profile plan asks the game's main
+    // executable, also when the profile is the plan's only op (F11).
+    if game.main_exe.is_none() {
+        return Err(invalid(
+            Some(k),
+            "a profile plan without the game's main executable",
+        ));
+    }
     let p = proto::decode(bytes)
         .map_err(|_| invalid(Some(k), "inline bytes that are no launch profile"))?;
     if !below(&p.start, &game.path) || !below(&p.target, &game.path) {

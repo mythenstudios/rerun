@@ -37,9 +37,9 @@ A WOW64 process holds affinity as pointer-sized values: `DWORD_PTR` in `SetProce
 ### D1 · Profile format 1
 - UTF-8 text, at most 8 KiB (`MAX_PROFILE_BYTES`), header `rerun-profile 1`, then `key=value` lines in a fixed order, each ending in LF: `method` (`direct`/`watch`), `start`, `target`, `bitness` (`x86`/`x64`), `priority` (`none`/`normal`/`above_normal`/`high`), `watch_timeout_s` (1–120), `cpu` (`none`/`rule`), and with `rule` the six lines `cpu.prefer`, `cpu.single_l3`, `cpu.prefer_l3`, `cpu.smt`, `cpu.mode`, `cpu.max_threads` (`none`/1–4096). Every key always present (explicit `none`), so the encoding is canonical: a file decodes to one profile and encodes back to the same bytes.
 - Refused: more than 8 KiB (before parsing), not UTF-8, no final LF, CR, any control character, an empty line, another header or format, an unknown, repeated, misplaced or trailing key, a value outside its set, a number with a sign or leading zero, `direct` with `target != start`. Errors carry the line and the key, never content.
-- `start` and `target` are canonical absolute drive paths: `X:\` and components, none empty, `.` or `..`, none starting with a space or ending in a space or a dot, none a reserved device name (`CON`, `NUL`, `COM1`, `nul.txt`, …), none of `< > : " / | ? *`, no Unicode format or separator character (Cf, Zl, Zp: bidirectional controls, zero-width characters, U+FEFF, U+2028/U+2029), at most 2,048 UTF-16 units; never `\\?\`, UNC or relative. `bitness` is the target's PE machine, read when planning.
+- `start` and `target` are canonical absolute drive paths: `X:\` and components, none empty, `.` or `..`, none starting with a space or ending in a space or a dot, none a reserved device name (`CON`, `NUL`, `COM1`, `nul.txt`, …), none of `< > : " / | ? *`, no Unicode format or separator character (Cf, Zl, Zp: bidirectional controls, zero-width characters, U+FEFF, U+2028/U+2029), at most 2,048 UTF-16 units; never `\\?\`, UNC or relative. `bitness` is `x86` if a process of the chain the rule reaches is i386 (`IMAGE_FILE_MACHINE_I386`), read when planning: the planner reads `start` and the game's main executable (amendment P3-3, review condition A8). A .NET "AnyCPU" image is i386 on disk and may run as x64; it counts as x86, conservatively: the cost is only on a processor group of more than 32 logical processors (B6).
 - `encode` checks its output with `decode` (a difference is `NotCanonical`) and fails rather than write a file the shim would refuse (a deviation from the plan's infallible signature).
-- `ProfileId`: 16 bytes, 32 lower-case hex digits in the file name and the launch option. How core derives it (folded canonical start path, or app ID + start path; plan nit) is decided with the planner in P3-3.
+- `ProfileId`: 16 bytes, 32 lower-case hex digits in the file name and the launch option. Core derives it from the Steam app ID (`rerun_core::plan::profile_id`, user decision E1 a of P3-3; amendment P3-3 below).
 - Place: `<LocalAppData>\Rerun\profiles\<id>.profile` (docs/01). Written only by `apply` as a journaled file op (P3-3).
 
 ### D2 · How the shim finds its profile
@@ -181,8 +181,41 @@ The primary group is no longer set at creation. On a multi-group machine the rea
 
 Stronghold 2 (Steam app 40960, 32-bit), 5950X, build 26300, release shim; rows in docs/09, "Launch shim on the developer machine".
 
-- **Launcher entry.** Steam's only launch entry is `FFLauncher.exe`; it starts `Stronghold2.exe` with `ShellExecute`. A profile whose start path is the game exe records `skipped:path_mismatch` and starts unchanged (D3 as designed). With the launcher as start path the game inherits the job and its limit. P3-3 therefore takes the start path from the exe of Steam's launch entry (appinfo), not from the game exe the topo names; the post-launch check then covers the launcher, not the game.
+- **Launcher entry.** Steam's only launch entry is `FFLauncher.exe`; it starts `Stronghold2.exe` with `ShellExecute`. A profile whose start path is the game exe records `skipped:path_mismatch` and starts unchanged (D3 as designed). With the launcher as start path the game inherits the job and its limit. P3-3 therefore takes the start path from the exe of Steam's launch entry, named explicitly in the step or Topo (`start`; user decision E2 a of P3-3: `appinfo.vdf` is not read, see amendment P3-3), not from the game exe the topo names; the post-launch check then covers the launcher, not the game.
 - **B4, `KILL_ON_JOB_CLOSE`: stays off.** Steam's "Stop" ended the game after the shim had already exited with the launcher: Steam tracks the game itself, so the flag is not needed for "Stop" and would only add the risk named in B4.
 - **B3 / R1.** The shim exiting before the game (it waits for its direct child, the launcher) did not break Steam's running state, "Stop" or the overlay. The wait stays as decided; playtime, Steam Input and cloud sync are still open.
 - **D2: unchanged.** Warm start delay 31 ms; the cold measurement is still open.
 - **M2.** Steam passes the exe path quoted when it contains spaces.
+
+## Amendment P3-3 (2026-11-08): the `launch_method` planner
+
+Plan `P3-3` with the user decisions E1 a and E2 a and the review conditions (senior-dev and security-reviewer on the plan; A8, N2 to N4 and S2 of the reviews of P3-3a). The format of the plan and `exec` are ADR 0020 amendment P3-3; this records what the planner (`rerun_core::prim::launch_method`, P3-3c) decides about the profile.
+
+### Profile ID (E1 a)
+`plan::profile_id(app_id)`: the first 16 bytes of SHA-256(`"rerun-profile-id\0"` ‖ `1u8` ‖ `"steam\0"` ‖ the app ID as 4 bytes little-endian). One profile per Steam app: a new plan, another start or a moved library keep the ID and so the launch option the user pasted; the domain tag leaves room for a form without Steam. Pinned: app 40960 (Stronghold 2) is `79ac7ab577e4075a93c65cf04abd5211`.
+
+### Start path (E2 a, F4, F7)
+- `start` is the program of **Steam's launch entry** (what Steam starts on Play), named in the step (`launch_method.start`) or the Topo (`launch.start`), relative to the game folder. `appinfo.vdf` is **not** read: a binary, undocumented format Valve changes without notice would be a new untrusted parser for a fact a Topo records once; a wrong `start` shows itself as `path_mismatch` and starts unchanged (D3). Phase 4 re-evaluates with the Topo loader. The curator finds the entry in Steam's process tree or with `rerun status` (`path_mismatch`), never by guessing.
+- The profile names `<game folder>\<start>` in the spelling stored on disk; at most 259 UTF-16 units (long paths unmeasured); a plain `.exe` below plain folders, none case-sensitive. Only a Steam game folder at its canonical path: a library reached through a junction or another name is refused (Steam's `argv[0]` would be another path).
+
+### The launcher case (F5) and what is inherited (N2)
+With `start` other than the main executable (folded), only a hard CPU rule is allowed; `mode: soft` and `priority` are refused until `watch` (P3-4) sets both on the game itself:
+- **Hard limit:** the job's group affinity is inherited by every process the started program creates in the job (Nested Jobs; measured on the developer machine with Stronghold 2, row "Steam starts a launcher" in docs/09).
+- **Priority class (a):** `CreateProcessW`, `dwCreationFlags`: "If none of the priority class flags is specified, the priority class defaults to `NORMAL_PRIORITY_CLASS` unless the priority class of the creating process is `IDLE_PRIORITY_CLASS` or `BELOW_NORMAL_PRIORITY_CLASS`. In this case, the child process receives the default priority class of the calling process." (https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw, https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags). A class above normal that the shim sets on a launcher is therefore not passed on to the game.
+- **Default CPU Sets (b):** the page of `SetProcessDefaultCpuSets` (https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setprocessdefaultcpusets) says nothing about child processes. Not confirmed by documentation, so the refusal stays (fail closed); docs/09 has a manual row to measure it.
+- **`JOB_OBJECT_LIMIT_PRIORITY_CLASS` (c)** would set one class for every process of the job, but `JOBOBJECT_BASIC_LIMIT_INFORMATION.PriorityClass` requires that "the calling process must enable the `SE_INC_BASE_PRIORITY_NAME` privilege" (https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_limit_information). A standard user does not hold `SeIncreaseBasePriorityPrivilege` by default, so it is no option for a shim that never runs elevated (rule 6).
+- The quotes above are to be re-confirmed against the current pages by the `win32-systems` review of P3-3c.
+
+### Bitness (F6, A8)
+`x86` if `start` **or** the main executable has machine `IMAGE_FILE_MACHINE_I386`, else `x64`; ARM64, another machine or no PE image is refused. This is "a process of the chain the rule reaches is i386" for the chain the planner can see; Stronghold 2's `FFLauncher.exe` is a .NET image, i386 on disk ("AnyCPU", it may run as x64): counted as x86. The cost of x86 is only on a group of more than 32 logical processors (B6); the preview names it.
+
+### The rule, the timeout, the size (F8, F9, N3)
+- `cpu` fields that are missing do not restrict: `prefer: any`, `single_l3: false`, `prefer_l3` none, `smt: true`, no `max_threads`, `mode: hard`; `cpu: {}` and `max_threads` outside 1 to 1024 are refused, `report_cores` too (in-process only, phase 6), and `method: auto` (the Topo engine, phase 4). A step needs `cpu` or `priority`; at most one `launch_method` step per plan.
+- `watch_timeout_s` of a `direct` profile is always 120 (the format keeps the key; the shim reads it only for `watch`), so equal rules give equal bytes and the same rule planned again is "nothing to do".
+- The profile is at most 2 KiB (`plan::MAX_INLINE_BYTES`).
+
+### The game must be closed (F11, S2)
+D4 holds for a plan whose only op is the profile: apply and revert ask `users()` of the main executable, and the format (`Rules::Current`) requires root 0 to name it whenever the plan has a profile.
+
+### On this machine (preview only)
+`prim::on_this_machine(topology, profile)` runs `cpu::rule::select` on the topology now and shows threads of all, group, mask, cores and the one LLC, hard or soft, more than one group, and the x86 cap (B6); a topology that cannot be read or an empty selection is said as such ("rerun-launch decides at every start"). Never part of the plan: CPU Set IDs are runtime values.

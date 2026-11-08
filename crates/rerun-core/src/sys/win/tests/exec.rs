@@ -99,6 +99,7 @@ impl Win {
                     steam_app: None,
                     main_exe: Some(&main),
                     reg: crate::policy::registry::RegPolicy.reader(&self.sys),
+                    app_path: None,
                 },
             )
             .unwrap_or_else(|e| panic!("{e}"));
@@ -138,6 +139,7 @@ impl Win {
                     steam_app: None,
                     main_exe: Some(&main),
                     reg: crate::policy::registry::RegPolicy.reader(&self.sys),
+                    app_path: None,
                 },
             )
             .unwrap_or_else(|e| panic!("{e}"));
@@ -826,6 +828,7 @@ impl WinSteam {
                     steam_app: Some(220),
                     main_exe: Some(&main),
                     reg: crate::policy::registry::RegPolicy.reader(&w.sys),
+                    app_path: None,
                 },
             )
             .unwrap_or_else(|e| panic!("{e}"));

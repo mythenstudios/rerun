@@ -283,6 +283,25 @@
         },
         "cpu": {
           "$ref": "#/$defs/cpuRuleLaunch"
+        },
+        "start": {
+          "description": "The program of Steam's launch entry (what Steam starts on Play), relative to the game folder; may be a launcher other than the game (P3-3, ADR 0022 amendment P3-3). Required for direct and watch by the Topo loader (phase 4).",
+          "allOf": [
+            {
+              "$ref": "#/$defs/relPath"
+            },
+            {
+              "pattern": "\\.[Ee][Xx][Ee]$"
+            }
+          ]
+        },
+        "priority": {
+          "description": "Priority class set by rerun-launch at the start; never realtime. Only when start is the game itself (a launcher passes no priority class on).",
+          "enum": [
+            "normal",
+            "above_normal",
+            "high"
+          ]
         }
       },
       "if": {

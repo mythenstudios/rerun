@@ -238,6 +238,7 @@ impl Sb {
                     steam_app: None,
                     main_exe: Some(&main),
                     reg: crate::policy::registry::RegPolicy.reader(&self.sys),
+                    app_path: None,
                 },
             )
             .map_err(|e| e.to_string())?;

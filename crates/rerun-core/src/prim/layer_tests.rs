@@ -250,6 +250,7 @@ fn t9l_a_game_folder_reached_through_a_link_is_refused() {
         steam_app: None,
         main_exe: Some(&main),
         reg: RegPolicy.reader(&sys),
+        app_path: None,
     };
     let e = plan(&[layer_step("game.exe", &["ZZ_OS_A"])], &ctx(&via)).unwrap_err();
     assert!(e.to_string().contains("reached through a link"), "{e}");
@@ -464,6 +465,7 @@ fn t9l_a_steam_library_reached_through_a_junction_is_refused() {
             steam_app: Some(220),
             main_exe: Some(&main),
             reg: RegPolicy.reader(&sys),
+            app_path: None,
         };
         let r = plan(&[layer_step("game.exe", &["ZZ_OS_A"])], &ctx);
         assert_eq!(r.is_ok(), ok, "{lib}: {r:?}");
@@ -502,6 +504,7 @@ fn t9l_a_long_launch_path_opens_the_game_and_refuses_only_compat_layer() {
         steam_app: Some(220),
         main_exe: Some(&main),
         reg: RegPolicy.reader(&sys),
+        app_path: None,
     };
     let e = plan(&[layer_step("game.exe", &["ZZ_OS_A"])], &ctx).unwrap_err();
     assert!(e.to_string().contains("reached through a link"), "{e}");

@@ -312,7 +312,17 @@ impl AppDir<'_> {
     /// Opens the folder `s` read-only, handle-relative. `Ok(None)` if it is missing; a
     /// reparse point there is [`RootError::Reparse`].
     pub(crate) fn sub(&self, s: AppSub) -> Result<Option<Box<dyn Dir + '_>>, RootError> {
-        let at = s.rel();
+        self.read_side(s.rel())
+    }
+
+    /// `profiles`, read side only (P3-3c: the planner looks at a profile there), like
+    /// [`Self::sub`]: `Ok(None)` if it is missing, a reparse point is [`RootError::Reparse`].
+    /// Only [`Self::profiles`] writes there.
+    pub(crate) fn profiles_read(&self) -> Result<Option<Box<dyn Dir + '_>>, RootError> {
+        self.read_side(RelPath::from_segment(PROFILES)?)
+    }
+
+    fn read_side(&self, at: RelPath) -> Result<Option<Box<dyn Dir + '_>>, RootError> {
         match self.dir.open_dir(&at) {
             Ok(d) => Ok(Some(d)),
             Err(e) if e.kind == SysErrorKind::NotFound => Ok(None),

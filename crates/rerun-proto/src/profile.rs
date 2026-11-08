@@ -9,7 +9,7 @@
 //! method=direct                       direct | watch
 //! start=C:\Games\Game\game.exe        the exe Steam starts (%command%), canonical
 //! target=C:\Games\Game\game.exe       the exe whose affinity is set; = start for direct
-//! bitness=x64                         x86 | x64 (of target)
+//! bitness=x64                         x86 | x64 (x86 if a program of the chain is i386)
 //! priority=none                       none | normal | above_normal | high
 //! watch_timeout_s=120                 1..=120
 //! cpu=rule                            none | rule; with rule the six cpu.* lines follow
@@ -110,7 +110,10 @@ pub struct LaunchProfile {
     pub start: String,
     /// The exe whose limit is set and checked; equal to `start` for [`Method::Direct`].
     pub target: String,
-    /// Bitness of `target`.
+    /// `x86` if a process of the chain the rule reaches is i386 (`IMAGE_FILE_MACHINE_I386`):
+    /// the planner reads `start` and the game's main executable (ADR 0022 D1, amendment P3-3).
+    /// A .NET "AnyCPU" image is i386 on disk and may run as x64; it counts as x86, which costs
+    /// only on a processor group of more than 32 logical processors (B6).
     pub bitness: Bitness,
     /// Priority class, if any.
     pub priority: Option<Priority>,

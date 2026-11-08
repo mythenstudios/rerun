@@ -114,6 +114,7 @@ impl Env {
                 steam_app,
                 main_exe: Some(&main),
                 reg: crate::policy::registry::RegPolicy.reader(&self.sys),
+                app_path: None,
             },
         )
         .unwrap_or_else(|e| panic!("{e}"));
