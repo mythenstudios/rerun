@@ -113,7 +113,7 @@ use crate::path::RelPath;
 use crate::plan::{self, Object, Op, Plan, PlanError, PlanHash, Target};
 use crate::policy::ini::{IniName, KeyState};
 use crate::policy::registry::{RegPolicy, RegWriter};
-use crate::policy::root::{AppDir, Create, ForbiddenRoots, RootError, StoreDir};
+use crate::policy::root::{AppDir, ForbiddenRoots, RootError, StoreDir};
 use crate::sys::fs::TmpName;
 use crate::sys::registry::Hive;
 use crate::sys::{SysError, SysResult, System};
@@ -1283,7 +1283,7 @@ pub fn check(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<usize, Refusal> {
     let hold = j.hold().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
     let stores = roots::open_stores(cx, &Bindings::head(&plan));
-    let roots = preflight(cx, &plan, &j, &listing, &stores, Create::Never)?;
+    let roots = preflight(cx, &plan, &j, &listing, &stores, roots::Preflight::Check)?;
     drop(roots);
     drop(hold);
     Ok(plan.ops.len())
@@ -1293,7 +1293,7 @@ pub fn check(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<usize, Refusal> {
 /// under the lock and [`check`] without it): stacking on the listing, every root reopened by
 /// identity (writable where it has file ops), the main executable of every root a file, the
 /// game closed, the old state of every op and source, the old registry state. The roots stay
-/// open for the apply. `create`: the apply creates a missing profiles root (P3-3), `check`
+/// open for the apply. `run`: the apply creates a missing profiles root (P3-3), `check`
 /// creates nothing.
 fn preflight<'g>(
     cx: &ExecCtx<'g>,
@@ -1301,11 +1301,11 @@ fn preflight<'g>(
     j: &Journal<'_>,
     listing: &Listing,
     stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
-    create: Create,
+    run: roots::Preflight,
 ) -> Result<roots::Roots<'g>, Refusal> {
     let objects = Object::of(plan).map_err(Refusal::Plan)?;
     stack::for_apply(j, listing, &objects)?;
-    let roots = roots::Roots::all(cx, plan, &Bindings::head(plan), stores, create)?;
+    let roots = roots::Roots::all(cx, plan, &Bindings::head(plan), stores, run)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
     roots::main_exe_present(plan, &roots)?;
     roots::game_closed(plan, &roots, &all)?;
@@ -1326,7 +1326,7 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
     let stores = roots::open_stores(cx, &Bindings::head(&plan));
-    let roots = preflight(cx, &plan, &j, &listing, &stores, Create::IfMissing)?;
+    let roots = preflight(cx, &plan, &j, &listing, &stores, roots::Preflight::Apply)?;
     let mut w = lock.begin(bytes.bytes()).map_err(Refusal::from)?;
     let txn = *w.id();
     let mut touched = Touched::new(cx.sys, &roots);

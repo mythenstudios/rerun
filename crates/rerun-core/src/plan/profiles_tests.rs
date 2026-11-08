@@ -335,7 +335,9 @@ fn lm_p2_every_rule_of_the_fence_is_refused_with_its_rule_set() {
         old.len = (8 << 10) + 1;
     }
     refused("a replaced profile larger than 8 KiB", &p, true);
-    // A2 without a profiles root: a game root never carries the profiles identity.
+    // A2 without a profiles root: a game root never carries the profiles identity. Only this
+    // single-root case shows that rule alone (review N6): without it, the two-root case above
+    // would still be refused, as "a root is listed twice".
     let mut p = lm_plan();
     p.roots.truncate(1);
     p.ops.remove(0);

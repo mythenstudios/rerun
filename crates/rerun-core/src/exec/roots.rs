@@ -158,6 +158,16 @@ pub(super) struct Roots<'g> {
     moved: Option<ProfilesMoved>,
 }
 
+/// Which run opens every root before `begin` ([`Roots::all`]; review N2 of P3-3a: no hidden
+/// meaning of a `Create`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Preflight {
+    /// `apply`: a missing profiles root is created.
+    Apply,
+    /// `check` (read only): nothing is created, a missing profiles root counts as empty.
+    Check,
+}
+
 /// How the profiles root is opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Use {
@@ -177,24 +187,23 @@ enum Failed {
 
 impl<'g> Roots<'g> {
     /// Apply: every root open and checked by identity, and writable if a file op targets it
-    /// (S1); else its refusal, stores first, then the roots in order. `create`: the profiles
-    /// root is created if missing (the apply; `check` passes [`Create::Never`] and a missing
-    /// profiles root then counts as empty).
+    /// (S1); else its refusal, stores first, then the roots in order. `run`: an apply creates a
+    /// missing profiles root; `check` creates nothing and counts a missing one as empty.
     pub(super) fn all(
         cx: &ExecCtx<'g>,
         plan: &Plan,
         b: &Bindings,
         stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
-        create: Create,
+        run: Preflight,
     ) -> Result<Self, Refusal> {
         for s in stores.iter().flatten() {
             if let Err(e) = s {
                 return Err(e.clone().into());
             }
         }
-        let how = match create {
-            Create::IfMissing => Use::Apply,
-            Create::Never => Use::Check,
+        let how = match run {
+            Preflight::Apply => Use::Apply,
+            Preflight::Check => Use::Check,
         };
         let mut slots = Vec::with_capacity(b.len());
         for (i, (r, store)) in b.iter().zip(stores).enumerate() {
@@ -486,7 +495,12 @@ fn open_profiles<'g>(
         Use::Apply => Create::IfMissing,
         Use::Check | Use::Revert => Create::Never,
     };
-    let p = match cx.app.profiles(create) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ADR 0020 amendment P3-3: exec is the one writer of Rerun's launch profiles"
+    )]
+    let opened = cx.app.profiles(create);
+    let p = match opened {
         Ok(Some(p)) => p,
         Ok(None) => {
             return Err(Failed::Absent(NoFiles::Root(Box::new(RootError::Sys(

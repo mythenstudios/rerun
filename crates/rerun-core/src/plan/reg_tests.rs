@@ -257,7 +257,7 @@ fn p7_registry_ops_break_no_rule() {
     // E2, M1: registry ops need a root, and a main executable for every root.
     refused(
         &with(&|p| p.roots[1].main_exe = None),
-        "ops need the main executable of every root",
+        "ops need the main executable of every game root",
     );
     refused(
         &Plan {
@@ -265,7 +265,7 @@ fn p7_registry_ops_break_no_rule() {
             ops: base.ops[3..].to_vec(),
             ..base.clone()
         },
-        "ops need the main executable of every root",
+        "ops need the main executable of every game root",
     );
     // A file plan without main executables stays allowed.
     let mut files = sample();

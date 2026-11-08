@@ -22,7 +22,10 @@
 //!   file op is `NeedsHelper`.
 //! - LM-T11 rebinds: the profiles root is never rebound; a rebind of the game root reverts the
 //!   profile normally.
-//! - Controls: K-LM1 (inline content on any root) makes LM-T9's forged head delete a game file;
+//! - Controls: K-LM1 (inline content on any root) lets LM-T9's forged head pass, so its revert
+//!   deletes a game file: the control that `exec` enforces "inline content is never a source
+//!   for a game folder" (rule 4). It is no new power of a forged head: a forged `Package` op
+//!   with the file's hash deletes it just the same (the same-user class, ADR 0019; review F2);
 //!   K-LM2 (no path comparison) makes LM-T8's apply write; K-LM3 (profile op last) makes LM-T6
 //!   leave every game op unreverted.
 
@@ -435,11 +438,21 @@ fn t6(last: bool) -> bool {
     let fx = env.sys.fake_fs();
     fx.remove_abs(Path::new(&profile_abs(220))).unwrap();
     fx.remove_abs(Path::new(PROFILES)).unwrap();
+    let n = records(&env, &t);
     let r = env.revert(&t).unwrap();
     crate::plan::profile_knob::allow_profile_op_anywhere(false);
     let profile_op = if last { 5 } else { 0 };
     let h = r.halted.as_ref().unwrap();
     assert_eq!((h.op, h.root), (profile_op, 1), "{r:?}");
+    // Review N4: a `RevertIntent` and a `RevertDone` per reverted op, none for the profile op.
+    assert_eq!(records(&env, &t), n + 2 * r.ops.len(), "{r:?}");
+    assert!(r.ops.iter().all(|o| o.op != profile_op));
+    let a = app(&env.sys);
+    let v = Journal::new(&a, InstanceTag::fixed(7))
+        .load(&t, crate::journal::VerifyBackups::Length)
+        .unwrap();
+    let log = &v.ops[&profile_op];
+    assert!(log.reverts.is_empty() && log.reverted.is_none());
     assert_eq!(r.closed, None);
     assert!(!exists_abs(&env.sys, PROFILES), "a revert never creates it");
     env.forget(&t).unwrap();
@@ -559,6 +572,8 @@ fn t8_apply(unchecked: bool) -> bool {
     move_lad(&env.sys);
     let game = snap_game(&env);
     super::knob::uncheck_profiles_paths(unchecked);
+    // `check` (read only) refuses the same way (review N3).
+    let c = env.check(&h);
     let r = env.apply(&h);
     super::knob::uncheck_profiles_paths(false);
     let now = format!(r"{LAD}B\Rerun\profiles");
@@ -571,6 +586,7 @@ fn t8_apply(unchecked: bool) -> bool {
             }
             other => panic!("{other:?}"),
         }
+        assert!(matches!(&c, Err(Refusal::ProfilesMoved(_))), "check: {c:?}");
         assert!(env.states().is_empty());
         same(&game, &snap_game(&env));
     }
@@ -772,4 +788,28 @@ fn lm_t11_the_profiles_root_is_never_rebound_and_a_rebound_game_root_reverts_it(
     assert_eq!(r.closed, Some(Closing::Reverted), "{r:?}");
     assert!(!exists_abs(&env.sys, &profile_abs(220)));
     assert!(content_diff(&env.sys, REF, GAME_E).is_empty());
+}
+
+/// Review F3: `profiles` deleted and the library moved. The rebind looks only at game roots
+/// (the profiles root is never rebound), so it is not refused as "more than one root"; it
+/// reverts every game op and halts at the profile op without a record.
+#[test]
+fn lm_t11b_a_missing_profiles_folder_does_not_block_the_rebind_of_the_game_root() {
+    let env = Env::new(lm_sys(false));
+    copy_tree(&env.sys, STEAM_GAME, REF);
+    env.sys.sync_all();
+    let t = env.applied(&lm(&env, 220, &[Step::FileInstall(t1_spec())], 8));
+    let fx = env.sys.fake_fs();
+    fx.remove_abs(Path::new(&profile_abs(220))).unwrap();
+    fx.remove_abs(Path::new(PROFILES)).unwrap();
+    move_lib(&env.sys, STEAM_LIB, LIB_E);
+    let pv = env.rebind_check(&t).unwrap();
+    assert_eq!(pv.to.root, 0);
+    let r = env.revert_rebound(&t, &pv.to).unwrap();
+    let h = r.halted.as_ref().unwrap();
+    assert_eq!((h.op, h.root), (0, 1), "{r:?}");
+    assert_eq!(r.ops.len(), 5, "{r:?}");
+    assert!(content_diff(&env.sys, REF, GAME_E).is_empty());
+    assert!(!exists_abs(&env.sys, PROFILES), "a revert never creates it");
+    env.forget(&t).unwrap();
 }

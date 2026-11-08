@@ -1048,7 +1048,7 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
     {
         return Err(invalid(
             None,
-            "registry and INI ops need the main executable of every root",
+            "registry and INI ops need the main executable of every game root",
         ));
     }
     // P3-3: the fence of the profiles root and of inline content (both rule sets).

@@ -239,6 +239,12 @@ fn target(
     }
     let mut gone = Vec::new();
     for (i, x) in b.iter().enumerate() {
+        // The profiles root is never rebound (ADR 0020 amendment P3-3): a missing or moved
+        // `profiles` is the revert's matter (a halt at op 0, or `profiles_moved`), never a
+        // second root that needs a rebind (review F3 of P3-3a).
+        if matches!(x.origin, PlanOrigin::AppDir) {
+            continue;
+        }
         match roots::probe(cx, x) {
             Probe::Opens => {}
             Probe::Gone(why) => gone.push((i, why)),
@@ -422,7 +428,17 @@ fn checked<'g>(
         let mut touched = Touched::new(cx.sys, &roots);
         verify_seen(plan, &mut touched, &roots, ops).map_err(refused_early)?
     };
-    if let Some(h) = verified.halted.take() {
+    // A halt at the profiles root comes last (its op is op 0, ADR 0020 amendment P3-3), after
+    // every op of the rebound root was observed: the rebind reverts those and the revert halts
+    // there, as without a rebind (review F3 of P3-3a). Any other halt refuses.
+    let at_profiles = |h: &super::Halt| {
+        plan.roots
+            .get(usize::from(h.root))
+            .is_some_and(|r| matches!(r.origin, PlanOrigin::AppDir))
+    };
+    if let Some(h) = verified.halted.take()
+        && !at_profiles(&h)
+    {
         return Err(RebindRefusal::Halts(h.why).into());
     }
     let mut dirs = Vec::new();

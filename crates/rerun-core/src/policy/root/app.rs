@@ -57,10 +57,12 @@ pub(crate) enum AppSub {
     /// `launch`: the result files of `rerun-launch` (ADR 0022 amendment P3-2); read only
     /// here, the shim writes them.
     Launch,
-    /// `profiles`: the launch profiles (ADR 0022 D2), written by `exec` only, through
-    /// [`AppDir::profiles`] (P3-3).
-    Profiles,
 }
+
+/// Name of the launch profiles folder (ADR 0022 D2) below [`AppDir`]: deliberately no
+/// [`AppSub`], so `sub`/`sub_write` cannot reach it; only [`AppDir::profiles`] opens it, and
+/// only `exec` may call that (`clippy.toml`; review F1 of P3-3a).
+const PROFILES: &str = "profiles";
 
 impl AppSub {
     fn rel(self) -> RelPath {
@@ -69,7 +71,6 @@ impl AppSub {
             Self::Plans => "plans",
             Self::Packages => "packages",
             Self::Launch => "launch",
-            Self::Profiles => "profiles",
         };
         match RelPath::from_segment(name) {
             Ok(p) => p,
@@ -289,7 +290,7 @@ impl AppDir<'_> {
     pub(crate) fn profiles(&self, create: Create) -> Result<Option<ProfilesDir<'_>>, RootError> {
         let Some(dir) = open_or_create(
             self.dir_write()?,
-            &AppSub::Profiles.rel(),
+            &RelPath::from_segment(PROFILES)?,
             create,
             &self.path,
         )?
@@ -298,7 +299,7 @@ impl AppDir<'_> {
         };
         let info = dir.info()?;
         let path = RootPath::from_final_path(&info.final_path)?;
-        let expected = self.path.child("profiles")?;
+        let expected = self.path.child(PROFILES)?;
         if path != expected || info.volume_serial != self.info.volume_serial {
             return Err(RootError::Escaped {
                 store: self.path.clone(),

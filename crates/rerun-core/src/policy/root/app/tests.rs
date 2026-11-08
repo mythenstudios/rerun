@@ -294,16 +294,28 @@ fn a3_a_junction_to_the_moved_folder_is_escaped() {
 
 // ---------- P3-3: `profiles` and the path without opening ----------
 
+/// `AppDir::profiles` (banned outside `exec`, `clippy.toml`).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test: the one opener of profiles"
+)]
+fn profiles<'a>(
+    app: &'a AppDir<'_>,
+    create: Create,
+) -> Result<Option<super::ProfilesDir<'a>>, RootError> {
+    app.profiles(create)
+}
+
 #[test]
 fn p3_profiles_is_opened_created_and_checked_like_the_other_sub_folders() {
     let sys = base().build().unwrap();
     let app = AppDir::open(&sys, Create::IfMissing).unwrap().unwrap();
-    assert!(app.profiles(Create::Never).unwrap().is_none());
+    assert!(profiles(&app, Create::Never).unwrap().is_none());
     assert!(
         names(&sys, &format!(r"{LAD}\Rerun")).is_empty(),
         "Never creates nothing"
     );
-    let p = app.profiles(Create::IfMissing).unwrap().unwrap();
+    let p = profiles(&app, Create::IfMissing).unwrap().unwrap();
     assert_eq!(
         p.path(),
         &RootPath::new(format!(r"{LAD}\Rerun\profiles")).unwrap()
@@ -315,7 +327,7 @@ fn p3_profiles_is_opened_created_and_checked_like_the_other_sub_folders() {
     let w = p.dir_write().is_ok();
     assert!(w);
     drop(p);
-    assert!(app.profiles(Create::Never).unwrap().is_some());
+    assert!(profiles(&app, Create::Never).unwrap().is_some());
     assert_eq!(names(&sys, &format!(r"{LAD}\Rerun")), ["profiles"]);
 }
 
@@ -333,7 +345,7 @@ fn p3_a_junction_or_mount_point_at_profiles_is_refused_and_nothing_is_created_be
         let sys = b.build().unwrap();
         let app = AppDir::open(&sys, Create::Never).unwrap().unwrap();
         for create in [Create::Never, Create::IfMissing] {
-            let (store, at) = reparse_at(app.profiles(create));
+            let (store, at) = reparse_at(profiles(&app, create));
             assert_eq!((store, at.as_str()), (app.path().clone(), "profiles"));
         }
         assert_eq!(names(&sys, r"C:\Out"), ["canary.txt"], "mount {mount}");
@@ -348,7 +360,7 @@ fn p3_profiles_on_fat_opens_but_refuses_the_write_handle() {
         .unwrap();
     sys.fake_fs().set_fs_kind('C', FsKind::Fat);
     let app = AppDir::open(&sys, Create::Never).unwrap().unwrap();
-    let r = app.profiles(Create::Never);
+    let r = profiles(&app, Create::Never);
     // The write handle of `AppDir` itself is refused first (journal and plans need it too).
     assert_eq!(sys_kind(r), SysErrorKind::Unsupported);
 }
