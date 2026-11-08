@@ -17,8 +17,9 @@
 //!    `<canonical LocalAppData>\Rerun` on the same volume (else [`RootError::Escaped`]).
 //!
 //! Below it, [`AppDir::sub`] and [`AppDir::sub_write`] open `journal`, `plans` and
-//! `packages` the same way, one directory at a time. Nothing persisted refers to an
-//! `AppDir`, so it has no `ensure_id`; [`AppDir::id`] is for snapshots and display.
+//! `packages` (and `launch`, read side only) the same way, one directory at a time. Nothing
+//! persisted refers to an `AppDir`, so it has no `ensure_id`; [`AppDir::id`] is for snapshots
+//! and display.
 
 use super::{Forbidden, RootError, RootId, open_abs_write};
 use crate::path::{RelPath, RootPath};
@@ -46,6 +47,9 @@ pub(crate) enum AppSub {
     Plans,
     /// `packages` (ADR 0020, D11).
     Packages,
+    /// `launch`: the result files of `rerun-launch` (ADR 0022 amendment P3-2); read only
+    /// here, the shim writes them.
+    Launch,
 }
 
 impl AppSub {
@@ -54,6 +58,7 @@ impl AppSub {
             Self::Journal => "journal",
             Self::Plans => "plans",
             Self::Packages => "packages",
+            Self::Launch => "launch",
         };
         match RelPath::from_segment(name) {
             Ok(p) => p,

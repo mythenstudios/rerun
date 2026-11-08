@@ -73,6 +73,7 @@
 mod bind;
 mod file;
 mod ini;
+mod launch;
 mod rebind;
 mod reg;
 mod roots;
@@ -81,6 +82,14 @@ mod status;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use launch::{LaunchEntry, LaunchResults, MAX_LAUNCH_ENTRIES, launch_results};
+/// The launch result types (`rerun_proto::launch`, ADR 0022 amendment P3-2).
+pub mod launch_result {
+    pub use super::launch::{
+        AppliedCpu, Check, Ended, LaunchResult, Mode, Outcome, Priority, ProfileId, SkipReason,
+        Start,
+    };
+}
 pub use rebind::{
     CreatedDir, RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,
 };

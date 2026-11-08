@@ -616,6 +616,41 @@ fn c6_refusals_change_nothing() {
     }
 }
 
+/// P3-2: `rerun status` shows the launch results after the journal; a broken file is one line,
+/// never an abort; nothing is written.
+#[test]
+fn status_shows_the_last_start_per_launch_profile() {
+    let ok = "rerun-result 1\nprofile=0123456789abcdef0123456789abcdef\ntime=1762600000\nrule=applied\ncpu=hard:8:32\npriority=none\ncheck=ok\nstart=created\nended=none\n";
+    let launch = format!(r"{RERUN}\launch");
+    let sys = build(
+        bare()
+            .file(
+                format!(r"{launch}\0123456789abcdef0123456789abcdef.result"),
+                ok.as_bytes().to_vec(),
+            )
+            .file(
+                format!(r"{launch}\ffffffffffffffffffffffffffffffff.result"),
+                b"rerun-result 1\nprofile=\x1b[2J\n".to_vec(),
+            ),
+        &no_package_steps(),
+    );
+    let before = snap_all(&sys);
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert_eq!(
+        s.stdout,
+        "no transactions\n\nlast start per launch profile (rerun-launch):\n  \
+         0123456789abcdef0123456789abcdef, 2025-11-08 11:06:40 UTC: ok, verified: 8 of 32 \
+         threads (hard)\n  ffffffffffffffffffffffffffffffff: unreadable: launch result line 2: \
+         control character\n"
+    );
+    assert!(s.stderr.is_empty(), "{}", s.stderr);
+    same(&before, &snap_all(&sys));
+    // Elevated: still shown (read only).
+    sys.fake_registry().set_elevated(true);
+    let e = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert_eq!(e.stdout, s.stdout);
+}
+
 #[test]
 fn c6_elevated_only_status_runs() {
     let sys = build(with_package(), &file_steps());

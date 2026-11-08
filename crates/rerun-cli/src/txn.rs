@@ -1,7 +1,8 @@
 //! `rerun status [--all]`, `rerun revert <txn> [--dry-run] [--yes]` and
 //! `rerun forget <txn> [--yes]` (P2-13).
 //!
-//! - `status` reads the journal only (no lock, no game folder, nothing observed): every
+//! - `status` reads the journal and the launch results only (no lock, no game folder, nothing
+//!   observed; P3-2: after the journal, the last start of each launch profile): every
 //!   transaction that is not settled as a block (state, roots, ops with their recorded state,
 //!   backups, pending cleanups, the next step), forgotten ones with their backups (review S8),
 //!   closed and empty ones counted (listed with `--all`), and any `.old` a closed one left.
@@ -26,9 +27,11 @@ use std::io::Write;
 
 use rerun_core::detect::steam::AppState;
 use rerun_core::escape;
+use rerun_core::exec::launch_result::Outcome;
 use rerun_core::exec::{
-    self, Backup, Detail, ExecCtx, ExecError, Halt, OldSeen, OpState, OpStatus, PendingOld,
-    RebindPreview, RebindRefusal, Refusal, RerunStep, RevertReport, TxnLine, TxnStatus, Verified,
+    self, Backup, Detail, ExecCtx, ExecError, Halt, LaunchResults, OldSeen, OpState, OpStatus,
+    PendingOld, RebindPreview, RebindRefusal, Refusal, RerunStep, RevertReport, TxnLine, TxnStatus,
+    Verified,
 };
 use rerun_core::journal::{Closing, InstanceTag, JournalError, Observed, TxnId};
 use rerun_core::plan::Preview;
@@ -41,7 +44,7 @@ use crate::host::{
     Host, after_change, before_change, confirm, existing_app, exit_for_exec, fail, forbidden, note,
     shown, standard_user,
 };
-use crate::messages::{Message, OpText, StepText, TxnMsg, TxnText};
+use crate::messages::{LaunchMsg, Message, OpText, StepText, TxnMsg, TxnText, Utc};
 use crate::out::{Out, failed as failed_out};
 use crate::preview::{op_at, roots};
 
@@ -257,7 +260,66 @@ pub fn render_status(s: &exec::Status, all: bool) -> Vec<Message<'_>> {
     out
 }
 
-/// `rerun status` (module docs). Runs elevated too (it only reads the journal).
+/// The launch results after the journal (P3-2, ADR 0022 amendment P3-2): the last start per
+/// profile with its time, a file that cannot be read as one line, never an abort. Nothing if
+/// the folder `launch` does not exist or holds nothing.
+pub fn launch_lines(r: &Result<Option<LaunchResults>, RootError>) -> Vec<Message<'_>> {
+    let l = |m| Message::Launch(m);
+    let r = match r {
+        Ok(None) => return Vec::new(),
+        Ok(Some(r)) if r.entries.is_empty() && r.other == 0 => return Vec::new(),
+        Ok(Some(r)) => r,
+        Err(e) => {
+            return vec![
+                Message::Blank,
+                l(LaunchMsg::FolderUnreadable { error: shown(e) }),
+            ];
+        }
+    };
+    let mut out = vec![Message::Blank, l(LaunchMsg::Heading)];
+    for e in &r.entries {
+        out.push(l(match &e.result {
+            Err(why) => LaunchMsg::Unreadable {
+                id: e.id,
+                why: why.clone(),
+            },
+            Ok(res) => {
+                let at = Utc(res.unix_s);
+                match &res.outcome {
+                    Outcome::Applied {
+                        cpu,
+                        priority,
+                        check,
+                    } => LaunchMsg::Applied {
+                        id: e.id,
+                        at,
+                        cpu: *cpu,
+                        priority: *priority,
+                        check: *check,
+                    },
+                    Outcome::Skipped {
+                        reason,
+                        start,
+                        ended,
+                    } => LaunchMsg::Skipped {
+                        id: e.id,
+                        at,
+                        reason: *reason,
+                        start: *start,
+                        ended: *ended,
+                    },
+                }
+            }
+        }));
+    }
+    if r.other > 0 {
+        out.push(l(LaunchMsg::Other { n: r.other }));
+    }
+    out
+}
+
+/// `rerun status` (module docs). Runs elevated too (it only reads the journal and the launch
+/// results).
 pub fn status<W: Write, E: Write>(
     sys: &dyn System,
     all: bool,
@@ -284,10 +346,10 @@ pub fn status<W: Write, E: Write>(
             );
         }
     };
-    match out
-        .lines(&render_status(&s, all))
-        .and_then(|()| out.flush())
-    {
+    let launch = exec::launch_results(&app);
+    let mut lines = render_status(&s, all);
+    lines.extend(launch_lines(&launch));
+    match out.lines(&lines).and_then(|()| out.flush()) {
         Ok(()) => Exit::Report,
         Err(e) => failed_out(err, e),
     }
@@ -832,5 +894,7 @@ fn run_forget<W: Write, E: Write>(
         .map_or_else(|e| after_change(err, e, Exit::Report), |()| Exit::Report))
 }
 
+#[cfg(test)]
+mod launch_tests;
 #[cfg(test)]
 mod tests;

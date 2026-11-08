@@ -1,11 +1,13 @@
 //! Every user-facing string of `rerun` (ADR 0016), English only (German with Fluent in phase
-//! 5). The phase 2 commands have their lines in `txn` ([`TxnMsg`]).
+//! 5). The phase 2 commands have their lines in `txn` ([`TxnMsg`]), the launch results of
+//! `rerun status` in `launch` ([`LaunchMsg`]).
 //!
 //! One [`Message`] is one output line. Parameters are named; counts are parameters (so Fluent
 //! plurals can follow) and a sentence is never assembled from other messages. Static text is
 //! ASCII; untrusted fields enter only as [`Shown`], which only `rerun_core::escape` creates.
 //! Untrusted text stands last on its line where possible, so a name cannot pose as a marker.
 
+mod launch;
 mod txn;
 
 use std::fmt;
@@ -17,6 +19,7 @@ use rerun_core::detect::steam::{AppState, RootSource};
 use rerun_core::escape::Shown;
 use rerun_core::hw::GpuVendor;
 
+pub use launch::{LaunchMsg, Utc};
 pub use txn::{At, OpRef, OpText, SteamWhy, StepText, TxnMsg, TxnText};
 
 /// A section heading.
@@ -398,6 +401,8 @@ pub enum Message<'a> {
     WindowsOnly,
     /// A line of the phase 2 commands.
     Txn(TxnMsg<'a>),
+    /// A line of the launch results in `rerun status` (P3-2).
+    Launch(LaunchMsg<'a>),
     /// A usage error, formatted by Rerun (security review N5): the user's own value only
     /// through `escape::text`, last on the line.
     Usage {
@@ -827,6 +832,7 @@ impl fmt::Display for Message<'_> {
             #[cfg(not(windows))]
             Self::WindowsOnly => f.write_str("rerun: runs on Windows only"),
             Self::Txn(m) => write!(f, "{m}"),
+            Self::Launch(m) => write!(f, "{m}"),
             Self::Usage { what, why, value } => {
                 write!(f, "rerun: {what}")?;
                 if let Some(why) = why {

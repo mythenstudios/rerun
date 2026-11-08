@@ -26,7 +26,7 @@ The same applies to EA App, Rockstar Launcher, Battle.net. In addition: games th
 
 ## Post-launch check (required)
 
-`rerun-launch` checks the actual affinity (and priority class) of the target process about 5 s after the start, while it waits, and writes the outcome of the last start to `<LocalAppData>\Rerun\launch\<id>.result` (ADR 0022 D5 and amendment P3-2), never to the journal: the journal has one writer, and a game start during an `apply` must neither block nor write records. Core reads the file as untrusted input.
+`rerun-launch` checks the actual affinity (and priority class) of the target process about 5 s after the start, while it waits, and writes the outcome of the last start to `<LocalAppData>\Rerun\launch\<id>.result` (ADR 0022 D5 and amendment P3-2), never to the journal: the journal has one writer, and a game start during an `apply` must neither block nor write records. Core reads the file as untrusted input; `rerun status` shows the last result per profile with its time (UTC), a file it cannot read as one line.
 
 What is checked (rule applied, once, after waiting up to 5 s on the running game): hard limit – the job still holds exactly the selected group affinity and the game's process affinity equals it; soft limit – the game's default CPU Sets are exactly the selected ones; priority – the game's priority class is the one set (not checked if the profile sets none).
 
