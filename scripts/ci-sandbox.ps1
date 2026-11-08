@@ -98,7 +98,7 @@ $how = 'scheduled task'
 $cfg = Join-Path $env:RUNNER_TEMP 'secpol.inf'
 $db = Join-Path $env:RUNNER_TEMP 'secpol.sdb'
 & secedit /export /cfg $cfg /areas USER_RIGHTS | Out-Null
-$sid = (New-Object Security.Principal.NTAccount(".\$user")).Translate([Security.Principal.SecurityIdentifier]).Value
+$sid = (Get-LocalUser -Name $user).SID.Value
 $inf = Get-Content -LiteralPath $cfg
 if ($inf -match '^SeBatchLogonRight') {
     $inf = $inf | ForEach-Object { if ($_ -match '^SeBatchLogonRight') { "$_,*$sid" } else { $_ } }
