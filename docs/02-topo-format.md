@@ -158,7 +158,7 @@ cpu:
   report_cores: 8         # only in launch.cpu and only with method: inproc
 ```
 
-Never concrete thread numbers in Topos. See `03-cpu-topology.md`. `shim_single` (`04-launch-methods.md`) enters the enum `method` only with Phase 6.
+Never concrete thread numbers in Topos. See `03-cpu-topology.md`. `single_l3` keeps the game on the LLC with the most threads, which is not always the one with full-size cores: on CPUs with compact cores (Zen 5c next to Zen 5, Ryzen AI 300) it picks the larger Zen 5c cluster. For full-size cores (or the V-Cache CCD) write `prefer_l3: largest`. `shim_single` (`04-launch-methods.md`) enters the enum `method` only with Phase 6.
 
 ## Package
 

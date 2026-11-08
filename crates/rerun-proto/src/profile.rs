@@ -164,6 +164,8 @@ pub enum ProfileErrorKind {
     },
     /// `method=direct` with `target` other than `start`.
     TargetNotStart,
+    /// [`encode`] only: the bytes would decode to another profile (never for a correct codec).
+    NotCanonical,
 }
 
 /// A rejected profile: the 1-based line (0: the file as a whole) and why.
@@ -202,6 +204,7 @@ impl fmt::Display for ProfileError {
             K::TrailingLine => write!(f, "line after the last key"),
             K::BadValue { key } => write!(f, "invalid value of {key}"),
             K::TargetNotStart => write!(f, "method direct needs target equal to start"),
+            K::NotCanonical => write!(f, "does not read back as written"),
         }
     }
 }
@@ -294,7 +297,7 @@ pub fn encode(p: &LaunchProfile) -> Result<Vec<u8>, ProfileError> {
         // Unreachable for a correct codec; never hand out bytes that read back differently.
         Err(ProfileError {
             line: 0,
-            kind: ProfileErrorKind::BadHeader,
+            kind: ProfileErrorKind::NotCanonical,
         })
     }
 }
@@ -520,8 +523,11 @@ fn canonical_number(v: &str) -> Option<u64> {
 
 /// A canonical absolute drive path as `rerun-launch` compares it with Steam's first argument:
 /// `X:\` and at least one component; components separated by one `\`, none empty, `.` or
-/// `..`, none ending in a space or a dot; none of `< > : " / | ? *`; at most
-/// [`MAX_PATH_UNITS`] UTF-16 units. Never `\\?\`, UNC or relative.
+/// `..`, none starting with a space or ending in a space or a dot, none a reserved device name
+/// (`CON`, `NUL`, `COM1`, `nul.txt`, …, docs/06 #4); none of `< > : " / | ? *`, no format or
+/// separator character (Unicode Cf, Zl, Zp: bidirectional controls, zero-width characters,
+/// U+FEFF, U+2028/U+2029; docs/06 #6); at most [`MAX_PATH_UNITS`] UTF-16 units. Never `\\?\`,
+/// UNC or relative.
 fn path(v: &str) -> Option<String> {
     let b = v.as_bytes();
     if b.len() < 4 || !b[0].is_ascii_alphabetic() || b[1] != b':' || b[2] != b'\\' {
@@ -534,11 +540,51 @@ fn path(v: &str) -> Option<String> {
         !c.is_empty()
             && c != "."
             && c != ".."
+            && !c.starts_with(' ')
             && !c.ends_with(' ')
             && !c.ends_with('.')
             && !c.contains(['<', '>', ':', '"', '/', '|', '?', '*'])
+            && !c.chars().any(is_format_or_separator)
+            && !is_device_name(c)
     });
     ok.then(|| v.to_owned())
+}
+
+/// Unicode general categories Cf (format), Zl (line separator) and Zp (paragraph separator),
+/// as of Unicode 16. `std` has no category table; the list is short and stable.
+fn is_format_or_separator(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}' | '\u{070F}'
+        | '\u{0890}'..='\u{0891}' | '\u{08E2}' | '\u{180E}'
+        | '\u{200B}'..='\u{200F}'   // zero-width characters, LRM/RLM
+        | '\u{2028}'..='\u{202E}'   // line and paragraph separator, bidi embedding/override
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' // word joiner, bidi isolates
+        | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}' | '\u{E0001}' | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+/// A reserved DOS device name: the part before the first dot, trailing spaces ignored, is
+/// `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `CLOCK$`, or `COM`/`LPT` with one digit or
+/// superscript 1–3 (the rule of `rerun-core`'s `RelPath`).
+fn is_device_name(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"].contains(&stem.as_str()) {
+        return true;
+    }
+    ["COM", "LPT"].iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|rest| {
+            let mut rc = rest.chars();
+            matches!((rc.next(), rc.next()), (Some(c), None)
+                if c.is_ascii_digit() || matches!(c, '¹' | '²' | '³'))
+        })
+    })
 }
 
 #[cfg(test)]

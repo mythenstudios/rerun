@@ -170,7 +170,7 @@ fn oversize_is_refused_before_anything_else() {
 }
 
 #[test]
-fn a_path_that_fills_the_file_is_refused_by_the_writer() {
+fn a_path_over_the_unit_limit_is_refused_by_the_writer() {
     let long = format!(r"C:\{}\game.exe", "a".repeat(MAX_PATH_UNITS));
     let p = LaunchProfile {
         start: long.clone(),
@@ -181,6 +181,21 @@ fn a_path_that_fills_the_file_is_refused_by_the_writer() {
         encode(&p).unwrap_err(),
         at(3, ProfileErrorKind::BadValue { key: "start" })
     );
+}
+
+#[test]
+fn two_long_non_ascii_paths_overflow_8_kib_and_are_refused_by_the_writer() {
+    // Each path is within MAX_PATH_UNITS (1,510 UTF-16 units) but 4,510 bytes of UTF-8.
+    let start = format!(r"C:\{}\g.exe", "名".repeat(1500));
+    let target = format!(r"D:\{}\t.exe", "名".repeat(1500));
+    assert!(path(&start).is_some() && path(&target).is_some());
+    let p = LaunchProfile {
+        method: Method::Watch,
+        start,
+        target,
+        ..direct()
+    };
+    assert_eq!(encode(&p).unwrap_err(), at(0, ProfileErrorKind::TooLarge));
 }
 
 #[test]
@@ -328,6 +343,10 @@ fn bad_values_are_refused() {
 fn paths_must_be_canonical_absolute_drive_paths() {
     let start_ok = [
         r"C:\g.exe",
+        r"C:\Games\console.exe",
+        r"C:\Games\COM10.exe",
+        r"C:\Games\nullify\g.exe",
+        r"C:\Games\CONx.exe",
         r"z:\Spiele\Ünïcödé 名前\game.exe",
         r"D:\a b\c.d\e.exe",
     ];
@@ -361,6 +380,27 @@ fn paths_must_be_canonical_absolute_drive_paths() {
         r"C:\Games\g<x>.exe",
         r"C:\Games\g:stream.exe",
         r"C:\Games/g.exe",
+        r"C:\ Games\g.exe",
+        // Format and separator characters (docs/06 #6).
+        "C:\\Games\\g\u{202E}exe.txt",
+        "C:\\Games\\g\u{200B}.exe",
+        "C:\\Games\\g\u{200E}.exe",
+        "C:\\Games\\\u{FEFF}g.exe",
+        "C:\\Games\\g\u{2028}.exe",
+        "C:\\Games\\g\u{2029}.exe",
+        "C:\\Games\\g\u{2066}.exe",
+        "C:\\Games\\g\u{00AD}.exe",
+        "C:\\Games\\g\u{E0041}.exe",
+        // Reserved device names (docs/06 #4).
+        r"C:\CON\g.exe",
+        r"C:\Games\nul",
+        r"C:\Games\nul.txt",
+        r"C:\Games\Nul .exe",
+        r"C:\Games\com1",
+        r"C:\Games\LPT9.exe",
+        r"C:\Games\COM¹.exe",
+        r"C:\Games\conin$",
+        r"C:\Games\CLOCK$.exe",
     ];
     for p in start_bad {
         assert_eq!(
