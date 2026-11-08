@@ -53,12 +53,12 @@ use crate::sys::fs::{Attrs, tag};
 use crate::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
 
 const LAD: &str = r"C:\Users\Player\AppData\Local";
-const PROFILES: &str = r"C:\Users\Player\AppData\Local\Rerun\profiles";
+pub(super) const PROFILES: &str = r"C:\Users\Player\AppData\Local\Rerun\profiles";
 /// The game folder of app 221.
 const GAME_H: &str = r"D:\SteamLibrary\steamapps\common\H";
 
 /// The program Steam starts for `app_id`.
-fn start(app_id: u32) -> String {
+pub(super) fn start(app_id: u32) -> String {
     let dir = if app_id == 221 { GAME_H } else { STEAM_GAME };
     format!(r"{dir}\game.exe")
 }
@@ -68,13 +68,13 @@ fn profile_at(profiles: &str, app_id: u32) -> String {
     format!(r"{profiles}\{}", profile_file(profile_id(app_id)))
 }
 
-fn profile_abs(app_id: u32) -> String {
+pub(super) fn profile_abs(app_id: u32) -> String {
     profile_at(PROFILES, app_id)
 }
 
 /// [`rb_sys`] (Steam, library [`STEAM_LIB`] with app 220 in `G`), app 221 in `H`, and `profiles`
 /// unless `bare`.
-fn lm_sys(bare: bool) -> FakeSystem {
+pub(super) fn lm_sys(bare: bool) -> FakeSystem {
     let sys = rb_sys();
     let acf = "\"AppState\"\n{\n\t\"appid\"\t\t\"221\"\n\t\"name\"\t\t\"H\"\n\t\"StateFlags\"\t\t\"4\"\n\t\"installdir\"\t\t\"H\"\n}\n";
     sys_put(
@@ -158,7 +158,7 @@ fn stored(env: &Env, p: &Plan) -> PlanHash {
 }
 
 /// The stored plan of `app_id`'s profile (a rule of at most `max` threads) and `steps`.
-fn lm(env: &Env, app_id: u32, steps: &[Step], max: u16) -> PlanHash {
+pub(super) fn lm(env: &Env, app_id: u32, steps: &[Step], max: u16) -> PlanHash {
     let p = game_plan(env, app_id, steps);
     stored(
         env,
@@ -167,7 +167,7 @@ fn lm(env: &Env, app_id: u32, steps: &[Step], max: u16) -> PlanHash {
 }
 
 /// The game folders, `profiles` and `HKCU\Software`.
-fn snap_all(env: &Env) -> Snapshot {
+pub(super) fn snap_all(env: &Env) -> Snapshot {
     let fr = fr(&env.sys);
     let g = GameDir::open_manual(&env.sys, &fr, Path::new(STEAM_GAME)).ok();
     let h = GameDir::open_manual(&env.sys, &fr, Path::new(GAME_H)).ok();
