@@ -48,7 +48,7 @@ $shimExe = Join-Path $repo 'target\release\rerun-launch.exe'
 if (-not (Test-Path -LiteralPath $cliExe)) { throw "release rerun.exe missing: $cliExe" }
 if (-not (Test-Path -LiteralPath $shimExe)) { throw "release rerun-launch.exe missing: $shimExe" }
 $exe = $json | ForEach-Object { try { $_ | ConvertFrom-Json } catch { $null } } |
-    Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.target.name -eq 'rerun-core' -and $_.target.kind -contains 'lib' -and $_.executable } |
+    Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.target.name -in @('rerun_core', 'rerun-core') -and $_.target.kind -contains 'lib' -and $_.executable } |
     Select-Object -Last 1 -ExpandProperty executable
 if (-not $exe) { throw 'could not locate the rerun-core lib test executable' }
 
