@@ -37,7 +37,7 @@ pub use file_install::{FileEntry, FileInstallSpec};
 pub use ini_set::{IniSetSpec, IniSetValue};
 pub use launch_method::{
     CpuRuleSpec, LaunchMethodSpec, MachineView, MachineWhy, MethodSpec, ModeSpec, PreferL3Spec,
-    PreferSpec, PrioritySpec, SelectionShown, launch_option, on_this_machine,
+    PreferSpec, PrioritySpec, SHIM, SelectionShown, launch_option, on_this_machine,
 };
 pub use registry_set::{RegValueEntry, RegistrySetSpec};
 pub use step_file::{

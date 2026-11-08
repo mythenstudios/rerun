@@ -637,6 +637,8 @@ pub enum TxnMsg<'a> {
     NoConsole,
     /// Rerun's folder does not exist yet.
     NoAppDir,
+    /// Rerun's folder is at another path than when the plan was made (P3-3d).
+    AppDirMoved,
     /// Rerun's folder cannot be opened.
     AppDir {
         /// The error.
@@ -1112,6 +1114,9 @@ impl fmt::Display for TxnMsg<'_> {
             Self::Error { error } => write!(f, "rerun: {error}"),
             Self::NoConsole => f.write_str(
                 "rerun: stdin or stdout is not a console, so nothing can be asked; pass --yes",
+            ),
+            Self::AppDirMoved => f.write_str(
+                "rerun: Rerun's folder moved while the plan was made; nothing stored, plan again",
             ),
             Self::NoAppDir => f.write_str(
                 "rerun: Rerun has no folder yet, so there is no plan or transaction; run rerun \

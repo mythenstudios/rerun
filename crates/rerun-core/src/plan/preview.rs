@@ -25,7 +25,7 @@
 use std::fmt;
 
 use rerun_proto::cpu::rule::{Bitness, CpuRule, Mode, Prefer, PreferL3};
-use rerun_proto::profile::{self as proto, Method, Priority};
+use rerun_proto::profile::{self as proto, LaunchProfile, Method, Priority};
 
 use super::{
     ContentRef, FileState, Op, Plan, PlanBytes, PlanError, PlanOrigin, RootKind, Target,
@@ -69,6 +69,17 @@ the game or you changed, and everything else in the file, stay. A key the game s
 same value as Rerun is set back too. A file that is gone at the time of the revert stays gone. \
 The main executable must be the program that writes the file when it exits (with a launcher, \
 the game itself)";
+
+/// What a plan with a launch profile says once (P3-3d, plan `P3-3` §5): the lifetime of the
+/// shim, the start path, one launch option per game, Steam as administrator (ADR 0022).
+pub const PROFILE_NOTE: &str = "launch profile: rerun-launch runs only when Steam starts the \
+game through the launch option; it starts the program, waits for it and exits with it, checks \
+the limit about 5 s after the start and writes <LocalAppData>\\Rerun\\launch\\<id>.result; \
+nothing else runs. The rule applies only when Steam starts exactly the start program shown \
+above (the program of the game's launch entry); another launch entry, or a start outside \
+Steam, starts the game unchanged and rerun status shows path_mismatch. Steam has one launch \
+option per game: with several Play entries only the one that starts that program gets the \
+rule. While Steam runs as administrator, no rule applies";
 
 /// The old state of a key for display (senior-dev nit): the untrusted value as `Shown`, or a word
 /// of Rerun's, never mixed in one string.
@@ -122,13 +133,18 @@ pub struct ProfileShown {
     pub priority: Option<&'static str>,
     /// The CPU rule in the words of `docs/02-topo-format.md`, if the profile has one.
     pub cpu: Option<String>,
+    /// `start` is not the main executable of root 0 (folded): a launcher; the check covers it,
+    /// not the game (ADR 0022 amendment P3-3).
+    pub launcher: bool,
+    /// The profile as decoded (for the selection on this computer, P3-3d).
+    pub decoded: LaunchProfile,
 }
 
 /// The profile of a launch profile op.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfilePreview {
     /// Decoded.
-    Decoded(ProfileShown),
+    Decoded(Box<ProfileShown>),
     /// The bytes are no launch profile of this version (a recorded head only): the reason,
     /// never the content.
     Unreadable(String),
@@ -222,6 +238,8 @@ pub struct Preview {
     pub layers: Option<&'static str>,
     /// [`INI_NOTE`], once per plan with `edit ini` ops.
     pub ini: Option<&'static str>,
+    /// [`PROFILE_NOTE`], once per plan with a launch profile op.
+    pub profiles: Option<&'static str>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -262,12 +280,17 @@ fn cpu_words(r: &CpuRule) -> String {
 }
 
 /// The profile written by an op with inline bytes at `path`.
-fn profile_of(path: &crate::path::RelPath, bytes: &[u8]) -> ProfilePreview {
+fn profile_of(plan: &Plan, path: &crate::path::RelPath, bytes: &[u8]) -> ProfilePreview {
     let p = match proto::decode(bytes) {
         Ok(p) => p,
         Err(e) => return ProfilePreview::Unreadable(e.to_string()),
     };
-    ProfilePreview::Decoded(ProfileShown {
+    let launcher = plan.roots.first().is_some_and(|r| {
+        r.main_exe.as_ref().is_some_and(|m| {
+            crate::fold::fold(&format!(r"{}\{m}", r.path)) != crate::fold::fold(&p.start)
+        })
+    });
+    ProfilePreview::Decoded(Box::new(ProfileShown {
         id: path
             .as_str()
             .strip_suffix(".profile")
@@ -289,7 +312,9 @@ fn profile_of(path: &crate::path::RelPath, bytes: &[u8]) -> ProfilePreview {
             Priority::High => "high",
         }),
         cpu: p.cpu.as_ref().map(cpu_words),
-    })
+        launcher,
+        decoded: p,
+    }))
 }
 
 /// A registry type for display.
@@ -398,7 +423,7 @@ pub fn preview(p: &Plan) -> Preview {
                 .map(|m| escape::path(m.as_str()).into_owned()),
         })
         .collect();
-    let ops = p
+    let ops: Vec<PreviewOp> = p
         .ops
         .iter()
         .enumerate()
@@ -496,7 +521,7 @@ pub fn preview(p: &Plan) -> Preview {
             };
             let profile = match (op.target(), op.content()) {
                 (Target::File { path, .. }, Some(ContentRef::Inline { bytes, .. })) => {
-                    Some(profile_of(path, bytes))
+                    Some(profile_of(p, path, bytes))
                 }
                 _ => None,
             };
@@ -546,6 +571,10 @@ pub fn preview(p: &Plan) -> Preview {
         .iter()
         .any(|o| matches!(o, Op::IniValue { .. }))
         .then_some(INI_NOTE);
+    let profiles = ops
+        .iter()
+        .any(|o| o.profile.is_some())
+        .then_some(PROFILE_NOTE);
     Preview {
         roots,
         ops,
@@ -553,6 +582,7 @@ pub fn preview(p: &Plan) -> Preview {
         registry,
         layers,
         ini,
+        profiles,
     }
 }
 
@@ -646,6 +676,9 @@ impl fmt::Display for Preview {
         }
         if let Some(i) = self.ini {
             writeln!(f, "note: {i}")?;
+        }
+        if let Some(n) = self.profiles {
+            writeln!(f, "note: {n}")?;
         }
         Ok(())
     }

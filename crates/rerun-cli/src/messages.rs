@@ -8,6 +8,7 @@
 //! Untrusted text stands last on its line where possible, so a name cannot pose as a marker.
 
 mod launch;
+mod profile;
 mod txn;
 
 use std::fmt;
@@ -20,6 +21,7 @@ use rerun_core::escape::Shown;
 use rerun_core::hw::GpuVendor;
 
 pub use launch::{LaunchMsg, Utc};
+pub use profile::{ProfileMsg, ranges};
 pub use txn::{At, OpRef, OpText, SteamWhy, StepText, TxnMsg, TxnText};
 
 /// A section heading.
@@ -403,6 +405,8 @@ pub enum Message<'a> {
     Txn(TxnMsg<'a>),
     /// A line of the launch results in `rerun status` (P3-2).
     Launch(LaunchMsg<'a>),
+    /// A line about a launch profile (P3-3d).
+    Profile(ProfileMsg<'a>),
     /// A usage error, formatted by Rerun (security review N5): the user's own value only
     /// through `escape::text`, last on the line.
     Usage {
@@ -833,6 +837,7 @@ impl fmt::Display for Message<'_> {
             Self::WindowsOnly => f.write_str("rerun: runs on Windows only"),
             Self::Txn(m) => write!(f, "{m}"),
             Self::Launch(m) => write!(f, "{m}"),
+            Self::Profile(m) => write!(f, "{m}"),
             Self::Usage { what, why, value } => {
                 write!(f, "rerun: {what}")?;
                 if let Some(why) = why {

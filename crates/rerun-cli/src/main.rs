@@ -142,4 +142,6 @@ fn install_dir() -> Result<PathBuf, String> {
 }
 
 #[cfg(test)]
+mod lm_tests;
+#[cfg(test)]
 mod tests;

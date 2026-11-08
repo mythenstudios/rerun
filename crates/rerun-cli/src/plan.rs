@@ -80,7 +80,13 @@ fn run<W: Write, E: Write>(
     }
     let hash = bytes.hash();
     let ops = view.ops.len();
-    out.lines(&preview::render(&view))
+    // P3-3d: the launch profile's selection here, hints and the launch option (not stored).
+    let lv = preview::launch_view(sys, &host.install, &view);
+    let mut lines = preview::render(&view);
+    if let Some(lv) = &lv {
+        lines.extend(preview::launch_lines(&view, lv));
+    }
+    out.lines(&lines)
         .and_then(|()| out.line(&Message::Blank))
         .and_then(|()| out.flush())
         .map_err(|e| before_change(err, e))?;
@@ -98,6 +104,11 @@ fn run<W: Write, E: Write>(
             Err(e) => return Err(fail(err, TxnMsg::AppDir { error: shown(&e) }, Exit::Fatal)),
         },
     };
+    // Plan §9 (review of P3-3c): a launch profile names Rerun's folder by the path planned
+    // with; one that is another now (LocalAppData moved meanwhile) is not stored.
+    if app_path.as_ref().is_some_and(|p| p != app.path()) {
+        return Err(fail(err, TxnMsg::AppDirMoved, Exit::Refused));
+    }
     plan::store(&app, &bytes)
         .map_err(|e| fail(err, TxnMsg::StoreFailed { error: shown(&e) }, Exit::Refused))?;
     let done = [

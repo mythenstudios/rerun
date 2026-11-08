@@ -94,6 +94,16 @@ pub enum LaunchMsg<'a> {
         /// How many.
         n: usize,
     },
+    /// A start without a profile (`profile_missing`): the launch option is still set (A7, X12).
+    OptionStillSet {
+        /// Profile.
+        id: ProfileId,
+    },
+    /// The check covered a launcher, not the game (A6, from the journal head).
+    CheckedLauncher {
+        /// The launcher.
+        start: Shown<'a>,
+    },
     /// The folder cannot be read.
     FolderUnreadable {
         /// The error (escaped).
@@ -216,6 +226,14 @@ impl fmt::Display for LaunchMsg<'_> {
                 f,
                 "  {} in the launch folder not Rerun's (not read)",
                 Count(*n, "other entry", "other entries")
+            ),
+            Self::OptionStillSet { id } => write!(
+                f,
+                "    the launch option with --profile {id} is still set in Steam; remove it (the game starts unchanged through it)"
+            ),
+            Self::CheckedLauncher { start } => write!(
+                f,
+                "    Steam starts a launcher here: the check covered the launcher, not the game: {start}"
             ),
             Self::FolderUnreadable { error } => {
                 write!(f, "launch results cannot be read: {error}")

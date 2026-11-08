@@ -37,9 +37,7 @@
 //! every start).
 
 use rerun_proto::cpu::CpuTopology;
-use rerun_proto::cpu::rule::{
-    Bitness, CpuRule, Mode, Prefer, PreferL3, SelectError, SelectStep, select,
-};
+use rerun_proto::cpu::rule::{Bitness, CpuRule, Mode, Prefer, PreferL3, SelectError, select};
 use rerun_proto::profile::{
     self as proto, LaunchProfile, MAX_WATCH_TIMEOUT_S, Method, Priority, ProfileId,
 };
@@ -49,6 +47,7 @@ use sha2::{Digest, Sha256};
 use super::compat_layer::stored_exe;
 use super::{Builder, PlanCtx};
 use crate::detect::pe::{Limits, Machine, open_game_exe};
+use crate::escape::Shown;
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 use crate::plan::{
@@ -58,6 +57,9 @@ use crate::plan::{
 use crate::policy::root::GameOrigin;
 use crate::sys::SysResult;
 use crate::sys::fs::{Attrs, EntryKind};
+
+/// The rule types a front end shows (`MachineView`).
+pub use rerun_proto::cpu::rule::{Mode as RuleMode, SelectStep};
 
 /// `watch_timeout_s` of a `direct` profile (review N3): the format keeps the key for every
 /// method; the shim reads it only for `watch`. One fixed value, so equal rules give equal bytes.
@@ -204,10 +206,23 @@ impl CpuRuleSpec {
     }
 }
 
-/// The launch option for Steam: `"<install>\rerun-launch.exe" --profile <id> %command%`
-/// (`install`: Rerun's installation folder). A preview line; Rerun never writes it.
-pub fn launch_option(install: &RootPath, id: ProfileId) -> String {
-    format!("\"{install}\\rerun-launch.exe\" --profile {id} %command%")
+/// The shim's file name in Rerun's installation folder.
+pub const SHIM: &str = "rerun-launch.exe";
+
+/// The launch option for Steam, `"<install>\rerun-launch.exe" --profile <id> %command%`
+/// (`install`: Rerun's installation folder, also a drive root), as text to show and copy (ADR
+/// 0016). `None` if the path cannot be shown as it is (not Unicode, a quote, or a character
+/// `escape::path` escapes): the escaped form would not be the path, so no option is offered. A
+/// preview line; Rerun never writes it.
+pub fn launch_option(install: &std::path::Path, id: ProfileId) -> Option<Shown<'static>> {
+    let shim = install.join(SHIM);
+    let shim = shim.to_str()?;
+    if shim.contains('"') {
+        return None;
+    }
+    let raw = format!("\"{shim}\" --profile {id} %command%");
+    let shown = crate::escape::path(&raw).into_owned();
+    (shown.as_str() == raw).then_some(shown)
 }
 
 /// The bitness of `exe` (F6): `x86` for i386, `x64` for AMD64, anything else refused.

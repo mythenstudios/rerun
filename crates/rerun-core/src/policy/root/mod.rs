@@ -38,7 +38,7 @@ use std::path::Path;
 pub(crate) use app::AppSub;
 pub use app::{AppDir, Create, ProfilesDir};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
-pub use input::read_input;
+pub use input::{file_present, read_input};
 
 use crate::path::{Anomaly, PathError, RelPath, RootPath, classify};
 use crate::sys::fs::RootInfo;

@@ -59,6 +59,7 @@ fn preview(root_path: &str, ops: Vec<PreviewOp>) -> Preview {
         registry: Some(REGISTRY_NOTE),
         layers: Some(LAYERS_NOTE),
         ini: Some(INI_NOTE),
+        profiles: None,
     }
 }
 

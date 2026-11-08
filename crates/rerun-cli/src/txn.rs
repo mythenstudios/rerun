@@ -44,9 +44,12 @@ use crate::host::{
     Host, after_change, before_change, confirm, existing_app, exit_for_exec, fail, forbidden, note,
     shown, standard_user,
 };
-use crate::messages::{LaunchMsg, Message, OpText, StepText, TxnMsg, TxnText, Utc};
+use crate::messages::{LaunchMsg, Message, OpText, ProfileMsg, StepText, TxnMsg, TxnText, Utc};
 use crate::out::{Out, failed as failed_out};
-use crate::preview::{op_at, roots};
+use crate::preview::{op_at, option_stays, profile_id_of, profile_of, roots};
+use rerun_core::exec::ProfilesMoved;
+use rerun_core::exec::launch_result::{ProfileId, SkipReason};
+use rerun_core::plan::RootKind;
 
 fn m(t: TxnMsg<'_>) -> Message<'_> {
     Message::Txn(t)
@@ -263,7 +266,10 @@ pub fn render_status(s: &exec::Status, all: bool) -> Vec<Message<'_>> {
 /// The launch results after the journal (P3-2, ADR 0022 amendment P3-2): the last start per
 /// profile with its time, a file that cannot be read as one line, never an abort. Nothing if
 /// the folder `launch` does not exist or holds nothing.
-pub fn launch_lines(r: &Result<Option<LaunchResults>, RootError>) -> Vec<Message<'_>> {
+pub fn launch_lines<'a>(
+    r: &'a Result<Option<LaunchResults>, RootError>,
+    launchers: &'a [(ProfileId, rerun_core::escape::Shown<'static>)],
+) -> Vec<Message<'a>> {
     let l = |m| Message::Launch(m);
     let r = match r {
         Ok(None) => return Vec::new(),
@@ -278,6 +284,11 @@ pub fn launch_lines(r: &Result<Option<LaunchResults>, RootError>) -> Vec<Message
     };
     let mut out = vec![Message::Blank, l(LaunchMsg::Heading)];
     for e in &r.entries {
+        let missing = matches!(
+            &e.result,
+            Ok(res) if matches!(res.outcome, Outcome::Skipped { reason: SkipReason::ProfileMissing, .. })
+        );
+        let launcher = launchers.iter().find(|(id, _)| *id == e.id);
         out.push(l(match &e.result {
             Err(why) => LaunchMsg::Unreadable {
                 id: e.id,
@@ -311,11 +322,38 @@ pub fn launch_lines(r: &Result<Option<LaunchResults>, RootError>) -> Vec<Message
                 }
             }
         }));
+        // A7: after a revert or forget the option still starts the game through the shim.
+        if missing {
+            out.push(l(LaunchMsg::OptionStillSet { id: e.id }));
+        } else if let (Some((_, start)), Ok(res)) = (launcher, &e.result)
+            && matches!(res.outcome, Outcome::Applied { .. })
+        {
+            // A6: the check covered the launcher Steam starts, not the game.
+            out.push(l(LaunchMsg::CheckedLauncher {
+                start: start.clone(),
+            }));
+        }
     }
     if r.other > 0 {
         out.push(l(LaunchMsg::Other { n: r.other }));
     }
     out
+}
+
+/// The profiles whose start is a launcher (A6), from the heads of the transactions that are
+/// neither closed nor forgotten.
+fn launchers(s: &exec::Status) -> Vec<(ProfileId, rerun_core::escape::Shown<'static>)> {
+    s.txns
+        .iter()
+        .filter(|st| !st.is_forgotten() && !st.is_settled())
+        .filter_map(|st| {
+            let p = head(st)?;
+            let prof = profile_of(p)?;
+            (prof.launcher)
+                .then(|| Some((profile_id_of(p)?, prof.start.clone())))
+                .flatten()
+        })
+        .collect()
 }
 
 /// `rerun status` (module docs). Runs elevated too (it only reads the journal and the launch
@@ -348,7 +386,8 @@ pub fn status<W: Write, E: Write>(
     };
     let launch = exec::launch_results(&app);
     let mut lines = render_status(&s, all);
-    lines.extend(launch_lines(&launch));
+    let launchers = launchers(&s);
+    lines.extend(launch_lines(&launch, &launchers));
     match out.lines(&lines).and_then(|()| out.flush()) {
         Ok(()) => Exit::Report,
         Err(e) => failed_out(err, e),
@@ -414,14 +453,45 @@ fn now_lines<'a>(st: &'a TxnStatus, v: &'a Verified) -> Vec<Message<'a>> {
         }
     }
     out.extend(cleanup_lines(&v.cleanup));
+    out.extend(moved_lines(v.profiles_moved.as_ref()));
     if let Some(h) = &v.halted {
         out.push(m(TxnMsg::Halted {
             op: h.op,
             why: shown(&h.why),
         }));
         out.extend(halt_hint(st, h));
+        out.extend(profiles_halt(st, h));
     }
     out
+}
+
+/// S3 of P3-3a: Rerun's profiles folder at another path than the head names (A1).
+fn moved_lines(m: Option<&ProfilesMoved>) -> Vec<Message<'_>> {
+    m.map(|m| {
+        vec![
+            Message::Profile(ProfileMsg::ProfilesMovedFrom {
+                planned: m.planned.clone(),
+            }),
+            Message::Profile(ProfileMsg::ProfilesMovedTo { now: m.now.clone() }),
+        ]
+    })
+    .unwrap_or_default()
+}
+
+/// A halt at the profiles root: its folder is missing (also the tolerated halt of a rebind).
+fn profiles_halt<'a>(st: &TxnStatus, h: &Halt) -> Option<Message<'a>> {
+    head(st)
+        .and_then(|p| p.roots.get(usize::from(h.root)))
+        .is_some_and(|r| r.kind == RootKind::Profiles)
+        .then_some(Message::Profile(ProfileMsg::ProfilesHalt))
+}
+
+/// X12 (B7): the launch option of the head's profile, which Rerun does not remove.
+fn x12_lines(host: &Host<'_>, st: &TxnStatus) -> Vec<Message<'static>> {
+    head(st)
+        .and_then(profile_id_of)
+        .map(|id| option_stays(&host.install, id))
+        .unwrap_or_default()
 }
 
 /// The keys of an INI op and the `.old` before a step of Rerun (P2-12 open point: shown
@@ -475,12 +545,14 @@ fn report_lines<'a>(st: &TxnStatus, rep: &'a RevertReport, v: &Verified) -> Vec<
         }
     }
     out.extend(cleanup_lines(&rep.cleanup));
+    out.extend(moved_lines(rep.profiles_moved.as_ref()));
     if let Some(h) = &rep.halted {
         out.push(m(TxnMsg::Halted {
             op: h.op,
             why: shown(&h.why),
         }));
         out.extend(halt_hint(st, h));
+        out.extend(profiles_halt(st, h));
     }
     out
 }
@@ -571,6 +643,8 @@ fn run_revert<W: Write, E: Write>(
     } else {
         lines.extend(now_lines(&st, &v));
     }
+    // X12 (B7, C-LM3): the launch option Rerun does not remove, said before the question.
+    lines.extend(x12_lines(host, &st));
     lines.push(Message::Blank);
     out.lines(&lines)
         .and_then(|()| out.flush())
@@ -618,6 +692,7 @@ fn run_revert<W: Write, E: Write>(
     let (exit, last) = closing_line(&rep);
     let mut lines = report_lines(&st, &rep, &v);
     lines.push(m(last));
+    lines.extend(x12_lines(host, &st));
     Ok(out
         .lines(&lines)
         .and_then(|()| out.flush())
@@ -786,6 +861,7 @@ fn rebind_run<W: Write, E: Write>(
     let (exit, last) = closing_line(&rep);
     let mut lines = report_lines(st, &rep, &p.verified);
     lines.push(m(last));
+    lines.extend(x12_lines(host, st));
     Ok(out
         .lines(&lines)
         .and_then(|()| out.flush())
@@ -857,6 +933,11 @@ fn run_forget<W: Write, E: Write>(
         TxnMsg::ForgetStays
     }));
     lines.push(m(TxnMsg::ForgetKeeps));
+    // C-LM4 (A3, X12): the profile stays and keeps applying through the launch option.
+    if let Some(id) = head(&st).and_then(profile_id_of) {
+        lines.push(Message::Profile(ProfileMsg::ForgetProfileStays { id }));
+        lines.extend(option_stays(&host.install, id));
+    }
     if st.state == TxnLine::Applied && st.ops.iter().all(|o| o.state == OpState::Applied) {
         lines.push(m(TxnMsg::AllStay { ops: st.ops.len() }));
     }

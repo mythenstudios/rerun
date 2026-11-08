@@ -184,23 +184,31 @@ fn every_outcome_has_its_line() {
             "  {}, {at}: rule_skipped: profile_missing, nothing started (Win32 error 2)",
             p(12)
         ),
+        // A7: the launch option still starts the game through the shim.
+        format!(
+            "    the launch option with --profile {} is still set in Steam; remove it (the game starts unchanged through it)",
+            p(12)
+        ),
         format!(
             "  {}: unreadable: launch result line 2: control character",
             p(13)
         ),
         "  1 other entry in the launch folder not Rerun's (not read)".to_owned(),
     ];
-    assert_eq!(shown(&launch_lines(&Ok(Some(r)))), want.join("\n") + "\n");
+    assert_eq!(
+        shown(&launch_lines(&Ok(Some(r)), &[])),
+        want.join("\n") + "\n"
+    );
 }
 
 #[test]
 fn nothing_without_results_and_one_line_for_an_unreadable_folder() {
-    assert!(launch_lines(&Ok(None)).is_empty());
+    assert!(launch_lines(&Ok(None), &[]).is_empty());
     let empty = LaunchResults {
         entries: Vec::new(),
         other: 0,
     };
-    assert!(launch_lines(&Ok(Some(empty))).is_empty());
+    assert!(launch_lines(&Ok(Some(empty)), &[]).is_empty());
     // A reason with a terminal escape is shown escaped.
     let bad = LaunchResults {
         entries: vec![LaunchEntry {
@@ -209,10 +217,10 @@ fn nothing_without_results_and_one_line_for_an_unreadable_folder() {
         }],
         other: 0,
     };
-    let s = shown(&launch_lines(&Ok(Some(bad))));
+    let s = shown(&launch_lines(&Ok(Some(bad)), &[]));
     assert!(!s.contains('\u{1b}'), "{s}");
     let e = RootError::Sys(SysError::new(SysErrorKind::TooLarge, "launch"));
-    let s = shown(&launch_lines(&Err(e)));
+    let s = shown(&launch_lines(&Err(e), &[]));
     assert!(s.starts_with("\nlaunch results cannot be read: "), "{s}");
 }
 
@@ -223,7 +231,7 @@ fn a_narrowed_affinity_is_explained_not_an_error() {
         other: 0,
     };
     assert_eq!(
-        shown(&launch_lines(&Ok(Some(r)))),
+        shown(&launch_lines(&Ok(Some(r)), &[])),
         format!(
             "\nlast start per launch profile (rerun-launch):\n  {}, 2025-11-08 11:06:40 UTC: \
              narrowed, the game limited itself to fewer threads within the rule (set: 8 of 32 \

@@ -19,7 +19,7 @@ use crate::host::{
     Host, after_change, before_change, confirm, existing_app, exit_for_apply, fail, forbidden,
     note, shown, standard_user,
 };
-use crate::messages::{Message, TxnMsg};
+use crate::messages::{Message, ProfileMsg, TxnMsg};
 use crate::out::Out;
 use crate::preview;
 use crate::txn::{cleanup_lines, holding};
@@ -58,6 +58,11 @@ fn run<W: Write, E: Write>(
     let ops = view.ops.len();
     let mut lines = vec![Message::Txn(TxnMsg::PlanHead { hash: *hash, ops })];
     lines.extend(preview::render(&view));
+    // P3-3d: the launch profile's selection here, hints and the launch option.
+    let lv = preview::launch_view(sys, &host.install, &view);
+    if let Some(lv) = &lv {
+        lines.extend(preview::launch_lines(&view, lv));
+    }
     lines.push(Message::Blank);
     out.lines(&lines)
         .and_then(|()| out.flush())
@@ -88,10 +93,14 @@ fn run<W: Write, E: Write>(
             Ok(Exit::Report)
         }
         Ok(Outcome::Applied(txn)) => {
-            let done = [
+            let mut done = vec![
                 Message::Txn(TxnMsg::Applied { txn }),
                 Message::Txn(TxnMsg::RevertWith { txn }),
             ];
+            // C-LM5: the launch option is the user's step now.
+            if lv.is_some() {
+                done.push(Message::Profile(ProfileMsg::PasteNow));
+            }
             Ok(out
                 .lines(&done)
                 .and_then(|()| out.flush())

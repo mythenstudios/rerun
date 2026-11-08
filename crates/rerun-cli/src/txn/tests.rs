@@ -83,6 +83,7 @@ fn head() -> Preview {
         registry: None,
         layers: None,
         ini: None,
+        profiles: None,
     }
 }
 
@@ -514,4 +515,50 @@ fn a_full_journal_names_forget() {
         )),
         "{text}"
     );
+}
+
+/// P3-3d: a halt at the profiles root says what it means (also the tolerated halt a rebind
+/// preview shows), and a moved profiles folder names both paths (S3).
+#[test]
+fn a_halt_at_the_profiles_root_and_a_moved_profiles_folder_are_explained() {
+    let mut h = head();
+    h.roots.push(PreviewRoot {
+        index: 1,
+        kind: RootKind::Profiles,
+        path: escape::path(r"C:\Users\Player\AppData\Local\Rerun\profiles").into_owned(),
+        steam: None,
+        main_exe: None,
+    });
+    let s = st(txn(4), TxnLine::Applied, Some(Ok(h)), Vec::new());
+    let v = Verified {
+        ops: Vec::new(),
+        halted: Some(Halt {
+            op: 0,
+            root: 1,
+            why: Box::new(Refusal::NeedsHelper),
+        }),
+        details: BTreeMap::new(),
+        cleanup: Vec::new(),
+        profiles_moved: Some(rerun_core::exec::ProfilesMoved {
+            planned: escape::path(r"C:\A\Rerun\profiles").into_owned(),
+            now: escape::path(r"C:\B\Rerun\profiles").into_owned(),
+        }),
+    };
+    let text = shown(&now_lines(&s, &v));
+    for want in [
+        r"Rerun's profiles folder is at another path than the transaction names (its hashes decide): named C:\A\Rerun\profiles",
+        r"  now C:\B\Rerun\profiles",
+        "  Rerun's profiles folder is missing: the revert stops at the launch profile after everything else is reverted; forget closes the transaction then",
+    ] {
+        assert!(text.contains(want), "{want}\n{text}");
+    }
+    // A halt at the game root says nothing about profiles.
+    let mut v = v;
+    v.halted = Some(Halt {
+        op: 0,
+        root: 0,
+        why: Box::new(Refusal::NeedsHelper),
+    });
+    v.profiles_moved = None;
+    assert!(!shown(&now_lines(&s, &v)).contains("profiles"));
 }

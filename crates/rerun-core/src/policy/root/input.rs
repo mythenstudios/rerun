@@ -76,3 +76,16 @@ pub fn read_input(sys: &dyn System, abs: &Path, max: u64) -> Result<Vec<u8>, Roo
     }
     Ok(dir.read_limited(&file, max)?)
 }
+
+/// Whether `<install>\<name>` is a plain file (P3-3d: the shim the launch option names), read
+/// side only: `install` opened by absolute path like [`read_input`]'s folder (a drive root
+/// too), the file one segment below it, never followed through a link. `Ok(false)` if it is
+/// missing, a folder, a link or restricted.
+pub fn file_present(sys: &dyn System, install: &Path, name: &str) -> Result<bool, RootError> {
+    let dir = open_abs(sys, install)?;
+    let file: RelPath = classify(name, false)?;
+    Ok(matches!(
+        dir.metadata(&file)?,
+        Some(m) if m.kind == EntryKind::File && m.reparse.is_none() && !m.restricted
+    ))
+}

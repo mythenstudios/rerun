@@ -75,8 +75,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use preview::{
-    INI_NOTE, IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, Preview, PreviewOp, PreviewRoot,
-    ProfilePreview, ProfileShown, REGISTRY_NOTE, RegShown, preview, preview_head, preview_stored,
+    INI_NOTE, IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, PROFILE_NOTE, Preview, PreviewOp,
+    PreviewRoot, ProfilePreview, ProfileShown, REGISTRY_NOTE, RegShown, preview, preview_head,
+    preview_stored,
 };
 #[cfg(test)]
 pub(crate) use profile::knob as profile_knob;
