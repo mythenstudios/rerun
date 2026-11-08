@@ -32,15 +32,17 @@ try {
     $exit = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($exit -ne 0) { throw 'cargo test --no-run failed (run it by hand to see why)' }
-    # The release rerun.exe for the CLI round trip (P2-13, sandbox-cli.ps1); built only.
+    # The release rerun.exe and rerun-launch.exe for the CLI round trip (P2-13, P3-3e, sandbox-cli.ps1); built only.
     $ErrorActionPreference = 'Continue'
-    & cargo build -p rerun-cli --release 2>$null | Out-Null
+    & cargo build -p rerun-cli -p rerun-launch --release 2>$null | Out-Null
     $exit = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
-    if ($exit -ne 0) { throw 'cargo build -p rerun-cli --release failed (run it by hand to see why)' }
+    if ($exit -ne 0) { throw 'cargo build -p rerun-cli -p rerun-launch --release failed (run it by hand to see why)' }
 } finally { Pop-Location }
 $cliExe = Join-Path $repo 'target\release\rerun.exe'
+$shimExe = Join-Path $repo 'target\release\rerun-launch.exe'
 if (-not (Test-Path -LiteralPath $cliExe)) { throw "release rerun.exe missing: $cliExe" }
+if (-not (Test-Path -LiteralPath $shimExe)) { throw "release rerun-launch.exe missing: $shimExe" }
 $exe = $json | ForEach-Object { try { $_ | ConvertFrom-Json } catch { $null } } |
     Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.target.name -eq 'rerun-core' -and $_.target.kind -contains 'lib' -and $_.executable } |
     Select-Object -Last 1 -ExpandProperty executable
@@ -59,6 +61,8 @@ Copy-Item -LiteralPath $exe -Destination (Join-Path $bin 'rerun-core-tests.exe')
 Write-Host "staged $exe -> $bin\rerun-core-tests.exe"
 Copy-Item -LiteralPath $cliExe -Destination (Join-Path $bin 'rerun.exe') -Force
 Write-Host "staged $cliExe -> $bin\rerun.exe"
+Copy-Item -LiteralPath $shimExe -Destination (Join-Path $bin 'rerun-launch.exe') -Force
+Write-Host "staged $shimExe -> $bin\rerun-launch.exe"
 if (Test-Path -LiteralPath (Join-Path $tools 'Procmon64.exe')) { Write-Host 'Procmon64.exe found: the probes will use it' }
 if ($StageOnly) { return }
 

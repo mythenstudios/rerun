@@ -96,10 +96,10 @@ $code = -1
 $passed = 0
 $failed = 0
 $err = ''
-# P2-13 (user decision E7 a): the CLI round trip with the release rerun.exe, before the tests
+# P2-13 (user decision E7 a), P3-3e: the CLI round trip and the launch_method round trip with the release rerun.exe, before the tests
 # (its own game folder and registry key; a test that fails cannot block it).
 $cli = $null
-Status 'CLI round trip (cli.log)'
+Status 'CLI round trip and launch_method round trip (cli.log)'
 try {
     $cli = &'C:\sandbox\scripts\sandbox-cli.ps1' -Out $out -Elevated $elevated
 } catch {
