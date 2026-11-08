@@ -8,8 +8,14 @@
 //! - LP4 `--dry-run` without Rerun's folder: the same plan bytes as with it (F1).
 //! - LP5 the same rule twice: nothing to do; another rule replaces the profile; a round trip.
 //! - LP6 (review S2) a profile plan while the game runs: refused (D4 also for a plan whose only
-//!   op is the profile); a recorded or stored profile plan without a main executable is refused
-//!   by the format.
+//!   op is the profile); a profile plan without a main executable is refused by the current rules
+//!   (planning, encode, apply) and accepted as a recorded head (B1, E4: its revert then asks no
+//!   main executable).
+//! - LP8 `file_install`, `registry_set`, `compat_layer` and `launch_method` in one plan: the
+//!   profile is op 0, then the file ops, then the registry ops; the round trip is identical. A
+//!   profile-only plan on a game folder the user cannot write needs no helper.
+//! - LP9 `app_path` other than the path of Rerun's folder refused; a start of exactly 259
+//!   characters accepted.
 //! - LV1 `on_this_machine` on fixtures: 5950X, hybrid, more than one group, x86 on a group of more
 //!   than 32, an unreadable topology, an empty selection, a priority-only profile.
 
@@ -326,7 +332,8 @@ fn lp2_every_refusal_of_the_planner() {
     sys.fake_fs()
         .set_restricted(Path::new(&game("locked.exe")), true)
         .unwrap();
-    assert!(e(plan_lm(&sys, &one(spec("locked.exe")), "game.exe")).contains("locked.exe"));
+    let r = e(plan_lm(&sys, &one(spec("locked.exe")), "game.exe"));
+    assert!(r.contains("not a plain file"), "{r}");
     // A start path of 260 characters (F7).
     let long = format!(r"{}\{}.exe", "a".repeat(200), "b".repeat(20));
     put(&sys, &game(&long), &pe_x64());
@@ -553,6 +560,90 @@ fn lp6_a_profile_plan_while_the_game_runs_is_refused() {
     p.roots[0].main_exe = None;
     let e = p.encode().unwrap_err().to_string();
     assert!(e.contains("main executable"), "{e}");
+    // A recorded head keeps only the form (B1, E4).
+    let bytes = serde_json::to_vec(&p).unwrap();
+    assert!(crate::plan::decode(&bytes).is_err());
+    assert_eq!(crate::plan::decode_recorded(&bytes).unwrap(), p);
+}
+
+#[test]
+fn lp8_a_profile_with_file_and_registry_ops_orders_them_and_round_trips() {
+    let env = Env::new(lp_sys(&pe_x86(), &pe_x86()));
+    env.sys.fake_fs().mkdir_all(Path::new(PROFILES)).unwrap();
+    let mut steps = crate::exec::rebind_tests::rb_steps(false);
+    steps.push(Step::LaunchMethod(spec("FFLauncher.exe")));
+    let p = plan_lm(&env.sys, &steps, "game.exe").unwrap();
+    assert_eq!(p.roots[1].kind, RootKind::Profiles);
+    assert!(matches!(&p.ops[0], Op::CreateFile { root, .. } if root.0 == 1));
+    let kinds: Vec<u8> = p
+        .ops
+        .iter()
+        .map(|o| match o.target() {
+            crate::plan::Target::File { root, .. } if root.0 == 1 => 0,
+            crate::plan::Target::File { .. } => 1,
+            _ => 2,
+        })
+        .collect();
+    assert!(kinds.windows(2).all(|w| w[0] <= w[1]), "{kinds:?}");
+    assert_eq!(kinds.iter().filter(|k| **k == 0).count(), 1);
+    assert!(kinds.contains(&1) && kinds.contains(&2), "{kinds:?}");
+    let snap = |sys: &FakeSystem| (snap_all(sys), crate::exec::rebind_tests::keys(sys));
+    let before = snap(&env.sys);
+    let h = store(&app(&env.sys), &p.encode().unwrap()).unwrap();
+    let t = env.applied(&h);
+    assert_eq!(env.revert(&t).unwrap().closed, Some(Closing::Reverted));
+    let after = snap(&env.sys);
+    assert!(
+        before.0 == after.0 && before.1 == after.1,
+        "{:#?} {:#?}",
+        before.0.diff(&after.0),
+        before.1.diff(&after.1)
+    );
+
+    // A profile-only plan on a game folder the user cannot write: nothing is written there.
+    let sys = lp_sys(&pe_x86(), &pe_x86());
+    sys.fake_fs()
+        .set_user_writable(Path::new(STEAM_GAME), false)
+        .unwrap();
+    let p = plan_lm(&sys, &one(spec("FFLauncher.exe")), "game.exe").unwrap();
+    assert_eq!(p.ops.len(), 1);
+    // With a file op in the game folder: the elevated helper (phase 4).
+    let mut steps = vec![Step::FileInstall(crate::exec::tests::t1_spec())];
+    steps.push(Step::LaunchMethod(spec("FFLauncher.exe")));
+    assert!(matches!(
+        plan_lm(&sys, &steps, "game.exe"),
+        Err(PlanError::NeedsHelper)
+    ));
+}
+
+#[test]
+fn lp9_another_app_path_is_refused_and_259_characters_are_accepted() {
+    let sys = lp_sys(&pe_x86(), &pe_x86());
+    let fr = fr(&sys);
+    let store = StoreDir::open(&sys, &fr, Path::new(STEAM_LIB)).unwrap();
+    let g = store.game(&fr, "G").unwrap();
+    let a = app(&sys);
+    let main = rel("game.exe");
+    let other = crate::path::RootPath::new(r"C:\Users\Other\AppData\Local\Rerun").unwrap();
+    let r = plan(
+        &one(spec("FFLauncher.exe")),
+        &PlanCtx {
+            game: &g,
+            app: Some(&a),
+            steam_app: Some(220),
+            main_exe: Some(&main),
+            reg: RegPolicy.reader(&sys),
+            app_path: Some(&other),
+        },
+    );
+    let e = r.expect_err("another app path").to_string();
+    assert!(e.contains("Rerun's folder changed"), "{e}");
+    // F7: 259 UTF-16 units is the limit, not over it.
+    let long = format!(r"{}\{}.exe", "a".repeat(200), "b".repeat(19));
+    put(&sys, &game(&long), &pe_x64());
+    assert_eq!(game(&long).encode_utf16().count(), 259);
+    let p = plan_lm(&sys, &one(spec(&long)), &long).unwrap();
+    assert_eq!(profile_of(&p).start, game(&long));
 }
 
 const RYZEN_5950X: &str = include_str!("../../../../tests/fixtures/cpu/ryzen9-5950x.json");

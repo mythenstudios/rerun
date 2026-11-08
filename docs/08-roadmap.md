@@ -41,6 +41,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - Elevated helper (moved from phase 3, together with the signed index it anchors on) + primitive `firewall_rule`, admin-only roots; audit A4 before the helper
 - Package download (allowed hosts, SHA256, Zip Slip safe), DLL slots, reference counting
 - Topo engine with `when`, variants, conflicts
+- Topo loader requires `launch.start` for `direct`, `watch` and `auto`; re-evaluate E2 of P3-3 (reading Steam's `appinfo.vdf` to propose or check `start`, ADR 0022 amendment P3-3)
 - Primitive `gpu_preference` with the `when` keys `gpu.hybrid` and `gpu.integrated`; `UserData` roots (`Documents`, `My Games`) with their own allowlist (both moved from phase 2, user decisions D6 and D8)
 - Signed index (Ed25519)
 - 20 Topos, at least 5 of them `verified` on the developer machine
