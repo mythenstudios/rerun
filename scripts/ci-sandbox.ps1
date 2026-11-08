@@ -10,9 +10,9 @@
 #     standard user cannot hold an elevated token, so no trick is needed, and its profile and
 #     HKCU are new, like a fresh Sandbox. A restricted token of the runner's administrator
 #     (`runas /trustlevel`, SAFER) was rejected: in the Sandbox it kept the high integrity
-#     label and `TokenElevation` still said elevated (docs/09). The process is started with
-#     Start-Process -Credential (Secondary Logon); if that fails, with a scheduled task of that
-#     user (run level limited). Both are tried, and the log says which one worked.
+#     label and `TokenElevation` still said elevated (docs/09). The process is started as a
+#     scheduled task of that user (run level limited, "Log on as a batch job" granted to it);
+#     Start-Process -Credential died at once on the runner (presumably no desktop for the new logon).
 #  2. elevated pass: `sandbox-run.ps1 -Ci -CliOnly` as the runner's administrator; the only
 #     thing checked is that `plan` refuses (exit 3) and nothing changes (E3).
 # The wrapper's UAC restart (Sandbox only) is off with -Ci.
@@ -89,25 +89,32 @@ EndSection
 Section "pass 1: non-elevated as $user (sandbox-run.ps1 -Ci)"
 $out1 = "$sb\out\nonelevated"
 $argList = "-NoProfile -ExecutionPolicy Bypass -File $sb\scripts\sandbox-run.ps1 -Ci -Out $out1"
-$cred = New-Object Management.Automation.PSCredential(".\$user", $secure)
-$how = ''
-$proc = $null
-try {
-    Start-Service seclogon -ErrorAction SilentlyContinue
-    $proc = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList $argList `
-        -Credential $cred -LoadUserProfile -UseNewEnvironment -WorkingDirectory $out1 -WindowStyle Hidden -PassThru
-    $how = 'Start-Process -Credential'
-} catch {
-    Write-Host "Start-Process -Credential failed: $_"
-    Write-Host 'falling back to a scheduled task of the user (run level limited)'
-    $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $argList -WorkingDirectory $out1
-    Register-ScheduledTask -TaskName 'RerunCiSandbox' -Action $action -User ".\$user" -Password $plain -RunLevel Limited -Force | Out-Null
-    Start-ScheduledTask -TaskName 'RerunCiSandbox'
-    $how = 'scheduled task'
+# A scheduled task of the user (run level limited) is the primary way: Start-Process -Credential
+# (Secondary Logon) from the runner's session without a desktop starts a child that dies at once
+# (presumably no window station/desktop for the new logon; not measured); seen on the first CI run.
+# A password task needs "Log on as a batch job", which Users lack on a client SKU by default:
+# granted to this throwaway account on the throwaway runner only.
+$how = 'scheduled task'
+$cfg = Join-Path $env:RUNNER_TEMP 'secpol.inf'
+$db = Join-Path $env:RUNNER_TEMP 'secpol.sdb'
+& secedit /export /cfg $cfg /areas USER_RIGHTS | Out-Null
+$sid = (New-Object Security.Principal.NTAccount(".\$user")).Translate([Security.Principal.SecurityIdentifier]).Value
+$inf = Get-Content -LiteralPath $cfg
+if ($inf -match '^SeBatchLogonRight') {
+    $inf = $inf | ForEach-Object { if ($_ -match '^SeBatchLogonRight') { "$_,*$sid" } else { $_ } }
+} else {
+    $inf = $inf | ForEach-Object { $_; if ($_ -eq '[Privilege Rights]') { "SeBatchLogonRight = *$sid" } }
 }
+Set-Content -LiteralPath $cfg -Value $inf -Encoding Unicode
+& secedit /configure /db $db /cfg $cfg /areas USER_RIGHTS | Out-Null
+Write-Host "granted SeBatchLogonRight to $user (secedit exit $LASTEXITCODE)"
+$action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $argList -WorkingDirectory $out1
+Register-ScheduledTask -TaskName 'RerunCiSandbox' -Action $action -User ".\$user" -Password $plain -RunLevel Limited -Force | Out-Null
+$t0 = Get-Date
+Start-ScheduledTask -TaskName 'RerunCiSandbox'
 Write-Host "started the pass with: $how"
 
-# Follow status.txt while it runs, until the process ends, `done:` appears and the timeout.
+# Follow status.txt while it runs, until the task has run and is no longer running, or the timeout.
 $seen = 0
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $ended = $false
@@ -119,13 +126,19 @@ while ((Get-Date) -lt $deadline) {
         for ($i = $seen; $i -lt $lines.Count; $i++) { Write-Host "[status] $($lines[$i])" }
         $seen = $lines.Count
     }
-    if ($proc) { $ended = $proc.HasExited }
-    else { $ended = ((Get-ScheduledTask -TaskName 'RerunCiSandbox').State -ne 'Running') -and ($seen -gt 0) }
+    $task = Get-ScheduledTask -TaskName 'RerunCiSandbox'
+    $info = Get-ScheduledTaskInfo -TaskName 'RerunCiSandbox'
+    $ran = $info.LastRunTime -and $info.LastRunTime -ge $t0.AddSeconds(-5)
+    $ended = $ran -and ($task.State -ne 'Running') -and ($task.State -ne 'Queued')
     if ($ended) { break }
 }
+$info = Get-ScheduledTaskInfo -TaskName 'RerunCiSandbox'
+Write-Host ("task last result: 0x{0:X8}, last run: {1}" -f $info.LastTaskResult, $info.LastRunTime)
 if (-not $ended) {
     Fail "pass 1 did not finish within $TimeoutSeconds s (status.txt above shows how far it got)"
-    if ($proc) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    Stop-ScheduledTask -TaskName 'RerunCiSandbox' -ErrorAction SilentlyContinue
+    Get-CimInstance Win32_Process | Where-Object { try { (Invoke-CimMethod -InputObject $_ -MethodName GetOwner).User -eq $user } catch { $false } } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 Write-Host "pass 1 process ended: $ended"
 EndSection
