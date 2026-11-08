@@ -387,9 +387,11 @@ disallowed-methods = [
   { path = "windows_sys::Win32::UI::Shell::SHGetKnownFolderItem", reason = "known folders only via sys::win::shell (ADR 0009)", allow-invalid = true },
   { path = "windows_sys::Win32::UI::Shell::SHGetFolderLocation", reason = "known folders only via sys::win::shell (ADR 0009)", allow-invalid = true },
   { path = "windows_sys::Win32::UI::Shell::SHGetSpecialFolderLocation", reason = "known folders only via sys::win::shell (ADR 0009)", allow-invalid = true },
-  # ADR 0010: the CPU topology only through sys::win::cpu (rerun-launch gets its own copy of the two
-  # calls in phase 3); no source that sees one group, the process affinity or a bare count; no
-  # affinity or CPU Set setter until phase 3 gives them one wrapper.
+  # ADR 0010: the CPU topology only through sys::win::cpu (rerun-launch has its own copy of the two
+  # calls in src/win/cpu.rs); no source that sees one group, the process affinity or a bare count;
+  # the affinity, CPU Set and job setters (and CreateProcessW, ShellExecuteExW, CoInitializeEx,
+  # GetThreadGroupAffinity) only in rerun-launch's wrapper module src/win/launch.rs (ADR 0010
+  # amendment P3-1b, ADR 0022), each call site with an expect.
   { path = "windows_sys::Win32::System::SystemInformation::GetSystemCpuSetInformation", reason = "only via sys::win::cpu (ADR 0010)", allow-invalid = true },
   { path = "windows_sys::Win32::System::SystemInformation::GetLogicalProcessorInformationEx", reason = "only via sys::win::cpu (ADR 0010)", allow-invalid = true },
   { path = "windows_sys::Win32::System::SystemInformation::GetLogicalProcessorInformation", reason = "group 0 only; the topology only via sys::win::cpu (ADR 0010)", allow-invalid = true },

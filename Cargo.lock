@@ -691,6 +691,7 @@ name = "rerun-launch"
 version = "0.1.0"
 dependencies = [
  "rerun-core",
+ "rerun-proto",
  "windows-sys",
 ]
 

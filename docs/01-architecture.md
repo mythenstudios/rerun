@@ -86,7 +86,7 @@ revert: journal ─► observe each op (never overwrite a foreign state) ─► 
 
 - Reads the launch profile named by `--profile <id>` from `%LOCALAPPDATA%\Rerun\profiles\<id>.profile` (format 1, written on apply; ADR 0022).
 - Knows no Topos, no network, no registry except reading the profile.
-- Target: < 1 MB, < 50 ms startup time, exits immediately (direct/watch) or together with the game (hold/ifeo).
+- Target: < 1 MB, < 50 ms startup time until `CreateProcessW`. Lifetime (ADR 0022, B3): `direct` waits until the started process exits and passes its exit code on; `watch` lives at least as long as the started process and at most until the target is found and checked; `hold`/`ifeo` together with the game. No console window (`windows_subsystem = "windows"`).
 - DLL hardening like every shipped executable (ADR 0008 amendment 2026-11-05): linked with `/DEPENDENTLOADFLAG:0x800` (`build.rs`), and the first statement of `main` restricts the DLL search path to System32 (`src/dll.rs`, its own copy of the one `SetDefaultDllDirectories` call), failing closed. `rerun` does the same through `rerun_core::sys::win::restrict_dll_search`.
 
 ## rerun-cpu (inproc)

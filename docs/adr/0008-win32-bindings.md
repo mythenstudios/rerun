@@ -69,3 +69,6 @@ Alternative rejected: one list for both binaries, which would grant `rerun-launc
 - **Delay-load `dxgi.dll`:** see the hardening alternatives; an explicit System32 load is narrower.
 - **`D3DKMTEnumAdapters2`/`D3DKMTQueryAdapterInfo`** (`windows-sys`, `Wdk_Graphics_Direct3D`): no COM, but a WDK thunk API with versioned, driver-specific query structures, no driver version in the DXGI form, and no help for the firewall. Banned instead.
 
+
+## Amendment P3-1b (2026-11-08): `LAUNCH_IMPORTS` of the shim
+`rerun-launch.exe` now starts processes, so its allowlist grows by four reviewed imports (ADR 0022): `advapi32.dll` (`OpenProcessToken`, `GetTokenInformation`, `CheckTokenMembership`: an elevated shim ignores the profile), `shell32.dll` (`SHGetKnownFolderPath` for the profile folder, `ShellExecuteExW` for the 740 fallback), `combase.dll` (`CoTaskMemFree` for the known-folder string) and `ole32.dll` (`CoInitializeEx`/`CoUninitialize` around `ShellExecuteExW`). All four are KnownDLLs on Windows 11 and resolve from System32 under `/DEPENDENTLOADFLAG:0x800`. `ole32.dll` is in `LAUNCH_IMPORTS` only, not in `CLI_IMPORTS`. `CoInitializeEx` has its second reviewed exception to the COM ban in `rerun-launch`'s wrapper module (ADR 0010 amendment P3-1b), on the 740 path only; the shim activates no COM class itself.

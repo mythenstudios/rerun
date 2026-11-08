@@ -46,13 +46,42 @@ fn release_rerun_launch_exe_loads_dependencies_from_system32_only() {
     );
 }
 
+/// The shim gets past its DLL search restriction (exit code 1 would mean it failed) and,
+/// without `--profile`, starts nothing and exits with 2 (ADR 0022, B1: no console, so the exit
+/// code is the only report).
 #[test]
 fn rerun_launch_exe_runs_with_the_restricted_search_path() {
     let out = Command::new(env!("CARGO_BIN_EXE_rerun-launch"))
         .output()
         .unwrap();
-    // Phase 0: the shim reports "not implemented yet" after the restriction succeeded.
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("not implemented yet"), "{stderr}");
-    assert!(!stderr.contains("DLL search path"), "{stderr}");
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
+}
+
+/// End to end with a harmless system binary: an unknown profile ID starts Steam's command
+/// unchanged and passes its exit code on (D3, B3). Reads only the (missing) profile file.
+#[test]
+fn rerun_launch_exe_starts_the_command_and_passes_its_exit_code() {
+    let system32 = Path::new(&std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let cmd = system32.join("cmd.exe");
+    let out = Command::new(env!("CARGO_BIN_EXE_rerun-launch"))
+        .arg("--profile")
+        .arg("fefefefefefefefefefefefefefefefe")
+        .arg(&cmd)
+        .args(["/c", "exit", "7"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "{out:?}");
+    // A relative program is an unusable command line: nothing started, exit 2.
+    let out = Command::new(env!("CARGO_BIN_EXE_rerun-launch"))
+        .args([
+            "--profile",
+            "fefefefefefefefefefefefefefefefe",
+            "cmd.exe",
+            "/c",
+            "exit 7",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
 }

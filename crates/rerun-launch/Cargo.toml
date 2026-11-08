@@ -9,12 +9,30 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# Only windows-sys and rerun-proto are allowed (checked by CI, ADR 0006). windows-sys with the
-# features in use only: SetDefaultDllDirectories (Win32_System_LibraryLoader, ADR 0008, H2).
+# Only windows-sys and rerun-proto are allowed (checked by CI, ADR 0006). rerun-proto without
+# serde (the profile codec and the CPU rule selection, ADR 0022). windows-sys with the features
+# in use only: SetDefaultDllDirectories (LibraryLoader, ADR 0008, H2); the command line
+# (Environment); the token check (Security); the known folder, ShellExecuteExW and COM for the
+# 740 fallback (UI_Shell, Com; Registry only for the HKEY field of SHELLEXECUTEINFOW); the
+# profile read (Storage_FileSystem constants); process, job and topology calls (Threading,
+# JobObjects, SystemInformation; ADR 0010, ADR 0022).
 [dependencies]
+rerun-proto.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_Environment",
+  "Win32_System_JobObjects",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Registry",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+] }
 
 # Test only: the hardening test reads the built shim with rerun_core::detect::pe (ADR 0013,
 # "Hardening tests"). A dev-dependency never reaches the shipped binary (`cargo tree -e normal`,

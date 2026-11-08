@@ -48,12 +48,22 @@ pub fn forbidden_import(dll: &str) -> bool {
 }
 
 /// The static imports `rerun-launch.exe` may have: exact names, compared case-insensitively.
-/// Found on 2026-11-05 (debug and release, x64). A new import fails the hardening test: review
-/// it, then extend this list and ADR 0008 (amendment 2026-11-05, DLL hardening).
+/// Found on 2026-11-05 (debug and release, x64); extended by P3-1b (ADR 0022, reviewed there
+/// and in ADR 0008): `advapi32.dll` for the token check of an elevated shim
+/// (`OpenProcessToken`, `GetTokenInformation`, `CheckTokenMembership`, M1), `shell32.dll` for
+/// `SHGetKnownFolderPath` (D2) and the `ShellExecuteExW` fallback (B2), `combase.dll` for
+/// `CoTaskMemFree` (the known-folder string), `ole32.dll` for `CoInitializeEx`/`CoUninitialize`
+/// around `ShellExecuteExW` (B2). All four are KnownDLLs on Windows 11 (checked on build 26300). A new import
+/// fails the hardening test: review it, then extend this list and ADR 0008 (amendment
+/// 2026-11-05, DLL hardening).
 pub const LAUNCH_IMPORTS: &[&str] = &[
     "kernel32.dll",
     "ntdll.dll",
     "api-ms-win-core-synch-l1-2-0.dll",
+    "advapi32.dll",
+    "shell32.dll",
+    "combase.dll",
+    "ole32.dll",
 ];
 
 /// The static imports `rerun.exe` may have, which links all of `WinSystem` from phase 1 step 16
@@ -244,19 +254,17 @@ fn each_binary_has_its_own_allowlist() {
     let check = |imports: &[&str], allowed: &[&str]| {
         check_hardened(Cursor::new(image(imports, &[], SEARCH_SYSTEM32)), allowed)
     };
-    // The CLI's imports pass its own list and fail the shim's: rerun-launch.exe never gets
-    // advapi32, combase or shell32 without a review.
-    for dll in [
-        "advapi32.dll",
-        "combase.dll",
-        "shell32.dll",
-        "bcryptprimitives.dll",
-        "userenv.dll",
-    ] {
+    // The CLI's own imports pass its list and fail the shim's: rerun-launch.exe never gets
+    // them without a review (advapi32, combase and shell32 were reviewed for it in P3-1b).
+    for dll in ["bcryptprimitives.dll", "userenv.dll"] {
         check(&["kernel32.dll", dll], CLI_IMPORTS).unwrap();
         let e = check(&["kernel32.dll", dll], LAUNCH_IMPORTS).unwrap_err();
         assert!(e.contains("not in the allowlist"), "{e}");
     }
+    // The shim's own import (COM around ShellExecuteExW, B2) fails the CLI's list.
+    check(&["kernel32.dll", "ole32.dll"], LAUNCH_IMPORTS).unwrap();
+    let e = check(&["kernel32.dll", "ole32.dll"], CLI_IMPORTS).unwrap_err();
+    assert!(e.contains("not in the allowlist"), "{e}");
     // An import outside both lists fails both, a forbidden one fails both.
     for allowed in [LAUNCH_IMPORTS, CLI_IMPORTS] {
         let e = check(&["kernel32.dll", "user32.dll"], allowed).unwrap_err();
@@ -264,8 +272,9 @@ fn each_binary_has_its_own_allowlist() {
         let e = check(&["kernel32.dll", "dxgi.dll"], allowed).unwrap_err();
         assert!(e.contains("forbidden static import dxgi.dll"), "{e}");
     }
-    // The shim's list is part of the CLI's; no list holds a forbidden name.
-    for dll in LAUNCH_IMPORTS {
+    // The shim's list is part of the CLI's apart from ole32.dll; no list holds a forbidden
+    // name.
+    for dll in LAUNCH_IMPORTS.iter().filter(|d| **d != "ole32.dll") {
         assert!(CLI_IMPORTS.contains(dll), "{dll}");
     }
     for dll in LAUNCH_IMPORTS.iter().chain(CLI_IMPORTS) {

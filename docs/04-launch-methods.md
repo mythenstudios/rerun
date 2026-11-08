@@ -15,8 +15,8 @@ The same applies to EA App, Rockstar Launcher, Battle.net. In addition: games th
 
 | Method | How | Lifetime | Admin | Risk |
 |---|---|---|---|---|
-| `direct` | Start game suspended, in a Job Object with limit, resume | ms | no | none |
-| `watch` | Start chain, wait for target exe (path + hash), set affinity/CPU Sets, exit. Timeout 120 s | until game start | no | low |
+| `direct` | Start game suspended, in a Job Object with limit (or with default CPU Sets), resume, wait for it | until the started process exits | no | none |
+| `watch` | Start chain, wait for target exe (path; its hash is checked when planning), set affinity/CPU Sets, check, exit. Timeout 120 s | at least as long as the started process, at most until the target is found and checked (≤ 130 s if it never appears, plus the wait for the started process) | no | low |
 | `hold` | like `watch`, stays until the game ends, sets affinity again if it was reset (check interval 2 s) | game duration | no | low, visible, opt-in |
 | `ifeo` | `IFEO\<exe>\Debugger = rerun-launch`. Every start of the exe goes through us. Starts the real game (debugger flag, detach immediately), stays until the game ends, passes the exit code through | game duration | yes | AV/DRM may trigger; opt-in |
 | `inproc` | `rerun-cpu.asi` in the game: sets affinity from inside, hooks `SetProcessAffinityMask`, reports a smaller core count | in the game | no | occupies slot; off-limits with anti-cheat |
@@ -26,11 +26,12 @@ The same applies to EA App, Rockstar Launcher, Battle.net. In addition: games th
 
 ## Post-launch check (required)
 
-`rerun-launch` (or, with `direct`, a short follow-up run) checks the actual affinity of the target process a few seconds after the game starts and writes the result to the Journal:
+`rerun-launch` checks the actual affinity (and priority class) of the target process about 5 s after the start, while it waits, and writes the outcome of the last start to `<LocalAppData>\Rerun\launch\<id>.result` (P3-2, ADR 0022 D5), never to the journal: the journal has one writer, and a game start during an `apply` must neither block nor write records. An elevated shim writes nothing (B13). Core reads the file as untrusted input.
 
 - `ok` – "Affinity active · 8 of 32 threads · verified"
-- `reset_by:<exe>` – "Reset by upc.exe · method hold/ifeo recommended"
+- `reset` – the affinity was changed after the start (no culprit is named: the shim cannot tell who did it) · method hold/ifeo recommended
 - `target_not_found` – timeout, target exe never seen
+- `path_mismatch`, `profile_invalid`, `elevation_required`, … – the rule was not applied and the game started unchanged (below)
 
 The app shows this the next time it is opened. Failures become suggestions for the Topo (GitHub issue template).
 
@@ -44,7 +45,15 @@ Apply and revert ask `users()` of every file a plan touches and of the game's **
 
 ## Steam integration
 
-Launch option `"<path>\rerun-launch.exe" %command%`. Written to `localconfig.vdf` only while Steam is closed, previous value to the Journal. Otherwise: copy + instructions.
+Launch option `"<path>\rerun-launch.exe" --profile <id> %command%` (`<id>`: 32 lower-case hex digits, the profile `<LocalAppData>\Rerun\profiles\<id>.profile`, ADR 0022 D2). Written to `localconfig.vdf` only while Steam is closed, previous value to the Journal (phase 5). Otherwise: copy + instructions.
+
+## `rerun-launch direct` (phase 3, ADR 0022)
+
+- **Command line.** Taken raw from `GetCommandLineW`: the shim's own name, `--profile`, one token, then Steam's command as the raw tail, passed to `CreateProcessW` unit for unit, never re-quoted. Steam's first argument (`argv[0]`, cut by the `CommandLineToArgvW` rule for argument 0) is always `lpApplicationName`, never `NULL`, so Windows never searches the current directory or `PATH`; it must be an absolute drive path (`X:\…`).
+- **Path only.** The rule applies only if `argv[0]` equals the profile's `start` (ordinal, case-insensitive); the game is started by Steam's spelling of the path. Otherwise `path_mismatch`. The exe's hash is checked when planning, not at the start.
+- **Fail open for the start.** A missing, unreadable or invalid profile, another path, a topology or selection error, or any failure while setting and reading back the limit starts Steam's command unchanged (no job, no limit, no priority). Error 740 (`requireAdministrator`) starts it through `ShellExecuteExW` without a rule (`.exe` only). A shim that runs elevated (Steam as administrator, or UAC off) never reads the profile and starts the command unchanged.
+- **Hard limit.** A Job Object with one `GROUP_AFFINITY` (`JobObjectGroupInformationEx`), the child created suspended inside it, the job and the initial thread read back, then resumed; a difference ends the suspended child and starts the command unchanged. **Soft limit.** `SetProcessDefaultCpuSets` on the suspended child (the started process only, not its children).
+- **Lifetime.** The shim waits for the process it started and exits with its exit code, so Steam keeps tracking the game (playtime, overlay, "Stop"). Before a start: exit 1 (DLL hardening failed) or 2 (the shim's own command line is unusable: no `--profile`, nothing after it, or `argv[0]` not absolute); 3: the command could not be started. No console window.
 
 ## A game that Steam moved or reinstalled
 
@@ -52,7 +61,7 @@ After Steam moved a library (or the app into another library) or reinstalled the
 
 ## Compatibility layers and the start path (phase 3 condition)
 
-A compatibility layer (`compat_layer`, `AppCompatFlags\Layers`) applies only when Windows starts the program by exactly the path of the value name, the game's canonical path (SB-L2, ADR 0018 amendment P2-11b): a start through a junction, or through another spelling, gets no layer, silently. So `rerun-launch` and the IFEO launcher must start the game by that path as the plan names it: no `\\?\` prefix, no path taken from a handle, no junctioned library path. 8.3 names are not measured. The Sandbox probes (`scripts/sandbox-probe-layers.ps1`) can check a start form before phase 3 relies on it.
+A compatibility layer (`compat_layer`, `AppCompatFlags\Layers`) applies only when Windows starts the program by exactly the path of the value name, the game's canonical path (SB-L2, ADR 0018 amendment P2-11b): a start through a junction, or through another spelling, gets no layer, silently. So `rerun-launch` and the IFEO launcher must start the game by that path as the plan names it: no `\\?\` prefix, no path taken from a handle, no junctioned library path. `rerun-launch` starts by Steam's `argv[0]` and applies a rule only if it equals the planned path case-insensitively (ADR 0022 M2); whether the layer then applies to Steam's spelling is Sandbox case SB-L7. 8.3 names are not measured. The Sandbox probes (`scripts/sandbox-probe-layers.ps1`) can check a start form before phase 3 relies on it.
 
 ## IFEO details
 
