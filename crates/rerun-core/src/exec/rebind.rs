@@ -409,7 +409,7 @@ fn checked<'g>(
         }
     })?;
     let i = usize::from(tg.root);
-    if roots.game(i).is_none() {
+    if roots.opened(i).is_none() {
         return Err(RebindRefusal::Changed.into());
     }
     if roots.for_files(i).is_err() {

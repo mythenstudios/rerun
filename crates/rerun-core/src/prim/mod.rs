@@ -172,11 +172,12 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
             "registry and INI fixes need the game's main executable".to_owned(),
         ));
     }
-    // S1: write access only for a root with file ops; D4 needs read access only.
+    // S1: write access only for a root with file ops; D4 needs read access only. Only root 0
+    // is the game folder (P3-3: a launch profile lies in Rerun's folder, root 1).
     let file_ops = b
         .ops
         .iter()
-        .any(|o| matches!(o.target(), Target::File { .. }));
+        .any(|o| matches!(o.target(), Target::File { root, .. } if root.0 == 0));
     if file_ops && !ctx.game.info().user_writable {
         return Err(PlanError::NeedsHelper);
     }

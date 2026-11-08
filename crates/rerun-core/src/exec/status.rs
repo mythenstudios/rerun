@@ -205,7 +205,7 @@ fn one(j: &Journal<'_>, app: &AppDir<'_>, l: &Listed, always: bool) -> TxnStatus
                 .and_then(|p| p.roots.get(usize::from(r.root)))
                 .and_then(|h| match &h.origin {
                     PlanOrigin::Steam { installdir, .. } => Some(installdir),
-                    PlanOrigin::Manual => None,
+                    PlanOrigin::Manual | PlanOrigin::AppDir => None,
                 })
                 .map(|d| escape::path(&format!(r"{}\steamapps\common\{d}", r.store)).into_owned()),
             id: r.id,

@@ -206,15 +206,15 @@ pub(super) fn apply_op(
             format!("the folder of {path}"),
         )));
     };
-    let packages = match op {
-        Op::CreateDir { .. } => None,
-        _ => cx
+    // Only a package source needs `packages` (an inline one is the plan's bytes, P3-3).
+    let packages = match op.content() {
+        Some(ContentRef::Package { .. }) => cx
             .app
             .sub(AppSub::Packages)
             .map_err(|x| ExecError::Refused(super::Refusal::from(x)))?,
+        Some(ContentRef::Inline { .. }) | None => None,
     };
-    let source = |c: &ContentRef| -> Result<_, ExecError> {
-        let ContentRef::Package { id, version, .. } = c;
+    let source = |id: &str, version: &str| -> Result<_, ExecError> {
         let pk = packages
             .as_deref()
             .ok_or_else(|| e(SysError::new(SysErrorKind::NotFound, "packages")))?;
@@ -225,6 +225,9 @@ pub(super) fn apply_op(
             ))
         })
     };
+    // The content as a stream: a package file, or the plan's inline bytes (P3-3); `create_new`
+    // and `replace` check its SHA-256 and length while it is streamed (ADR 0017).
+    let (pkg, mut from_pkg, mut from_plan);
     match op {
         Op::CreateDir { .. } => {
             w.intent(k, None, None)?;
@@ -243,20 +246,28 @@ pub(super) fn apply_op(
             }
         }
         Op::CreateFile { content, attrs, .. } => {
-            let ContentRef::Package {
-                file, sha256, len, ..
-            } = content;
-            let pkg = source(content)?;
-            let mut src = pkg.open_read(file).map_err(&e)?;
+            let src: &mut dyn std::io::Read = match content {
+                ContentRef::Package {
+                    id, version, file, ..
+                } => {
+                    pkg = source(id, version)?;
+                    from_pkg = pkg.open_read(file).map_err(&e)?;
+                    &mut from_pkg
+                }
+                ContentRef::Inline { bytes, .. } => {
+                    from_plan = std::io::Cursor::new(bytes.as_slice());
+                    &mut from_plan
+                }
+            };
             let x = w.tmp();
             w.intent(k, Some(x.clone()), None)?;
             let new = NewFile {
                 tmp: x,
                 attrs: *attrs,
-                sha256: *sha256,
-                max_len: *len,
+                sha256: *content.sha256(),
+                max_len: content.len(),
             };
-            match parent.create_new(&name, &mut src, &new) {
+            match parent.create_new(&name, src, &new) {
                 Ok(wr) => Ok(w.done(k, Some(wr.file_id), false)?),
                 Err(x) => {
                     // `Busy` here is a collision at the final rename: someone else's file.
@@ -273,9 +284,6 @@ pub(super) fn apply_op(
             attrs,
             ..
         } => {
-            let ContentRef::Package {
-                file, sha256, len, ..
-            } = content;
             let mut g = parent.guard(&name).map_err(&e)?;
             // Condition 5: the guard holds exactly the old state before backup and intent,
             // under exactly the planned spelling (A2-B1: a recovery renames back onto it).
@@ -292,18 +300,29 @@ pub(super) fn apply_op(
                     format!("{path} is in use"),
                 )));
             }
-            let pkg = source(content)?;
-            let mut src = pkg.open_read(file).map_err(&e)?;
+            let src: &mut dyn std::io::Read = match content {
+                ContentRef::Package {
+                    id, version, file, ..
+                } => {
+                    pkg = source(id, version)?;
+                    from_pkg = pkg.open_read(file).map_err(&e)?;
+                    &mut from_pkg
+                }
+                ContentRef::Inline { bytes, .. } => {
+                    from_plan = std::io::Cursor::new(bytes.as_slice());
+                    &mut from_plan
+                }
+            };
             let b = w.backup(&mut *g)?;
             let x = w.tmp();
             w.intent(k, Some(x.clone()), Some(BeforeArg::Backup(b)))?;
             let new = NewFile {
                 tmp: x,
                 attrs: *attrs,
-                sha256: *sha256,
-                max_len: *len,
+                sha256: *content.sha256(),
+                max_len: content.len(),
             };
-            let r = g.replace(&old.sha256, &mut src, &new).map_err(&e)?;
+            let r = g.replace(&old.sha256, src, &new).map_err(&e)?;
             w.done(k, Some(r.new.file_id), r.old_left.is_some())?;
             Ok(())
         }

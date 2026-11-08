@@ -69,6 +69,11 @@
 //! undone exactly. Otherwise it stays open (stacking: `Refusal::CleanupPending`), and only a
 //! later `revert` of the same transaction cleans up: nothing in the background, at start or on
 //! reboot.
+//!
+//! Launch profiles (P3-3, ADR 0020 amendment P3-3): a profile op is a plain file op on the
+//! profiles root (`roots`: opened through `AppDir`, created by the apply, never by a revert)
+//! with inline content (`file`); its records, observation and revert are those of every
+//! `CreateFile` and `ReplaceFile`, and there is no new record kind or flush site.
 
 mod bind;
 mod file;
@@ -108,7 +113,7 @@ use crate::path::RelPath;
 use crate::plan::{self, Object, Op, Plan, PlanError, PlanHash, Target};
 use crate::policy::ini::{IniName, KeyState};
 use crate::policy::registry::{RegPolicy, RegWriter};
-use crate::policy::root::{AppDir, ForbiddenRoots, RootError, StoreDir};
+use crate::policy::root::{AppDir, Create, ForbiddenRoots, RootError, StoreDir};
 use crate::sys::fs::TmpName;
 use crate::sys::registry::Hive;
 use crate::sys::{SysError, SysResult, System};
@@ -234,6 +239,10 @@ pub enum Refusal {
     /// A root the current user cannot write (phase 3: the elevated helper).
     #[error("the game folder needs administrator rights (not supported yet)")]
     NeedsHelper,
+    /// Rerun's profiles folder is at another path than the plan names (`<LocalAppData>` moved
+    /// since planning): an apply writes nothing then (P3-3, senior-dev condition A1).
+    #[error("Rerun's profiles folder is {} now, the plan names {}; plan again", .0.now, .0.planned)]
+    ProfilesMoved(ProfilesMoved),
     /// The main executable of a root is missing or no plain file (audit A2 should-item 8):
     /// the game-closed check would ask nothing about it.
     #[error("the main executable {0} is missing or not a file; plan again")]
@@ -273,6 +282,18 @@ pub enum Refusal {
     /// The journal could not be read or the transaction not begun.
     #[error(transparent)]
     Journal(Box<JournalError>),
+}
+
+/// The profiles root at another path than the plan or head names (P3-3, A1): an apply refuses
+/// ([`Refusal::ProfilesMoved`]); a revert and `verify` work at the folder now (every profile op
+/// is decided by its hashes) and report it ([`RevertReport::profiles_moved`],
+/// [`Verified::profiles_moved`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfilesMoved {
+    /// The path the plan names.
+    pub planned: Shown<'static>,
+    /// The path of `<LocalAppData>\Rerun\profiles` now.
+    pub now: Shown<'static>,
 }
 
 /// Why a Steam app counts as gone for its root (E3 "absent").
@@ -568,6 +589,8 @@ pub struct RevertReport {
     /// ascending; one that holds the transaction open ([`OldSeen::holds_open`]) means
     /// `closed == None`.
     pub cleanup: Vec<PendingOld>,
+    /// The profiles root was reverted at another path than the head names (P3-3, A1).
+    pub profiles_moved: Option<ProfilesMoved>,
 }
 
 /// What [`verify`] observed.
@@ -584,6 +607,8 @@ pub struct Verified {
     /// The `.old` files the journal names for the ops reverted already, as a revert's cleanup
     /// pass would find them now (P2-15, rule 5: `OldSeen::Ours` is what it deletes).
     pub cleanup: Vec<PendingOld>,
+    /// The profiles root was observed at another path than the head names (P3-3, A1).
+    pub profiles_moved: Option<ProfilesMoved>,
 }
 
 /// A `.old` the journal says a step of Rerun left (P2-15), as observed now.
@@ -657,6 +682,15 @@ pub(crate) mod knob {
         static FLUSH_ONCE_PER_FOLDER: Cell<bool> = const { Cell::new(false) };
         static RENAME_BACK_UPCASED: Cell<bool> = const { Cell::new(false) };
         static PARENT_NOT_MARKED: Cell<bool> = const { Cell::new(false) };
+        static PROFILES_PATHS_UNCHECKED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// K-LM2 (P3-3): the path of the profiles root is not compared with the plan's.
+    pub(crate) fn uncheck_profiles_paths(on: bool) {
+        PROFILES_PATHS_UNCHECKED.with(|s| s.set(on));
+    }
+    pub(crate) fn profiles_paths_unchecked() -> bool {
+        PROFILES_PATHS_UNCHECKED.with(Cell::get)
     }
 
     /// K-CM1 (audit A2/A3, `combo_tests`): a folder is flushed once per run, not before every
@@ -1181,6 +1215,7 @@ fn verify_seen(
             halted,
             details,
             cleanup: Vec::new(),
+            profiles_moved: roots.profiles_moved().cloned(),
         },
         seen,
     ))
@@ -1248,7 +1283,7 @@ pub fn check(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<usize, Refusal> {
     let hold = j.hold().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
     let stores = roots::open_stores(cx, &Bindings::head(&plan));
-    let roots = preflight(cx, &plan, &j, &listing, &stores)?;
+    let roots = preflight(cx, &plan, &j, &listing, &stores, Create::Never)?;
     drop(roots);
     drop(hold);
     Ok(plan.ops.len())
@@ -1258,17 +1293,19 @@ pub fn check(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<usize, Refusal> {
 /// under the lock and [`check`] without it): stacking on the listing, every root reopened by
 /// identity (writable where it has file ops), the main executable of every root a file, the
 /// game closed, the old state of every op and source, the old registry state. The roots stay
-/// open for the apply.
+/// open for the apply. `create`: the apply creates a missing profiles root (P3-3), `check`
+/// creates nothing.
 fn preflight<'g>(
     cx: &ExecCtx<'g>,
     plan: &Plan,
     j: &Journal<'_>,
     listing: &Listing,
     stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
+    create: Create,
 ) -> Result<roots::Roots<'g>, Refusal> {
     let objects = Object::of(plan).map_err(Refusal::Plan)?;
     stack::for_apply(j, listing, &objects)?;
-    let roots = roots::Roots::all(cx, plan, &Bindings::head(plan), stores)?;
+    let roots = roots::Roots::all(cx, plan, &Bindings::head(plan), stores, create)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
     roots::main_exe_present(plan, &roots)?;
     roots::game_closed(plan, &roots, &all)?;
@@ -1289,7 +1326,7 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
     let stores = roots::open_stores(cx, &Bindings::head(&plan));
-    let roots = preflight(cx, &plan, &j, &listing, &stores)?;
+    let roots = preflight(cx, &plan, &j, &listing, &stores, Create::IfMissing)?;
     let mut w = lock.begin(bytes.bytes()).map_err(Refusal::from)?;
     let txn = *w.id();
     let mut touched = Touched::new(cx.sys, &roots);
@@ -1731,6 +1768,7 @@ fn revert_run<W: Reverting>(
         }
         Err(e) => return Err(e),
     };
+    let profiles_moved = roots.profiles_moved().cloned();
     if halted.is_some() || !foreign_ops(&w).is_empty() {
         return Ok(RevertReport {
             txn: *t,
@@ -1738,6 +1776,7 @@ fn revert_run<W: Reverting>(
             ops,
             halted,
             cleanup: Vec::new(),
+            profiles_moved,
         });
     }
     // P2-15: the cleanup pass; a deletion is a change of this run (senior-dev B2), so an error
@@ -1768,6 +1807,7 @@ fn revert_run<W: Reverting>(
             ops,
             halted,
             cleanup,
+            profiles_moved,
         });
     }
     let how = if w.is_applied() {
@@ -1791,6 +1831,7 @@ fn revert_run<W: Reverting>(
         ops,
         halted: None,
         cleanup,
+        profiles_moved,
     })
 }
 
@@ -1899,6 +1940,8 @@ pub(crate) mod ini_tests;
 mod layer_crash_tests;
 #[cfg(test)]
 pub(crate) mod layer_tests;
+#[cfg(test)]
+mod profiles_tests;
 #[cfg(test)]
 mod rebind_crash_tests;
 #[cfg(test)]

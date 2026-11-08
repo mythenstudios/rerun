@@ -16,12 +16,20 @@
 //! An `edit ini` op (P2-12) shows the file with its old and new hash, length and R/H/S (kept),
 //! and per key `[section] key`, the old value (`missing`, `new section`) and the new one, every
 //! name and value through `escape::text`; a plan with such an op adds [`INI_NOTE`] once.
+//!
+//! A launch profile op (P3-3) names its root "Rerun's launch profiles", its source `inline
+//! (launch profile)`, and the profile decoded from the plan's bytes ([`ProfileShown`], the paths
+//! through `escape::path`); bytes that do not decode (only in a recorded head: the apply decode
+//! refuses them) are a hint, never an error of the preview (senior-dev condition B1).
 
 use std::fmt;
 
+use rerun_proto::cpu::rule::{Bitness, CpuRule, Mode, Prefer, PreferL3};
+use rerun_proto::profile::{self as proto, Method, Priority};
+
 use super::{
-    ContentRef, FileState, Op, Plan, PlanBytes, PlanError, PlanOrigin, Target, ValueState, allowed,
-    created_key,
+    ContentRef, FileState, Op, Plan, PlanBytes, PlanError, PlanOrigin, RootKind, Target,
+    ValueState, allowed, created_key,
 };
 use crate::escape::{self, Shown};
 use crate::policy::ini::Old;
@@ -97,11 +105,42 @@ pub struct IniShown {
     pub new: Shown<'static>,
 }
 
+/// A launch profile decoded from a plan's inline bytes, for display (P3-3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileShown {
+    /// The profile ID (the file name without `.profile`).
+    pub id: String,
+    /// `direct` or `watch`.
+    pub method: &'static str,
+    /// The program Steam must start for the rule to apply.
+    pub start: Shown<'static>,
+    /// The program whose limit is set (`start` for `direct`).
+    pub target: Shown<'static>,
+    /// `x86` or `x64`.
+    pub bitness: &'static str,
+    /// The priority class, if the profile sets one.
+    pub priority: Option<&'static str>,
+    /// The CPU rule in the words of `docs/02-topo-format.md`, if the profile has one.
+    pub cpu: Option<String>,
+}
+
+/// The profile of a launch profile op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfilePreview {
+    /// Decoded.
+    Decoded(ProfileShown),
+    /// The bytes are no launch profile of this version (a recorded head only): the reason,
+    /// never the content.
+    Unreadable(String),
+}
+
 /// One root of a [`Preview`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewRoot {
     /// Index in the plan.
     pub index: usize,
+    /// A game folder or Rerun's launch profiles.
+    pub kind: RootKind,
     /// Canonical path.
     pub path: Shown<'static>,
     /// The Steam app and library, if the root is a Steam install folder.
@@ -144,6 +183,8 @@ pub struct PreviewOp {
     pub config: bool,
     /// The keys of an `edit ini` op.
     pub ini: Vec<IniShown>,
+    /// The launch profile a profile op writes (P3-3).
+    pub profile: Option<ProfilePreview>,
 }
 
 /// A registry value for display (review S3: the `Shown` guarantee kept): `kind` is built by
@@ -194,6 +235,61 @@ fn rhs(a: &Attrs) -> String {
 
 fn old(o: &FileState) -> (String, u64, String) {
     (hex32::to_string(&o.sha256), o.len, rhs(&o.attrs))
+}
+
+/// The CPU rule in the words of `docs/02-topo-format.md`.
+fn cpu_words(r: &CpuRule) -> String {
+    let max = r
+        .max_threads
+        .map_or_else(|| "none".to_owned(), |n| n.to_string());
+    format!(
+        "max_threads {max}, prefer {}, single_l3 {}, prefer_l3 {}, smt {}, mode {}",
+        match r.prefer {
+            Prefer::Performance => "performance",
+            Prefer::Any => "any",
+        },
+        r.single_l3,
+        match r.prefer_l3 {
+            None => "none",
+            Some(PreferL3::Largest) => "largest",
+        },
+        r.smt,
+        match r.mode {
+            Mode::Hard => "hard",
+            Mode::Soft => "soft",
+        },
+    )
+}
+
+/// The profile written by an op with inline bytes at `path`.
+fn profile_of(path: &crate::path::RelPath, bytes: &[u8]) -> ProfilePreview {
+    let p = match proto::decode(bytes) {
+        Ok(p) => p,
+        Err(e) => return ProfilePreview::Unreadable(e.to_string()),
+    };
+    ProfilePreview::Decoded(ProfileShown {
+        id: path
+            .as_str()
+            .strip_suffix(".profile")
+            .unwrap_or(path.as_str())
+            .to_owned(),
+        method: match p.method {
+            Method::Direct => "direct",
+            Method::Watch => "watch",
+        },
+        start: escape::path(&p.start).into_owned(),
+        target: escape::path(&p.target).into_owned(),
+        bitness: match p.bitness {
+            Bitness::X86 => "x86",
+            Bitness::X64 => "x64",
+        },
+        priority: p.priority.map(|x| match x {
+            Priority::Normal => "normal",
+            Priority::AboveNormal => "above_normal",
+            Priority::High => "high",
+        }),
+        cpu: p.cpu.as_ref().map(cpu_words),
+    })
 }
 
 /// A registry type for display.
@@ -288,12 +384,13 @@ pub fn preview(p: &Plan) -> Preview {
         .enumerate()
         .map(|(index, r)| PreviewRoot {
             index,
+            kind: r.kind,
             path: escape::path(&r.path.to_string()).into_owned(),
             steam: match &r.origin {
                 PlanOrigin::Steam { store, app_id, .. } => {
                     Some((*app_id, escape::path(&store.to_string()).into_owned()))
                 }
-                PlanOrigin::Manual => None,
+                PlanOrigin::Manual | PlanOrigin::AppDir => None,
             },
             main_exe: r
                 .main_exe
@@ -367,6 +464,11 @@ pub fn preview(p: &Plan) -> Preview {
                     Some((hex32::to_string(sha256), *len)),
                     *config,
                 ),
+                Some(c @ ContentRef::Inline { sha256, .. }) => (
+                    Some(escape::path("inline (launch profile)").into_owned()),
+                    Some((hex32::to_string(sha256), c.len())),
+                    false,
+                ),
                 None => match op {
                     Op::IniValue { new, .. } => {
                         (None, Some((hex32::to_string(&new.sha256), new.len)), false)
@@ -391,6 +493,12 @@ pub fn preview(p: &Plan) -> Preview {
                     })
                     .collect(),
                 _ => Vec::new(),
+            };
+            let profile = match (op.target(), op.content()) {
+                (Target::File { path, .. }, Some(ContentRef::Inline { bytes, .. })) => {
+                    Some(profile_of(path, bytes))
+                }
+                _ => None,
             };
             let (root, path, name) = match op.target() {
                 Target::File { root, path, .. } => (
@@ -419,6 +527,7 @@ pub fn preview(p: &Plan) -> Preview {
                 old: old_state,
                 config,
                 ini,
+                profile,
             }
         })
         .collect();
@@ -451,6 +560,9 @@ impl fmt::Display for Preview {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for r in &self.roots {
             write!(f, "root {}: {}", r.index, r.path)?;
+            if r.kind == RootKind::Profiles {
+                write!(f, " (Rerun's launch profiles)")?;
+            }
             if let Some((app, store)) = &r.steam {
                 write!(f, " (Steam app {app} in {store})")?;
             }
@@ -494,6 +606,29 @@ impl fmt::Display for Preview {
             }
             for k in &o.ini {
                 writeln!(f, "     [{}] {}: {} -> {}", k.section, k.key, k.old, k.new)?;
+            }
+            match &o.profile {
+                Some(ProfilePreview::Decoded(p)) => {
+                    writeln!(
+                        f,
+                        "     profile {}: method {}, {}",
+                        p.id, p.method, p.bitness
+                    )?;
+                    if let Some(c) = &p.cpu {
+                        writeln!(f, "     cpu {c}")?;
+                    }
+                    if let Some(x) = p.priority {
+                        writeln!(f, "     priority {x}")?;
+                    }
+                    if p.target != p.start {
+                        writeln!(f, "     target {}", p.target)?;
+                    }
+                    writeln!(f, "     start {}", p.start)?;
+                }
+                Some(ProfilePreview::Unreadable(why)) => {
+                    writeln!(f, "     not a launch profile of this version: {why}")?;
+                }
+                None => {}
             }
             if o.config {
                 writeln!(

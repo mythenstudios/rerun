@@ -87,7 +87,7 @@ impl Binding {
             PlanOrigin::Steam {
                 store, store_id, ..
             } => Some((store, *store_id)),
-            PlanOrigin::Manual => None,
+            PlanOrigin::Manual | PlanOrigin::AppDir => None,
         }
     }
 }

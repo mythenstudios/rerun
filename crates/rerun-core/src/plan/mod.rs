@@ -55,8 +55,17 @@
 //! and the dialect (a narrower dialect is a format change, never silent). An `IniValue`, like a
 //! registry op, needs the main executable of every root ([`Op::needs_main_exe`], user decision
 //! E5: the game holds no INI open while it runs).
+//!
+//! Launch profiles (P3-3, ADR 0020 amendment P3-3, `profile`): a second root kind
+//! [`RootKind::Profiles`] (`<LocalAppData>\Rerun\profiles`, origin [`PlanOrigin::AppDir`], the
+//! fixed identity [`PROFILES_ROOT_ID`]: reopened only through `AppDir`, never by the head's path or
+//! by identity) and a second content source [`ContentRef::Inline`] (the bytes in the plan, at most
+//! [`MAX_INLINE_BYTES`]). `profile::fence` checks both on encode and decode alike (the head is
+//! untrusted); [`Rules::Current`] adds the profile decode, its start path below root 0 and its
+//! file name from the Steam app ID ([`profile_id`]).
 
 mod preview;
+mod profile;
 mod store;
 
 use std::fmt;
@@ -67,8 +76,11 @@ use sha2::{Digest, Sha256};
 
 pub use preview::{
     INI_NOTE, IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, Preview, PreviewOp, PreviewRoot,
-    REGISTRY_NOTE, RegShown, preview, preview_head, preview_stored,
+    ProfilePreview, ProfileShown, REGISTRY_NOTE, RegShown, preview, preview_head, preview_stored,
 };
+#[cfg(test)]
+pub(crate) use profile::knob as profile_knob;
+pub use profile::{MAX_PROFILE_OLD_BYTES, MAX_START_UNITS, profile_file, profile_id};
 pub use store::{load, store};
 
 use crate::fold::fold;
@@ -94,6 +106,16 @@ pub const MAX_ROOTS: usize = 16;
 pub const MAX_FILE_LEN: u64 = 2 << 30;
 /// Most bytes of all backups of one plan (the journal's limit per transaction).
 pub const MAX_BACKUP_BYTES: u64 = 4 << 30;
+/// Most bytes of [`ContentRef::Inline`] (a launch profile with a start path of at most
+/// [`MAX_START_UNITS`] is about 1.8 KiB; as hex the op stays below [`MAX_OP_BYTES`]).
+pub const MAX_INLINE_BYTES: usize = 2 << 10;
+/// The identity of the profiles root in every plan: none is checked (ADR 0020 amendment P3-3,
+/// F1), one fixed value so a plan's bytes are the same with and without `--dry-run`. No game
+/// root may carry it (a fake or a volume never hands out serial 0 with file ID 0).
+pub const PROFILES_ROOT_ID: RootId = RootId {
+    volume_serial: 0,
+    file_id: 0,
+};
 
 /// A plan (ADR 0020).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +153,9 @@ pub struct PlanRoot {
 pub enum RootKind {
     /// A game folder.
     Game,
+    /// Rerun's launch profiles, `<LocalAppData>\Rerun\profiles` (P3-3): origin
+    /// [`PlanOrigin::AppDir`], identity [`PROFILES_ROOT_ID`], no main executable.
+    Profiles,
 }
 
 /// Where a plan root came from.
@@ -150,6 +175,9 @@ pub enum PlanOrigin {
     },
     /// A folder added by the user, reopened by absolute path.
     Manual,
+    /// Rerun's profiles folder (P3-3), reopened only through `AppDir` (handle-relative, no
+    /// reparse point, its final path checked), never by the head's path or identity.
+    AppDir,
 }
 
 /// Index into [`Plan::roots`].
@@ -484,13 +512,23 @@ pub enum ContentRef {
         /// leaves it (ADR 0020); the preview says so.
         config: bool,
     },
+    /// Bytes the plan carries (P3-3: a launch profile, only on the profiles root), lower-case
+    /// hex on the wire, at most [`MAX_INLINE_BYTES`], with their SHA-256.
+    Inline {
+        /// The content.
+        #[serde(with = "crate::wire::hex_bytes")]
+        bytes: Vec<u8>,
+        /// SHA-256 of `bytes` (checked by the format, and again while it is streamed).
+        #[serde(with = "crate::wire::hex32")]
+        sha256: [u8; 32],
+    },
 }
 
 impl ContentRef {
     /// SHA-256 of the content.
     pub fn sha256(&self) -> &[u8; 32] {
         match self {
-            Self::Package { sha256, .. } => sha256,
+            Self::Package { sha256, .. } | Self::Inline { sha256, .. } => sha256,
         }
     }
 
@@ -498,6 +536,7 @@ impl ContentRef {
     pub fn len(&self) -> u64 {
         match self {
             Self::Package { len, .. } => *len,
+            Self::Inline { bytes, .. } => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
         }
     }
 
@@ -1002,15 +1041,18 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
         return Err(invalid(None, "more roots than allowed"));
     }
     // E2, review M1, E5 of P2-12: ops that need it (registry ops, INI ops) need at least one
-    // root and a main executable for every root.
+    // game root and a main executable for every game root (P3-3: the profiles root has none).
+    let mut games = plan.roots.iter().filter(|r| r.kind == RootKind::Game);
     if plan.ops.iter().any(Op::needs_main_exe)
-        && (plan.roots.is_empty() || plan.roots.iter().any(|r| r.main_exe.is_none()))
+        && (games.clone().next().is_none() || games.any(|r| r.main_exe.is_none()))
     {
         return Err(invalid(
             None,
             "registry and INI ops need the main executable of every root",
         ));
     }
+    // P3-3: the fence of the profiles root and of inline content (both rule sets).
+    profile::fence(plan, rules)?;
     for (i, r) in plan.roots.iter().enumerate() {
         if plan.roots[..i].iter().any(|o| o.id == r.id) {
             return Err(invalid(None, "a root is listed twice"));

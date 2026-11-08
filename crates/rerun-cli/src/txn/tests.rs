@@ -11,7 +11,7 @@ use rerun_core::exec::{
 };
 use rerun_core::journal::{Closing, Damage, Observed, TxnId};
 use rerun_core::path::RelPath;
-use rerun_core::plan::{NOT_RESTORED, Preview, PreviewOp, PreviewRoot};
+use rerun_core::plan::{NOT_RESTORED, Preview, PreviewOp, PreviewRoot, RootKind};
 use rerun_core::policy::ini::{IniName, KeyState};
 
 use super::{now_lines, render_status, report_lines};
@@ -58,6 +58,7 @@ fn file_op(index: usize, action: &'static str, path: &str) -> PreviewOp {
         old: None,
         config: false,
         ini: Vec::new(),
+        profile: None,
     }
 }
 
@@ -68,6 +69,7 @@ fn head() -> Preview {
     Preview {
         roots: vec![PreviewRoot {
             index: 0,
+            kind: RootKind::Game,
             path: escape::path(r"D:\Games\G").into_owned(),
             steam: None,
             main_exe: Some(escape::path("game.exe").into_owned()),
@@ -325,6 +327,7 @@ fn what_a_revert_does_now_and_its_report() {
         }),
         details: BTreeMap::from([(1, ini.clone())]),
         cleanup: Vec::new(),
+        profiles_moved: None,
     };
     let t4 = txn(4);
     assert_eq!(
@@ -363,6 +366,7 @@ the revert stops at op 0: the game folder needs administrator rights (not suppor
         ],
         halted: None,
         cleanup: Vec::new(),
+        profiles_moved: None,
     };
     assert_eq!(
         shown(&report_lines(
@@ -421,6 +425,7 @@ fn c_cl2_pending_cleanup_in_the_preview_the_report_and_status() {
             item(0, ".rerun-00000000000000ab-6.tmp.old", OldSeen::Foreign),
             item(0, ".rerun-00000000000000ab-7.tmp.old", OldSeen::Gone),
         ],
+        profiles_moved: None,
     };
     let sha = "ab".repeat(32);
     assert_eq!(
@@ -444,6 +449,7 @@ fn c_cl2_pending_cleanup_in_the_preview_the_report_and_status() {
             item(0, ".rerun-00000000000000ab-3.tmp.old", OldSeen::Deleted),
             item(0, ".rerun-00000000000000ab-4.tmp.old", OldSeen::InUse),
         ],
+        profiles_moved: None,
     };
     assert_eq!(
         shown(&report_lines(&s, &rep, &v)),

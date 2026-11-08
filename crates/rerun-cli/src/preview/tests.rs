@@ -4,7 +4,7 @@
 use rerun_core::escape;
 use rerun_core::plan::{
     INI_NOTE, IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, Preview, PreviewOp, PreviewRoot,
-    REGISTRY_NOTE, RegShown,
+    REGISTRY_NOTE, RegShown, RootKind,
 };
 
 use super::render;
@@ -34,6 +34,7 @@ fn op(index: usize, action: &'static str, root: Option<usize>, path: &str) -> Pr
         old: None,
         config: false,
         ini: Vec::new(),
+        profile: None,
     }
 }
 
@@ -48,6 +49,7 @@ fn preview(root_path: &str, ops: Vec<PreviewOp>) -> Preview {
     Preview {
         roots: vec![PreviewRoot {
             index: 0,
+            kind: RootKind::Game,
             path: escape::path(root_path).into_owned(),
             steam: Some((220, escape::path(r"D:\SteamLibrary").into_owned())),
             main_exe: Some(escape::path(r"bin\game.exe").into_owned()),

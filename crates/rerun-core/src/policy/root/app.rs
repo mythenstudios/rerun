@@ -17,11 +17,18 @@
 //!    `<canonical LocalAppData>\Rerun` on the same volume (else [`RootError::Escaped`]).
 //!
 //! Below it, [`AppDir::sub`] and [`AppDir::sub_write`] open `journal`, `plans` and
-//! `packages` (and `launch`, read side only) the same way, one directory at a time. Nothing
-//! persisted refers to an `AppDir`, so it has no `ensure_id`; [`AppDir::id`] is for snapshots
-//! and display.
+//! `packages` (and `launch`, read side only) the same way, one directory at a time;
+//! [`AppDir::profiles`] opens `profiles` as a [`ProfilesDir`], the root of a plan's launch
+//! profile ops (P3-3), and checks that its final path is exactly `<AppDir>\profiles`.
+//!
+//! Nothing persisted refers to an `AppDir` **by identity**, so it has no `ensure_id`;
+//! [`AppDir::id`] is for snapshots and display. Since P3-3 a plan names `<AppDir>\profiles` by
+//! its path (`PlanOrigin::AppDir`, `RootKind::Profiles`) with the fixed identity
+//! `PROFILES_ROOT_ID`: `exec` reopens it only through this module and compares the paths, never
+//! the identity (ADR 0020 amendment P3-3, F1). [`AppDir::path_of`] gives the canonical path
+//! without creating anything (`rerun plan --dry-run` before the first run).
 
-use super::{Forbidden, RootError, RootId, open_abs_write};
+use super::{Forbidden, RootError, RootId, open_abs, open_abs_write};
 use crate::path::{RelPath, RootPath};
 use crate::sys::fs::RootInfo;
 use crate::sys::{Dir, DirWrite, KnownFolder, SysError, SysErrorKind, SysResult, System};
@@ -50,6 +57,9 @@ pub(crate) enum AppSub {
     /// `launch`: the result files of `rerun-launch` (ADR 0022 amendment P3-2); read only
     /// here, the shim writes them.
     Launch,
+    /// `profiles`: the launch profiles (ADR 0022 D2), written by `exec` only, through
+    /// [`AppDir::profiles`] (P3-3).
+    Profiles,
 }
 
 impl AppSub {
@@ -59,6 +69,7 @@ impl AppSub {
             Self::Plans => "plans",
             Self::Packages => "packages",
             Self::Launch => "launch",
+            Self::Profiles => "profiles",
         };
         match RelPath::from_segment(name) {
             Ok(p) => p,
@@ -175,6 +186,65 @@ impl<'s> AppDir<'s> {
     pub fn dir(&self) -> &dyn Dir {
         &*self.dir
     }
+
+    /// The canonical path of `<LocalAppData>\Rerun`, also if it does not exist yet: nothing is
+    /// created or opened below `LocalAppData` (`rerun plan --dry-run` before the first run; the
+    /// path is the one [`Self::open`] checks the folder against).
+    pub fn path_of(sys: &dyn System) -> Result<RootPath, RootError> {
+        let lad = sys.known_folders().get(KnownFolder::LocalAppData)?;
+        let lexical = RootPath::new(&lad)?;
+        let base = open_abs(sys, lexical.path())?;
+        let base_info = base.info()?;
+        let base_path = RootPath::from_final_path(&base_info.final_path)?;
+        if base_info.volume_first_segment().is_none() {
+            return Err(RootError::Forbidden {
+                path: base_path,
+                reason: Forbidden::VolumeRoot,
+            });
+        }
+        Ok(base_path.child(RERUN)?)
+    }
+}
+
+/// `<LocalAppData>\Rerun\profiles` (P3-3): the root of a plan's launch profile ops, opened only
+/// by [`AppDir::profiles`]. No identity is kept or checked (ADR 0020 amendment P3-3, F1).
+#[derive(Debug)]
+pub struct ProfilesDir<'a> {
+    dir: Box<dyn DirWrite + 'a>,
+    path: RootPath,
+    info: RootInfo,
+}
+
+impl ProfilesDir<'_> {
+    /// Canonical path as of opening (exactly `<AppDir>\profiles`).
+    pub fn path(&self) -> &RootPath {
+        &self.path
+    }
+
+    /// Properties as of opening.
+    pub fn info(&self) -> &RootInfo {
+        &self.info
+    }
+
+    /// The handle, read side only.
+    pub fn dir(&self) -> &dyn Dir {
+        &*self.dir
+    }
+
+    /// The handle with the write capability, for `exec` only (`clippy.toml`). `Unsupported` on
+    /// a volume without POSIX delete and rename semantics, as for a game folder.
+    pub(crate) fn dir_write(&self) -> SysResult<&dyn DirWrite> {
+        if !self.info.supports_posix_rename {
+            return Err(SysError::new(
+                SysErrorKind::Unsupported,
+                format!(
+                    "{}: volume without POSIX delete and rename (FAT, exFAT)",
+                    self.path
+                ),
+            ));
+        }
+        Ok(&*self.dir)
+    }
 }
 
 impl AppDir<'_> {
@@ -206,6 +276,36 @@ impl AppDir<'_> {
         create: Create,
     ) -> Result<Option<Box<dyn DirWrite + '_>>, RootError> {
         open_or_create(self.dir_write()?, &s.rel(), create, &self.path)
+    }
+
+    /// Opens (and with [`Create::IfMissing`] creates) `profiles` with the write capability,
+    /// handle-relative, never following a reparse point ([`RootError::Reparse`]); its final path
+    /// must be exactly `<self.path>\profiles` on the same volume ([`RootError::Escaped`]).
+    /// `Ok(None)`: missing and `create` is [`Create::Never`].
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ADR 0020 amendment P3-3: profiles is opened through the write handle of AppDir"
+    )]
+    pub(crate) fn profiles(&self, create: Create) -> Result<Option<ProfilesDir<'_>>, RootError> {
+        let Some(dir) = open_or_create(
+            self.dir_write()?,
+            &AppSub::Profiles.rel(),
+            create,
+            &self.path,
+        )?
+        else {
+            return Ok(None);
+        };
+        let info = dir.info()?;
+        let path = RootPath::from_final_path(&info.final_path)?;
+        let expected = self.path.child("profiles")?;
+        if path != expected || info.volume_serial != self.info.volume_serial {
+            return Err(RootError::Escaped {
+                store: self.path.clone(),
+                child: path,
+            });
+        }
+        Ok(Some(ProfilesDir { dir, path, info }))
     }
 
     /// Opens the folder `s` read-only, handle-relative. `Ok(None)` if it is missing; a

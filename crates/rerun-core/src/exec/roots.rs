@@ -24,17 +24,30 @@
 //!
 //! Every root is opened where it is bound (`exec::bind`, P2-14): the head's root, or the folder
 //! the last `Rebind` of that root names; messages name the bound path.
+//!
+//! The profiles root (P3-3, ADR 0020 amendment P3-3) is opened only through
+//! `AppDir::profiles` (handle-relative below Rerun's folder, no reparse point, its final path
+//! checked), never by the head's path, and has no identity to check (F1). An apply creates it if
+//! it is missing ([`Create::IfMissing`], before the first record, Rerun's own state like
+//! `journal`) and refuses if its path is not the head's now ([`Refusal::ProfilesMoved`]); a
+//! revert and `verify` never create it (missing: absent, so the revert halts at the profile op
+//! without a record) and work at the `profiles` of Rerun's folder now, whatever path the head
+//! names (senior-dev condition A1: every profile op is decided by its hashes alone), reporting a
+//! different path ([`Roots::profiles_moved`]). `check` (read only) never creates it either: a
+//! missing one counts as empty there.
 
 use super::bind::{Binding, Bindings, Proof};
-use super::{ExecCtx, Refusal, op_ix};
+use super::{ExecCtx, ProfilesMoved, Refusal, op_ix};
 use crate::detect::steam::{AppState, app_manifest};
 use crate::escape;
 use crate::path::{RelPath, RootPath};
 use crate::plan::{ContentRef, Op, Plan, PlanOrigin, Target};
 use crate::policy::registry::RegSlot;
-use crate::policy::root::{AppSub, GameDir, RootError, StoreDir};
+use crate::policy::root::{AppSub, Create, GameDir, ProfilesDir, RootError, StoreDir};
 use crate::prim::file_install::{hash_file, open_package};
+use crate::sys::Dir;
 use crate::sys::fs::FileGuard;
+use crate::sys::fs::RootInfo;
 use crate::sys::{DirWrite, SysErrorKind};
 
 /// The store of each Steam root as bound (`None` for a manual one), reopened and checked by
@@ -51,7 +64,7 @@ pub(super) fn open_stores<'s>(
                 s.ensure_id(*store_id)?;
                 Ok(s)
             })),
-            PlanOrigin::Manual => None,
+            PlanOrigin::Manual | PlanOrigin::AppDir => None,
         })
         .collect()
 }
@@ -93,15 +106,41 @@ impl NoFiles {
     }
 }
 
+/// A root of a plan as opened: a game folder, or Rerun's profiles folder (P3-3).
+pub(super) enum Opened<'g> {
+    /// A game folder, checked by identity.
+    Game(GameDir<'g>),
+    /// `<AppDir>\profiles`, opened through `AppDir` (no identity, F1).
+    Profiles(ProfilesDir<'g>),
+}
+
+impl Opened<'_> {
+    /// The handle, read side only.
+    pub(super) fn dir(&self) -> &dyn Dir {
+        match self {
+            Self::Game(g) => g.dir(),
+            Self::Profiles(p) => p.dir(),
+        }
+    }
+
+    /// Properties as of opening.
+    pub(super) fn info(&self) -> &RootInfo {
+        match self {
+            Self::Game(g) => g.info(),
+            Self::Profiles(p) => p.info(),
+        }
+    }
+}
+
 /// One root of a plan as reopened.
 #[expect(
     clippy::large_enum_variant,
     reason = "one per root of a plan (at most 16), never moved after opening"
 )]
 enum Slot<'g> {
-    /// Opened and checked by identity; `no_files`: why its file ops cannot run.
+    /// Opened (a game folder checked by identity); `no_files`: why its file ops cannot run.
     Open {
-        game: GameDir<'g>,
+        root: Opened<'g>,
         no_files: Option<NoFiles>,
     },
     /// Gone (E3): no D4, no file ops.
@@ -115,6 +154,19 @@ pub(super) struct Roots<'g> {
     paths: Vec<RootPath>,
     /// How the created folders of each root are proven.
     proofs: Vec<Proof>,
+    /// The profiles root is at another path than the head names (revert and `verify`, A1).
+    moved: Option<ProfilesMoved>,
+}
+
+/// How the profiles root is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Use {
+    /// An apply: created if missing; another path than the head's refuses.
+    Apply,
+    /// `check`: never created (missing counts as empty); another path refuses.
+    Check,
+    /// A revert, `verify`, a rebind: never created; another path is reported (A1).
+    Revert,
 }
 
 /// Why a root did not open: gone, or undecided (E3).
@@ -125,33 +177,48 @@ enum Failed {
 
 impl<'g> Roots<'g> {
     /// Apply: every root open and checked by identity, and writable if a file op targets it
-    /// (S1); else its refusal, stores first, then the roots in order.
+    /// (S1); else its refusal, stores first, then the roots in order. `create`: the profiles
+    /// root is created if missing (the apply; `check` passes [`Create::Never`] and a missing
+    /// profiles root then counts as empty).
     pub(super) fn all(
         cx: &ExecCtx<'g>,
         plan: &Plan,
         b: &Bindings,
         stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
+        create: Create,
     ) -> Result<Self, Refusal> {
         for s in stores.iter().flatten() {
             if let Err(e) = s {
                 return Err(e.clone().into());
             }
         }
+        let how = match create {
+            Create::IfMissing => Use::Apply,
+            Create::Never => Use::Check,
+        };
         let mut slots = Vec::with_capacity(b.len());
         for (i, (r, store)) in b.iter().zip(stores).enumerate() {
-            let game = open_root(cx, r, store.as_ref()).map_err(|f| match f {
-                Failed::Absent(n) => n.refusal(),
-                Failed::Undecided(r) => r,
-            })?;
-            let no_files = no_files(&game);
+            let root = match open_root(cx, r, store.as_ref(), how) {
+                Ok((root, _)) => root,
+                // `check` only: a missing profiles folder holds nothing yet.
+                Err(Failed::Absent(n))
+                    if how == Use::Check && matches!(r.origin, PlanOrigin::AppDir) =>
+                {
+                    slots.push(Slot::Absent(n));
+                    continue;
+                }
+                Err(Failed::Absent(n)) => return Err(n.refusal()),
+                Err(Failed::Undecided(r)) => return Err(r),
+            };
+            let no_files = no_files(&root);
             if let Some(n) = &no_files
                 && has_file_ops(plan, i)
             {
                 return Err(n.refusal());
             }
-            slots.push(Slot::Open { game, no_files });
+            slots.push(Slot::Open { root, no_files });
         }
-        Ok(Self::new(slots, b))
+        Ok(Self::new(slots, b, None))
     }
 
     /// Revert and verify: each root on its own (module docs, E3); an undecided one refuses.
@@ -161,12 +228,16 @@ impl<'g> Roots<'g> {
         stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
     ) -> Result<Self, Refusal> {
         let mut slots = Vec::with_capacity(b.len());
+        let mut moved = None;
         for (r, store) in b.iter().zip(stores) {
-            let slot = match open_root(cx, r, store.as_ref()) {
-                Ok(game) => Slot::Open {
-                    no_files: no_files(&game),
-                    game,
-                },
+            let slot = match open_root(cx, r, store.as_ref(), Use::Revert) {
+                Ok((root, m)) => {
+                    moved = moved.or(m);
+                    Slot::Open {
+                        no_files: no_files(&root),
+                        root,
+                    }
+                }
                 Err(Failed::Absent(n)) => Slot::Absent(n),
                 Err(Failed::Undecided(r)) => return Err(r),
             };
@@ -185,15 +256,22 @@ impl<'g> Roots<'g> {
                 }
             }
         }
-        Ok(Self::new(slots, b))
+        Ok(Self::new(slots, b, moved))
     }
 
-    fn new(slots: Vec<Slot<'g>>, b: &Bindings) -> Self {
+    fn new(slots: Vec<Slot<'g>>, b: &Bindings, moved: Option<ProfilesMoved>) -> Self {
         Self {
             slots,
             paths: b.iter().map(|r| r.path.clone()).collect(),
             proofs: b.iter().map(|r| r.proof.clone()).collect(),
+            moved,
         }
+    }
+
+    /// The profiles root opened at another path than the head names (revert and `verify`,
+    /// senior-dev condition A1): reported, the ops decided by their hashes there.
+    pub(super) fn profiles_moved(&self) -> Option<&ProfilesMoved> {
+        self.moved.as_ref()
     }
 
     /// How the created folders of root `i` are proven (P2-14).
@@ -220,20 +298,20 @@ impl<'g> Roots<'g> {
     }
 
     /// The open root `i` (D4 asks it), `None` if it is absent.
-    pub(super) fn game(&self, i: usize) -> Option<&GameDir<'g>> {
+    pub(super) fn opened(&self, i: usize) -> Option<&Opened<'g>> {
         match self.slots.get(i)? {
-            Slot::Open { game, .. } => Some(game),
+            Slot::Open { root, .. } => Some(root),
             Slot::Absent(_) => None,
         }
     }
 
     /// Root `i` for file ops, or why its file ops cannot run.
-    pub(super) fn for_files(&self, i: usize) -> Result<&GameDir<'g>, NoFiles> {
+    pub(super) fn for_files(&self, i: usize) -> Result<&Opened<'g>, NoFiles> {
         match self.slots.get(i) {
             Some(Slot::Open {
-                game,
+                root,
                 no_files: None,
-            }) => Ok(game),
+            }) => Ok(root),
             Some(
                 Slot::Open {
                     no_files: Some(n), ..
@@ -270,7 +348,7 @@ pub(super) fn main_exe_at(plan: &Plan, roots: &Roots<'_>, i: usize) -> Result<()
     let Some(r) = plan.roots.get(i) else {
         return Ok(());
     };
-    let (Some(m), Some(g)) = (&r.main_exe, roots.game(i)) else {
+    let (Some(m), Some(g)) = (&r.main_exe, roots.opened(i)) else {
         return Ok(());
     };
     match g.dir().metadata(m) {
@@ -311,10 +389,10 @@ pub(super) fn probe(cx: &ExecCtx<'_>, b: &Binding) -> Probe {
             s.ensure_id(*store_id)?;
             Ok(s)
         })),
-        PlanOrigin::Manual => None,
+        PlanOrigin::Manual | PlanOrigin::AppDir => None,
     };
     let mismatch = |r: &Refusal| matches!(r, Refusal::Root(e) if matches!(**e, RootError::IdentityMismatch { .. }));
-    match open_root(cx, b, store.as_ref()) {
+    match open_root(cx, b, store.as_ref(), Use::Revert) {
         Ok(_) => Probe::Opens,
         Err(Failed::Absent(NoFiles::Steam {
             app_id,
@@ -388,23 +466,63 @@ pub(super) fn candidate(
 
 /// Why the file ops of an opened root cannot run: the current user cannot write it, or its
 /// volume has no POSIX semantics.
-fn no_files(game: &GameDir<'_>) -> Option<NoFiles> {
-    if !game.info().user_writable {
+fn no_files(root: &Opened<'_>) -> Option<NoFiles> {
+    if !root.info().user_writable {
         return Some(NoFiles::NeedsHelper);
     }
-    write_handle(game)
+    write_handle(root)
         .err()
         .map(|e| NoFiles::Root(Box::new(RootError::Sys(e))))
 }
 
+/// Opens the profiles root through `AppDir` (module docs) and compares its path with the
+/// head's: the root, and its other path if a revert opens it elsewhere.
+fn open_profiles<'g>(
+    cx: &ExecCtx<'g>,
+    r: &Binding,
+    how: Use,
+) -> Result<(Opened<'g>, Option<ProfilesMoved>), Failed> {
+    let create = match how {
+        Use::Apply => Create::IfMissing,
+        Use::Check | Use::Revert => Create::Never,
+    };
+    let p = match cx.app.profiles(create) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return Err(Failed::Absent(NoFiles::Root(Box::new(RootError::Sys(
+                crate::sys::SysError::new(SysErrorKind::NotFound, "profiles"),
+            )))));
+        }
+        Err(e) => return Err(Failed::Undecided(e.into())),
+    };
+    let moved = (*p.path() != r.path && !paths_unchecked()).then(|| ProfilesMoved {
+        planned: escape::path(&r.path.to_string()).into_owned(),
+        now: escape::path(&p.path().to_string()).into_owned(),
+    });
+    match (moved, how) {
+        (Some(m), Use::Apply | Use::Check) => Err(Failed::Undecided(Refusal::ProfilesMoved(m))),
+        (m, _) => Ok((Opened::Profiles(p), m)),
+    }
+}
+
+/// K-LM2 (tests): the path of the profiles root is not compared with the head's.
+fn paths_unchecked() -> bool {
+    #[cfg(test)]
+    return super::knob::profiles_paths_unchecked();
+    #[cfg(not(test))]
+    false
+}
+
 /// Opens root `r` (a Steam root after its app state, with the plan's install folder, through
-/// its store; a manual one by absolute path) and checks its identity; a failure sorted as
-/// absent or undecided (module docs).
+/// its store; a manual one by absolute path; the profiles root through `AppDir`) and checks
+/// the identity of a game folder; a failure sorted as absent or undecided (module docs). The
+/// second value: the profiles root lies at another path than the head's (revert, A1).
 fn open_root<'g>(
     cx: &ExecCtx<'g>,
     r: &Binding,
     store: Option<&'g Result<StoreDir<'g>, RootError>>,
-) -> Result<GameDir<'g>, Failed> {
+    how: Use,
+) -> Result<(Opened<'g>, Option<ProfilesMoved>), Failed> {
     // `NotFound` here is the open of a missing path; `policy::root` turns the races after
     // an open into `Busy` (review S-1).
     let by_root = |e: RootError| {
@@ -456,7 +574,8 @@ fn open_root<'g>(
         (PlanOrigin::Manual, None) => {
             GameDir::open_manual(cx.sys, cx.fr, r.path.path()).map_err(by_root)?
         }
-        (PlanOrigin::Steam { .. }, None) | (PlanOrigin::Manual, Some(_)) => {
+        (PlanOrigin::AppDir, None) => return open_profiles(cx, r, how),
+        (PlanOrigin::Steam { .. }, None) | (PlanOrigin::Manual | PlanOrigin::AppDir, Some(_)) => {
             return Err(Failed::Undecided(Refusal::Plan(
                 crate::plan::PlanError::Invalid {
                     op: None,
@@ -468,22 +587,26 @@ fn open_root<'g>(
     // Another folder now: undecided (a rebind, D5, may bind it), never absent.
     game.ensure_id(r.id)
         .map_err(|e| Failed::Undecided(e.into()))?;
-    Ok(game)
+    Ok((Opened::Game(game), None))
 }
 
-/// The write handle of a game folder (`clippy.toml`: only `exec` and `journal`).
+/// The write handle of a root of a plan (`clippy.toml`: a game folder's only for `exec` and
+/// `journal`, the profiles folder's only for `exec`).
 #[expect(
     clippy::disallowed_methods,
-    reason = "ADR 0020: exec writes the game folders of a plan"
+    reason = "ADR 0020 and its amendment P3-3: exec writes the roots of a plan"
 )]
-pub(super) fn write_handle<'g>(game: &'g GameDir<'_>) -> crate::sys::SysResult<&'g dyn DirWrite> {
-    game.dir_write()
+pub(super) fn write_handle<'g>(root: &'g Opened<'_>) -> crate::sys::SysResult<&'g dyn DirWrite> {
+    match root {
+        Opened::Game(g) => g.dir_write(),
+        Opened::Profiles(p) => p.dir_write(),
+    }
 }
 
 /// `p` has no users, or does not exist (a directory or reparse point is no file to ask); an
 /// absent root has nothing to ask.
 fn unused(roots: &Roots<'_>, root: usize, p: &RelPath) -> Result<(), Refusal> {
-    let Some(g) = roots.game(root) else {
+    let Some(g) = roots.opened(root) else {
         return Ok(());
     };
     // Decided from the entry itself, not from the error of `users()` (where a folder and a
@@ -546,7 +669,19 @@ pub(super) fn old_state(cx: &ExecCtx<'_>, plan: &Plan, roots: &Roots<'_>) -> Res
         let Target::File { root, .. } = op.target() else {
             continue;
         };
-        let g = roots.game(usize::from(root.0)).ok_or_else(mismatch)?;
+        let g = match roots.opened(usize::from(root.0)) {
+            Some(g) => g,
+            // `check` only: a missing profiles folder holds no file to create over.
+            None if matches!(op, Op::CreateFile { .. })
+                && plan
+                    .roots
+                    .get(usize::from(root.0))
+                    .is_some_and(|r| matches!(r.origin, PlanOrigin::AppDir)) =>
+            {
+                continue;
+            }
+            None => return Err(mismatch()),
+        };
         match op {
             Op::CreateDir { path, .. } | Op::CreateFile { path, .. } => {
                 if g.dir().metadata(path)?.is_some() {

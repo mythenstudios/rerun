@@ -36,7 +36,7 @@ use std::fmt;
 use std::path::Path;
 
 pub(crate) use app::AppSub;
-pub use app::{AppDir, Create};
+pub use app::{AppDir, Create, ProfilesDir};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
 pub use input::read_input;
 

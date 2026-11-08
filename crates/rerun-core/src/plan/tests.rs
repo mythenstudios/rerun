@@ -260,8 +260,11 @@ fn p3_store_and_load_bind_the_bytes_to_their_hash() {
 #[test]
 fn p4_preview_shows_every_op_and_what_is_not_restored() {
     let mut p = sample();
-    if let Op::CreateFile { content, .. } = &mut p.ops[1] {
-        let ContentRef::Package { config, .. } = content;
+    if let Op::CreateFile {
+        content: ContentRef::Package { config, .. },
+        ..
+    } = &mut p.ops[1]
+    {
         *config = true;
     }
     let pv = preview(&p);
@@ -353,6 +356,9 @@ mod ini_tests;
 #[cfg(test)]
 #[path = "layer_tests.rs"]
 mod layer_tests;
+#[cfg(test)]
+#[path = "profiles_tests.rs"]
+pub(crate) mod profiles_tests;
 #[cfg(test)]
 #[path = "reg_tests.rs"]
 pub(crate) mod reg_tests;

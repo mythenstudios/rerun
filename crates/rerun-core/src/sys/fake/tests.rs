@@ -780,6 +780,32 @@ fn reparse_point_is_visible_but_not_followed() {
     );
 }
 
+/// ADR 0020 amendment P3-3 (condition A2): no folder of the fake has the identity of the profiles
+/// root (volume serial 0 and file ID 0): drive roots, mounted volumes and new folders alike.
+#[test]
+fn no_folder_has_the_identity_of_the_profiles_root() {
+    let sys = FakeSystem::builder()
+        .dir(r"C:\A")
+        .mounted_volume(r"C:\Mnt")
+        .dir(r"E:\B")
+        .build()
+        .unwrap();
+    let made = open(&sys, r"C:\")
+        .create_dir(&crate::path::RelPath::parse("New").unwrap())
+        .unwrap();
+    assert_ne!(made, 0);
+    for abs in [r"C:\", r"C:\A", r"C:\Mnt", r"E:\", r"E:\B", r"C:\New"] {
+        let info = open(&sys, abs).info().unwrap();
+        assert_ne!(
+            crate::policy::root::RootId::of(&info),
+            crate::plan::PROFILES_ROOT_ID,
+            "{abs}"
+        );
+        assert_ne!(info.volume_serial, 0, "{abs}");
+        assert_ne!(info.file_id, 0, "{abs}");
+    }
+}
+
 #[test]
 fn absolute_open_follows_links_and_reports_the_final_path() {
     let sys = FakeSystem::builder()
