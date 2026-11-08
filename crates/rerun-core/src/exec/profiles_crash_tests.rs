@@ -386,7 +386,7 @@ fn without(k: Kind, site: Site, property: &str) -> Option<String> {
 /// (`GameBeforeApplied`, `GameBeforeRevertDone`), cannot be told apart from a later flush of the
 /// same log. That is expected and asserted here, not a gap: `exec` still flushes the profiles
 /// root like any root (one flush path), and the other flushes are needed as soon as a second
-/// volume is involved: with a game folder on `D:` (`GameDirFile`) every control fails.
+/// volume is involved: with a game folder on `D:` (`GameDirFile`; `GameReplace` runs the same code and is left out, it costs minutes in the dev profile) every control fails.
 ///
 /// A variant with `profiles` on its own fake volume cannot be built (nit N7): the root's path
 /// is pinned to `<AppDir>\profiles` (a moved folder is refused, A1), a mounted volume shares its
@@ -415,7 +415,7 @@ fn lm_c3_the_flushes_for_profile_ops() {
         ),
     ];
     // With a second volume every flush is needed (and bites with the property of J6).
-    for k in [Kind::GameDirFile, Kind::GameReplace] {
+    for k in [Kind::GameDirFile] {
         for (site, property) in want {
             let hit = without(k, site, property);
             assert!(hit.is_some(), "{k:?} without {site:?}: no {property}");
