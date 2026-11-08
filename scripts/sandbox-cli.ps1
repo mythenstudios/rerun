@@ -269,7 +269,7 @@ function Invoke-LaunchMethod {
         if ($child) { try { $maskBits = Get-Bits ([int64]$child.ProcessorAffinity) } catch { $maskBits = -2 } }
         $deadline = (Get-Date).AddSeconds(25)
         while (-not (Test-Path -LiteralPath $result) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
-        $rtext = if (Test-Path -LiteralPath $result) { Get-Content -LiteralPath $result -Raw } else { '' }
+        $rtext = if (Test-Path -LiteralPath $result) { [string](Get-Content -LiteralPath $result -Raw) } else { '' }
         Add-Content -LiteralPath $log -Value "result file:`n$rtext`nchild mask bits: $maskBits"
         $c.result_file = $rtext -ne ''
         $c.result_profile = $rtext -match "(?m)^profile=$lmId\r?$"
