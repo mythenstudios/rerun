@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use rerun_proto::cpu::CpuTopology;
 use rerun_proto::profile::ProfileId;
 
-use crate::os::{GroupAffinity, Os, OsError, ReadBack, Spawn};
+use crate::os::{GroupAffinity, Os, OsError, ReadBack, Spawn, Terminated};
 
 /// One recorded call. Paths and command lines as `String` (the tests use valid UTF-16).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +46,7 @@ pub(crate) struct FakeOs {
     /// `Ok(true)`: a process handle; `Ok(false)`: none.
     pub(crate) shell: Result<bool, u32>,
     pub(crate) wait: Result<u32, u32>,
+    pub(crate) terminated: Terminated,
     pub(crate) calls: RefCell<Vec<Call>>,
     next: RefCell<u32>,
     last_limit: RefCell<Option<GroupAffinity>>,
@@ -56,8 +57,9 @@ fn s(u: &[u16]) -> String {
 }
 
 impl FakeOs {
-    /// A non-elevated machine with the given command line, no profile file, an empty
-    /// (invalid) topology, every call succeeding and the child exiting with 42.
+    /// A non-elevated machine with the given command line, no profile file
+    /// (`ERROR_FILE_NOT_FOUND`), no topology (`Unsupported`), every other call succeeding and
+    /// the child exiting with 42.
     pub(crate) fn new(line: &str) -> Self {
         Self {
             line: line.encode_utf16().collect(),
@@ -71,6 +73,7 @@ impl FakeOs {
             resume: Ok(()),
             shell: Ok(true),
             wait: Ok(42),
+            terminated: Terminated::Ended,
             calls: RefCell::new(Vec::new()),
             next: RefCell::new(0),
             last_limit: RefCell::new(None),
@@ -152,8 +155,15 @@ impl Os for FakeOs {
         self.resume
     }
 
-    fn terminate(&self, child: u32) {
+    fn terminate(&self, child: u32) -> Terminated {
         self.record(Call::Terminate(child));
+        self.terminated
+    }
+
+    /// ASCII case-insensitive only: the tests use ASCII paths; the real comparison
+    /// (`CompareStringOrdinal`) is tested in `win::tests`.
+    fn same_path(&self, app: &[u16], start: &str) -> bool {
+        String::from_utf16(app).is_ok_and(|a| a.eq_ignore_ascii_case(start))
     }
 
     fn shell_execute(&self, file: &[u16], parameters: Option<&[u16]>) -> Result<Option<u32>, u32> {

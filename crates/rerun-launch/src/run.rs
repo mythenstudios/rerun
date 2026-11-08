@@ -15,7 +15,7 @@ use rerun_proto::profile::{
 };
 
 use crate::cmdline::{self, Command, Usage};
-use crate::os::{GroupAffinity, Os, OsError, Spawn};
+use crate::os::{GroupAffinity, Os, OsError, Spawn, Terminated};
 
 /// winerror.h `ERROR_ELEVATION_REQUIRED`.
 pub(crate) const ERROR_ELEVATION_REQUIRED: u32 = 740;
@@ -113,13 +113,29 @@ pub(crate) enum Report {
     Usage(Usage),
     /// Steam's command was handled.
     Ran {
+        /// The profile ID from the command line, if the token is one (the name of the result
+        /// file, P3-2; also when the shim is elevated, which writes nothing, B13).
+        profile: Option<ProfileId>,
         /// What became of the profile.
         rule: Rule,
         /// How the command was started.
         start: Start,
         /// The shim's exit code.
         exit: u32,
+        /// A child created with the rule that had to be ended before the unchanged start.
+        terminated: Option<Terminated>,
     },
+}
+
+/// A `Report::Ran` without profile ID and termination (filled in by [`run`]).
+fn ran(rule: Rule, start: Start, exit: u32) -> Report {
+    Report::Ran {
+        profile: None,
+        rule,
+        start,
+        exit,
+        terminated: None,
+    }
 }
 
 impl Report {
@@ -156,23 +172,27 @@ pub(crate) fn run<O: Os>(os: &O) -> Report {
         Ok(c) => c,
         Err(u) => return Report::Usage(u),
     };
+    let id = String::from_utf16(cmd.token)
+        .ok()
+        .and_then(|t| ProfileId::from_hex(&t));
     let plan = if os.elevated() {
         Plan::Unchanged(Skip::Elevated)
     } else {
-        decide(os, &cmd)
+        decide(os, &cmd, id)
     };
-    match plan {
+    let mut report = match plan {
         Plan::Unchanged(skip) => unchanged(os, &cmd, skip),
         Plan::Rule { limit, priority } => with_rule(os, &cmd, limit, priority),
+    };
+    if let Report::Ran { profile, .. } = &mut report {
+        *profile = id;
     }
+    report
 }
 
 /// Reads the profile and the topology and selects the processors (non-elevated only).
-fn decide<O: Os>(os: &O, cmd: &Command<'_>) -> Plan {
-    let Some(id) = String::from_utf16(cmd.token)
-        .ok()
-        .and_then(|t| ProfileId::from_hex(&t))
-    else {
+fn decide<O: Os>(os: &O, cmd: &Command<'_>, id: Option<ProfileId>) -> Plan {
+    let Some(id) = id else {
         return Plan::Unchanged(Skip::ProfileId);
     };
     let bytes = match os.read_profile(&id) {
@@ -189,7 +209,7 @@ fn decide<O: Os>(os: &O, cmd: &Command<'_>) -> Plan {
     if profile.method != Method::Direct {
         return Plan::Unchanged(Skip::Method(profile.method));
     }
-    if !same_path(cmd.app, &profile.start) {
+    if !os.same_path(cmd.app, &profile.start) {
         return Plan::Unchanged(Skip::PathMismatch);
     }
     match limit_of(os, &profile) {
@@ -229,26 +249,6 @@ fn limit_of<O: Os>(os: &O, profile: &LaunchProfile) -> Result<Option<(Limit, App
     Ok(Some((limit, applied)))
 }
 
-/// `argv[0]` equals `start` ordinally and case-insensitively (D3), folded one to one like
-/// NTFS compares names (a character becomes upper case only if that is one character).
-fn same_path(app: &[u16], start: &str) -> bool {
-    let Ok(app) = String::from_utf16(app) else {
-        return false;
-    };
-    let fold = |s: &str| -> Vec<char> {
-        s.chars()
-            .map(|c| {
-                let mut up = c.to_uppercase();
-                match (up.next(), up.next()) {
-                    (Some(u), None) => u,
-                    _ => c,
-                }
-            })
-            .collect()
-    };
-    fold(&app) == fold(start)
-}
-
 /// Starts with the profile's settings; any failure ends in one unchanged start.
 fn with_rule<O: Os>(
     os: &O,
@@ -259,15 +259,15 @@ fn with_rule<O: Os>(
     let (spawn, applied) = match &limit {
         None => (
             Spawn {
-                job: None,
+                in_job: false,
                 suspended: false,
                 priority,
             },
             None,
         ),
-        Some((Limit::Hard(ga), a)) => (
+        Some((Limit::Hard(_), a)) => (
             Spawn {
-                job: Some(*ga),
+                in_job: true,
                 suspended: true,
                 priority,
             },
@@ -275,7 +275,7 @@ fn with_rule<O: Os>(
         ),
         Some((Limit::Soft(_), a)) => (
             Spawn {
-                job: None,
+                in_job: false,
                 suspended: true,
                 priority,
             },
@@ -302,8 +302,12 @@ fn with_rule<O: Os>(
         }
     });
     if let Err(skip) = resumed {
-        os.terminate(child);
-        return unchanged(os, cmd, skip);
+        let ended = os.terminate(child);
+        let mut report = unchanged(os, cmd, skip);
+        if let Report::Ran { terminated, .. } = &mut report {
+            *terminated = Some(ended);
+        }
+        return report;
     }
     let rule = Rule::Applied {
         cpu: applied,
@@ -327,47 +331,27 @@ fn unchanged<O: Os>(os: &O, cmd: &Command<'_>, skip: Skip) -> Report {
     match os.spawn(cmd.app, cmd.tail, &Spawn::UNCHANGED) {
         Ok(child) => wait(os, child, Rule::Skipped(skip), Start::Created),
         Err(ERROR_ELEVATION_REQUIRED) => shell(os, cmd, Rule::Skipped(skip)),
-        Err(code) => Report::Ran {
-            rule: Rule::Skipped(skip),
-            start: Start::Failed(code),
-            exit: EXIT_NOT_STARTED,
-        },
+        Err(code) => ran(Rule::Skipped(skip), Start::Failed(code), EXIT_NOT_STARTED),
     }
 }
 
 /// B2: the same `argv[0]` and the raw parameters through `ShellExecuteExW`, `.exe` only.
 fn shell<O: Os>(os: &O, cmd: &Command<'_>, rule: Rule) -> Report {
     if !cmdline::ends_with_exe(cmd.app) {
-        return Report::Ran {
-            rule,
-            start: Start::NotExe,
-            exit: EXIT_NOT_STARTED,
-        };
+        return ran(rule, Start::NotExe, EXIT_NOT_STARTED);
     }
     match os.shell_execute(cmd.app, cmd.parameters) {
         Ok(Some(child)) => wait(os, child, rule, Start::ShellExecuted),
-        Ok(None) => Report::Ran {
-            rule,
-            start: Start::ShellWithoutProcess,
-            exit: 0,
-        },
-        Err(code) => Report::Ran {
-            rule,
-            start: Start::Failed(code),
-            exit: EXIT_NOT_STARTED,
-        },
+        Ok(None) => ran(rule, Start::ShellWithoutProcess, 0),
+        Err(code) => ran(rule, Start::Failed(code), EXIT_NOT_STARTED),
     }
 }
 
 /// B3: wait for the direct child, pass its exit code on.
 fn wait<O: Os>(os: &O, child: O::Child, rule: Rule, start: Start) -> Report {
     match os.wait(child) {
-        Ok(exit) => Report::Ran { rule, start, exit },
-        Err(code) => Report::Ran {
-            rule,
-            start: Start::WaitFailed(code),
-            exit: EXIT_NOT_STARTED,
-        },
+        Ok(exit) => ran(rule, start, exit),
+        Err(code) => ran(rule, Start::WaitFailed(code), EXIT_NOT_STARTED),
     }
 }
 

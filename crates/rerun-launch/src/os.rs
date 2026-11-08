@@ -25,9 +25,9 @@ pub(crate) struct GroupAffinity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Spawn {
     /// Create a job first (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, B4) and the child inside it
-    /// (`PROC_THREAD_ATTRIBUTE_JOB_LIST`), with this group affinity for its initial thread
-    /// (`PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY`, so it is the primary group). Implies suspended.
-    pub(crate) job: Option<GroupAffinity>,
+    /// (`PROC_THREAD_ATTRIBUTE_JOB_LIST` only; the group affinity follows with
+    /// [`Os::limit_job`], ADR 0022 amendment P3-1b). Implies suspended.
+    pub(crate) in_job: bool,
     /// `CREATE_SUSPENDED`.
     pub(crate) suspended: bool,
     /// Priority class creation flag; none = the default.
@@ -37,10 +37,22 @@ pub(crate) struct Spawn {
 impl Spawn {
     /// Steam's command as Steam would start it: no job, not suspended, default priority.
     pub(crate) const UNCHANGED: Self = Self {
-        job: None,
+        in_job: false,
         suspended: false,
         priority: None,
     };
+}
+
+/// How [`Os::terminate`] went (for the result file, P3-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Terminated {
+    /// The child ended within the wait.
+    Ended,
+    /// `TerminateProcess` failed with this Win32 error code.
+    Failed(u32),
+    /// `TerminateProcess` succeeded, but the child had not ended after the wait (or the wait
+    /// failed with this Win32 error code; `WAIT_TIMEOUT` = 258 for the timeout).
+    NotConfirmed(u32),
 }
 
 /// What [`Os::read_back`] found.
@@ -124,8 +136,13 @@ pub(crate) trait Os {
     /// `ResumeThread` on the initial thread.
     fn resume(&self, child: &Self::Child) -> Result<(), u32>;
 
-    /// Ends a child that never ran (`TerminateProcess`) and closes its handles.
-    fn terminate(&self, child: Self::Child);
+    /// Ends a child that never ran (`TerminateProcess`, then a bounded wait for its end) and
+    /// closes its handles. The outcome is reported, never acted on (the start stays fail open).
+    fn terminate(&self, child: Self::Child) -> Terminated;
+
+    /// Steam's `argv[0]` equals the profile's `start`: `CompareStringOrdinal(…, TRUE)`, the
+    /// comparison Windows uses for file names (ADR 0022 amendment P3-1b review).
+    fn same_path(&self, app: &[u16], start: &str) -> bool;
 
     /// `ShellExecuteExW` (B2): default verb, `file`, `parameters`, no directory, with COM
     /// initialised around the call. `None` if Windows started no process it could hand back.

@@ -233,6 +233,16 @@ fn banned_windows_sys_items_resolve() {
     let _ = windows_sys::Win32::System::JobObjects::SetInformationJobObject;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: AssignProcessToJobObject must be banned"
+    )]
+    let _ = windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetPriorityClass must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::SetPriorityClass;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: CreateFileW must be banned"
     )]
     let _ = windows_sys::Win32::Storage::FileSystem::CreateFileW;

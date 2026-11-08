@@ -413,6 +413,8 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Threading::SetThreadIdealProcessor", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::SetThreadIdealProcessorEx", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
   { path = "windows_sys::Win32::System::JobObjects::SetInformationJobObject", reason = "Job Object limits (affinity, CPU rate, groups); none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::JobObjects::AssignProcessToJobObject", reason = "puts a process under a job's limits; only rerun-launch's wrapper module (ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetPriorityClass", reason = "priority class setter; only rerun-launch's wrapper module (ADR 0022, D6)", allow-invalid = true },
   # Security review of step 9 (2026-11-05): the remaining affinity setters and readers, and the
   # process creation APIs not covered above.
   { path = "windows_sys::Wdk::System::Threading::NtSetInformationThread", reason = "thread affinity/ideal processor setter among others; none until phase 3 gives it one wrapper (ADR 0010)", allow-invalid = true },

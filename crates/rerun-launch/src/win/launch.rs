@@ -18,7 +18,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
 
 use rerun_proto::profile::Priority;
-use windows_sys::Win32::Foundation::{ERROR_INVALID_HANDLE, HANDLE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{ERROR_INVALID_HANDLE, HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
 };
@@ -41,7 +41,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 
 use super::last_error;
-use crate::os::{GroupAffinity, ReadBack, Spawn};
+use crate::os::{GroupAffinity, ReadBack, Spawn, Terminated};
 
 /// winuser.h `SW_SHOWNORMAL` (avoids the `Win32_UI_WindowsAndMessaging` feature).
 const SW_SHOWNORMAL: i32 = 1;
@@ -58,13 +58,22 @@ pub(crate) struct Child {
 }
 
 /// Takes ownership of a handle a successful call returned; `None` for null.
-fn own(raw: HANDLE) -> Option<OwnedHandle> {
+///
+/// # Safety
+/// `raw` is null or a handle that the caller owns (just returned by a successful call) and
+/// that nothing else closes.
+unsafe fn own(raw: HANDLE) -> Option<OwnedHandle> {
     (!raw.is_null()).then(|| {
-        // SAFETY: `raw` was just returned by a successful CreateJobObjectW, CreateProcessW or
-        // ShellExecuteExW (SEE_MASK_NOCLOSEPROCESS); the caller owns it and nothing else
-        // closes it.
+        // SAFETY: non-null, owned by the caller and closed by nothing else (the contract).
         unsafe { OwnedHandle::from_raw_handle(raw) }
     })
+}
+
+/// The Win32 error of a `WaitForSingleObject` result other than `WAIT_OBJECT_0`: the last
+/// error for `WAIT_FAILED`, otherwise the result itself (`WAIT_TIMEOUT` = 258,
+/// `WAIT_ABANDONED` = 128; neither is expected for a process handle without a timeout).
+fn wait_error(r: u32) -> u32 {
+    if r == WAIT_FAILED { last_error() } else { r }
 }
 
 /// `size_of::<T>()` as the `u32` length the APIs take (all such `T` are a few bytes).
@@ -121,7 +130,9 @@ fn create_job() -> Result<OwnedHandle, u32> {
     // SAFETY: null security attributes (default, not inheritable) and a null name (an
     // unnamed job) are documented inputs.
     let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
-    let job = own(raw).ok_or_else(last_error)?;
+    // SAFETY: `raw` was just returned by CreateJobObjectW (null on failure); nothing else
+    // owns it.
+    let job = unsafe { own(raw) }.ok_or_else(last_error)?;
     let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
     set_job_info(&job, JobObjectExtendedLimitInformation, &info)?;
@@ -229,16 +240,16 @@ fn with_nul(s: &[u16]) -> Vec<u16> {
 }
 
 /// `CreateProcessW(app, command_line)` (M2: `lpApplicationName` never null), no inherited
-/// handles, the shim's environment and directory. With `spawn.job`: steps 1 and 2 of B-2.
+/// handles, the shim's environment and directory. With `spawn.in_job`: steps 1 and 2 of B-2.
 pub(crate) fn spawn(app: &[u16], command_line: &[u16], spawn: &Spawn) -> Result<Child, u32> {
     let app = with_nul(app);
     let mut line = with_nul(command_line);
     let mut flags = priority_flag(spawn.priority);
-    if spawn.suspended || spawn.job.is_some() {
+    if spawn.suspended || spawn.in_job {
         flags |= CREATE_SUSPENDED;
     }
     // Declared before `list`, so they outlive it (drop order is reverse).
-    let job = spawn.job.map(|_| create_job()).transpose()?;
+    let job = spawn.in_job.then(create_job).transpose()?;
     let jobs: [HANDLE; 1] = [job
         .as_ref()
         .map_or(ptr::null_mut(), AsRawHandle::as_raw_handle)];
@@ -292,8 +303,11 @@ pub(crate) fn spawn(app: &[u16], command_line: &[u16], spawn: &Spawn) -> Result<
         return Err(last_error());
     }
     drop(list);
-    let thread = own(pi.hThread);
-    let process = own(pi.hProcess).ok_or(ERROR_INVALID_HANDLE)?;
+    // SAFETY: CreateProcessW succeeded, so both handles are new and owned by this function;
+    // nothing else closes them.
+    let thread = unsafe { own(pi.hThread) };
+    // SAFETY: as above.
+    let process = unsafe { own(pi.hProcess) }.ok_or(ERROR_INVALID_HANDLE)?;
     Ok(Child {
         process,
         thread,
@@ -380,11 +394,26 @@ pub(crate) fn resume(child: &Child) -> Result<(), u32> {
     Ok(())
 }
 
-/// Ends a suspended child that never ran; the handles close on return.
-pub(crate) fn terminate(child: Child) {
-    // SAFETY: `child.process` is a live process handle with PROCESS_TERMINATE (from
-    // CreateProcessW). A failure leaves nothing to clean up beyond the handles, which drop.
-    unsafe { TerminateProcess(child.process.as_raw_handle(), 1) };
+/// How long [`terminate`] waits for the ended child.
+const TERMINATE_WAIT_MS: u32 = 5_000;
+
+/// Ends a suspended child that never ran and waits up to 5 s for it to end; the handles close
+/// on return. Reported only: the unchanged start follows either way (D3).
+pub(crate) fn terminate(child: Child) -> Terminated {
+    let process = child.process.as_raw_handle();
+    // SAFETY: `process` is a live process handle with PROCESS_TERMINATE (from CreateProcessW),
+    // kept alive by `child` until this function returns.
+    let ok = unsafe { TerminateProcess(process, 1) };
+    if ok == 0 {
+        return Terminated::Failed(last_error());
+    }
+    // SAFETY: as above, with SYNCHRONIZE.
+    let r = unsafe { WaitForSingleObject(process, TERMINATE_WAIT_MS) };
+    if r == WAIT_OBJECT_0 {
+        Terminated::Ended
+    } else {
+        Terminated::NotConfirmed(wait_error(r))
+    }
 }
 
 /// B3: waits for the child, then its exit code.
@@ -394,7 +423,7 @@ pub(crate) fn wait(child: Child) -> Result<u32, u32> {
     // until this function returns.
     let r = unsafe { WaitForSingleObject(process, INFINITE) };
     if r != WAIT_OBJECT_0 {
-        return Err(last_error());
+        return Err(wait_error(r));
     }
     let mut code: u32 = 0;
     // SAFETY: `process` as above (PROCESS_QUERY_LIMITED_INFORMATION included); `code` is
@@ -462,9 +491,145 @@ pub(crate) fn shell_execute(
     if ok == 0 {
         return Err(code);
     }
-    Ok(own(info.hProcess).map(|process| Child {
+    // SAFETY: with SEE_MASK_NOCLOSEPROCESS a successful call hands over `hProcess` (or null)
+    // to the caller; nothing else closes it.
+    let process = unsafe { own(info.hProcess) };
+    Ok(process.map(|process| Child {
         process,
         thread: None,
         job: None,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Facts ADR 0022 amendment P3-1b relies on, measured on every Windows test run. Only
+    //! `System32\cmd.exe` is started, suspended, and ended at once.
+
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn cmd_exe() -> Vec<u16> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test: the Windows directory for a harmless system binary"
+        )]
+        let root = std::env::var_os("SystemRoot").unwrap();
+        let p = PathBuf::from(root).join("System32").join("cmd.exe");
+        p.as_os_str().encode_wide().collect()
+    }
+
+    /// `CreateProcessW` refuses `PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY` with 87 (why B-2 sets the
+    /// group through the job only). If a Windows version ever accepts it, this fails and the
+    /// order can be revisited.
+    #[test]
+    fn create_process_with_group_affinity_attribute_fails_with_87() {
+        let ga = GROUP_AFFINITY {
+            Mask: 1,
+            Group: 0,
+            Reserved: [0; 3],
+        };
+        let mut list = AttributeList::new(1).unwrap();
+        // SAFETY: `ga` is a GROUP_AFFINITY declared before `list` and alive until after
+        // CreateProcessW.
+        unsafe {
+            list.update(
+                windows_sys::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY,
+                ptr::from_ref(&ga).cast(),
+                size_of::<GROUP_AFFINITY>(),
+            )
+        }
+        .unwrap();
+        let mut si = STARTUPINFOEXW::default();
+        si.StartupInfo.cb = len32::<STARTUPINFOEXW>();
+        si.lpAttributeList = list.ptr();
+        let app = with_nul(&cmd_exe());
+        let mut line = app.clone();
+        let mut pi = PROCESS_INFORMATION::default();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test: measures that CreateProcessW refuses the group affinity attribute"
+        )]
+        // SAFETY: as in `spawn`: NUL-terminated buffers owned here, null attributes,
+        // environment and directory, an initialized list alive in `list`, `pi` writable.
+        let ok = unsafe {
+            CreateProcessW(
+                app.as_ptr(),
+                line.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+                ptr::null(),
+                ptr::null(),
+                ptr::from_ref(&si).cast::<STARTUPINFOW>(),
+                &mut pi,
+            )
+        };
+        let code = last_error();
+        if ok != 0 {
+            // It started after all: end the never-resumed child before failing.
+            // SAFETY: CreateProcessW succeeded; both handles are owned here.
+            let thread = unsafe { own(pi.hThread) };
+            // SAFETY: as above.
+            let process = unsafe { own(pi.hProcess) }.unwrap();
+            terminate(Child {
+                process,
+                thread,
+                job: None,
+            });
+            panic!("CreateProcessW accepted PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY");
+        }
+        assert_eq!(code, ERROR_INVALID_PARAMETER);
+    }
+
+    /// `JobObjectGroupInformationEx` can be set on a job that holds no process yet.
+    #[test]
+    fn group_information_on_an_empty_job_succeeds() {
+        let job = create_job().unwrap();
+        let ga = GROUP_AFFINITY {
+            Mask: 1,
+            Group: 0,
+            Reserved: [0; 3],
+        };
+        set_job_info(&job, JobObjectGroupInformationEx, &ga).unwrap();
+    }
+
+    /// Soft mode has teeth: the suspended child reports exactly the CPU Set set on it.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn soft_limit_reads_back() {
+        let topology = crate::win::cpu::topology().unwrap();
+        let id = topology.cpus[0].cpu_set_id;
+        let app = cmd_exe();
+        let s = Spawn {
+            in_job: false,
+            suspended: true,
+            priority: None,
+        };
+        let child = spawn(&app, &app, &s).unwrap();
+        set_cpu_sets(&child, &[id]).unwrap();
+        let mut ids = [0u32; 4];
+        let mut n: u32 = 0;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test: reads back the CPU Sets the shim set on its own child"
+        )]
+        // SAFETY: `child.process` is a live process handle with query rights; `ids` is a
+        // writable array of 4 u32 and `n` is valid for a write.
+        let ok = unsafe {
+            windows_sys::Win32::System::Threading::GetProcessDefaultCpuSets(
+                child.process.as_raw_handle(),
+                ids.as_mut_ptr(),
+                4,
+                &mut n,
+            )
+        };
+        let code = last_error();
+        assert_eq!(terminate(child), Terminated::Ended);
+        assert_ne!(ok, 0, "GetProcessDefaultCpuSets failed: {code}");
+        assert_eq!(&ids[..usize::try_from(n).unwrap()], [id]);
+    }
 }

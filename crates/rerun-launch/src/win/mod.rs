@@ -23,6 +23,7 @@ use std::ptr;
 use rerun_proto::cpu::CpuTopology;
 use rerun_proto::profile::{MAX_PROFILE_BYTES, ProfileId};
 use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Security::{
     CheckTokenMembership, GetTokenInformation, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE,
     TOKEN_IMPERSONATE, TOKEN_QUERY, TokenElevation, TokenElevationType, TokenElevationTypeDefault,
@@ -39,7 +40,20 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::core::PWSTR;
 
-use crate::os::{GroupAffinity, Os, OsError, ReadBack, Spawn};
+use crate::os::{GroupAffinity, Os, OsError, ReadBack, Spawn, Terminated};
+
+/// `CompareStringOrdinal(a, b, TRUE) == CSTR_EQUAL`: the ordinal, case-insensitive comparison
+/// Windows uses for file names (its upper-case table, one unit for one unit, so `ß` and `SS`
+/// differ). Strings longer than `i32::MAX` units, or a failed call, compare unequal.
+pub(crate) fn compare_ordinal_ignore_case(a: &[u16], b: &[u16]) -> bool {
+    let (Ok(la), Ok(lb)) = (i32::try_from(a.len()), i32::try_from(b.len())) else {
+        return false;
+    };
+    // SAFETY: `a` and `b` are readable slices of exactly `la` and `lb` units, alive for the
+    // call (explicit lengths, no NUL needed); TRUE asks for the case-insensitive comparison.
+    let r = unsafe { CompareStringOrdinal(a.as_ptr(), la, b.as_ptr(), lb, 1) };
+    r == CSTR_EQUAL
+}
 
 /// Longest command line or path in UTF-16 units, without the NUL.
 const MAX_UNITS: usize = 32_767;
@@ -96,13 +110,18 @@ fn process_token(access: u32) -> Result<OwnedHandle, u32> {
 }
 
 /// `GetTokenInformation` for a fixed-size `T`.
-fn token_info<T: Default>(token: &OwnedHandle, class: i32) -> Result<T, u32> {
+///
+/// # Safety
+/// `T` is exactly the fixed-size structure Windows writes for `class` (`TOKEN_ELEVATION` for
+/// `TokenElevation`, `TOKEN_ELEVATION_TYPE` for `TokenElevationType`), and every bit pattern
+/// Windows writes is a valid `T`.
+unsafe fn token_info<T: Default>(token: &OwnedHandle, class: i32) -> Result<T, u32> {
     let mut value = T::default();
     let mut returned: u32 = 0;
     let len = u32::try_from(size_of::<T>()).map_err(|_| 0u32)?;
     // SAFETY: `token` is a live token handle with TOKEN_QUERY, kept alive until after the call;
-    // `value` is a valid, writable buffer of exactly `len` bytes for the fixed-size class the
-    // caller names (TOKEN_ELEVATION or TOKEN_ELEVATION_TYPE); `returned` is valid for a write.
+    // `value` is a valid, writable buffer of exactly `len` bytes, the structure of `class` by
+    // the caller's contract; `returned` is valid for a write.
     let ok = unsafe {
         GetTokenInformation(
             token.as_raw_handle(),
@@ -140,11 +159,13 @@ const ADMINS: AdminsSid = AdminsSid {
 /// `TokenElevationTypeDefault` with Administrators enabled in the token.
 fn elevated() -> Result<bool, u32> {
     let token = process_token(TOKEN_QUERY)?;
-    let e: TOKEN_ELEVATION = token_info(&token, TokenElevation)?;
+    // SAFETY: TokenElevation writes a TOKEN_ELEVATION (one u32, any value valid).
+    let e: TOKEN_ELEVATION = unsafe { token_info(&token, TokenElevation) }?;
     if e.TokenIsElevated != 0 {
         return Ok(true);
     }
-    let ty: TOKEN_ELEVATION_TYPE = token_info(&token, TokenElevationType)?;
+    // SAFETY: TokenElevationType writes a TOKEN_ELEVATION_TYPE (an i32, any value valid).
+    let ty: TOKEN_ELEVATION_TYPE = unsafe { token_info(&token, TokenElevationType) }?;
     if ty != TokenElevationTypeDefault {
         return Ok(false);
     }
@@ -204,14 +225,20 @@ fn local_app_data() -> Result<OsString, OsError> {
     if hr < 0 {
         return Err(OsError::HResult(hr));
     }
+    if owned.0.is_null() {
+        // Success without a string: no folder to read from.
+        return Err(OsError::HResult(E_POINTER));
+    }
     // SAFETY: on success `raw` is a NUL-terminated string owned by `owned`, alive and
     // unchanged until `owned` drops at the end of this function, after the copy.
-    let units = unsafe { wide_units(owned.0) }.ok_or(OsError::HResult(E_POINTER))?;
+    let units = unsafe { wide_units(owned.0) }.ok_or(OsError::Win32(ERROR_FILENAME_EXCED_RANGE))?;
     Ok(OsString::from_wide(units))
 }
 
-/// winerror.h `E_POINTER`: success without a string.
+/// winerror.h `E_POINTER`: the call reported success but returned a null string.
 const E_POINTER: i32 = 0x8000_4003_u32.cast_signed();
+/// winerror.h `ERROR_FILENAME_EXCED_RANGE`: no NUL within 32,767 units.
+const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
 
 /// The real system layer.
 pub(crate) struct WinOs;
@@ -301,8 +328,13 @@ impl Os for WinOs {
         launch::resume(child)
     }
 
-    fn terminate(&self, child: launch::Child) {
-        launch::terminate(child);
+    fn terminate(&self, child: launch::Child) -> Terminated {
+        launch::terminate(child)
+    }
+
+    fn same_path(&self, app: &[u16], start: &str) -> bool {
+        let start: Vec<u16> = start.encode_utf16().collect();
+        compare_ordinal_ignore_case(app, &start)
     }
 
     fn shell_execute(
