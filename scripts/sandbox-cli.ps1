@@ -15,16 +15,17 @@
 
 param(
     [Parameter(Mandatory = $true)][string]$Out,
-    [Parameter(Mandatory = $true)][bool]$Elevated
+    [Parameter(Mandatory = $true)][bool]$Elevated,
+    [switch]$Ci
 )
 
 $ErrorActionPreference = 'Stop'
-# The account of the process token too (not spoofable through the environment), and the
-# script's own path in the read-only mapped folder of the .wsb.
-$tokenUser = ([Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\')[-1]
-if ($env:USERNAME -ne 'WDAGUtilityAccount' -or $env:USERPROFILE -notmatch '\\WDAGUtilityAccount\\?$' -or
-    $tokenUser -ne 'WDAGUtilityAccount' -or $PSCommandPath -ne 'C:\sandbox\scripts\sandbox-cli.ps1') {
-    throw "refusing to run: not the Windows Sandbox account and its mapped scripts (USERNAME=$env:USERNAME, token $tokenUser, script $PSCommandPath)"
+# The shared guard (sandbox-guard.ps1): the account of the process token (not spoofable through
+# the environment), the environment, the script's own path in the mapped (Sandbox) or staged
+# (CI) folder, and with -Ci the CI marker.
+. 'C:\sandbox\scripts\sandbox-guard.ps1'
+if (-not (Test-SandboxGuard -Script $PSCommandPath -Expected 'C:\sandbox\scripts\sandbox-cli.ps1' -Ci ([bool]$Ci))) {
+    throw "refusing to run: not the Windows Sandbox account and its mapped scripts, nor the CI accounts with -Ci (USERNAME=$env:USERNAME, script $PSCommandPath, ci=$Ci)"
 }
 
 $source = 'C:\sandbox\bin\rerun.exe'

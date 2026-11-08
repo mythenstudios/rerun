@@ -166,3 +166,45 @@ jobs:
           name: rerun-cpu-${{ matrix.arch }}
           path: dist/${{ matrix.arch }}/rerun-cpu.asi
           if-no-files-found: error
+
+  sandbox:
+    # The Windows Sandbox suite (docs/09-testing.md) on a disposable runner: the `#[ignore]`
+    # sandbox tests and the CLI round trips write the real HKCU and LocalAppData of the account
+    # that runs them, which is fine on a throwaway VM. Locally the suite stays an optional
+    # fallback (scripts/sandbox-test.wsb; Smart App Control blocks it on the developer machine).
+    name: sandbox suite (windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Its own key (the windows job builds with --profile ci, this one with the dev profile
+          # of scripts/sandbox-launch.ps1, which stages the same binaries as the Sandbox gets).
+          key: windows-sandbox-p1
+      - name: build the sandbox binaries (rerun-core tests, rerun.exe, rerun-launch.exe)
+        # Visible here; scripts/sandbox-launch.ps1 -StageOnly (run by ci-sandbox.ps1) repeats
+        # exactly these builds, which are then up to date, and stages the results.
+        run: |
+          cargo test -p rerun-core --lib --no-run --locked
+          cargo build -p rerun-cli --release --locked
+          cargo build -p rerun-launch --release --locked
+      - name: sandbox suite (non-elevated as a new standard user, then elevated)
+        # Windows PowerShell 5.1, like the Sandbox. Creates the local user `rerunci`, writes the
+        # real HKCU of that user and of the runner account (disposable VM).
+        shell: powershell
+        run: .\scripts\ci-sandbox.ps1
+      - name: upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sandbox-suite
+          path: C:\sandbox\out
+          if-no-files-found: warn

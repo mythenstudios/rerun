@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use super::super::testfx::{AppHive, is_elevated, sandbox_decision, sandbox_guard};
+use super::super::testfx::{
+    AppHive, is_elevated, process_account, sandbox_decision, sandbox_guard,
+};
 use super::super::{WinRegistry, WinSystem};
 use crate::exec::reg_tests::{SUB, VENDOR_GAME, rt1_steps};
 use crate::exec::tests::{N, NEW, OLD, X, t1_spec};
@@ -52,7 +54,7 @@ const OK_PROFILE: &str = r"C:\Users\WDAGUtilityAccount";
 
 #[test]
 fn sandbox_gate_needs_all_three_conditions() {
-    let ok = |f, u, p| sandbox_decision(f, u, p, Some("WDAGUtilityAccount")).is_ok();
+    let ok = |f, u, p| sandbox_decision(f, u, p, Some("WDAGUtilityAccount"), None).is_ok();
     assert!(ok(Some("1"), Some("WDAGUtilityAccount"), Some(OK_PROFILE)));
     assert!(ok(
         Some("1"),
@@ -79,7 +81,14 @@ fn sandbox_gate_needs_all_three_conditions() {
     // The environment says Sandbox but the process token belongs to another account (or none).
     for who in [Some("developer"), None] {
         assert!(
-            sandbox_decision(Some("1"), Some("WDAGUtilityAccount"), Some(OK_PROFILE), who).is_err()
+            sandbox_decision(
+                Some("1"),
+                Some("WDAGUtilityAccount"),
+                Some(OK_PROFILE),
+                who,
+                None
+            )
+            .is_err()
         );
     }
     // The flag alone, or the account name alone (a developer who sets one by habit), refuses.
@@ -95,6 +104,49 @@ fn sandbox_gate_needs_all_three_conditions() {
         Some("1"),
         Some("WDAGUtilityAccount"),
         Some(r"C:\Users\WDAGUtilityAccount\other")
+    ));
+}
+
+/// The CI opt-in (`RERUN_CI_SANDBOX=1`) admits the runner's two accounts and only with the
+/// flag; the account must still be the process token's and match `USERNAME` and the profile.
+#[test]
+fn sandbox_gate_admits_the_ci_accounts_only_with_the_ci_flag() {
+    fn d(
+        flag: Option<&str>,
+        user: Option<&str>,
+        p: Option<&str>,
+        who: Option<&str>,
+        ci: Option<&str>,
+    ) -> bool {
+        sandbox_decision(flag, user, p, who, ci).is_ok()
+    }
+    for name in ["runneradmin", "rerunci"] {
+        let profile = format!(r"C:\Users\{name}");
+        let p = Some(profile.as_str());
+        assert!(d(Some("1"), Some(name), p, Some(name), Some("1")));
+        // Without the CI flag (every normal run on a runner) the guard refuses.
+        assert!(!d(Some("1"), Some(name), p, Some(name), None));
+        assert!(!d(Some("1"), Some(name), p, Some(name), Some("0")));
+        // Without the sandbox flag, or with the environment of another account.
+        assert!(!d(None, Some(name), p, Some(name), Some("1")));
+        assert!(!d(Some("1"), Some("developer"), p, Some(name), Some("1")));
+        assert!(!d(
+            Some("1"),
+            Some(name),
+            Some(r"C:\Users\developer"),
+            Some(name),
+            Some("1")
+        ));
+        // The environment names the CI account but the token is a developer's.
+        assert!(!d(Some("1"), Some(name), p, Some("developer"), Some("1")));
+    }
+    // The CI flag does not admit any other account.
+    assert!(!d(
+        Some("1"),
+        Some("developer"),
+        Some(r"C:\Users\developer"),
+        Some("developer"),
+        Some("1")
     ));
 }
 
@@ -181,8 +233,10 @@ impl Sb {
         let sys = WinSystem::new().unwrap_or_else(|e| panic!("{e}"));
         let lad = sys.known_folders().get(KnownFolder::LocalAppData).unwrap();
         assert!(
-            lad.to_string_lossy().contains("WDAGUtilityAccount"),
-            "LocalAppData is {}, not the Sandbox profile",
+            lad.to_string_lossy()
+                .to_ascii_lowercase()
+                .contains(&process_account().unwrap_or_default().to_ascii_lowercase()),
+            "LocalAppData is {}, not the profile of the account the guard accepted",
             lad.display()
         );
         let pkg = lad.join(r"Rerun\packages\fix-pack\1.0.2");

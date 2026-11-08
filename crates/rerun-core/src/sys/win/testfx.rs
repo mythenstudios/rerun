@@ -155,35 +155,48 @@ pub(super) fn hosted_ci() -> bool {
 /// Account name of the Windows Sandbox user.
 const SANDBOX_ACCOUNT: &str = "WDAGUtilityAccount";
 
+/// The accounts of a disposable GitHub-hosted runner, allowed only with the CI opt-in
+/// (`RERUN_CI_SANDBOX=1`, set by `scripts/sandbox-run.ps1 -Ci`): the runner's administrator
+/// (the elevated pass) and the standard user `scripts/ci-sandbox.ps1` creates (the
+/// non-elevated pass).
+const CI_ACCOUNTS: [&str; 2] = ["runneradmin", "rerunci"];
+
 /// The decision behind [`sandbox_guard`], on injected values (the process environment is read
-/// in one place only): all of `RERUN_SANDBOX=1`, `USERNAME` = the Sandbox account,
-/// `USERPROFILE` ending in that account's name and the account the process token belongs to
-/// (`account`, not an environment variable) must hold. `Err` says what is missing.
+/// in one place only): `RERUN_SANDBOX=1`, `USERNAME` and the last folder of `USERPROFILE` equal
+/// to the account the process token belongs to (`account`, not an environment variable), and
+/// that account is the Sandbox account, or with `ci` = `RERUN_CI_SANDBOX=1` one of
+/// [`CI_ACCOUNTS`]. `Err` says what is missing.
 pub(super) fn sandbox_decision(
     flag: Option<&str>,
     username: Option<&str>,
     profile: Option<&str>,
     account: Option<&str>,
+    ci: Option<&str>,
 ) -> Result<(), String> {
     if flag != Some("1") {
         return Err("RERUN_SANDBOX is not 1".to_owned());
     }
-    if !username.is_some_and(|u| u.eq_ignore_ascii_case(SANDBOX_ACCOUNT)) {
-        return Err(format!("USERNAME is {username:?}, not {SANDBOX_ACCOUNT}"));
+    let allowed = |a: &str| {
+        a.eq_ignore_ascii_case(SANDBOX_ACCOUNT)
+            || (ci == Some("1") && CI_ACCOUNTS.iter().any(|c| a.eq_ignore_ascii_case(c)))
+    };
+    let Some(account) = account.filter(|a| allowed(a)) else {
+        return Err(format!(
+            "the process runs as {account:?}, not {SANDBOX_ACCOUNT} (or, with RERUN_CI_SANDBOX=1, \
+             one of {CI_ACCOUNTS:?})"
+        ));
+    };
+    if !username.is_some_and(|u| u.eq_ignore_ascii_case(account)) {
+        return Err(format!("USERNAME is {username:?}, not {account}"));
     }
     let in_profile = profile.is_some_and(|p| {
         p.rsplit(['\\', '/'])
             .find(|s| !s.is_empty())
-            .is_some_and(|last| last.eq_ignore_ascii_case(SANDBOX_ACCOUNT))
+            .is_some_and(|last| last.eq_ignore_ascii_case(account))
     });
     if !in_profile {
         return Err(format!(
-            "USERPROFILE is {profile:?}, not the profile of {SANDBOX_ACCOUNT}"
-        ));
-    }
-    if !account.is_some_and(|a| a.eq_ignore_ascii_case(SANDBOX_ACCOUNT)) {
-        return Err(format!(
-            "the process runs as {account:?}, not {SANDBOX_ACCOUNT}"
+            "USERPROFILE is {profile:?}, not the profile of {account}"
         ));
     }
     Ok(())
@@ -191,7 +204,7 @@ pub(super) fn sandbox_decision(
 
 /// The name of the account this process runs as (`GetUserNameW`), which an environment
 /// variable cannot fake.
-fn process_account() -> Option<String> {
+pub(super) fn process_account() -> Option<String> {
     let mut buf = [0u16; 257];
     let mut len = u32::try_from(buf.len()).ok()?;
     // SAFETY: `buf` is writable for `len` UTF-16 units and lives across the call; `len` is
@@ -207,7 +220,7 @@ fn process_account() -> Option<String> {
 }
 
 /// The safety net of every Windows Sandbox test: call it first. Panics, before anything is
-/// touched, unless this process runs in the Windows Sandbox ([`sandbox_decision`]). An
+/// touched, unless this process runs in the Windows Sandbox or the CI sandbox job ([`sandbox_decision`]). An
 /// `--ignored` run on a developer machine or a CI runner therefore changes nothing.
 pub(super) fn sandbox_guard() {
     #[expect(
@@ -220,10 +233,11 @@ pub(super) fn sandbox_guard() {
         var("USERNAME").as_deref(),
         var("USERPROFILE").as_deref(),
         process_account().as_deref(),
+        var("RERUN_CI_SANDBOX").as_deref(),
     ) {
         panic!(
             "refusing to run: this test changes the machine and runs only in Windows Sandbox \
-             (scripts/sandbox-test.wsb): {why}"
+             (scripts/sandbox-test.wsb, or the CI job via scripts/ci-sandbox.ps1): {why}"
         );
     }
 }

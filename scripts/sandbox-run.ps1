@@ -22,22 +22,33 @@
 # Windows PowerShell 5.1: native stderr is never redirected under $ErrorActionPreference =
 # 'Stop' (that throws NativeCommandError); native calls go through Run-Native.
 
+# CI (docs/09-testing.md, "Windows Sandbox suite"): scripts/ci-sandbox.ps1 runs this script on a
+# disposable GitHub-hosted runner, twice: -Ci alone as the standard user rerunci (the
+# non-elevated pass: the Rust tests and the CLI round trips) and -Ci -CliOnly as the runner's
+# elevated administrator (the elevated pass: only the refusal of plan, user decision E3).
+# With -Ci there is no UAC restart, no probes, no Explorer window and no pause, and the guard
+# also accepts the CI accounts.
+param(
+    [switch]$Ci,
+    [switch]$CliOnly,
+    [string]$Out = 'C:\sandbox\out'
+)
+
 $ErrorActionPreference = 'Stop'
-$out = 'C:\sandbox\out'
+$out = $Out
 $exe = 'C:\sandbox\bin\rerun-core-tests.exe'
 
-# The guard: the environment, the account of the process token (not spoofable through the
-# environment) and the script's own path in the read-only mapped folder of the .wsb. It
-# runs before every write; this script writes HKLM and restarts the machine.
-function Test-SandboxGuard {
-    $tokenUser = ([Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\')[-1]
-    return ($env:USERNAME -eq 'WDAGUtilityAccount' -and $env:USERPROFILE -match '\\WDAGUtilityAccount\\?$' -and
-        $tokenUser -eq 'WDAGUtilityAccount' -and $PSCommandPath -eq 'C:\sandbox\scripts\sandbox-run.ps1')
-}
-if (-not (Test-SandboxGuard)) {
-    Write-Error "refusing to run: not the Windows Sandbox account and its mapped LogonCommand (USERNAME=$env:USERNAME, script $PSCommandPath)"
+# The guard (sandbox-guard.ps1): the environment, the account of the process token (not
+# spoofable through the environment) and the script's own path in the mapped (Sandbox) or
+# staged (CI) folder. It runs before every write; without -Ci this script writes HKLM and
+# restarts the machine.
+. 'C:\sandbox\scripts\sandbox-guard.ps1'
+function Test-Here { Test-SandboxGuard -Script $PSCommandPath -Expected 'C:\sandbox\scripts\sandbox-run.ps1' -Ci ([bool]$Ci) }
+if (-not (Test-Here)) {
+    Write-Error "refusing to run: not the Windows Sandbox account and its mapped LogonCommand, nor the CI accounts with -Ci (USERNAME=$env:USERNAME, script $PSCommandPath, ci=$Ci)"
     exit 2
 }
+if ($Ci) { $env:RERUN_CI_SANDBOX = '1' }
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 # Runs a native command with stderr merged into the output as plain text; sets $script:NativeExit.
@@ -70,14 +81,14 @@ $uacKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 # fresh Sandbox starts without it (a copy in out\ is only for the record; a stale copy there
 # from an earlier session blocked the restart once).
 $marker = 'C:\RerunSandbox\uac-restart.txt'
-if ($elevated) {
+if ($elevated -and -not $Ci) {
     $lua = (Get-ItemProperty -LiteralPath $uacKey -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
     if ($lua -ne 1 -and (Test-Path -LiteralPath $marker)) {
         # Restarted once already and UAC is still off: never loop.
         $note = 'the UAC restart did not take effect (EnableLUA is still off); running elevated, the writing tests are expected to fail'
         Status $note
     } elseif ($lua -ne 1) {
-        if (-not (Test-SandboxGuard)) { Write-Error 'refusing: guard failed before the HKLM write'; exit 2 }
+        if (-not (Test-Here)) { Write-Error 'refusing: guard failed before the HKLM write'; exit 2 }
         Set-ItemProperty -LiteralPath $uacKey -Name EnableLUA -Value 1 -Type DWord
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $marker) | Out-Null
         $line = "EnableLUA was $lua; set to 1 and restarted at $(Get-Date -Format o)"
@@ -101,12 +112,14 @@ $err = ''
 $cli = $null
 Status 'CLI round trip and launch_method round trip (cli.log)'
 try {
-    $cli = &'C:\sandbox\scripts\sandbox-cli.ps1' -Out $out -Elevated $elevated
+    $cli = &'C:\sandbox\scripts\sandbox-cli.ps1' -Out $out -Elevated $elevated -Ci:$Ci
 } catch {
     $cli = [ordered]@{ error = "$_"; expected = $false }
     Write-Host "CLI round trip failed: $_"
 }
 try {
+    if ($CliOnly) { $code = 0; Status "sandbox tests skipped (-CliOnly: the elevated pass checks only the refusal of plan)" }
+    else {
     if (-not (Test-Path -LiteralPath $exe)) { throw "test binary missing: $exe (run scripts/sandbox-launch.ps1 on the host)" }
     $env:RERUN_SANDBOX = '1'
     $env:RUST_BACKTRACE = '1'
@@ -119,6 +132,7 @@ try {
     $text = Get-Content -LiteralPath $log -Raw
     $passed = ([regex]::Matches($text, '(?m)^test \S+ \.\.\. ok')).Count
     $failed = ([regex]::Matches($text, '(?m)^test \S+ \.\.\. FAILED')).Count
+    }
 } catch {
     $err = "$_"
     Write-Host "run failed: $err"
@@ -135,22 +149,24 @@ try {
         started   = $started.ToString('o')
         finished  = (Get-Date).ToString('o')
         cli       = $cli
+        ci        = [bool]$Ci
+        cli_only  = [bool]$CliOnly
     }
     $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'result.json') -Encoding UTF8
 }
 
 # Facts for the compatibility layer (P2-11): a failure here never changes the test result.
-Status 'layer probes (probe-layers.md)'
-try { & 'C:\sandbox\scripts\sandbox-probe-layers.ps1' -Out $out } catch { Write-Host "probe failed: $_" }
+if (-not $Ci) { Status 'layer probes (probe-layers.md)' }
+if (-not $Ci) { try { & 'C:\sandbox\scripts\sandbox-probe-layers.ps1' -Out $out } catch { Write-Host "probe failed: $_" } }
 Write-Host ''
 Status "done: exit code $code, $passed passed, $failed failed, elevated=$elevated $note"
-# A visible end in the Sandbox too: an Explorer window on the results.
-try { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList $out } catch { }
+# A visible end in the Sandbox too: an Explorer window on the results (not in CI).
+if (-not $Ci) { try { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList $out } catch { } }
 if ($cli) { Write-Host "CLI round trip: expected=$($cli.expected) (details in cli.log)" }
 if ($passed -eq 0 -and $code -eq 0) { Write-Host 'WARNING: no test ran' }
 # After the restart from inside there is no visible window to wait in (the Explorer window
 # shows the end); only the first, visible run pauses.
-if (-not (Test-Path -LiteralPath $marker)) {
+if (-not $Ci -and -not (Test-Path -LiteralPath $marker)) {
     Read-Host 'Done. Press Enter to leave this window (close the Sandbox yourself)'
 }
 exit $code

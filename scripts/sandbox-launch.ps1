@@ -33,11 +33,15 @@ try {
     $ErrorActionPreference = 'Stop'
     if ($exit -ne 0) { throw 'cargo test --no-run failed (run it by hand to see why)' }
     # The release rerun.exe and rerun-launch.exe for the CLI round trip (P2-13, P3-3e, sandbox-cli.ps1); built only.
-    $ErrorActionPreference = 'Continue'
-    & cargo build -p rerun-cli -p rerun-launch --release 2>$null | Out-Null
-    $exit = $LASTEXITCODE
-    $ErrorActionPreference = 'Stop'
-    if ($exit -ne 0) { throw 'cargo build -p rerun-cli -p rerun-launch --release failed (run it by hand to see why)' }
+    # One package per build: the same artifacts as the release builds of ci.yml (feature
+    # unification of a combined -p build would change rerun-launch).
+    foreach ($pkg in 'rerun-cli', 'rerun-launch') {
+        $ErrorActionPreference = 'Continue'
+        & cargo build -p $pkg --release 2>$null | Out-Null
+        $exit = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($exit -ne 0) { throw "cargo build -p $pkg --release failed (run it by hand to see why)" }
+    }
 } finally { Pop-Location }
 $cliExe = Join-Path $repo 'target\release\rerun.exe'
 $shimExe = Join-Path $repo 'target\release\rerun-launch.exe'
