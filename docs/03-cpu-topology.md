@@ -53,9 +53,9 @@ The FFI lives in one module per binary: `rerun-core::sys::win::cpu` now (size qu
 | Multiple CCDs (Ryzen 9, Threadripper) | several `llc` groups | `single_l3: true` → all threads from one group |
 | X3D with 2 CCDs | `llcs` sizes unequal | `prefer_l3: largest` → V-Cache CCD |
 | Intel hybrid (P/E) | several `efficiency_class` | `prefer: performance` → highest class |
-| LP E-cores (Core Ultra) | lowest class, own LLC with `level: 2` | never for games, unless explicit |
-| > 64 threads | several groups | mask per group; game in one group |
-| 32-bit game | PE header x86 | select at most 32 logical processors |
+| LP E-cores (Core Ultra) | own LLC with a lower `level` (L2 as last level); the class alone may not tell them from E-cores | never for games: step 1 drops them, no rule selects them |
+| > 64 threads | several groups | the game stays in one group (step 1); the mask is per group |
+| 32-bit game | PE header x86 | only indices below 32 of the group (step 2) |
 | Zen 2 CCX (Ryzen 3000) | two `llc` groups of 4 cores per CCD | `single_l3: true` → 4 cores, not 8; never infer the group size from the product name |
 | X3D with V-Cache on both CCDs (9950X3D2) | several `llc` groups, **equal** sizes | `prefer_l3: largest` → tie → same as `single_l3` (see step 3) |
 | Hybrid without SMT (Arrow Lake, Lunar Lake, Panther Lake) | several `efficiency_class`, one thread per `core` | `smt: off` is a no-op, not an error |
@@ -64,13 +64,17 @@ The FFI lives in one module per binary: `rerun-core::sys::win::cpu` now (size qu
 
 ## Selection algorithm (order)
 
-1. Candidates = all logical CPUs of group 0 (or of the largest group).
-2. `prefer: performance` → only the highest `efficiency_class`.
-3. `prefer_l3: largest` → L3 group with the largest cache; otherwise with `single_l3` the L3 group with the most candidates. **Ties** (equal size, e.g. 9950X3D2 or plain dual-CCD parts): the group with the most candidates, then the lowest `llc` number. A rule never spreads a game across tied groups. The number of cores per group is always read, never assumed (4 on Zen 2, 8 on Zen 3–5, up to 12 on Zen 6, 16 on Zen 6c).
-4. `smt: off` → only the first thread per `core`.
-5. 32-bit → truncate to 32.
-6. `max_threads` → the first N (cores before SMT siblings).
-7. Empty result → rule too strict, error with explanation instead of a silent fallback.
+`rerun_proto::cpu::rule::select(topology, rule, bitness)` (ADR 0022), pure, on the live topology at every start:
+
+1. **Group.** Candidates = the logical CPUs of the group with the most logical CPUs; on a tie the lowest group number (a machine with one group: group 0). Within it, every LLC whose `level` is below the highest `level` in the group drops out: LP E-cores sit on their own L2 as last level next to an L3, and no rule ever selects them. A machine whose LLCs all have the same level (e.g. an old CPU with two L2s and no L3) keeps them all.
+2. **32-bit.** For an x86 game only indices `< 32` stay. A WOW64 process holds every affinity mask as a 32-bit value, so a bit at index 32 or higher is invisible to the game and lost when it reads and sets its own mask (ADR 0022, B6). The limit comes before the L3 step, so the L3 choice only sees processors the game can address. Nothing left → error (`bitness`).
+3. **`prefer: performance`** → only the highest `efficiency_class` among the candidates.
+4. **`prefer_l3: largest`** → the LLC with the largest size, then the most candidates, then the lowest `llc` number. **`single_l3`** alone → the LLC with the most candidates, then the largest size, then the lowest `llc` number. Either way exactly one LLC: a rule with `single_l3` or `prefer_l3` never spreads a game across tied LLCs (9950X3D2, plain dual-CCD parts, two Nova Lake tiles). Without either, all LLCs left after step 3 stay. The number of cores per LLC is always read, never assumed (4 on Zen 2, 8 on Zen 3–5, up to 12 on Zen 6, 16 on Zen 6c).
+5. **`smt: off`** → only the first thread (lowest index) of each `core`.
+6. **`max_threads: N`** → the first `N` in the order "the first thread of every core, then the second thread of every core, …", each by index: cores before SMT siblings. On the 5950X, `max_threads: 8` with `single_l3` gives 8 cores × 1 thread on CCD 0 with `smt` on or off.
+7. **Empty result** → error naming the step that emptied the candidates (`bitness`, or `max_threads: 0`), never a silent fallback. Steps 1, 3, 4 and 5 cannot empty a non-empty candidate set.
+
+The result is one group, a mask within it, the CPU Set IDs of the same processors and "`threads` of `of`" (`of` = all logical processors of the machine). Golden snapshot of every fixture × a rule table × both bitnesses: `tests/fixtures/cpu/select.golden`; properties (subset of the group, one group, no LLC below the top level, x86 below index 32, one LLC with `single_l3`/`prefer_l3`, `max_threads` a prefix) on every fixture and on random topologies.
 
 ## Coverage by CPU family (as of 2026-11-05)
 
@@ -100,7 +104,7 @@ Rerun keeps no model list; every row below is handled by the rules above. The ta
 ## Pitfalls
 
 - **Core count ≠ affinity.** `GetSystemInfo().dwNumberOfProcessors` stays the same, no matter which mask is set. Games that count this way and crash with too many cores need `inproc` with `report_cores`.
-- **Hard vs. soft.** Affinity (`SetProcessAffinityMask`, Job Object) is hard. CPU Sets (`SetProcessDefaultCpuSets`) are a preference; often better on hybrid CPUs because Thread Director can keep working. Default: hard.
+- **Hard vs. soft.** Affinity (Job Object group affinity, `SetProcessAffinityMask`) is hard. CPU Sets (`SetProcessDefaultCpuSets`) are a preference; often better on hybrid CPUs because Thread Director can keep working. Default: hard.
 - **Games that set affinity themselves.** Only `hold` (set again) or `inproc` (hook) helps.
 - **Vendor schedulers already at work.** On dual-CCD X3D parts with V-Cache on one CCD, AMD's chipset driver parks the other CCD for games it recognises (via Game Bar); on Intel hybrid parts Thread Director steers threads. Rerun's rule must agree with them (`prefer_l3: largest` picks the same CCD the driver keeps awake) and never fight them. Parked state is ignored by the parser on purpose; the post-launch check reports what the game actually got.
 
@@ -112,7 +116,7 @@ Thread tiles grouped by topology: one row per L3 group or core type, SMT sibling
 
 `tests/fixtures/cpu/` (see its `README.md`). A real machine is stored **raw**: `<cpu>.raw.json` (format 1) holds the bytes of both calls as hex, next to it `<cpu>.json` is the expected parsed `CpuTopology`; a test parses the raw file and compares. Machines without a dump are parsed-only fixtures (`CpuTopology` JSON, validated). Parser edge cases are byte records built in the `rerun-proto` tests.
 
-Present: `ryzen9-5950x.raw.json` + `ryzen9-5950x.json` (2 CCD, 32 T, real dump, Windows 11 build 26300), `i5-6600.json` (4 cores, no SMT, datasheet). Planned: `ryzen9-7950x3d.json`, `i9-14900k.json`, `core-ultra-9-285k.json`, `core-ultra-7-155h.json` (LP-E), `threadripper-7980x.json` (>64), `ryzen7-3700x.json` (Zen 2, two CCX per CCD), `ryzen9-9950x3d2.json` (equal V-Cache, tie-break), `ryzen-ai-9-hx370.json` (Zen 5 + Zen 5c), `core-ultra-x9-388h.json` (Panther Lake, E and LP-E possibly in the same class). Synthetic only until real hardware exists: `nova-lake-2tile.json` (two compute tiles), `zen6-12c.json` (12 cores per CCD).
+Present: `ryzen9-5950x.raw.json` + `ryzen9-5950x.json` (2 CCD, 32 T, real dump, Windows 11 build 26300), and built from datasheets or announcements (the README lists the assumptions each one makes until a dump exists): `i5-6600.json`, `ryzen9-7950x3d.json`, `ryzen9-9950x3d2.json` (equal V-Cache, tie-break), `ryzen7-3700x.json` (Zen 2, two CCX per CCD), `ryzen-ai-9-hx370.json` (Zen 5 + Zen 5c), `i9-14900k.json`, `core-ultra-9-285k.json`, `core-ultra-7-155h.json` (LP-E), `core-ultra-7-258v.json` (Lunar Lake, LP-E), `core-ultra-x9-388h.json` (Panther Lake, E and LP-E in one class), `threadripper-7980x.json` (two groups of 64). Synthetic, until real hardware exists: `nova-lake-2tile.json` (two compute tiles), `zen6-12c.json` (12 cores per CCD).
 
 ## Sources (checked 2026-11-05)
 

@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub mod parse;
+pub mod rule;
 
 pub use parse::{Check, Source};
 

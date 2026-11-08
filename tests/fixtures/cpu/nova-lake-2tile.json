@@ -1,0 +1,434 @@
+{
+  "cpus": [
+    {
+      "cpu_set_id": 256,
+      "group": 0,
+      "index": 0,
+      "core": 0,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 257,
+      "group": 0,
+      "index": 1,
+      "core": 1,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 258,
+      "group": 0,
+      "index": 2,
+      "core": 2,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 259,
+      "group": 0,
+      "index": 3,
+      "core": 3,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 260,
+      "group": 0,
+      "index": 4,
+      "core": 4,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 261,
+      "group": 0,
+      "index": 5,
+      "core": 5,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 262,
+      "group": 0,
+      "index": 6,
+      "core": 6,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 263,
+      "group": 0,
+      "index": 7,
+      "core": 7,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 264,
+      "group": 0,
+      "index": 8,
+      "core": 8,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 265,
+      "group": 0,
+      "index": 9,
+      "core": 9,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 266,
+      "group": 0,
+      "index": 10,
+      "core": 10,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 267,
+      "group": 0,
+      "index": 11,
+      "core": 11,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 268,
+      "group": 0,
+      "index": 12,
+      "core": 12,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 269,
+      "group": 0,
+      "index": 13,
+      "core": 13,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 270,
+      "group": 0,
+      "index": 14,
+      "core": 14,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 271,
+      "group": 0,
+      "index": 15,
+      "core": 15,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 272,
+      "group": 0,
+      "index": 16,
+      "core": 16,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 273,
+      "group": 0,
+      "index": 17,
+      "core": 17,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 274,
+      "group": 0,
+      "index": 18,
+      "core": 18,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 275,
+      "group": 0,
+      "index": 19,
+      "core": 19,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 276,
+      "group": 0,
+      "index": 20,
+      "core": 20,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 277,
+      "group": 0,
+      "index": 21,
+      "core": 21,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 278,
+      "group": 0,
+      "index": 22,
+      "core": 22,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 279,
+      "group": 0,
+      "index": 23,
+      "core": 23,
+      "llc": 0,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 280,
+      "group": 0,
+      "index": 24,
+      "core": 24,
+      "llc": 1,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 281,
+      "group": 0,
+      "index": 25,
+      "core": 25,
+      "llc": 1,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 282,
+      "group": 0,
+      "index": 26,
+      "core": 26,
+      "llc": 1,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 283,
+      "group": 0,
+      "index": 27,
+      "core": 27,
+      "llc": 1,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 284,
+      "group": 0,
+      "index": 28,
+      "core": 28,
+      "llc": 1,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 285,
+      "group": 0,
+      "index": 29,
+      "core": 29,
+      "llc": 1,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 286,
+      "group": 0,
+      "index": 30,
+      "core": 30,
+      "llc": 1,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 287,
+      "group": 0,
+      "index": 31,
+      "core": 31,
+      "llc": 1,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 288,
+      "group": 0,
+      "index": 32,
+      "core": 32,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 289,
+      "group": 0,
+      "index": 33,
+      "core": 33,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 290,
+      "group": 0,
+      "index": 34,
+      "core": 34,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 291,
+      "group": 0,
+      "index": 35,
+      "core": 35,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 292,
+      "group": 0,
+      "index": 36,
+      "core": 36,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 293,
+      "group": 0,
+      "index": 37,
+      "core": 37,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 294,
+      "group": 0,
+      "index": 38,
+      "core": 38,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 295,
+      "group": 0,
+      "index": 39,
+      "core": 39,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 296,
+      "group": 0,
+      "index": 40,
+      "core": 40,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 297,
+      "group": 0,
+      "index": 41,
+      "core": 41,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 298,
+      "group": 0,
+      "index": 42,
+      "core": 42,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 299,
+      "group": 0,
+      "index": 43,
+      "core": 43,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 300,
+      "group": 0,
+      "index": 44,
+      "core": 44,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 301,
+      "group": 0,
+      "index": 45,
+      "core": 45,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 302,
+      "group": 0,
+      "index": 46,
+      "core": 46,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 303,
+      "group": 0,
+      "index": 47,
+      "core": 47,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 304,
+      "group": 0,
+      "index": 48,
+      "core": 48,
+      "llc": 2,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 305,
+      "group": 0,
+      "index": 49,
+      "core": 49,
+      "llc": 2,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 306,
+      "group": 0,
+      "index": 50,
+      "core": 50,
+      "llc": 2,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 307,
+      "group": 0,
+      "index": 51,
+      "core": 51,
+      "llc": 2,
+      "efficiency_class": 0
+    }
+  ],
+  "llcs": [
+    {
+      "level": 3,
+      "size": 37748736
+    },
+    {
+      "level": 3,
+      "size": 37748736
+    },
+    {
+      "level": 2,
+      "size": 4194304
+    }
+  ]
+}

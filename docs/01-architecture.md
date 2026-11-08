@@ -84,7 +84,7 @@ revert: journal ─► observe each op (never overwrite a foreign state) ─► 
 
 ## rerun-launch
 
-- Reads the launch profile of the target exe from `%LOCALAPPDATA%\Rerun\profiles\<hash>.json` (written on apply).
+- Reads the launch profile named by `--profile <id>` from `%LOCALAPPDATA%\Rerun\profiles\<id>.profile` (format 1, written on apply; ADR 0022).
 - Knows no Topos, no network, no registry except reading the profile.
 - Target: < 1 MB, < 50 ms startup time, exits immediately (direct/watch) or together with the game (hold/ifeo).
 - DLL hardening like every shipped executable (ADR 0008 amendment 2026-11-05): linked with `/DEPENDENTLOADFLAG:0x800` (`build.rs`), and the first statement of `main` restricts the DLL search path to System32 (`src/dll.rs`, its own copy of the one `SetDefaultDllDirectories` call), failing closed. `rerun` does the same through `rerun_core::sys::win::restrict_dll_search`.

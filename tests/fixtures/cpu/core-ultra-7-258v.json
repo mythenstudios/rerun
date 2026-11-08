@@ -1,0 +1,78 @@
+{
+  "cpus": [
+    {
+      "cpu_set_id": 256,
+      "group": 0,
+      "index": 0,
+      "core": 0,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 257,
+      "group": 0,
+      "index": 1,
+      "core": 1,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 258,
+      "group": 0,
+      "index": 2,
+      "core": 2,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 259,
+      "group": 0,
+      "index": 3,
+      "core": 3,
+      "llc": 0,
+      "efficiency_class": 1
+    },
+    {
+      "cpu_set_id": 260,
+      "group": 0,
+      "index": 4,
+      "core": 4,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 261,
+      "group": 0,
+      "index": 5,
+      "core": 5,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 262,
+      "group": 0,
+      "index": 6,
+      "core": 6,
+      "llc": 1,
+      "efficiency_class": 0
+    },
+    {
+      "cpu_set_id": 263,
+      "group": 0,
+      "index": 7,
+      "core": 7,
+      "llc": 1,
+      "efficiency_class": 0
+    }
+  ],
+  "llcs": [
+    {
+      "level": 3,
+      "size": 12582912
+    },
+    {
+      "level": 2,
+      "size": 4194304
+    }
+  ]
+}
