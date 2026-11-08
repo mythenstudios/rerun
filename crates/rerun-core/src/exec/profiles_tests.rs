@@ -805,6 +805,12 @@ fn lm_t11b_a_missing_profiles_folder_does_not_block_the_rebind_of_the_game_root(
     move_lib(&env.sys, STEAM_LIB, LIB_E);
     let pv = env.rebind_check(&t).unwrap();
     assert_eq!(pv.to.root, 0);
+    let ph = pv
+        .verified
+        .halted
+        .as_ref()
+        .expect("the preview shows the halt (rule 5)");
+    assert_eq!((ph.op, ph.root), (0, 1), "{pv:?}");
     let r = env.revert_rebound(&t, &pv.to).unwrap();
     let h = r.halted.as_ref().unwrap();
     assert_eq!((h.op, h.root), (0, 1), "{r:?}");

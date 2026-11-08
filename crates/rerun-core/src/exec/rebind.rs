@@ -430,16 +430,22 @@ fn checked<'g>(
     };
     // A halt at the profiles root comes last (its op is op 0, ADR 0020 amendment P3-3), after
     // every op of the rebound root was observed: the rebind reverts those and the revert halts
-    // there, as without a rebind (review F3 of P3-3a). Any other halt refuses.
+    // there, as without a rebind (review F3 of P3-3a). Any other halt refuses. The tolerated
+    // halt stays in `verified`, so the rebind preview shows it (rule 5).
     let at_profiles = |h: &super::Halt| {
         plan.roots
             .get(usize::from(h.root))
             .is_some_and(|r| matches!(r.origin, PlanOrigin::AppDir))
     };
-    if let Some(h) = verified.halted.take()
-        && !at_profiles(&h)
-    {
-        return Err(RebindRefusal::Halts(h.why).into());
+    if let Some(h) = verified.halted.take() {
+        if !at_profiles(&h) {
+            return Err(RebindRefusal::Halts(h.why).into());
+        }
+        debug_assert_eq!(
+            h.op, 0,
+            "the profile op is op 0 (fence of ADR 0020 amendment P3-3)"
+        );
+        verified.halted = Some(h);
     }
     let mut dirs = Vec::new();
     for k in file_ops(plan, tg.root) {
