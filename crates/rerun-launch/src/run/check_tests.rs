@@ -8,7 +8,7 @@ use rerun_proto::profile::{Method, Priority, encode};
 use super::tests::{CCD0_FIRST_THREADS, ID, fake, id, line_with, profile, rule, tail, zen3};
 use super::*;
 use crate::fake::{Call, FakeOs};
-use crate::os::{OsError, ReadBack, Terminated, priority_class};
+use crate::os::{GroupAffinity, OsError, ReadBack, Terminated, priority_class};
 
 /// The one result file `os` wrote, decoded; panics unless exactly one was written.
 fn written_one(os: &FakeOs) -> result::LaunchResult {
@@ -68,12 +68,27 @@ fn a_verified_rule_is_ok_in_the_report_and_the_file() {
 #[test]
 fn a_changed_affinity_cpu_set_or_priority_is_reset() {
     let reset = |cpu, priority| Some(Check::Reset { cpu, priority });
-    // Hard: the process narrowed itself, or the job holds another entry.
-    let mut os = fake(&profile(Some(rule(Mode::Hard)), None));
-    os.process_affinity = Some(Ok(0x0001));
-    assert_eq!(check_of(&run(&os)), reset(true, false));
+    // Hard: the job holds another entry (two, or exactly one other mask or group), or the
+    // process has bits outside the job's mask.
     let mut os = fake(&profile(Some(rule(Mode::Hard)), None));
     os.job_affinity = Some(Ok(vec![CCD0_FIRST_THREADS, CCD0_FIRST_THREADS]));
+    assert_eq!(check_of(&run(&os)), reset(true, false));
+    for other in [
+        GroupAffinity {
+            group: 0,
+            mask: 0x5554,
+        },
+        GroupAffinity {
+            group: 1,
+            mask: 0x5555,
+        },
+    ] {
+        let mut os = fake(&profile(Some(rule(Mode::Hard)), None));
+        os.job_affinity = Some(Ok(vec![other]));
+        assert_eq!(check_of(&run(&os)), reset(true, false), "{other:?}");
+    }
+    let mut os = fake(&profile(Some(rule(Mode::Hard)), None));
+    os.process_affinity = Some(Ok(0x5555 | 0x0002));
     assert_eq!(check_of(&run(&os)), reset(true, false));
     // Threads in more than one group: GetProcessAffinityMask reports 0.
     let mut os = fake(&profile(Some(rule(Mode::Hard)), None));
@@ -439,4 +454,32 @@ fn a_failed_write_changes_neither_the_start_nor_the_exit_code() {
         os.write = Err(e.clone());
         assert_eq!(run(&os).exit_code(), 42);
     }
+}
+
+/// Senior-dev B1: a game that narrows its own affinity within the job (an old engine pinning
+/// itself to CPU 0) is `narrowed`, not a reset; a priority reset takes precedence.
+#[test]
+fn a_process_narrowed_within_the_job_is_narrowed() {
+    for mask in [0x0001, 0x5554, 0x4000] {
+        let mut os = fake(&profile(Some(rule(Mode::Hard)), None));
+        os.process_affinity = Some(Ok(mask));
+        assert_eq!(check_of(&run(&os)), Some(Check::Narrowed), "{mask:#x}");
+        assert!(matches!(
+            written_one(&os).outcome,
+            Outcome::Applied {
+                check: Check::Narrowed,
+                ..
+            }
+        ));
+    }
+    let mut os = fake(&profile(Some(rule(Mode::Hard)), Some(Priority::High)));
+    os.process_affinity = Some(Ok(0x0001));
+    os.priority_class = Some(Ok(priority_class(Priority::Normal)));
+    assert_eq!(
+        check_of(&run(&os)),
+        Some(Check::Reset {
+            cpu: false,
+            priority: true
+        })
+    );
 }

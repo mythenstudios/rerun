@@ -167,7 +167,17 @@ impl fmt::Display for LaunchMsg<'_> {
                 let set = Set(*cpu, *priority);
                 write!(f, "  {id}, {at}: ")?;
                 match check {
-                    Check::Ok => write!(f, "ok, verified: {set}"),
+                    Check::Ok => {
+                        write!(f, "ok, verified: {set}")?;
+                        if cpu.is_some_and(|c| c.mode == Mode::Soft) {
+                            f.write_str(" (CPU Sets of the started process only)")?;
+                        }
+                        Ok(())
+                    }
+                    Check::Narrowed => write!(
+                        f,
+                        "narrowed, the game limited itself to fewer threads within the rule (set: {set}; not an error, the rule holds)"
+                    ),
                     Check::Reset {
                         cpu: c,
                         priority: p,
@@ -177,14 +187,11 @@ impl fmt::Display for LaunchMsg<'_> {
                             (true, false) => "affinity",
                             _ => "priority",
                         };
-                        write!(
-                            f,
-                            "reset, the {what} changed after the start (set: {set}; method hold or ifeo would keep it)"
-                        )
+                        write!(f, "reset, the {what} changed after the start (set: {set})")
                     }
                     Check::ExitedEarly => write!(
                         f,
-                        "exited_early, the started process ended before the check (set: {set}; a launcher stub needs method watch)"
+                        "exited_early, the started process ended within 5 s, before the check (set: {set}; it crashed, or it is a launcher that starts the game as another process)"
                     ),
                     Check::Failed { code } => {
                         write!(f, "check failed (Win32 error {code}), set: {set}")

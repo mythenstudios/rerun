@@ -146,19 +146,22 @@ fn every_outcome_has_its_line() {
             "  {}, {at}: ok, verified: 8 of 32 threads (hard), priority high",
             p(1)
         ),
-        format!("  {}, {at}: ok, verified: 4 of 16 threads (soft)", p(2)),
+        format!(
+            "  {}, {at}: ok, verified: 4 of 16 threads (soft) (CPU Sets of the started process only)",
+            p(2)
+        ),
         format!("  {}, {at}: ok, verified: priority above normal", p(3)),
         format!("  {}, {at}: ok, verified: no CPU rule, no priority", p(4)),
         format!(
-            "  {}, {at}: reset, the affinity and priority changed after the start (set: 8 of 32 threads (hard), priority normal; method hold or ifeo would keep it)",
+            "  {}, {at}: reset, the affinity and priority changed after the start (set: 8 of 32 threads (hard), priority normal)",
             p(5)
         ),
         format!(
-            "  {}, {at}: reset, the affinity changed after the start (set: 8 of 32 threads (hard); method hold or ifeo would keep it)",
+            "  {}, {at}: reset, the affinity changed after the start (set: 8 of 32 threads (hard))",
             p(6)
         ),
         format!(
-            "  {}, {at}: exited_early, the started process ended before the check (set: 8 of 32 threads (hard); a launcher stub needs method watch)",
+            "  {}, {at}: exited_early, the started process ended within 5 s, before the check (set: 8 of 32 threads (hard); it crashed, or it is a launcher that starts the game as another process)",
             p(7)
         ),
         format!(
@@ -211,4 +214,21 @@ fn nothing_without_results_and_one_line_for_an_unreadable_folder() {
     let e = RootError::Sys(SysError::new(SysErrorKind::TooLarge, "launch"));
     let s = shown(&launch_lines(&Err(e)));
     assert!(s.starts_with("\nlaunch results cannot be read: "), "{s}");
+}
+
+#[test]
+fn a_narrowed_affinity_is_explained_not_an_error() {
+    let r = LaunchResults {
+        entries: vec![entry(0x01, applied(HARD, None, Check::Narrowed))],
+        other: 0,
+    };
+    assert_eq!(
+        shown(&launch_lines(&Ok(Some(r)))),
+        format!(
+            "\nlast start per launch profile (rerun-launch):\n  {}, 2025-11-08 11:06:40 UTC: \
+             narrowed, the game limited itself to fewer threads within the rule (set: 8 of 32 \
+             threads (hard); not an error, the rule holds)\n",
+            id(1)
+        )
+    );
 }

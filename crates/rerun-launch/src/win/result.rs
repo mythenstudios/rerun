@@ -7,18 +7,24 @@
 //!    directory without a reparse point; it is never created (no Rerun folder, no result).
 //! 2. `launch` likewise; created with `CreateDirectoryW` if missing, then opened and checked.
 //!    Both handles are kept without `FILE_SHARE_DELETE` until the end: neither folder, nor any
-//!    folder above them, can be renamed or replaced while they are open, so the paths below
-//!    resolve to the folders checked.
+//!    folder above them, can be **renamed** while they are open. That does not stop a change of
+//!    the folder itself: an empty `launch` can still be made a mount point
+//!    (`FSCTL_SET_REPARSE_POINT` needs only `FILE_WRITE_ATTRIBUTES`, which no share mode
+//!    protects; measured on build 26300). Step 3 catches that before the first byte.
 //! 3. A temp file `<id>.<pid>-<nanos>.tmp` is created new (`CREATE_NEW`, so never an existing
 //!    entry or link, share mode 0), and its final path must be the `launch` handle's final path
-//!    plus its name (else [`OsError::Escaped`]). The bytes are written through its handle.
+//!    plus its name (else [`OsError::Escaped`]; the temp file, wherever it landed, is then
+//!    deleted by handle). Only then are the bytes written through its handle.
 //! 4. An existing `<id>.result` that is a reparse point or not a file refuses the write.
 //! 5. The temp file is renamed by its handle (`FileRenameInfoEx`, replace if exists, POSIX
-//!    semantics, so a reader that holds the old file open does not block it) to the full path
-//!    `<launch>\<id>.result`: `SetFileInformationByHandle` refuses a `RootDirectory` with 87
-//!    (measured on build 26300), and a bare name would be resolved against the current
-//!    directory. The renamed file's final path is checked like the temp file's. Any failure
-//!    after step 3 and before the rename marks the temp file for deletion by handle.
+//!    semantics) to the full path `<launch>\<id>.result`: `SetFileInformationByHandle` refuses
+//!    a `RootDirectory` with 87 (measured on build 26300), and a bare name would be resolved
+//!    against the current directory. A reader that holds the old file shared for delete does
+//!    not block the replace; `rerun status` (core's `sys::win`) opens it shared for read only,
+//!    so a replace during a concurrent `rerun status` fails with a sharing violation: harmless,
+//!    the start is recorded as `Written::Failed` and the old result stays. The renamed file's
+//!    final path is checked like the temp file's. Any failure after step 3 and before the
+//!    rename marks the temp file for deletion by handle.
 //!
 //! No flush: the file is a status record, its loss on a power cut is harmless. Never called
 //! when elevated (B13, `WinOs::write_result` checks again).
@@ -239,8 +245,9 @@ fn rename(temp: &Temp, target: &[u16]) -> Result<(), u32> {
     let info = buf.as_ptr().cast::<FILE_RENAME_INFO>();
     #[expect(
         clippy::disallowed_methods,
-        reason = "rerun-launch's result writer renames its own temp file by handle, relative \
-                  to the checked launch folder (ADR 0022 amendment P3-2)"
+        reason = "rerun-launch's result writer renames its own temp file by handle to the full \
+                  path below the held launch folder, final path checked after (ADR 0022 \
+                  amendment P3-2)"
     )]
     // SAFETY: the temp file's handle is live and opened with DELETE; `info` points to `len`
     // initialized bytes of a FILE_RENAME_INFO as built above, alive for the call.
@@ -281,6 +288,17 @@ fn create_dir(path: &[u16]) -> Result<(), u32> {
 /// Writes `bytes` to `<base>\Rerun\launch\<id>.result` (module docs). `base` is the
 /// `LocalAppData` path without a NUL.
 pub(crate) fn write(base: &[u16], id: &ProfileId, bytes: &[u8]) -> Result<(), OsError> {
+    write_with(base, id, bytes, &mut |_| {})
+}
+
+/// [`write`] with a hook called with the `launch` path right after its handle is checked
+/// (tests: change the folder in the window between the check and the create).
+fn write_with(
+    base: &[u16],
+    id: &ProfileId,
+    bytes: &[u8],
+    after_launch: &mut dyn FnMut(&[u16]),
+) -> Result<(), OsError> {
     if bytes.len() > MAX_RESULT_BYTES {
         return Err(OsError::Encode);
     }
@@ -295,6 +313,7 @@ pub(crate) fn write(base: &[u16], id: &ProfileId, bytes: &[u8]) -> Result<(), Os
         }
         Err(e) => return Err(e),
     };
+    after_launch(&launch_path);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());

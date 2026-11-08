@@ -564,3 +564,20 @@ fn mutated_profiles_never_panic_and_never_decode_to_something_else() {
     }
     assert!(accepted > 0, "no mutation decoded");
 }
+
+/// `scripts/dev-launch-profile.ps1` checks its profile writer against its own copy of
+/// [`GOLDEN`] (review of P3-2): that copy must be these bytes (PowerShell's `` `n `` is LF).
+#[test]
+fn the_dev_script_golden_is_the_codec_golden() {
+    let script = include_str!("../../../../scripts/dev-launch-profile.ps1");
+    let line = script
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("$golden = \""))
+        .expect("the script has a $golden line");
+    let copy = line
+        .strip_suffix('"')
+        .expect("one double-quoted string")
+        .replace("`n", "\n");
+    assert!(!copy.contains('`') && !copy.contains('$'), "{copy}");
+    assert_eq!(copy, GOLDEN);
+}

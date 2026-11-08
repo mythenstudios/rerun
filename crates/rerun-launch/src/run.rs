@@ -12,8 +12,9 @@
 //!   group affinity and the process's affinity (hard), the default CPU Sets (soft), the
 //!   priority class (D6 addition).
 //! - Result file (P3-2, D5): exactly one record per start that has a profile ID, written
-//!   **before** the long wait for the game (so Steam's "Stop", which ends the shim, cannot lose
-//!   it), on every path: after the check, after an unchanged start, after a failed start. A
+//!   **before** the long wait for the game, on every path: after the check, after an unchanged
+//!   start, after a failed start. With the rule applied it is written after the check, so
+//!   ending the shim (Steam's "Stop") within the first 5 s loses it; later it is on disk. A
 //!   failed write changes nothing else: not the start, not the exit code.
 
 use rerun_proto::cpu::rule::{Mode, SelectError, select};
@@ -322,7 +323,8 @@ fn record<O: Os, C>(os: &O, ctx: Ctx, done: &Done<C>) -> Written {
                 of: a.of,
             }),
             priority: *priority,
-            check: done.check.unwrap_or(Check::Ok),
+            // `with_rule` always sets the check; a missing one is never shown as verified.
+            check: done.check.unwrap_or(Check::Failed { code: 0 }),
         },
         Rule::Skipped(skip) => {
             let Some(reason) = skip.reason() else {
@@ -504,18 +506,28 @@ fn check<O: Os>(
         Err(code) => return Check::Failed { code },
     }
     let cpu = match limit {
-        None => Ok(false),
+        None => Ok(Cpu::Same),
         Some(Limit::Hard(ga)) => os.job_affinity(child).and_then(|job| {
-            // The job keeps exactly the one entry, and the process's mask (of its primary
-            // group, which the read-back made the selected one) is the selection.
+            // The job keeps exactly the one entry; the process's mask (of its primary group,
+            // which the read-back made the selected one) is the selection, or a non-empty
+            // proper subset of it that the game set itself within the rule (`narrowed`). 0
+            // (threads in several groups) or bits outside the job's mask are a reset.
             let mask = os.process_affinity(child)?;
-            Ok(job != [*ga] || mask != ga.mask)
+            Ok(if job != [*ga] {
+                Cpu::Changed
+            } else if mask == ga.mask {
+                Cpu::Same
+            } else if mask != 0 && mask & !ga.mask == 0 {
+                Cpu::Narrowed
+            } else {
+                Cpu::Changed
+            })
         }),
         Some(Limit::Soft(ids)) => os.cpu_sets(child).map(|mut now| {
             let mut set = ids.clone();
             now.sort_unstable();
             set.sort_unstable();
-            now != set
+            if now == set { Cpu::Same } else { Cpu::Changed }
         }),
     };
     let cpu = match cpu {
@@ -529,14 +541,25 @@ fn check<O: Os>(
             Err(code) => return Check::Failed { code },
         },
     };
-    if cpu || prio {
-        Check::Reset {
-            cpu,
+    match (cpu, prio) {
+        (Cpu::Changed, _) | (_, true) => Check::Reset {
+            cpu: cpu == Cpu::Changed,
             priority: prio,
-        }
-    } else {
-        Check::Ok
+        },
+        (Cpu::Narrowed, false) => Check::Narrowed,
+        (Cpu::Same, false) => Check::Ok,
     }
+}
+
+/// The CPU part of the check.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cpu {
+    /// As set.
+    Same,
+    /// Hard limit: the process narrowed itself within the job's mask.
+    Narrowed,
+    /// Differs from what was set.
+    Changed,
 }
 
 /// Steam's command, unchanged; 740 goes to `ShellExecuteExW`.

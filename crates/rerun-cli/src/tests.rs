@@ -620,7 +620,7 @@ fn c6_refusals_change_nothing() {
 /// never an abort; nothing is written.
 #[test]
 fn status_shows_the_last_start_per_launch_profile() {
-    let ok = "rerun-result 1\nprofile=0123456789abcdef0123456789abcdef\ntime=1762600000\nrule=applied\ncpu=hard:8:32\npriority=none\ncheck=ok\nstart=created\nended=none\n";
+    let ok = "rerun-result 1\nprofile=0123456789abcdef0123456789abcdef\ntime=1762600000\nrule=applied\ncpu=hard:8:32\npriority=none\ncheck=ok\nstart=created\nrule_child=none\n";
     let launch = format!(r"{RERUN}\launch");
     let sys = build(
         bare()

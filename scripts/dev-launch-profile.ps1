@@ -1,22 +1,24 @@
 # [DEV] measurement of rerun-launch with a Steam game on the developer machine
 # (docs/09-testing.md, "Launch shim on the developer machine"; ADR 0022).
 #
-#   powershell -File scripts\dev-launch-profile.ps1 -Exe "D:\SteamLibrary\steamapps\common\Game\game.exe"
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev-launch-profile.ps1 -Exe "D:\SteamLibrary\steamapps\common\Game\game.exe"
 #
 # Optional: -Threads 8 (default), -Smt, -Mode hard|soft, -Priority none|normal|above_normal|high,
-# -Launcher <path of rerun-launch.exe> (default: builds and uses target\release\rerun-launch.exe),
-# -WaitMinutes 15.
+# -Launcher <path of rerun-launch.exe> (default: builds the release shim and copies it to
+# C:\RerunTest\rerun-launch.exe, a fixed place for the launch option), -WaitMinutes 15.
 #
 # What it does, without a single question (the current instruction is in the window title):
-#  1. checks itself: its profile writer against the golden bytes of rerun-proto's codec;
+#  1. checks itself: its profile writer against its copy of the codec golden (a Rust test binds
+#     that copy to rerun-proto's golden);
 #  2. writes the launch profile <LocalAppData>\Rerun\profiles\<id>.profile (format 1, UTF-8
-#     without BOM, LF) and lets rerun-launch decode it (a start of cmd.exe through the shim must
-#     record "path_mismatch", never "profile_invalid");
+#     without BOM, LF; creates Rerun and profiles if missing) and lets rerun-launch decode it (a
+#     start of cmd.exe through the shim must record "path_mismatch", never "profile_invalid");
 #  3. puts the Steam launch option into the clipboard; you paste it in Steam and start the game;
-#  4. waits for the game, checks affinity, job and priority class about 8 s after its start and
-#     reads the result file <LocalAppData>\Rerun\launch\<id>.result;
+#  4. waits for the game (or for a result file of this start), checks affinity, job and
+#     priority class about 8 s after its start and reads <LocalAppData>\Rerun\launch\<id>.result;
 #  5. prints a summary (also copied to the clipboard) and deletes the profile. The result file
-#     stays. It never changes Steam's settings: remove the launch option in Steam yourself.
+#     stays. It never changes Steam's settings: once the launch option is in the clipboard it
+#     always ends with "remove the launch option in Steam", also when it stops early.
 #
 # Run it in a normal (not administrator) PowerShell: an elevated shim ignores the profile (M1).
 
@@ -34,6 +36,8 @@ $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $started = Get-Date
 $profilePath = $null
+$option = $null
+$done = $null
 
 function Title([string]$text) {
     $Host.UI.RawUI.WindowTitle = "Rerun DEV - $text"
@@ -150,7 +154,15 @@ try {
             $ErrorActionPreference = 'Stop'
         } finally { Pop-Location }
         if ($exit -ne 0) { Fail 'cargo build -p rerun-launch --release failed (run it by hand to see why)' }
-        $Launcher = Join-Path $repo 'target\release\rerun-launch.exe'
+        $built = Join-Path $repo 'target\release\rerun-launch.exe'
+        # A fixed place, so the launch option stays valid across rebuilds and checkouts.
+        $fixed = 'C:\RerunTest'
+        Assert-Plain $fixed
+        New-Item -ItemType Directory -Force -Path $fixed | Out-Null
+        $Launcher = Join-Path $fixed 'rerun-launch.exe'
+        Assert-Plain $Launcher
+        Copy-Item -LiteralPath $built -Destination $Launcher -Force
+        Write-Host "release shim copied to $Launcher"
     }
     if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) { Fail "rerun-launch.exe not found: $Launcher" }
     $Launcher = (Resolve-Path -LiteralPath $Launcher).Path
@@ -199,20 +211,26 @@ try {
     Write-Host "Steam > the game > Properties > Launch options: paste it (Ctrl+V), close the dialog, start the game."
     Title "STEP: paste the launch option in Steam (Ctrl+V) and start $exeName"
 
-    # ---------- 3: wait for the game ----------
+    # ---------- 3: wait for the game, or for a result of this start ----------
+    # A launcher stub may end in under a second, before this loop sees it: the shim's result
+    # file of this start (newer than the self-check's) ends the wait as well.
     $deadline = $started.AddMinutes($WaitMinutes)
     $game = $null
-    while (-not $game) {
+    $newResult = $false
+    while (-not $game -and -not $newResult) {
         if ((Get-Date) -gt $deadline) { Fail "the game did not start within $WaitMinutes minutes" }
         Start-Sleep -Seconds 1
         $game = Get-Process -ErrorAction SilentlyContinue | Where-Object {
             try { $_.Path -and [string]::Equals($_.Path, $Exe, [StringComparison]::OrdinalIgnoreCase) -and $_.StartTime -gt $started } catch { $false }
         } | Select-Object -First 1
+        $newResult = (Get-Item -LiteralPath $resultPath).LastWriteTimeUtc -gt $selfCheckTime
     }
-    $gameStart = $game.StartTime
-    Title "$exeName is running: checking in a few seconds (keep it running)"
-    $wait = 8 - ((Get-Date) - $gameStart).TotalSeconds
-    if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]($wait * 1000)) }
+    if ($game) {
+        $gameStart = $game.StartTime
+        Title "$exeName is running: checking in a few seconds (keep it running)"
+        $wait = 8 - ((Get-Date) - $gameStart).TotalSeconds
+        if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]($wait * 1000)) }
+    }
 
     # ---------- 4: check ----------
     $rows = New-Object System.Collections.Generic.List[string]
@@ -224,9 +242,32 @@ try {
     }
     function Info([string]$name, [string]$detail) { $rows.Add(("info  {0,-16} {1}" -f $name, $detail)) }
 
-    $game.Refresh()
-    $running = -not $game.HasExited
-    Row 'game running' $running $(if ($running) { 'at the check' } else { 'ended before the check (a launcher stub? then the Topo needs method watch)' })
+    # The result of this start first: newer than the self-check's, written about 5 s after the
+    # start. Its `cpu=<mode>:<threads>:<of>` is what the shim selected on this machine, which
+    # the affinity is compared with (it may be fewer than -Threads).
+    $resultDeadline = (Get-Date).AddSeconds(15)
+    while (((Get-Item -LiteralPath $resultPath).LastWriteTimeUtc -le $selfCheckTime) -and ((Get-Date) -lt $resultDeadline)) { Start-Sleep -Milliseconds 500 }
+    $selected = $null
+    $checkValue = ''
+    if ((Get-Item -LiteralPath $resultPath).LastWriteTimeUtc -le $selfCheckTime) {
+        Row 'result file' $false 'not written for this start (the shim did not run with this profile?)'
+    } else {
+        $r = Read-Result $resultPath
+        $checkValue = "$($r['check'])"
+        $parts = "$($r['cpu'])" -split ':'
+        if ($parts.Count -eq 3 -and $parts[0] -eq $Mode) { $selected = [int]$parts[1] }
+        Row 'result rule' ($r['rule'] -eq 'applied') "rule=$($r['rule'])"
+        Row 'result check' (($r['check'] -eq 'ok') -or ($r['check'] -eq 'narrowed')) "check=$($r['check'])"
+        Row 'result cpu' ($null -ne $selected -and $selected -ge 1 -and $selected -le $Threads) "cpu=$($r['cpu']) (asked: $Threads)"
+        Info 'result file' $resultPath
+    }
+
+    $running = $false
+    if ($game) {
+        $game.Refresh()
+        $running = -not $game.HasExited
+    }
+    Row 'game running' $running $(if ($running) { 'at the check' } else { 'ended before the check (crashed, or a launcher that starts the game as another process)' })
     if ($running) {
         $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$($game.Id)"
         $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($cim.ParentProcessId)" -ErrorAction SilentlyContinue
@@ -242,7 +283,7 @@ try {
             $mask = [BitConverter]::ToUInt64([BitConverter]::GetBytes($game.ProcessorAffinity.ToInt64()), 0)
             $count = Pop-Count $mask
             $detail = ("0x{0:X} = {1} threads" -f $mask, $count)
-            if ($Mode -eq 'hard') { Row 'affinity' ($count -eq $Threads) $detail } else { Info 'affinity' "$detail (soft mode: CPU Sets, the mask stays whole)" }
+            if ($Mode -eq 'hard') { Row 'affinity' (($count -eq $selected) -or ($checkValue -eq 'narrowed' -and $count -ge 1 -and $count -lt $selected)) "$detail (selected: $selected)" } else { Info 'affinity' "$detail (soft mode: CPU Sets, the mask stays whole)" }
         } catch { Row 'affinity' $false "cannot read: $($_.Exception.Message)" }
 
         try {
@@ -258,19 +299,6 @@ try {
         } catch { Row 'priority class' $false "cannot read: $($_.Exception.Message)" }
     }
 
-    # The result of this start: newer than the self-check's, written about 5 s after the start.
-    $resultDeadline = (Get-Date).AddSeconds(15)
-    while (((Get-Item -LiteralPath $resultPath).LastWriteTimeUtc -le $selfCheckTime) -and ((Get-Date) -lt $resultDeadline)) { Start-Sleep -Milliseconds 500 }
-    if ((Get-Item -LiteralPath $resultPath).LastWriteTimeUtc -le $selfCheckTime) {
-        Row 'result file' $false 'not written for this start (the shim did not run with this profile?)'
-    } else {
-        $r = Read-Result $resultPath
-        Row 'result rule' ($r['rule'] -eq 'applied') "rule=$($r['rule'])"
-        Row 'result check' ($r['check'] -eq 'ok') "check=$($r['check'])"
-        Row 'result cpu' ($r['cpu'] -like "$($Mode):$($Threads):*") "cpu=$($r['cpu'])"
-        Info 'result file' $resultPath
-    }
-
     # ---------- 5: summary ----------
     $verdict = if ($ok) { 'PASS' } else { 'FAIL' }
     $summary = @(
@@ -283,11 +311,18 @@ try {
     Set-Clipboard -Value ($summary -join "`r`n")
     Write-Host ''
     Write-Host 'Summary copied to the clipboard. The profile is deleted; the result file stays.'
-    Write-Host 'Remove the launch option in Steam (Properties > Launch options) yourself.'
-    Title "DONE: $verdict - remove the launch option in Steam (summary in the clipboard)"
+    $done = "DONE: $verdict"
 } finally {
     if ($profilePath -and (Test-Path -LiteralPath $profilePath -PathType Leaf)) {
         Remove-Item -LiteralPath $profilePath -Force
         Write-Host "profile removed: $profilePath"
+    }
+    # Once the launch option was handed out, always end with the reminder (also after a stop,
+    # a timeout or Ctrl+C): the script never changes Steam's settings itself.
+    if ($option) {
+        $state = if ($done) { $done } else { 'STOPPED' }
+        Write-Host ''
+        Write-Host "Remove the launch option in Steam (Properties > Launch options): $option" -ForegroundColor Yellow
+        $Host.UI.RawUI.WindowTitle = "Rerun DEV - $state - remove the launch option in Steam"
     }
 }

@@ -7,6 +7,7 @@
 )]
 
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -89,8 +90,8 @@ fn creates_launch_writes_and_replaces() {
     std::fs::create_dir(root.0.join("Rerun")).unwrap();
     write(&root.base(), &ID, b"one\n").unwrap();
     assert_eq!(std::fs::read(root.result()).unwrap(), b"one\n");
-    // A reader holding the old file open (share read, write and delete, as `rerun status`
-    // reads) does not block the replace (POSIX semantics).
+    // A reader holding the old file open shared for delete (std's default share mode) does not
+    // block the replace (POSIX semantics). `rerun status` shares for read only: see the docs.
     let reader = std::fs::File::open(root.result()).unwrap();
     write(&root.base(), &ID, b"two\n").unwrap();
     drop(reader);
@@ -203,4 +204,106 @@ fn rename_info_layout() {
         offset_of!(FILE_RENAME_INFO, FileName),
         2 * size_of::<usize>() + 4
     );
+}
+
+/// Makes the existing, empty folder `dir` a mount point to `target` (`FSCTL_SET_REPARSE_POINT`
+/// with `IO_REPARSE_TAG_MOUNT_POINT`), through a handle of its own: what any process of the
+/// user can do while the writer holds `dir` (security review S1).
+fn make_mount_point(dir: &[u16], target: &Path) {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+
+    let h = super::create(
+        dir,
+        FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+    .unwrap();
+    let mut sub: Vec<u16> = r"\??\".encode_utf16().collect();
+    sub.extend(target.as_os_str().encode_wide());
+    let print: Vec<u16> = target.as_os_str().encode_wide().collect();
+    let sub_len = u16::try_from(sub.len() * 2).unwrap();
+    let print_len = u16::try_from(print.len() * 2).unwrap();
+    let mut path = Vec::new();
+    for u in sub
+        .iter()
+        .chain([0u16].iter())
+        .chain(print.iter())
+        .chain([0u16].iter())
+    {
+        path.extend_from_slice(&u.to_le_bytes());
+    }
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&0xA000_0003u32.to_le_bytes()); // IO_REPARSE_TAG_MOUNT_POINT
+    buf.extend_from_slice(&u16::try_from(8 + path.len()).unwrap().to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+    buf.extend_from_slice(&sub_len.to_le_bytes());
+    buf.extend_from_slice(&(sub_len + 2).to_le_bytes()); // PrintNameOffset
+    buf.extend_from_slice(&print_len.to_le_bytes());
+    buf.extend_from_slice(&path);
+    let mut returned = 0u32;
+    // SAFETY: `h` is a live directory handle with FILE_WRITE_ATTRIBUTES; `buf` is a readable
+    // REPARSE_DATA_BUFFER of `buf.len()` bytes alive for the call; no output buffer; `returned`
+    // is valid for a write; synchronous (no OVERLAPPED).
+    let ok = unsafe {
+        DeviceIoControl(
+            h.as_raw_handle(),
+            FSCTL_SET_REPARSE_POINT,
+            buf.as_ptr().cast(),
+            u32::try_from(buf.len()).unwrap(),
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(ok, 0, "FSCTL_SET_REPARSE_POINT: {}", super::last_error());
+}
+
+/// Security review S1: the held handles keep `launch` from being renamed, not from becoming a
+/// mount point while it is empty. The final-path check after the create catches it before the
+/// first byte; the temp file is deleted wherever it landed.
+#[test]
+fn an_empty_launch_made_a_mount_point_while_held_is_escaped() {
+    let root = Root::new("mount");
+    let elsewhere = root.0.join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::create_dir(root.0.join("Rerun")).unwrap();
+    let mut done = false;
+    let e = super::write_with(&root.base(), &ID, b"x\n", &mut |launch| {
+        make_mount_point(launch, &elsewhere);
+        done = true;
+    })
+    .unwrap_err();
+    assert!(done);
+    assert_eq!(e, OsError::Escaped);
+    assert!(names(&elsewhere).is_empty(), "{:?}", names(&elsewhere));
+}
+
+/// A reader that shares for read only (as `rerun status` opens files through core's
+/// `sys::win`) makes the replace fail with a sharing violation; the old result stays and no
+/// temp file is left. Harmless: the start is recorded as `Written::Failed`.
+#[test]
+fn a_reader_without_share_delete_blocks_the_replace_harmlessly() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = Root::new("share");
+    std::fs::create_dir(root.0.join("Rerun")).unwrap();
+    write(&root.base(), &ID, b"one\n").unwrap();
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+        .open(root.result())
+        .unwrap();
+    let e = write(&root.base(), &ID, b"two\n").unwrap_err();
+    drop(reader);
+    assert!(matches!(e, OsError::Win32(32 | 5)), "{e:?}");
+    assert_eq!(std::fs::read(root.result()).unwrap(), b"one\n");
+    assert_eq!(names(&root.launch()), [format!("{ID}.result")]);
 }

@@ -60,8 +60,8 @@ fn rerun_launch_exe_runs_with_the_restricted_search_path() {
 
 /// End to end with a harmless system binary: a token that is no profile ID starts Steam's
 /// command unchanged and passes its exit code on (D3, B3). It reads no profile and writes no
-/// result file (no ID, no file name), so the test never touches `LocalAppDataRerun` (a
-/// valid but unknown ID would write `launch<id>.result` there on a non-elevated machine that
+/// result file (no ID, no file name), so the test never touches `LocalAppData\Rerun` (a
+/// valid but unknown ID would write `launch\<id>.result` there on a non-elevated machine that
 /// has the folder, P3-2).
 #[test]
 fn rerun_launch_exe_starts_the_command_and_passes_its_exit_code() {

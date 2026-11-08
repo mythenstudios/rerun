@@ -351,8 +351,9 @@ pub(crate) fn read_back(child: &Child) -> Result<ReadBack, u32> {
 }
 
 /// The job's `JobObjectGroupInformationEx`, every entry (at most [`READ_BACK_ENTRIES`]; more
-/// fails the call, which the callers treat as a difference). Step 4 of B-2 and the post-launch
-/// check (P3-2).
+/// fails the call with its Win32 error, which the callers record as a failure:
+/// `read_back_failed:<code>` before the resume, `failed:<code>` in the post-launch check).
+/// Step 4 of B-2 and the post-launch check (P3-2).
 pub(crate) fn job_affinity(child: &Child) -> Result<Vec<GroupAffinity>, u32> {
     let job = child.job.as_ref().ok_or(ERROR_INVALID_HANDLE)?;
     let mut entries = [GROUP_AFFINITY::default(); READ_BACK_ENTRIES];

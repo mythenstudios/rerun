@@ -42,5 +42,10 @@ windows-sys = { workspace = true, features = [
 [dev-dependencies]
 rerun-core.workspace = true
 
+# Test only: `win::result::tests` turns a held, empty `launch` folder into a mount point
+# (DeviceIoControl, FSCTL_SET_REPARSE_POINT; security review S1). Never in the shipped binary.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_IO", "Win32_System_Ioctl"] }
+
 [lints]
 workspace = true

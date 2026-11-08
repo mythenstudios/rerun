@@ -28,16 +28,17 @@ The same applies to EA App, Rockstar Launcher, Battle.net. In addition: games th
 
 `rerun-launch` checks the actual affinity (and priority class) of the target process about 5 s after the start, while it waits, and writes the outcome of the last start to `<LocalAppData>\Rerun\launch\<id>.result` (ADR 0022 D5 and amendment P3-2), never to the journal: the journal has one writer, and a game start during an `apply` must neither block nor write records. Core reads the file as untrusted input; `rerun status` shows the last result per profile with its time (UTC), a file it cannot read as one line.
 
-What is checked (rule applied, once, after waiting up to 5 s on the running game): hard limit – the job still holds exactly the selected group affinity and the game's process affinity equals it; soft limit – the game's default CPU Sets are exactly the selected ones; priority – the game's priority class is the one set (not checked if the profile sets none).
+What is checked (rule applied, once, after waiting up to 5 s on the running game): hard limit – the job still holds exactly the selected group affinity and the game's process affinity equals it (or is a non-empty subset of it: `narrowed`); soft limit – the game's default CPU Sets are exactly the selected ones; priority – the game's priority class is the one set (not checked if the profile sets none).
 
-- `ok` – "Affinity active · 8 of 32 threads · verified"
-- `reset` (`cpu`, `priority` or both) – changed after the start (no culprit is named: the shim cannot tell who did it) · method hold/ifeo recommended
-- `exited_early` – the started process ended before the check (a launcher stub that hands over to the real game: the Topo needs `watch`)
+- `ok` – "Affinity active · 8 of 32 threads · verified" (soft: the CPU Sets of the started process only)
+- `narrowed` – hard limit: the job still holds the selection and the game limited itself to fewer of its threads (e.g. CPU 0); within the rule, not an error
+- `reset` (`cpu`, `priority` or both) – changed after the start: the job holds something else, or the game's mask is empty or outside the job's (no culprit is named: the shim cannot tell who did it)
+- `exited_early` – the started process ended within 5 s, before the check (it crashed, or it is a launcher stub that hands over to the real game as another process)
 - `failed:<code>` – the check itself could not read the process
 - `target_not_found` – `watch` only (P3-4): timeout, target exe never seen
 - `rule_skipped` with a reason – the rule was not applied and the game started unchanged (below): `profile_missing`, `profile_unreadable`, `profile_reparse_point`, `profile_invalid`, `method_unsupported`, `path_mismatch`, `topology_unavailable`, `topology_invalid`, `selection_empty`, `spawn_failed`, `job_failed`, `read_back_failed`, `mismatch` (the read-back before the resume differed), `cpu_sets_failed`, `resume_failed`, `elevation_required`, … (the full list and the file format in ADR 0022 amendment P3-2)
 
-The record is written once per start, before the shim waits for the game, so ending the shim (Steam's "Stop") does not lose it; a failed write changes nothing else. Nothing is written by an elevated shim (B13), for a token that is no profile ID, or when `<LocalAppData>\Rerun` does not exist; the folder `launch` is created if missing. The writer refuses a reparse point at `Rerun`, `launch` or the file. The file is Rerun's own state like the journal: revert and `forget` leave it, the next start replaces it.
+The record is written once per start, before the shim waits for the game; with the rule applied that is after the check, so ending the shim (Steam's "Stop") within the first 5 s loses it. A failed write changes nothing else (a concurrent `rerun status` can make the replace fail; the old record stays). Nothing is written by an elevated shim (B13), for a token that is no profile ID, or when `<LocalAppData>\Rerun` does not exist; the folder `launch` is created if missing. The writer refuses a reparse point at `Rerun`, `launch` or the file. The file is Rerun's own state like the journal: revert and `forget` leave it, the next start replaces it.
 
 The app shows this the next time it is opened. Failures become suggestions for the Topo (GitHub issue template).
 

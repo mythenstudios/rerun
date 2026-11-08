@@ -35,7 +35,7 @@ cpu=hard:8:32
 priority=none
 check=ok
 start=created
-ended=none
+rule_child=none
 ";
 
 const GOLDEN_SKIPPED: &str = "rerun-result 1
@@ -46,7 +46,7 @@ cpu=none
 priority=none
 check=none
 start=created
-ended=not_confirmed:258
+rule_child=not_confirmed:258
 ";
 
 fn skipped() -> LaunchResult {
@@ -142,6 +142,9 @@ fn all_outcomes() -> Vec<Outcome> {
                 Check::Failed { code: 0 },
                 Check::Failed { code: 1_234_567 },
             ];
+            if cpu.is_some_and(|c| c.mode == Mode::Hard) {
+                checks.push(Check::Narrowed);
+            }
             for (c, p) in [(true, false), (false, true), (true, true)] {
                 if (!c || cpu.is_some()) && (!p || priority.is_some()) {
                     checks.push(Check::Reset {
@@ -189,7 +192,7 @@ fn all_outcomes() -> Vec<Outcome> {
 #[test]
 fn every_outcome_round_trips() {
     let outcomes = all_outcomes();
-    assert_eq!(outcomes.len(), 71 + 30 * 5 * 4);
+    assert_eq!(outcomes.len(), 75 + 30 * 5 * 4);
     for outcome in outcomes {
         for unix_s in [0, 1, 1_762_600_000, u64::MAX] {
             let r = LaunchResult {
@@ -413,8 +416,8 @@ fn bad_values_are_refused() {
         (7, "check=failed:x"),
         (8, "start=failed"),
         (8, "start=wait_failed:5"),
-        (9, "ended=failed:"),
-        (9, "ended=not_confirmed"),
+        (9, "rule_child=failed:"),
+        (9, "rule_child=not_confirmed"),
     ] {
         assert_eq!(
             err(with_line(GOLDEN, n, v).as_bytes()),
@@ -431,7 +434,7 @@ fn contradicting_values_are_refused() {
         // Applied: no check, another start, an end.
         (GOLDEN, 7, "check=none"),
         (GOLDEN, 8, "start=shell"),
-        (GOLDEN, 9, "ended=ended"),
+        (GOLDEN, 9, "rule_child=ended"),
         // A reset of what was not set, or threads above `of`.
         (GOLDEN, 7, "check=reset:priority"),
         (GOLDEN, 5, "cpu=hard:33:32"),
@@ -442,6 +445,13 @@ fn contradicting_values_are_refused() {
         (GOLDEN_SKIPPED, 7, "check=ok"),
     ] {
         assert_eq!(err(with_line(golden, n, v).as_bytes()), inconsistent, "{v}");
+    }
+    // `narrowed` only with a hard limit.
+    let narrowed = GOLDEN.replace("check=ok", "check=narrowed");
+    assert!(decode(narrowed.as_bytes()).is_ok());
+    for cpu in ["cpu=soft:8:32", "cpu=none"] {
+        let soft = narrowed.replace("cpu=hard:8:32", cpu);
+        assert_eq!(err(soft.as_bytes()), inconsistent, "{cpu}");
     }
 }
 

@@ -13,13 +13,14 @@
 //! rule=applied                               applied | skipped:<reason>[:<code>]
 //! cpu=hard:8:32                              none | hard:<threads>:<of> | soft:<threads>:<of>
 //! priority=none                              none | normal | above_normal | high
-//! check=ok                                   none | ok | reset:<what> | exited_early | failed:<code>
+//! check=ok                                   none | ok | narrowed | reset:<what> | exited_early | failed:<code>
 //! start=created                              created | shell | shell_no_process | not_exe | failed:<code>
-//! ended=none                                 none | ended | failed:<code> | not_confirmed:<code>
+//! rule_child=none                            none | ended | failed:<code> | not_confirmed:<code>
 //! ```
 //!
 //! `rule=applied` carries `cpu`, `priority` and `check` and always `start=created`,
-//! `ended=none`; `rule=skipped:…` carries `start` and `ended` and always `cpu=none`,
+//! `rule_child=none`; `rule=skipped:…` carries `start` and `rule_child` (a child created with
+//! the rule and ended before the unchanged start) and always `cpu=none`,
 //! `priority=none`, `check=none`. `<code>` is a Win32 error code (or an `HRESULT` as an
 //! unsigned number where Windows gave one) in canonical decimal. The reader is strict like the
 //! profile reader: no other key, order or spelling, no leading zero, no empty line, no CR, no
@@ -90,6 +91,11 @@ pub struct AppliedCpu {
 pub enum Check {
     /// Affinity (or CPU Sets) and priority class are as set.
     Ok,
+    /// Hard limit only: the job still holds exactly the selected group affinity, and the
+    /// process narrowed its own affinity to a non-empty proper subset of it (e.g. an old engine
+    /// pinning itself to CPU 0). Not an error: the game stays within the rule. A priority
+    /// reset takes precedence (then `Reset { cpu: false, priority: true }`).
+    Narrowed,
     /// Something differs from what was set (no culprit is named: the shim cannot tell who
     /// changed it). At least one of the two is `true`.
     Reset {
@@ -98,7 +104,8 @@ pub enum Check {
         /// The priority class differs.
         priority: bool,
     },
-    /// The started process ended before the check (a launcher stub hands over: `watch`).
+    /// The started process ended before the check (a launcher stub that hands over, or a crash
+    /// within the first seconds).
     ExitedEarly,
     /// The check itself failed with this code.
     Failed {
@@ -279,7 +286,14 @@ impl fmt::Display for ResultError {
 impl std::error::Error for ResultError {}
 
 const KEYS: [&str; 8] = [
-    "profile", "time", "rule", "cpu", "priority", "check", "start", "ended",
+    "profile",
+    "time",
+    "rule",
+    "cpu",
+    "priority",
+    "check",
+    "start",
+    "rule_child",
 ];
 
 impl SkipReason {
@@ -393,6 +407,7 @@ fn check_str(c: Option<Check>) -> String {
             // `(false, false)` is refused by `valid` before it is written.
             (false, _) => "reset:priority".to_owned(),
         },
+        Some(Check::Narrowed) => "narrowed".to_owned(),
         Some(Check::ExitedEarly) => "exited_early".to_owned(),
         Some(Check::Failed { code }) => format!("failed:{code}"),
     }
@@ -474,6 +489,7 @@ fn valid(r: &LaunchResult) -> bool {
                     cpu: c,
                     priority: p,
                 } => (*c || *p) && (!*c || cpu.is_some()) && (!*p || priority.is_some()),
+                Check::Narrowed => cpu.is_some_and(|c| c.mode == Mode::Hard),
                 _ => true,
             };
             cpu_ok && check_ok
@@ -483,7 +499,7 @@ fn valid(r: &LaunchResult) -> bool {
 }
 
 /// Encodes `r`. Fails (`Inconsistent`) for a value no file may hold (threads 0 or above `of`,
-/// a reset of nothing or of something not set), and checks its output with [`decode`].
+/// a reset of nothing or of something not set, `narrowed` without a hard limit), and checks its output with [`decode`].
 pub fn encode(r: &LaunchResult) -> Result<Vec<u8>, ResultError> {
     if !valid(r) {
         return Err(ResultError {
@@ -680,6 +696,7 @@ fn parse_check(v: &str) -> Option<Option<Check>> {
             cpu: true,
             priority: true,
         },
+        "narrowed" => Check::Narrowed,
         "exited_early" => Check::ExitedEarly,
         _ => Check::Failed {
             code: code(v.strip_prefix("failed:")?)?,
