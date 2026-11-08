@@ -293,6 +293,23 @@ CPU topology (ADR 0010): the parser runs on real bytes only for machines with a 
 | 32-bit game on a group with more than 32 logical processors (ADR 0022, B6) | a WOW64 test program in a job whose group mask has bits 32 and higher: what `GetProcessAffinityMask` returns inside it, and whether `SetProcessAffinityMask(GetProcessAffinityMask())` fails or narrows the set. Confirms or relaxes the "indices below 32" rule (it only relaxes to "count ≤ 32" if bits above 31 are proven harmless) | open |
 | Core Ultra with LP E-cores (Meteor, Lunar, Panther Lake) | a dump replaces the datasheet fixture: the LP-E LLC has a lower `level` than the P/E LLC (the rule of step 1 depends on it); record the efficiency classes Windows reports for P, E and LP-E | open |
 
+Launch shim on the developer machine (P3-1, [DEV], ADR 0022). Run by the user; nothing in Steam's settings is changed by Rerun. Use a release shim (`cargo build -p rerun-launch --release`, copied to a folder of its own, e.g. `C:\RerunTest\rerun-launch.exe`) and a Steam game that has no other launch options and no anti-cheat. Preparation:
+1. Pick any 32 lower-case hex digits as `<id>` and write `%LOCALAPPDATA%\Rerun\profiles\<id>.profile` by hand (format 1, LF line ends, final LF; `start` and `target` exactly the game exe's path as the Steam library holds it; `bitness` from `rerun scan`):
+   `rerun-profile 1` · `method=direct` · `start=<exe>` · `target=<exe>` · `bitness=x64` · `priority=none` · `watch_timeout_s=120` · `cpu=rule` · `cpu.prefer=performance` · `cpu.single_l3=true` · `cpu.prefer_l3=none` · `cpu.smt=false` · `cpu.mode=hard` · `cpu.max_threads=8` (one line each, in this order).
+2. Steam → game → Properties → Launch options: `"C:\RerunTest\rerun-launch.exe" --profile <id> %command%`. Remove it after the measurements.
+
+| Case | How to check | Status |
+|---|---|---|
+| Affinity of the game | while it runs: `(Get-Process <game>).ProcessorAffinity` is `21845` (`0x5555`: CPUs 0, 2, …, 14, CCD 0, one thread per core, B5); Task Manager → Details → Set affinity shows the same; Process Explorer → game → Job tab lists the job with that affinity. Any other value (all 32) means the shim fell back to an unchanged start: check the profile and the path | open |
+| Start time, cold (D2) | after a reboot, first start: `(Get-Process <game>).StartTime - (Get-Process rerun-launch).StartTime` while the game runs (the shim waits for it); repeat warm. Cold ≥ 50 ms means the launch option carries the full profile path instead (D2 b) | open |
+| Steam's quoting of `%command%` | `Get-CimInstance Win32_Process -Filter "Name='rerun-launch.exe'" \| Select CommandLine` while the game runs: is the exe path quoted, with a path with spaces (a game in `...\steamapps\common\My Game\`)? With extra arguments in the launch option after `%command%` (`-windowed`), where do they end up? The game must start limited in both cases. If Steam passes a path with spaces unquoted, the game does not start at all (M2: `argv[0]` ends at the first space, exit 3): record it, it changes the design | open |
+| Steam tracking and playtime (R1) | the library shows the game as running and the "Stop" button while it runs; playtime grows by the session after quitting; the friends list shows "In-Game" | open |
+| Overlay and Steam Input | Shift+Tab opens the overlay in the game; a controller with Steam Input enabled for the game works in the game | open |
+| Cloud sync after the end | for a game with Steam Cloud: Steam syncs only after the game exited (the shim exits with the game), not at the start of the session | open |
+| Steam's "Stop" button (B4, `KILL_ON_JOB_CLOSE`) | press "Stop" while the game runs: does the game keep running (the shim was ended, `KILL_ON_JOB_CLOSE` is off) and how does Steam show it afterwards? Decides whether the job gets `KILL_ON_JOB_CLOSE` | open |
+| A game Steam starts through a SteamStub-wrapped exe | the same affinity check: the limit holds on the process the stub starts (it stays in the job unless it breaks away) | open |
+| Empty job (ADR 0022 B-2) | `JobObjectGroupInformationEx` on a job with no process yet: accepted on build 26300 (measured by an experiment in P3-1b, see the ADR amendment); the order stays | measured 2026-11-08 |
+
 Steam detection (ADR 0012): the fake has no network, no 64-bit client and no Steam writing a file; check by hand with `dump_steam_scan` (read-only).
 
 | Case | Checks / why manual | Status |
