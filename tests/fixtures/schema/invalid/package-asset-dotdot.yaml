@@ -1,0 +1,13 @@
+# Invalid: Asset download leaves the repository through a .. segment
+format: 1
+id: schema-fixture
+name: "Fixture"
+status: draft
+tier: established
+source:
+  repo: "https://github.com/owner/repo"
+version: "1.0"
+assets:
+  - { arch: x86, url: "https://github.com/owner/repo/releases/download/v1/../../../../evil/repo/releases/download/v1/x.zip", sha256: "0000000000000000000000000000000000000000000000000000000000000000" }
+license: "MIT"
+arch: [x86]

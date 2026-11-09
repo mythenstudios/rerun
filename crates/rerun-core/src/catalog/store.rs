@@ -3,11 +3,13 @@
 //! - `<sha256>.json` and `<sha256>.sig`: the bytes and the signature of every index accepted,
 //!   named by the SHA-256 of the bytes (64 lower-case hex digits). Kept: a transaction applied
 //!   with an index names it by this hash, and its revert reads exactly these bytes again
-//!   ([`by_hash`]: signature only, no `seq` floor; P4 condition R1). Rerun deletes none of them
-//!   in phase 4.
+//!   ([`by_hash`]: signature only, also by a retired key, no `seq` floor; P4 condition R1).
+//!   Rerun deletes none of them in phase 4.
 //! - `current.json`: `{"format":1,"seq":<n>,"sha256":"<hex>"}`, the last accepted index. Its
 //!   `seq` is the floor of [`import`]: lower is a rollback, equal with other bytes a second
-//!   index under one number; both refused.
+//!   index under one number; both refused. Before comparing, [`import`] checks the pointer and
+//!   the index it names like [`by_hash`]; anything wrong there is [`StoreError::Damaged`] naming
+//!   the file to remove.
 //! - `lock`: held by [`import`] (share 0), so two imports never interleave.
 //!
 //! Everything below `<AppDir>` is user-writable (`docs/06-security.md` #14): what is read back is
@@ -19,7 +21,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Catalog, IndexError, MAX_INDEX_BYTES, PublicKey, SIG_BYTES, verify};
+use super::{Catalog, IndexError, MAX_INDEX_BYTES, PublicKey, SIG_BYTES, key, verify};
 use crate::journal::InstanceTag;
 use crate::path::RelPath;
 use crate::policy::root::{AppDir, AppSub, Create, RootError};
@@ -181,6 +183,52 @@ fn load(
     Ok(Catalog::from_verified(&v)?)
 }
 
+/// `keys` and the retired keys, without revoked ones: what an already accepted index may be
+/// signed with (a rotation does not invalidate it).
+fn with_retired(keys: &[PublicKey]) -> Vec<PublicKey> {
+    let mut all = keys.to_vec();
+    all.extend(key::RETIRED_KEYS.iter().map(|k| PublicKey::new(*k)));
+    all.retain(|k| !key::revoked(k));
+    all
+}
+
+/// The pointer and the index it names, checked like [`by_hash`] (a retired key still counts:
+/// the index was accepted before the rotation) and carrying the pointer's `seq`. Any failure
+/// is [`StoreError::Damaged`] naming the file to remove.
+fn floor(
+    app: &AppDir<'_>,
+    dir: &dyn crate::sys::Dir,
+    keys: &[PublicKey],
+) -> Result<Option<Current>, StoreError> {
+    let at = || format!(r"{}\index\{CURRENT}", app.path());
+    let c = match read_current(dir) {
+        Ok(c) => c,
+        Err(StoreError::Damaged(why)) => {
+            return Err(StoreError::Damaged(format!(
+                "{why}; remove {} to import again",
+                at()
+            )));
+        }
+        Err(e) => return Err(e),
+    };
+    let Some(c) = c else { return Ok(None) };
+    match load(dir, &c.sha256, &with_retired(keys)) {
+        Ok(cat) if cat.seq() == c.seq => Ok(Some(c)),
+        Ok(cat) => Err(StoreError::Damaged(format!(
+            "{} names index {} but the index there is {}; remove it to import again",
+            at(),
+            c.seq,
+            cat.seq()
+        ))),
+        Err(StoreError::Root(e)) => Err(StoreError::Root(e)),
+        Err(StoreError::Sys(e)) if e.kind != SysErrorKind::NotFound => Err(StoreError::Sys(e)),
+        Err(e) => Err(StoreError::Damaged(format!(
+            "{} names an index that cannot be used ({e}); remove it to import again",
+            at()
+        ))),
+    }
+}
+
 /// Verifies and parses `index` with `sig` (nothing is parsed before the signature checked
 /// out), applies the rollback rule against `current.json` and stores both under
 /// `<AppDir>\index` (created if missing), then moves the pointer.
@@ -196,7 +244,7 @@ pub fn import(
         .sub_write(AppSub::Index, Create::IfMissing)?
         .ok_or_else(|| SysError::new(SysErrorKind::NotFound, "index"))?;
     let _lock = dir.lock(&seg(LOCK))?;
-    let cur = read_current(&*dir)?;
+    let cur = floor(app, &*dir, keys)?;
     let same = match cur {
         Some(c) if catalog.seq() < c.seq => {
             return Err(StoreError::Rollback {
@@ -256,8 +304,14 @@ pub fn current(app: &AppDir<'_>, keys: &[PublicKey]) -> Result<Option<Catalog>, 
 
 /// The accepted index with this hash, whatever the current one is (a revert reads the index
 /// its transaction was applied with; P4 condition R1): bounded, hash against name, signature
-/// under `keys`, form; no `seq` floor.
-pub fn by_hash(
+/// under [`key::revert_keys`] (the trusted and the retired keys, never a revoked one), form;
+/// no `seq` floor. The only reader that accepts a retired key.
+pub fn by_hash(app: &AppDir<'_>, sha: &[u8; 32]) -> Result<Catalog, StoreError> {
+    by_hash_with(app, sha, &key::revert_keys())
+}
+
+/// [`by_hash`] with explicit keys (tests sign with the test key).
+pub(crate) fn by_hash_with(
     app: &AppDir<'_>,
     sha: &[u8; 32],
     keys: &[PublicKey],

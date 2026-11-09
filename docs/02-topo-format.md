@@ -212,7 +212,7 @@ Exactly one of the two forms (except for `community`):
 - **One download:** `source.release` + `sha256`.
 - **Separate builds per architecture:** `assets: [{ arch, url, sha256 }]`, then without `source.release` and without top-level `sha256` (e.g. Ultimate ASI Loader).
 
-**Provenance:** Every download URL must belong to the original, i.e. start with `<source.repo>/releases/download/` or be located on the host of `source.page`. A test checks this (`download_urls_belong_to_the_source`), and from Phase 4 the loader does too. The SHA256 secures integrity, not provenance.
+**Provenance:** Every download URL must belong to the original, i.e. be exactly `<source.repo>/releases/download/<tag>/<file>` or be located on the host of `source.page`. A URL that names a release download (`/releases/download/`) has exactly that form, tag and file of `A-Z a-z 0-9 . _ + -`, neither `.` nor `..` (no `%`, `?`, `#`, no further `/`), and counts only for its own `source.repo`, never through the host of `source.page` (ADR 0024). A test checks this (`download_urls_belong_to_the_source`), and from Phase 4 the loader does too. The SHA256 secures integrity, not provenance.
 
 With `tier: community` (see `05-sources-policy.md`), `source.page` (original page) is required and there is **no** direct download (`source.release` and `assets` forbidden). Rerun opens the page, the user downloads it themselves, Rerun then checks `sha256`.
 

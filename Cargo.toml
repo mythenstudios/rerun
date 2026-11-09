@@ -38,7 +38,8 @@ clap = { version = "4.6.7", default-features = false, features = [
 windows-sys = "0.61.2"
 # Ed25519 for the signed index (ADR 0024): pure Rust, MIT, no dependencies without default
 # features (no `random`, `pem`, `x25519`); verification in rerun-core, signing in the workbench.
-ed25519-compact = { version = "2.6.1", default-features = false }
+# Pinned exactly: every binary that verifies (rerun, later the helper) decides edge cases alike.
+ed25519-compact = { version = "=2.6.1", default-features = false }
 # The seed of the index key in `rerun-workbench key generate` (OS RNG; workbench only).
 getrandom = "0.3.4"
 

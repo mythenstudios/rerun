@@ -1,0 +1,13 @@
+# Invalid: Release download with more than tag and file
+format: 1
+id: schema-fixture
+name: "Fixture"
+status: draft
+tier: established
+source:
+  repo: "https://github.com/owner/repo"
+  release: "https://github.com/owner/repo/releases/download/v1/sub/tool.zip"
+version: "1.0"
+sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+license: "MIT"
+arch: [x86, x64]

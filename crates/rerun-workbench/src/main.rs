@@ -13,6 +13,8 @@
     reason = "curator tool, not shipped: reads the repository and writes files the curator names"
 )]
 
+#[cfg(windows)]
+mod acl;
 mod bundle;
 mod keys;
 
@@ -172,12 +174,31 @@ fn sign(bundle: &Path, key: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn create_new(path: &Path, text: &str) -> Result<(), String> {
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+/// Creates `path` (never replacing a file) with `text`. `secret`: the empty file gets an
+/// owner-only protected DACL before anything is written (ADR 0024); if that fails, the empty
+/// file is removed again.
+fn create_new(path: &Path, text: &str, secret: bool) -> Result<(), String> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(windows)]
+    if secret {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.access_mode(acl::KEY_FILE_ACCESS);
+    }
+    let mut f = opts
         .open(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
+    if secret {
+        #[cfg(windows)]
+        let protected = acl::owner_only(&f);
+        #[cfg(not(windows))]
+        let protected: Result<(), String> = Err("a private key is written on Windows only".into());
+        if let Err(e) = protected {
+            drop(f);
+            let _ = fs::remove_file(path);
+            return Err(format!("{}: {e}", path.display()));
+        }
+    }
     f.write_all(text.as_bytes())
         .and_then(|()| f.sync_all())
         .map_err(|e| format!("{}: {e}", path.display()))
@@ -188,8 +209,8 @@ fn generate(out_dir: &Path) -> Result<(), String> {
     let kp = keys::generate()?;
     let key = dir.join(keys::KEY_FILE);
     let public = dir.join(keys::PUB_FILE);
-    create_new(&key, &keys::key_text(&kp))?;
-    create_new(&public, &keys::pub_text(&kp))?;
+    create_new(&key, &keys::key_text(&kp), true)?;
+    create_new(&public, &keys::pub_text(&kp), false)?;
     let pk = rerun_core::catalog::key::PublicKey::new(*kp.pk);
     println!(
         "private key: {} (keep it offline, never in a repository)",

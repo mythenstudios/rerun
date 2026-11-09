@@ -3,7 +3,9 @@
 //! Two slots are compiled in ([`RELEASE_KEYS`]): the current key and the next one, so a key
 //! can be rotated by shipping a binary that already trusts its successor. Both slots are empty
 //! until the release key is generated offline (`rerun-workbench key generate`); a build without
-//! a key refuses every index ([`super::IndexError::NoKeys`]).
+//! a key refuses every index ([`super::IndexError::NoKeys`]). After a rotation the old key
+//! goes to [`RETIRED_KEYS`] (only a revert reads what it signed, [`revert_keys`]); a
+//! compromised key goes to [`REVOKED_KEYS`] (refused everywhere).
 //!
 //! The test key ([`test_key`], feature `test-key`) is published: its seed is in this file. It
 //! is trusted only with the feature, which only dev-dependencies enable; CI checks that no
@@ -69,14 +71,50 @@ pub fn release_keys() -> Vec<PublicKey> {
         .collect()
 }
 
-/// The keys this build trusts: the release keys, and with the feature `test-key` the test key.
+/// Former release keys, taken out of [`RELEASE_KEYS`] by a rotation (raw 32-byte public keys).
+/// They never let an index in ([`trusted_keys`] leaves them out): only
+/// [`super::store::by_hash`] reads an index they signed, so a transaction applied with such an
+/// index can still be reverted (P4 condition R1). A key that was compromised goes to
+/// [`REVOKED_KEYS`] instead, never here.
+pub const RETIRED_KEYS: &[[u8; 32]] = &[];
+
+/// Compromised keys (raw 32-byte public keys): a signature by one of them is refused
+/// everywhere, also when reading a stored index for a revert ([`super::IndexError::Revoked`]).
+pub const REVOKED_KEYS: &[[u8; 32]] = &[];
+
+/// Whether `k` is on [`REVOKED_KEYS`].
+pub fn revoked(k: &PublicKey) -> bool {
+    REVOKED_KEYS.contains(k.bytes())
+}
+
+/// The keys this build trusts for a new index (`import`, `current`): the release keys, and with
+/// the feature `test-key` the test key; never a retired or revoked key.
 pub fn trusted_keys() -> Vec<PublicKey> {
     #[allow(unused_mut, reason = "only the feature test-key adds a key")]
     let mut keys = release_keys();
     #[cfg(feature = "test-key")]
     keys.push(test_key::public());
+    keys.retain(|k| !revoked(k));
     keys
 }
+
+/// The keys a stored index may be signed with when a revert reads it
+/// ([`super::store::by_hash`] only): [`trusted_keys`] plus [`RETIRED_KEYS`], never a revoked
+/// key.
+pub fn revert_keys() -> Vec<PublicKey> {
+    let mut keys = trusted_keys();
+    keys.extend(RETIRED_KEYS.iter().map(|k| PublicKey(*k)));
+    keys.retain(|k| !revoked(k));
+    keys
+}
+
+// The published test key never reaches an optimised build: `--release` turns debug assertions
+// off, the test profiles (`dev`, `ci`) keep them (ADR 0024).
+#[cfg(all(feature = "test-key", not(debug_assertions)))]
+compile_error!(
+    "the feature test-key (the published index test key) is for test builds only, never with \
+     debug assertions off (a release build)"
+);
 
 /// The published test key (feature `test-key`, and this crate's own tests). Never trusted by a
 /// release build.

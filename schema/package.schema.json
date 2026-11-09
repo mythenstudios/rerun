@@ -52,7 +52,7 @@
         "release": {
           "anyOf": [
             {
-              "$ref": "#/$defs/httpsUrl"
+              "$ref": "#/$defs/downloadUrl"
             },
             {
               "const": "TODO"
@@ -91,7 +91,7 @@
           "url": {
             "anyOf": [
               {
-                "$ref": "#/$defs/httpsUrl"
+                "$ref": "#/$defs/downloadUrl"
               },
               {
                 "const": "TODO"
@@ -427,6 +427,29 @@
       "type": "string",
       "maxLength": 2048,
       "pattern": "^https://[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\\.[a-z]{2,63}(/[^\\s\\\\]*)?$"
+    },
+    "downloadUrl": {
+      "description": "A download: an https URL; one that names a release download is exactly https://<forge>/<owner>/<repo>/releases/download/<tag>/<file>, tag and file of [A-Za-z0-9._+-], neither . nor .. (no %, ?, #). Same rule as catalog::check::release_download.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        {
+          "anyOf": [
+            {
+              "not": {
+                "pattern": "/releases/download/"
+              }
+            },
+            {
+              "pattern": "^https://(github\\.com|gitlab\\.com|codeberg\\.org)/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[A-Za-z0-9._+-]+/[A-Za-z0-9._+-]+$",
+              "not": {
+                "pattern": "/releases/download/(\\.\\.?/|[^/]+/\\.\\.?$)"
+              }
+            }
+          ]
+        }
+      ]
     },
     "repoUrl": {
       "type": "string",

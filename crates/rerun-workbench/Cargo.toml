@@ -24,6 +24,18 @@ sha2.workspace = true
 ed25519-compact.workspace = true
 getrandom.workspace = true
 
+# The owner-only DACL of the private key file (src/acl.rs, ADR 0024): OpenProcessToken,
+# GetTokenInformation(TokenUser), InitializeAcl, AddAccessAllowedAce, SetSecurityInfo and
+# GetSecurityInfo on the file handle, LocalFree. Features of the existing dependency.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 jsonschema.workspace = true
 # Tests sign with the published test key (ADR 0024).

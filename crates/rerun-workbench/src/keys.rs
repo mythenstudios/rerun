@@ -2,9 +2,10 @@
 //!
 //! The private key is an Ed25519 seed, written as 64 lower-case hex digits and a newline to
 //! `rerun-index.key`; the public key the same way to `rerun-index.pub`. Neither file is ever
-//! written into a Git working tree or this repository ([`outside_repo`]), and `index sign` reads
-//! a private key only from outside one. The public key goes into `RELEASE_KEYS` of
-//! `rerun_core::catalog::key` by hand (the printed line).
+//! written into a Git working tree, this repository or a OneDrive folder ([`outside_repo`]), and
+//! `index sign` reads a private key only from outside those. The private key file gets an
+//! owner-only protected DACL before the key is written (`acl`). The public key goes into
+//! `RELEASE_KEYS` of `rerun_core::catalog::key` by hand (the printed line).
 
 use std::path::{Path, PathBuf};
 
@@ -47,7 +48,7 @@ fn this_repo() -> PathBuf {
 
 /// Refuses `dir` (an existing folder) when it is this repository or below it, or below any Git
 /// working tree (a folder with a `.git` entry on the way up): a private key must never be
-/// one `git add` away from a commit.
+/// one `git add` away from a commit. Also refuses a OneDrive folder (synced is not offline).
 pub fn outside_repo(dir: &Path) -> Result<PathBuf, String> {
     let canon = dir
         .canonicalize()
@@ -67,7 +68,41 @@ pub fn outside_repo(dir: &Path) -> Result<PathBuf, String> {
             top.display()
         ));
     }
+    if let Some(root) = synced_root(&canon, &onedrive_roots()) {
+        return Err(format!(
+            "{} is inside the OneDrive folder {root}: a synced folder is not offline storage",
+            dir.display()
+        ));
+    }
     Ok(canon)
+}
+
+/// The OneDrive folders of this user (`OneDrive`, `OneDriveConsumer`, `OneDriveCommercial`).
+fn onedrive_roots() -> Vec<String> {
+    ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .filter_map(|v| v.into_string().ok())
+        .filter(|v| !v.trim().is_empty())
+        .collect()
+}
+
+/// `path` without a `\\?\` prefix, `\` separated, lower case, no trailing separator.
+fn plain(path: &str) -> String {
+    let p = path.strip_prefix(r"\\?\").unwrap_or(path);
+    p.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+/// The first of `roots` that `canon` is or lies below (case-insensitive, by whole segments).
+fn synced_root(canon: &Path, roots: &[String]) -> Option<String> {
+    let p = plain(&canon.to_string_lossy());
+    roots
+        .iter()
+        .find(|r| {
+            let r = plain(r);
+            !r.is_empty() && (p == r || p.starts_with(&format!("{r}\\")))
+        })
+        .cloned()
 }
 
 /// A new key pair from 32 bytes of the OS random number generator.
@@ -141,6 +176,23 @@ mod tests {
         assert!(outside_repo(&repo.join("crates")).is_err());
         assert!(outside_repo(&std::env::temp_dir()).is_ok());
         assert!(outside_repo(&repo.join("no-such-folder")).is_err());
+    }
+
+    #[test]
+    fn onedrive_folders_are_refused() {
+        use super::synced_root;
+        use std::path::Path;
+        let roots = vec![
+            r"C:\Users\P\OneDrive".to_owned(),
+            r"D:\Sync\OneDrive - Firm\".to_owned(),
+        ];
+        let hit = |p: &str| synced_root(Path::new(p), &roots).is_some();
+        assert!(hit(r"\\?\C:\Users\P\OneDrive"));
+        assert!(hit(r"\\?\c:\users\p\onedrive\Keys"));
+        assert!(hit(r"D:\Sync\OneDrive - Firm\x"));
+        assert!(!hit(r"C:\Users\P\OneDriveOld\Keys"), "by whole segments");
+        assert!(!hit(r"C:\Users\P\Keys"));
+        assert!(synced_root(Path::new(r"C:\x"), &[String::new()]).is_none());
     }
 
     #[test]

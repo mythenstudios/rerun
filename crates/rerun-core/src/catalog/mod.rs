@@ -50,6 +50,9 @@ pub enum IndexError {
     /// The signature is not 64 bytes, or no trusted key made it for these bytes.
     #[error("the signature does not match the index (wrong, damaged or from an unknown key)")]
     Signature,
+    /// The signature is valid, but by a key on `key::REVOKED_KEYS` (compromised).
+    #[error("the index is signed with the revoked key {0}: refused")]
+    Revoked(KeyId),
     /// Not UTF-8 JSON of the index form (position only, never the text).
     #[error("the signed index is not a valid index ({class} at line {line}, column {column})")]
     Parse {
@@ -94,11 +97,22 @@ impl<'a> Verified<'a> {
 }
 
 /// Checks the size and the signature of `index` (module docs, step 1). `keys` empty is
-/// [`IndexError::NoKeys`].
+/// [`IndexError::NoKeys`]; a signature by a key on `key::REVOKED_KEYS` is
+/// [`IndexError::Revoked`], whatever `keys` holds.
 pub fn verify<'a>(
     index: &'a [u8],
     sig: &[u8],
     keys: &[PublicKey],
+) -> Result<Verified<'a>, IndexError> {
+    verify_with(index, sig, keys, key::REVOKED_KEYS)
+}
+
+/// [`verify`] against an explicit revocation list (tests).
+fn verify_with<'a>(
+    index: &'a [u8],
+    sig: &[u8],
+    keys: &[PublicKey],
+    revoked: &[[u8; 32]],
 ) -> Result<Verified<'a>, IndexError> {
     if keys.is_empty() {
         return Err(IndexError::NoKeys);
@@ -113,6 +127,9 @@ pub fn verify<'a>(
         .iter()
         .find(|k| k.verifies(index, sig))
         .ok_or(IndexError::Signature)?;
+    if revoked.contains(key.bytes()) {
+        return Err(IndexError::Revoked(key.id()));
+    }
     Ok(Verified {
         bytes: index,
         key: key.id(),

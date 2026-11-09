@@ -394,10 +394,10 @@ fn import_keeps_every_index_and_refuses_a_rollback() {
         use sha2::Digest;
         sha2::Sha256::digest(&first.0).into()
     };
-    assert_eq!(store::by_hash(&app, &sha, &keys()).unwrap().seq(), 2);
+    assert_eq!(store::by_hash_with(&app, &sha, &keys()).unwrap().seq(), 2);
     // ... but only under a trusted key.
     assert!(matches!(
-        store::by_hash(&app, &sha, &[test_key::foreign_public()]),
+        store::by_hash_with(&app, &sha, &[test_key::foreign_public()]),
         Err(StoreError::Index(IndexError::Signature))
     ));
 }
@@ -430,8 +430,16 @@ fn a_tampered_store_is_damaged_not_trusted() {
         crate::wire::hex32::to_string(&sha2::Sha256::digest(&first.0).into())
     };
     let app = || AppDir::open(&sys, Create::Never).unwrap().unwrap();
+    let cur = format!(r"{INDEX_DIR}\{}", store::CURRENT);
+    let names_pointer = |r: Result<Imported, StoreError>| match r {
+        Err(StoreError::Damaged(why)) => {
+            assert!(why.contains(&cur) && why.contains("remove"), "{why}");
+        }
+        other => panic!("expected Damaged naming {cur}, got {other:?}"),
+    };
 
-    // The stored bytes changed: they no longer hash to their name.
+    // The stored bytes changed: they no longer hash to their name. `current` and an import
+    // (which checks its floor first, nit 5 of the review) say so and name the pointer to remove.
     let json = format!(r"{INDEX_DIR}\{sha}.json");
     let mut changed = first.0.clone();
     changed[10] ^= 1;
@@ -440,10 +448,13 @@ fn a_tampered_store_is_damaged_not_trusted() {
         store::current(&app(), &keys()),
         Err(StoreError::Damaged(_))
     ));
-    // Importing the same index again repairs the copy.
+    names_pointer(import(&sys, &signed(2)));
+    names_pointer(import(&sys, &first));
+    // Removing the pointer (the user's decision) lets the same index in again and repairs it.
+    sys.fake_fs().remove_abs(Path::new(&cur)).unwrap();
     assert!(matches!(
         import(&sys, &first).unwrap(),
-        Imported::AlreadyCurrent(_)
+        Imported::New { previous: None, .. }
     ));
     assert_eq!(current_seq(&sys), Some(1));
 
@@ -456,10 +467,12 @@ fn a_tampered_store_is_damaged_not_trusted() {
         store::current(&app(), &keys()),
         Err(StoreError::Index(IndexError::Signature))
     ));
-    import(&sys, &first).unwrap();
+    names_pointer(import(&sys, &signed(2)));
+    sys.fake_fs()
+        .put_file(Path::new(&sig), &test_key::sign(&first.0))
+        .unwrap();
 
-    // A pointer that names another seq than its index.
-    let cur = format!(r"{INDEX_DIR}\{}", store::CURRENT);
+    // A pointer that names another seq than its index: not a rollback, damaged.
     let forged = format!(r#"{{"format":1,"seq":9,"sha256":"{sha}"}}"#);
     sys.fake_fs()
         .put_file(Path::new(&cur), forged.as_bytes())
@@ -468,6 +481,7 @@ fn a_tampered_store_is_damaged_not_trusted() {
         store::current(&app(), &keys()),
         Err(StoreError::Damaged(_))
     ));
+    names_pointer(import(&sys, &signed(2)));
     // A pointer of another form.
     sys.fake_fs()
         .put_file(Path::new(&cur), b"{\"seq\":1}")
@@ -476,4 +490,65 @@ fn a_tampered_store_is_damaged_not_trusted() {
         store::current(&app(), &keys()),
         Err(StoreError::Damaged(_))
     ));
+    names_pointer(import(&sys, &signed(2)));
+    // A pointer naming an index that is not there.
+    let missing = format!(r#"{{"format":1,"seq":1,"sha256":"{}"}}"#, "0".repeat(64));
+    sys.fake_fs()
+        .put_file(Path::new(&cur), missing.as_bytes())
+        .unwrap();
+    names_pointer(import(&sys, &signed(2)));
+}
+
+/// Review follow-up 1: a rotation must not make old indexes unreadable for a revert, and a
+/// revoked key is refused everywhere.
+#[test]
+fn retired_keys_serve_reverts_only_and_revoked_keys_nothing() {
+    let b = bytes(&index(1));
+    let sig = test_key::sign(&b);
+    let pk = test_key::public();
+    // Revoked: refused even when the caller trusts the key.
+    assert_eq!(
+        super::verify_with(&b, &sig, &[pk], &[*pk.bytes()]).unwrap_err(),
+        IndexError::Revoked(pk.id())
+    );
+    assert!(super::verify_with(&b, &sig, &[pk], &[[0; 32]]).is_ok());
+
+    // The lists of this build: no test key retired or revoked, the revert set holds the trusted
+    // set and never a revoked key.
+    for k in [test_key::public(), test_key::foreign_public()] {
+        assert!(!super::key::RETIRED_KEYS.contains(k.bytes()));
+    }
+    let revert = super::key::revert_keys();
+    for k in super::key::trusted_keys() {
+        assert!(revert.contains(&k));
+    }
+    assert!(revert.iter().all(|k| !super::key::revoked(k)));
+    assert!(
+        super::key::trusted_keys()
+            .iter()
+            .all(|k| !super::key::RETIRED_KEYS.contains(k.bytes()))
+    );
+
+    // A stored index signed by a key the import no longer trusts stays readable for a revert
+    // when that key is passed as retired (here: explicitly, as `by_hash` does with
+    // RETIRED_KEYS), but `current` refuses it.
+    let sys = sys();
+    let first = signed(1);
+    import(&sys, &first).unwrap();
+    let app = AppDir::open(&sys, Create::Never).unwrap().unwrap();
+    let sha: [u8; 32] = {
+        use sha2::Digest;
+        sha2::Sha256::digest(&first.0).into()
+    };
+    let other = test_key::foreign_public();
+    assert!(matches!(
+        store::current(&app, &[other]),
+        Err(StoreError::Index(IndexError::Signature))
+    ));
+    assert_eq!(
+        store::by_hash_with(&app, &sha, &[other, test_key::public()])
+            .unwrap()
+            .seq(),
+        1
+    );
 }

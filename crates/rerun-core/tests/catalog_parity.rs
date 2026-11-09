@@ -27,14 +27,17 @@ fn repo() -> PathBuf {
 /// The loader's YAML rules (ADR 0005, phase 4): strict booleans, no merge keys, no duplicate
 /// keys, no anchors or aliases.
 fn load_yaml(p: &Path) -> Result<Value, String> {
-    let text = fs::read_to_string(p).unwrap();
+    yaml_text(&fs::read_to_string(p).unwrap())
+}
+
+fn yaml_text(text: &str) -> Result<Value, String> {
     let options = serde_saphyr::options! {
         strict_booleans: true,
         merge_keys: serde_saphyr::MergeKeyPolicy::Error,
         duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
         budget: serde_saphyr::budget! { max_anchors: 0, max_aliases: 0 },
     };
-    serde_saphyr::from_str_with_options(&text, options).map_err(|e| e.to_string())
+    serde_saphyr::from_str_with_options(text, options).map_err(|e| e.to_string())
 }
 
 fn files(rel: &str, prefix: &str) -> Vec<PathBuf> {
@@ -143,4 +146,49 @@ fn todo_needs_draft_and_release_refuses_both() {
     if check::topo(&t, Rules::Source).is_ok() {
         check::topo(&t, Rules::Release).unwrap();
     }
+}
+
+/// Review follow-up 4: a release download is exactly `<repo>/releases/download/<tag>/<file>`,
+/// and a page on the forge's host never admits another repository's release.
+#[test]
+fn release_downloads_have_one_form_and_belong_to_their_repository() {
+    use rerun_core::catalog::check::release_download;
+    for good in [
+        "https://github.com/owner/repo/releases/download/v1.0/tool.zip",
+        "https://github.com/owner/repo/releases/download/v2.4+1/dxvk-2.4.tar.gz",
+        "https://example.org/files/tool.zip",
+    ] {
+        assert!(release_download(good), "{good}");
+    }
+    for bad in [
+        "https://github.com/owner/repo/releases/download/../../../other/repo/releases/download/x",
+        "https://github.com/owner/repo/releases/download/%2e%2e/tool.zip",
+        "https://github.com/owner/repo/releases/download/v1/tool.zip?x=1",
+        "https://github.com/owner/repo/releases/download/v1/tool.zip#x",
+        "https://github.com/owner/repo/releases/download/v1/sub/tool.zip",
+        "https://github.com/owner/repo/releases/download/v1/..",
+        "https://github.com/owner/repo/releases/download/./tool.zip",
+        "https://github.com/owner/repo/releases/download/v1",
+        "https://example.org/releases/download/v1/tool.zip",
+    ] {
+        assert!(!release_download(bad), "{bad}");
+    }
+
+    let other_repo = r#"format: 1
+id: schema-fixture
+name: "Fixture"
+status: draft
+tier: established
+source:
+  repo: "https://github.com/owner/repo"
+  page: "https://github.com/owner/repo/wiki"
+  release: "https://github.com/evil/repo/releases/download/v1/tool.zip"
+version: "1.0"
+sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+license: "MIT"
+arch: [x86, x64]
+"#;
+    let p: Package = serde_json::from_value(yaml_text(other_repo).unwrap()).unwrap();
+    let e = check::package(&p, Rules::Source).unwrap_err().to_string();
+    assert!(e.contains("not from the original source"), "{e}");
 }

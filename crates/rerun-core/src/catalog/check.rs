@@ -582,8 +582,9 @@ fn license(s: &str) -> bool {
         })
 }
 
+/// `TODO`, or an https URL that, if it names a release download, has exactly that form.
 fn url_or_todo(u: &str) -> bool {
-    u == TODO || https_url(u)
+    u == TODO || (https_url(u) && release_download(u))
 }
 
 /// Checks a package.
@@ -729,17 +730,18 @@ pub fn package(p: &Package, rules: Rules) -> Result<(), RuleError> {
             )?;
         }
     }
-    for (name, o) in &p.options {
-        let at = format!("options.{name}");
+    // By position until the name is checked: an error never carries an unchecked map key.
+    for (i, (name, o)) in p.options.iter().enumerate() {
+        let ok = !name.is_empty()
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_');
         ensure(
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_'),
-            &at,
+            ok,
+            &format!("options[{i}]"),
             "an option name of a-z, 0-9 and _",
         )?;
-        option(o, &at)?;
+        option(o, &format!("options.{name}"))?;
     }
     status_rule(p, p.status, rules)
 }
@@ -778,6 +780,33 @@ fn option(o: &PackageOption, at: &str) -> R {
     Ok(())
 }
 
+/// The path part of a forge release download.
+const RELEASES: &str = "/releases/download/";
+
+/// After [`RELEASES`]: exactly `<tag>/<file>`, each of `[A-Za-z0-9._+-]`, neither `.` nor `..`
+/// (so no `%`, `?`, `#`, no further `/`).
+fn tag_and_file(rest: &str) -> bool {
+    let seg = |s: &str| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && s.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'+' | b'-'))
+    };
+    rest.split_once('/')
+        .is_some_and(|(tag, file)| seg(tag) && seg(file))
+}
+
+/// A download URL that names a release download must be exactly
+/// `https://<forge>/<owner>/<repo>/releases/download/<tag>/<file>` (schema
+/// `$defs/downloadUrl`); any other https URL is left to [`provenance`].
+pub fn release_download(u: &str) -> bool {
+    let Some(at) = u.find(RELEASES) else {
+        return true;
+    };
+    repo_url(&u[..at]) && tag_and_file(&u[at + RELEASES.len()..])
+}
+
 /// docs/02 "Provenance": a download belongs to the releases of `source.repo` or to the host of
 /// `source.page`.
 fn provenance(p: &Package) -> R {
@@ -792,10 +821,13 @@ fn provenance(p: &Package) -> R {
     for u in urls.into_iter().filter(|u| *u != TODO) {
         let from_repo = p.source.repo.as_deref().is_some_and(|r| {
             u.strip_prefix(r.trim_end_matches('/'))
-                .and_then(|rest| rest.strip_prefix("/releases/download/"))
-                .is_some_and(|rest| !rest.is_empty())
+                .and_then(|rest| rest.strip_prefix(RELEASES))
+                .is_some_and(tag_and_file)
         });
-        let from_page = page_host.is_some_and(|h| split_https(u).is_some_and(|(uh, _)| uh == h));
+        // A release download counts only for its own repository, never by the host of a page
+        // (a page on github.com would otherwise admit any repository there).
+        let from_page = !u.contains(RELEASES)
+            && page_host.is_some_and(|h| split_https(u).is_some_and(|(uh, _)| uh == h));
         ensure(
             from_repo || from_page,
             "source",

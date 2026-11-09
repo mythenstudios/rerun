@@ -1,0 +1,13 @@
+# Invalid: Release download with percent-encoded dots
+format: 1
+id: schema-fixture
+name: "Fixture"
+status: draft
+tier: established
+source:
+  repo: "https://github.com/owner/repo"
+  release: "https://github.com/owner/repo/releases/download/%2e%2e/tool.zip"
+version: "1.0"
+sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+license: "MIT"
+arch: [x86, x64]
