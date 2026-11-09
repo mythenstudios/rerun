@@ -21,12 +21,13 @@ pub use exit::{ExitClass, HelperExit, OpResult, Reason};
 /// each.
 pub const MAX_BATCH_OPS: usize = 8;
 
-/// Runs the helper (ADR 0023 §3) with its own token and its arguments (without the program
-/// name) and returns its report. Each step is fail closed: a privilege that cannot be dropped
+/// Runs the helper (ADR 0023 §3) with its own token and returns its report. `args` reads the
+/// arguments (without the program name); it is called only after the privileges are dropped
+/// and the elevation is checked, so nothing of the caller is read before steps 2 and 3. Each step is fail closed: a privilege that cannot be dropped
 /// or a token that cannot be read is `Refused(Internal)`, a token that is not elevated
 /// `Refused(NotElevated)`. P4-2a: every argument list then ends in `Refused(Usage)`.
 #[must_use]
-pub fn serve(token: &dyn HelperToken, args: &[OsString]) -> HelperExit {
+pub fn serve(token: &dyn HelperToken, args: impl FnOnce() -> Vec<OsString>) -> HelperExit {
     // §3 step 2, before anything else reads input.
     if token.drop_privileges().is_err() {
         return HelperExit::refused(Reason::Internal);
@@ -39,7 +40,7 @@ pub fn serve(token: &dyn HelperToken, args: &[OsString]) -> HelperExit {
     }
     // §3 step 4 (P4-2b) and step 5 (P4-2c): no argument form is accepted yet, not even an
     // empty list.
-    let _ = args;
+    let _args = args();
     HelperExit::refused(Reason::Usage)
 }
 

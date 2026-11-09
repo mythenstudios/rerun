@@ -173,8 +173,9 @@ disallowed-methods = [
   { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", reason = "only via sys::win::nt::{open_relative, open_self_for_flush, open_absolute_dir} (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Wdk::Storage::FileSystem::NtOpenFile", reason = "use sys::win::nt::{open_relative, open_absolute_dir} (ADR 0007)", allow-invalid = true },
   { path = "std::process::Command::new", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)" },
-  # ADR 0023 §3 step 2: the elevated helper removes its own privileges; nothing else changes a token.
-  { path = "windows_sys::Win32::Security::AdjustTokenPrivileges", reason = "only sys::win::token::drop_privileges, the elevated helper (ADR 0023)", allow-invalid = true },
+  # ADR 0023 §3 step 2: the elevated helper removes its own privileges (product); the only other
+  # call is the test fixture sys::win::testfx (SeRestorePrivilege). Nothing else changes a token.
+  { path = "windows_sys::Win32::Security::AdjustTokenPrivileges", reason = "two call sites: sys::win::token::drop_privileges (the elevated helper, ADR 0023) and the test-only SeRestorePrivilege fixture in sys::win::testfx", allow-invalid = true },
   # ADR 0009: known folders only through sys::win::shell; the environment is never a source of
   # paths (every program of the user can set it, the elevated helper inherits it).
   { path = "windows_sys::Win32::UI::Shell::SHGetKnownFolderPath", reason = "only via sys::win::shell (ADR 0009)", allow-invalid = true },

@@ -27,8 +27,8 @@ fn main() {
     let exit = if restrict_dll_search().is_err() {
         HelperExit::refused(Reason::Internal)
     } else {
-        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-        serve(&WinHelperToken, &args)
+        // The arguments are read only after the privileges are dropped and the elevation checked.
+        serve(&WinHelperToken, || std::env::args_os().skip(1).collect())
     };
     // Every code is below 0x8000_0000 (magic 0x52), so the cast keeps its bits.
     std::process::exit(exit.to_code().cast_signed());

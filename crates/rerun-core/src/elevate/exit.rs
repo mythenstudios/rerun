@@ -177,7 +177,7 @@ impl HelperExit {
 
     /// Decodes `code` for a batch of `batch` ops (A4 N4, strict): the magic; a known class; a
     /// known reason, none exactly with `Done`; every slot from `batch` on `NotRun`; with
-    /// `Done` every op of the batch reached (not `NotRun`); with `Refused` none (nothing
+    /// `Done` a batch of at least one op, every one reached (not `NotRun`); with `Refused` none (nothing
     /// changed before step 8, §5). `batch` above [`MAX_BATCH_OPS`] decodes nothing. Anything
     /// else is `None`: the run's outcome is unknown.
     #[must_use]
@@ -201,7 +201,7 @@ impl HelperExit {
         let fits = (class == ExitClass::Done) == reason.is_none()
             && unused.iter().all(|o| *o == OpResult::NotRun)
             && match class {
-                ExitClass::Done => used.iter().all(|o| *o != OpResult::NotRun),
+                ExitClass::Done => batch >= 1 && used.iter().all(|o| *o != OpResult::NotRun),
                 ExitClass::Refused => used.iter().all(|o| *o == OpResult::NotRun),
                 ExitClass::RolledBack | ExitClass::LeftOpen => true,
             };

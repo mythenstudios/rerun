@@ -8,17 +8,31 @@
 //! different contract sources refuse each other (`Refused(Build)`, P4-2c), while unrelated
 //! changes keep them compatible.
 //!
+//! Test files are not part of the contract ([`is_test_file`]: `tests.rs`, `*_tests.rs`, anything
+//! below a `tests` folder): they define nothing either binary derives, and a test-only change
+//! must not make a hand-copied helper refuse the CLI.
+//!
 //! The hash: for every regular file below the contract paths, sorted by its `/`-separated path
 //! relative to `src/`: the path's bytes, a NUL, the content's length as `u64` little-endian,
-//! the content, with every `\r` removed (a checkout with CRLF gives the same ID). Missing paths
-//! contribute nothing.
+//! the content without a leading UTF-8 BOM and with every `\r` removed (a checkout with CRLF or
+//! an editor's BOM gives the same ID). Missing paths contribute nothing; a link or any other
+//! reparse point, or an entry that is neither a file nor a folder, fails the build.
 
 use std::path::{Path, PathBuf};
 
 /// The contract paths, relative to `src/` (a directory, or a file).
 pub const CONTRACT_PATHS: &[&str] = &["elevate", "policy/firewall.rs", "policy/firewall"];
 
-/// Every regular file below `p` (or `p` itself), recursively; links are not followed.
+/// Whether `rel` (`/`-separated, relative to `src/`) is a test file, not contract.
+pub fn is_test_file(rel: &str) -> bool {
+    let mut segments = rel.split('/').rev();
+    let name = segments.next().unwrap_or_default();
+    name == "tests.rs" || name.ends_with("_tests.rs") || segments.any(|s| s == "tests")
+}
+
+/// Every regular file below `p` (or `p` itself), recursively. A link (or, on Windows, any
+/// reparse point) or an entry that is neither a file nor a folder is an error: it is never
+/// followed and never silently skipped.
 fn files(p: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     #[expect(
         clippy::disallowed_methods,
@@ -29,9 +43,28 @@ fn files(p: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("{}: {e}", p.display())),
     };
+    #[cfg(windows)]
+    let reparse = {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT (winnt.h): symlinks, junctions and every other tag.
+        meta.file_attributes() & 0x400 != 0
+    };
+    #[cfg(not(windows))]
+    let reparse = false;
+    if reparse || meta.file_type().is_symlink() {
+        return Err(format!(
+            "{}: a link in the contract sources of the build ID",
+            p.display()
+        ));
+    }
     if meta.is_file() {
         out.push(p.to_path_buf());
-    } else if meta.is_dir() {
+    } else if !meta.is_dir() {
+        return Err(format!(
+            "{}: neither a file nor a folder in the contract sources",
+            p.display()
+        ));
+    } else {
         #[expect(
             clippy::disallowed_methods,
             reason = "build ID: the crate's own sources, read at build time and in a test (A4 S9)"
@@ -62,6 +95,7 @@ pub fn feed_contract(src: &Path, update: &mut dyn FnMut(&[u8])) -> Result<Vec<St
                 .replace('\\', "/");
             Ok((rel, f))
         })
+        .filter(|r| r.as_ref().map_or(true, |(rel, _)| !is_test_file(rel)))
         .collect::<Result<_, String>>()?;
     let mut read = Vec::with_capacity(named.len());
     for (rel, f) in named {
@@ -76,11 +110,12 @@ pub fn feed_contract(src: &Path, update: &mut dyn FnMut(&[u8])) -> Result<Vec<St
 }
 
 /// Feeds `(relative path, content)` pairs to `update` as the module docs say (sorted by path,
-/// `\r` removed). Pure. Returns the paths in order.
+/// a leading UTF-8 BOM and every `\r` removed). Pure. Returns the paths in order.
 pub fn feed(mut files: Vec<(String, Vec<u8>)>, update: &mut dyn FnMut(&[u8])) -> Vec<String> {
     files.sort();
     for (rel, bytes) in &files {
-        let content: Vec<u8> = bytes.iter().copied().filter(|b| *b != b'\r').collect();
+        let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+        let content: Vec<u8> = text.iter().copied().filter(|b| *b != b'\r').collect();
         update(rel.as_bytes());
         update(&[0]);
         update(&(content.len() as u64).to_le_bytes());

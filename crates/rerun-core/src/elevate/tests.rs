@@ -131,6 +131,9 @@ fn from_code_is_strict() {
     let two = 0x5200_000A; // Done, ops 0 and 1 After
     assert!(HelperExit::from_code(two, 2).is_some());
     assert_eq!(HelperExit::from_code(two, 1), None);
+    // Done needs a batch of at least one op; a refusal of an empty batch decodes.
+    assert_eq!(HelperExit::from_code(0x5200_0000, 0), None);
+    assert!(HelperExit::from_code(usage, 0).is_some());
     // A batch larger than the code has slots decodes nothing.
     assert_eq!(HelperExit::from_code(usage, MAX_BATCH_OPS + 1), None);
     assert!(HelperExit::from_code(usage, MAX_BATCH_OPS).is_some());
@@ -143,18 +146,42 @@ fn args(a: &[&str]) -> Vec<OsString> {
 #[test]
 fn serve_drops_privileges_first_then_requires_elevation() {
     let t = FakeHelperToken::new(false);
-    assert_eq!(serve(&t, &[]), HelperExit::refused(Reason::NotElevated));
+    assert_eq!(
+        serve(&t, Vec::new),
+        HelperExit::refused(Reason::NotElevated)
+    );
     assert_eq!(
         t.calls(),
         [TokenCall::DropPrivileges, TokenCall::IsElevated]
     );
     // A privilege that cannot be dropped stops before anything else.
     let t = FakeHelperToken::new(true).fail(TokenCall::DropPrivileges);
-    assert_eq!(serve(&t, &[]), HelperExit::refused(Reason::Internal));
+    assert_eq!(serve(&t, Vec::new), HelperExit::refused(Reason::Internal));
     assert_eq!(t.calls(), [TokenCall::DropPrivileges]);
     // An unreadable elevation is no elevation.
     let t = FakeHelperToken::new(true).fail(TokenCall::IsElevated);
-    assert_eq!(serve(&t, &[]), HelperExit::refused(Reason::Internal));
+    assert_eq!(serve(&t, Vec::new), HelperExit::refused(Reason::Internal));
+}
+
+/// The arguments are read only after steps 2 and 3 passed (review nit 6).
+#[test]
+fn serve_reads_the_arguments_only_after_privileges_and_elevation() {
+    use std::cell::Cell;
+    let read = Cell::new(false);
+    let args = || {
+        read.set(true);
+        Vec::new()
+    };
+    for t in [
+        FakeHelperToken::new(false),
+        FakeHelperToken::new(true).fail(TokenCall::DropPrivileges),
+        FakeHelperToken::new(true).fail(TokenCall::IsElevated),
+    ] {
+        let _ = serve(&t, args);
+        assert!(!read.get(), "{:?}", t.calls());
+    }
+    let _ = serve(&FakeHelperToken::new(true), args);
+    assert!(read.get());
 }
 
 /// P4-2a: elevated, every argument list is a usage refusal, also the form of §3 step 5.
@@ -172,7 +199,7 @@ fn the_scaffold_refuses_every_argument_list() {
     ]);
     for a in [vec![], args(&["--help"]), args(&["x"; 40]), form] {
         let t = FakeHelperToken::new(true);
-        assert_eq!(serve(&t, &a), HelperExit::refused(Reason::Usage));
+        assert_eq!(serve(&t, || a), HelperExit::refused(Reason::Usage));
         assert_eq!(
             t.calls(),
             [TokenCall::DropPrivileges, TokenCall::IsElevated]

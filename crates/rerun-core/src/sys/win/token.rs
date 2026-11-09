@@ -428,22 +428,23 @@ pub(super) fn drop_privileges() -> Result<(), u32> {
     use windows_sys::Win32::Security::{AdjustTokenPrivileges, TOKEN_PRIVILEGES};
     let token = adjustable_process_token()?;
     if let Some(words) = removal(&privileges(token.as_handle())?) {
-        let len = u32::try_from(words.len() * 4).map_err(|_| ERROR_INSUFFICIENT_BUFFER)?;
         #[expect(
             clippy::disallowed_methods,
-            reason = "the one AdjustTokenPrivileges call site: the elevated helper removes its \
-                      privileges (ADR 0023 §3 step 2)"
+            reason = "the product AdjustTokenPrivileges call site (the other one is test-only, in \
+                      testfx): the elevated helper removes its privileges (ADR 0023 §3 step 2)"
         )]
         // SAFETY: `token` is a live token handle with TOKEN_ADJUST_PRIVILEGES, kept alive until
-        // after the call; `words` is a 4-aligned TOKEN_PRIVILEGES of `len` bytes built by
-        // `removal` (the count, then that many LUID_AND_ATTRIBUTES), alive across the call; no
-        // previous state is requested (null, length 0).
+        // after the call; `words` is a 4-aligned TOKEN_PRIVILEGES built by `removal`: its count
+        // is exactly the number of LUID_AND_ATTRIBUTES that follow, so the API reads only inside
+        // `words`, which stays alive across the call (the new state has no length parameter).
+        // No previous state is requested: PreviousState and ReturnLength are null, and
+        // BufferLength, the size of the PreviousState buffer, is 0.
         let ok = unsafe {
             AdjustTokenPrivileges(
                 token.as_raw_handle(),
                 0,
                 words.as_ptr().cast::<TOKEN_PRIVILEGES>(),
-                len,
+                0,
                 ptr::null_mut(),
                 ptr::null_mut(),
             )

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use crate::build_contract::{feed, feed_contract, valid_release_id};
+use crate::build_contract::{feed, feed_contract, is_test_file, valid_release_id};
 use crate::{BUILD_ID, VERSION};
 
 /// A dev build's ID is the SHA-256 the build script computed over exactly the contract
@@ -28,7 +28,8 @@ fn the_build_id_names_this_build() {
         "the build script hashed other sources than {files:?}"
     );
     assert!(
-        files.iter().any(|f| f == "elevate/exit.rs") && files.iter().all(|f| !f.contains('\\')),
+        files.iter().any(|f| f == "elevate/exit.rs")
+            && files.iter().all(|f| !f.contains('\\') && !is_test_file(f)),
         "{files:?}"
     );
 }
@@ -48,9 +49,25 @@ fn the_contract_hash_has_teeth() {
     };
     let (base, order) = hash(&[("elevate/mod.rs", b"a\nb\n"), ("elevate/exit.rs", b"c")]);
     assert_eq!(order, ["elevate/exit.rs", "elevate/mod.rs"]);
-    // Listing order and CRLF do not matter.
+    // Listing order, CRLF and a leading BOM do not matter; a BOM elsewhere does.
     assert_eq!(
         hash(&[("elevate/exit.rs", b"c"), ("elevate/mod.rs", b"a\r\nb\r\n")]).0,
+        base
+    );
+    assert_eq!(
+        hash(&[
+            ("elevate/mod.rs", b"\xEF\xBB\xBFa\nb\n"),
+            ("elevate/exit.rs", b"c")
+        ])
+        .0,
+        base
+    );
+    assert_ne!(
+        hash(&[
+            ("elevate/mod.rs", b"a\n\xEF\xBB\xBFb\n"),
+            ("elevate/exit.rs", b"c")
+        ])
+        .0,
         base
     );
     // Content, a path, a moved boundary between two files, an added file do.
@@ -84,5 +101,25 @@ fn release_ids_are_checked() {
         &"a".repeat(65),
     ] {
         assert!(!valid_release_id(bad), "{bad:?}");
+    }
+}
+
+/// Test files are not contract (ADR 0023 §2): a test-only change keeps the build ID.
+#[test]
+fn test_files_are_not_contract() {
+    for t in [
+        "elevate/tests.rs",
+        "elevate/exit_tests.rs",
+        "policy/firewall/tests/rule.rs",
+    ] {
+        assert!(is_test_file(t), "{t}");
+    }
+    for c in [
+        "elevate/mod.rs",
+        "elevate/exit.rs",
+        "policy/firewall.rs",
+        "elevate/testsuite.rs",
+    ] {
+        assert!(!is_test_file(c), "{c}");
     }
 }

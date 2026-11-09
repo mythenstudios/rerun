@@ -18,9 +18,10 @@
 //!   wrapper with three classes, `NtFlushBuffersFileEx`, `GetFinalPathNameByHandleW`,
 //!   `GetVolumeInformationByHandleW`, `DeviceIoControl`), handles as `OwnedHandle`.
 //! - `token`: `user_writable` via `AccessCheck` against the non-elevated user's token, and
-//!   `TokenElevation` for the registry write side (S2) and the elevated helper; the one
-//!   `AdjustTokenPrivileges` (`drop_privileges`, ADR 0023 §3 step 2: every privilege but
-//!   `SeChangeNotifyPrivilege` removed and read back; only the helper process calls it).
+//!   `TokenElevation` for the registry write side (S2) and the elevated helper; the product
+//!   `AdjustTokenPrivileges` call (`drop_privileges`, ADR 0023 §3 step 2: every privilege but
+//!   `SeChangeNotifyPrivilege` removed and read back; only the helper process calls it; the
+//!   other call is the test-only `testfx` fixture).
 //! - `shell`: the only calls to `SHGetKnownFolderPath` (with the process token, freed with
 //!   `CoTaskMemFree`) and `GetSystemWindowsDirectoryW`.
 //! - `reg`: the only registry calls (`RegOpenCurrentUser`, `RegOpenKeyExW`, `RegEnumKeyExW`,
