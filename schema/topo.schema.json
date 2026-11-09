@@ -14,18 +14,58 @@
     "match",
     "issues"
   ],
-  "if": {
-    "required": [
-      "anti_cheat"
-    ]
-  },
-  "then": {
-    "properties": {
-      "status": {
-        "const": "draft"
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "anti_cheat"
+        ]
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "draft"
+          }
+        }
+      }
+    },
+    {
+      "description": "firewall_rule is draft only until reviewed (P4-5a).",
+      "if": {
+        "required": [
+          "issues"
+        ],
+        "properties": {
+          "issues": {
+            "contains": {
+              "properties": {
+                "variants": {
+                  "contains": {
+                    "properties": {
+                      "steps": {
+                        "contains": {
+                          "required": [
+                            "firewall_rule"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "draft"
+          }
+        }
       }
     }
-  },
+  ],
   "properties": {
     "format": {
       "const": 1
@@ -660,6 +700,36 @@
         },
         "ini_set": {
           "$ref": "#/$defs/iniSet"
+        },
+        "firewall_rule": {
+          "$ref": "#/$defs/firewallRule"
+        }
+      }
+    },
+    "firewallRule": {
+      "description": "Rerun's block rule for one executable of match.exes (docs/02-topo-format.md, ADR 0023 §6). The schema checks the form; the loader checks that exe is a match.exes entry with a sha256 (ADR 0024, sha256 for elevated anchors). Draft only until reviewed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exe",
+        "direction"
+      ],
+      "properties": {
+        "exe": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/relPath"
+            },
+            {
+              "pattern": "\\.[Ee][Xx][Ee]$"
+            }
+          ]
+        },
+        "direction": {
+          "enum": [
+            "out",
+            "in"
+          ]
         }
       }
     },

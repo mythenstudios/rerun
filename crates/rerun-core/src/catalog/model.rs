@@ -20,6 +20,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::detect::exe::AntiCheat;
 use crate::hw::arch::ArchId;
 use crate::path::RelPath;
+use crate::policy::firewall::Direction;
 use crate::prim::{CompatLayerSpec, CpuRuleSpec, IniSetSpec, PrioritySpec, RegistrySetSpec};
 
 /// The one value of `format` (Topo, package, index).
@@ -635,6 +636,20 @@ pub enum TopoStep {
     CompatLayer(CompatLayerSpec),
     /// `ini_set`.
     IniSet(IniSetSpec),
+    /// `firewall_rule` (P4-5a): Rerun's block rule for one executable of `match.exes`.
+    FirewallRule(FirewallRuleSpec),
+}
+
+/// `firewall_rule` (ADR 0023 §6, P4-5a): block the network of one executable of `match.exes`
+/// that carries a `sha256` (the loader rule of ADR 0024, P4 R6). Draft only until reviewed
+/// ([`super::check::FIREWALL_RULE_REVIEWED`]); the engine plans it from P4-2d.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirewallRuleSpec {
+    /// The executable, a `match.exes` path.
+    pub exe: RelPath,
+    /// `out` or `in`.
+    pub direction: Direction,
 }
 
 /// `steam_input`: only `enable`.

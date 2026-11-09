@@ -553,3 +553,49 @@ fn retired_keys_serve_reverts_only_and_revoked_keys_nothing() {
         1
     );
 }
+
+/// `firewall_rule` (P4-5a): draft only until reviewed, and its executable is a `match.exes`
+/// entry with a `sha256` (ADR 0024, P4 R6); the release rules refuse it with every draft.
+#[test]
+fn firewall_rule_needs_a_draft_and_a_sha256_anchor() {
+    use super::check::{self, Rules};
+    use super::model::FirewallRuleSpec;
+    use crate::policy::firewall::Direction;
+
+    let mut t = topo("game", "fix-pack");
+    t.status = Status::Draft;
+    t.issues[0].variants[0].steps = vec![TopoStep::FirewallRule(FirewallRuleSpec {
+        exe: rel("GAME.exe"),
+        direction: Direction::Out,
+    })];
+    assert_eq!(
+        check::topo(&t, Rules::Source),
+        Ok(()),
+        "the path is compared folded"
+    );
+    let what = |t: &Topo| check::topo(t, Rules::Source).unwrap_err().what;
+    let mut active = t.clone();
+    active.status = Status::Active;
+    assert!(what(&active).starts_with("draft only"), "{}", what(&active));
+    let mut other = t.clone();
+    other.issues[0].variants[0].steps = vec![TopoStep::FirewallRule(FirewallRuleSpec {
+        exe: rel("other.exe"),
+        direction: Direction::In,
+    })];
+    assert_eq!(what(&other), "an executable of match.exes");
+    let mut sha1_only = t.clone();
+    sha1_only.matches.exes[0].sha256 = None;
+    sha1_only.matches.exes[0].sha1 = Some(Hex::new([0x22; 20]));
+    assert!(
+        what(&sha1_only).contains("needs a sha256"),
+        "{}",
+        what(&sha1_only)
+    );
+    let mut todo = t.clone();
+    todo.matches.exes[0].sha256 = Some(Hex::parse("TODO").unwrap());
+    assert_eq!(check::topo(&todo, Rules::Source), Ok(()), "TODO in a draft");
+    assert!(
+        check::topo(&t, Rules::Release).is_err(),
+        "never released as a draft"
+    );
+}

@@ -12,8 +12,8 @@
 //!   nothing.
 //! - [`plan`] (reads through the planners only): the picked variants, at most one per issue.
 //!   `when = no` is refused, `unknown` is planned with a warning; the anti-cheat rule refuses or
-//!   warns per step kind; `package` waits for P4-7. A `cpu` step becomes the one `launch_method`
-//!   step: the Topo's method (`auto` is `direct` when the chain is exactly `[steam]`, else
+//!   warns per step kind; `package` waits for P4-7, `firewall_rule` for the helper batch
+//!   (P4-2d). A `cpu` step becomes the one `launch_method` step: the Topo's method (`auto` is `direct` when the chain is exactly `[steam]`, else
 //!   `watch`, L10), its `launch.start`, and its `launch.priority`. The steps go to
 //!   [`prim::plan`] unchanged, so the plan has the bytes of a step file with the same steps,
 //!   plus [`Plan::source`] (the index's SHA-256, the Topo and the picks).
@@ -287,6 +287,7 @@ fn step_kind(s: &TopoStep, launch: &Result<LaunchPlan, LaunchProblem>) -> StepKi
         TopoStep::RegistrySet(_) => StepKind::RegistrySet,
         TopoStep::CompatLayer(_) => StepKind::CompatLayer,
         TopoStep::IniSet(_) => StepKind::IniSet,
+        TopoStep::FirewallRule(_) => StepKind::FirewallRule,
     }
 }
 
@@ -463,7 +464,8 @@ fn assess(
         };
         let why = match (r, k, s) {
             (AcRule::Refuse, ..) => Some(Refusal::AntiCheat(k)),
-            (_, StepKind::Package, _) => Some(Refusal::NotYet(k)),
+            // `package` waits for P4-7, `firewall_rule` for the helper batch (P4-2d, P4-5b).
+            (_, StepKind::Package | StepKind::FirewallRule, _) => Some(Refusal::NotYet(k)),
             (_, _, TopoStep::Cpu(_)) => launch.as_ref().err().map(|p| Refusal::Launch(*p)),
             _ => None,
         };
@@ -698,7 +700,7 @@ pub fn plan(
         for s in &variant.steps {
             match s {
                 // Refused by `assess` above.
-                TopoStep::Package(_) => {}
+                TopoStep::Package(_) | TopoStep::FirewallRule(_) => {}
                 TopoStep::SteamInput(_) => warnings.push(Warning::SteamInput {
                     issue: p.issue.clone(),
                 }),

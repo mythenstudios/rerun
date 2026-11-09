@@ -11,8 +11,8 @@
 use std::collections::BTreeSet;
 
 use super::model::{
-    ArchList, Compare, Id, Launch, Method, Package, PackageOption, Source, SourceType, Status,
-    TODO, Tier, Topo, TopoStep, When,
+    ArchList, Compare, FirewallRuleSpec, Id, Launch, Method, Package, PackageOption, Source,
+    SourceType, Status, TODO, Tier, Topo, TopoStep, When,
 };
 use crate::fold::fold;
 use crate::policy::ini::IniName;
@@ -24,6 +24,10 @@ use crate::prim::{CompatLayerSpec, CpuRuleSpec, IniSetSpec, RegistrySetSpec};
 /// P4-4). `false` until the field is reviewed: the signed index then holds none, and the
 /// engine enforces the anti-cheat rule for every system it finds.
 pub const ANTI_CHEAT_RELEASE_REVIEWED: bool = false;
+
+/// Whether a Topo outside a draft may hold a `firewall_rule` step (P4-5a). `false` until the step
+/// is reviewed with the helper chain (P4-2c, P4-5b): the signed index then holds none.
+pub const FIREWALL_RULE_REVIEWED: bool = false;
 
 /// Most executables of `match.exes` (P4-4: each is hashed when the engine reads a game).
 pub const MAX_EXES: usize = 8;
@@ -322,7 +326,11 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
                 "at least one step",
             )?;
             for (k, s) in v.steps.iter().enumerate() {
-                step(s, &format!("{at}.steps[{k}]"))?;
+                let at = format!("{at}.steps[{k}]");
+                step(s, &at)?;
+                if let TopoStep::FirewallRule(f) = s {
+                    firewall_rule(t, f, &format!("{at}.firewall_rule"))?;
+                }
             }
             for (k, x) in v.tradeoffs.iter().enumerate() {
                 ensure(!x.is_empty(), &format!("{at}.tradeoffs[{k}]"), "not empty")?;
@@ -465,7 +473,34 @@ fn step(s: &TopoStep, at: &str) -> R {
         TopoStep::RegistrySet(r) => registry_set(r, &format!("{at}.registry_set")),
         TopoStep::CompatLayer(c) => compat_layer(c, &format!("{at}.compat_layer")),
         TopoStep::IniSet(i) => ini_set(i, &format!("{at}.ini_set")),
+        TopoStep::FirewallRule(f) => ensure(
+            fold(f.exe.as_str()).ends_with(".EXE"),
+            &format!("{at}.firewall_rule.exe"),
+            "an .exe",
+        ),
     }
+}
+
+/// `firewall_rule` against its Topo: draft only until reviewed, and the executable is an entry
+/// of `match.exes` with a `sha256` (ADR 0024 "sha256 for elevated anchors", P4 R6: `sha1` alone
+/// never anchors anything elevated; a `TODO` only in a draft, like every `TODO`).
+fn firewall_rule(t: &Topo, f: &FirewallRuleSpec, at: &str) -> R {
+    ensure(
+        FIREWALL_RULE_REVIEWED || t.status == Status::Draft,
+        at,
+        "draft only until firewall_rule is reviewed (P4-5a)",
+    )?;
+    let anchor = t.matches.exes.iter().find(|e| e.path == f.exe);
+    ensure(
+        anchor.is_some(),
+        &format!("{at}.exe"),
+        "an executable of match.exes",
+    )?;
+    ensure(
+        anchor.is_some_and(|e| e.sha256.is_some()),
+        &format!("{at}.exe"),
+        "its match.exes entry needs a sha256 (an elevated anchor, ADR 0024)",
+    )
 }
 
 /// Printable ASCII without `\ / : %`.
