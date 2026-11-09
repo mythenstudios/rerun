@@ -649,9 +649,13 @@ function Invoke-VirtualStore {
         $vsSteps = Join-Path $root 'steps-vs.json'
         Write-Plain $vsSteps ('{"format":1,"game":{"folder":"' + $folder + '"},"main_exe":"game.exe","steps":[{"ini_set":{"file":"settings.ini","values":[{"section":"Display","key":"Width","value":"1920"}]}}]}')
         Add-Content -LiteralPath $log -Value "`n=== VirtualStore (P4-0) ==="
+        # The folder is admin-only for this user. Until admin-only roots exist (phase 6, user
+        # decision E1 of the phase 4 plan) plan refuses it; that refusal is the expected result.
+        $adminOnly = 'the game folder needs administrator rights'
         $before = Invoke-Rerun plan $vsSteps --dry-run
         $v.plan_before = "exit $($before.Code)"
-        if ($before.Code -ne 0) { throw "plan --dry-run for a folder under Program Files failed before the stub ran (exit $($before.Code)): $(($before.Text -split "`n" | Select-Object -First 3) -join ' | ')" }
+        $refusedBefore = $before.Code -eq 3 -and $before.Text.Contains($adminOnly)
+        if ($before.Code -ne 0 -and -not $refusedBefore) { throw "plan --dry-run for a folder under Program Files failed before the stub ran (exit $($before.Code)): $(($before.Text -split "`n" | Select-Object -First 3) -join ' | ')" }
         if ($before.Text.Contains('Windows keeps a VirtualStore copy')) { throw 'the plan warned about a VirtualStore copy before there was one' }
 
         $ErrorActionPreference = 'Continue'
@@ -673,6 +677,15 @@ function Invoke-VirtualStore {
 
         $after = Invoke-Rerun plan $vsSteps --dry-run
         $v.plan_after = "exit $($after.Code)"
+        if ($refusedBefore) {
+            if ($after.Code -eq 3 -and $after.Text.Contains($adminOnly)) {
+                $v.verdict = 'refused_admin_only'
+                $v.detail = "Windows virtualized the write (copy at $copy, real file unchanged); plan refuses the admin-only folder before and after, so the warning itself waits for admin-only roots (phase 6)"
+            } else {
+                $v.detail = "plan refused the admin-only folder before the stub ran but not the same way after it (exit $($after.Code)): $(($after.Text -split "`n" | Select-Object -First 3) -join ' | ')"
+            }
+            return $v
+        }
         $warns = $after.Text.Contains('Windows keeps a VirtualStore copy')
         $names = $after.Text.IndexOf($copy, [StringComparison]::OrdinalIgnoreCase) -ge 0
         $v.plan_warns = $warns

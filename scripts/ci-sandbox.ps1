@@ -212,6 +212,7 @@ if (-not $r1) {
             $vs.verdict, $vs.stub_exit, $vs.stub_output, $vs.copy_exists, $vs.real_file_unchanged, $vs.plan_warns, $vs.plan_names_the_copy, $vs.copy)
         switch ($vs.verdict) {
             'ok' { Write-Host 'VirtualStore: a copy appeared under the user''s VirtualStore and plan --dry-run warned and named it' }
+            'refused_admin_only' { Write-Host "::warning::VirtualStore: $($vs.detail)" }
             'not_virtualized' {
                 $on = ($vs.uac.EnableLUA -eq 1) -and ($vs.uac.EnableVirtualization -ne 0)
                 if ($on) { Fail "VirtualStore: UAC is on (EnableLUA=1) but the stub's write was not virtualized: $($vs.detail)" }
