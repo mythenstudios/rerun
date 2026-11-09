@@ -11,7 +11,7 @@ use crate::journal::{InstanceTag, Journal, JournalError, TxnState, VerifyBackups
 use crate::path::{RelPath, RootPath};
 use crate::policy::root::{AppDir, AppSub, Create, RootError};
 use crate::sys::contract::FsFixture;
-use crate::sys::fake::{FakeGpu, FakeKnownFolders, FakeRegistry, FakeTopology};
+use crate::sys::fake::{FakeFirewall, FakeGpu, FakeKnownFolders, FakeRegistry, FakeTopology};
 use crate::sys::fs::WriteCap;
 use crate::sys::{Fs, Gpu, KnownFolder, KnownFolders, Registry, RegistryWrite, System, Topology};
 
@@ -25,6 +25,7 @@ pub(super) struct AppTestSys {
     reg: Box<dyn RegistryWrite>,
     topo: FakeTopology,
     gpu: FakeGpu,
+    firewall: FakeFirewall,
 }
 
 impl AppTestSys {
@@ -61,6 +62,7 @@ impl AppTestSys {
             reg,
             topo: FakeTopology::default(),
             gpu: FakeGpu::default(),
+            firewall: FakeFirewall::default(),
         }
     }
 }
@@ -83,6 +85,9 @@ impl System for AppTestSys {
     }
     fn gpu(&self) -> &dyn Gpu {
         &self.gpu
+    }
+    fn firewall(&self) -> &dyn crate::sys::Firewall {
+        &self.firewall
     }
     fn elevation(&self) -> &dyn crate::sys::Elevation {
         &crate::sys::NoElevation

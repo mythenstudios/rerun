@@ -5,9 +5,12 @@
 //!
 //! - [`path`]: re-export of [`crate::path`] (lexical rules for relative paths and roots).
 //! - [`root`]: the only way to open a store or game folder; forbidden roots, root identity.
+//! - [`firewall`]: Rerun's own firewall rules: the one rule form and their observation (ADR 0023
+//!   §6, P4-5a).
 //! - [`ini`]: the bounded INI editor (ADR 0021): dialect, `edit` and `unedit`.
 //! - [`registry`]: the registry allowlist and the only way to the registry write side (ADR 0018).
 
+pub mod firewall;
 pub mod ini;
 pub mod registry;
 pub mod root;

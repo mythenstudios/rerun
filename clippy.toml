@@ -210,7 +210,7 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Environment::ExpandEnvironmentStringsForUserW", reason = "the environment is never a source of paths (ADR 0009)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Environment::ExpandEnvironmentStringsForUserA", reason = "the environment is never a source of paths (ADR 0009)", allow-invalid = true },
   { path = "std::env::var", reason = "the environment is never a source of paths (ADR 0009); test gates carry an expect" },
-  { path = "std::env::var_os", reason = "the environment is never a source of paths (ADR 0009); test gates carry an expect" },
+  { path = "std::env::var_os", reason = "the environment is never a source of paths (ADR 0009); test gates and the A4 S10 comparison in sys::win::com carry an expect" },
   { path = "std::env::vars", reason = "the environment is never a source of paths (ADR 0009)" },
   { path = "std::env::vars_os", reason = "the environment is never a source of paths (ADR 0009)" },
   { path = "std::env::home_dir", reason = "the environment is never a source of paths (ADR 0009); use KnownFolders" },
@@ -497,12 +497,17 @@ disallowed-methods = [
   { path = "windows_sys::Wdk::Graphics::Direct3D::D3DKMTEnumAdapters3", reason = "GPU data only via sys::win::dxgi (ADR 0008 amendment)", allow-invalid = true },
   { path = "windows_sys::Wdk::Graphics::Direct3D::D3DKMTQueryAdapterInfo", reason = "GPU data only via sys::win::dxgi (ADR 0008 amendment)", allow-invalid = true },
   { path = "windows_sys::Wdk::Graphics::Direct3D::D3DKMTOpenAdapterFromLuid", reason = "GPU data only via sys::win::dxgi (ADR 0008 amendment)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Com::CoCreateInstance", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoCreateInstance", reason = "COM activation only via rerun-core sys::win::com::activate (behind create_inproc and the A4 S10 environment check), CLSCTX_INPROC_SERVER only (ADR 0008 amendment P4-5a)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::CoCreateInstanceEx", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::CoGetClassObject", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::CoInitialize", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Com::CoInitializeEx", reason = "COM only via the reviewed call sites: rerun-launch win::launch (ADR 0022) and rerun-core sys::win::elevation (the helper start, ADR 0023 N3); activation only via one wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoInitializeEx", reason = "COM only via the reviewed call sites: rerun-launch win::launch (ADR 0022), rerun-core sys::win::elevation (the helper start, ADR 0023 N3) and sys::win::com::Apartment (the firewall read, ADR 0008 amendment P4-5a); activation only via sys::win::com, CLSCTX_INPROC_SERVER only", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::CoGetObject", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  # ADR 0008 amendment P4-5a: BSTR and VARIANT only through the owning guards of sys::win::com
+  # (one call site each), so every string and variant a COM call returns is freed exactly once.
+  { path = "windows_sys::Win32::Foundation::SysFreeString", reason = "BSTRs only via sys::win::com::Bstr (ADR 0008 amendment P4-5a)", allow-invalid = true },
+  { path = "windows_sys::Win32::Foundation::SysStringLen", reason = "BSTRs only via sys::win::com::Bstr (ADR 0008 amendment P4-5a)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Variant::VariantClear", reason = "VARIANTs only via sys::win::com::Variant (ADR 0008 amendment P4-5a)", allow-invalid = true },
   # Security review of step 10 (2026-11-05): the remaining process-start, delay-load symbol and
   # COM activation paths. CoGetInstanceFromFile, CoGetClassObjectFromURL, OleInitialize and
   # LoadLibraryShim live behind windows-sys features rerun-core does not use; the test-only

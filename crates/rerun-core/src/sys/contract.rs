@@ -52,12 +52,14 @@ use super::{Gpu, KnownFolder, KnownFolders, SysErrorKind, SysResult, Topology};
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 
+mod firewall;
 mod identity;
 mod reg_write;
 mod snapshot;
 mod write;
 mod write_race;
 
+pub use firewall::firewall_read_contract;
 pub use identity::fs_identity_contract;
 pub use reg_write::registry_write_contract;
 pub use snapshot::snapshot_contract;

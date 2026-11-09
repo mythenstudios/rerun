@@ -4040,4 +4040,5 @@ fn hooks_stop_after_a_crash_and_calls_from_hooks_are_not_counted() {
     fx.clear_on_step();
 }
 
+mod firewall;
 mod reg_faults;

@@ -46,8 +46,15 @@
 //!   per enumeration, at most 64 adapters.
 //! - `gpu`: `WinGpu`, name/LUID/driver-version mapping and error mapping; no `unsafe`.
 //! - `system`: `WinSystem`; no `unsafe`.
-//! - `elevation`: `WinElevation` (ADR 0023 §2, §7): the only `ShellExecuteExW`, `CoInitializeEx`
-//!   and `QueryFullProcessImageNameW` of `rerun-core`: the helper start with the `HKLM` `exefile`
+//! - `com` (ADR 0008 amendment P4-5a): the one `CoCreateInstance` (`create_inproc`,
+//!   `CLSCTX_INPROC_SERVER`, after the A4 S10 environment check), the firewall's `CoInitializeEx`
+//!   (`Apartment`), owned interface pointers and the `BSTR`/`VARIANT` guards (the only
+//!   `SysStringLen`, `SysFreeString`, `VariantClear`); `unsafe`.
+//! - `firewall`: `WinFirewall`, the hand-written read-only binding of `INetFwPolicy2`,
+//!   `INetFwRules`, `INetFwRule`/`2`/`3` and `IEnumVARIANT` (ADR 0023 §13): one enumeration per
+//!   `select`, bounded in rules, text length and time; `unsafe`.
+//! - `elevation`: `WinElevation` (ADR 0023 §2, §7): the only `ShellExecuteExW`, the first
+//!   `CoInitializeEx` and the `QueryFullProcessImageNameW` of `rerun-core`: the helper start with the `HKLM` `exefile`
 //!   class key and the reads on the started process; `unsafe`.
 //! - `sd`: the pure parser of a self-relative security descriptor (owner, DACL; ADR 0007
 //!   amendment P4-2b); no `unsafe`.
@@ -64,7 +71,8 @@
 //! - `registry`: `WinRegistry`, input rules, limits, retries and enumeration restarts, and the
 //!   write primitives of `sys::seq::reg` (`WinKey`, ADR 0018); no `unsafe`.
 //!
-//! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu`, `loader`, `dxgi` and `elevation`. Path-based Win32 file APIs
+//! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu`, `loader`, `dxgi`, `elevation`,
+//! `com` and `firewall`. Path-based Win32 file APIs
 //! (`CreateFileW`, `DeleteFileW`, `MoveFileExW`, `GetFileAttributesW`, …) and every
 //! environment-based path source (`std::env::var`, `GetEnvironmentVariableW`,
 //! `ExpandEnvironmentStringsW`, `SHGetFolderPathW`, `GetWindowsDirectoryW`, …) are banned in
@@ -94,10 +102,12 @@ compile_error!(
      Program Files folders and redirected system paths"
 );
 
+mod com;
 mod console;
 mod cpu;
 mod dxgi;
 mod elevation;
+mod firewall;
 mod fs;
 mod gpu;
 mod helper;
@@ -126,6 +136,7 @@ mod tests;
 
 pub use console::discard_console_input;
 pub use elevation::WinElevation;
+pub use firewall::WinFirewall;
 pub use fs::{WinDir, WinFs};
 pub use gpu::WinGpu;
 pub use helper::WinHelperToken;

@@ -17,6 +17,7 @@
 
 mod elevation;
 mod faults;
+mod firewall;
 mod fs;
 mod gpu;
 mod helper;
@@ -32,6 +33,7 @@ use rerun_proto::cpu::CpuTopology;
 
 pub use elevation::{FakeElevation, RunCall};
 pub use faults::{Fault, Prim, RegPrim};
+pub use firewall::FakeFirewall;
 pub use fs::{
     FAKE_USER_SID, FakeDir, FakeFile, FakeFs, FakeHold, FakeSd, FsOp, StepEvent, StepHook,
 };
@@ -45,8 +47,8 @@ use super::contract::{Access, FsFixture, Held, Share};
 use super::fs::{Attrs, tag};
 use super::registry::{Hive, RegKey, RegValue};
 use super::{
-    Elevation, Fs, Gpu, GpuAdapter, KnownFolder, KnownFolders, Registry, RegistryWrite,
-    SysErrorKind, SysResult, System, Topology,
+    Elevation, Firewall, Fs, FwRule, Gpu, GpuAdapter, KnownFolder, KnownFolders, Registry,
+    RegistryWrite, SysErrorKind, SysResult, System, Topology,
 };
 use faults::FaultHub;
 
@@ -71,6 +73,7 @@ pub struct FakeSystem {
     topology: FakeTopology,
     known_folders: FakeKnownFolders,
     gpu: FakeGpu,
+    firewall: FakeFirewall,
     elevation: FakeElevation,
 }
 
@@ -82,6 +85,7 @@ impl Default for FakeSystem {
             topology: FakeTopology::default(),
             known_folders: FakeKnownFolders::default(),
             gpu: FakeGpu::default(),
+            firewall: FakeFirewall::default(),
             elevation: FakeElevation::default(),
         };
         let hub = Arc::new(FaultHub::default());
@@ -152,6 +156,11 @@ impl FakeSystem {
         &self.fs
     }
 
+    /// The fake firewall (rules as data, P4-5a).
+    pub fn fake_firewall(&self) -> &FakeFirewall {
+        &self.firewall
+    }
+
     /// The fake elevation (token kind, scripted helper runs).
     pub fn fake_elevation(&self) -> &FakeElevation {
         &self.elevation
@@ -191,6 +200,9 @@ impl System for FakeSystem {
     }
     fn gpu(&self) -> &dyn Gpu {
         &self.gpu
+    }
+    fn firewall(&self) -> &dyn Firewall {
+        &self.firewall
     }
     fn elevation(&self) -> &dyn Elevation {
         &self.elevation
@@ -535,6 +547,12 @@ impl FakeSystemBuilder {
     /// Adapter enumeration fails with `kind` (DXGI unavailable).
     pub fn gpu_error(mut self, kind: SysErrorKind) -> Self {
         self.sys.gpu.fail_with(kind);
+        self
+    }
+
+    /// Appends a firewall rule (enumeration order).
+    pub fn fw_rule(self, rule: FwRule) -> Self {
+        self.sys.firewall.push(rule);
         self
     }
 

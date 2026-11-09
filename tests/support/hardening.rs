@@ -74,7 +74,9 @@ pub const LAUNCH_IMPORTS: &[&str] = &[
 /// `userenv.dll` come from `std`, `advapi32.dll`, `combase.dll` and `shell32.dll` from
 /// `windows-sys`. P4-2b (ADR 0023 §2, A4 N3): `ole32.dll` for `CoInitializeEx`/`CoUninitialize`
 /// around the helper's `ShellExecuteExW` (`sys::win::elevation`), a KnownDLL like in
-/// [`LAUNCH_IMPORTS`]. A new import fails the tests: review it, then extend this list and ADR 0008
+/// [`LAUNCH_IMPORTS`]. P4-5a (ADR 0023 §8 outcome A, ADR 0008 amendment P4-5a): `ole32.dll` also
+/// for `CoCreateInstance` and `oleaut32.dll` (a KnownDLL) for `SysStringLen`, `SysFreeString`
+/// and `VariantClear` of the firewall read (`sys::win::com`). A new import fails the tests: review it, then extend this list and ADR 0008
 /// (amendment "import allowlist per binary").
 pub const CLI_IMPORTS: &[&str] = &[
     "kernel32.dll",
@@ -86,6 +88,7 @@ pub const CLI_IMPORTS: &[&str] = &[
     "bcryptprimitives.dll",
     "userenv.dll",
     "ole32.dll",
+    "oleaut32.dll",
 ];
 
 /// The static imports `rerun-helper.exe` may have (ADR 0023 §13, docs/08 "Acceptance

@@ -1621,6 +1621,21 @@ fn banned_gpu_and_com_items_resolve() {
         reason = "ban check: CoGetObject must be banned"
     )]
     let _ = windows_sys::Win32::System::Com::CoGetObject;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SysFreeString must be banned"
+    )]
+    let _ = windows_sys::Win32::Foundation::SysFreeString;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SysStringLen must be banned"
+    )]
+    let _ = windows_sys::Win32::Foundation::SysStringLen;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: VariantClear must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Variant::VariantClear;
 }
 
 /// The bans of the step 10 security review (2026-11-05).

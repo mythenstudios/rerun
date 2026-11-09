@@ -2299,6 +2299,17 @@ pub(super) fn module_path(module: windows_sys::Win32::Foundation::HMODULE) -> Pa
     PathBuf::from(OsString::from_wide(&buf[..n]))
 }
 
+/// Where Windows loaded the module `name` from, if this process has it loaded
+/// (`GetModuleHandleW`, no reference taken).
+pub(super) fn loaded_module(name: &str) -> Option<PathBuf> {
+    let w: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    // SAFETY: `w` is NUL-terminated and outlives the call; the returned handle is not
+    // reference-counted and only read while the module stays loaded (this process never frees
+    // the modules it asks about).
+    let h = unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(w.as_ptr()) };
+    (!h.is_null()).then(|| module_path(h))
+}
+
 // ---------- NaiveFs ----------
 
 /// Check-then-use-by-path control implementation (never use outside this test): checks each

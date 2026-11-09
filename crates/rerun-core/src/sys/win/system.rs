@@ -3,9 +3,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::{WinElevation, WinFs, WinGpu, WinKnownFolders, WinRegistry, WinTopology};
+use super::{WinElevation, WinFirewall, WinFs, WinGpu, WinKnownFolders, WinRegistry, WinTopology};
 use crate::sys::{
-    Elevation, Fs, Gpu, KnownFolders, Registry, RegistryWrite, SysResult, System, Topology,
+    Elevation, Firewall, Fs, Gpu, KnownFolders, Registry, RegistryWrite, SysResult, System,
+    Topology,
 };
 
 /// The real file system, registry, known folders (on that registry), CPU topology and graphics
@@ -20,6 +21,7 @@ pub struct WinSystem {
     known_folders: WinKnownFolders,
     topology: WinTopology,
     gpu: WinGpu,
+    firewall: WinFirewall,
     elevation: WinElevation,
 }
 
@@ -36,6 +38,7 @@ impl WinSystem {
             registry,
             topology: WinTopology::new(),
             gpu: WinGpu::new(),
+            firewall: WinFirewall,
             elevation: WinElevation,
         })
     }
@@ -70,6 +73,10 @@ impl System for WinSystem {
 
     fn gpu(&self) -> &dyn Gpu {
         &self.gpu
+    }
+
+    fn firewall(&self) -> &dyn Firewall {
+        &self.firewall
     }
 
     fn elevation(&self) -> &dyn Elevation {

@@ -1,7 +1,8 @@
 //! [`WinElevation`]: the CLI's one start of the elevated helper (ADR 0023 §2, §7; A4 S2, N3)
-//! and the token kind (§10). The only calls in `rerun-core` to `ShellExecuteExW`,
-//! `CoInitializeEx` and `QueryFullProcessImageNameW` (`clippy.toml`; `rerun-launch` has its own
-//! reviewed `ShellExecuteExW`).
+//! and the token kind (§10). The only calls in `rerun-core` to `ShellExecuteExW` and
+//! `QueryFullProcessImageNameW`, and one of its two `CoInitializeEx` sites (the other is
+//! `com::Apartment`, the firewall read; `clippy.toml`; `rerun-launch` has its own reviewed
+//! `ShellExecuteExW`).
 //!
 //! The start:
 //! 1. `HKLM\SOFTWARE\Classes\exefile`, opened read-only in the native view through `reg`, is
@@ -104,8 +105,8 @@ impl Com {
         let flags = (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).cast_unsigned();
         #[expect(
             clippy::disallowed_methods,
-            reason = "rerun-core's one CoInitializeEx call site, for the helper's ShellExecuteExW \
-                      (ADR 0023 §2, ADR 0008, A4 N3)"
+            reason = "rerun-core's first CoInitializeEx call site (com::Apartment is the \
+                      second), for the helper's ShellExecuteExW (ADR 0023 §2, ADR 0008, A4 N3)"
         )]
         // SAFETY: the reserved pointer must be null; the flags are documented COINIT values.
         let hr = unsafe { CoInitializeEx(ptr::null(), flags) };
