@@ -279,12 +279,97 @@ fn step_kind(s: &TopoStep, launch: &Result<LaunchPlan, LaunchProblem>) -> StepKi
                 method: MethodSpec::Watch,
                 ..
             }) => StepKind::LaunchWatch,
+            Err(LaunchProblem::NotYet("hold")) => StepKind::LaunchHold,
+            Err(LaunchProblem::NotYet("ifeo")) => StepKind::LaunchIfeo,
+            Err(LaunchProblem::NotYet(_)) => StepKind::LaunchInproc,
             _ => StepKind::LaunchDirect,
         },
         TopoStep::RegistrySet(_) => StepKind::RegistrySet,
         TopoStep::CompatLayer(_) => StepKind::CompatLayer,
         TopoStep::IniSet(_) => StepKind::IniSet,
     }
+}
+
+/// The kind of a step of a step file (E4 holds for every plan source, review follow-up 1).
+pub fn prim_step_kind(s: &Step) -> StepKind {
+    match s {
+        Step::FileInstall(_) => StepKind::Package,
+        Step::RegistrySet(_) => StepKind::RegistrySet,
+        Step::CompatLayer(_) => StepKind::CompatLayer,
+        Step::IniSet(_) => StepKind::IniSet,
+        Step::LaunchMethod(l) => match l.method {
+            MethodSpec::Watch => StepKind::LaunchWatch,
+            // `auto` is refused by the planner; counted as the stricter of its results.
+            MethodSpec::Auto => StepKind::LaunchWatch,
+            MethodSpec::Direct => StepKind::LaunchDirect,
+        },
+    }
+}
+
+/// The folders a step file's anti-cheat check looks in besides the game folder: those of the
+/// main executable and of a `launch_method` start.
+pub fn step_file_dirs(steps: &[Step], main_exe: &RelPath) -> Vec<RelPath> {
+    let mut dirs: Vec<RelPath> = main_exe.parent().into_iter().collect();
+    dirs.extend(steps.iter().filter_map(|s| match s {
+        Step::LaunchMethod(l) => l.start.parent(),
+        _ => None,
+    }));
+    dirs
+}
+
+/// The anti-cheat rule on the steps of a step file: nothing when `scan` is clear; else the
+/// first refused kind as `Err`, or the warned kinds (each once, in step order). A step file
+/// has no Topo, so nothing is released as dead.
+pub fn anti_cheat_steps(steps: &[Step], scan: &AntiCheatScan) -> Result<Vec<StepKind>, Refusal> {
+    let mut warned = Vec::new();
+    if scan.is_clear() {
+        return Ok(warned);
+    }
+    for s in steps {
+        let k = prim_step_kind(s);
+        match anti_cheat_rule(k) {
+            AcRule::Refuse => return Err(Refusal::AntiCheat(k)),
+            AcRule::Warn if !warned.contains(&k) => warned.push(k),
+            _ => {}
+        }
+    }
+    Ok(warned)
+}
+
+/// Which Topo of the app is meant (review follow-up 4): retired Topos aside, exactly one that
+/// matches.
+#[derive(Debug)]
+pub enum Selection<'t> {
+    /// Exactly one Topo that is not retired matches.
+    One(&'t Topo, GameFacts),
+    /// None matches; every Topo that is not retired with what was read.
+    NoMatch(Vec<(&'t Topo, GameFacts)>),
+    /// Several match (the index refuses overlapping Topos, so a damaged or foreign index).
+    Several(Vec<&'t Topo>),
+}
+
+/// Splits `read` (every Topo of the app with what was read for it) into the retired ones and
+/// the [`Selection`] among the others.
+pub fn select<'t>(read: Vec<(&'t Topo, GameFacts)>) -> (Vec<&'t Topo>, Selection<'t>) {
+    let (retired, live): (Vec<_>, Vec<_>) = read
+        .into_iter()
+        .partition(|(t, _)| t.status == Status::Retired);
+    let retired = retired.into_iter().map(|(t, _)| t).collect();
+    let matched = live.iter().filter(|(_, g)| g.matched()).count();
+    let sel = match matched {
+        0 => Selection::NoMatch(live),
+        1 => match live.into_iter().find(|(_, g)| g.matched()) {
+            Some((t, g)) => Selection::One(t, g),
+            None => Selection::NoMatch(Vec::new()),
+        },
+        _ => Selection::Several(
+            live.into_iter()
+                .filter(|(_, g)| g.matched())
+                .map(|(t, _)| t)
+                .collect(),
+        ),
+    };
+    (retired, sel)
 }
 
 // ---------- Report ----------

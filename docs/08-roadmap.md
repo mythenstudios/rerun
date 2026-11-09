@@ -44,7 +44,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - Topo loader requires `launch.start` for `direct`, `watch` and `auto`; re-evaluate E2 of P3-3 (reading Steam's `appinfo.vdf` to propose or check `start`, ADR 0022 amendment P3-3)
 - Primitive `gpu_preference` with the `when` keys `gpu.hybrid` and `gpu.integrated`; `UserData` roots (`Documents`, `My Games`) with their own allowlist (both moved from phase 2, user decisions D6 and D8)
 - Primitive `laa_patch` (the Large Address Aware flag of a 32-bit game executable from the Topo's `match`: backup, SHA-256 before and after, refused for DRM-protected builds, .NET and anti-cheat games; user-writable roots only in this phase)
-- Anti-cheat detection in the scan: for such a game the Topo engine refuses packages, `laa_patch`, `firewall_rule` and `compat_layer` and warns for the other steps; a signed Topo may release an anti-cheat that is verifiably dead (with a source). Non-goal in `00-vision.md` unchanged
+- Anti-cheat detection in the scan: for such a game every plan (from a Topo or a step file) refuses packages, `laa_patch`, `firewall_rule`, `compat_layer` and the launch methods `watch`, `hold`, `ifeo`, `inproc`, and warns for the other steps; a signed Topo may release an anti-cheat that is verifiably dead (with a source; draft only until unlocked in P4-13 with the first PunkBuster Topo, ADR 0020 amendment P4-4). Non-goal in `00-vision.md` unchanged
 - One package = one pinned version; another verified version of the same tool is its own package (e.g. `dxvk-1.10`), a Topo variant chooses it (no free version choice, rule 4)
 - Shared package files are reference counted: a revert removes its own files, a file another open transaction still holds stays until the last one is reverted
 - 20 Topos, at least 5 of them `verified` on the developer machine
@@ -59,6 +59,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - Primitive `launch_option` (writes the Steam launch option, Steam closed; moved from phase 3)
 - i18n en/de
 - Code signing, portable build
+- Before A6: every anti-cheat marker without a vendor source (`EasyAntiCheat`, `EasyAntiCheat_EOS`, `GameGuard`, `XIGNCODE`, `EAAntiCheat.GameServiceLauncher.exe`; `docs/05-sources-policy.md`) has one, or a dump of a real machine; the third-party link for `start_protected_game.exe` is replaced by Epic's own documentation once found
 
 **Acceptance:** All flows from the mockup work against the real core.
 

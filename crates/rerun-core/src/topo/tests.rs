@@ -550,7 +550,10 @@ fn ta_the_rule_table_is_exactly_e4() {
             StepKind::LaaPatch,
             StepKind::FirewallRule,
             StepKind::CompatLayer,
-            StepKind::LaunchWatch
+            StepKind::LaunchWatch,
+            StepKind::LaunchHold,
+            StepKind::LaunchIfeo,
+            StepKind::LaunchInproc
         ]
     );
     let warned: Vec<StepKind> = ANTI_CHEAT_RULES
@@ -799,4 +802,206 @@ fn tc_from_a_signed_index() {
     };
     let p = plan(c.sha256(), found[0], &facts, &picks(&["cores/limit"]), &ctx).unwrap();
     assert_eq!(&p.plan.source.unwrap().index, c.sha256());
+}
+
+// ---------- Review follow-ups (P4-4) ----------
+
+fn mkdir(sys: &FakeSystem, rel: &str) {
+    sys.fake_fs()
+        .mkdir_all(Path::new(&format!(r"{STEAM_GAME}\{rel}")))
+        .unwrap();
+    sys.sync_all();
+}
+
+/// Follow-up 2: a marker the user may not open counts even against a release of its system,
+/// and alone (no find at all) it triggers the rule.
+#[test]
+fn rf_an_unreadable_marker_is_never_released() {
+    let sys = game_sys();
+    mkdir(&sys, "pb");
+    sys.fake_fs()
+        .set_restricted(Path::new(&format!(r"{STEAM_GAME}\pb")), true)
+        .unwrap();
+    sys.sync_all();
+    let mut j: serde_json::Value =
+        serde_json::from_str(&topo_json(&sha256(&pe(false)), DIRECT)).unwrap();
+    j["status"] = "draft".into();
+    j["anti_cheat"] = serde_json::json!({
+        "dead": ["punkbuster"],
+        "source": {"type": "pcgw", "url": "https://www.pcgamingwiki.com/wiki/Invented#Multiplayer"}
+    });
+    let t: Topo = serde_json::from_value(j).unwrap();
+    let f = facts_of(&sys, &t);
+    assert!(f.anti_cheat.found.is_empty(), "{:?}", f.anti_cheat);
+    assert_eq!(f.anti_cheat.unreadable.len(), 1);
+    assert_eq!(
+        super::anti_cheat_state(&t, &f.anti_cheat),
+        AntiCheatState::Enforced {
+            systems: vec![],
+            unreadable: true
+        }
+    );
+    assert!(matches!(
+        plan_on(&sys, &t, &["display/layer"]),
+        Err(EngineError::Refused {
+            why: Refusal::AntiCheat(StepKind::CompatLayer),
+            ..
+        })
+    ));
+}
+
+/// Follow-up 2 and 7: a marker that is a link counts as found; a named folder that is a link
+/// is unreadable as a whole, not one find per marker.
+#[test]
+fn rf_links_as_markers_and_as_folders() {
+    let sys = game_sys();
+    mkdir(&sys, "BattlEye");
+    sys.fake_fs()
+        .swap_with_junction(
+            Path::new(&format!(r"{STEAM_GAME}\BattlEye")),
+            r"D:\Elsewhere",
+        )
+        .unwrap();
+    mkdir(&sys, "bin");
+    sys.fake_fs()
+        .swap_with_junction(Path::new(&format!(r"{STEAM_GAME}\bin")), r"D:\Elsewhere")
+        .unwrap();
+    sys.sync_all();
+    let fr = fr(&sys);
+    let store = StoreDir::open(&sys, &fr, Path::new(STEAM_LIB)).unwrap();
+    let g = store.game(&fr, "G").unwrap();
+    let bin = crate::path::RelPath::parse("bin").unwrap();
+    let s = crate::detect::exe::anti_cheat::find(&g, &[bin]);
+    assert_eq!(s.systems(), [AntiCheat::Battleye]);
+    assert_eq!(s.found.len(), 1);
+    assert_eq!(
+        s.unreadable.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        ["bin"]
+    );
+}
+
+/// Follow-up 2: `retired` refused, `needs-retest` warned, two CPU rules refused.
+#[test]
+fn rf_status_and_two_cpu_rules() {
+    let sys = game_sys();
+    let mut t = game_topo(DIRECT);
+    t.status = crate::catalog::model::Status::Retired;
+    assert!(matches!(
+        plan_on(&sys, &t, &["cores/limit"]),
+        Err(EngineError::Retired(_))
+    ));
+    t.status = crate::catalog::model::Status::NeedsRetest;
+    let p = plan_on(&sys, &t, &["cores/limit"]).unwrap();
+    assert_eq!(p.warnings, [Warning::NeedsRetest]);
+
+    let mut j: serde_json::Value =
+        serde_json::from_str(&topo_json(&sha256(&pe(false)), DIRECT)).unwrap();
+    let mut second = j["issues"][0].clone();
+    second["id"] = "cores-again".into();
+    j["issues"].as_array_mut().unwrap().push(second);
+    let two: Topo = serde_json::from_value(j).unwrap();
+    assert!(matches!(
+        plan_on(&sys, &two, &["cores/limit", "cores-again/limit"]),
+        Err(EngineError::TwoCpuRules)
+    ));
+}
+
+/// Follow-up 3: every launch method that opens or enters the game is refused with anti-cheat.
+#[test]
+fn rf_hold_ifeo_inproc_are_refused_with_anti_cheat() {
+    let sys = game_sys();
+    mkdir(&sys, "pb");
+    for (m, k) in [
+        ("hold", StepKind::LaunchHold),
+        ("ifeo", StepKind::LaunchIfeo),
+        ("inproc", StepKind::LaunchInproc),
+    ] {
+        let t = game_topo(&format!(r#"{{"method":"{m}"}}"#));
+        assert!(
+            matches!(
+                plan_on(&sys, &t, &["cores/limit"]),
+                Err(EngineError::Refused { why: Refusal::AntiCheat(got), .. }) if got == k
+            ),
+            "{m}"
+        );
+        assert_eq!(anti_cheat_rule(k), AcRule::Refuse);
+    }
+}
+
+/// Follow-up 4: retired Topos aside, exactly one match; two are `Several`.
+#[test]
+fn rf_select_sets_retired_topos_aside() {
+    use super::{Selection, select};
+    let sys = game_sys();
+    let a = game_topo(DIRECT);
+    let mut b = a.clone();
+    b.id = crate::catalog::model::Id::parse("invented-game-b").unwrap();
+    let fa = facts_of(&sys, &a);
+    let fb = facts_of(&sys, &b);
+    assert!(matches!(
+        select(vec![(&a, fa.clone()), (&b, fb.clone())]).1,
+        Selection::Several(v) if v.len() == 2
+    ));
+    let mut r = b.clone();
+    r.status = crate::catalog::model::Status::Retired;
+    let (retired, sel) = select(vec![(&a, fa), (&r, fb.clone())]);
+    assert_eq!(retired.len(), 1);
+    assert!(matches!(sel, Selection::One(t, _) if t.id.as_str() == "invented-game"));
+    let (retired, sel) = select(vec![(&r, fb)]);
+    assert_eq!(retired.len(), 1);
+    assert!(matches!(sel, Selection::NoMatch(v) if v.is_empty()));
+}
+
+/// Follow-up 4: the index refuses two live Topos with the same app and an exe hash in common.
+#[test]
+fn rf_the_index_refuses_overlapping_topos() {
+    let mut a = game_topo(DIRECT);
+    a.issues.retain(|i| i.id.as_str() != "wrapper");
+    let mut b = a.clone();
+    b.id = crate::catalog::model::Id::parse("invented-game-b").unwrap();
+    let index = |topos: &[&Topo]| crate::catalog::Index {
+        format: 1,
+        seq: 1,
+        issued: "2026-11-09T12:00:00Z".into(),
+        topos: topos.iter().map(|t| (*t).clone()).collect(),
+        packages: vec![],
+    };
+    let e = crate::catalog::check_index(&index(&[&a, &b])).unwrap_err();
+    assert!(e.to_string().contains("claim the same app"), "{e}");
+    let mut retired = b.clone();
+    retired.status = crate::catalog::model::Status::Retired;
+    crate::catalog::check_index(&index(&[&a, &retired])).unwrap();
+    let mut other_app = b.clone();
+    other_app.matches.steam_appid = Some(APP + 1);
+    crate::catalog::check_index(&index(&[&a, &other_app])).unwrap();
+}
+
+/// Follow-up 1: a step file gets the same rule (nothing released, a step file has no Topo).
+#[test]
+fn rf_step_files_get_the_same_rule() {
+    use super::anti_cheat_steps;
+    let sys = game_sys();
+    let sf = StepFile::parse(
+        br#"{"format":1,"game":{"steam":220},"main_exe":"game.exe","steps":[
+ {"launch_method":{"method":"direct","start":"FFLauncher.exe","cpu":{"max_threads":8}}},
+ {"ini_set":{"file":"cfg\\Game.ini","values":[{"section":"Display","key":"Width","value":"1920"}]}}]}"#,
+    )
+    .unwrap();
+    let clear = crate::detect::exe::AntiCheatScan::default();
+    assert_eq!(anti_cheat_steps(&sf.steps, &clear), Ok(vec![]));
+    mkdir(&sys, "pb");
+    let f = facts_of(&sys, &game_topo(DIRECT));
+    assert_eq!(
+        anti_cheat_steps(&sf.steps, &f.anti_cheat),
+        Ok(vec![StepKind::LaunchDirect, StepKind::IniSet])
+    );
+    let layer = StepFile::parse(
+        br#"{"format":1,"game":{"steam":220},"main_exe":"game.exe","steps":[
+ {"compat_layer":{"exe":"game.exe","layers":["ZZ_FLAG_A"]}}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        anti_cheat_steps(&layer.steps, &f.anti_cheat),
+        Err(Refusal::AntiCheat(StepKind::CompatLayer))
+    );
 }

@@ -38,6 +38,17 @@ pub enum TopoMsg<'a> {
     },
     /// No executable matched: nothing is offered.
     NoMatch,
+    /// A retired Topo of the app: listed, never chosen.
+    Retired {
+        /// Its ID.
+        id: String,
+        /// Its revision.
+        rev: u32,
+        /// Its title.
+        title: Shown<'a>,
+    },
+    /// `launch.cpu` is shown, not planned (ADR 0020 amendment P4-4).
+    LaunchCpuNotPlanned,
     /// Several Topos match this installation.
     Several {
         /// Their IDs.
@@ -128,6 +139,12 @@ impl fmt::Display for TopoMsg<'_> {
             Self::NoMatch => f.write_str(
                 "  no executable of this installation matches the Topo's hashes: nothing is offered",
             ),
+            Self::Retired { id, rev, title } => {
+                write!(f, "Topo {id} rev {rev} is retired and offers nothing: {title}")
+            }
+            Self::LaunchCpuNotPlanned => {
+                f.write_str("  launch.cpu: not planned (pick a cpu step)")
+            }
             Self::Several { ids } => write!(
                 f,
                 "several Topos match this installation ({ids}): refused, nothing is offered"

@@ -25,6 +25,9 @@ use crate::prim::{CompatLayerSpec, CpuRuleSpec, IniSetSpec, RegistrySetSpec};
 /// engine enforces the anti-cheat rule for every system it finds.
 pub const ANTI_CHEAT_RELEASE_REVIEWED: bool = false;
 
+/// Most executables of `match.exes` (P4-4: each is hashed when the engine reads a game).
+pub const MAX_EXES: usize = 8;
+
 /// Which entries are allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rules {
@@ -261,6 +264,11 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
         !t.matches.exes.is_empty(),
         "match.exes",
         "at least one executable",
+    )?;
+    ensure(
+        t.matches.exes.len() <= MAX_EXES,
+        "match.exes",
+        "at most 8 executables",
     )?;
     for (i, e) in t.matches.exes.iter().enumerate() {
         ensure(
@@ -880,4 +888,30 @@ pub fn package_refs(t: &Topo) -> impl Iterator<Item = &Id> {
             TopoStep::Package(id) => Some(id),
             _ => None,
         })
+}
+
+/// Two Topos claim the same build: the same `match.steam_appid` and a hash in common (a SHA-256
+/// or a SHA-1 of any of their executables, `TODO` never counts).
+pub fn overlap(a: &Topo, b: &Topo) -> bool {
+    if a.matches.steam_appid != b.matches.steam_appid {
+        return false;
+    }
+    let hashes = |t: &Topo| -> Vec<Vec<u8>> {
+        t.matches
+            .exes
+            .iter()
+            .flat_map(|e| {
+                let s256 = e
+                    .sha256
+                    .as_ref()
+                    .and_then(|h| h.bytes())
+                    .map(|b| b.to_vec());
+                let s1 = e.sha1.as_ref().and_then(|h| h.bytes()).map(|b| b.to_vec());
+                [s256, s1]
+            })
+            .flatten()
+            .collect()
+    };
+    let hb = hashes(b);
+    hashes(a).iter().any(|h| hb.contains(h))
 }

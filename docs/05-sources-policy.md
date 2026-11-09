@@ -41,13 +41,13 @@ The compatibility-layer tokens (`policy::registry::layers`, ADR 0018 amendment P
 
 Observed and in the group table only (not addable): `16BITCOLOR` (`layers-04-color16`), `256COLOR` (`layers-12-combined`), `640X480` (`layers-05-640x480`), `DPIUNAWARE` (`layers-21-dpi-system`), `GDIDPISCALING` (`layers-22-dpi-sysenh`), `WINXPSP3` (`layers-02-xpsp3`), `WIN7RTM` (`layers-03-win7`). Observed and neither: `RUNASADMIN` (`layers-07-admin`), `REGISTERAPPRESTART` (`layers-08-restart`), `TRANSFORMLEGACYCOLORMANAGED` (`layers-09-icc`).
 
-The anti-cheat markers (`detect::exe::anti_cheat::MARKERS`, P4-4, user decision E4) follow the same standard: a folder or file name of an anti-cheat system next to the game, each with its source. Any entry of the name counts (fail closed: a false find costs fixes, never a ban, P4 risk R7). An entry without a vendor source yet is marked `TODO` and needs one, or a dump of a real machine, before A6.
+The anti-cheat markers (`detect::exe::anti_cheat::MARKERS`, P4-4, user decision E4) follow the same standard: a folder or file name of an anti-cheat system next to the game, each with its source. Any entry of the name counts (fail closed: a false find costs fixes, never a ban, P4 risk R7); an entry the user may not open, and a searched folder that is a link or cannot be asked, count as unreadable, which no release of a dead system covers. An entry without a vendor source yet is marked `TODO` and needs one, or a dump of a real machine, before A6.
 
 | System | Marker | Source |
 |---|---|---|
 | `easy-anti-cheat` | folder `EasyAntiCheat` | TODO (no vendor source yet; already on the walk's skip list, ADR 0014) |
 | `easy-anti-cheat` | folder `EasyAntiCheat_EOS` | TODO (no vendor source yet) |
-| `easy-anti-cheat` | file `start_protected_game.exe` | https://redpoint-games-docs.pages.dev/docs/setup/networking/anticheat |
+| `easy-anti-cheat` | file `start_protected_game.exe` | https://redpoint-games-docs.pages.dev/docs/setup/networking/anticheat (third-party plugin documentation; to be replaced by Epic's own documentation once found) |
 | `battleye` | folder `BattlEye` | https://www.battleye.com/support/faq/ ("the "BattlEye" folder in your game directory") |
 | `punkbuster` | folder `PunkBuster` | developer-machine dump, ADR 0014 amendment 2026-11-05 |
 | `punkbuster` | folder `pb` | https://www.pbbans.com/info-center-pbsetup.html ("the game PB folder") |

@@ -23,7 +23,9 @@ use rerun_core::plan::{Pick, PlanBytes, Preview};
 use rerun_core::policy::registry::RegPolicy;
 use rerun_core::policy::root::{AppDir, Create, Shadow, preview_with_shadows};
 use rerun_core::prim::{GameRef, MethodSpec, PlanCtx};
-use rerun_core::topo::{self, AntiCheatState, ExeState, Facts, GameFacts, Report, Warning};
+use rerun_core::topo::{
+    self, AntiCheatState, ExeState, Facts, GameFacts, Report, Selection, Warning,
+};
 
 use crate::cli::Exit;
 use crate::host::{Host, fail, forbidden, shown, standard_user};
@@ -99,6 +101,9 @@ fn report_lines(r: &Report<'_>, g: &GameFacts) -> Vec<Message<'static>> {
         },
         Err(p) => TopoMsg::LaunchProblem { why: p.to_string() },
     }));
+    if t.launch.as_ref().is_some_and(|l| l.cpu.is_some()) {
+        m.push(Message::Topo(TopoMsg::LaunchCpuNotPlanned));
+    }
     match &r.anti_cheat {
         AntiCheatState::Clear => {}
         AntiCheatState::Enforced {
@@ -248,34 +253,42 @@ fn run<W: Write, E: Write>(
             .iter()
             .map(|t| (*t, topo::read_game(game, t)))
             .collect();
-        let matched: Vec<&(&rerun_core::catalog::Topo, GameFacts)> =
-            read.iter().filter(|(_, g)| g.matched()).collect();
-        let (t, g) = match matched.as_slice() {
-            [one] => (one.0, &one.1),
-            [] => {
-                let mut m = Vec::new();
-                for (t, g) in &read {
-                    m.push(Message::Topo(TopoMsg::Heading {
+        // Review follow-up 4: retired Topos are listed, never chosen.
+        let (retired, selection) = topo::select(read);
+        let mut lead: Vec<Message<'static>> = retired
+            .iter()
+            .map(|t| {
+                Message::Topo(TopoMsg::Retired {
+                    id: t.id.to_string(),
+                    rev: t.rev,
+                    title: escape::text(&t.title).into_owned(),
+                })
+            })
+            .collect();
+        let (t, g) = match selection {
+            Selection::One(t, g) => (t, g),
+            Selection::NoMatch(live) => {
+                for (t, g) in &live {
+                    lead.push(Message::Topo(TopoMsg::Heading {
                         id: t.id.to_string(),
                         rev: t.rev,
                         status: status(t.status),
                         title: escape::text(&t.title).into_owned(),
                     }));
-                    m.extend(exe_lines(g));
+                    lead.extend(exe_lines(g));
                 }
-                m.push(Message::Topo(TopoMsg::NoMatch));
-                return Outcome::Report(m, refused);
+                lead.push(Message::Topo(TopoMsg::NoMatch));
+                return Outcome::Report(lead, refused);
             }
-            several => {
-                let ids: Vec<String> = several.iter().map(|(t, _)| t.id.to_string()).collect();
-                return Outcome::Report(
-                    vec![Message::Topo(TopoMsg::Several {
-                        ids: ids.join(", "),
-                    })],
-                    refused,
-                );
+            Selection::Several(several) => {
+                let ids: Vec<String> = several.iter().map(|t| t.id.to_string()).collect();
+                lead.push(Message::Topo(TopoMsg::Several {
+                    ids: ids.join(", "),
+                }));
+                return Outcome::Report(lead, refused);
             }
         };
+        let g = &g;
         let facts = Facts {
             profile: &profile,
             table,
@@ -284,7 +297,8 @@ fn run<W: Write, E: Write>(
         if picks.is_empty() {
             return match topo::report(t, &facts) {
                 Ok(r) => {
-                    let mut m = report_lines(&r, g);
+                    let mut m = lead;
+                    m.extend(report_lines(&r, g));
                     m.push(Message::Blank);
                     m.push(Message::Topo(TopoMsg::PickHint));
                     Outcome::Report(m, Exit::Report)
@@ -316,7 +330,8 @@ fn run<W: Write, E: Write>(
         });
         match encoded {
             Ok((bytes, view, shadows)) => {
-                let mut before = heading;
+                let mut before = lead;
+                before.extend(heading);
                 before.push(Message::Topo(TopoMsg::Source {
                     id: t.id.to_string(),
                     rev: t.rev,

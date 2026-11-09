@@ -130,13 +130,19 @@ fn pick(s: &str) -> Result<Pick, String> {
     }
 }
 
-/// The target of `rerun plan`: digits only are a Steam app ID (1 to 4294967295).
+/// The target of `rerun plan` is digits only: always meant as a Steam app ID.
+pub fn digits_only(target: &std::path::Path) -> bool {
+    target
+        .to_str()
+        .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The target of `rerun plan` as a Steam app ID (1 to 4294967295), if it is digits only.
 pub fn app_id(target: &std::path::Path) -> Option<u32> {
-    let s = target.to_str()?;
-    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+    if !digits_only(target) {
         return None;
     }
-    s.parse().ok().filter(|n| *n > 0)
+    target.to_str()?.parse().ok().filter(|n| *n > 0)
 }
 
 /// A plan hash: exactly 64 lower-case hex digits, checked before any system access.

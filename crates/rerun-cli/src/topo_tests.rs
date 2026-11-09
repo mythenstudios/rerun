@@ -46,12 +46,12 @@ fn index(game_sha256: &str) -> String {
     format!(
         r#"{{"format":1,"seq":1,"issued":"2026-11-09T12:00:00Z","topos":[{{"format":1,"id":"invented-game","title":"Invented Game","status":"active","rev":2,
 "match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{game_sha256}","api":"d3d9"}}]}},
-"launch":{{"chain":["steam"],"method":"auto","start":"FFLauncher.exe"}},
+"launch":{{"chain":["steam"],"method":"auto","start":"FFLauncher.exe","cpu":{{"max_threads":4}}}},
 "issues":[
  {{"id":"cores","title":"Too many cores","variants":[{{"id":"limit","status":"verified","kind":"fix","steps":[{{"cpu":{{"max_threads":8,"single_l3":true,"smt":false}}}}]}}]}},
  {{"id":"nvidia","title":"NVIDIA only","when":{{"gpu.vendor":"nvidia"}},"variants":[]}},
  {{"id":"display","title":"Display","variants":[{{"id":"layer","status":"unverified","kind":"fix","steps":[{{"compat_layer":{{"exe":"game.exe","layers":["HIGHDPIAWARE"]}}}}]}}]}}
-]}}],"packages":[]}}"#
+]}},{{"format":1,"id":"invented-game-old","title":"Invented Game (old)","status":"retired","rev":1,"match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{game_sha256}","api":"d3d9"}}]}},"issues":[]}}],"packages":[]}}"#
     )
 }
 
@@ -109,6 +109,8 @@ fn c_te2_the_report() {
         "    no known fix\n",
         "    display/layer: unverified fix\n",
         "plan with --pick <issue>/<variant>",
+        "Topo invented-game-old rev 1 is retired and offers nothing: Invented Game (old)\n",
+        "  launch.cpu: not planned (pick a cpu step)\n",
     ] {
         assert!(r.stdout.contains(line), "{line}\n{}", r.stdout);
     }
@@ -250,4 +252,59 @@ fn c_te6_usage() {
         ])
         .is_err()
     );
+}
+
+/// Review follow-up 1: a step file gets the anti-cheat rule too (warned here, refused below).
+#[test]
+fn c_te7_step_files_get_the_anti_cheat_rule() {
+    let sys = lm_sys(false, &steps(8));
+    sys.fake_fs()
+        .mkdir_all(Path::new(&format!(r"{G}\BattlEye")))
+        .unwrap();
+    sys.fake_fs().sync_all();
+    let r = expect(
+        &sys,
+        &["plan", crate::tests::STEPS, "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    assert!(
+        r.stdout
+            .starts_with("warning: anti-cheat found; cpu (direct) is planned, at your own risk\n"),
+        "{}",
+        r.stdout
+    );
+    let watch = steps(8).replace(r#""method":"direct""#, r#""method":"watch""#);
+    sys.fake_fs()
+        .remove_abs(Path::new(crate::tests::STEPS))
+        .unwrap();
+    sys.fake_fs()
+        .put_file(Path::new(crate::tests::STEPS), watch.as_bytes())
+        .unwrap();
+    sys.fake_fs().sync_all();
+    let r = expect(
+        &sys,
+        &["plan", crate::tests::STEPS, "--dry-run"],
+        Answer::No,
+        Exit::Refused,
+    );
+    assert!(
+        r.stderr.contains("no cpu (watch) for this game"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// Review follow-up 9: digits only are always an app ID; 0 and more than u32 are usage errors.
+#[test]
+fn c_te8_digits_out_of_range() {
+    let sys = sys();
+    for bad in ["0", "4294967296", "99999999999999999999"] {
+        let r = expect(&sys, &["plan", bad], Answer::No, Exit::Usage);
+        assert!(
+            r.stderr.contains("not a Steam app ID"),
+            "{bad}: {}",
+            r.stderr
+        );
+    }
 }

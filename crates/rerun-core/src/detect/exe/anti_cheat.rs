@@ -5,8 +5,9 @@
 //! The markers are a fixed table ([`MARKERS`]): a folder or a file of an anti-cheat system
 //! next to the game, each with its source (`docs/05-sources-policy.md`, "Reference data"; an
 //! entry without a vendor source yet says so). Fail closed: any entry of that name (a file, a
-//! folder, a link, an entry the user may not open) counts as found, and a folder that cannot
-//! be asked is [`AntiCheatScan::unreadable`], which the Topo engine treats like a find. A
+//! folder, a link) counts as found; an entry the user may not open, and a named folder that is
+//! a link or cannot be asked, is [`AntiCheatScan::unreadable`]: the Topo engine applies the
+//! rule for it and no release of a dead system covers it. A
 //! false find costs fixes, never a ban (P4 risk R7): leftovers of an old system (a `pb`
 //! folder of PunkBuster) count too, until a signed Topo releases that system as dead.
 //!
@@ -22,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::path::RelPath;
 use crate::policy::root::GameDir;
 use crate::sys::SysErrorKind;
+use crate::sys::fs::EntryKind;
 
 /// An anti-cheat system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -196,6 +198,21 @@ pub fn find(game: &GameDir<'_>, dirs: &[RelPath]) -> AntiCheatScan {
     }
     let mut out = AntiCheatScan::default();
     for dir in where_ {
+        // A named folder is asked once: missing or a file holds no marker; a link or a folder
+        // that cannot be asked is unreadable as a whole (never one find per marker).
+        if let Some(d) = dir {
+            match game.dir().metadata(d) {
+                Ok(Some(md))
+                    if md.kind == EntryKind::Dir && md.reparse.is_none() && !md.restricted => {}
+                Ok(Some(md)) if md.kind == EntryKind::File => continue,
+                Ok(None) => continue,
+                Err(e) if e.kind == SysErrorKind::NotFound => continue,
+                _ => {
+                    out.unreadable.push(d.clone());
+                    continue;
+                }
+            }
+        }
         for m in MARKERS {
             let path = match dir {
                 None => RelPath::from_segment(m.name),
@@ -206,13 +223,15 @@ pub fn find(game: &GameDir<'_>, dirs: &[RelPath]) -> AntiCheatScan {
                 continue;
             };
             match game.dir().metadata(&path) {
+                // An entry the user may not open could be anything: counted, never released.
+                Ok(Some(md)) if md.restricted => out.unreadable.push(path),
                 Ok(Some(_)) => out.found.push(AntiCheatHit {
                     system: m.system,
                     path,
                 }),
                 Ok(None) => {}
                 Err(e) if e.kind == SysErrorKind::NotFound => {}
-                // A link on the way or the entry itself: something of that name is there.
+                // The entry itself is a link: something of that name is there.
                 Err(e) if e.kind == SysErrorKind::ReparsePoint => out.found.push(AntiCheatHit {
                     system: m.system,
                     path,

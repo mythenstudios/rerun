@@ -12,6 +12,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use rerun_core::detect::exe::anti_cheat;
 use rerun_core::detect::steam::{self, AppState};
 use rerun_core::path::RootPath;
 use rerun_core::plan::{self, PlanBytes, Preview};
@@ -21,10 +22,11 @@ use rerun_core::policy::root::{
 };
 use rerun_core::prim::{self, GameRef, MAX_STEP_FILE, PlanCtx, StepFile};
 use rerun_core::sys::System;
+use rerun_core::topo::{self, StepKind};
 
 use crate::cli::Exit;
 use crate::host::{Host, after_change, before_change, fail, forbidden, shown, standard_user};
-use crate::messages::{Message, SteamWhy, TxnMsg};
+use crate::messages::{Message, SteamWhy, TopoMsg, TxnMsg};
 use crate::out::Out;
 use crate::preview;
 
@@ -62,7 +64,12 @@ fn run<W: Write, E: Write>(
     // P3-3c: the path of Rerun's folder without creating it (a launch profile names its
     // profiles root by path); unknown only fails a `launch_method` step.
     let app_path = AppDir::path_of(sys).ok();
-    let (bytes, view, shadows) = with_game(sys, &fr, &sf.game, err, |game, steam_app| {
+    let (bytes, view, shadows, warned) = with_game(sys, &fr, &sf.game, err, |game, steam_app| {
+        // User decision E4 holds for every plan source (P4-4 review follow-up 1): a step file
+        // has no Topo, so nothing is released as dead.
+        let scan = anti_cheat::find(game, &topo::step_file_dirs(&sf.steps, &sf.main_exe));
+        let warned = topo::anti_cheat_steps(&sf.steps, &scan)
+            .map_err(|r| plan::PlanError::Step(r.to_string()))?;
         let ctx = PlanCtx {
             game,
             app: app.as_ref(),
@@ -75,7 +82,7 @@ fn run<W: Write, E: Write>(
         let b = p.encode()?;
         // P3-7: the VirtualStore lookup (read only) from the same decode as the preview.
         let (v, sh) = preview_with_shadows(sys, &b)?;
-        Ok::<(PlanBytes, Preview, Vec<Shadow>), plan::PlanError>((b, v, sh))
+        Ok::<_, plan::PlanError>((b, v, sh, warned))
     })?
     .map_err(|e| fail(err, TxnMsg::PlanFailed { error: shown(&e) }, Exit::Refused))?;
     show_and_store(
@@ -87,11 +94,30 @@ fn run<W: Write, E: Write>(
             view,
             shadows,
         },
-        &[],
+        &warned_lines(&warned),
         dry_run,
         out,
         err,
     )
+}
+
+/// The anti-cheat warnings of a step file, before its preview.
+fn warned_lines(warned: &[StepKind]) -> Vec<Message<'static>> {
+    let mut m: Vec<Message<'static>> = warned
+        .iter()
+        .map(|k| {
+            Message::Topo(TopoMsg::Warning {
+                text: format!(
+                    "warning: anti-cheat found; {} is planned, at your own risk",
+                    k.as_str()
+                ),
+            })
+        })
+        .collect();
+    if !m.is_empty() {
+        m.push(Message::Blank);
+    }
+    m
 }
 
 /// A plan as encoded, with its preview and Rerun's folder as found while planning.

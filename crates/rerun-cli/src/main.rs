@@ -129,6 +129,18 @@ fn run<W: io::Write, E: io::Write>(
             dry_run,
         } => match cli::app_id(&target) {
             Some(app_id) => topo::plan(host, app_id, &picks, dry_run, out, err),
+            // Digits only are always meant as an app ID (review follow-up 9).
+            None if cli::digits_only(&target) => {
+                let _ = err.lines(&[
+                    Message::Usage {
+                        what: "not a Steam app ID (1 to 4294967295)",
+                        why: None,
+                        value: target.to_str().map(|s| escape::text(s).into_owned()),
+                    },
+                    Message::UsageHelp,
+                ]);
+                Exit::Usage
+            }
             None if !picks.is_empty() => {
                 let _ = err.lines(&[
                     Message::Usage {

@@ -291,6 +291,21 @@ pub fn check_index(index: &Index) -> Result<(Lookup, Lookup), IndexError> {
     for p in &index.packages {
         check::package(p, Rules::Release).map_err(|e| rule(format!("package {}: {e}", p.id)))?;
     }
+    // P4-4 review follow-up 4: two Topos that are not retired never claim the same build (the
+    // same app and an executable hash in common), so the engine finds at most one.
+    let live: Vec<&Topo> = index
+        .topos
+        .iter()
+        .filter(|t| t.status != model::Status::Retired)
+        .collect();
+    for (i, a) in live.iter().enumerate() {
+        if let Some(b) = live[..i].iter().find(|b| check::overlap(a, b)) {
+            return Err(rule(format!(
+                "topos {} and {} claim the same app and executable hash",
+                b.id, a.id
+            )));
+        }
+    }
     let packages: Lookup = index
         .packages
         .iter()
