@@ -214,9 +214,11 @@ if (-not $r1) {
             'ok' { Write-Host 'VirtualStore: a copy appeared under the user''s VirtualStore and plan --dry-run warned and named it' }
             'refused_admin_only' { Write-Host "::warning::VirtualStore: $($vs.detail)" }
             'not_virtualized' {
-                $on = ($vs.uac.EnableLUA -eq 1) -and ($vs.uac.EnableVirtualization -ne 0)
-                if ($on) { Fail "VirtualStore: UAC is on (EnableLUA=1) but the stub's write was not virtualized: $($vs.detail)" }
-                else { Write-Host "::warning::VirtualStore NOT VERIFIED: file virtualization is off on this runner (EnableLUA=$($vs.uac.EnableLUA), EnableVirtualization=$($vs.uac.EnableVirtualization)); the real case stays open in docs/09-testing.md. $($vs.detail)" }
+                # Measured (CI run 42664558936): UAC is on, yet the write is denied, not virtualized.
+                # The suite runs as a scheduled task with a password (a batch logon), and Windows
+                # virtualizes only interactive logons, so this runner cannot show the real case. It
+                # is a gate for admin-only roots only (phase 6), checked there by hand.
+                Write-Host "::warning::VirtualStore NOT VERIFIED: the write was not virtualized (batch logon of the scheduled task; EnableLUA=$($vs.uac.EnableLUA), EnableVirtualization=$($vs.uac.EnableVirtualization)); the real case stays open in docs/09-testing.md. $($vs.detail)"
             }
             'no_warning' { Fail "VirtualStore: $($vs.detail)" }
             default { Fail "VirtualStore: the case failed (verdict $($vs.verdict)): $($vs.detail)" }
