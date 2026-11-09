@@ -18,7 +18,9 @@
 //!   wrapper with three classes, `NtFlushBuffersFileEx`, `GetFinalPathNameByHandleW`,
 //!   `GetVolumeInformationByHandleW`, `DeviceIoControl`), handles as `OwnedHandle`.
 //! - `token`: `user_writable` via `AccessCheck` against the non-elevated user's token, and
-//!   `TokenElevation` for the registry write side (S2).
+//!   `TokenElevation` for the registry write side (S2) and the elevated helper; the one
+//!   `AdjustTokenPrivileges` (`drop_privileges`, ADR 0023 §3 step 2: every privilege but
+//!   `SeChangeNotifyPrivilege` removed and read back; only the helper process calls it).
 //! - `shell`: the only calls to `SHGetKnownFolderPath` (with the process token, freed with
 //!   `CoTaskMemFree`) and `GetSystemWindowsDirectoryW`.
 //! - `reg`: the only registry calls (`RegOpenCurrentUser`, `RegOpenKeyExW`, `RegEnumKeyExW`,
@@ -42,6 +44,8 @@
 //!   per enumeration, at most 64 adapters.
 //! - `gpu`: `WinGpu`, name/LUID/driver-version mapping and error mapping; no `unsafe`.
 //! - `system`: `WinSystem`; no `unsafe`.
+//! - `helper`: `WinHelperToken`, the elevated helper's own token (ADR 0023); no `unsafe`; never
+//!   references `WinSystem`, `WinGpu`, `dxgi` or `loader`'s DLL loading.
 //! - `status`: `NTSTATUS`/Win32 code → `SysErrorKind`, for files and the registry (pure).
 //! - `name`: single-segment check, L1 long-name check, `volume_path`, `open_dir` input rules,
 //!   NT buffer decoding (pure).
@@ -88,6 +92,7 @@ mod cpu;
 mod dxgi;
 mod fs;
 mod gpu;
+mod helper;
 mod known_folders;
 mod loader;
 mod name;
@@ -113,6 +118,7 @@ mod tests;
 pub use console::discard_console_input;
 pub use fs::{WinDir, WinFs};
 pub use gpu::WinGpu;
+pub use helper::WinHelperToken;
 pub use known_folders::WinKnownFolders;
 pub use loader::restrict_dll_search;
 pub(crate) use registry::WinRegistry;

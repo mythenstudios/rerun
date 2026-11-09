@@ -278,3 +278,246 @@ pub(super) fn user_writable(dir: BorrowedHandle<'_>) -> Result<bool, u32> {
     }
     Ok(status != 0 && granted & WRITE_RIGHTS != 0)
 }
+
+/// wdm.h `SE_CHANGE_NOTIFY_PRIVILEGE`: the well-known LUID (`{ LowPart: 23, HighPart: 0 }`) of
+/// `SeChangeNotifyPrivilege`, the one privilege the elevated helper keeps (ADR 0023 §3 step 2:
+/// traverse checking; every process has it, removing it would only break path walks).
+const SE_CHANGE_NOTIFY_PRIVILEGE: u32 = 23;
+/// winerror.h `ERROR_NOT_ALL_ASSIGNED`: `AdjustTokenPrivileges` succeeded only in part. Also
+/// the error when a privilege is still in the token after the removal.
+const ERROR_NOT_ALL_ASSIGNED: u32 = 1300;
+/// Bound of the `TokenPrivileges` buffer: a token holds at most about 36 privileges (12 bytes
+/// each); anything near this is not a token Windows made.
+const MAX_PRIVILEGES_BYTES: u32 = 64 << 10;
+
+/// One `LUID_AND_ATTRIBUTES` of a `TOKEN_PRIVILEGES` buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Privilege {
+    /// `Luid.LowPart`.
+    pub low: u32,
+    /// `Luid.HighPart`.
+    pub high: i32,
+    /// `Attributes` (`SE_PRIVILEGE_*`).
+    pub attributes: u32,
+}
+
+impl Privilege {
+    fn is_change_notify(self) -> bool {
+        self.low == SE_CHANGE_NOTIFY_PRIVILEGE && self.high == 0
+    }
+}
+
+/// Decodes a `TOKEN_PRIVILEGES` buffer as `GetTokenInformation(TokenPrivileges)` fills it
+/// (`winnt.h`, 4-byte packing): `PrivilegeCount` (u32), then that many 12-byte
+/// `LUID_AND_ATTRIBUTES` (`LowPart` u32, `HighPart` i32, `Attributes` u32). `None` if the
+/// buffer is shorter than the count says. Pure; the layout is pinned by a test against
+/// `windows-sys`.
+pub(super) fn decode_privileges(b: &[u8]) -> Option<Vec<Privilege>> {
+    let u32_at = |at: usize| -> Option<u32> {
+        let bytes: [u8; 4] = b.get(at..at.checked_add(4)?)?.try_into().ok()?;
+        Some(u32::from_ne_bytes(bytes))
+    };
+    let count = usize::try_from(u32_at(0)?).ok()?;
+    let end = count.checked_mul(12)?.checked_add(4)?;
+    if end > b.len() {
+        return None;
+    }
+    (0..count)
+        .map(|i| {
+            let at = 4 + 12 * i;
+            Some(Privilege {
+                low: u32_at(at)?,
+                high: u32_at(at + 4)?.cast_signed(),
+                attributes: u32_at(at + 8)?,
+            })
+        })
+        .collect()
+}
+
+/// The `TOKEN_PRIVILEGES` buffer (as `u32` words, so it is 4-aligned) that removes every
+/// privilege of `privileges` except `SeChangeNotifyPrivilege` (`SE_PRIVILEGE_REMOVED`); `None`
+/// if there is nothing to remove. Pure.
+pub(super) fn removal(privileges: &[Privilege]) -> Option<Vec<u32>> {
+    use windows_sys::Win32::Security::SE_PRIVILEGE_REMOVED;
+    let gone: Vec<&Privilege> = privileges
+        .iter()
+        .filter(|p| !p.is_change_notify())
+        .collect();
+    if gone.is_empty() {
+        return None;
+    }
+    let mut words = Vec::with_capacity(1 + 3 * gone.len());
+    words.push(u32::try_from(gone.len()).ok()?);
+    for p in gone {
+        words.extend([p.low, p.high.cast_unsigned(), SE_PRIVILEGE_REMOVED]);
+    }
+    Some(words)
+}
+
+/// The process token with `TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES`.
+fn adjustable_process_token() -> Result<OwnedHandle, u32> {
+    use windows_sys::Win32::Security::TOKEN_ADJUST_PRIVILEGES;
+    let mut raw: HANDLE = ptr::null_mut();
+    // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing and is always
+    // valid in this process.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: `process` is the current-process pseudo handle; `raw` is valid for a write.
+    let ok = unsafe { OpenProcessToken(process, TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &mut raw) };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    own(raw).ok_or(ERROR_INSUFFICIENT_BUFFER)
+}
+
+/// The privileges of `token` (`TokenPrivileges`), size query first, at most
+/// [`MAX_PRIVILEGES_BYTES`].
+fn privileges(token: BorrowedHandle<'_>) -> Result<Vec<Privilege>, u32> {
+    use windows_sys::Win32::Security::TokenPrivileges;
+    let mut needed: u32 = 0;
+    // SAFETY: `token` is a live token handle with TOKEN_QUERY; a null buffer of length 0 is the
+    // documented size query; `needed` is valid for a write.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenPrivileges,
+            ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if ok != 0 {
+        // A size query cannot succeed: the buffer holds at least the count.
+        return Err(ERROR_INSUFFICIENT_BUFFER);
+    }
+    let err = last_error();
+    if err != ERROR_INSUFFICIENT_BUFFER || needed == 0 || needed > MAX_PRIVILEGES_BYTES {
+        return Err(err);
+    }
+    // u32 words: 4-byte alignment, as TOKEN_PRIVILEGES needs.
+    let mut words = vec![0u32; (needed as usize).div_ceil(4)];
+    let len = u32::try_from(words.len() * 4).map_err(|_| ERROR_INSUFFICIENT_BUFFER)?;
+    let mut returned: u32 = 0;
+    // SAFETY: `token` is a live token handle with TOKEN_QUERY; `words` is valid for writes of
+    // `len` bytes and 4-aligned; `returned` is valid for a write.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenPrivileges,
+            words.as_mut_ptr().cast::<c_void>(),
+            len,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+    let filled = bytes
+        .get(..returned as usize)
+        .ok_or(ERROR_INSUFFICIENT_BUFFER)?;
+    decode_privileges(filled).ok_or(ERROR_INSUFFICIENT_BUFFER)
+}
+
+/// Removes every privilege of the process token except `SeChangeNotifyPrivilege` and reads
+/// the token back (ADR 0023 §3 step 2). Process-wide and irreversible: only the elevated
+/// helper calls it, as its first step after `restrict_dll_search` (never a test process,
+/// which would lose privileges other tests need). Win32 error on failure;
+/// `ERROR_NOT_ALL_ASSIGNED` if a privilege is still there afterwards.
+pub(super) fn drop_privileges() -> Result<(), u32> {
+    use std::os::windows::io::AsHandle;
+    use windows_sys::Win32::Security::{AdjustTokenPrivileges, TOKEN_PRIVILEGES};
+    let token = adjustable_process_token()?;
+    if let Some(words) = removal(&privileges(token.as_handle())?) {
+        let len = u32::try_from(words.len() * 4).map_err(|_| ERROR_INSUFFICIENT_BUFFER)?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the one AdjustTokenPrivileges call site: the elevated helper removes its \
+                      privileges (ADR 0023 §3 step 2)"
+        )]
+        // SAFETY: `token` is a live token handle with TOKEN_ADJUST_PRIVILEGES, kept alive until
+        // after the call; `words` is a 4-aligned TOKEN_PRIVILEGES of `len` bytes built by
+        // `removal` (the count, then that many LUID_AND_ATTRIBUTES), alive across the call; no
+        // previous state is requested (null, length 0).
+        let ok = unsafe {
+            AdjustTokenPrivileges(
+                token.as_raw_handle(),
+                0,
+                words.as_ptr().cast::<TOKEN_PRIVILEGES>(),
+                len,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        // Success can still mean "not all": the last error tells (documented).
+        let err = last_error();
+        if ok == 0 || err == ERROR_NOT_ALL_ASSIGNED {
+            return Err(err);
+        }
+    }
+    if privileges(token.as_handle())?
+        .iter()
+        .all(|p| p.is_change_notify())
+    {
+        Ok(())
+    } else {
+        Err(ERROR_NOT_ALL_ASSIGNED)
+    }
+}
+
+#[cfg(test)]
+mod privilege_tests {
+    use std::mem::{offset_of, size_of};
+
+    use windows_sys::Win32::Security::{
+        LUID_AND_ATTRIBUTES, SE_PRIVILEGE_REMOVED, TOKEN_PRIVILEGES,
+    };
+
+    use super::{Privilege, decode_privileges, removal};
+
+    /// The 12-byte entries after a 4-byte count that `decode_privileges` and `removal` assume.
+    #[test]
+    fn token_privileges_layout_is_pinned() {
+        assert_eq!(size_of::<LUID_AND_ATTRIBUTES>(), 12);
+        assert_eq!(offset_of!(TOKEN_PRIVILEGES, Privileges), 4);
+        assert_eq!(offset_of!(LUID_AND_ATTRIBUTES, Attributes), 8);
+    }
+
+    fn bytes(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_ne_bytes()).collect()
+    }
+
+    #[test]
+    fn privileges_decode_and_every_one_but_change_notify_is_removed() {
+        // SeShutdown (19, disabled), SeChangeNotify (23, enabled by default), SeBackup (17),
+        // and a LUID with a high part.
+        let buf = bytes(&[4, 19, 0, 0, 23, 0, 3, 17, 0, 0, 23, 1, 0]);
+        let p = decode_privileges(&buf).unwrap();
+        assert_eq!(p.len(), 4);
+        assert_eq!(
+            p[1],
+            Privilege {
+                low: 23,
+                high: 0,
+                attributes: 3
+            }
+        );
+        // The high part counts: {23, 1} is not SeChangeNotify.
+        let words = removal(&p).unwrap();
+        let r = SE_PRIVILEGE_REMOVED;
+        assert_eq!(words, [3, 19, 0, r, 17, 0, r, 23, 1, r]);
+        assert_eq!(decode_privileges(&bytes(&words)).unwrap().len(), 3);
+        // Only SeChangeNotify left, or nothing: nothing to remove.
+        assert_eq!(removal(&p[1..2]), None);
+        assert_eq!(removal(&[]), None);
+    }
+
+    #[test]
+    fn a_short_or_lying_buffer_is_refused() {
+        assert_eq!(decode_privileges(&[]), None);
+        assert_eq!(decode_privileges(&[1, 0]), None);
+        // The count says two, the buffer holds one.
+        assert_eq!(decode_privileges(&bytes(&[2, 19, 0, 0])), None);
+        assert_eq!(decode_privileges(&bytes(&[u32::MAX])), None);
+        assert_eq!(decode_privileges(&bytes(&[0])), Some(vec![]));
+    }
+}

@@ -18,6 +18,7 @@
 mod faults;
 mod fs;
 mod gpu;
+mod helper;
 mod known_folders;
 mod registry;
 mod topology;
@@ -31,6 +32,7 @@ use rerun_proto::cpu::CpuTopology;
 pub use faults::{Fault, Prim, RegPrim};
 pub use fs::{FakeDir, FakeFile, FakeFs, FakeHold, FsOp, StepEvent, StepHook};
 pub use gpu::FakeGpu;
+pub use helper::{FakeHelperToken, TokenCall};
 pub use known_folders::FakeKnownFolders;
 pub use registry::{FakeRegistry, MAX_LINK_HOPS, RegHook};
 pub use topology::FakeTopology;

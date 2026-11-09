@@ -1,0 +1,33 @@
+[package]
+name = "rerun-helper"
+description = "The elevated helper rerun-helper.exe (ADR 0023): adds and removes Rerun's own firewall rules, nothing else."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rerun-helper"
+path = "src/main.rs"
+
+[features]
+# The published test key of the signed index (ADR 0024) for the [SB] and [DEV] helper only
+# (ADR 0023 §2, audit A4 S3). Refused at compile time without debug assertions; CI checks that
+# `-e normal,build` of rerun-helper does not enable rerun-core/test-key, and the release binary
+# test looks for the test key's bytes.
+test-key = ["rerun-core/test-key"]
+
+[dependencies]
+rerun-core.workspace = true
+
+# Test only: the hardening test reads the built helper with rerun_core::detect::pe and the
+# release byte check needs the test key (ADR 0024). Never in the shipped binary
+# (`cargo tree -e normal,build`).
+[dev-dependencies]
+rerun-core = { workspace = true, features = ["test-key"] }
+
+[lints]
+workspace = true

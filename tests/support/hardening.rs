@@ -1,6 +1,7 @@
 //! Test policy for the DLL hardening of the shipped executables (ADR 0008, H2; ADR 0013,
 //! "Hardening tests"), included with `#[path]` by `crates/rerun-cli/tests/hardening.rs`,
-//! `crates/rerun-launch/tests/hardening.rs` and `crates/rerun-core/tests/win_gpu_restricted.rs`.
+//! `crates/rerun-launch/tests/hardening.rs`, `crates/rerun-helper/tests/hardening.rs` and
+//! `crates/rerun-core/tests/win_gpu_restricted.rs`.
 //! The executables are read with `rerun_core::detect::pe` over a `std::fs::File` of the build
 //! output; this file keeps only what is checked. Its teeth test writes its images with the
 //! minimal PE writer in `tests/support/pe_image.rs` (independent of `detect::pe`), which the
@@ -8,7 +9,8 @@
 //!
 //! One allowlist per shipped binary (ADR 0008 amendment "import allowlist per binary", ADR
 //! 0016): [`LAUNCH_IMPORTS`] for `rerun-launch.exe`, [`CLI_IMPORTS`] for `rerun.exe` (and for
-//! the `WinSystem` test binary, so the two cannot drift apart).
+//! the `WinSystem` test binary, so the two cannot drift apart), [`HELPER_IMPORTS`] for
+//! `rerun-helper.exe` (ADR 0023), whose image must also pass [`check_helper_content`].
 
 #![allow(
     dead_code,
@@ -82,6 +84,108 @@ pub const CLI_IMPORTS: &[&str] = &[
     "bcryptprimitives.dll",
     "userenv.dll",
 ];
+
+/// The static imports `rerun-helper.exe` may have (ADR 0023 §13, docs/08 "Acceptance
+/// (helper)"). Found on 2026-11-09 with the P4-2a scaffold (`restrict_dll_search`, the token's
+/// privileges and elevation): `advapi32.dll` for `OpenProcessToken`, `GetTokenInformation` and
+/// `AdjustTokenPrivileges`. The later slices add what they use after a review (`shell32`,
+/// `combase`, `ole32`, `oleaut32` for the known folder and the firewall COM, P4-2b/P4-5a).
+/// Never a graphics DLL ([`forbidden_import`]).
+pub const HELPER_IMPORTS: &[&str] = &[
+    "kernel32.dll",
+    "ntdll.dll",
+    "api-ms-win-core-synch-l1-2-0.dll",
+    "advapi32.dll",
+];
+
+/// The run-time loaders `std` itself names in every binary: its backtrace support loads
+/// `dbghelp.dll` with them (checked on 2026-11-09 in the release `rerun-launch.exe`, which does
+/// not depend on `rerun-core`). Reviewed exception of the helper's loader check
+/// ([`dynamic_loaders`]); the content check ([`dxgi_references`]) shows that nothing loads
+/// DXGI through them.
+pub const STD_LOADERS: &[&str] = &["LoadLibraryA", "LoadLibraryExW"];
+
+/// Whether `image` contains `needle`, ASCII case-insensitive.
+fn contains_ascii_ci(image: &[u8], needle: &[u8]) -> bool {
+    image
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
+}
+
+/// Whether `image` contains `needle` as UTF-16LE, ASCII case-insensitive.
+fn contains_utf16_ci(image: &[u8], needle: &[u8]) -> bool {
+    let n = needle.len() * 2;
+    image.windows(n).any(|w| {
+        w.as_chunks::<2>()
+            .0
+            .iter()
+            .zip(needle)
+            .all(|(c, b)| c[1] == 0 && c[0].eq_ignore_ascii_case(b))
+    })
+}
+
+/// What in `image` names DXGI (docs/08 "Acceptance (helper)", B9): `dxgi.dll` as ASCII or
+/// UTF-16LE (case-insensitive) and the entry point `CreateDXGIFactory1`. A byte search over the
+/// whole file, so it finds an import, a `LoadLibrary` argument and a `GetProcAddress` name
+/// alike. Empty for the helper; the `WinGpu` control binary must not be empty.
+pub fn dxgi_references(image: &[u8]) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    if contains_ascii_ci(image, b"dxgi.dll") {
+        found.push("dxgi.dll (ASCII)");
+    }
+    if contains_utf16_ci(image, b"dxgi.dll") {
+        found.push("dxgi.dll (UTF-16LE)");
+    }
+    if image
+        .windows(b"CreateDXGIFactory1".len())
+        .any(|w| w == b"CreateDXGIFactory1")
+    {
+        found.push("CreateDXGIFactory1");
+    }
+    found
+}
+
+/// Every run-time loader name in `image` (`LoadLibrary` followed by letters, and
+/// `LoadPackagedLibrary`), sorted and unique: a byte search over the whole file (an import's
+/// hint/name entry or a `GetProcAddress` string alike), so `detect::pe` needs no function-name
+/// API (ADR 0013). The helper may name only [`STD_LOADERS`].
+pub fn dynamic_loaders(image: &[u8]) -> Vec<String> {
+    let mut found = Vec::new();
+    for prefix in [&b"LoadLibrary"[..], b"LoadPackagedLibrary"] {
+        for (i, w) in image.windows(prefix.len()).enumerate() {
+            if w == prefix {
+                let tail = image[i + prefix.len()..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_alphabetic())
+                    .count();
+                let name = &image[i..i + prefix.len() + tail];
+                found.push(String::from_utf8_lossy(name).into_owned());
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// The helper's content rules on `image` (docs/08 "Acceptance (helper)"): no DXGI reference
+/// and no run-time loader beyond [`STD_LOADERS`].
+pub fn check_helper_content(image: &[u8]) -> Result<(), String> {
+    let dxgi = dxgi_references(image);
+    if !dxgi.is_empty() {
+        return Err(format!("names DXGI: {dxgi:?}"));
+    }
+    let extra: Vec<String> = dynamic_loaders(image)
+        .into_iter()
+        .filter(|n| !STD_LOADERS.contains(&n.as_str()))
+        .collect();
+    if !extra.is_empty() {
+        return Err(format!(
+            "run-time loaders beyond std's {STD_LOADERS:?}: {extra:?}"
+        ));
+    }
+    Ok(())
+}
 
 /// Console APIs that change state the parent shell shares (code page, modes; ADR 0016).
 /// `rerun.exe` must not name them anywhere: neither as a static import (the hint/name table
@@ -244,6 +348,59 @@ fn the_console_api_check_has_teeth() {
     );
     // SetConsoleCtrlHandler is no console state API.
     assert!(console_state_apis(b"SetConsoleCtrlHandler\0").is_empty());
+}
+
+#[test]
+fn the_helper_content_checks_have_teeth() {
+    let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+    // Clean: std's two loaders, a DXGI-like name that is none.
+    let clean = b"MZ\0LoadLibraryA\0LoadLibraryExW\0GetProcAddress\0dxgi_dll\0dxcore\0";
+    assert_eq!(check_helper_content(clean), Ok(()));
+    assert_eq!(dynamic_loaders(clean), ["LoadLibraryA", "LoadLibraryExW"]);
+    // Each DXGI form alone fails, in any case.
+    for bad in [
+        b"\0dxgi.dll\0".to_vec(),
+        b"\0DXGI.DLL\0".to_vec(),
+        utf16("Dxgi.Dll"),
+        b"\0CreateDXGIFactory1\0".to_vec(),
+    ] {
+        let e = check_helper_content(&bad).unwrap_err();
+        assert!(e.contains("names DXGI"), "{e}");
+    }
+    assert_eq!(
+        dxgi_references(
+            &[
+                b"dxgi.dll ".as_slice(),
+                &utf16("DXGI.dll"),
+                b"CreateDXGIFactory1"
+            ]
+            .concat()
+        ),
+        [
+            "dxgi.dll (ASCII)",
+            "dxgi.dll (UTF-16LE)",
+            "CreateDXGIFactory1"
+        ]
+    );
+    // A loader beyond std's fails.
+    for bad in [
+        &b"LoadLibraryW\0"[..],
+        b"LoadLibraryExA",
+        b"LoadPackagedLibrary\0",
+    ] {
+        let e = check_helper_content(bad).unwrap_err();
+        assert!(e.contains("run-time loaders"), "{e}");
+    }
+    // The CLI's own imports fail the helper's list.
+    for dll in ["shell32.dll", "combase.dll", "bcryptprimitives.dll"] {
+        use pe_image::image;
+        let img = image(&["kernel32.dll", dll], &[], SEARCH_SYSTEM32);
+        let e = check_hardened(std::io::Cursor::new(img), HELPER_IMPORTS).unwrap_err();
+        assert!(e.contains("not in the allowlist"), "{e}");
+    }
+    for dll in HELPER_IMPORTS {
+        assert!(!forbidden_import(dll), "{dll}");
+    }
 }
 
 #[test]

@@ -31,6 +31,11 @@ serde_json.workspace = true
 # Already in the tree through rerun-proto and serde_json.
 serde.workspace = true
 
+# The build ID (ADR 0023 §2, A4 S9): `build.rs` hashes the contract sources with SHA-256. The
+# same crate as the normal dependency above, no new crate in the lock file.
+[build-dependencies]
+sha2.workspace = true
+
 # sys::win (ADR 0008): NT file APIs, final path, volume info, reparse data, AccessCheck;
 # known folders (ADR 0009): SHGetKnownFolderPath, CoTaskMemFree, GetSystemWindowsDirectoryW;
 # registry (ADR 0009): RegOpenCurrentUser, RegOpenKeyExW, RegEnumKeyExW, RegQueryInfoKeyW,

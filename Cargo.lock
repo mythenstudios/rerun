@@ -694,6 +694,13 @@ name = "rerun-cpu"
 version = "0.1.0"
 
 [[package]]
+name = "rerun-helper"
+version = "0.1.0"
+dependencies = [
+ "rerun-core",
+]
+
+[[package]]
 name = "rerun-launch"
 version = "0.1.0"
 dependencies = [

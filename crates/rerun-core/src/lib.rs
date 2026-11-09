@@ -17,11 +17,13 @@
 //! - [`exec`]: apply, verify, revert and forget of plans with the journal (ADR 0020).
 //! - [`catalog`]: the signed index and the typed Topos and packages (ADR 0024, ADR 0005).
 //! - [`topo`]: the Topo engine (P4-4): match, `when`, variants, anti-cheat rule, plan.
+//! - [`elevate`]: the elevated helper's side (ADR 0023): its exit code and `serve`.
 //!
 //! See `docs/01-architecture.md`, ADR 0004, ADR 0007 and ADR 0011.
 
 pub mod catalog;
 pub mod detect;
+pub mod elevate;
 pub mod escape;
 pub mod exec;
 mod fold;
@@ -37,3 +39,15 @@ mod wire;
 
 /// Rerun version (from `Cargo.toml`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The build ID (ADR 0023 §2, A4 S9): `<version>+<commit>` for a release or CI build that
+/// sets `RERUN_BUILD_ID`, else `<version>+dev-<SHA-256 of the contract sources>` (`build.rs`,
+/// `src/build_contract.rs`). A helper request carries the CLI's; the helper refuses another
+/// (P4-2c). Not a security boundary: it catches a CLI and a helper of different builds.
+pub const BUILD_ID: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("RERUN_BUILD_ID"));
+
+#[cfg(test)]
+mod build_contract;
+
+#[cfg(test)]
+mod build_id_tests;

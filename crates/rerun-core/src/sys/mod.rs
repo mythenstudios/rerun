@@ -20,12 +20,13 @@
 //!
 //! - [`KnownFolders`] never reads environment variables (ADR 0007, ADR 0009).
 //!
-//! `sys::win::WinSystem` bundles the real parts into one [`System`]. `Firewall` and `Process`
-//! arrive in phase 3.
+//! `sys::win::WinSystem` bundles the real parts into one [`System`]. [`HelperToken`] is the
+//! elevated helper's own token (ADR 0023, P4-2a); `Firewall` arrives with P4-5a.
 
 mod error;
 pub mod fs;
 pub mod gpu;
+pub mod helper;
 pub mod known_folders;
 pub mod registry;
 pub mod topology;
@@ -45,6 +46,7 @@ pub mod win;
 pub use error::{SysError, SysErrorKind, SysResult, shown_target};
 pub use fs::{Dir, DirWrite, Fs, WriteCap};
 pub use gpu::{DriverVersion, Gpu, GpuAdapter};
+pub use helper::HelperToken;
 pub use known_folders::{KnownFolder, KnownFolders};
 pub use registry::{Registry, RegistryWrite};
 pub use topology::Topology;

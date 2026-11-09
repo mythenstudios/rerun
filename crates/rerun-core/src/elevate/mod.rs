@@ -1,0 +1,47 @@
+//! The elevated helper's side of `rerun-core` (ADR 0023): its exit code and [`serve`], the
+//! only entry `rerun-helper.exe` calls after `restrict_dll_search`.
+//!
+//! P4-2a (the scaffold, ADR 0023 §15): [`exit`] (the code layout of §7, strict decoding, A4
+//! N4) and [`serve`] with the steps of §3 that need no file system: drop the privileges
+//! (step 2), require elevation (step 3), then refuse every argument list (`Refused(Usage)`):
+//! no request form is accepted yet. The image check (step 4) arrives with `sd_facts` and
+//! `open_by_id` in P4-2b, the request codec, `judge` and the validation chain of §5 in P4-2c.
+//!
+//! `serve` never uses `exec`, `journal`, `hw`, `pkg`, `detect::steam`, `topo::when` or
+//! `exec::standard_user` (§11); `crates/rerun-helper/tests/source_rules.rs` checks it.
+
+pub mod exit;
+
+use std::ffi::OsString;
+
+use crate::sys::HelperToken;
+pub use exit::{ExitClass, HelperExit, OpResult, Reason};
+
+/// At most this many ops in one helper batch (§5 step 1); the exit code has a 2-bit slot for
+/// each.
+pub const MAX_BATCH_OPS: usize = 8;
+
+/// Runs the helper (ADR 0023 §3) with its own token and its arguments (without the program
+/// name) and returns its report. Each step is fail closed: a privilege that cannot be dropped
+/// or a token that cannot be read is `Refused(Internal)`, a token that is not elevated
+/// `Refused(NotElevated)`. P4-2a: every argument list then ends in `Refused(Usage)`.
+#[must_use]
+pub fn serve(token: &dyn HelperToken, args: &[OsString]) -> HelperExit {
+    // §3 step 2, before anything else reads input.
+    if token.drop_privileges().is_err() {
+        return HelperExit::refused(Reason::Internal);
+    }
+    // §3 step 3.
+    match token.is_elevated() {
+        Ok(true) => {}
+        Ok(false) => return HelperExit::refused(Reason::NotElevated),
+        Err(_) => return HelperExit::refused(Reason::Internal),
+    }
+    // §3 step 4 (P4-2b) and step 5 (P4-2c): no argument form is accepted yet, not even an
+    // empty list.
+    let _ = args;
+    HelperExit::refused(Reason::Usage)
+}
+
+#[cfg(test)]
+mod tests;

@@ -13,6 +13,11 @@
 fn banned_windows_sys_items_resolve() {
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: AdjustTokenPrivileges must be banned"
+    )]
+    let _ = windows_sys::Win32::Security::AdjustTokenPrivileges;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: NtSetInformationThread must be banned"
     )]
     let _ = windows_sys::Wdk::System::Threading::NtSetInformationThread;

@@ -16,6 +16,11 @@ use std::process::Command;
 #[path = "../../../tests/support/hardening.rs"]
 mod hardening;
 
+#[path = "../../../tests/support/test_key.rs"]
+mod test_key;
+
+use test_key::holds_test_key;
+
 #[test]
 fn rerun_exe_loads_dependencies_from_system32_only() {
     let exe = env!("CARGO_BIN_EXE_rerun");
@@ -60,16 +65,6 @@ fn rerun_exe_runs_with_the_restricted_search_path() {
     assert!(out.status.success(), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("DLL search path"), "{stderr}");
-}
-
-/// Whether `image` holds the published test key of the signed index (ADR 0024): its seed as
-/// hex text or its public key bytes.
-fn holds_test_key(image: &[u8]) -> bool {
-    use rerun_core::catalog::key::test_key;
-    let seed = test_key::SEED_HEX.as_bytes();
-    let public = test_key::public();
-    let found = |needle: &[u8]| image.windows(needle.len()).any(|w| w == needle);
-    found(seed) || found(public.bytes())
 }
 
 /// ADR 0024: the test key is trusted only with the feature `test-key`, which only

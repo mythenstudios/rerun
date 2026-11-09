@@ -8,6 +8,9 @@
 //!   topology, GPU), as `rerun.exe` does from step 16. Its static imports must stay within
 //!   `hardening::CLI_IMPORTS`, the list of `rerun.exe` (no `dxgi.dll`, no `d3d*`, no dynamic
 //!   CRT), so a GPU or other import that slipped past the source rule and the bans shows here.
+//! - It is also the control of the elevated helper's acceptance (ADR 0023 §14, B9): the
+//!   helper's content check (no `dxgi.dll`, no `CreateDXGIFactory1`) and its import allowlist
+//!   must both fail on this binary.
 //!
 //! Its own test binary, because the restriction is process-wide. Read-only.
 
@@ -53,4 +56,16 @@ fn win_system_gpu_with_the_dll_search_path_restricted_to_system32() {
     eprintln!("imports: {}", hardening::joined(&imports));
     hardening::check_imports(&imports, hardening::CLI_IMPORTS).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(delayed, vec![]);
+    // The control of the helper's acceptance (ADR 0023 §14, B9): this binary uses `WinGpu`, so
+    // the helper's content check and import allowlist must both fail on it.
+    let image = std::fs::read(&exe).unwrap();
+    let dxgi = hardening::dxgi_references(&image);
+    assert!(
+        dxgi.contains(&"dxgi.dll (ASCII)") && dxgi.contains(&"CreateDXGIFactory1"),
+        "{dxgi:?}"
+    );
+    let e = hardening::check_helper_content(&image).unwrap_err();
+    assert!(e.contains("names DXGI"), "{e}");
+    let e = hardening::check_imports(&imports, hardening::HELPER_IMPORTS).unwrap_err();
+    assert!(e.contains("not in the allowlist"), "{e}");
 }
