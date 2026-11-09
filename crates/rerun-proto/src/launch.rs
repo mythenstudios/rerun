@@ -25,7 +25,8 @@
 //! the rule and ended before the unchanged start) and always `cpu=none`,
 //! `priority=none`, `check=none`. The tenth line `priority_restore=failed:<code>` is present
 //! only when `rerun-launch watch` set the priority class on the found game, the CPU step
-//! after it failed (`skipped:job_failed:…` or `skipped:cpu_sets_failed:…`) and putting the
+//! after it failed (`skipped:job_failed:…`, `skipped:job_ineffective`,
+//! `skipped:read_back_failed:…` or `skipped:cpu_sets_failed:…`) and putting the
 //! class back failed too (P3-4 A4); absent otherwise, so a file of an earlier shim reads
 //! unchanged. `<code>` is a Win32 error code (or an `HRESULT` as an unsigned number where Windows gave one) in canonical decimal. The reader is strict like the
 //! profile reader: no other key, order or spelling, no leading zero, no empty line, no CR, no
@@ -182,6 +183,10 @@ pub enum SkipReason {
     ElevationRequired,
     /// `target_not_found` (`watch`): no new process of the target appeared before the timeout.
     TargetNotFound,
+    /// `job_ineffective` (`watch`): the target joined the job, but right after it its process
+    /// affinity was not the selection (a job it already was in keeps another limit). The
+    /// membership cannot be undone; the priority class set before was put back.
+    JobIneffective,
     /// `target_elevated` (`watch`): the target runs at a higher integrity level than the shim
     /// (M1); left untouched.
     TargetElevated,
@@ -356,6 +361,7 @@ impl SkipReason {
             Self::ElevationRequired => "elevation_required",
             Self::TargetNotFound => "target_not_found",
             Self::TargetElevated => "target_elevated",
+            Self::JobIneffective => "job_ineffective",
             Self::TargetDenied { .. } => "target_denied",
             Self::SearchFailed { .. } => "search_failed",
             Self::PriorityFailed { .. } => "priority_failed",
@@ -394,6 +400,7 @@ impl SkipReason {
             "elevation_required" => Some(Self::ElevationRequired),
             "target_not_found" => Some(Self::TargetNotFound),
             "target_elevated" => Some(Self::TargetElevated),
+            "job_ineffective" => Some(Self::JobIneffective),
             _ => None,
         };
         if let Some(r) = plain {
@@ -563,7 +570,10 @@ fn valid(r: &LaunchResult) -> bool {
             priority_restore.is_none()
                 || matches!(
                     reason,
-                    SkipReason::JobFailed { .. } | SkipReason::CpuSetsFailed { .. }
+                    SkipReason::JobFailed { .. }
+                        | SkipReason::JobIneffective
+                        | SkipReason::ReadBackFailed { .. }
+                        | SkipReason::CpuSetsFailed { .. }
                 )
         }
     }

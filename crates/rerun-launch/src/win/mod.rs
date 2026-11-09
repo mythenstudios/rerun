@@ -2,7 +2,8 @@
 //! profile read (D2) live here; process, job and shell calls and the reads of the post-launch
 //! check in [`launch`] (the one wrapper module of the banned setters, ADR 0010 and ADR 0022);
 //! the result file writer in `result` (the one wrapper module of the shim's file writes,
-//! P3-2); the topology in `cpu` (64-bit only).
+//! P3-2); the topology in `cpu` (64-bit only); the snapshot, `OpenProcess` and the facts of an
+//! opened process for `watch` in `process` (P3-4).
 
 #![allow(
     unsafe_code,
@@ -13,6 +14,7 @@
 #[cfg(target_pointer_width = "64")]
 mod cpu;
 pub(crate) mod launch;
+mod process;
 mod result;
 
 use std::borrow::Borrow;
@@ -28,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use rerun_proto::cpu::CpuTopology;
 use rerun_proto::profile::{MAX_PROFILE_BYTES, ProfileId};
-use windows_sys::Win32::Foundation::{ERROR_NOT_SUPPORTED, HANDLE};
+use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Security::{
     CheckTokenMembership, GetTokenInformation, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE,
@@ -251,18 +253,6 @@ const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
 /// The real system layer.
 pub(crate) struct WinOs;
 
-/// A process `watch` found. P3-4a2: none exists yet (`own`, `processes` and `open_process`
-/// answer `ERROR_NOT_SUPPORTED`, so a real `watch` start records `search_failed:50` and starts
-/// Steam's command unchanged); the type cannot be constructed.
-#[derive(Debug)]
-pub(crate) enum Target {}
-
-impl Borrow<launch::Child> for Target {
-    fn borrow(&self) -> &launch::Child {
-        match *self {}
-    }
-}
-
 /// The start of the shim's monotonic clock (`now_ms`).
 fn epoch() -> Instant {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
@@ -270,9 +260,9 @@ fn epoch() -> Instant {
 }
 
 impl Os for WinOs {
-    type Proc = launch::Child;
+    type Proc = launch::Proc;
     type Child = launch::Child;
-    type Target = Target;
+    type Target = launch::Target;
 
     fn command_line(&self) -> Vec<u16> {
         // SAFETY: no arguments; the returned pointer is the process's command line, valid for
@@ -348,8 +338,8 @@ impl Os for WinOs {
         launch::read_back(child)
     }
 
-    fn set_cpu_sets(&self, child: &launch::Child, ids: &[u32]) -> Result<(), u32> {
-        launch::set_cpu_sets(child, ids)
+    fn set_cpu_sets(&self, p: &launch::Proc, ids: &[u32]) -> Result<(), u32> {
+        launch::set_cpu_sets(p, ids)
     }
 
     fn resume(&self, child: &launch::Child) -> Result<(), u32> {
@@ -377,24 +367,24 @@ impl Os for WinOs {
         launch::wait(child)
     }
 
-    fn wait_for(&self, child: &launch::Child, ms: u32) -> Result<bool, u32> {
-        launch::wait_for(child, ms)
+    fn wait_for(&self, p: &launch::Proc, ms: u32) -> Result<bool, u32> {
+        launch::wait_for(p, ms)
     }
 
-    fn job_affinity(&self, child: &launch::Child) -> Result<Vec<GroupAffinity>, u32> {
-        launch::job_affinity(child)
+    fn job_affinity(&self, p: &launch::Proc) -> Result<Vec<GroupAffinity>, u32> {
+        launch::job_affinity(p)
     }
 
-    fn process_affinity(&self, child: &launch::Child) -> Result<u64, u32> {
-        launch::process_affinity(child)
+    fn process_affinity(&self, p: &launch::Proc) -> Result<u64, u32> {
+        launch::process_affinity(p)
     }
 
-    fn cpu_sets(&self, child: &launch::Child) -> Result<Vec<u32>, u32> {
-        launch::cpu_sets(child)
+    fn cpu_sets(&self, p: &launch::Proc) -> Result<Vec<u32>, u32> {
+        launch::cpu_sets(p)
     }
 
-    fn priority_class(&self, child: &launch::Child) -> Result<u32, u32> {
-        launch::priority_class(child)
+    fn priority_class(&self, p: &launch::Proc) -> Result<u32, u32> {
+        launch::priority_class(p)
     }
 
     fn now_unix_s(&self) -> u64 {
@@ -412,46 +402,37 @@ impl Os for WinOs {
         result::write(&base, id, bytes)
     }
 
-    // P3-4a2: `GetProcessTimes` and the token facts of the shim. Until then `watch` stops
-    // here, before the start: `search_failed:50`, Steam's command starts unchanged.
     fn own(&self) -> Result<Own, u32> {
-        Err(ERROR_NOT_SUPPORTED)
+        process::own()
     }
 
-    // P3-4a2: `GetProcessId`. Not reached while `own` fails.
-    fn pid(&self, _child: &launch::Child) -> u32 {
-        0
+    fn pid(&self, child: &launch::Child) -> u32 {
+        Borrow::<launch::Proc>::borrow(child).pid()
     }
 
-    // P3-4a2: Toolhelp32 snapshot in `win::process`.
     fn processes(&self) -> Result<Vec<Listed>, u32> {
-        Err(ERROR_NOT_SUPPORTED)
+        process::snapshot()
     }
 
-    // P3-4a2: `OpenProcess` in `win::process`.
-    fn open_process(&self, _pid: u32, _access: Access) -> Result<Target, u32> {
-        Err(ERROR_NOT_SUPPORTED)
+    fn open_process(&self, pid: u32, access: Access) -> Result<launch::Target, u32> {
+        process::open(pid, access)
     }
 
-    // P3-4a2: image path, creation time, token facts.
-    fn facts(&self, t: &Target) -> Result<Facts, u32> {
-        match *t {}
+    fn facts(&self, t: &launch::Target) -> Result<Facts, u32> {
+        process::facts(t.borrow())
     }
 
-    // P3-4a2: new job, `JobObjectGroupInformationEx`, `AssignProcessToJobObject` in
-    // `win::launch`.
     fn attach_job(
         &self,
-        t: &mut Target,
-        _affinity: GroupAffinity,
-        _limit_flags: u32,
+        t: &mut launch::Target,
+        affinity: GroupAffinity,
+        limit_flags: u32,
     ) -> Result<(), u32> {
-        match *t {}
+        launch::attach_job(t, affinity, limit_flags)
     }
 
-    // P3-4a2: `SetPriorityClass` in `win::launch`.
-    fn set_priority(&self, t: &Target, _class: u32) -> Result<(), u32> {
-        match *t {}
+    fn set_priority(&self, t: &launch::Target, class: u32) -> Result<(), u32> {
+        launch::set_priority(t, class)
     }
 
     fn now_ms(&self) -> u64 {

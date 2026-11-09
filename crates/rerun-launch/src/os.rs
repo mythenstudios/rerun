@@ -69,9 +69,9 @@ pub(crate) enum Terminated {
 
 /// Most entries [`Os::processes`] returns from one snapshot; more is
 /// `ERROR_BUFFER_OVERFLOW` for that poll.
-#[expect(
-    dead_code,
-    reason = "the Toolhelp32 snapshot of WinOs arrives in P3-4a2"
+#[cfg_attr(
+    not(windows),
+    expect(dead_code, reason = "only the Toolhelp32 snapshot of WinOs uses it")
 )]
 pub(crate) const MAX_LISTED: usize = 16_384;
 

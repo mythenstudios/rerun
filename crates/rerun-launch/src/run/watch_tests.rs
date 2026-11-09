@@ -7,8 +7,8 @@ use rerun_proto::profile::{LaunchProfile, Method, Priority};
 
 use super::tests::{CCD0_FIRST_THREADS, GAME, fake, id, profile, rule, tail};
 use super::watch::{
-    ERROR_INVALID_DATA, FAST_POLL_FOR_MS, MAX_OPENS_PER_POLL, MAX_TARGETS, POLL_MS, SLOW_POLL_MS,
-    Trust, trust,
+    ERROR_INVALID_DATA, FAST_POLL_FOR_MS, LATE_POLL_MS, MAX_OPENS_PER_POLL, MAX_TARGETS, POLL_MS,
+    SLOW_POLL_FOR_MS, SLOW_POLL_MS, Trust, trust,
 };
 use super::*;
 use crate::fake::{CHILD_PID, Call, FakeOs, FakeProc, own_token};
@@ -159,7 +159,7 @@ fn invariants(os: &FakeOs, timeout_ms: u64) {
     // Never an end of anything: no terminate on a target (A2), nor on the started program.
     assert!(!calls.iter().any(|c| matches!(c, Call::Terminate(_))));
     // Bounded search: snapshots, opens with query rights per snapshot, time of the write.
-    assert!(snapshots(os) as u64 <= timeout_ms / u64::from(POLL_MS) + 4);
+    assert!(snapshots(os) as u64 <= schedule(timeout_ms) + 4);
     let mut opens = 0;
     for c in &calls {
         match c {
@@ -173,7 +173,7 @@ fn invariants(os: &FakeOs, timeout_ms: u64) {
     }
     let at = os.written_at.borrow()[0];
     assert!(
-        at <= timeout_ms + u64::from(CHECK_DELAY_MS) + u64::from(SLOW_POLL_MS),
+        at <= timeout_ms + u64::from(CHECK_DELAY_MS) + u64::from(LATE_POLL_MS),
         "{at}"
     );
     // Set calls only on handles opened with set rights; every job without KILL_ON_JOB_CLOSE.
@@ -284,6 +284,9 @@ fn w1_target_found_after_polls_gets_priority_then_cpu_and_is_checked() {
             Call::PriorityClass(3),
             Call::SetPriority(3, HIGH),
             Call::AttachJob(3, CCD0_FIRST_THREADS, JOB_LIMIT_BREAKAWAY_OK),
+            // The read-back right after the join (A7).
+            Call::JobAffinity(3),
+            Call::ProcessAffinity(3),
             Call::WaitFor(3, CHECK_DELAY_MS),
             Call::JobAffinity(3),
             Call::ProcessAffinity(3),
@@ -320,6 +323,18 @@ fn w1_target_found_after_polls_gets_priority_then_cpu_and_is_checked() {
     assert!(matches!(sets(&os)[..], [Call::CpuSets(3, ref ids)] if ids.len() == 8));
 }
 
+/// Snapshots of a search of `timeout_ms` without a target under the poll schedule (A6).
+fn schedule(timeout_ms: u64) -> u64 {
+    let part = |from: u64, to: u64, every: u32| {
+        to.min(timeout_ms)
+            .saturating_sub(from)
+            .div_ceil(u64::from(every))
+    };
+    part(0, FAST_POLL_FOR_MS, POLL_MS)
+        + part(FAST_POLL_FOR_MS, SLOW_POLL_FOR_MS, SLOW_POLL_MS)
+        + part(SLOW_POLL_FOR_MS, u64::MAX, LATE_POLL_MS)
+}
+
 // ---- W2, A6: never found ----
 
 #[test]
@@ -327,10 +342,13 @@ fn w2_a6_no_target_is_target_not_found_after_the_poll_schedule() {
     let os = wfake(&hard_high(), Vec::new());
     let r = go(&os, T120);
     assert_eq!(parts(&r), (skipped(Skip::TargetNotFound), None, None, 42));
-    // 100 ms for the first 10 s, 250 ms up to 120 s: 100 + 440 snapshots.
+    // 100 ms for the first 10 s, 250 ms up to 30 s, 500 ms up to 120 s: 100 + 80 + 180.
     let fast = FAST_POLL_FOR_MS / u64::from(POLL_MS);
-    let slow = (T120 - FAST_POLL_FOR_MS) / u64::from(SLOW_POLL_MS);
-    assert_eq!(snapshots(&os) as u64, fast + slow);
+    let slow = (SLOW_POLL_FOR_MS - FAST_POLL_FOR_MS) / u64::from(SLOW_POLL_MS);
+    let late = (T120 - SLOW_POLL_FOR_MS) / u64::from(LATE_POLL_MS);
+    assert_eq!((fast, slow, late), (100, 80, 180));
+    assert_eq!(snapshots(&os) as u64, fast + slow + late);
+    assert_eq!(schedule(T120), 360);
     let paces: Vec<u32> = os
         .calls()
         .into_iter()
@@ -339,9 +357,10 @@ fn w2_a6_no_target_is_target_not_found_after_the_poll_schedule() {
             _ => None,
         })
         .collect();
-    assert_eq!(paces.len() as u64, fast + slow);
+    assert_eq!(paces.len() as u64, fast + slow + late);
     assert!(paces[..100].iter().all(|ms| *ms == POLL_MS));
-    assert!(paces[100..].iter().all(|ms| *ms == SLOW_POLL_MS));
+    assert!(paces[100..180].iter().all(|ms| *ms == SLOW_POLL_MS));
+    assert!(paces[180..].iter().all(|ms| *ms == LATE_POLL_MS));
     assert!(sets(&os).is_empty());
     assert_eq!(count(&os, |c| matches!(c, Call::Open { .. })), 0);
     assert_eq!(os.written_at.borrow()[0], T120);
@@ -372,7 +391,7 @@ fn w3_a_copy_created_before_the_shim_is_never_a_target() {
             "{before}"
         );
         assert!(set_opened(&os).is_empty());
-        // Held after the first look (A5): opened once in 540 snapshots.
+        // Held after the first look (A5): opened once in 360 snapshots.
         assert_eq!(count(&os, |c| *c == query(5000)), 1);
     }
     // Created in the same FILETIME tick as the shim counts as after it.
@@ -599,6 +618,26 @@ fn b1_a_search_with_refused_candidates_only_ends_target_denied() {
     assert_eq!(parts(&go(&os, T120)).0, skipped(Skip::TargetNotFound));
 }
 
+/// Measured in P3-4a2 (`win::tests::open_of_an_exited_pid_fails_with_87`): a process that
+/// ended can still be opened for a few ms, but its facts fail (31). It is gone, not refused:
+/// the search ends `target_not_found`, and a later game is still found.
+#[test]
+fn b1_an_ended_candidate_that_cannot_be_read_is_gone_not_refused() {
+    let mut ended = FakeProc::new(5001, TARGET, 5);
+    ended.facts = Err(31);
+    ended.exits_after_ms = Some(0);
+    let os = wfake(&hard_high(), vec![Ok(vec![ended.clone()]), Ok(Vec::new())]);
+    assert_eq!(parts(&go(&os, T120)).0, skipped(Skip::TargetNotFound));
+    let os = wfake(&hard_high(), vec![Ok(vec![ended]), Ok(vec![game(5004)])]);
+    assert_eq!(parts(&go(&os, T120)).1, Some(Check::Ok));
+    assert_eq!(set_opened(&os), [5004]);
+    // Control: the same failed read on a process that runs on is a refusal.
+    let mut unreadable = FakeProc::new(5001, TARGET, 5);
+    unreadable.facts = Err(31);
+    let os = wfake(&hard_high(), vec![Ok(vec![unreadable]), Ok(Vec::new())]);
+    assert_eq!(parts(&go(&os, T120)).0, skipped(Skip::TargetDenied(31)));
+}
+
 // ---- A5: held handles, the cap on new PIDs only ----
 
 #[test]
@@ -757,6 +796,76 @@ fn w11_a_cpu_failure_puts_the_priority_back() {
     );
 }
 
+/// A7 (measured in P3-4a2): a target in a job with another limit joins the new job without
+/// effect. The read-back right after the join sees it: `job_ineffective`, the priority class
+/// put back, no check. Without the read-back the rule would count as applied.
+#[test]
+fn a7_a_join_without_effect_is_job_ineffective_with_the_priority_back() {
+    let mut os = wfake(&hard_high(), after(0, vec![game(5000)]));
+    os.join_mask = Some(Ok(0x1));
+    assert_eq!(
+        parts(&go(&os, T120)),
+        (skipped(Skip::JobIneffective), None, None, 42)
+    );
+    assert_eq!(
+        sets(&os),
+        [
+            Call::SetPriority(3, HIGH),
+            Call::AttachJob(3, CCD0_FIRST_THREADS, JOB_LIMIT_BREAKAWAY_OK),
+            Call::SetPriority(3, NORMAL),
+        ]
+    );
+    let calls = os.calls();
+    let join = calls
+        .iter()
+        .position(|c| matches!(c, Call::AttachJob(..)))
+        .unwrap();
+    assert_eq!(
+        calls[join + 1..join + 3],
+        [Call::JobAffinity(3), Call::ProcessAffinity(3)]
+    );
+    assert!(!calls.contains(&Call::WaitFor(3, CHECK_DELAY_MS)));
+    assert_eq!(
+        outcome(&os),
+        Outcome::Skipped {
+            reason: SkipReason::JobIneffective,
+            start: result::Start::Created,
+            ended: None,
+            priority_restore: None,
+        }
+    );
+    // The job reports another entry: the same.
+    let mut os = wfake(&hard_high(), after(0, vec![game(5000)]));
+    os.join_job = Some(Ok(vec![GroupAffinity {
+        group: 0,
+        mask: 0x2,
+    }]));
+    assert_eq!(parts(&go(&os, T120)).0, skipped(Skip::JobIneffective));
+    // A failed read-back: read_back_failed, the priority back too.
+    let mut os = wfake(&hard_high(), after(0, vec![game(5000)]));
+    os.join_mask = Some(Err(6));
+    assert_eq!(parts(&go(&os, T120)).0, skipped(Skip::ReadBack(6)));
+    assert_eq!(sets(&os).last(), Some(&Call::SetPriority(3, NORMAL)));
+    // The restore fails as well: the tenth line.
+    let mut os = wfake(&hard_high(), after(0, vec![game(5000)]));
+    os.join_mask = Some(Ok(0x1));
+    os.set_priority.borrow_mut().extend([Ok(()), Err(6)]);
+    go(&os, T120);
+    assert!(matches!(
+        outcome(&os),
+        Outcome::Skipped {
+            reason: SkipReason::JobIneffective,
+            priority_restore: Some(6),
+            ..
+        }
+    ));
+    // Control: the read-back as set, the check later reads a narrowed mask: applied, and the
+    // check (not the read-back) reports it.
+    let mut os = wfake(&hard_high(), after(0, vec![game(5000)]));
+    os.process_affinity = Some(Ok(0x1));
+    assert_eq!(parts(&go(&os, T120)).1, Some(Check::Narrowed));
+}
+
 #[test]
 fn w11_a_priority_failure_sets_nothing() {
     let os = wfake(&hard_high(), after(0, vec![game(5000)]));
@@ -882,7 +991,7 @@ fn w13_failing_snapshots() {
         parts(&go(&os, T120)),
         (skipped(Skip::SearchFailed(2)), None, None, 42)
     );
-    assert_eq!(snapshots(&os), 540);
+    assert_eq!(snapshots(&os) as u64, schedule(T120));
     assert!(matches!(
         outcome(&os),
         Outcome::Skipped {

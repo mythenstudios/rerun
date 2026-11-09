@@ -189,6 +189,14 @@ pub(crate) struct FakeOs {
     pub(crate) set_priority: RefCell<VecDeque<Result<(), u32>>>,
     /// `watch`: the answer of `attach_job`.
     pub(crate) attach_job: Result<(), u32>,
+    /// `watch`: the job's entries read right after `attach_job` (A7), before the check waits on
+    /// the target; `None`: the joined selection. [`FakeOs::job_affinity`] answers the check.
+    pub(crate) join_job: Option<Result<Vec<GroupAffinity>, u32>>,
+    /// `watch`: the process affinity read right after `attach_job`; `None`: the joined mask.
+    pub(crate) join_mask: Option<Result<u64, u32>>,
+    /// The target that joined a job and has not been waited on yet (its reads are the
+    /// read-back after the join).
+    joined: Cell<Option<u32>>,
     /// The virtual clock in milliseconds.
     pub(crate) clock: Cell<u64>,
     /// The table of the last successful snapshot: what `open_process` finds.
@@ -243,6 +251,9 @@ impl FakeOs {
             table: RefCell::new(VecDeque::new()),
             set_priority: RefCell::new(VecDeque::new()),
             attach_job: Ok(()),
+            join_job: None,
+            join_mask: None,
+            joined: Cell::new(None),
             clock: Cell::new(0),
             current: RefCell::new(Vec::new()),
             opened: RefCell::new(Vec::new()),
@@ -390,6 +401,7 @@ impl Os for FakeOs {
     fn wait_for(&self, child: &u32, ms: u32) -> Result<bool, u32> {
         self.record(Call::WaitFor(*child, ms));
         if let Some(t) = self.target(*child) {
+            self.joined.set(None);
             return Ok(match t.proc.exits_after_ms {
                 Some(e) if e <= ms => {
                     self.advance(u64::from(e));
@@ -416,6 +428,12 @@ impl Os for FakeOs {
 
     fn job_affinity(&self, child: &u32) -> Result<Vec<GroupAffinity>, u32> {
         self.record(Call::JobAffinity(*child));
+        if self.joined.get() == Some(*child) {
+            return match &self.join_job {
+                Some(r) => r.clone(),
+                None => Ok(self.last_limit.borrow().iter().copied().collect()),
+            };
+        }
         match &self.job_affinity {
             Some(r) => r.clone(),
             None => Ok(self.last_limit.borrow().iter().copied().collect()),
@@ -424,6 +442,12 @@ impl Os for FakeOs {
 
     fn process_affinity(&self, child: &u32) -> Result<u64, u32> {
         self.record(Call::ProcessAffinity(*child));
+        if self.joined.get() == Some(*child) {
+            return match self.join_mask {
+                Some(r) => r,
+                None => Ok(self.last_limit.borrow().map_or(0, |ga| ga.mask)),
+            };
+        }
         match self.process_affinity {
             Some(r) => r,
             None => Ok(self.last_limit.borrow().map_or(0xFFFF_FFFF, |ga| ga.mask)),
@@ -532,6 +556,7 @@ impl Os for FakeOs {
         self.record(Call::AttachJob(t.0, affinity, limit_flags));
         self.attach_job?;
         *self.last_limit.borrow_mut() = Some(affinity);
+        self.joined.set(Some(t.0));
         Ok(())
     }
 

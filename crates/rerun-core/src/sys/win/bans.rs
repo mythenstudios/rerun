@@ -243,6 +243,16 @@ fn banned_windows_sys_items_resolve() {
     let _ = windows_sys::Win32::System::Threading::SetPriorityClass;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: TerminateProcess must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::TerminateProcess;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: OpenProcess must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::OpenProcess;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: CreateFileW must be banned"
     )]
     let _ = windows_sys::Win32::Storage::FileSystem::CreateFileW;

@@ -91,6 +91,9 @@ pub(crate) enum Skip {
     SearchFailed(u32),
     /// `watch`: the target's priority class could not be read or set; nothing was set.
     Priority(u32),
+    /// `watch`: the target joined the job, but its process affinity right after is not the
+    /// selection (a job it already was in keeps another limit). The membership stays.
+    JobIneffective,
 }
 
 impl Skip {
@@ -129,6 +132,7 @@ impl Skip {
             Self::TargetDenied(code) => SkipReason::TargetDenied { code: *code },
             Self::SearchFailed(code) => SkipReason::SearchFailed { code: *code },
             Self::Priority(code) => SkipReason::PriorityFailed { code: *code },
+            Self::JobIneffective => SkipReason::JobIneffective,
         })
     }
 }
@@ -649,7 +653,7 @@ fn shell<O: Os>(
     }
 }
 
-mod watch;
+pub(crate) mod watch;
 
 #[cfg(test)]
 mod check_tests;

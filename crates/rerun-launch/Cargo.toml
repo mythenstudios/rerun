@@ -16,7 +16,7 @@ publish.workspace = true
 # (Security); the known folder, ShellExecuteExW and COM for the 740 fallback (UI_Shell, Com;
 # Registry only for the HKEY field of SHELLEXECUTEINFOW); the profile read (Storage_FileSystem
 # constants); process, job and topology calls (Threading, JobObjects, SystemInformation;
-# ADR 0010, ADR 0022).
+# ADR 0010, ADR 0022); the process snapshot of `watch` (Diagnostics_ToolHelp, kernel32, P3-4).
 [dependencies]
 rerun-proto.workspace = true
 
@@ -27,6 +27,7 @@ windows-sys = { workspace = true, features = [
   "Win32_Security",
   "Win32_Storage_FileSystem",
   "Win32_System_Com",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Environment",
   "Win32_System_JobObjects",
   "Win32_System_LibraryLoader",

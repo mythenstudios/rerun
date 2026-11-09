@@ -4,12 +4,14 @@
 //! - **Start (W1):** the shim reads its own creation time and token, then starts Steam's
 //!   command with [`Spawn::UNCHANGED`]. 740 goes to `ShellExecuteExW` without a search (B2);
 //!   any other start error is `spawn_failed:<code>` with nothing started (A9).
-//! - **Search (W2, B1, A5, A6):** every [`POLL_MS`] for the first [`FAST_POLL_FOR_MS`], then
-//!   every [`SLOW_POLL_MS`], until the deadline (start + `watch_timeout_s`), one process
+//! - **Search (W2, B1, A5, A6):** every [`POLL_MS`] for the first [`FAST_POLL_FOR_MS`], every
+//!   [`SLOW_POLL_MS`] until [`SLOW_POLL_FOR_MS`], then every [`LATE_POLL_MS`], until the
+//!   deadline (start + `watch_timeout_s`; 360 snapshots for 120 s), one process
 //!   snapshot. Its entries are a name pre-filter only. The started child is excluded by PID
 //!   before anything is opened. A new PID whose name matches is opened with query rights only
 //!   (at most [`MAX_OPENS_PER_POLL`] per snapshot); a failed open or read skips it for this
-//!   poll and remembers the code (except 87 on the open: the process is gone, not refused).
+//!   poll and remembers the code (except 87 on the open, or a failed read of a process that
+//!   has ended: it is gone, not refused).
 //!   Its handle reports the image path, the creation time and the token: a candidate has the
 //!   target's path, was created at or after the shim, and runs as the same user in the same
 //!   session ([`trust`], A3). Every other opened process stays
@@ -23,7 +25,9 @@
 //! - **Set (W4):** the priority class first (read the old one, set the new one; a failure is
 //!   `priority_failed:<code>`, nothing set), then the CPU limit: hard = a new job with the
 //!   selection on the still empty job, then the assignment ([`Os::attach_job`], never
-//!   `KILL_ON_JOB_CLOSE`, A1); soft = default CPU Sets. A CPU failure puts the old priority
+//!   `KILL_ON_JOB_CLOSE`, A1), then a read-back: the job's entry and the process affinity must
+//!   be the selection, else `job_ineffective` (A7: a job the target already was in keeps its
+//!   limit; the membership stays) or `read_back_failed:<code>`; soft = default CPU Sets. A CPU failure puts the old priority
 //!   class back (a failure of that is recorded, A4): skipped means nothing stays set, except a
 //!   priority restore that failed and says so.
 //! - **Check and search on (W5):** the check of `direct` on the target. A target that ends
@@ -46,14 +50,21 @@ use super::{
     shell, unchanged,
 };
 use crate::cmdline::Command;
-use crate::os::{Access, Facts, JOB_LIMIT_BREAKAWAY_OK, Os, Own, Spawn, Token, priority_class};
+use crate::os::{
+    Access, Facts, GroupAffinity, JOB_LIMIT_BREAKAWAY_OK, Os, Own, Spawn, Token, priority_class,
+};
 
 /// The poll interval of the first [`FAST_POLL_FOR_MS`] of the search (W2).
 pub(crate) const POLL_MS: u32 = 100;
-/// The poll interval after that (A6: a snapshot costs CPU time; most games appear early).
+/// The poll interval after that (A6: a snapshot costs about 3.5 ms CPU with 240 processes,
+/// measured; most games appear early).
 pub(crate) const SLOW_POLL_MS: u32 = 250;
+/// The poll interval from [`SLOW_POLL_FOR_MS`] on (A6: a full search about 1.3 s CPU).
+pub(crate) const LATE_POLL_MS: u32 = 500;
 /// How long the search polls every [`POLL_MS`].
 pub(crate) const FAST_POLL_FOR_MS: u64 = 10_000;
+/// Until when (from the start of the search) it polls every [`SLOW_POLL_MS`].
+pub(crate) const SLOW_POLL_FOR_MS: u64 = 30_000;
 /// Targets handled per start (a target that ends within the check lets the search go on).
 pub(crate) const MAX_TARGETS: u8 = 4;
 /// New PIDs opened per snapshot (A5: held PIDs are skipped without opening and do not count).
@@ -222,10 +233,13 @@ fn search<O: Os>(os: &O, w: &Watch, own: &Own, child: &O::Child) -> Found {
                 }
             }
         }
-        let ms = if os.now_ms().saturating_sub(begin) < FAST_POLL_FOR_MS {
+        let since = os.now_ms().saturating_sub(begin);
+        let ms = if since < FAST_POLL_FOR_MS {
             POLL_MS
-        } else {
+        } else if since < SLOW_POLL_FOR_MS {
             SLOW_POLL_MS
+        } else {
+            LATE_POLL_MS
         };
         if child_running {
             match os.wait_for(child.borrow(), ms) {
@@ -288,7 +302,12 @@ fn pick<O: Os>(
         let facts = match os.facts(&handle) {
             Ok(f) => f,
             Err(code) => {
-                *denied = Some(code);
+                // A process that ended can still be opened for a moment (until the last
+                // handle to it closes) but no longer read (measured: ERROR_GEN_FAILURE, 31):
+                // gone like 87, not refused.
+                if os.wait_for(handle.borrow(), 0) != Ok(true) {
+                    *denied = Some(code);
+                }
                 held.push((l.pid, handle));
                 continue;
             }
@@ -309,6 +328,21 @@ fn pick<O: Os>(
     found.sort_by_key(|c| (c.facts.created, c.pid));
     // The others are dropped untouched: they may be the next target after this one.
     found.into_iter().next()
+}
+
+/// The read-back right after the join (A7): the job holds exactly the selection and the
+/// process affinity is the selection. A target that already was in a job with another limit
+/// joins without effect (measured: the parent's mask stays), which is `job_ineffective`; the
+/// membership cannot be undone, the caller puts the priority class back. A failed read is
+/// `read_back_failed:<code>`.
+fn joined<O: Os>(os: &O, t: &O::Proc, ga: GroupAffinity) -> Result<(), Skip> {
+    let job = os.job_affinity(t).map_err(Skip::ReadBack)?;
+    let mask = os.process_affinity(t).map_err(Skip::ReadBack)?;
+    if job == [ga] && mask == ga.mask {
+        Ok(())
+    } else {
+        Err(Skip::JobIneffective)
+    }
 }
 
 /// W3–W5 on a candidate of the same user and session.
@@ -350,7 +384,8 @@ fn set<O: Os>(
         None => Ok(()),
         Some((Limit::Hard(ga), _)) => os
             .attach_job(&mut t, *ga, JOB_LIMIT_BREAKAWAY_OK)
-            .map_err(Skip::Job),
+            .map_err(Skip::Job)
+            .and_then(|()| joined(os, t.borrow(), *ga)),
         Some((Limit::Soft(ids), _)) => os.set_cpu_sets(t.borrow(), ids).map_err(Skip::CpuSets),
     };
     if let Err(skip) = cpu {
@@ -371,3 +406,8 @@ fn set<O: Os>(
         restore: None,
     }
 }
+
+#[cfg(test)]
+#[cfg(windows)]
+#[path = "watch_win_tests.rs"]
+mod win_tests;

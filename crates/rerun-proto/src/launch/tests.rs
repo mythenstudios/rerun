@@ -102,6 +102,7 @@ fn all_reasons() -> Vec<SkipReason> {
         R::ElevationRequired,
         R::TargetNotFound,
         R::TargetElevated,
+        R::JobIneffective,
     ];
     for code in [0, 5, u32::MAX] {
         v.extend([
@@ -196,6 +197,8 @@ fn all_outcomes() -> Vec<Outcome> {
     // A failed priority restore (watch, A4) after either CPU step that can follow it.
     for reason in [
         SkipReason::JobFailed { code: 5 },
+        SkipReason::JobIneffective,
+        SkipReason::ReadBackFailed { code: 6 },
         SkipReason::CpuSetsFailed { code: 87 },
     ] {
         for code in [0, 6, u32::MAX] {
@@ -213,7 +216,7 @@ fn all_outcomes() -> Vec<Outcome> {
 #[test]
 fn every_outcome_round_trips() {
     let outcomes = all_outcomes();
-    assert_eq!(outcomes.len(), 75 + 41 * 5 * 4 + 6);
+    assert_eq!(outcomes.len(), 75 + 42 * 5 * 4 + 12);
     for outcome in outcomes {
         for unix_s in [0, 1, 1_762_600_000, u64::MAX] {
             let r = LaunchResult {
@@ -564,6 +567,7 @@ fn watch_reasons_golden_and_round_trip() {
     for (reason, line) in [
         (SkipReason::TargetNotFound, "rule=skipped:target_not_found"),
         (SkipReason::TargetElevated, "rule=skipped:target_elevated"),
+        (SkipReason::JobIneffective, "rule=skipped:job_ineffective"),
         (
             SkipReason::TargetDenied { code: 5 },
             "rule=skipped:target_denied:5",
@@ -598,6 +602,7 @@ fn watch_reasons_take_exactly_their_code_form() {
     for l in [
         "rule=skipped:target_not_found:5",
         "rule=skipped:target_elevated:0",
+        "rule=skipped:job_ineffective:0",
         "rule=skipped:target_denied",
         "rule=skipped:search_failed",
         "rule=skipped:priority_failed",
@@ -624,9 +629,14 @@ fn method_unsupported_of_an_earlier_shim_still_reads() {
 #[test]
 fn a_priority_restore_line_is_strict() {
     let inconsistent = at(0, ResultErrorKind::Inconsistent);
-    // Only after job_failed or cpu_sets_failed; never on an applied rule.
+    // Only after a CPU step of watch (job_failed, job_ineffective, read_back_failed,
+    // cpu_sets_failed); never on an applied rule.
     let cpu_sets = GOLDEN_RESTORE.replace("job_failed:5", "cpu_sets_failed:87");
     assert!(decode(cpu_sets.as_bytes()).is_ok());
+    let ineffective = GOLDEN_RESTORE.replace("job_failed:5", "job_ineffective");
+    let r = watch_skipped(SkipReason::JobIneffective, Some(6));
+    assert_eq!(decode(ineffective.as_bytes()).unwrap(), r);
+    assert_eq!(encode(&r).unwrap(), ineffective.as_bytes());
     for other in [
         SkipReason::TargetDenied { code: 5 },
         SkipReason::PriorityFailed { code: 5 },
