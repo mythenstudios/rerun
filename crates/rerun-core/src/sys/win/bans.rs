@@ -288,6 +288,11 @@ fn banned_windows_sys_items_resolve() {
     let _ = windows_sys::Win32::System::Threading::CreateMutexExA;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: OpenMutexW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::OpenMutexW;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: CreateToolhelp32Snapshot must be banned"
     )]
     let _ = windows_sys::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;

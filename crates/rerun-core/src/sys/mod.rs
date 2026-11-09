@@ -47,7 +47,9 @@ pub(crate) mod seq;
 #[cfg(windows)]
 pub mod win;
 
-pub use elevation::{Elevation, HelperProc, HelperRun, NoElevation, TokenKind};
+pub use elevation::{
+    Elevation, HelperLock, HelperPresence, HelperProc, HelperRun, NoElevation, TokenKind,
+};
 pub use error::{SysError, SysErrorKind, SysResult, shown_target};
 pub use firewall::{Firewall, FwRest, FwRule, FwRule3, FwSelection};
 pub use fs::{AceFact, Dir, DirWrite, Fs, SdFacts, VolumeGuid, WriteCap};

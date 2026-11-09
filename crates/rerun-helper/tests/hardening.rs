@@ -97,8 +97,8 @@ fn release_rerun_helper_exe_is_hardened_and_holds_no_test_key() {
 /// Started from this test (no `runas`), the helper gets past `restrict_dll_search` and drops
 /// its privileges (else `Refused(Internal)`), then refuses: `NotElevated` from a standard
 /// process (the developer machine), `ImageFolder` from an elevated one (the CI runner, whose
-/// processes are elevated): it runs from `target`, not from the admin-only
-/// `Program FilesRerun` (ADR 0023 §3 step 4, P4-2c). Its privileges are its own: this test
+/// processes are elevated): it runs from `target\`, not from the admin-only
+/// `Program Files\Rerun` (ADR 0023 §3 step 4, P4-2c). Its privileges are its own: this test
 /// process keeps its own.
 #[test]
 fn rerun_helper_exe_refuses_outside_its_folder() {

@@ -7,7 +7,9 @@ use std::collections::VecDeque;
 use std::sync::{Mutex, PoisonError};
 
 use crate::path::RootPath;
-use crate::sys::elevation::{Elevation, HelperRun, TokenKind, parameters};
+use crate::sys::elevation::{
+    Elevation, HelperLock, HelperPresence, HelperRun, TokenKind, parameters,
+};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
 /// A recorded [`Elevation::run_helper`] call: the image and the command line.
@@ -29,6 +31,8 @@ pub struct FakeElevation {
     runs: Mutex<VecDeque<SysResult<HelperRun>>>,
     calls: Mutex<Vec<RunCall>>,
     running: Mutex<SysResult<Vec<String>>>,
+    unaskable: Mutex<bool>,
+    lock: Mutex<SysResult<HelperLock>>,
 }
 
 impl Default for FakeElevation {
@@ -38,6 +42,8 @@ impl Default for FakeElevation {
             runs: Mutex::new(VecDeque::new()),
             calls: Mutex::new(Vec::new()),
             running: Mutex::new(Ok(Vec::new())),
+            unaskable: Mutex::new(false),
+            lock: Mutex::new(Ok(HelperLock::Free)),
         }
     }
 }
@@ -67,6 +73,19 @@ impl FakeElevation {
     /// The NT names of the images that run from now on (or the error of the process list).
     pub fn set_helper_running(&self, images: SysResult<Vec<String>>) {
         *self.running.lock().unwrap_or_else(PoisonError::into_inner) = images;
+    }
+
+    /// A process of the helper's file name runs that cannot be asked (or none).
+    pub fn set_helper_unaskable(&self, on: bool) {
+        *self
+            .unaskable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = on;
+    }
+
+    /// The helper's instance lock from now on.
+    pub fn set_helper_lock(&self, lock: SysResult<HelperLock>) {
+        *self.lock.lock().unwrap_or_else(PoisonError::into_inner) = lock;
     }
 }
 
@@ -99,13 +118,32 @@ impl Elevation for FakeElevation {
             })
     }
 
-    fn helper_running(&self, nt_name: &str) -> SysResult<bool> {
+    fn helper_running(&self, nt_name: &str) -> SysResult<HelperPresence> {
         let folded = crate::fold::fold(nt_name);
-        self.running
+        let running = self
+            .running
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map(|v| v.iter().any(|i| crate::fold::fold(i) == folded))
-            .map_err(Clone::clone)
+            .map_err(Clone::clone)?;
+        let unaskable = *self
+            .unaskable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Ok(if running {
+            HelperPresence::Running
+        } else if unaskable {
+            HelperPresence::Unaskable
+        } else {
+            HelperPresence::None
+        })
+    }
+
+    fn helper_lock(&self) -> SysResult<HelperLock> {
+        self.lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }

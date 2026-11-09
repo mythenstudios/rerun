@@ -54,7 +54,9 @@ use super::reg::{self, OwnedKey, ReadAccess, Root, View};
 use super::status::kind_of_win32;
 use super::token;
 use crate::path::RootPath;
-use crate::sys::elevation::{Elevation, HelperProc, HelperRun, TokenKind, parameters};
+use crate::sys::elevation::{
+    Elevation, HelperLock, HelperPresence, HelperProc, HelperRun, TokenKind, parameters,
+};
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
 /// winerror.h `ERROR_CANCELLED`: the user declined the UAC prompt.
@@ -266,7 +268,12 @@ impl Elevation for WinElevation {
         Ok(HelperRun::Exited { code, proc })
     }
 
-    fn helper_running(&self, nt_name: &str) -> SysResult<bool> {
+    fn helper_running(&self, nt_name: &str) -> SysResult<HelperPresence> {
         super::process::running(nt_name).map_err(|c| sys_err("the process list", c))
+    }
+
+    fn helper_lock(&self) -> SysResult<HelperLock> {
+        super::process::lock_state(super::process::INSTANCE_MUTEX)
+            .map_err(|c| sys_err("the helper's instance lock", c))
     }
 }

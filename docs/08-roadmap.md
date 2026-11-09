@@ -61,6 +61,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - Code signing, portable build
 - Before A6: every anti-cheat marker without a vendor source (`EasyAntiCheat`, `EasyAntiCheat_EOS`, `GameGuard`, `XIGNCODE`, `EAAntiCheat.GameServiceLauncher.exe`; `docs/05-sources-policy.md`) has one, or a dump of a real machine; the third-party link for `start_protected_game.exe` is replaced by Epic's own documentation once found
 - Before A6: no release with an unsigned `rerun-helper.exe` (ADR 0023, audit A4 S12: before code signing its UAC prompt cannot be told apart from a malware prompt of the same name)
+- Before A6: `elevate::HELPER_MIN_SEQ` is the `seq` of the index shipped with the release (today 1: no index shipped, no release key; the test `helper_min_seq_rises_with_the_first_release_key` fails once a release key slot is filled while it is still 1; ADR 0023 §5 step 2, security review N1 of P4-2c)
 
 **Acceptance:** All flows from the mockup work against the real core.
 

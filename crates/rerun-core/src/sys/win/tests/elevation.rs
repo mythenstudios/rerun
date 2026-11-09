@@ -35,7 +35,7 @@ use crate::fold::fold;
 use crate::path::RelPath;
 use crate::policy::root::{RootError, helper_image};
 use crate::sys::fs::Fs;
-use crate::sys::{Elevation, HelperRun, System, TokenKind};
+use crate::sys::{Elevation, HelperPresence, HelperRun, System, TokenKind};
 
 fn system32() -> PathBuf {
     let windir: OsString = shell::system_windows_directory().unwrap();
@@ -276,19 +276,23 @@ fn own_image_and_the_process_check() {
     use super::super::process;
     let own = process::own_image().unwrap();
     assert!(own.starts_with(r"\Device\"), "{own}");
-    assert_eq!(process::running(&own), Ok(true));
-    assert_eq!(process::running(&own.to_uppercase()), Ok(true));
+    assert_eq!(process::running(&own), Ok(HelperPresence::Running));
+    assert_eq!(
+        process::running(&own.to_uppercase()),
+        Ok(HelperPresence::Running)
+    );
     let elsewhere = format!(
         r"\Device\HarddiskVolume999\nowhere\{}",
         own.rsplit('\\').next().unwrap()
     );
-    assert_eq!(process::running(&elsewhere), Ok(false));
+    assert_eq!(process::running(&elsewhere), Ok(HelperPresence::None));
     assert_eq!(
         process::running(r"\Device\HarddiskVolume999\nowhere\rerun-helper-none.exe"),
-        Ok(false)
+        Ok(HelperPresence::None)
     );
-    assert!(
+    assert_eq!(
         WinElevation.helper_running(&own).unwrap(),
+        HelperPresence::Running,
         "through the Elevation trait"
     );
 }
@@ -300,8 +304,23 @@ fn the_instance_mutex_admits_one_holder() {
     use super::super::process;
     let name = format!(r"Local\Rerun.Test.{}", std::process::id());
     let first = process::named_mutex(&name).unwrap();
-    assert_eq!(process::named_mutex(&name).map(|_| ()), Err(183));
+    let second = process::named_mutex(&name).map(|_| ()).unwrap_err();
+    assert_eq!(second.code, 183);
+    // Created by this (non-elevated or elevated) process: its owner is readable on the handle.
+    assert!(
+        second
+            .owner
+            .as_deref()
+            .is_some_and(|o| o.starts_with("S-1-")),
+        "{second:?}"
+    );
+    // The CLI's view of the same lock: held, owner readable (created by this very user).
+    assert!(matches!(
+        process::lock_state(&name),
+        Ok(crate::sys::HelperLock::Held { owner: Some(_) })
+    ));
     drop(first);
+    assert_eq!(process::lock_state(&name), Ok(crate::sys::HelperLock::Free));
     assert!(process::named_mutex(&name).is_ok());
 }
 
@@ -439,8 +458,9 @@ fn dev_helper_chain_with_the_test_key() {
                 path: RootPath::from_final_path(&gi.final_path).unwrap(),
             },
             ops: vec![AddOp {
-                op: 0,
+                op: 1,
                 program: RelPath::parse("game.exe").unwrap(),
+                direction: crate::policy::firewall::Direction::Out,
             }],
         },
     };

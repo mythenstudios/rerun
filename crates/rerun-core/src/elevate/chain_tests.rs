@@ -32,18 +32,20 @@ use super::serve::{Keys, serve_with};
 use crate::catalog::check::review_seam;
 use crate::catalog::key::test_key;
 use crate::catalog::model::{Id, Topo};
+use crate::detect::exe::{AntiCheat, AntiCheatHit, AntiCheatScan};
 use crate::path::{RelPath, RootPath};
 use crate::plan::{Pick, PlanSource};
 use crate::policy::firewall::{Direction, Program, TxnId, rule};
 use crate::policy::root::{HelperImage, RootId, helper_image};
 use crate::sys::fake::{
-    FakeElevation, FakeHelperSystem, FakeHelperToken, FakeKnownFolders, FakeSd, FakeSystem,
-    TokenCall,
+    FAKE_USER_SID, FakeElevation, FakeHelperSystem, FakeHelperToken, FakeKnownFolders, FakeSd,
+    FakeSystem, TokenCall,
 };
 use crate::sys::{
-    Elevation, HelperProc, HelperRun, KnownFolder, SysError, SysErrorKind, SysResult, System,
-    TokenKind,
+    Elevation, HelperLock, HelperPresence, HelperProc, HelperRun, KnownFolder, SysError,
+    SysErrorKind, SysResult, System, TokenKind,
 };
+use crate::topo::{ExeCheck, ExeState, GameFacts};
 use crate::wire::hex32;
 
 const PF: &str = r"C:\Program Files";
@@ -187,6 +189,7 @@ fn add_request(sys: &FakeSystem, index: [u8; 32]) -> Request {
             ops: vec![AddOp {
                 op: 4,
                 program: RelPath::parse(r"bin\game.exe").unwrap(),
+                direction: Direction::Out,
             }],
         },
     }
@@ -271,8 +274,12 @@ impl Elevation for Wire<'_> {
         })
     }
 
-    fn helper_running(&self, _: &str) -> SysResult<bool> {
-        Ok(false)
+    fn helper_running(&self, _: &str) -> SysResult<HelperPresence> {
+        Ok(HelperPresence::None)
+    }
+
+    fn helper_lock(&self) -> SysResult<HelperLock> {
+        Ok(HelperLock::Free)
     }
 }
 
@@ -486,6 +493,23 @@ fn the_request_round_trips_and_is_strict() {
         });
     }
     assert!(encode(&r).is_err());
+    // Op 0 is the profile fence, never a helper op.
+    let mut r0 = r.clone();
+    add_ops(&mut r0).truncate(1);
+    add_ops(&mut r0)[0].op = 0;
+    assert!(encode(&r0).is_err());
+    let zero = text.replacen(r#""op":4"#, r#""op":0"#, 1);
+    assert!(matches!(
+        decode(zero.as_bytes(), crate::BUILD_ID),
+        Err(RequestError::Form(_))
+    ));
+    // A direction this build does not know is no request.
+    let inbound = text.replacen(r#""direction":"out""#, r#""direction":"in""#, 1);
+    assert_ne!(inbound, text);
+    assert!(matches!(
+        decode(inbound.as_bytes(), crate::BUILD_ID),
+        Err(RequestError::Form(_))
+    ));
     drop(sys);
 }
 
@@ -528,6 +552,30 @@ fn r_every_step_passes_up_to_the_write() {
         let mut shipped = Wire::new(&sys);
         shipped.keys.trusted = crate::catalog::key::release_keys();
         assert_eq!(run_on(&shipped, &at, &sha, 1), refused(Reason::Index));
+    });
+    // Without the review seam the same index is no valid index: `firewall_rule` is draft only
+    // until reviewed, so even a test-key helper stops at the index.
+    let (sys, req) = ready();
+    let (at, sha) = write(&sys, &req);
+    assert_eq!(
+        run_on(&Wire::new(&sys), &at, &sha, 1),
+        refused(Reason::Index)
+    );
+}
+
+/// A request with a direction the helper does not derive (today the only one is `out`, so the
+/// file form itself refuses another) is no request.
+#[test]
+fn r_another_direction_is_refused() {
+    seam(|| {
+        let (sys, req) = ready();
+        let text = String::from_utf8(encode(&req).unwrap()).unwrap();
+        let inbound = text.replacen(r#""direction":"out""#, r#""direction":"in""#, 1);
+        let (at, sha) = write_bytes(&sys, inbound.as_bytes());
+        assert_eq!(
+            run_on(&Wire::new(&sys), &at, &sha, 1),
+            refused(Reason::Request)
+        );
     });
 }
 
@@ -999,30 +1047,78 @@ fn d_the_cli_derives_what_the_helper_derives() {
     ));
 }
 
+/// What `topo::read_game` would report: `game.exe` and `tool.exe` there with their hashes
+/// unless `tool` says otherwise, anti-cheat as given.
+fn facts(tool: ExeState, anti_cheat: AntiCheatScan) -> GameFacts {
+    let check = |p: &str, state| ExeCheck {
+        path: RelPath::parse(p).unwrap(),
+        state,
+    };
+    GameFacts {
+        exes: vec![
+            check(r"bin\game.exe", ExeState::Match),
+            check(r"bin\tool.exe", tool),
+        ],
+        anti_cheat,
+    }
+}
+
 #[test]
-fn d_the_plan_refuses_a_drive_without_open_by_id() {
+fn d_the_plan_refuses_what_the_helper_would() {
     let sys = world();
     let t = parsed(&topo_json("invented-game", 3, "active", &game_sha()));
+    let good = facts(ExeState::Match, AntiCheatScan::default());
+    let both = picks(&["net/block", "other/also"]);
     let mut info = info_of(&sys, GAME);
-    assert_eq!(
-        check_plan(&t, &picks(&["net/block"]), &info).unwrap().len(),
-        1
-    );
+    assert_eq!(check_plan(&t, &both, &info, &good).unwrap().len(), 2);
+    // A non-main anchor with another hash, missing or unreadable: refused at plan time.
+    for state in [
+        ExeState::Mismatch,
+        ExeState::Missing,
+        ExeState::Unreadable("x".to_owned()),
+    ] {
+        let f = facts(state, AntiCheatScan::default());
+        assert!(matches!(
+            check_plan(&t, &both, &info, &f),
+            Err(PlanRefusal::ExeMismatch(p)) if p.as_str() == r"bin\tool.exe"
+        ));
+        // Not picked, not checked.
+        assert_eq!(
+            check_plan(&t, &picks(&["net/block"]), &info, &f)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    // Anti-cheat found (or a marker unreadable): refused.
+    let ac = AntiCheatScan {
+        found: vec![AntiCheatHit {
+            system: AntiCheat::Battleye,
+            path: RelPath::parse(r"bin\BattlEye").unwrap(),
+        }],
+        unreadable: Vec::new(),
+    };
+    assert!(matches!(
+        check_plan(&t, &both, &info, &facts(ExeState::Match, ac)),
+        Err(PlanRefusal::AntiCheat)
+    ));
+    // The drive.
     info.supports_open_by_id = false;
     assert!(matches!(
-        check_plan(&t, &picks(&["net/block"]), &info),
+        check_plan(&t, &picks(&["net/block"]), &info, &good),
         Err(PlanRefusal::NoOpenById)
     ));
-    // Without a helper op the drive does not matter.
+    // Without a helper op neither the drive nor the game matters.
+    let bad = facts(ExeState::Missing, AntiCheatScan::default());
     assert!(
-        check_plan(&t, &picks(&["net/none"]), &info)
+        check_plan(&t, &picks(&["net/none"]), &info, &bad)
             .unwrap()
             .is_empty()
     );
     info.supports_open_by_id = true;
     info.volume_guid = None;
     assert!(matches!(
-        check_plan(&t, &picks(&["net/block"]), &info),
+        check_plan(&t, &picks(&["net/block"]), &info, &good),
         Err(PlanRefusal::NoOpenById)
     ));
 }
@@ -1047,4 +1143,26 @@ fn s_a_running_helper_makes_the_cli_wait() {
         client::ensure_idle(&e, &img).unwrap_err().kind,
         SysErrorKind::AccessDenied
     );
+    e.set_helper_running(Ok(Vec::new()));
+    // A process of the helper's name that cannot be asked: busy, worded as interference.
+    e.set_helper_unaskable(true);
+    let why = client::ensure_idle(&e, &img).unwrap_err();
+    assert_eq!(why.kind, SysErrorKind::Busy);
+    assert!(why.to_string().contains("cannot inspect"), "{why}");
+    e.set_helper_unaskable(false);
+    // The lock: held by the user (a squatter), by Administrators, unreadable.
+    e.set_helper_lock(Ok(HelperLock::Held {
+        owner: Some(FAKE_USER_SID.to_owned()),
+    }));
+    let why = client::ensure_idle(&e, &img).unwrap_err();
+    assert!(why.to_string().contains("non-administrator"), "{why}");
+    assert!(why.to_string().contains(FAKE_USER_SID), "{why}");
+    for owner in [Some("S-1-5-32-544".to_owned()), None] {
+        e.set_helper_lock(Ok(HelperLock::Held { owner }));
+        let why = client::ensure_idle(&e, &img).unwrap_err();
+        assert_eq!(why.kind, SysErrorKind::Busy);
+        assert!(!why.to_string().contains("non-administrator"), "{why}");
+    }
+    e.set_helper_lock(Ok(HelperLock::Free));
+    assert!(client::ensure_idle(&e, &img).is_ok());
 }

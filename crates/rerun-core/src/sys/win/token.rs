@@ -32,7 +32,9 @@ use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHand
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
-use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+use windows_sys::Win32::Security::Authorization::{
+    GetSecurityInfo, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE,
+};
 use windows_sys::Win32::Security::{
     AccessCheck, DACL_SECURITY_INFORMATION, DuplicateToken, GENERIC_MAPPING,
     GROUP_SECURITY_INFORMATION, GetTokenInformation, LABEL_SECURITY_INFORMATION,
@@ -271,6 +273,17 @@ fn security_descriptor(dir: BorrowedHandle<'_>) -> Result<LocalSd, u32> {
 /// self-relative security descriptor (ADR 0023 §2, A4 N1): `GetSecurityInfo` on the handle
 /// (never by path), then `GetSecurityDescriptorLength`, copied out; `sys::win::sd` parses them.
 pub(super) fn owner_and_dacl(h: BorrowedHandle<'_>) -> Result<Vec<u8>, u32> {
+    descriptor(h, SE_FILE_OBJECT)
+}
+
+/// Owner and DACL of the kernel object `h` (opened with `READ_CONTROL`; the helper's instance
+/// mutex, A4 S8), as [`owner_and_dacl`] does for a file.
+pub(super) fn kernel_owner_and_dacl(h: BorrowedHandle<'_>) -> Result<Vec<u8>, u32> {
+    descriptor(h, SE_KERNEL_OBJECT)
+}
+
+/// `GetSecurityInfo` of `object` type on `h`, copied out as a self-relative descriptor.
+fn descriptor(h: BorrowedHandle<'_>, object: SE_OBJECT_TYPE) -> Result<Vec<u8>, u32> {
     use windows_sys::Win32::Security::GetSecurityDescriptorLength;
     /// Bound of a descriptor: an ACL is at most 64 KiB, plus owner, group and header.
     const MAX_SD: usize = 128 << 10;
@@ -281,7 +294,7 @@ pub(super) fn owner_and_dacl(h: BorrowedHandle<'_>) -> Result<Vec<u8>, u32> {
     let rc = unsafe {
         GetSecurityInfo(
             h.as_raw_handle(),
-            SE_FILE_OBJECT,
+            object,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             ptr::null_mut(),
             ptr::null_mut(),

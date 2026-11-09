@@ -30,6 +30,9 @@ $ErrorSacBlocked = 4551
 
 $script:HelperTitle = 'Rerun DEV helper'
 $script:HelperForeign = $false
+# Set only after the elevated install returned 0 (a fresh copy, or the taken-over leftover of
+# this same build): only then does Remove-Helper touch Program FilesRerun.
+$script:HelperInstalled = $false
 
 function Title([string]$text) {
     $Host.UI.RawUI.WindowTitle = "$script:HelperTitle - $text"
@@ -137,8 +140,8 @@ function Invoke-Elevated([string]$body) {
 }
 
 # The elevated install (one prompt, named by $prompt in the window title). Throws on any
-# failure. Sets $script:HelperForeign when the folder existed before and is not admin-only (exit
-# 3): then it is not the test's, and the removal leaves it alone.
+# failure. Sets $script:HelperInstalled after exit 0, and $script:HelperForeign when the folder
+# existed before and is not this test's (exit 3): then the removal leaves it alone.
 function Install-Helper($paths, $build, [string]$prompt) {
     Title "${prompt}: allow Windows PowerShell to install the helper to Program Files\Rerun"
     $body = $script:ElevatedPrelude + $script:AclCheck + @"
@@ -180,7 +183,7 @@ try {
         Fail "the install was not started (prompt declined?): $($_.Exception.Message)"
     }
     switch ($code) {
-        0 { }
+        0 { $script:HelperInstalled = $true }
         2 { Fail 'SHA-256 differs, installed copy removed' }
         3 { $script:HelperForeign = $true; Fail "$($paths.Dir) existed and is not this test's (a link, not admin-only, other content, or a helper of another build): nothing copied, nothing removed (check and delete it as administrator)" }
         default { Fail "the elevated install failed (exit $code)" }
@@ -209,7 +212,13 @@ function Get-AclVerdict($paths) {
 # The elevated removal (one prompt, named by $prompt), then the check that the folder is gone.
 # Returns 'PASS: ...' or 'FAIL: ...'; never throws (it runs in a `finally`).
 function Remove-Helper($paths, [string]$prompt) {
-    if ($script:HelperForeign) { return "SKIPPED: $($paths.Dir) existed before the test and is not admin-only; left alone" }
+    if ($script:HelperForeign) { return "SKIPPED: $($paths.Dir) existed before the test and is not this test's (a link, not admin-only, other content, or a helper of another build); left alone" }
+    if (-not $script:HelperInstalled) {
+        # Nothing of this run was installed (the install was not reached, declined or failed):
+        # nothing is removed. A folder that is there anyway is named, never touched.
+        if (Test-Path -LiteralPath $paths.Dir) { return "FAIL: nothing was installed by this run, but $($paths.Dir) exists (left alone; check it and delete it in an administrator PowerShell)" }
+        return "PASS: nothing was installed, $($paths.Dir) does not exist"
+    }
     if (-not (Test-Path -LiteralPath $paths.Dir)) { return "PASS: $($paths.Dir) is gone (nothing to remove)" }
     Title "${prompt}: allow Windows PowerShell to remove Program Files\Rerun again"
     $body = $script:ElevatedPrelude + @"

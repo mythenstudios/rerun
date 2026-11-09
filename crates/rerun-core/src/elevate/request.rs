@@ -167,6 +167,8 @@ pub struct AddOp {
     pub op: u16,
     /// The executable below the root.
     pub program: RelPath,
+    /// The direction of the step (compared with the derived one, §5 step 7).
+    pub direction: Direction,
 }
 
 /// One op of a remove batch: the rule as recorded in the journal head.
@@ -268,6 +270,7 @@ struct WireRoot {
 struct WireAddOp {
     op: u16,
     program: RelPath,
+    direction: Direction,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -340,13 +343,17 @@ fn dir_of(w: &WireDir) -> Result<DirRef, RequestError> {
     })
 }
 
-/// The op indices: 1 to [`MAX_BATCH_OPS`], consecutive (a batch is the last ops of a plan, §9).
+/// The op indices: 1 to [`MAX_BATCH_OPS`] of them, consecutive, none 0 (a batch is the last ops of a
+/// plan, §9; op 0 is always the profile fence, ADR 0020 B8).
 fn check_ops(ops: impl ExactSizeIterator<Item = u16>) -> Result<(), RequestError> {
     let n = ops.len();
     if n == 0 || n > MAX_BATCH_OPS {
         return Err(RequestError::Form("1 to 8 ops"));
     }
     let v: Vec<u16> = ops.collect();
+    if v.first() == Some(&0) {
+        return Err(RequestError::Form("op 0 is never a helper op"));
+    }
     if v.windows(2).any(|w| w[0].checked_add(1) != Some(w[1])) {
         return Err(RequestError::Form("consecutive op indices"));
     }
@@ -383,6 +390,7 @@ pub fn encode(r: &Request) -> Result<Vec<u8>, RequestError> {
                     .map(|o| WireAddOp {
                         op: o.op,
                         program: o.program.clone(),
+                        direction: o.direction,
                     })
                     .collect(),
             })
@@ -455,6 +463,7 @@ pub fn decode(b: &[u8], build: &str) -> Result<Request, RequestError> {
                     .map(|o| AddOp {
                         op: o.op,
                         program: o.program,
+                        direction: o.direction,
                     })
                     .collect(),
             }

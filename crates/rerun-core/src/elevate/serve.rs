@@ -259,7 +259,7 @@ fn validate_add(
         && ops
             .iter()
             .zip(&anchors)
-            .all(|(o, a)| o.program.same_spelling(&a.exe));
+            .all(|(o, a)| o.program.same_spelling(&a.exe) && o.direction == a.direction);
     if !same {
         return Err(Reason::Ops);
     }

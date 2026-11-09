@@ -399,3 +399,17 @@ fn the_fake_elevation_runs_as_scripted_and_records_the_command_line() {
     assert_eq!(calls[0].parameters, "--a b");
     assert_eq!(calls[0].image, image);
 }
+
+/// Tripwire (security review N1): `HELPER_MIN_SEQ` is 1 only while no release key and no shipped
+/// index exist. The day a release key slot is filled, this fails until the floor is raised to
+/// the seq of the index shipped with that build (ADR 0023 §5 step 2, user decision E5).
+#[test]
+fn helper_min_seq_rises_with_the_first_release_key() {
+    let no_release_key = crate::catalog::key::RELEASE_KEYS
+        .iter()
+        .all(Option::is_none);
+    assert!(
+        no_release_key || super::HELPER_MIN_SEQ > 1,
+        "a release key is set but HELPER_MIN_SEQ is still 1: raise it to the shipped index's seq"
+    );
+}

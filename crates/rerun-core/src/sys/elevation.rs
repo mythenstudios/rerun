@@ -55,6 +55,29 @@ pub enum HelperRun {
     Declined,
 }
 
+/// Processes of the helper image ([`Elevation::helper_running`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperPresence {
+    /// None runs.
+    None,
+    /// A process of exactly that image runs.
+    Running,
+    /// A process of that file name runs whose image cannot be asked.
+    Unaskable,
+}
+
+/// The helper's instance lock ([`Elevation::helper_lock`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelperLock {
+    /// The mutex does not exist.
+    Free,
+    /// It exists; its owner SID if it could be read.
+    Held {
+        /// The owner SID (`S-1-…`), `None` if unreadable.
+        owner: Option<String>,
+    },
+}
+
 /// Elevation, CLI side (ADR 0023 §12).
 pub trait Elevation: Send + Sync {
     /// The kind of this process's token.
@@ -81,12 +104,21 @@ pub trait Elevation: Send + Sync {
     /// the NT name the pre-check read on the installed file ([`crate::sys::SdFacts::nt_name`]).
     /// Every process whose file name is the last segment of `nt_name` is asked for its image
     /// (`QueryFullProcessImageNameW(PROCESS_NAME_NATIVE)`, compared folded); one that cannot be
-    /// opened or asked counts as running (fail closed: it cannot be told apart). A check at a
-    /// moment, not a lock: the helper's own instance lock keeps two helpers apart.
+    /// opened or asked is [`HelperPresence::Unaskable`] (the caller fails closed, with its own
+    /// wording: it may be interference, not a helper). A check at a moment, not a lock: the
+    /// helper's own instance lock keeps two helpers apart ([`Self::helper_lock`]).
     ///
     /// # Errors
     /// The process list cannot be read.
-    fn helper_running(&self, nt_name: &str) -> SysResult<bool>;
+    fn helper_running(&self, nt_name: &str) -> SysResult<HelperPresence>;
+
+    /// Whether the helper's instance lock (the named mutex of A4 S8) exists now, and its owner
+    /// if it can be read (`READ_CONTROL`; a genuine helper's mutex belongs to Administrators and
+    /// is usually unreadable for a non-elevated process).
+    ///
+    /// # Errors
+    /// The open fails for another reason than "not found" or "access denied".
+    fn helper_lock(&self) -> SysResult<HelperLock>;
 }
 
 /// An argument of the helper's command line: non-empty, printable ASCII without a space or a
@@ -127,10 +159,17 @@ impl Elevation for NoElevation {
         ))
     }
 
-    fn helper_running(&self, _: &str) -> SysResult<bool> {
+    fn helper_running(&self, _: &str) -> SysResult<HelperPresence> {
         Err(SysError::new(
             SysErrorKind::Unsupported,
             "helper process check: no elevation here",
+        ))
+    }
+
+    fn helper_lock(&self) -> SysResult<HelperLock> {
+        Err(SysError::new(
+            SysErrorKind::Unsupported,
+            "helper lock: no elevation here",
         ))
     }
 }
@@ -177,6 +216,10 @@ mod tests {
         );
         assert_eq!(
             NoElevation.helper_running("x").unwrap_err().kind,
+            SysErrorKind::Unsupported
+        );
+        assert_eq!(
+            NoElevation.helper_lock().unwrap_err().kind,
             SysErrorKind::Unsupported
         );
     }

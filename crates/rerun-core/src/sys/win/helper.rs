@@ -3,8 +3,12 @@
 //! - [`WinHelperToken`]: `drop_privileges` and `is_elevated` over `token`, `own_image` and
 //!   `instance_lock` over `process` (A4 S8).
 //! - [`WinHelperSystem`]: the file system read side with `open_by_id` ([`WinFs`]), the known
-//!   folders over a machine-only registry (the `ProfileList` values of `HKLM`; no user hive is
-//!   opened), the token; [`NoGpu`], [`NoTopology`], [`NoRegistry`] (as `registry()` and
+//!   folders over a machine-only registry (the `ProfileList` values of `HKLM` for `ProgramData`
+//!   and `UserProfiles`; no user hive is opened by Rerun), the token. The other known folders
+//!   come from `SHGetKnownFolderPath` with the helper's token: `LocalAppData`, `RoamingAppData`
+//!   and `Profile` may follow the helper account's `User Shell Folders`, which the shell reads.
+//!   For `ForbiddenRoots` that only adds folders: the defaults from `ProfileList` stay in the
+//!   list, so a redirection can make the list stricter, never shorter; [`NoGpu`], [`NoTopology`], [`NoRegistry`] (as `registry()` and
 //!   `registry_write()`), `NoElevation`, and in P4-2c [`NoFirewall`]: the COM binding enters the
 //!   helper with the write side in P4-5b, so its imports stay without COM until then.
 //!
@@ -46,12 +50,20 @@ impl HelperToken for WinHelperToken {
     }
 
     fn instance_lock(&self) -> SysResult<InstanceLock> {
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS};
         match process::instance_mutex() {
             Ok(m) => Ok(InstanceLock::new(Box::new(m))),
-            Err(c) if c == windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS => {
-                Err(SysError::new(SysErrorKind::Busy, "another elevated helper runs").with_win32(c))
+            // The helper reports only `Busy`; the text names the holder for a debugger or a test
+            // (the CLI makes its own diagnosis, `elevate::client::ensure_idle`).
+            Err(b) if b.code == ERROR_ALREADY_EXISTS || b.code == ERROR_ACCESS_DENIED => {
+                let holder = b.owner.as_deref().unwrap_or("an unreadable owner");
+                Err(SysError::new(
+                    SysErrorKind::Busy,
+                    format!("the helper's instance lock is held (owner {holder})"),
+                )
+                .with_win32(b.code))
             }
-            Err(c) => Err(err("the helper's instance lock", c)),
+            Err(b) => Err(err("the helper's instance lock", b.code)),
         }
     }
 }

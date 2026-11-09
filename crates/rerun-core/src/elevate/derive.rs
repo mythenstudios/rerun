@@ -16,7 +16,8 @@
 //!
 //! [`check_plan`] (A4 S7, the CLI): [`derive_add`], and a root whose volume cannot open by ID
 //! (FAT, exFAT: no `FILE_SUPPORTS_OPEN_BY_FILE_ID`) or has no volume GUID path is refused in the
-//! plan, never at the helper.
+//! plan, never at the helper; so is an anchor whose executable is not there with its signed hash, and
+//! a game where the anti-cheat rule applies (the facts `topo::read_game` read).
 
 use super::MAX_BATCH_OPS;
 use crate::catalog::model::{Sha256, Status, Topo, TopoStep};
@@ -25,7 +26,7 @@ use crate::path::RelPath;
 use crate::plan::Pick;
 use crate::policy::firewall::Direction;
 use crate::sys::fs::RootInfo;
-use crate::topo::{EngineError, resolve_picks};
+use crate::topo::{EngineError, ExeState, GameFacts, anti_cheat_state, resolve_picks};
 
 /// One elevated op a Topo authorises: a block rule for this executable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,9 +119,20 @@ pub enum PlanRefusal {
          Rerun's firewall rules need an NTFS or ReFS drive"
     )]
     NoOpenById,
+    /// The executable a rule names is not there with its signed SHA-256 (it need not be the
+    /// main executable the Topo was matched by).
+    #[error("{0} is not there with the SHA-256 the Topo signs: no firewall rule for it")]
+    ExeMismatch(RelPath),
+    /// The anti-cheat rule applies (E4): no firewall rule.
+    #[error("anti-cheat found: no firewall rule for this game")]
+    AntiCheat,
 }
 
-/// The CLI's check of a plan's helper ops (module docs).
+/// The CLI's check of a plan's helper ops (module docs): what the helper will check later, from
+/// what the engine read of the game folder (`game`, `topo::read_game` of the same root): every
+/// anchor's executable there with its hashes (`ExeState::Match`, which for an anchor includes the
+/// signed SHA-256; also for an executable that is not the main one), and the anti-cheat rule not
+/// enforced. The engine builds `Op::FirewallRule` from these anchors only (P4-2d).
 ///
 /// # Errors
 /// [`PlanRefusal`].
@@ -128,10 +140,26 @@ pub fn check_plan(
     topo: &Topo,
     picks: &[Pick],
     root: &RootInfo,
+    game: &GameFacts,
 ) -> Result<Vec<Anchor>, PlanRefusal> {
     let anchors = derive_add(topo, picks)?;
-    if !anchors.is_empty() && !(root.supports_open_by_id && root.volume_guid.is_some()) {
+    if anchors.is_empty() {
+        return Ok(anchors);
+    }
+    if !(root.supports_open_by_id && root.volume_guid.is_some()) {
         return Err(PlanRefusal::NoOpenById);
+    }
+    if anti_cheat_state(topo, &game.anti_cheat).enforced() {
+        return Err(PlanRefusal::AntiCheat);
+    }
+    for a in &anchors {
+        let ok = game
+            .exes
+            .iter()
+            .any(|e| e.path.same_spelling(&a.exe) && e.state == ExeState::Match);
+        if !ok {
+            return Err(PlanRefusal::ExeMismatch(a.exe.clone()));
+        }
     }
     Ok(anchors)
 }

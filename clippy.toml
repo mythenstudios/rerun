@@ -433,6 +433,7 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Threading::CreateMutexA", reason = "one named mutex: rerun-core sys::win::process::named_mutex (ADR 0023, A4 S8)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::CreateMutexExW", reason = "one named mutex: rerun-core sys::win::process::named_mutex (ADR 0023, A4 S8)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::CreateMutexExA", reason = "one named mutex: rerun-core sys::win::process::named_mutex (ADR 0023, A4 S8)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::OpenMutexW", reason = "one named mutex read: rerun-core sys::win::process::lock_state, the CLI's view of the helper's lock (ADR 0023, A4 S8)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot", reason = "process snapshots only in rerun-launch win::process::snapshot (watch) and rerun-core sys::win::process::candidates (ADR 0023, A4 S8)", allow-invalid = true },
   # Review of P3-4a (SEC-S1): never, no exception. Ending a job's processes, threads in or
   # handles to another process's threads, and reading another process's memory (rule 3).
