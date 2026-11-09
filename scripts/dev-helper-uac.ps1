@@ -58,10 +58,12 @@ function Invoke-DevTest([string]$mode) {
     $result = $lines | Where-Object { $_ -like 'RERUN_DEV_UAC_RESULT:*' } | Select-Object -First 1
     $s2 = $lines | Where-Object { $_ -like 'RERUN_DEV_UAC_S2:*' } | Select-Object -First 1
     $panic = $lines | Where-Object { $_ -match 'panicked at|assertion' } | Select-Object -First 2
+    # What the start actually returned, so a FAIL names it (e.g. a prompt answered with Yes).
+    $run = $lines | Where-Object { $_ -like 'RERUN_DEV_UAC_RUN:*' } | Select-Object -First 1
     $verdict = if ($code -eq 0 -and $result -like '*PASS*') {
         $result -replace '^RERUN_DEV_UAC_RESULT: ', ''
     } else {
-        "FAIL: test exit $code $($panic -join ' ')"
+        "FAIL: test exit $code; got $(if ($run) { $run -replace '^RERUN_DEV_UAC_RUN: ', '' } else { '(no run)' }); $($panic -join ' ')"
     }
     return @{ Verdict = $verdict; S2 = $(if ($s2) { $s2 -replace '^RERUN_DEV_UAC_S2: ', '' } else { '(not reached)' }) }
 }
@@ -95,7 +97,8 @@ try {
     $accept = Invoke-DevTest 'accept'
 
     # --- 4. decline (prompt 3 of 4) --------------------------------------------------------
-    Title 'PROMPT 3 of 4: rerun-helper.exe (unknown publisher) - click NO'
+    Title 'PROMPT 3 of 4: rerun-helper.exe (unknown publisher) - click NO / NEIN this time'
+    Write-Host '   >>> this prompt: click NO (Nein) <<<' -ForegroundColor Red
     $decline = Invoke-DevTest 'decline'
 } catch {
     $stopped = $_.Exception.Message
