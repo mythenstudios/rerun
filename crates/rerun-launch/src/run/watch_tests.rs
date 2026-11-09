@@ -675,6 +675,41 @@ fn a5_held_pids_are_skipped_without_opening_and_do_not_count() {
     assert_eq!(snapshots(&os), 2);
 }
 
+/// S2 of the review of P3-4a: refused PIDs (no handle, so not held) use only the budget the
+/// new PIDs leave. Eight refused ones listed before the game no longer keep it from being
+/// opened; they are retried with what is left, never skipped.
+#[test]
+fn a5_refused_pids_are_retried_only_with_the_budget_left() {
+    let refused: Vec<FakeProc> = (5001..=5008)
+        .map(|p| {
+            let mut r = FakeProc::new(p, TARGET, 5);
+            r.open = Err(5);
+            r
+        })
+        .collect();
+    let mut then = refused.clone();
+    then.push(game(5100));
+    let os = wfake(&hard_high(), vec![Ok(refused), Ok(then)]);
+    assert_eq!(parts(&go(&os, T120)).1, Some(Check::Ok));
+    assert_eq!(set_opened(&os), [5100]);
+    let calls = os.calls();
+    let at = |c: &Call| calls.iter().rposition(|x| x == c).unwrap();
+    // The new PID first, then seven refused ones with the rest of the budget.
+    assert!(at(&query(5100)) < at(&query(5001)));
+    for pid in 5001..=5007 {
+        assert_eq!(count(&os, |c| *c == query(pid)), 2, "{pid}");
+    }
+    assert_eq!(count(&os, |c| *c == query(5008)), 1);
+    // Control: a refused PID is remembered, not skipped: it is tried again and becomes the
+    // target once it opens.
+    let mut first = FakeProc::new(5002, TARGET, 5);
+    first.open = Err(5);
+    let later = FakeProc::new(5002, TARGET, 5);
+    let os = wfake(&hard_high(), vec![Ok(vec![first]), Ok(vec![later])]);
+    assert_eq!(parts(&go(&os, T120)).1, Some(Check::Ok));
+    assert_eq!(set_opened(&os), [5002]);
+}
+
 // ---- W10: a target that ends within the check ----
 
 #[test]
@@ -983,6 +1018,23 @@ fn w12_the_check_reads_the_target() {
 }
 
 // ---- W13: snapshots that fail ----
+
+/// SEC-N2: without the started child's PID it cannot be excluded: no snapshot, no open,
+/// `search_failed:6`, Steam's command keeps running unchanged.
+#[test]
+fn an_unknown_child_pid_searches_nothing() {
+    let mut os = wfake(&hard_high(), after(0, vec![game(5000)]));
+    os.child_pid = 0;
+    assert_eq!(
+        parts(&go(&os, T120)),
+        (skipped(Skip::SearchFailed(6)), None, None, 42)
+    );
+    assert_eq!(snapshots(&os), 0);
+    assert_eq!(count(&os, |c| matches!(c, Call::Open { .. })), 0);
+    // Control: the same table with the PID known applies.
+    let os = wfake(&hard_high(), after(0, vec![game(5000)]));
+    assert_eq!(parts(&go(&os, T120)).1, Some(Check::Ok));
+}
 
 #[test]
 fn w13_failing_snapshots() {

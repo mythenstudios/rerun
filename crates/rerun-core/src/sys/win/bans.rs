@@ -253,6 +253,31 @@ fn banned_windows_sys_items_resolve() {
     let _ = windows_sys::Win32::System::Threading::OpenProcess;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: TerminateJobObject must be banned"
+    )]
+    let _ = windows_sys::Win32::System::JobObjects::TerminateJobObject;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateRemoteThread must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::CreateRemoteThread;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateRemoteThreadEx must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::CreateRemoteThreadEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: OpenThread must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::OpenThread;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: Toolhelp32ReadProcessMemory must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Diagnostics::ToolHelp::Toolhelp32ReadProcessMemory;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: CreateFileW must be banned"
     )]
     let _ = windows_sys::Win32::Storage::FileSystem::CreateFileW;

@@ -189,6 +189,8 @@ pub(crate) struct FakeOs {
     pub(crate) set_priority: RefCell<VecDeque<Result<(), u32>>>,
     /// `watch`: the answer of `attach_job`.
     pub(crate) attach_job: Result<(), u32>,
+    /// `watch`: what `pid` answers for the started child ([`CHILD_PID`]).
+    pub(crate) child_pid: u32,
     /// `watch`: the job's entries read right after `attach_job` (A7), before the check waits on
     /// the target; `None`: the joined selection. [`FakeOs::job_affinity`] answers the check.
     pub(crate) join_job: Option<Result<Vec<GroupAffinity>, u32>>,
@@ -251,6 +253,7 @@ impl FakeOs {
             table: RefCell::new(VecDeque::new()),
             set_priority: RefCell::new(VecDeque::new()),
             attach_job: Ok(()),
+            child_pid: CHILD_PID,
             join_job: None,
             join_mask: None,
             joined: Cell::new(None),
@@ -498,7 +501,7 @@ impl Os for FakeOs {
     }
 
     fn pid(&self, _child: &u32) -> u32 {
-        CHILD_PID
+        self.child_pid
     }
 
     fn processes(&self) -> Result<Vec<Listed>, u32> {

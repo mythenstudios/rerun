@@ -8,16 +8,19 @@
 //!   [`SLOW_POLL_MS`] until [`SLOW_POLL_FOR_MS`], then every [`LATE_POLL_MS`], until the
 //!   deadline (start + `watch_timeout_s`; 360 snapshots for 120 s), one process
 //!   snapshot. Its entries are a name pre-filter only. The started child is excluded by PID
-//!   before anything is opened. A new PID whose name matches is opened with query rights only
-//!   (at most [`MAX_OPENS_PER_POLL`] per snapshot); a failed open or read skips it for this
-//!   poll and remembers the code (except 87 on the open, or a failed read of a process that
-//!   has ended: it is gone, not refused).
-//!   Its handle reports the image path, the creation time and the token: a candidate has the
+//!   before anything is opened (a PID of 0 for it: no search, `search_failed:6`). A PID
+//!   whose name matches is opened with query rights only, at most [`MAX_OPENS_PER_POLL`] per
+//!   snapshot: PIDs never refused first, then PIDs whose open was refused before, with what
+//!   is left of the budget (A5, S2 of the review of P3-4a). A refused open has no handle: the
+//!   code is remembered and the PID is tried again in later polls. 87 on the open, or a failed
+//!   read of a process that has ended, is gone, not refused.
+//!   The handle reports the image path, the creation time and the token: a candidate has the
 //!   target's path, was created at or after the shim, and runs as the same user in the same
-//!   session ([`trust`], A3). Every other opened process stays
-//!   held until the search ends and its PID is skipped without opening again (a held handle
-//!   keeps the PID from being reused). Of several candidates the earliest created wins (then
-//!   the smallest PID); the others stay untouched.
+//!   session ([`trust`], A3). A process rejected after its facts were read (or whose facts
+//!   could not be read) stays held until the search ends, and its PID is skipped without
+//!   opening again (a held handle keeps the PID from being reused). Of several candidates the
+//!   earliest created wins (then the smallest PID); the others are dropped untouched (handle
+//!   closed) and, if opened again in a later poll, read again from scratch.
 //! - **Target (W3):** a target at a higher integrity level ends the search untouched
 //!   (`target_elevated`). Otherwise it is opened a second time with exactly the rights the
 //!   profile needs while the first handle is held; the second handle must report the same
@@ -72,6 +75,8 @@ pub(crate) const MAX_OPENS_PER_POLL: usize = 8;
 /// winerror.h `ERROR_INVALID_DATA`: the second handle of a target reports other facts than
 /// the first (cannot happen while the first is held; refused if it does).
 pub(crate) const ERROR_INVALID_DATA: u32 = 13;
+/// winerror.h `ERROR_INVALID_HANDLE`: the started child's PID could not be read (0).
+pub(crate) const ERROR_INVALID_HANDLE: u32 = 6;
 /// winerror.h `ERROR_INVALID_PARAMETER`: what `OpenProcess` reports for a PID that no longer
 /// exists (the candidate ended after the snapshot; not a refusal).
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -156,6 +161,16 @@ impl Found {
     }
 }
 
+/// What the search keeps between snapshots.
+struct Seen<T> {
+    /// Rejected and handled processes: held until the search ends, their PIDs skipped (A5).
+    held: Vec<(u32, T)>,
+    /// PIDs whose open was refused: no handle, tried again with the budget left (A5).
+    refused: Vec<u32>,
+    /// The code of the last refusal (open or read).
+    denied: Option<u32>,
+}
+
 /// A candidate of one snapshot: opened with query rights, facts read.
 struct Candidate<T> {
     pid: u32,
@@ -202,14 +217,21 @@ pub(super) fn start<O: Os>(os: &O, cmd: &Command<'_>, w: &Watch) -> Done<O::Chil
 /// The search loop (W2–W6).
 fn search<O: Os>(os: &O, w: &Watch, own: &Own, child: &O::Child) -> Found {
     let child_pid = os.pid(child);
+    // 0: the started child's PID is unknown, so it could not be excluded (SEC-N2 of the review
+    // of P3-4a): no search at all.
+    if child_pid == 0 {
+        return Found::skipped(Skip::SearchFailed(ERROR_INVALID_HANDLE));
+    }
     let begin = os.now_ms();
     let deadline = begin.saturating_add(w.timeout_ms);
-    // Rejected and handled processes: held until the search ends, their PIDs skipped (A5).
-    let mut held: Vec<(u32, O::Target)> = Vec::new();
+    let mut seen = Seen {
+        held: Vec::new(),
+        refused: Vec::new(),
+        denied: None,
+    };
     let mut child_running = true;
     let mut listed_once = false;
     let mut snapshot_error = None;
-    let mut denied = None;
     let mut targets = 0u8;
     let mut last: Option<Found> = None;
     while os.now_ms() < deadline {
@@ -217,13 +239,13 @@ fn search<O: Os>(os: &O, w: &Watch, own: &Own, child: &O::Child) -> Found {
             Err(code) => snapshot_error = Some(code),
             Ok(list) => {
                 listed_once = true;
-                if let Some(c) = pick(os, w, own, child_pid, &list, &mut held, &mut denied) {
+                if let Some(c) = pick(os, w, own, child_pid, &list, &mut seen) {
                     targets += 1;
                     let found = if trust(&own.token, &c.facts.token) == Trust::Elevated {
-                        held.push((c.pid, c.handle));
+                        seen.held.push((c.pid, c.handle));
                         Found::skipped(Skip::TargetElevated)
                     } else {
-                        set(os, w, c, &mut held)
+                        set(os, w, c, &mut seen.held)
                     };
                     let again = found.check == Some(Check::ExitedEarly) && targets < MAX_TARGETS;
                     last = Some(found);
@@ -254,7 +276,8 @@ fn search<O: Os>(os: &O, w: &Watch, own: &Own, child: &O::Child) -> Found {
             os.sleep_ms(ms);
         }
     }
-    drop(held);
+    let denied = seen.denied;
+    drop(seen);
     if let Some(found) = last {
         return found;
     }
@@ -274,31 +297,43 @@ fn pick<O: Os>(
     own: &Own,
     child_pid: u32,
     list: &[crate::os::Listed],
-    held: &mut Vec<(u32, O::Target)>,
-    denied: &mut Option<u32>,
+    seen: &mut Seen<O::Target>,
 ) -> Option<Candidate<O::Target>> {
-    let mut opened = 0;
+    let Seen {
+        held,
+        refused,
+        denied,
+    } = seen;
+    let matches: Vec<u32> = list
+        .iter()
+        .filter(|l| {
+            l.pid != child_pid
+                && !held.iter().any(|(pid, _)| *pid == l.pid)
+                && os.same_path(&l.name, &w.name)
+        })
+        .map(|l| l.pid)
+        .collect();
+    // PIDs never refused first; refused ones only with the budget left (A5).
+    let (again, new): (Vec<u32>, Vec<u32>) =
+        matches.into_iter().partition(|pid| refused.contains(pid));
     let mut found: Vec<Candidate<O::Target>> = Vec::new();
-    for l in list {
-        if l.pid == child_pid
-            || held.iter().any(|(pid, _)| *pid == l.pid)
-            || !os.same_path(&l.name, &w.name)
-        {
-            continue;
-        }
-        if opened == MAX_OPENS_PER_POLL {
-            break;
-        }
-        opened += 1;
-        let handle = match os.open_process(l.pid, Access::default()) {
+    for pid in new.into_iter().chain(again).take(MAX_OPENS_PER_POLL) {
+        let handle = match os.open_process(pid, Access::default()) {
             Ok(h) => h,
             // The process ended after the snapshot: gone, not refused.
-            Err(ERROR_INVALID_PARAMETER) => continue,
+            Err(ERROR_INVALID_PARAMETER) => {
+                refused.retain(|p| *p != pid);
+                continue;
+            }
             Err(code) => {
                 *denied = Some(code);
+                if !refused.contains(&pid) {
+                    refused.push(pid);
+                }
                 continue;
             }
         };
+        refused.retain(|p| *p != pid);
         let facts = match os.facts(&handle) {
             Ok(f) => f,
             Err(code) => {
@@ -308,7 +343,7 @@ fn pick<O: Os>(
                 if os.wait_for(handle.borrow(), 0) != Ok(true) {
                     *denied = Some(code);
                 }
-                held.push((l.pid, handle));
+                held.push((pid, handle));
                 continue;
             }
         };
@@ -316,13 +351,9 @@ fn pick<O: Os>(
             && facts.created >= own.created
             && trust(&own.token, &facts.token) != Trust::Foreign;
         if fits {
-            found.push(Candidate {
-                pid: l.pid,
-                facts,
-                handle,
-            });
+            found.push(Candidate { pid, facts, handle });
         } else {
-            held.push((l.pid, handle));
+            held.push((pid, handle));
         }
     }
     found.sort_by_key(|c| (c.facts.created, c.pid));

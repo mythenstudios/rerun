@@ -422,6 +422,13 @@ disallowed-methods = [
   # only by rerun-launch win::process::open (W7; test fixtures under a module-wide expect).
   { path = "windows_sys::Win32::System::Threading::TerminateProcess", reason = "ends a process; only rerun-launch's win::launch::terminate (ADR 0022 amendment P3-4, A2)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::OpenProcess", reason = "opens another process; only rerun-launch's win::process::open (ADR 0022 amendment P3-4, W7)", allow-invalid = true },
+  # Review of P3-4a (SEC-S1): never, no exception. Ending a job's processes, threads in or
+  # handles to another process's threads, and reading another process's memory (rule 3).
+  { path = "windows_sys::Win32::System::JobObjects::TerminateJobObject", reason = "ends every process of a job; never (ADR 0022 amendment P3-4, A2)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::CreateRemoteThread", reason = "no injection, never (rule 3, ADR 0022 amendment P3-4)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::CreateRemoteThreadEx", reason = "no injection, never (rule 3, ADR 0022 amendment P3-4)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::OpenThread", reason = "no handles to another process's threads, never (rule 3, ADR 0022 amendment P3-4)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Diagnostics::ToolHelp::Toolhelp32ReadProcessMemory", reason = "reads another process's memory; never (rule 3, ADR 0022 amendment P3-4)", allow-invalid = true },
   # Security review of step 9 (2026-11-05): the remaining affinity setters and readers, and the
   # process creation APIs not covered above.
   { path = "windows_sys::Wdk::System::Threading::NtSetInformationThread", reason = "thread affinity/ideal processor setter among others; none until phase 3 gives it one wrapper (ADR 0010)", allow-invalid = true },

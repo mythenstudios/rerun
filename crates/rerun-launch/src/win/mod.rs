@@ -449,4 +449,4 @@ fn io_error(e: std::io::Error) -> OsError {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

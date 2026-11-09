@@ -1,10 +1,9 @@
 //! A7 of the review of P3-4: W3 to W5 of `watch` ([`set`]) on real Windows, on a target that
 //! already is in a job (as under a launcher or a CI runner that holds its processes in one).
 //! The target is a suspended `System32\cmd.exe` child of this test process, created inside a
-//! parent job of its own by `WinOs::spawn`; it never runs and is ended at the end. Nothing
-//! else is opened.
+//! parent job of its own by `WinOs::spawn`; it never runs and is ended at the end, also when a
+//! test panics (`Kid`, SEC-N1 of the review of P3-4a). Nothing else is opened.
 
-use std::borrow::Borrow;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 
@@ -16,7 +15,8 @@ use super::{Candidate, Watch, set};
 use crate::os::{Access, GroupAffinity, Os, Spawn, priority_class};
 use crate::run::{Applied, Limit, Rule, Skip};
 use crate::win::WinOs;
-use crate::win::launch::{Child, Target};
+use crate::win::launch::Target;
+use crate::win::tests::Kid;
 
 fn cmd_exe() -> Vec<u16> {
     #[expect(
@@ -30,23 +30,23 @@ fn cmd_exe() -> Vec<u16> {
 
 /// A suspended `cmd.exe` in a parent job (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`), with `parent` as
 /// the parent job's group affinity if given.
-fn child_in_a_job(parent: Option<GroupAffinity>) -> Child {
+fn child_in_a_job(parent: Option<GroupAffinity>) -> Kid {
     let app = cmd_exe();
     let spawn = Spawn {
         in_job: true,
         suspended: true,
         priority: None,
     };
-    let child = WinOs.spawn(&app, &app, &spawn).unwrap();
+    let child = Kid::new(WinOs.spawn(&app, &app, &spawn).unwrap());
     if let Some(ga) = parent {
-        WinOs.limit_job(&child, ga).unwrap();
+        WinOs.limit_job(child.child(), ga).unwrap();
     }
     child
 }
 
 /// The child as `pick` hands it to `set`: opened with query rights, facts read.
-fn candidate(child: &Child) -> Candidate<Target> {
-    let pid = WinOs.pid(child);
+fn candidate(child: &Kid) -> Candidate<Target> {
+    let pid = child.pid();
     let handle = WinOs.open_process(pid, Access::default()).unwrap();
     let facts = WinOs.facts(&handle).unwrap();
     Candidate { pid, facts, handle }
@@ -97,9 +97,9 @@ fn a_target_in_a_job_without_a_limit_is_applied() {
     let c = candidate(&child);
     let mut held = Vec::new();
     let found = set(&WinOs, &watch(ga), c, &mut held);
-    let class = WinOs.priority_class(child.borrow());
+    let class = WinOs.priority_class(child.proc());
     drop(held);
-    WinOs.terminate(child);
+    drop(child);
     assert_eq!(
         found.rule,
         Rule::Applied {
@@ -127,14 +127,14 @@ fn a_target_in_a_job_with_a_disjoint_mask_is_job_ineffective_with_the_priority_b
         return;
     };
     let child = child_in_a_job(Some(parent));
-    let before = WinOs.priority_class(child.borrow());
+    let before = WinOs.priority_class(child.proc());
     let c = candidate(&child);
     let mut held = Vec::new();
     let found = set(&WinOs, &watch(ga), c, &mut held);
-    let class = WinOs.priority_class(child.borrow());
-    let mask = WinOs.process_affinity(child.borrow());
+    let class = WinOs.priority_class(child.proc());
+    let mask = WinOs.process_affinity(child.proc());
     drop(held);
-    WinOs.terminate(child);
+    drop(child);
     eprintln!(
         "A7: disjoint nested job: {:?}, process mask {mask:?} (parent {:#x}, new {:#x})",
         found.rule, parent.mask, ga.mask
@@ -153,7 +153,7 @@ fn a_target_in_a_job_with_a_disjoint_mask_is_job_ineffective_with_the_priority_b
 #[test]
 fn a_failed_job_puts_the_priority_back() {
     let child = child_in_a_job(None);
-    let before = WinOs.priority_class(child.borrow());
+    let before = WinOs.priority_class(child.proc());
     let c = candidate(&child);
     let mut held = Vec::new();
     let nowhere = GroupAffinity {
@@ -161,9 +161,9 @@ fn a_failed_job_puts_the_priority_back() {
         mask: 1,
     };
     let found = set(&WinOs, &watch(nowhere), c, &mut held);
-    let after = WinOs.priority_class(child.borrow());
+    let after = WinOs.priority_class(child.proc());
     drop(held);
-    WinOs.terminate(child);
+    drop(child);
     eprintln!("W4: job refused: {:?}", found.rule);
     assert!(
         matches!(found.rule, Rule::Skipped(Skip::Job(_))),

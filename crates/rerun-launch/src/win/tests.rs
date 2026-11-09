@@ -1,8 +1,12 @@
 //! `WinOs` on real Windows. Nothing on the system changes: the only process started is
 //! `System32\cmd.exe` (`/c exit <n>`, never resumed, or `/c ping -n <n> 127.0.0.1 >nul` for a
 //! child that runs a few seconds; ending that `cmd` leaves its `ping` to finish on its own),
-//! and the only limits, priorities and jobs set are on such a child of this test process.
-//! `watch` opens only these children (plan P3-4 §7.3), never another process.
+//! and the only limits, priorities and jobs set are on such a child of this test process; each
+//! is held by a [`Kid`], which ends it also when a test panics. Every process the tests open
+//! with set rights is such a child. Two tests reopen the PID of a child that has ended; that
+//! PID may belong to another process by then, so they open it with query rights only, read
+//! only its facts and a zero wait, and stop without a verdict as soon as it is not the child
+//! (SEC-S2 of the review of P3-4a).
 
 use std::borrow::Borrow;
 use std::os::windows::ffi::OsStrExt;
@@ -98,19 +102,18 @@ fn hard_limit_round_trip_on_a_child_cmd() {
         suspended: true,
         priority: None,
     };
-    let child = WinOs.spawn(&app, &line, &spawn).unwrap();
-    if let Err(e) = WinOs.limit_job(&child, ga) {
-        launch::terminate(child);
+    let child = Kid::new(WinOs.spawn(&app, &line, &spawn).unwrap());
+    if let Err(e) = WinOs.limit_job(child.child(), ga) {
         panic!(
             "JobObjectGroupInformationEx failed with {e}; this test process in a job: {:?}",
             in_job()
         );
     }
-    let back = WinOs.read_back(&child).unwrap();
+    let back = WinOs.read_back(child.child()).unwrap();
     assert_eq!(back.job, [ga]);
     assert_eq!(back.thread, ga);
-    WinOs.resume(&child).unwrap();
-    assert_eq!(WinOs.wait(child), Ok(3));
+    WinOs.resume(child.child()).unwrap();
+    assert_eq!(WinOs.wait(child.take()), Ok(3));
 }
 
 #[test]
@@ -123,10 +126,10 @@ fn soft_limit_and_terminate_on_a_suspended_child() {
         suspended: true,
         priority: None,
     };
-    let child = WinOs.spawn(&app, &app, &spawn).unwrap();
-    WinOs.set_cpu_sets(child.borrow(), &ids).unwrap();
+    let child = Kid::new(WinOs.spawn(&app, &app, &spawn).unwrap());
+    WinOs.set_cpu_sets(child.proc(), &ids).unwrap();
     // Never resumed: it never ran.
-    assert_eq!(WinOs.terminate(child), crate::os::Terminated::Ended);
+    assert_eq!(WinOs.terminate(child.take()), crate::os::Terminated::Ended);
 }
 
 /// The read-back has teeth: without step 3 the job and the thread report the whole group, not
@@ -156,11 +159,11 @@ fn read_back_without_the_limit_differs() {
         suspended: true,
         priority: None,
     };
-    let child = WinOs.spawn(&app, &app, &spawn).unwrap();
-    let back = WinOs.read_back(&child).unwrap();
+    let child = Kid::new(WinOs.spawn(&app, &app, &spawn).unwrap());
+    let back = WinOs.read_back(child.child()).unwrap();
+    drop(child);
     assert_ne!(back.thread, ga);
     assert_ne!(back.job, [ga]);
-    launch::terminate(child);
 }
 
 /// `IsProcessInJob` of this test process (for the failure message: a CI runner may hold the
@@ -195,19 +198,55 @@ fn same_path_is_ordinal_ignore_case() {
     assert!(!os.same_path(&[u16::from(b'C'), 0xD800], "C\u{FFFD}"));
 }
 
-/// A `cmd.exe` child, suspended (it never runs; ended with `terminate`).
-pub(crate) fn suspended_cmd() -> launch::Child {
+/// An own child of this test process, ended with `terminate` when dropped, also when a test
+/// panics before its end (SEC-N1 of the review of P3-4a): no suspended or running `cmd.exe`
+/// outlives a failed test.
+pub(crate) struct Kid(Option<launch::Child>);
+
+impl Kid {
+    pub(crate) fn new(child: launch::Child) -> Self {
+        Self(Some(child))
+    }
+
+    pub(crate) fn child(&self) -> &launch::Child {
+        self.0.as_ref().unwrap()
+    }
+
+    pub(crate) fn proc(&self) -> &launch::Proc {
+        self.child().borrow()
+    }
+
+    pub(crate) fn pid(&self) -> u32 {
+        WinOs.pid(self.child())
+    }
+
+    /// The child itself, for a call that consumes it (`wait`, `terminate`).
+    pub(crate) fn take(mut self) -> launch::Child {
+        self.0.take().unwrap()
+    }
+}
+
+impl Drop for Kid {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.take() {
+            launch::terminate(child);
+        }
+    }
+}
+
+/// A `cmd.exe` child, suspended (it never runs).
+pub(crate) fn suspended_cmd() -> Kid {
     let app = cmd_exe();
     let spawn = Spawn {
         in_job: false,
         suspended: true,
         priority: None,
     };
-    WinOs.spawn(&app, &app, &spawn).unwrap()
+    Kid::new(WinOs.spawn(&app, &app, &spawn).unwrap())
 }
 
 /// A `cmd.exe` child that runs for about `seconds` (waiting on a `ping` of its own).
-fn running_cmd(seconds: u32) -> launch::Child {
+fn running_cmd(seconds: u32) -> Kid {
     let app = cmd_exe();
     let mut line = vec![u16::from(b'"')];
     line.extend_from_slice(&app);
@@ -215,7 +254,7 @@ fn running_cmd(seconds: u32) -> launch::Child {
         "\" /d /q /c ping -n {} 127.0.0.1 >nul",
         seconds + 1
     )));
-    WinOs.spawn(&app, &line, &Spawn::UNCHANGED).unwrap()
+    Kid::new(WinOs.spawn(&app, &line, &Spawn::UNCHANGED).unwrap())
 }
 
 /// The selection of `max_threads: 1` on this machine: one logical processor.
@@ -240,9 +279,9 @@ fn one_processor() -> GroupAffinity {
 #[test]
 fn snapshot_lists_an_own_child() {
     let child = suspended_cmd();
-    let pid = WinOs.pid(&child);
+    let pid = child.pid();
     let list = WinOs.processes();
-    WinOs.terminate(child);
+    drop(child);
     assert_ne!(pid, 0);
     let list = list.unwrap();
     assert!(list.len() <= crate::os::MAX_LISTED);
@@ -260,11 +299,10 @@ fn snapshot_lists_an_own_child() {
 fn facts_of_an_own_child_are_the_same_trust() {
     let own = WinOs.own().unwrap();
     let child = suspended_cmd();
-    let pid = WinOs.pid(&child);
     let facts = WinOs
-        .open_process(pid, Access::default())
+        .open_process(child.pid(), Access::default())
         .and_then(|t| WinOs.facts(&t));
-    WinOs.terminate(child);
+    drop(child);
     let facts = facts.unwrap();
     let cmd = String::from_utf16(&cmd_exe()).unwrap();
     assert!(
@@ -281,38 +319,89 @@ fn facts_of_an_own_child_are_the_same_trust() {
     assert!(own.token.integrity >= 0x1000, "{:#x}", own.token.integrity);
 }
 
-/// `OpenProcess` on the PID of a child that exited (its last handle here closed) fails with
+/// What opening the PID of an own child that has ended finds.
+#[derive(Debug, PartialEq, Eq)]
+enum Reopen {
+    /// `OpenProcess` fails with 87: no process has the PID.
+    Gone,
+    /// It opens, its facts fail with 31 and a zero wait reports it ended: the ended child
+    /// (its process object still kept by some handle).
+    Ended,
+    /// It opens and reports the child's creation time and image: still the child, readable.
+    Same,
+    /// Anything else (another creation time or image, 5, another failure): the PID may belong
+    /// to another process by now. Inconclusive; nothing more is read from it.
+    Reused(String),
+}
+
+/// One query-rights open of `pid` (SEC-S2 of the review of P3-4a): the only reads are the
+/// facts and a zero wait, both with `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`.
+fn reopen(pid: u32, created: u64, image: &[u16]) -> Reopen {
+    let t = match WinOs.open_process(pid, Access::default()) {
+        Err(87) => return Reopen::Gone,
+        Err(code) => return Reopen::Reused(format!("open {code}")),
+        Ok(t) => t,
+    };
+    match WinOs.facts(&t) {
+        Ok(f) if f.created == created && f.image == image => Reopen::Same,
+        Ok(_) => Reopen::Reused("other facts".to_owned()),
+        Err(31) if WinOs.wait_for(t.borrow(), 0) == Ok(true) => Reopen::Ended,
+        Err(code) => Reopen::Reused(format!("facts {code}")),
+    }
+}
+
+/// An own suspended child, its facts read while it exists, then ended (its last handle here
+/// closed): its PID, creation time and image.
+fn ended_child() -> (u32, u64, Vec<u16>) {
+    let child = suspended_cmd();
+    let pid = child.pid();
+    let facts = super::process::facts(child.proc()).unwrap();
+    assert_eq!(
+        launch::terminate(child.take()),
+        crate::os::Terminated::Ended
+    );
+    (pid, facts.created, facts.image)
+}
+
+/// `OpenProcess` on the PID of a child that ended (its last handle here closed) ends in
 /// `ERROR_INVALID_PARAMETER`, the code `run::watch` reads as "gone, not refused" (B1 of the
 /// review of P3-4). For 20 to 40 ms after the end the open still succeeds (measured on the
 /// developer machine; another holder of a handle, e.g. a scanner, keeps the process object):
-/// retried, every code seen is reported.
+/// retried, every answer is reported. A PID that another process got meanwhile is
+/// inconclusive: the test stops without a verdict and reads nothing more from it.
 #[test]
 fn open_of_an_exited_pid_fails_with_87() {
-    let app = cmd_exe();
-    let mut line = vec![u16::from(b'"')];
-    line.extend_from_slice(&app);
-    line.extend(w("\" /c exit 0"));
-    let child = WinOs.spawn(&app, &line, &Spawn::UNCHANGED).unwrap();
-    let pid = WinOs.pid(&child);
-    assert_eq!(WinOs.wait(child), Ok(0));
-    let mut codes = Vec::new();
+    let (pid, created, image) = ended_child();
+    let mut seen = Vec::new();
     for _ in 0..50 {
-        match WinOs.open_process(pid, Access::default()) {
-            Err(code) => {
-                codes.push(code);
-                if code == 87 {
-                    break;
-                }
-            }
-            Ok(_) => codes.push(0),
+        let r = reopen(pid, created, &image);
+        let stop = matches!(r, Reopen::Gone | Reopen::Reused(_));
+        seen.push(r);
+        if stop {
+            break;
         }
         WinOs.sleep_ms(20);
     }
-    eprintln!("B1: OpenProcess of an exited PID, codes in order (0 = opened): {codes:?}");
-    assert_eq!(
-        codes.last(),
-        Some(&87),
-        "codes seen (0 = opened): {codes:?}"
+    eprintln!("B1: OpenProcess of an ended child's PID, in order: {seen:?}");
+    if let Some(Reopen::Reused(why)) = seen.last() {
+        eprintln!("B1: PID {pid} reused ({why}): inconclusive");
+        return;
+    }
+    assert_eq!(seen.last(), Some(&Reopen::Gone), "{seen:?}");
+}
+
+/// What `run::watch::pick` relies on for a candidate that ended between the snapshot and the
+/// open: right after the end it can often still be opened, but its facts fail (31) and a zero
+/// wait reports it ended; or the open already fails with 87. Either way gone, not refused;
+/// never readable as the process it was. A reused PID is inconclusive.
+#[test]
+fn an_ended_process_is_gone_whether_or_not_it_opens() {
+    let (pid, created, image) = ended_child();
+    let r = reopen(pid, created, &image);
+    eprintln!("B1: an ended child's PID reopened at once: {r:?}");
+    assert!(
+        matches!(r, Reopen::Gone | Reopen::Ended | Reopen::Reused(_)),
+        "{r:?}"
     );
 }
 
@@ -320,13 +409,11 @@ fn open_of_an_exited_pid_fails_with_87() {
 #[test]
 fn a_query_only_target_cannot_be_set() {
     let child = suspended_cmd();
-    let mut t = WinOs
-        .open_process(WinOs.pid(&child), Access::default())
-        .unwrap();
+    let mut t = WinOs.open_process(child.pid(), Access::default()).unwrap();
     let prio = WinOs.set_priority(&t, priority_class(Priority::High));
     let job = WinOs.attach_job(&mut t, one_processor(), JOB_LIMIT_BREAKAWAY_OK);
     drop(t);
-    WinOs.terminate(child);
+    drop(child);
     assert_eq!(prio, Err(5));
     assert_eq!(job, Err(5));
 }
@@ -339,11 +426,11 @@ fn attach_job_refuses_kill_on_job_close() {
         job: true,
         ..Access::default()
     };
-    let mut t = WinOs.open_process(WinOs.pid(&child), access).unwrap();
+    let mut t = WinOs.open_process(child.pid(), access).unwrap();
     let r = WinOs.attach_job(&mut t, one_processor(), JOB_LIMIT_BREAKAWAY_OK | 0x2000);
     let kept = WinOs.job_affinity(t.borrow());
     drop(t);
-    WinOs.terminate(child);
+    drop(child);
     assert_eq!(r, Err(87));
     // No job was kept in the target (ERROR_INVALID_HANDLE).
     assert_eq!(kept, Err(6));
@@ -361,14 +448,14 @@ fn attach_job_to_a_running_child_outlives_the_job_handle() {
         job: true,
         ..Access::default()
     };
-    let mut t = WinOs.open_process(WinOs.pid(&child), access).unwrap();
+    let mut t = WinOs.open_process(child.pid(), access).unwrap();
     let attached = WinOs.attach_job(&mut t, ga, JOB_LIMIT_BREAKAWAY_OK);
     let job = WinOs.job_affinity(t.borrow());
     let mask = WinOs.process_affinity(t.borrow());
     drop(t);
-    let alive = WinOs.wait_for(child.borrow(), 500);
-    let after = WinOs.process_affinity(child.borrow());
-    WinOs.terminate(child);
+    let alive = WinOs.wait_for(child.proc(), 500);
+    let after = WinOs.process_affinity(child.proc());
+    drop(child);
     attached.unwrap();
     assert_eq!(job, Ok(vec![ga]));
     assert_eq!(mask, Ok(ga.mask));
@@ -392,7 +479,7 @@ fn priority_and_cpu_sets_on_a_running_child() {
         priority: true,
         ..Access::default()
     };
-    let t = WinOs.open_process(WinOs.pid(&child), access).unwrap();
+    let t = WinOs.open_process(child.pid(), access).unwrap();
     let old = WinOs.priority_class(t.borrow());
     let high = priority_class(Priority::High);
     let set = WinOs.set_priority(&t, high);
@@ -402,7 +489,7 @@ fn priority_and_cpu_sets_on_a_running_child() {
     let back = old.map(|class| WinOs.set_priority(&t, class));
     let again = WinOs.priority_class(t.borrow());
     drop(t);
-    WinOs.terminate(child);
+    drop(child);
     let old = old.unwrap();
     assert_eq!(set, Ok(()));
     assert_eq!(now, Ok(high));
@@ -448,32 +535,4 @@ fn thread_cpu_100ns() -> u64 {
     assert_ne!(ok, 0);
     let v = |f: &FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
     v(k) + v(u)
-}
-
-/// What `run::watch::pick` relies on for a candidate that ended between the snapshot and the
-/// open: right after the end it can often still be opened (measured: for 20 to 40 ms after
-/// the last handle here closed), but its facts fail and a zero wait reports it ended; or the
-/// open already fails with 87. Either way it is gone, not refused.
-#[test]
-fn an_ended_process_is_gone_whether_or_not_it_opens() {
-    let app = cmd_exe();
-    let mut line = vec![u16::from(b'"')];
-    line.extend_from_slice(&app);
-    line.extend(w("\" /c exit 0"));
-    let child = WinOs.spawn(&app, &line, &Spawn::UNCHANGED).unwrap();
-    let pid = WinOs.pid(&child);
-    assert_eq!(WinOs.wait(child), Ok(0));
-    match WinOs.open_process(pid, Access::default()) {
-        Err(code) => assert_eq!(code, 87),
-        Ok(t) => {
-            let facts = WinOs.facts(&t);
-            let ended = WinOs.wait_for(t.borrow(), 0);
-            eprintln!(
-                "B1: an ended process opened; facts {:?}, ended {ended:?}",
-                facts.as_ref().map(|_| ())
-            );
-            assert!(facts.is_err());
-            assert_eq!(ended, Ok(true));
-        }
-    }
 }

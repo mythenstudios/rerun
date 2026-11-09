@@ -26,12 +26,13 @@
 //! `priority=none`, `check=none`. The tenth line `priority_restore=failed:<code>` is present
 //! only when `rerun-launch watch` set the priority class on the found game, the CPU step
 //! after it failed (`skipped:job_failed:…`, `skipped:job_ineffective`,
-//! `skipped:read_back_failed:…` or `skipped:cpu_sets_failed:…`) and putting the
-//! class back failed too (P3-4 A4); absent otherwise, so a file of an earlier shim reads
-//! unchanged. `<code>` is a Win32 error code (or an `HRESULT` as an unsigned number where Windows gave one) in canonical decimal. The reader is strict like the
-//! profile reader: no other key, order or spelling, no leading zero, no empty line, no CR, no
-//! control character; a file decodes to one [`LaunchResult`] and encodes back to the same
-//! bytes. Errors name the line and the key, never the content.
+//! `skipped:read_back_failed:…` or `skipped:cpu_sets_failed:…`) and putting the class back
+//! failed too (P3-4 A4); absent otherwise, so a file of an earlier shim reads unchanged.
+//! `<code>` is a Win32 error code (or an `HRESULT` as an unsigned number where Windows gave
+//! one) in canonical decimal. The reader is strict like the profile reader: no other key,
+//! order or spelling, no leading zero, no empty line, no CR, no control character; a file
+//! decodes to one [`LaunchResult`] and encodes back to the same bytes. Errors name the line
+//! and the key, never the content.
 
 use std::fmt;
 
@@ -79,7 +80,8 @@ pub enum Outcome {
         /// A child created with the rule that had to be ended first.
         ended: Option<Ended>,
         /// `watch` only: the priority class set on the found game could not be put back after
-        /// the CPU step failed (Win32 error code). Only with `job_failed` or `cpu_sets_failed`.
+        /// the CPU step failed (Win32 error code). Only with `job_failed`, `job_ineffective`,
+        /// `read_back_failed` or `cpu_sets_failed`.
         priority_restore: Option<u32>,
     },
 }

@@ -79,7 +79,8 @@ impl Proc {
 
     /// `GetProcessId`: never reused while this handle is held. 0 only for a handle without
     /// query rights, which the shim never holds (`CreateProcessW` gives all rights,
-    /// `ShellExecuteExW` and `OpenProcess` at least `PROCESS_QUERY_LIMITED_INFORMATION`).
+    /// `ShellExecuteExW` and `OpenProcess` at least `PROCESS_QUERY_LIMITED_INFORMATION`);
+    /// `run::watch` searches nothing then (`search_failed:6`).
     pub(crate) fn pid(&self) -> u32 {
         // SAFETY: `self.process` is a live process handle with at least
         // PROCESS_QUERY_LIMITED_INFORMATION, kept alive by the borrow; no pointers.
