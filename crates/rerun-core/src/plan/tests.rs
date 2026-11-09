@@ -43,6 +43,7 @@ fn content(file: &str, data: &[u8]) -> ContentRef {
 fn sample() -> Plan {
     Plan {
         format: 1,
+        source: None,
         roots: vec![
             PlanRoot {
                 kind: RootKind::Game,

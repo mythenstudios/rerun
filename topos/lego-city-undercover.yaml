@@ -14,6 +14,7 @@ match:
 launch:
   chain: [steam]
   method: auto
+  start: "TODO"              # TODO: Steam's launch entry, read from rerun status (path_mismatch) or the process tree; never guessed
 
 issues:
   - id: performance-fullscreen

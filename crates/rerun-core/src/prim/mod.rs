@@ -16,8 +16,8 @@
 //! - [`launch_method`]: the launch profile of a Steam game for `rerun-launch` (P3-3c, ADR 0022
 //!   amendment P3-3): one `CreateFile`/`ReplaceFile` with inline content on the plan root
 //!   `<LocalAppData>\Rerun\profiles` (root 1), op 0 of the plan.
-//! - [`StepFile`]: the phase 2 step file `rerun plan` reads (P2-13), a throwaway wrapper until
-//!   the Topo engine (phase 4 removes it).
+//! - [`StepFile`]: the phase 2 step file `rerun plan <steps.json>` reads (P2-13); since the Topo
+//!   engine (P4-4) the local, unsigned input (L8), removed at the earliest before A6.
 //!
 //! The builder orders the ops: every file op first (an `IniValue` is one), then every registry
 //! op, whatever the order of the steps (6b-d; `plan::check` refuses anything else). An
@@ -225,6 +225,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
     }
     let plan = Plan {
         format: FORMAT,
+        source: None,
         roots,
         ops,
     };

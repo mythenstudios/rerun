@@ -298,6 +298,17 @@ pub fn render_game<'a>(app: &'a SteamApp, exes: &'a GameExes) -> Vec<Message<'a>
             });
         }
     }
+    for h in &exes.anti_cheat.found {
+        m.push(Message::GameAntiCheat {
+            system: h.system.as_str(),
+            path: escape::path(h.path.as_str()).into_owned(),
+        });
+    }
+    for p in &exes.anti_cheat.unreadable {
+        m.push(Message::GameAntiCheatUnreadable {
+            path: escape::path(p.as_str()).into_owned(),
+        });
+    }
     for issue in &exes.issues {
         m.push(Message::GameIssue {
             issue: escape::text(&issue.to_string()).into_owned(),

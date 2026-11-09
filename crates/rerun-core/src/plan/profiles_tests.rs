@@ -87,6 +87,7 @@ fn profiles_root() -> PlanRoot {
 fn lm_plan() -> Plan {
     Plan {
         format: 1,
+        source: None,
         roots: vec![game_root(), profiles_root()],
         ops: vec![
             Op::CreateFile {

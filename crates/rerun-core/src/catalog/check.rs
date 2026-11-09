@@ -20,6 +20,11 @@ use crate::policy::registry::{AsciiName, AsciiSeg, GameKey};
 use crate::prim::registry_set::{KEY_PREFIX, MAX_VALUES};
 use crate::prim::{CompatLayerSpec, CpuRuleSpec, IniSetSpec, RegistrySetSpec};
 
+/// Whether a Topo outside a draft may release an anti-cheat system as dead (`anti_cheat`,
+/// P4-4). `false` until the field is reviewed: the signed index then holds none, and the
+/// engine enforces the anti-cheat rule for every system it finds.
+pub const ANTI_CHEAT_RELEASE_REVIEWED: bool = false;
+
 /// Which entries are allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rules {
@@ -267,6 +272,20 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
     if let Some(l) = &t.launch {
         launch(l)?;
     }
+    if let Some(a) = &t.anti_cheat {
+        ensure(
+            !a.dead.is_empty() && unique(a.dead.iter()),
+            "anti_cheat.dead",
+            "at least one system, unique",
+        )?;
+        source(&a.source, "anti_cheat.source")?;
+        // P4-4: a new release of the anti-cheat rule; draft only until it is reviewed.
+        ensure(
+            ANTI_CHEAT_RELEASE_REVIEWED || t.status == Status::Draft,
+            "anti_cheat",
+            "draft only until the anti-cheat release is reviewed (P4-4)",
+        )?;
+    }
     ensure(
         unique(t.issues.iter().map(|i| &i.id)),
         "issues",
@@ -361,8 +380,22 @@ fn launch(l: &Launch) -> R {
         )?;
     }
     if let Some(s) = &l.start {
-        ensure(ends_with_ci(s.as_str(), ".exe"), "launch.start", "a .exe")?;
+        ensure(
+            s.as_str() == TODO || ends_with_ci(s.as_str(), ".exe"),
+            "launch.start",
+            "a .exe (or TODO in a draft)",
+        )?;
     }
+    // P4-4: the engine needs Steam's launch entry for these methods (`auto` resolves to
+    // `direct` or `watch`); never guessed, unknown is `TODO` in a draft.
+    ensure(
+        !matches!(
+            l.method,
+            Some(Method::Auto | Method::Direct | Method::Watch)
+        ) || l.start.is_some(),
+        "launch.start",
+        "required for method auto, direct and watch",
+    )?;
     Ok(())
 }
 

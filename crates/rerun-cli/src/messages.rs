@@ -10,6 +10,7 @@
 mod index;
 mod launch;
 mod profile;
+mod topo;
 mod txn;
 
 use std::fmt;
@@ -26,6 +27,7 @@ pub use launch::{LaunchMsg, Utc};
 #[cfg(test)]
 pub(crate) use profile::size as size_text;
 pub use profile::{ProfileMsg, ranges};
+pub use topo::TopoMsg;
 pub use txn::{At, OpRef, OpText, SteamWhy, StepText, TxnMsg, TxnText};
 
 /// A section heading.
@@ -369,6 +371,19 @@ pub enum Message<'a> {
         /// Location and kind.
         issue: Shown<'a>,
     },
+    /// An anti-cheat marker in the game folder (P4-4): the Topo engine refuses file and
+    /// firewall fixes and `watch` for this game and warns for the others.
+    GameAntiCheat {
+        /// The system.
+        system: &'static str,
+        /// The marker found.
+        path: Shown<'a>,
+    },
+    /// An anti-cheat marker that could not be asked (treated like a find).
+    GameAntiCheatUnreadable {
+        /// The marker path.
+        path: Shown<'a>,
+    },
     /// A requested app ID that no library holds.
     AppNotFound {
         /// The app ID.
@@ -413,6 +428,8 @@ pub enum Message<'a> {
     Profile(ProfileMsg<'a>),
     /// A line about the signed index (ADR 0024).
     Index(IndexMsg<'a>),
+    /// A line of the Topo engine (P4-4).
+    Topo(TopoMsg<'a>),
     /// A usage error, formatted by Rerun (security review N5): the user's own value only
     /// through `escape::text`, last on the line.
     Usage {
@@ -814,6 +831,12 @@ impl fmt::Display for Message<'_> {
                 f.write_str(" (the list of executables may be incomplete)")
             }
             Self::GameIssue { issue } => write!(f, "    issue: {issue}"),
+            Self::GameAntiCheat { system, path } => {
+                write!(f, "    anti-cheat: {system} at {path}")
+            }
+            Self::GameAntiCheatUnreadable { path } => {
+                write!(f, "    anti-cheat: cannot check {path} (counted as found)")
+            }
             Self::AppNotFound { app_id } => write!(f, "app {app_id}: not found in any library"),
             Self::Summary(counts) => write!(f, "{counts}"),
             Self::Hints => {
@@ -845,6 +868,7 @@ impl fmt::Display for Message<'_> {
             Self::Launch(m) => write!(f, "{m}"),
             Self::Profile(m) => write!(f, "{m}"),
             Self::Index(m) => write!(f, "{m}"),
+            Self::Topo(m) => write!(f, "{m}"),
             Self::Usage { what, why, value } => {
                 write!(f, "rerun: {what}")?;
                 if let Some(why) = why {

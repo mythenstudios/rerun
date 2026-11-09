@@ -1,0 +1,14 @@
+format: 1
+id: schema-fixture
+title: "Fixture"
+rev: 1
+match:
+  steam_appid: 40960
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+status: draft
+launch:
+  chain: [steam]
+  method: auto
+  start: "TODO"
+issues: []

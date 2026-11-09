@@ -15,9 +15,12 @@
 //!   [`inspect_exe`]: the per-file pipeline, also for Topo matching.
 //! - `hash`: with `--hashes` ([`Options::hashes`]), streaming SHA-1 and SHA-256 of the best
 //!   `Game` candidates on the very handle that was parsed ([`HashLimits`], [`HashOutcome`]).
+//! - [`anti_cheat`]: markers of anti-cheat systems from a fixed table with sources (P4-4,
+//!   user decision E4); the Topo engine refuses or warns by them.
 //! - Problems of the walk are [`ExeIssue`]s; they never carry file content, raw names only
 //!   escaped. Problems of a file stay on its [`Candidate`].
 
+pub mod anti_cheat;
 mod api;
 mod hash;
 mod issue;
@@ -26,6 +29,7 @@ mod role;
 mod scan;
 mod walk;
 
+pub use anti_cheat::{AntiCheat, AntiCheatHit, AntiCheatScan};
 pub use api::{
     ApiEvidence, ApiReport, ApiSet, ApiVerdict, Basis, Engine, GraphicsApi, Source, TableEvidence,
 };

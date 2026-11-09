@@ -34,7 +34,7 @@ On Linux the principle has existed for a long time (protonfixes, Luxtorpeda). On
 ## Non-goals
 
 - No mod manager, no launcher replacement, no game library with metadata maintenance.
-- No anti-cheat games, no online games with ban risk.
+- No anti-cheat games, no online games with ban risk. Rerun detects anti-cheat in a game folder (`rerun scan`, the Topo engine) only to stay away: for such a game it refuses file, firewall and compatibility-layer fixes and the `watch` launch method, and warns for the rest (P4-4, `02-topo-format.md`). A Topo can release a verifiably dead system (`anti_cheat.dead`).
 - No cracks, no circumventing copy protection.
 - No driver updates as a "fix" for old games.
 - No ARM64 in v1 (the field `tested_on` does exist in the format, though).

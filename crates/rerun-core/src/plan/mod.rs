@@ -134,6 +134,66 @@ pub struct Plan {
     pub roots: Vec<PlanRoot>,
     /// The ops, applied in this order and reverted newest first.
     pub ops: Vec<Op>,
+    /// Where the steps came from (P4-4): the signed index and the Topo with the variants
+    /// picked. `None` for a plan from a step file (unsigned, L8). Omitted on the wire then, so
+    /// a plan of the same steps has the same bytes apart from this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PlanSource>,
+}
+
+/// Most variants a Topo plan names.
+pub const MAX_PICKS: usize = 32;
+
+/// The origin of a plan built by the Topo engine (P4-4, ADR 0020 amendment P4-4): the SHA-256
+/// of the signed index it was planned from (kept under `<AppDir>index` by that name, so a
+/// revert finds it again, P4 condition R1; the elevated helper checks against it, L8) and
+/// the Topo with every variant picked. Display and binding only: nothing of it is trusted
+/// when read back beyond its form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanSource {
+    /// SHA-256 of the signed index bytes.
+    #[serde(with = "crate::wire::hex32")]
+    pub index: [u8; 32],
+    /// The Topo ID.
+    pub topo: String,
+    /// Its revision.
+    pub rev: u32,
+    /// The variants picked, in the order given: one per issue.
+    pub picks: Vec<Pick>,
+}
+
+/// One picked variant of a Topo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pick {
+    /// The issue ID.
+    pub issue: String,
+    /// The variant ID.
+    pub variant: String,
+}
+
+impl PlanSource {
+    /// The form rules (encode and decode alike): IDs of the Topo form, `rev` from 1, 1 to
+    /// [`MAX_PICKS`] picks, each issue once.
+    fn check(&self) -> Result<(), PlanError> {
+        let id = |s: &str| crate::catalog::model::Id::parse(s).is_some();
+        if !id(&self.topo) || self.rev == 0 {
+            return Err(invalid(None, "a source without a Topo ID and revision"));
+        }
+        if self.picks.is_empty() || self.picks.len() > MAX_PICKS {
+            return Err(invalid(None, "a source names 1 to 32 variants"));
+        }
+        for (i, p) in self.picks.iter().enumerate() {
+            if !id(&p.issue) || !id(&p.variant) {
+                return Err(invalid(None, "a pick that is no issue and variant ID"));
+            }
+            if self.picks[..i].iter().any(|q| q.issue == p.issue) {
+                return Err(invalid(None, "two variants of one issue"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A root of a plan: reopened through `policy::root` and checked by identity before every
@@ -1113,6 +1173,9 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
     }
     if plan.roots.len() > MAX_ROOTS {
         return Err(invalid(None, "more roots than allowed"));
+    }
+    if let Some(s) = &plan.source {
+        s.check()?;
     }
     // E2, review M1, E5 of P2-12: ops that need it (registry ops, INI ops) need at least one
     // game root and a main executable for every game root (P3-3: the profiles root has none).

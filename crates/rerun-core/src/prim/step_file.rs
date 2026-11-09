@@ -1,6 +1,7 @@
-//! The phase 2 step file (ADR 0020, user decision D7; P2-13): the input of `rerun plan` until
-//! the Topo engine exists. **A throwaway wrapper:** phase 4 replaces it with Topo input and
-//! removes this module.
+//! The phase 2 step file (ADR 0020, user decision D7; P2-13): the input of
+//! `rerun plan <steps.json>`. Since the Topo engine (P4-4) the local, unsigned input for tests,
+//! the Sandbox and experts (L8): its plans carry no `PlanSource`, so they never reach the
+//! elevated helper. Removed at the earliest before A6.
 //!
 //! `{"format":1,"game":{"steam":440},"main_exe":"bin\\game.exe","steps":[{"ini_set":{…}}]}`
 //! (or `"game":{"folder":"D:\\Games\\X"}` for a folder the user names). Untrusted input: at

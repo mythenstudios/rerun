@@ -38,7 +38,7 @@ use crate::tests::{INSTALL, LAD, RERUN, Ran, bare, build, expect, hash_of, txn_o
 
 const STEAM: &str = r"C:\Program Files (x86)\Steam";
 const LIB: &str = r"D:\SteamLibrary";
-const G: &str = r"D:\SteamLibrary\steamapps\common\G";
+pub(crate) const G: &str = r"D:\SteamLibrary\steamapps\common\G";
 const RYZEN_5950X: &str = include_str!("../../../tests/fixtures/cpu/ryzen9-5950x.json");
 /// The ID of app 220 (`plan::profile_id`, pinned in the core).
 const ID: &str = "323ad79fbc93ca3e73b0b152a5d44616";
@@ -56,7 +56,7 @@ fn pe(runs: &[(usize, &str)]) -> Vec<u8> {
     b
 }
 
-fn x86() -> Vec<u8> {
+pub(crate) fn x86() -> Vec<u8> {
     pe(&[
         (0x0, "4d5a"),
         (0x3c, "80"),
@@ -77,7 +77,7 @@ fn x86() -> Vec<u8> {
     ])
 }
 
-fn x64() -> Vec<u8> {
+pub(crate) fn x64() -> Vec<u8> {
     pe(&[
         (0x0, "4d5a"),
         (0x3c, "80"),
@@ -113,7 +113,7 @@ fn lib_vdf() -> String {
 
 /// The step file: a hard rule of at most `max` threads, Steam starts `FFLauncher.exe`, the
 /// game is `game.exe`.
-fn steps(max: u16) -> String {
+pub(crate) fn steps(max: u16) -> String {
     format!(
         r#"{{"format":1,"game":{{"steam":220}},"main_exe":"game.exe","steps":[{{"launch_method":{{"method":"direct","start":"FFLauncher.exe","cpu":{{"max_threads":{max},"single_l3":true,"smt":false}}}}}}]}}"#
     )
@@ -121,7 +121,7 @@ fn steps(max: u16) -> String {
 
 /// Steam with app 220 in `G` (a launcher and an x86 game), the 5950X topology, and the shim in
 /// the install folder unless `no_shim`.
-fn lm_sys(no_shim: bool, json: &str) -> FakeSystem {
+pub(crate) fn lm_sys(no_shim: bool, json: &str) -> FakeSystem {
     let acf = "\"AppState\"\n{\n\t\"appid\"\t\t\"220\"\n\t\"name\"\t\t\"G\"\n\t\"StateFlags\"\t\t\"4\"\n\t\"installdir\"\t\t\"G\"\n}\n";
     let mut b = bare()
         .value(

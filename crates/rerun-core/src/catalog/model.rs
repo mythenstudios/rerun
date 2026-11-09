@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::detect::exe::AntiCheat;
 use crate::hw::arch::ArchId;
 use crate::path::RelPath;
 use crate::prim::{CompatLayerSpec, CpuRuleSpec, IniSetSpec, PrioritySpec, RegistrySetSpec};
@@ -235,6 +236,15 @@ pub struct Topo {
         skip_serializing_if = "Option::is_none"
     )]
     pub launch: Option<Launch>,
+    /// Anti-cheat systems of this game that are verifiably dead (P4-4, user decision E4): the
+    /// engine does not enforce the anti-cheat rule for them. Draft only until reviewed
+    /// ([`super::check::ANTI_CHEAT_RELEASE_REVIEWED`]).
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub anti_cheat: Option<AntiCheatRelease>,
     /// The problems and their solutions.
     pub issues: Vec<Issue>,
     /// Hints.
@@ -251,6 +261,16 @@ pub struct Topo {
         skip_serializing_if = "Option::is_none"
     )]
     pub links: Option<Links>,
+}
+
+/// `anti_cheat`: systems a signed Topo releases as dead, with the source that shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AntiCheatRelease {
+    /// The dead systems, at least one, unique.
+    pub dead: Vec<AntiCheat>,
+    /// Where it is shown that they are dead (servers shut down, checks off).
+    pub source: Source,
 }
 
 /// `tested_on`.

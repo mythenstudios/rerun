@@ -13,6 +13,7 @@ use std::io::Write;
 use std::path::Path;
 
 use rerun_core::detect::steam::{self, AppState};
+use rerun_core::path::RootPath;
 use rerun_core::plan::{self, PlanBytes, Preview};
 use rerun_core::policy::registry::RegPolicy;
 use rerun_core::policy::root::{
@@ -77,6 +78,57 @@ fn run<W: Write, E: Write>(
         Ok::<(PlanBytes, Preview, Vec<Shadow>), plan::PlanError>((b, v, sh))
     })?
     .map_err(|e| fail(err, TxnMsg::PlanFailed { error: shown(&e) }, Exit::Refused))?;
+    show_and_store(
+        host,
+        Stored {
+            app,
+            app_path,
+            bytes,
+            view,
+            shadows,
+        },
+        &[],
+        dry_run,
+        out,
+        err,
+    )
+}
+
+/// A plan as encoded, with its preview and Rerun's folder as found while planning.
+pub(crate) struct Stored<'s> {
+    /// Rerun's folder, if it existed (planning never creates it).
+    pub app: Option<AppDir<'s>>,
+    /// Its path, if known.
+    pub app_path: Option<RootPath>,
+    /// The encoded plan.
+    pub bytes: PlanBytes,
+    /// The preview of exactly these bytes.
+    pub view: Preview,
+    /// VirtualStore copies of managed files.
+    pub shadows: Vec<Shadow>,
+}
+
+/// Prints `before`, then the preview of `s`, then (without `--dry-run`) stores the plan
+/// (module docs). Shared by the step file and the Topo engine.
+pub(crate) fn show_and_store<W: Write, E: Write>(
+    host: &Host<'_>,
+    s: Stored<'_>,
+    before: &[Message<'_>],
+    dry_run: bool,
+    out: &mut Out<W>,
+    err: &mut Out<E>,
+) -> Result<Exit, Exit> {
+    let sys = host.sys;
+    let Stored {
+        app,
+        app_path,
+        bytes,
+        view,
+        shadows,
+    } = s;
+    if !before.is_empty() {
+        out.lines(before).map_err(|e| before_change(err, e))?;
+    }
     if view.ops.is_empty() {
         let _ = out.line(&Message::Txn(TxnMsg::NothingToDo));
         return Ok(Exit::Report);
@@ -127,7 +179,7 @@ fn run<W: Write, E: Write>(
 }
 
 /// Opens the game folder a step file names and runs `f` on it; refusals end with exit 3.
-fn with_game<R, E: Write>(
+pub(crate) fn with_game<R, E: Write>(
     sys: &dyn System,
     fr: &ForbiddenRoots,
     game: &GameRef,

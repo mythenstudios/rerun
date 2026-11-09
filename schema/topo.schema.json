@@ -14,6 +14,18 @@
     "match",
     "issues"
   ],
+  "if": {
+    "required": [
+      "anti_cheat"
+    ]
+  },
+  "then": {
+    "properties": {
+      "status": {
+        "const": "draft"
+      }
+    }
+  },
   "properties": {
     "format": {
       "const": 1
@@ -48,6 +60,9 @@
     },
     "launch": {
       "$ref": "#/$defs/launch"
+    },
+    "anti_cheat": {
+      "$ref": "#/$defs/antiCheatRelease"
     },
     "issues": {
       "type": "array",
@@ -285,13 +300,20 @@
           "$ref": "#/$defs/cpuRuleLaunch"
         },
         "start": {
-          "description": "The program of Steam's launch entry (what Steam starts on Play), relative to the game folder; may be a launcher other than the game (P3-3, ADR 0022 amendment P3-3). Required for direct and watch by the Topo loader (phase 4).",
-          "allOf": [
+          "description": "The program of Steam's launch entry (what Steam starts on Play), relative to the game folder; may be a launcher other than the game (P3-3, ADR 0022 amendment P3-3). Required for auto, direct and watch (P4-4); TODO only in a draft.",
+          "anyOf": [
             {
-              "$ref": "#/$defs/relPath"
+              "allOf": [
+                {
+                  "$ref": "#/$defs/relPath"
+                },
+                {
+                  "pattern": "\\.[Ee][Xx][Ee]$"
+                }
+              ]
             },
             {
-              "pattern": "\\.[Ee][Xx][Ee]$"
+              "const": "TODO"
             }
           ]
         },
@@ -304,25 +326,79 @@
           ]
         }
       },
-      "if": {
-        "required": [
-          "method"
-        ],
-        "properties": {
-          "method": {
-            "const": "inproc"
-          }
-        }
-      },
-      "else": {
-        "properties": {
-          "cpu": {
-            "not": {
-              "required": [
-                "report_cores"
-              ]
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "method"
+            ],
+            "properties": {
+              "method": {
+                "const": "inproc"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "cpu": {
+                "not": {
+                  "required": [
+                    "report_cores"
+                  ]
+                }
+              }
             }
           }
+        },
+        {
+          "if": {
+            "required": [
+              "method"
+            ],
+            "properties": {
+              "method": {
+                "enum": [
+                  "auto",
+                  "direct",
+                  "watch"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "start"
+            ]
+          }
+        }
+      ]
+    },
+    "antiCheatRelease": {
+      "description": "Anti-cheat systems of the game that are verifiably dead (P4-4): the engine does not enforce the anti-cheat rule for them. Draft only until reviewed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dead",
+        "source"
+      ],
+      "properties": {
+        "dead": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "easy-anti-cheat",
+              "battleye",
+              "punkbuster",
+              "gameguard",
+              "xigncode",
+              "ea-anticheat"
+            ]
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/source"
         }
       }
     },

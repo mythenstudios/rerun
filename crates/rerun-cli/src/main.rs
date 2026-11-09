@@ -22,6 +22,7 @@ mod plan;
 mod preview;
 mod scan;
 mod system;
+mod topo;
 mod txn;
 
 use std::io;
@@ -122,7 +123,25 @@ fn run<W: io::Write, E: io::Write>(
                 Exit::Fatal
             }
         },
-        Command::Plan { steps, dry_run } => plan::plan(host, &steps, dry_run, out, err),
+        Command::Plan {
+            target,
+            picks,
+            dry_run,
+        } => match cli::app_id(&target) {
+            Some(app_id) => topo::plan(host, app_id, &picks, dry_run, out, err),
+            None if !picks.is_empty() => {
+                let _ = err.lines(&[
+                    Message::Usage {
+                        what: "--pick needs a Steam app ID, not a step file",
+                        why: None,
+                        value: None,
+                    },
+                    Message::UsageHelp,
+                ]);
+                Exit::Usage
+            }
+            None => plan::plan(host, &target, dry_run, out, err),
+        },
         Command::Apply { hash, dry_run, yes } => apply::apply(host, &hash, dry_run, yes, out, err),
         Command::Revert {
             txn,
@@ -155,3 +174,5 @@ mod index_tests;
 mod lm_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod topo_tests;

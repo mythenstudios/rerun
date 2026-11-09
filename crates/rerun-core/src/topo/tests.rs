@@ -1,0 +1,802 @@
+//! The Topo engine (P4-4) against the fake. Every Topo, folder, hash and ID is invented.
+//!
+//! - TW `when`: each key yes, no and unknown; the Kleene AND; empty and missing are yes.
+//! - TM match: SHA-256 and SHA-1 on the parsed handle; another content, a missing file and a
+//!   wrong second hash are no match; the first match is the main executable.
+//! - TL `launch`: `auto` resolves to `direct` with `chain: [steam]`, else `watch`; the loader
+//!   requires `start` for `auto`, `direct` and `watch`.
+//! - TP picks: unknown issue or variant, two variants of one issue, `when = no` refused,
+//!   `unknown` planned with a warning, no pick, `package` not yet.
+//! - TA anti-cheat: refused and warned exactly per user decision E4, also the step kinds that
+//!   come later; a dead system released by the Topo; the release is draft only until reviewed.
+//! - TB the plan has the bytes of a step file with the same steps (apart from `source`).
+//! - TC the whole way from a signed index (test key): the source names the index.
+
+use std::path::Path;
+
+use sha2::{Digest, Sha256};
+
+use super::{
+    ANTI_CHEAT_RULES, AcRule, AntiCheatState, EngineError, ExeState, Facts, GameFacts,
+    LaunchProblem, Refusal, StepKind, Tri, Warning, anti_cheat_rule, plan, read_game, report,
+    resolve_launch, topos_for, when,
+};
+use crate::catalog::check::{self, Rules};
+use crate::catalog::model::{Topo, When};
+use crate::catalog::{Catalog, key::test_key, verify};
+use crate::detect::exe::AntiCheat;
+use crate::detect::pe::testfx::Builder as PeBuilder;
+use crate::exec::rebind_tests::rb_sys;
+use crate::hw::{self, GpuArchTable, SystemProfile};
+use crate::plan::{Pick, PlanSource};
+use crate::policy::registry::RegPolicy;
+use crate::policy::root::StoreDir;
+use crate::prim::tests::{STEAM_GAME, STEAM_LIB, app, fr};
+use crate::prim::{self, MethodSpec, PlanCtx, StepFile};
+use crate::sys::GpuAdapter;
+use crate::sys::fake::FakeSystem;
+
+const RYZEN_5950X: &str = include_str!("../../../../tests/fixtures/cpu/ryzen9-5950x.json");
+
+// ---------- TW ----------
+
+fn rx_9070_xt() -> GpuAdapter {
+    GpuAdapter {
+        name: "AMD Radeon RX 9070 XT".to_owned(),
+        vendor_id: 0x1002,
+        device_id: 0x7550,
+        dedicated_video_memory: 16 << 30,
+        ..GpuAdapter::default()
+    }
+}
+
+fn table() -> &'static GpuArchTable {
+    GpuArchTable::builtin().unwrap()
+}
+
+/// RX 9070 XT (rdna4), 5950X (32 threads, not hybrid), build 26100.
+fn full() -> SystemProfile {
+    let sys = FakeSystem::builder()
+        .gpu(rx_9070_xt())
+        .topology_json(RYZEN_5950X)
+        .os_build(26100, Some(1))
+        .build()
+        .unwrap();
+    hw::read(&sys, Some(table()))
+}
+
+/// Nothing readable: adapters fail, no topology, no build.
+fn blind() -> SystemProfile {
+    let sys = FakeSystem::builder()
+        .gpu_error(crate::sys::SysErrorKind::Other)
+        .build()
+        .unwrap();
+    hw::read(&sys, Some(table()))
+}
+
+/// No hardware adapter, an unknown device, or no table.
+fn no_adapter() -> SystemProfile {
+    hw::read(&FakeSystem::builder().build().unwrap(), Some(table()))
+}
+
+fn unknown_device() -> SystemProfile {
+    let sys = FakeSystem::builder()
+        .gpu(GpuAdapter {
+            device_id: 0x0001,
+            ..rx_9070_xt()
+        })
+        .build()
+        .unwrap();
+    hw::read(&sys, Some(table()))
+}
+
+fn w(json: &str) -> When {
+    serde_json::from_str(json).unwrap()
+}
+
+#[test]
+fn tw_each_key_is_yes_no_or_unknown() {
+    let (full, blind, none, unknown) = (full(), blind(), no_adapter(), unknown_device());
+    let no_table = hw::read(
+        &FakeSystem::builder().gpu(rx_9070_xt()).build().unwrap(),
+        None,
+    );
+    let cases: &[(&str, &SystemProfile, Tri)] = &[
+        (r#"{"gpu.vendor":"amd"}"#, &full, Tri::Yes),
+        (r#"{"gpu.vendor":"nvidia"}"#, &full, Tri::No),
+        (r#"{"gpu.vendor":"amd"}"#, &blind, Tri::Unknown),
+        (r#"{"gpu.vendor":"amd"}"#, &none, Tri::No),
+        (r#"{"gpu.arch":["rdna4"]}"#, &full, Tri::Yes),
+        (r#"{"gpu.arch":["rdna2","rdna3"]}"#, &full, Tri::No),
+        (r#"{"gpu.arch":["rdna4"]}"#, &blind, Tri::Unknown),
+        (r#"{"gpu.arch":["rdna4"]}"#, &none, Tri::No),
+        (r#"{"gpu.arch":["rdna4"]}"#, &unknown, Tri::No),
+        (r#"{"gpu.arch":["rdna4"]}"#, &no_table, Tri::Unknown),
+        (r#"{"cpu.threads":{"gt":16}}"#, &full, Tri::Yes),
+        (r#"{"cpu.threads":{"lt":16}}"#, &full, Tri::No),
+        (r#"{"cpu.threads":{"gte":32,"lte":32}}"#, &full, Tri::Yes),
+        (r#"{"cpu.threads":{"gt":16,"eq":31}}"#, &full, Tri::No),
+        (r#"{"cpu.threads":{"gt":16}}"#, &blind, Tri::Unknown),
+        (r#"{"cpu.hybrid":false}"#, &full, Tri::Yes),
+        (r#"{"cpu.hybrid":true}"#, &full, Tri::No),
+        (r#"{"cpu.hybrid":true}"#, &blind, Tri::Unknown),
+        (r#"{"os.build":{"gte":22000}}"#, &full, Tri::Yes),
+        (r#"{"os.build":{"lt":22000}}"#, &full, Tri::No),
+        (r#"{"os.build":{"gte":22000}}"#, &blind, Tri::Unknown),
+    ];
+    for (json, p, want) in cases {
+        assert_eq!(when::eval(Some(&w(json)), p), *want, "{json}");
+    }
+}
+
+#[test]
+fn tw_keys_are_and_and_empty_is_yes() {
+    let (full, blind) = (full(), blind());
+    assert_eq!(when::eval(None, &blind), Tri::Yes);
+    assert_eq!(when::eval(Some(&When::default()), &blind), Tri::Yes);
+    // no AND unknown is no; unknown AND yes is unknown; yes AND yes is yes.
+    let mixed = w(r#"{"gpu.vendor":"nvidia","os.build":{"gte":1}}"#);
+    assert_eq!(when::eval(Some(&mixed), &full), Tri::No);
+    let blind_no = w(r#"{"gpu.vendor":"amd","cpu.hybrid":true}"#);
+    assert_eq!(when::eval(Some(&blind_no), &blind), Tri::Unknown);
+    let partly = hw::read(
+        &FakeSystem::builder()
+            .gpu(rx_9070_xt())
+            .os_build(26100, None)
+            .build()
+            .unwrap(),
+        Some(table()),
+    );
+    let yes_unknown = w(r#"{"gpu.vendor":"amd","cpu.threads":{"gt":1}}"#);
+    assert_eq!(when::eval(Some(&yes_unknown), &partly), Tri::Unknown);
+    let no_unknown = w(r#"{"gpu.vendor":"intel","cpu.threads":{"gt":1}}"#);
+    assert_eq!(when::eval(Some(&no_unknown), &partly), Tri::No);
+    let all = w(
+        r#"{"gpu.vendor":"amd","gpu.arch":["rdna4"],"cpu.threads":{"gt":12},"cpu.hybrid":false,"os.build":{"gte":22000}}"#,
+    );
+    assert_eq!(when::eval(Some(&all), &full), Tri::Yes);
+    for (a, b, r) in [
+        (Tri::Yes, Tri::Yes, Tri::Yes),
+        (Tri::Yes, Tri::No, Tri::No),
+        (Tri::Yes, Tri::Unknown, Tri::Unknown),
+        (Tri::No, Tri::Unknown, Tri::No),
+        (Tri::Unknown, Tri::Unknown, Tri::Unknown),
+        (Tri::No, Tri::No, Tri::No),
+    ] {
+        assert_eq!(a.and(b), r);
+        assert_eq!(b.and(a), r);
+    }
+}
+
+// ---------- The game and its Topo ----------
+
+const APP: u32 = 220;
+
+fn pe(x86: bool) -> Vec<u8> {
+    if x86 {
+        PeBuilder::x86().build().bytes
+    } else {
+        PeBuilder::x64().build().bytes
+    }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect()
+}
+
+fn sha256(b: &[u8]) -> String {
+    hex(&Sha256::digest(b))
+}
+
+fn sha1(b: &[u8]) -> String {
+    use sha1::Sha1;
+    hex(&Sha1::digest(b))
+}
+
+fn put(sys: &FakeSystem, rel: &str, data: &[u8]) {
+    let abs = format!(r"{STEAM_GAME}\{rel}");
+    let _ = sys.fake_fs().remove_abs(Path::new(&abs));
+    sys.fake_fs().put_file(Path::new(&abs), data).unwrap();
+    sys.sync_all();
+}
+
+/// Steam app 220 in `G` with an x64 `game.exe` and an x86 `FFLauncher.exe`; `cfg\Game.ini`
+/// from the INI tests.
+fn game_sys() -> FakeSystem {
+    let sys = rb_sys();
+    put(&sys, "game.exe", &pe(false));
+    put(&sys, "FFLauncher.exe", &pe(true));
+    sys
+}
+
+/// The Topo: `match` on `game.exe` by SHA-256; `launch` from `extra_launch`; issues `cores`
+/// (`cpu`), `settings` (`ini_set` or `registry_set`, `when` on the build), `display`
+/// (`compat_layer`), `nvidia` (`when` on the vendor, `steam_input`), `wrapper` (`package`).
+fn topo_json(game_sha256: &str, launch: &str) -> String {
+    format!(
+        r#"{{"format":1,"id":"invented-game","title":"Invented Game","status":"active","rev":3,
+"match":{{"steam_appid":{APP},"exes":[{{"path":"game.exe","sha256":"{game_sha256}","api":"d3d9"}}]}},
+"launch":{launch},
+"issues":[
+ {{"id":"cores","title":"Too many cores","variants":[
+   {{"id":"limit","status":"verified","kind":"fix","steps":[{{"cpu":{{"max_threads":8,"single_l3":true,"smt":false}}}}]}}]}},
+ {{"id":"settings","title":"Settings","when":{{"os.build":{{"gte":22000}}}},"variants":[
+   {{"id":"ini","status":"reported","kind":"fix","steps":[{{"ini_set":{{"file":"cfg\\Game.ini","values":[{{"section":"Display","key":"Width","value":"1920"}}]}}}}]}},
+   {{"id":"reg","status":"reported","kind":"fix","steps":[{{"registry_set":{{"key":"HKCU\\Software\\Invented\\Game","values":[{{"name":"Windowed","dword":1}}]}}}}]}}]}},
+ {{"id":"display","title":"Display","variants":[
+   {{"id":"layer","status":"unverified","kind":"fix","steps":[{{"compat_layer":{{"exe":"game.exe","layers":["ZZ_FLAG_A"]}}}}]}}]}},
+ {{"id":"nvidia","title":"NVIDIA only","when":{{"gpu.vendor":"nvidia"}},"variants":[
+   {{"id":"input","status":"unverified","kind":"fix","steps":[{{"steam_input":"enable"}}]}}]}},
+ {{"id":"wrapper","title":"Wrapper","variants":[
+   {{"id":"pkg","status":"unverified","kind":"fix","steps":[{{"package":"invented-wrapper"}}]}}]}}
+]}}"#
+    )
+}
+
+const DIRECT: &str = r#"{"chain":["steam"],"method":"auto","start":"FFLauncher.exe"}"#;
+const WATCH: &str = r#"{"chain":["steam","upc"],"method":"auto","start":"FFLauncher.exe"}"#;
+
+fn topo(game_sha256: &str, launch: &str) -> Topo {
+    let t: Topo = serde_json::from_str(&topo_json(game_sha256, launch)).unwrap();
+    check::topo(&t, Rules::Release).unwrap();
+    t
+}
+
+fn game_topo(launch: &str) -> Topo {
+    topo(&sha256(&pe(false)), launch)
+}
+
+fn facts_of(sys: &FakeSystem, t: &Topo) -> GameFacts {
+    let fr = fr(sys);
+    let store = StoreDir::open(sys, &fr, Path::new(STEAM_LIB)).unwrap();
+    let g = store.game(&fr, "G").unwrap();
+    read_game(&g, t)
+}
+
+fn picks(p: &[&str]) -> Vec<Pick> {
+    p.iter()
+        .map(|s| {
+            let (issue, variant) = s.split_once('/').unwrap();
+            Pick {
+                issue: issue.to_owned(),
+                variant: variant.to_owned(),
+            }
+        })
+        .collect()
+}
+
+const INDEX: [u8; 32] = [7; 32];
+
+/// Plans `p` of `t` on `sys` with `profile`.
+fn plan_with(
+    sys: &FakeSystem,
+    t: &Topo,
+    profile: &SystemProfile,
+    p: &[&str],
+) -> Result<super::TopoPlan, EngineError> {
+    let gf = facts_of(sys, t);
+    let fr = fr(sys);
+    let store = StoreDir::open(sys, &fr, Path::new(STEAM_LIB)).unwrap();
+    let g = store.game(&fr, "G").unwrap();
+    let a = app(sys);
+    let ctx = PlanCtx {
+        game: &g,
+        app: Some(&a),
+        steam_app: Some(APP),
+        main_exe: None,
+        reg: RegPolicy.reader(sys),
+        app_path: None,
+    };
+    let facts = Facts {
+        profile,
+        table: Some(table()),
+        game: &gf,
+    };
+    plan(&INDEX, t, &facts, &picks(p), &ctx)
+}
+
+fn plan_on(sys: &FakeSystem, t: &Topo, p: &[&str]) -> Result<super::TopoPlan, EngineError> {
+    plan_with(sys, t, &full(), p)
+}
+
+// ---------- TM ----------
+
+#[test]
+fn tm_matches_by_every_hash_on_the_parsed_handle() {
+    let sys = game_sys();
+    let exe = pe(false);
+    let ok = game_topo(DIRECT);
+    let f = facts_of(&sys, &ok);
+    assert_eq!(f.exes[0].state, ExeState::Match);
+    assert_eq!(f.main_exe().unwrap().as_str(), "game.exe");
+
+    // Another content: no match, and the engine refuses to plan.
+    let other = topo(&sha256(b"another build"), DIRECT);
+    let f = facts_of(&sys, &other);
+    assert_eq!(f.exes[0].state, ExeState::Mismatch);
+    assert!(!f.matched());
+    assert!(matches!(
+        plan_on(&sys, &other, &["cores/limit"]),
+        Err(EngineError::NoMatch(id)) if id == "invented-game"
+    ));
+    let r = report(
+        &other,
+        &Facts {
+            profile: &full(),
+            table: Some(table()),
+            game: &f,
+        },
+    )
+    .unwrap();
+    assert!(r.main_exe.is_none(), "a report names no main executable");
+
+    // SHA-1 alone, both right, one of two wrong.
+    let with = |sha1_: &str, sha256_: Option<&str>| {
+        let mut j: serde_json::Value =
+            serde_json::from_str(&topo_json(&sha256(&exe), DIRECT)).unwrap();
+        let e = &mut j["match"]["exes"][0];
+        e["sha1"] = sha1_.into();
+        match sha256_ {
+            Some(s) => e["sha256"] = s.into(),
+            None => {
+                e.as_object_mut().unwrap().remove("sha256");
+            }
+        }
+        serde_json::from_value::<Topo>(j).unwrap()
+    };
+    let state = |t: &Topo| facts_of(&sys, t).exes[0].state.clone();
+    assert_eq!(state(&with(&sha1(&exe), None)), ExeState::Match);
+    assert_eq!(
+        state(&with(&sha1(&exe), Some(&sha256(&exe)))),
+        ExeState::Match
+    );
+    assert_eq!(
+        state(&with(&sha1(b"x"), Some(&sha256(&exe)))),
+        ExeState::Mismatch
+    );
+    assert_eq!(
+        state(&with(&sha1(&exe), Some(&sha256(b"x")))),
+        ExeState::Mismatch
+    );
+
+    // Missing, and a file that is no image.
+    let mut j: serde_json::Value = serde_json::from_str(&topo_json(&sha256(&exe), DIRECT)).unwrap();
+    j["match"]["exes"] = serde_json::json!([
+        {"path": "gone.exe", "sha256": sha256(&exe), "api": "d3d9"},
+        {"path": "cfg\\Game.ini", "sha256": sha256(&exe), "api": "d3d9"},
+        {"path": "game.exe", "sha256": sha256(&exe), "api": "d3d9"}
+    ]);
+    let t: Topo = serde_json::from_value(j).unwrap();
+    let f = facts_of(&sys, &t);
+    assert_eq!(f.exes[0].state, ExeState::Missing);
+    assert!(matches!(f.exes[1].state, ExeState::Unreadable(_)));
+    assert_eq!(f.main_exe().unwrap().as_str(), "game.exe");
+}
+
+// ---------- TL ----------
+
+#[test]
+fn tl_auto_resolves_and_start_is_required() {
+    let r = |launch: &str| resolve_launch(&game_topo(launch));
+    let lp = r(DIRECT).unwrap();
+    assert_eq!((lp.method, lp.auto), (MethodSpec::Direct, true));
+    assert_eq!(lp.start.as_str(), "FFLauncher.exe");
+    assert_eq!(r(WATCH).unwrap().method, MethodSpec::Watch);
+    assert_eq!(
+        r(r#"{"method":"auto","start":"FFLauncher.exe"}"#)
+            .unwrap()
+            .method,
+        MethodSpec::Watch,
+        "no chain is not [steam]"
+    );
+    assert_eq!(
+        r(r#"{"chain":["upc"],"method":"direct","start":"FFLauncher.exe"}"#)
+            .unwrap()
+            .method,
+        MethodSpec::Direct
+    );
+    let lw = r(r#"{"chain":["steam"],"method":"watch","start":"game.exe"}"#).unwrap();
+    assert_eq!((lw.method, lw.auto), (MethodSpec::Watch, false));
+    assert_eq!(
+        r(r#"{"method":"hold"}"#),
+        Err(LaunchProblem::NotYet("hold"))
+    );
+    assert_eq!(r(r#"{"chain":["steam"]}"#), Err(LaunchProblem::NoMethod));
+
+    // The loader: `start` required for auto, direct and watch; `TODO` only in a draft.
+    for m in ["auto", "direct", "watch"] {
+        let j = topo_json(&sha256(b"x"), &format!(r#"{{"method":"{m}"}}"#));
+        let t: Topo = serde_json::from_str(&j).unwrap();
+        let e = check::topo(&t, Rules::Source).unwrap_err();
+        assert_eq!(e.at, "launch.start", "{m}");
+    }
+    let j = topo_json(&sha256(b"x"), r#"{"method":"hold"}"#);
+    check::topo(&serde_json::from_str::<Topo>(&j).unwrap(), Rules::Release).unwrap();
+    let j = topo_json(&sha256(b"x"), r#"{"method":"auto","start":"TODO"}"#);
+    let mut t: Topo = serde_json::from_str(&j).unwrap();
+    assert!(check::topo(&t, Rules::Source).is_err(), "TODO needs draft");
+    t.status = crate::catalog::model::Status::Draft;
+    check::topo(&t, Rules::Source).unwrap();
+    assert!(check::topo(&t, Rules::Release).is_err());
+    assert_eq!(resolve_launch(&t), Err(LaunchProblem::NoStart));
+}
+
+#[test]
+fn tl_the_cpu_step_takes_the_resolved_method() {
+    let sys = game_sys();
+    let direct = plan_on(&sys, &game_topo(DIRECT), &["cores/limit"]).unwrap();
+    assert_eq!(direct.launch.unwrap().method, MethodSpec::Direct);
+    let watch = plan_on(&sys, &game_topo(WATCH), &["cores/limit"]).unwrap();
+    assert_eq!(watch.launch.unwrap().method, MethodSpec::Watch);
+    assert!(matches!(
+        &watch.steps[..],
+        [prim::Step::LaunchMethod(s)] if s.method == MethodSpec::Watch
+            && s.start.as_str() == "FFLauncher.exe"
+    ));
+    // A launch the engine cannot carry refuses the cpu step.
+    let hold = game_topo(r#"{"method":"hold"}"#);
+    assert!(matches!(
+        plan_on(&sys, &hold, &["cores/limit"]),
+        Err(EngineError::Refused {
+            why: Refusal::Launch(LaunchProblem::NotYet("hold")),
+            ..
+        })
+    ));
+}
+
+// ---------- TP ----------
+
+#[test]
+fn tp_pick_rules() {
+    let sys = game_sys();
+    let t = game_topo(DIRECT);
+    let err = |p: &[&str]| plan_on(&sys, &t, p).unwrap_err();
+    assert!(matches!(err(&[]), EngineError::Picks));
+    assert!(matches!(err(&["nope/limit"]), EngineError::UnknownIssue(i) if i == "nope"));
+    assert!(matches!(
+        err(&["cores/nope"]),
+        EngineError::UnknownVariant { issue, variant } if issue == "cores" && variant == "nope"
+    ));
+    assert!(matches!(
+        err(&["settings/ini", "settings/reg"]),
+        EngineError::TwoVariants(i) if i == "settings"
+    ));
+    // `when = no` (an AMD system, an NVIDIA issue) is refused.
+    assert!(matches!(err(&["nvidia/input"]), EngineError::WhenNo(i) if i == "nvidia"));
+    // `package` waits for P4-7.
+    assert!(matches!(
+        err(&["wrapper/pkg"]),
+        EngineError::Refused {
+            why: Refusal::NotYet(StepKind::Package),
+            ..
+        }
+    ));
+
+    // `when = unknown` (no build readable) only on an explicit pick, with a warning.
+    let blind = hw::read(
+        &FakeSystem::builder().gpu(rx_9070_xt()).build().unwrap(),
+        Some(table()),
+    );
+    let p = plan_with(&sys, &t, &blind, &["settings/ini"]).unwrap();
+    assert_eq!(
+        p.warnings,
+        vec![Warning::WhenUnknown {
+            issue: "settings".into()
+        }]
+    );
+    assert!(!p.plan.ops.is_empty());
+    let r = report(
+        &t,
+        &Facts {
+            profile: &blind,
+            table: Some(table()),
+            game: &facts_of(&sys, &t),
+        },
+    )
+    .unwrap();
+    let whens: Vec<(&str, Tri)> = r
+        .issues
+        .iter()
+        .map(|i| (i.issue.id.as_str(), i.when))
+        .collect();
+    assert_eq!(
+        whens,
+        [
+            ("cores", Tri::Yes),
+            ("settings", Tri::Unknown),
+            ("display", Tri::Yes),
+            ("nvidia", Tri::No),
+            ("wrapper", Tri::Yes),
+        ]
+    );
+
+    // A steam_input hint plans nothing; several issues in one plan.
+    let p = plan_on(&sys, &t, &["cores/limit", "settings/ini", "display/layer"]).unwrap();
+    assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    assert_eq!(p.steps.len(), 3);
+    let src = p.plan.source.as_ref().unwrap();
+    assert_eq!(
+        (src.topo.as_str(), src.rev, src.index, src.picks.len()),
+        ("invented-game", 3, INDEX, 3)
+    );
+
+    // An undeclared gpu.arch is refused for the whole Topo (ADR 0015).
+    let mut j: serde_json::Value =
+        serde_json::from_str(&topo_json(&sha256(&pe(false)), DIRECT)).unwrap();
+    j["issues"][0]["when"] = serde_json::json!({"gpu.arch": ["invented_arch"]});
+    let odd: Topo = serde_json::from_value(j).unwrap();
+    assert!(matches!(
+        plan_on(&sys, &odd, &["cores/limit"]),
+        Err(EngineError::UndeclaredArch { arch, .. }) if arch == "invented_arch"
+    ));
+}
+
+// ---------- TA ----------
+
+#[test]
+fn ta_the_rule_table_is_exactly_e4() {
+    for (k, r) in ANTI_CHEAT_RULES {
+        assert_eq!(anti_cheat_rule(k), r, "{k:?}");
+    }
+    let refused: Vec<StepKind> = ANTI_CHEAT_RULES
+        .iter()
+        .filter(|(_, r)| *r == AcRule::Refuse)
+        .map(|(k, _)| *k)
+        .collect();
+    assert_eq!(
+        refused,
+        [
+            StepKind::Package,
+            StepKind::LaaPatch,
+            StepKind::FirewallRule,
+            StepKind::CompatLayer,
+            StepKind::LaunchWatch
+        ]
+    );
+    let warned: Vec<StepKind> = ANTI_CHEAT_RULES
+        .iter()
+        .filter(|(_, r)| *r == AcRule::Warn)
+        .map(|(k, _)| *k)
+        .collect();
+    assert_eq!(
+        warned,
+        [
+            StepKind::LaunchDirect,
+            StepKind::IniSet,
+            StepKind::RegistrySet,
+            StepKind::GpuPreference
+        ]
+    );
+}
+
+#[test]
+fn ta_anti_cheat_refuses_and_warns_per_e4() {
+    let sys = game_sys();
+    sys.fake_fs()
+        .mkdir_all(Path::new(&format!(r"{STEAM_GAME}\pb")))
+        .unwrap();
+    sys.sync_all();
+    let direct = game_topo(DIRECT);
+    let f = facts_of(&sys, &direct);
+    assert_eq!(f.anti_cheat.systems(), [AntiCheat::Punkbuster]);
+    let refused = |t: &Topo, p: &str| match plan_on(&sys, t, &[p]) {
+        Err(EngineError::Refused {
+            why: Refusal::AntiCheat(k),
+            ..
+        }) => k,
+        other => panic!("{p}: {other:?}"),
+    };
+    assert_eq!(refused(&direct, "display/layer"), StepKind::CompatLayer);
+    assert_eq!(refused(&direct, "wrapper/pkg"), StepKind::Package);
+    assert_eq!(
+        refused(&game_topo(WATCH), "cores/limit"),
+        StepKind::LaunchWatch
+    );
+    let warned = |p: &str| {
+        plan_on(&sys, &direct, &[p])
+            .unwrap()
+            .warnings
+            .into_iter()
+            .map(|w| match w {
+                Warning::AntiCheat { step, .. } => step,
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(warned("cores/limit"), [StepKind::LaunchDirect]);
+    assert_eq!(warned("settings/ini"), [StepKind::IniSet]);
+    assert_eq!(warned("settings/reg"), [StepKind::RegistrySet]);
+
+    // The report says the same per variant, without planning.
+    let r = report(
+        &direct,
+        &Facts {
+            profile: &full(),
+            table: Some(table()),
+            game: &f,
+        },
+    )
+    .unwrap();
+    assert!(r.anti_cheat.enforced());
+    let display = &r.issues[2].variants[0];
+    assert_eq!(
+        display.refused,
+        Some(Refusal::AntiCheat(StepKind::CompatLayer))
+    );
+    assert_eq!(r.issues[1].variants[0].warned, [StepKind::IniSet]);
+    assert_eq!(r.issues[3].variants[0].refused, None, "steam_input");
+}
+
+#[test]
+fn ta_a_dead_system_released_by_the_topo_does_not_count() {
+    let sys = game_sys();
+    sys.fake_fs()
+        .mkdir_all(Path::new(&format!(r"{STEAM_GAME}\pb")))
+        .unwrap();
+    sys.sync_all();
+    let released = |dead: &str| {
+        let mut j: serde_json::Value =
+            serde_json::from_str(&topo_json(&sha256(&pe(false)), DIRECT)).unwrap();
+        j["status"] = "draft".into();
+        j["anti_cheat"] = serde_json::json!({
+            "dead": [dead],
+            "source": {"type": "pcgw", "url": "https://www.pcgamingwiki.com/wiki/Invented#Multiplayer"}
+        });
+        let t: Topo = serde_json::from_value(j).unwrap();
+        check::topo(&t, Rules::Source).unwrap();
+        t
+    };
+    let t = released("punkbuster");
+    let f = facts_of(&sys, &t);
+    assert_eq!(
+        super::anti_cheat_state(&t, &f.anti_cheat),
+        AntiCheatState::Released {
+            systems: vec![AntiCheat::Punkbuster]
+        }
+    );
+    let p = plan_on(&sys, &t, &["display/layer"]).unwrap();
+    assert!(p.warnings.is_empty());
+    // Another system found next to it still counts.
+    sys.fake_fs()
+        .mkdir_all(Path::new(&format!(r"{STEAM_GAME}\BattlEye")))
+        .unwrap();
+    sys.sync_all();
+    assert!(matches!(
+        plan_on(&sys, &t, &["display/layer"]),
+        Err(EngineError::Refused {
+            why: Refusal::AntiCheat(StepKind::CompatLayer),
+            ..
+        })
+    ));
+    // A release of another system does not release this one.
+    let other = released("battleye");
+    let f = facts_of(&sys, &other);
+    assert_eq!(
+        super::anti_cheat_state(&other, &f.anti_cheat),
+        AntiCheatState::Enforced {
+            systems: vec![AntiCheat::Punkbuster],
+            unreadable: false
+        }
+    );
+    // Draft only until reviewed: never in the signed index, never active.
+    assert!(check::topo(&t, Rules::Release).is_err());
+    let mut active = t.clone();
+    active.status = crate::catalog::model::Status::Active;
+    let e = check::topo(&active, Rules::Source).unwrap_err();
+    assert_eq!(e.at, "anti_cheat");
+}
+
+// ---------- TB ----------
+
+#[test]
+fn tb_the_plan_has_the_bytes_of_the_same_step_file() {
+    let sys = game_sys();
+    let t = game_topo(DIRECT);
+    let p = plan_on(&sys, &t, &["cores/limit", "settings/ini", "display/layer"]).unwrap();
+    let sf = StepFile::parse(
+        br#"{"format":1,"game":{"steam":220},"main_exe":"game.exe","steps":[
+ {"launch_method":{"method":"direct","start":"FFLauncher.exe","cpu":{"max_threads":8,"single_l3":true,"smt":false}}},
+ {"ini_set":{"file":"cfg\\Game.ini","values":[{"section":"Display","key":"Width","value":"1920"}]}},
+ {"compat_layer":{"exe":"game.exe","layers":["ZZ_FLAG_A"]}}]}"#,
+    )
+    .unwrap();
+    assert_eq!(sf.steps, p.steps);
+    let fr = fr(&sys);
+    let store = StoreDir::open(&sys, &fr, Path::new(STEAM_LIB)).unwrap();
+    let g = store.game(&fr, "G").unwrap();
+    let a = app(&sys);
+    let from_file = prim::plan(
+        &sf.steps,
+        &PlanCtx {
+            game: &g,
+            app: Some(&a),
+            steam_app: Some(APP),
+            main_exe: Some(&sf.main_exe),
+            reg: RegPolicy.reader(&sys),
+            app_path: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        from_file.ops.len() >= 3,
+        "a profile, an INI and a layer op at least"
+    );
+    let mut bare = p.plan.clone();
+    let source = bare.source.take().unwrap();
+    assert_eq!(
+        bare.encode().unwrap().bytes(),
+        from_file.encode().unwrap().bytes()
+    );
+    // The source adds exactly one field at the end.
+    let with = String::from_utf8(p.plan.encode().unwrap().bytes().to_vec()).unwrap();
+    let without = String::from_utf8(from_file.encode().unwrap().bytes().to_vec()).unwrap();
+    let tail = format!(",\"source\":{}}}", serde_json::to_string(&source).unwrap());
+    assert_eq!(with, format!("{}{tail}", &without[..without.len() - 1]));
+    // And it survives the strict decode, which checks its form.
+    let decoded = crate::plan::decode(p.plan.encode().unwrap().bytes()).unwrap();
+    assert_eq!(decoded, p.plan);
+}
+
+#[test]
+fn tb_a_source_out_of_form_is_refused() {
+    let sys = game_sys();
+    let base = plan_on(&sys, &game_topo(DIRECT), &["cores/limit"])
+        .unwrap()
+        .plan;
+    let with = |f: &dyn Fn(&mut PlanSource)| {
+        let mut p = base.clone();
+        f(p.source.as_mut().unwrap());
+        p.encode()
+    };
+    assert!(with(&|_| {}).is_ok());
+    assert!(with(&|s| s.topo = "Not An ID".into()).is_err());
+    assert!(with(&|s| s.rev = 0).is_err());
+    assert!(with(&|s| s.picks.clear()).is_err());
+    assert!(with(&|s| s.picks.push(s.picks[0].clone())).is_err());
+    assert!(with(&|s| s.picks[0].variant = "a/b".into()).is_err());
+}
+
+// ---------- TC ----------
+
+#[test]
+fn tc_from_a_signed_index() {
+    let sys = game_sys();
+    let t = game_topo(DIRECT);
+    let index = format!(
+        r#"{{"format":1,"seq":1,"issued":"2026-11-09T12:00:00Z","topos":[{}],"packages":[]}}"#,
+        serde_json::to_string(&{
+            // The index lists every package a Topo names: drop the package issue here.
+            let mut t = t.clone();
+            t.issues.retain(|i| i.id.as_str() != "wrapper");
+            t
+        })
+        .unwrap()
+    );
+    let sig = test_key::sign(index.as_bytes());
+    let v = verify(index.as_bytes(), &sig, &[test_key::public()]).unwrap();
+    let c = Catalog::from_verified(&v).unwrap();
+    let found = topos_for(&c, APP);
+    assert_eq!(found.len(), 1);
+    assert!(topos_for(&c, APP + 1).is_empty());
+    let gf = facts_of(&sys, found[0]);
+    let fr = fr(&sys);
+    let store = StoreDir::open(&sys, &fr, Path::new(STEAM_LIB)).unwrap();
+    let g = store.game(&fr, "G").unwrap();
+    let a = app(&sys);
+    let ctx = PlanCtx {
+        game: &g,
+        app: Some(&a),
+        steam_app: Some(APP),
+        main_exe: None,
+        reg: RegPolicy.reader(&sys),
+        app_path: None,
+    };
+    let profile = full();
+    let facts = Facts {
+        profile: &profile,
+        table: Some(table()),
+        game: &gf,
+    };
+    let p = plan(c.sha256(), found[0], &facts, &picks(&["cores/limit"]), &ctx).unwrap();
+    assert_eq!(&p.plan.source.unwrap().index, c.sha256());
+}

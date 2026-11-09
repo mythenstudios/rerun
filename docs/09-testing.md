@@ -183,6 +183,19 @@ See ADR 0013. Every image is synthetic, built by the test-only builder `detect/p
 - **Messages** name the kind and the offset only.
 - **Deterministic fuzzing** (xorshift64*, fixed seed): 20,000 mutated images (bit flips, edge values over header fields, cuts, duplicated slices; every fourth round against small limits) must yield both parsed images and errors, never panic, and stay within the limits and the budget.
 
+## Topo engine
+
+ADR 0020 amendment P4-4, ADR 0015 amendment P4-4. Against the fake only; every Topo, folder, hash and ID is invented, the index is signed with the published test key.
+
+- **`when`** (`topo/tests.rs` TW): each key yes, no and unknown on fake profiles (RX 9070 XT with the 5950X topology and build 26100; adapters failing; no adapter; a device the table does not know; no table): `gpu.vendor`, `gpu.arch`, `cpu.threads` (also a range and `eq`), `cpu.hybrid`, `os.build`; the Kleene AND in both orders; empty and missing are yes.
+- **Match** (TM): SHA-256 on the handle that was parsed; SHA-1 alone; both given and either one wrong is no match; another content, a missing file and a file that is no image; the first match is the main executable; no match refuses to plan and the report names no main executable.
+- **Launch** (TL): `auto` is `direct` with `chain: [steam]`, `watch` with another chain or none; `direct` and `watch` kept; `hold` refuses a `cpu` step; the loader refuses `auto`, `direct`, `watch` without `launch.start`, accepts `TODO` only in a draft, the engine refuses `TODO`.
+- **Picks** (TP): no pick, an unknown issue or variant, two variants of one issue, `when = no`, `package` (P4-7) are refused; `when = unknown` is planned on an explicit pick with a warning; the report's `when` per issue; an undeclared `gpu.arch` refuses the Topo.
+- **Anti-cheat** (TA, `detect/exe/anti_cheat.rs`): the rule table is exactly user decision E4 (refused: `package`, `laa_patch`, `firewall_rule`, `compat_layer`, `watch`; warned: CPU rule with `direct`, `ini_set`, `registry_set`, `gpu_preference`); with a `pb` folder `compat_layer`, `package` and `watch` are refused and the others planned with their warning, the report says the same per variant; a Topo releasing `punkbuster` as dead plans without a warning, a `BattlEye` folder next to it still refuses, a release of another system releases nothing; the release is draft only; markers are found in the game folder and the named folders only, each folder asked once; every marker is one segment with a source or a `TODO`.
+- **Bytes** (TB): a plan of three picks has, without `source`, exactly the bytes of the step file with the same steps (parsed by `StepFile::parse`); `source` is the last field; the strict decode reads it back; a source out of form (no ID, `rev: 0`, no pick, an issue twice, a pick of another form) is refused on encode.
+- **From the index** (TC): a `Catalog` from an index signed with the test key, `topos_for` by app ID, the plan's `source` names the index's SHA-256.
+- **CLI** (`crates/rerun-cli/src/topo_tests.rs` C-TE1 to C-TE6): no index; the report lines (Topo, executable, launch with `auto`, `when` per issue, variants, "no known fix") store nothing; `--pick … --dry-run` prints the origin before the preview and stores nothing, without `--dry-run` it stores; another content offers nothing and a pick is exit 3; a `BattlEye` folder in the report, `compat_layer` refused (exit 3), the CPU rule warned, `rerun scan` names the marker; `--pick` with a step file and a pick of another form are usage errors.
+
 ## Executable candidates
 
 See ADR 0014. Everything runs against `sys::fake` with synthetic images from `detect/pe/testfx.rs` (every name, folder and string invented); nothing touches the real system.

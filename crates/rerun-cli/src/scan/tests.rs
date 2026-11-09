@@ -129,6 +129,7 @@ fn exes(candidates: Vec<Candidate>, main: Main, issues: Vec<ExeIssue>) -> GameEx
         candidates,
         main,
         issues,
+        anti_cheat: rerun_core::detect::exe::AntiCheatScan::default(),
     }
 }
 

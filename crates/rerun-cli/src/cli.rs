@@ -8,8 +8,9 @@ use clap::{Parser, Subcommand};
 
 use rerun_core::escape;
 
+use rerun_core::catalog::model::Id;
 use rerun_core::journal::TxnId;
-use rerun_core::plan::PlanHash;
+use rerun_core::plan::{Pick, PlanHash};
 
 use crate::messages::Message;
 
@@ -38,10 +39,14 @@ pub enum Command {
         #[arg(long)]
         hashes: bool,
     },
-    /// Plans the steps of a step file and shows every change; stores the plan for apply.
+    /// Plans fixes from the signed index for a Steam app (or the steps of a step file) and shows
+    /// every change; stores the plan for apply. Without --pick, an app ID gives a report only.
     Plan {
-        /// The step file (JSON, at most 1 MiB).
-        steps: PathBuf,
+        /// A Steam app ID (digits only), or a step file (JSON, at most 1 MiB).
+        target: PathBuf,
+        /// A variant to plan, as <issue>/<variant>; repeat for several issues (app ID only).
+        #[arg(long = "pick", value_parser = pick)]
+        picks: Vec<Pick>,
         /// Show the plan only; store nothing.
         #[arg(long)]
         dry_run: bool,
@@ -110,6 +115,28 @@ pub enum IndexCommand {
     },
     /// The current index: number, date, entries, key.
     Show,
+}
+
+/// A pick `<issue>/<variant>`: two IDs of the Topo form, checked before any system access.
+fn pick(s: &str) -> Result<Pick, String> {
+    let bad = || "not <issue>/<variant> (IDs of a-z, 0-9 and single hyphens)".to_owned();
+    let (issue, variant) = s.split_once('/').ok_or_else(bad)?;
+    match (Id::parse(issue), Id::parse(variant)) {
+        (Some(i), Some(v)) => Ok(Pick {
+            issue: i.to_string(),
+            variant: v.to_string(),
+        }),
+        _ => Err(bad()),
+    }
+}
+
+/// The target of `rerun plan`: digits only are a Steam app ID (1 to 4294967295).
+pub fn app_id(target: &std::path::Path) -> Option<u32> {
+    let s = target.to_str()?;
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok().filter(|n| *n > 0)
 }
 
 /// A plan hash: exactly 64 lower-case hex digits, checked before any system access.

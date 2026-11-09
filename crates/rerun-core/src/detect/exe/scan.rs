@@ -5,6 +5,7 @@
 use std::io::{Read, Seek};
 
 use super::ExeLimits;
+use super::anti_cheat::{AntiCheatScan, find};
 use super::api::{ApiReport, classify};
 use super::hash::{HashError, HashLimits, HashOutcome, HashSkip, Stop, stream};
 use super::issue::ExeIssue;
@@ -102,6 +103,8 @@ pub struct GameExes {
     pub stats: WalkStats,
     /// Every problem of the walk, in the order it was found.
     pub issues: Vec<ExeIssue>,
+    /// Anti-cheat markers in the game folder and the folders of the main executable (P4-4).
+    pub anti_cheat: AntiCheatScan,
 }
 
 /// Opens `exe` (relative to the game folder) through [`open_game_exe`], parses it within
@@ -192,11 +195,21 @@ pub fn scan_game(game: &GameDir<'_>, options: &Options) -> GameExes {
     if options.hashes {
         hash_games(game, &mut candidates, &options.limits);
     }
+    let dirs: Vec<RelPath> = match &main {
+        Main::One(i) => vec![*i],
+        Main::Tied(v) => v.clone(),
+        Main::None => Vec::new(),
+    }
+    .into_iter()
+    .filter_map(|i| candidates.get(i).and_then(|c| c.path.parent()))
+    .collect();
+    let anti_cheat = find(game, &dirs);
     GameExes {
         candidates,
         main,
         stats: walked.stats,
         issues: walked.issues,
+        anti_cheat,
     }
 }
 
