@@ -158,8 +158,9 @@ fn helper_image_reads_program_files() {
 /// runas\command` (default and `IsolatedCommand`) pointing to `cmd.exe /c exit 77`, a `runas`
 /// start of `hostname.exe` through the merged `HKCR\exefile` key is measured (redirected or
 /// not), and through the `HKLM` key must start `hostname.exe` itself. The runner's
-/// administrator is elevated and `ConsentPromptBehaviorAdmin` is 0, so no dialog appears. The
-/// key stays (the runner is disposable; this runs last in `scripts/ci-sandbox.ps1`).
+/// administrator is elevated and `ConsentPromptBehaviorAdmin` is 0, so no dialog appears.
+/// `scripts/ci-sandbox.ps1` runs it last and deletes the `runas` key afterwards, also after a
+/// failure.
 #[test]
 #[ignore = "[SB] writes the real HKCU; CI runner only (scripts/ci-sandbox.ps1)"]
 fn sb_runas_redirection_and_the_class_key() {

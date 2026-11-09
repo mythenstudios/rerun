@@ -5,9 +5,14 @@
 # What it changes on the machine, and only through the two elevated steps below, each started
 # by its full path and named in the window title:
 #  - Install-Helper: creates C:\Program Files\Rerun (the known folder, not the environment) and
-#    copies the freshly built release rerun-helper.exe into it. The elevated part refuses a
-#    folder that already exists and is not admin-only (exit 3, nothing copied), hashes the copy
-#    itself and removes it again if its SHA-256 is not the build's (exit 2).
+#    copies the freshly built release rerun-helper.exe into it. The elevated part treats an
+#    existing folder as foreign (exit 3: nothing copied, nothing removed) unless it is the
+#    leftover of an aborted run of this build: no reparse point, admin-only, empty or holding
+#    only rerun-helper.exe (no link) with the fresh build's SHA-256. It never copies over an
+#    existing file, hashes the copy itself and removes it again if its SHA-256 is not the
+#    build's (exit 2). Every elevated body first sets PSModulePath to $PSHOME\Modules.
+#  - After an abort (Ctrl+C or a closed window) run the script again; it takes over an
+#    admin-only leftover folder and removes it at the end.
 #  - Remove-Helper: deletes rerun-helper.exe and then the folder (only if it is empty, never
 #    through a link: a folder or file that is a reparse point is refused, exit 3). The callers
 #    run it in a `finally`, so the helper is removed also after a failure, and then check that
@@ -37,6 +42,13 @@ function Fail([string]$text) {
 function Hex([int]$code) {
     '0x{0:X8}' -f $code
 }
+
+# The first line of every elevated body: modules only from Windows PowerShell's own folder,
+# never from the user's profile (a user-writable module path would run code elevated).
+$script:ElevatedPrelude = @'
+$env:PSModulePath = Join-Path $PSHOME 'Modules'
+
+'@
 
 # Paths go into an elevated command as single-quoted literals: double every quote.
 function Quote([string]$s) { "'" + ($s -replace "'", "''") + "'" }
@@ -114,19 +126,32 @@ function Invoke-Elevated([string]$body) {
 # 3): then it is not the test's, and the removal leaves it alone.
 function Install-Helper($paths, $build, [string]$prompt) {
     Title "${prompt}: allow Windows PowerShell to install the helper to Program Files\Rerun"
-    $body = $script:AclCheck + @"
+    $body = $script:ElevatedPrelude + $script:AclCheck + @"
 
 `$ErrorActionPreference = 'Stop'
 `$dir = $(Quote $paths.Dir)
 `$dst = $(Quote $paths.Exe)
+`$link = [IO.FileAttributes]::ReparsePoint
 try {
-    # A folder that exists already must be admin-only before anything goes into it.
+    # An existing folder is taken over only if it is the leftover of an aborted run of this
+    # build: no reparse point, admin-only, holding nothing or exactly rerun-helper.exe (no link)
+    # with the fresh build's SHA-256. Anything else is foreign (exit 3): nothing is copied over
+    # it and nothing of it is removed.
     if (Test-Path -LiteralPath `$dir) {
+        if (((Get-Item -LiteralPath `$dir -Force).Attributes -band `$link) -ne 0) { exit 3 }
         if (Test-AdminOnly `$dir) { exit 3 }
+        foreach (`$i in @(Get-ChildItem -LiteralPath `$dir -Force)) {
+            if (`$i.Name -ne 'rerun-helper.exe') { exit 3 }
+        }
+        if (Test-Path -LiteralPath `$dst) {
+            if (((Get-Item -LiteralPath `$dst -Force).Attributes -band `$link) -ne 0) { exit 3 }
+            if ((Get-FileHash -LiteralPath `$dst -Algorithm SHA256).Hash -ne '$($build.Hash)') { exit 3 }
+            exit 0
+        }
     } else {
         New-Item -ItemType Directory -Path `$dir | Out-Null
     }
-    Copy-Item -LiteralPath $(Quote $build.Path) -Destination `$dst -Force
+    Copy-Item -LiteralPath $(Quote $build.Path) -Destination `$dst
     if ((Get-FileHash -LiteralPath `$dst -Algorithm SHA256).Hash -ne '$($build.Hash)') {
         Remove-Item -LiteralPath `$dst -Force
         exit 2
@@ -142,7 +167,7 @@ try {
     switch ($code) {
         0 { }
         2 { Fail 'SHA-256 differs, installed copy removed' }
-        3 { $script:HelperForeign = $true; Fail "$($paths.Dir) existed and is not admin-only: nothing copied, nothing removed (fix or delete it as administrator)" }
+        3 { $script:HelperForeign = $true; Fail "$($paths.Dir) existed and is not this test's (a link, not admin-only, other content, or a helper of another build): nothing copied, nothing removed (check and delete it as administrator)" }
         default { Fail "the elevated install failed (exit $code)" }
     }
     if (-not (Test-Path -LiteralPath $paths.Exe -PathType Leaf)) { Fail "not installed: $($paths.Exe)" }
@@ -172,7 +197,7 @@ function Remove-Helper($paths, [string]$prompt) {
     if ($script:HelperForeign) { return "SKIPPED: $($paths.Dir) existed before the test and is not admin-only; left alone" }
     if (-not (Test-Path -LiteralPath $paths.Dir)) { return "PASS: $($paths.Dir) is gone (nothing to remove)" }
     Title "${prompt}: allow Windows PowerShell to remove Program Files\Rerun again"
-    $body = @"
+    $body = $script:ElevatedPrelude + @"
 `$ErrorActionPreference = 'Stop'
 `$dir = $(Quote $paths.Dir)
 `$dst = $(Quote $paths.Exe)

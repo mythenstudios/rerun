@@ -27,6 +27,11 @@
 # What it changes on the machine: only C:\Program Files\Rerun with rerun-helper.exe, created in
 # step 2 and removed in step 5. Nothing is left behind (unless the removal prompt is declined:
 # the summary then says FAIL and names the folder to delete). It never asks a question.
+#
+# After an abort (Ctrl+C or a closed window) run the script again; it takes over an admin-only
+# leftover folder (empty, or holding only the helper of this same build) and removes it at the
+# end. Anything else in the Rerun folder of Program Files is left alone and named
+# (dev-helper-common.ps1).
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path

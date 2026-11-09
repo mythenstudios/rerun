@@ -258,18 +258,28 @@ if (-not $r2) {
 EndSection
 
 # ---- pass 3: the runas redirection probe (ADR 0023 section 7, A4 S2) ---------------------------
-# Last, because it leaves HKCU\Software\Classes\exefile\shell\runas\command of runneradmin pointing
-# to cmd.exe (the runner is disposable). Elevated, ConsentPromptBehaviorAdmin = 0: no dialog.
+# Last: the probe points HKCU\Software\Classes\exefile\shell\runas\command of runneradmin to
+# cmd.exe; the script deletes that runas key again afterwards, also after a failure.
+# Elevated, ConsentPromptBehaviorAdmin = 0: no dialog.
 Section 'pass 3: runas with a HKCU exefile redirection, with and without the HKLM class key'
 $probeTest = 'sys::win::tests::elevation::sb_runas_redirection_and_the_class_key'
 $env:RERUN_SANDBOX = '1'
 $env:RERUN_CI_SANDBOX = '1'
 $previous = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
-$probe = @(& "$sb\bin\rerun-core-tests.exe" --ignored --exact $probeTest --nocapture --test-threads=1 2>&1 | ForEach-Object { "$_" })
-$probeCode = $LASTEXITCODE
-$ErrorActionPreference = $previous
-Remove-Item Env:RERUN_SANDBOX, Env:RERUN_CI_SANDBOX -ErrorAction SilentlyContinue
+$redirect = 'HKCU:\Software\Classes\exefile\shell\runas'
+$probe = @()
+$probeCode = -1
+try {
+    $probe = @(& "$sb\bin\rerun-core-tests.exe" --ignored --exact $probeTest --nocapture --test-threads=1 2>&1 | ForEach-Object { "$_" })
+    $probeCode = $LASTEXITCODE
+} finally {
+    # The redirection the probe planted goes again, also after a failure.
+    Remove-Item -LiteralPath $redirect -Recurse -Force -ErrorAction SilentlyContinue
+    $ErrorActionPreference = $previous
+    Remove-Item Env:RERUN_SANDBOX, Env:RERUN_CI_SANDBOX -ErrorAction SilentlyContinue
+}
+if (Test-Path -LiteralPath $redirect) { Fail "pass 3: $redirect could not be removed" }
 $probe | ForEach-Object { Write-Host $_ }
 $probe | Where-Object { $_ -like 'MEASURED S2*' } | ForEach-Object { Write-Host "::notice::$_" }
 Set-Content -LiteralPath "$sb\out\elevated\s2-probe.log" -Value $probe -Encoding UTF8
