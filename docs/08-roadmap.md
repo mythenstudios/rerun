@@ -38,18 +38,21 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 **Acceptance:** A Steam game launches via `rerun-launch` with 8 threads on one CCD, the check reports `ok`. A Ubisoft game via Steam with `watch` as well. **Accepted 2026-11-09** ([DEV] Stronghold 2 with `direct` on 2026-11-08: `0x5555`, 8 threads on CCD 0 in a job, `applied`/`ok`/`hard:8:32`, revert closed; [DEV] AC Black Flag Resynced through Ubisoft Connect with `watch` on 2026-11-09: the game in a job with `0x5555`, the launcher chain untouched, `ok`, revert closed; docs/09; the CI sandbox suite green including `direct` and `watch`; `full-probes` green, run 42552362570 on `65c1dd8`; the acceptance review passed with conditions, met in this commit. Deferred: SB-L7 (a layer at a start with Steam's spelling of the path) and the real VirtualStore sandbox case to phase 4, the cold start of D2 before phase 5).
 
 ## Phase 4 – Topos and packages
-- Elevated helper (moved from phase 3, together with the signed index it anchors on) + primitive `firewall_rule`, admin-only roots; audit A4 before the helper
+- Signed index (Ed25519) and Topo engine first; then the elevated helper (moved from phase 3) with `firewall_rule` as its only operation in this phase; audit A4 on the helper design before any helper write code. Reverting a helper operation never depends on the current index or the current executable hash
 - Package download (allowed hosts, SHA256, Zip Slip safe), DLL slots, reference counting
 - Topo engine with `when`, variants, conflicts
 - Topo loader requires `launch.start` for `direct`, `watch` and `auto`; re-evaluate E2 of P3-3 (reading Steam's `appinfo.vdf` to propose or check `start`, ADR 0022 amendment P3-3)
 - Primitive `gpu_preference` with the `when` keys `gpu.hybrid` and `gpu.integrated`; `UserData` roots (`Documents`, `My Games`) with their own allowlist (both moved from phase 2, user decisions D6 and D8)
-- Signed index (Ed25519)
+- Primitive `laa_patch` (the Large Address Aware flag of a 32-bit game executable from the Topo's `match`: backup, SHA-256 before and after, refused for DRM-protected builds, .NET and anti-cheat games; user-writable roots only in this phase)
+- Anti-cheat detection in the scan: for such a game the Topo engine refuses packages, `laa_patch`, `firewall_rule` and `compat_layer` and warns for the other steps; a signed Topo may release an anti-cheat that is verifiably dead (with a source). Non-goal in `00-vision.md` unchanged
+- One package = one pinned version; another verified version of the same tool is its own package (e.g. `dxvk-1.10`), a Topo variant chooses it (no free version choice, rule 4)
+- Shared package files are reference counted: a revert removes its own files, a file another open transaction still holds stays until the last one is reverted
 - 20 Topos, at least 5 of them `verified` on the developer machine
 - `rerun-workbench`: PCGW query → draft
 
 **Acceptance:** Install and revert of DXVK, dgVoodoo 2, Ultimate ASI Loader + EaglePatch leave a bit-identical game folder.
 
-**Acceptance (helper):** the elevated helper (ADR 0008, H2): its `System` has no GPU (a separate type, or a GPU part that returns `Unsupported` without touching DXGI); the helper binary never links `sys::win::loader`'s DLL loading or `sys::win::dxgi`, checked by an import allowlist test on the built helper with `tests/support/hardening.rs` (`detect::pe`, ADR 0013); and a source rule test refuses `WinGpu` and `WinSystem` in the helper's sources.
+**Acceptance (helper):** the elevated helper (ADR 0008, H2): its `System` has no GPU (a separate type, or a GPU part that returns `Unsupported` without touching DXGI); the helper binary never links `sys::win::loader`'s DLL loading or `sys::win::dxgi`, checked by an import allowlist test on the built helper with `tests/support/hardening.rs` (`detect::pe`, ADR 0013); and a source rule test refuses `WinGpu` and `WinSystem` in the helper's sources; a content test on the built helper finds neither `dxgi.dll` (ASCII or UTF-16) nor `CreateDXGIFactory1`, and a control binary that uses `WinGpu` must fail the same tests.
 
 ## Phase 5 – App
 - Tauri app: Library, Game detail (3 tabs), Log, First launch
@@ -61,6 +64,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 
 ## Phase 6 – Expansion
 - `hold`, `ifeo`, `inproc` (`rerun-cpu.asi`, x86/x64), `shim_single`
-- GOG, Epic, Ubisoft Connect detection
+- GOG, Epic, Ubisoft Connect detection, and game folders added by hand (matched by executable hash)
+- Admin-only roots (retail installs under `Program Files`) through the helper, including replacing files there (`laa_patch`); needs a helper-owned backup store (moved from phase 4, user decision E1)
 - Heuristic for games without a Topo (import table → wrapper suggestion)
 - Separate repo `mythenstudios/rerun-topos` with PR templates and CI validation
