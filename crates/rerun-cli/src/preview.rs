@@ -15,7 +15,9 @@ use rerun_core::prim::launch_method::{ProfileMethod as Method, RuleMode};
 use rerun_core::prim::{MachineView, MachineWhy, SHIM, on_this_machine, steam_option_text};
 use rerun_core::sys::System;
 
-use crate::messages::{At, Message, OpRef, ProfileMsg, TxnMsg, ranges};
+use rerun_core::elevate::{PromptKind, PromptState};
+
+use crate::messages::{At, HelperMsg, Message, OpRef, ProfileMsg, TxnMsg, ranges};
 
 fn m(t: TxnMsg<'_>) -> Message<'_> {
     Message::Txn(t)
@@ -154,6 +156,62 @@ pub fn op(o: &PreviewOp) -> Vec<Message<'_>> {
         }
         None => {}
     }
+    if let Some(r) = &o.firewall {
+        out.push(Message::Helper(HelperMsg::Rule {
+            direction: r.direction,
+            group: r.group,
+            name: r.name.clone(),
+        }));
+        out.push(Message::Helper(HelperMsg::Program {
+            program: r.program.clone(),
+        }));
+    }
+    out
+}
+
+/// The administrator prompt a plan with firewall rules brings on this machine (P4-2d; ADR 0023
+/// §10, A4 N7): announced before the confirmation, so the user knows whether Windows asks again.
+/// Nothing for a plan without them.
+pub fn prompt_lines(sys: &dyn System, p: &Preview) -> Vec<Message<'static>> {
+    if p.firewall.is_none() {
+        return Vec::new();
+    }
+    let s = rerun_core::elevate::prompt::read(sys);
+    prompt_lines_of(&s)
+}
+
+/// At `plan` (ADR 0023 §2): the helper's pre-check as a warning, never an error, and the prompt
+/// lines; nothing for a plan without firewall rules.
+pub fn helper_lines(sys: &dyn System, p: &Preview) -> Vec<Message<'static>> {
+    if p.firewall.is_none() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if let Err(e) = rerun_core::policy::root::helper_image(sys) {
+        out.push(Message::Helper(HelperMsg::NotInstalled {
+            error: escape::text(&e.to_string()).into_owned(),
+        }));
+    }
+    out.extend(prompt_lines(sys, p));
+    out
+}
+
+/// [`prompt_lines`] for a prompt state (pure).
+pub fn prompt_lines_of(s: &PromptState) -> Vec<Message<'static>> {
+    let mut out = Vec::new();
+    if s.has_dialog() {
+        out.push(Message::Helper(HelperMsg::PromptDialog {
+            credentials: s.kind == PromptKind::Credentials,
+        }));
+        if s.secure_desktop == Some(false) {
+            out.push(Message::Helper(HelperMsg::PromptNotSecure));
+        }
+    } else if matches!(s.kind, PromptKind::NoPrompt | PromptKind::Unknown) {
+        out.push(Message::Helper(HelperMsg::NoDialog));
+    }
+    if s.signed_only {
+        out.push(Message::Helper(HelperMsg::SignedOnly));
+    }
     out
 }
 
@@ -170,7 +228,7 @@ pub fn render(p: &Preview) -> Vec<Message<'_>> {
         out.extend(op(o));
     }
     out.push(m(TxnMsg::Note(p.not_restored)));
-    for note in [p.registry, p.layers, p.ini, p.profiles]
+    for note in [p.registry, p.layers, p.ini, p.profiles, p.firewall]
         .into_iter()
         .flatten()
     {

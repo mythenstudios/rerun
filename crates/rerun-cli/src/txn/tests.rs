@@ -807,3 +807,32 @@ fn x12_says_what_becomes_of_the_profile() {
     let plain = st(txn(4), TxnLine::Applied, Some(Ok(head())), Vec::new());
     assert!(x12_forget(&install, &plain, None).is_empty());
 }
+
+/// A4 N6 (P4-2d): the `status` lines of Rerun rules no transaction of this account owns, worded
+/// for every account on the PC; nothing without such rules; one line when unreadable.
+#[test]
+fn orphan_rules_are_worded_for_this_account() {
+    use rerun_core::exec::OrphanRule;
+    let r = Ok(vec![OrphanRule {
+        name: escape::text("Rerun - invented-game - 00000003-00000000000000aa-000").into_owned(),
+        program: escape::path(r"D:\Games\G\game.exe").into_owned(),
+    }]);
+    let s = shown(&super::orphan_lines(&r));
+    assert!(
+        s.contains("Rerun firewall rules that no transaction of this account owns:\n"),
+        "{s}"
+    );
+    assert!(s.contains("  Rerun - invented-game - 00000003-00000000000000aa-000: program "));
+    assert!(s.contains("Rules of other Windows accounts on this PC appear here too."));
+    assert!(s.contains("group Rerun); a non-elevated Rerun never removes it."));
+    assert!(!s.contains("orphan") && !s.contains("left behind"), "{s}");
+    assert_eq!(shown(&super::orphan_lines(&Ok(Vec::new()))), "");
+    let e = Err(rerun_core::sys::SysError::new(
+        rerun_core::sys::SysErrorKind::AccessDenied,
+        "firewall rules",
+    ));
+    assert!(
+        shown(&super::orphan_lines(&e))
+            .starts_with("Rerun firewall rules: the firewall cannot be read now: ")
+    );
+}

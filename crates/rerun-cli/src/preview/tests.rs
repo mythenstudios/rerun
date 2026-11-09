@@ -534,3 +534,78 @@ fn virtual_store_lines() {
     assert_eq!(text.lines().collect::<Vec<_>>(), want);
     assert!(!text.contains('\u{202e}'));
 }
+
+/// P4-2d: a firewall rule op with its rule and program, the note once, and the administrator
+/// prompt lines per prompt state (ADR 0023 §10, A4 N7).
+#[test]
+fn a_firewall_rule_and_the_prompt_lines() {
+    use rerun_core::elevate::{PromptKind, PromptState};
+    use rerun_core::plan::{FIREWALL_NOTE, FirewallShown};
+    let mut r = op(1, "block in firewall", Some(0), "game.exe");
+    r.firewall = Some(FirewallShown {
+        program: escape::path(r"D:\Games\G\game.exe").into_owned(),
+        direction: "outbound",
+        name: escape::path("Rerun - invented-game - <transaction>-001").into_owned(),
+        group: "Rerun",
+    });
+    let mut p = preview(r"D:\Games\G", vec![r]);
+    p.firewall = Some(FIREWALL_NOTE);
+    let s = shown(&render(&p));
+    assert!(
+        s.contains(
+            "op 1: block in firewall in root 0: game.exe\n  firewall rule: outbound, block, \
+             group Rerun, name Rerun - invented-game - <transaction>-001\n  program: \
+             D:\\Games\\G\\game.exe\n"
+        ),
+        "{s}"
+    );
+    assert_eq!(
+        s.matches("firewall rules: Rerun's helper adds them")
+            .count(),
+        1,
+        "{s}"
+    );
+    let state = |kind, secure_desktop, signed_only| PromptState {
+        kind,
+        secure_desktop,
+        signed_only,
+    };
+    let consent = "administrator: Windows asks once for administrator approval (UAC) when \
+                   Rerun's helper changes the firewall rules\n";
+    let password = "administrator: Windows asks once for an administrator's password (UAC) \
+                    when Rerun's helper changes the firewall rules\n";
+    let not_secure = "administrator: the Windows prompt appears on your normal desktop, not the \
+                      secure desktop (PromptOnSecureDesktop is 0): other programs could reach \
+                      it\n";
+    let none = "administrator: Windows will not ask for administrator approval on this PC: your \
+                confirmation here is the only one\n";
+    let signed = "administrator: Windows elevates only signed programs on this PC \
+                  (ValidateAdminCodeSignatures is 1): Rerun's helper of this version is not \
+                  signed and will not start; the apply is then rolled back\n";
+    for (st, want) in [
+        (
+            state(PromptKind::Consent, Some(true), false),
+            consent.to_owned(),
+        ),
+        (state(PromptKind::Consent, None, false), consent.to_owned()),
+        (
+            state(PromptKind::Consent, Some(false), false),
+            format!("{consent}{not_secure}"),
+        ),
+        (
+            state(PromptKind::Credentials, Some(true), false),
+            password.to_owned(),
+        ),
+        (state(PromptKind::NoPrompt, None, false), none.to_owned()),
+        (state(PromptKind::Unknown, None, false), none.to_owned()),
+        (
+            state(PromptKind::Consent, Some(true), true),
+            format!("{consent}{signed}"),
+        ),
+        // Refused before the lock, so never shown with a question.
+        (state(PromptKind::Denied, None, false), String::new()),
+        (state(PromptKind::UacOff, None, false), String::new()),
+    ] {
+        assert_eq!(shown(&super::prompt_lines_of(&st)), want, "{st:?}");
+    }
+}

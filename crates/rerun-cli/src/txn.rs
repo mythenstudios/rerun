@@ -477,9 +477,37 @@ pub fn status<W: Write, E: Write>(
     let mut lines = render_status(&s, all);
     let holders = holders(&app, &s);
     lines.extend(launch_lines(&launch, &holders));
+    // P4-2d (ADR 0023 §6, A4 N6): Rerun rules no transaction of this account owns.
+    let orphans = exec::firewall_orphans(sys, &app);
+    lines.extend(orphan_lines(&orphans));
     match out.lines(&lines).and_then(|()| out.flush()) {
         Ok(()) => Exit::Report,
         Err(e) => failed_out(err, e),
+    }
+}
+
+/// The `status` lines of the Rerun firewall rules no transaction of this account owns (A4 N6):
+/// nothing when there are none; an unreadable firewall is one line, never an error of `status`.
+pub(crate) fn orphan_lines(
+    r: &Result<Vec<exec::OrphanRule>, rerun_core::sys::SysError>,
+) -> Vec<Message<'_>> {
+    use crate::messages::HelperMsg;
+    match r {
+        Ok(v) if v.is_empty() => Vec::new(),
+        Ok(v) => {
+            let mut out = vec![Message::Blank, Message::Helper(HelperMsg::OrphansHeading)];
+            out.extend(v.iter().map(|o| {
+                Message::Helper(HelperMsg::Orphan {
+                    program: o.program.clone(),
+                    name: o.name.clone(),
+                })
+            }));
+            out.push(Message::Helper(HelperMsg::OrphansHint));
+            out
+        }
+        Err(e) => vec![Message::Helper(HelperMsg::OrphansUnreadable {
+            error: shown(e),
+        })],
     }
 }
 
@@ -837,6 +865,18 @@ fn run_revert<W: Write, E: Write>(
     // X12 (B7, C-LM3): the launch option Rerun does not change, said before the question.
     if !empty {
         lines.extend(x12_before(&host.install, &st, &v));
+    }
+    // P4-2d: a firewall rule still there brings the administrator prompt (ADR 0023 §10).
+    if let Some(Ok(p)) = &st.preview {
+        let rule_there = v.ops.iter().any(|(k, o)| {
+            *o == Observed::After
+                && p.ops
+                    .get(usize::from(*k))
+                    .is_some_and(|x| x.firewall.is_some())
+        });
+        if rule_there {
+            lines.extend(crate::preview::prompt_lines(host.sys, p));
+        }
     }
     lines.push(Message::Blank);
     out.lines(&lines)

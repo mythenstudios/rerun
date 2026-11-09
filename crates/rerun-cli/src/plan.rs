@@ -166,6 +166,8 @@ pub(crate) fn show_and_store<W: Write, E: Write>(
     let mut lines = preview::render(&view);
     // P3-7: a VirtualStore copy of a managed file (looked up with the preview above).
     lines.extend(preview::shadow_lines(&shadows));
+    // P4-2d (ADR 0023 §2): the helper's pre-check as a warning, and the prompt to expect.
+    lines.extend(preview::helper_lines(sys, &view));
     if let Some(lv) = &lv {
         lines.extend(preview::launch_lines(&view, lv));
     }

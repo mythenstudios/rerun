@@ -61,6 +61,8 @@ fn run<W: Write, E: Write>(
     let mut lines = vec![Message::Txn(TxnMsg::PlanHead { hash: *hash, ops })];
     lines.extend(preview::render(&view));
     lines.extend(preview::shadow_lines(&shadows));
+    // P4-2d: the administrator prompt the firewall rules bring (ADR 0023 §10).
+    lines.extend(preview::prompt_lines(sys, &view));
     // P3-3d: the launch profile's selection here, hints and the launch option.
     let lv = preview::launch_view(sys, &host.install, &view);
     if let Some(lv) = &lv {

@@ -61,6 +61,31 @@ fn c12_every_row_of_the_exit_table() {
         }),
         Exit::Open
     );
+    // P4-2d (ADR 0023 §9, §11): a declined prompt or a helper refusal at an apply rolls the
+    // earlier ops back (4); a helper result the rollback cannot undo stays open (5); the
+    // helper's pre-check and a machine that allows no elevation refuse before the lock (3).
+    use rerun_core::exec::HelperFailure;
+    assert_eq!(
+        exit_for_apply(&ApplyError::RolledBack {
+            txn: txn(),
+            cause: Box::new(ExecError::Helper(HelperFailure::Declined)),
+            cleanup: Vec::new(),
+        }),
+        Exit::RolledBack
+    );
+    assert_eq!(
+        exit_for_apply(&ApplyError::HelperOpen {
+            txn: txn(),
+            cause: Box::new(ExecError::Helper(HelperFailure::Unknown)),
+        }),
+        Exit::Open
+    );
+    for r in [
+        Refusal::NoElevation(rerun_core::elevate::PromptKind::Denied),
+        Refusal::NoElevation(rerun_core::elevate::PromptKind::UacOff),
+    ] {
+        assert_eq!(exit_for_apply(&ApplyError::Refused(r)), Exit::Refused);
+    }
     // 5: left open; and every revert error after its first record.
     assert_eq!(
         exit_for_apply(&ApplyError::LeftOpen {
