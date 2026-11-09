@@ -2,7 +2,9 @@
 //! format. LM-P1 one form on the wire (golden); LM-P2 every rule of the fence refused on encode
 //! and, written by hand, on decode, the form rules under both rule sets and the rules of
 //! `Rules::Current` only by the apply decode (senior-dev condition B1); LM-P3 the main
-//! executable rule only for game roots, old heads unchanged; LM-P4 the preview.
+//! executable rule only for game roots, old heads unchanged; LM-P4 the preview; LM-P5 (P3-4b) a
+//! `watch` profile's target is root 0's main executable and at most 259 units, `Rules::Current`
+//! only, with the control K-LW1.
 
 use rerun_proto::cpu::rule::{Bitness, CpuRule, Mode, Prefer};
 use rerun_proto::profile::{self as proto, LaunchProfile, Method};
@@ -458,4 +460,84 @@ fn lm_p4_preview_names_the_profiles_root_the_source_and_the_profile() {
         "{text}"
     );
     assert!(!text.contains('\x1b') && !text.contains('\u{202e}') && !text.contains("evil"));
+}
+
+/// A `watch` profile starting `start` with the target `target`.
+fn watch_bytes(start: &str, target: &str) -> Vec<u8> {
+    let mut p = proto::decode(&profile_bytes(start, 8)).unwrap();
+    p.method = Method::Watch;
+    p.target = target.to_owned();
+    proto::encode(&p).unwrap()
+}
+
+#[test]
+fn lm_p5_a_watch_target_is_the_main_executable_under_the_current_rules() {
+    let launcher = format!(r"{GAME}\FFLauncher.exe");
+    let main = format!(r"{GAME}\game.exe");
+    // Accepted: the main executable as the target (folded), with a launcher or as the start.
+    for (start, target) in [
+        (launcher.as_str(), main.as_str()),
+        (main.as_str(), main.as_str()),
+        (
+            launcher.as_str(),
+            r"d:\steamlibrary\STEAMAPPS\common\g\GAME.exe",
+        ),
+    ] {
+        let mut p = lm_plan();
+        set_content(&mut p, inline(watch_bytes(start, target)));
+        let b = p.encode().unwrap();
+        assert_eq!(decode(b.bytes()).unwrap(), p);
+    }
+    // Refused by the current rules, accepted as a recorded head (form only, B1).
+    let long = format!(r"{GAME}\{}\{}.exe", "a".repeat(200), "b".repeat(20));
+    assert_eq!(long.encode_utf16().count(), 260);
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "a watch target other than the main executable",
+            watch_bytes(&main, &launcher),
+        ),
+        (
+            "a watch target in a subfolder",
+            watch_bytes(&launcher, &format!(r"{GAME}\bin\game.exe")),
+        ),
+        (
+            "a watch target outside the game folder",
+            watch_bytes(&launcher, r"D:\SteamLibrary\steamapps\common\Gx\game.exe"),
+        ),
+        (
+            "a watch target of 260 characters",
+            watch_bytes(&launcher, &long),
+        ),
+    ];
+    for (what, bytes) in &cases {
+        let mut p = lm_plan();
+        set_content(&mut p, inline(bytes.clone()));
+        refused(what, &p, false);
+    }
+    // The main executable of the root decides: with another one, the same profile is refused.
+    let mut p = lm_plan();
+    set_content(&mut p, inline(watch_bytes(&launcher, &main)));
+    p.roots[0].main_exe = Some(r("FFLauncher.exe"));
+    refused(
+        "a watch target that is not the root's main executable",
+        &p,
+        false,
+    );
+    // A target of 260 characters is refused even when it is the main executable (P4).
+    let mut p = lm_plan();
+    let rel_long = long.strip_prefix(&format!(r"{GAME}\")).unwrap();
+    p.roots[0].main_exe = Some(r(rel_long));
+    set_content(&mut p, inline(watch_bytes(&launcher, &long)));
+    refused(
+        "a watch target of 260 characters that is the main executable",
+        &p,
+        false,
+    );
+    // Control K-LW1: without the target rule the other main executable passes the encode.
+    crate::plan::profile_knob::allow_watch_target_anywhere(true);
+    let mut p = lm_plan();
+    set_content(&mut p, inline(watch_bytes(&main, &launcher)));
+    let bitten = p.encode().is_ok();
+    crate::plan::profile_knob::allow_watch_target_anywhere(false);
+    assert!(bitten, "K-LW1: the knob turns the target rule off");
 }

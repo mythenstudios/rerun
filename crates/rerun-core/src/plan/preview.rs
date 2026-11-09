@@ -20,7 +20,9 @@
 //! A launch profile op (P3-3) names its root "Rerun's launch profiles", its source `inline
 //! (launch profile)`, and the profile decoded from the plan's bytes ([`ProfileShown`], the paths
 //! through `escape::path`); bytes that do not decode (only in a recorded head: the apply decode
-//! refuses them) are a hint, never an error of the preview (senior-dev condition B1).
+//! refuses them) are a hint, never an error of the preview (senior-dev condition B1). A plan
+//! with a profile adds [`PROFILE_NOTE`] once, or [`PROFILE_WATCH_NOTE`] for a `watch` profile
+//! (P3-4); [`ProfileShown`] says whether `direct` starts a launcher or `watch` a stub.
 
 use std::fmt;
 
@@ -70,16 +72,45 @@ same value as Rerun is set back too. A file that is gone at the time of the reve
 The main executable must be the program that writes the file when it exits (with a launcher, \
 the game itself)";
 
-/// What a plan with a launch profile says once (P3-3d, plan `P3-3` §5): the lifetime of the
-/// shim, the start path, one launch option per game, Steam as administrator (ADR 0022).
-pub const PROFILE_NOTE: &str = "launch profile: rerun-launch runs only when Steam starts the \
-game through the launch option; it starts the program, waits for it and exits with it, checks \
-the limit about 5 s after the start and writes <LocalAppData>\\Rerun\\launch\\<id>.result; \
-nothing else runs. The rule applies only when Steam starts exactly the start program shown \
-above (the program of the game's launch entry); another launch entry, or a start outside \
-Steam, starts the game unchanged and rerun status shows path_mismatch. Steam has one launch \
-option per game: with several Play entries only the one that starts that program gets the \
-rule. While Steam runs as administrator, no rule applies";
+/// The part of [`PROFILE_NOTE`] and [`PROFILE_WATCH_NOTE`] both methods share: the start path,
+/// one launch option per game, Steam as administrator (ADR 0022).
+macro_rules! profile_note_tail {
+    () => {
+        "The rule applies only when Steam starts exactly the start program shown above (the \
+program of the game's launch entry); another launch entry, or a start outside Steam, starts \
+the game unchanged and rerun status shows path_mismatch. Steam has one launch option per game: \
+with several Play entries only the one that starts that program gets the rule. While Steam \
+runs as administrator, no rule applies"
+    };
+}
+
+/// What a plan with a `direct` launch profile says once (P3-3d, plan `P3-3` §5): the lifetime of
+/// the shim, then the shared part.
+pub const PROFILE_NOTE: &str = concat!(
+    "launch profile: rerun-launch runs only when Steam starts the game through the launch \
+option; it starts the program, waits for it and exits with it, checks the limit about 5 s after \
+the start and writes <LocalAppData>\\Rerun\\launch\\<id>.result; nothing else runs. ",
+    profile_note_tail!()
+);
+
+/// What a plan with a `watch` launch profile says once (P3-4, plan `P3-4` §3.5, review A8): the
+/// search and its lifetime, the time window, the path Windows reports, then the shared part.
+pub const PROFILE_WATCH_NOTE: &str = concat!(
+    "launch profile (method watch): rerun-launch runs only when Steam starts the game through \
+the launch option; it starts the program Steam names unchanged, then looks for at most 120 s \
+(every 0.1 s for the first 10 s, then less often) for a new process of the target shown above \
+that started after it: not the program it started, not a copy that already ran, not one of \
+another user or session, not one running as administrator (target_elevated). On the first one \
+it sets the priority class, then the CPU rule, and checks them about 5 s later; if that process \
+ends within the 5 s, it looks for the next one (at most 4). It writes \
+<LocalAppData>\\Rerun\\launch\\<id>.result at most about 125 s after the start and exits once \
+the program it started has exited too; nothing else runs. The rule reaches the game shortly \
+after it started (within about 0.1 s at first): a game that counts its processors in its first \
+moments may already have counted all of them. Windows reports the game's path with junctions, \
+symbolic links and subst drives resolved: a game folder reached through one of them is never \
+found (target_not_found). ",
+    profile_note_tail!()
+);
 
 /// The old state of a key for display (senior-dev nit): the untrusted value as `Shown`, or a word
 /// of Rerun's, never mixed in one string.
@@ -133,9 +164,13 @@ pub struct ProfileShown {
     pub priority: Option<&'static str>,
     /// The CPU rule in the words of `docs/02-topo-format.md`, if the profile has one.
     pub cpu: Option<String>,
-    /// `start` is not the main executable of root 0 (folded): a launcher; the check covers it,
-    /// not the game (ADR 0022 amendment P3-3).
+    /// `direct` and `start` is not the main executable of root 0 (folded): a launcher; the check
+    /// covers it, not the game (ADR 0022 amendment P3-3). Never for `watch`, which sets the rule
+    /// on the game.
     pub launcher: bool,
+    /// `watch` and `start` is `target` (folded): Steam starts the game's own program, so the
+    /// search needs a second process of it (a stub that hands over, P3-4 P2).
+    pub stub: bool,
     /// The profile as decoded (for the selection on this computer, P3-3d).
     pub decoded: LaunchProfile,
 }
@@ -241,7 +276,8 @@ pub struct Preview {
     pub layers: Option<&'static str>,
     /// [`INI_NOTE`], once per plan with `edit ini` ops.
     pub ini: Option<&'static str>,
-    /// [`PROFILE_NOTE`], once per plan with a launch profile op.
+    /// [`PROFILE_NOTE`] or, for a `watch` profile, [`PROFILE_WATCH_NOTE`], once per plan with
+    /// a launch profile op.
     pub profiles: Option<&'static str>,
 }
 
@@ -288,11 +324,14 @@ fn profile_of(plan: &Plan, path: &crate::path::RelPath, bytes: &[u8]) -> Profile
         Ok(p) => p,
         Err(e) => return ProfilePreview::Unreadable(e.to_string()),
     };
-    let launcher = plan.roots.first().is_some_and(|r| {
-        r.main_exe.as_ref().is_some_and(|m| {
-            crate::fold::fold(&format!(r"{}\{m}", r.path)) != crate::fold::fold(&p.start)
-        })
-    });
+    let launcher = p.method == Method::Direct
+        && plan.roots.first().is_some_and(|r| {
+            r.main_exe.as_ref().is_some_and(|m| {
+                crate::fold::fold(&format!(r"{}\{m}", r.path)) != crate::fold::fold(&p.start)
+            })
+        });
+    let stub =
+        p.method == Method::Watch && crate::fold::fold(&p.start) == crate::fold::fold(&p.target);
     ProfilePreview::Decoded(Box::new(ProfileShown {
         id: path
             .as_str()
@@ -316,6 +355,7 @@ fn profile_of(plan: &Plan, path: &crate::path::RelPath, bytes: &[u8]) -> Profile
         }),
         cpu: p.cpu.as_ref().map(cpu_words),
         launcher,
+        stub,
         decoded: p,
     }))
 }
@@ -575,10 +615,15 @@ pub fn preview(p: &Plan) -> Preview {
         .iter()
         .any(|o| matches!(o, Op::IniValue { .. }))
         .then_some(INI_NOTE);
-    let profiles = ops
-        .iter()
-        .any(|o| o.profile.is_some())
-        .then_some(PROFILE_NOTE);
+    // The note of the profile's method; a recorded profile that does not decode gets the
+    // `direct` one (what every profile was before P3-4).
+    let profiles = ops.iter().find_map(|o| match &o.profile {
+        Some(ProfilePreview::Decoded(s)) if s.decoded.method == Method::Watch => {
+            Some(PROFILE_WATCH_NOTE)
+        }
+        Some(_) => Some(PROFILE_NOTE),
+        None => None,
+    });
     Preview {
         roots,
         ops,
@@ -654,7 +699,7 @@ impl fmt::Display for Preview {
                     if let Some(x) = p.priority {
                         writeln!(f, "     priority {x}")?;
                     }
-                    if p.target != p.start {
+                    if p.target != p.start || p.decoded.method == Method::Watch {
                         writeln!(f, "     target {}", p.target)?;
                     }
                     writeln!(f, "     start {}", p.start)?;

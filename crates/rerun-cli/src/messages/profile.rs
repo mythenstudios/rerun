@@ -1,6 +1,7 @@
 //! The lines of a launch profile (P3-3d, ADR 0016 amendment P3-3, plan `P3-3` §5 and X12): the
 //! profile in a plan's preview, the selection on this computer, the hints, the launch option to
-//! copy, and what a revert or `forget` leaves in Steam. One [`ProfileMsg`] is one line. Every
+//! copy, and what a revert or `forget` leaves in Steam. A `watch` profile (P3-4c, plan `P3-4`
+//! §3.5) adds its target and says what is set on the game process found after the start. One [`ProfileMsg`] is one line. Every
 //! field is Rerun's own words or numbers, except paths and the launch option, which are
 //! [`Shown`] and stand last on their line.
 
@@ -41,6 +42,11 @@ pub enum ProfileMsg<'a> {
         /// Its path.
         path: Shown<'a>,
     },
+    /// `watch`: the program whose new process gets the rule.
+    Target {
+        /// Its path.
+        path: Shown<'a>,
+    },
     /// The profile's bytes are no profile of this version (a recorded head).
     Unreadable {
         /// Why (no content).
@@ -65,6 +71,11 @@ pub enum ProfileMsg<'a> {
     },
     /// How the selection is applied.
     Mode {
+        /// Hard or soft.
+        mode: Mode,
+    },
+    /// How the selection is applied by `watch` (on the game process found).
+    WatchMode {
         /// Hard or soft.
         mode: Mode,
     },
@@ -99,6 +110,15 @@ pub enum ProfileMsg<'a> {
         /// The class.
         class: &'static str,
     },
+    /// The priority class note of `watch`.
+    WatchPriorityNote {
+        /// The class.
+        class: &'static str,
+    },
+    /// `watch` with the game as the start: a stub that must start the game again.
+    WatchStub,
+    /// `watch`: an elevated game is left alone; a game that does not appear runs unchanged.
+    WatchLeftAlone,
     /// The heading of the launch option.
     OptionHeading,
     /// The launch option, to copy.
@@ -217,6 +237,7 @@ impl fmt::Display for ProfileMsg<'_> {
             Self::Rule { words } => write!(f, "     cpu {words}"),
             Self::Priority { class } => write!(f, "     priority {class}"),
             Self::Start { path } => write!(f, "     start {path}"),
+            Self::Target { path } => write!(f, "     target {path}"),
             Self::Unreadable { why } => {
                 write!(f, "     not a launch profile of this version: {why}")
             }
@@ -242,6 +263,10 @@ impl fmt::Display for ProfileMsg<'_> {
                 Mode::Hard => "  hard: job affinity, inherited by the programs the started program starts",
                 Mode::Soft => "  soft: default CPU Sets of the started program only, not of its children; Windows may override them",
             }),
+            Self::WatchMode { mode } => f.write_str(match mode {
+                Mode::Hard => "  hard: a new job with the selection on the game process once found; the game cannot widen it, programs it starts inherit it, and it stays until the game exits (a job the game is already in keeps its own limit: job_ineffective)",
+                Mode::Soft => "  soft: default CPU Sets of the game process once found, not of programs it starts; Windows may override them, and whether threads already running follow them is unproven (the check reads only that they are set)",
+            }),
             Self::MachineUnknown { why } => write!(
                 f,
                 "  unknown here, rerun-launch decides at every start; the topology: {why}"
@@ -266,6 +291,16 @@ impl fmt::Display for ProfileMsg<'_> {
             Self::PriorityNote { class } => write!(
                 f,
                 "  priority {class} is set only when Steam starts the game through the launch option (not from a shortcut or the exe), and only on the start program; the check reads it"
+            ),
+            Self::WatchPriorityNote { class } => write!(
+                f,
+                "  priority {class} is set on the game process once found, only when Steam starts the game through the launch option (not from a shortcut or the exe); the check reads it, and it is put back if the CPU rule cannot be set"
+            ),
+            Self::WatchStub => f.write_str(
+                "  hint: Steam starts the game's own program: watch looks for a second process of it (a stub that hands over to a launcher such as Ubisoft Connect, which starts the game again); if the game does not start itself again, it runs unchanged (target_not_found): use method direct",
+            ),
+            Self::WatchLeftAlone => f.write_str(
+                "  hint: a game running as administrator, or started by a launcher that runs as administrator, is left alone (target_elevated); a game that does not appear within 120 s (a login or an update in the launcher) runs unchanged (target_not_found): start it again",
             ),
             Self::OptionHeading => f.write_str("launch option for Steam (copy it):"),
             Self::Option { option } => write!(f, "  {option}"),

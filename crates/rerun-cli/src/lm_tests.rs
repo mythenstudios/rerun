@@ -14,6 +14,10 @@
 //! - C-LM8 a stacked profile: reverting the second brings the first back, the option stays.
 //! - C-LM9 a changed profile is left and keeps applying.
 //! - C-LM10 `plan` stores nothing when Rerun's folder moved between the preview and creating it.
+//! - C-LW1 (P3-4c) `plan` of a `watch` profile: the target, the watch note and hints, no launcher
+//!   hint; the stub hint when Steam starts the game itself; no watch line for `direct`.
+//! - C-LW2 (P3-4c) `status` of a `watch` profile: the watch words and the target from the head
+//!   that holds it, the failed priority restore; none of it once nothing holds the profile.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -489,4 +493,134 @@ fn c_lm10_plan_stores_nothing_when_rerun_s_folder_moved_meanwhile() {
         let files = open.map(|h| h.read_dir(None).unwrap().len()).unwrap_or(0);
         assert_eq!(files, 0, "{d}");
     }
+}
+
+// ---------- P3-4c: `watch` (plan `P3-4` §7.5) ----------
+
+/// The step file of a `watch` profile: Steam starts `start`, the game is `game.exe`, a soft rule
+/// of 8 threads and priority high.
+fn watch_steps(start: &str) -> String {
+    format!(
+        r#"{{"format":1,"game":{{"steam":220}},"main_exe":"game.exe","steps":[{{"launch_method":{{"method":"watch","start":"{start}","cpu":{{"max_threads":8,"single_l3":true,"smt":false,"mode":"soft"}},"priority":"high"}}}}]}}"#
+    )
+}
+
+/// The plan output of C-LW1, golden.
+fn c_lw1_golden(hash: &str) -> String {
+    let note = rerun_core::plan::PROFILE_WATCH_NOTE;
+    let not = rerun_core::plan::NOT_RESTORED;
+    let o = option();
+    format!(
+        r"root 0: {G}
+  Steam app 220, library: {LIB}
+  main executable: game.exe
+root 1: {RERUN}\profiles
+  Rerun's launch profiles: written by apply, read by rerun-launch at a game start
+op 0: create file in root 1: {ID}.profile
+  content: the launch profile, carried by the plan (no package)
+  new: sha256 0d75cf7589a9eb1ebcf92277e2537a63d5dd69f33a74cfc10356a7553d032f27, 290 bytes, attributes -
+     launch profile {ID}: method watch, x86
+     cpu max_threads 8, prefer any, single_l3 true, prefer_l3 none, smt false, mode soft
+     priority high
+     start {G}\FFLauncher.exe
+     target {G}\game.exe
+note: {not}
+note: {note}
+on this computer now (not part of the plan; rerun-launch selects again at every start):
+  8 of 32 logical processors, group 0, mask 0x0000000000005555, cores 0-7, L3 #0 (32 MiB)
+  soft: default CPU Sets of the game process once found, not of programs it starts; Windows may override them, and whether threads already running follow them is unproven (the check reads only that they are set)
+  priority high is set on the game process once found, only when Steam starts the game through the launch option (not from a shortcut or the exe); the check reads it, and it is put back if the CPU rule cannot be set
+  hint: a game running as administrator, or started by a launcher that runs as administrator, is left alone (target_elevated); a game that does not appear within 120 s (a login or an update in the launcher) runs unchanged (target_not_found): start it again
+launch option for Steam (copy it):
+  {o}
+  paste it in Steam: the game > Properties > General > Launch options
+  Rerun does not change Steam's settings: remove the option by hand after a revert
+  existing launch options of the game go after %command%; an option that already holds %command% (another wrapper) cannot be combined
+  moving or deleting rerun-launch.exe breaks the start through Steam until the option is removed
+
+plan {hash} stored: 1 change
+apply with: rerun apply {hash}
+"
+    )
+}
+
+const STUB: &str = "  hint: Steam starts the game's own program: watch looks for a second process of it (a stub that hands over to a launcher such as Ubisoft Connect, which starts the game again); if the game does not start itself again, it runs unchanged (target_not_found): use method direct";
+
+#[test]
+fn c_lw1_plan_shows_the_watch_target_the_note_and_no_launcher_hint() {
+    let sys = lm_sys(false, &watch_steps("FFLauncher.exe"));
+    let p = expect(&sys, &["plan", STEPS], Answer::No, Exit::Report);
+    assert_eq!(p.stdout, c_lw1_golden(&hash_of(&p)));
+    assert!(p.stderr.is_empty(), "{}", p.stderr);
+    // No launcher hint and no stub hint with a launcher entry (the rule lands on the game).
+    assert!(!p.stdout.contains("Steam starts a launcher"));
+    assert!(!p.stdout.contains(STUB));
+    // The game as the start: the stub hint, after the mode line; the rest as above.
+    let sys = lm_sys(false, &watch_steps("game.exe"));
+    let p = expect(&sys, &["plan", STEPS], Answer::No, Exit::Report);
+    let lines: Vec<&str> = p.stdout.lines().collect();
+    let at = lines.iter().position(|l| *l == STUB).expect(&p.stdout);
+    assert!(lines[at - 1].starts_with("  soft: default CPU Sets of the game process"));
+    assert!(p.stdout.contains(&format!(
+        "     start {G}\\game.exe\n     target {G}\\game.exe\n"
+    )));
+    assert!(!p.stdout.contains("Steam starts a launcher"));
+    // `direct` with the same launcher: its launcher hint and note, no watch lines.
+    let sys = lm_sys(false, &steps(8));
+    let p = expect(&sys, &["plan", STEPS], Answer::No, Exit::Report);
+    for watch_only in [
+        "     target ",
+        "(method watch)",
+        "target_elevated",
+        "once found",
+    ] {
+        assert!(!p.stdout.contains(watch_only), "{watch_only}: {}", p.stdout);
+    }
+}
+
+const WATCH_EXITED: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=applied\ncpu=soft:8:32\npriority=high\ncheck=exited_early\nstart=created\nrule_child=none\n";
+const WATCH_INEFFECTIVE: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=skipped:job_ineffective\ncpu=none\npriority=none\ncheck=none\nstart=created\nrule_child=none\npriority_restore=failed:5\n";
+
+#[test]
+fn c_lw2_status_names_the_watch_target_from_the_head() {
+    let sys = lm_sys(false, &watch_steps("FFLauncher.exe"));
+    let (t, _) = applied(&sys);
+    let at = "2025-11-08 11:06:40 UTC";
+    let watched = format!(
+        "    method watch: the rule is for the game process found after the start, not the program Steam starts: {G}\\game.exe"
+    );
+    // An applied result of a `watch` profile: the watch words, the target, no launcher line.
+    result(&sys, WATCH_EXITED);
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    has_all(
+        &s.stdout,
+        &[format!(
+            "  {ID}, {at}: exited_early, the game process found ended within 5 s, before the check, and no other one followed in time (at most 4 within 120 s) (set: 8 of 32 threads (soft), priority high; it crashed, or it hands over to a process of another path)\n{watched}\n"
+        )],
+    );
+    assert!(!s.stdout.contains(LAUNCHER), "{}", s.stdout);
+    // A skip with a failed restore: the reason explained, the restore line, the target.
+    result(&sys, WATCH_INEFFECTIVE);
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    has_all(
+        &s.stdout,
+        &[format!(
+            "  {ID}, {at}: rule_skipped: job_ineffective, the game process joined the job but kept another limit (a job it was already in, e.g. a launcher's); the job stays without effect until the game exits; Steam's command started unchanged\n    the priority class set on the game process could not be put back (Win32 error 5); it stays until the game exits\n{watched}\n"
+        )],
+    );
+    // `profile_missing` while held: the holder line, no target line.
+    result(&sys, MISSING);
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(!s.stdout.contains("method watch:"), "{}", s.stdout);
+    // After the revert nothing holds the profile: no target line, the generic exited_early.
+    expect(&sys, &["revert", &t, "--yes"], Answer::No, Exit::Report);
+    result(&sys, WATCH_EXITED);
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(!s.stdout.contains("method watch:"), "{}", s.stdout);
+    assert!(
+        s.stdout
+            .contains("exited_early, the started process ended within 5 s"),
+        "{}",
+        s.stdout
+    );
 }

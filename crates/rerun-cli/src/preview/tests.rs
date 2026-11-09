@@ -433,6 +433,9 @@ fn hostile_profile_paths_are_escaped() {
         Message::Profile(ProfileMsg::LauncherStarts {
             start: escape::path(bad),
         }),
+        Message::Profile(ProfileMsg::Target {
+            path: escape::path(bad),
+        }),
         Message::Profile(ProfileMsg::ShimMissing {
             path: escape::path(bad),
         }),
@@ -442,4 +445,45 @@ fn hostile_profile_paths_are_escaped() {
     ];
     let t = shown(&lines);
     assert!(!t.contains('\u{1b}') && !t.contains('\u{202e}'), "{t}");
+}
+
+/// The `watch` lines of the preview (P3-4c): the target last on its line, the hard and soft
+/// modes, the priority note, the stub and the left-alone hints.
+#[test]
+fn every_watch_profile_line_has_its_text() {
+    let cases: Vec<(ProfileMsg<'_>, &str)> = vec![
+        (
+            ProfileMsg::Target {
+                path: escape::path(r"D:\G\g.exe"),
+            },
+            r"     target D:\G\g.exe",
+        ),
+        (
+            ProfileMsg::WatchMode {
+                mode: RuleMode::Hard,
+            },
+            "  hard: a new job with the selection on the game process once found; the game cannot widen it, programs it starts inherit it, and it stays until the game exits (a job the game is already in keeps its own limit: job_ineffective)",
+        ),
+        (
+            ProfileMsg::WatchMode {
+                mode: RuleMode::Soft,
+            },
+            "  soft: default CPU Sets of the game process once found, not of programs it starts; Windows may override them, and whether threads already running follow them is unproven (the check reads only that they are set)",
+        ),
+        (
+            ProfileMsg::WatchPriorityNote { class: "high" },
+            "  priority high is set on the game process once found, only when Steam starts the game through the launch option (not from a shortcut or the exe); the check reads it, and it is put back if the CPU rule cannot be set",
+        ),
+        (
+            ProfileMsg::WatchStub,
+            "  hint: Steam starts the game's own program: watch looks for a second process of it (a stub that hands over to a launcher such as Ubisoft Connect, which starts the game again); if the game does not start itself again, it runs unchanged (target_not_found): use method direct",
+        ),
+        (
+            ProfileMsg::WatchLeftAlone,
+            "  hint: a game running as administrator, or started by a launcher that runs as administrator, is left alone (target_elevated); a game that does not appear within 120 s (a login or an update in the launcher) runs unchanged (target_not_found): start it again",
+        ),
+    ];
+    for (m, want) in cases {
+        assert_eq!(m.to_string(), want);
+    }
 }

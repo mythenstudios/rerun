@@ -18,6 +18,12 @@
 //!   characters accepted.
 //! - LV1 `on_this_machine` on fixtures: 5950X, hybrid, more than one group, x86 on a group of more
 //!   than 32, an unreadable topology, an empty selection, a priority-only profile.
+//! - LW (P3-4b, plan `P3-4` §7.4) `method: watch`: LW1 the target is the main executable in the
+//!   spelling on disk, soft and priority allowed with a launcher, the bitness from the target
+//!   alone, the profile bytes pinned; LW2 start = main executable (a stub) is allowed and the
+//!   preview says so; LW3 every refusal of `watch`; LW4 `direct` keeps F5 and points to
+//!   `watch`; LW5 `direct` to `watch` replaces the same profile, the same `watch` rule twice is
+//!   nothing to do, and a `watch` profile round-trips (apply, verify, revert, identical).
 
 use std::path::Path;
 
@@ -25,7 +31,7 @@ use rerun_proto::cpu::rule::{Bitness, Mode, SelectStep};
 use rerun_proto::cpu::{CpuTopology, Llc, LogicalCpu};
 use rerun_proto::profile::{self as proto, LaunchProfile, Method};
 
-use super::launch_method::{DIRECT_WATCH_TIMEOUT_S, on_this_machine};
+use super::launch_method::{WATCH_TIMEOUT_S, on_this_machine};
 use super::{
     CpuRuleSpec, LaunchMethodSpec, MachineWhy, MethodSpec, ModeSpec, PlanCtx, PrioritySpec, Step,
     plan,
@@ -35,9 +41,10 @@ use crate::detect::pe::testfx::Builder as PeBuilder;
 use crate::exec::rebind_tests::rb_sys;
 use crate::exec::tests::{Env, sys_put, try_read_abs};
 use crate::exec::{ApplyError, Outcome, Refusal};
-use crate::journal::Closing;
+use crate::journal::{Closing, Observed};
 use crate::plan::{
-    ContentRef, Op, Plan, PlanError, PlanHash, RootKind, profile_file, profile_id, store,
+    ContentRef, Op, PROFILE_NOTE, PROFILE_WATCH_NOTE, Plan, PlanError, PlanHash, ProfilePreview,
+    ProfileShown, RootKind, preview, profile_file, profile_id, store,
 };
 use crate::policy::registry::RegPolicy;
 use crate::policy::root::{AppDir, Create, GameDir, StoreDir};
@@ -191,7 +198,7 @@ fn lp1_a_launcher_entry_with_an_i386_game_or_launcher_is_x86() {
          cpu.mode=hard\n\
          cpu.max_threads=8\n"
     );
-    assert_eq!(DIRECT_WATCH_TIMEOUT_S, 120);
+    assert_eq!(WATCH_TIMEOUT_S, 120);
     // Start = main executable: soft and priority allowed.
     let mut s = spec("game.exe");
     s.priority = Some(PrioritySpec::AboveNormal);
@@ -661,7 +668,7 @@ fn profile(rule: CpuRuleSpec, bitness: Bitness) -> LaunchProfile {
         target: r"D:\G\game.exe".to_owned(),
         bitness,
         priority: None,
-        watch_timeout_s: DIRECT_WATCH_TIMEOUT_S,
+        watch_timeout_s: WATCH_TIMEOUT_S,
         cpu: Some(rule.rule().unwrap()),
     }
 }
@@ -755,7 +762,7 @@ fn lp7_the_step_parses_from_a_step_file_and_refuses_unknown_fields() {
     let f = super::StepFile::parse(sf).unwrap();
     assert!(matches!(&f.steps[0], Step::LaunchMethod(s) if s.start.as_str() == "FFLauncher.exe"));
     for bad in [
-        r#"{"method":"watch","start":"a.exe","priority":"high"}"#,
+        r#"{"method":"hold","start":"a.exe","priority":"high"}"#,
         r#"{"method":"direct","start":"a.exe","cpu":{"threads":[0,1]}}"#,
         r#"{"method":"direct","start":"a.exe","priority":"realtime"}"#,
         r#"{"method":"direct","start":"C:\\a.exe","priority":"high"}"#,
@@ -797,4 +804,263 @@ fn c_lm1_the_launch_option_is_shown_as_it_is_or_not_at_all() {
             "{bad:?}"
         );
     }
+}
+
+fn watch(start: &str) -> LaunchMethodSpec {
+    LaunchMethodSpec {
+        method: MethodSpec::Watch,
+        ..spec(start)
+    }
+}
+
+/// `watch` with a soft rule and priority high (the Stronghold 2 case of D-W1).
+fn watch_soft_high(start: &str) -> LaunchMethodSpec {
+    let mut s = watch(start);
+    s.priority = Some(PrioritySpec::High);
+    if let Some(c) = &mut s.cpu {
+        c.mode = Some(ModeSpec::Soft);
+    }
+    s
+}
+
+/// The decoded profile of the preview of `p`.
+fn shown_of(p: &Plan) -> (crate::plan::Preview, ProfileShown) {
+    let pv = preview(p);
+    let Some(ProfilePreview::Decoded(s)) = &pv.ops[0].profile else {
+        panic!("{:?}", pv.ops[0].profile)
+    };
+    let s = (**s).clone();
+    (pv, s)
+}
+
+const G_GAME: &str = r"D:\SteamLibrary\steamapps\common\G\game.exe";
+
+#[test]
+fn lw1_watch_targets_the_main_executable_with_soft_and_priority_allowed() {
+    // A launcher entry (x64) and an i386 game: soft and priority are allowed (they land on the
+    // game), the target is the main executable in the spelling on disk, x86 from the target.
+    let sys = lp_sys(&pe_x86(), &pe_x64());
+    let p = plan_lm(&sys, &one(watch_soft_high("FFLauncher.exe")), "GAME.exe").unwrap();
+    let Some(ContentRef::Inline { bytes, .. }) = p.ops[0].content() else {
+        panic!("{:?}", p.ops[0])
+    };
+    assert_eq!(
+        std::str::from_utf8(bytes).unwrap(),
+        "rerun-profile 1\n\
+         method=watch\n\
+         start=D:\\SteamLibrary\\steamapps\\common\\G\\FFLauncher.exe\n\
+         target=D:\\SteamLibrary\\steamapps\\common\\G\\game.exe\n\
+         bitness=x86\n\
+         priority=high\n\
+         watch_timeout_s=120\n\
+         cpu=rule\n\
+         cpu.prefer=any\n\
+         cpu.single_l3=true\n\
+         cpu.prefer_l3=none\n\
+         cpu.smt=false\n\
+         cpu.mode=soft\n\
+         cpu.max_threads=8\n"
+    );
+    // The same file as `direct` (P6): one profile per app.
+    let Op::CreateFile { path, .. } = &p.ops[0] else {
+        panic!("{:?}", p.ops[0])
+    };
+    assert_eq!(path, &profile_file(profile_id(220)));
+    // Bitness from the target alone (P3): an i386 launcher does not make an x64 game x86, and
+    // the start's image is not read (a start that is no PE image is fine with `watch`).
+    for (launcher, game_pe, want) in [
+        (pe_x86(), pe_x64(), Bitness::X64),
+        (pe_x64(), pe_x86(), Bitness::X86),
+        (b"MZ not an image".to_vec(), pe_x64(), Bitness::X64),
+    ] {
+        let sys = lp_sys(&game_pe, &launcher);
+        let p = plan_lm(&sys, &one(watch("FFLauncher.exe")), "game.exe").unwrap();
+        assert_eq!(profile_of(&p).bitness, want);
+        assert_eq!(profile_of(&p).method, Method::Watch);
+    }
+    // A priority-only profile.
+    let mut s = watch("FFLauncher.exe");
+    s.cpu = None;
+    s.priority = Some(PrioritySpec::Normal);
+    let pr = profile_of(&plan_lm(&sys, &one(s), "game.exe").unwrap());
+    assert!(pr.cpu.is_none() && pr.priority.is_some());
+    // The preview: no launcher (the check covers the game), no stub, the watch note.
+    let p = plan_lm(&sys, &one(watch("FFLauncher.exe")), "game.exe").unwrap();
+    let (pv, s) = shown_of(&p);
+    assert!(!s.launcher && !s.stub);
+    assert_eq!(s.method, "watch");
+    assert_eq!(s.target.as_str(), G_GAME);
+    assert_eq!(pv.profiles, Some(PROFILE_WATCH_NOTE));
+    assert!(
+        pv.to_string().contains(&format!("     target {G_GAME}")),
+        "{pv}"
+    );
+}
+
+#[test]
+fn lw2_watch_with_the_game_as_start_is_a_stub() {
+    let sys = lp_sys(&pe_x64(), &pe_x64());
+    let p = plan_lm(&sys, &one(watch_soft_high("game.EXE")), "GAME.exe").unwrap();
+    let pr = profile_of(&p);
+    assert_eq!(pr.start, pr.target);
+    assert_eq!(pr.target, G_GAME);
+    let (pv, s) = shown_of(&p);
+    assert!(s.stub && !s.launcher);
+    // The core display names the target of a stub too.
+    assert!(
+        pv.to_string().contains(&format!("     target {G_GAME}")),
+        "{pv}"
+    );
+    // `direct` with start = main: neither a launcher nor a stub, the `direct` note.
+    let (pv, s) = shown_of(&plan_lm(&sys, &one(spec("game.exe")), "game.exe").unwrap());
+    assert!(!s.stub && !s.launcher);
+    assert_eq!(pv.profiles, Some(PROFILE_NOTE));
+    // `direct` with a launcher: the launcher flag, never the stub.
+    let (_, s) = shown_of(&plan_lm(&sys, &one(spec("FFLauncher.exe")), "game.exe").unwrap());
+    assert!(s.launcher && !s.stub);
+}
+
+#[test]
+fn lw3_every_refusal_of_watch() {
+    let e = |r: Result<Plan, PlanError>| r.expect_err("refused").to_string();
+    let sys = lp_sys(&pe_x86(), &pe_x64());
+    // The main executable: ARM64, no PE image, no .exe, missing.
+    for (main, want) in [
+        ("arm.exe", "neither x86 nor x64"),
+        ("text.exe", "no Windows executable"),
+        ("readme.txt", "readme.txt"),
+        ("nope.exe", "nope.exe"),
+    ] {
+        let r = e(plan_lm(&sys, &one(watch("FFLauncher.exe")), main));
+        assert!(r.contains(want), "{main}: {r}");
+    }
+    // The start must still be a plain .exe of the game folder.
+    for (start, want) in [
+        ("readme.txt", "not an .exe"),
+        ("dir.exe", "not a plain file"),
+        ("nope.exe", "missing"),
+    ] {
+        let r = e(plan_lm(&sys, &one(watch(start)), "game.exe"));
+        assert!(r.contains(want), "{start}: {r}");
+    }
+    // A target of 260 characters (P4), with a short start; 259 is accepted.
+    let long = format!(r"{}\{}.exe", "a".repeat(200), "b".repeat(20));
+    put(&sys, &game(&long), &pe_x64());
+    assert_eq!(game(&long).encode_utf16().count(), 260);
+    let r = e(plan_lm(&sys, &one(watch("FFLauncher.exe")), &long));
+    assert!(
+        r.contains("the target path") && r.contains("longer than 259"),
+        "{r}"
+    );
+    let ok = format!(r"{}\{}.exe", "a".repeat(200), "b".repeat(19));
+    put(&sys, &game(&ok), &pe_x64());
+    let p = plan_lm(&sys, &one(watch("FFLauncher.exe")), &ok).unwrap();
+    assert_eq!(profile_of(&p).target, game(&ok));
+    // A start of 260 characters with a short target.
+    let r = e(plan_lm(&sys, &one(watch(&long)), "game.exe"));
+    assert!(
+        r.contains("the start path") && r.contains("longer than 259"),
+        "{r}"
+    );
+    // `auto` names both methods.
+    let mut s = watch("FFLauncher.exe");
+    s.method = MethodSpec::Auto;
+    assert!(e(plan_lm(&sys, &one(s), "game.exe")).contains("name direct or watch"));
+    // A manual folder (no launch option without Steam).
+    put(&sys, &format!(r"{GAME}\game.exe"), &pe_x86());
+    let fr = fr(&sys);
+    let g = GameDir::open_manual(&sys, &fr, Path::new(GAME)).unwrap();
+    let a = app(&sys);
+    let main = rel("game.exe");
+    let r = plan(
+        &one(watch("game.exe")),
+        &PlanCtx {
+            game: &g,
+            app: Some(&a),
+            steam_app: None,
+            main_exe: Some(&main),
+            reg: RegPolicy.reader(&sys),
+            app_path: None,
+        },
+    );
+    assert!(e(r).contains("only for a Steam game"));
+}
+
+#[test]
+fn lw4_direct_keeps_refusing_soft_and_priority_on_a_launcher() {
+    let sys = lp_sys(&pe_x86(), &pe_x64());
+    let mut s = watch_soft_high("FFLauncher.exe");
+    s.method = MethodSpec::Direct;
+    let r = plan_lm(&sys, &one(s), "game.exe").unwrap_err().to_string();
+    assert!(r.contains("mode soft") && r.contains("method watch"), "{r}");
+    let mut s = spec("FFLauncher.exe");
+    s.priority = Some(PrioritySpec::High);
+    let r = plan_lm(&sys, &one(s), "game.exe").unwrap_err().to_string();
+    assert!(
+        r.contains("priority class") && r.contains("method watch sets it"),
+        "{r}"
+    );
+    // `direct` keeps its bitness rule: an i386 launcher makes the profile x86.
+    let p = plan_lm(
+        &lp_sys(&pe_x64(), &pe_x86()),
+        &one(spec("FFLauncher.exe")),
+        "game.exe",
+    );
+    assert_eq!(profile_of(&p.unwrap()).bitness, Bitness::X86);
+    // And its target is the start.
+    let pr = profile_of(&plan_lm(&sys, &one(spec("FFLauncher.exe")), "game.exe").unwrap());
+    assert_eq!(pr.target, pr.start);
+}
+
+#[test]
+fn lw5_direct_to_watch_replaces_the_profile_and_a_watch_profile_round_trips() {
+    let env = Env::new(lp_sys(&pe_x86(), &pe_x64()));
+    env.sys.fake_fs().mkdir_all(Path::new(PROFILES)).unwrap();
+    let before = snap_all(&env.sys);
+    let t1 = env.applied(&stored(&env, &one(spec("FFLauncher.exe"))));
+    // `watch` for the same app: the same file, replaced (the launch option stays valid).
+    let p = plan_lm(
+        &env.sys,
+        &one(watch_soft_high("FFLauncher.exe")),
+        "game.exe",
+    )
+    .unwrap();
+    let Op::ReplaceFile { path, .. } = &p.ops[0] else {
+        panic!("{:?}", p.ops[0])
+    };
+    assert_eq!(path, &profile_file(profile_id(220)));
+    let t2 = env.applied(&store(&app(&env.sys), &p.encode().unwrap()).unwrap());
+    assert_eq!(env.verify(&t2), [(0, Observed::After)]);
+    // The same `watch` rule again: nothing to do.
+    let p = plan_lm(
+        &env.sys,
+        &one(watch_soft_high("FFLauncher.exe")),
+        "game.exe",
+    )
+    .unwrap();
+    assert!(p.ops.is_empty(), "{:?}", p.ops);
+    // LIFO back to nothing, identical.
+    assert_eq!(env.revert(&t2).unwrap().closed, Some(Closing::Reverted));
+    assert_eq!(env.revert(&t1).unwrap().closed, Some(Closing::Reverted));
+    assert!(
+        before == snap_all(&env.sys),
+        "{:#?}",
+        before.diff(&snap_all(&env.sys))
+    );
+    // A `watch` profile alone: apply → verify → revert → identical.
+    let t = env.applied(&stored(&env, &one(watch("game.exe"))));
+    assert_eq!(env.verify(&t), [(0, Observed::After)]);
+    let name = format!(r"{PROFILES}\{}", profile_file(profile_id(220)));
+    let bytes = try_read_abs(&env.sys, &name).unwrap();
+    assert!(
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .contains("method=watch\n")
+    );
+    assert_eq!(env.revert(&t).unwrap().closed, Some(Closing::Reverted));
+    assert!(
+        before == snap_all(&env.sys),
+        "{:#?}",
+        before.diff(&snap_all(&env.sys))
+    );
 }

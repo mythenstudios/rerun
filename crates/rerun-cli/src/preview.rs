@@ -138,6 +138,11 @@ pub fn op(o: &PreviewOp) -> Vec<Message<'_>> {
             out.push(Message::Profile(ProfileMsg::Start {
                 path: s.start.clone(),
             }));
+            if s.method == "watch" {
+                out.push(Message::Profile(ProfileMsg::Target {
+                    path: s.target.clone(),
+                }));
+            }
         }
         Some(ProfilePreview::Unreadable(why)) => {
             out.push(Message::Profile(ProfileMsg::Unreadable {
@@ -264,6 +269,8 @@ pub fn launch_lines<'a>(p: &'a Preview, v: &'a LaunchView) -> Vec<Message<'a>> {
     let pm = Message::Profile;
     let mut out = vec![pm(ProfileMsg::MachineHeading)];
     let mut hard = false;
+    let shown = profile_of(p);
+    let watch = shown.is_some_and(|s| s.method == "watch");
     match &v.machine.selection {
         Ok(s) => {
             hard = s.mode == RuleMode::Hard;
@@ -275,7 +282,11 @@ pub fn launch_lines<'a>(p: &'a Preview, v: &'a LaunchView) -> Vec<Message<'a>> {
                 cores: ranges(&s.cores),
                 llc: s.llc,
             }));
-            out.push(pm(ProfileMsg::Mode { mode: s.mode }));
+            out.push(pm(if watch {
+                ProfileMsg::WatchMode { mode: s.mode }
+            } else {
+                ProfileMsg::Mode { mode: s.mode }
+            }));
         }
         Err(MachineWhy::NoRule) => out.push(pm(ProfileMsg::MachineNoRule)),
         Err(MachineWhy::Topology(why)) => out.push(pm(ProfileMsg::MachineUnknown {
@@ -291,7 +302,7 @@ pub fn launch_lines<'a>(p: &'a Preview, v: &'a LaunchView) -> Vec<Message<'a>> {
     if v.machine.x86_capped {
         out.push(pm(ProfileMsg::X86Capped));
     }
-    if let Some(s) = profile_of(p) {
+    if let Some(s) = shown {
         if s.launcher {
             out.push(pm(ProfileMsg::LauncherStarts {
                 start: s.start.clone(),
@@ -300,8 +311,18 @@ pub fn launch_lines<'a>(p: &'a Preview, v: &'a LaunchView) -> Vec<Message<'a>> {
                 out.push(pm(ProfileMsg::LauncherGame { main }));
             }
         }
+        if s.stub {
+            out.push(pm(ProfileMsg::WatchStub));
+        }
         if let Some(class) = s.priority {
-            out.push(pm(ProfileMsg::PriorityNote { class }));
+            out.push(pm(if watch {
+                ProfileMsg::WatchPriorityNote { class }
+            } else {
+                ProfileMsg::PriorityNote { class }
+            }));
+        }
+        if watch {
+            out.push(pm(ProfileMsg::WatchLeftAlone));
         }
     }
     out.push(pm(ProfileMsg::OptionHeading));

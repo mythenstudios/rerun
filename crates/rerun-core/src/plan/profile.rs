@@ -16,13 +16,15 @@
 //!   SHA-256 of its bytes.
 //! - [`Rules::Current`] only (planning, encode, apply): the bytes decode as a launch profile
 //!   (`rerun_proto::profile`), its `start` and `target` lie below the path of root 0 (folded),
-//!   `start` has at most [`MAX_START_UNITS`] UTF-16 units, root 0 names its main executable
-//!   (D4 asks it, also for a plan whose only op is the profile; review S2), and the file name is
-//!   [`profile_id`] of root 0's Steam app. A recorded head keeps only the form, so a rule a
+//!   each has at most [`MAX_EXE_PATH_UNITS`] UTF-16 units, root 0 names its main executable
+//!   (D4 asks it, also for a plan whose only op is the profile; review S2), a `watch` profile's
+//!   `target` is `<root 0>\<main executable>` (folded; P3-4 P1, P4: the shim sets the rule on
+//!   exactly the program apply and revert ask), and the file name is [`profile_id`] of root 0's
+//!   Steam app. A recorded head keeps only the form, so a rule a
 //!   later version adds never blocks a revert (user decision E4 of P2-11); the revert only
 //!   observes hashes and never reads the profile.
 
-use rerun_proto::profile::{self as proto, ProfileId};
+use rerun_proto::profile::{self as proto, Method, ProfileId};
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -38,8 +40,9 @@ use crate::sys::fs::Attrs;
 /// larger at that name is not a profile Rerun wrote, and stays.
 pub const MAX_PROFILE_OLD_BYTES: u64 = 8 << 10;
 
-/// Most UTF-16 units of a profile's `start` (ADR 0022 "Not decided here": no long paths yet).
-pub const MAX_START_UNITS: usize = 259;
+/// Most UTF-16 units of a profile's `start` and `target` (ADR 0022 "Not decided here": no long
+/// paths yet; P3-4 P4: the target too).
+pub const MAX_EXE_PATH_UNITS: usize = 259;
 
 /// Domain tag of [`profile_id`] (another form of ID, e.g. without Steam, gets another tag).
 const ID_TAG: &[u8] = b"rerun-profile-id\0";
@@ -248,12 +251,12 @@ fn current(plan: &Plan, k: usize, path: &RelPath, bytes: &[u8]) -> Result<(), Pl
     };
     // P3-3c review S2: the game-closed check (D4) of a profile plan asks the game's main
     // executable, also when the profile is the plan's only op (F11).
-    if game.main_exe.is_none() {
+    let Some(main) = &game.main_exe else {
         return Err(invalid(
             Some(k),
             "a profile plan without the game's main executable",
         ));
-    }
+    };
     let p = proto::decode(bytes)
         .map_err(|_| invalid(Some(k), "inline bytes that are no launch profile"))?;
     if !below(&p.start, &game.path) || !below(&p.target, &game.path) {
@@ -262,8 +265,22 @@ fn current(plan: &Plan, k: usize, path: &RelPath, bytes: &[u8]) -> Result<(), Pl
             "a profile whose start or target is not in the game folder",
         ));
     }
-    if p.start.encode_utf16().count() > MAX_START_UNITS {
+    if p.start.encode_utf16().count() > MAX_EXE_PATH_UNITS {
         return Err(invalid(Some(k), "a start path longer than 259 characters"));
+    }
+    if p.target.encode_utf16().count() > MAX_EXE_PATH_UNITS {
+        return Err(invalid(Some(k), "a target path longer than 259 characters"));
+    }
+    // P3-4 P1, P4: `watch` sets the rule on the main executable and nothing else (`direct`:
+    // `target == start`, the profile decoder's rule).
+    if p.method == Method::Watch
+        && !knob::watch_target_anywhere()
+        && fold(&p.target) != fold(&format!(r"{}\{main}", game.path))
+    {
+        return Err(invalid(
+            Some(k),
+            "a watch profile whose target is not the game's main executable",
+        ));
     }
     if *path != profile_file(profile_id(*app_id)) {
         return Err(invalid(Some(k), "a profile not named by its game's ID"));
@@ -271,7 +288,8 @@ fn current(plan: &Plan, k: usize, path: &RelPath, bytes: &[u8]) -> Result<(), Pl
     Ok(())
 }
 
-/// Test knobs (controls K-LM1 and K-LM3, ADR 0020 amendment P3-3): a rule of the fence off.
+/// Test knobs (controls K-LM1 and K-LM3, ADR 0020 amendment P3-3; K-LW1, P3-4): a rule of the
+/// fence off.
 #[cfg(test)]
 pub(crate) mod knob {
     use std::cell::Cell;
@@ -279,6 +297,7 @@ pub(crate) mod knob {
     thread_local! {
         static INLINE_ANYWHERE: Cell<bool> = const { Cell::new(false) };
         static PROFILE_OP_ANYWHERE: Cell<bool> = const { Cell::new(false) };
+        static WATCH_TARGET_ANYWHERE: Cell<bool> = const { Cell::new(false) };
     }
 
     /// K-LM1: inline content allowed on any root.
@@ -295,6 +314,13 @@ pub(crate) mod knob {
     pub(crate) fn profile_op_anywhere() -> bool {
         PROFILE_OP_ANYWHERE.with(Cell::get)
     }
+    /// K-LW1: a `watch` target other than the main executable allowed (P4 off).
+    pub(crate) fn allow_watch_target_anywhere(on: bool) {
+        WATCH_TARGET_ANYWHERE.with(|s| s.set(on));
+    }
+    pub(crate) fn watch_target_anywhere() -> bool {
+        WATCH_TARGET_ANYWHERE.with(Cell::get)
+    }
 }
 
 #[cfg(not(test))]
@@ -303,6 +329,9 @@ mod knob {
         false
     }
     pub(super) fn profile_op_anywhere() -> bool {
+        false
+    }
+    pub(super) fn watch_target_anywhere() -> bool {
         false
     }
 }

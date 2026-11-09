@@ -75,13 +75,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use preview::{
-    INI_NOTE, IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, PROFILE_NOTE, Preview, PreviewOp,
-    PreviewRoot, ProfilePreview, ProfileShown, REGISTRY_NOTE, RegShown, preview, preview_head,
-    preview_stored,
+    INI_NOTE, IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, PROFILE_NOTE, PROFILE_WATCH_NOTE,
+    Preview, PreviewOp, PreviewRoot, ProfilePreview, ProfileShown, REGISTRY_NOTE, RegShown,
+    preview, preview_head, preview_stored,
 };
 #[cfg(test)]
 pub(crate) use profile::knob as profile_knob;
-pub use profile::{MAX_PROFILE_OLD_BYTES, MAX_START_UNITS, profile_file, profile_id};
+pub use profile::{MAX_EXE_PATH_UNITS, MAX_PROFILE_OLD_BYTES, profile_file, profile_id};
 pub use store::{load, store};
 
 use crate::fold::fold;
@@ -108,7 +108,7 @@ pub const MAX_FILE_LEN: u64 = 2 << 30;
 /// Most bytes of all backups of one plan (the journal's limit per transaction).
 pub const MAX_BACKUP_BYTES: u64 = 4 << 30;
 /// Most bytes of [`ContentRef::Inline`] (a launch profile with a start path of at most
-/// [`MAX_START_UNITS`] is about 1.8 KiB; as hex the op stays below [`MAX_OP_BYTES`]).
+/// [`MAX_EXE_PATH_UNITS`] is about 1.8 KiB; as hex the op stays below [`MAX_OP_BYTES`]).
 pub const MAX_INLINE_BYTES: usize = 2 << 10;
 /// The identity of the profiles root in every plan: none is checked (ADR 0020 amendment P3-3,
 /// F1), one fixed value so a plan's bytes are the same with and without `--dry-run`. No game

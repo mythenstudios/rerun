@@ -9,23 +9,31 @@
 //! - **`start`** is the program of Steam's launch entry, explicit in the step (E2 a: `appinfo.vdf`
 //!   is not read), relative to the game folder, in the spelling stored on disk; a plain `.exe`
 //!   below plain folders, none case-sensitive. The profile names it absolutely, at most
-//!   [`MAX_START_UNITS`] UTF-16 units (F7).
-//! - **The launcher case** (F5): with `start` other than the main executable (folded) only a hard
-//!   CPU rule is allowed: a soft rule (default CPU Sets) and a priority class reach only the
-//!   started program, not the game it starts (ADR 0022 amendment P3-3, sources there).
-//! - **Bitness** (F6, condition A8): `x86` if a program of the chain the rule reaches is i386,
-//!   i.e. `start` or the main executable has machine `IMAGE_FILE_MACHINE_I386`, else `x64`. A
-//!   .NET "AnyCPU" image is i386 on disk and may run as x64: counted as x86, conservatively; the
-//!   cost is only on a processor group of more than 32 logical processors (ADR 0022 B6). ARM64,
-//!   another machine or no PE image is refused. Read through the bounded PE parser (ADR 0013).
+//!   [`MAX_EXE_PATH_UNITS`] UTF-16 units (F7).
+//! - **The target** (P3-4 P1, P4): `direct` sets the rule on what it starts, so `target` is
+//!   `start`. `watch` sets it on a new process of the main executable found after the start:
+//!   `target` is `<game folder>\<main_exe>` in the spelling stored on disk (no field of its own:
+//!   one identity, the program apply and revert ask, D4), at most [`MAX_EXE_PATH_UNITS`] units.
+//! - **The launcher case** (F5, `direct` only, P3-4 P2): with `start` other than the main
+//!   executable (folded) only a hard CPU rule is allowed: a soft rule (default CPU Sets) and a
+//!   priority class reach only the started program, not the game it starts (ADR 0022 amendment
+//!   P3-3, sources there). `watch` sets both on the game itself; `start` equal to the main
+//!   executable is allowed there too (a stub that starts the game again; the preview says so).
+//! - **Bitness** (F6, condition A8; P3-4 P3): `x86` if a program of the chain the rule reaches is
+//!   i386, else `x64`: for `direct` `start` or the main executable, for `watch` the main
+//!   executable alone (`start` runs unchanged; it must still be a plain `.exe`, its image is not
+//!   read). A .NET "AnyCPU" image is i386 on disk and may run as x64: counted as x86,
+//!   conservatively; the cost is only on a processor group of more than 32 logical processors
+//!   (ADR 0022 B6). ARM64, another machine or no PE image is refused. Read through the bounded
+//!   PE parser (ADR 0013).
 //! - **The rule** (F8): every field of `cpu` optional, at least one given; missing fields do not
 //!   restrict (`prefer: any`, `single_l3: false`, `prefer_l3` none, `smt: true`, no
 //!   `max_threads`, `mode: hard`); `max_threads` 1 to 1024; `report_cores` refused (`inproc`,
 //!   phase 6); `method: auto` refused (the Topo engine chooses, phase 4). Neither `cpu` nor
 //!   `priority` is refused (F9), and so is a second `launch_method` step.
-//! - **`watch_timeout_s`** of a `direct` profile is [`DIRECT_WATCH_TIMEOUT_S`] (120, the format's
-//!   largest value; the shim does not read it for `direct`), so equal rules give equal bytes
-//!   (review N3).
+//! - **`watch_timeout_s`** of every profile is [`WATCH_TIMEOUT_S`] (120, the format's largest
+//!   value; the search time of `watch`, unread by the shim for `direct`; review N3, P3-4 P5), so
+//!   equal rules give equal bytes, and `direct` and `watch` replace the same profile (one ID).
 //! - **The profile file**: [`plan::profile_id`] of the Steam app (E1 a) below the profiles root
 //!   (path from [`PlanCtx::app`] or [`PlanCtx::app_path`]); missing → `CreateFile`; the same bytes
 //!   → nothing to do; another plain file of at most 8 KiB with one link → `ReplaceFile` (a rest
@@ -51,7 +59,7 @@ use crate::escape::Shown;
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 use crate::plan::{
-    self, ContentRef, FileState, MAX_INLINE_BYTES, MAX_PROFILE_OLD_BYTES, MAX_START_UNITS, Op,
+    self, ContentRef, FileState, MAX_EXE_PATH_UNITS, MAX_INLINE_BYTES, MAX_PROFILE_OLD_BYTES, Op,
     PlanError, RootIx,
 };
 use crate::policy::root::GameOrigin;
@@ -61,9 +69,10 @@ use crate::sys::fs::{Attrs, EntryKind};
 /// The rule types a front end shows (`MachineView`).
 pub use rerun_proto::cpu::rule::{Mode as RuleMode, SelectStep};
 
-/// `watch_timeout_s` of a `direct` profile (review N3): the format keeps the key for every
-/// method; the shim reads it only for `watch`. One fixed value, so equal rules give equal bytes.
-pub const DIRECT_WATCH_TIMEOUT_S: u16 = MAX_WATCH_TIMEOUT_S;
+/// `watch_timeout_s` of every profile (review N3, P3-4 P5): the search time of `watch`, fixed
+/// (no step field); the format keeps the key for `direct` too, where the shim does not read it.
+/// One value, so equal rules give equal bytes.
+pub const WATCH_TIMEOUT_S: u16 = MAX_WATCH_TIMEOUT_S;
 
 /// Largest `max_threads` of a step (`docs/02-topo-format.md`).
 pub const MAX_THREADS: u16 = 1024;
@@ -72,7 +81,7 @@ pub const MAX_THREADS: u16 = 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchMethodSpec {
-    /// How the game is started (`direct`; `auto` is refused until phase 4).
+    /// How the game is started (`direct` or `watch`; `auto` is refused until phase 4).
     pub method: MethodSpec,
     /// The program of Steam's launch entry (what Steam starts on Play), relative to the game
     /// folder.
@@ -91,6 +100,9 @@ pub struct LaunchMethodSpec {
 pub enum MethodSpec {
     /// Start Steam's command in a job with the limit (ADR 0022).
     Direct,
+    /// Start Steam's command unchanged, then set the rule on a new process of the main
+    /// executable (ADR 0022 amendment P3-4).
+    Watch,
     /// Chosen by the Topo engine (phase 4): refused.
     Auto,
 }
@@ -331,7 +343,7 @@ pub(crate) fn plan_into(
     b.launch_method = true;
     if spec.method == MethodSpec::Auto {
         return Err(refuse(
-            "method auto is chosen by the Topo engine (phase 4); name direct",
+            "method auto is chosen by the Topo engine (phase 4); name direct or watch",
         ));
     }
     if spec.cpu.is_none() && spec.priority.is_none() {
@@ -363,13 +375,14 @@ pub(crate) fn plan_into(
         return Err(refuse("needs the game's main executable"));
     };
     let start = stored_exe(game, &spec.start, "launch_method")?;
-    let launcher = fold(start.as_str()) != fold(main.as_str());
-    // F5: soft rules and priority classes reach only the started program.
-    if launcher {
+    let watch = spec.method == MethodSpec::Watch;
+    // F5 (`direct` only, P3-4 P2): soft rules and priority classes reach only the started
+    // program; `watch` sets them on the game.
+    if !watch && fold(start.as_str()) != fold(main.as_str()) {
         if rule.is_some_and(|r| r.mode == Mode::Soft) {
             return Err(refuse(format!(
                 "Steam starts {}, not the game {}: CPU Sets (mode soft) reach only the started \
-                 program; use mode hard (the game inherits the job) or watch (P3-4)",
+                 program; use mode hard (the game inherits the job) or method watch",
                 shown(start.as_str()),
                 shown(main.as_str())
             )));
@@ -377,35 +390,51 @@ pub(crate) fn plan_into(
         if spec.priority.is_some() {
             return Err(refuse(format!(
                 "Steam starts {}, not the game {}: a priority class reaches only the started \
-                 program; watch (P3-4) sets it on the game",
+                 program; method watch sets it on the game",
                 shown(start.as_str()),
                 shown(main.as_str())
             )));
         }
     }
-    // F6 (A8): x86 if a program of the chain the rule reaches is i386.
-    let mut bitness = bitness_of(game, &start)?;
-    if bitness_of(game, main)? == Bitness::X86 {
-        bitness = Bitness::X86;
-    }
+    // F6 (A8, P3-4 P3): x86 if a program of the chain the rule reaches is i386; with `watch`
+    // the rule reaches the main executable (and what it starts) only.
+    let main_bitness = bitness_of(game, main)?;
+    let bitness = if watch {
+        main_bitness
+    } else {
+        match (bitness_of(game, &start)?, main_bitness) {
+            (Bitness::X64, Bitness::X64) => Bitness::X64,
+            _ => Bitness::X86,
+        }
+    };
     let start_abs = format!(r"{}\{}", game.path(), start);
-    if start_abs.encode_utf16().count() > MAX_START_UNITS {
-        return Err(refuse(format!(
-            "the start path {} is longer than {MAX_START_UNITS} characters",
-            shown(&start_abs)
-        )));
+    // P1: the target of `watch` is the main executable in the spelling stored on disk.
+    let target_abs = if watch {
+        let main = stored_exe(game, main, "launch_method main_exe")?;
+        format!(r"{}\{}", game.path(), main)
+    } else {
+        start_abs.clone()
+    };
+    // F7, P4: both paths as the shim compares them (no long paths yet).
+    for (what, abs) in [("start", &start_abs), ("target", &target_abs)] {
+        if abs.encode_utf16().count() > MAX_EXE_PATH_UNITS {
+            return Err(refuse(format!(
+                "the {what} path {} is longer than {MAX_EXE_PATH_UNITS} characters",
+                shown(abs)
+            )));
+        }
     }
     let profile = LaunchProfile {
-        method: Method::Direct,
-        start: start_abs.clone(),
-        target: start_abs,
+        method: if watch { Method::Watch } else { Method::Direct },
+        start: start_abs,
+        target: target_abs,
         bitness,
         priority: spec.priority.map(|p| match p {
             PrioritySpec::Normal => Priority::Normal,
             PrioritySpec::AboveNormal => Priority::AboveNormal,
             PrioritySpec::High => Priority::High,
         }),
-        watch_timeout_s: DIRECT_WATCH_TIMEOUT_S,
+        watch_timeout_s: WATCH_TIMEOUT_S,
         cpu: rule,
     };
     let bytes = proto::encode(&profile).map_err(|e| refuse(format!("the profile: {e}")))?;

@@ -1,6 +1,12 @@
 //! The lines of the launch results in `rerun status` (ADR 0022 amendment P3-2, ADR 0016). One
 //! [`LaunchMsg`] is one line. Every field is typed and shown by Rerun's own words, except the
-//! reason a file is unreadable, which is [`Shown`] and stands last on its line.
+//! reason a file is unreadable and the target of a `watch` profile, which are [`Shown`] and
+//! stand last on their line.
+//!
+//! `watch` (P3-4c, plan `P3-4` §3.5 and the review of P3-4a): every reason only `watch` writes
+//! is explained on its line; whether a profile is `watch` otherwise comes from the head of the
+//! transaction that holds it (the result may be older than that head), and then `exited_early`,
+//! a soft `ok` and the start of a skipped rule get `watch` words, and a line names the target.
 
 use std::fmt;
 
@@ -70,6 +76,9 @@ pub enum LaunchMsg<'a> {
         priority: Option<Priority>,
         /// The post-launch check.
         check: Check,
+        /// The profile is `watch` (from the head that holds it): the check covered the game
+        /// process found after the start.
+        watch: bool,
     },
     /// The rule was not applied to the last start.
     Skipped {
@@ -83,6 +92,20 @@ pub enum LaunchMsg<'a> {
         start: Start,
         /// How a child created with the rule was ended.
         ended: Option<Ended>,
+        /// `watch`: the priority class set on the game could not be put back (Win32 error).
+        restore: Option<u32>,
+        /// The profile is `watch` (from the head, or a reason only `watch` writes).
+        watch: bool,
+    },
+    /// `watch` (A4): the priority class set on the game could not be put back.
+    PriorityNotRestored {
+        /// Win32 error code.
+        code: u32,
+    },
+    /// The profile is `watch` (from the head that holds it): what the rule was for.
+    Watched {
+        /// The target.
+        target: Shown<'a>,
     },
     /// The file cannot be read or decoded.
     Unreadable {
@@ -151,8 +174,42 @@ impl fmt::Display for Set {
     }
 }
 
-fn start(s: Start) -> String {
+/// What a reason only `watch` writes means (`None` for the others: their name says it).
+fn why(reason: SkipReason, restore: Option<u32>) -> Option<String> {
+    Some(match reason {
+        SkipReason::TargetNotFound => "no new game process appeared within the 120 s search (a launcher waiting for a login or an update: start the game again; a game that is itself the program Steam starts and does not start itself again: use method direct)".to_owned(),
+        SkipReason::TargetElevated => "the game process runs as administrator, or was started by a launcher that does; rerun-launch leaves it alone".to_owned(),
+        SkipReason::TargetDenied { code } => format!("a game process could not be opened or read to set the rule (Win32 error {code}: a protected or anti-cheat process, or one Windows refused, e.g. of another account); nothing was set"),
+        SkipReason::SearchFailed { code } => format!("no game process could be looked for (Win32 error {code}: the process list, or rerun-launch's own process information before the search, could not be read); nothing was set"),
+        SkipReason::PriorityFailed { code } => format!("the priority class of the game process could not be read or set (Win32 error {code}); nothing was set"),
+        SkipReason::JobIneffective => {
+            let mut s = "the game process joined the job but kept another limit (a job it was already in, e.g. a launcher's); the job stays without effect until the game exits".to_owned();
+            if restore.is_none() {
+                s.push_str(", and a priority class set on it was put back");
+            }
+            s
+        }
+        SkipReason::MethodUnsupported => "written by an older rerun-launch without method watch".to_owned(),
+        _ => return None,
+    })
+}
+
+/// A reason only `watch` writes.
+pub fn watch_only(reason: SkipReason) -> bool {
+    matches!(
+        reason,
+        SkipReason::TargetNotFound
+            | SkipReason::TargetElevated
+            | SkipReason::TargetDenied { .. }
+            | SkipReason::SearchFailed { .. }
+            | SkipReason::PriorityFailed { .. }
+            | SkipReason::JobIneffective
+    )
+}
+
+fn start(s: Start, watch: bool) -> String {
     match s {
+        Start::Created if watch => "Steam's command started unchanged".to_owned(),
         Start::Created => "the game started unchanged".to_owned(),
         Start::Shell | Start::ShellNoProcess => {
             "the game started unchanged through the shell (administrator prompt)".to_owned()
@@ -184,6 +241,7 @@ impl fmt::Display for LaunchMsg<'_> {
                 cpu,
                 priority,
                 check,
+                watch,
             } => {
                 let set = Set(*cpu, *priority);
                 write!(f, "  {id}, {at}: ")?;
@@ -191,7 +249,11 @@ impl fmt::Display for LaunchMsg<'_> {
                     Check::Ok => {
                         write!(f, "ok, verified: {set}")?;
                         if cpu.is_some_and(|c| c.mode == Mode::Soft) {
-                            f.write_str(" (CPU Sets of the started process only)")?;
+                            f.write_str(if *watch {
+                                " (CPU Sets of the game process only; whether threads already running follow them is unproven)"
+                            } else {
+                                " (CPU Sets of the started process only)"
+                            })?;
                         }
                         Ok(())
                     }
@@ -210,6 +272,10 @@ impl fmt::Display for LaunchMsg<'_> {
                         };
                         write!(f, "reset, the {what} changed after the start (set: {set})")
                     }
+                    Check::ExitedEarly if *watch => write!(
+                        f,
+                        "exited_early, the game process found ended within 5 s, before the check, and no other one followed in time (at most 4 within 120 s) (set: {set}; it crashed, or it hands over to a process of another path)"
+                    ),
                     Check::ExitedEarly => write!(
                         f,
                         "exited_early, the started process ended within 5 s, before the check (set: {set}; it crashed, or it is a launcher that starts the game as another process)"
@@ -225,8 +291,14 @@ impl fmt::Display for LaunchMsg<'_> {
                 reason,
                 start: s,
                 ended: e,
+                restore,
+                watch,
             } => {
-                write!(f, "  {id}, {at}: rule_skipped: {reason}, {}", start(*s))?;
+                write!(f, "  {id}, {at}: rule_skipped: {reason}, ")?;
+                if let Some(why) = why(*reason, *restore) {
+                    write!(f, "{why}; ")?;
+                }
+                f.write_str(&start(*s, *watch))?;
                 match e {
                     Some(e) => write!(f, "; {}", ended(*e)),
                     None => Ok(()),
@@ -249,6 +321,14 @@ impl fmt::Display for LaunchMsg<'_> {
             Self::OptionStillSetForgotten { id } => write!(
                 f,
                 "    the launch option with --profile {id} was still set in Steam at that start; a forgotten transaction left a profile of this ID and it was missing then: remove the launch option"
+            ),
+            Self::PriorityNotRestored { code } => write!(
+                f,
+                "    the priority class set on the game process could not be put back (Win32 error {code}); it stays until the game exits"
+            ),
+            Self::Watched { target } => write!(
+                f,
+                "    method watch: the rule is for the game process found after the start, not the program Steam starts: {target}"
             ),
             Self::CheckedLauncher { start } => write!(
                 f,

@@ -20,7 +20,7 @@ use rerun_core::detect::steam::{AppState, RootSource};
 use rerun_core::escape::Shown;
 use rerun_core::hw::GpuVendor;
 
-pub use launch::{LaunchMsg, Utc};
+pub use launch::{LaunchMsg, Utc, watch_only};
 #[cfg(test)]
 pub(crate) use profile::size as size_text;
 pub use profile::{ProfileMsg, ranges};

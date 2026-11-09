@@ -44,7 +44,9 @@ use crate::host::{
     Host, after_change, before_change, confirm, existing_app, exit_for_exec, fail, forbidden, note,
     shown, standard_user,
 };
-use crate::messages::{LaunchMsg, Message, OpText, ProfileMsg, StepText, TxnMsg, TxnText, Utc};
+use crate::messages::{
+    LaunchMsg, Message, OpText, ProfileMsg, StepText, TxnMsg, TxnText, Utc, watch_only,
+};
 use crate::out::{Out, failed as failed_out};
 use crate::preview::{Fate, op_at, profile_id_of, profile_of, roots, x12_lines};
 use rerun_core::exec::ProfilesMoved;
@@ -289,6 +291,8 @@ pub fn launch_lines<'a>(
             Ok(res) if matches!(res.outcome, Outcome::Skipped { reason: SkipReason::ProfileMissing, .. })
         );
         let holder = holders.iter().find(|h| h.id == e.id);
+        let watched = holder.and_then(|h| h.watch.as_ref());
+        let mut restore_failed = None;
         out.push(l(match &e.result {
             Err(why) => LaunchMsg::Unreadable {
                 id: e.id,
@@ -307,23 +311,32 @@ pub fn launch_lines<'a>(
                         cpu: *cpu,
                         priority: *priority,
                         check: *check,
+                        watch: watched.is_some(),
                     },
-                    // `priority_restore` (watch, P3-4 A4) gets its status line with P3-4c.
                     Outcome::Skipped {
                         reason,
                         start,
                         ended,
-                        ..
-                    } => LaunchMsg::Skipped {
-                        id: e.id,
-                        at,
-                        reason: *reason,
-                        start: *start,
-                        ended: *ended,
-                    },
+                        priority_restore,
+                    } => {
+                        restore_failed = *priority_restore;
+                        LaunchMsg::Skipped {
+                            id: e.id,
+                            at,
+                            reason: *reason,
+                            start: *start,
+                            ended: *ended,
+                            restore: *priority_restore,
+                            watch: watched.is_some() || watch_only(*reason),
+                        }
+                    }
                 }
             }
         }));
+        // A4: the priority class could not be put back after a failed CPU step.
+        if let Some(code) = restore_failed {
+            out.push(l(LaunchMsg::PriorityNotRestored { code }));
+        }
         // A7: after a revert or forget the option still starts the game through the shim.
         if missing {
             out.push(l(match holder {
@@ -346,6 +359,11 @@ pub fn launch_lines<'a>(
             out.push(l(LaunchMsg::CheckedLauncher {
                 start: start.clone(),
             }));
+        } else if let (Some(target), Ok(_)) = (watched, &e.result) {
+            // P3-4c: the rule and the check concern the game process found after the start.
+            out.push(l(LaunchMsg::Watched {
+                target: target.clone(),
+            }));
         }
     }
     if r.other > 0 {
@@ -363,8 +381,10 @@ pub struct Holder {
     pub txn: TxnId,
     /// It is forgotten (it cannot be reverted any more).
     pub forgotten: bool,
-    /// The start, if it is a launcher (not the game).
+    /// The start, if it is a launcher (not the game) of a `direct` profile.
     pub launcher: Option<rerun_core::escape::Shown<'static>>,
+    /// The target, if the profile is `watch` (P3-4c).
+    pub watch: Option<rerun_core::escape::Shown<'static>>,
 }
 
 /// The op index of the launch profile op of `p`, and whether it replaces a profile.
@@ -409,6 +429,7 @@ fn holders(app: &AppDir<'_>, s: &exec::Status) -> Vec<Holder> {
             txn: st.id,
             forgotten: st.is_forgotten(),
             launcher: prof.launcher.then(|| prof.start.clone()),
+            watch: (prof.method == "watch").then(|| prof.target.clone()),
         };
         // The listing is in order: a later transaction replaces an earlier one.
         out.retain(|x| x.id != id);
