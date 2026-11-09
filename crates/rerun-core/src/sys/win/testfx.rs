@@ -1843,13 +1843,18 @@ impl AppHive {
         }
     }
 
-    /// `key` lies below the hive key (by its kernel name), else an error.
+    /// `key` lies below the hive key (by its kernel name), else an error. In the real user hive
+    /// `Software\Classes` is the user's classes hive, mounted by Windows as
+    /// `\REGISTRY\USER\<SID>_Classes`: that one hive counts as inside too.
     fn guard(&self, key: &OwnedKey, what: &str) -> SysResult<()> {
         let name = key_name(key, what)?;
-        let inside = name
-            .get(..self.name.len())
-            .is_some_and(|p| p.eq_ignore_ascii_case(&self.name))
-            && name[self.name.len()..].starts_with('\\');
+        let below = |root: &str| {
+            name.get(..root.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(root))
+                && name[root.len()..].starts_with('\\')
+        };
+        let classes = format!("{}_Classes", self.name);
+        let inside = below(&self.name) || (self.real && below(&classes));
         if inside {
             Ok(())
         } else {
