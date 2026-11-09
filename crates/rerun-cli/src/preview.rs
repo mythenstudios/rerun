@@ -193,9 +193,10 @@ pub fn shadow_lines(s: &[Shadow]) -> Vec<Message<'_>> {
                     root: *root,
                     at: at.clone(),
                 },
-                Shadow::Unchecked { root, why } => TxnMsg::VirtualStoreUnchecked {
+                Shadow::Unchecked { root, why, at } => TxnMsg::VirtualStoreUnchecked {
                     root: *root,
                     why: why.clone(),
+                    at: at.clone(),
                 },
             })
         })

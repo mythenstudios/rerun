@@ -3,6 +3,7 @@
 use std::fmt;
 use std::path::Path;
 
+use super::vstore::{VIRTUAL_STORE, virtual_store};
 use super::{RootError, open_abs};
 use crate::fold::fold;
 use crate::path::RootPath;
@@ -93,7 +94,7 @@ const DERIVED: [(KnownFolder, &str); 9] = [
     (KnownFolder::RoamingAppData, "Microsoft"),
     (KnownFolder::LocalAppData, "Microsoft"),
     (KnownFolder::LocalAppData, "Packages"),
-    (KnownFolder::LocalAppData, "VirtualStore"),
+    (KnownFolder::LocalAppData, VIRTUAL_STORE),
     (KnownFolder::LocalAppData, "Rerun"),
 ];
 
@@ -109,8 +110,8 @@ const PROFILE_DEFAULTS: [(&str, &str, &str); 5] = [
     (r"AppData\Local", "Packages", r"AppData\Local\Packages"),
     (
         r"AppData\Local",
-        "VirtualStore",
-        r"AppData\Local\VirtualStore",
+        VIRTUAL_STORE,
+        concat!(r"AppData\Local\", virtual_store!()),
     ),
     (r"AppData\Local", "Rerun", r"AppData\Local\Rerun"),
     (

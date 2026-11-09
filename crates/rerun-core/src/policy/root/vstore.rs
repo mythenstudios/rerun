@@ -17,19 +17,33 @@
 //!   never a root and never written.
 //! - The lookup never fails a preview or `verify`: whatever keeps it from running (`LocalAppData`
 //!   unknown, an access error) is [`Shadow::Unchecked`], so "no copy" and "not looked" are never
-//!   shown alike.
+//!   shown alike. A path in its reason is shown as a path (`escape::path`), apart from the text.
+//! - A file (not a folder) at a component of `VirtualStore\<path without drive>\<file>` means
+//!   that no copy can exist there: virtualization would need a folder at that place, and the
+//!   game cannot read a copy through a file. Nothing is reported, for the root part exactly as
+//!   for the part below it ([`Dir::metadata`](crate::sys::Dir::metadata) is `Ok(None)` for a
+//!   path whose parent is a file).
 
 use std::collections::BTreeSet;
 
 use super::open_abs;
 use crate::escape::{self, Shown};
-use crate::path::{RelPath, RootPath};
-use crate::plan::{Plan, PlanBytes, PlanError, RootKind, Target};
-use crate::sys::fs::EntryKind;
-use crate::sys::{KnownFolder, SysErrorKind, System};
+use crate::path::{PathError, RelPath, RootPath};
+use crate::plan::{Plan, PlanBytes, PlanError, Preview, RootKind, Target};
+use crate::sys::fs::{EntryKind, Metadata};
+use crate::sys::{KnownFolder, SysError, SysErrorKind, SysResult, System};
+
+/// The literal of [`VIRTUAL_STORE`], for `concat!` in the const tables of the forbidden list
+/// (`forbidden.rs`): one spelling, so the list and the lookup cannot drift apart.
+macro_rules! virtual_store {
+    () => {
+        "VirtualStore"
+    };
+}
+pub(super) use virtual_store;
 
 /// The folder below `LocalAppData` that UAC file virtualization writes to.
-pub const VIRTUAL_STORE: &str = "VirtualStore";
+pub const VIRTUAL_STORE: &str = virtual_store!();
 
 /// The known folders whose writes UAC file virtualization redirects (the ones a game folder can
 /// lie in; `%windir%` is forbidden as a root anyway).
@@ -63,9 +77,61 @@ pub enum Shadow {
     Unchecked {
         /// Root index in the plan.
         root: usize,
-        /// Why (`escape::text`).
+        /// Why, without the path it is about (`escape::text`).
         why: Shown<'static>,
+        /// The path the reason is about, if any (`escape::path`): a raw `LocalAppData` value,
+        /// the path an access error names.
+        at: Option<Shown<'static>>,
     },
+}
+
+/// [`Shadow::Unchecked`] with the reason as text and the path, if any, as a path.
+fn unchecked(root: usize, why: &str, at: Option<&str>) -> Shadow {
+    Shadow::Unchecked {
+        root,
+        why: escape::text(why).into_owned(),
+        at: at.map(|a| escape::path(a).into_owned()),
+    }
+}
+
+/// [`unchecked`] for a system error: kind (and limit) as the reason, its target as the path.
+fn unchecked_sys(root: usize, ctx: &str, e: &SysError) -> Shadow {
+    let limit = e.limit.map(|n| format!(" (limit {n})")).unwrap_or_default();
+    let at = (!e.target.is_empty()).then_some(e.target.as_str());
+    unchecked(root, &format!("{ctx}{}{limit}", e.kind), at)
+}
+
+/// [`unchecked`] for a path error: its reason as the reason, the checked path as the path.
+fn unchecked_path(root: usize, ctx: &str, e: &PathError) -> Shadow {
+    unchecked(
+        root,
+        &format!("{ctx}invalid path: {}", e.reason),
+        Some(&e.path),
+    )
+}
+
+/// What one `metadata` answer on the way to a copy means. `None`: nothing to report (missing,
+/// a folder of the file's name, or a file at a component of the way: module docs). `file`:
+/// the managed file a found file is a copy of (`None` for the root part, where a file is a
+/// component of the way, never a copy).
+fn classify(
+    root: usize,
+    m: SysResult<Option<Metadata>>,
+    shown: impl Fn() -> Shown<'static>,
+    file: Option<&RelPath>,
+) -> Option<Shadow> {
+    match m {
+        Ok(Some(m)) if m.kind == EntryKind::Reparse => Some(Shadow::Link { root, at: shown() }),
+        Ok(Some(m)) if m.kind == EntryKind::File => file.map(|f| Shadow::Copy {
+            root,
+            file: f.clone(),
+            copy: shown(),
+        }),
+        Ok(_) => None,
+        Err(e) if e.kind == SysErrorKind::NotFound => None,
+        Err(e) if e.kind == SysErrorKind::ReparsePoint => Some(Shadow::Link { root, at: shown() }),
+        Err(e) => Some(unchecked_sys(root, "", &e)),
+    }
 }
 
 /// `true` if `root` lies inside one of the three virtualized known folders (lexical, folded). A
@@ -91,78 +157,64 @@ pub fn check_root<'a>(
     if !virtualized(sys, path) {
         return Vec::new();
     }
-    let unchecked = |why: &str| {
-        vec![Shadow::Unchecked {
-            root,
-            why: escape::text(why).into_owned(),
-        }]
-    };
+    let one = |s: Shadow| vec![s];
     // `Program Files (x86)\G`: the canonical path below its drive letter.
     let rest = path.to_string();
     let below = match RelPath::parse(&format!(r"{VIRTUAL_STORE}\{}", rest.get(3..).unwrap_or(""))) {
         Ok(b) => b,
-        Err(e) => return unchecked(&e.to_string()),
+        Err(e) => return one(unchecked_path(root, "", &e)),
     };
     let lad = match sys.known_folders().get(KnownFolder::LocalAppData) {
         Ok(p) => p,
-        Err(e) => return unchecked(&format!("LocalAppData is unknown: {e}")),
+        Err(e) => return one(unchecked_sys(root, "LocalAppData is unknown: ", &e)),
     };
     let base = match RootPath::new(&lad) {
         Ok(b) => b,
-        Err(e) => return unchecked(&format!("LocalAppData: {e}")),
+        Err(e) => return one(unchecked_path(root, "LocalAppData: ", &e)),
     };
     let dir = match open_abs(sys, base.path()) {
         Ok(d) => d,
-        Err(e) => return unchecked(&format!("LocalAppData: {e}")),
+        Err(e) => return one(unchecked_sys(root, "LocalAppData: ", &e)),
     };
     // Shown with the canonical path of the folder that was actually opened.
-    let canon = match dir
-        .info()
-        .map_err(|e| e.to_string())
-        .and_then(|i| RootPath::from_final_path(&i.final_path).map_err(|e| e.to_string()))
-    {
+    let info = match dir.info() {
+        Ok(i) => i,
+        Err(e) => return one(unchecked_sys(root, "LocalAppData: ", &e)),
+    };
+    let canon = match RootPath::from_final_path(&info.final_path) {
         Ok(c) => c,
-        Err(e) => return unchecked(&format!("LocalAppData: {e}")),
+        Err(e) => return one(unchecked_path(root, "LocalAppData: ", &e)),
     };
     let shown = |rel: &str| escape::path(&format!(r"{canon}\{rel}")).into_owned();
     let store = match dir.open_dir(&below) {
         Ok(s) => s,
         Err(e) if e.kind == SysErrorKind::NotFound => return Vec::new(),
         Err(e) if e.kind == SysErrorKind::ReparsePoint => {
-            return vec![Shadow::Link {
+            return one(Shadow::Link {
                 root,
                 at: shown(below.as_str()),
-            }];
+            });
         }
-        Err(e) => return unchecked(&e.to_string()),
+        // Not a folder somewhere on the way: asked like the walk below asks a file, so a file
+        // at a component says nothing here exactly as there (module docs). A folder after all
+        // (it changed in between) is the open's error.
+        Err(e) if e.kind == SysErrorKind::InvalidPath => {
+            return match dir.metadata(&below) {
+                Ok(Some(m)) if m.kind == EntryKind::Dir => one(unchecked_sys(root, "", &e)),
+                m => classify(root, m, || shown(below.as_str()), None)
+                    .into_iter()
+                    .collect(),
+            };
+        }
+        Err(e) => return one(unchecked_sys(root, "", &e)),
     };
-    let mut out = Vec::new();
-    for file in files {
-        let at = format!(r"{below}\{file}");
-        match store.metadata(file) {
-            Ok(Some(m)) if m.kind == EntryKind::File => out.push(Shadow::Copy {
-                root,
-                file: file.clone(),
-                copy: shown(&at),
-            }),
-            Ok(Some(m)) if m.kind == EntryKind::Reparse => out.push(Shadow::Link {
-                root,
-                at: shown(&at),
-            }),
-            // Missing, or a folder of that name (no copy of a file).
-            Ok(_) => {}
-            Err(e) if e.kind == SysErrorKind::NotFound => {}
-            Err(e) if e.kind == SysErrorKind::ReparsePoint => out.push(Shadow::Link {
-                root,
-                at: shown(&at),
-            }),
-            Err(e) => out.push(Shadow::Unchecked {
-                root,
-                why: escape::text(&e.to_string()).into_owned(),
-            }),
-        }
-    }
-    out
+    files
+        .into_iter()
+        .filter_map(|file| {
+            let at = format!(r"{below}\{file}");
+            classify(root, store.metadata(file), || shown(&at), Some(file))
+        })
+        .collect()
 }
 
 /// The lookup for every game root of `p`, at `paths` (the plan's root paths for a preview, the
@@ -192,12 +244,16 @@ pub fn shadows(sys: &dyn System, p: &Plan, paths: &[&RootPath]) -> Vec<Shadow> {
     out
 }
 
-/// [`shadows`] of stored plan bytes at the plan's own root paths (the preview of `rerun plan`
-/// and `rerun apply`), decoded like [`crate::plan::preview_stored`].
-pub fn shadows_stored(sys: &dyn System, b: &PlanBytes) -> Result<Vec<Shadow>, PlanError> {
+/// [`crate::plan::preview_stored`] of stored plan bytes together with their [`shadows`] at the
+/// plan's own root paths (the preview of `rerun plan` and `rerun apply`): one decode for both,
+/// so a decode error fails the preview and is never a silent "no copy".
+pub fn preview_with_shadows(
+    sys: &dyn System,
+    b: &PlanBytes,
+) -> Result<(Preview, Vec<Shadow>), PlanError> {
     let p = crate::plan::decode(b.bytes())?;
     let paths: Vec<&RootPath> = p.roots.iter().map(|r| &r.path).collect();
-    Ok(shadows(sys, &p, &paths))
+    Ok((crate::plan::preview(&p), shadows(sys, &p, &paths)))
 }
 
 #[cfg(test)]

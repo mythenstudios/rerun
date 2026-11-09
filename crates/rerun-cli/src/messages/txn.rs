@@ -291,8 +291,10 @@ pub enum TxnMsg<'a> {
     VirtualStoreUnchecked {
         /// Root index.
         root: usize,
-        /// Why, escaped.
+        /// Why, escaped as text (without the path).
         why: Shown<'a>,
+        /// The path the reason is about, if any, escaped as a path; shown last.
+        at: Option<Shown<'a>>,
     },
 
     // ---------- plan ----------
@@ -909,10 +911,16 @@ impl fmt::Display for TxnMsg<'_> {
                 f,
                 "note: root {root}: a link (junction or symbolic link) lies on the way to a VirtualStore copy; it is not followed, nothing behind it was checked: {at}"
             ),
-            Self::VirtualStoreUnchecked { root, why } => write!(
-                f,
-                "note: root {root}: VirtualStore copies of the managed files were not checked: {why}"
-            ),
+            Self::VirtualStoreUnchecked { root, why, at } => {
+                write!(
+                    f,
+                    "note: root {root}: VirtualStore copies of the managed files were not checked: {why}"
+                )?;
+                match at {
+                    Some(at) => write!(f, ": {at}"),
+                    None => Ok(()),
+                }
+            }
 
             Self::NothingToDo => {
                 f.write_str("nothing to do: everything already is as the steps want it")

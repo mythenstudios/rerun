@@ -173,10 +173,79 @@ fn an_unknown_local_app_data_is_a_note_not_a_failure() {
         .build()
         .unwrap();
     let found = check(&sys, PF86_GAME, &["settings.ini"]);
-    let [Shadow::Unchecked { root: 0, why }] = found.as_slice() else {
+    let [Shadow::Unchecked { root: 0, why, .. }] = found.as_slice() else {
         panic!("{found:?}")
     };
     assert!(why.as_str().starts_with("LocalAppData is unknown"), "{why}");
+}
+
+/// Review nit: the raw `LocalAppData` value in a reason is shown as a path (`escape::path`),
+/// apart from the text, so a deceptive character in it never reaches the console raw.
+#[test]
+fn a_path_in_the_reason_is_escaped_as_a_path() {
+    let raw = "C:\\Users\\Player\\AppData\\Lo\u{202e}cal";
+    let sys = layout()
+        .known_folder(KnownFolder::LocalAppData, raw)
+        .build()
+        .unwrap();
+    let found = check(&sys, PF86_GAME, &["settings.ini"]);
+    let [Shadow::Unchecked { root: 0, why, at }] = found.as_slice() else {
+        panic!("{found:?}")
+    };
+    assert_eq!(
+        why.as_str(),
+        "LocalAppData: invalid path: invisible or confusable character"
+    );
+    let at = at.as_ref().expect("the path is named");
+    assert_eq!(at, &escape::path(raw).into_owned());
+    assert!(at.as_str().contains(r"\u{202e}"), "{at}");
+    assert!(!at.as_str().contains('\u{202e}'));
+    assert!(!why.as_str().contains('\u{202e}'));
+}
+
+/// Review nit: a root whose `VirtualStore\<path without drive>` exceeds [`RelPath::MAX_LEN`]
+/// cannot be looked up: a note, not "no copy".
+#[test]
+fn a_root_too_long_for_the_virtual_store_path_is_a_note() {
+    // The root itself is valid (`MAX_LEN` characters below the drive); `VirtualStore\` makes the
+    // looked-up path longer than a `RelPath` may be.
+    let name = "g".repeat(RelPath::MAX_LEN - r"Program Files (x86)\".len());
+    let at = format!(r"C:\Program Files (x86)\{name}");
+    let sys = layout().dir(&at).build().unwrap();
+    let found = check(&sys, &at, &["settings.ini"]);
+    let [Shadow::Unchecked { root: 0, why, at }] = found.as_slice() else {
+        panic!("{found:?}")
+    };
+    assert_eq!(why.as_str(), "invalid path: too long");
+    assert!(
+        at.as_ref()
+            .is_some_and(|a| a.as_str().starts_with("VirtualStore\\"))
+    );
+}
+
+/// Review nit: a file (not a folder) at a component of `VirtualStore\…` means no copy can
+/// exist there (module docs), for the root part and for the part below the game folder alike:
+/// nothing is reported, never a note in one place and silence in the other.
+#[test]
+fn a_file_on_the_way_means_no_copy_in_both_parts() {
+    // Root part: `VirtualStore\Program Files (x86)` is a file.
+    let sys = layout()
+        .file(format!(r"{VS}\Program Files (x86)"), b"x".to_vec())
+        .build()
+        .unwrap();
+    assert_eq!(check(&sys, PF86_GAME, &["settings.ini"]), Vec::new());
+    // Root part, deeper: `VirtualStore\Program Files (x86)\G` is a file.
+    let sys = layout()
+        .file(format!(r"{VS}\Program Files (x86)\G"), b"x".to_vec())
+        .build()
+        .unwrap();
+    assert_eq!(check(&sys, PF86_GAME, &["settings.ini"]), Vec::new());
+    // Below the game folder: `…\G\bin` is a file, the managed file is `bin\x.cfg`.
+    let sys = layout()
+        .file(format!(r"{VS}\Program Files (x86)\G\bin"), b"x".to_vec())
+        .build()
+        .unwrap();
+    assert_eq!(check(&sys, PF86_GAME, &[r"bin\x.cfg"]), Vec::new());
 }
 
 #[test]

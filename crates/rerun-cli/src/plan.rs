@@ -16,7 +16,7 @@ use rerun_core::detect::steam::{self, AppState};
 use rerun_core::plan::{self, PlanBytes, Preview};
 use rerun_core::policy::registry::RegPolicy;
 use rerun_core::policy::root::{
-    AppDir, Create, ForbiddenRoots, GameDir, read_input, shadows_stored,
+    AppDir, Create, ForbiddenRoots, GameDir, Shadow, preview_with_shadows, read_input,
 };
 use rerun_core::prim::{self, GameRef, MAX_STEP_FILE, PlanCtx, StepFile};
 use rerun_core::sys::System;
@@ -61,7 +61,7 @@ fn run<W: Write, E: Write>(
     // P3-3c: the path of Rerun's folder without creating it (a launch profile names its
     // profiles root by path); unknown only fails a `launch_method` step.
     let app_path = AppDir::path_of(sys).ok();
-    let (bytes, view) = with_game(sys, &fr, &sf.game, err, |game, steam_app| {
+    let (bytes, view, shadows) = with_game(sys, &fr, &sf.game, err, |game, steam_app| {
         let ctx = PlanCtx {
             game,
             app: app.as_ref(),
@@ -72,8 +72,9 @@ fn run<W: Write, E: Write>(
         };
         let p = prim::plan(&sf.steps, &ctx)?;
         let b = p.encode()?;
-        let v = plan::preview_stored(&b)?;
-        Ok::<(PlanBytes, Preview), plan::PlanError>((b, v))
+        // P3-7: the VirtualStore lookup (read only) from the same decode as the preview.
+        let (v, sh) = preview_with_shadows(sys, &b)?;
+        Ok::<(PlanBytes, Preview, Vec<Shadow>), plan::PlanError>((b, v, sh))
     })?
     .map_err(|e| fail(err, TxnMsg::PlanFailed { error: shown(&e) }, Exit::Refused))?;
     if view.ops.is_empty() {
@@ -85,9 +86,7 @@ fn run<W: Write, E: Write>(
     // P3-3d: the launch profile's selection here, hints and the launch option (not stored).
     let lv = preview::launch_view(sys, &host.install, &view);
     let mut lines = preview::render(&view);
-    // P3-7: a VirtualStore copy of a managed file (read only; the decode cannot fail here, the
-    // preview above decoded the same bytes).
-    let shadows = shadows_stored(sys, &bytes).unwrap_or_default();
+    // P3-7: a VirtualStore copy of a managed file (looked up with the preview above).
     lines.extend(preview::shadow_lines(&shadows));
     if let Some(lv) = &lv {
         lines.extend(preview::launch_lines(&view, lv));

@@ -13,7 +13,7 @@ use std::io::Write;
 use rerun_core::exec::{self, ApplyError, ExecCtx, ExecError, Outcome};
 use rerun_core::journal::InstanceTag;
 use rerun_core::plan::{self, PlanHash};
-use rerun_core::policy::root::shadows_stored;
+use rerun_core::policy::root::preview_with_shadows;
 
 use crate::cli::Exit;
 use crate::host::{
@@ -55,12 +55,11 @@ fn run<W: Write, E: Write>(
         fail(err, TxnMsg::Error { error: shown(&e) }, Exit::Refused)
     };
     let bytes = plan::load(&app, hash).map_err(|e| refused(err, &e))?;
-    let view = plan::preview_stored(&bytes).map_err(|e| refused(err, &e))?;
+    // P3-7: the VirtualStore lookup (read only) from the same decode as the preview.
+    let (view, shadows) = preview_with_shadows(sys, &bytes).map_err(|e| refused(err, &e))?;
     let ops = view.ops.len();
     let mut lines = vec![Message::Txn(TxnMsg::PlanHead { hash: *hash, ops })];
     lines.extend(preview::render(&view));
-    // P3-7: a VirtualStore copy of a managed file (read only; decoded above already).
-    let shadows = shadows_stored(sys, &bytes).unwrap_or_default();
     lines.extend(preview::shadow_lines(&shadows));
     // P3-3d: the launch profile's selection here, hints and the launch option.
     let lv = preview::launch_view(sys, &host.install, &view);

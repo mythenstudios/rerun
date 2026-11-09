@@ -1571,7 +1571,7 @@ fn t7_nested_roots_overlap() {
 /// name the copy; the game folder at [`GAME`] (outside the three folders) has none.
 #[test]
 fn p3_7_virtual_store_copy_in_preview_and_verify() {
-    use crate::policy::root::{Shadow, shadows_stored};
+    use crate::policy::root::{Shadow, preview_with_shadows};
     const PF: &str = r"C:\Program Files (x86)\G";
     const COPY: &str = r"C:\Users\Player\AppData\Local\VirtualStore\Program Files (x86)\G\new.dll";
     let env = Env::new(finish(
@@ -1591,7 +1591,11 @@ fn p3_7_virtual_store_copy_in_preview_and_verify() {
     }];
     let app = app(&env.sys);
     let bytes = crate::plan::load(&app, &h).unwrap();
-    assert_eq!(shadows_stored(&env.sys, &bytes).unwrap(), want, "preview");
+    assert_eq!(
+        preview_with_shadows(&env.sys, &bytes).unwrap().1,
+        want,
+        "preview"
+    );
     let t = env.applied(&h);
     assert_eq!(env.verified(&t).unwrap().virtual_store, want, "verify");
     assert!(closed(&env.revert(&t)).is_some());

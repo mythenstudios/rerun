@@ -510,6 +510,13 @@ fn virtual_store_lines() {
         Shadow::Unchecked {
             root: 0,
             why: escape::text("LocalAppData is unknown: not found").into_owned(),
+            at: None,
+        },
+        Shadow::Unchecked {
+            root: 2,
+            why: escape::text("LocalAppData: invalid path: invisible or confusable character")
+                .into_owned(),
+            at: Some(escape::path("C:\\L\u{202e}x").into_owned()),
         },
     ];
     let lines = super::shadow_lines(&shadows);
@@ -520,6 +527,7 @@ fn virtual_store_lines() {
         ),
         r#"note: root 1: a link (junction or symbolic link) lies on the way to a VirtualStore copy; it is not followed, nothing behind it was checked: "C:\\VS\\G\u{202e}x""#.to_owned(),
         "note: root 0: VirtualStore copies of the managed files were not checked: LocalAppData is unknown: not found".to_owned(),
+        r#"note: root 2: VirtualStore copies of the managed files were not checked: LocalAppData: invalid path: invisible or confusable character: "C:\\L\u{202e}x""#.to_owned(),
     ];
     assert_eq!(text.lines().collect::<Vec<_>>(), want);
     assert!(!text.contains('\u{202e}'));

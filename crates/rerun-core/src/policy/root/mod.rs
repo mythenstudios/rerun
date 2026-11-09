@@ -42,7 +42,7 @@ pub(crate) use app::AppSub;
 pub use app::{AppDir, Create, ProfilesDir};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
 pub use input::{file_present, read_input};
-pub use vstore::{Shadow, VIRTUAL_STORE, check_root, shadows, shadows_stored};
+pub use vstore::{Shadow, VIRTUAL_STORE, check_root, preview_with_shadows, shadows};
 
 use crate::path::{Anomaly, PathError, RelPath, RootPath, classify};
 use crate::sys::fs::RootInfo;
