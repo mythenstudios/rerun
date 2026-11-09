@@ -11,7 +11,7 @@ Rerun detects your installed PC games and applies the compatibility fixes they n
 - Fixes only apply when they match your GPU, CPU and Windows build.
 - Only original, verified sources. Pinned versions, checked hashes.
 
-**Status:** concept, not usable yet. See `docs/08-roadmap.md`.
+**Status:** early development, not ready for use. Detection, the reversible primitives with their journal, and launching with CPU rules work as a command-line tool (phases 1–3); topos and packages (phase 4) and the app (phase 5) are next. See [`docs/08-roadmap.md`](docs/08-roadmap.md).
 
 Rerun by Mythen Studios.
 
