@@ -133,6 +133,16 @@ fn banned_windows_sys_items_resolve() {
     let _ = windows_sys::Win32::UI::Shell::ShellExecuteExW;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: QueryFullProcessImageNameW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: QueryFullProcessImageNameA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::QueryFullProcessImageNameA;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: GetSystemCpuSetInformation must be banned"
     )]
     let _ = windows_sys::Win32::System::SystemInformation::GetSystemCpuSetInformation;

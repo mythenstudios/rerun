@@ -99,8 +99,8 @@ use crate::fold::fold;
 use crate::path::RelPath;
 use crate::sys::contract::{Access, Share, share_conflict};
 use crate::sys::fs::{
-    Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, FileLock, Fs, FsKind, Metadata, NewFile,
-    ReadSeek, ReparseInfo, RootInfo, WriteCap, Written, tag,
+    AceFact, Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, FileLock, Fs, FsKind, Metadata,
+    NewFile, ReadSeek, ReparseInfo, RootInfo, SdFacts, VolumeGuid, WriteCap, Written, ace, tag,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult, seq};
 
@@ -136,6 +136,10 @@ pub enum FsOp {
     Write,
     /// `Dir::info` (only as a fault unit, [`Prim::ReadSide`]; no walk, no hook).
     Info,
+    /// `Fs::open_by_id` (only as a fault unit, [`Prim::ReadSide`]; no walk, no hook).
+    OpenById,
+    /// `Dir::sd_facts`.
+    SdFacts,
     /// `Fs::open_dir` and `Fs::open_dir_write`: a hook only (`name` is the absolute path as
     /// given), fired once before the path is resolved; the fault unit stays
     /// `Prim::ReadSide(FsOp::OpenDir)`.
@@ -322,6 +326,9 @@ struct State {
     hub: Arc<FaultHub>,
     /// Per-volume logs of Rerun's metadata changes (power-loss model, `fs/durable.rs`).
     logs: BTreeMap<char, VolLog>,
+    /// Security descriptors set by [`FakeFs::set_sd`], by directory or link node and by inode
+    /// (shared by hard links); anything else has [`default_sd`].
+    sds: BTreeMap<NodeId, FakeSd>,
 }
 
 fn err(kind: SysErrorKind, target: &str) -> SysError {
@@ -335,6 +342,68 @@ fn volume_serial(drive: char) -> u64 {
 /// Serial of a volume mounted in a folder: its own, distinct from every drive serial.
 fn mounted_serial(root: NodeId) -> u64 {
     0x5EED_0001_0000_0000 + root
+}
+
+/// The fake volume GUID of the volume with `serial`: one per serial, so drives and volumes
+/// mounted in a folder each have their own.
+fn volume_guid(serial: u64) -> VolumeGuid {
+    VolumeGuid::from_u128((0x5EED_u128 << 112) | u128::from(serial))
+}
+
+/// Owner and DACL of one fake object ([`FakeFs::set_sd`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeSd {
+    /// Owner SID, `None` = the descriptor has no owner.
+    pub owner: Option<String>,
+    /// The DACL; `None` = a NULL DACL.
+    pub dacl: Option<Vec<AceFact>>,
+}
+
+/// The SID the fake's current user has in a security descriptor.
+pub const FAKE_USER_SID: &str = "S-1-5-21-1000-2000-3000-1001";
+/// `FILE_ALL_ACCESS`.
+const FULL: u32 = 0x001F_01FF;
+
+impl FakeSd {
+    /// An allow ACE for `sid` with `mask`, applying to the object itself.
+    pub fn allow(sid: &str, mask: u32) -> AceFact {
+        AceFact {
+            ace_type: ace::ALLOWED,
+            flags: 0,
+            mask,
+            sid: Some(sid.to_owned()),
+        }
+    }
+
+    /// Owner Administrators; full control for Administrators, SYSTEM and TrustedInstaller,
+    /// read and execute for Users: what an administrator's copy below `Program Files` gets.
+    pub fn admin_only() -> Self {
+        Self {
+            owner: Some("S-1-5-32-544".to_owned()),
+            dacl: Some(vec![
+                Self::allow("S-1-5-32-544", FULL),
+                Self::allow("S-1-5-18", FULL),
+                Self::allow(
+                    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+                    FULL,
+                ),
+                Self::allow("S-1-5-32-545", 0x0012_00A9),
+            ]),
+        }
+    }
+}
+
+/// The descriptor of every fake object nobody set one for: owned by the current user, who
+/// has full control (like anything a user creates in a folder of their own).
+fn default_sd() -> FakeSd {
+    FakeSd {
+        owner: Some(FAKE_USER_SID.to_owned()),
+        dacl: Some(vec![
+            FakeSd::allow(FAKE_USER_SID, FULL),
+            FakeSd::allow("S-1-5-32-544", FULL),
+            FakeSd::allow("S-1-5-18", FULL),
+        ]),
+    }
 }
 
 /// Parses `X:\a\b` or `\\?\X:\a\b` (also with `/`) into drive and segments.
@@ -907,6 +976,7 @@ impl State {
         } else {
             mounted_serial(vol)
         };
+        let modern = matches!(fs_kind, FsKind::Ntfs | FsKind::Refs);
         Ok(RootInfo {
             final_path: self.final_path(node, target)?,
             volume_serial: serial,
@@ -915,7 +985,56 @@ impl State {
             case_sensitive: d.case_sensitive,
             volume_path: vol_segs.join("\\"),
             fs_kind,
-            supports_posix_rename: matches!(fs_kind, FsKind::Ntfs | FsKind::Refs),
+            supports_posix_rename: modern,
+            volume_guid: Some(volume_guid(serial)),
+            supports_open_by_id: modern,
+            persistent_acls: modern,
+        })
+    }
+
+    /// Drive, file system and volume serial of the volume that holds `node`.
+    fn volume_facts(&self, node: NodeId, target: &str) -> SysResult<(FsKind, u64)> {
+        let (drive, _) = self.path_of(node, target)?;
+        let fs_kind = self.fs_kinds.get(&drive).copied().unwrap_or(FsKind::Ntfs);
+        let (vol, _) = self.volume_of(node, target)?;
+        let serial = if self.drives.get(&drive) == Some(&vol) {
+            volume_serial(drive)
+        } else {
+            mounted_serial(vol)
+        };
+        Ok((fs_kind, serial))
+    }
+
+    /// The node or inode whose descriptor describes `id` (hard links share their inode's).
+    fn sd_key(&self, id: NodeId) -> NodeId {
+        match self.nodes.get(&id).map(|n| &n.body) {
+            Some(Body::File(ino)) => *ino,
+            _ => id,
+        }
+    }
+
+    /// [`Dir::sd_facts`] of the entry `id` (not restricted, not pending: the caller checks).
+    fn sd_facts_of(&self, id: NodeId, target: &str) -> SysResult<SdFacts> {
+        let (fs_kind, serial) = self.volume_facts(id, target)?;
+        let (_, below) = self.volume_of(id, target)?;
+        let nt_name = format!(r"\Device\FakeVolume{serial:016x}\{}", below.join("\\"));
+        let kind = self.rel_kind(id);
+        let links = match &self.node(id, target)?.body {
+            Body::File(ino) if kind == EntryKind::File => self.inode(*ino, target)?.links,
+            _ => 1,
+        };
+        let sd = self
+            .sds
+            .get(&self.sd_key(id))
+            .cloned()
+            .unwrap_or_else(default_sd);
+        Ok(SdFacts {
+            kind,
+            links,
+            owner: sd.owner,
+            dacl: sd.dacl,
+            persistent_acls: matches!(fs_kind, FsKind::Ntfs | FsKind::Refs),
+            nt_name: Some(nt_name),
         })
     }
 
@@ -1617,6 +1736,16 @@ impl FakeFs {
         Ok(())
     }
 
+    /// Sets owner and DACL of an existing entry (for a file: of its inode, shared by its hard
+    /// links). Reported by [`Dir::sd_facts`] only, never enforced (like `user_writable`).
+    pub fn set_sd(&self, abs: &Path, sd: FakeSd) -> SysResult<()> {
+        let mut st = self.lock();
+        let id = st.require_abs(abs)?;
+        let key = st.sd_key(id);
+        st.sds.insert(key, sd);
+        Ok(())
+    }
+
     /// Marks an existing directory as the root of a volume mounted in a folder. It gets its
     /// own volume serial; the file system stays that of the drive.
     pub fn set_volume_root(&self, abs: &Path) -> SysResult<()> {
@@ -1905,6 +2034,56 @@ impl Fs for FakeFs {
     fn open_dir_write(&self, abs: &Path, _: &WriteCap) -> SysResult<Box<dyn DirWrite + '_>> {
         Ok(Box::new(self.open_abs(abs)?))
     }
+
+    /// The node whose ID is `file_id`, if it lies on the volume `volume`: a directory is
+    /// opened, a mount point or a tagged directory is `ReparsePoint`, a file (an inode ID)
+    /// `InvalidPath`, anything else `NotFound`; FAT and exFAT are `Unsupported`.
+    fn open_by_id(&self, volume: &VolumeGuid, file_id: u128) -> SysResult<Box<dyn Dir + '_>> {
+        let shown = format!("{volume} id {file_id:#x}");
+        self.lock().enter_read(FsOp::OpenById)?;
+        let node = {
+            let st = self.lock();
+            let missing = || err(SysErrorKind::NotFound, &shown);
+            let id = NodeId::try_from(file_id).map_err(|_| missing())?;
+            let on_volume = |n: NodeId| {
+                st.volume_facts(n, &shown)
+                    .is_ok_and(|(_, serial)| volume_guid(serial) == *volume)
+            };
+            if st.inodes.contains_key(&id) {
+                // A file: its ID is its inode's. On the volume of any of its entries.
+                let entry = st
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| matches!(n.body, Body::File(ino) if ino == id))
+                    .map(|(k, _)| *k);
+                return Err(match entry {
+                    Some(e) if on_volume(e) => err(SysErrorKind::InvalidPath, &shown),
+                    _ => missing(),
+                });
+            }
+            let Some(n) = st.nodes.get(&id) else {
+                return Err(missing());
+            };
+            if !on_volume(id) {
+                return Err(missing());
+            }
+            let (fs_kind, _) = st.volume_facts(id, &shown)?;
+            if !matches!(fs_kind, FsKind::Ntfs | FsKind::Refs) {
+                return Err(err(SysErrorKind::Unsupported, &shown));
+            }
+            match &n.body {
+                Body::File(_) => return Err(missing()),
+                Body::Link(_) => return Err(err(SysErrorKind::ReparsePoint, &shown)),
+                Body::Dir(d) if !d.plain() => {
+                    return Err(err(SysErrorKind::ReparsePoint, &shown));
+                }
+                Body::Dir(_) => {}
+            }
+            st.openable(id, &shown)?;
+            id
+        };
+        Ok(Box::new(self.dir_handle(node, &shown)?))
+    }
 }
 
 /// Handle to a directory of a [`FakeFs`]: a node ID, valid across renames.
@@ -2095,6 +2274,22 @@ impl Dir for FakeDir {
             (EntryKind::File | EntryKind::Reparse, _) => Err(err(SysErrorKind::ReparsePoint, t)),
             (EntryKind::Dir, _) => Err(err(SysErrorKind::AccessDenied, t)),
         }
+    }
+
+    fn sd_facts(&self, p: Option<&RelPath>) -> SysResult<SdFacts> {
+        self.check(FsOp::SdFacts)?;
+        let Some(p) = p else {
+            let t = self.handle_target();
+            let st = self.fs.lock();
+            st.dir(self.node, &t)?;
+            return st.sd_facts_of(self.node, &t);
+        };
+        let t = p.as_str();
+        let (parent, name) = self.split(FsOp::SdFacts, p)?;
+        let st = self.fs.lock();
+        let id = Self::require(&st, parent, name, t)?;
+        st.openable(id, t)?;
+        st.sd_facts_of(id, t)
     }
 }
 

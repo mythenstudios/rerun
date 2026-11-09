@@ -991,6 +991,9 @@ mod tests {
                 volume_path: "G".to_owned(),
                 fs_kind: crate::sys::fs::FsKind::Ntfs,
                 supports_posix_rename: true,
+                volume_guid: None,
+                supports_open_by_id: true,
+                persistent_acls: true,
             })
         }
         fn open_dir(&self, _: &RelPath) -> SysResult<Box<dyn Dir + '_>> {

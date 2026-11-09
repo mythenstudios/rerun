@@ -72,7 +72,9 @@ pub const LAUNCH_IMPORTS: &[&str] = &[
 /// (ADR 0016); also the list of `crates/rerun-core/tests/win_gpu_restricted.rs`, the test binary
 /// that links every part of `WinSystem`. Found on 2026-11-05. `bcryptprimitives.dll` and
 /// `userenv.dll` come from `std`, `advapi32.dll`, `combase.dll` and `shell32.dll` from
-/// `windows-sys`. A new import fails the tests: review it, then extend this list and ADR 0008
+/// `windows-sys`. P4-2b (ADR 0023 §2, A4 N3): `ole32.dll` for `CoInitializeEx`/`CoUninitialize`
+/// around the helper's `ShellExecuteExW` (`sys::win::elevation`), a KnownDLL like in
+/// [`LAUNCH_IMPORTS`]. A new import fails the tests: review it, then extend this list and ADR 0008
 /// (amendment "import allowlist per binary").
 pub const CLI_IMPORTS: &[&str] = &[
     "kernel32.dll",
@@ -83,6 +85,7 @@ pub const CLI_IMPORTS: &[&str] = &[
     "shell32.dll",
     "bcryptprimitives.dll",
     "userenv.dll",
+    "ole32.dll",
 ];
 
 /// The static imports `rerun-helper.exe` may have (ADR 0023 §13, docs/08 "Acceptance
@@ -418,9 +421,11 @@ fn each_binary_has_its_own_allowlist() {
         let e = check(&["kernel32.dll", dll], LAUNCH_IMPORTS).unwrap_err();
         assert!(e.contains("not in the allowlist"), "{e}");
     }
-    // The shim's own import (COM around ShellExecuteExW, B2) fails the CLI's list.
+    // COM around ShellExecuteExW: the shim (B2) and, since P4-2b, the CLI (the helper start,
+    // ADR 0023 N3) both import ole32.dll; the helper scaffold does not.
     check(&["kernel32.dll", "ole32.dll"], LAUNCH_IMPORTS).unwrap();
-    let e = check(&["kernel32.dll", "ole32.dll"], CLI_IMPORTS).unwrap_err();
+    check(&["kernel32.dll", "ole32.dll"], CLI_IMPORTS).unwrap();
+    let e = check(&["kernel32.dll", "ole32.dll"], HELPER_IMPORTS).unwrap_err();
     assert!(e.contains("not in the allowlist"), "{e}");
     // An import outside both lists fails both, a forbidden one fails both.
     for allowed in [LAUNCH_IMPORTS, CLI_IMPORTS] {
@@ -429,9 +434,8 @@ fn each_binary_has_its_own_allowlist() {
         let e = check(&["kernel32.dll", "dxgi.dll"], allowed).unwrap_err();
         assert!(e.contains("forbidden static import dxgi.dll"), "{e}");
     }
-    // The shim's list is part of the CLI's apart from ole32.dll; no list holds a forbidden
-    // name.
-    for dll in LAUNCH_IMPORTS.iter().filter(|d| **d != "ole32.dll") {
+    // The shim's list is part of the CLI's; no list holds a forbidden name.
+    for dll in LAUNCH_IMPORTS {
         assert!(CLI_IMPORTS.contains(dll), "{dll}");
     }
     for dll in LAUNCH_IMPORTS.iter().chain(CLI_IMPORTS) {

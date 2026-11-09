@@ -26,11 +26,11 @@ use crate::policy::root::{
     Forbidden, ForbiddenRoots, GameDir, Protected, RootError, RootId, StoreDir,
 };
 use crate::sys::contract::{
-    FsContractResult, FsFixture, RACE_LEAK, RegFixture, WriteOp, fs_link_read_contract,
-    fs_link_write_contract, fs_race_contract, fs_read_contract, fs_volume_contract,
-    fs_write_contract, fs_write_race_contract, gpu_contract, known_folders_contract,
-    registry_read_contract, registry_system_contract, registry_write_contract, snapshot_contract,
-    topology_contract,
+    FsContractResult, FsFixture, RACE_LEAK, RegFixture, WriteOp, fs_identity_contract,
+    fs_link_read_contract, fs_link_write_contract, fs_race_contract, fs_read_contract,
+    fs_volume_contract, fs_write_contract, fs_write_race_contract, gpu_contract,
+    known_folders_contract, registry_read_contract, registry_system_contract,
+    registry_write_contract, snapshot_contract, topology_contract,
 };
 use crate::sys::fs::{EntryKind, Fs, WriteCap};
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry, RegistryWrite, reg_type};
@@ -38,6 +38,7 @@ use crate::sys::snapshot::SnapRoot;
 use crate::sys::{Gpu, KnownFolder, KnownFolders, SysErrorKind, System, Topology};
 
 mod app;
+mod elevation;
 mod exec;
 mod sandbox;
 
@@ -363,6 +364,18 @@ fn win_fulfils_fs_link_read_contract() {
     report(
         "fs_link_read_contract",
         fs_link_read_contract(&WinFs::new(), root.fx(), &work),
+    );
+}
+
+#[test]
+fn win_fulfils_fs_identity_contract() {
+    let Some(root) = TestRoot::new("identity") else {
+        return;
+    };
+    let work = root.work("w");
+    report(
+        "fs_identity_contract",
+        fs_identity_contract(&WinFs::new(), root.fx(), &work),
     );
 }
 

@@ -92,7 +92,7 @@ use windows_sys::Win32::System::Memory::{
 use windows_sys::Win32::System::Registry::{
     HKEY, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_QUERY_VALUE, KEY_READ,
     KEY_SET_VALUE, REG_BINARY, REG_CREATED_NEW_KEY, REG_LINK, REG_OPTION_CREATE_LINK,
-    REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE, REG_PROCESS_APPKEY, RegCreateKeyExW,
+    REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE, REG_PROCESS_APPKEY, REG_SZ, RegCreateKeyExW,
     RegDeleteValueW, RegLoadAppKeyW, RegOpenCurrentUser, RegOpenKeyExW, RegRenameKey,
 };
 use windows_sys::Win32::System::Threading::{
@@ -1764,6 +1764,53 @@ impl AppHive {
         Self::set_raw(&key, "SymbolicLinkValue", REG_LINK, &data, &what)
     }
 
+    /// A class key `base` in this hive with `shell\<verb>\command` = `command` (the default
+    /// value, with `isolated` also `IsolatedCommand`; `REG_SZ`), `base` returned opened
+    /// read-only: the `hkeyClass` of the elevation tests, which measure that
+    /// `SEE_MASK_CLASSKEY` takes the verb from the given key, and the `HKCU` redirection of the
+    /// [SB] probe (ADR 0023 §7, A4 S2).
+    pub(super) fn class_key(
+        &self,
+        base: &str,
+        verb: &str,
+        command: &str,
+        isolated: bool,
+    ) -> SysResult<OwnedKey> {
+        let cmd = self.create(
+            &format!(r"{base}\shell\{verb}\command"),
+            KEY_SET_VALUE,
+            false,
+        )?;
+        let data: Vec<u8> = command
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        Self::set_raw(&cmd, "", REG_SZ, &data, "class key command")?;
+        if isolated {
+            Self::set_raw(&cmd, "IsolatedCommand", REG_SZ, &data, "class key command")?;
+        }
+        self.create(base, KEY_READ, false)
+    }
+
+    /// `HKEY_CLASSES_ROOT\<sub>`, read only: the merged view (the user's classes over the
+    /// machine's) that a start without `SEE_MASK_CLASSKEY` consults, for the [SB] probe of
+    /// ADR 0023 §7 (A4 S2).
+    pub(super) fn classes_root(sub: &str) -> SysResult<OwnedKey> {
+        use windows_sys::Win32::System::Registry::HKEY_CLASSES_ROOT;
+        let w = wide(sub);
+        let mut raw: HKEY = ptr::null_mut();
+        // SAFETY: HKEY_CLASSES_ROOT is a predefined key; `w` is NUL-terminated and outlives
+        // the call; `raw` is valid for a write and on success a new key handle owned below.
+        let rc = unsafe { RegOpenKeyExW(HKEY_CLASSES_ROOT, w.as_ptr(), 0, KEY_READ, &mut raw) };
+        if rc != 0 || raw.is_null() {
+            return Err(win32_err(rc, &format!(r"HKCR\{sub}")));
+        }
+        // SAFETY: `raw` was just returned by a successful RegOpenKeyExW; nothing else owns or
+        // closes it.
+        Ok(unsafe { OwnedKey::from_raw(raw) })
+    }
+
     /// A [`WinRegistry`] whose hives are this hive's keys `HKCU` and `HKLM` (read handles).
     pub(super) fn registry(&self) -> SysResult<WinRegistry> {
         if self.real {
@@ -2552,6 +2599,9 @@ impl Dir for NaiveDir {
             volume_path: String::new(),
             fs_kind: FsKind::Ntfs,
             supports_posix_rename: true,
+            volume_guid: None,
+            supports_open_by_id: false,
+            persistent_acls: true,
         })
     }
 

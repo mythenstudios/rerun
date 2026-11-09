@@ -138,6 +138,11 @@ fn created(process: BorrowedHandle<'_>) -> Result<u64, u32> {
 fn image(process: BorrowedHandle<'_>) -> Result<Vec<u16>, u32> {
     let mut buf = vec![0u16; IMAGE_UNITS];
     let mut size = u32::try_from(IMAGE_UNITS).unwrap_or(0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "rerun-launch's one QueryFullProcessImageNameW call site: the watch target's \
+                  image (ADR 0022 amendment P3-4)"
+    )]
     // SAFETY: `process` is a live process handle with PROCESS_QUERY_LIMITED_INFORMATION, kept
     // alive by the borrow; `buf` is a writable buffer of `size` units; `size` is valid for a
     // read and a write.

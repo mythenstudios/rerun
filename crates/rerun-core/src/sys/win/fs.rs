@@ -34,6 +34,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use super::name::{self, DirLayout, Listed, Seg16};
 use super::nt::{self, Access, RelOpen};
 use super::reparse;
+use super::sd;
 use super::status::{
     NtStatus, STATUS_DELETE_PENDING, STATUS_UNSUCCESSFUL, is_unsupported_class, nt_error,
     win32_error, win32_info_error,
@@ -43,7 +44,7 @@ use crate::fold::fold;
 use crate::path::RelPath;
 use crate::sys::fs::{
     Attrs, Dir, DirEntry, DirWrite, EntryKind, FileGuard, FileLock, Fs, FsKind, Metadata, NewFile,
-    ReadSeek, ReparseInfo, RootInfo, WriteCap, Written, tag,
+    ReadSeek, ReparseInfo, RootInfo, SdFacts, VolumeGuid, WriteCap, Written, tag,
 };
 use crate::sys::seq;
 use crate::sys::{SysError, SysErrorKind, SysResult};
@@ -55,6 +56,10 @@ const HANDLE_TARGET: &str = "<dir handle>";
 
 /// winnt.h `FILE_SUPPORTS_POSIX_UNLINK_RENAME`.
 const FILE_SUPPORTS_POSIX_UNLINK_RENAME: u32 = 0x0000_0400;
+/// winnt.h `FILE_SUPPORTS_OPEN_BY_FILE_ID`.
+const FILE_SUPPORTS_OPEN_BY_FILE_ID: u32 = 0x0100_0000;
+/// winnt.h `FILE_PERSISTENT_ACLS`.
+const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
 /// ntifs.h `FILE_CS_FLAG_CASE_SENSITIVE_DIR`.
 const FILE_CS_FLAG_CASE_SENSITIVE_DIR: u32 = 0x0000_0001;
 
@@ -391,6 +396,36 @@ impl Fs for WinFs {
     fn open_dir_write(&self, abs: &Path, _: &WriteCap) -> SysResult<Box<dyn DirWrite + '_>> {
         Ok(Box::new(Self::open_abs(abs)?))
     }
+
+    /// The volume's root directory by `\GLOBAL??\Volume{…}\` (the global namespace: a
+    /// `Volume{…}` link a user defines in its own session's device map is never consulted),
+    /// `FILE_SUPPORTS_OPEN_BY_FILE_ID` required, then `nt::open_by_file_id` relative to it.
+    /// The opened object must be a directory without a non-allowlisted tag whose volume serial
+    /// and file ID on its own handle are the volume root's serial and `file_id`.
+    fn open_by_id(&self, volume: &VolumeGuid, id: u128) -> SysResult<Box<dyn Dir + '_>> {
+        let shown = format!("{volume} id {id:#x}");
+        let nt_path: Vec<u16> = format!(r"\GLOBAL??\Volume{volume}\")
+            .encode_utf16()
+            .collect();
+        let vol = nt::open_absolute_dir(&nt_path).map_err(|s| nt_error(s, &shown))?;
+        let (_, flags) =
+            nt::volume_info(vol.as_handle()).map_err(|c| win32_info_error(c, &shown))?;
+        if flags & FILE_SUPPORTS_OPEN_BY_FILE_ID == 0 {
+            return Err(err(SysErrorKind::Unsupported, &shown));
+        }
+        let (serial, _) = file_id(vol.as_handle(), &shown)?;
+        let handle = nt::open_by_file_id(vol.as_handle(), id).map_err(|s| nt_error(s, &shown))?;
+        let t = tag_info(handle.as_handle(), &shown)?;
+        match t.kind() {
+            EntryKind::Dir => {}
+            EntryKind::Reparse => return Err(err(SysErrorKind::ReparsePoint, &shown)),
+            EntryKind::File => return Err(err(SysErrorKind::InvalidPath, &shown)),
+        }
+        if file_id(handle.as_handle(), &shown)? != (serial, id) {
+            return Err(err(SysErrorKind::NotFound, &shown));
+        }
+        Ok(Box::new(WinDir::new(handle)))
+    }
 }
 
 impl WinFs {
@@ -622,6 +657,11 @@ impl Dir for WinDir {
             volume_path,
             fs_kind: fs_kind(&String::from_utf16_lossy(&fs_name)),
             supports_posix_rename: flags & FILE_SUPPORTS_POSIX_UNLINK_RENAME != 0,
+            volume_guid: nt::final_path_guid(h)
+                .ok()
+                .and_then(|w| VolumeGuid::from_volume_path(&String::from_utf16_lossy(&w))),
+            supports_open_by_id: flags & FILE_SUPPORTS_OPEN_BY_FILE_ID != 0,
+            persistent_acls: flags & FILE_PERSISTENT_ACLS != 0,
         })
     }
 
@@ -757,6 +797,44 @@ impl Dir for WinDir {
             EntryKind::Reparse => Err(err(SysErrorKind::ReparsePoint, t)),
         }
     }
+
+    fn sd_facts(&self, p: Option<&RelPath>) -> SysResult<SdFacts> {
+        self.ensure_live()?;
+        let Some(p) = p else {
+            return sd_facts_of(self.h(), EntryKind::Dir, 1, HANDLE_TARGET);
+        };
+        let t = p.as_str();
+        let (parent, last) = self.split(p)?;
+        let parent = parent.as_ref().map_or(self.h(), AsHandle::as_handle);
+        let s = seg16(last, t)?;
+        // `READ_CONTROL` and attributes, relative, never following a reparse point.
+        let o = open_entry(parent, &s, Access::Security, t)?;
+        let kind = o.tag.kind();
+        let links = if kind == EntryKind::File {
+            standard(o.handle.as_handle(), t)?.links
+        } else {
+            1
+        };
+        sd_facts_of(o.handle.as_handle(), kind, links, t)
+    }
+}
+
+/// [`Dir::sd_facts`] on a handle with `READ_CONTROL`: owner and DACL parsed by `sd`,
+/// `FILE_PERSISTENT_ACLS` of its volume.
+fn sd_facts_of(h: BorrowedHandle<'_>, kind: EntryKind, links: u32, t: &str) -> SysResult<SdFacts> {
+    let bytes = token::owner_and_dacl(h).map_err(|c| win32_error(c, t))?;
+    let (owner, dacl) = sd::parse(&bytes).ok_or_else(|| err(SysErrorKind::Other, t))?;
+    let (_, flags) = nt::volume_info(h).map_err(|c| win32_info_error(c, t))?;
+    Ok(SdFacts {
+        kind,
+        links,
+        owner,
+        dacl,
+        persistent_acls: flags & FILE_PERSISTENT_ACLS != 0,
+        nt_name: nt::final_path_nt(h)
+            .ok()
+            .and_then(|w| String::from_utf16(&w).ok()),
+    })
 }
 
 impl DirWrite for WinDir {

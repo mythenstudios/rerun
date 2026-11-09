@@ -11,8 +11,9 @@
 //! the real [`System`](crate::sys::System).
 //!
 //! Modules:
-//! - `nt`: the only NT/Win32 file calls (`NtCreateFile` through exactly two calls, the
-//!   absolute directory open and the relative one behind `open_relative` and
+//! - `nt`: the only NT/Win32 file calls (`NtCreateFile` through exactly three calls, the
+//!   absolute directory open, the open by file ID (`open_by_file_id`, ADR 0023) and the
+//!   relative one behind `open_relative` and
 //!   `open_self_for_flush`,
 //!   `NtQueryInformationFile`, `NtQueryDirectoryFile`, `NtSetInformationFile` through one
 //!   wrapper with three classes, `NtFlushBuffersFileEx`, `GetFinalPathNameByHandleW`,
@@ -45,6 +46,11 @@
 //!   per enumeration, at most 64 adapters.
 //! - `gpu`: `WinGpu`, name/LUID/driver-version mapping and error mapping; no `unsafe`.
 //! - `system`: `WinSystem`; no `unsafe`.
+//! - `elevation`: `WinElevation` (ADR 0023 §2, §7): the only `ShellExecuteExW`, `CoInitializeEx`
+//!   and `QueryFullProcessImageNameW` of `rerun-core`: the helper start with the `HKLM` `exefile`
+//!   class key and the reads on the started process; `unsafe`.
+//! - `sd`: the pure parser of a self-relative security descriptor (owner, DACL; ADR 0007
+//!   amendment P4-2b); no `unsafe`.
 //! - `helper`: `WinHelperToken`, the elevated helper's own token (ADR 0023); no `unsafe`; never
 //!   references `WinSystem`, `WinGpu`, `dxgi` or `loader`'s DLL loading.
 //! - `status`: `NTSTATUS`/Win32 code → `SysErrorKind`, for files and the registry (pure).
@@ -58,7 +64,7 @@
 //! - `registry`: `WinRegistry`, input rules, limits, retries and enumeration restarts, and the
 //!   write primitives of `sys::seq::reg` (`WinKey`, ADR 0018); no `unsafe`.
 //!
-//! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu`, `loader` and `dxgi`. Path-based Win32 file APIs
+//! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu`, `loader`, `dxgi` and `elevation`. Path-based Win32 file APIs
 //! (`CreateFileW`, `DeleteFileW`, `MoveFileExW`, `GetFileAttributesW`, …) and every
 //! environment-based path source (`std::env::var`, `GetEnvironmentVariableW`,
 //! `ExpandEnvironmentStringsW`, `SHGetFolderPathW`, `GetWindowsDirectoryW`, …) are banned in
@@ -91,6 +97,7 @@ compile_error!(
 mod console;
 mod cpu;
 mod dxgi;
+mod elevation;
 mod fs;
 mod gpu;
 mod helper;
@@ -101,6 +108,7 @@ mod nt;
 mod reg;
 mod registry;
 mod reparse;
+mod sd;
 mod shell;
 mod status;
 mod system;
@@ -117,6 +125,7 @@ mod testfx;
 mod tests;
 
 pub use console::discard_console_input;
+pub use elevation::WinElevation;
 pub use fs::{WinDir, WinFs};
 pub use gpu::WinGpu;
 pub use helper::WinHelperToken;

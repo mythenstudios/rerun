@@ -16,6 +16,8 @@
 #     Start-Process -Credential died at once on the runner (presumably no desktop for the new logon).
 #  2. elevated pass: `sandbox-run.ps1 -Ci -CliOnly` as the runner's administrator; the only
 #     thing checked is that `plan` refuses (exit 3) and nothing changes (E3).
+#  3. the runas probe of ADR 0023 section 7 (A4 S2), elevated, last: a HKCU exefile runas
+#     redirection is measured with and without the HKLM class key (s2-probe.log, `MEASURED S2`).
 # The wrapper's UAC restart (Sandbox only) is off with -Ci.
 #
 # Layout (the same paths as in the Sandbox, so the scripts need no second variant): C:\sandbox
@@ -253,6 +255,25 @@ if (-not $r2) {
     if (-not $r2.elevated) { Fail 'pass 2 did not run elevated' }
     if (-not $r2.cli -or -not $r2.cli.expected) { Fail 'pass 2: the elevated refusal of plan (exit 3, nothing changed) is not as expected (see cli.log)' }
 }
+EndSection
+
+# ---- pass 3: the runas redirection probe (ADR 0023 section 7, A4 S2) ---------------------------
+# Last, because it leaves HKCU\Software\Classes\exefile\shell\runas\command of runneradmin pointing
+# to cmd.exe (the runner is disposable). Elevated, ConsentPromptBehaviorAdmin = 0: no dialog.
+Section 'pass 3: runas with a HKCU exefile redirection, with and without the HKLM class key'
+$probeTest = 'sys::win::tests::elevation::sb_runas_redirection_and_the_class_key'
+$env:RERUN_SANDBOX = '1'
+$env:RERUN_CI_SANDBOX = '1'
+$previous = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$probe = @(& "$sb\bin\rerun-core-tests.exe" --ignored --exact $probeTest --nocapture --test-threads=1 2>&1 | ForEach-Object { "$_" })
+$probeCode = $LASTEXITCODE
+$ErrorActionPreference = $previous
+Remove-Item Env:RERUN_SANDBOX, Env:RERUN_CI_SANDBOX -ErrorAction SilentlyContinue
+$probe | ForEach-Object { Write-Host $_ }
+$probe | Where-Object { $_ -like 'MEASURED S2*' } | ForEach-Object { Write-Host "::notice::$_" }
+Set-Content -LiteralPath "$sb\out\elevated\s2-probe.log" -Value $probe -Encoding UTF8
+if ($probeCode -ne 0) { Fail 'pass 3: a runas start through the HKLM exefile class key was redirected, or the probe failed (see s2-probe.log)' }
 EndSection
 
 # ---- clean up and verdict ---------------------------------------------------------------------

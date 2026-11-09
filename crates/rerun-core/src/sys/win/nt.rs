@@ -32,11 +32,11 @@ use windows_sys::Wdk::Storage::FileSystem::{
     FILE_BASIC_INFORMATION, FILE_CREATE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_DELETE,
     FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_INFORMATION_EX,
     FILE_DISPOSITION_POSIX_SEMANTICS, FILE_INFORMATION_CLASS, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
-    FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
-    FileBasicInformation, FileDispositionInformationEx, FileFullDirectoryInformation,
-    FileIdExtdDirectoryInformation, FileRenameInformationEx, NTCREATEFILE_CREATE_DISPOSITION,
-    NtCreateFile, NtFlushBuffersFileEx, NtQueryDirectoryFile, NtQueryInformationFile,
-    NtSetInformationFile,
+    FILE_OPEN_BY_FILE_ID, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION,
+    FILE_SYNCHRONOUS_IO_NONALERT, FileBasicInformation, FileDispositionInformationEx,
+    FileFullDirectoryInformation, FileIdExtdDirectoryInformation, FileRenameInformationEx,
+    NTCREATEFILE_CREATE_DISPOSITION, NtCreateFile, NtFlushBuffersFileEx, NtQueryDirectoryFile,
+    NtQueryInformationFile, NtSetInformationFile,
 };
 use windows_sys::Win32::Foundation::{
     HANDLE, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, OBJECT_ATTRIBUTE_FLAGS, UNICODE_STRING,
@@ -46,7 +46,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
     GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
-    READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_DOS,
+    READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_DOS, VOLUME_NAME_GUID, VOLUME_NAME_NT,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
@@ -75,6 +75,9 @@ pub(super) enum Access {
     ///
     /// [`Dir`]: crate::sys::Dir
     Dir,
+    /// `READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE`: the security descriptor of an
+    /// entry (`sd_facts`, ADR 0023 §2). Shares read, write and delete.
+    Security,
     /// `FILE_GENERIC_READ`: data reads. Shares read only, so a concurrent writer yields a
     /// sharing violation (`Busy`) instead of torn content.
     Read,
@@ -91,13 +94,16 @@ impl Access {
                     | READ_CONTROL
                     | SYNCHRONIZE
             }
+            Self::Security => READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
             Self::Read => FILE_GENERIC_READ,
         }
     }
 
     fn share(self) -> u32 {
         match self {
-            Self::Attributes | Self::Dir => FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            Self::Attributes | Self::Dir | Self::Security => {
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+            }
             Self::Read => FILE_SHARE_READ,
         }
     }
@@ -359,6 +365,64 @@ fn create_relative(
     finish(status, raw)
 }
 
+/// The `ObjectName` bytes of an open by file ID (ADR 0023 §4, A4 N2): the 8-byte `FILE_ID`
+/// (little-endian) when the upper half of `id` is 0, as NTFS expects, else the 16-byte
+/// `FILE_ID_128` (ReFS, Dev Drive). As UTF-16 units, because `UNICODE_STRING` points to
+/// `u16`s; the bytes are the same.
+pub(super) fn file_id_name(id: u128) -> Vec<u16> {
+    let bytes = id.to_le_bytes();
+    let len = if id >> 64 == 0 { 8 } else { 16 };
+    bytes[..len]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect()
+}
+
+/// Opens the directory with file ID `id` on the volume whose root directory `volume` is
+/// (ADR 0023 §4, §5 step 4; ADR 0007 "Elevation", R4): `RootDirectory` = `volume`, the name
+/// = [`file_id_name`], `FILE_OPEN_BY_FILE_ID | FILE_OPEN_REPARSE_POINT | FILE_DIRECTORY_FILE`
+/// (the object itself, never what a link points to; a file is `STATUS_NOT_A_DIRECTORY`),
+/// [`Access::Dir`], `FILE_OPEN`. Never `OpenFileById`. The caller checks the handle's file ID
+/// and kind.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the third NtCreateFile call site: open by file ID (ADR 0023, A4 S1/N2)"
+)]
+pub(super) fn open_by_file_id(
+    volume: BorrowedHandle<'_>,
+    id: u128,
+) -> Result<OwnedHandle, NtStatus> {
+    let units = file_id_name(id);
+    let name = unicode(&units).ok_or(STATUS_INVALID_PARAMETER)?;
+    let oa = object_attributes(volume.as_raw_handle(), &name, 0);
+    let mut iosb = IO_STATUS_BLOCK::default();
+    let mut raw: HANDLE = ptr::null_mut();
+    // SAFETY: `volume` is a live handle borrowed for the call; `raw` and `iosb` are valid for
+    // writes; `oa` points to `name`, whose buffer (`units`, 8 or 16 bytes) outlives the call; no
+    // allocation size, no EA buffer. Synchronous call (FILE_SYNCHRONOUS_IO_NONALERT).
+    let status = unsafe {
+        NtCreateFile(
+            &mut raw,
+            Access::Dir.mask(),
+            &oa,
+            &mut iosb,
+            ptr::null(),
+            0,
+            Access::Dir.share(),
+            FILE_OPEN,
+            FILE_OPEN_BY_FILE_ID
+                | FILE_OPEN_REPARSE_POINT
+                | FILE_DIRECTORY_FILE
+                | FILE_SYNCHRONOUS_IO_NONALERT,
+            ptr::null(),
+            0,
+        )
+    };
+    finish(status, raw)
+}
+
 /// A change made on a held handle: the three classes of ADR 0017.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum SetInfo<'a> {
@@ -573,6 +637,21 @@ fn last_error() -> u32 {
 
 /// `GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)`, growing the buffer.
 pub(super) fn final_path(h: BorrowedHandle<'_>) -> Result<Vec<u16>, u32> {
+    final_path_as(h, VOLUME_NAME_DOS)
+}
+
+/// `GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED | VOLUME_NAME_GUID)`: `\\?\Volume{…}\…`, the
+/// volume GUID of `RootInfo::volume_guid` (ADR 0023 §4).
+pub(super) fn final_path_guid(h: BorrowedHandle<'_>) -> Result<Vec<u16>, u32> {
+    final_path_as(h, VOLUME_NAME_GUID)
+}
+
+/// `GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED | VOLUME_NAME_NT)`: the NT name of `SdFacts::nt_name`.
+pub(super) fn final_path_nt(h: BorrowedHandle<'_>) -> Result<Vec<u16>, u32> {
+    final_path_as(h, VOLUME_NAME_NT)
+}
+
+fn final_path_as(h: BorrowedHandle<'_>, volume: u32) -> Result<Vec<u16>, u32> {
     let mut cap: u32 = 512;
     loop {
         let mut buf = vec![0u16; cap as usize];
@@ -582,7 +661,7 @@ pub(super) fn final_path(h: BorrowedHandle<'_>) -> Result<Vec<u16>, u32> {
                 h.as_raw_handle(),
                 buf.as_mut_ptr(),
                 cap,
-                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                FILE_NAME_NORMALIZED | volume,
             )
         };
         if n == 0 {
@@ -709,5 +788,24 @@ mod tests {
         assert_eq!(back, name);
         // A one-character name still passes the full fixed size.
         assert_eq!(rename_buffer(0x1 as _, &[0x61]).unwrap().1, 24);
+    }
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::file_id_name;
+
+    /// A4 N2: 8 bytes when the upper half is 0 (NTFS `FILE_ID`), else 16 (ReFS `FILE_ID_128`),
+    /// little-endian either way.
+    #[test]
+    fn open_by_id_names_are_8_or_16_bytes() {
+        let ntfs = file_id_name(0x0001_0000_0000_002A);
+        assert_eq!(ntfs, [0x002A, 0, 0, 0x0001]);
+        let refs = file_id_name(0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10);
+        assert_eq!(refs.len(), 8);
+        assert_eq!(refs[0], 0x0F10);
+        assert_eq!(refs[7], 0x0102);
+        assert_eq!(file_id_name(1u128 << 64).len(), 8);
+        assert_eq!(file_id_name(0).len(), 4);
     }
 }

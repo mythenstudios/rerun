@@ -3,8 +3,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::{WinFs, WinGpu, WinKnownFolders, WinRegistry, WinTopology};
-use crate::sys::{Fs, Gpu, KnownFolders, Registry, RegistryWrite, SysResult, System, Topology};
+use super::{WinElevation, WinFs, WinGpu, WinKnownFolders, WinRegistry, WinTopology};
+use crate::sys::{
+    Elevation, Fs, Gpu, KnownFolders, Registry, RegistryWrite, SysResult, System, Topology,
+};
 
 /// The real file system, registry, known folders (on that registry), CPU topology and graphics
 /// adapters of this machine. Opening it opens the current user's registry root; `dxgi.dll` is
@@ -18,6 +20,7 @@ pub struct WinSystem {
     known_folders: WinKnownFolders,
     topology: WinTopology,
     gpu: WinGpu,
+    elevation: WinElevation,
 }
 
 impl WinSystem {
@@ -33,6 +36,7 @@ impl WinSystem {
             registry,
             topology: WinTopology::new(),
             gpu: WinGpu::new(),
+            elevation: WinElevation,
         })
     }
 }
@@ -66,5 +70,9 @@ impl System for WinSystem {
 
     fn gpu(&self) -> &dyn Gpu {
         &self.gpu
+    }
+
+    fn elevation(&self) -> &dyn Elevation {
+        &self.elevation
     }
 }

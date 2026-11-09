@@ -15,6 +15,7 @@
 //! assert_eq!(game.read(&exe).unwrap(), b"MZ");
 //! ```
 
+mod elevation;
 mod faults;
 mod fs;
 mod gpu;
@@ -29,8 +30,11 @@ use std::sync::Arc;
 
 use rerun_proto::cpu::CpuTopology;
 
+pub use elevation::{FakeElevation, RunCall};
 pub use faults::{Fault, Prim, RegPrim};
-pub use fs::{FakeDir, FakeFile, FakeFs, FakeHold, FsOp, StepEvent, StepHook};
+pub use fs::{
+    FAKE_USER_SID, FakeDir, FakeFile, FakeFs, FakeHold, FakeSd, FsOp, StepEvent, StepHook,
+};
 pub use gpu::FakeGpu;
 pub use helper::{FakeHelperToken, TokenCall};
 pub use known_folders::FakeKnownFolders;
@@ -41,8 +45,8 @@ use super::contract::{Access, FsFixture, Held, Share};
 use super::fs::{Attrs, tag};
 use super::registry::{Hive, RegKey, RegValue};
 use super::{
-    Fs, Gpu, GpuAdapter, KnownFolder, KnownFolders, Registry, RegistryWrite, SysErrorKind,
-    SysResult, System, Topology,
+    Elevation, Fs, Gpu, GpuAdapter, KnownFolder, KnownFolders, Registry, RegistryWrite,
+    SysErrorKind, SysResult, System, Topology,
 };
 use faults::FaultHub;
 
@@ -67,6 +71,7 @@ pub struct FakeSystem {
     topology: FakeTopology,
     known_folders: FakeKnownFolders,
     gpu: FakeGpu,
+    elevation: FakeElevation,
 }
 
 impl Default for FakeSystem {
@@ -77,6 +82,7 @@ impl Default for FakeSystem {
             topology: FakeTopology::default(),
             known_folders: FakeKnownFolders::default(),
             gpu: FakeGpu::default(),
+            elevation: FakeElevation::default(),
         };
         let hub = Arc::new(FaultHub::default());
         sys.fs.set_hub(hub.clone());
@@ -146,6 +152,11 @@ impl FakeSystem {
         &self.fs
     }
 
+    /// The fake elevation (token kind, scripted helper runs).
+    pub fn fake_elevation(&self) -> &FakeElevation {
+        &self.elevation
+    }
+
     /// The fake registry, also the [`RegFixture`](super::contract::RegFixture) of the contracts.
     pub fn fake_registry(&self) -> &FakeRegistry {
         &self.registry
@@ -180,6 +191,9 @@ impl System for FakeSystem {
     }
     fn gpu(&self) -> &dyn Gpu {
         &self.gpu
+    }
+    fn elevation(&self) -> &dyn Elevation {
+        &self.elevation
     }
 }
 

@@ -16,13 +16,14 @@
 //!   `policy::registry`); the real known folders;
 //!   the real CPU topology (ADR 0010); and the real graphics adapters (DXGI, ADR 0008
 //!   amendment). `unsafe` exists only in its modules `nt`, `token`, `reg`, `shell`, `cpu`,
-//!   `loader` and `dxgi`.
+//!   `loader`, `dxgi` and `elevation`.
 //!
 //! - [`KnownFolders`] never reads environment variables (ADR 0007, ADR 0009).
 //!
 //! `sys::win::WinSystem` bundles the real parts into one [`System`]. [`HelperToken`] is the
 //! elevated helper's own token (ADR 0023, P4-2a); `Firewall` arrives with P4-5a.
 
+pub mod elevation;
 mod error;
 pub mod fs;
 pub mod gpu;
@@ -43,8 +44,9 @@ pub(crate) mod seq;
 #[cfg(windows)]
 pub mod win;
 
+pub use elevation::{Elevation, HelperProc, HelperRun, NoElevation, TokenKind};
 pub use error::{SysError, SysErrorKind, SysResult, shown_target};
-pub use fs::{Dir, DirWrite, Fs, WriteCap};
+pub use fs::{AceFact, Dir, DirWrite, Fs, SdFacts, VolumeGuid, WriteCap};
 pub use gpu::{DriverVersion, Gpu, GpuAdapter};
 pub use helper::HelperToken;
 pub use known_folders::{KnownFolder, KnownFolders};
@@ -66,6 +68,9 @@ pub trait System: Send + Sync {
     fn known_folders(&self) -> &dyn KnownFolders;
     /// Graphics adapters.
     fn gpu(&self) -> &dyn Gpu;
+    /// Elevation, CLI side: the token kind and the one start of the elevated helper (ADR 0023
+    /// §12). The helper's own system refuses it (`NoElevation`, §11).
+    fn elevation(&self) -> &dyn Elevation;
 }
 
 #[cfg(test)]

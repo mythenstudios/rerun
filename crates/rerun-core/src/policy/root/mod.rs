@@ -17,6 +17,9 @@
 //!   opened read side by absolute path, the file one plain segment below it, bounded.
 //! - [`shadows`]: the UAC VirtualStore lookup (P3-7): a copy of a managed file below
 //!   `<LocalAppData>\VirtualStore`, read only, never a root.
+//! - [`helper_image`], [`admin_only`], [`dir_by_id`] (P4-2b, ADR 0023): the pre-check of the
+//!   installed elevated helper before any UAC prompt, the admin-only rule on security-descriptor
+//!   facts, and the only open by `{volume GUID, file ID}` ([`crate::sys::Fs::open_by_id`]).
 //! - [`RootId`]: volume serial and file ID. Plans store it; apply and revert reopen the root
 //!   and abort on a mismatch ([`StoreDir::ensure_id`], [`GameDir::ensure_id`]).
 //!
@@ -32,6 +35,7 @@
 
 mod app;
 mod forbidden;
+mod helper;
 mod input;
 mod vstore;
 
@@ -41,6 +45,10 @@ use std::path::Path;
 pub(crate) use app::AppSub;
 pub use app::{AppDir, Create, ProfilesDir};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
+pub use helper::{
+    ADMIN_SIDS, HELPER_EXE, HELPER_FOLDER, HelperImage, NotAdminOnly, WRITE_MASK, admin_only,
+    dir_by_id, helper_image,
+};
 pub use input::{file_present, read_input};
 pub use vstore::{Shadow, VIRTUAL_STORE, check_root, preview_with_shadows, shadows};
 
@@ -135,6 +143,15 @@ pub enum RootError {
         /// Folder that failed.
         what: String,
         /// Reason.
+        reason: String,
+    },
+    /// The installed elevated helper (or `Program Files` above it) is not safe to start, or
+    /// not installed (ADR 0023 §2): no UAC prompt is shown.
+    #[error("the helper is not installed safely: {path}: {reason}")]
+    HelperUnsafe {
+        /// The object checked.
+        path: RootPath,
+        /// Why.
         reason: String,
     },
     /// Error of the system layer.

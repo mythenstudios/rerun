@@ -106,8 +106,8 @@ impl OwnedKey {
         Self(raw)
     }
 
-    /// The raw handle, borrowed for a call while `self` lives.
-    #[cfg(test)]
+    /// The raw handle, borrowed for a call while `self` lives (tests; and `hkeyClass` of the
+    /// helper start, `elevation`).
     pub(super) fn raw(&self) -> HKEY {
         self.0
     }

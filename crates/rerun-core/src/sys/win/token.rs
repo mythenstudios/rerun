@@ -134,7 +134,44 @@ fn elevation_type(token: BorrowedHandle<'_>) -> Result<TOKEN_ELEVATION_TYPE, u32
 /// The process token is elevated (`TokenElevation`): an administrator's full token, also with
 /// UAC off. The registry write side refuses then (ADR 0018, S2).
 pub(super) fn process_elevated() -> Result<bool, u32> {
+    use std::os::windows::io::AsHandle;
+    elevated(process_token()?.as_handle())
+}
+
+/// `TokenElevation` and `TokenElevationType` of this process's token (`Elevation::token_kind`,
+/// ADR 0023 §10).
+pub(super) fn process_elevation() -> Result<(bool, TOKEN_ELEVATION_TYPE), u32> {
+    use std::os::windows::io::AsHandle;
     let token = process_token()?;
+    Ok((
+        elevated(token.as_handle())?,
+        elevation_type(token.as_handle())?,
+    ))
+}
+
+/// `TokenElevationTypeLimited`: the filtered token of an administrator in approval mode.
+pub(super) const LIMITED: TOKEN_ELEVATION_TYPE =
+    windows_sys::Win32::Security::TokenElevationTypeLimited;
+
+/// `TokenElevation` of the token of another process (ADR 0023 §7, A4 S2): `process` is the
+/// `hProcess` of the started helper, which needs `PROCESS_QUERY_LIMITED_INFORMATION`;
+/// `OpenProcessToken(TOKEN_QUERY)`, then the token's own DACL decides whether this process
+/// may read it. Win32 error otherwise: the caller treats any error as "unknown".
+pub(super) fn elevated_of(process: BorrowedHandle<'_>) -> Result<bool, u32> {
+    use std::os::windows::io::AsHandle;
+    let mut raw: HANDLE = ptr::null_mut();
+    // SAFETY: `process` is a live process handle borrowed for the call; `raw` is valid for a
+    // write and on success receives a token handle that `own` takes over.
+    let ok = unsafe { OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut raw) };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    let token = own(raw).ok_or(ERROR_INSUFFICIENT_BUFFER)?;
+    elevated(token.as_handle())
+}
+
+/// `TokenElevation` of `token` (needs `TOKEN_QUERY`).
+fn elevated(token: BorrowedHandle<'_>) -> Result<bool, u32> {
     let mut e = TOKEN_ELEVATION { TokenIsElevated: 0 };
     let mut returned: u32 = 0;
     // SAFETY: `token` is a live token handle with TOKEN_QUERY, kept alive until after the call;
@@ -228,6 +265,48 @@ fn security_descriptor(dir: BorrowedHandle<'_>) -> Result<LocalSd, u32> {
         return Err(ERROR_INSUFFICIENT_BUFFER);
     }
     Ok(sd)
+}
+
+/// Owner and DACL of the object `h` (opened with `READ_CONTROL`) as the bytes of a
+/// self-relative security descriptor (ADR 0023 §2, A4 N1): `GetSecurityInfo` on the handle
+/// (never by path), then `GetSecurityDescriptorLength`, copied out; `sys::win::sd` parses them.
+pub(super) fn owner_and_dacl(h: BorrowedHandle<'_>) -> Result<Vec<u8>, u32> {
+    use windows_sys::Win32::Security::GetSecurityDescriptorLength;
+    /// Bound of a descriptor: an ACL is at most 64 KiB, plus owner, group and header.
+    const MAX_SD: usize = 128 << 10;
+    let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: `h` is a live handle opened with READ_CONTROL; the four component outputs are
+    // optional (null) because the whole descriptor is requested; `sd` is valid for a write and
+    // receives a LocalAlloc'd self-relative descriptor that LocalSd frees.
+    let rc = unsafe {
+        GetSecurityInfo(
+            h.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    let sd = LocalSd(sd);
+    if rc != 0 {
+        return Err(rc);
+    }
+    if sd.0.is_null() {
+        return Err(ERROR_INSUFFICIENT_BUFFER);
+    }
+    // SAFETY: `sd.0` is the valid descriptor GetSecurityInfo just returned, alive in `sd`.
+    let len = unsafe { GetSecurityDescriptorLength(sd.0) } as usize;
+    if !(20..=MAX_SD).contains(&len) {
+        return Err(ERROR_INSUFFICIENT_BUFFER);
+    }
+    // SAFETY: GetSecurityInfo returns a self-relative descriptor in one allocation of at least
+    // `len` bytes (its length by GetSecurityDescriptorLength); `sd` keeps it alive while the
+    // slice is copied, and nothing writes to it meanwhile.
+    let bytes = unsafe { std::slice::from_raw_parts(sd.0.cast::<u8>(), len) }.to_vec();
+    Ok(bytes)
 }
 
 /// The non-elevated user may change the directory `dir` itself: any of [`WRITE_RIGHTS`]

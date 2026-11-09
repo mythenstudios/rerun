@@ -5,7 +5,7 @@ allow-expect-in-tests = true
 # rerun_core::policy::root (ADR 0007). Exceptions via
 # #[expect(clippy::disallowed_methods, reason = "...")] so a stale exception warns:
 # policy::root::open_abs, contract and test code, sys::win and rerun-launch (sys::snapshot
-# takes root handles since P2-5). NtCreateFile has exactly two exceptions in production
+# takes root handles since P2-5). NtCreateFile has exactly three exceptions in production
 # code, in sys::win::nt (test fixtures in sys::win::testfx also use it).
 disallowed-methods = [
   { path = "std::fs::write", reason = "filesystem access only through sys::Fs" },
@@ -39,6 +39,9 @@ disallowed-methods = [
   { path = "rerun_core::policy::root::AppDir::profiles", reason = "Rerun's launch profiles are opened and written only by exec (ADR 0020 amendment P3-3)", allow-invalid = true },
   { path = "rerun_core::policy::root::ProfilesDir::dir_write", reason = "Rerun's launch profiles are written only by exec (ADR 0020 amendment P3-3)", allow-invalid = true },
   # ADR 0018: the registry write side. Only policy::registry reaches it (tests carry an expect).
+  # ADR 0023: opens by identity only through policy::root::dir_by_id (A4 S1); the helper is started only by elevate (from P4-2c).
+  { path = "rerun_core::sys::fs::Fs::open_by_id", reason = "open by identity only through policy::root::dir_by_id (ADR 0023, A4 S1)", allow-invalid = true },
+  { path = "rerun_core::sys::elevation::Elevation::run_helper", reason = "the elevated helper is started only by elevate (ADR 0023 §2)", allow-invalid = true },
   { path = "rerun_core::sys::System::registry_write", reason = "the registry write side only through policy::registry (ADR 0018)", allow-invalid = true },
   { path = "rerun_core::sys::registry::RegistryWrite::create_key", reason = "registry writes only through policy::registry::RegWriter (ADR 0018)", allow-invalid = true },
   { path = "rerun_core::sys::registry::RegistryWrite::set", reason = "registry writes only through policy::registry::RegWriter (ADR 0018)", allow-invalid = true },
@@ -170,7 +173,7 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Threading::CreateProcessA", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::CreateProcessAsUserW", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
   # NtCreateFile only through sys::win::nt::{open_relative, open_self_for_flush, open_absolute_dir}; NtOpenFile never.
-  { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", reason = "only via sys::win::nt::{open_relative, open_self_for_flush, open_absolute_dir} (ADR 0007)", allow-invalid = true },
+  { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", reason = "only via sys::win::nt::{open_relative, open_self_for_flush, open_absolute_dir, open_by_file_id} (ADR 0007, ADR 0023)", allow-invalid = true },
   { path = "windows_sys::Wdk::Storage::FileSystem::NtOpenFile", reason = "use sys::win::nt::{open_relative, open_absolute_dir} (ADR 0007)", allow-invalid = true },
   { path = "std::process::Command::new", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)" },
   # ADR 0023 §3 step 2: the elevated helper removes its own privileges (product); the only other
@@ -468,7 +471,10 @@ disallowed-methods = [
   { path = "windows_sys::Win32::UI::Shell::ShellExecuteA", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
   { path = "windows_sys::Win32::UI::Shell::ShellExecuteW", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
   { path = "windows_sys::Win32::UI::Shell::ShellExecuteExA", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
-  { path = "windows_sys::Win32::UI::Shell::ShellExecuteExW", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::UI::Shell::ShellExecuteExW", reason = "processes are started only by rerun-launch's win::launch (ADR 0022) and the elevated helper only by rerun-core's sys::win::elevation::start (ADR 0023)", allow-invalid = true },
+  # The image of a process: rerun-launch win::process::image (watch) and the started helper (ADR 0023 §7, A4 S2), each with an expect.
+  { path = "windows_sys::Win32::System::Threading::QueryFullProcessImageNameW", reason = "a process image only in rerun-launch win::process::image (ADR 0022 amendment P3-4) and rerun-core sys::win::elevation::image_of (ADR 0023, A4 S2)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::QueryFullProcessImageNameA", reason = "a process image only in rerun-launch win::process::image (ADR 0022 amendment P3-4) and rerun-core sys::win::elevation::image_of (ADR 0023, A4 S2)", allow-invalid = true },
   # ADR 0008 amendment (2026-11-05): dynamic loads only through sys::win::loader (System32, by bare
   # name); the DLL search path only through loader::restrict_dll_search (rerun-launch: its own
   # copy of the one call).
@@ -495,7 +501,7 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Com::CoCreateInstanceEx", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::CoGetClassObject", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::CoInitialize", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Com::CoInitializeEx", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::CoInitializeEx", reason = "COM only via the reviewed call sites: rerun-launch win::launch (ADR 0022) and rerun-core sys::win::elevation (the helper start, ADR 0023 N3); activation only via one wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::CoGetObject", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },
   # Security review of step 10 (2026-11-05): the remaining process-start, delay-load symbol and
   # COM activation paths. CoGetInstanceFromFile, CoGetClassObjectFromURL, OleInitialize and

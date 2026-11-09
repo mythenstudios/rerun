@@ -84,6 +84,9 @@ impl System for AppTestSys {
     fn gpu(&self) -> &dyn Gpu {
         &self.gpu
     }
+    fn elevation(&self) -> &dyn crate::sys::Elevation {
+        &crate::sys::NoElevation
+    }
 }
 
 /// A test root with `lad\` as the fake `LocalAppData` and `out\canary.txt` as the target of

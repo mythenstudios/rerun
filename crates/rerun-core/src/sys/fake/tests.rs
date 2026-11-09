@@ -12,10 +12,11 @@ use std::time::{Duration, Instant};
 use super::{Domain, FakeFs, FakeSystem, Fault, FsOp, Prim, StepEvent};
 use crate::path::RelPath;
 use crate::sys::contract::{
-    Access, FsFixture, Held, Share, fs_link_read_contract, fs_link_write_contract,
-    fs_race_contract, fs_read_contract, fs_volume_contract, fs_write_contract,
-    fs_write_race_contract, gpu_contract, known_folders_contract, registry_read_contract,
-    registry_system_contract, registry_write_contract, snapshot_contract, topology_contract,
+    Access, FsFixture, Held, Share, fs_identity_contract, fs_link_read_contract,
+    fs_link_write_contract, fs_race_contract, fs_read_contract, fs_volume_contract,
+    fs_write_contract, fs_write_race_contract, gpu_contract, known_folders_contract,
+    registry_read_contract, registry_system_contract, registry_write_contract, snapshot_contract,
+    topology_contract,
 };
 use crate::sys::fs::{Attrs, DirWrite, EntryKind, Fs, FsKind, NewFile, TmpName, WriteCap, tag};
 use crate::sys::registry::{
@@ -83,6 +84,13 @@ fn fake_fulfils_fs_volume_contract() {
     let skips = fs_volume_contract(sys.fs(), sys.fake_fs(), Path::new(r"D:\Work")).unwrap();
     // The fake has no drive substitution.
     assert_eq!(skips, ["subst"]);
+}
+
+#[test]
+fn fake_fulfils_fs_identity_contract() {
+    let sys = fresh(r"D:\Work");
+    let skips = fs_identity_contract(sys.fs(), sys.fake_fs(), Path::new(r"D:\Work")).unwrap();
+    assert!(skips.is_empty(), "{skips:?}");
 }
 
 #[test]

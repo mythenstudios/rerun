@@ -220,6 +220,141 @@ pub struct RootInfo {
     pub fs_kind: FsKind,
     /// The volume supports POSIX rename semantics (`FILE_RENAME_FLAG_POSIX_SEMANTICS`).
     pub supports_posix_rename: bool,
+    /// The volume's GUID (`\\?\Volume{…}\`), the volume half of the identity the elevated
+    /// helper opens by ([`Fs::open_by_id`], ADR 0023 §4, A4 S1). `None` if the volume has no
+    /// GUID path (`sys::win`: `GetFinalPathNameByHandleW(VOLUME_NAME_GUID)` fails).
+    pub volume_guid: Option<VolumeGuid>,
+    /// The volume opens files by ID (`FILE_SUPPORTS_OPEN_BY_FILE_ID`: NTFS and ReFS, not FAT or
+    /// exFAT). A root on a volume without it can never be handed to the helper (A4 S7).
+    pub supports_open_by_id: bool,
+    /// The volume keeps ACLs (`FILE_PERSISTENT_ACLS`): without it no security descriptor
+    /// means anything, and `policy::root` never calls an object on it admin-only (A4 N1).
+    pub persistent_acls: bool,
+}
+
+/// The GUID of a volume as in its volume GUID path `\\?\Volume{…}\` (ADR 0023 §4, A4 S1).
+/// Kept as the 32 hexadecimal digits of its text form in reading order (not the in-memory
+/// `GUID` byte order), so [`Self::parse`] and [`Display`](std::fmt::Display) are a bijection on the braced
+/// lower-case form `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VolumeGuid(u128);
+
+impl VolumeGuid {
+    /// Lengths of the five groups of the text form.
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+
+    /// From the 32 hex digits read as one number.
+    pub const fn from_u128(v: u128) -> Self {
+        Self(v)
+    }
+
+    /// The 32 hex digits read as one number.
+    pub const fn as_u128(self) -> u128 {
+        self.0
+    }
+
+    /// Parses exactly the braced lower-case form that [`Display`](std::fmt::Display) writes; anything else
+    /// (upper case, no braces, another grouping, whitespace) is `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        let inner = s.strip_prefix('{')?.strip_suffix('}')?;
+        let groups: Vec<&str> = inner.split('-').collect();
+        if groups.len() != Self::GROUPS.len() {
+            return None;
+        }
+        let mut digits = String::with_capacity(32);
+        for (g, len) in groups.iter().zip(Self::GROUPS) {
+            if g.len() != len
+                || !g
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return None;
+            }
+            digits.push_str(g);
+        }
+        u128::from_str_radix(&digits, 16).ok().map(Self)
+    }
+
+    /// From a volume GUID path as Windows writes it (`\\?\Volume{…}\…`, any case of the hex
+    /// digits): the GUID of its first segment.
+    pub fn from_volume_path(path: &str) -> Option<Self> {
+        let rest = path.strip_prefix(r"\\?\")?;
+        let head = rest.get(..6)?;
+        if !head.eq_ignore_ascii_case("Volume") {
+            return None;
+        }
+        let guid = rest.get(6..)?.split('\\').next()?;
+        Self::parse(&guid.to_ascii_lowercase())
+    }
+}
+
+impl std::fmt::Display for VolumeGuid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hex = format!("{:032x}", self.0);
+        let (a, rest) = hex.split_at(8);
+        let (b, rest) = rest.split_at(4);
+        let (c, rest) = rest.split_at(4);
+        let (d, e) = rest.split_at(4);
+        write!(f, "{{{a}-{b}-{c}-{d}-{e}}}")
+    }
+}
+
+/// ACE types and flags of a DACL (`winnt.h`), as [`AceFact`] carries them.
+pub mod ace {
+    /// `ACCESS_ALLOWED_ACE_TYPE`.
+    pub const ALLOWED: u8 = 0x0;
+    /// `ACCESS_DENIED_ACE_TYPE`.
+    pub const DENIED: u8 = 0x1;
+    /// `ACCESS_ALLOWED_OBJECT_ACE_TYPE`.
+    pub const ALLOWED_OBJECT: u8 = 0x5;
+    /// `ACCESS_DENIED_OBJECT_ACE_TYPE`.
+    pub const DENIED_OBJECT: u8 = 0x6;
+    /// `ACCESS_ALLOWED_CALLBACK_ACE_TYPE` (conditional ACE).
+    pub const ALLOWED_CALLBACK: u8 = 0x9;
+    /// `ACCESS_DENIED_CALLBACK_ACE_TYPE`.
+    pub const DENIED_CALLBACK: u8 = 0xA;
+    /// `ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE`.
+    pub const ALLOWED_CALLBACK_OBJECT: u8 = 0xB;
+    /// `ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE`.
+    pub const DENIED_CALLBACK_OBJECT: u8 = 0xC;
+    /// `INHERIT_ONLY_ACE`: the ACE does not apply to the object itself.
+    pub const INHERIT_ONLY: u8 = 0x08;
+}
+
+/// One ACE of a DACL, as stored (ADR 0023 §2, A4 N1). A fact: `policy::root` decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AceFact {
+    /// `AceType` (see [`ace`]).
+    pub ace_type: u8,
+    /// `AceFlags` (inheritance, [`ace::INHERIT_ONLY`]).
+    pub flags: u8,
+    /// `ACCESS_MASK`, as stored (generic bits not mapped).
+    pub mask: u32,
+    /// The SID in its string form (`S-1-5-32-544`) for the ACE types with the plain layout
+    /// (allowed, denied and their callback forms); `None` for every other type.
+    pub sid: Option<String>,
+}
+
+/// Owner and DACL of one object, read on one handle opened for `READ_CONTROL` without
+/// following a reparse point (ADR 0023 §2, A4 N1), with the kind and link count of that same
+/// object. Facts only; `policy::root` decides what is admin-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdFacts {
+    /// Kind of the object the descriptor belongs to.
+    pub kind: EntryKind,
+    /// Hard links (1 for a directory or a reparse point).
+    pub links: u32,
+    /// Owner SID, `None` if the descriptor has none.
+    pub owner: Option<String>,
+    /// The DACL in order; `None` for a NULL DACL (no DACL present: everyone has every right).
+    pub dacl: Option<Vec<AceFact>>,
+    /// The volume keeps ACLs (`FILE_PERSISTENT_ACLS`).
+    pub persistent_acls: bool,
+    /// The object's name in the NT namespace (`\Device\HarddiskVolumeN\…`,
+    /// `GetFinalPathNameByHandleW(VOLUME_NAME_NT)` on the same handle), `None` if it cannot be
+    /// read: what `QueryFullProcessImageNameW(PROCESS_NAME_NATIVE)` reports for a process
+    /// started from this file (ADR 0023 §7, A4 S2).
+    pub nt_name: Option<String>,
 }
 
 impl RootInfo {
@@ -273,6 +408,28 @@ pub trait Fs: Send + Sync {
     /// this crate can create: outside `rerun-core` (CLI, app) no write handle can be obtained
     /// at all. Only `policy::root` calls this (`clippy.toml`, ADR 0017).
     fn open_dir_write(&self, abs: &Path, cap: &WriteCap) -> SysResult<Box<dyn DirWrite + '_>>;
+
+    /// Opens a directory by identity, read side only (ADR 0023 §4, §5 step 4; ADR 0007
+    /// "Elevation", R4; A4 S1, N2): the volume by its GUID, the directory by its 128-bit file
+    /// ID on it. No path is walked and no link is followed: `sys::win` opens
+    /// `\GLOBAL??\Volume{…}\` and then `NtCreateFile` with `FILE_OPEN_BY_FILE_ID |
+    /// FILE_OPEN_REPARSE_POINT | FILE_DIRECTORY_FILE` relative to it (8-byte ID when its upper
+    /// half is 0, as NTFS wants, else 16 bytes for ReFS), never `OpenFileById`.
+    ///
+    /// A volume without `FILE_SUPPORTS_OPEN_BY_FILE_ID` (FAT, exFAT) is `Unsupported`; a
+    /// reparse point (junction, mount point) is `ReparsePoint`; a file `InvalidPath`; an ID
+    /// that names nothing is an error (`NotFound` in the fake, the file system's status in
+    /// `sys::win`). The opened directory's volume serial and file ID are checked on its handle.
+    ///
+    /// Only `policy::root` calls this (`clippy.toml`). The default refuses (`Unsupported`), so
+    /// a test double without identities fails closed.
+    fn open_by_id(&self, volume: &VolumeGuid, file_id: u128) -> SysResult<Box<dyn Dir + '_>> {
+        let _ = file_id;
+        Err(SysError::new(
+            SysErrorKind::Unsupported,
+            format!("open by ID on {volume}"),
+        ))
+    }
 }
 
 /// Proof of the write capability for [`Fs::open_dir_write`] (ADR 0017). Zero-sized; its
@@ -394,6 +551,21 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     /// which no share mode blocks. `sys::fake` reports every handle its share model records
     /// on the file (`Dir::open_read` readers, fixture holds), with their process IDs.
     fn users(&self, p: &RelPath) -> SysResult<Vec<u32>>;
+
+    /// Owner and DACL of this directory (`None`) or of the entry `p` below it, with the kind
+    /// and link count of that object (ADR 0023 §2, A4 N1). The entry is opened handle-relative
+    /// for `READ_CONTROL` and attributes only, never following a reparse point (a link is
+    /// described itself, kind [`EntryKind::Reparse`]); a reparse point on the way is
+    /// `ReparsePoint`, a missing entry `NotFound`, a restricted one `AccessDenied`.
+    ///
+    /// The default refuses (`Unsupported`): a test double without security descriptors makes
+    /// the admin-only check fail closed.
+    fn sd_facts(&self, p: Option<&RelPath>) -> SysResult<SdFacts> {
+        Err(SysError::new(
+            SysErrorKind::Unsupported,
+            p.map_or("<dir handle>", RelPath::as_str),
+        ))
+    }
 }
 
 /// An opened directory that can write its direct children (ADR 0017). `policy::root` hands
@@ -662,6 +834,42 @@ mod tests {
             ".rerun-a-1.TMP",
         ] {
             assert!(TmpName::parse(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn volume_guids_have_one_text_form() {
+        use super::VolumeGuid;
+        let s = "{0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0}";
+        let g = VolumeGuid::parse(s).unwrap();
+        assert_eq!(g.to_string(), s);
+        assert_eq!(g.as_u128(), 0x0f1e_2d3c_4b5a_6978_8796_a5b4_c3d2_e1f0);
+        assert_eq!(VolumeGuid::from_u128(g.as_u128()), g);
+        assert_eq!(
+            VolumeGuid::from_u128(1).to_string(),
+            "{00000000-0000-0000-0000-000000000001}"
+        );
+        for bad in [
+            "",
+            "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+            "{0F1E2D3C-4b5a-6978-8796-a5b4c3d2e1f0}",
+            "{0f1e2d3c4b5a-6978-8796-a5b4c3d2e1f0}",
+            "{0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f}",
+            "{0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0 }",
+            "{0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1fg}",
+            "{+f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0}",
+        ] {
+            assert_eq!(VolumeGuid::parse(bad), None, "{bad}");
+        }
+        // From a volume GUID path as Windows writes it (upper-case hex too).
+        let p = r"\\?\Volume{0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0}\Users\x";
+        assert_eq!(VolumeGuid::from_volume_path(p), Some(g));
+        assert_eq!(
+            VolumeGuid::from_volume_path(r"\\?\volume{0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0}\"),
+            Some(g)
+        );
+        for bad in [r"\\?\C:\x", r"C:\Volume{x}", r"\\?\Volume{zz}\"] {
+            assert_eq!(VolumeGuid::from_volume_path(bad), None, "{bad}");
         }
     }
 
