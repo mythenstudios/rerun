@@ -76,12 +76,13 @@ fn s10_child_activates_fwpolicy2_with_a_decoy_environment() {
     drop(apartment);
 }
 
-/// A4 S10, the evidence: `InprocServer32` of `HNetCfg.FwPolicy2` is a `REG_EXPAND_SZ` with
-/// `%SystemRoot%`, and a child whose own environment names a decoy folder as `SystemRoot` and
-/// `windir` (the folder exists and is empty) shows whether combase expands it from the process
-/// environment (the activation fails or loads from the decoy) or not (`FirewallAPI.dll` from
-/// System32). Either way the product path (`create_inproc`) refuses in that child before any
-/// activation.
+/// A4 S10, the evidence: the type and value of `InprocServer32` of `HNetCfg.FwPolicy2` (on build
+/// 26300 a `REG_SZ` absolute path, not the `REG_EXPAND_SZ` with `%SystemRoot%` A4 assumed;
+/// either is accepted and printed), and a child whose own environment names a decoy folder as
+/// `SystemRoot` and `windir` (the folder exists and is empty) shows whether the activation
+/// depends on the process environment (it fails or loads from the decoy) or not
+/// (`FirewallAPI.dll` from System32). Either way the product path (`create_inproc`) refuses in
+/// that child before any activation.
 #[test]
 fn com_and_the_process_environment() {
     let key = RegKey::new(

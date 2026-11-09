@@ -565,14 +565,10 @@ fn firewall_rule_needs_a_draft_and_a_sha256_anchor() {
     let mut t = topo("game", "fix-pack");
     t.status = Status::Draft;
     t.issues[0].variants[0].steps = vec![TopoStep::FirewallRule(FirewallRuleSpec {
-        exe: rel("GAME.exe"),
+        exe: rel("game.exe"),
         direction: Direction::Out,
     })];
-    assert_eq!(
-        check::topo(&t, Rules::Source),
-        Ok(()),
-        "the path is compared folded"
-    );
+    assert_eq!(check::topo(&t, Rules::Source), Ok(()));
     let what = |t: &Topo| check::topo(t, Rules::Source).unwrap_err().what;
     let mut active = t.clone();
     active.status = Status::Active;
@@ -580,9 +576,23 @@ fn firewall_rule_needs_a_draft_and_a_sha256_anchor() {
     let mut other = t.clone();
     other.issues[0].variants[0].steps = vec![TopoStep::FirewallRule(FirewallRuleSpec {
         exe: rel("other.exe"),
-        direction: Direction::In,
+        direction: Direction::Out,
     })];
     assert_eq!(what(&other), "an executable of match.exes");
+    // Exact spelling only: another case, or a Unicode fold twin (U+0131 against `I`), is no
+    // anchor.
+    for (entry, step) in [
+        ("game.exe", "GAME.exe"),
+        ("bin\\gam\u{131}.exe", "bin\\GAMI.exe"),
+    ] {
+        let mut twin = t.clone();
+        twin.matches.exes[0].path = rel(entry);
+        twin.issues[0].variants[0].steps = vec![TopoStep::FirewallRule(FirewallRuleSpec {
+            exe: rel(step),
+            direction: Direction::Out,
+        })];
+        assert_eq!(what(&twin), "an executable of match.exes", "{step}");
+    }
     let mut sha1_only = t.clone();
     sha1_only.matches.exes[0].sha256 = None;
     sha1_only.matches.exes[0].sha1 = Some(Hex::new([0x22; 20]));

@@ -1,0 +1,17 @@
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha256: "00000000000000000000000000000000000000000000000000000000000000AB", api: d3d9 }
+issues:
+  - id: issue
+    title: "Issue"
+    variants:
+      - id: v
+        status: unverified
+        kind: fix
+        steps:
+          - firewall_rule: { exe: game.exe, direction: in }

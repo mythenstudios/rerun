@@ -14,7 +14,8 @@
 //! [`BATCH`] through `IEnumVARIANT::Next`, and per rule only `Name` and `Grouping` are read
 //! before `keep` decides whether the rest is read. More than [`MAX_RULES`] rules, a text longer
 //! than [`MAX_TEXT_UTF16`] or an enumeration longer than [`ENUM_DEADLINE`] is `TooLarge`,
-//! never a partial list. Nothing here writes: no setter slot is typed.
+//! never a partial list (the deadline is checked between batches, module constant docs).
+//! Nothing here writes: no setter slot is typed.
 
 #![allow(
     unsafe_code,
@@ -32,8 +33,8 @@ use windows_sys::Win32::System::Variant::{VARIANT, VT_DISPATCH, VT_EMPTY};
 use windows_sys::core::{BSTR, GUID, HRESULT};
 
 use super::com::{
-    Apartment, Bstr, Com, CreateError, DispatchVtbl, E_POINTER, E_TOO_LONG, EnvMismatch, Slot,
-    UnknownVtbl, Variant, Vtable, create_inproc,
+    Apartment, Bstr, Com, CreateError, DispatchVtbl, E_POINTER, EnvMismatch, Slot, UnknownVtbl,
+    Variant, Vtable, create_inproc,
 };
 use crate::sys::firewall::{FwRest, FwRule, FwRule3, FwSelection, MAX_RULES, MAX_TEXT_UTF16};
 use crate::sys::{Firewall, SysError, SysErrorKind, SysResult};
@@ -58,7 +59,9 @@ const E_NOINTERFACE: HRESULT = 0x8000_4002_u32.cast_signed();
 const E_ACCESSDENIED: HRESULT = 0x8007_0005_u32.cast_signed();
 /// Variants per `IEnumVARIANT::Next`.
 pub(super) const BATCH: u32 = 64;
-/// The time bound of one enumeration (A4 S11; measured cost in ADR 0023 §6).
+/// The time bound of one enumeration (A4 S11; measured cost in ADR 0023 §6). Cooperative: it is
+/// checked between two `IEnumVARIANT::Next` batches, so a single COM call that hangs (the
+/// firewall service not answering) is not cut off.
 pub(super) const ENUM_DEADLINE: Duration = Duration::from_secs(60);
 
 type GetBstr = unsafe extern "system" fn(this: *mut c_void, out: *mut BSTR) -> HRESULT;
@@ -188,7 +191,13 @@ unsafe impl Vtable for EnumVtbl {}
 
 /// A failed read: the call and its `HRESULT`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Fail(&'static str, HRESULT);
+enum Fail {
+    /// The call failed with this `HRESULT`.
+    Hr(&'static str, HRESULT),
+    /// The call returned a text longer than `MAX_TEXT_UTF16`: Rerun's own bound, never mixed
+    /// up with an `HRESULT` a getter returns itself.
+    TooLong(&'static str),
+}
 
 /// `$com.$slot(out)` for a `BSTR` property, bounded: `Result<String, Fail>`. `$slot` must be a
 /// field of `$com`'s vtable, so the getter always belongs to the object it is called on.
@@ -201,9 +210,9 @@ macro_rules! text {
         // a valid BSTR slot that `b` frees afterwards.
         let hr = unsafe { (c.vtbl().$slot)(c.as_raw(), &mut b.0) };
         if hr < 0 {
-            Err(Fail($call, hr))
+            Err(Fail::Hr($call, hr))
         } else {
-            b.text(MAX_TEXT_UTF16).map_err(|hr| Fail($call, hr))
+            b.text(MAX_TEXT_UTF16).ok_or(Fail::TooLong($call))
         }
     }};
 }
@@ -216,7 +225,11 @@ macro_rules! long {
         // SAFETY: `c` is a live interface whose vtable types `$slot` as a `long` getter
         // (netfw.h, pinned by the slot test); `v` is valid for a write.
         let hr = unsafe { (c.vtbl().$slot)(c.as_raw(), &mut v) };
-        if hr < 0 { Err(Fail($call, hr)) } else { Ok(v) }
+        if hr < 0 {
+            Err(Fail::Hr($call, hr))
+        } else {
+            Ok(v)
+        }
     }};
 }
 
@@ -229,7 +242,7 @@ macro_rules! flag {
         // (netfw.h, pinned by the slot test); `v` is valid for a write.
         let hr = unsafe { (c.vtbl().$slot)(c.as_raw(), &mut v) };
         if hr < 0 {
-            Err(Fail($call, hr))
+            Err(Fail::Hr($call, hr))
         } else {
             Ok(v != 0)
         }
@@ -249,7 +262,7 @@ unsafe fn optional<V: Vtable, W: Vtable>(
     match unsafe { c.cast::<W>(iid) } {
         Ok(w) => Ok(Some(w)),
         Err(E_NOINTERFACE) => Ok(None),
-        Err(hr) => Err(Fail(call, hr)),
+        Err(hr) => Err(Fail::Hr(call, hr)),
     }
 }
 
@@ -267,7 +280,7 @@ impl Com<RuleVtbl> {
         // VARIANT slot that its guard clears.
         let hr = unsafe { (self.vtbl().get_interfaces)(self.as_raw(), &mut interfaces.0) };
         if hr < 0 {
-            return Err(Fail("get_Interfaces", hr));
+            return Err(Fail::Hr("get_Interfaces", hr));
         }
         // SAFETY: `Rule2Vtbl` is the vtable of INetFwRule2, the interface IID_RULE2 names.
         let r2 = unsafe { optional::<_, Rule2Vtbl>(self, &IID_RULE2, "INetFwRule2") }?;
@@ -361,10 +374,11 @@ fn enumerate(keep: &dyn Fn(&str, &str) -> bool) -> Result<FwSelection, EnumError
     // SAFETY: `policy` is a live INetFwPolicy2; slot 18 is get_Rules; `raw` is a valid location.
     let hr = unsafe { (policy.vtbl().get_rules)(policy.as_raw(), &mut raw) };
     if hr < 0 {
-        return Err(Fail("get_Rules", hr).into());
+        return Err(Fail::Hr("get_Rules", hr).into());
     }
     // SAFETY: on success `raw` is an INetFwRules with one reference owned by the caller.
-    let rules = unsafe { Com::<RulesVtbl>::from_raw(raw) }.ok_or(Fail("get_Rules", E_POINTER))?;
+    let rules =
+        unsafe { Com::<RulesVtbl>::from_raw(raw) }.ok_or(Fail::Hr("get_Rules", E_POINTER))?;
     let count = long!(rules, get_count, "get_Count")?;
     if !usize::try_from(count).is_ok_and(|c| c <= MAX_RULES) {
         return Err(EnumError::TooMany);
@@ -373,14 +387,14 @@ fn enumerate(keep: &dyn Fn(&str, &str) -> bool) -> Result<FwSelection, EnumError
     // SAFETY: `rules` is live; slot 11 is get__NewEnum; `raw` is a valid location.
     let hr = unsafe { (rules.vtbl().get_new_enum)(rules.as_raw(), &mut raw) };
     if hr < 0 {
-        return Err(Fail("get__NewEnum", hr).into());
+        return Err(Fail::Hr("get__NewEnum", hr).into());
     }
     // SAFETY: on success `raw` is an IUnknown with one reference owned by the caller.
     let unknown =
-        unsafe { Com::<UnknownVtbl>::from_raw(raw) }.ok_or(Fail("get__NewEnum", E_POINTER))?;
+        unsafe { Com::<UnknownVtbl>::from_raw(raw) }.ok_or(Fail::Hr("get__NewEnum", E_POINTER))?;
     // SAFETY: `EnumVtbl` is the vtable prefix of IEnumVARIANT, the interface the IID names.
     let walk = unsafe { unknown.cast::<EnumVtbl>(&IID_ENUM_VARIANT) }
-        .map_err(|hr| Fail("IEnumVARIANT", hr))?;
+        .map_err(|hr| Fail::Hr("IEnumVARIANT", hr))?;
     let mut out = FwSelection::default();
     loop {
         if start.elapsed() > ENUM_DEADLINE {
@@ -400,7 +414,7 @@ fn enumerate(keep: &dyn Fn(&str, &str) -> bool) -> Result<FwSelection, EnumError
             )
         };
         if hr < 0 {
-            return Err(Fail("IEnumVARIANT::Next", hr).into());
+            return Err(Fail::Hr("IEnumVARIANT::Next", hr).into());
         }
         let n = fetched.min(BATCH) as usize;
         for v in &batch[..n] {
@@ -418,8 +432,8 @@ fn enumerate(keep: &dyn Fn(&str, &str) -> bool) -> Result<FwSelection, EnumError
             };
             let d = ManuallyDrop::new(d);
             // SAFETY: `RuleVtbl` is the vtable of INetFwRule, the interface IID_RULE names.
-            let rule =
-                unsafe { d.cast::<RuleVtbl>(&IID_RULE) }.map_err(|hr| Fail("INetFwRule", hr))?;
+            let rule = unsafe { d.cast::<RuleVtbl>(&IID_RULE) }
+                .map_err(|hr| Fail::Hr("INetFwRule", hr))?;
             let (name, grouping) = rule.name_and_group()?;
             if keep(&name, &grouping) {
                 out.rules.push(rule.read(name, grouping)?);
@@ -444,13 +458,17 @@ fn sys_error(e: EnumError) -> SysError {
         EnumError::Create(CreateError::Com(hr)) => {
             SysError::new(kind_of_hresult(hr), format!("{T}: HNetCfg.FwPolicy2")).with_hresult(hr)
         }
+        EnumError::Create(CreateError::NotAllowed) => SysError::new(
+            SysErrorKind::Unsupported,
+            format!("{T}: a COM class outside the allowlist"),
+        ),
         EnumError::Apartment(hr) => {
             SysError::new(SysErrorKind::Other, format!("{T}: CoInitializeEx")).with_hresult(hr)
         }
-        EnumError::Call(Fail(call, E_TOO_LONG)) => {
+        EnumError::Call(Fail::TooLong(call)) => {
             SysError::too_large(format!("{T}: {call}"), MAX_TEXT_UTF16 as u64)
         }
-        EnumError::Call(Fail(call, hr)) => {
+        EnumError::Call(Fail::Hr(call, hr)) => {
             SysError::new(kind_of_hresult(hr), format!("{T}: {call}")).with_hresult(hr)
         }
         EnumError::Element(vt) => {

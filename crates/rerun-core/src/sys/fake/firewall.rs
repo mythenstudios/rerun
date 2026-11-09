@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
-use crate::sys::firewall::{FwRule, FwSelection, MAX_RULES};
+use crate::sys::firewall::{FwRule, FwSelection, MAX_RULES, MAX_TEXT_UTF16};
 use crate::sys::{Firewall, SysError, SysErrorKind, SysResult};
 
 /// The fake firewall: rules as data, an optional fixed error.
@@ -66,13 +66,51 @@ impl Firewall for FakeFirewall {
         if rules.len() > MAX_RULES {
             return Err(SysError::too_large("firewall rules", MAX_RULES as u64));
         }
-        Ok(FwSelection {
+        // Like `sys::win`: name and grouping of every rule are read, every text of a kept rule.
+        let too_long = || SysError::too_large("firewall rules: a text", MAX_TEXT_UTF16 as u64);
+        let long = |t: &str| t.encode_utf16().count() > MAX_TEXT_UTF16;
+        let mut out = FwSelection {
             total: rules.len(),
-            rules: rules
-                .iter()
-                .filter(|r| keep(&r.name, &r.grouping))
-                .cloned()
-                .collect(),
-        })
+            rules: Vec::new(),
+        };
+        for r in rules.iter() {
+            if long(&r.name) || long(&r.grouping) {
+                return Err(too_long());
+            }
+            if keep(&r.name, &r.grouping) {
+                if texts(r).any(long) {
+                    return Err(too_long());
+                }
+                out.rules.push(r.clone());
+            }
+        }
+        Ok(out)
     }
+}
+
+/// Every text field of a rule.
+fn texts(r: &FwRule) -> impl Iterator<Item = &str> {
+    let x = &r.rest;
+    let v3 = x.v3.iter().flat_map(|v| {
+        [
+            &v.package_id[..],
+            &v.user_owner,
+            &v.local_users,
+            &v.remote_users,
+            &v.remote_machines,
+        ]
+    });
+    [
+        &r.description[..],
+        &r.program,
+        &x.service,
+        &x.local_ports,
+        &x.remote_ports,
+        &x.local_addresses,
+        &x.remote_addresses,
+        &x.icmp_types,
+        &x.interface_types,
+    ]
+    .into_iter()
+    .chain(v3)
 }

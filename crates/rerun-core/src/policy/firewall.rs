@@ -3,11 +3,11 @@
 //!
 //! **The form** ([`rule`]): name `Rerun - <topo-id> - <txn>-<op:03>` ([`RuleName`], ASCII, R10),
 //! group [`GROUP`], description `Added by Rerun for <topo-id>; removed by rerun revert <txn>`,
-//! the direction of the Topo step (`out` or `in`), action block, all profiles, any protocol,
+//! the direction of the Topo step (today only `out`), action block, all profiles, any protocol,
 //! enabled, program = a [`Program`], every other field at the firewall's default ([`rest`]).
 //!
 //! **The program** (A4 S6 a, b): the path as the request or the journal head spells it, never
-//! the spelling a handle reports; compared **folded** with what the firewall returns, so a
+//! the spelling a handle reports; compared with ASCII case ignored with what the firewall returns, so a
 //! case-only rename between plan and apply does not make Rerun's rule `Foreign`. A `%` is
 //! refused (the firewall expands environment variables in `ApplicationName`; built-in rules use
 //! `%SystemRoot%`), as is U+FFFD (what `sys` reads for text that is no valid UTF-16). At most
@@ -36,7 +36,7 @@ use crate::fold::fold;
 use crate::journal::TxnId;
 use crate::path::{RelPath, RootPath};
 use crate::sys::firewall::{
-    ACTION_BLOCK, DIR_IN, DIR_OUT, FwRest, FwRule, FwRule3, PROFILES_ALL, PROTOCOL_ANY,
+    ACTION_BLOCK, DIR_OUT, FwRest, FwRule, FwRule3, PROFILES_ALL, PROTOCOL_ANY,
 };
 use crate::sys::{Firewall, SysResult};
 
@@ -47,14 +47,13 @@ pub const NAME_PREFIX: &str = "Rerun - ";
 /// The longest program path: a drive (`X:\`) and a [`RelPath`].
 pub const MAX_PROGRAM_CHARS: usize = 3 + RelPath::MAX_LEN;
 
-/// The direction a `firewall_rule` step blocks.
+/// The direction a `firewall_rule` step blocks. Only `out` for now (lead decision after the
+/// P4-5a review): `in` can be added without a format break when a Topo needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
     /// Outbound (the game cannot connect).
     Out,
-    /// Inbound (nothing can connect to the game).
-    In,
 }
 
 impl Direction {
@@ -62,7 +61,6 @@ impl Direction {
     pub fn raw(self) -> i32 {
         match self {
             Self::Out => DIR_OUT,
-            Self::In => DIR_IN,
         }
     }
 
@@ -70,7 +68,6 @@ impl Direction {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Out => "out",
-            Self::In => "in",
         }
     }
 }
@@ -199,9 +196,10 @@ impl Program {
         &self.0
     }
 
-    /// `other` names this program: equal folded (A4 S6 a).
+    /// `other` names this program: equal with ASCII case ignored (A4 S6 a; no Unicode folding,
+    /// which would equate names NTFS keeps apart, e.g. U+0131 and `I`).
     pub fn names(&self, other: &str) -> bool {
-        fold(&self.0) == fold(other)
+        self.0.eq_ignore_ascii_case(other)
     }
 }
 
@@ -250,10 +248,11 @@ pub enum Observed {
     Foreign,
 }
 
-/// `found` is exactly `expected`: the exact name, the program folded, every other fact equal.
+/// `found` is exactly `expected`: the exact name, the program with ASCII case ignored, every
+/// other fact equal.
 fn is_ours(expected: &FwRule, found: &FwRule) -> bool {
     found.name == expected.name
-        && fold(&found.program) == fold(&expected.program)
+        && found.program.eq_ignore_ascii_case(&expected.program)
         && FwRule {
             program: String::new(),
             ..found.clone()

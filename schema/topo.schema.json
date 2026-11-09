@@ -707,7 +707,7 @@
       }
     },
     "firewallRule": {
-      "description": "Rerun's block rule for one executable of match.exes (docs/02-topo-format.md, ADR 0023 §6). The schema checks the form; the loader checks that exe is a match.exes entry with a sha256 (ADR 0024, sha256 for elevated anchors). Draft only until reviewed.",
+      "description": "Rerun's block rule for one executable of match.exes (docs/02-topo-format.md, ADR 0023 §6). The schema checks the form; the loader checks that exe is a match.exes entry, in exactly its spelling, with a sha256 (ADR 0024, sha256 for elevated anchors). Draft only until reviewed.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -726,9 +726,9 @@
           ]
         },
         "direction": {
+          "description": "Only out for now; in may follow without a format break.",
           "enum": [
-            "out",
-            "in"
+            "out"
           ]
         }
       }

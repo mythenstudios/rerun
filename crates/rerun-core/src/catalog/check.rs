@@ -482,7 +482,7 @@ fn step(s: &TopoStep, at: &str) -> R {
 }
 
 /// `firewall_rule` against its Topo: draft only until reviewed, and the executable is an entry
-/// of `match.exes` with a `sha256` (ADR 0024 "sha256 for elevated anchors", P4 R6: `sha1` alone
+/// of `match.exes` in exactly its spelling, with a `sha256` (ADR 0024 "sha256 for elevated anchors", P4 R6: `sha1` alone
 /// never anchors anything elevated; a `TODO` only in a draft, like every `TODO`).
 fn firewall_rule(t: &Topo, f: &FirewallRuleSpec, at: &str) -> R {
     ensure(
@@ -490,7 +490,9 @@ fn firewall_rule(t: &Topo, f: &FirewallRuleSpec, at: &str) -> R {
         at,
         "draft only until firewall_rule is reviewed (P4-5a)",
     )?;
-    let anchor = t.matches.exes.iter().find(|e| e.path == f.exe);
+    // The exact spelling: `RelPath` equality folds Unicode (U+0131 equals `I`), which NTFS does
+    // not; the program of the rule is derived from this entry (P4-2d), never from the step.
+    let anchor = t.matches.exes.iter().find(|e| e.path.same_spelling(&f.exe));
     ensure(
         anchor.is_some(),
         &format!("{at}.exe"),

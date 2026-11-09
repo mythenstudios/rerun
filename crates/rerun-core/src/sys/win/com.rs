@@ -14,8 +14,10 @@
 //! `FirewallAPI.dll` from System32. So for this class nothing is expanded on that build. Other
 //! builds and other classes may register `%SystemRoot%`; hence [`create_inproc`] still first
 //! requires that `SystemRoot` and `windir` both name the folder `GetSystemWindowsDirectoryW`
-//! reports (compared folded) and refuses with [`EnvMismatch`] before any activation otherwise.
-//! Nothing sets the environment: a process with a changed one gets no COM object.
+//! reports (ASCII case ignored, never Unicode folding) and refuses with [`EnvMismatch`] before
+//! any activation otherwise. Nothing sets the environment: a process with a changed one gets no
+//! COM object. Only the classes of `INPROC_ALLOWED` (`NetFwPolicy2`, `NetFwRule`) are activated;
+//! a new class is reviewed against S10 first.
 //!
 //! Interface pointers live in [`Com`], which releases its one reference on drop and is neither
 //! `Send` nor `Sync`. Elevated processes ignore per-user COM registrations (`HKCU\Software\
@@ -33,6 +35,7 @@ use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 
 use windows_sys::Win32::Foundation::{SysFreeString, SysStringLen};
+use windows_sys::Win32::NetworkManagement::WindowsFirewall::{NetFwPolicy2, NetFwRule};
 use windows_sys::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_DISABLE_OLE1DDE, COINIT_MULTITHREADED, CoCreateInstance,
     CoInitializeEx, CoUninitialize,
@@ -41,14 +44,11 @@ use windows_sys::Win32::System::Variant::{VARIANT, VariantClear};
 use windows_sys::core::{BSTR, GUID, HRESULT};
 
 use super::shell;
-use crate::fold::fold;
 
 /// winerror.h `E_POINTER`: a call reported success but returned no interface.
 pub(super) const E_POINTER: HRESULT = 0x8000_4003_u32.cast_signed();
 /// winerror.h `RPC_E_CHANGED_MODE`: COM is initialised on this thread in another apartment.
 const RPC_E_CHANGED_MODE: HRESULT = 0x8001_0106_u32.cast_signed();
-/// The `HRESULT` of [`Bstr::text`] for a string longer than its bound.
-pub(super) const E_TOO_LONG: HRESULT = 0x8007_00CE_u32.cast_signed(); // HRESULT_FROM_WIN32(206)
 
 /// An unused vtable slot (never read).
 pub(super) type Slot = *const c_void;
@@ -162,11 +162,11 @@ impl Bstr {
         Self(ptr::null())
     }
 
-    /// The text (`NULL` is empty), lossy for text that is not valid UTF-16; longer than
-    /// `max` UTF-16 units is [`E_TOO_LONG`].
-    pub(super) fn text(&self, max: usize) -> Result<String, HRESULT> {
+    /// The text (`NULL` is empty), lossy for text that is not valid UTF-16; `None` if longer
+    /// than `max` UTF-16 units.
+    pub(super) fn text(&self, max: usize) -> Option<String> {
         if self.0.is_null() {
-            return Ok(String::new());
+            return Some(String::new());
         }
         #[expect(
             clippy::disallowed_methods,
@@ -176,12 +176,12 @@ impl Bstr {
         // length prefix is valid.
         let len = unsafe { SysStringLen(self.0) } as usize;
         if len > max {
-            return Err(E_TOO_LONG);
+            return None;
         }
         // SAFETY: a BSTR is `len` initialised UTF-16 units at `self.0` (plus a NUL), aligned and
         // alive while `self` owns it; the slice borrows `self`.
         let units = unsafe { std::slice::from_raw_parts(self.0, len) };
-        Ok(String::from_utf16_lossy(units))
+        Some(String::from_utf16_lossy(units))
     }
 }
 
@@ -288,8 +288,10 @@ pub(super) enum EnvMismatch {
 /// The variables combase expands in `InprocServer32` paths of system classes.
 const ENV_VARS: [&str; 2] = ["SystemRoot", "windir"];
 
-/// A4 S10: `SystemRoot` and `windir` of this process both name the Windows folder (folded,
-/// without a trailing separator). Read only; the environment is compared, never used.
+/// A4 S10: `SystemRoot` and `windir` of this process both name the Windows folder (ASCII case
+/// ignored, trailing separators ignored). No Unicode folding: U+0131 and U+017F fold to `I` and
+/// `S`, but NTFS keeps them apart, so `C:\Wındows` is another folder. Read only; the
+/// environment is compared, never used.
 pub(super) fn check_environment() -> Result<(), EnvMismatch> {
     let windows = shell::system_windows_directory().map_err(EnvMismatch::Windows)?;
     environment_matches(&windows, |name| {
@@ -306,7 +308,7 @@ pub(super) fn environment_matches(
     windows: &OsString,
     var: impl Fn(&str) -> Option<OsString>,
 ) -> Result<(), EnvMismatch> {
-    let norm = |s: &str| fold(s.trim_end_matches('\\'));
+    let norm = |s: &str| s.trim_end_matches('\\').to_owned();
     let want = windows
         .to_str()
         .map(norm)
@@ -315,7 +317,7 @@ pub(super) fn environment_matches(
         let ok = var(name)
             .as_deref()
             .and_then(|v| v.to_str())
-            .is_some_and(|v| !v.is_empty() && norm(v) == want);
+            .is_some_and(|v| !v.is_empty() && norm(v).eq_ignore_ascii_case(&want));
         if !ok {
             return Err(EnvMismatch::Var(name));
         }
@@ -354,10 +356,17 @@ pub(super) enum CreateError {
     Env(EnvMismatch),
     /// `CoCreateInstance` failed.
     Com(HRESULT),
+    /// The class is not in [`INPROC_ALLOWED`].
+    NotAllowed,
 }
 
+/// The classes [`create_inproc`] activates: every new one is reviewed against A4 S10 first (its
+/// `InprocServer32` value and whether the environment check covers it, ADR 0008 amendment P4-5a).
+const INPROC_ALLOWED: [GUID; 2] = [NetFwPolicy2, NetFwRule];
+
 /// A4 S10, then the in-process server of `clsid` as the interface `iid`. The caller is in an
-/// [`Apartment`].
+/// [`Apartment`]. A class outside [`INPROC_ALLOWED`] is
+/// [`CreateError::NotAllowed`].
 ///
 /// # Safety
 /// `V` is the vtable of the interface `iid` names.
@@ -365,6 +374,10 @@ pub(super) unsafe fn create_inproc<V: Vtable>(
     clsid: &GUID,
     iid: &GUID,
 ) -> Result<Com<V>, CreateError> {
+    let key = |g: &GUID| (g.data1, g.data2, g.data3, g.data4);
+    if !INPROC_ALLOWED.iter().any(|a| key(a) == key(clsid)) {
+        return Err(CreateError::NotAllowed);
+    }
     check_environment().map_err(CreateError::Env)?;
     // SAFETY: forwarded from the caller.
     unsafe { activate(clsid, iid) }.map_err(CreateError::Com)
@@ -435,6 +448,24 @@ mod tests {
             environment_matches(&win, env(r"C:\Windows\System32", r"C:\Windows")),
             Err(EnvMismatch::Var("SystemRoot"))
         );
+        // Unicode folding would accept these; NTFS treats them as other folders.
+        assert_eq!(
+            environment_matches(&win, env("C:\\W\u{131}ndows", r"C:\Windows")),
+            Err(EnvMismatch::Var("SystemRoot"))
+        );
+        assert_eq!(
+            environment_matches(&win, env(r"C:\Windows", "C:\\Window\u{17F}")),
+            Err(EnvMismatch::Var("windir"))
+        );
+    }
+
+    #[test]
+    fn only_allowed_classes_are_activated() {
+        // A CLSID outside the allowlist is refused before COM is touched.
+        let other = GUID::from_u128(0x0002_1401_0000_0000_c000_0000_0000_0046); // ShellLink
+        // SAFETY: `UnknownVtbl` is the vtable of `IUnknown`, the interface `IID_UNKNOWN` names.
+        let r = unsafe { create_inproc::<UnknownVtbl>(&other, &IID_UNKNOWN) };
+        assert_eq!(r.err(), Some(CreateError::NotAllowed));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::sys::System;
 use crate::sys::fake::FakeSystem;
-use crate::sys::firewall::ACTION_ALLOW;
+use crate::sys::firewall::{ACTION_ALLOW, DIR_IN};
 
 fn id(s: &str) -> Id {
     Id::parse(s).unwrap()
@@ -49,8 +49,6 @@ fn the_rule_has_rerun_s_form() {
         (DIR_OUT, ACTION_BLOCK, PROFILES_ALL, PROTOCOL_ANY, true)
     );
     assert_eq!(r.rest, rest());
-    let inbound = rule(&id("x"), &txn(), 0, &program(), Direction::In);
-    assert_eq!(inbound.direction, DIR_IN);
     assert!(r.name.is_ascii());
 }
 
@@ -130,6 +128,10 @@ fn programs_are_drive_paths_without_percent() {
     let p = program();
     assert!(p.names(&p.as_str().to_uppercase()));
     assert!(!p.names(r"D:\Other\AssassinsCreed_Dx9.exe"));
+    // ASCII case only: U+0131 folds to `I` in Unicode, NTFS keeps the names apart.
+    let dotless = Program::parse("C:\\Games\\gam\u{131}.exe").unwrap();
+    assert!(!dotless.names(r"C:\Games\GAMI.EXE"));
+    assert!(dotless.names("C:\\GAMES\\gam\u{131}.EXE"));
 }
 
 fn fw_with(rules: Vec<FwRule>) -> FakeSystem {

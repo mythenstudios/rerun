@@ -15,5 +15,5 @@ issues:
         status: unverified
         kind: fix
         steps:
-          - firewall_rule: { exe: 'bin/Game.EXE', direction: out }
-          - firewall_rule: { exe: launcher.exe, direction: in }
+          - firewall_rule: { exe: 'bin/game.exe', direction: out }
+          - firewall_rule: { exe: launcher.exe, direction: out }

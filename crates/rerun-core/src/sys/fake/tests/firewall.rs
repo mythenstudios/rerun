@@ -96,3 +96,26 @@ fn the_firewall_contract_catches_a_broken_read() {
         "no rule at all"
     );
 }
+
+#[test]
+fn the_fake_bounds_texts_like_windows() {
+    use crate::sys::firewall::MAX_TEXT_UTF16;
+    let long = "x".repeat(MAX_TEXT_UTF16 + 1);
+    let fw = FakeFirewall::default();
+    let mut r = rule("a", "g");
+    r.description = long.clone();
+    fw.push(r);
+    assert!(
+        fw.select(&|_, _| false).is_ok(),
+        "only kept rules are read fully"
+    );
+    let e = fw.select(&|_, _| true).unwrap_err();
+    assert_eq!(e.kind, SysErrorKind::TooLarge);
+    fw.set_rules(vec![rule(&long, "g")]);
+    let e = fw.select(&|_, _| false).unwrap_err();
+    assert_eq!(
+        e.kind,
+        SysErrorKind::TooLarge,
+        "a name is read for every rule"
+    );
+}
