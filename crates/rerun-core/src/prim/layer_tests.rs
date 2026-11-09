@@ -4,20 +4,21 @@
 //! `.exe`, a link on the way, restricted, the stored spelling), a game folder reached through
 //! a link (E3), two steps for one executable, every token refusal, a link or volatile key on
 //! the way, the step's wire form, with synthetic tokens; T9-L-P (P2-11b) the production tokens
-//! on every value of the SB-L1 fixture.
+//! on every value of the SB-L1 fixture; T9-L-M (P3-6) the "all users" (`HKLM`) value of the
+//! same executable in both views.
 
 use std::path::Path;
 
 use super::reg_tests::{hkcu, plan_steps};
 use super::tests::{GAME, app, builder, fr, rel};
 use super::{CompatLayerSpec, PlanCtx, Step, plan};
-use crate::plan::{Op, Plan, ValueState};
+use crate::plan::{LayerView, Op, Plan, ValueState};
 use crate::policy::registry::RegPolicy;
 use crate::policy::registry::layers::knob;
 use crate::policy::root::GameDir;
 use crate::sys::contract::RegFixture;
 use crate::sys::fake::{FakeSystem, FakeSystemBuilder};
-use crate::sys::registry::{RegValue, reg_type};
+use crate::sys::registry::{Hive, RegKey, RegValue, RegView, reg_type};
 
 /// The anchor of `AppCompatFlags\Layers` (it must exist).
 pub(crate) const CURRENT_VERSION: &str = r"Software\Microsoft\Windows NT\CurrentVersion";
@@ -67,6 +68,7 @@ fn token_list(p: &Plan) -> (String, Option<ValueState>, Vec<String>, String) {
                 old,
                 add,
                 new,
+                ..
             } => {
                 let av = crate::plan::allowed(p, slot, 0).ok()?;
                 Some((
@@ -508,4 +510,246 @@ fn t9l_a_long_launch_path_opens_the_game_and_refuses_only_compat_layer() {
     };
     let e = plan(&[layer_step("game.exe", &["ZZ_OS_A"])], &ctx).unwrap_err();
     assert!(e.to_string().contains("reached through a link"), "{e}");
+}
+
+/// P3-6: the "all users" key of the compatibility-layer values in `view`.
+fn hklm(view: RegView) -> RegKey {
+    RegKey::new(Hive::LocalMachine, view, LAYERS_KEY)
+}
+
+/// P3-6: the 32-bit view's key as the native view names it (`WOW6432Node`).
+fn hklm_wow_native() -> RegKey {
+    RegKey::new(
+        Hive::LocalMachine,
+        RegView::Native,
+        r"Software\WOW6432Node\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+    )
+}
+
+/// The `machine` field of the one token list of `p`.
+fn machine_of(p: &Plan) -> Vec<(LayerView, String)> {
+    p.ops
+        .iter()
+        .find_map(|o| match o {
+            Op::TokenList { machine, .. } => {
+                Some(machine.iter().map(|m| (m.view, m.value.clone())).collect())
+            }
+            _ => None,
+        })
+        .expect("a token list")
+}
+
+/// T9-L-M1 (P3-6): a word of the group of an added token in the "all users" value, in either
+/// view, is refused with the value named.
+#[test]
+fn t9l_m1_hklm_a_group_conflict_in_either_view_is_refused() {
+    let exe = exe_name("game.exe");
+    // The native view, the 32-bit view (by its view and by its WOW6432Node path), a joined
+    // prefix, another case, a second word of the group: each refused, naming the value.
+    for (key, value, view, word) in [
+        (
+            hklm(RegView::Native),
+            "~ ZZ_DPI_B",
+            "64-bit view",
+            "ZZ_DPI_B",
+        ),
+        (
+            hklm(RegView::Wow32),
+            "~ RUNASADMIN ZZ_DPI_B",
+            "32-bit view",
+            "ZZ_DPI_B",
+        ),
+        (hklm_wow_native(), "~ zz_dpi_b", "32-bit view", "zz_dpi_b"),
+        (
+            hklm(RegView::Native),
+            "~ZZ_DPI_B",
+            "64-bit view",
+            "~ZZ_DPI_B",
+        ),
+        (
+            hklm(RegView::Native),
+            "~ ZZ_OS_C ZZ_DPI_B",
+            "64-bit view",
+            "ZZ_DPI_B",
+        ),
+    ] {
+        let sys = layer_builder()
+            .value(key, &exe, RegValue::String(value.into()))
+            .build()
+            .unwrap();
+        let e = plan_one(&sys, layer_step("game.exe", &["ZZ_DPI_A", "ZZ_FLAG_A"]))
+            .expect_err(value)
+            .to_string();
+        for want in [
+            &format!(
+                "compat_layer: the all-users compatibility-layer value of game.exe (HKLM, \
+                 {view}) holds {word}, of the same kind as ZZ_DPI_A; Rerun does not add \
+                 ZZ_DPI_A for the current user over it"
+            ) as &str,
+            "(Change settings for all users) first",
+            &format!("The value: {value}"),
+        ] {
+            assert!(e.contains(want), "{value}: {want:?} not in {e}");
+        }
+    }
+    // The production tables: an HKLM DPI setting against HKCU `HIGHDPIAWARE` (ADR 0018:154).
+    let _r = Reset;
+    knob::production(true);
+    for (value, word) in [
+        ("~ DPIUNAWARE", "DPIUNAWARE"),
+        ("~ GDIDPISCALING DPIUNAWARE", "GDIDPISCALING"),
+    ] {
+        let sys = layer_builder()
+            .value(hklm(RegView::Native), &exe, RegValue::String(value.into()))
+            .build()
+            .unwrap();
+        let e = plan_one(&sys, layer_step("game.exe", &["HIGHDPIAWARE"]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains(&format!("holds {word}, of the same kind as HIGHDPIAWARE")),
+            "{e}"
+        );
+    }
+}
+
+/// T9-L-M2 (P3-6): without a conflict the plan proceeds and records, and the preview names,
+/// the value of every view where it exists.
+#[test]
+fn t9l_m2_hklm_without_conflict_plans_and_the_preview_names_it() {
+    let exe = exe_name("game.exe");
+    // Both views, different values; the added token itself in HKLM is no conflict.
+    let sys = layer_builder()
+        .value(
+            hklm(RegView::Native),
+            &exe,
+            RegValue::String("~ RUNASADMIN ZZ_OS_A".into()),
+        )
+        .value(
+            hklm_wow_native(),
+            &exe,
+            RegValue::String("~ ZZ_DPI_A".into()),
+        )
+        .build()
+        .unwrap();
+    let p = plan_one(&sys, layer_step("game.exe", &["ZZ_DPI_A", "ZZ_FLAG_A"])).unwrap();
+    assert_eq!(
+        machine_of(&p),
+        [
+            (LayerView::Native, "~ RUNASADMIN ZZ_OS_A".to_owned()),
+            (LayerView::Wow32, "~ ZZ_DPI_A".to_owned()),
+        ]
+    );
+    let (_, old, add, new) = token_list(&p);
+    assert_eq!(old, None);
+    assert_eq!(add, ["ZZ_DPI_A", "ZZ_FLAG_A"]);
+    assert_eq!(new, "~ ZZ_DPI_A ZZ_FLAG_A");
+    let text = crate::plan::preview_stored(&p.encode().unwrap())
+        .unwrap()
+        .to_string();
+    for want in [
+        "     all users (HKLM, 64-bit view), not changed: REG_SZ: ~ RUNASADMIN ZZ_OS_A\n",
+        "     all users (HKLM, 32-bit view), not changed: REG_SZ: ~ ZZ_DPI_A\n",
+    ] {
+        assert!(text.contains(want), "{want:?} not in\n{text}");
+    }
+    // Only one view: only that one is named.
+    let sys = layer_builder()
+        .value(
+            hklm(RegView::Wow32),
+            &exe,
+            RegValue::String("~ ZZ_FLAG_B".into()),
+        )
+        .build()
+        .unwrap();
+    let p = plan_one(&sys, layer_step("game.exe", &["ZZ_DPI_A"])).unwrap();
+    assert_eq!(
+        machine_of(&p),
+        [(LayerView::Wow32, "~ ZZ_FLAG_B".to_owned())]
+    );
+}
+
+/// T9-L-M3 (P3-6): no "all users" value of the executable: the plan's bytes are those of a
+/// system without one.
+#[test]
+fn t9l_m3_hklm_absent_changes_nothing() {
+    let base = plan_one(
+        &layer_builder().build().unwrap(),
+        layer_step("game.exe", &["ZZ_DPI_A"]),
+    )
+    .unwrap();
+    assert!(machine_of(&base).is_empty());
+    for sys in [
+        layer_builder()
+            .key(hklm(RegView::Native))
+            .key(hklm(RegView::Wow32))
+            .build()
+            .unwrap(),
+        layer_builder()
+            .value(
+                hklm(RegView::Native),
+                &exe_name("other.exe"),
+                RegValue::String("~ ZZ_DPI_B".into()),
+            )
+            .build()
+            .unwrap(),
+    ] {
+        let p = plan_one(&sys, layer_step("game.exe", &["ZZ_DPI_A"])).unwrap();
+        assert_eq!(p.encode().unwrap(), base.encode().unwrap());
+    }
+}
+
+/// T9-L-M4 (P3-6): an "all users" value that cannot be read, or whose tokens cannot be
+/// checked, is refused in either view (fail closed); with nothing to add it is not read.
+#[test]
+fn t9l_m4_hklm_unreadable_or_unusual_is_refused() {
+    let exe = exe_name("game.exe");
+    for (key, view) in [
+        (hklm(RegView::Native), "64-bit view"),
+        (hklm(RegView::Wow32), "32-bit view"),
+        (hklm_wow_native(), "32-bit view"),
+    ] {
+        let sys = layer_builder().denied_key(key).build().unwrap();
+        let e = plan_one(&sys, layer_step("game.exe", &["ZZ_FLAG_A"]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains(&format!(
+                "the all-users compatibility-layer value of game.exe (HKLM, {view}) cannot be \
+                 read"
+            )) && e.contains("Rerun adds no token it cannot check against it"),
+            "{view}: {e}"
+        );
+    }
+    for v in [
+        RegValue::Dword(1),
+        RegValue::ExpandString("~ ZZ_FLAG_B".into()),
+        RegValue::String("~  ZZ_FLAG_B".into()),
+        RegValue::String(String::new()),
+        RegValue::String(format!("~ {}", "A".repeat(600))),
+    ] {
+        let sys = layer_builder()
+            .value(hklm(RegView::Wow32), &exe, v.clone())
+            .build()
+            .unwrap();
+        let e = plan_one(&sys, layer_step("game.exe", &["ZZ_FLAG_A"]))
+            .expect_err(&format!("{v:?}"))
+            .to_string();
+        assert!(
+            e.contains("(HKLM, 32-bit view) is unusual") && e.contains("adds none"),
+            "{v:?}: {e}"
+        );
+    }
+    // Nothing to add: HKLM is not read, the step is no op as before.
+    let sys = layer_builder()
+        .value(
+            hkcu(LAYERS_KEY),
+            &exe,
+            RegValue::String("~ ZZ_FLAG_A".into()),
+        )
+        .denied_key(hklm(RegView::Native))
+        .build()
+        .unwrap();
+    let p = plan_one(&sys, layer_step("game.exe", &["ZZ_FLAG_A"])).unwrap();
+    assert!(!p.ops.iter().any(|o| matches!(o, Op::TokenList { .. })));
 }

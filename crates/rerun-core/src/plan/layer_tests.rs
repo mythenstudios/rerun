@@ -4,8 +4,8 @@
 //! Synthetic tokens only (review S8).
 
 use super::super::{
-    MAX_OP_BYTES, NewValue, Object, Op, Plan, PlanError, RootIx, ValueState, decode,
-    decode_recorded, overlap, preview,
+    LayerView, MAX_OP_BYTES, MachineLayers, NewValue, Object, Op, Plan, PlanError, RootIx,
+    ValueState, decode, decode_recorded, overlap, preview, preview_head,
 };
 use super::{r, sample};
 use crate::policy::registry::{RegSlot, TokenName};
@@ -48,6 +48,7 @@ fn layer_plan() -> Plan {
             old: None,
             add: ts(&["ZZ_FLAG_A", "ZZ_OS_A"]),
             new: "~ ZZ_FLAG_A ZZ_OS_A".to_owned(),
+            machine: Vec::new(),
         },
     ]);
     p
@@ -62,6 +63,7 @@ fn merge_plan() -> Plan {
         old: old_sz("~ RUNASADMIN"),
         add: ts(&["ZZ_DPI_A"]),
         new: "~ RUNASADMIN ZZ_DPI_A".to_owned(),
+        machine: Vec::new(),
     });
     p
 }
@@ -151,6 +153,7 @@ fn p_l2_token_lists_break_no_rule() {
                 old: None,
                 add: ts(&["ZZ_OS_A"]),
                 new: "~ ZZ_OS_A".to_owned(),
+                machine: Vec::new(),
             });
         }),
         "tokens are only added to a compatibility-layer value",
@@ -239,6 +242,7 @@ fn p_l2_token_lists_break_no_rule() {
                 old: None,
                 add: ts(&["ZZ_RES_A"]),
                 new: "~ ZZ_RES_A".to_owned(),
+                machine: Vec::new(),
             });
         }),
         "a second op on the same object",
@@ -333,6 +337,7 @@ fn p_l3_the_worst_case_token_list_fits_the_op_budget() {
         old: old_sz(&old),
         add: ts(&["A"]),
         new: format!("{old} A"),
+        machine: Vec::new(),
     });
     let size = serde_json::to_vec(&p.ops[3]).unwrap().len();
     eprintln!("P-L3: worst-case TokenList is {size} bytes");
@@ -348,6 +353,7 @@ fn p_l3_the_worst_case_token_list_fits_the_op_budget() {
         old: old_sz(&short),
         add: ts(&tokens),
         new: format!("{short} {}", tokens.join(" ")),
+        machine: Vec::new(),
     };
     let other = serde_json::to_vec(&q.ops[3]).unwrap().len();
     assert!(other < size, "{other} < {size}");
@@ -410,4 +416,83 @@ fn p_l5_the_preview_shows_tokens_old_new_and_the_layers_note() {
             .to_string()
             .contains("compatibility layers")
     );
+}
+
+/// `merge_plan` with the "all users" values `m` on its token list (P3-6).
+fn machine_plan(m: &[(LayerView, &str)]) -> Plan {
+    with(&merge_plan(), &|p| {
+        if let Some(Op::TokenList { machine, .. }) = p.ops.last_mut() {
+            *machine = m
+                .iter()
+                .map(|(view, value)| MachineLayers {
+                    view: *view,
+                    value: (*value).to_owned(),
+                })
+                .collect();
+        }
+    })
+}
+
+#[test]
+fn p_l6_all_users_values_one_form_rules_and_preview() {
+    // Absent: the wire form of a token list is unchanged (no `machine` field).
+    let bytes = merge_plan().encode().unwrap();
+    assert!(!String::from_utf8_lossy(bytes.bytes()).contains("machine"));
+    // Present: round trip in one form, both views in order.
+    let p = machine_plan(&[
+        (LayerView::Native, "~ RUNASINVOKER"),
+        (LayerView::Wow32, "~ ZZ_DPI_A ZZ_FLAG_B"),
+    ]);
+    let b = p.encode().unwrap();
+    let text = String::from_utf8_lossy(b.bytes()).into_owned();
+    assert!(
+        text.contains(r#""machine":[{"view":"native","value":"~ RUNASINVOKER"},{"view":"wow32""#),
+        "{text}"
+    );
+    assert_eq!(decode(b.bytes()).unwrap(), p);
+    // An explicit empty list is a second spelling.
+    let empty = text.replace(
+        r#","machine":[{"view":"native","value":"~ RUNASINVOKER"},{"view":"wow32","value":"~ ZZ_DPI_A ZZ_FLAG_B"}]"#,
+        r#","machine":[]"#,
+    );
+    assert_ne!(empty, text);
+    assert!(decode(empty.as_bytes()).is_err());
+    // The preview names each value, marked as not changed; a recorded head masks it.
+    let shown = preview(&p).to_string();
+    for want in [
+        "     all users (HKLM, 64-bit view), not changed: REG_SZ: ~ RUNASINVOKER\n",
+        "     all users (HKLM, 32-bit view), not changed: REG_SZ: ~ ZZ_DPI_A ZZ_FLAG_B\n",
+    ] {
+        assert!(shown.contains(want), "{want:?} not in\n{shown}");
+    }
+    let head = preview_head(b.bytes()).unwrap().to_string();
+    assert!(
+        head.contains("all users (HKLM, 64-bit view), not changed: REG_SZ, "),
+        "{head}"
+    );
+    assert!(!head.contains("RUNASINVOKER"), "{head}");
+    // Form rules, either rule set: one per view in view order, each in the grammar.
+    refused(
+        &machine_plan(&[(LayerView::Native, "~ A"), (LayerView::Native, "~ B")]),
+        "at most one per view, in view order",
+    );
+    refused(
+        &machine_plan(&[(LayerView::Wow32, "~ A"), (LayerView::Native, "~ B")]),
+        "at most one per view, in view order",
+    );
+    refused(
+        &machine_plan(&[(LayerView::Native, "~  A")]),
+        "all-users compatibility-layer value outside the grammar",
+    );
+    // A group conflict with an added token (ZZ_DPI_A): current rules only, also behind a
+    // joined prefix; the added token itself is no conflict.
+    for v in ["~ ZZ_DPI_B", "~ZZ_DPI_B", "$ ~ zz_dpi_b"] {
+        refused_now(
+            &machine_plan(&[(LayerView::Wow32, v)]),
+            "with a token of the group of an added token",
+        );
+    }
+    machine_plan(&[(LayerView::Native, "~ ZZ_DPI_A ZZ_OS_A")])
+        .encode()
+        .unwrap();
 }

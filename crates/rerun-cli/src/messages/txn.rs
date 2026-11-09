@@ -241,6 +241,14 @@ pub enum TxnMsg<'a> {
         /// The tokens.
         tokens: Shown<'a>,
     },
+    /// The "all users" (`HKLM`) value of the executable of an `add tokens` op (P3-6), which
+    /// Rerun does not change.
+    MachineValue {
+        /// `64-bit view`, `32-bit view`.
+        view: &'a str,
+        /// The value.
+        value: &'a RegShown,
+    },
     /// The old value of a registry op.
     OldValue(&'a RegShown),
     /// The new value of a registry op.
@@ -859,6 +867,9 @@ impl fmt::Display for TxnMsg<'_> {
                 attrs,
             } => write!(f, "  old: sha256 {sha256}, {len} bytes, attributes {attrs}"),
             Self::Tokens { tokens } => write!(f, "  adds tokens: {tokens}"),
+            Self::MachineValue { view, value } => {
+                write!(f, "  all users (HKLM, {view}), not changed: {value}")
+            }
             Self::OldValue(v) => write!(f, "  old value: {v}"),
             Self::NewValue(v) => write!(f, "  new value: {v}"),
             Self::TypeChange => f.write_str("  the type of the value changes"),

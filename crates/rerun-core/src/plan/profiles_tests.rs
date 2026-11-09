@@ -323,6 +323,7 @@ fn lm_p2_every_rule_of_the_fence_is_refused_with_its_rule_set() {
                 old: None,
                 add: vec![crate::policy::registry::TokenName::parse("HIGHDPIAWARE").unwrap()],
                 new: "~ HIGHDPIAWARE".to_owned(),
+                machine: Vec::new(),
             });
         }),
     ];

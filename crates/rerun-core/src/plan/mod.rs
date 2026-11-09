@@ -44,7 +44,11 @@
 //! allowlist, groups of the added tokens, an old value without a joined prefix, length) and `new` equal to `layers::merge(old, add)`; [`Rules::Recorded`]
 //! keeps the form and the version-independent relation (an old value: `new` is it, one space
 //! and the tokens; none: `new` ends with the tokens), not the allowlist, the groups or the
-//! prefix of a new value (a later allowlist or prefix must not block the revert).
+//! prefix of a new value (a later allowlist or prefix must not block the revert). Its optional
+//! `machine` (P3-6, ADR 0018 amendment P3-6) records the "all users" (`HKLM`) value of the same
+//! executable the planner read, per view, for the preview only (never written or re-observed):
+//! at most one per view in view order, each in the grammar; [`Rules::Current`] adds that none
+//! holds a word of a group of an added token.
 //!
 //! `IniValue` (P2-12, ADR 0020 amendment P2-12, ADR 0021): a file op on an existing `.ini` file
 //! (`policy::ini::path_ok`: not `desktop.ini`); its edits pass `policy::ini::check_edits` (1 to
@@ -188,6 +192,28 @@ pub enum PlanOrigin {
 #[serde(transparent)]
 pub struct RootIx(pub u16);
 
+/// A registry view of an "all users" compatibility-layer value (P3-6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerView {
+    /// The native (64-bit) view.
+    Native,
+    /// The 32-bit view (`WOW6432Node`).
+    Wow32,
+}
+
+/// The "all users" (`HKLM`) compatibility-layer value of a `TokenList`'s executable in one view,
+/// as the planner read it (P3-6): a `REG_SZ` in the strict grammar of
+/// `policy::registry::layers`, display only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineLayers {
+    /// The view it was read in.
+    pub view: LayerView,
+    /// The value.
+    pub value: String,
+}
+
 /// One op (ADR 0020). There is no delete op: deleting is only ever a revert.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -253,6 +279,11 @@ pub enum Op {
         add: Vec<TokenName>,
         /// The new value: `old` with `add` appended (`policy::registry::layers::merge`).
         new: String,
+        /// The "all users" value of the same executable in `HKLM` as planned, per view in which
+        /// it exists (P3-6, ADR 0018 amendment P3-6): for the preview only, never written,
+        /// never re-observed. Omitted on the wire when empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        machine: Vec<MachineLayers>,
     },
     /// Sets keys of an existing INI file whose state was `old` when planned (P2-12): only the
     /// edits change (`policy::ini::edit`); a revert restores the old content exactly, or puts
@@ -836,8 +867,15 @@ impl RegSeen {
         }
         let (old, new) = match op {
             Op::SetValue { old, new, .. } => (old, new),
-            Op::TokenList { old, add, new, .. } => {
+            Op::TokenList {
+                old,
+                add,
+                new,
+                machine,
+                ..
+            } => {
                 self.tokens(k, &av, &obj.0, old.as_ref(), add, new, rules)?;
+                machine_rules(k, add, machine, rules)?;
                 self.values.push(obj);
                 return Ok(());
             }
@@ -970,6 +1008,39 @@ impl RegSeen {
         }
         Ok(())
     }
+}
+
+/// The rules of a `TokenList`'s "all users" values (P3-6, module docs): at most one per view,
+/// in view order, each in the strict grammar; [`Rules::Current`] adds that none holds a word
+/// of a group one of the added tokens holds (`layers::machine_conflict`). The recorded rules
+/// skip the groups: a later group table must not block a revert.
+fn machine_rules(
+    k: usize,
+    add: &[TokenName],
+    machine: &[MachineLayers],
+    rules: Rules,
+) -> Result<(), PlanError> {
+    if machine.windows(2).any(|w| w[0].view >= w[1].view) {
+        return Err(invalid(
+            Some(k),
+            "all-users values: at most one per view, in view order",
+        ));
+    }
+    for m in machine {
+        let conflict = layers::machine_conflict(&m.value, add).map_err(|_| {
+            invalid(
+                Some(k),
+                "an all-users compatibility-layer value outside the grammar",
+            )
+        })?;
+        if rules == Rules::Current && conflict.is_some() {
+            return Err(invalid(
+                Some(k),
+                "an all-users compatibility-layer value with a token of the group of an added token",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The old compatibility-layer value of a `TokenList`: a `REG_SZ` with its NUL, inline with

@@ -7,6 +7,8 @@
 //! (`System::registry_write` is a `clippy.toml` ban everywhere else).
 //!
 //! - `HKCU` only, native view; `HKLM` is `NeedsHelper` (the GUI never writes it, core rule 6).
+//!   The one `HKLM` read is the "all users" compatibility-layer value of an executable, both
+//!   views, read only ([`RegReader::machine_layers`], P3-6).
 //! - `CompatLayers`: `HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers`,
 //!   the value name the canonical path of an executable in a plan root, built from the root's
 //!   path (parsed again) and a [`RelPath`] (M2). No value is set there: [`RegWriter::add_tokens`]
@@ -38,7 +40,8 @@ use crate::sys::registry::{
 };
 use crate::sys::{SysError, SysErrorKind, SysResult, System};
 
-/// The fixed key of `AppCompatFlags\Layers` below `HKCU`.
+/// The fixed key of `AppCompatFlags\Layers` below `HKCU` (and, read only, below `HKLM`:
+/// [`RegReader::machine_layers`], P3-6).
 const LAYERS: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
 /// Segments of [`LAYERS`] that must exist (`…\CurrentVersion`): `AppCompatFlags` and `Layers`
 /// may be created.
@@ -614,6 +617,23 @@ impl RegReader<'_> {
             }
         }
         Ok(out)
+    }
+
+    /// The "all users" value of the executable of a `CompatLayers` slot: the same value name
+    /// below `HKLM\Software\…\AppCompatFlags\Layers` in `view` (P3-6, ADR 0018 amendment P3-6).
+    /// Read only, through the read side ([`crate::sys::registry::Registry::get`]: `KEY_QUERY_VALUE`
+    /// with the view's `KEY_WOW64_*` flag; the write side refuses `HKLM`). The key is a plain
+    /// [`RegKey`], never an [`AllowedKey`], so no write can name it. A missing key or value is
+    /// `None`; another slot is `Ok(None)`.
+    pub fn machine_layers(&self, v: &AllowedValue, view: RegView) -> SysResult<Option<RegValue>> {
+        if !matches!(v.slot, RegSlot::CompatLayers { .. }) {
+            return Ok(None);
+        }
+        let key = RegKey::new(Hive::LocalMachine, view, LAYERS);
+        match self.w.get(&key, &v.name) {
+            Err(e) if e.kind == SysErrorKind::NotFound => Ok(None),
+            r => r,
+        }
     }
 }
 

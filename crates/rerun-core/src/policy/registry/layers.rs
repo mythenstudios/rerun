@@ -588,6 +588,33 @@ pub(super) fn check(old: Option<&str>, add: &[TokenName]) -> Result<(), RegPolic
     Ok(())
 }
 
+/// The first conflict between the "all users" value `machine` (the `HKLM` value of the same
+/// executable, P3-6, ADR 0018 amendment P3-6) and the tokens `add` Rerun would append to the
+/// `HKCU` value: a word of `machine` in the group of one of `add` and not that token itself
+/// (both folded), as (word, token). A prefix character joined to a word (`~X`, `$X`) is looked
+/// through, since Windows applies `~X` like `X` (SB-L3). `Err` for a value outside the strict
+/// grammar: its tokens cannot be checked. Rerun never writes `HKLM`; this only reads.
+pub fn machine_conflict<'m>(
+    machine: &'m str,
+    add: &[TokenName],
+) -> Result<Option<(&'m str, TokenName)>, RegPolicyError> {
+    let l = parse(machine)?;
+    for t in add {
+        let Some(g) = group_of(t.as_str()) else {
+            continue;
+        };
+        let f = fold(t.as_str());
+        let hit = l.words().iter().copied().find(|w| {
+            let bare = w.trim_start_matches(['~', '$']);
+            fold(bare) != f && group_of(bare) == Some(g)
+        });
+        if let Some(w) = hit {
+            return Ok(Some((w, t.clone())));
+        }
+    }
+    Ok(None)
+}
+
 /// The first word of `words` that is a prefix character (`~`, `$`) joined to a word, or a lone
 /// one after another word (P2-11b, B4.3; module docs). Lone ones at the start (`~`, `$ ~`)
 /// are fine.

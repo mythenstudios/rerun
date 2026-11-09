@@ -27,6 +27,7 @@ fn op(index: usize, action: &'static str, root: Option<usize>, path: &str) -> Pr
         old_value: None,
         new_value: None,
         tokens: None,
+        machine: Vec::new(),
         type_change: false,
         source: None,
         content: None,
@@ -100,6 +101,7 @@ fn every_op_kind_and_the_notes() {
     let mut tokens = op(4, "add tokens", None, r"HKCU\Software\Layers");
     tokens.name = Some(escape::path(r"D:\Games\G\game.exe").into_owned());
     tokens.tokens = Some("ZZ_A ZZ_B".to_owned());
+    tokens.machine = vec![("64-bit view", reg("REG_SZ", Some("~ RUNASADMIN")))];
     tokens.old_value = Some(reg("missing", None));
     tokens.new_value = Some(reg("REG_SZ", Some("~ ZZ_A ZZ_B")));
     let p = preview(r"D:\Games\G", vec![replace, ini, key, value, tokens]);
@@ -130,6 +132,7 @@ op 3: set value: HKCU\Software\Vendor\Game
 op 4: add tokens: HKCU\Software\Layers
   value: D:\Games\G\game.exe
   adds tokens: ZZ_A ZZ_B
+  all users (HKLM, 64-bit view), not changed: REG_SZ: ~ RUNASADMIN
   old value: missing
   new value: REG_SZ: ~ ZZ_A ZZ_B
 note: {NOT_RESTORED}

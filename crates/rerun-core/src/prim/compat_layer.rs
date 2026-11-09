@@ -23,6 +23,15 @@
 //! `Layers`) each become a `CreateKey`, top-down and once for all steps; one `TokenList` with
 //! the tokens in byte order and the new value (`layers::merge`).
 //!
+//! The "all users" value (P3-6, ADR 0018 amendment P3-6): when there is something to add, the
+//! planner reads the value of the same executable below `HKLM\…\AppCompatFlags\Layers`, read
+//! only, in the native and the 32-bit view (`RegReader::machine_layers`). A word there of the
+//! group of a token Rerun would add (folded, a joined `~` looked through, the token itself
+//! excepted) is refused, as is a value outside the strict grammar or not a `REG_SZ` (its tokens
+//! cannot be checked) and one that cannot be read for any reason but "missing" (fail closed).
+//! Otherwise the op records the value of every view where it exists (`TokenList::machine`), and
+//! the preview names it. Rerun never writes `HKLM` (core rule 6).
+//!
 //! Refused besides: a game folder reached by another path than its canonical one (a link, a
 //! junctioned library, an 8.3 name; user decision E3 a, final after SB-L2: Windows applies a
 //! layer only when the value name is the path the program is started by, and the value name is
@@ -35,7 +44,7 @@ use super::{Builder, PlanCtx};
 use crate::fold::fold;
 use crate::journal::{InstanceTag, Journal, TxnId, TxnState, VerifyBackups};
 use crate::path::RelPath;
-use crate::plan::{self, Op, PlanError, RootIx, ValueState};
+use crate::plan::{self, LayerView, MachineLayers, Op, PlanError, RootIx, ValueState};
 use crate::policy::registry::{
     AllowedValue, RegPolicy, RegSlot, TokenName,
     layers::{self, MAX_ADD},
@@ -43,7 +52,7 @@ use crate::policy::registry::{
 use crate::policy::root::GameDir;
 use crate::sys::SysErrorKind;
 use crate::sys::fs::EntryKind;
-use crate::sys::registry::RegValue;
+use crate::sys::registry::{RegValue, RegView};
 
 /// The `compat_layer` step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +293,7 @@ pub(crate) fn plan_into(
     RegPolicy
         .check_tokens(&av, old.as_deref(), &add)
         .map_err(|e| refuse(format!("compat_layer: {e}")))?;
+    let machine = machine_layers(ctx, &av, &exe, &add)?;
     for k in ctx.reg.missing_keys(av.key()).map_err(read_err)? {
         if b.reg_keys.contains(&k) {
             continue;
@@ -306,8 +316,68 @@ pub(crate) fn plan_into(
         old,
         add,
         new,
+        machine,
     });
     Ok(())
+}
+
+/// The "all users" value of the executable (P3-6, ADR 0018 amendment P3-6), read only in both
+/// views: refused when it holds a word of the group of a token of `add`, when it is unusual
+/// (its tokens cannot be checked) or cannot be read (fail closed); otherwise every view where it
+/// exists, for the preview. Rerun never writes `HKLM` (core rule 6).
+fn machine_layers(
+    ctx: &PlanCtx<'_>,
+    av: &AllowedValue,
+    exe: &RelPath,
+    add: &[TokenName],
+) -> Result<Vec<MachineLayers>, PlanError> {
+    let mut out = Vec::new();
+    for (view, rv, words) in [
+        (LayerView::Native, RegView::Native, "64-bit view"),
+        (LayerView::Wow32, RegView::Wow32, "32-bit view"),
+    ] {
+        let at = || {
+            format!(
+                "compat_layer: the all-users compatibility-layer value of {} (HKLM, {words})",
+                shown(exe.as_str())
+            )
+        };
+        let unusual = || {
+            refuse(format!(
+                "{} is unusual (another type, another form or longer than 511 characters); \
+                 Rerun cannot check its tokens and adds none",
+                at()
+            ))
+        };
+        let value = match ctx.reg.machine_layers(av, rv) {
+            Ok(None) => continue,
+            Ok(Some(RegValue::String(s))) => s,
+            Ok(Some(_)) => return Err(unusual()),
+            Err(e) if e.kind == SysErrorKind::TooLarge => return Err(unusual()),
+            Err(e) => {
+                return Err(refuse(format!(
+                    "{} cannot be read ({e}); Rerun adds no token it cannot check against it",
+                    at()
+                )));
+            }
+        };
+        match layers::machine_conflict(&value, add) {
+            Ok(None) => {}
+            Ok(Some((w, t))) => {
+                return Err(refuse(format!(
+                    "{} holds {}, of the same kind as {t}; Rerun does not add {t} for the \
+                     current user over it; change it in the Compatibility tab of the \
+                     executable's Properties (Change settings for all users) first. The value: {}",
+                    at(),
+                    shown(w),
+                    crate::escape::text(&value)
+                )));
+            }
+            Err(_) => return Err(unusual()),
+        }
+        out.push(MachineLayers { view, value });
+    }
+    Ok(out)
 }
 
 fn unusual(exe: &RelPath) -> PlanError {

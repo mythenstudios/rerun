@@ -11,7 +11,9 @@
 //! and the new value; a plan with registry ops adds [`REGISTRY_NOTE`] once.
 //!
 //! An `add tokens` op (P2-11) shows the value name (the executable's path), the old value, the
-//! tokens it adds and the new value; a plan with such an op adds [`LAYERS_NOTE`] once.
+//! tokens it adds and the new value; a plan with such an op adds [`LAYERS_NOTE`] once. The
+//! "all users" (`HKLM`) value of the same executable the planner saw (P3-6) is named per view,
+//! marked as not changed; a recorded head masks it like every registry value.
 //!
 //! An `edit ini` op (P2-12) shows the file with its old and new hash, length and R/H/S (kept),
 //! and per key `[section] key`, the old value (`missing`, `new section`) and the new one, every
@@ -30,7 +32,7 @@ use rerun_proto::cpu::rule::{Bitness, CpuRule, Mode, Prefer, PreferL3};
 use rerun_proto::profile::{self as proto, LaunchProfile, Method, Priority};
 
 use super::{
-    ContentRef, FileState, Op, Plan, PlanBytes, PlanError, PlanOrigin, RootKind, Target,
+    ContentRef, FileState, LayerView, Op, Plan, PlanBytes, PlanError, PlanOrigin, RootKind, Target,
     ValueState, allowed, created_key,
 };
 use crate::escape::{self, Shown};
@@ -220,6 +222,10 @@ pub struct PreviewOp {
     pub new_value: Option<RegShown>,
     /// The tokens an `add tokens` adds, in order (their form is `[A-Z0-9_]`).
     pub tokens: Option<String>,
+    /// The "all users" (`HKLM`) value of the executable of an `add tokens` op, per view in which
+    /// the planner saw it (P3-6): the view (`64-bit view`, `32-bit view`) and the value. Never
+    /// changed by Rerun.
+    pub machine: Vec<(&'static str, RegShown)>,
     /// A `set value` changes the value's type.
     pub type_change: bool,
     /// Source: `<package id> <version>: <file>`.
@@ -519,6 +525,23 @@ pub fn preview(p: &Plan) -> Preview {
                 ),
                 _ => None,
             };
+            let machine = match op {
+                Op::TokenList { machine, .. } => machine
+                    .iter()
+                    .map(|m| {
+                        let v = RegValue::String(m.value.clone());
+                        let shown = ValueState::of(&v).map_or_else(
+                            || RegShown {
+                                kind: "a value without an encoding".to_owned(),
+                                text: None,
+                            },
+                            |s| value_text(&v, &s),
+                        );
+                        (view_words(m.view), shown)
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
             let (source, content, config) = match op.content() {
                 Some(ContentRef::Package {
                     id,
@@ -588,6 +611,7 @@ pub fn preview(p: &Plan) -> Preview {
                 old_value,
                 new_value,
                 tokens,
+                machine,
                 type_change,
                 source,
                 content,
@@ -676,6 +700,9 @@ impl fmt::Display for Preview {
             if let Some(t) = &o.tokens {
                 writeln!(f, "     adds {t}")?;
             }
+            for (view, v) in &o.machine {
+                writeln!(f, "     all users (HKLM, {view}), not changed: {v}")?;
+            }
             if let (Some(old), Some(new)) = (&o.old_value, &o.new_value) {
                 writeln!(f, "     old {old}")?;
                 writeln!(f, "     new {new}")?;
@@ -751,7 +778,12 @@ pub fn preview_head(b: &[u8]) -> Result<Preview, PlanError> {
     for (op, shown) in p.ops.iter().zip(v.ops.iter_mut()) {
         match op {
             Op::SetValue { old, .. } => shown.old_value = Some(masked(old.as_ref())),
-            Op::TokenList { old, new, .. } => {
+            Op::TokenList {
+                old, new, machine, ..
+            } => {
+                for (m, (_, v)) in machine.iter().zip(shown.machine.iter_mut()) {
+                    *v = masked(ValueState::of(&RegValue::String(m.value.clone())).as_ref());
+                }
                 shown.old_value = Some(masked(old.as_ref()));
                 shown.new_value = Some(masked(
                     ValueState::of(&RegValue::String(new.clone())).as_ref(),
@@ -764,6 +796,14 @@ pub fn preview_head(b: &[u8]) -> Result<Preview, PlanError> {
 }
 
 /// A registry value by type, length and SHA-256 only (`missing` without one).
+/// The words of an "all users" view (P3-6).
+fn view_words(v: LayerView) -> &'static str {
+    match v {
+        LayerView::Native => "64-bit view",
+        LayerView::Wow32 => "32-bit view",
+    }
+}
+
 fn masked(s: Option<&ValueState>) -> RegShown {
     RegShown {
         kind: s.map_or_else(|| "missing".to_owned(), opaque),

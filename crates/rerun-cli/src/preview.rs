@@ -100,6 +100,9 @@ pub fn op(o: &PreviewOp) -> Vec<Message<'_>> {
     if let Some(t) = &o.tokens {
         out.push(m(TxnMsg::Tokens { tokens: tokens(t) }));
     }
+    for (view, value) in &o.machine {
+        out.push(m(TxnMsg::MachineValue { view, value }));
+    }
     if let Some(v) = &o.old_value {
         out.push(m(TxnMsg::OldValue(v)));
     }

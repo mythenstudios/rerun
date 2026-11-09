@@ -51,6 +51,7 @@ fn file_op(index: usize, action: &'static str, path: &str) -> PreviewOp {
         old_value: None,
         new_value: None,
         tokens: None,
+        machine: Vec::new(),
         type_change: false,
         source: None,
         content: None,
