@@ -224,6 +224,14 @@ if (-not $r1) {
             default { Fail "VirtualStore: the case failed (verdict $($vs.verdict)): $($vs.detail)" }
         }
     }
+
+    # B12 b (ADR 0023): firewall rules readable by the standard user? A measurement, never a failure.
+    $fw = if ($r1.cli) { $r1.cli.firewall_read } else { $null }
+    if (-not $fw -or $fw -is [string]) { Write-Host '::warning::B12 b: the firewall read probe did not run (no cli.firewall_read object in result.json)' }
+    else {
+        Write-Host ("MEASURED firewall read (standard user): COM {0} (rules {1}; first rule {2}); CIM {3} (rules {4})" -f `
+            $fw.com, $fw.com_count, $fw.com_fields, $fw.cim, $fw.cim_count)
+    }
 }
 EndSection
 

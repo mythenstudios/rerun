@@ -701,13 +701,41 @@ function Invoke-VirtualStore {
     $v
 }
 
+# B12 b (ADR 0023): can a standard user read the Windows Firewall rules? Read only, never a
+# write; records facts, tests no Rerun code. Both the COM policy (INetFwPolicy2, what the
+# helper design uses) and the CIM provider are tried.
+function Invoke-FirewallRead {
+    $v = [ordered]@{ com = ''; com_count = $null; com_fields = ''; cim = ''; cim_count = $null }
+    try {
+        $policy = New-Object -ComObject HNetCfg.FwPolicy2
+        $rules = @($policy.Rules)
+        $v.com_count = $rules.Count
+        $first = $rules | Select-Object -First 1
+        if ($first) {
+            $v.com_fields = "name=$([bool]$first.Name) grouping=$($null -ne $first.Grouping) application=$($null -ne $first.ApplicationName) direction=$($first.Direction) action=$($first.Action)"
+        }
+        $v.com = 'readable'
+    } catch {
+        $v.com = "error: $($_.Exception.Message)"
+    }
+    try {
+        $v.cim_count = @(Get-NetFirewallRule -ErrorAction Stop).Count
+        $v.cim = 'readable'
+    } catch {
+        $v.cim = "error: $($_.Exception.Message)"
+    }
+    $v
+}
+
 $lm = $null
 $lw = $null
 $vs = $null
+$fw = $null
 if (-not $Elevated) {
     $lm = Invoke-LaunchMethod
     $lw = Invoke-LaunchWatch
     $vs = Invoke-VirtualStore
+    $fw = Invoke-FirewallRead
 }
 [ordered]@{
     runs          = $runs
@@ -717,5 +745,6 @@ if (-not $Elevated) {
     launch_method = if ($lm) { $lm } else { 'skipped: elevated' }
     launch_watch  = if ($lw) { $lw } else { 'skipped: elevated' }
     virtualstore  = if ($vs) { $vs } else { 'skipped: elevated' }
+    firewall_read = if ($fw) { $fw } else { 'skipped: elevated' }
     note          = if ($Elevated) { 'elevated: the refusal (exit 3) of plan is the expected result' } else { '' }
 }
