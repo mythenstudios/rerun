@@ -543,6 +543,7 @@ fn now_lines<'a>(st: &'a TxnStatus, v: &'a Verified) -> Vec<Message<'a>> {
     }
     out.extend(cleanup_lines(&v.cleanup));
     out.extend(moved_lines(v.profiles_moved.as_ref()));
+    out.extend(crate::preview::shadow_lines(&v.virtual_store));
     if let Some(h) = &v.halted {
         out.push(m(TxnMsg::Halted {
             op: h.op,

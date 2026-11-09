@@ -15,6 +15,8 @@
 //!   one that counts.
 //! - [`read_input`]: a file the user names (the step file of `rerun plan`, P2-13): its folder
 //!   opened read side by absolute path, the file one plain segment below it, bounded.
+//! - [`shadows`]: the UAC VirtualStore lookup (P3-7): a copy of a managed file below
+//!   `<LocalAppData>\VirtualStore`, read only, never a root.
 //! - [`RootId`]: volume serial and file ID. Plans store it; apply and revert reopen the root
 //!   and abort on a mismatch ([`StoreDir::ensure_id`], [`GameDir::ensure_id`]).
 //!
@@ -31,6 +33,7 @@
 mod app;
 mod forbidden;
 mod input;
+mod vstore;
 
 use std::fmt;
 use std::path::Path;
@@ -39,6 +42,7 @@ pub(crate) use app::AppSub;
 pub use app::{AppDir, Create, ProfilesDir};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
 pub use input::{file_present, read_input};
+pub use vstore::{Shadow, VIRTUAL_STORE, check_root, shadows, shadows_stored};
 
 use crate::path::{Anomaly, PathError, RelPath, RootPath, classify};
 use crate::sys::fs::RootInfo;

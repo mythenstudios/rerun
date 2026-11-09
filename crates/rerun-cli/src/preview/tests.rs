@@ -490,3 +490,37 @@ fn every_watch_profile_line_has_its_text() {
         assert_eq!(m.to_string(), want);
     }
 }
+
+/// P3-7: the VirtualStore lines, golden; a hostile path arrives escaped and stays last.
+#[test]
+fn virtual_store_lines() {
+    use rerun_core::path::RelPath;
+    use rerun_core::policy::root::Shadow;
+    let copy = r"C:\Users\P\AppData\Local\VirtualStore\Program Files (x86)\G\settings.ini";
+    let shadows = [
+        Shadow::Copy {
+            root: 0,
+            file: RelPath::parse("settings.ini").unwrap(),
+            copy: escape::path(copy).into_owned(),
+        },
+        Shadow::Link {
+            root: 1,
+            at: escape::path("C:\\VS\\G\u{202e}x").into_owned(),
+        },
+        Shadow::Unchecked {
+            root: 0,
+            why: escape::text("LocalAppData is unknown: not found").into_owned(),
+        },
+    ];
+    let lines = super::shadow_lines(&shadows);
+    let text = shown(&lines);
+    let want = [
+        format!(
+            "warning: root 0: Windows keeps a VirtualStore copy of a managed file; the game probably reads this copy, not the managed file: {copy}"
+        ),
+        r#"note: root 1: a link (junction or symbolic link) lies on the way to a VirtualStore copy; it is not followed, nothing behind it was checked: "C:\\VS\\G\u{202e}x""#.to_owned(),
+        "note: root 0: VirtualStore copies of the managed files were not checked: LocalAppData is unknown: not found".to_owned(),
+    ];
+    assert_eq!(text.lines().collect::<Vec<_>>(), want);
+    assert!(!text.contains('\u{202e}'));
+}

@@ -273,6 +273,27 @@ pub enum TxnMsg<'a> {
     Config,
     /// A note of the preview.
     Note(&'static str),
+    /// P3-7: a UAC VirtualStore copy of a managed file of root `root` (preview and `verify`).
+    VirtualStoreCopy {
+        /// Root index.
+        root: usize,
+        /// The copy's full path, escaped.
+        copy: Shown<'a>,
+    },
+    /// P3-7: a link (junction, symbolic link) on the way to a VirtualStore copy: not followed.
+    VirtualStoreLink {
+        /// Root index.
+        root: usize,
+        /// The path looked up, escaped.
+        at: Shown<'a>,
+    },
+    /// P3-7: the VirtualStore lookup could not run for root `root`.
+    VirtualStoreUnchecked {
+        /// Root index.
+        root: usize,
+        /// Why, escaped.
+        why: Shown<'a>,
+    },
 
     // ---------- plan ----------
     /// The plan has no ops.
@@ -880,6 +901,18 @@ impl fmt::Display for TxnMsg<'_> {
                 f.write_str("  configuration file: once edited, a revert leaves it as it is")
             }
             Self::Note(text) => write!(f, "note: {text}"),
+            Self::VirtualStoreCopy { root, copy } => write!(
+                f,
+                "warning: root {root}: Windows keeps a VirtualStore copy of a managed file; the game probably reads this copy, not the managed file: {copy}"
+            ),
+            Self::VirtualStoreLink { root, at } => write!(
+                f,
+                "note: root {root}: a link (junction or symbolic link) lies on the way to a VirtualStore copy; it is not followed, nothing behind it was checked: {at}"
+            ),
+            Self::VirtualStoreUnchecked { root, why } => write!(
+                f,
+                "note: root {root}: VirtualStore copies of the managed files were not checked: {why}"
+            ),
 
             Self::NothingToDo => {
                 f.write_str("nothing to do: everything already is as the steps want it")

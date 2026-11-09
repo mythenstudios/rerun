@@ -331,6 +331,7 @@ fn what_a_revert_does_now_and_its_report() {
         details: BTreeMap::from([(1, ini.clone())]),
         cleanup: Vec::new(),
         profiles_moved: None,
+        virtual_store: Vec::new(),
     };
     let t4 = txn(4);
     assert_eq!(
@@ -429,6 +430,7 @@ fn c_cl2_pending_cleanup_in_the_preview_the_report_and_status() {
             item(0, ".rerun-00000000000000ab-7.tmp.old", OldSeen::Gone),
         ],
         profiles_moved: None,
+        virtual_store: Vec::new(),
     };
     let sha = "ab".repeat(32);
     assert_eq!(
@@ -545,6 +547,7 @@ fn a_halt_at_the_profiles_root_and_a_moved_profiles_folder_are_explained() {
             planned: escape::path(r"C:\A\Rerun\profiles").into_owned(),
             now: escape::path(r"C:\B\Rerun\profiles").into_owned(),
         }),
+        virtual_store: Vec::new(),
     };
     let text = shown(&now_lines(&s, &v));
     for want in [
@@ -603,6 +606,7 @@ fn verified(ops: Vec<(u16, Observed)>, halted: Option<(u16, u16)>) -> Verified {
         details: BTreeMap::new(),
         cleanup: Vec::new(),
         profiles_moved: None,
+        virtual_store: Vec::new(),
     }
 }
 

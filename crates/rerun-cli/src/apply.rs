@@ -13,6 +13,7 @@ use std::io::Write;
 use rerun_core::exec::{self, ApplyError, ExecCtx, ExecError, Outcome};
 use rerun_core::journal::InstanceTag;
 use rerun_core::plan::{self, PlanHash};
+use rerun_core::policy::root::shadows_stored;
 
 use crate::cli::Exit;
 use crate::host::{
@@ -58,6 +59,9 @@ fn run<W: Write, E: Write>(
     let ops = view.ops.len();
     let mut lines = vec![Message::Txn(TxnMsg::PlanHead { hash: *hash, ops })];
     lines.extend(preview::render(&view));
+    // P3-7: a VirtualStore copy of a managed file (read only; decoded above already).
+    let shadows = shadows_stored(sys, &bytes).unwrap_or_default();
+    lines.extend(preview::shadow_lines(&shadows));
     // P3-3d: the launch profile's selection here, hints and the launch option.
     let lv = preview::launch_view(sys, &host.install, &view);
     if let Some(lv) = &lv {

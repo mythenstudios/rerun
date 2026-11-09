@@ -33,7 +33,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - CPU rule selection against all fixtures
 - Primitive `launch_method` (the launch profile, incl. `priority`; the Steam launch option is copied by the user, the revert preview names the option to remove)
 - Preconditions from `compat_layer` (P2-11b, ADR 0018 amendment P2-11b): `rerun-launch` and the IFEO launcher start the game by exactly the path of its `Layers` value name (`docs/04-launch-methods.md`); the `HKLM` "all users" layer of the same executable (written by the compatibility tab, an `HKLM` `~ DPIUNAWARE` next to Rerun's `HKCU` `HIGHDPIAWARE`: how they combine is not measured) is read (read only) in the planner, a group conflict is refused (done in P3-6, ADR 0018 amendment P3-6: both views, fail closed, the preview names the value)
-- `verify` warns about UAC VirtualStore shadow copies of managed files (moved from phase 2)
+- `verify` warns about UAC VirtualStore shadow copies of managed files (moved from phase 2); done in P3-7: the preview of `plan` and `apply` and `verify` (`revert`, `forget`) warn for a root below `Program Files`, `Program Files (x86)` or `ProgramData` (ADR 0007 amendment P3-7)
 
 **Acceptance:** A Steam game launches via `rerun-launch` with 8 threads on one CCD, the check reports `ok`. A Ubisoft game via Steam with `watch` as well.
 

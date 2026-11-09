@@ -609,6 +609,9 @@ pub struct Verified {
     pub cleanup: Vec<PendingOld>,
     /// The profiles root was observed at another path than the head names (P3-3, A1).
     pub profiles_moved: Option<ProfilesMoved>,
+    /// UAC VirtualStore copies of the managed files at the bound roots (P3-7; only `verify`
+    /// looks, a rebind's check leaves it empty).
+    pub virtual_store: Vec<crate::policy::root::Shadow>,
 }
 
 /// A `.old` the journal says a step of Rerun left (P2-15), as observed now.
@@ -1216,6 +1219,7 @@ fn verify_seen(
             details,
             cleanup: Vec::new(),
             profiles_moved: roots.profiles_moved().cloned(),
+            virtual_store: Vec::new(),
         },
         seen,
     ))
@@ -1872,6 +1876,9 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
         out.cleanup = cleanup;
         out.halted = halted;
     }
+    // P3-7: read only, never an error of `verify`.
+    let paths: Vec<_> = b.iter().map(|r| &r.path).collect();
+    out.virtual_store = crate::policy::root::shadows(cx.sys, &plan, &paths);
     Ok(out)
 }
 

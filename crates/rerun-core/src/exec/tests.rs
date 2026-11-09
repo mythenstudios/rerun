@@ -1565,3 +1565,39 @@ fn t7_nested_roots_overlap() {
     assert!(closed(&env.revert(&t2)).is_some());
     assert!(closed(&env.revert(&t1)).is_some());
 }
+
+/// P3-7: a game folder below `Program Files (x86)` with a VirtualStore copy of a file the plan
+/// manages: the stored plan's lookup (what `rerun plan` and `rerun apply` show) and `verify`
+/// name the copy; the game folder at [`GAME`] (outside the three folders) has none.
+#[test]
+fn p3_7_virtual_store_copy_in_preview_and_verify() {
+    use crate::policy::root::{Shadow, shadows_stored};
+    const PF: &str = r"C:\Program Files (x86)\G";
+    const COPY: &str = r"C:\Users\Player\AppData\Local\VirtualStore\Program Files (x86)\G\new.dll";
+    let env = Env::new(finish(
+        base()
+            .file(format!(r"{PF}\game.exe"), b"MZ".to_vec())
+            .file(COPY, b"an older copy the game wrote".to_vec()),
+    ));
+    let fr = fr(&env.sys);
+    let g = GameDir::open_manual(&env.sys, &fr, Path::new(PF)).unwrap();
+    let s = spec(vec![entry("new.dll", "new.dll", N)]);
+    let h = env.plan_for(&g, None, &s);
+    drop(g);
+    let want = vec![Shadow::Copy {
+        root: 0,
+        file: rel("new.dll"),
+        copy: crate::escape::path(COPY).into_owned(),
+    }];
+    let app = app(&env.sys);
+    let bytes = crate::plan::load(&app, &h).unwrap();
+    assert_eq!(shadows_stored(&env.sys, &bytes).unwrap(), want, "preview");
+    let t = env.applied(&h);
+    assert_eq!(env.verified(&t).unwrap().virtual_store, want, "verify");
+    assert!(closed(&env.revert(&t)).is_some());
+
+    // The same file below `D:\Games\G`: no lookup, nothing shown.
+    let h = env.plan(&s);
+    let t = env.applied(&h);
+    assert_eq!(env.verified(&t).unwrap().virtual_store, Vec::new());
+}

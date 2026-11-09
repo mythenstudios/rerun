@@ -15,7 +15,9 @@ use std::path::Path;
 use rerun_core::detect::steam::{self, AppState};
 use rerun_core::plan::{self, PlanBytes, Preview};
 use rerun_core::policy::registry::RegPolicy;
-use rerun_core::policy::root::{AppDir, Create, ForbiddenRoots, GameDir, read_input};
+use rerun_core::policy::root::{
+    AppDir, Create, ForbiddenRoots, GameDir, read_input, shadows_stored,
+};
 use rerun_core::prim::{self, GameRef, MAX_STEP_FILE, PlanCtx, StepFile};
 use rerun_core::sys::System;
 
@@ -83,6 +85,10 @@ fn run<W: Write, E: Write>(
     // P3-3d: the launch profile's selection here, hints and the launch option (not stored).
     let lv = preview::launch_view(sys, &host.install, &view);
     let mut lines = preview::render(&view);
+    // P3-7: a VirtualStore copy of a managed file (read only; the decode cannot fail here, the
+    // preview above decoded the same bytes).
+    let shadows = shadows_stored(sys, &bytes).unwrap_or_default();
+    lines.extend(preview::shadow_lines(&shadows));
     if let Some(lv) = &lv {
         lines.extend(preview::launch_lines(&view, lv));
     }

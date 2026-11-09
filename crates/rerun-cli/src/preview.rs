@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use rerun_core::escape::{self, Shown};
 use rerun_core::exec::launch_result::ProfileId;
 use rerun_core::plan::{Preview, PreviewOp, ProfilePreview, ProfileShown, RootKind};
-use rerun_core::policy::root::file_present;
+use rerun_core::policy::root::{Shadow, file_present};
 use rerun_core::prim::launch_method::{ProfileMethod as Method, RuleMode};
 use rerun_core::prim::{MachineView, MachineWhy, SHIM, on_this_machine, steam_option_text};
 use rerun_core::sys::System;
@@ -177,6 +177,29 @@ pub fn render(p: &Preview) -> Vec<Message<'_>> {
         out.push(m(TxnMsg::Note(note)));
     }
     out
+}
+
+/// The lines of the UAC VirtualStore lookup (P3-7): after the notes of a preview, in the part of
+/// `verify` that says what is on disk now.
+pub fn shadow_lines(s: &[Shadow]) -> Vec<Message<'_>> {
+    s.iter()
+        .map(|x| {
+            m(match x {
+                Shadow::Copy { root, copy, .. } => TxnMsg::VirtualStoreCopy {
+                    root: *root,
+                    copy: copy.clone(),
+                },
+                Shadow::Link { root, at } => TxnMsg::VirtualStoreLink {
+                    root: *root,
+                    at: at.clone(),
+                },
+                Shadow::Unchecked { root, why } => TxnMsg::VirtualStoreUnchecked {
+                    root: *root,
+                    why: why.clone(),
+                },
+            })
+        })
+        .collect()
 }
 
 /// The launch profile a preview writes, decoded (a stored plan: `Rules::Current` decodes it).
