@@ -16,7 +16,7 @@ The same applies to EA App, Rockstar Launcher, Battle.net. In addition: games th
 | Method | How | Lifetime | Admin | Risk |
 |---|---|---|---|---|
 | `direct` | Start game suspended, in a Job Object with limit (or with default CPU Sets), resume, wait for it | until the started process exits | no | none |
-| `watch` | Start chain unchanged, look for a new process of the target exe (path; its hash is checked when planning), set priority, then job affinity or CPU Sets on it, check, exit. Timeout 120 s | at least as long as the started process; the search and its check end at most about 125 s after the start (plus the wait for the started process) | no | low |
+| `watch` | Start chain unchanged, look for a new process of the target exe (path only; no hash is checked in phase 3, the Topo's `match` checks it from phase 4), set priority, then job affinity or CPU Sets on it, check, exit. Timeout 120 s | at least as long as the started process; the search and its check end at most about 125 s after the start (plus the wait for the started process) | no | low |
 | `hold` | like `watch`, stays until the game ends, sets affinity again if it was reset (check interval 2 s) | game duration | no | low, visible, opt-in |
 | `ifeo` | `IFEO\<exe>\Debugger = rerun-launch`. Every start of the exe goes through us. Starts the real game (debugger flag, detach immediately), stays until the game ends, passes the exit code through | game duration | yes | AV/DRM may trigger; opt-in |
 | `inproc` | `rerun-cpu.asi` in the game: sets affinity from inside, hooks `SetProcessAffinityMask`, reports a smaller core count | in the game | no | occupies slot; off-limits with anti-cheat |

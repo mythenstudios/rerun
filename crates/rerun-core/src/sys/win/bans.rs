@@ -278,6 +278,51 @@ fn banned_windows_sys_items_resolve() {
     let _ = windows_sys::Win32::System::Diagnostics::ToolHelp::Toolhelp32ReadProcessMemory;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: WriteProcessMemory must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: VirtualAllocEx must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Memory::VirtualAllocEx;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: VirtualAllocExNuma must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Memory::VirtualAllocExNuma;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: QueueUserAPC must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::QueueUserAPC;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: QueueUserAPC2 must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::QueueUserAPC2;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetThreadContext must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Diagnostics::Debug::SetThreadContext;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetWindowsHookExA must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::WindowsAndMessaging::SetWindowsHookExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SetWindowsHookExW must be banned"
+    )]
+    let _ = windows_sys::Win32::UI::WindowsAndMessaging::SetWindowsHookExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: DebugActiveProcess must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Diagnostics::Debug::DebugActiveProcess;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: CreateFileW must be banned"
     )]
     let _ = windows_sys::Win32::Storage::FileSystem::CreateFileW;

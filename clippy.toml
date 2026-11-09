@@ -165,14 +165,14 @@ disallowed-methods = [
   { path = "windows_sys::Win32::Storage::FileSystem::FlushFileBuffers", reason = "flush only via sys::win::nt::flush (ADR 0017)", allow-invalid = true },
   { path = "std::fs::File::sync_all", reason = "flush only via sys::win::nt::flush (ADR 0017)" },
   { path = "std::fs::File::sync_data", reason = "flush only via sys::win::nt::flush (ADR 0017)" },
-  # Processes only through sys::Process (phase 3).
-  { path = "windows_sys::Win32::System::Threading::CreateProcessW", reason = "processes only through sys::Process", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::CreateProcessA", reason = "processes only through sys::Process", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::CreateProcessAsUserW", reason = "processes only through sys::Process", allow-invalid = true },
+  # Processes are started only by rerun-launch's win::launch (ADR 0022); there is no sys trait.
+  { path = "windows_sys::Win32::System::Threading::CreateProcessW", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::CreateProcessA", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::CreateProcessAsUserW", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
   # NtCreateFile only through sys::win::nt::{open_relative, open_self_for_flush, open_absolute_dir}; NtOpenFile never.
   { path = "windows_sys::Wdk::Storage::FileSystem::NtCreateFile", reason = "only via sys::win::nt::{open_relative, open_self_for_flush, open_absolute_dir} (ADR 0007)", allow-invalid = true },
   { path = "windows_sys::Wdk::Storage::FileSystem::NtOpenFile", reason = "use sys::win::nt::{open_relative, open_absolute_dir} (ADR 0007)", allow-invalid = true },
-  { path = "std::process::Command::new", reason = "processes only through sys::Process" },
+  { path = "std::process::Command::new", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)" },
   # ADR 0009: known folders only through sys::win::shell; the environment is never a source of
   # paths (every program of the user can set it, the elevated helper inherits it).
   { path = "windows_sys::Win32::UI::Shell::SHGetKnownFolderPath", reason = "only via sys::win::shell (ADR 0009)", allow-invalid = true },
@@ -405,16 +405,16 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Threading::GetMaximumProcessorGroupCount", reason = "a count, not the topology; use sys::Topology (ADR 0010)", allow-invalid = true },
   { path = "windows_sys::Wdk::System::SystemInformation::NtQuerySystemInformation", reason = "undocumented system information; the topology only via sys::win::cpu (ADR 0010)", allow-invalid = true },
   { path = "windows_sys::Wdk::System::SystemInformation::ZwQuerySystemInformation", reason = "undocumented system information; the topology only via sys::win::cpu (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::SetProcessAffinityMask", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::SetThreadAffinityMask", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::SetThreadGroupAffinity", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::SetProcessDefaultCpuSets", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::SetProcessDefaultCpuSetMasks", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::SetThreadSelectedCpuSets", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::SetThreadSelectedCpuSetMasks", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::SetThreadIdealProcessor", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::SetThreadIdealProcessorEx", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::JobObjects::SetInformationJobObject", reason = "Job Object limits (affinity, CPU rate, groups); none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetProcessAffinityMask", reason = "affinity or CPU Set setter; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetThreadAffinityMask", reason = "affinity or CPU Set setter; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetThreadGroupAffinity", reason = "affinity or CPU Set setter; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetProcessDefaultCpuSets", reason = "affinity or CPU Set setter; only rerun-launch's wrapper module win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetProcessDefaultCpuSetMasks", reason = "affinity or CPU Set setter; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetThreadSelectedCpuSets", reason = "affinity or CPU Set setter; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetThreadSelectedCpuSetMasks", reason = "affinity or CPU Set setter; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetThreadIdealProcessor", reason = "affinity or CPU Set setter; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetThreadIdealProcessorEx", reason = "affinity or CPU Set setter; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::JobObjects::SetInformationJobObject", reason = "Job Object limits (affinity, CPU rate, groups); only rerun-launch's wrapper module win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
   { path = "windows_sys::Win32::System::JobObjects::AssignProcessToJobObject", reason = "puts a process under a job's limits; only rerun-launch's wrapper module (ADR 0022)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::SetPriorityClass", reason = "priority class setter; only rerun-launch's wrapper module (ADR 0022, D6)", allow-invalid = true },
   # ADR 0022 amendment P3-4 (A2): only a child of the shim that never ran is ended
@@ -429,13 +429,25 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Threading::CreateRemoteThreadEx", reason = "no injection, never (rule 3, ADR 0022 amendment P3-4)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::OpenThread", reason = "no handles to another process's threads, never (rule 3, ADR 0022 amendment P3-4)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Diagnostics::ToolHelp::Toolhelp32ReadProcessMemory", reason = "reads another process's memory; never (rule 3, ADR 0022 amendment P3-4)", allow-invalid = true },
+  # Acceptance of phase 3 (defence in depth for rule 3): the child's handle from CreateProcessW has
+  # full access, so the injection primitives are banned outright, no exception. NtWriteVirtualMemory
+  # is not in windows-sys 0.61. The ifeo method (phase 6) may get DebugActiveProcessStop, never these.
+  { path = "windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory", reason = "writes another process's memory; no injection, never (rule 3)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Memory::VirtualAllocEx", reason = "allocates memory in another process; no injection, never (rule 3)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Memory::VirtualAllocExNuma", reason = "allocates memory in another process; no injection, never (rule 3)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::QueueUserAPC", reason = "queues code to another thread; no injection, never (rule 3)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::QueueUserAPC2", reason = "queues code to another thread; no injection, never (rule 3)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Diagnostics::Debug::SetThreadContext", reason = "redirects a thread; no injection, never (rule 3)", allow-invalid = true },
+  { path = "windows_sys::Win32::UI::WindowsAndMessaging::SetWindowsHookExA", reason = "global or cross-process hook; no injection, never (rule 3)", allow-invalid = true },
+  { path = "windows_sys::Win32::UI::WindowsAndMessaging::SetWindowsHookExW", reason = "global or cross-process hook; no injection, never (rule 3)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Diagnostics::Debug::DebugActiveProcess", reason = "attaches as a debugger; no injection, never (rule 3)", allow-invalid = true },
   # Security review of step 9 (2026-11-05): the remaining affinity setters and readers, and the
   # process creation APIs not covered above.
-  { path = "windows_sys::Wdk::System::Threading::NtSetInformationThread", reason = "thread affinity/ideal processor setter among others; none until phase 3 gives it one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Wdk::System::Threading::ZwSetInformationThread", reason = "thread affinity/ideal processor setter among others; none until phase 3 gives it one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::UpdateProcThreadAttribute", reason = "sets group affinity and ideal processor at process creation; none until phase 3 gives it one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::SetProcessAffinityUpdateMode", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::Gaming::ReleaseExclusiveCpuSets", reason = "affinity or CPU Set setter; none until phase 3 gives them one wrapper (ADR 0010)", allow-invalid = true },
+  { path = "windows_sys::Wdk::System::Threading::NtSetInformationThread", reason = "thread affinity/ideal processor setter among others; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Wdk::System::Threading::ZwSetInformationThread", reason = "thread affinity/ideal processor setter among others; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::UpdateProcThreadAttribute", reason = "sets group affinity and ideal processor at process creation; only rerun-launch's wrapper module win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::SetProcessAffinityUpdateMode", reason = "affinity or CPU Set setter; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::Gaming::ReleaseExclusiveCpuSets", reason = "affinity or CPU Set setter; never: rerun-launch limits a process only through a job or SetProcessDefaultCpuSets in win::launch (ADR 0010, ADR 0022)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::GetProcessAffinityMask", reason = "the process's affinity/CPU Set/NUMA view, not the topology; use sys::Topology (ADR 0010)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::GetProcessGroupAffinity", reason = "the process's affinity/CPU Set/NUMA view, not the topology; use sys::Topology (ADR 0010)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::GetThreadGroupAffinity", reason = "the process's affinity/CPU Set/NUMA view, not the topology; use sys::Topology (ADR 0010)", allow-invalid = true },
@@ -447,13 +459,13 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::Threading::GetNumaNodeProcessorMaskEx", reason = "the process's affinity/CPU Set/NUMA view, not the topology; use sys::Topology (ADR 0010)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::GetNumaProcessorNode", reason = "the process's affinity/CPU Set/NUMA view, not the topology; use sys::Topology (ADR 0010)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Threading::GetNumaProcessorNodeEx", reason = "the process's affinity/CPU Set/NUMA view, not the topology; use sys::Topology (ADR 0010)", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::CreateProcessAsUserA", reason = "processes only through sys::Process", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::CreateProcessWithLogonW", reason = "processes only through sys::Process", allow-invalid = true },
-  { path = "windows_sys::Win32::System::Threading::CreateProcessWithTokenW", reason = "processes only through sys::Process", allow-invalid = true },
-  { path = "windows_sys::Win32::UI::Shell::ShellExecuteA", reason = "processes only through sys::Process", allow-invalid = true },
-  { path = "windows_sys::Win32::UI::Shell::ShellExecuteW", reason = "processes only through sys::Process", allow-invalid = true },
-  { path = "windows_sys::Win32::UI::Shell::ShellExecuteExA", reason = "processes only through sys::Process", allow-invalid = true },
-  { path = "windows_sys::Win32::UI::Shell::ShellExecuteExW", reason = "processes only through sys::Process", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::CreateProcessAsUserA", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::CreateProcessWithLogonW", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Threading::CreateProcessWithTokenW", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::UI::Shell::ShellExecuteA", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::UI::Shell::ShellExecuteW", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::UI::Shell::ShellExecuteExA", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
+  { path = "windows_sys::Win32::UI::Shell::ShellExecuteExW", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
   # ADR 0008 amendment (2026-11-05): dynamic loads only through sys::win::loader (System32, by bare
   # name); the DLL search path only through loader::restrict_dll_search (rerun-launch: its own
   # copy of the one call).
@@ -486,7 +498,7 @@ disallowed-methods = [
   # COM activation paths. CoGetInstanceFromFile, CoGetClassObjectFromURL, OleInitialize and
   # LoadLibraryShim live behind windows-sys features rerun-core does not use; the test-only
   # features of rerun-core make them resolve in sys/win/bans.rs like every other entry.
-  { path = "windows_sys::Win32::System::LibraryLoader::LoadModule", reason = "processes only through sys::Process", allow-invalid = true },
+  { path = "windows_sys::Win32::System::LibraryLoader::LoadModule", reason = "processes are started only by rerun-launch's win::launch (CreateProcessW, ShellExecuteExW; ADR 0022)", allow-invalid = true },
   { path = "windows_sys::Win32::System::LibraryLoader::QueryOptionalDelayLoadedAPI", reason = "dynamic loads only via sys::win::loader (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::ClrHosting::LoadLibraryShim", reason = "dynamic loads only via sys::win::loader (ADR 0008)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Com::CoCreateInstanceFromApp", reason = "COM activation only via one phase 3 wrapper, CLSCTX_INPROC_SERVER only (ADR 0008)", allow-invalid = true },

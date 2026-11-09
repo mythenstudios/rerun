@@ -83,7 +83,7 @@ For `ini_set` the semantic revert is the normal path, not an exception: games re
 
 ### Exceptions to core rule 2 (audit A3 S1)
 
-Core rule 2 says a revert restores the state before the first change exactly. These are all the documented places where it does not, collected in one table (A6 checks the code and the docs against it; every new primitive adds its rows). Behaviour is unchanged; the amendments below keep the details. "Where the user is told" is the preview, or, for a case that arises only at revert time, the report of `revert` and `status`. A row without a pinning test says so.
+Core rule 2 says a revert restores the state before the first change exactly. These are all the documented places where it does not, collected in one table (A6 checks the code and the docs against it; every new primitive adds its rows). Behaviour is unchanged; the amendments below keep the details. "Where the user is told" is the preview, or, for a case that arises only at revert time, the report of `revert` and `status`. A row without a pinning test says so. The runtime effects of `rerun-launch` (job membership, CPU Sets, the priority class of a running game) are not system changes in the sense of rule 2 and have no row here: they belong to the process and end with it; what it writes (the launch profile) is an ordinary file op of the plan (ADR 0022).
 
 | # | What is not exact | Why | Where the user is told | Test |
 |---|---|---|---|---|
