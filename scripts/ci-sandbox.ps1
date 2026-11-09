@@ -6,7 +6,8 @@
 # Why two passes: the runner's administrator is elevated, and Rerun refuses every apply, revert
 # and forget in an elevated process (S2) and plan in the CLI (user decision E3). So
 #  1. non-elevated pass: a freshly created local standard user `rerunci` runs
-#     `sandbox-run.ps1 -Ci` (the Rust sandbox tests, the CLI round trip, launch_method). A
+#     `sandbox-run.ps1 -Ci` (the Rust sandbox tests, the CLI round trip, launch_method direct
+#     and watch). A
 #     standard user cannot hold an elevated token, so no trick is needed, and its profile and
 #     HKCU are new, like a fresh Sandbox. A restricted token of the runner's administrator
 #     (`runas /trustlevel`, SAFER) was rejected: in the Sandbox it kept the high integrity
@@ -167,6 +168,8 @@ if (-not $r1) {
     if ($r1.passed -lt 1) { Fail 'pass 1: no sandbox test ran' }
     if (-not $r1.cli -or -not $r1.cli.expected) { Fail 'pass 1: the CLI round trip is not as expected (see cli.log and cli.unchanged / cli.launch_method.failed above)' }
     if ($r1.cli -and $r1.cli.launch_method -and $r1.cli.launch_method.failed) { Fail "pass 1: launch_method checks failed: $($r1.cli.launch_method.failed -join ', ')" }
+    if ($r1.cli -and $r1.cli.launch_watch -and $r1.cli.launch_watch.failed) { Fail "pass 1: launch_method watch checks failed: $($r1.cli.launch_watch.failed -join ', ')" }
+    if ($r1.cli -and $r1.cli.launch_watch -and $r1.cli.launch_watch.error) { Fail "pass 1: launch_method watch error: $($r1.cli.launch_watch.error)" }
 }
 EndSection
 

@@ -190,22 +190,42 @@ function Get-Profiles {
 }
 function Get-Bits([int64]$mask) { $n = 0; while ($mask -ne 0) { $n += [int]($mask -band 1); $mask = $mask -shr 1 }; $n }
 
-function Invoke-LaunchMethod {
-    $lm = [ordered]@{ checks = [ordered]@{}; expected = $false; error = '' }
-    $c = $lm.checks
+# The Steam registry value as it was before a case (put back by Restore-SteamKey).
+function Save-SteamKey {
     $hadKey = Test-Path -LiteralPath $steamKey
     $hadValue = $hadKey -and ($null -ne (Get-Item -LiteralPath $steamKey).GetValue('SteamPath', $null))
     $oldValue = if ($hadValue) { (Get-Item -LiteralPath $steamKey).GetValue('SteamPath', $null, 'DoNotExpandEnvironmentNames') }
+    @{ HadKey = $hadKey; HadValue = $hadValue; OldValue = $oldValue }
+}
+# Puts the Steam registry value back (the Sandbox is disposable, but the Rust tests are not to
+# see a stale key); never throws.
+function Restore-SteamKey($saved) {
     try {
-        if (-not (Test-Path -LiteralPath $launchExe)) { throw "rerun-launch.exe missing: $launchExe (run scripts/sandbox-launch.ps1 on the host)" }
-        New-Item -ItemType Directory -Force -Path $lmGame | Out-Null
-        Copy-Item -LiteralPath "$env:WINDIR\System32\cmd.exe" -Destination $lmExe -Force
-        $vdf = "`"libraryfolders`"`n{`n`t`"0`"`n`t{`n`t`t`"path`"`t`t`"$($lmRoot.Replace('\', '\\'))`"`n`t}`n}`n"
-        Write-Plain (Join-Path $lmRoot 'steamapps\libraryfolders.vdf') $vdf
-        $acf = "`"AppState`"`n{`n`t`"appid`"`t`t`"220`"`n`t`"name`"`t`t`"G`"`n`t`"StateFlags`"`t`t`"4`"`n`t`"installdir`"`t`t`"G`"`n}`n"
-        Write-Plain (Join-Path $lmRoot 'steamapps\appmanifest_220.acf') $acf
-        New-Item -Force -Path $steamKey | Out-Null
-        Set-ItemProperty -LiteralPath $steamKey -Name SteamPath -Value $lmRoot -Type String
+        if (-not $saved.HadKey) { Remove-Item -LiteralPath $steamKey -Recurse -Force -ErrorAction SilentlyContinue }
+        elseif ($saved.HadValue) { Set-ItemProperty -LiteralPath $steamKey -Name SteamPath -Value $saved.OldValue -Type String }
+        else { Remove-ItemProperty -LiteralPath $steamKey -Name SteamPath -ErrorAction SilentlyContinue }
+    } catch { }
+}
+# The mimicked Steam layout of app 220: SteamPath, libraryfolders.vdf, appmanifest_220.acf and
+# the game folder with a fresh copy of cmd.exe as game.exe.
+function New-SteamLayout {
+    if (-not (Test-Path -LiteralPath $launchExe)) { throw "rerun-launch.exe missing: $launchExe (run scripts/sandbox-launch.ps1 on the host)" }
+    New-Item -ItemType Directory -Force -Path $lmGame | Out-Null
+    Copy-Item -LiteralPath "$env:WINDIR\System32\cmd.exe" -Destination $lmExe -Force
+    $vdf = "`"libraryfolders`"`n{`n`t`"0`"`n`t{`n`t`t`"path`"`t`t`"$($lmRoot.Replace('\', '\\'))`"`n`t}`n}`n"
+    Write-Plain (Join-Path $lmRoot 'steamapps\libraryfolders.vdf') $vdf
+    $acf = "`"AppState`"`n{`n`t`"appid`"`t`t`"220`"`n`t`"name`"`t`t`"G`"`n`t`"StateFlags`"`t`t`"4`"`n`t`"installdir`"`t`t`"G`"`n}`n"
+    Write-Plain (Join-Path $lmRoot 'steamapps\appmanifest_220.acf') $acf
+    New-Item -Force -Path $steamKey | Out-Null
+    Set-ItemProperty -LiteralPath $steamKey -Name SteamPath -Value $lmRoot -Type String
+}
+
+function Invoke-LaunchMethod {
+    $lm = [ordered]@{ checks = [ordered]@{}; expected = $false; error = '' }
+    $c = $lm.checks
+    $saved = Save-SteamKey
+    try {
+        New-SteamLayout
         Write-Plain $lmSteps '{"format":1,"game":{"steam":220},"main_exe":"game.exe","steps":[{"launch_method":{"method":"direct","start":"game.exe","cpu":{"max_threads":2}}}]}'
         Add-Content -LiteralPath $log -Value "`n=== launch_method (P3-3e) ==="
 
@@ -306,24 +326,226 @@ function Invoke-LaunchMethod {
         $lm.error = "$_"
         Add-Content -LiteralPath $log -Value "launch_method failed: $_"
     } finally {
-        # Put the Steam registry value back (the Sandbox is disposable, but the Rust tests are
-        # not to see a stale key).
-        try {
-            if (-not $hadKey) { Remove-Item -LiteralPath $steamKey -Recurse -Force -ErrorAction SilentlyContinue }
-            elseif ($hadValue) { Set-ItemProperty -LiteralPath $steamKey -Name SteamPath -Value $oldValue -Type String }
-            else { Remove-ItemProperty -LiteralPath $steamKey -Name SteamPath -ErrorAction SilentlyContinue }
-        } catch { }
+        Restore-SteamKey $saved
     }
     $lm
 }
 
+# ---- launch_method watch (P3-4d, SB-W1 and SB-W2) --------------------------------------------
+# The same Steam layout and app 220 (so the same profile ID), now with `method: watch` and the
+# Ubisoft-like stub chain of plan P3-4 §7.6: Steam's entry is the game's own exe, the program the
+# shim starts (game.exe, the stub) starts game.exe again and ends at once, and the second game.exe
+# is the target. That the target is in the shim's own process tree here does not matter: the
+# shim looks only at the image path, the creation time, the token and the PID of the program it
+# started (which is never the target). `max_threads: 1` because the CI runner has 2 logical
+# processors: with 2 the mask check could not tell a limited process from an unlimited one.
+# SB-W2: a copy of game.exe started before the shim keeps its mask (only a new process is the
+# target). Not here: `target_not_found` after the 120 s search (the fake tests in
+# run::watch_tests cover it, and it would add two minutes to every CI run, plan §7.6).
+#
+# A7, a parent job: the CI pass runs as a scheduled task, and processes of a task are in the Task
+# Scheduler's job, so the target is in a job before the shim joins it to its own (a nested job).
+# Measured (run::watch::win_tests): a parent job without a CPU limit lets the nested job take
+# effect (`applied`, `ok`); a parent job with another limit keeps its own, and the shim honestly
+# reports `skipped:job_ineffective`. The check decides from what the runner shows: the copy of
+# SB-W2, started by this script like the shim, has the processor mask of the parent job. With
+# every logical processor in that mask the parent sets no narrower limit, so `job_ineffective`
+# would be a regression and fails; only with a narrower mask is `job_ineffective` accepted (then
+# the target must keep exactly the parent's mask, and nothing else counts as passed). Whether the
+# script runs in a job at all is recorded as `in_job` (information, not a check).
+$lwSteps = Join-Path $root 'steps-lw.json'
+
+# IsProcessInJob of a process (any job); $null when it cannot be read. Information only.
+function Test-InJob($proc) {
+    try {
+        if (-not ('RerunSandbox.JobQuery' -as [type])) {
+            Add-Type -Namespace RerunSandbox -Name JobQuery -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+'@ -ErrorAction Stop
+        }
+        $r = $false
+        if ([RerunSandbox.JobQuery]::IsProcessInJob($proc.Handle, [IntPtr]::Zero, [ref]$r)) { return $r }
+    } catch { }
+    $null
+}
+function Get-Affinity($proc) {
+    if (-not $proc) { return [int64]-1 }
+    try { $proc.Refresh(); [int64]$proc.ProcessorAffinity } catch { [int64]-2 }
+}
+
+function Invoke-LaunchWatch {
+    $lw = [ordered]@{ checks = [ordered]@{}; expected = $false; error = ''; outcome = '' }
+    $c = $lw.checks
+    $saved = Save-SteamKey
+    $pre = $null
+    $shim = $null
+    try {
+        New-SteamLayout
+        Write-Plain $lwSteps '{"format":1,"game":{"steam":220},"main_exe":"game.exe","steps":[{"launch_method":{"method":"watch","start":"game.exe","cpu":{"max_threads":1}}}]}'
+        Add-Content -LiteralPath $log -Value "`n=== launch_method watch (P3-4d, SB-W1, SB-W2) ==="
+
+        $gameBefore = Get-Tree $lmRoot
+        $profilesBefore = Get-Profiles
+        $rerunBefore = Get-Tree $rerunDir
+        $file = Join-Path $profiles "$lmId.profile"
+        $c.no_profile_before = -not (Test-Path -LiteralPath $file)
+
+        # plan --dry-run: the watch preview (start and target are the same game.exe, the stub
+        # hint), nothing written.
+        $d = Invoke-Rerun plan $lwSteps --dry-run
+        $c.dry_run_exit = $d.Code
+        $c.dry_run_writes_nothing = ((Get-Tree $rerunDir) -eq $rerunBefore) -and ((Get-Tree $lmRoot) -eq $gameBefore)
+        $m = [regex]::Match($d.Text, '(?m)^\s+"(?<dir>[^"]+)\\rerun-launch\.exe" --profile (?<id>[0-9a-f]{32}) %command%\s*$')
+        $c.preview_launch_option = $m.Success -and $m.Groups['id'].Value -eq $lmId -and
+            $m.Groups['dir'].Value -eq (Split-Path -Parent $rerun)
+        $c.preview_profile = $d.Text.Contains("launch profile ${lmId}: method watch, x64") -and
+            $d.Text.Contains("start $lmExe`n     target $lmExe`n") -and $d.Text.Contains('cpu max_threads 1')
+        $c.preview_stub_hint = $d.Text.Contains("hint: Steam starts the game's own program: watch looks for a second process of it")
+        $c.preview_op = $d.Text.Contains("create file in root 1: $lmId.profile")
+        $nm = [regex]::Match($d.Text, 'new: sha256 (?<sha>[0-9a-f]{64}), (?<len>\d+) bytes')
+        $c.preview_bytes_found = $nm.Success
+        $c.no_shim_warning = -not $d.Text.Contains('rerun-launch.exe is not in Rerun')
+
+        $p = Invoke-Rerun plan $lwSteps
+        $c.plan_exit = $p.Code
+        $hm = [regex]::Match($p.Text, 'apply with: rerun apply ([0-9a-f]{64})')
+        if ($p.Code -ne 0 -or -not $hm.Success) { throw 'plan did not store a plan (see cli.log)' }
+        $h = $hm.Groups[1].Value
+        $dh = [regex]::Match($d.Text, '(?m)^plan ([0-9a-f]{64})')
+        $c.dry_run_hash_equals_plan_hash = $dh.Success -and $dh.Groups[1].Value -eq $h
+
+        $a = Invoke-Rerun apply $h --yes
+        $c.apply_exit = $a.Code
+        $c.profile_exists = Test-Path -LiteralPath $file -PathType Leaf
+        $c.profile_bytes_are_the_previews = $false
+        if ($c.profile_exists -and $nm.Success) {
+            $c.profile_bytes_are_the_previews = ((Get-Item -LiteralPath $file).Length -eq [int]$nm.Groups['len'].Value) -and
+                ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -eq $nm.Groups['sha'].Value)
+        }
+        $tm = [regex]::Match($a.Text, 'revert with: rerun revert ([0-9]{8}-[0-9a-f]{16})')
+        if ($a.Code -ne 0 -or -not $tm.Success) { throw 'apply did not report a transaction (see cli.log)' }
+        $txn = $tm.Groups[1].Value
+        $c.game_folder_untouched_by_apply = (Get-Tree $lmRoot) -eq $gameBefore
+
+        $result = Join-Path $rerunDir "launch\$lmId.result"
+        Remove-Item -LiteralPath $result -Force -ErrorAction SilentlyContinue
+        # SB-W2: a copy of the game that runs before the shim starts (about 59 s, stopped below).
+        # The pause keeps its creation time clear of the shim's (the search takes processes
+        # created at or after the shim, and the clock has a coarse tick).
+        $pre = Start-Process -FilePath $lmExe -ArgumentList '/d /q /c ping -n 60 127.0.0.1 >nul' -PassThru
+        Start-Sleep -Milliseconds 1500
+        $lps = [int]$env:NUMBER_OF_PROCESSORS
+        $preBefore = Get-Affinity $pre
+        $lw.in_job = Test-InJob $pre
+        $lw.logical_processors = $lps
+        $lw.parent_mask_bits = if ($preBefore -gt 0) { Get-Bits $preBefore } else { $preBefore }
+        $parentNarrows = ($preBefore -gt 0) -and ((Get-Bits $preBefore) -lt $lps)
+        $lw.parent_job_narrows = $parentNarrows
+
+        # SB-W1: Steam's command is the stub: game.exe runs `start /b game.exe ...` and ends at
+        # once; the second game.exe holds for about 14 s, so that the check about 5 s after it was
+        # found sees it running.
+        $since = Get-Date
+        $argLine = "--profile $lmId `"$lmExe`" /d /q /c start `"`" /b `"$lmExe`" /d /q /c ping -n 15 127.0.0.1 >nul"
+        $shim = Start-Process -FilePath $launchExe -ArgumentList $argLine -PassThru
+        $deadline = $since.AddSeconds(40)
+        while (-not (Test-Path -LiteralPath $result) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+        $lw.seconds_to_result = [math]::Round(((Get-Date) - $since).TotalSeconds, 1)
+        # The file is complete when it appears (the existing direct case reads it the same way);
+        # a short pause costs nothing.
+        Start-Sleep -Milliseconds 250
+        $rtext = if (Test-Path -LiteralPath $result) { [string](Get-Content -LiteralPath $result -Raw) } else { '' }
+        # The target: a running game.exe created after the shim's start that is not the copy of
+        # SB-W2 (the stub has ended by then).
+        $target = Get-Process -Name game -ErrorAction SilentlyContinue | Where-Object {
+            $_.Path -eq $lmExe -and $_.Id -ne $pre.Id -and $_.StartTime -gt $since
+        } | Sort-Object StartTime | Select-Object -First 1
+        $targetMask = Get-Affinity $target
+        $preAfter = Get-Affinity $pre
+        $targetBits = if ($targetMask -gt 0) { Get-Bits $targetMask } else { $targetMask }
+        $shimLeft = [int][math]::Max(0, 20000 - ((Get-Date) - $since).TotalMilliseconds)
+        $c.shim_ends_within_20_s = $shim.WaitForExit($shimLeft)
+        Add-Content -LiteralPath $log -Value ("result file after $($lw.seconds_to_result) s:`n$rtext`n" +
+            "logical processors $lps, in_job $($lw.in_job), mask before the shim of the earlier copy 0x$('{0:x}' -f $preBefore) " +
+            "(after 0x$('{0:x}' -f $preAfter)), parent job narrows: $parentNarrows`n" +
+            "target pid $(if ($target) { $target.Id } else { 'none' }), mask 0x$('{0:x}' -f $targetMask) ($targetBits bits); shim ended within 20 s: $($c.shim_ends_within_20_s)")
+        $lw.result = $rtext
+        $lw.target_mask_bits = $targetBits
+
+        $c.result_file = $rtext -ne ''
+        $c.result_profile = $rtext -match "(?m)^profile=$lmId\r?$"
+        $c.result_method_watch = $rtext -match '(?m)^method=watch\r?$'
+        $c.target_found = $null -ne $target
+        $isApplied = $rtext -match '(?m)^rule=applied\r?$'
+        $isIneffective = $rtext -match '(?m)^rule=skipped:job_ineffective\r?$'
+        if ($isApplied -or -not $parentNarrows) {
+            $lw.outcome = if ($isApplied) { 'applied' } elseif ($isIneffective) { 'job_ineffective' } else { 'other' }
+            $c.result_rule_applied = $isApplied
+            $c.result_check_ok = $rtext -match '(?m)^check=ok\r?$'
+            $cm = [regex]::Match($rtext, '(?m)^cpu=hard:(\d+):(\d+)\r?$')
+            $c.result_cpu_hard_1_of_all = $cm.Success -and ([int]$cm.Groups[1].Value -eq 1) -and ([int]$cm.Groups[2].Value -eq $lps)
+            # The target in the job has the mask: one bit (max_threads 1).
+            $c.target_has_one_bit = $targetBits -eq 1
+        } else {
+            # A7: the parent job limits the processors; the honest outcome is job_ineffective, and
+            # the parent's limit stays in force on the target.
+            $lw.outcome = if ($isIneffective) { 'job_ineffective' } else { 'other' }
+            $c.result_job_ineffective_under_a_narrowing_parent = $isIneffective
+            $c.target_keeps_the_parent_mask = $targetMask -eq $preBefore
+        }
+        # SB-W2: the copy that ran before the shim is not the target.
+        $c.earlier_copy_keeps_its_mask = ($preBefore -gt 0) -and ($preAfter -eq $preBefore)
+
+        $v = Invoke-Rerun status
+        $c.status_exit = $v.Code
+        $c.status_names_the_watch_target = $v.Text.Contains("method watch: the rule is for the game process found after the start, not the program Steam starts: $lmExe")
+
+        # Stop what is left of the start and the earlier copy (with their ping).
+        Get-Process -Name game, ping -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq 'ping' -or $_.Path -eq $lmExe } | Stop-Process -Force -ErrorAction SilentlyContinue
+        if (-not $shim.WaitForExit(15000)) { Stop-Process -Id $shim.Id -Force -ErrorAction SilentlyContinue }
+
+        $r = Invoke-Rerun revert $txn --yes
+        $c.revert_exit = $r.Code
+        $c.revert_closed = $r.Text -match "transaction $txn reverted and closed"
+        $c.profile_removed = -not (Test-Path -LiteralPath $file)
+        $c.profiles_folder_stays = Test-Path -LiteralPath $profiles -PathType Container
+        $c.game_folder_as_before = (Get-Tree $lmRoot) -eq $gameBefore
+        $c.profile_files_as_before = (Get-Profiles) -eq $profilesBefore
+        $s = Invoke-Rerun status --all
+        $c.status_all_exit = $s.Code
+
+        $bad = @($c.GetEnumerator() | Where-Object {
+            if ($_.Key -like '*_exit') { $_.Value -ne 0 } else { $_.Value -ne $true }
+        } | ForEach-Object { $_.Key })
+        $lw.failed = $bad
+        $lw.expected = ($bad.Count -eq 0)
+    } catch {
+        $lw.error = "$_"
+        Add-Content -LiteralPath $log -Value "launch_method watch failed: $_"
+    } finally {
+        # Also after a failure: no copy of game.exe or ping stays behind.
+        Get-Process -Name game, ping -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq 'ping' -or $_.Path -eq $lmExe } | Stop-Process -Force -ErrorAction SilentlyContinue
+        if ($shim -and -not $shim.HasExited) { Stop-Process -Id $shim.Id -Force -ErrorAction SilentlyContinue }
+        Restore-SteamKey $saved
+    }
+    $lw
+}
+
 $lm = $null
-if (-not $Elevated) { $lm = Invoke-LaunchMethod }
+$lw = $null
+if (-not $Elevated) {
+    $lm = Invoke-LaunchMethod
+    $lw = Invoke-LaunchWatch
+}
 [ordered]@{
     runs          = $runs
     unchanged     = $same
-    expected      = ($expected -and $same -and ($Elevated -or $lm.expected))
+    expected      = ($expected -and $same -and ($Elevated -or ($lm.expected -and $lw.expected)))
     elevated      = $Elevated
     launch_method = if ($lm) { $lm } else { 'skipped: elevated' }
+    launch_watch  = if ($lw) { $lw } else { 'skipped: elevated' }
     note          = if ($Elevated) { 'elevated: the refusal (exit 3) of plan is the expected result' } else { '' }
 }
