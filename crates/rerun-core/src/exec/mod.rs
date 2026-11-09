@@ -77,6 +77,7 @@
 
 mod bind;
 mod file;
+mod helper;
 mod ini;
 mod launch;
 mod rebind;
@@ -95,10 +96,14 @@ pub mod launch_result {
         Start,
     };
 }
+pub use helper::{HelperFailure, reason_words};
 pub use rebind::{
     CreatedDir, RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,
 };
-pub use status::{OpState, OpStatus, RebindLine, Status, TxnLine, TxnStatus, status, txn_status};
+pub use status::{
+    OpState, OpStatus, OrphanRule, RebindLine, Status, TxnLine, TxnStatus, firewall_orphans,
+    status, txn_status,
+};
 
 use bind::Bindings;
 use file::Mode;
@@ -279,6 +284,21 @@ pub enum Refusal {
     /// A rebind is refused (P2-14).
     #[error(transparent)]
     Rebind(RebindRefusal),
+    /// The installed helper fails the pre-check (ADR 0023 §2, P4-2d): no prompt is shown.
+    #[error("the helper is not installed safely: {0}")]
+    HelperUnsafe(Box<RootError>),
+    /// Windows allows no elevation here (ADR 0023 §10): standard users are denied it, or UAC
+    /// is off.
+    #[error("{}", no_elevation(*.0))]
+    NoElevation(crate::elevate::PromptKind),
+    /// The firewall rules of the plan are no longer what the signed Topo and the game folder
+    /// authorise (A4 S7 before `begin`).
+    #[error("the firewall rules of this plan no longer hold: {0}; plan again")]
+    HelperPlan(Box<crate::elevate::PlanRefusal>),
+    /// The helper batch of a revert did not finish (ADR 0023 §9; a [`Halt`]'s reason) or a
+    /// helper of an earlier run may still be running (A4 S8).
+    #[error("{0}")]
+    Helper(HelperFailure),
     /// The journal could not be read or the transaction not begun.
     #[error(transparent)]
     Journal(Box<JournalError>),
@@ -305,6 +325,20 @@ pub enum SteamGone {
     OtherFolder,
     /// The manifest says not installed.
     NotInstalled,
+}
+
+/// A [`Refusal::NoElevation`] for a message.
+fn no_elevation(k: crate::elevate::PromptKind) -> &'static str {
+    match k {
+        crate::elevate::PromptKind::UacOff => {
+            "User Account Control is off on this PC: Rerun cannot ask for administrator rights \
+             for its firewall rules"
+        }
+        _ => {
+            "Windows denies administrator rights to standard users on this PC: Rerun cannot \
+             add or remove its firewall rules here"
+        }
+    }
 }
 
 /// A [`SteamGone`] for a message.
@@ -394,6 +428,9 @@ pub enum ExecError {
     /// on disk (P2-14 reviews N3 and S3): the transaction may be bound now; `status` shows it.
     #[error("the rebind may have been written, but whether it is on disk cannot be read: {0}")]
     RebindUnconfirmed(JournalError),
+    /// The helper batch of an apply did not end with every rule added (ADR 0023 §9, P4-2d).
+    #[error(transparent)]
+    Helper(HelperFailure),
 }
 
 impl From<Refusal> for ExecError {
@@ -434,6 +471,20 @@ pub enum ApplyError {
         cause: Box<ExecError>,
         /// What the cleanup pass observed; at least one item holds the transaction open.
         cleanup: Vec<PendingOld>,
+    },
+    /// The helper batch ended in a state the apply cannot roll back without a second
+    /// administrator prompt (ADR 0023 §9, R3: `LeftOpen`, an unknown result, a disagreement
+    /// with the observed firewall): nothing more was changed, the transaction stays open, and
+    /// `rerun revert <txn>` finishes it with one prompt.
+    #[error(
+        "apply failed ({txn}): {cause}; nothing more was changed; rerun revert {txn} finishes it \
+         (with one administrator prompt if a rule is there)"
+    )]
+    HelperOpen {
+        /// The transaction.
+        txn: TxnId,
+        /// The failure.
+        cause: Box<ExecError>,
     },
     /// Failed, and the rollback failed too or met a foreign state: the transaction stays
     /// open; `revert` finishes it later (or `forget` closes it).
@@ -994,6 +1045,9 @@ enum Seen {
     File(file::Seen),
     /// A registry key or value.
     Reg(reg::Seen),
+    /// A firewall rule of the helper batch (P4-2d): observed only (`verify`); its revert is the
+    /// batch's ([`helper::revert_batch`]).
+    Rule(Observed),
 }
 
 impl Seen {
@@ -1002,6 +1056,7 @@ impl Seen {
         match self {
             Self::File(s) => s.observed,
             Self::Reg(s) => s.observed,
+            Self::Rule(o) => *o,
         }
     }
 
@@ -1009,7 +1064,7 @@ impl Seen {
     fn restore(&self) -> bool {
         match self {
             Self::File(s) => s.restore,
-            Self::Reg(_) => false,
+            Self::Reg(_) | Self::Rule(_) => false,
         }
     }
 
@@ -1017,7 +1072,7 @@ impl Seen {
     fn rewrite(&self) -> Option<Semantic> {
         match self {
             Self::File(s) => s.rewrite,
-            Self::Reg(_) => None,
+            Self::Reg(_) | Self::Rule(_) => None,
         }
     }
 
@@ -1025,7 +1080,7 @@ impl Seen {
     fn detail(&self) -> Option<Detail> {
         match self {
             Self::File(s) => s.detail.clone(),
-            Self::Reg(_) => None,
+            Self::Reg(_) | Self::Rule(_) => None,
         }
     }
 }
@@ -1047,6 +1102,10 @@ struct Touched<'g> {
     hives: BTreeSet<Hive>,
     reg: RegWriter<'g>,
     sys: &'g dyn System,
+    /// The transaction, for the names of its firewall rules (P4-2d; `None` before `begin`).
+    txn: Option<TxnId>,
+    /// The firewall rules of the plan as observed in one enumeration (A4 S11), by op.
+    rules: Option<BTreeMap<u16, Observed>>,
 }
 
 impl<'g> Touched<'g> {
@@ -1056,7 +1115,36 @@ impl<'g> Touched<'g> {
             hives: BTreeSet::new(),
             reg: RegPolicy.writer(sys),
             sys,
+            txn: None,
+            rules: None,
         }
+    }
+
+    /// For transaction `t` (its firewall rules' names).
+    fn of(mut self, t: TxnId) -> Self {
+        self.txn = Some(t);
+        self
+    }
+
+    /// What the firewall holds for the rule of op `k`: every rule of the plan observed once.
+    fn rule_seen(&mut self, plan: &Plan, k: u16) -> Result<Observed, ExecError> {
+        if self.rules.is_none() {
+            let txn = self.txn.ok_or(ExecError::Journal(JournalError::Order(
+                "a firewall rule observed without its transaction",
+            )))?;
+            self.rules = Some(
+                helper::observe_rules(self.sys, plan, &txn)?
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        self.rules
+            .as_ref()
+            .and_then(|m| m.get(&k).copied())
+            .ok_or(ExecError::Verify {
+                op: k,
+                observed: Observed::Foreign,
+            })
     }
 
     /// Before `Applied`: every domain the apply changed (the game folders, after every guard
@@ -1092,6 +1180,8 @@ impl<'g> Touched<'g> {
                         .map_err(|source| ExecError::Op { op: k, source })?;
                 }
             }
+            // The firewall persists its rules itself (ADR 0023 §6); the batch has no flush here.
+            Target::Rule { .. } => {}
         }
         Ok(())
     }
@@ -1116,6 +1206,19 @@ fn apply_op(
             t.hives.insert(Hive::CurrentUser);
             reg::apply_op(w, &t.reg, plan, k, op, hints)
         }
+        // The helper batch is applied as a whole (`helper::run_batch`).
+        Target::Rule { .. } => Err(helper_only(k)),
+    }
+}
+
+/// An op of the helper batch reached a path of a single op.
+fn helper_only(k: u16) -> ExecError {
+    ExecError::Op {
+        op: k,
+        source: SysError::new(
+            crate::sys::SysErrorKind::Other,
+            "a firewall rule op is changed only by the helper batch",
+        ),
     }
 }
 
@@ -1145,6 +1248,7 @@ fn observe(
         Target::Key { .. } | Target::Value { .. } => {
             reg::observe(&t.reg, t.sys, plan, k, op, log, mode, hint, later).map(Seen::Reg)
         }
+        Target::Rule { .. } => t.rule_seen(plan, k).map(Seen::Rule),
     }
 }
 
@@ -1156,8 +1260,9 @@ fn halt(roots: &roots::Roots<'_>, k: u16, op: &Op) -> Option<Halt> {
             root: root.0,
             why: Box::new(n.refusal()),
         }),
-        // Registry ops never halt: they need no root (6b-d).
-        Target::Key { .. } | Target::Value { .. } => None,
+        // Registry ops never halt: they need no root (6b-d). Nor does a firewall rule: its
+        // program is the head's path, the root need not be there (ADR 0023 §9).
+        Target::Key { .. } | Target::Value { .. } | Target::Rule { .. } => None,
     }
 }
 
@@ -1237,6 +1342,7 @@ fn act<W: Reverting>(
     match seen {
         Seen::File(s) => file::act(w, &mut t.dirs, k, op, s, y),
         Seen::Reg(s) => reg::act(w, &t.reg, k, op, s),
+        Seen::Rule(_) => Err(helper_only(k)),
     }
 }
 
@@ -1246,14 +1352,30 @@ fn records_fit(plan: &Plan, ops: &BTreeMap<u16, OpLog>) -> bool {
     ops.iter()
         .all(|(k, log)| match plan.ops.get(usize::from(*k)) {
             None => false,
+            // P4-2d: an op of the helper batch exactly when the head says it is a firewall rule.
+            Some(op) if log.intent.batch != op.target().is_helper() => false,
             Some(op) => match op.target() {
                 Target::File { .. } if matches!(op, Op::IniValue { .. }) => {
                     ini::records_fit(op, log)
                 }
                 Target::File { .. } => file::records_fit(op, log),
                 Target::Key { .. } | Target::Value { .. } => reg::records_fit(op, log),
+                Target::Rule { .. } => rule_records_fit(log),
             },
         })
+}
+
+/// The records of a firewall rule op (ADR 0023 §9): no temp name, no old state, no file ID, no
+/// `.old`, no semantic revert (the grammar refuses most of it already; the head decides the kind).
+fn rule_records_fit(log: &OpLog) -> bool {
+    log.intent.tmp.is_none()
+        && log.intent.before.is_none()
+        && log.done.is_none_or(|d| d.file_id.is_none() && !d.old_left)
+        && log
+            .reverts
+            .iter()
+            .all(|r| r.tmp.is_none() && r.from.is_none() && r.to.is_none())
+        && log.reverted.as_ref().is_none_or(|r| r.old_left.is_empty())
 }
 
 /// The front-end and core guard of every write (P2-13, user decision E3): Rerun runs as a
@@ -1283,6 +1405,8 @@ pub fn check(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<usize, Refusal> {
     if plan.ops.is_empty() {
         return Ok(0);
     }
+    // P4-2d: the helper's pre-check and the prompt state, before anything else (ADR 0023 §2).
+    helper::ready(cx.sys, &plan)?;
     let j = Journal::new(cx.app, cx.tag);
     let hold = j.hold().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
@@ -1315,6 +1439,8 @@ fn preflight<'g>(
     roots::game_closed(plan, &roots, &all)?;
     roots::old_state(cx, plan, &roots)?;
     reg::old_state(&RegPolicy.writer(cx.sys), plan)?;
+    // A4 S7: the firewall rules are still what the signed Topo authorises here.
+    helper::recheck(cx, plan, &roots)?;
     Ok(roots)
 }
 
@@ -1326,6 +1452,8 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     if plan.ops.is_empty() {
         return Ok(Outcome::Nothing);
     }
+    // P4-2d: the helper's pre-check and the prompt state before the lock (ADR 0023 §2, §10).
+    let ready = helper::ready(cx.sys, &plan)?;
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
@@ -1333,12 +1461,29 @@ pub fn apply(cx: &ExecCtx<'_>, h: &PlanHash) -> Result<Outcome, ApplyError> {
     let roots = preflight(cx, &plan, &j, &listing, &stores, roots::Preflight::Apply)?;
     let mut w = lock.begin(bytes.bytes()).map_err(Refusal::from)?;
     let txn = *w.id();
-    let mut touched = Touched::new(cx.sys, &roots);
+    let mut touched = Touched::new(cx.sys, &roots).of(txn);
     let mut hints = BTreeMap::new();
-    let cause = match run(cx, &plan, &mut w, &mut touched, &roots, &mut hints) {
+    let cause = match run(
+        cx,
+        &plan,
+        &mut w,
+        &mut touched,
+        &roots,
+        &mut hints,
+        ready.as_ref(),
+    ) {
         Ok(()) => return Ok(Outcome::Applied(txn)),
         Err(e) => e,
     };
+    // R3: a helper result the rollback cannot undo without a second prompt stays open.
+    if let ExecError::Helper(f) = &cause
+        && !f.rolls_back()
+    {
+        return Err(ApplyError::HelperOpen {
+            txn,
+            cause: Box::new(cause),
+        });
+    }
     match rollback(cx, &plan, w, &mut touched, &roots, &hints) {
         Ok(cleanup) if cleanup.iter().any(|p| p.seen.holds_open()) => {
             Err(ApplyError::CleanupPending {
@@ -1365,7 +1510,8 @@ fn op_ix(k: usize) -> u16 {
     u16::try_from(k).unwrap_or(u16::MAX)
 }
 
-/// The ops, `After` for each, the flushes, `Applied`.
+/// The ops, `After` for each, the flushes, `Applied`. The helper batch (P4-2d, ADR 0023 §9)
+/// comes after the flushes of every other op, so only `Done` records and `Applied` follow it.
 fn run(
     cx: &ExecCtx<'_>,
     plan: &Plan,
@@ -1373,8 +1519,11 @@ fn run(
     t: &mut Touched<'_>,
     roots: &roots::Roots<'_>,
     hints: &mut BTreeMap<u16, Hint>,
+    ready: Option<&helper::Ready>,
 ) -> Result<(), ExecError> {
-    for (k, op) in plan.ops.iter().enumerate() {
+    let batch = helper::batch_of(plan);
+    let plain = batch.map_or(plan.ops.len(), |(first, _)| usize::from(first));
+    for (k, op) in plan.ops.iter().enumerate().take(plain) {
         apply_op(cx, plan, w, t, op_ix(k), op, hints)?;
     }
     let ops = w.ops().clone();
@@ -1388,6 +1537,12 @@ fn run(
         return Err(ExecError::Refused(*h.why));
     }
     t.flush_all()?;
+    if batch.is_some() {
+        let ready = ready.ok_or(ExecError::Journal(JournalError::Order(
+            "a helper batch without the helper's pre-check",
+        )))?;
+        helper::run_batch(cx, plan, w, roots, ready)?;
+    }
     w.applied(op_ix(plan.ops.len()))?;
     Ok(())
 }
@@ -1528,6 +1683,16 @@ fn revert_loop<W: Reverting>(
             .get(&k)
             .cloned()
             .ok_or(JournalError::Order("an op to revert without its intent"))?;
+        // P4-2d: the helper batch as a whole (newest first, so before every other op); a
+        // rollback never starts the helper (R3).
+        if log.intent.batch {
+            let (done, halted) = helper::revert_batch(cx, plan, w, mode != Mode::Rollback)?;
+            reports.extend(done);
+            if halted.is_some() {
+                return Ok((reports, halted));
+            }
+            continue;
+        }
         let op = op_of(plan, k)?;
         if let Some(h) = halt(roots, k, op) {
             return Ok((reports, Some(h)));
@@ -1755,7 +1920,7 @@ fn revert_run<W: Reverting>(
     roots: &roots::Roots<'_>,
     early: bool,
 ) -> Result<RevertReport, ExecError> {
-    let mut touched = Touched::new(cx.sys, roots);
+    let mut touched = Touched::new(cx.sys, roots).of(*t);
     let written = revert_records(w.ops());
     let (ops, halted) = match revert_loop(
         cx,
@@ -1861,7 +2026,7 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     let b = Bindings::of(&plan, &v.rebinds).ok_or_else(blocked)?;
     let stores = roots::open_stores(cx, &b);
     let roots = roots::Roots::each(cx, &b, &stores)?;
-    let mut touched = Touched::new(cx.sys, &roots);
+    let mut touched = Touched::new(cx.sys, &roots).of(*t);
     let mut out = verify_ops(&plan, &mut touched, &roots, &v.ops)?;
     // P2-15 (rule 5): what the cleanup pass of a revert would find now, unless it halts first.
     if out.halted.is_none() {
@@ -1937,6 +2102,10 @@ mod combo_tests;
 mod crash_tests;
 #[cfg(test)]
 mod front_tests;
+#[cfg(test)]
+mod fw_crash_tests;
+#[cfg(test)]
+pub(crate) mod fw_tests;
 #[cfg(test)]
 mod halt_tests;
 #[cfg(test)]

@@ -21,6 +21,12 @@
 //! earlier record durable with it); the change; `done` (not flushed; the next flush covers
 //! it). The caller flushes the changed folders before `applied` and before `close`, which
 //! flush the transaction folder, as does every `revert_intent`.
+//!
+//! The helper batch (ADR 0023 §9, P4-2d): `helper_batch` in place of the intents of the last
+//! ops of a plan and `revert_batch` in place of their revert intents, each followed by a flush
+//! of the transaction folder (flush sites `HelperBatch` and `RevertBatch`, J6). The caller
+//! flushes every game folder and hive the apply changed before `helper_batch`, so only `Done`
+//! records and `Applied` follow the helper.
 
 pub mod names;
 mod read;
@@ -521,6 +527,9 @@ pub struct IntentRec {
     pub tmp: Option<TmpName>,
     /// The old state its revert needs.
     pub before: Option<Before>,
+    /// Not an `Intent` record: the op is part of the `HelperBatch` (ADR 0023 §9, P4-2d), with
+    /// neither a temp name nor an old state.
+    pub batch: bool,
 }
 
 impl IntentRec {

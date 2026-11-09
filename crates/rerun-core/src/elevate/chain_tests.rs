@@ -265,8 +265,14 @@ impl Elevation for Wire<'_> {
         }
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();
         let exit = serve_with(&helper, || args, &self.keys);
+        // A helper that crashed (`WriteFault::CrashAfter`) ends with an NTSTATUS, no helper code.
+        let code = if self.world.fake_firewall().take_crash() {
+            0xC000_0409
+        } else {
+            exit.to_code()
+        };
         Ok(HelperRun::Exited {
-            code: exit.to_code(),
+            code,
             proc: HelperProc {
                 image: Some(nt),
                 elevated: Some(true),
@@ -290,6 +296,17 @@ fn run_on(wire: &Wire<'_>, at: &RequestRef, sha: &[u8; 32], batch: usize) -> Jud
 
 fn refused(r: Reason) -> Judged {
     Judged::Exit(HelperExit::refused(r))
+}
+
+/// The chain passed every step and added the one rule of `net/block` (P4-2d, the fake's write
+/// side); the rule is removed again so the world can be used once more.
+fn assert_added(sys: &FakeSystem, got: Judged) {
+    let done = HelperExit::done(&[OpResult::After]).unwrap();
+    assert_eq!(got, Judged::Exit(done));
+    let rules = sys.fake_firewall().rules();
+    assert_eq!(rules.len(), 1, "{rules:?}");
+    assert!(rules[0].name.starts_with("Rerun - invented-game - "));
+    sys.fake_firewall().set_rules(Vec::new());
 }
 
 /// A world with the index and an add request written; the request as the CLI wrote it.
@@ -493,16 +510,13 @@ fn the_request_round_trips_and_is_strict() {
         });
     }
     assert!(encode(&r).is_err());
-    // Op 0 is the profile fence, never a helper op.
+    // Op 0 (P4-2d): a plan of firewall rules alone starts its batch there.
     let mut r0 = r.clone();
     add_ops(&mut r0).truncate(1);
     add_ops(&mut r0)[0].op = 0;
-    assert!(encode(&r0).is_err());
+    assert!(encode(&r0).is_ok());
     let zero = text.replacen(r#""op":4"#, r#""op":0"#, 1);
-    assert!(matches!(
-        decode(zero.as_bytes(), crate::BUILD_ID),
-        Err(RequestError::Form(_))
-    ));
+    assert!(decode(zero.as_bytes(), crate::BUILD_ID).is_ok());
     // A direction this build does not know is no request.
     let inbound = text.replacen(r#""direction":"out""#, r#""direction":"in""#, 1);
     assert_ne!(inbound, text);
@@ -534,19 +548,19 @@ fn request_names_have_one_form() {
 
 // ---------- R: the refusal matrix ----------
 
-/// The whole chain passes: the helper reaches step 8, observes once, and (P4-2c, no write side)
-/// refuses with `Firewall`, every op `NotRun`.
+/// The whole chain passes: the helper reaches step 8 and adds the rule (P4-2d: the fake's write
+/// side; the real helper refuses with `Firewall` until P4-5b).
 #[test]
 fn r_every_step_passes_up_to_the_write() {
     seam(|| {
         let (sys, req) = ready();
         let (at, sha) = write(&sys, &req);
         let wire = Wire::new(&sys);
-        assert_eq!(run_on(&wire, &at, &sha, 1), refused(Reason::Firewall));
+        assert_added(&sys, run_on(&wire, &at, &sha, 1));
         assert_eq!(
             sys.fake_firewall().selects(),
-            1,
-            "one enumeration before the batch"
+            2,
+            "one enumeration before the batch and one after it"
         );
         // A shipped helper (release slots empty, no test key) stops at the index.
         let mut shipped = Wire::new(&sys);
@@ -810,7 +824,7 @@ fn t_the_request_file_and_its_folder() {
         // helper opens by identity, so the request it reads is still the CLI's.
         let (at5, sha5) = write(&sys, &req);
         sys.swap_with_junction(ELEVATE, r"D:\Games\Other").unwrap();
-        assert_eq!(run_on(&wire, &at5, &sha5, 1), refused(Reason::Firewall));
+        assert_added(&sys, run_on(&wire, &at5, &sha5, 1));
         // A request file that is a hard link.
         let (sys, req) = ready();
         let (at, sha) = write(&sys, &req);
@@ -851,7 +865,7 @@ fn t_the_index() {
         wire.keys.min_seq = 2;
         assert_eq!(run_on(&wire, &at, &sha, 1), refused(Reason::Index));
         wire.keys.min_seq = 1;
-        assert_eq!(run_on(&wire, &at, &sha, 1), refused(Reason::Firewall));
+        assert_added(&sys, run_on(&wire, &at, &sha, 1));
         // Bytes changed under their name.
         let h = hex32::to_string(&idx);
         let p = format!(r"{INDEX}\{h}.json");
@@ -920,10 +934,7 @@ fn t_the_root() {
             *root = root_ref(&sys, r"C:\Users\Player\Games\G");
         }
         let (at, sha) = write(&sys, &req);
-        assert_eq!(
-            run_on(&Wire::new(&sys), &at, &sha, 1),
-            refused(Reason::Firewall)
-        );
+        assert_added(&sys, run_on(&Wire::new(&sys), &at, &sha, 1));
         let mut admin = FakeKnownFolders::default();
         admin.set(KnownFolder::Profile, r"C:\Users\Admin");
         admin.set(KnownFolder::LocalAppData, r"C:\Users\Admin\AppData\Local");
@@ -966,17 +977,24 @@ fn m_remove_needs_no_index_and_no_game() {
     let (at, sha) = write(&sys, &req);
     let done = HelperExit::done(&[OpResult::Before]).unwrap();
     assert_eq!(run_on(&Wire::new(&sys), &at, &sha, 1), Judged::Exit(done));
-    // A rule still there needs the write side (P4-5b): nothing is changed.
+    // A rule still there is removed (P4-2d, the fake's write side): `Done`, the op `Before`.
     let Body::Remove { topo, ops } = &req.body else {
         unreachable!()
     };
     let r = rule(topo, &txn(), 4, &ops[0].program, Direction::Out);
     sys.fake_firewall().push(r.clone());
+    assert_eq!(run_on(&Wire::new(&sys), &at, &sha, 1), Judged::Exit(done));
+    assert_eq!(sys.fake_firewall().rules(), Vec::new());
+    // A rule changed by an administrator is `Foreign` and stays.
+    let mut changed = r.clone();
+    changed.enabled = false;
+    sys.fake_firewall().push(changed.clone());
+    let foreign = HelperExit::done(&[OpResult::Foreign]).unwrap();
     assert_eq!(
         run_on(&Wire::new(&sys), &at, &sha, 1),
-        refused(Reason::Firewall)
+        Judged::Exit(foreign)
     );
-    assert_eq!(sys.fake_firewall().rules(), vec![r]);
+    assert_eq!(sys.fake_firewall().rules(), vec![changed]);
     // Another build's remove is refused like an add.
     let mut other = req.clone();
     other.build = "0.0.0+other".to_owned();
@@ -985,6 +1003,151 @@ fn m_remove_needs_no_index_and_no_game() {
         run_on(&Wire::new(&sys), &at, &sha, 1),
         refused(Reason::Build)
     );
+}
+
+// ---------- W: step 8, the write side of the fake (P4-2d) ----------
+
+/// The add request of `net/block` and `other/also` (two rules, ops 4 and 5).
+fn two_rules(sys: &FakeSystem, index: [u8; 32]) -> Request {
+    let mut req = add_request(sys, index);
+    if let Body::Add { source, ops, .. } = &mut req.body {
+        source.picks = picks(&["net/block", "other/also"]);
+        ops.push(AddOp {
+            op: 5,
+            program: RelPath::parse(r"bin\tool.exe").unwrap(),
+            direction: Direction::Out,
+        });
+    }
+    req
+}
+
+/// A failed add undoes the helper's own adds, newest first (`RolledBack`, every op `Before`);
+/// an undo that fails too is `LeftOpen` with what is there.
+#[test]
+fn w_a_failed_add_is_undone_by_the_helper() {
+    use crate::sys::fake::WriteFault;
+    seam(|| {
+        let (sys, req) = ready();
+        let Body::Add { source, .. } = &req.body else {
+            unreachable!()
+        };
+        let req = two_rules(&sys, source.index);
+        let (at, sha) = write(&sys, &req);
+        let fw = sys.fake_firewall();
+        // The second add fails: the first is removed again.
+        fw.fault_write(2, WriteFault::Fail(SysErrorKind::Other));
+        let got = run_on(&Wire::new(&sys), &at, &sha, 2);
+        let Judged::Exit(e) = got else {
+            panic!("{got:?}")
+        };
+        assert_eq!(e.class, crate::elevate::ExitClass::RolledBack);
+        assert_eq!(e.ops[..2], [OpResult::Before, OpResult::Before]);
+        assert!(fw.rules().is_empty());
+        // The undo's remove fails as well: `LeftOpen`, the first rule there.
+        let got = {
+            // The fake's add (its second one fails), a remove that always fails.
+            struct Twice<'a>(&'a FakeSystem);
+            impl crate::sys::FirewallWrite for Twice<'_> {
+                fn add(&self, r: &crate::sys::FwRule) -> SysResult<()> {
+                    #[expect(clippy::disallowed_methods, reason = "test: the fake's write side")]
+                    let x = self.0.fake_firewall().add(r);
+                    x
+                }
+                fn remove_named(&self, _: &str) -> SysResult<()> {
+                    Err(SysError::new(SysErrorKind::Other, "test: the remove fails"))
+                }
+            }
+            // `policy::firewall` directly, on the helper's view with a failing remove.
+            let rules: Vec<crate::sys::FwRule> = req_rules(&sys, &req);
+            fw.set_rules(Vec::new());
+            let view = Undo {
+                inner: FakeHelperSystem::new(&sys, FakeHelperToken::new(true)),
+                write: Twice(&sys),
+            };
+            fw.fault_write(2, WriteFault::Fail(SysErrorKind::Other));
+            crate::policy::firewall::add_all(&view, &rules)
+        };
+        assert!(
+            matches!(&got, crate::policy::firewall::Written::LeftOpen(v)
+                if v[0] == Some(crate::policy::firewall::Observed::After)
+                    && v[1] == Some(crate::policy::firewall::Observed::Before)),
+            "{got:?}"
+        );
+        assert_eq!(fw.rules().len(), 1);
+    });
+}
+
+/// The rules an add request asks for, as the helper derives them.
+fn req_rules(sys: &FakeSystem, req: &Request) -> Vec<crate::sys::FwRule> {
+    let Body::Add { root, ops, .. } = &req.body else {
+        unreachable!()
+    };
+    let _ = sys;
+    let id = Id::parse("invented-game").unwrap();
+    ops.iter()
+        .map(|o| {
+            let p = Program::new(&root.path, &o.program).unwrap();
+            rule(&id, &req.txn, o.op, &p, o.direction)
+        })
+        .collect()
+}
+
+/// A helper view whose write side is `write` (a test of `policy::firewall`'s undo).
+struct Undo<'w, W> {
+    inner: FakeHelperSystem<'w>,
+    write: W,
+}
+
+impl<W: crate::sys::FirewallWrite> System for Undo<'_, W> {
+    fn fs(&self) -> &dyn crate::sys::Fs {
+        self.inner.fs()
+    }
+    fn registry(&self) -> &dyn crate::sys::Registry {
+        self.inner.registry()
+    }
+    fn registry_write(&self) -> &dyn crate::sys::RegistryWrite {
+        #[expect(clippy::disallowed_methods, reason = "test: delegation")]
+        let r = self.inner.registry_write();
+        r
+    }
+    fn topology(&self) -> &dyn crate::sys::Topology {
+        self.inner.topology()
+    }
+    fn known_folders(&self) -> &dyn crate::sys::KnownFolders {
+        self.inner.known_folders()
+    }
+    fn gpu(&self) -> &dyn crate::sys::Gpu {
+        self.inner.gpu()
+    }
+    fn firewall(&self) -> &dyn crate::sys::Firewall {
+        self.inner.firewall()
+    }
+    fn elevation(&self) -> &dyn Elevation {
+        self.inner.elevation()
+    }
+}
+
+impl<W: crate::sys::FirewallWrite> crate::sys::HelperSystem for Undo<'_, W> {
+    fn token(&self) -> &dyn crate::sys::HelperToken {
+        self.inner.token()
+    }
+    fn firewall_write(&self) -> &dyn crate::sys::FirewallWrite {
+        &self.write
+    }
+}
+
+/// A helper that crashes right after its first add leaves the rule; its exit code is no
+/// helper code, so the CLI judges `Unknown` (and the apply stays open, `exec::helper`).
+#[test]
+fn w_a_helper_crash_after_its_add_is_unknown() {
+    use crate::sys::fake::WriteFault;
+    seam(|| {
+        let (sys, req) = ready();
+        let (at, sha) = write(&sys, &req);
+        sys.fake_firewall().fault_write(1, WriteFault::CrashAfter);
+        assert_eq!(run_on(&Wire::new(&sys), &at, &sha, 1), Judged::Unknown);
+        assert_eq!(sys.fake_firewall().rules().len(), 1);
+    });
 }
 
 // ---------- D: the derivation and the CLI's plan check (A4 S7) ----------

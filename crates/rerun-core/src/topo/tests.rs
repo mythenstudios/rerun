@@ -1005,3 +1005,62 @@ fn rf_step_files_get_the_same_rule() {
         Err(Refusal::AntiCheat(StepKind::CompatLayer))
     );
 }
+
+// ---------- TF: firewall rules (P4-2d) ----------
+
+/// The engine plans `firewall_rule` steps as `FirewallRule` ops after every other op, from the
+/// anchors of `elevate::check_plan` only (A4 S7), and refuses them where the helper would.
+#[test]
+fn tf_firewall_rules_are_planned_last_from_the_anchors() {
+    crate::catalog::check::review_seam::firewall_rule(|| {
+        let sys = game_sys();
+        let json = topo_json(&sha256(&pe(false)), DIRECT).replace(
+            r#" {"id":"wrapper""#,
+            r#" {"id":"net","title":"Online check","variants":[
+   {"id":"block","status":"verified","kind":"fix","steps":[{"firewall_rule":{"exe":"game.exe","direction":"out"}}]}]},
+ {"id":"wrapper""#,
+        );
+        let t: Topo = serde_json::from_str(&json).unwrap();
+        check::topo(&t, Rules::Release).unwrap();
+        let p = plan_on(&sys, &t, &["cores/limit", "net/block"])
+            .unwrap()
+            .plan;
+        let last = p.ops.last().unwrap();
+        assert_eq!(
+            last,
+            &crate::plan::Op::FirewallRule {
+                root: crate::plan::RootIx(0),
+                program: crate::path::RelPath::parse("game.exe").unwrap(),
+                direction: crate::policy::firewall::Direction::Out,
+            }
+        );
+        assert!(
+            p.ops[..p.ops.len() - 1]
+                .iter()
+                .all(|o| !o.target().is_helper())
+        );
+        // A rule alone is op 0.
+        let p = plan_on(&sys, &t, &["net/block"]).unwrap().plan;
+        assert_eq!(p.ops.len(), 1);
+        assert!(p.ops[0].target().is_helper());
+        assert!(p.source.is_some());
+        // The program changed since the scan: refused, as the helper would.
+        let json2 = json.replace(
+            r#""exe":"game.exe","direction":"out""#,
+            r#""exe":"FFLauncher.exe","direction":"out""#,
+        );
+        let t2: Topo = serde_json::from_str(&json2.replace(
+            r#"{"path":"game.exe","sha256""#,
+            &format!(
+                r#"{{"path":"FFLauncher.exe","sha256":"{}","api":"d3d9"}},{{"path":"game.exe","sha256""#,
+                sha256(b"not the launcher")
+            ),
+        ))
+        .unwrap();
+        assert!(matches!(
+            plan_on(&sys, &t2, &["net/block"]),
+            Err(EngineError::Firewall(e))
+                if matches!(*e, crate::elevate::PlanRefusal::ExeMismatch(_))
+        ));
+    });
+}

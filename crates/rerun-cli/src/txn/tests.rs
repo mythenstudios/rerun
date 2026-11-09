@@ -61,6 +61,7 @@ fn file_op(index: usize, action: &'static str, path: &str) -> PreviewOp {
         ini: Vec::new(),
         profile: None,
         replaces: false,
+        firewall: None,
     }
 }
 
@@ -86,6 +87,7 @@ fn head() -> Preview {
         layers: None,
         ini: None,
         profiles: None,
+        firewall: None,
     }
 }
 

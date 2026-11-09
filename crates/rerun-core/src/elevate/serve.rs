@@ -22,13 +22,13 @@
 //! **Remove** (§5, R1): never an index, a `seq` floor, the game folder or a hash; the expected
 //! rule is formed from the request alone.
 //!
-//! **Step 8 in P4-2c:** the firewall write side arrives with P4-5b. The helper observes the
-//! derived rules once (`policy::firewall::observe_all`, A4 S11) and changes nothing: an add
-//! whose rule name is taken is `Refused(DuplicateName)` (§6), any other add `Refused(Firewall)`;
-//! a remove whose rules are all gone is `Done` with every op `Before` (nothing to do, the one
-//! success without a write), any other remove `Refused(Firewall)`. The real helper has no
-//! firewall read side yet either (`NoFirewall`, so no COM in its imports): every validated
-//! batch ends in `Refused(Firewall)` there.
+//! **Step 8** (P4-2d): the batch is written through `policy::firewall::{add_all, remove_all}`
+//! (ADR 0023 §6): an add counts every name free (else `Refused(DuplicateName)`), adds in order,
+//! reads again and reports `Done` with every op `After`, or removes its own adds again, newest
+//! first (`RolledBack`, else `LeftOpen` with what it saw); a remove takes away each rule that is
+//! exactly Rerun's, leaves `Foreign` ones, and reports `Done` per op (`Before` or `Foreign`).
+//! The real helper's firewall is `NoFirewall` until P4-5b binds COM: every validated real batch
+//! still ends in `Refused(Firewall)` there.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -36,8 +36,9 @@ use std::path::Path;
 use sha2::{Digest, Sha256 as Sha256Hasher};
 
 use super::HELPER_MIN_SEQ;
+use super::MAX_BATCH_OPS;
 use super::derive::{DeriveError, derive_add};
-use super::exit::{HelperExit, OpResult, Reason};
+use super::exit::{ExitClass, HelperExit, OpResult, Reason};
 use super::request::{Body, MAX_REQUEST_BYTES, Request, RequestError, RequestRef, decode};
 use crate::catalog::model::{Sha256, Topo};
 use crate::catalog::{PublicKey, key, store, trusted_keys};
@@ -46,7 +47,7 @@ use crate::detect::exe::anti_cheat::find_in;
 use crate::detect::exe::hash::stream;
 use crate::fold::fold;
 use crate::path::RelPath;
-use crate::policy::firewall::{Observed, Program, observe_all, rule};
+use crate::policy::firewall::{Observed, Program, Written, add_all, remove_all, rule};
 use crate::policy::root::{ForbiddenRoots, HelperImage, dir_by_id, helper_image, root_by_id};
 use crate::sys::fs::{EntryKind, Metadata};
 use crate::sys::{Dir, FwRule, HelperSystem, SysErrorKind, System};
@@ -270,19 +271,50 @@ fn validate_add(
         .collect())
 }
 
-/// §5 step 8 in P4-2c (module docs): observes once, changes nothing.
+/// One op's report from what the firewall holds for its rule.
+fn result_of(o: Option<Observed>) -> OpResult {
+    match o {
+        Some(Observed::Before) => OpResult::Before,
+        Some(Observed::After) => OpResult::After,
+        Some(Observed::Foreign) => OpResult::Foreign,
+        None => OpResult::NotRun,
+    }
+}
+
+/// A report of class `class` with reason `Firewall` and these per-op results.
+fn with_ops(class: ExitClass, ops: &[OpResult]) -> HelperExit {
+    let mut all = [OpResult::NotRun; MAX_BATCH_OPS];
+    for (slot, o) in all.iter_mut().zip(ops) {
+        *slot = *o;
+    }
+    HelperExit {
+        class,
+        reason: Some(Reason::Firewall),
+        ops: all,
+    }
+}
+
+/// §5 step 8 (module docs): the batch written through `policy::firewall`, reported per op.
 fn execute(sys: &dyn HelperSystem, rules: &[FwRule], adding: bool) -> Result<HelperExit, Reason> {
-    let seen = observe_all(sys.firewall(), rules).map_err(|_| Reason::Firewall)?;
-    if adding {
-        if seen.iter().any(|o| *o != Observed::Before) {
-            return Err(Reason::DuplicateName);
+    let written = if adding {
+        add_all(sys, rules)
+    } else {
+        remove_all(sys, rules)
+    };
+    match written {
+        Written::Done(now) => {
+            let ops: Vec<OpResult> = now.into_iter().map(|o| result_of(Some(o))).collect();
+            HelperExit::done(&ops).ok_or(Reason::Internal)
         }
-        // The write side (`FirewallWrite`, COM) arrives with P4-5b.
-        return Err(Reason::Firewall);
+        Written::Duplicate => Err(Reason::DuplicateName),
+        Written::Unreadable => Err(Reason::Firewall),
+        Written::RolledBack => Ok(with_ops(
+            ExitClass::RolledBack,
+            &vec![OpResult::Before; rules.len()],
+        )),
+        Written::LeftOpen(now) => {
+            let ops: Vec<OpResult> = now.into_iter().map(result_of).collect();
+            Ok(with_ops(ExitClass::LeftOpen, &ops))
+        }
     }
-    if seen.iter().all(|o| *o == Observed::Before) {
-        let ops = vec![OpResult::Before; seen.len()];
-        return HelperExit::done(&ops).ok_or(Reason::Internal);
-    }
-    Err(Reason::Firewall)
 }

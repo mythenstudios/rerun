@@ -37,6 +37,7 @@ fn op(index: usize, action: &'static str, root: Option<usize>, path: &str) -> Pr
         ini: Vec::new(),
         profile: None,
         replaces: false,
+        firewall: None,
     }
 }
 
@@ -62,6 +63,7 @@ fn preview(root_path: &str, ops: Vec<PreviewOp>) -> Preview {
         layers: Some(LAYERS_NOTE),
         ini: Some(INI_NOTE),
         profiles: None,
+        firewall: None,
     }
 }
 

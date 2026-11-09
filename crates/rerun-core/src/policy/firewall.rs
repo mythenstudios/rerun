@@ -38,7 +38,7 @@ use crate::path::{RelPath, RootPath};
 use crate::sys::firewall::{
     ACTION_BLOCK, DIR_OUT, FwRest, FwRule, FwRule3, PROFILES_ALL, PROTOCOL_ANY,
 };
-use crate::sys::{Firewall, SysResult};
+use crate::sys::{Firewall, FirewallWrite, HelperSystem, SysResult};
 
 /// The group (`Grouping`) of every Rerun rule.
 pub const GROUP: &str = "Rerun";
@@ -293,6 +293,132 @@ pub fn observe_all(fw: &dyn Firewall, expected: &[FwRule]) -> SysResult<Vec<Obse
 pub fn observe(fw: &dyn Firewall, expected: &FwRule) -> SysResult<Observed> {
     let mut v = observe_all(fw, std::slice::from_ref(expected))?;
     Ok(v.pop().unwrap_or(Observed::Before))
+}
+
+/// What a batch write of the elevated helper left (ADR 0023 §5 step 8, §6; P4-2d).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Written {
+    /// Every rule as the batch wants it, per rule what is there now: an add `After`; a remove
+    /// `Before`, or `Foreign` for a rule it left untouched (ADR 0020 D10).
+    Done(Vec<Observed>),
+    /// An add whose rule name is taken: nothing changed.
+    Duplicate,
+    /// The firewall could not be read before any change: nothing changed.
+    Unreadable,
+    /// A failure after a change, undone: every rule of the batch `Before`.
+    RolledBack,
+    /// A failure that could not be undone: per rule what was seen last (`None`: unknown).
+    LeftOpen(Vec<Option<Observed>>),
+}
+
+/// The rules of `rules` observed now, as `Some` each, or every one `None` if unreadable.
+fn last_seen(fw: &dyn Firewall, rules: &[FwRule]) -> Vec<Option<Observed>> {
+    observe_all(fw, rules).map_or_else(
+        |_| vec![None; rules.len()],
+        |v| v.into_iter().map(Some).collect(),
+    )
+}
+
+/// Removes every rule of `rules` that is exactly Rerun's (`After`), newest first, then reads
+/// again: `RolledBack` if every one is gone, else `LeftOpen`.
+fn undo(fw: &dyn Firewall, w: &dyn FirewallWrite, rules: &[FwRule]) -> Written {
+    if let Ok(seen) = observe_all(fw, rules) {
+        for (r, s) in rules.iter().zip(&seen).rev() {
+            if *s != Observed::After {
+                continue;
+            }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "ADR 0023 §6: the undo of the helper's own adds, each exactly Rerun's"
+            )]
+            let removed = w.remove_named(&r.name);
+            if removed.is_err() {
+                break;
+            }
+        }
+    }
+    let now = last_seen(fw, rules);
+    if now.iter().all(|o| *o == Some(Observed::Before)) {
+        Written::RolledBack
+    } else {
+        Written::LeftOpen(now)
+    }
+}
+
+/// The add of a batch (ADR 0023 §6): one enumeration, every name free (else `Duplicate`); each
+/// rule added in order; one enumeration again, every rule exactly Rerun's (`Done`); on any
+/// failure the helper's own adds are removed again, newest first (`RolledBack`, or `LeftOpen`).
+pub fn add_all(sys: &dyn HelperSystem, rules: &[FwRule]) -> Written {
+    let fw = sys.firewall();
+    let seen = match observe_all(fw, rules) {
+        Ok(s) => s,
+        Err(_) => return Written::Unreadable,
+    };
+    if seen.iter().any(|o| *o != Observed::Before) {
+        return Written::Duplicate;
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ADR 0023 §12: policy::firewall is the one writer of firewall rules"
+    )]
+    let w = sys.firewall_write();
+    let mut added = 0;
+    for r in rules {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "ADR 0023 §6: the add of Rerun's rule form, names counted free above"
+        )]
+        let r = w.add(r);
+        if r.is_err() {
+            break;
+        }
+        added += 1;
+    }
+    if added == rules.len()
+        && let Ok(now) = observe_all(fw, rules)
+        && now.iter().all(|o| *o == Observed::After)
+    {
+        return Written::Done(now);
+    }
+    undo(fw, w, rules)
+}
+
+/// The remove of a batch (ADR 0023 §5 "Remove", §6, R1): one enumeration; each rule that is
+/// exactly Rerun's (`After`, so exactly one of its name) removed, newest first; `Before` (gone
+/// already) and `Foreign` (never touched) stay; one enumeration again. `Done` if no rule of
+/// Rerun's is left, else `LeftOpen`.
+pub fn remove_all(sys: &dyn HelperSystem, rules: &[FwRule]) -> Written {
+    let fw = sys.firewall();
+    let seen = match observe_all(fw, rules) {
+        Ok(s) => s,
+        Err(_) => return Written::Unreadable,
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ADR 0023 §12: policy::firewall is the one writer of firewall rules"
+    )]
+    let w = sys.firewall_write();
+    for (r, s) in rules.iter().zip(&seen).rev() {
+        if *s != Observed::After {
+            continue;
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "ADR 0023 §6, R10: exactly one rule of the name, Rerun's, counted above"
+        )]
+        let removed = w.remove_named(&r.name);
+        if removed.is_err() {
+            return Written::LeftOpen(last_seen(fw, rules));
+        }
+    }
+    let now = last_seen(fw, rules);
+    if now
+        .iter()
+        .any(|o| *o == Some(Observed::After) || o.is_none())
+    {
+        return Written::LeftOpen(now);
+    }
+    Written::Done(now.into_iter().flatten().collect())
 }
 
 /// Every rule of group `Rerun` (folded) or of Rerun's name form, in one enumeration.

@@ -119,6 +119,8 @@ pub(super) fn fence(plan: &Plan, rules: Rules) -> Result<(), PlanError> {
                 }
                 false
             }
+            // `plan::rule_check`: a firewall rule only on a game root.
+            Target::Rule { .. } => false,
         };
         if target_profiles {
             profile_op(plan, k, op, rules)?;

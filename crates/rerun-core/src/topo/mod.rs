@@ -12,8 +12,9 @@
 //!   nothing.
 //! - [`plan`] (reads through the planners only): the picked variants, at most one per issue.
 //!   `when = no` is refused, `unknown` is planned with a warning; the anti-cheat rule refuses or
-//!   warns per step kind; `package` waits for P4-7, `firewall_rule` for the helper batch
-//!   (P4-2d). A `cpu` step becomes the one `launch_method` step: the Topo's method (`auto` is `direct` when the chain is exactly `[steam]`, else
+//!   warns per step kind; `package` waits for P4-7. The `firewall_rule` steps (P4-2d) become
+//!   `FirewallRule` ops after every other op, built only from the anchors of
+//!   `elevate::check_plan` (the helper's own derivation on the game folder as read, A4 S7). A `cpu` step becomes the one `launch_method` step: the Topo's method (`auto` is `direct` when the chain is exactly `[steam]`, else
 //!   `watch`, L10), its `launch.start`, and its `launch.priority`. The steps go to
 //!   [`prim::plan`] unchanged, so the plan has the bytes of a step file with the same steps,
 //!   plus [`Plan::source`] (the index's SHA-256, the Topo and the picks).
@@ -38,7 +39,7 @@ use crate::detect::exe::{
 use crate::detect::pe::{self, PeReadError};
 use crate::hw::{GpuArchTable, SystemProfile};
 use crate::path::RelPath;
-use crate::plan::{MAX_PICKS, Pick, Plan, PlanError, PlanSource};
+use crate::plan::{MAX_PICKS, Op, Pick, Plan, PlanError, PlanSource, RootIx};
 use crate::policy::root::GameDir;
 use crate::prim::{self, LaunchMethodSpec, MethodSpec, PlanCtx, Step};
 use crate::sys::SysErrorKind;
@@ -471,8 +472,9 @@ fn assess(
         };
         let why = match (r, k, s) {
             (AcRule::Refuse, ..) => Some(Refusal::AntiCheat(k)),
-            // `package` waits for P4-7, `firewall_rule` for the helper batch (P4-2d, P4-5b).
-            (_, StepKind::Package | StepKind::FirewallRule, _) => Some(Refusal::NotYet(k)),
+            // `package` waits for P4-7 (`firewall_rule` is planned since P4-2d, from the anchors of
+            // `elevate::check_plan`).
+            (_, StepKind::Package, _) => Some(Refusal::NotYet(k)),
             (_, _, TopoStep::Cpu(_)) => launch.as_ref().err().map(|p| Refusal::Launch(*p)),
             _ => None,
         };
@@ -540,6 +542,9 @@ pub enum EngineError {
     /// The planners refused.
     #[error(transparent)]
     Plan(#[from] PlanError),
+    /// The firewall rules of the picked variants cannot be planned here (A4 S7, P4-2d).
+    #[error(transparent)]
+    Firewall(Box<crate::elevate::PlanRefusal>),
 }
 
 /// Every `gpu.arch` of the Topo is declared by `table` (none to check without a table).
@@ -703,6 +708,7 @@ pub fn plan(
     let ac = anti_cheat_state(topo, &facts.game.anti_cheat);
     let mut steps = Vec::new();
     let mut planned_launch = None;
+    let mut rules = false;
     for (p, (issue, variant)) in picks.iter().zip(resolved) {
         match when::eval(issue.when.as_ref(), facts.profile) {
             Tri::No => return Err(EngineError::WhenNo(p.issue.clone())),
@@ -727,7 +733,9 @@ pub fn plan(
         for s in &variant.steps {
             match s {
                 // Refused by `assess` above.
-                TopoStep::Package(_) | TopoStep::FirewallRule(_) => {}
+                TopoStep::Package(_) => {}
+                // Planned below from `elevate::check_plan` (the helper's own derivation).
+                TopoStep::FirewallRule(_) => rules = true,
                 TopoStep::SteamInput(_) => warnings.push(Warning::SteamInput {
                     issue: p.issue.clone(),
                 }),
@@ -755,6 +763,18 @@ pub fn plan(
         ..*ctx
     };
     let mut plan = prim::plan(&steps, &ctx)?;
+    // P4-2d (ADR 0023 §9, A4 S7): the firewall rules last, built only from the anchors of the
+    // derivation the helper repeats, on the game folder as read here.
+    if rules {
+        let anchors = crate::elevate::check_plan(topo, picks, ctx.game.info(), facts.game)
+            .map_err(|e| EngineError::Firewall(Box::new(e)))?;
+        plan.ops
+            .extend(anchors.into_iter().map(|a| Op::FirewallRule {
+                root: RootIx(0),
+                program: a.exe,
+                direction: a.direction,
+            }));
+    }
     plan.source = Some(PlanSource {
         index: *index,
         topo: topo.id.to_string(),

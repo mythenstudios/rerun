@@ -189,4 +189,7 @@ impl HelperSystem for FakeHelperSystem<'_> {
     fn token(&self) -> &dyn HelperToken {
         &self.token
     }
+    fn firewall_write(&self) -> &dyn crate::sys::FirewallWrite {
+        self.world.fake_firewall()
+    }
 }

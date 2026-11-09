@@ -21,6 +21,11 @@
 //! with the identities seen when the user confirmed it, and the file IDs of the folders the plan
 //! created as found there ([`DirProof`]). No game path: the install folder is always the head's
 //! (senior-dev S3).
+//!
+//! `HelperBatch` and `RevertBatch` (P4-2d, ADR 0023 §9; additive, format 1 stays unstable until
+//! A6): the ops of the elevated helper's batch, in place of their intents and revert intents,
+//! with the digest of the request file written for the run (none for a revert that starts no
+//! helper).
 
 use serde::{Deserialize, Serialize};
 
@@ -135,6 +140,18 @@ pub(crate) enum Record {
         /// `<tmp>.old` was left behind (mapped as an image, ADR 0017).
         old_left: bool,
     },
+    /// Before the elevated helper changes anything (ADR 0023 §9, P4-2d): ops `first..=last`
+    /// are the helper batch, in place of their intents; `request` is the request file the CLI
+    /// wrote for it (its SHA-256 and length; the file itself is never read again). Then
+    /// `Done(k)` for `k = first..=last` in order, then `Applied`.
+    HelperBatch {
+        /// The first op of the batch: the number of intents so far.
+        first: u16,
+        /// The last op of the batch (at most 8 ops).
+        last: u16,
+        /// The request file of the add.
+        request: Digest,
+    },
     /// Every op is done and flushed.
     Applied {
         /// Number of ops.
@@ -150,6 +167,19 @@ pub(crate) enum Record {
         from: Option<Digest>,
         /// A semantic revert (P2-12): the content it writes; with `from`, or neither.
         to: Option<Digest>,
+    },
+    /// Before the revert of the helper batch changes anything (ADR 0023 §9, P4-2d), in place of
+    /// the `RevertIntent`s of ops `first..=last`: `first` is the batch's, `last` its highest op
+    /// without `RevertDone`. `request`: the remove request the CLI wrote, `None` when no helper
+    /// is started (every op observed `Before` or `Foreign`). Repeatable; then `RevertDone(k)`
+    /// for `k = last` down to `first`.
+    RevertBatch {
+        /// The first op of the batch.
+        first: u16,
+        /// The highest op of the batch not reverted yet.
+        last: u16,
+        /// The request file of the remove, if a helper is started.
+        request: Option<Digest>,
     },
     /// The revert of op `op` is done.
     RevertDone {
@@ -344,7 +374,61 @@ mod tests {
             Record::Closed {
                 how: Closing::RolledBack,
             },
+            Record::HelperBatch {
+                first: 3,
+                last: 4,
+                request: Digest {
+                    sha256: [0xa5; 32],
+                    len: 412,
+                },
+            },
+            Record::RevertBatch {
+                first: 3,
+                last: 4,
+                request: Some(Digest {
+                    sha256: [0x5a; 32],
+                    len: 300,
+                }),
+            },
+            Record::RevertBatch {
+                first: 3,
+                last: 3,
+                request: None,
+            },
         ]
+    }
+
+    /// J3 for the batch records (P4-2d): one written form, every field parsed again.
+    #[test]
+    fn batch_records_have_one_form() {
+        let head = [9u8; 32];
+        let all = every_kind();
+        let wire = |r: &Record| String::from_utf8(encode(6, &head, r).unwrap()).unwrap();
+        let hb = wire(&all[15]);
+        assert!(hb.contains(&format!(
+            r#""record":{{"helper_batch":{{"first":3,"last":4,"request":{{"sha256":"{}","len":412}}}}}}"#,
+            "a5".repeat(32)
+        )));
+        let rb = wire(&all[17]);
+        assert!(rb.contains(r#""record":{"revert_batch":{"first":3,"last":3,"request":null}}"#));
+        for bad in [
+            hb.replace(r#""first":3"#, r#""first":-3"#),
+            hb.replace(r#""first":3,"#, ""),
+            hb.replace(r#""last":4"#, r#""last":4,"x":0"#),
+            hb.replace(r#""request":{"#, r#""request":null,"y":{"#),
+            hb.replace(&"a5".repeat(32), &"A5".repeat(32)),
+            hb.replace(r#""len":412"#, r#""len":"412""#),
+            rb.replace(r#""request":null"#, r#""request":false"#),
+            rb.replace(r#","request":null"#, ""),
+            rb.replace("revert_batch", "RevertBatch"),
+        ] {
+            assert_ne!(bad, hb);
+            assert_eq!(
+                decode(bad.as_bytes(), 6, &head),
+                Err(Damage::Unparsable { n: 6 }),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

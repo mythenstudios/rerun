@@ -81,9 +81,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use preview::{
-    INI_NOTE, IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, PROFILE_NOTE, PROFILE_WATCH_NOTE,
-    Preview, PreviewOp, PreviewRoot, ProfilePreview, ProfileShown, REGISTRY_NOTE, RegShown,
-    preview, preview_head, preview_stored,
+    FIREWALL_NOTE, FirewallShown, INI_NOTE, IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED,
+    PROFILE_NOTE, PROFILE_WATCH_NOTE, Preview, PreviewOp, PreviewRoot, ProfilePreview,
+    ProfileShown, REGISTRY_NOTE, RegShown, preview, preview_head, preview_stored,
 };
 #[cfg(test)]
 pub(crate) use profile::knob as profile_knob;
@@ -92,6 +92,7 @@ pub use store::{load, store};
 
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
+use crate::policy::firewall::{Direction, Program};
 use crate::policy::ini::{self, IniEdit, IniError};
 use crate::policy::registry::{RegPolicy, RegPolicyError, RegSlot, TokenName, layers};
 use crate::policy::root::{RootError, RootId};
@@ -360,6 +361,18 @@ pub enum Op {
         /// The keys, in canonical order.
         edits: Vec<IniEdit>,
     },
+    /// Rerun's block rule in the Windows Firewall for an executable of a game folder (P4-2d,
+    /// ADR 0023 §6, §9): added and removed only by the elevated helper, as the last ops of a
+    /// plan with a [`Plan::source`]. The rule's name follows from the Topo, the transaction and
+    /// the op index; its program is the root's planned path and `program`, never a rebound one.
+    FirewallRule {
+        /// The game folder (a [`RootKind::Game`] root).
+        root: RootIx,
+        /// The executable below it, in the spelling of the Topo's `match.exes` entry.
+        program: RelPath,
+        /// The direction the rule blocks.
+        direction: Direction,
+    },
 }
 
 /// The new content of an `IniValue` (P2-12): SHA-256 and length; its R/H/S are the old ones.
@@ -477,12 +490,25 @@ pub enum Target<'a> {
         /// The slot.
         slot: &'a RegSlot,
     },
+    /// A firewall rule of the elevated helper's batch (P4-2d): its object is its rule name,
+    /// unique per transaction and op, so it overlaps nothing.
+    Rule {
+        /// The game folder whose executable it names.
+        root: RootIx,
+        /// The executable below it.
+        program: &'a RelPath,
+    },
 }
 
 impl Target<'_> {
     /// A registry key or value.
     pub fn is_registry(&self) -> bool {
         matches!(self, Self::Key { .. } | Self::Value { .. })
+    }
+
+    /// An op of the elevated helper's batch (P4-2d).
+    pub fn is_helper(&self) -> bool {
+        matches!(self, Self::Rule { .. })
     }
 }
 
@@ -504,6 +530,10 @@ impl Op {
             },
             Self::CreateKey { slot, segs } => Target::Key { slot, segs: *segs },
             Self::SetValue { slot, .. } | Self::TokenList { slot, .. } => Target::Value { slot },
+            Self::FirewallRule { root, program, .. } => Target::Rule {
+                root: *root,
+                program,
+            },
         }
     }
 
@@ -522,7 +552,8 @@ impl Op {
             | Self::IniValue { .. }
             | Self::CreateKey { .. }
             | Self::SetValue { .. }
-            | Self::TokenList { .. } => None,
+            | Self::TokenList { .. }
+            | Self::FirewallRule { .. } => None,
             Self::CreateFile { content, .. } | Self::ReplaceFile { content, .. } => Some(content),
         }
     }
@@ -1155,6 +1186,31 @@ fn ini_rules(
     Ok(())
 }
 
+/// Most `FirewallRule` ops of a plan: one helper batch (`elevate::MAX_BATCH_OPS`).
+pub const MAX_RULE_OPS: usize = crate::elevate::MAX_BATCH_OPS;
+
+/// The rules of a `FirewallRule` (module docs): a plan with a source (a signed Topo), a game
+/// root, and a program Rerun's rule form takes (`policy::firewall::Program`: no `%`, at most
+/// 243 characters, an `.exe`).
+fn rule_check(plan: &Plan, k: usize, root: RootIx, program: &RelPath) -> Result<(), PlanError> {
+    if plan.source.is_none() {
+        return Err(invalid(
+            Some(k),
+            "a firewall rule needs the plan's source (a signed Topo)",
+        ));
+    }
+    let r = plan
+        .roots
+        .get(usize::from(root.0))
+        .ok_or_else(|| invalid(Some(k), "root index outside the plan's roots"))?;
+    if r.kind != RootKind::Game {
+        return Err(invalid(Some(k), "a firewall rule outside a game folder"));
+    }
+    Program::new(&r.path, program)
+        .map_err(|_| invalid(Some(k), "a program a firewall rule cannot name"))?;
+    Ok(())
+}
+
 /// The bounds and rules shared by [`Plan::encode`] and [`decode`] (`rules`: module docs).
 fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), PlanError> {
     if plan.format != FORMAT {
@@ -1212,6 +1268,7 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
     let mut seen: Vec<(RootIx, String)> = Vec::with_capacity(plan.ops.len());
     let mut reg = RegSeen::default();
     let mut backups = 0u64;
+    let mut rules_seen: Vec<(RootIx, String)> = Vec::new();
     for (k, op) in plan.ops.iter().enumerate() {
         let size = serde_json::to_vec(op)
             .map_err(|e| PlanError::Encode(e.to_string()))?
@@ -1221,6 +1278,11 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
                 op: k,
                 limit: lim.op_bytes,
             });
+        }
+        // P4-2d (ADR 0023 §9): the helper batch is the last ops of a plan (both rule sets: a
+        // revert reaches it first, so it never needs a second helper run).
+        if !rules_seen.is_empty() && !op.target().is_helper() {
+            return Err(invalid(Some(k), "an op after a firewall rule"));
         }
         match op.target() {
             Target::File { root, path, .. } => {
@@ -1240,6 +1302,17 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
             }
             Target::Key { slot, segs } => reg.key(plan, k, slot, segs)?,
             Target::Value { slot } => reg.value(plan, k, op, slot, rules)?,
+            Target::Rule { root, program } => {
+                rule_check(plan, k, root, program)?;
+                let key = (root, fold(program.as_str()));
+                if rules_seen.contains(&key) {
+                    return Err(invalid(Some(k), "two firewall rules for one executable"));
+                }
+                rules_seen.push(key);
+                if rules_seen.len() > MAX_RULE_OPS {
+                    return Err(invalid(Some(k), "more than 8 firewall rules"));
+                }
+            }
         }
         if let Some(ContentRef::Package {
             id, version, len, ..
@@ -1320,6 +1393,9 @@ pub(crate) enum Object {
         /// Its folded name.
         name: String,
     },
+    /// A firewall rule of the helper batch (P4-2d): named by its transaction and op, so it
+    /// overlaps nothing.
+    Rule,
 }
 
 impl Object {
@@ -1371,6 +1447,7 @@ impl Object {
                         name: fold(av.name()),
                     })
                 }
+                Target::Rule { .. } => Ok(Self::Rule),
             })
             .collect()
     }
@@ -1381,6 +1458,7 @@ impl Object {
     /// registry object never overlap.
     pub(crate) fn overlaps(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::Rule, _) | (_, Self::Rule) => false,
             (
                 Self::Key {
                     key: a,

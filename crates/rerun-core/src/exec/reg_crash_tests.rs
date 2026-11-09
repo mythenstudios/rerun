@@ -325,7 +325,9 @@ fn r_t3_a_failure_at_any_call_rolls_back_or_leaves_it_for_revert() {
                     Ok(Outcome::Nothing) => panic!("{k:?} {a:?}: nothing"),
                     Err(super::ApplyError::Refused(_)) => "refused",
                     Err(super::ApplyError::RolledBack { .. }) => "rolled back",
-                    Err(super::ApplyError::LeftOpen { .. }) => "left open",
+                    Err(
+                        super::ApplyError::LeftOpen { .. } | super::ApplyError::HelperOpen { .. },
+                    ) => "left open",
                     Err(e @ super::ApplyError::CleanupPending { .. }) => {
                         panic!("{k:?} {a:?}: cleanup pending without a mapping: {e:?}")
                     }

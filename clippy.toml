@@ -42,6 +42,10 @@ disallowed-methods = [
   # ADR 0023: opens by identity only through policy::root::dir_by_id (A4 S1); the helper is started only by elevate (from P4-2c).
   { path = "rerun_core::sys::fs::Fs::open_by_id", reason = "open by identity only through policy::root::dir_by_id (ADR 0023, A4 S1)", allow-invalid = true },
   { path = "rerun_core::sys::elevation::Elevation::run_helper", reason = "the elevated helper is started only by elevate (ADR 0023 §2)", allow-invalid = true },
+  # ADR 0023 §12 (P4-2d): the firewall write side only through policy::firewall::{add_all, remove_all}, in the elevated helper.
+  { path = "rerun_core::sys::helper::HelperSystem::firewall_write", reason = "the firewall write side only through policy::firewall (ADR 0023 §12)", allow-invalid = true },
+  { path = "rerun_core::sys::firewall::FirewallWrite::add", reason = "firewall rules are added only by policy::firewall::add_all (ADR 0023 §6)", allow-invalid = true },
+  { path = "rerun_core::sys::firewall::FirewallWrite::remove_named", reason = "firewall rules are removed only by policy::firewall (ADR 0023 §6, R10)", allow-invalid = true },
   { path = "rerun_core::sys::System::registry_write", reason = "the registry write side only through policy::registry (ADR 0018)", allow-invalid = true },
   { path = "rerun_core::sys::registry::RegistryWrite::create_key", reason = "registry writes only through policy::registry::RegWriter (ADR 0018)", allow-invalid = true },
   { path = "rerun_core::sys::registry::RegistryWrite::set", reason = "registry writes only through policy::registry::RegWriter (ADR 0018)", allow-invalid = true },

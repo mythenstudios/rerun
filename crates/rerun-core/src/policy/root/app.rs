@@ -60,6 +60,9 @@ pub(crate) enum AppSub {
     Launch,
     /// `index`: the accepted signed indexes and the pointer to the current one (ADR 0024).
     Index,
+    /// `elevate`: the request files of the elevated helper (ADR 0023 §4, P4-2d), written
+    /// under the journal lock and never read back by the CLI.
+    Elevate,
 }
 
 /// Name of the launch profiles folder (ADR 0022 D2) below [`AppDir`]: deliberately no
@@ -75,6 +78,7 @@ impl AppSub {
             Self::Packages => "packages",
             Self::Launch => "launch",
             Self::Index => "index",
+            Self::Elevate => "elevate",
         };
         match RelPath::from_segment(name) {
             Ok(p) => p,

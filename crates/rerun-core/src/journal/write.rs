@@ -188,6 +188,10 @@ pub(crate) enum FlushSite {
     RevertIntent,
     /// P2-14: a confirmed rebind survives every cut once its call returned `Ok`.
     Rebind,
+    /// P4-2d: the helper batch is durable before the helper starts.
+    HelperBatch,
+    /// P4-2d: the revert batch is durable before the helper starts.
+    RevertBatch,
     Close,
 }
 
@@ -481,6 +485,31 @@ impl<'l> Txn<'l> {
         self.write(&rec, Some(FlushSite::RevertIntent))
     }
 
+    /// `RevertBatch` (P4-2d): the grammar, then the room rule of a `RevertIntent` (the batch and
+    /// a `RevertDone` per open op take at most two records per op); flushed.
+    fn revert_batch(
+        &mut self,
+        first: u16,
+        last: u16,
+        request: Option<Digest>,
+    ) -> Result<(), JournalError> {
+        self.pending = None;
+        let rec = Record::RevertBatch {
+            first,
+            last,
+            request,
+        };
+        self.m.check(&rec).map_err(JournalError::Order)?;
+        let records = usize::from(self.m.records());
+        if !room_for_revert_intent(records, self.m.ops(), &self.lock.lim) {
+            return Err(JournalError::TooLarge {
+                what: "the records of a transaction",
+                limit: u64::from(self.lock.lim.records),
+            });
+        }
+        self.write(&rec, Some(FlushSite::RevertBatch))
+    }
+
     /// The old state of `op` as bytes, at most `max`: inline from its intent, or
     /// `op-NNNN.bin` read whole (bounded) and checked against the intent's digest (else
     /// `BackupMismatch`), so what is used is what was checked (no TOCTOU).
@@ -626,6 +655,22 @@ macro_rules! common {
                 self.t.m.next_revert()
             }
 
+            /// The helper batch, its first and last op (P4-2d).
+            pub(crate) fn batch(&self) -> Option<(u16, u16)> {
+                self.t.m.batch()
+            }
+
+            /// Before the revert of the helper batch changes anything (P4-2d): ops
+            /// `first..=last`, the remove request if a helper is started; flushed. Repeatable.
+            pub(crate) fn revert_batch(
+                &mut self,
+                first: u16,
+                last: u16,
+                request: Option<Digest>,
+            ) -> Result<(), JournalError> {
+                self.t.revert_batch(first, last, request)
+            }
+
             /// `Applied` is recorded.
             pub(crate) fn is_applied(&self) -> bool {
                 self.t.m.applied()
@@ -702,6 +747,17 @@ macro_rules! common {
             fn is_applied(&self) -> bool {
                 $ty::is_applied(self)
             }
+            fn batch(&self) -> Option<(u16, u16)> {
+                $ty::batch(self)
+            }
+            fn revert_batch(
+                &mut self,
+                first: u16,
+                last: u16,
+                request: Option<Digest>,
+            ) -> Result<(), JournalError> {
+                $ty::revert_batch(self, first, last, request)
+            }
             fn revert_intent(
                 &mut self,
                 op: u16,
@@ -744,6 +800,15 @@ pub(crate) trait Reverting {
     fn next_revert(&self) -> Option<u16>;
     /// `Applied` is recorded.
     fn is_applied(&self) -> bool;
+    /// The helper batch, its first and last op (P4-2d).
+    fn batch(&self) -> Option<(u16, u16)>;
+    /// `RevertBatch` (P4-2d); flushed.
+    fn revert_batch(
+        &mut self,
+        first: u16,
+        last: u16,
+        request: Option<Digest>,
+    ) -> Result<(), JournalError>;
     /// `RevertIntent` (with `sem` for a semantic revert); flushed.
     fn revert_intent(
         &mut self,
@@ -809,6 +874,38 @@ impl TxnWriter<'_> {
             old_left,
         };
         self.t.write(&rec, None)
+    }
+
+    /// Before the elevated helper changes anything (ADR 0023 §9, P4-2d): ops `first..=last` are
+    /// the helper batch, `request` the request file written for it; flushed. The grammar, no
+    /// backup waiting for its intent, and the room rule (the batch, a `Done` per op, `Applied`,
+    /// two revert records per op of the transaction, `Closed`) are checked before anything is
+    /// written. The caller flushes every game folder and hive the apply changed first.
+    pub(crate) fn helper_batch(
+        &mut self,
+        first: u16,
+        last: u16,
+        request: Digest,
+    ) -> Result<(), JournalError> {
+        let rec = Record::HelperBatch {
+            first,
+            last,
+            request,
+        };
+        self.t.m.check(&rec).map_err(JournalError::Order)?;
+        if self.t.pending.is_some() {
+            return Err(JournalError::Order("a helper batch while a backup waits"));
+        }
+        let n = u32::from(last - first) + 1;
+        let ops = u32::from(self.t.m.intents()) + n;
+        let need = u32::from(self.t.m.records()) + 1 + n + 1 + 2 * ops + 1;
+        if need > u32::from(self.t.lock.lim.records) {
+            return Err(JournalError::TooLarge {
+                what: "the records of a transaction",
+                limit: u64::from(self.t.lock.lim.records),
+            });
+        }
+        self.t.write(&rec, Some(FlushSite::HelperBatch))
     }
 
     /// Every op is done; flushed. The caller flushes every changed folder first.

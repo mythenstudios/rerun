@@ -561,3 +561,336 @@ fn j2_revert_done_names_only_sequences_of_its_op() {
     let rs = with(vec![rit(1, 1), rd(1), ri(0), rdl(0, &[1])]);
     assert_eq!(replay(&rs), Err((n + 3, named)));
 }
+
+// ---------- the helper batch (ADR 0023 §9, P4-2d) ----------
+
+fn hb(first: u16, last: u16) -> Record {
+    Record::HelperBatch {
+        first,
+        last,
+        request: Digest {
+            sha256: [5; 32],
+            len: 100,
+        },
+    }
+}
+fn rb_(first: u16, last: u16, helper: bool) -> Record {
+    Record::RevertBatch {
+        first,
+        last,
+        request: helper.then_some(Digest {
+            sha256: [6; 32],
+            len: 90,
+        }),
+    }
+}
+fn db(op: u16) -> Record {
+    Record::Done {
+        op,
+        file_id: None,
+        old_left: false,
+    }
+}
+
+/// Every valid sequence with a batch (J2 for `HelperBatch` and `RevertBatch`).
+#[test]
+fn j2_helper_batch_valid_sequences() {
+    use Closing::{Forgotten, Reverted, RolledBack};
+    let o = |op| rdo(op, Observed::Before);
+    let ok: Vec<(Vec<Record>, TxnState)> = vec![
+        // A plan of helper ops alone (op 0 too), applied and reverted.
+        (vec![hb(0, 0)], TxnState::Open),
+        (vec![hb(0, 0), db(0)], TxnState::Open),
+        (vec![hb(0, 0), db(0), a(1)], TxnState::Applied),
+        (
+            vec![hb(0, 1), db(0), db(1), a(2), rb_(0, 1, true), rd(1), rd(0)],
+            TxnState::Applied,
+        ),
+        (
+            vec![
+                hb(0, 1),
+                db(0),
+                db(1),
+                a(2),
+                rb_(0, 1, true),
+                rd(1),
+                rd(0),
+                c(Reverted),
+            ],
+            TxnState::Closed(Reverted),
+        ),
+        // The batch last, after a file op; reverted first, then the file op (LIFO).
+        (
+            vec![
+                i(0),
+                d(0),
+                hb(1, 2),
+                db(1),
+                db(2),
+                a(3),
+                rb_(1, 2, true),
+                rd(2),
+                rd(1),
+                ri(0),
+                rd(0),
+                c(Reverted),
+            ],
+            TxnState::Closed(Reverted),
+        ),
+        // The revert batch repeated (a declined prompt, a crash before the helper), then done.
+        (
+            vec![
+                hb(0, 1),
+                db(0),
+                db(1),
+                a(2),
+                rb_(0, 1, true),
+                rb_(0, 1, true),
+                rd(1),
+                rd(0),
+                c(Reverted),
+            ],
+            TxnState::Closed(Reverted),
+        ),
+        // Interrupted inside the batch: a new revert batch for the ops left.
+        (
+            vec![
+                hb(0, 2),
+                db(0),
+                db(1),
+                db(2),
+                a(3),
+                rb_(0, 2, true),
+                rd(2),
+                rb_(0, 1, false),
+                o(1),
+                o(0),
+                c(Reverted),
+            ],
+            TxnState::Closed(Reverted),
+        ),
+        // The rollback of an apply after a declined prompt: no Done, every op Before, no
+        // helper.
+        (
+            vec![
+                i(0),
+                d(0),
+                hb(1, 1),
+                rb_(1, 1, false),
+                o(1),
+                ri(0),
+                rd(0),
+                c(RolledBack),
+            ],
+            TxnState::Closed(RolledBack),
+        ),
+        // Some Done recorded (a crash between two), the rest recovered by a revert.
+        (
+            vec![hb(0, 2), db(0), rb_(0, 2, true), rd(2), rd(1), rd(0)],
+            TxnState::Open,
+        ),
+        (
+            vec![i(0), d(0), hb(1, 1), rb_(1, 1, true), rd(1)],
+            TxnState::Open,
+        ),
+        // Eight ops, and forget at any point.
+        (
+            vec![
+                hb(0, 7),
+                db(0),
+                db(1),
+                db(2),
+                db(3),
+                db(4),
+                db(5),
+                db(6),
+                db(7),
+                a(8),
+            ],
+            TxnState::Applied,
+        ),
+        (vec![hb(0, 1), c(Forgotten)], TxnState::Closed(Forgotten)),
+        (
+            vec![hb(0, 1), db(0), db(1), a(2), rb_(0, 1, true), c(Forgotten)],
+            TxnState::Closed(Forgotten),
+        ),
+        // A foreign batch op is recorded and the rest goes on; only forget closes.
+        (
+            vec![
+                i(0),
+                d(0),
+                hb(1, 1),
+                db(1),
+                a(2),
+                rb_(1, 1, false),
+                rdo(1, Observed::Foreign),
+                ri(0),
+                rd(0),
+                c(Forgotten),
+            ],
+            TxnState::Closed(Forgotten),
+        ),
+    ];
+    for (rs, want) in ok {
+        assert_eq!(replay(&rs), Ok(want), "{rs:?}");
+    }
+}
+
+/// Every invalid sequence with a batch is refused at its record with its rule.
+#[test]
+fn j2_helper_batch_invalid_sequences_name_the_record_and_rule() {
+    use Closing::{Reverted, RolledBack};
+    let mut old_done = db(1);
+    if let Record::Done { old_left, .. } = &mut old_done {
+        *old_left = true;
+    }
+    let order = "a helper batch out of order";
+    let size = "a helper batch of other than 1 to 8 ops";
+    let done_order = "a batch op's done not in batch order";
+    let done_form = "a batch op's done with a file ID or a .old";
+    let not_batch = "a revert batch that is not the helper batch";
+    let rd_order = "a batch op's revert done not in batch order";
+    let bad: Vec<(Vec<Record>, usize, &str)> = vec![
+        // HelperBatch.
+        (vec![hb(1, 1)], 0, order),
+        (vec![i(0), d(0), hb(0, 0)], 2, order),
+        (vec![i(0), d(0), hb(2, 2)], 2, order),
+        (
+            vec![i(0), hb(1, 1)],
+            1,
+            "a helper batch before the previous op is done",
+        ),
+        (vec![hb(0, 8)], 0, size),
+        (vec![i(0), d(0), hb(1, 0)], 2, size),
+        (vec![hb(0, 0), hb(1, 1)], 1, "a second helper batch"),
+        (
+            vec![i(0), d(0), a(1), hb(1, 1)],
+            3,
+            "a helper batch after Applied",
+        ),
+        (
+            vec![i(0), d(0), ri(0), hb(1, 1)],
+            3,
+            "a helper batch after a revert started",
+        ),
+        // No intent after the batch: it is the last ops of a plan.
+        (
+            vec![hb(0, 0), db(0), i(1)],
+            2,
+            "an intent after the helper batch",
+        ),
+        (vec![hb(0, 0), i(1)], 1, "an intent after the helper batch"),
+        // Done in batch order, without a file ID or a .old.
+        (vec![hb(0, 1), db(1)], 1, done_order),
+        (vec![hb(0, 1), db(0), db(0)], 2, done_order),
+        (vec![hb(0, 0), d(0)], 1, done_form),
+        (vec![hb(0, 1), db(0), old_done], 2, done_form),
+        (
+            vec![hb(0, 1), db(0), a(2)],
+            2,
+            "Applied before every op is done",
+        ),
+        (
+            vec![hb(0, 1), db(0), db(1), a(1)],
+            3,
+            "Applied does not count every intent",
+        ),
+        // No RevertIntent for a batch op; RevertBatch is the batch's and in order.
+        (
+            vec![hb(0, 0), db(0), a(1), ri(0)],
+            3,
+            "a revert intent for a batch op",
+        ),
+        (vec![i(0), d(0), a(1), rb_(0, 0, true)], 3, not_batch),
+        (
+            vec![hb(0, 1), db(0), db(1), a(2), rb_(1, 1, true)],
+            4,
+            not_batch,
+        ),
+        (
+            vec![hb(0, 1), db(0), db(1), a(2), rb_(0, 2, true)],
+            4,
+            not_batch,
+        ),
+        (
+            vec![hb(0, 1), db(0), db(1), a(2), rb_(0, 0, true)],
+            4,
+            "a revert batch out of order",
+        ),
+        (
+            vec![
+                hb(0, 1),
+                db(0),
+                db(1),
+                a(2),
+                rb_(0, 1, true),
+                rd(1),
+                rb_(0, 1, true),
+            ],
+            6,
+            "a revert batch out of order",
+        ),
+        // RevertDone in batch order, without a .old.
+        (vec![hb(0, 1), db(0), db(1), a(2), rd(1)], 4, rd_order),
+        (
+            vec![hb(0, 1), db(0), db(1), a(2), rb_(0, 1, true), rd(0)],
+            5,
+            rd_order,
+        ),
+        (
+            vec![hb(0, 1), db(0), db(1), a(2), rb_(0, 1, true), rdl(1, &[0])],
+            5,
+            "a batch op's revert done with a .old",
+        ),
+        // The ops below the batch only after every batch op (LIFO).
+        (
+            vec![i(0), d(0), hb(1, 1), db(1), a(2), ri(0)],
+            5,
+            "a revert intent out of order",
+        ),
+        // Closed only when every op is reverted, never as reverted after a foreign op.
+        (
+            vec![
+                hb(0, 1),
+                db(0),
+                db(1),
+                a(2),
+                rb_(0, 1, true),
+                rd(1),
+                c(Reverted),
+            ],
+            6,
+            "closed before every op is reverted",
+        ),
+        (
+            vec![
+                hb(0, 0),
+                rb_(0, 0, false),
+                rdo(0, Observed::Foreign),
+                c(RolledBack),
+            ],
+            3,
+            "closed as reverted although an op was Foreign",
+        ),
+    ];
+    for (rs, at, why) in bad {
+        assert_eq!(replay(&rs), Err((at, why)), "{rs:?}");
+    }
+}
+
+/// Replay keeps a batch op's records: an intent without a temp name or old state, marked.
+#[test]
+fn j2_replay_marks_the_batch_ops() {
+    let mut m = Machine::default();
+    for r in [i(0), d(0), hb(1, 2), db(1), db(2), a(3), rb_(1, 2, true)] {
+        m.step(&r).unwrap();
+    }
+    assert_eq!(m.batch(), Some((1, 2)));
+    assert!(!m.ops()[&0].intent.batch);
+    for k in [1, 2] {
+        let o = &m.ops()[&k];
+        assert!(o.intent.batch && o.intent.tmp.is_none() && o.intent.before.is_none());
+        assert_eq!(o.reverts.len(), 1);
+    }
+    assert_eq!(m.next_revert(), Some(2));
+}

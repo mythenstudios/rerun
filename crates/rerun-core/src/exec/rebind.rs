@@ -425,7 +425,7 @@ fn checked<'g>(
     let intended: Vec<u16> = ops.keys().copied().collect();
     roots::game_closed(plan, &roots, &intended)?;
     let (mut verified, seen) = {
-        let mut touched = Touched::new(cx.sys, &roots);
+        let mut touched = Touched::new(cx.sys, &roots).of(*t);
         verify_seen(plan, &mut touched, &roots, ops).map_err(refused_early)?
     };
     // A halt at the profiles root comes last (its op is op 0, ADR 0020 amendment P3-3), after

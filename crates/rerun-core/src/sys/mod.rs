@@ -51,7 +51,7 @@ pub use elevation::{
     Elevation, HelperLock, HelperPresence, HelperProc, HelperRun, NoElevation, TokenKind,
 };
 pub use error::{SysError, SysErrorKind, SysResult, shown_target};
-pub use firewall::{Firewall, FwRest, FwRule, FwRule3, FwSelection};
+pub use firewall::{Firewall, FirewallWrite, FwRest, FwRule, FwRule3, FwSelection};
 pub use fs::{AceFact, Dir, DirWrite, Fs, SdFacts, VolumeGuid, WriteCap};
 pub use gpu::{DriverVersion, Gpu, GpuAdapter};
 pub use helper::{

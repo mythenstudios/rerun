@@ -12,7 +12,7 @@
 //! Direction, action, profiles and protocol stay raw numbers; the constants below name the
 //! values Rerun uses (`netfw.h`, pinned against `windows-sys` by a test in `sys::win`).
 //!
-//! The write side (`FirewallWrite`: add, remove) arrives with P4-5b and is reached only by the
+//! The write side ([`FirewallWrite`]: add, remove; P4-2d with the fake, P4-5b on Windows) is reached only by the
 //! elevated helper through `policy::firewall`.
 
 use super::SysResult;
@@ -127,13 +127,33 @@ pub trait Firewall: Send + Sync {
     fn select(&self, keep: &dyn Fn(&str, &str) -> bool) -> SysResult<FwSelection>;
 }
 
+/// The firewall's write side (ADR 0023 §6, §12): the elevated helper's alone, reached only
+/// through `policy::firewall` (`HelperSystem::firewall_write`). P4-2d brings the trait and the
+/// fake's rules as data; the real one (`INetFwRules::Add`, `Remove`) comes with P4-5b, until
+/// then the real helper's write side refuses every call (`NoFirewall`).
+pub trait FirewallWrite: Send + Sync {
+    /// Adds `rule` (`INetFwRules::Add`).
+    ///
+    /// # Errors
+    /// The firewall refuses the rule or cannot be reached.
+    fn add(&self, rule: &FwRule) -> SysResult<()>;
+
+    /// Removes **every** rule of the name `name` (`INetFwRules::Remove`; the design assumes
+    /// the worst, ADR 0023 §6, R10: the caller counts first).
+    ///
+    /// # Errors
+    /// The firewall refuses or cannot be reached.
+    fn remove_named(&self, name: &str) -> SysResult<()>;
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Firewall;
+    use super::{Firewall, FirewallWrite};
 
     #[test]
     fn firewall_is_an_object_safe_send_sync_trait() {
         fn assert_send_sync<T: ?Sized + Send + Sync>() {}
         assert_send_sync::<dyn Firewall>();
+        assert_send_sync::<dyn FirewallWrite>();
     }
 }

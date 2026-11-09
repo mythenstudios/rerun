@@ -49,7 +49,7 @@ use crate::sys::{DirWrite, SysError, SysErrorKind, SysResult};
 fn file_target(k: u16, op: &Op) -> Result<(u16, &RelPath), ExecError> {
     match op.target() {
         Target::File { root, path, .. } => Ok((root.0, path)),
-        Target::Key { .. } | Target::Value { .. } => Err(not_a_file_op(k)),
+        Target::Key { .. } | Target::Value { .. } | Target::Rule { .. } => Err(not_a_file_op(k)),
     }
 }
 
@@ -326,9 +326,11 @@ pub(super) fn apply_op(
             w.done(k, Some(r.new.file_id), r.old_left.is_some())?;
             Ok(())
         }
-        Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } | Op::IniValue { .. } => {
-            Err(not_a_file_op(k))
-        }
+        Op::CreateKey { .. }
+        | Op::SetValue { .. }
+        | Op::TokenList { .. }
+        | Op::IniValue { .. }
+        | Op::FirewallRule { .. } => Err(not_a_file_op(k)),
     }
 }
 
@@ -541,7 +543,8 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
             Op::CreateKey { .. }
             | Op::SetValue { .. }
             | Op::TokenList { .. }
-            | Op::IniValue { .. } => false,
+            | Op::IniValue { .. }
+            | Op::FirewallRule { .. } => false,
         }
 }
 
@@ -684,9 +687,11 @@ pub(super) fn observe(
             };
             replace_seen(parent, &name, log, &x, old, content, attrs).map_err(&e)
         }
-        Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } | Op::IniValue { .. } => {
-            Err(not_a_file_op(k))
-        }
+        Op::CreateKey { .. }
+        | Op::SetValue { .. }
+        | Op::TokenList { .. }
+        | Op::IniValue { .. }
+        | Op::FirewallRule { .. } => Err(not_a_file_op(k)),
     }
 }
 
@@ -703,9 +708,10 @@ pub(super) fn trusted(op: &Op, log: &OpLog) -> Seen {
         },
         Op::CreateFile { content, .. } => s.act(Action::DeleteTarget(*content.sha256())),
         Op::ReplaceFile { .. } | Op::IniValue { .. } => Seen { restore: true, ..s },
-        Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => {
-            Seen::new(Observed::Foreign)
-        }
+        Op::CreateKey { .. }
+        | Op::SetValue { .. }
+        | Op::TokenList { .. }
+        | Op::FirewallRule { .. } => Seen::new(Observed::Foreign),
     }
 }
 

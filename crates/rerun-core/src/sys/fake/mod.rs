@@ -32,8 +32,10 @@ use std::sync::Arc;
 use rerun_proto::cpu::CpuTopology;
 
 pub use elevation::{FakeElevation, RunCall};
+#[cfg(test)]
+pub(crate) use faults::set_in_hook;
 pub use faults::{Fault, Prim, RegPrim};
-pub use firewall::FakeFirewall;
+pub use firewall::{FakeFirewall, WriteFault};
 pub use fs::{
     FAKE_USER_SID, FakeDir, FakeFile, FakeFs, FakeHold, FakeSd, FsOp, StepEvent, StepHook,
 };

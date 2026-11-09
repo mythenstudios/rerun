@@ -481,7 +481,9 @@ fn t3_a_failure_at_any_call_rolls_back_or_leaves_it_for_revert() {
                     Ok(Outcome::Nothing) => panic!("{what}: nothing"),
                     Err(ApplyError::Refused(_)) => outcomes[1] += 1,
                     Err(ApplyError::RolledBack { .. }) => outcomes[2] += 1,
-                    Err(ApplyError::LeftOpen { .. }) => outcomes[3] += 1,
+                    Err(ApplyError::LeftOpen { .. } | ApplyError::HelperOpen { .. }) => {
+                        outcomes[3] += 1;
+                    }
                     Err(e @ ApplyError::CleanupPending { .. }) => {
                         panic!("{what}: cleanup pending without a mapping: {e:?}")
                     }

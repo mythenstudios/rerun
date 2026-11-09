@@ -1719,6 +1719,7 @@ fn j9_a_revert_intent_needs_room_for_its_done_and_the_rest() {
                     intent: super::IntentRec {
                         tmp: None,
                         before: None,
+                        batch: false,
                     },
                     done: None,
                     reverts: Vec::new(),
@@ -1744,4 +1745,76 @@ fn j9_a_revert_intent_needs_room_for_its_done_and_the_rest() {
             &lim
         ));
     }
+}
+
+/// J1/J9 for the helper batch (P4-2d): the writer refuses what the grammar refuses, before
+/// anything is written; `helper_batch` needs room for its `Done`s, `Applied`, a full revert and
+/// `Closed`; a batch written, done and reverted reads back as written.
+#[test]
+fn j9_the_helper_batch_writer() {
+    use super::record::Digest;
+    let sys = system();
+    let app = open_app(&sys);
+    let req = Digest {
+        sha256: [3; 32],
+        len: 120,
+    };
+    // Out of order or after Applied: `Order`, nothing written.
+    let j = Journal::new(&app, InstanceTag::fixed(0xb1));
+    let lock = j.lock().unwrap();
+    let mut w = lock.begin(HEAD).unwrap();
+    assert!(matches!(
+        w.helper_batch(1, 1, req),
+        Err(JournalError::Order("a helper batch out of order"))
+    ));
+    w.helper_batch(0, 1, req).unwrap();
+    assert!(matches!(
+        w.intent(2, None, None),
+        Err(JournalError::Order("an intent after the helper batch"))
+    ));
+    assert!(matches!(
+        w.done(1, None, false),
+        Err(JournalError::Order("a batch op's done not in batch order"))
+    ));
+    w.done(0, None, false).unwrap();
+    w.done(1, None, false).unwrap();
+    w.applied(2).unwrap();
+    let id = *w.id();
+    drop(w);
+    let mut w = lock.resume(&id).unwrap();
+    assert_eq!(w.batch(), Some((0, 1)));
+    assert!(matches!(
+        w.revert_intent(1, None, None),
+        Err(JournalError::Order("a revert intent for a batch op"))
+    ));
+    w.revert_batch(0, 1, Some(req)).unwrap();
+    w.revert_batch(0, 1, Some(req)).unwrap();
+    w.revert_done(1, Observed::After, &[]).unwrap();
+    w.revert_done(0, Observed::Before, &[]).unwrap();
+    w.close(Closing::Reverted).unwrap();
+    let v = load(&j, &id);
+    assert_eq!(v.state, TxnState::Closed(Closing::Reverted));
+    assert!(v.ops.values().all(|o| o.intent.batch));
+    assert_eq!(v.log.len(), 9);
+    drop(lock);
+    // The room rule: after one op (2 records) a batch of 2 needs 2 + 1 + 2 + 1 + 2·3 + 1 = 13
+    // records: with a budget of 12 refused before anything is written.
+    let g = game(&sys, r"D:\G");
+    let j = Journal::with_limits(&app, InstanceTag::fixed(0xb2), small(|l| l.records = 12));
+    let lock = j.lock().unwrap();
+    let mut w = lock.begin(HEAD).unwrap();
+    let mut guard = g.guard(&r("a.bin")).unwrap();
+    let b = w.backup(&mut *guard).unwrap();
+    drop(guard);
+    let t0 = w.tmp();
+    w.intent(0, Some(t0), Some(BeforeArg::Backup(b))).unwrap();
+    w.done(0, Some(7), false).unwrap();
+    let id = *w.id();
+    assert!(matches!(
+        w.helper_batch(1, 2, req),
+        Err(JournalError::TooLarge { .. })
+    ));
+    assert_eq!(load(&j, &id).log.len(), 2);
+    // One op fewer fits: 2 + 1 + 1 + 1 + 2·2 + 1 = 10.
+    w.helper_batch(1, 1, req).unwrap();
 }

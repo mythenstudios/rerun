@@ -275,7 +275,10 @@ fn reroot(op: &mut Op, to: u16) {
         | Op::IniValue { root, .. } => {
             *root = RootIx(to);
         }
-        Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => {}
+        Op::CreateKey { .. }
+        | Op::SetValue { .. }
+        | Op::TokenList { .. }
+        | Op::FirewallRule { .. } => {}
     }
 }
 

@@ -130,4 +130,8 @@ impl HelperSystem for WinHelperSystem {
     fn token(&self) -> &dyn HelperToken {
         &self.token
     }
+    fn firewall_write(&self) -> &dyn crate::sys::FirewallWrite {
+        // The COM write side arrives with P4-5b (ADR 0023 §3 step 6).
+        &NoFirewall
+    }
 }

@@ -74,6 +74,15 @@ same value as Rerun is set back too. A file that is gone at the time of the reve
 The main executable must be the program that writes the file when it exits (with a launcher, \
 the game itself)";
 
+/// What a plan with firewall rules says once (P4-2d, ADR 0023 §7, §9, §11; rule 5).
+pub const FIREWALL_NOTE: &str = "firewall rules: Rerun's helper adds them with administrator \
+rights after every other change of the plan, in one run with one Windows administrator prompt \
+(UAC); a revert removes them first, again with one prompt, and only if a rule is still there. \
+A rule blocks the program by its path in every network profile, until it is reverted; it names \
+the program, not its content. Declining the prompt at an apply undoes the other changes of the \
+plan; declining it at a revert leaves the whole transaction as it is. Forget leaves a rule in \
+place: remove it in Windows Defender Firewall with Advanced Security (group Rerun)";
+
 /// The part of [`PROFILE_NOTE`] and [`PROFILE_WATCH_NOTE`] both methods share: the start path,
 /// one launch option per game, Steam as administrator (ADR 0022).
 macro_rules! profile_note_tail {
@@ -245,6 +254,21 @@ pub struct PreviewOp {
     /// The op replaces an existing file (`ReplaceFile`): a front end need not compare `action`
     /// (review of P3-3d).
     pub replaces: bool,
+    /// The firewall rule a `FirewallRule` op adds (P4-2d).
+    pub firewall: Option<FirewallShown>,
+}
+
+/// The rule of a `FirewallRule` op for display (P4-2d, ADR 0023 §6, rule 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirewallShown {
+    /// The program, as the rule names it (`escape::path`).
+    pub program: Shown<'static>,
+    /// `outbound`.
+    pub direction: &'static str,
+    /// The name with the transaction left open: `Rerun - <topo> - <transaction>-NNN`.
+    pub name: Shown<'static>,
+    /// The group, `Rerun`.
+    pub group: &'static str,
 }
 
 /// A registry value for display (review S3: the `Shown` guarantee kept): `kind` is built by
@@ -285,6 +309,8 @@ pub struct Preview {
     /// [`PROFILE_NOTE`] or, for a `watch` profile, [`PROFILE_WATCH_NOTE`], once per plan with
     /// a launch profile op.
     pub profiles: Option<&'static str>,
+    /// [`FIREWALL_NOTE`], once per plan with firewall rules (P4-2d).
+    pub firewall: Option<&'static str>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -446,8 +472,40 @@ fn reg_target(p: &Plan, k: usize, t: Target<'_>) -> (Shown<'static>, Option<Show
             }
             Err(_) => (refused(), None),
         },
-        Target::File { path, .. } => (escape::path(path.as_str()).into_owned(), None),
+        Target::File { path, .. } | Target::Rule { program: path, .. } => {
+            (escape::path(path.as_str()).into_owned(), None)
+        }
     }
+}
+
+/// The rule of a `FirewallRule` op (P4-2d): the program as the rule names it (the root's
+/// planned path and the executable), the direction, the name with the transaction left open.
+fn firewall_of(p: &Plan, index: usize, op: &Op) -> Option<FirewallShown> {
+    let Op::FirewallRule {
+        root,
+        program,
+        direction,
+    } = op
+    else {
+        return None;
+    };
+    let full = p
+        .roots
+        .get(usize::from(root.0))
+        .map_or_else(|| program.to_string(), |r| format!("{}\\{program}", r.path));
+    let topo = p.source.as_ref().map_or("?", |s| s.topo.as_str());
+    Some(FirewallShown {
+        program: escape::path(&full).into_owned(),
+        direction: match direction {
+            crate::policy::firewall::Direction::Out => "outbound",
+        },
+        name: escape::path(&format!(
+            "{}{topo} - <transaction>-{index:03}",
+            crate::policy::firewall::NAME_PREFIX
+        ))
+        .into_owned(),
+        group: crate::policy::firewall::GROUP,
+    })
 }
 
 /// The preview of `p`.
@@ -487,6 +545,7 @@ pub fn preview(p: &Plan) -> Preview {
                 Op::SetValue { .. } => ("set value", None, None),
                 Op::TokenList { .. } => ("add tokens", None, None),
                 Op::IniValue { old: o, .. } => ("edit ini", Some(rhs(&o.attrs)), Some(old(o))),
+                Op::FirewallRule { .. } => ("block in firewall", None, None),
             };
             let (old_value, new_value, type_change) = match op {
                 Op::SetValue { old: o, new, .. } => {
@@ -601,7 +660,13 @@ pub fn preview(p: &Plan) -> Preview {
                     let (path, name) = reg_target(p, index, t);
                     (None, path, name)
                 }
+                Target::Rule { root, program } => (
+                    Some(usize::from(root.0)),
+                    escape::path(program.as_str()).into_owned(),
+                    None,
+                ),
             };
+            let firewall = firewall_of(p, index, op);
             PreviewOp {
                 index,
                 action,
@@ -621,6 +686,7 @@ pub fn preview(p: &Plan) -> Preview {
                 ini,
                 profile,
                 replaces: matches!(op, Op::ReplaceFile { .. }),
+                firewall,
             }
         })
         .collect();
@@ -641,6 +707,11 @@ pub fn preview(p: &Plan) -> Preview {
         .then_some(INI_NOTE);
     // The note of the profile's method; a recorded profile that does not decode gets the
     // `direct` one (what every profile was before P3-4).
+    let firewall = p
+        .ops
+        .iter()
+        .any(|o| o.target().is_helper())
+        .then_some(FIREWALL_NOTE);
     let profiles = ops.iter().find_map(|o| match &o.profile {
         Some(ProfilePreview::Decoded(s)) if s.decoded.method == Method::Watch => {
             Some(PROFILE_WATCH_NOTE)
@@ -656,6 +727,7 @@ pub fn preview(p: &Plan) -> Preview {
         layers,
         ini,
         profiles,
+        firewall,
     }
 }
 
@@ -737,6 +809,14 @@ impl fmt::Display for Preview {
                 }
                 None => {}
             }
+            if let Some(r) = &o.firewall {
+                writeln!(
+                    f,
+                    "     rule {}, group {}, {}",
+                    r.name, r.group, r.direction
+                )?;
+                writeln!(f, "     program {}", r.program)?;
+            }
             if o.config {
                 writeln!(
                     f,
@@ -755,6 +835,9 @@ impl fmt::Display for Preview {
             writeln!(f, "note: {i}")?;
         }
         if let Some(n) = self.profiles {
+            writeln!(f, "note: {n}")?;
+        }
+        if let Some(n) = self.firewall {
             writeln!(f, "note: {n}")?;
         }
         Ok(())

@@ -197,7 +197,9 @@ fn t9_plans_folders_top_down_new_files_and_replaces() {
         .iter()
         .filter_map(|o| match o.target() {
             crate::plan::Target::File { path, .. } => Some(path.as_str()),
-            crate::plan::Target::Key { .. } | crate::plan::Target::Value { .. } => None,
+            crate::plan::Target::Key { .. }
+            | crate::plan::Target::Value { .. }
+            | crate::plan::Target::Rule { .. } => None,
         })
         .collect();
     assert_eq!(

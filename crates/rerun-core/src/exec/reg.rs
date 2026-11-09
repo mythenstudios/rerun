@@ -260,7 +260,8 @@ pub(super) fn old_state(w: &RegWriter<'_>, plan: &Plan) -> Result<(), Refusal> {
             Op::CreateDir { .. }
             | Op::CreateFile { .. }
             | Op::ReplaceFile { .. }
-            | Op::IniValue { .. } => {}
+            | Op::IniValue { .. }
+            | Op::FirewallRule { .. } => {}
         }
     }
     Ok(())
@@ -364,7 +365,8 @@ pub(super) fn apply_op(
         Op::CreateDir { .. }
         | Op::CreateFile { .. }
         | Op::ReplaceFile { .. }
-        | Op::IniValue { .. } => Err(not_a_registry_op(k)),
+        | Op::IniValue { .. }
+        | Op::FirewallRule { .. } => Err(not_a_registry_op(k)),
     }
 }
 
@@ -543,7 +545,8 @@ pub(super) fn observe(
         Op::CreateDir { .. }
         | Op::CreateFile { .. }
         | Op::ReplaceFile { .. }
-        | Op::IniValue { .. } => Err(not_a_registry_op(k)),
+        | Op::IniValue { .. }
+        | Op::FirewallRule { .. } => Err(not_a_registry_op(k)),
     }
 }
 
@@ -691,6 +694,7 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
             Op::CreateDir { .. }
             | Op::CreateFile { .. }
             | Op::ReplaceFile { .. }
-            | Op::IniValue { .. } => false,
+            | Op::IniValue { .. }
+            | Op::FirewallRule { .. } => false,
         }
 }

@@ -19,7 +19,7 @@ use std::fmt;
 
 use rerun_proto::cpu::CpuTopology;
 
-use super::firewall::{Firewall, FwSelection};
+use super::firewall::{Firewall, FirewallWrite, FwRule, FwSelection};
 use super::registry::{KeyState, RegKey, RegLink, RegValue, Registry, RegistryWrite};
 use super::{Gpu, GpuAdapter, SysError, SysErrorKind, SysResult, System, Topology};
 use crate::sys::registry::Hive;
@@ -80,6 +80,9 @@ pub trait HelperToken: Send + Sync {
 pub trait HelperSystem: System {
     /// The helper's own token.
     fn token(&self) -> &dyn HelperToken;
+    /// The firewall's write side (ADR 0023 §12): `clippy.toml` bans it outside
+    /// `policy::firewall`. `NoFirewall` in the real helper until P4-5b.
+    fn firewall_write(&self) -> &dyn FirewallWrite;
 }
 
 fn refused(what: &str) -> SysError {
@@ -166,6 +169,15 @@ pub struct NoFirewall;
 impl Firewall for NoFirewall {
     fn select(&self, _: &dyn Fn(&str, &str) -> bool) -> SysResult<FwSelection> {
         Err(refused("firewall rules"))
+    }
+}
+
+impl FirewallWrite for NoFirewall {
+    fn add(&self, _: &FwRule) -> SysResult<()> {
+        Err(refused("firewall rules, write side"))
+    }
+    fn remove_named(&self, _: &str) -> SysResult<()> {
+        Err(refused("firewall rules, write side"))
     }
 }
 

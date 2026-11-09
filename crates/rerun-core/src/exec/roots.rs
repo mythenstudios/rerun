@@ -662,7 +662,19 @@ pub(super) fn game_closed(plan: &Plan, roots: &Roots<'_>, ops: &[u16]) -> Result
             } => unused(roots, usize::from(root.0), exe)?,
             // A registry op has no file to ask: the main executables below are (E2).
             Target::File { dir: true, .. } | Target::Key { .. } | Target::Value { .. } => {}
+            // A firewall rule needs no closed game (ADR 0023 N5, P4-2d): no `users()` for it.
+            Target::Rule { .. } => {}
         }
+    }
+    // Only firewall rules (or nothing): no main executable to ask either.
+    let helper_only = !ops.is_empty()
+        && ops.iter().all(|k| {
+            plan.ops
+                .get(usize::from(*k))
+                .is_none_or(|o| o.target().is_helper())
+        });
+    if helper_only {
+        return Ok(());
     }
     for (i, r) in plan.roots.iter().enumerate() {
         if let Some(m) = &r.main_exe {
@@ -733,7 +745,10 @@ pub(super) fn old_state(cx: &ExecCtx<'_>, plan: &Plan, roots: &Roots<'_>) -> Res
                     return Err(mismatch());
                 }
             }
-            Op::CreateKey { .. } | Op::SetValue { .. } | Op::TokenList { .. } => {}
+            Op::CreateKey { .. }
+            | Op::SetValue { .. }
+            | Op::TokenList { .. }
+            | Op::FirewallRule { .. } => {}
         }
         if let Some(ContentRef::Package {
             id,

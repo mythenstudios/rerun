@@ -279,7 +279,7 @@ fn op_status(
         .and_then(|p| p.ops.get(usize::from(k)))
         .and_then(|op| match op.target() {
             Target::File { path, .. } => Some(path.parent()),
-            Target::Key { .. } | Target::Value { .. } => None,
+            Target::Key { .. } | Target::Value { .. } | Target::Rule { .. } => None,
         });
     let cleanup = old_left(o)
         .filter(|_| !exact)
@@ -297,4 +297,69 @@ fn op_status(
         backup: Backup::of(app, t, k, &o.intent),
         cleanup,
     }
+}
+
+/// A Rerun firewall rule that no transaction of this account owns (ADR 0023 §6, A4 N6; P4-2d).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanRule {
+    /// Its name (escaped).
+    pub name: Shown<'static>,
+    /// Its program (escaped).
+    pub program: Shown<'static>,
+}
+
+/// The Rerun rules (group `Rerun` or Rerun's name form, one enumeration) that no transaction of
+/// this account that is not closed names. The firewall is machine-wide: the rules of other
+/// Windows accounts are among them, and a rule `forget` left in place. A transaction whose head
+/// cannot be read names nothing (its rules are listed rather than hidden). Read only.
+///
+/// # Errors
+/// The firewall or the journal cannot be read.
+pub fn firewall_orphans(
+    sys: &dyn crate::sys::System,
+    app: &AppDir<'_>,
+) -> Result<Vec<OrphanRule>, crate::sys::SysError> {
+    use crate::policy::firewall::{RuleName, orphans, rerun_rules};
+    let rules = rerun_rules(sys.firewall())?;
+    if rules.is_empty() {
+        return Ok(Vec::new());
+    }
+    let j = Journal::new(app, InstanceTag::new());
+    let listing = j
+        .list()
+        .map_err(|e| crate::sys::SysError::new(crate::sys::SysErrorKind::Other, e.to_string()))?;
+    let mut owned = Vec::new();
+    for l in &listing.txns {
+        let open = !l.forgotten
+            && l.view
+                .as_ref()
+                .is_ok_and(|v| !matches!(v.state, TxnState::Closed(_)));
+        if !open {
+            continue;
+        }
+        let Ok(full) = j.load(&l.id, VerifyBackups::Length) else {
+            continue;
+        };
+        let Some(plan) = full
+            .head
+            .as_deref()
+            .and_then(|h| super::decode_head(h).ok())
+        else {
+            continue;
+        };
+        if let Some((first, last)) = super::helper::batch_of(&plan) {
+            owned.extend(
+                (first..=last)
+                    .filter_map(|k| super::helper::rule_of(&plan, &l.id, k))
+                    .filter_map(|(r, _)| RuleName::parse(&r.name)),
+            );
+        }
+    }
+    Ok(orphans(&rules, &owned)
+        .into_iter()
+        .map(|r| OrphanRule {
+            name: escape::text(&r.name).into_owned(),
+            program: escape::path(&r.program).into_owned(),
+        })
+        .collect())
 }
