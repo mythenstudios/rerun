@@ -795,7 +795,6 @@ pub fn preview_head(b: &[u8]) -> Result<Preview, PlanError> {
     Ok(v)
 }
 
-/// A registry value by type, length and SHA-256 only (`missing` without one).
 /// The words of an "all users" view (P3-6).
 fn view_words(v: LayerView) -> &'static str {
     match v {
@@ -804,6 +803,7 @@ fn view_words(v: LayerView) -> &'static str {
     }
 }
 
+/// A registry value by type, length and SHA-256 only (`missing` without one).
 fn masked(s: Option<&ValueState>) -> RegShown {
     RegShown {
         kind: s.map_or_else(|| "missing".to_owned(), opaque),

@@ -584,7 +584,9 @@ impl RegPolicy {
 
 /// What a planner reads of the registry (P2-10b): the methods of the write side that change
 /// nothing, so a link or volatile key on the way is reported (`ReparsePoint`,
-/// `Unsupported`), never followed.
+/// `Unsupported`), never followed. The one exception is [`Self::machine_layers`] (P3-6): it
+/// reads the `HKLM` "all users" compatibility-layer value through the read side, which
+/// follows links like every read of `Registry`; `HKLM` is only ever read, never written.
 #[derive(Clone, Copy)]
 pub struct RegReader<'s> {
     w: &'s dyn RegistryWrite,
@@ -623,11 +625,18 @@ impl RegReader<'_> {
     /// below `HKLM\Software\…\AppCompatFlags\Layers` in `view` (P3-6, ADR 0018 amendment P3-6).
     /// Read only, through the read side ([`crate::sys::registry::Registry::get`]: `KEY_QUERY_VALUE`
     /// with the view's `KEY_WOW64_*` flag; the write side refuses `HKLM`). The key is a plain
-    /// [`RegKey`], never an [`AllowedKey`], so no write can name it. A missing key or value is
-    /// `None`; another slot is `Ok(None)`.
+    /// [`RegKey`], never an [`AllowedKey`], so no write can name it. Unlike the other methods
+    /// it follows a link key on the way (an `HKLM` link needs an administrator). A missing key
+    /// or value is `None`; another slot is `Unsupported` (a caller's bug, never "absent").
     pub fn machine_layers(&self, v: &AllowedValue, view: RegView) -> SysResult<Option<RegValue>> {
         if !matches!(v.slot, RegSlot::CompatLayers { .. }) {
-            return Ok(None);
+            return Err(SysError::new(
+                SysErrorKind::Unsupported,
+                format!(
+                    "{} @ {:?}: not a compatibility-layer value",
+                    v.key.key, v.name
+                ),
+            ));
         }
         let key = RegKey::new(Hive::LocalMachine, view, LAYERS);
         match self.w.get(&key, &v.name) {

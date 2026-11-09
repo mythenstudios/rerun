@@ -363,6 +363,27 @@ fn p_l3_the_worst_case_token_list_fits_the_op_budget() {
     );
     let bytes = serde_json::to_vec(&p).unwrap();
     assert_eq!(decode_recorded(&bytes).unwrap(), p);
+    // P3-6 (security review S-1): both "all users" values at their longest (511 quote
+    // characters, 2 bytes each as an escaped JSON string) still fit.
+    let all = "\"".repeat(511);
+    let mut m = p.clone();
+    if let Some(Op::TokenList { machine, .. }) = m.ops.get_mut(3) {
+        *machine = [LayerView::Native, LayerView::Wow32]
+            .into_iter()
+            .map(|view| MachineLayers {
+                view,
+                value: all.clone(),
+            })
+            .collect();
+    }
+    let with_machine = serde_json::to_vec(&m.ops[3]).unwrap().len();
+    eprintln!("P-L3: worst-case TokenList with both all-users values is {with_machine} bytes");
+    assert!(with_machine < MAX_OP_BYTES, "{with_machine}");
+    assert!(with_machine > size + 2 * 2 * 511, "{with_machine}");
+    assert_eq!(
+        decode_recorded(&serde_json::to_vec(&m).unwrap()).unwrap(),
+        m
+    );
 }
 
 /// E7 (M2): the created `AppCompatFlags` and `Layers` are shared Windows keys, one object

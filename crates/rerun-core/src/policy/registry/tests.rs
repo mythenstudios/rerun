@@ -321,3 +321,32 @@ fn set_checks_the_new_value_and_restore_does_not() {
         }
     );
 }
+
+/// P3-6 (security review N-2): the "all users" read names only a compatibility-layer value;
+/// another slot is an error, never "absent", and a present `HKLM` value is read in its view.
+#[test]
+fn machine_layers_reads_only_a_compat_layers_slot() {
+    use crate::sys::registry::{Hive, RegView};
+    let key = RegKey::new(Hive::LocalMachine, RegView::Wow32, LAYERS);
+    let sys = FakeSystem::builder()
+        .value(key, r"D:\G\g.exe", RegValue::String("~ X".into()))
+        .build()
+        .unwrap();
+    let r = RegPolicy.reader(&sys);
+    let e = r.machine_layers(&value("V"), RegView::Native).unwrap_err();
+    assert_eq!(e.kind, crate::sys::SysErrorKind::Unsupported, "{e}");
+    let layers = RegPolicy
+        .check(
+            &RegSlot::CompatLayers {
+                root: RootIx(0),
+                exe: RelPath::parse("g.exe").unwrap(),
+            },
+            &[RootPath::new(r"D:\G").unwrap()],
+        )
+        .unwrap();
+    assert_eq!(
+        r.machine_layers(&layers, RegView::Wow32).unwrap(),
+        Some(RegValue::String("~ X".into()))
+    );
+    assert_eq!(r.machine_layers(&layers, RegView::Native).unwrap(), None);
+}
