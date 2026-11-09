@@ -22,7 +22,7 @@
 //! - [`KnownFolders`] never reads environment variables (ADR 0007, ADR 0009).
 //!
 //! `sys::win::WinSystem` bundles the real parts into one [`System`]. [`HelperToken`] is the
-//! elevated helper's own token (ADR 0023, P4-2a); [`Firewall`] the firewall's read side (ADR 0023
+//! elevated helper's own token (ADR 0023, P4-2a) and [`HelperSystem`] its system (P4-2c); [`Firewall`] the firewall's read side (ADR 0023
 //! §8, P4-5a).
 
 pub mod elevation;
@@ -52,7 +52,9 @@ pub use error::{SysError, SysErrorKind, SysResult, shown_target};
 pub use firewall::{Firewall, FwRest, FwRule, FwRule3, FwSelection};
 pub use fs::{AceFact, Dir, DirWrite, Fs, SdFacts, VolumeGuid, WriteCap};
 pub use gpu::{DriverVersion, Gpu, GpuAdapter};
-pub use helper::HelperToken;
+pub use helper::{
+    HelperSystem, HelperToken, InstanceLock, NoFirewall, NoGpu, NoRegistry, NoTopology,
+};
 pub use known_folders::{KnownFolder, KnownFolders};
 pub use registry::{Registry, RegistryWrite};
 pub use topology::Topology;

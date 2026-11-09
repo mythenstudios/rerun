@@ -38,7 +38,7 @@ pub use fs::{
     FAKE_USER_SID, FakeDir, FakeFile, FakeFs, FakeHold, FakeSd, FsOp, StepEvent, StepHook,
 };
 pub use gpu::FakeGpu;
-pub use helper::{FakeHelperToken, TokenCall};
+pub use helper::{FakeHelperSystem, FakeHelperToken, TokenCall};
 pub use known_folders::FakeKnownFolders;
 pub use registry::{FakeRegistry, MAX_LINK_HOPS, RegHook};
 pub use topology::FakeTopology;

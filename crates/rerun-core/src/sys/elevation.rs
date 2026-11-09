@@ -75,6 +75,18 @@ pub trait Elevation: Send + Sync {
     /// An argument is not plain; the start fails for another reason than a declined prompt
     /// (the Win32 code in the error); the wait or the exit code fails.
     fn run_helper(&self, image: &RootPath, args: &[&str]) -> SysResult<HelperRun>;
+
+    /// Whether a process of the helper image runs now (A4 S8): before the CLI observes a batch
+    /// that has no result yet, a helper of an earlier run may still be working. `nt_name` is
+    /// the NT name the pre-check read on the installed file ([`crate::sys::SdFacts::nt_name`]).
+    /// Every process whose file name is the last segment of `nt_name` is asked for its image
+    /// (`QueryFullProcessImageNameW(PROCESS_NAME_NATIVE)`, compared folded); one that cannot be
+    /// opened or asked counts as running (fail closed: it cannot be told apart). A check at a
+    /// moment, not a lock: the helper's own instance lock keeps two helpers apart.
+    ///
+    /// # Errors
+    /// The process list cannot be read.
+    fn helper_running(&self, nt_name: &str) -> SysResult<bool>;
 }
 
 /// An argument of the helper's command line: non-empty, printable ASCII without a space or a
@@ -112,6 +124,13 @@ impl Elevation for NoElevation {
         Err(SysError::new(
             SysErrorKind::Unsupported,
             format!("{image}: no elevation here"),
+        ))
+    }
+
+    fn helper_running(&self, _: &str) -> SysResult<bool> {
+        Err(SysError::new(
+            SysErrorKind::Unsupported,
+            "helper process check: no elevation here",
         ))
     }
 }
@@ -154,6 +173,10 @@ mod tests {
         assert_eq!(run.unwrap_err().kind, SysErrorKind::Unsupported);
         assert_eq!(
             NoElevation.token_kind().unwrap_err().kind,
+            SysErrorKind::Unsupported
+        );
+        assert_eq!(
+            NoElevation.helper_running("x").unwrap_err().kind,
             SysErrorKind::Unsupported
         );
     }

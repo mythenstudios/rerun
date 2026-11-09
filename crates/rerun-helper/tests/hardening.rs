@@ -3,7 +3,7 @@
 //! delay-load import, nothing that names DXGI (`dxgi.dll` as ASCII or UTF-16LE,
 //! `CreateDXGIFactory1`), no run-time loader beyond `std`'s own, the Windows subsystem and an
 //! `asInvoker` manifest; started, it gets past its DLL search restriction and refuses
-//! (P4-2a: `Refused(NotElevated)` from a standard process, `Refused(Usage)` from an elevated
+//! (`Refused(NotElevated)` from a standard process, `Refused(ImageFolder)` from an elevated
 //! one). The control for the content and import checks is the `WinGpu` test binary of
 //! `crates/rerun-core/tests/win_gpu_restricted.rs`, which must fail both (B9).
 
@@ -96,10 +96,12 @@ fn release_rerun_helper_exe_is_hardened_and_holds_no_test_key() {
 
 /// Started from this test (no `runas`), the helper gets past `restrict_dll_search` and drops
 /// its privileges (else `Refused(Internal)`), then refuses: `NotElevated` from a standard
-/// process (the developer machine), `Usage` from an elevated one (the CI runner, whose
-/// processes are elevated). Its privileges are its own: this test process keeps its own.
+/// process (the developer machine), `ImageFolder` from an elevated one (the CI runner, whose
+/// processes are elevated): it runs from `target`, not from the admin-only
+/// `Program FilesRerun` (ADR 0023 §3 step 4, P4-2c). Its privileges are its own: this test
+/// process keeps its own.
 #[test]
-fn rerun_helper_exe_refuses_as_the_scaffold() {
+fn rerun_helper_exe_refuses_outside_its_folder() {
     let elevated = WinHelperToken.is_elevated().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_rerun-helper"))
         .args(["--volume", "x"])
@@ -110,7 +112,7 @@ fn rerun_helper_exe_refuses_as_the_scaffold() {
     assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
     let code = out.status.code().unwrap().cast_unsigned();
     let want = if elevated {
-        Reason::Usage
+        Reason::ImageFolder
     } else {
         Reason::NotElevated
     };

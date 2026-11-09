@@ -58,7 +58,8 @@
 //!   class key and the reads on the started process; `unsafe`.
 //! - `sd`: the pure parser of a self-relative security descriptor (owner, DACL; ADR 0007
 //!   amendment P4-2b); no `unsafe`.
-//! - `helper`: `WinHelperToken`, the elevated helper's own token (ADR 0023); no `unsafe`; never
+//! - `helper`: `WinHelperToken` and `WinHelperSystem`, the elevated helper's own token and system
+//!   (ADR 0023 §11: no GPU, no topology, no registry; P4-2c); no `unsafe`; never
 //!   references `WinSystem`, `WinGpu`, `dxgi` or `loader`'s DLL loading.
 //! - `status`: `NTSTATUS`/Win32 code → `SysErrorKind`, for files and the registry (pure).
 //! - `name`: single-segment check, L1 long-name check, `volume_path`, `open_dir` input rules,
@@ -71,7 +72,11 @@
 //! - `registry`: `WinRegistry`, input rules, limits, retries and enumeration restarts, and the
 //!   write primitives of `sys::seq::reg` (`WinKey`, ADR 0018); no `unsafe`.
 //!
-//! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu`, `loader`, `dxgi`, `elevation`,
+//! - `process`: the helper's own image, its instance mutex (the one `CreateMutexW`) and the CLI's
+//!   check whether a helper process runs (the one `CreateToolhelp32Snapshot` and `OpenProcess` of
+//!   `rerun-core`; ADR 0023, A4 S8); `unsafe`.
+//!
+//! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu`, `loader`, `dxgi`, `elevation`, `process`,
 //! `com` and `firewall`. Path-based Win32 file APIs
 //! (`CreateFileW`, `DeleteFileW`, `MoveFileExW`, `GetFileAttributesW`, …) and every
 //! environment-based path source (`std::env::var`, `GetEnvironmentVariableW`,
@@ -115,6 +120,7 @@ mod known_folders;
 mod loader;
 mod name;
 mod nt;
+mod process;
 mod reg;
 mod registry;
 mod reparse;
@@ -139,7 +145,7 @@ pub use elevation::WinElevation;
 pub use firewall::WinFirewall;
 pub use fs::{WinDir, WinFs};
 pub use gpu::WinGpu;
-pub use helper::WinHelperToken;
+pub use helper::{WinHelperSystem, WinHelperToken};
 pub use known_folders::WinKnownFolders;
 pub use loader::restrict_dll_search;
 pub(crate) use registry::WinRegistry;

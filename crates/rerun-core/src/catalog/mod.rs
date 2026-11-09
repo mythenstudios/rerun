@@ -108,7 +108,7 @@ pub fn verify<'a>(
 }
 
 /// [`verify`] against an explicit revocation list (tests).
-fn verify_with<'a>(
+pub(crate) fn verify_with<'a>(
     index: &'a [u8],
     sig: &[u8],
     keys: &[PublicKey],

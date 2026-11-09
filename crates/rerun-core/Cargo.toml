@@ -45,7 +45,9 @@ sha2.workspace = true
 # GetProcAddress (Win32_System_LibraryLoader). DXGI itself is hand-written in sys::win::dxgi:
 # windows-sys 0.61 has no DXGI feature. The console input flush before a confirmation (P2-13,
 # security review N4): GetStdHandle, FlushConsoleInputBuffer (Win32_System_Console; a feature
-# of the existing dependency, no console mode is ever changed).
+# of the existing dependency, no console mode is ever changed). The helper process check of the
+# CLI (ADR 0023, A4 S8): CreateToolhelp32Snapshot, Process32FirstW/NextW
+# (Win32_System_Diagnostics_ToolHelp, a feature of the existing dependency, read only).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
   "Wdk_Foundation",
@@ -58,6 +60,7 @@ windows-sys = { workspace = true, features = [
   "Win32_Storage_FileSystem",
   "Win32_System_Com",
   "Win32_System_Console",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_IO",
   "Win32_System_Ioctl",
   "Win32_System_LibraryLoader",

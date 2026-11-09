@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::path::RelPath;
 use crate::policy::root::GameDir;
-use crate::sys::SysErrorKind;
 use crate::sys::fs::EntryKind;
+use crate::sys::{Dir, SysErrorKind};
 
 /// An anti-cheat system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -185,6 +185,12 @@ impl AntiCheatScan {
 /// Looks for every marker in the game folder and in each of `dirs` (relative folders; the
 /// game folder itself is always asked first, duplicates once).
 pub fn find(game: &GameDir<'_>, dirs: &[RelPath]) -> AntiCheatScan {
+    find_in(game.dir(), dirs)
+}
+
+/// [`find`] on any read handle of a game folder (the elevated helper's root opened by identity,
+/// ADR 0023 §5 step 6).
+pub fn find_in(game: &dyn Dir, dirs: &[RelPath]) -> AntiCheatScan {
     let mut where_: Vec<Option<&RelPath>> = vec![None];
     for d in dirs {
         let folded = crate::fold::fold(d.as_str());
@@ -201,7 +207,7 @@ pub fn find(game: &GameDir<'_>, dirs: &[RelPath]) -> AntiCheatScan {
         // A named folder is asked once: missing or a file holds no marker; a link or a folder
         // that cannot be asked is unreadable as a whole (never one find per marker).
         if let Some(d) = dir {
-            match game.dir().metadata(d) {
+            match game.metadata(d) {
                 Ok(Some(md))
                     if md.kind == EntryKind::Dir && md.reparse.is_none() && !md.restricted => {}
                 Ok(Some(md)) if md.kind == EntryKind::File => continue,
@@ -222,7 +228,7 @@ pub fn find(game: &GameDir<'_>, dirs: &[RelPath]) -> AntiCheatScan {
                 // A folder too long for one more segment: nothing can lie there by that name.
                 continue;
             };
-            match game.dir().metadata(&path) {
+            match game.metadata(&path) {
                 // An entry the user may not open could be anything: counted, never released.
                 Ok(Some(md)) if md.restricted => out.unreadable.push(path),
                 Ok(Some(_)) => out.found.push(AntiCheatHit {

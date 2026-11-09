@@ -265,3 +265,203 @@ fn dev_uac_helper_dialog() {
     assert_eq!(judge(&run, &image, 0), Judged::Exit(usage));
     println!("RERUN_DEV_UAC_RESULT: PASS accept -> Refused(Usage) {code:#010x}, S2 checks hold");
 }
+
+// ---------- the helper's process facts (ADR 0023 §3 step 4, A4 S8) ----------
+
+/// The own image is this test binary's NT name; the process check finds this very process by
+/// it (the file name pre-filter and the image comparison), and nothing for an image no process
+/// runs. Read only.
+#[test]
+fn own_image_and_the_process_check() {
+    use super::super::process;
+    let own = process::own_image().unwrap();
+    assert!(own.starts_with(r"\Device\"), "{own}");
+    assert_eq!(process::running(&own), Ok(true));
+    assert_eq!(process::running(&own.to_uppercase()), Ok(true));
+    let elsewhere = format!(
+        r"\Device\HarddiskVolume999\nowhere\{}",
+        own.rsplit('\\').next().unwrap()
+    );
+    assert_eq!(process::running(&elsewhere), Ok(false));
+    assert_eq!(
+        process::running(r"\Device\HarddiskVolume999\nowhere\rerun-helper-none.exe"),
+        Ok(false)
+    );
+    assert!(
+        WinElevation.helper_running(&own).unwrap(),
+        "through the Elevation trait"
+    );
+}
+
+/// The instance mutex (under a test name, so a helper that happens to run is not disturbed):
+/// a second one is `ERROR_ALREADY_EXISTS` while the first is held, free again after the drop.
+#[test]
+fn the_instance_mutex_admits_one_holder() {
+    use super::super::process;
+    let name = format!(r"Local\Rerun.Test.{}", std::process::id());
+    let first = process::named_mutex(&name).unwrap();
+    assert_eq!(process::named_mutex(&name).map(|_| ()), Err(183));
+    drop(first);
+    assert!(process::named_mutex(&name).is_ok());
+}
+
+/// The helper's own system (ADR 0023 §11) reads what its chain needs, read only: every known
+/// folder (`ProgramData` and `UserProfiles` from the machine's `ProfileList` without a user
+/// hive), the forbidden list, the helper pre-check; it has no GPU, no topology, no registry and
+/// no firewall yet (P4-2c).
+#[test]
+fn the_helper_system_has_what_the_chain_needs_and_nothing_else() {
+    use super::super::WinHelperSystem;
+    use crate::policy::root::ForbiddenRoots;
+    use crate::sys::registry::{Hive, RegKey, RegView};
+    use crate::sys::{KnownFolder, SysErrorKind};
+    let h = WinHelperSystem::new();
+    let full = WinSystem::new().unwrap();
+    for k in KnownFolder::ALL {
+        assert_eq!(
+            h.known_folders().get(k).unwrap(),
+            full.known_folders().get(k).unwrap(),
+            "{k}"
+        );
+    }
+    let pf = h.known_folders().get(KnownFolder::ProgramFiles).unwrap();
+    // The helper passes its own folder; it may not be installed here, so its parent stands in.
+    ForbiddenRoots::resolve(&h, &pf).unwrap();
+    assert_eq!(
+        helper_image(&h).map(|i| i.nt_name),
+        helper_image(&full).map(|i| i.nt_name)
+    );
+    let unsupported = |k| assert_eq!(k, SysErrorKind::Unsupported);
+    unsupported(h.gpu().adapters().unwrap_err().kind);
+    unsupported(h.topology().read().unwrap_err().kind);
+    unsupported(h.firewall().select(&|_, _| true).unwrap_err().kind);
+    let key = RegKey::new(Hive::LocalMachine, RegView::Native, "SOFTWARE");
+    unsupported(h.registry().key_exists(&key).unwrap_err().kind);
+    unsupported(h.elevation().token_kind().unwrap_err().kind);
+    // The machine-only registry under the known folders never opens a user hive.
+    let machine = super::super::registry::WinRegistry::machine_only();
+    let user = RegKey::new(Hive::CurrentUser, RegView::Native, "Software");
+    unsupported(
+        crate::sys::Registry::key_exists(&machine, &user)
+            .unwrap_err()
+            .kind,
+    );
+    assert!(crate::sys::Registry::key_exists(&machine, &key).unwrap());
+}
+
+// ---------- [DEV] the validation chain with the test-key helper (ADR 0023 §14, A4 S3) ----------
+
+/// [DEV] (`scripts/dev-helper-chain.ps1`, `RERUN_DEV_CHAIN=accept`): the installed test-key
+/// helper (a debug build with the feature `test-key`) is started through the real
+/// `WinElevation` for a real request: the `elevate` and `index` folders and the game folder are
+/// fresh folders of a test root below `target\` (the helper opens them by `{volume GUID, file
+/// ID}`, so where they lie does not matter), the index is signed with the published test key and
+/// names no Topo. Expected: the helper passes §3 (own image in `Program Files\Rerun`, instance
+/// lock, arguments), reads the request by identity with its hash and build ID, verifies the
+/// index under its trusted keys (the test key) and refuses the unknown Topo: `Refused(Topo)`.
+/// A release helper (empty key slots) would give `Refused(Index)`. Nothing is changed; the test
+/// root is removed when the test ends.
+#[test]
+#[ignore = "[DEV] shows a real UAC prompt; run by scripts/dev-helper-chain.ps1"]
+fn dev_helper_chain_with_the_test_key() {
+    use sha2::{Digest, Sha256};
+
+    use super::super::testfx::TestRoot;
+    use crate::catalog::key::test_key;
+    use crate::elevate::client;
+    use crate::elevate::request::{
+        AddOp, Body, DirRef, Request, RequestName, RequestRef, RootRef, encode,
+    };
+    use crate::path::RootPath;
+    use crate::plan::{Pick, PlanSource};
+    use crate::policy::root::RootId;
+    use crate::sys::contract::FsFixture;
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "[DEV] test: the hand-test script names the expected answer"
+    )]
+    let mode = std::env::var("RERUN_DEV_CHAIN").unwrap_or_default();
+    assert_eq!(
+        mode, "accept",
+        "set RERUN_DEV_CHAIN=accept (scripts/dev-helper-chain.ps1)"
+    );
+    assert!(!is_elevated(), "run from a non-elevated process");
+    let sys = WinSystem::new().unwrap();
+    let image = helper_image(&sys).unwrap_or_else(|e| panic!("pre-check: {e}"));
+    let root = TestRoot::new("dev-chain").unwrap();
+    let elevate = root.work("elevate");
+    let index = root.work("index");
+    let game = root.work("game");
+    let fs = WinFs::new();
+    let info = |p: &Path| {
+        #[expect(clippy::disallowed_methods, reason = "[DEV] test: its own test root")]
+        let d = fs.open_dir(p).unwrap();
+        d.info().unwrap()
+    };
+    let dir_ref = |p: &Path| {
+        let i = info(p);
+        DirRef {
+            volume: i
+                .volume_guid
+                .expect("the test root's volume has a GUID path"),
+            file_id: i.file_id,
+        }
+    };
+    let bytes = br#"{"format":1,"seq":1,"issued":"2026-11-09T12:00:00Z","topos":[],"packages":[]}"#;
+    let sha: [u8; 32] = Sha256::digest(bytes).into();
+    let hex = crate::wire::hex32::to_string(&sha);
+    root.fx()
+        .file(&index.join(format!("{hex}.json")), bytes)
+        .unwrap();
+    root.fx()
+        .file(&index.join(format!("{hex}.sig")), &test_key::sign(bytes))
+        .unwrap();
+    let gi = info(&game);
+    let txn = "00000001-00000000000000de".parse().unwrap();
+    let req = Request {
+        build: crate::BUILD_ID.to_owned(),
+        txn,
+        body: Body::Add {
+            source: PlanSource {
+                index: sha,
+                topo: "dev-unknown-topo".to_owned(),
+                rev: 1,
+                picks: vec![Pick {
+                    issue: "net".to_owned(),
+                    variant: "block".to_owned(),
+                }],
+            },
+            index_dir: dir_ref(&index),
+            root: RootRef {
+                volume: gi.volume_guid.unwrap(),
+                id: RootId::of(&gi),
+                path: RootPath::from_final_path(&gi.final_path).unwrap(),
+            },
+            ops: vec![AddOp {
+                op: 0,
+                program: RelPath::parse("game.exe").unwrap(),
+            }],
+        },
+    };
+    let file = encode(&req).unwrap();
+    let name = RequestName::new(txn, 1).unwrap();
+    root.fx().file(&elevate.join(name.as_str()), &file).unwrap();
+    let at = RequestRef {
+        dir: dir_ref(&elevate),
+        name,
+    };
+    let file_sha: [u8; 32] = Sha256::digest(&file).into();
+    let judged = client::start(&WinElevation, &image, &at, &file_sha, 1).unwrap();
+    println!("RERUN_DEV_CHAIN_RUN: {judged:?}");
+    let topo = Judged::Exit(HelperExit::refused(Reason::Topo));
+    if judged == Judged::Exit(HelperExit::refused(Reason::Index)) {
+        panic!(
+            "Refused(Index): the installed helper does not trust the test key (a release build?)"
+        );
+    }
+    assert_eq!(judged, topo);
+    println!(
+        "RERUN_DEV_CHAIN_RESULT: PASS accept -> Refused(Topo) 0x52170000, the chain up to step 3 holds"
+    );
+}

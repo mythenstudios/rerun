@@ -20,7 +20,7 @@ use crate::policy::root::RootId;
 use crate::sys::fs::{Attrs, TmpName};
 
 /// Exactly `n` lower-case hex digits.
-fn parse_hex(s: &str, n: usize) -> Option<u128> {
+pub(crate) fn parse_hex(s: &str, n: usize) -> Option<u128> {
     let hex = |c: char| c.is_ascii_digit() || ('a'..='f').contains(&c);
     (s.len() == n && s.chars().all(hex)).then(|| u128::from_str_radix(s, 16).ok())?
 }

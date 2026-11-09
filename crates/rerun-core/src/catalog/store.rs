@@ -159,10 +159,20 @@ fn read_current(dir: &dyn crate::sys::Dir) -> Result<Option<Current>, StoreError
 }
 
 /// Reads the index stored under `sha`, checks its name, signature and form.
-fn load(
+pub(crate) fn load(
     dir: &dyn crate::sys::Dir,
     sha: &[u8; 32],
     keys: &[PublicKey],
+) -> Result<Catalog, StoreError> {
+    load_with(dir, sha, keys, key::REVOKED_KEYS)
+}
+
+/// [`load`] against an explicit revocation list (the elevated helper's tests, ADR 0023 §14).
+pub(crate) fn load_with(
+    dir: &dyn crate::sys::Dir,
+    sha: &[u8; 32],
+    keys: &[PublicKey],
+    revoked: &[[u8; 32]],
 ) -> Result<Catalog, StoreError> {
     let (json, sig) = names(sha);
     let read = |name: &RelPath, max: usize| match dir.read_limited(name, max as u64) {
@@ -179,7 +189,7 @@ fn load(
         )));
     }
     let sig = read(&sig, SIG_BYTES)?;
-    let v = verify(&bytes, &sig, keys)?;
+    let v = super::verify_with(&bytes, &sig, keys, revoked)?;
     Ok(Catalog::from_verified(&v)?)
 }
 

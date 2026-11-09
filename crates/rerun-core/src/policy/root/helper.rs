@@ -230,5 +230,67 @@ pub fn dir_by_id<'s>(
     Ok(sys.fs().open_by_id(volume, file_id)?)
 }
 
+/// A game folder the elevated helper opened by identity (ADR 0023 §5 step 4): read side only,
+/// nothing is ever written into it.
+#[derive(Debug)]
+pub struct RootById<'s> {
+    dir: Box<dyn Dir + 's>,
+    path: RootPath,
+    info: crate::sys::fs::RootInfo,
+}
+
+impl RootById<'_> {
+    /// The handle, read side.
+    pub fn dir(&self) -> &dyn Dir {
+        &*self.dir
+    }
+
+    /// The canonical path read on the handle.
+    pub fn path(&self) -> &RootPath {
+        &self.path
+    }
+
+    /// Properties as of opening.
+    pub fn info(&self) -> &crate::sys::fs::RootInfo {
+        &self.info
+    }
+}
+
+/// Opens the game folder the request names by `{volume GUID, file ID}` (ADR 0023 §5 step 4,
+/// R4, N2): through [`dir_by_id`] (no path walked, no link followed, a reparse point refused),
+/// then on the handle: the volume serial and file ID as expected, the canonical path equal to
+/// `expected` (folded) and allowed by `fr` (the helper's own forbidden list, with the
+/// per-volume rule and no volume root). The folder need not be admin-only: nothing is written
+/// there.
+///
+/// # Errors
+/// The open; [`RootError::IdentityMismatch`] for another serial or file ID;
+/// [`RootError::Escaped`] for another canonical path; [`RootError::Forbidden`].
+pub fn root_by_id<'s>(
+    sys: &'s dyn System,
+    fr: &super::ForbiddenRoots,
+    volume: &VolumeGuid,
+    file_id: u128,
+    serial: u64,
+    expected: &RootPath,
+) -> Result<RootById<'s>, RootError> {
+    let dir = dir_by_id(sys, volume, file_id)?;
+    let info = dir.info().map_err(raced)?;
+    let want = super::RootId {
+        volume_serial: serial,
+        file_id,
+    };
+    let path = RootPath::from_final_path(&info.final_path)?;
+    super::ensure(&path, &info, want)?;
+    if &path != expected {
+        return Err(RootError::Escaped {
+            store: expected.clone(),
+            child: path,
+        });
+    }
+    super::check_canonical(fr, &path, &info)?;
+    Ok(RootById { dir, path, info })
+}
+
 #[cfg(test)]
 mod tests;

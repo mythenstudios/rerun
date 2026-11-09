@@ -1,11 +1,8 @@
-//! Tests of the helper's exit code (ADR 0023 §7, A4 N4) and the scaffold `serve` (§3) against
-//! the fake token.
+//! Tests of the helper's exit code (ADR 0023 §7, A4 N4), `judge`, the prompt state and the fake
+//! elevation. `serve` and the request: `chain_tests`.
 
-use std::ffi::OsString;
-
+use super::MAX_BATCH_OPS;
 use super::exit::{ExitClass, HelperExit, MAGIC, OpResult, Reason};
-use super::{MAX_BATCH_OPS, serve};
-use crate::sys::fake::{FakeHelperToken, TokenCall};
 
 const CLASSES: [ExitClass; 4] = [
     ExitClass::Done,
@@ -19,7 +16,7 @@ const OPS: [OpResult; 4] = [
     OpResult::After,
     OpResult::Foreign,
 ];
-const REASONS: [Reason; 14] = [
+const REASONS: [Reason; 15] = [
     Reason::Usage,
     Reason::NotElevated,
     Reason::ImageFolder,
@@ -34,6 +31,7 @@ const REASONS: [Reason; 14] = [
     Reason::DuplicateName,
     Reason::Firewall,
     Reason::Internal,
+    Reason::Busy,
 ];
 
 /// The codes are an interface between two binaries of one build and the hand-test script
@@ -46,6 +44,8 @@ fn codes_are_pinned() {
         0x5212_0000
     );
     assert_eq!(HelperExit::refused(Reason::Internal).to_code(), 0x521E_0000);
+    assert_eq!(HelperExit::refused(Reason::Busy).to_code(), 0x521F_0000);
+    assert_eq!(HelperExit::refused(Reason::Topo).to_code(), 0x5217_0000);
     let mut ops = [OpResult::NotRun; MAX_BATCH_OPS];
     ops[0] = OpResult::After;
     ops[1] = OpResult::Before;
@@ -117,8 +117,7 @@ fn from_code_is_strict() {
         // Class 4 to 15.
         0x5241_0000,
         0x52F1_0000,
-        // Reason 15; no reason with Refused; a reason with Done.
-        0x521F_0000,
+        // No reason with Refused; a reason with Done (every reason value 1 to 15 is used, P4-2c).
         0x5210_0000,
         0x5201_0002,
         // Done with an op not reached; Refused with an op reported.
@@ -139,74 +138,6 @@ fn from_code_is_strict() {
     assert!(HelperExit::from_code(usage, MAX_BATCH_OPS).is_some());
 }
 
-fn args(a: &[&str]) -> Vec<OsString> {
-    a.iter().map(OsString::from).collect()
-}
-
-#[test]
-fn serve_drops_privileges_first_then_requires_elevation() {
-    let t = FakeHelperToken::new(false);
-    assert_eq!(
-        serve(&t, Vec::new),
-        HelperExit::refused(Reason::NotElevated)
-    );
-    assert_eq!(
-        t.calls(),
-        [TokenCall::DropPrivileges, TokenCall::IsElevated]
-    );
-    // A privilege that cannot be dropped stops before anything else.
-    let t = FakeHelperToken::new(true).fail(TokenCall::DropPrivileges);
-    assert_eq!(serve(&t, Vec::new), HelperExit::refused(Reason::Internal));
-    assert_eq!(t.calls(), [TokenCall::DropPrivileges]);
-    // An unreadable elevation is no elevation.
-    let t = FakeHelperToken::new(true).fail(TokenCall::IsElevated);
-    assert_eq!(serve(&t, Vec::new), HelperExit::refused(Reason::Internal));
-}
-
-/// The arguments are read only after steps 2 and 3 passed (review nit 6).
-#[test]
-fn serve_reads_the_arguments_only_after_privileges_and_elevation() {
-    use std::cell::Cell;
-    let read = Cell::new(false);
-    let args = || {
-        read.set(true);
-        Vec::new()
-    };
-    for t in [
-        FakeHelperToken::new(false),
-        FakeHelperToken::new(true).fail(TokenCall::DropPrivileges),
-        FakeHelperToken::new(true).fail(TokenCall::IsElevated),
-    ] {
-        let _ = serve(&t, args);
-        assert!(!read.get(), "{:?}", t.calls());
-    }
-    let _ = serve(&FakeHelperToken::new(true), args);
-    assert!(read.get());
-}
-
-/// P4-2a: elevated, every argument list is a usage refusal, also the form of §3 step 5.
-#[test]
-fn the_scaffold_refuses_every_argument_list() {
-    let form = args(&[
-        "--volume",
-        "{00000000-0000-0000-0000-000000000000}",
-        "--dir",
-        "0123456789abcdef0123456789abcdef",
-        "--request",
-        "00000001-0000000000000001-1.req",
-        "--sha256",
-        &"0".repeat(64),
-    ]);
-    for a in [vec![], args(&["--help"]), args(&["x"; 40]), form] {
-        let t = FakeHelperToken::new(true);
-        assert_eq!(serve(&t, || a), HelperExit::refused(Reason::Usage));
-        assert_eq!(
-            t.calls(),
-            [TokenCall::DropPrivileges, TokenCall::IsElevated]
-        );
-    }
-}
-
 /// The hand-test scripts (A4 S12, P4-2b) compare the helper's exit codes with their own copies
 /// in `scripts/dev-helper-common.ps1`.
 #[test]
@@ -215,6 +146,8 @@ fn the_dev_script_codes_are_the_helper_codes() {
     for (name, reason) in [
         ("NotElevated", Reason::NotElevated),
         ("Usage", Reason::Usage),
+        ("Topo", Reason::Topo),
+        ("Index", Reason::Index),
     ] {
         let line = format!("${name} = {:#010x}", HelperExit::refused(reason).to_code());
         assert!(

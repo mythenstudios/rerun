@@ -94,14 +94,21 @@ pub const CLI_IMPORTS: &[&str] = &[
 /// The static imports `rerun-helper.exe` may have (ADR 0023 §13, docs/08 "Acceptance
 /// (helper)"). Found on 2026-11-09 with the P4-2a scaffold (`restrict_dll_search`, the token's
 /// privileges and elevation): `advapi32.dll` for `OpenProcessToken`, `GetTokenInformation` and
-/// `AdjustTokenPrivileges`. The later slices add what they use after a review (`shell32`,
-/// `combase`, `ole32`, `oleaut32` for the known folder and the firewall COM, P4-2b/P4-5a).
-/// Never a graphics DLL ([`forbidden_import`]).
+/// `AdjustTokenPrivileges`. P4-2c (`WinHelperSystem`, reviewed): `shell32.dll` for
+/// `SHGetKnownFolderPath` (`Program Files` for the own image check and the forbidden list),
+/// `combase.dll` for `CoTaskMemFree` of its result (no COM is initialised or activated), and
+/// `bcryptprimitives.dll` from `std` (`ProcessPrng`, the seed of the `HashMap`/`HashSet` of the
+/// registry and file system reads), the same three as in [`CLI_IMPORTS`]. `ole32` and
+/// `oleaut32` follow with the firewall COM in P4-5b. Never a graphics DLL
+/// ([`forbidden_import`]).
 pub const HELPER_IMPORTS: &[&str] = &[
     "kernel32.dll",
     "ntdll.dll",
     "api-ms-win-core-synch-l1-2-0.dll",
     "advapi32.dll",
+    "shell32.dll",
+    "combase.dll",
+    "bcryptprimitives.dll",
 ];
 
 /// The run-time loaders `std` itself names in every binary: its backtrace support loads
@@ -397,8 +404,8 @@ fn the_helper_content_checks_have_teeth() {
         let e = check_helper_content(bad).unwrap_err();
         assert!(e.contains("run-time loaders"), "{e}");
     }
-    // The CLI's own imports fail the helper's list.
-    for dll in ["shell32.dll", "combase.dll", "bcryptprimitives.dll"] {
+    // The CLI's own imports beyond the helper's fail the helper's list (until P4-5b: no COM).
+    for dll in ["ole32.dll", "oleaut32.dll", "userenv.dll"] {
         use pe_image::image;
         let img = image(&["kernel32.dll", dll], &[], SEARCH_SYSTEM32);
         let e = check_hardened(std::io::Cursor::new(img), HELPER_IMPORTS).unwrap_err();
@@ -425,7 +432,7 @@ fn each_binary_has_its_own_allowlist() {
         assert!(e.contains("not in the allowlist"), "{e}");
     }
     // COM around ShellExecuteExW: the shim (B2) and, since P4-2b, the CLI (the helper start,
-    // ADR 0023 N3) both import ole32.dll; the helper scaffold does not.
+    // ADR 0023 N3) both import ole32.dll; the helper does not (no COM before P4-5b).
     check(&["kernel32.dll", "ole32.dll"], LAUNCH_IMPORTS).unwrap();
     check(&["kernel32.dll", "ole32.dll"], CLI_IMPORTS).unwrap();
     let e = check(&["kernel32.dll", "ole32.dll"], HELPER_IMPORTS).unwrap_err();

@@ -176,7 +176,7 @@ pub struct Pick {
 impl PlanSource {
     /// The form rules (encode and decode alike): IDs of the Topo form, `rev` from 1, 1 to
     /// [`MAX_PICKS`] picks, each issue once.
-    fn check(&self) -> Result<(), PlanError> {
+    pub(crate) fn check(&self) -> Result<(), PlanError> {
         let id = |s: &str| crate::catalog::model::Id::parse(s).is_some();
         if !id(&self.topo) || self.rev == 0 {
             return Err(invalid(None, "a source without a Topo ID and revision"));

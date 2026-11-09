@@ -111,6 +111,16 @@ pub fn read_game(game: &GameDir<'_>, topo: &Topo) -> GameFacts {
             state: check_exe(game, e),
         })
         .collect();
+    GameFacts {
+        exes,
+        anti_cheat: anti_cheat::find(game, &anti_cheat_dirs(topo)),
+    }
+}
+
+/// The folders the anti-cheat markers are looked for in besides the game folder: those of the
+/// executables of `match.exes` and of `launch.start` (also the elevated helper's re-check,
+/// ADR 0023 §5 step 6).
+pub fn anti_cheat_dirs(topo: &Topo) -> Vec<RelPath> {
     let mut dirs: Vec<RelPath> = topo
         .matches
         .exes
@@ -125,10 +135,7 @@ pub fn read_game(game: &GameDir<'_>, topo: &Topo) -> GameFacts {
     {
         dirs.push(s);
     }
-    GameFacts {
-        exes,
-        anti_cheat: anti_cheat::find(game, &dirs),
-    }
+    dirs
 }
 
 fn check_exe(game: &GameDir<'_>, e: &Exe) -> ExeState {
@@ -632,34 +639,22 @@ pub struct TopoPlan {
     pub warnings: Vec<Warning>,
 }
 
-/// Plans the picked variants of `topo` (module docs). `index` is the SHA-256 of the signed
-/// index the Topo comes from; `ctx` is the planners' context without a main executable (the
-/// engine names the one that matched).
-pub fn plan(
-    index: &[u8; 32],
-    topo: &Topo,
-    facts: &Facts<'_>,
+/// The picked variants of `topo` with their issues, in pick order, by the engine's pure rules:
+/// 1 to [`MAX_PICKS`] picks, each issue once, every issue and variant present. `when` is not
+/// evaluated here (the elevated helper re-derives with this and nothing of the system profile,
+/// ADR 0023 §5 step 3).
+///
+/// # Errors
+/// [`EngineError::Picks`], [`EngineError::TwoVariants`], [`EngineError::UnknownIssue`],
+/// [`EngineError::UnknownVariant`].
+pub fn resolve_picks<'t>(
+    topo: &'t Topo,
     picks: &[Pick],
-    ctx: &PlanCtx<'_>,
-) -> Result<TopoPlan, EngineError> {
-    check_archs(topo, facts.table)?;
-    if topo.status == Status::Retired {
-        return Err(EngineError::Retired(topo.id.to_string()));
-    }
-    let Some(main_exe) = facts.game.main_exe() else {
-        return Err(EngineError::NoMatch(topo.id.to_string()));
-    };
+) -> Result<Vec<(&'t Issue, &'t Variant)>, EngineError> {
     if picks.is_empty() || picks.len() > MAX_PICKS {
         return Err(EngineError::Picks);
     }
-    let mut warnings = Vec::new();
-    if topo.status == Status::NeedsRetest {
-        warnings.push(Warning::NeedsRetest);
-    }
-    let launch = resolve_launch(topo);
-    let ac = anti_cheat_state(topo, &facts.game.anti_cheat);
-    let mut steps = Vec::new();
-    let mut planned_launch = None;
+    let mut out = Vec::with_capacity(picks.len());
     for (i, p) in picks.iter().enumerate() {
         if picks[..i].iter().any(|q| q.issue == p.issue) {
             return Err(EngineError::TwoVariants(p.issue.clone()));
@@ -677,6 +672,38 @@ pub fn plan(
                 issue: p.issue.clone(),
                 variant: p.variant.clone(),
             })?;
+        out.push((issue, variant));
+    }
+    Ok(out)
+}
+
+/// Plans the picked variants of `topo` (module docs). `index` is the SHA-256 of the signed
+/// index the Topo comes from; `ctx` is the planners' context without a main executable (the
+/// engine names the one that matched).
+pub fn plan(
+    index: &[u8; 32],
+    topo: &Topo,
+    facts: &Facts<'_>,
+    picks: &[Pick],
+    ctx: &PlanCtx<'_>,
+) -> Result<TopoPlan, EngineError> {
+    check_archs(topo, facts.table)?;
+    if topo.status == Status::Retired {
+        return Err(EngineError::Retired(topo.id.to_string()));
+    }
+    let Some(main_exe) = facts.game.main_exe() else {
+        return Err(EngineError::NoMatch(topo.id.to_string()));
+    };
+    let resolved = resolve_picks(topo, picks)?;
+    let mut warnings = Vec::new();
+    if topo.status == Status::NeedsRetest {
+        warnings.push(Warning::NeedsRetest);
+    }
+    let launch = resolve_launch(topo);
+    let ac = anti_cheat_state(topo, &facts.game.anti_cheat);
+    let mut steps = Vec::new();
+    let mut planned_launch = None;
+    for (p, (issue, variant)) in picks.iter().zip(resolved) {
         match when::eval(issue.when.as_ref(), facts.profile) {
             Tri::No => return Err(EngineError::WhenNo(p.issue.clone())),
             Tri::Unknown => warnings.push(Warning::WhenUnknown {

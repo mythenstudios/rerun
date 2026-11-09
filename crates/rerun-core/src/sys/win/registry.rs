@@ -56,7 +56,8 @@ const KEY_NAME_BUFFER: usize = 256;
 
 /// The real registry. Read-only in phase 1.
 pub struct WinRegistry {
-    current_user: Root,
+    /// `None` in the elevated helper's machine-only registry ([`Self::machine_only`]).
+    current_user: Option<Root>,
     local_machine: Root,
     /// Kernel name of the `current_user` root (`\REGISTRY\USER\<SID>`; a test: the app hive
     /// key), the start of every kernel-name check of the write side.
@@ -101,7 +102,7 @@ impl WinRegistry {
         })?;
         let user_name = reg::key_name(&current_user).map_err(|st| reg_nt_error(st, WHAT))?;
         Ok(Self {
-            current_user: Root::Key(current_user),
+            current_user: Some(Root::Key(current_user)),
             local_machine: Root::LocalMachine,
             user_name,
             // Fail closed: a token that cannot be asked counts as elevated.
@@ -109,12 +110,25 @@ impl WinRegistry {
         })
     }
 
+    /// `HKEY_LOCAL_MACHINE` only, read side (the elevated helper's known folders read the
+    /// machine's `ProfileList`, ADR 0023 §11): no user hive is opened (nothing of the helper
+    /// uses `HKCU`, §4), every `Hive::CurrentUser` call is `Unsupported`, and the write side
+    /// refuses as for an elevated process.
+    pub(super) fn machine_only() -> Self {
+        Self {
+            current_user: None,
+            local_machine: Root::LocalMachine,
+            user_name: String::new(),
+            elevated: true,
+        }
+    }
+
     /// Test only: both hives mapped to keys of a private app hive (ADR 0009).
     #[cfg(test)]
     pub(super) fn with_roots(current_user: OwnedKey, local_machine: OwnedKey) -> Self {
         let user_name = reg::key_name(&current_user).unwrap_or_default();
         Self {
-            current_user: Root::Key(current_user),
+            current_user: Some(Root::Key(current_user)),
             local_machine: Root::Key(local_machine),
             user_name,
             elevated: false,
@@ -127,16 +141,21 @@ impl WinRegistry {
         self.elevated = on;
     }
 
-    fn root(&self, hive: Hive) -> &Root {
+    fn root(&self, hive: Hive) -> SysResult<&Root> {
         match hive {
-            Hive::CurrentUser => &self.current_user,
-            Hive::LocalMachine => &self.local_machine,
+            Hive::CurrentUser => self.current_user.as_ref().ok_or_else(|| {
+                SysError::new(
+                    SysErrorKind::Unsupported,
+                    "HKCU: the elevated helper reads HKLM only (ADR 0023 §4, §11)",
+                )
+            }),
+            Hive::LocalMachine => Ok(&self.local_machine),
         }
     }
 
     /// Opens `k` (already checked) with `access` in its view.
     fn open(&self, k: &RegKey, access: ReadAccess) -> SysResult<OwnedKey> {
-        reg::open(self.root(k.hive), &k.path, access, view_of(k.view))
+        reg::open(self.root(k.hive)?, &k.path, access, view_of(k.view))
             .map_err(|code| reg_error(code, &k.to_string()))
     }
 
@@ -412,7 +431,7 @@ impl Registry for WinRegistry {
             return Ok(None);
         }
         let target = k.to_string();
-        let key = reg::open_link(self.root(k.hive), &k.path, view_of(k.view))
+        let key = reg::open_link(self.root(k.hive)?, &k.path, view_of(k.view))
             .map_err(|code| reg_error(code, &target))?;
         let flags = reg::key_flags(&key).map_err(|st| reg_nt_error(st, &target))?;
         if flags & reg::REG_FLAG_LINK == 0 {
@@ -547,7 +566,7 @@ impl PrimHive for WinRegistry {
 
     fn open_root(&self, h: Hive, a: KeyAccess) -> SysResult<WinKey> {
         let shown = h.to_string();
-        let key = reg::reopen(self.root(h), access(a)).map_err(|code| reg_error(code, &shown))?;
+        let key = reg::reopen(self.root(h)?, access(a)).map_err(|code| reg_error(code, &shown))?;
         Ok(WinKey { key, shown })
     }
 

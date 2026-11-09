@@ -44,7 +44,7 @@ impl ExitClass {
     }
 }
 
-/// Why the helper did not finish with `Done` (bits 19..16, values 1 to 14).
+/// Why the helper did not finish with `Done` (bits 19..16, values 1 to 15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     /// The arguments are not exactly the form of §3 step 5.
@@ -75,10 +75,12 @@ pub enum Reason {
     Firewall,
     /// Anything else (a privilege that cannot be dropped, the token unreadable, …).
     Internal,
+    /// Another helper holds the instance lock (A4 S8, P4-2c).
+    Busy,
 }
 
 impl Reason {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::Usage,
         Self::NotElevated,
         Self::ImageFolder,
@@ -93,6 +95,7 @@ impl Reason {
         Self::DuplicateName,
         Self::Firewall,
         Self::Internal,
+        Self::Busy,
     ];
 
     const fn bits(self) -> u32 {
@@ -111,6 +114,7 @@ impl Reason {
             Self::DuplicateName => 12,
             Self::Firewall => 13,
             Self::Internal => 14,
+            Self::Busy => 15,
         }
     }
 }
@@ -161,6 +165,22 @@ impl HelperExit {
             reason: Some(reason),
             ops: [OpResult::NotRun; MAX_BATCH_OPS],
         }
+    }
+
+    /// Every op of a batch of `ops.len()` (1 to [`MAX_BATCH_OPS`]) reached with these results:
+    /// `Done`. `None` for an empty or too long batch, or an op `NotRun`.
+    #[must_use]
+    pub fn done(ops: &[OpResult]) -> Option<Self> {
+        if ops.is_empty() || ops.len() > MAX_BATCH_OPS || ops.contains(&OpResult::NotRun) {
+            return None;
+        }
+        let mut all = [OpResult::NotRun; MAX_BATCH_OPS];
+        all[..ops.len()].copy_from_slice(ops);
+        Some(Self {
+            class: ExitClass::Done,
+            reason: None,
+            ops: all,
+        })
     }
 
     /// The exit code (layout in the module docs).

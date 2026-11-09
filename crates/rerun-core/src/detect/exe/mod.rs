@@ -22,7 +22,7 @@
 
 pub mod anti_cheat;
 mod api;
-mod hash;
+pub(crate) mod hash;
 mod issue;
 mod rank;
 mod role;

@@ -268,6 +268,31 @@ fn banned_windows_sys_items_resolve() {
     let _ = windows_sys::Win32::System::Threading::OpenProcess;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: CreateMutexW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::CreateMutexW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateMutexA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::CreateMutexA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateMutexExW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::CreateMutexExW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateMutexExA must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Threading::CreateMutexExA;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: CreateToolhelp32Snapshot must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: TerminateJobObject must be banned"
     )]
     let _ = windows_sys::Win32::System::JobObjects::TerminateJobObject;

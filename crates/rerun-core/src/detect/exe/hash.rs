@@ -136,7 +136,7 @@ impl fmt::Display for HashOutcome {
 /// Why [`stream`] stopped, and how many bytes it had read by then (charged to the game
 /// budget by the caller).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Stop {
+pub(crate) enum Stop {
     /// More than the cap.
     TooLarge {
         /// Bytes read, at most the cap plus one chunk.
@@ -154,7 +154,7 @@ pub(super) enum Stop {
 /// Hashes `reader` from offset 0 to its end with one buffer of `chunk` bytes (clamped to
 /// 1 ..= [`MAX_CHUNK_BYTES`]). More than `cap` bytes is [`Stop::TooLarge`], after reading at
 /// most `cap` plus one chunk.
-pub(super) fn stream<R: Read + Seek>(
+pub(crate) fn stream<R: Read + Seek>(
     mut reader: R,
     cap: u64,
     chunk: usize,

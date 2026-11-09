@@ -1,11 +1,12 @@
 # Shared part of the [DEV] helper hand tests (docs/09-testing.md, "Elevated helper on the
-# developer machine"; ADR 0023 section 14): dot-sourced by scripts/dev-helper-sac.ps1 and
-# scripts/dev-helper-uac.ps1, never run on its own.
+# developer machine"; ADR 0023 section 14): dot-sourced by scripts/dev-helper-sac.ps1,
+# scripts/dev-helper-uac.ps1 and scripts/dev-helper-chain.ps1, never run on its own.
 #
 # What it changes on the machine, and only through the two elevated steps below, each started
 # by its full path and named in the window title:
 #  - Install-Helper: creates C:\Program Files\Rerun (the known folder, not the environment) and
-#    copies the freshly built release rerun-helper.exe into it. The elevated part treats an
+#    copies the freshly built rerun-helper.exe into it (release, or the test-key debug build of
+#    dev-helper-chain.ps1). The elevated part treats an
 #    existing folder as foreign (exit 3: nothing copied, nothing removed) unless it is the
 #    leftover of an aborted run of this build: no reparse point, admin-only, empty or holding
 #    only rerun-helper.exe (no link) with the fresh build's SHA-256. It never copies over an
@@ -22,6 +23,8 @@
 # ADR 0023 section 7, bound to rerun_core::elevate::HelperExit by elevate::tests.
 $NotElevated = 0x52120000
 $Usage = 0x52110000
+$Index = 0x52160000
+$Topo = 0x52170000
 $ErrorCancelled = 1223
 $ErrorSacBlocked = 4551
 
@@ -98,16 +101,28 @@ function Assert-NotElevated {
     if (-not [Environment]::Is64BitProcess) { Fail 'start it from a 64-bit PowerShell' }
 }
 
-# Builds the release helper (the P4-2a scaffold: it drops its privileges, checks its elevation
-# and refuses every request; it changes nothing) and returns its path and SHA-256.
-function Build-Helper([string]$repo) {
-    Title 'building the release helper (about 1 minute)'
+# Builds the helper and returns its path and SHA-256. Until P4-5b no helper changes anything.
+# Without -TestKey: the release helper (it trusts only the release key slots, which are empty, so
+# it refuses every add with Refused(Index)). With -TestKey: the [DEV] test-key helper (ADR 0023
+# section 2, A4 S3), a debug build with the feature test-key that trusts the published index test
+# key; it must never stay installed, so its callers remove it in their `finally`.
+function Build-Helper([string]$repo, [switch]$TestKey) {
     Push-Location $repo
     try {
-        & cargo build -p rerun-helper --release --locked
+        if ($TestKey) {
+            Title 'building the test-key helper (debug, feature test-key; about 1 minute)'
+            & cargo build -p rerun-helper --features test-key --locked
+        } else {
+            Title 'building the release helper (about 1 minute)'
+            & cargo build -p rerun-helper --release --locked
+        }
         if ($LASTEXITCODE -ne 0) { Fail "cargo build failed ($LASTEXITCODE)" }
     } finally { Pop-Location }
-    $built = Join-Path $repo 'target\release\rerun-helper.exe'
+    $built = if ($TestKey) {
+        Join-Path $repo 'target\debug\rerun-helper.exe'
+    } else {
+        Join-Path $repo 'target\release\rerun-helper.exe'
+    }
     if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { Fail "not built: $built" }
     return @{ Path = $built; Hash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash }
 }

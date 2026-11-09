@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::model::Id;
 use crate::fold::fold;
-use crate::journal::TxnId;
+pub use crate::journal::TxnId;
 use crate::path::{RelPath, RootPath};
 use crate::sys::firewall::{
     ACTION_BLOCK, DIR_OUT, FwRest, FwRule, FwRule3, PROFILES_ALL, PROTOCOL_ANY,

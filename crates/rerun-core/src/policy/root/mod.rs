@@ -46,8 +46,8 @@ pub(crate) use app::AppSub;
 pub use app::{AppDir, Create, ProfilesDir};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
 pub use helper::{
-    ADMIN_SIDS, HELPER_EXE, HELPER_FOLDER, HelperImage, NotAdminOnly, WRITE_MASK, admin_only,
-    dir_by_id, helper_image,
+    ADMIN_SIDS, HELPER_EXE, HELPER_FOLDER, HelperImage, NotAdminOnly, RootById, WRITE_MASK,
+    admin_only, dir_by_id, helper_image, root_by_id,
 };
 pub use input::{file_present, read_input};
 pub use vstore::{Shadow, VIRTUAL_STORE, check_root, preview_with_shadows, shadows};

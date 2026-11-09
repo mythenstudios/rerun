@@ -76,6 +76,10 @@ pub(crate) fn open(pid: u32, access: Access) -> Result<Target, u32> {
 /// One Toolhelp32 snapshot of the processes: PID and `szExeFile` (up to its NUL) of each, at
 /// most [`MAX_LISTED`] (more: `ERROR_BUFFER_OVERFLOW` for this poll).
 pub(crate) fn snapshot() -> Result<Vec<Listed>, u32> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "rerun-launch's one CreateToolhelp32Snapshot call site: watch lists candidates (ADR 0022 amendment P3-4)"
+    )]
     // SAFETY: documented flags; the process ID is ignored for TH32CS_SNAPPROCESS; no pointers.
     let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if raw == INVALID_HANDLE_VALUE {

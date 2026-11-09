@@ -265,4 +265,8 @@ impl Elevation for WinElevation {
         let code = wait(process.as_handle()).map_err(|c| sys_err(&shown, c))?;
         Ok(HelperRun::Exited { code, proc })
     }
+
+    fn helper_running(&self, nt_name: &str) -> SysResult<bool> {
+        super::process::running(nt_name).map_err(|c| sys_err("the process list", c))
+    }
 }

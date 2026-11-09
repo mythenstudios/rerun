@@ -29,6 +29,35 @@ pub const ANTI_CHEAT_RELEASE_REVIEWED: bool = false;
 /// is reviewed with the helper chain (P4-2c, P4-5b): the signed index then holds none.
 pub const FIREWALL_RULE_REVIEWED: bool = false;
 
+/// [`FIREWALL_RULE_REVIEWED`], or in this crate's own tests a thread that set the review seam
+/// (`review_seam::firewall_rule`): the elevated helper's chain (P4-2c) needs a signed index
+/// with a `firewall_rule` step before the step is reviewed. Never true in a shipped build.
+fn firewall_rule_reviewed() -> bool {
+    #[cfg(test)]
+    if review_seam::FIREWALL_RULE.with(std::cell::Cell::get) {
+        return true;
+    }
+    FIREWALL_RULE_REVIEWED
+}
+
+/// Test only: pretends `firewall_rule` is reviewed on this thread (P4-2c chain tests).
+#[cfg(test)]
+pub(crate) mod review_seam {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static FIREWALL_RULE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Runs `f` with `firewall_rule` counted as reviewed on this thread.
+    pub(crate) fn firewall_rule<R>(f: impl FnOnce() -> R) -> R {
+        FIREWALL_RULE.with(|c| c.set(true));
+        let r = f();
+        FIREWALL_RULE.with(|c| c.set(false));
+        r
+    }
+}
+
 /// Most executables of `match.exes` (P4-4: each is hashed when the engine reads a game).
 pub const MAX_EXES: usize = 8;
 
@@ -486,7 +515,7 @@ fn step(s: &TopoStep, at: &str) -> R {
 /// never anchors anything elevated; a `TODO` only in a draft, like every `TODO`).
 fn firewall_rule(t: &Topo, f: &FirewallRuleSpec, at: &str) -> R {
     ensure(
-        FIREWALL_RULE_REVIEWED || t.status == Status::Draft,
+        firewall_rule_reviewed() || t.status == Status::Draft,
         at,
         "draft only until firewall_rule is reviewed (P4-5a)",
     )?;
