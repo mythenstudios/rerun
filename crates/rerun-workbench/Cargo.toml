@@ -1,6 +1,6 @@
 [package]
 name = "rerun-workbench"
-description = "Curator tool (queries PCGamingWiki, generates topo drafts). Not shipped."
+description = "Curator tool (signed index, later PCGamingWiki drafts). Not shipped."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,25 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# Curator tool, never shipped (ADR 0024): YAML is parsed here (ADR 0005: serde-saphyr only in
+# the workbench and tests), the index is signed here (ed25519-compact, the signing half of the
+# crate rerun-core verifies with), and the key seed comes from the OS RNG (getrandom 0.3, already
+# in the lock file through jsonschema; ed25519-compact's own `random` feature would add
+# getrandom 0.4).
 [dependencies]
+rerun-core.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
+sha2.workspace = true
+ed25519-compact.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true
+# Tests sign with the published test key (ADR 0024).
+rerun-core = { workspace = true, features = ["test-key"] }
 
 [lints]
 workspace = true

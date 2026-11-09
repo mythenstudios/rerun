@@ -12,8 +12,14 @@ publish.workspace = true
 [features]
 # In-memory system layer and contract tests for tests in other crates.
 fake = []
+# Trusts the published test key of the signed index (ADR 0024) next to the release keys, for
+# tests in other crates. Never in a shipped build: CI checks that `-e normal,build` of
+# rerun-cli does not enable it, and the release binary test looks for the test key's bytes.
+test-key = []
 
 [dependencies]
+# The signed index (ADR 0024): Ed25519 verification only, no default features.
+ed25519-compact.workspace = true
 rerun-proto = { workspace = true, features = ["serde"] }
 thiserror.workspace = true
 # Snapshot hashes and, with sha1, exe hashes (detect::exe::hash, ADR 0014).

@@ -1,0 +1,146 @@
+//! Parity of the typed loader (`rerun_core::catalog`) with the schemas (ADR 0005): the same
+//! valid and invalid fixtures of `tests/fixtures/schema`, and every file of `topos/` and
+//! `packages/`, go through serde (`deny_unknown_fields`, `RelPath`, hashes) and the form rules
+//! of `catalog::check` with `Rules::Source`. A valid fixture must load, an invalid one must be
+//! refused (by serde or by a rule). The schema side of the same fixtures is `tests/schema.rs`.
+
+#![expect(
+    clippy::disallowed_methods,
+    reason = "reads repository fixtures (topos, packages, schema fixtures), never game folders"
+)]
+#![allow(
+    clippy::unwrap_used,
+    reason = "test code: a failure should abort the test"
+)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use rerun_core::catalog::check::{self, Rules};
+use rerun_core::catalog::{Package, Topo};
+use serde_json::Value;
+
+fn repo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// The loader's YAML rules (ADR 0005, phase 4): strict booleans, no merge keys, no duplicate
+/// keys, no anchors or aliases.
+fn load_yaml(p: &Path) -> Result<Value, String> {
+    let text = fs::read_to_string(p).unwrap();
+    let options = serde_saphyr::options! {
+        strict_booleans: true,
+        merge_keys: serde_saphyr::MergeKeyPolicy::Error,
+        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+        budget: serde_saphyr::budget! { max_anchors: 0, max_aliases: 0 },
+    };
+    serde_saphyr::from_str_with_options(&text, options).map_err(|e| e.to_string())
+}
+
+fn files(rel: &str, prefix: &str) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = fs::read_dir(repo().join(rel))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "yaml")
+                && p.file_name().unwrap().to_string_lossy().starts_with(prefix)
+        })
+        .collect();
+    v.sort();
+    assert!(!v.is_empty(), "no {prefix}*.yaml in {rel}");
+    v
+}
+
+fn load_topo(p: &Path) -> Result<Topo, String> {
+    let t: Topo = serde_json::from_value(load_yaml(p)?).map_err(|e| e.to_string())?;
+    check::topo(&t, Rules::Source).map_err(|e| e.to_string())?;
+    Ok(t)
+}
+
+fn load_package(p: &Path) -> Result<Package, String> {
+    let t: Package = serde_json::from_value(load_yaml(p)?).map_err(|e| e.to_string())?;
+    check::package(&t, Rules::Source).map_err(|e| e.to_string())?;
+    Ok(t)
+}
+
+#[test]
+fn valid_fixtures_and_the_repository_load() {
+    let mut failed = Vec::new();
+    let topos = files("tests/fixtures/schema/valid", "topo-")
+        .into_iter()
+        .chain(files("topos", ""));
+    for f in topos {
+        if let Err(e) = load_topo(&f) {
+            failed.push(format!("{}: {e}", f.display()));
+        }
+    }
+    let packages = files("tests/fixtures/schema/valid", "package-")
+        .into_iter()
+        .chain(files("packages", ""));
+    for f in packages {
+        if let Err(e) = load_package(&f) {
+            failed.push(format!("{}: {e}", f.display()));
+        }
+    }
+    assert!(failed.is_empty(), "refused:\n{}", failed.join("\n"));
+}
+
+#[test]
+fn invalid_fixtures_are_refused() {
+    let mut accepted = Vec::new();
+    for f in files("tests/fixtures/schema/invalid", "topo-") {
+        if load_topo(&f).is_ok() {
+            accepted.push(f.display().to_string());
+        }
+    }
+    for f in files("tests/fixtures/schema/invalid", "package-") {
+        if load_package(&f).is_ok() {
+            accepted.push(f.display().to_string());
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted by the typed loader:\n{}",
+        accepted.join("\n")
+    );
+}
+
+/// Serialising a loaded entry and loading it again gives the same entry (the bundle form is
+/// lossless), and serialising twice gives the same bytes.
+#[test]
+fn typed_entries_round_trip_through_their_json() {
+    for f in files("tests/fixtures/schema/valid", "topo-") {
+        let t = load_topo(&f).unwrap();
+        let a = serde_json::to_vec(&t).unwrap();
+        let back: Topo = serde_json::from_slice(&a).unwrap();
+        assert_eq!(back, t, "{}", f.display());
+        assert_eq!(serde_json::to_vec(&back).unwrap(), a, "{}", f.display());
+    }
+    for f in files("tests/fixtures/schema/valid", "package-") {
+        let p = load_package(&f).unwrap();
+        let a = serde_json::to_vec(&p).unwrap();
+        let back: Package = serde_json::from_slice(&a).unwrap();
+        assert_eq!(back, p, "{}", f.display());
+        assert_eq!(serde_json::to_vec(&back).unwrap(), a, "{}", f.display());
+    }
+}
+
+/// "TODO anywhere ⇒ draft" (docs/02) is a loader rule too, and a release entry has neither.
+#[test]
+fn todo_needs_draft_and_release_refuses_both() {
+    let f = repo().join("tests/fixtures/schema/valid/package-assets.yaml");
+    let mut p = load_package(&f).unwrap();
+    assert!(
+        check::package(&p, Rules::Release).is_err(),
+        "draft released"
+    );
+    p.status = rerun_core::catalog::model::Status::Active;
+    let e = check::package(&p, Rules::Source).unwrap_err();
+    assert!(e.to_string().contains("TODO"), "{e}");
+    let f = repo().join("tests/fixtures/schema/valid/topo-minimal.yaml");
+    let mut t = load_topo(&f).unwrap();
+    t.status = rerun_core::catalog::model::Status::Active;
+    if check::topo(&t, Rules::Source).is_ok() {
+        check::topo(&t, Rules::Release).unwrap();
+    }
+}

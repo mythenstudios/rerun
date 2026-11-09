@@ -89,6 +89,27 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// The signed Topo index.
+    Index {
+        /// What to do with it.
+        #[command(subcommand)]
+        command: IndexCommand,
+    },
+}
+
+/// `rerun index`.
+#[derive(Debug, Subcommand)]
+pub enum IndexCommand {
+    /// Checks a signed index and its signature and makes it the current index (never an older
+    /// one).
+    Import {
+        /// The index (index.json, at most 8 MiB).
+        index: PathBuf,
+        /// Its signature (index.json.sig, 64 bytes).
+        sig: PathBuf,
+    },
+    /// The current index: number, date, entries, key.
+    Show,
 }
 
 /// A plan hash: exactly 64 lower-case hex digits, checked before any system access.

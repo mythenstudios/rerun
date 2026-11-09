@@ -61,3 +61,38 @@ fn rerun_exe_runs_with_the_restricted_search_path() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("DLL search path"), "{stderr}");
 }
+
+/// Whether `image` holds the published test key of the signed index (ADR 0024): its seed as
+/// hex text or its public key bytes.
+fn holds_test_key(image: &[u8]) -> bool {
+    use rerun_core::catalog::key::test_key;
+    let seed = test_key::SEED_HEX.as_bytes();
+    let public = test_key::public();
+    let found = |needle: &[u8]| image.windows(needle.len()).any(|w| w == needle);
+    found(seed) || found(public.bytes())
+}
+
+/// ADR 0024: the test key is trusted only with the feature `test-key`, which only
+/// dev-dependencies enable. The test-profile binary has it (the check bites), the release binary
+/// must not (`RERUN_RELEASE_CLI_EXE`, as above).
+#[test]
+fn only_the_test_build_trusts_the_test_key() {
+    let image = std::fs::read(env!("CARGO_BIN_EXE_rerun")).unwrap();
+    assert!(
+        holds_test_key(&image),
+        "the test build should hold the test key: the check would not bite"
+    );
+    let Some(exe) = std::env::var_os("RERUN_RELEASE_CLI_EXE") else {
+        assert!(
+            !hardening::on_github_hosted_runner(),
+            "RERUN_RELEASE_CLI_EXE is not set on a GitHub-hosted runner (ci.yml)"
+        );
+        eprintln!("RERUN_RELEASE_CLI_EXE not set: release binary not checked");
+        return;
+    };
+    let image = std::fs::read(&exe).unwrap();
+    assert!(
+        !holds_test_key(&image),
+        "the release rerun.exe holds the index test key"
+    );
+}

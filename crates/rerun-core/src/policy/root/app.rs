@@ -16,8 +16,9 @@
 //!    as the relative open (volume serial and file ID, else `Busy`), at exactly
 //!    `<canonical LocalAppData>\Rerun` on the same volume (else [`RootError::Escaped`]).
 //!
-//! Below it, [`AppDir::sub`] and [`AppDir::sub_write`] open `journal`, `plans` and
-//! `packages` (and `launch`, read side only) the same way, one directory at a time;
+//! Below it, [`AppDir::sub`] and [`AppDir::sub_write`] open `journal`, `plans`,
+//! `packages` and `index` (ADR 0024), and `launch` read side only, the same way, one
+//! directory at a time;
 //! [`AppDir::profiles`] opens `profiles` as a [`ProfilesDir`], the root of a plan's launch
 //! profile ops (P3-3), and checks that its final path is exactly `<AppDir>\profiles`.
 //!
@@ -57,6 +58,8 @@ pub(crate) enum AppSub {
     /// `launch`: the result files of `rerun-launch` (ADR 0022 amendment P3-2); read only
     /// here, the shim writes them.
     Launch,
+    /// `index`: the accepted signed indexes and the pointer to the current one (ADR 0024).
+    Index,
 }
 
 /// Name of the launch profiles folder (ADR 0022 D2) below [`AppDir`]: deliberately no
@@ -71,6 +74,7 @@ impl AppSub {
             Self::Plans => "plans",
             Self::Packages => "packages",
             Self::Launch => "launch",
+            Self::Index => "index",
         };
         match RelPath::from_segment(name) {
             Ok(p) => p,

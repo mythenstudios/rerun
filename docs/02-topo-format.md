@@ -198,8 +198,8 @@ slots: []                 # occupied DLL names in the game folder
 supports_exe_sha1:
   - "A9EA476E70F076709CCA59A802E26EC894432120"
 files:
-  - { from: "EaglePatchAC1.asi", to: "scripts/EaglePatchAC1.asi" }
-  - { from: "EaglePatchAC1.ini", to: "scripts/EaglePatchAC1.ini", config: true }
+  - { from: "EaglePatchAC1.asi", to: "scripts/EaglePatchAC1.asi", sha256: "TODO" }
+  - { from: "EaglePatchAC1.ini", to: "scripts/EaglePatchAC1.ini", sha256: "TODO", config: true }
 options:
   ps3_controls: { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: false }
   shadows_4096: { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: true, kind: enhancement }
@@ -224,10 +224,26 @@ With `tier: community` (see `05-sources-policy.md`), `source.page` (original pag
 - `requires`: shared dependencies are reference-counted. A package is removed only when nothing needs it anymore. Every referenced ID must exist as a package (test).
 - `requires_gpu`: GPU prerequisites, v1: `[vulkan]`.
 - `supports_exe_sha1`: exe versions the package is built for.
-- `files[]`: `{ from, to, config?, arch?, api? }`. `arch`/`api` restrict an entry to specific architectures or APIs. Folders are derived from `to`.
+- `files[]`: `{ from, to, sha256, config?, arch?, api? }`. `sha256` (required, ADR 0024): the SHA-256 of the file as extracted, computed ourselves; `TODO` only in a draft. `arch`/`api` restrict an entry to specific architectures or APIs. Folders are derived from `to`. One package is one pinned version (user decision E2 a): another version of the same tool is another package (`dxvk-1-10`).
 - `options`: INI values that appear as toggles in the UI; `kind` as for variants. `section` and `key`: `^[A-Za-z0-9_. -]+$`. String `default`: no control characters (no CR/LF), no absolute paths, no `..`. Options are meant to be applied through `ini_set` (ADR 0021), whose rules are narrower: names of 1 to 64 characters without a space at either end, values of 1 to 128 printable ASCII characters without `\ / : % ; # [ ]`, an existing `.ini` file. The package schema is aligned with them when options are implemented (phase 4); until then an option outside them could not be applied.
 - `config: true`: the file is meant to be modified by the user. A revert never overwrites or deletes a file whose content is no longer what Rerun wrote, whether `config` is set or not, and never asks: the change stays unresolved, its backup stays in the journal and `forget` closes it (user decision D10, ADR 0020). `config` is a hint for the preview and for `ini_set` options on that file.
 
 ## Signed index
 
-`index.json` lists all Topos and packages with SHA256. `index.json.sig` = Ed25519 signature. The client checks the signature before parsing anything. The public key is built into the binary.
+ADR 0024. One bundle `index.json` holds every released Topo and package; `index.json.sig` is its detached Ed25519 signature (exactly 64 raw bytes) over the raw bytes of `index.json`.
+
+```json
+{
+  "format": 1,
+  "seq": 12,
+  "issued": "2026-11-09T12:00:00Z",
+  "topos": [ { "format": 1, "id": "assassins-creed-dc", "...": "..." } ],
+  "packages": [ { "format": 1, "id": "eaglepatch-ac1", "...": "..." } ]
+}
+```
+
+- `seq`: from 1, raised for every published index. The client remembers the last one it accepted (`<LocalAppData>\Rerun\index\current.json`) and refuses a lower one (a rollback) and the same number with other bytes.
+- `issued`: UTC, `YYYY-MM-DDTHH:MM:SSZ`.
+- `topos`, `packages`: each entry in exactly the form of this document (the schemas `topo.schema.json`, `package.schema.json`; the bundle itself `index.schema.json`), sorted by `id`, no duplicates. Never `status: draft`, never `TODO` anywhere; every package a Topo step or a `requires` names is in the bundle.
+- The client checks, in this order: size (at most 8 MiB), the signature against the public keys built into the binary (two slots: current and next, for rotation), and only then parses (`deny_unknown_fields`, `RelPath`, hashes) and checks the rules above. Every accepted index is kept by its SHA-256 below `<LocalAppData>\Rerun\index`, so a revert finds the index its transaction was applied with.
+- Built from `topos/` and `packages/` by `rerun-workbench index build --seq <n> --issued <time> <out>` (drafts left out; the same files, `seq` and `issued` give the same bytes), signed offline by `rerun-workbench index sign <bundle> <private-key>`. Until phase 6 the user brings it in with `rerun index import <index.json> <index.json.sig>`; `rerun index show` names the current one.

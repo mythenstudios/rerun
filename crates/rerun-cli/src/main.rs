@@ -1,5 +1,6 @@
 //! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system` and `rerun scan`;
-//! phase 2 (P2-13): `rerun plan`, `apply`, `revert`, `status` and `forget`.
+//! phase 2 (P2-13): `rerun plan`, `apply`, `revert`, `status` and `forget`; phase 4 (P4-3):
+//! `rerun index import` and `rerun index show` (ADR 0024).
 //!
 //! Order in `main`: `restrict_dll_search` first (ADR 0008), then clap parses (`--help`,
 //! `--version` and usage errors, a malformed plan hash or transaction included, end there,
@@ -14,6 +15,7 @@ mod apply;
 mod cli;
 mod confirm;
 mod host;
+mod index;
 mod messages;
 mod out;
 mod plan;
@@ -30,7 +32,7 @@ use clap::Parser;
 
 use rerun_core::escape;
 
-use crate::cli::{Cli, Command, Exit};
+use crate::cli::{Cli, Command, Exit, IndexCommand};
 use crate::host::Host;
 use crate::messages::Message;
 use crate::out::Out;
@@ -130,6 +132,12 @@ fn run<W: io::Write, E: io::Write>(
         } => txn::revert(host, &txn, dry_run, yes, rebind, out, err),
         Command::Status { all } => txn::status(host.sys, all, out, err),
         Command::Forget { txn, yes } => txn::forget(host, &txn, yes, out, err),
+        Command::Index {
+            command: IndexCommand::Import { index, sig },
+        } => index::import(host, &index, &sig, out, err),
+        Command::Index {
+            command: IndexCommand::Show,
+        } => index::show(host, out, err),
     }
 }
 
@@ -141,6 +149,8 @@ fn install_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "the executable path has no parent folder".to_owned())
 }
 
+#[cfg(test)]
+mod index_tests;
 #[cfg(test)]
 mod lm_tests;
 #[cfg(test)]

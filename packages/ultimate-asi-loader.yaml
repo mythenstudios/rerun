@@ -16,4 +16,4 @@ license: "TODO"
 arch: [x86, x64]
 slots: [dinput8.dll]       # default proxy; other names possible depending on the game
 files:
-  - { from: "dinput8.dll", to: "dinput8.dll" }
+  - { from: "dinput8.dll", to: "dinput8.dll", sha256: "TODO" }

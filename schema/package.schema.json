@@ -192,7 +192,8 @@
         "additionalProperties": false,
         "required": [
           "from",
-          "to"
+          "to",
+          "sha256"
         ],
         "properties": {
           "from": {
@@ -200,6 +201,10 @@
           },
           "to": {
             "$ref": "#/$defs/relPath"
+          },
+          "sha256": {
+            "description": "SHA-256 of the extracted file (computed ourselves); required, ADR 0024.",
+            "$ref": "#/$defs/sha256OrTodo"
           },
           "config": {
             "type": "boolean",

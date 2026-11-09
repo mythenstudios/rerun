@@ -95,19 +95,22 @@ jobs:
           RERUN_RELEASE_CLI_EXE: ${{ github.workspace }}/target/release/rerun.exe
         # --profile ci: dev with optimisation (Cargo.toml), debug assertions stay on (docs/09-testing.md).
         run: cargo test --workspace --all-features --locked --profile ci
-      - name: rerun-core fake feature never in shipped binaries
+      - name: rerun-core fake and test-key features never in shipped binaries
         # ADR 0007: the in-memory fake and its TOCTOU hooks stay out of release builds.
+        # ADR 0024: the published test key of the signed index is never trusted by a release build.
         # Features do not depend on the profile; -e normal skips dev-dependencies.
         run: |
-          if ! cargo tree -p rerun-core --features fake -e features -i rerun-core --locked | grep -q 'feature "fake"'; then
-            echo "::error::sanity check failed: the grep pattern no longer matches cargo tree output"
-            exit 1
-          fi
-          for p in rerun-cli; do  # add the Tauri app crate in phase 4
-            if cargo tree -p "$p" -e normal,build,features -i rerun-core --locked | grep -q 'feature "fake"'; then
-              echo "::error::$p enables rerun-core/fake"
+          for f in fake test-key; do
+            if ! cargo tree -p rerun-core --features "$f" -e features -i rerun-core --locked | grep -q "feature \"$f\""; then
+              echo "::error::sanity check failed: the grep pattern no longer matches cargo tree output ($f)"
               exit 1
             fi
+            for p in rerun-cli; do  # add the Tauri app crate in phase 4
+              if cargo tree -p "$p" -e normal,build,features -i rerun-core --locked | grep -q "feature \"$f\""; then
+                echo "::error::$p enables rerun-core/$f"
+                exit 1
+              fi
+            done
           done
       - name: clap without the color feature
         # ADR 0016: clap's `color` feature (anstream) calls SetConsoleMode on the console the

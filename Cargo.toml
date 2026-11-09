@@ -36,8 +36,14 @@ clap = { version = "4.6.7", default-features = false, features = [
 ] }
 # Win32/NT bindings, features chosen per crate (ADR 0008).
 windows-sys = "0.61.2"
+# Ed25519 for the signed index (ADR 0024): pure Rust, MIT, no dependencies without default
+# features (no `random`, `pem`, `x25519`); verification in rerun-core, signing in the workbench.
+ed25519-compact = { version = "2.6.1", default-features = false }
+# The seed of the index key in `rerun-workbench key generate` (OS RNG; workbench only).
+getrandom = "0.3.4"
 
-# Dev dependencies only (schema validation in tests), see ADR 0005.
+# Dev dependencies only (schema validation in tests) and the curator tool rerun-workbench (YAML
+# into the signed index, never shipped), see ADR 0005 and ADR 0024.
 jsonschema = { version = "0.60.2", default-features = false }
 serde-saphyr = "2.0.0"
 

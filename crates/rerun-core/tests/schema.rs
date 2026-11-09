@@ -145,7 +145,12 @@ fn strings(v: &Value, out: &mut Vec<String>) {
 
 #[test]
 fn schemas_are_valid_against_metaschema() {
-    for s in [topo_schema(), package_schema(), gpu_arch_schema()] {
+    for s in [
+        topo_schema(),
+        package_schema(),
+        gpu_arch_schema(),
+        load_json("schema/index.schema.json"),
+    ] {
         jsonschema::meta::validate(&s).unwrap();
         assert_eq!(s["$schema"], "https://json-schema.org/draft/2020-12/schema");
     }

@@ -17,10 +17,11 @@ path = "src/main.rs"
 rerun-core.workspace = true
 clap.workspace = true
 
-# In-process end-to-end tests against the fake system layer (ADR 0016). Never in the shipped
-# build: CI checks that `-e normal,build` of rerun-cli does not enable `fake`.
+# In-process end-to-end tests against the fake system layer (ADR 0016), and the published test
+# key of the signed index (ADR 0024). Never in the shipped build: CI checks that
+# `-e normal,build` of rerun-cli enables neither `fake` nor `test-key`.
 [dev-dependencies]
-rerun-core = { workspace = true, features = ["fake"] }
+rerun-core = { workspace = true, features = ["fake", "test-key"] }
 
 [lints]
 workspace = true

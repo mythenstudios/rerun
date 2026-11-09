@@ -7,6 +7,7 @@
 //! ASCII; untrusted fields enter only as [`Shown`], which only `rerun_core::escape` creates.
 //! Untrusted text stands last on its line where possible, so a name cannot pose as a marker.
 
+mod index;
 mod launch;
 mod profile;
 mod txn;
@@ -20,6 +21,7 @@ use rerun_core::detect::steam::{AppState, RootSource};
 use rerun_core::escape::Shown;
 use rerun_core::hw::GpuVendor;
 
+pub use index::IndexMsg;
 pub use launch::{LaunchMsg, Utc};
 #[cfg(test)]
 pub(crate) use profile::size as size_text;
@@ -409,6 +411,8 @@ pub enum Message<'a> {
     Launch(LaunchMsg<'a>),
     /// A line about a launch profile (P3-3d).
     Profile(ProfileMsg<'a>),
+    /// A line about the signed index (ADR 0024).
+    Index(IndexMsg<'a>),
     /// A usage error, formatted by Rerun (security review N5): the user's own value only
     /// through `escape::text`, last on the line.
     Usage {
@@ -840,6 +844,7 @@ impl fmt::Display for Message<'_> {
             Self::Txn(m) => write!(f, "{m}"),
             Self::Launch(m) => write!(f, "{m}"),
             Self::Profile(m) => write!(f, "{m}"),
+            Self::Index(m) => write!(f, "{m}"),
             Self::Usage { what, why, value } => {
                 write!(f, "rerun: {what}")?;
                 if let Some(why) = why {

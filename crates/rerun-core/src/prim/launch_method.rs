@@ -109,30 +109,31 @@ pub enum MethodSpec {
     Auto,
 }
 
-/// A CPU rule of `docs/02-topo-format.md`: every field optional, at least one given.
+/// A CPU rule of `docs/02-topo-format.md`: every field optional, at least one given. A field
+/// that is not given is not written (the Topo bundle, ADR 0024).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CpuRuleSpec {
     /// At most this many logical processors, 1 to 1024.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_threads: Option<u16>,
     /// Default `any`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefer: Option<PreferSpec>,
     /// Default `false`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub single_l3: Option<bool>,
     /// Default none.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefer_l3: Option<PreferL3Spec>,
     /// Default `true`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smt: Option<bool>,
     /// Default `hard`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ModeSpec>,
     /// Only with `inproc` (phase 6): refused.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_cores: Option<u16>,
 }
 

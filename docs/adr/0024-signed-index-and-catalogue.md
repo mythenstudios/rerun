@@ -1,0 +1,50 @@
+# ADR 0024 · Signed index and catalogue
+
+**Status:** accepted · 2026-11-09 · extends ADR 0005, ADR 0019 · phase 4, step P4-3
+
+## Context
+From phase 4 Topos and packages decide what Rerun plans, and later what the elevated helper may do (ADR 0007: "no exe hash, no elevated apply"). They come from a repository Rerun does not control at runtime, so they must reach the client as signed data that Rerun can tell from a forgery, a damaged copy and an old copy replayed. ADR 0005 named the typed serde structs the runtime authority from phase 4; until now only the JSON Schemas existed. The plan of phase 4 (user decisions E2, E5; conditions R1, R6) fixed the frame: one signed bundle, an Ed25519 key generated offline with a rotation slot, a test key only behind a feature, one pinned version per package, and the bytes of the index a transaction was applied with kept for its revert.
+
+## Decision
+
+### One bundle, signed over its raw bytes
+- `index.json` holds every released Topo and every released package: `{ "format": 1, "seq": <n>, "issued": "YYYY-MM-DDTHH:MM:SSZ", "topos": [...], "packages": [...] }`, both lists sorted by `id` without duplicates (`schema/index.schema.json`; each entry in the language of `topo.schema.json` and `package.schema.json`).
+- `index.json.sig` is the detached Ed25519 signature over the raw bytes of `index.json`: exactly 64 bytes, no encoding, no header. The key signs index bundles only.
+- The client (`rerun_core::catalog`) works in a fixed order and skips nothing: (1) at most `MAX_INDEX_BYTES` (8 MiB) and a signature of exactly 64 bytes, (2) the signature verified under one of the trusted keys, (3) only then the bytes parsed as UTF-8 JSON (`format` first, then `deny_unknown_fields` at every level, `RelPath` for every path, hashes as typed values), (4) the form rules of `catalog::check` with `Rules::Release` on every entry (no `status: draft`, no `TODO` anywhere), sorted IDs, every package a Topo or package names present. A `Catalog` can only be built from a `Verified`, and a `Verified` only by `verify`. A parse error names its class, line and column, never the text.
+
+### Keys and rotation
+- `catalog::key::RELEASE_KEYS` has two slots of raw 32-byte public keys: the current key and its successor. Rotation ships a binary that already trusts the next key, then the index is signed with it; the old slot is cleared one release later. `KeyId` = the first 8 bytes of SHA-256 over the public key, shown by `rerun index show` and the workbench.
+- Both slots are empty until the user generates the release key offline (`rerun-workbench key generate <out-dir>`). With no key every index is refused with a clear message (`IndexError::NoKeys`).
+- The private key is a 32-byte seed in a file of 64 hex digits, written only with `create_new` into an existing folder that is neither this repository nor any Git working tree (a `.git` entry on the way up); `index sign` reads a key only from such a folder too. It is never in the repository.
+- The test key is published (its seed is in `catalog::key::test_key`). It is trusted only with the cargo feature `test-key`, which only dev-dependencies enable. Guards: a unit test (no release slot holds a test key; without the feature the trusted set is exactly the release set), CI (`cargo tree -e normal,build` of `rerun-cli` enables neither `fake` nor `test-key`), and the release binary test (the release `rerun.exe` holds neither the test seed nor the test public key; the test build must hold them, so the check bites).
+
+### Sequence and storage (`<AppDir>\index`)
+- `<sha256>.json` and `<sha256>.sig`: every accepted index and its signature, named by the SHA-256 of the bytes, written with `create_new` (a damaged copy is replaced through `FileGuard::replace`). Rerun deletes none of them in phase 4.
+- `current.json` = `{"format":1,"seq":<n>,"sha256":"<hex>"}`: the last accepted index. `import` refuses a lower `seq` (rollback) and the same `seq` with other bytes; the same bytes again are "already current". `lock` (share 0) is held by `import`. Order: index and signature, flush, then the pointer, flush; a crash leaves the old pointer.
+- Everything there is user-writable (`docs/06-security.md` #14): `current` reads the pointer, the bytes bounded, checks their hash against the name, verifies the signature and parses again; a pointer that disagrees with its index is `Damaged`. The `seq` floor protects against an old index replayed from outside (a mirror, a download, a user tricked into importing it), not against a process of the user that rewrites `current.json`: such a process can change anything below `<AppDir>`, and the signature still binds every entry to the key.
+- **Revert reads the index it was applied with (P4 condition R1):** `catalog::store::by_hash(app, sha256, keys)` reads `<sha256>.json` by its hash with the signature check and without any `seq` floor. A plan built from a Topo (P4-4, `PlanSource`) names the hash; the helper (ADR 0023) gets those bytes and checks only the signature. A revert therefore never depends on the current index, its `seq` or a hash that changed since.
+
+### Typed catalogue (ADR 0005, runtime authority)
+- `catalog::model`: `Topo`, `Package`, `Index` and their parts, `deny_unknown_fields` everywhere, an optional field refuses an explicit `null`, a list with `minItems: 1` is an `Option<Vec<_>>`, maps are `BTreeMap`. The planners' step types are reused (`RegistrySetSpec`, `CompatLayerSpec`, `IniSetSpec`, `CpuRuleSpec`); their rules in force now (token allowlist, the INI value rule, the game folder) stay the planners'.
+- `catalog::check`: the schema rules the types cannot carry (patterns of IDs, URLs per source type, licence, version, DLL names, lengths, unique items, the download forms), plus loader-only rules: unique issue IDs per Topo and variant IDs per issue, the registry vendor deny list and unique value names, the `qword` range, download provenance, `TODO` ⇒ `draft`. `Rules::Source` is a file of `topos/` or `packages/`; `Rules::Release` an entry of the index.
+- Parity: the typed loader and the schemas run against the same fixtures (`tests/fixtures/schema/`, `crates/rerun-core/tests/catalog_parity.rs` next to `tests/schema.rs`): every valid fixture loads, every invalid one is refused.
+- Packages (user decision E2 a): one package is one pinned version; another version is another package (`dxvk-1-10`). `files[].sha256` is required (`TODO` only in a draft): every file a package installs is anchored by its own hash.
+- **sha256 for elevated anchors (P4 condition R6):** `match.exes[].sha256` stays optional in the format (old games are documented by SHA-1), but an executable that anchors an elevated op (the target of `firewall_rule`, P4-5; `laa_patch`) must carry a `sha256`; `sha1` alone never anchors anything elevated. The loader rule enters with the first such step.
+
+### The workbench builds and signs, offline
+- `rerun-workbench index build --seq <n> --issued <time> [--root <repo>] <out>`: every file of `topos/` and `packages/` loaded like the runtime loader (strict YAML without anchors or aliases, typed structs, `Rules::Source`, file name = ID); drafts left out; a released Topo that needs a package left out fails the build; the bytes are a function of the files, `seq` and `issued` only (sorted, typed, pretty JSON with a final newline) and must read back as the same index. `seq` and `issued` are arguments, never the clock: the same input gives the same bytes.
+- `rerun-workbench index sign <bundle> <private-key>` signs only a bundle that passes the client's index rules, verifies its own signature and writes `<bundle>.sig`.
+- `rerun-workbench` is a curator tool, never shipped: it uses `std::fs`, `serde-saphyr`, the signing half of `ed25519-compact` and `getrandom` (the key seed).
+
+### Distribution until phase 6
+- No network in this step. `rerun index import <index.json> <index.json.sig>` reads both files through `policy::root::read_input` (bounded, plain files), verifies and checks before Rerun's folder is created, then stores; `rerun index show` reads the current index back like an import. Elevated, `import` is refused (user decision E3). A download (P4-6) and a bundled index (user decision E5) use the same `catalog::store::import`.
+
+### Dependency
+`ed25519-compact` 2.6 (MIT, Frank Denis, maintained, pure Rust, no dependencies without default features; about 5,000 lines of source plus precomputed tables): `rerun-core` uses it for verification only (`default-features = false`: no `random`, `pem`, `x25519`). `ed25519-dalek` would bring `curve25519-dalek` and a second `sha2` major version.
+
+## Consequences
+- A forged, damaged, truncated or foreign-signed index is refused before a byte of it is parsed; an old one cannot replace a newer one.
+- Until the release key exists, every real index is refused: development and tests use the test key behind `test-key`.
+- The Topo engine (P4-4) plans from a `Catalog` only, names the index hash in the plan, and the helper (P4-2, ADR 0023) checks the signature of exactly those bytes again.
+- Stored indexes accumulate below `<AppDir>\index`; cleaning up old ones that no open transaction names is left for later (at most a few MiB each).
+- The format of a package changed (`files[].sha256` required); `format` stays 1 because no index was ever published (ADR 0005).
