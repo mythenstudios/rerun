@@ -95,7 +95,11 @@ fn sandbox_gate_needs_all_three_conditions() {
         );
     }
     // The flag alone, or the account name alone (a developer who sets one by habit), refuses.
-    assert!(!ok(Some("1"), Some("developer"), Some(r"C:\Users\developer")));
+    assert!(!ok(
+        Some("1"),
+        Some("developer"),
+        Some(r"C:\Users\developer")
+    ));
     assert!(!ok(None, Some("WDAGUtilityAccount"), Some(OK_PROFILE)));
     // The account name only as a prefix or a parent folder is not the account.
     assert!(!ok(
