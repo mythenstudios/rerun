@@ -43,6 +43,17 @@ try {
         if ($exit -ne 0) { throw "cargo build -p $pkg --release failed (run it by hand to see why)" }
     }
 } finally { Pop-Location }
+# The 32-bit test program of the VirtualStore case (P4-0), built from the source in the repo (no
+# third-party binary): no manifest, i686 (rust-toolchain.toml lists the target). Built into
+# target\sandbox\stub, staged with the other binaries below.
+$stubSrc = Join-Path $repo 'tests\support\vstore_stub.rs'
+$stubExe = Join-Path $root 'stub\vstore-stub.exe'
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stubExe) | Out-Null
+$ErrorActionPreference = 'Continue'
+& rustc --edition 2024 --target i686-pc-windows-msvc -C opt-level=s -o $stubExe $stubSrc 2>$null | Out-Null
+$exit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($exit -ne 0 -or -not (Test-Path -LiteralPath $stubExe)) { throw "building the VirtualStore test program failed (run: rustc --edition 2024 --target i686-pc-windows-msvc -o $stubExe $stubSrc)" }
 $cliExe = Join-Path $repo 'target\release\rerun.exe'
 $shimExe = Join-Path $repo 'target\release\rerun-launch.exe'
 if (-not (Test-Path -LiteralPath $cliExe)) { throw "release rerun.exe missing: $cliExe" }
@@ -67,6 +78,8 @@ Copy-Item -LiteralPath $cliExe -Destination (Join-Path $bin 'rerun.exe') -Force
 Write-Host "staged $cliExe -> $bin\rerun.exe"
 Copy-Item -LiteralPath $shimExe -Destination (Join-Path $bin 'rerun-launch.exe') -Force
 Write-Host "staged $shimExe -> $bin\rerun-launch.exe"
+Copy-Item -LiteralPath $stubExe -Destination (Join-Path $bin 'vstore-stub.exe') -Force
+Write-Host "staged $stubExe -> $bin\vstore-stub.exe"
 if (Test-Path -LiteralPath (Join-Path $tools 'Procmon64.exe')) { Write-Host 'Procmon64.exe found: the probes will use it' }
 if ($StageOnly) { return }
 

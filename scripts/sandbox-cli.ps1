@@ -220,6 +220,73 @@ function New-SteamLayout {
     Set-ItemProperty -LiteralPath $steamKey -Name SteamPath -Value $lmRoot -Type String
 }
 
+# ---- SB-L7 (P4-0): a layer takes effect when the shim starts the exe with Steam's spelling ------
+# A HIGHDPIAWARE layer under the canonical path of game.exe (the value name, case as written by
+# the plan); the program is started (a) directly and (b) through rerun-launch.exe with an argv[0]
+# that differs from it only in case (upper and lower; Steam spells the path as its library
+# folder stores it). Observed the way SB-L2/SB-L3 observe layers: `__COMPAT_LAYER` in the
+# environment of the started copy of cmd.exe. The verdict is a fact, not a pass:
+#   applied          both shim spellings carry the layer
+#   not_applied      the layer is observable (direct, canonical spelling) but a shim spelling lacks it
+#   not_observable   the layer is not visible even for the direct canonical start, or the no-value
+#                    control already shows one: this runner cannot show layers, nothing is claimed
+#   error            the case itself failed (detail)
+# ci-sandbox.ps1 fails on not_applied and error and prints a warning for not_observable.
+function Invoke-SbL7 {
+    $r = [ordered]@{ verdict = 'error'; layer = '~ HIGHDPIAWARE'; value_name = $lmExe; rows = [ordered]@{}; detail = '' }
+    $outFile = Join-Path $root 'l7.txt'
+    $spellings = [ordered]@{ canonical = $lmExe; upper = $lmExe.ToUpperInvariant(); lower = $lmExe.ToLowerInvariant() }
+    $tail = "/d /q /c set __COMPAT_LAYER>$outFile"
+    # One start; the row text is what the started copy saw, or why there is nothing to see.
+    function Observe([bool]$viaShim, [string]$spelling) {
+        Remove-Item -LiteralPath $outFile -Force -ErrorAction SilentlyContinue
+        if ($viaShim) { $proc = Start-Process -FilePath $launchExe -ArgumentList "--profile $lmId `"$spelling`" $tail" -PassThru }
+        else { $proc = Start-Process -FilePath $spelling -ArgumentList $tail -PassThru }
+        if (-not $proc.WaitForExit(20000)) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; return 'timeout' }
+        Start-Sleep -Milliseconds 300
+        if (-not (Test-Path -LiteralPath $outFile)) { return "no output (exit $($proc.ExitCode))" }
+        $t = [string](Get-Content -LiteralPath $outFile -Raw)
+        $m = [regex]::Match($t, '__COMPAT_LAYER=(?<v>[^\r\n]*)')
+        if ($m.Success) { return "set: $($m.Groups['v'].Value.Trim())" }
+        'not set'
+    }
+    try {
+        Remove-Item Env:\__COMPAT_LAYER -ErrorAction SilentlyContinue
+        $r.rows.control_no_value = Observe $false $spellings.canonical
+        $madeKey = -not (Test-Path -LiteralPath $layersKey)
+        New-Item -Force -Path $layersKey | Out-Null
+        New-ItemProperty -LiteralPath $layersKey -Name $lmExe -Value $r.layer -PropertyType String -Force | Out-Null
+        foreach ($k in $spellings.Keys) { $r.rows["direct_$k"] = Observe $false $spellings[$k] }
+        foreach ($k in 'upper', 'lower') { $r.rows["shim_$k"] = Observe $true $spellings[$k] }
+        $has = { param($row) $row -match '^set: .*HighDpiAware' }
+        if ($r.rows.control_no_value -notmatch '^not set$') {
+            $r.verdict = 'not_observable'
+            $r.detail = "the control without a layer value already shows: $($r.rows.control_no_value)"
+        } elseif (-not (& $has $r.rows.direct_canonical)) {
+            $r.verdict = 'not_observable'
+            $r.detail = "a HIGHDPIAWARE value under the canonical path is not visible as __COMPAT_LAYER even for the direct canonical start: $($r.rows.direct_canonical)"
+        } elseif ((& $has $r.rows.shim_upper) -and (& $has $r.rows.shim_lower)) {
+            $r.verdict = 'applied'
+        } else {
+            $r.verdict = 'not_applied'
+            $r.detail = "the layer is visible for the direct canonical start but not for every shim spelling: shim_upper = $($r.rows.shim_upper); shim_lower = $($r.rows.shim_lower)"
+        }
+    } catch {
+        $r.detail = "$_"
+    } finally {
+        try {
+            Remove-ItemProperty -LiteralPath $layersKey -Name $lmExe -ErrorAction SilentlyContinue
+            # A Layers key this case created is removed again (an empty one is all that could be left).
+            if ($madeKey -and (Test-Path -LiteralPath $layersKey) -and (Get-Item -LiteralPath $layersKey).ValueCount -eq 0 -and (Get-Item -LiteralPath $layersKey).SubKeyCount -eq 0) { Remove-Item -LiteralPath $layersKey -Force }
+        } catch { }
+        Get-Process -Name game, ping -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq 'ping' -or $_.Path -eq $lmExe } | Stop-Process -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $outFile -Force -ErrorAction SilentlyContinue
+    }
+    Add-Content -LiteralPath $log -Value ("`n=== SB-L7 (P4-0) ===`n" + (($r.rows.GetEnumerator() | ForEach-Object { "$($_.Key): $($_.Value)" }) -join "`n") + "`nverdict: $($r.verdict) $($r.detail)")
+    $r
+}
+
 function Invoke-LaunchMethod {
     $lm = [ordered]@{ checks = [ordered]@{}; expected = $false; error = '' }
     $c = $lm.checks
@@ -304,6 +371,9 @@ function Invoke-LaunchMethod {
         Get-Process -Name game, ping -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -eq 'ping' -or $_.Path -eq $lmExe } | Stop-Process -Force -ErrorAction SilentlyContinue
         if (-not $shim.WaitForExit(15000)) { Stop-Process -Id $shim.Id -Force -ErrorAction SilentlyContinue }
+
+        # SB-L7 while the profile exists (a measurement, never a check of `expected`).
+        $lm.sb_l7 = Invoke-SbL7
 
         $r = Invoke-Rerun revert $txn --yes
         $c.revert_exit = $r.Code
@@ -534,11 +604,97 @@ function Invoke-LaunchWatch {
     $lw
 }
 
+# ---- VirtualStore, the real case (P4-0) --------------------------------------------------------
+# A 32-bit test program without a manifest (tests/support/vstore_stub.rs, built from source by
+# sandbox-launch.ps1) writes settings.ini in its own folder under Program Files as the standard
+# user: UAC file virtualization puts the copy into %LOCALAPPDATA%\VirtualStore\Program Files\...
+# and `rerun plan --dry-run` for a step that manages that settings.ini must then warn and name
+# the copy (P3-7). ci-sandbox.ps1 (as the runner's administrator) prepares the folder
+# C:\Program Files\RerunVsCase with game.exe (the stub) and a settings.ini; this script never
+# writes there, only the stub does, and it is refused or virtualized. Elsewhere (the Windows
+# Sandbox) the folder is absent and the case is skipped.
+# Verdict (a fact, like SB-L7):
+#   ok                virtualized, the real file untouched, no warning before, a warning naming the copy after
+#   not_virtualized   the stub's write was refused or left no copy: virtualization is off here
+#                     (UAC state in `uac`; ci-sandbox.ps1 fails only when UAC is on)
+#   no_warning        the copy exists and Rerun does not warn (a product bug)
+#   skipped, error    detail says why
+$vsDir = 'C:\Program Files\RerunVsCase'
+function Invoke-VirtualStore {
+    $v = [ordered]@{ verdict = 'error'; detail = ''; uac = Get-UacState; stub_exit = $null; stub_output = ''; copy = ''; plan_before = ''; plan_after = '' }
+    $exe = Join-Path $vsDir 'game.exe'
+    $ini = Join-Path $vsDir 'settings.ini'
+    if (-not ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $ini))) {
+        $v.verdict = 'skipped'
+        $v.detail = "$vsDir is not prepared (only ci-sandbox.ps1 prepares it, as the runner's administrator)"
+        return $v
+    }
+    try {
+        # The image: i686, no manifest (a manifest with a requestedExecutionLevel switches
+        # virtualization off, so a stub that has one would measure nothing).
+        $bytes = [IO.File]::ReadAllBytes($exe)
+        $peAt = [BitConverter]::ToInt32($bytes, 0x3C)
+        $machine = [BitConverter]::ToUInt16($bytes, $peAt + 4)
+        $latin = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
+        $v.image_machine = '0x{0:x}' -f $machine
+        $v.image_manifest = $latin.Contains('requestedExecutionLevel') -or $latin.Contains('<assembly')
+        if ($machine -ne 0x14c) { throw "the test program is not an i686 image (machine $($v.image_machine))" }
+        if ($v.image_manifest) { throw 'the test program carries a manifest: it would not be virtualized' }
+
+        $copy = Join-Path $env:LOCALAPPDATA 'VirtualStore\Program Files\RerunVsCase\settings.ini'
+        $v.copy = $copy
+        if (Test-Path -LiteralPath $copy) { throw "a VirtualStore copy exists before the stub ran: $copy" }
+        $hashBefore = (Get-FileHash -LiteralPath $ini -Algorithm SHA256).Hash
+        $folder = $vsDir.Replace('\', '\\')
+        $vsSteps = Join-Path $root 'steps-vs.json'
+        Write-Plain $vsSteps ('{"format":1,"game":{"folder":"' + $folder + '"},"main_exe":"game.exe","steps":[{"ini_set":{"file":"settings.ini","values":[{"section":"Display","key":"Width","value":"1920"}]}}]}')
+        Add-Content -LiteralPath $log -Value "`n=== VirtualStore (P4-0) ==="
+        $before = Invoke-Rerun plan $vsSteps --dry-run
+        $v.plan_before = "exit $($before.Code)"
+        if ($before.Code -ne 0) { throw "plan --dry-run for a folder under Program Files failed before the stub ran (exit $($before.Code)): $(($before.Text -split "`n" | Select-Object -First 3) -join ' | ')" }
+        if ($before.Text.Contains('Windows keeps a VirtualStore copy')) { throw 'the plan warned about a VirtualStore copy before there was one' }
+
+        $ErrorActionPreference = 'Continue'
+        $o = & $exe 2>&1 | ForEach-Object { "$_" }
+        $v.stub_exit = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        $v.stub_output = ($o -join ' ')
+        Add-Content -LiteralPath $log -Value "stub exit $($v.stub_exit): $($v.stub_output)"
+        $exists = Test-Path -LiteralPath $copy
+        $unchanged = (Get-FileHash -LiteralPath $ini -Algorithm SHA256).Hash -eq $hashBefore
+        $v.copy_exists = $exists
+        $v.real_file_unchanged = $unchanged
+        if ($v.stub_exit -ne 0 -or -not $exists) {
+            $v.verdict = 'not_virtualized'
+            $v.detail = "the stub exited $($v.stub_exit) ($($v.stub_output)); copy exists: $exists; real file unchanged: $unchanged. UAC: EnableLUA=$($v.uac.EnableLUA), EnableVirtualization=$($v.uac.EnableVirtualization)"
+            return $v
+        }
+        if (-not $unchanged) { throw 'the stub changed the real settings.ini: the write was not virtualized but allowed (the folder is writable for this user)' }
+
+        $after = Invoke-Rerun plan $vsSteps --dry-run
+        $v.plan_after = "exit $($after.Code)"
+        $warns = $after.Text.Contains('Windows keeps a VirtualStore copy')
+        $names = $after.Text.IndexOf($copy, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        $v.plan_warns = $warns
+        $v.plan_names_the_copy = $names
+        if ($after.Code -eq 0 -and $warns -and $names) { $v.verdict = 'ok' }
+        else {
+            $v.verdict = 'no_warning'
+            $v.detail = "a copy exists at $copy but plan --dry-run (exit $($after.Code)) warns: $warns, names the copy: $names (see cli.log)"
+        }
+    } catch {
+        $v.detail = "$_"
+    }
+    $v
+}
+
 $lm = $null
 $lw = $null
+$vs = $null
 if (-not $Elevated) {
     $lm = Invoke-LaunchMethod
     $lw = Invoke-LaunchWatch
+    $vs = Invoke-VirtualStore
 }
 [ordered]@{
     runs          = $runs
@@ -547,5 +703,6 @@ if (-not $Elevated) {
     elevated      = $Elevated
     launch_method = if ($lm) { $lm } else { 'skipped: elevated' }
     launch_watch  = if ($lw) { $lw } else { 'skipped: elevated' }
+    virtualstore  = if ($vs) { $vs } else { 'skipped: elevated' }
     note          = if ($Elevated) { 'elevated: the refusal (exit 3) of plan is the expected result' } else { '' }
 }

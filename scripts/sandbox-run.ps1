@@ -74,6 +74,10 @@ $build = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion')
 $started = Get-Date
 $note = ''
 Status "start: account $env:USERNAME, elevated=$elevated, build $build"
+# P4-0: the UAC state of this machine, measured and logged (it decides what a runner can show:
+# file virtualization, the elevation prompt of the helper in phase 4).
+$uac = Get-UacState
+Status ('UAC: ' + (($uac.Keys | ForEach-Object { "$_=" + $(if ($null -eq $uac[$_]) { '<absent>' } else { $uac[$_] }) }) -join ', '))
 
 # Elevated session with UAC off: turn UAC on and restart the Sandbox (see the header).
 $uacKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
@@ -143,6 +147,7 @@ try {
         failed    = $failed
         user      = $env:USERNAME
         elevated  = $elevated
+        uac       = $uac
         note      = $note
         error     = $err
         os_build  = $build
@@ -152,7 +157,7 @@ try {
         ci        = [bool]$Ci
         cli_only  = [bool]$CliOnly
     }
-    $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'result.json') -Encoding UTF8
+    $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $out 'result.json') -Encoding UTF8
 }
 
 # Facts for the compatibility layer (P2-11): a failure here never changes the test result.

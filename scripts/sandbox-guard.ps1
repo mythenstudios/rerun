@@ -29,3 +29,17 @@ function Test-SandboxGuard {
     return ($accounts -contains $tokenUser -and $env:USERNAME -eq $tokenUser -and
         $env:USERPROFILE -match ('\\' + [regex]::Escape($tokenUser) + '\\?$') -and $Script -eq $Expected)
 }
+
+# The UAC policy of this machine (read only), so that a result that depends on it (UAC file
+# virtualization, the shape of an elevation prompt) can be read later. A missing value is $null.
+# EnableVirtualization is the policy value of the same name (absent = the default, on).
+function Get-UacState {
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    $p = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+    [ordered]@{
+        EnableLUA                  = if ($p) { $p.EnableLUA } else { $null }
+        ConsentPromptBehaviorAdmin = if ($p) { $p.ConsentPromptBehaviorAdmin } else { $null }
+        PromptOnSecureDesktop      = if ($p) { $p.PromptOnSecureDesktop } else { $null }
+        EnableVirtualization       = if ($p) { $p.EnableVirtualization } else { $null }
+    }
+}

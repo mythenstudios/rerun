@@ -57,7 +57,7 @@ Section 'stage binaries and scripts (C:\sandbox)'
 # target\sandbox\bin (the builds of the previous workflow steps are reused from the cache).
 & (Join-Path $PSScriptRoot 'sandbox-launch.ps1') -StageOnly
 $staged = Join-Path $repo 'target\sandbox\bin'
-foreach ($f in 'rerun-core-tests.exe', 'rerun.exe', 'rerun-launch.exe') {
+foreach ($f in 'rerun-core-tests.exe', 'rerun.exe', 'rerun-launch.exe', 'vstore-stub.exe') {
     if (-not (Test-Path -LiteralPath (Join-Path $staged $f))) { throw "not staged: $f" }
 }
 New-Item -ItemType Directory -Force -Path "$sb\scripts", "$sb\bin", "$sb\out\nonelevated", "$sb\out\elevated", $game | Out-Null
@@ -84,6 +84,20 @@ foreach ($d in $sb, $game) { & icacls $d /inheritance:r | Out-Null }
 & icacls "$sb\out" /grant "${user}:(OI)(CI)M" | Out-Null
 & icacls $game /grant 'SYSTEM:(OI)(CI)F' /grant 'Administrators:(OI)(CI)F' /grant "${user}:(OI)(CI)M" | Out-Null
 Write-Host "user $user created (member of Users only)"
+EndSection
+
+# ---- the VirtualStore folder (P4-0) -----------------------------------------------------------
+# As the runner's administrator, before pass 1: a folder under Program Files that a standard user
+# cannot write (the inherited ACL: Users read and execute), with the 32-bit test program as
+# game.exe and a settings.ini. Pass 1 starts that program as $user; its write is virtualized.
+# Removed again at the end (and here first, if an earlier run left it).
+$vsDir = 'C:\Program Files\RerunVsCase'
+Section 'prepare the VirtualStore case folder (admin-only, under Program Files)'
+if (Test-Path -LiteralPath $vsDir) { Remove-Item -LiteralPath $vsDir -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $vsDir | Out-Null
+Copy-Item -LiteralPath "$sb\bin\vstore-stub.exe" -Destination "$vsDir\game.exe" -Force
+[IO.File]::WriteAllText("$vsDir\settings.ini", "[Display]`r`nWidth=1280`r`nHeight=720`r`n", (New-Object Text.UTF8Encoding $false))
+& icacls $vsDir
 EndSection
 
 # ---- pass 1: non-elevated ---------------------------------------------------------------------
@@ -170,6 +184,43 @@ if (-not $r1) {
     if ($r1.cli -and $r1.cli.launch_method -and $r1.cli.launch_method.failed) { Fail "pass 1: launch_method checks failed: $($r1.cli.launch_method.failed -join ', ')" }
     if ($r1.cli -and $r1.cli.launch_watch -and $r1.cli.launch_watch.failed) { Fail "pass 1: launch_method watch checks failed: $($r1.cli.launch_watch.failed -join ', ')" }
     if ($r1.cli -and $r1.cli.launch_watch -and $r1.cli.launch_watch.error) { Fail "pass 1: launch_method watch error: $($r1.cli.launch_watch.error)" }
+
+    # P4-0: the UAC state of the runner (a measurement, printed so the log and docs/09 can quote it).
+    if ($r1.uac) {
+        Write-Host ("MEASURED UAC (pass 1, runner): EnableLUA={0}, ConsentPromptBehaviorAdmin={1}, PromptOnSecureDesktop={2}, EnableVirtualization={3} (empty = value absent)" -f `
+            $r1.uac.EnableLUA, $r1.uac.ConsentPromptBehaviorAdmin, $r1.uac.PromptOnSecureDesktop, $r1.uac.EnableVirtualization)
+    } else { Fail 'pass 1: result.json has no uac object (the UAC state was not measured)' }
+
+    # P4-0, SB-L7: a layer applies when the shim starts the exe with Steam's spelling of argv[0].
+    $l7 = if ($r1.cli -and $r1.cli.launch_method) { $r1.cli.launch_method.sb_l7 } else { $null }
+    if (-not $l7) { Fail 'pass 1: SB-L7 did not run (no cli.launch_method.sb_l7 in result.json)' }
+    else {
+        Write-Host ("MEASURED SB-L7: verdict={0}; rows: {1}" -f $l7.verdict, (($l7.rows.PSObject.Properties | ForEach-Object { "$($_.Name) = $($_.Value)" }) -join '; '))
+        switch ($l7.verdict) {
+            'applied' { Write-Host 'SB-L7: the layer applied for both shim spellings (upper and lower case of argv[0])' }
+            'not_observable' { Write-Host "::warning::SB-L7 NOT VERIFIED: layers cannot be observed on this runner ($($l7.detail)). Nothing is claimed; the case stays open in docs/09-testing.md" }
+            'not_applied' { Fail "SB-L7: a layer set for the exe does NOT apply when the shim starts it with another spelling of argv[0]: $($l7.detail)" }
+            default { Fail "SB-L7: the probe failed (verdict $($l7.verdict)): $($l7.detail)" }
+        }
+    }
+
+    # P4-0, the real VirtualStore case: i686 test program without a manifest as the standard user.
+    $vs = if ($r1.cli) { $r1.cli.virtualstore } else { $null }
+    if (-not $vs -or $vs -is [string]) { Fail 'pass 1: the VirtualStore case did not run (no cli.virtualstore object in result.json)' }
+    else {
+        Write-Host ("MEASURED VirtualStore: verdict={0}; stub exit {1} ({2}); copy exists={3}; real file unchanged={4}; plan warns={5}, names the copy={6}; copy path {7}" -f `
+            $vs.verdict, $vs.stub_exit, $vs.stub_output, $vs.copy_exists, $vs.real_file_unchanged, $vs.plan_warns, $vs.plan_names_the_copy, $vs.copy)
+        switch ($vs.verdict) {
+            'ok' { Write-Host 'VirtualStore: a copy appeared under the user''s VirtualStore and plan --dry-run warned and named it' }
+            'not_virtualized' {
+                $on = ($vs.uac.EnableLUA -eq 1) -and ($vs.uac.EnableVirtualization -ne 0)
+                if ($on) { Fail "VirtualStore: UAC is on (EnableLUA=1) but the stub's write was not virtualized: $($vs.detail)" }
+                else { Write-Host "::warning::VirtualStore NOT VERIFIED: file virtualization is off on this runner (EnableLUA=$($vs.uac.EnableLUA), EnableVirtualization=$($vs.uac.EnableVirtualization)); the real case stays open in docs/09-testing.md. $($vs.detail)" }
+            }
+            'no_warning' { Fail "VirtualStore: $($vs.detail)" }
+            default { Fail "VirtualStore: the case failed (verdict $($vs.verdict)): $($vs.detail)" }
+        }
+    }
 }
 EndSection
 
@@ -195,6 +246,7 @@ EndSection
 
 # ---- clean up and verdict ---------------------------------------------------------------------
 try { Unregister-ScheduledTask -TaskName 'RerunCiSandbox' -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+try { Remove-Item -LiteralPath $vsDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
 Section 'verdict'
 if ($script:failed) { Write-Host '::error::sandbox suite FAILED (see the groups above and the sandbox-suite artifact)'; EndSection; exit 1 }
 Write-Host 'sandbox suite passed (non-elevated and elevated pass)'
