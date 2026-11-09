@@ -38,7 +38,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 **Acceptance:** A Steam game launches via `rerun-launch` with 8 threads on one CCD, the check reports `ok`. A Ubisoft game via Steam with `watch` as well. **Accepted 2026-11-09** ([DEV] Stronghold 2 with `direct` on 2026-11-08: `0x5555`, 8 threads on CCD 0 in a job, `applied`/`ok`/`hard:8:32`, revert closed; [DEV] AC Black Flag Resynced through Ubisoft Connect with `watch` on 2026-11-09: the game in a job with `0x5555`, the launcher chain untouched, `ok`, revert closed; docs/09; the CI sandbox suite green including `direct` and `watch`; `full-probes` green, run 42552362570 on `65c1dd8`; the acceptance review passed with conditions, met in this commit. Deferred: SB-L7 (a layer at a start with Steam's spelling of the path) and the real VirtualStore sandbox case to phase 4, the cold start of D2 before phase 5).
 
 ## Phase 4 – Topos and packages
-- Signed index (Ed25519) and Topo engine first; then the elevated helper (moved from phase 3) with `firewall_rule` as its only operation in this phase; audit A4 on the helper design before any helper write code. Reverting a helper operation never depends on the current index or the current executable hash
+- Signed index (Ed25519) and Topo engine first; then the elevated helper (moved from phase 3) with `firewall_rule` as its only operation in this phase; audit A4 on the helper design before any helper write code (passed with conditions on 2026-11-09, ADR 0023; slices 2a → 2b → 5a → 2c → 2d → 5b). Reverting a helper operation never depends on the current index or the current executable hash
 - Package download (allowed hosts, SHA256, Zip Slip safe), DLL slots, reference counting
 - Topo engine with `when`, variants, conflicts
 - Topo loader requires `launch.start` for `direct`, `watch` and `auto`; re-evaluate E2 of P3-3 (reading Steam's `appinfo.vdf` to propose or check `start`, ADR 0022 amendment P3-3)
@@ -60,6 +60,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - i18n en/de
 - Code signing, portable build
 - Before A6: every anti-cheat marker without a vendor source (`EasyAntiCheat`, `EasyAntiCheat_EOS`, `GameGuard`, `XIGNCODE`, `EAAntiCheat.GameServiceLauncher.exe`; `docs/05-sources-policy.md`) has one, or a dump of a real machine; the third-party link for `start_protected_game.exe` is replaced by Epic's own documentation once found
+- Before A6: no release with an unsigned `rerun-helper.exe` (ADR 0023, audit A4 S12: before code signing its UAC prompt cannot be told apart from a malware prompt of the same name)
 
 **Acceptance:** All flows from the mockup work against the real core.
 
