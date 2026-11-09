@@ -142,8 +142,9 @@ fn a_target_in_a_job_with_a_disjoint_mask_is_job_ineffective_with_the_priority_b
     assert_eq!(found.rule, Rule::Skipped(Skip::JobIneffective));
     assert_eq!(found.check, None);
     assert_eq!(found.restore, None);
+    // Equal to the class before, not a fixed class: a CI runner starts tests below normal,
+    // and a child inherits that.
     assert_eq!(class, before);
-    assert_eq!(class, Ok(priority_class(Priority::Normal)));
     // The parent's limit stays in force.
     assert_eq!(mask, Ok(parent.mask));
 }
@@ -172,6 +173,6 @@ fn a_failed_job_puts_the_priority_back() {
     );
     assert_eq!(found.check, None);
     assert_eq!(found.restore, None);
+    // Equal to the class before (see above: not a fixed class).
     assert_eq!(after, before);
-    assert_eq!(after, Ok(priority_class(Priority::Normal)));
 }
