@@ -458,7 +458,7 @@ Elevated helper on the developer machine (P4-2a, [DEV], ADR 0023 §14, audit A4 
 
 | Case | How to check | Status |
 |---|---|---|
-| Smart App Control and the unsigned helper (A4 S12) | the script above: `PASS` means the [DEV] helper steps run on this machine, `BLOCKED` means they run in a VM (ADR 0023 §14) | open (script ready since P4-2a) |
+| Smart App Control and the unsigned helper (A4 S12) | the script above: `PASS` means the [DEV] helper steps run on this machine, `BLOCKED` means they run in a VM (ADR 0023 §14) | PASS on the developer machine (2026-11-09, build 26300, Smart App Control enforcing): the locally built, unsigned release helper ran from `C:\Program Files\Rerun` (folder and file admin-only, owner Administrators); non-elevated `0x52120000` (Refused(NotElevated)), through `runas` `0x52110000` (Refused(Usage)). The [DEV] helper steps run on this machine, no VM needed. The local Windows Sandbox stays blocked (see above). |
 
 ## Rules
 
