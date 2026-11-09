@@ -68,6 +68,8 @@ use crate::sys::fs::{Attrs, EntryKind};
 
 /// The rule types a front end shows (`MachineView`).
 pub use rerun_proto::cpu::rule::{Mode as RuleMode, SelectStep};
+/// The method of a decoded profile, typed (`ProfileShown::decoded`; review N3).
+pub use rerun_proto::profile::Method as ProfileMethod;
 
 /// `watch_timeout_s` of every profile (review N3, P3-4 P5): the search time of `watch`, fixed
 /// (no step field); the format keeps the key for `direct` too, where the shim does not read it.

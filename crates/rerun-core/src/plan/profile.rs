@@ -20,9 +20,9 @@
 //!   (D4 asks it, also for a plan whose only op is the profile; review S2), a `watch` profile's
 //!   `target` is `<root 0>\<main executable>` (folded; P3-4 P1, P4: the shim sets the rule on
 //!   exactly the program apply and revert ask), and the file name is [`profile_id`] of root 0's
-//!   Steam app. A recorded head keeps only the form, so a rule a
-//!   later version adds never blocks a revert (user decision E4 of P2-11); the revert only
-//!   observes hashes and never reads the profile.
+//!   Steam app. A recorded head keeps only the form, so a rule a later version adds never
+//!   blocks a revert (user decision E4 of P2-11); the revert only observes hashes and never
+//!   reads the profile.
 
 use rerun_proto::profile::{self as proto, Method, ProfileId};
 use sha2::{Digest, Sha256};

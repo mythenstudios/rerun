@@ -174,21 +174,23 @@ impl fmt::Display for Set {
     }
 }
 
-/// What a reason only `watch` writes means (`None` for the others: their name says it).
-fn why(reason: SkipReason, restore: Option<u32>) -> Option<String> {
+/// What a reason only `watch` writes means (`None` for the others: their name says it), and
+/// `read_back_failed` of a known `watch` profile (review S2: the game stayed in the new job).
+fn why(reason: SkipReason, restore: Option<u32>, watch: bool) -> Option<String> {
+    // Review S1: without a failed restore, either the class was put back or none was set.
+    let put_back = if restore.is_none() {
+        "; any priority class set on it was put back"
+    } else {
+        ""
+    };
     Some(match reason {
         SkipReason::TargetNotFound => "no new game process appeared within the 120 s search (a launcher waiting for a login or an update: start the game again; a game that is itself the program Steam starts and does not start itself again: use method direct)".to_owned(),
         SkipReason::TargetElevated => "the game process runs as administrator, or was started by a launcher that does; rerun-launch leaves it alone".to_owned(),
-        SkipReason::TargetDenied { code } => format!("a game process could not be opened or read to set the rule (Win32 error {code}: a protected or anti-cheat process, or one Windows refused, e.g. of another account); nothing was set"),
-        SkipReason::SearchFailed { code } => format!("no game process could be looked for (Win32 error {code}: the process list, or rerun-launch's own process information before the search, could not be read); nothing was set"),
+        SkipReason::TargetDenied { code } => format!("a process of the game's name could not be opened or read (Win32 error {code}: protected or anti-cheat, another account, or possibly running as administrator); nothing was set (if the game itself never appeared, e.g. a launcher waiting for a login or an update: start the game again)"),
+        SkipReason::SearchFailed { code } => format!("no game process could be looked for (Win32 error {code}: the process list, or rerun-launch's own process information before the search, could not be read, or the program Steam started could not be identified); nothing was set"),
         SkipReason::PriorityFailed { code } => format!("the priority class of the game process could not be read or set (Win32 error {code}); nothing was set"),
-        SkipReason::JobIneffective => {
-            let mut s = "the game process joined the job but kept another limit (a job it was already in, e.g. a launcher's); the job stays without effect until the game exits".to_owned();
-            if restore.is_none() {
-                s.push_str(", and a priority class set on it was put back");
-            }
-            s
-        }
+        SkipReason::JobIneffective => format!("the game process joined the job but kept another limit (a job it was already in, e.g. a launcher's); the job stays without effect until the game exits{put_back}"),
+        SkipReason::ReadBackFailed { code } if watch => format!("the game process joined a job with the selection, but it could not be read back (Win32 error {code}); the limit may apply until the game exits{put_back}"),
         SkipReason::MethodUnsupported => "written by an older rerun-launch without method watch".to_owned(),
         _ => return None,
     })
@@ -295,10 +297,15 @@ impl fmt::Display for LaunchMsg<'_> {
                 watch,
             } => {
                 write!(f, "  {id}, {at}: rule_skipped: {reason}, ")?;
-                if let Some(why) = why(*reason, *restore) {
-                    write!(f, "{why}; ")?;
+                match why(*reason, *restore, *watch) {
+                    // Review S2: the game was found and joined the job; it did not start
+                    // unchanged.
+                    Some(why) if matches!(reason, SkipReason::ReadBackFailed { .. }) => {
+                        f.write_str(&why)?;
+                    }
+                    Some(why) => write!(f, "{why}; {}", start(*s, *watch))?,
+                    None => f.write_str(&start(*s, *watch))?,
                 }
-                f.write_str(&start(*s, *watch))?;
                 match e {
                     Some(e) => write!(f, "; {}", ended(*e)),
                     None => Ok(()),

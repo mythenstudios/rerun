@@ -275,6 +275,11 @@ fn every_watch_reason_has_its_line() {
             ),
             entry(0x09, skipped(SkipReason::ReadBackFailed { code: 31 }, None)),
             entry(0x0a, skipped(SkipReason::MethodUnsupported, None)),
+            // S2: a read-back failure known as `watch` (here by its restore line, N1).
+            entry(
+                0x0b,
+                skipped(SkipReason::ReadBackFailed { code: 31 }, Some(5)),
+            ),
         ],
         other: 0,
     };
@@ -293,11 +298,11 @@ fn every_watch_reason_has_its_line() {
             p(2)
         ),
         format!(
-            "  {}, {at}: rule_skipped: target_denied:5, a game process could not be opened or read to set the rule (Win32 error 5: a protected or anti-cheat process, or one Windows refused, e.g. of another account); nothing was set; {steam}",
+            "  {}, {at}: rule_skipped: target_denied:5, a process of the game's name could not be opened or read (Win32 error 5: protected or anti-cheat, another account, or possibly running as administrator); nothing was set (if the game itself never appeared, e.g. a launcher waiting for a login or an update: start the game again); {steam}",
             p(3)
         ),
         format!(
-            "  {}, {at}: rule_skipped: search_failed:6, no game process could be looked for (Win32 error 6: the process list, or rerun-launch's own process information before the search, could not be read); nothing was set; {steam}",
+            "  {}, {at}: rule_skipped: search_failed:6, no game process could be looked for (Win32 error 6: the process list, or rerun-launch's own process information before the search, could not be read, or the program Steam started could not be identified); nothing was set; {steam}",
             p(4)
         ),
         format!(
@@ -305,7 +310,7 @@ fn every_watch_reason_has_its_line() {
             p(5)
         ),
         format!(
-            "  {}, {at}: rule_skipped: job_ineffective, the game process joined the job but kept another limit (a job it was already in, e.g. a launcher's); the job stays without effect until the game exits, and a priority class set on it was put back; {steam}",
+            "  {}, {at}: rule_skipped: job_ineffective, the game process joined the job but kept another limit (a job it was already in, e.g. a launcher's); the job stays without effect until the game exits; any priority class set on it was put back; {steam}",
             p(6)
         ),
         format!(
@@ -313,9 +318,9 @@ fn every_watch_reason_has_its_line() {
             p(7)
         ),
         "    the priority class set on the game process could not be put back (Win32 error 5); it stays until the game exits".to_owned(),
-        // A CPU failure `direct` writes too: the method is not known without a holder.
+        // A CPU failure `direct` writes too; the restore line marks it as `watch` (N1).
         format!(
-            "  {}, {at}: rule_skipped: cpu_sets_failed:87, the game started unchanged",
+            "  {}, {at}: rule_skipped: cpu_sets_failed:87, {steam}",
             p(8)
         ),
         "    the priority class set on the game process could not be put back (Win32 error 6); it stays until the game exits".to_owned(),
@@ -327,6 +332,12 @@ fn every_watch_reason_has_its_line() {
             "  {}, {at}: rule_skipped: method_unsupported, written by an older rerun-launch without method watch; the game started unchanged",
             p(10)
         ),
+        // S2: the game joined the job; no "started unchanged".
+        format!(
+            "  {}, {at}: rule_skipped: read_back_failed:31, the game process joined a job with the selection, but it could not be read back (Win32 error 31); the limit may apply until the game exits",
+            p(11)
+        ),
+        "    the priority class set on the game process could not be put back (Win32 error 5); it stays until the game exits".to_owned(),
     ];
     assert_eq!(
         shown(&launch_lines(&Ok(Some(r)), &[])),

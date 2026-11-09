@@ -52,6 +52,7 @@ use crate::preview::{Fate, op_at, profile_id_of, profile_of, roots, x12_lines};
 use rerun_core::exec::ProfilesMoved;
 use rerun_core::exec::launch_result::{ProfileId, SkipReason};
 use rerun_core::plan::RootKind;
+use rerun_core::prim::launch_method::ProfileMethod as Method;
 
 fn m(t: TxnMsg<'_>) -> Message<'_> {
     Message::Txn(t)
@@ -327,7 +328,10 @@ pub fn launch_lines<'a>(
                             start: *start,
                             ended: *ended,
                             restore: *priority_restore,
-                            watch: watched.is_some() || watch_only(*reason),
+                            // Review N1: only `watch` writes a restore line.
+                            watch: watched.is_some()
+                                || watch_only(*reason)
+                                || priority_restore.is_some(),
                         }
                     }
                 }
@@ -429,7 +433,7 @@ fn holders(app: &AppDir<'_>, s: &exec::Status) -> Vec<Holder> {
             txn: st.id,
             forgotten: st.is_forgotten(),
             launcher: prof.launcher.then(|| prof.start.clone()),
-            watch: (prof.method == "watch").then(|| prof.target.clone()),
+            watch: (prof.decoded.method == Method::Watch).then(|| prof.target.clone()),
         };
         // The listing is in order: a later transaction replaces an earlier one.
         out.retain(|x| x.id != id);

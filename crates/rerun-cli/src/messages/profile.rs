@@ -1,9 +1,9 @@
 //! The lines of a launch profile (P3-3d, ADR 0016 amendment P3-3, plan `P3-3` §5 and X12): the
 //! profile in a plan's preview, the selection on this computer, the hints, the launch option to
 //! copy, and what a revert or `forget` leaves in Steam. A `watch` profile (P3-4c, plan `P3-4`
-//! §3.5) adds its target and says what is set on the game process found after the start. One [`ProfileMsg`] is one line. Every
-//! field is Rerun's own words or numbers, except paths and the launch option, which are
-//! [`Shown`] and stand last on their line.
+//! §3.5) adds its target and says what is set on the game process found after the start. One
+//! [`ProfileMsg`] is one line. Every field is Rerun's own words or numbers, except paths and the
+//! launch option, which are [`Shown`] and stand last on their line.
 
 use std::fmt;
 

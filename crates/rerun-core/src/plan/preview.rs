@@ -107,8 +107,8 @@ ends within the 5 s, it looks for the next one (at most 4). It writes \
 the program it started has exited too; nothing else runs. The rule reaches the game shortly \
 after it started (within about 0.1 s at first): a game that counts its processors in its first \
 moments may already have counted all of them. Windows reports the game's path with junctions, \
-symbolic links and subst drives resolved: a game folder reached through one of them is never \
-found (target_not_found). ",
+symbolic links, subst drives and 8.3 short names resolved: a game folder reached through one of \
+them is never found (target_not_found). ",
     profile_note_tail!()
 );
 
@@ -699,10 +699,11 @@ impl fmt::Display for Preview {
                     if let Some(x) = p.priority {
                         writeln!(f, "     priority {x}")?;
                     }
+                    writeln!(f, "     start {}", p.start)?;
+                    // Review N4: the target after the start, as in the CLI (ADR 0016).
                     if p.target != p.start || p.decoded.method == Method::Watch {
                         writeln!(f, "     target {}", p.target)?;
                     }
-                    writeln!(f, "     start {}", p.start)?;
                 }
                 Some(ProfilePreview::Unreadable(why)) => {
                     writeln!(f, "     not a launch profile of this version: {why}")?;

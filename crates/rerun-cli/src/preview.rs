@@ -11,7 +11,7 @@ use rerun_core::escape::{self, Shown};
 use rerun_core::exec::launch_result::ProfileId;
 use rerun_core::plan::{Preview, PreviewOp, ProfilePreview, ProfileShown, RootKind};
 use rerun_core::policy::root::file_present;
-use rerun_core::prim::launch_method::RuleMode;
+use rerun_core::prim::launch_method::{ProfileMethod as Method, RuleMode};
 use rerun_core::prim::{MachineView, MachineWhy, SHIM, on_this_machine, steam_option_text};
 use rerun_core::sys::System;
 
@@ -138,7 +138,7 @@ pub fn op(o: &PreviewOp) -> Vec<Message<'_>> {
             out.push(Message::Profile(ProfileMsg::Start {
                 path: s.start.clone(),
             }));
-            if s.method == "watch" {
+            if s.decoded.method == Method::Watch {
                 out.push(Message::Profile(ProfileMsg::Target {
                     path: s.target.clone(),
                 }));
@@ -270,7 +270,7 @@ pub fn launch_lines<'a>(p: &'a Preview, v: &'a LaunchView) -> Vec<Message<'a>> {
     let mut out = vec![pm(ProfileMsg::MachineHeading)];
     let mut hard = false;
     let shown = profile_of(p);
-    let watch = shown.is_some_and(|s| s.method == "watch");
+    let watch = shown.is_some_and(|s| s.decoded.method == Method::Watch);
     match &v.machine.selection {
         Ok(s) => {
             hard = s.mode == RuleMode::Hard;

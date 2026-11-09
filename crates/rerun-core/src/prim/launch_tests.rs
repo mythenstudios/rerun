@@ -1018,6 +1018,13 @@ fn lw5_direct_to_watch_replaces_the_profile_and_a_watch_profile_round_trips() {
     env.sys.fake_fs().mkdir_all(Path::new(PROFILES)).unwrap();
     let before = snap_all(&env.sys);
     let t1 = env.applied(&stored(&env, &one(spec("FFLauncher.exe"))));
+    let name = format!(r"{PROFILES}\{}", profile_file(profile_id(220)));
+    let direct = try_read_abs(&env.sys, &name).unwrap();
+    assert!(
+        std::str::from_utf8(&direct)
+            .unwrap()
+            .contains("method=direct\n")
+    );
     // `watch` for the same app: the same file, replaced (the launch option stays valid).
     let p = plan_lm(
         &env.sys,
@@ -1039,8 +1046,9 @@ fn lw5_direct_to_watch_replaces_the_profile_and_a_watch_profile_round_trips() {
     )
     .unwrap();
     assert!(p.ops.is_empty(), "{:?}", p.ops);
-    // LIFO back to nothing, identical.
+    // LIFO back to nothing, identical; after the first revert exactly the `direct` bytes (N5).
     assert_eq!(env.revert(&t2).unwrap().closed, Some(Closing::Reverted));
+    assert_eq!(try_read_abs(&env.sys, &name), Some(direct));
     assert_eq!(env.revert(&t1).unwrap().closed, Some(Closing::Reverted));
     assert!(
         before == snap_all(&env.sys),
@@ -1050,7 +1058,6 @@ fn lw5_direct_to_watch_replaces_the_profile_and_a_watch_profile_round_trips() {
     // A `watch` profile alone: apply → verify → revert → identical.
     let t = env.applied(&stored(&env, &one(watch("game.exe"))));
     assert_eq!(env.verify(&t), [(0, Observed::After)]);
-    let name = format!(r"{PROFILES}\{}", profile_file(profile_id(220)));
     let bytes = try_read_abs(&env.sys, &name).unwrap();
     assert!(
         std::str::from_utf8(&bytes)

@@ -61,8 +61,10 @@
 //! fixed identity [`PROFILES_ROOT_ID`]: reopened only through `AppDir`, never by the head's path or
 //! by identity) and a second content source [`ContentRef::Inline`] (the bytes in the plan, at most
 //! [`MAX_INLINE_BYTES`]). `profile::fence` checks both on encode and decode alike (the head is
-//! untrusted); [`Rules::Current`] adds the profile decode, its start path below root 0 and its
-//! file name from the Steam app ID ([`profile_id`]).
+//! untrusted); [`Rules::Current`] adds the profile decode, its start and target paths below
+//! root 0 and each at most [`MAX_EXE_PATH_UNITS`] UTF-16 units, the target of a `watch` profile
+//! equal to `<root 0>\<main executable of root 0>` (P3-4), and its file name from the Steam app
+//! ID ([`profile_id`]).
 
 mod preview;
 mod profile;
