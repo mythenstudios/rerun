@@ -3,9 +3,8 @@ name: Full probes
 # The unreduced crash / power-loss matrices (docs/09-testing.md). The normal CI runs the reduced
 # suite, a sample; the claim rests on these runs. Mandatory before every audit.
 on:
+  # Started by hand (before every audit and phase acceptance); no schedule, to save Actions minutes.
   workflow_dispatch:
-  schedule:
-    - cron: "17 3 * * 1" # Mondays 03:17 UTC
 
 permissions:
   contents: read
