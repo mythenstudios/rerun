@@ -15,6 +15,7 @@
     reason = "test code: a failure should abort the test"
 )]
 
+use std::os::windows::process::CommandExt;
 use std::process::Command;
 
 #[test]
@@ -26,6 +27,8 @@ fn rerun_scan_on_this_machine_counts_only() {
     }
     let out = Command::new(env!("CARGO_BIN_EXE_rerun"))
         .arg("scan")
+        // `CREATE_NO_WINDOW` (winbase.h): no console window from a test.
+        .creation_flags(0x0800_0000)
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);

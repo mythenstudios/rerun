@@ -9,6 +9,7 @@
     reason = "test reads and runs its own built binary"
 )]
 
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -52,6 +53,8 @@ fn release_rerun_exe_loads_dependencies_from_system32_only() {
 fn rerun_exe_runs_with_the_restricted_search_path() {
     let out = Command::new(env!("CARGO_BIN_EXE_rerun"))
         .arg("--version")
+        // `CREATE_NO_WINDOW` (winbase.h): no console window from a test.
+        .creation_flags(0x0800_0000)
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");

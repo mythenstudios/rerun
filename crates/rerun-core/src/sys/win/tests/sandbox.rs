@@ -20,9 +20,12 @@
 //! Open (`docs/09-testing.md` manual list): an exFAT volume and a third party holding the
 //! folder need admin tooling or a second process.
 
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+
 use std::time::Duration;
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use super::super::testfx::{
     AppHive, is_elevated, process_account, sandbox_decision, sandbox_guard,
@@ -418,6 +421,7 @@ fn start_game(w: &Sb) -> Child {
     // returned `Child`) it waits until it is killed. No console window, no AutoRun.
     let mut c = Command::new(w.game.join("game.exe"))
         .args(["/d", "/q", "/k"])
+        .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -750,6 +754,7 @@ fn reg_add_layer(name: &str, data: &str) {
     let key = format!(r"HKCU\{}", crate::prim::layer_tests::LAYERS_KEY);
     let st = Command::new("reg")
         .args(["add", &key, "/v", name, "/t", "REG_SZ", "/d", data, "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

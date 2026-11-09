@@ -312,14 +312,29 @@ fn with_nul(s: &[u16]) -> Vec<u16> {
     v
 }
 
+/// The creation flags of `spawn` in the shim as it ships: the priority class and, for a limit,
+/// `CREATE_SUSPENDED`. Nothing else: a game starts exactly as Steam's command would, a console
+/// program with its own console window (never `CREATE_NO_WINDOW` outside the tests).
+fn creation_flags(spawn: &Spawn) -> u32 {
+    let mut flags = priority_flag(spawn.priority);
+    if spawn.suspended || spawn.in_job {
+        flags |= CREATE_SUSPENDED;
+    }
+    flags
+}
+
 /// `CreateProcessW(app, command_line)` (M2: `lpApplicationName` never null), no inherited
 /// handles, the shim's environment and directory. With `spawn.in_job`: steps 1 and 2 of B-2.
 pub(crate) fn spawn(app: &[u16], command_line: &[u16], spawn: &Spawn) -> Result<Child, u32> {
     let app = with_nul(app);
     let mut line = with_nul(command_line);
-    let mut flags = priority_flag(spawn.priority);
-    if spawn.suspended || spawn.in_job {
-        flags |= CREATE_SUSPENDED;
+    let mut flags = creation_flags(spawn);
+    // Test builds only: the win tests start `System32\cmd.exe` through this path, and a
+    // console program started by a process without a console opens a window. The shipped shim
+    // (not `cfg(test)`) never sets it; `creation_flags` is what it uses, tested below.
+    #[cfg(test)]
+    {
+        flags |= windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
     }
     // Declared before `list`, so they outlive it (drop order is reverse).
     let job = spawn
@@ -788,7 +803,10 @@ mod tests {
                 ptr::null(),
                 ptr::null(),
                 0,
-                CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+                // No console window from a test (as `spawn` under `cfg(test)`).
+                CREATE_SUSPENDED
+                    | EXTENDED_STARTUPINFO_PRESENT
+                    | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
                 ptr::null(),
                 ptr::null(),
                 ptr::from_ref(&si).cast::<STARTUPINFOW>(),
@@ -863,6 +881,34 @@ mod tests {
     }
 
     /// The classes the check compares are the creation flags the shim sets.
+    #[test]
+    fn the_shipped_creation_flags_are_the_priority_and_suspended_only() {
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        for priority in [
+            None,
+            Some(Priority::Normal),
+            Some(Priority::AboveNormal),
+            Some(Priority::High),
+        ] {
+            for (in_job, suspended) in [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let s = Spawn {
+                    in_job,
+                    suspended,
+                    priority,
+                };
+                let want = priority_flag(priority)
+                    | if in_job || suspended {
+                        CREATE_SUSPENDED
+                    } else {
+                        0
+                    };
+                assert_eq!(creation_flags(&s), want);
+                assert_eq!(creation_flags(&s) & CREATE_NO_WINDOW, 0);
+            }
+        }
+    }
+
     #[test]
     fn priority_classes_are_the_creation_flags() {
         use crate::os::priority_class as class;

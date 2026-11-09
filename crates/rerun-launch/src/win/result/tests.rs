@@ -8,6 +8,7 @@
 
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -70,6 +71,8 @@ fn junction(link: &Path, target: &Path) {
     .arg("/J")
     .arg(link)
     .arg(target)
+    // No console window from a test (`CREATE_NO_WINDOW`).
+    .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
     .output()
     .unwrap();
     assert!(out.status.success(), "mklink /J: {out:?}");

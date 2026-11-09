@@ -457,6 +457,11 @@ mod tests {
         let mut cmd = std::process::Command::new(&exe);
         cmd.args([CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"])
             .env(CHILD_MARKER, "1");
+        // The child is a console program: no window from a test.
+        std::os::windows::process::CommandExt::creation_flags(
+            &mut cmd,
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+        );
         for var in VARS {
             cmd.env(var, decoy(&env, var));
         }
