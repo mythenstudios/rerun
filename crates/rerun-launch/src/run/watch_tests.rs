@@ -946,7 +946,7 @@ fn a4_a_failed_restore_is_in_the_report_and_the_file() {
     assert!(
         String::from_utf8(bytes)
             .unwrap()
-            .ends_with("rule_child=none\npriority_restore=failed:6\n")
+            .ends_with("rule_child=none\nmethod=watch\npriority_restore=failed:6\n")
     );
 }
 

@@ -3,9 +3,8 @@
 //! `rerun status` reads back.
 //!
 //! One grammar for the writer (`rerun-launch`, without serde, ADR 0006) and the reader
-//! (`rerun-core`, untrusted input). UTF-8 text of at most [`MAX_RESULT_BYTES`], nine lines
-//! (ten with `priority_restore`) in a fixed order, each `key=value` ending in LF, the first
-//! nine always present:
+//! (`rerun-core`, untrusted input). UTF-8 text of at most [`MAX_RESULT_BYTES`], nine to eleven
+//! lines in a fixed order, each `key=value` ending in LF, the first nine always present:
 //!
 //! ```text
 //! rerun-result 1
@@ -17,14 +16,20 @@
 //! check=ok                                   none | ok | narrowed | reset:<what> | exited_early | failed:<code>
 //! start=created                              created | shell | shell_no_process | not_exe | failed:<code>
 //! rule_child=none                            none | ended | failed:<code> | not_confirmed:<code>
-//! priority_restore=failed:<code>              optional tenth line (below)
+//! method=watch                                optional: direct | watch (below)
+//! priority_restore=failed:<code>              optional, last (below)
 //! ```
 //!
 //! `rule=applied` carries `cpu`, `priority` and `check` and always `start=created`,
 //! `rule_child=none`; `rule=skipped:…` carries `start` and `rule_child` (a child created with
 //! the rule and ended before the unchanged start) and always `cpu=none`,
-//! `priority=none`, `check=none`. The tenth line `priority_restore=failed:<code>` is present
-//! only when `rerun-launch watch` set the priority class on the found game, the CPU step
+//! `priority=none`, `check=none`. The line `method=<direct|watch>` names the method of the
+//! profile the shim decoded for this start (P3-4, senior-dev decision 1: `rerun status` words a
+//! result by the method that produced it, never by a journal head that may be newer); it is
+//! absent when no profile was decoded (`profile_missing`, `profile_invalid`, …) and in files of
+//! shims before it, which read as "method unknown". `method=direct` never comes with a reason
+//! only `watch` writes or with `priority_restore`. The line `priority_restore=failed:<code>` is
+//! present only when `rerun-launch watch` set the priority class on the found game, the CPU step
 //! after it failed (`skipped:job_failed:…`, `skipped:job_ineffective`,
 //! `skipped:read_back_failed:…` or `skipped:cpu_sets_failed:…`) and putting the class back
 //! failed too (P3-4 A4); absent otherwise, so a file of an earlier shim reads unchanged.
@@ -38,7 +43,7 @@ use std::fmt;
 
 use crate::cpu::MAX_LOGICAL_CPUS;
 use crate::cpu::rule::Mode;
-use crate::profile::{Priority, ProfileId};
+use crate::profile::{Method, Priority, ProfileId};
 
 /// The format this module reads and writes.
 pub const RESULT_FORMAT: u32 = 1;
@@ -57,6 +62,9 @@ pub struct LaunchResult {
     pub unix_s: u64,
     /// What happened.
     pub outcome: Outcome,
+    /// The method of the profile the shim decoded (`None`: no profile decoded, or a file of a
+    /// shim before the `method=` line).
+    pub method: Option<Method>,
 }
 
 /// What became of the profile's rule.
@@ -325,8 +333,41 @@ impl fmt::Display for ResultError {
 
 impl std::error::Error for ResultError {}
 
-/// The optional tenth key (P3-4 A4).
+/// The optional key of the last line (P3-4 A4).
 const RESTORE_KEY: &str = "priority_restore";
+
+/// The optional key after `rule_child` (P3-4, senior-dev decision 1).
+const METHOD_KEY: &str = "method";
+
+impl SkipReason {
+    /// A reason only `rerun-launch watch` writes.
+    pub fn watch_only(self) -> bool {
+        matches!(
+            self,
+            Self::TargetNotFound
+                | Self::TargetElevated
+                | Self::TargetDenied { .. }
+                | Self::SearchFailed { .. }
+                | Self::PriorityFailed { .. }
+                | Self::JobIneffective
+        )
+    }
+}
+
+fn method_str(m: Method) -> &'static str {
+    match m {
+        Method::Direct => "direct",
+        Method::Watch => "watch",
+    }
+}
+
+fn parse_method(v: &str) -> Option<Method> {
+    match v {
+        "direct" => Some(Method::Direct),
+        "watch" => Some(Method::Watch),
+        _ => None,
+    }
+}
 
 const KEYS: [&str; 8] = [
     "profile",
@@ -543,8 +584,19 @@ fn restore_line(r: &LaunchResult) -> Option<String> {
 }
 
 /// The invariants a value must meet: `1 <= threads <= of <= 4096`; a reset names at least one
-/// thing and only things that were set; a failed priority restore only after a failed CPU step.
+/// thing and only things that were set; a failed priority restore only after a failed CPU step;
+/// `method=direct` never with a reason only `watch` writes or a priority restore.
 fn valid(r: &LaunchResult) -> bool {
+    if r.method == Some(Method::Direct)
+        && let Outcome::Skipped {
+            reason,
+            priority_restore,
+            ..
+        } = &r.outcome
+        && (reason.watch_only() || priority_restore.is_some())
+    {
+        return false;
+    }
     match &r.outcome {
         Outcome::Applied {
             cpu,
@@ -596,6 +648,12 @@ pub fn encode(r: &LaunchResult) -> Result<Vec<u8>, ResultError> {
         s.push_str(k);
         s.push('=');
         s.push_str(&v);
+        s.push('\n');
+    }
+    if let Some(m) = r.method {
+        s.push_str(METHOD_KEY);
+        s.push('=');
+        s.push_str(method_str(m));
         s.push('\n');
     }
     if let Some(line) = restore_line(r) {
@@ -667,8 +725,23 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchResult, ResultError> {
                 kind: ResultErrorKind::UnexpectedKey { expected: key },
             })?;
     }
-    // The optional tenth line: only `priority_restore=…`; anything else, or more, is trailing.
-    let restore_at = KEYS.len() + 1;
+    // The optional lines, in this order: `method=…`, then `priority_restore=…`; anything
+    // else, or more, is trailing.
+    let mut restore_at = KEYS.len() + 1;
+    let method = match lines
+        .get(restore_at)
+        .and_then(|l| l.strip_prefix(METHOD_KEY).and_then(|r| r.strip_prefix('=')))
+    {
+        None => None,
+        Some(v) => {
+            let m = parse_method(v).ok_or(ResultError {
+                line: restore_at + 1,
+                kind: ResultErrorKind::BadValue { key: METHOD_KEY },
+            })?;
+            restore_at += 1;
+            Some(m)
+        }
+    };
     let restore = match lines.get(restore_at) {
         None => None,
         Some(l) => {
@@ -726,6 +799,7 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchResult, ResultError> {
         profile,
         unix_s,
         outcome,
+        method,
     };
     // Every value parsed; the combination must be one a writer emits: the same bytes back.
     // A restore line on an applied rule is lost above: compare its presence too.

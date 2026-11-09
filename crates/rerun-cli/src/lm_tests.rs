@@ -16,8 +16,10 @@
 //! - C-LM10 `plan` stores nothing when Rerun's folder moved between the preview and creating it.
 //! - C-LW1 (P3-4c) `plan` of a `watch` profile: the target, the watch note and hints, no launcher
 //!   hint; the stub hint when Steam starts the game itself; no watch line for `direct`.
-//! - C-LW2 (P3-4c) `status` of a `watch` profile: the watch words and the target from the head
-//!   that holds it, the failed priority restore; none of it once nothing holds the profile.
+//! - C-LW2 (P3-4c) `status` of a `watch` profile: the watch words by the result's `method=`
+//!   line, the target from the head that holds it, the failed priority restore; a stale
+//!   `direct` result or one without the line under a `watch` head gets no `watch` words; no
+//!   target line once nothing holds the profile.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -383,7 +385,7 @@ fn result(sys: &FakeSystem, body: &str) {
         .unwrap();
 }
 
-const APPLIED: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=applied\ncpu=hard:8:32\npriority=none\ncheck=ok\nstart=created\nrule_child=none\n";
+const APPLIED: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=applied\ncpu=hard:8:32\npriority=none\ncheck=ok\nstart=created\nrule_child=none\nmethod=direct\n";
 const MISSING: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=skipped:profile_missing\ncpu=none\npriority=none\ncheck=none\nstart=created\nrule_child=none\n";
 const LAUNCHER: &str = "Steam starts a launcher here: the check covered the launcher, not the game";
 
@@ -578,8 +580,12 @@ fn c_lw1_plan_shows_the_watch_target_the_note_and_no_launcher_hint() {
     }
 }
 
-const WATCH_EXITED: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=applied\ncpu=soft:8:32\npriority=high\ncheck=exited_early\nstart=created\nrule_child=none\n";
-const WATCH_INEFFECTIVE: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=skipped:job_ineffective\ncpu=none\npriority=none\ncheck=none\nstart=created\nrule_child=none\npriority_restore=failed:5\n";
+const WATCH_EXITED: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=applied\ncpu=soft:8:32\npriority=high\ncheck=exited_early\nstart=created\nrule_child=none\nmethod=watch\n";
+/// The same start without a `method=` line (a shim before it): the shared words.
+const EXITED_UNKNOWN: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=applied\ncpu=soft:8:32\npriority=high\ncheck=exited_early\nstart=created\nrule_child=none\n";
+/// A `direct` result older than the `watch` head that holds the profile now (stale).
+const DIRECT_EXITED: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=applied\ncpu=hard:8:32\npriority=none\ncheck=exited_early\nstart=created\nrule_child=none\nmethod=direct\n";
+const WATCH_INEFFECTIVE: &str = "rerun-result 1\nprofile=323ad79fbc93ca3e73b0b152a5d44616\ntime=1762600000\nrule=skipped:job_ineffective\ncpu=none\npriority=none\ncheck=none\nstart=created\nrule_child=none\nmethod=watch\npriority_restore=failed:5\n";
 
 #[test]
 fn c_lw2_status_names_the_watch_target_from_the_head() {
@@ -608,15 +614,36 @@ fn c_lw2_status_names_the_watch_target_from_the_head() {
             "  {ID}, {at}: rule_skipped: job_ineffective, the game process joined the job but kept another limit (a job it was already in, e.g. a launcher's); the job stays without effect until the game exits; Steam's command started unchanged\n    the priority class set on the game process could not be put back (Win32 error 5); it stays until the game exits\n{watched}\n"
         )],
     );
+    // The method is the result's own (review of P3-4b/c, decision 1): a `direct` result under
+    // the `watch` head (stale) gets the `direct` words and no target line, not the launcher
+    // line either (the head has no launcher); without a `method=` line the shared words.
+    let generic = "exited_early, the started process ended within 5 s";
+    for body in [DIRECT_EXITED, EXITED_UNKNOWN] {
+        result(&sys, body);
+        let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+        assert!(s.stdout.contains(generic), "{}", s.stdout);
+        assert!(!s.stdout.contains("method watch:"), "{}", s.stdout);
+        assert!(!s.stdout.contains("the game process found"), "{}", s.stdout);
+        assert!(!s.stdout.contains(LAUNCHER), "{}", s.stdout);
+    }
     // `profile_missing` while held: the holder line, no target line.
     result(&sys, MISSING);
     let s = expect(&sys, &["status"], Answer::No, Exit::Report);
     assert!(!s.stdout.contains("method watch:"), "{}", s.stdout);
-    // After the revert nothing holds the profile: no target line, the generic exited_early.
+    // After the revert nothing holds the profile: no target line (no path known), but the
+    // result's own method still words it.
     expect(&sys, &["revert", &t, "--yes"], Answer::No, Exit::Report);
     result(&sys, WATCH_EXITED);
     let s = expect(&sys, &["status"], Answer::No, Exit::Report);
     assert!(!s.stdout.contains("method watch:"), "{}", s.stdout);
+    assert!(
+        s.stdout
+            .contains("exited_early, the game process found ended within 5 s"),
+        "{}",
+        s.stdout
+    );
+    result(&sys, EXITED_UNKNOWN);
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
     assert!(
         s.stdout
             .contains("exited_early, the started process ended within 5 s"),

@@ -17,6 +17,13 @@ fn written_one(os: &FakeOs) -> result::LaunchResult {
     let r = result::decode(&w[0]).unwrap();
     assert_eq!(r.profile, id());
     assert_eq!(r.unix_s, 1_762_600_000);
+    // P3-4: the method of the decoded profile is in the file (a skip before the decode has
+    // none); these are `direct` profiles.
+    if matches!(r.outcome, Outcome::Applied { .. }) {
+        assert_eq!(r.method, Some(rerun_proto::profile::Method::Direct));
+    } else {
+        assert_ne!(r.method, Some(rerun_proto::profile::Method::Watch));
+    }
     r
 }
 

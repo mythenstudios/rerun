@@ -277,6 +277,10 @@ fn profile_missing_starts_unchanged() {
             Call::Wait(1)
         ]
     );
+    // P3-4: no profile decoded, no `method=` line.
+    let w = os.written.borrow().last().cloned().unwrap();
+    assert_eq!(rerun_proto::launch::decode(&w).unwrap().method, None);
+    assert!(!String::from_utf8(w).unwrap().contains("method="));
     os.calls.borrow_mut().clear();
     os.profile = Err(OsError::ReparsePoint);
     assert_eq!(

@@ -27,6 +27,7 @@ fn ok(b: u8) -> LaunchResult {
             priority: None,
             check: Check::Ok,
         },
+        method: None,
     }
 }
 
@@ -64,6 +65,7 @@ fn results_are_read_by_id_and_temps_skipped() {
             ended: None,
             priority_restore: None,
         },
+        method: None,
     };
     let sys = base()
         .file(file_of(0xbb), encode(&ok(0xbb)).unwrap())

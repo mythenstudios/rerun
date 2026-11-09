@@ -31,6 +31,7 @@ fn entry(b: u8, outcome: Outcome) -> LaunchEntry {
             profile: id(b),
             unix_s: 1_762_600_000,
             outcome,
+            method: None,
         }),
     }
 }

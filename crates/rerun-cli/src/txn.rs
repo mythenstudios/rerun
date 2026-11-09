@@ -44,9 +44,7 @@ use crate::host::{
     Host, after_change, before_change, confirm, existing_app, exit_for_exec, fail, forbidden, note,
     shown, standard_user,
 };
-use crate::messages::{
-    LaunchMsg, Message, OpText, ProfileMsg, StepText, TxnMsg, TxnText, Utc, watch_only,
-};
+use crate::messages::{LaunchMsg, Message, OpText, ProfileMsg, StepText, TxnMsg, TxnText, Utc};
 use crate::out::{Out, failed as failed_out};
 use crate::preview::{Fate, op_at, profile_id_of, profile_of, roots, x12_lines};
 use rerun_core::exec::ProfilesMoved;
@@ -292,7 +290,11 @@ pub fn launch_lines<'a>(
             Ok(res) if matches!(res.outcome, Outcome::Skipped { reason: SkipReason::ProfileMissing, .. })
         );
         let holder = holders.iter().find(|h| h.id == e.id);
-        let watched = holder.and_then(|h| h.watch.as_ref());
+        // The method for the wording is the result file's own (`method=`, senior-dev decision 1
+        // of the review of P3-4b/c): a head may be newer than the result. Without the line the
+        // shared words stay; the head gives a path only, and only when it agrees.
+        let method = e.result.as_ref().ok().and_then(|r| r.method);
+        let watch = method == Some(Method::Watch);
         let mut restore_failed = None;
         out.push(l(match &e.result {
             Err(why) => LaunchMsg::Unreadable {
@@ -312,7 +314,7 @@ pub fn launch_lines<'a>(
                         cpu: *cpu,
                         priority: *priority,
                         check: *check,
-                        watch: watched.is_some(),
+                        watch,
                     },
                     Outcome::Skipped {
                         reason,
@@ -328,10 +330,8 @@ pub fn launch_lines<'a>(
                             start: *start,
                             ended: *ended,
                             restore: *priority_restore,
-                            // Review N1: only `watch` writes a restore line.
-                            watch: watched.is_some()
-                                || watch_only(*reason)
-                                || priority_restore.is_some(),
+                            // Only `watch` writes these reasons and a restore line (N1).
+                            watch: watch || reason.watch_only() || priority_restore.is_some(),
                         }
                     }
                 }
@@ -357,13 +357,16 @@ pub fn launch_lines<'a>(
             }),
             Ok(res),
         ) = (holder, &e.result)
+            && method == Some(Method::Direct)
             && matches!(res.outcome, Outcome::Applied { .. })
         {
             // A6: the check covered the launcher Steam starts, not the game.
             out.push(l(LaunchMsg::CheckedLauncher {
                 start: start.clone(),
             }));
-        } else if let (Some(target), Ok(_)) = (watched, &e.result) {
+        } else if let Some(target) = holder.and_then(|h| h.watch.as_ref())
+            && watch
+        {
             // P3-4c: the rule and the check concern the game process found after the start.
             out.push(l(LaunchMsg::Watched {
                 target: target.clone(),

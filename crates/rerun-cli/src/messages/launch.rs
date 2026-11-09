@@ -4,9 +4,11 @@
 //! stand last on their line.
 //!
 //! `watch` (P3-4c, plan `P3-4` §3.5 and the review of P3-4a): every reason only `watch` writes
-//! is explained on its line; whether a profile is `watch` otherwise comes from the head of the
-//! transaction that holds it (the result may be older than that head), and then `exited_early`,
-//! a soft `ok` and the start of a skipped rule get `watch` words, and a line names the target.
+//! is explained on its line; otherwise the method is the result file's own `method=` line (a
+//! journal head may be newer than the result, so it never decides the method), and with
+//! `watch` `exited_early`, a soft `ok`, `read_back_failed` and the start of a skipped rule get
+//! `watch` words, and a line names the target when the transaction that holds the profile has a
+//! `watch` head too (the path comes from it). Without the line the shared words stay.
 
 use std::fmt;
 
@@ -76,7 +78,7 @@ pub enum LaunchMsg<'a> {
         priority: Option<Priority>,
         /// The post-launch check.
         check: Check,
-        /// The profile is `watch` (from the head that holds it): the check covered the game
+        /// The result says `method=watch`: the check covered the game
         /// process found after the start.
         watch: bool,
     },
@@ -94,7 +96,7 @@ pub enum LaunchMsg<'a> {
         ended: Option<Ended>,
         /// `watch`: the priority class set on the game could not be put back (Win32 error).
         restore: Option<u32>,
-        /// The profile is `watch` (from the head, or a reason only `watch` writes).
+        /// `method=watch`, a reason only `watch` writes, or a priority restore line.
         watch: bool,
     },
     /// `watch` (A4): the priority class set on the game could not be put back.
@@ -102,7 +104,7 @@ pub enum LaunchMsg<'a> {
         /// Win32 error code.
         code: u32,
     },
-    /// The profile is `watch` (from the head that holds it): what the rule was for.
+    /// `method=watch` and a `watch` head holds the profile: what the rule was for (its path).
     Watched {
         /// The target.
         target: Shown<'a>,
@@ -133,7 +135,8 @@ pub enum LaunchMsg<'a> {
         /// Profile.
         id: ProfileId,
     },
-    /// The check covered a launcher, not the game (A6, from the journal head).
+    /// The check covered a launcher, not the game (A6: `method=direct`, the launcher from the
+    /// journal head).
     CheckedLauncher {
         /// The launcher.
         start: Shown<'a>,
@@ -194,19 +197,6 @@ fn why(reason: SkipReason, restore: Option<u32>, watch: bool) -> Option<String> 
         SkipReason::MethodUnsupported => "written by an older rerun-launch without method watch".to_owned(),
         _ => return None,
     })
-}
-
-/// A reason only `watch` writes.
-pub fn watch_only(reason: SkipReason) -> bool {
-    matches!(
-        reason,
-        SkipReason::TargetNotFound
-            | SkipReason::TargetElevated
-            | SkipReason::TargetDenied { .. }
-            | SkipReason::SearchFailed { .. }
-            | SkipReason::PriorityFailed { .. }
-            | SkipReason::JobIneffective
-    )
 }
 
 fn start(s: Start, watch: bool) -> String {

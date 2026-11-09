@@ -4,6 +4,7 @@
 )]
 
 use super::*;
+use crate::profile::Method;
 
 const ID: &str = "0123456789abcdef0123456789abcdef";
 
@@ -24,6 +25,7 @@ fn ok() -> LaunchResult {
             priority: None,
             check: Check::Ok,
         },
+        method: None,
     }
 }
 
@@ -59,6 +61,7 @@ fn skipped() -> LaunchResult {
             ended: Some(Ended::NotConfirmed { code: 258 }),
             priority_restore: None,
         },
+        method: None,
     }
 }
 
@@ -218,15 +221,43 @@ fn every_outcome_round_trips() {
     let outcomes = all_outcomes();
     assert_eq!(outcomes.len(), 75 + 42 * 5 * 4 + 12);
     for outcome in outcomes {
-        for unix_s in [0, 1, 1_762_600_000, u64::MAX] {
+        for (unix_s, method) in [
+            (0, None),
+            (1, Some(Method::Watch)),
+            (1_762_600_000, None),
+            (u64::MAX, Some(Method::Watch)),
+        ] {
             let r = LaunchResult {
                 profile: ProfileId([0xab; 16]),
                 unix_s,
                 outcome: outcome.clone(),
+                method,
             };
             let bytes = encode(&r).unwrap();
             assert!(bytes.len() <= MAX_RESULT_BYTES / 3, "{}", bytes.len());
             assert_eq!(decode(&bytes).unwrap(), r);
+        }
+        // `direct`: every outcome but a reason only `watch` writes or a priority restore.
+        let direct = LaunchResult {
+            profile: ProfileId([0xab; 16]),
+            unix_s: 7,
+            outcome: outcome.clone(),
+            method: Some(Method::Direct),
+        };
+        let watch_only = matches!(
+            &outcome,
+            Outcome::Skipped { reason, priority_restore, .. }
+                if reason.watch_only() || priority_restore.is_some()
+        );
+        match encode(&direct) {
+            Ok(bytes) => {
+                assert!(!watch_only, "{outcome:?}");
+                assert_eq!(decode(&bytes).unwrap(), direct);
+            }
+            Err(e) => {
+                assert!(watch_only, "{outcome:?}: {e}");
+                assert_eq!(e, at(0, ResultErrorKind::Inconsistent));
+            }
         }
     }
 }
@@ -559,6 +590,7 @@ fn watch_skipped(reason: SkipReason, priority_restore: Option<u32>) -> LaunchRes
             ended: None,
             priority_restore,
         },
+        method: None,
     }
 }
 
@@ -611,6 +643,94 @@ fn watch_reasons_take_exactly_their_code_form() {
     ] {
         assert_eq!(err(with_line(GOLDEN_SKIPPED, 4, l).as_bytes()), bad, "{l}");
     }
+}
+
+const GOLDEN_METHOD: &str = "rerun-result 1
+profile=0123456789abcdef0123456789abcdef
+time=0
+rule=skipped:job_ineffective
+cpu=none
+priority=none
+check=none
+start=created
+rule_child=none
+method=watch
+priority_restore=failed:6
+";
+
+#[test]
+fn the_method_line_is_optional_strict_and_round_trips() {
+    // Golden: the method before the restore line.
+    let r = LaunchResult {
+        method: Some(Method::Watch),
+        ..watch_skipped(SkipReason::JobIneffective, Some(6))
+    };
+    assert_eq!(encode(&r).unwrap(), GOLDEN_METHOD.as_bytes());
+    assert_eq!(decode(GOLDEN_METHOD.as_bytes()).unwrap(), r);
+    // Both methods on an applied rule; without the line the method is unknown.
+    for (m, word) in [(Method::Direct, "direct"), (Method::Watch, "watch")] {
+        let r = LaunchResult {
+            method: Some(m),
+            ..ok()
+        };
+        let golden = format!("{GOLDEN}method={word}\n");
+        assert_eq!(encode(&r).unwrap(), golden.as_bytes());
+        assert_eq!(decode(golden.as_bytes()).unwrap(), r);
+    }
+    assert_eq!(decode(GOLDEN.as_bytes()).unwrap().method, None);
+    // Strict values: no other word, case or padding.
+    for bad in [
+        "auto", "Watch", "WATCH", "watch ", " watch", "", "direct:1", "hold",
+    ] {
+        let f = format!("{GOLDEN}method={bad}\n");
+        assert_eq!(
+            err(f.as_bytes()),
+            at(10, ResultErrorKind::BadValue { key: "method" }),
+            "{bad:?}"
+        );
+    }
+    // Order: after rule_child, before priority_restore; once.
+    let swapped = GOLDEN_METHOD.replace(
+        "method=watch\npriority_restore=failed:6\n",
+        "priority_restore=failed:6\nmethod=watch\n",
+    );
+    assert_eq!(
+        err(swapped.as_bytes()),
+        at(11, ResultErrorKind::TrailingLine)
+    );
+    let twice = format!("{GOLDEN}method=watch\nmethod=watch\n");
+    assert_eq!(err(twice.as_bytes()), at(11, ResultErrorKind::TrailingLine));
+    let early = GOLDEN.replace("rule_child=none\n", "method=watch\nrule_child=none\n");
+    assert_eq!(
+        err(early.as_bytes()),
+        at(
+            9,
+            ResultErrorKind::UnexpectedKey {
+                expected: "rule_child"
+            }
+        )
+    );
+    // `direct` with a reason only `watch` writes, or with a restore: inconsistent.
+    for f in [
+        GOLDEN_METHOD.replace("method=watch", "method=direct"),
+        with_line(GOLDEN_SKIPPED, 4, "rule=skipped:target_not_found")
+            .replace("rule_child=not_confirmed:258", "rule_child=none")
+            + "method=direct\n",
+    ] {
+        assert_eq!(
+            err(f.as_bytes()),
+            at(0, ResultErrorKind::Inconsistent),
+            "{f}"
+        );
+    }
+    let r = LaunchResult {
+        method: Some(Method::Direct),
+        ..watch_skipped(SkipReason::TargetNotFound, None)
+    };
+    assert_eq!(
+        encode(&r).unwrap_err(),
+        at(0, ResultErrorKind::Inconsistent)
+    );
 }
 
 #[test]

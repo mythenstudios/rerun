@@ -274,6 +274,8 @@ struct Ctx {
     id: Option<ProfileId>,
     /// The shim counts as elevated (M1): no result file (B13).
     elevated: bool,
+    /// The profile's method, once the profile decoded (the result's `method=` line).
+    method: Option<Method>,
 }
 
 /// What one run started and recorded, before the wait.
@@ -301,11 +303,18 @@ pub(crate) fn run<O: Os>(os: &O) -> Report {
         .ok()
         .and_then(|t| ProfileId::from_hex(&t));
     let elevated = os.elevated();
-    let ctx = Ctx { id, elevated };
-    let plan = if elevated {
-        Plan::Unchanged(Skip::Elevated)
+    let (plan, method) = if elevated {
+        (Plan::Unchanged(Skip::Elevated), None)
     } else {
-        decide(os, &cmd, id)
+        match profile(os, id) {
+            Ok(p) => (decide(os, &cmd, &p), Some(p.method)),
+            Err(skip) => (Plan::Unchanged(skip), None),
+        }
+    };
+    let ctx = Ctx {
+        id,
+        elevated,
+        method,
     };
     let done = match plan {
         Plan::Unchanged(skip) => unchanged(os, &cmd, skip, None),
@@ -372,6 +381,7 @@ fn record<O: Os, C>(os: &O, ctx: Ctx, done: &Done<C>) -> Written {
         profile: id,
         unix_s: os.now_unix_s(),
         outcome,
+        method: ctx.method,
     };
     let Ok(bytes) = launch::encode(&result) else {
         return Written::Failed(OsError::Encode);
@@ -382,26 +392,24 @@ fn record<O: Os, C>(os: &O, ctx: Ctx, done: &Done<C>) -> Written {
     }
 }
 
-/// Reads the profile and the topology and selects the processors (non-elevated only).
-fn decide<O: Os>(os: &O, cmd: &Command<'_>, id: Option<ProfileId>) -> Plan {
+/// Reads and decodes the profile (non-elevated only).
+fn profile<O: Os>(os: &O, id: Option<ProfileId>) -> Result<LaunchProfile, Skip> {
     let Some(id) = id else {
-        return Plan::Unchanged(Skip::ProfileId);
+        return Err(Skip::ProfileId);
     };
-    let bytes = match os.read_profile(&id) {
-        Ok(b) => b,
-        Err(e) => return Plan::Unchanged(Skip::ProfileUnreadable(e)),
-    };
+    let bytes = os.read_profile(&id).map_err(Skip::ProfileUnreadable)?;
     if bytes.len() > MAX_PROFILE_BYTES {
-        return Plan::Unchanged(Skip::ProfileInvalid(None));
+        return Err(Skip::ProfileInvalid(None));
     }
-    let profile = match decode(&bytes) {
-        Ok(p) => p,
-        Err(e) => return Plan::Unchanged(Skip::ProfileInvalid(Some(e))),
-    };
+    decode(&bytes).map_err(|e| Skip::ProfileInvalid(Some(e)))
+}
+
+/// Checks the start path, reads the topology and selects the processors.
+fn decide<O: Os>(os: &O, cmd: &Command<'_>, profile: &LaunchProfile) -> Plan {
     if !os.same_path(cmd.app, &profile.start) {
         return Plan::Unchanged(Skip::PathMismatch);
     }
-    let limit = match limit_of(os, &profile) {
+    let limit = match limit_of(os, profile) {
         Ok(limit) => limit,
         Err(skip) => return Plan::Unchanged(skip),
     };
@@ -410,7 +418,7 @@ fn decide<O: Os>(os: &O, cmd: &Command<'_>, id: Option<ProfileId>) -> Plan {
             limit,
             priority: profile.priority,
         },
-        Method::Watch => Plan::Watch(watch::Watch::new(&profile, limit)),
+        Method::Watch => Plan::Watch(watch::Watch::new(profile, limit)),
     }
 }
 
