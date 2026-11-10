@@ -369,3 +369,76 @@ fn relying_pairs(other: &share::Other, me: &Me<'_>) -> Option<Vec<(u16, Relier)>
     }
     Some(out)
 }
+
+/// An executable a live transaction patched (P4-10, `laa_patch`; P4 lead condition R5): where,
+/// from which build, to which content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchedExe {
+    /// The transaction.
+    pub txn: TxnId,
+    /// Folded path below the game folder.
+    pub path: String,
+    /// SHA-256 of the file before the patch (the patch's base).
+    pub base: [u8; 32],
+    /// SHA-256 of the patched file.
+    pub sha256: [u8; 32],
+}
+
+/// The patched files of game folder `root` that live transactions (not forgotten, not closed,
+/// their head usable) applied and have not reverted: a matching aid only (a transaction that
+/// cannot be read is left out; the match then fails closed as before).
+pub(crate) fn patched(
+    j: &Journal<'_>,
+    l: &Listing,
+    root: crate::policy::root::RootId,
+) -> Vec<PatchedExe> {
+    let mut out = Vec::new();
+    for t in &l.txns {
+        if t.forgotten {
+            continue;
+        }
+        let Ok(v) = &t.view else { continue };
+        if matches!(v.state, TxnState::Closed(_) | TxnState::Empty) {
+            continue;
+        }
+        let Ok(full) = j.load(&t.id, VerifyBackups::Length) else {
+            continue;
+        };
+        let Some(p) = full
+            .head
+            .as_deref()
+            .and_then(|h| super::decode_head(h).ok())
+        else {
+            continue;
+        };
+        let Some(b) = Bindings::of(&p, &full.rebinds) else {
+            continue;
+        };
+        let Ok(objs) = b.objects_by_op(&p) else {
+            continue;
+        };
+        for (k, o) in objs {
+            let Some(Op::ReplaceFile {
+                content: crate::plan::ContentRef::Patch { base, sha256, .. },
+                ..
+            }) = p.ops.get(k)
+            else {
+                continue;
+            };
+            let Object::File { root: r, path, .. } = o else {
+                continue;
+            };
+            let log = full.ops.get(&super::op_ix(k));
+            let live = log.is_some_and(|x| x.done.is_some() && x.reverted.is_none());
+            if r == root && live {
+                out.push(PatchedExe {
+                    txn: t.id,
+                    path,
+                    base: base.sha256,
+                    sha256: *sha256,
+                });
+            }
+        }
+    }
+    out
+}

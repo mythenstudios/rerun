@@ -138,7 +138,9 @@ pub enum PlanRefusal {
 /// The CLI's check of a plan's helper ops (module docs): what the helper will check later, from
 /// what the engine read of the game folder (`game`, `topo::read_game` of the same root): every
 /// anchor's executable there with its hashes (`ExeState::Match`, which for an anchor includes the
-/// signed SHA-256; also for an executable that is not the main one), and the anti-cheat rule not
+/// signed SHA-256; also for an executable that is not the main one; never a file that matched only
+/// as the build a live `laa_patch` changed, P4-10: the helper hashes the file itself and would
+/// refuse it), and the anti-cheat rule not
 /// enforced. The engine builds `Op::FirewallRule` from these anchors only (P4-2d).
 ///
 /// # Errors
@@ -167,10 +169,9 @@ pub fn check_plan(
         Program::new(&root_path, &a.exe)?;
     }
     for a in &anchors {
-        let ok = game
-            .exes
-            .iter()
-            .any(|e| e.path.same_spelling(&a.exe) && e.state == ExeState::Match);
+        let ok = game.exes.iter().any(|e| {
+            e.path.same_spelling(&a.exe) && e.state == ExeState::Match && e.patched_by.is_none()
+        });
         if !ok {
             return Err(PlanRefusal::ExeMismatch(a.exe.clone()));
         }

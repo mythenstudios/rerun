@@ -60,6 +60,10 @@ fn exe_lines(g: &GameFacts) -> Vec<Message<'static>> {
         .map(|e| {
             let path = e.path.as_str();
             let (state, what) = match &e.state {
+                ExeState::Match if e.patched_by.is_some() => (
+                    "matches (as patched by Rerun's laa_patch)",
+                    escape::path(path).into_owned(),
+                ),
                 ExeState::Match => ("matches", escape::path(path).into_owned()),
                 ExeState::Mismatch => (
                     "has another content (no match)",
@@ -261,9 +265,11 @@ fn run<W: Write, E: Write>(
     let profile = hw::read(sys, table);
     let index = *catalog.sha256();
     let outcome = with_game(sys, &fr, &GameRef::Steam(app_id), err, |game, steam_app| {
+        // P4-10 (R5): an executable a live laa_patch changed still counts as its build.
+        let patched = rerun_core::exec::patched_now(dir, game.id());
         let read: Vec<(&rerun_core::catalog::Topo, GameFacts)> = topos
             .iter()
-            .map(|t| (*t, topo::read_game(game, t)))
+            .map(|t| (*t, topo::read_game_with(game, t, &patched)))
             .collect();
         // Review follow-up 4: retired Topos are listed, never chosen.
         let (retired, selection) = topo::select(read);

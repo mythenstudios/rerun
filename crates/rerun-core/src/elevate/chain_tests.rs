@@ -1209,6 +1209,7 @@ fn facts(tool: ExeState, anti_cheat: AntiCheatScan) -> GameFacts {
         arch: None,
         api: None,
         sha1: None,
+        patched_by: None,
     };
     GameFacts {
         exes: vec![
@@ -1246,6 +1247,14 @@ fn d_the_plan_refuses_what_the_helper_would() {
             1
         );
     }
+    // P4-10 (R5): an anchor that matched only as the build a live laa_patch changed is no
+    // anchor (the helper hashes the file itself and would refuse it).
+    let mut patched = facts(ExeState::Match, AntiCheatScan::default());
+    patched.exes[1].patched_by = Some("00000001-0000000000000001".parse().unwrap());
+    assert!(matches!(
+        check_plan(&t, &both, &info, &patched),
+        Err(PlanRefusal::ExeMismatch(p)) if p.as_str() == r"bin\tool.exe"
+    ));
     // Anti-cheat found (or a marker unreadable): refused.
     let ac = AntiCheatScan {
         found: vec![AntiCheatHit {

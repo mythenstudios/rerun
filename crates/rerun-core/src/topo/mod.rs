@@ -90,8 +90,12 @@ pub struct ExeCheck {
     /// entries may name one path with different builds, so the path alone never says it.
     pub api: Option<Api>,
     /// Its SHA-1, hashed on the handle it was parsed on, when it matched (`None` otherwise; P4-8:
-    /// a package's `supports_exe_sha1`).
+    /// a package's `supports_exe_sha1`). For a file a live transaction patched, the Topo's SHA-1
+    /// of the build it was patched from.
     pub sha1: Option<Sha1>,
+    /// The file matched as the build a live transaction patched with `laa_patch` (P4-10, R5): the
+    /// transaction. `None` for a file that matched by its own hashes.
+    pub patched_by: Option<crate::journal::TxnId>,
 }
 
 /// What the engine read from the game folder for one Topo.
@@ -136,12 +140,25 @@ impl GameFacts {
 
 /// Reads what the engine needs of the game folder (module docs).
 pub fn read_game(game: &GameDir<'_>, topo: &Topo) -> GameFacts {
+    read_game_with(game, topo, &[])
+}
+
+/// [`read_game`], where a file that one of `patched` (the executables live transactions of this
+/// game folder patched, `exec::patched_now`) left matches as the build it was patched from: a
+/// `match.exes` entry with a `sha256` equal to the patch's base, at the same path (folded), and
+/// the file's SHA-256 the patch's result (P4-10, P4 lead condition R5). Such an entry carries
+/// [`ExeCheck::patched_by`]; the elevated helper's derivation never takes it as an anchor.
+pub fn read_game_with(
+    game: &GameDir<'_>,
+    topo: &Topo,
+    patched: &[crate::exec::PatchedExe],
+) -> GameFacts {
     let exes = topo
         .matches
         .exes
         .iter()
         .map(|e| {
-            let (state, arch, sha1) = check_exe(game, e);
+            let (state, arch, sha1, patched_by) = check_exe(game, e, patched);
             let api = (state == ExeState::Match).then_some(e.api);
             ExeCheck {
                 path: e.path.clone(),
@@ -149,6 +166,7 @@ pub fn read_game(game: &GameDir<'_>, topo: &Topo) -> GameFacts {
                 arch,
                 api,
                 sha1,
+                patched_by,
             }
         })
         .collect();
@@ -179,7 +197,16 @@ pub fn anti_cheat_dirs(topo: &Topo) -> Vec<RelPath> {
     dirs
 }
 
-fn check_exe(game: &GameDir<'_>, e: &Exe) -> (ExeState, Option<Arch>, Option<Sha1>) {
+fn check_exe(
+    game: &GameDir<'_>,
+    e: &Exe,
+    patched: &[crate::exec::PatchedExe],
+) -> (
+    ExeState,
+    Option<Arch>,
+    Option<Sha1>,
+    Option<crate::journal::TxnId>,
+) {
     let r = inspect_exe(
         game,
         &e.path,
@@ -195,6 +222,7 @@ fn check_exe(game: &GameDir<'_>, e: &Exe) -> (ExeState, Option<Arch>, Option<Sha
         Err(_) => None,
     };
     let mut matched_sha1 = None;
+    let mut patched_by = None;
     let state = match r {
         Err(ExeError::Pe(PeReadError::Open { source, .. }))
             if source.kind == SysErrorKind::NotFound =>
@@ -208,8 +236,22 @@ fn check_exe(game: &GameDir<'_>, e: &Exe) -> (ExeState, Option<Arch>, Option<Sha
                 let sha256 = e.sha256.as_ref().map(|x| x.to_string() == h.sha256);
                 let sha1 = e.sha1.as_ref().map(|x| x.to_string() == h.sha1);
                 let any = sha256.is_some() || sha1.is_some();
+                // R5: the result of a live patch of the Topo's build counts as that build.
+                let derived = e.sha256.as_ref().and_then(|x| x.bytes()).and_then(|base| {
+                    let at = crate::fold::fold(e.path.as_str());
+                    patched.iter().find(|p| {
+                        p.path == at
+                            && p.base == *base
+                            && crate::wire::hex32::to_string(&p.sha256)
+                                .eq_ignore_ascii_case(&h.sha256)
+                    })
+                });
                 if any && sha256 != Some(false) && sha1 != Some(false) {
                     matched_sha1 = Sha1::parse(&h.sha1);
+                    ExeState::Match
+                } else if let Some(p) = derived {
+                    matched_sha1 = e.sha1.clone().filter(|x| !x.is_todo());
+                    patched_by = Some(p.txn);
                     ExeState::Match
                 } else {
                     ExeState::Mismatch
@@ -219,7 +261,7 @@ fn check_exe(game: &GameDir<'_>, e: &Exe) -> (ExeState, Option<Arch>, Option<Sha
         },
     };
     let arch = if state == ExeState::Match { arch } else { None };
-    (state, arch, matched_sha1)
+    (state, arch, matched_sha1, patched_by)
 }
 
 // ---------- Anti-cheat and launch ----------
@@ -938,6 +980,11 @@ fn laa_step(
     if check.state != ExeState::Match {
         return Err(refused(
             "it is not the build the Topo names in this game folder (its hashes differ)",
+        ));
+    }
+    if check.patched_by.is_some() {
+        return Err(refused(
+            "a Rerun transaction has patched it already; revert that one first",
         ));
     }
     let sha256 = entry

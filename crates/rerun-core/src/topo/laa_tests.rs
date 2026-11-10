@@ -471,3 +471,91 @@ fn la7_one_executable_is_patched_once() {
     patch_of(&tp);
     assert_eq!(tp.steps.len(), 1, "{:?}", tp.steps);
 }
+
+// ---------- LA8 ----------
+
+/// LA8 (P4 lead condition R5): after the patch the executable has another SHA-256, yet a live
+/// transaction's patch of the Topo's build still counts as that build (`read_game_with`,
+/// `exec::patched_now`); `laa_patch` again is refused with the reason; after the revert, or once
+/// the transaction is forgotten, nothing is derived any more.
+#[test]
+fn la8_a_live_patch_still_matches_its_build() {
+    use super::{ExeState, read_game_with};
+    let exe = game_exe(true);
+    let env = Env::new(sys_with(&exe));
+    let sys = &env.sys;
+    let t = topo(&exe);
+    let facts_now = || {
+        let fr = fr(sys);
+        let store = StoreDir::open(sys, &fr, Path::new(STEAM_LIB)).unwrap();
+        let g = store.game(&fr, "G").unwrap();
+        let patched = crate::exec::patched_now(&app(sys), g.id());
+        (read_game(&g, &t), read_game_with(&g, &t, &patched), patched)
+    };
+    let txn = env.applied(&store_plan(&env, &plan_on(sys, &t).unwrap()));
+    let (plain, derived, patched) = facts_now();
+    assert_eq!(plain.exes[0].state, ExeState::Mismatch, "another hash now");
+    assert_eq!(patched.len(), 1);
+    assert_eq!(patched[0].txn, txn);
+    assert_eq!(derived.exes[0].state, ExeState::Match);
+    assert_eq!(derived.exes[0].patched_by, Some(txn));
+    assert_eq!(derived.main_exe().unwrap().as_str(), "Game.exe");
+    // Planned again on the derived match: refused, with the reason.
+    {
+        let fr = fr(sys);
+        let store = StoreDir::open(sys, &fr, Path::new(STEAM_LIB)).unwrap();
+        let g = store.game(&fr, "G").unwrap();
+        let a = app(sys);
+        let ctx = PlanCtx {
+            game: &g,
+            app: Some(&a),
+            steam_app: Some(APP),
+            main_exe: None,
+            reg: RegPolicy.reader(sys),
+            app_path: None,
+        };
+        let r = plan(
+            &INDEX,
+            &t,
+            &Facts {
+                profile: &profile(),
+                table: Some(GpuArchTable::builtin().unwrap()),
+                game: &derived,
+                packages: &[],
+            },
+            &[Pick {
+                issue: "memory".to_owned(),
+                variant: "laa".to_owned(),
+            }],
+            &ctx,
+        );
+        refused(r, "has patched it already");
+    }
+    // Another content at the path is not the patch's result: no match.
+    let mut other = game_exe(true);
+    other[0x350] ^= 0xFF;
+    put(sys, "Game.exe", &other);
+    assert_eq!(facts_now().1.exes[0].state, ExeState::Mismatch);
+    // Back to the patched bytes, then reverted: the original matches by its own hash.
+    put(sys, "Game.exe", &{
+        let mut p = exe.clone();
+        let (edits, _) = patch_of(&plan_on(&sys_with(&exe), &t).unwrap());
+        for e in edits {
+            p[usize::try_from(e.offset).unwrap()] = e.new;
+        }
+        p
+    });
+    assert_eq!(facts_now().1.exes[0].patched_by, Some(txn));
+    assert_eq!(env.revert(&txn).unwrap().closed, Some(Closing::Reverted));
+    let (plain, derived, patched) = facts_now();
+    assert!(patched.is_empty());
+    assert_eq!(plain.exes[0].state, ExeState::Match);
+    assert_eq!(derived.exes[0].patched_by, None);
+
+    // A forgotten transaction derives nothing.
+    let txn = env.applied(&store_plan(&env, &plan_on(sys, &t).unwrap()));
+    put(sys, "Game.exe", b"MZ an update");
+    env.revert(&txn).unwrap();
+    env.forget(&txn).unwrap();
+    assert!(facts_now().2.is_empty());
+}
