@@ -1412,3 +1412,320 @@ pub(super) fn cleanup_op(
     }
     Ok(out)
 }
+
+// ---------- P4-8b: the hand-over of shared files and folders (`exec::share`) ----------
+
+/// What is at a path, with its file ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Found {
+    Absent,
+    /// A plain file with one link (on a guard).
+    File {
+        sha: [u8; 32],
+        len: u64,
+        attrs: Attrs,
+        id: u128,
+        /// Stored in exactly the asked spelling.
+        exact: bool,
+    },
+    /// A plain folder.
+    Dir {
+        id: u128,
+    },
+    /// Anything else (a link, a reparse point, a restricted entry, a second link).
+    Other,
+}
+
+/// What is at `path` of `root`, read only.
+pub(super) fn find(dirs: &mut Dirs<'_>, root: u16, path: &RelPath) -> SysResult<Found> {
+    let Some((parent, name)) = dirs.parent(root, path, false)? else {
+        return Ok(Found::Absent);
+    };
+    let Some(m) = parent.metadata(&name)? else {
+        return Ok(Found::Absent);
+    };
+    if m.restricted || m.reparse.is_some() {
+        return Ok(Found::Other);
+    }
+    match m.kind {
+        EntryKind::Dir => return Ok(Found::Dir { id: m.file_id }),
+        EntryKind::Reparse => return Ok(Found::Other),
+        EntryKind::File => {}
+    }
+    match parent.guard(&name) {
+        Ok(mut g) => {
+            let gm = g.metadata()?;
+            let sha = g.sha256()?;
+            Ok(Found::File {
+                sha,
+                len: gm.len,
+                attrs: gm.attrs,
+                id: gm.file_id,
+                exact: g.name().same_spelling(&name),
+            })
+        }
+        Err(e) if e.kind == SysErrorKind::NotFound => Ok(Found::Absent),
+        Err(e)
+            if matches!(
+                e.kind,
+                SysErrorKind::Linked | SysErrorKind::ReparsePoint | SysErrorKind::AccessDenied
+            ) =>
+        {
+            Ok(Found::Other)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The names in the folder `path` of `root` (folded), at most `max` (more is `None`).
+fn names_in(
+    dirs: &mut Dirs<'_>,
+    root: u16,
+    path: &RelPath,
+    max: usize,
+) -> SysResult<Option<Vec<String>>> {
+    let Some((parent, name)) = dirs.parent(root, path, false)? else {
+        return Ok(Some(Vec::new()));
+    };
+    match parent.read_dir_limited(Some(&name), max) {
+        Ok(entries) => Ok(Some(entries.iter().map(|e| fold(&e.name)).collect())),
+        Err(e) if e.kind == SysErrorKind::TooLarge => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The creator side of the hand-over (P4-8b): `Some` with `Observed::Kept` when op `k` (a
+/// `CreateFile` or `CreateDir` later transactions rely on, `reliers`) finds its object exactly
+/// as it left it with its file ID; `None` when the plain observation decides (gone, changed,
+/// an empty folder that is removed as before). A file with the op's content but another file
+/// ID (or a relying `Hold` that recorded another one) cannot be handed over: `Refusal::Held`
+/// (S5 checks it before the first record; this is the same rule under the act).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the observation of a kept op and its context"
+)]
+pub(super) fn keep_seen(
+    plan: &Plan,
+    dirs: &mut Dirs<'_>,
+    k: u16,
+    op: &Op,
+    log: &OpLog,
+    mode: Mode,
+    reliers: &[super::share::Relier],
+    later: &BTreeMap<u16, super::Seen>,
+) -> Result<Option<Seen>, ExecError> {
+    let e = op_err(k);
+    let (root, path) = file_target(k, op)?;
+    let Some(first) = reliers.first() else {
+        return Ok(None);
+    };
+    let mut by: Vec<crate::journal::TxnId> = reliers.iter().map(|r| r.txn).collect();
+    by.sort();
+    by.dedup();
+    let done = log.done.and_then(|d| d.file_id);
+    let kept = |by: Vec<crate::journal::TxnId>| {
+        let mut s = Seen::new(Observed::Kept);
+        s.detail = Some(super::Detail::Kept { by });
+        s
+    };
+    match op {
+        Op::CreateFile { content, attrs, .. } => match find(dirs, root, path).map_err(&e)? {
+            Found::File {
+                sha,
+                len,
+                attrs: a,
+                id,
+                exact,
+            } if sha == *content.sha256() && len == content.len() && a == *attrs && exact => {
+                let chain = Some(id) == done
+                    && reliers
+                        .iter()
+                        .all(|r| r.held_id.is_none() || r.held_id == done);
+                if !chain && !super::knob_ho(1) {
+                    return Err(ExecError::Refused(super::Refusal::Held { txn: first.txn }));
+                }
+                let mut s = kept(by);
+                // A temp name of the apply that is still there stays reported as before.
+                if let Some(x) = log.intent.tmp.as_ref().map(TmpName::to_rel) {
+                    let parent = dirs.parent(root, path, false).map_err(&e)?.map(|(d, _)| d);
+                    if exists(parent, &x).map_err(&e)? {
+                        s.left.push(x);
+                    }
+                }
+                Ok(Some(s))
+            }
+            _ => Ok(None),
+        },
+        Op::CreateDir { .. } => {
+            let Found::Dir { id } = find(dirs, root, path).map_err(&e)? else {
+                return Ok(None);
+            };
+            if Some(id) != done {
+                return Ok(None);
+            }
+            let mut own = if mode == Mode::Verify {
+                later_children(plan, k, root, path, later)
+            } else {
+                Vec::new()
+            };
+            let mut names: Vec<String> = reliers.iter().map(|r| r.name.clone()).collect();
+            names.sort();
+            names.dedup();
+            let max = own.len() + names.len();
+            let Some(present) = names_in(dirs, root, path, max).map_err(&e)? else {
+                return Ok(None);
+            };
+            // Empty but for what this revert removes: removed as before.
+            if present.iter().all(|n| own.contains(n)) {
+                return Ok(None);
+            }
+            own.extend(names);
+            if present.iter().all(|n| own.contains(n)) {
+                Ok(Some(kept(by)))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The inheritor side (P4-8b): carries out (`act`) or predicts (`verify`) the duties of op `k`
+/// after its own act, a file first, then folders deepest first; and reports the objects another
+/// transaction still relies on. `gone`: the folded names below a folder that this revert's own
+/// ops remove (for the prediction of `verify`, N4), by folded folder path.
+pub(super) fn inherit(
+    dirs: &mut Dirs<'_>,
+    k: u16,
+    duties: &[super::share::Duty],
+    still: &[super::share::Still],
+    act: bool,
+    gone: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<super::Inherited>, ExecError> {
+    use super::share::Duty;
+    use super::{Inherited, InheritedOutcome as O, LeftWhy};
+    let e = op_err(k);
+    let mut out = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    for d in duties {
+        let shown = crate::escape::path(d.path().as_str()).into_owned();
+        let (outcome, dir) = match d {
+            Duty::File {
+                root,
+                path,
+                sha256,
+                len,
+                attrs,
+                file_id,
+                ..
+            } => {
+                let o = match find(dirs, *root, path).map_err(&e)? {
+                    Found::Absent => O::Gone,
+                    Found::File {
+                        sha,
+                        len: l,
+                        attrs: a,
+                        id,
+                        exact,
+                    } if sha == *sha256 && l == *len && a == *attrs && exact => {
+                        if id != *file_id && !super::knob_ho(1) {
+                            O::Left(LeftWhy::OtherFileId)
+                        } else {
+                            if act {
+                                let Some((parent, name)) =
+                                    dirs.parent(*root, path, true).map_err(&e)?
+                                else {
+                                    return Err(e(SysError::new(
+                                        SysErrorKind::NotFound,
+                                        path.as_str(),
+                                    )));
+                                };
+                                parent
+                                    .guard(&name)
+                                    .and_then(|g| g.delete(sha256))
+                                    .map_err(&e)?;
+                            }
+                            removed.push(fold(path.as_str()));
+                            O::Removed
+                        }
+                    }
+                    Found::File { .. } | Found::Dir { .. } | Found::Other => {
+                        O::Left(LeftWhy::Changed)
+                    }
+                };
+                (o, false)
+            }
+            Duty::Dir {
+                root,
+                path,
+                file_id,
+                ..
+            } => {
+                let o = match find(dirs, *root, path).map_err(&e)? {
+                    Found::Absent => O::Gone,
+                    // Another folder of that name: not Rerun's (B1), not reported.
+                    Found::Dir { id } if id != *file_id => continue,
+                    Found::Dir { id } => {
+                        let key = fold(path.as_str());
+                        let mut allowed: Vec<String> = gone.get(&key).cloned().unwrap_or_default();
+                        // Below it, what this run removed already or predicts to remove.
+                        allowed.extend(removed.iter().filter_map(|r| {
+                            r.strip_prefix(key.as_str())
+                                .and_then(|x| x.strip_prefix('\\'))
+                                .map(|x| x.split('\\').next().unwrap_or(x).to_owned())
+                        }));
+                        let empty =
+                            match names_in(dirs, *root, path, allowed.len().max(1)).map_err(&e)? {
+                                None => false,
+                                Some(present) if act => present.is_empty(),
+                                Some(present) => present.iter().all(|n| allowed.contains(n)),
+                            };
+                        if empty {
+                            if act {
+                                dirs.evict(*root, path);
+                                let mark = !super::knob_ho(4);
+                                let Some((parent, name)) =
+                                    dirs.parent(*root, path, mark).map_err(&e)?
+                                else {
+                                    return Err(e(SysError::new(
+                                        SysErrorKind::NotFound,
+                                        path.as_str(),
+                                    )));
+                                };
+                                parent.remove_dir(&name, id).map_err(&e)?;
+                            }
+                            removed.push(key);
+                            O::Removed
+                        } else {
+                            O::Left(LeftWhy::NotEmpty)
+                        }
+                    }
+                    Found::File { .. } | Found::Other => O::Left(LeftWhy::Changed),
+                };
+                (o, true)
+            }
+        };
+        out.push(Inherited {
+            from: d.from(),
+            path: shown,
+            dir,
+            outcome,
+        });
+    }
+    for s in still {
+        // A folder of another file ID is not the creator's (B1): not reported.
+        if s.dir {
+            match find(dirs, s.root, &s.path).map_err(&e)? {
+                Found::Dir { id } if id == s.file_id => {}
+                _ => continue,
+            }
+        }
+        out.push(Inherited {
+            from: s.from,
+            path: crate::escape::path(s.path.as_str()).into_owned(),
+            dir: s.dir,
+            outcome: O::StillRelied(s.by),
+        });
+    }
+    Ok(out)
+}

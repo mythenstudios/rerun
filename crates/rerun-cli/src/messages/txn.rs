@@ -7,6 +7,7 @@
 use std::fmt;
 
 use rerun_core::escape::Shown;
+use rerun_core::exec::{InheritedOutcome, LeftWhy, ShareKind};
 use rerun_core::journal::{Closing, Observed, TxnId};
 use rerun_core::plan::{IniOldShown, PlanHash, RegShown};
 use rerun_core::policy::ini::KeyState;
@@ -134,6 +135,15 @@ fn will(o: Observed) -> &'static str {
         Observed::Kept => {
             "kept for a later transaction that relies on it (the last revert that relies on it removes it)"
         }
+    }
+}
+
+/// Why a handed-over file or folder is left (X14).
+fn left_why(w: LeftWhy) -> &'static str {
+    match w {
+        LeftWhy::Changed => "it changed since",
+        LeftWhy::OtherFileId => "the same content, but not the same file any more",
+        LeftWhy::NotEmpty => "it holds something else",
     }
 }
 
@@ -599,6 +609,36 @@ pub enum TxnMsg<'a> {
         changed: bool,
         /// A `keep shared file` op (P4-8): its revert changes nothing.
         held: bool,
+    },
+    /// P4-8b (E6): the op's file or folder is kept for later transactions that rely on it.
+    KeptFor {
+        /// The transactions, as text (`T2, T3`).
+        by: String,
+    },
+    /// P4-8b (E6): a file or folder an earlier transaction created and handed over, and what the
+    /// revert does (`will`) or did with it.
+    Inherited {
+        /// `verify` (what it will do) or the report (what it did).
+        will: bool,
+        /// The transaction that created it.
+        from: TxnId,
+        /// What.
+        outcome: InheritedOutcome,
+        /// A folder.
+        dir: bool,
+        /// The path (escaped, last on its line).
+        path: Shown<'a>,
+    },
+    /// P4-8b: in `status` and the `forget` preview, a shared file or folder an op relies on.
+    Share {
+        /// The `forget` preview (what forget means for it) or `status`.
+        forget: bool,
+        /// What becomes of it.
+        kind: ShareKind,
+        /// A folder.
+        dir: bool,
+        /// The path (escaped, last on its line).
+        path: Shown<'a>,
     },
     /// A name the revert left in the op's folder.
     Left {
@@ -1138,6 +1178,63 @@ impl fmt::Display for TxnMsg<'_> {
                 }
             }
             Self::Left { path } => write!(f, "    left: {path}"),
+            Self::KeptFor { by } => write!(
+                f,
+                "    kept for {by}, which relies on it (the last revert that relies on it removes it)"
+            ),
+            Self::Inherited {
+                will,
+                from,
+                outcome,
+                dir,
+                path,
+            } => {
+                let what = if *dir { "folder" } else { "file" };
+                let words = match (will, outcome) {
+                    (true, InheritedOutcome::Removed) => {
+                        format!("removes the {what} {from} installed and handed over (unchanged)")
+                    }
+                    (false, InheritedOutcome::Removed) => {
+                        format!("removed the {what} {from} installed and handed over")
+                    }
+                    (_, InheritedOutcome::StillRelied(t)) => {
+                        format!("keeps the {what} {from} installed: {t} still relies on it")
+                    }
+                    (_, InheritedOutcome::Gone) => {
+                        format!("the {what} {from} installed is gone already")
+                    }
+                    (true, InheritedOutcome::Left(w)) => {
+                        format!("leaves the {what} {from} installed ({})", left_why(*w))
+                    }
+                    (false, InheritedOutcome::Left(w)) => {
+                        format!("left the {what} {from} installed ({})", left_why(*w))
+                    }
+                };
+                write!(f, "    {words}: {path}")
+            }
+            Self::Share {
+                forget,
+                kind,
+                dir,
+                path,
+            } => {
+                let what = if *dir { "folder" } else { "file" };
+                let words = match (forget, kind) {
+                    (false, ShareKind::Inherits { from }) => format!(
+                        "relies on the {what} {from} installed and handed over; its revert removes it if unchanged"
+                    ),
+                    (false, ShareKind::RemovedBy { from, by }) => format!(
+                        "relies on the {what} {from} installed; the revert of {by} removes it once nothing else relies on it"
+                    ),
+                    (true, ShareKind::Inherits { from }) => format!(
+                        "forget leaves the {what} {from} installed and handed over to this transaction, until a later transaction that relies on it is reverted"
+                    ),
+                    (true, ShareKind::RemovedBy { from, by }) => format!(
+                        "after forget, the revert of {by} may remove the {what} {from} installed (this transaction no longer keeps it)"
+                    ),
+                };
+                write!(f, "  {words}: {path}")
+            }
             Self::Reverted { txn } => write!(f, "transaction {txn} reverted and closed"),
             Self::AlreadyClosed { txn, how } => write!(
                 f,

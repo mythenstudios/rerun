@@ -405,7 +405,7 @@ fn checked<'g>(
     // E-R6: LIFO with the objects at the head's roots, the folder bound before and the new one.
     let mut objects = b.objects(plan).map_err(|_| blocked())?;
     objects.extend(tg.overlay.objects(plan).map_err(|_| blocked())?);
-    stack::for_revert(j, listing, t, &objects)?;
+    stack::for_revert(j, listing, t, &objects, None)?;
     let mismatch = |r: &Refusal| matches!(r, Refusal::Root(e) if matches!(**e, RootError::IdentityMismatch { .. }));
     let roots = roots::Roots::each(cx, &tg.overlay, stores).map_err(|r| {
         if mismatch(&r) {
@@ -627,5 +627,14 @@ pub fn revert_rebound(
     let ids: BTreeMap<u16, u128> = c.dirs.iter().map(|d| (d.op, d.file_id)).collect();
     c.roots.set_proof(to.root, Proof::Rebound(ids));
     let plan = knob_rewrite_head(&plan, &rebound).unwrap_or(plan);
-    revert_run(cx, &j, t, &plan, w, &c.roots, false)
+    revert_run(
+        cx,
+        &j,
+        t,
+        &plan,
+        w,
+        &c.roots,
+        false,
+        super::Shares::default(),
+    )
 }

@@ -231,6 +231,7 @@ pub fn render_status(s: &exec::Status, all: bool) -> Vec<Message<'_>> {
             for o in &st.ops {
                 out.extend(op_lines(st, o, true));
             }
+            out.extend(share_lines(st, false));
             out.push(if blocked(st) {
                 m(TxnMsg::HintForgetOnly { txn })
             } else if left_foreign(st) {
@@ -564,7 +565,7 @@ fn now_lines<'a>(st: &'a TxnStatus, v: &'a Verified) -> Vec<Message<'a>> {
             at: op_at(head(st), *k),
         }));
         out.extend(value_line(st, *k));
-        out.extend(detail_lines(v.details.get(k)));
+        out.extend(detail_lines(v.details.get(k), true));
         if *observed == Observed::Foreign {
             let b = st
                 .ops
@@ -720,8 +721,27 @@ fn x12_forget(
 
 /// The keys of an INI op and the `.old` before a step of Rerun (P2-12 open point: shown
 /// before forget, never called the original).
-fn detail_lines(d: Option<&Detail>) -> Vec<Message<'_>> {
+fn detail_lines(d: Option<&Detail>, will: bool) -> Vec<Message<'_>> {
     let mut out = Vec::new();
+    // P4-8b (E6): kept for later transactions, or inherited from earlier ones.
+    match d {
+        Some(Detail::Kept { by }) => {
+            let by: Vec<String> = by.iter().map(ToString::to_string).collect();
+            out.push(m(TxnMsg::KeptFor { by: by.join(", ") }));
+        }
+        Some(Detail::Inherited(items)) => {
+            for i in items {
+                out.push(m(TxnMsg::Inherited {
+                    will,
+                    from: i.from,
+                    outcome: i.outcome,
+                    dir: i.dir,
+                    path: i.path.clone(),
+                }));
+            }
+        }
+        _ => {}
+    }
     if let Some(Detail::Ini { keys, before_step }) = d {
         for k in keys {
             out.push(m(TxnMsg::KeyState {
@@ -744,6 +764,21 @@ fn detail_lines(d: Option<&Detail>) -> Vec<Message<'_>> {
     out
 }
 
+/// The shared files and folders of `st` (P4-8b): in `status`, or what `forget` means for them.
+fn share_lines(st: &TxnStatus, forget: bool) -> Vec<Message<'_>> {
+    st.shares
+        .iter()
+        .map(|s| {
+            m(TxnMsg::Share {
+                forget,
+                kind: s.kind,
+                dir: s.dir,
+                path: s.path.clone(),
+            })
+        })
+        .collect()
+}
+
 /// The report of a revert.
 fn report_lines<'a>(st: &TxnStatus, rep: &'a RevertReport, v: &Verified) -> Vec<Message<'a>> {
     let mut out = Vec::new();
@@ -755,7 +790,7 @@ fn report_lines<'a>(st: &TxnStatus, rep: &'a RevertReport, v: &Verified) -> Vec<
             changed: seen != Some(o.observed),
             held: op_at(head(st), o.op).is_some_and(|r| r.action == rerun_core::plan::HOLD_ACTION),
         }));
-        out.extend(detail_lines(o.detail.as_ref()));
+        out.extend(detail_lines(o.detail.as_ref(), false));
         out.extend(backup(o.backup.as_ref()));
         // A `.old` the cleanup pass reports below is not repeated here (P2-15).
         let reported = |l: &rerun_core::path::RelPath| {
@@ -1170,6 +1205,8 @@ fn run_forget<W: Write, E: Write>(
         Some(Err(e)) => lines.push(m(TxnMsg::CannotObserve { error: shown(e) })),
         None => {}
     }
+    // P4-8b (S3, default 2): what forget means for the files it shares.
+    lines.extend(share_lines(&st, true));
     lines.push(m(TxnMsg::ForgetChangesNothing));
     // P2-15 (senior-dev S3): with only the cleanup pending, no change of Rerun's stays.
     lines.push(m(if st.state == TxnLine::CleanupPending {

@@ -1451,6 +1451,39 @@ pub(crate) fn append_revert_intent(
     .unwrap();
 }
 
+/// Appends a `RevertIntent` and a `RevertDone { observed }` of `op` as the next records (a
+/// planted revert, P4-8b tamper rows).
+pub(crate) fn append_revert_done(
+    fx: &crate::sys::fake::FakeFs,
+    dir: &str,
+    op: u16,
+    observed: super::Observed,
+) {
+    append_revert_intent(fx, dir, op, None, None);
+    let read = |name: &str| -> Option<Vec<u8>> {
+        #[expect(clippy::disallowed_methods, reason = "test: read a fixture file")]
+        let d = fx.open_dir(Path::new(dir)).ok()?;
+        d.read(&r(name)).ok()
+    };
+    let head = read("head.json").unwrap();
+    let sha: [u8; 32] =
+        sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(&head)).into();
+    let mut n = 1u16;
+    while read(&format!("{n:04}.json")).is_some() {
+        n += 1;
+    }
+    let rec = Record::RevertDone {
+        op,
+        observed,
+        old_left: Vec::new(),
+    };
+    fx.put_file(
+        &Path::new(dir).join(format!("{n:04}.json")),
+        &record::encode(n, &sha, &rec).unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn d2_a_forget_marker_covers_the_head_it_names() {
     let sys = system();

@@ -74,6 +74,13 @@
 //! profiles root (`roots`: opened through `AppDir`, created by the apply, never by a revert)
 //! with inline content (`file`); its records, observation and revert are those of every
 //! `CreateFile` and `ReplaceFile`, and there is no new record kind or flush site.
+//!
+//! Shared files and folders (P4-8b, user decision E6, `share`): a revert keeps a file or folder
+//! it created that a later applied transaction relies on (`RevertDone { Kept }`, nothing
+//! deleted), and the last revert that relies on such an object removes it if it is still exactly
+//! the creator's (its file ID, content and R/H/S; a folder empty), after its own flushed intent
+//! of the op that carries it. Everything is derived under the lock before the first record from
+//! the listing and the other transactions' heads and records; the disk is checked when acting.
 
 mod bind;
 mod file;
@@ -83,6 +90,7 @@ mod launch;
 mod rebind;
 mod reg;
 mod roots;
+mod share;
 mod stack;
 mod status;
 
@@ -101,8 +109,8 @@ pub use rebind::{
     CreatedDir, RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,
 };
 pub use status::{
-    OpState, OpStatus, OrphanRule, OrphansError, RebindLine, Status, TxnLine, TxnStatus,
-    firewall_orphans, status, txn_status,
+    OpState, OpStatus, OrphanRule, OrphansError, RebindLine, ShareKind, ShareLine, Status, TxnLine,
+    TxnStatus, firewall_orphans, status, txn_status,
 };
 
 use bind::Bindings;
@@ -188,14 +196,31 @@ pub enum Refusal {
         /// The transaction.
         txn: TxnId,
     },
-    /// A later transaction relies on a file of the one to revert (P4-8, L7): it keeps a shared
-    /// package file this one installed (`Hold`), so this one is reverted after it.
+    /// A later transaction relies on a file of the one to revert that cannot be handed over
+    /// (P4-8, P4-8b): a file this one replaced (its old content would need this one's backup), or
+    /// one whose identity changed since (rewritten with the same content); newest first.
     #[error(
-        "transaction {txn} uses a file this transaction installed (a shared package file, such          as a loader several fixes need); revert {txn} first, then this one (newest first)"
+        "transaction {txn} relies on a shared file this transaction replaced, or one that is          no longer the file it installed, so it cannot be handed over; revert {txn} first, then          this one (newest first)"
     )]
     Held {
         /// The later transaction.
         txn: TxnId,
+    },
+    /// The plan would replace or edit a file a live transaction holds (P4-8b, S2).
+    #[error(
+        "transaction {txn} relies on a shared file this plan would change; revert {txn} first,          then plan again"
+    )]
+    HeldChange {
+        /// The transaction that holds it.
+        txn: TxnId,
+    },
+    /// More transactions than one revert reads for the hand-over of shared files (P4-8b, S4).
+    #[error(
+        "more than {limit} transactions would have to be read to hand over shared files; forget          transactions you no longer need, then try again"
+    )]
+    TooManyTransactions {
+        /// The bound.
+        limit: usize,
     },
     /// A DLL of a package of the plan lies where a live transaction has a DLL of another
     /// package (P4-8): one DLL of a name per folder is loaded, and Rerun does not chainload.
@@ -596,6 +621,52 @@ pub enum Detail {
         /// The `.rerun-….tmp.old` holding the file as it was before a step of Rerun.
         before_step: Option<BeforeStep>,
     },
+    /// P4-8b (E6): a file or folder the op created, kept for the later transactions that rely
+    /// on it (the last revert that relies on it removes it).
+    Kept {
+        /// The transactions that rely on it.
+        by: Vec<TxnId>,
+    },
+    /// P4-8b (E6): files and folders an earlier transaction created and handed over, that this
+    /// op relies on: what the revert does with them.
+    Inherited(Vec<Inherited>),
+}
+
+/// One file or folder handed over to a transaction (P4-8b, E6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inherited {
+    /// The transaction that created it.
+    pub from: TxnId,
+    /// The path below the root (escaped).
+    pub path: Shown<'static>,
+    /// A folder.
+    pub dir: bool,
+    /// What the revert does (`verify`) or did with it.
+    pub outcome: InheritedOutcome,
+}
+
+/// What a revert does with a file or folder handed over to it (P4-8b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InheritedOutcome {
+    /// Removed: the last revert that relied on it, and it was exactly the creator's.
+    Removed,
+    /// Another transaction still relies on it: it stays for that one.
+    StillRelied(TxnId),
+    /// Not there any more: nothing to do.
+    Gone,
+    /// Left as it is, not the creator's any more (X14).
+    Left(LeftWhy),
+}
+
+/// Why a handed-over file or folder is left (X14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftWhy {
+    /// Another content, R/H/S, a link or another kind of entry.
+    Changed,
+    /// The same content with another file ID (rewritten or a copy).
+    OtherFileId,
+    /// A folder that holds something else.
+    NotEmpty,
 }
 
 /// A file as it was before a step of Rerun, left in a `.old` next to a foreign file (review S6,
@@ -761,6 +832,19 @@ pub(crate) mod knob {
         static RENAME_BACK_UPCASED: Cell<bool> = const { Cell::new(false) };
         static PARENT_NOT_MARKED: Cell<bool> = const { Cell::new(false) };
         static PROFILES_PATHS_UNCHECKED: Cell<bool> = const { Cell::new(false) };
+        static HANDOVER: Cell<u8> = const { Cell::new(0) };
+    }
+
+    /// K-HO1 to K-HO5 (P4-8b, `handover_tests`): one control of the hand-over switched on (0:
+    /// none). 1 the file-ID chain off (content only); 2 condition (d) off (a duty also while
+    /// another transaction relies); 3 a forgotten creator honoured; 4 the parent of a removed
+    /// inherited folder not marked for the flush; 5 an inherited act before the carrying op's
+    /// `RevertIntent`.
+    pub(crate) fn handover(n: u8) {
+        HANDOVER.with(|s| s.set(n));
+    }
+    pub(crate) fn handover_is(n: u8) -> bool {
+        HANDOVER.with(Cell::get) == n
     }
 
     /// K-LM2 (P3-3): the path of the profiles root is not compared with the plan's.
@@ -961,6 +1045,16 @@ fn knob_flush_only_after_delete() -> bool {
     false
 }
 
+/// K-HO1 to K-HO5 (tests, P4-8b): control `n` of the hand-over is on.
+pub(super) fn knob_ho(
+    #[cfg_attr(not(test), expect(unused_variables, reason = "test knob"))] n: u8,
+) -> bool {
+    #[cfg(test)]
+    return knob::handover_is(n);
+    #[cfg(not(test))]
+    false
+}
+
 /// K-CM3 (tests): the parent folder of an op's target is not marked for the flush.
 fn knob_parent_not_marked() -> bool {
     #[cfg(test)]
@@ -1130,6 +1224,18 @@ struct Touched<'g> {
     txn: Option<TxnId>,
     /// The firewall rules of the plan as observed in one enumeration (A4 S11), by op.
     rules: Option<BTreeMap<u16, Observed>>,
+    /// What this revert hands over and inherits (P4-8b; empty for an apply and a rollback).
+    shares: Shares,
+}
+
+/// What a revert hands over to later transactions and inherits from earlier ones (P4-8b, E6;
+/// `share`).
+#[derive(Debug, Default)]
+struct Shares {
+    /// Ops whose object later transactions rely on: kept, not removed.
+    keeps: share::Keeps,
+    /// Objects handed over to this transaction.
+    inherit: share::Inherit,
 }
 
 impl<'g> Touched<'g> {
@@ -1141,6 +1247,7 @@ impl<'g> Touched<'g> {
             sys,
             txn: None,
             rules: None,
+            shares: Shares::default(),
         }
     }
 
@@ -1334,9 +1441,23 @@ fn verify_seen(
                 }
             }
         }
-        let s = observe(plan, t, *k, op, log, Mode::Verify, None, &seen)?;
+        // P4-8b: a kept op, as the revert would keep it (a chain that does not hold shows the
+        // plain observation; the revert refuses it before its first record).
+        let s = match keep_of(plan, t, *k, op, log, Mode::Verify, &seen) {
+            Ok(Some(s)) => s,
+            Ok(None) | Err(ExecError::Refused(_)) => {
+                observe(plan, t, *k, op, log, Mode::Verify, None, &seen)?
+            }
+            Err(e) => return Err(e),
+        };
         out.insert(*k, s.observed());
-        if let Some(d) = s.detail() {
+        let mut with = seen.clone();
+        with.insert(*k, s.clone());
+        let inherited = inherit_of(t, *k, false, &gone_below(plan, &with))?;
+        if let Some(d) = s
+            .detail()
+            .or_else(|| (!inherited.is_empty()).then_some(Detail::Inherited(inherited)))
+        {
             details.insert(*k, d);
         }
         seen.insert(*k, s);
@@ -1481,7 +1602,12 @@ fn preflight<'g>(
     run: roots::Preflight,
 ) -> Result<roots::Roots<'g>, Refusal> {
     let objects = Object::of(plan).map_err(Refusal::Plan)?;
-    stack::for_apply(j, listing, &objects)?;
+    let changes: Vec<bool> = plan
+        .ops
+        .iter()
+        .map(|o| matches!(o, Op::ReplaceFile { .. } | Op::IniValue { .. }))
+        .collect();
+    stack::for_apply(j, listing, &objects, &changes)?;
     // P4-8: no DLL slot of another package's live transaction.
     if let Some(s) = stack::slot_taken(j, listing, plan) {
         return Err(Refusal::SlotTaken {
@@ -1727,6 +1853,63 @@ fn close<W: Reverting>(w: W) -> Result<(), ExecError> {
     Ok(())
 }
 
+/// The creator side of the hand-over for op `k` (P4-8b): `Some` when the op is kept for later
+/// transactions (`file::keep_seen`).
+fn keep_of(
+    plan: &Plan,
+    t: &mut Touched<'_>,
+    k: u16,
+    op: &Op,
+    log: &OpLog,
+    mode: Mode,
+    later: &BTreeMap<u16, Seen>,
+) -> Result<Option<Seen>, ExecError> {
+    if mode == Mode::Rollback {
+        return Ok(None);
+    }
+    let Some(reliers) = t.shares.keeps.get(&k).cloned() else {
+        return Ok(None);
+    };
+    file::keep_seen(plan, &mut t.dirs, k, op, log, mode, &reliers, later).map(|s| s.map(Seen::File))
+}
+
+/// The inheritor side of the hand-over for op `k` (P4-8b): its duties carried out (`act`) or
+/// predicted, and the objects another transaction still relies on.
+fn inherit_of(
+    t: &mut Touched<'_>,
+    k: u16,
+    act: bool,
+    gone: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<Inherited>, ExecError> {
+    let duties = t.shares.inherit.duties.get(&k).cloned().unwrap_or_default();
+    let still = t.shares.inherit.still.get(&k).cloned().unwrap_or_default();
+    if duties.is_empty() && still.is_empty() {
+        return Ok(Vec::new());
+    }
+    file::inherit(&mut t.dirs, k, &duties, &still, act, gone)
+}
+
+/// For `verify` (N5): the folded names below each folder (folded path) that the observed ops of
+/// `seen` remove (`After`) or never made (`Before`).
+fn gone_below(plan: &Plan, seen: &BTreeMap<u16, Seen>) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (k, s) in seen {
+        if !matches!(s.observed(), Observed::After | Observed::Before) {
+            continue;
+        }
+        let Some(Target::File { path, .. }) = plan.ops.get(usize::from(*k)).map(Op::target) else {
+            continue;
+        };
+        let segs: Vec<String> = path.segments().map(crate::fold::fold).collect();
+        for i in 1..segs.len() {
+            out.entry(segs[..i].join("\\"))
+                .or_default()
+                .push(segs[i].clone());
+        }
+    }
+    out
+}
+
 /// Newest op first while one is left: observe, `RevertIntent` (with a temp name only when a
 /// restore starts, B2), act, flush the domain of the op (always), `RevertDone`. A foreign
 /// op gets its records and is left (R1). A file op whose root cannot run file ops ends the
@@ -1770,8 +1953,17 @@ fn revert_loop<W: Reverting>(
             return Ok((reports, Some(h)));
         }
         let none = BTreeMap::new();
-        let seen = observe(plan, t, k, op, &log, mode, hints.get(&k).copied(), &none)?;
+        let seen = match keep_of(plan, t, k, op, &log, mode, &none)? {
+            Some(s) => s,
+            None => observe(plan, t, k, op, &log, mode, hints.get(&k).copied(), &none)?,
+        };
         let observed = seen.observed();
+        // K-HO5 (tests): the inherited act before this op's `RevertIntent` (what S1 forbids).
+        let early_inherited = if knob_ho(5) {
+            inherit_of(t, k, true, &BTreeMap::new())?
+        } else {
+            Vec::new()
+        };
         let sem = seen.rewrite();
         let y = (seen.restore() || sem.is_some()).then(|| w.tmp());
         // P2-12: a rewrite records where it starts and ends, before its first change (K-I1
@@ -1788,6 +1980,11 @@ fn revert_loop<W: Reverting>(
         }
         w.revert_intent(k, y.clone(), sem.filter(|_| !ini::unrecorded()))?;
         let done = act(w, t, k, op, &seen, y)?;
+        // P4-8b (S1): what this op inherited, after its own act and its flushed intent.
+        let mut inherited = early_inherited;
+        if !knob_ho(5) {
+            inherited = inherit_of(t, k, true, &BTreeMap::new())?;
+        }
         // Always, also when the act changed nothing (`Touched::flush_for`).
         t.flush_for(k, op.target())?;
         w.revert_done(k, observed, &done.old_left)?;
@@ -1798,7 +1995,9 @@ fn revert_loop<W: Reverting>(
             backup: (observed == Observed::Foreign)
                 .then(|| Backup::of(cx.app, w.id(), k, &log.intent))
                 .flatten(),
-            detail: seen.detail(),
+            detail: seen
+                .detail()
+                .or_else(|| (!inherited.is_empty()).then_some(Detail::Inherited(inherited))),
         });
     }
     Ok((reports, None))
@@ -1889,13 +2088,175 @@ fn revert_roots<'g>(
     t: &TxnId,
     ops: &BTreeMap<u16, OpLog>,
     stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
-) -> Result<roots::Roots<'g>, Refusal> {
-    let objects = b.objects(plan).map_err(|_| Refusal::Blocked { txn: *t })?;
-    stack::for_revert(j, listing, t, &objects)?;
+    applied: bool,
+    rebound: bool,
+) -> Result<(roots::Roots<'g>, Shares), Refusal> {
+    let by_op = b
+        .objects_by_op(plan)
+        .map_err(|_| Refusal::Blocked { txn: *t })?;
+    let objects: Vec<Object> = by_op.iter().map(|(_, o)| o.clone()).collect();
+    let me = stack::Me {
+        plan,
+        objs: &by_op,
+        rebound,
+    };
+    let keeps = stack::for_revert(j, listing, t, &objects, Some(&me))?;
     let roots = roots::Roots::each(cx, b, stores)?;
     let intended: Vec<u16> = ops.keys().copied().collect();
     roots::game_closed(plan, &roots, &intended)?;
-    Ok(roots)
+    let (inherit, blocked) = if applied && !rebound && share::may_inherit(plan, ops) {
+        let others = share::read(j, listing, t, true)?;
+        (share::duties(&others, t, plan, ops)?, others.blocked)
+    } else {
+        (share::Inherit::default(), Vec::new())
+    };
+    let shares = Shares { keeps, inherit };
+    shares_hold(t, plan, ops, &roots, &shares, &blocked)?;
+    Ok((roots, shares))
+}
+
+/// The disk checks of a hand-over before the first record, read only (P4-8b): S5, a file a
+/// later transaction relies on that holds the op's content with another file ID than the op
+/// recorded (or a relying `Hold` that recorded another one) cannot be handed over
+/// (`Refusal::Held`, nothing written); fail closed (HO8), a duty whose object still exists with
+/// its creator's file ID while an entry of the listing cannot be read is `Blocked`.
+fn shares_hold(
+    own: &TxnId,
+    plan: &Plan,
+    ops: &BTreeMap<u16, OpLog>,
+    roots: &roots::Roots<'_>,
+    shares: &Shares,
+    blocked: &[TxnId],
+) -> Result<(), Refusal> {
+    let mut dirs = file::Dirs::new(roots);
+    for (k, reliers) in &shares.keeps {
+        let Some(Op::CreateFile {
+            root,
+            path,
+            content,
+            attrs,
+        }) = plan.ops.get(usize::from(*k))
+        else {
+            continue;
+        };
+        if ops.get(k).is_some_and(|l| l.reverted.is_some()) {
+            continue;
+        }
+        let done = ops.get(k).and_then(|l| l.done).and_then(|d| d.file_id);
+        let found = file::find(&mut dirs, root.0, path)
+            .map_err(|source| Refusal::Observe { op: *k, source })?;
+        if let file::Found::File {
+            sha,
+            len,
+            attrs: a,
+            id,
+            exact,
+        } = found
+            && sha == *content.sha256()
+            && len == content.len()
+            && a == *attrs
+            && exact
+        {
+            let chain = Some(id) == done
+                && reliers
+                    .iter()
+                    .all(|r| r.held_id.is_none() || r.held_id == done);
+            if !chain
+                && !knob_ho(1)
+                && let Some(r) = reliers.first()
+            {
+                return Err(Refusal::Held { txn: r.txn });
+            }
+        }
+    }
+    let Some(first) = blocked.first() else {
+        return Ok(());
+    };
+    for (k, duties) in &shares.inherit.duties {
+        for d in duties {
+            let (root, path, want) = match d {
+                share::Duty::File {
+                    root,
+                    path,
+                    file_id,
+                    ..
+                }
+                | share::Duty::Dir {
+                    root,
+                    path,
+                    file_id,
+                    ..
+                } => (*root, path, *file_id),
+            };
+            let found = file::find(&mut dirs, root, path)
+                .map_err(|source| Refusal::Observe { op: *k, source })?;
+            let ours = match found {
+                file::Found::File { id, .. } | file::Found::Dir { id } => id == want,
+                file::Found::Absent | file::Found::Other => false,
+            };
+            if ours {
+                return Err(Refusal::Blocked { txn: *first });
+            }
+        }
+    }
+    // An unreadable entry earlier than this transaction may be the creator of an object it
+    // relies on (its records cannot be read): a held file that still has the ID this transaction
+    // recorded, or a folder above one of its relying ops that it did not create, is refused
+    // too (fail closed; `forget` of that entry ends it).
+    let Some(earlier) = blocked.iter().find(|b| *b < own) else {
+        return Ok(());
+    };
+    let created: Vec<String> = plan
+        .ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::CreateDir { path, .. } => Some(crate::fold::fold(path.as_str())),
+            _ => None,
+        })
+        .collect();
+    for (k, op) in plan.ops.iter().enumerate() {
+        let k16 = op_ix(k);
+        let Some(log) = ops.get(&k16).filter(|l| l.reverted.is_none()) else {
+            continue;
+        };
+        let Target::File { root, path, .. } = op.target() else {
+            continue;
+        };
+        if !matches!(
+            op,
+            Op::CreateFile { .. } | Op::CreateDir { .. } | Op::Hold { .. }
+        ) {
+            continue;
+        }
+        let refuse = |found: file::Found, want: Option<u128>| match (found, want) {
+            (file::Found::File { id, .. }, Some(w)) => id == w,
+            (file::Found::Dir { .. }, None) => true,
+            _ => false,
+        };
+        if matches!(op, Op::Hold { .. }) {
+            let want = log.done.and_then(|d| d.file_id);
+            let found = file::find(&mut dirs, root.0, path)
+                .map_err(|source| Refusal::Observe { op: k16, source })?;
+            if want.is_some() && refuse(found, want) {
+                return Err(Refusal::Blocked { txn: *earlier });
+            }
+        }
+        let segs: Vec<&str> = path.segments().collect();
+        for i in 1..segs.len() {
+            let Ok(dir) = crate::path::RelPath::parse(&segs[..i].join("\\")) else {
+                continue;
+            };
+            if created.contains(&crate::fold::fold(dir.as_str())) {
+                continue;
+            }
+            let found = file::find(&mut dirs, root.0, &dir)
+                .map_err(|source| Refusal::Observe { op: k16, source })?;
+            if refuse(found, None) {
+                return Err(Refusal::Blocked { txn: *earlier });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Every check of [`revert`] before its first record, read only (P2-13, senior-dev S-a): the
@@ -1912,7 +2273,19 @@ pub fn revert_check(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), Refusal> {
     let before = |k: u16, d: &crate::journal::Digest, max: u64| j.read_backup(t, k, d, max);
     let (plan, b) = revert_plan(t, &head, &v.ops, &v.rebinds, &before)?;
     let stores = roots::open_stores(cx, &b);
-    let roots = revert_roots(cx, &plan, &b, &j, &listing, t, &v.ops, &stores)?;
+    let applied = v.state == TxnState::Applied;
+    let (roots, _) = revert_roots(
+        cx,
+        &plan,
+        &b,
+        &j,
+        &listing,
+        t,
+        &v.ops,
+        &stores,
+        applied,
+        !v.rebinds.is_empty(),
+    )?;
     drop(roots);
     drop(hold);
     Ok(())
@@ -1976,13 +2349,28 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
     let before = |k: u16, _: &crate::journal::Digest, max: u64| w.before_bytes(k, max);
     let (plan, b) = revert_plan(t, w.head(), w.ops(), w.rebinds(), &before)?;
     let stores = roots::open_stores(cx, &b);
-    let roots = revert_roots(cx, &plan, &b, &j, &listing, t, w.ops(), &stores)?;
+    let (roots, shares) = revert_roots(
+        cx,
+        &plan,
+        &b,
+        &j,
+        &listing,
+        t,
+        w.ops(),
+        &stores,
+        w.is_applied(),
+        !w.rebinds().is_empty(),
+    )?;
     let plan = knob_rewrite_head(&plan, &b).unwrap_or(plan);
-    revert_run(cx, &j, t, &plan, w, &roots, true)
+    revert_run(cx, &j, t, &plan, w, &roots, true, shares)
 }
 
 /// The revert loop of [`revert`] and [`revert_rebound`] and the close. `early`: no record of
 /// this run is written yet, so an error before the loop's first record is a refusal (review S4).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the revert loop's context and what it hands over"
+)]
 fn revert_run<W: Reverting>(
     cx: &ExecCtx<'_>,
     j: &Journal<'_>,
@@ -1991,8 +2379,10 @@ fn revert_run<W: Reverting>(
     mut w: W,
     roots: &roots::Roots<'_>,
     early: bool,
+    shares: Shares,
 ) -> Result<RevertReport, ExecError> {
     let mut touched = Touched::new(cx.sys, roots).of(*t);
+    touched.shares = shares;
     let written = revert_records(w.ops());
     let (ops, halted) = match revert_loop(
         cx,
@@ -2099,6 +2489,9 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     let stores = roots::open_stores(cx, &b);
     let roots = roots::Roots::each(cx, &b, &stores)?;
     let mut touched = Touched::new(cx.sys, &roots).of(*t);
+    // P4-8b (rule 5): what the revert would hand over and inherit now (a refusal of the revert
+    // shows the plain observation; `revert_check` names it).
+    touched.shares = verify_shares(&j, t, &plan, &b, &v);
     let mut out = verify_ops(&plan, &mut touched, &roots, &v.ops)?;
     // P2-15 (rule 5): what the cleanup pass of a revert would find now, unless it halts first.
     if out.halted.is_none() {
@@ -2117,6 +2510,43 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     let paths: Vec<_> = b.iter().map(|r| &r.path).collect();
     out.virtual_store = crate::policy::root::shadows(cx.sys, &plan, &paths);
     Ok(out)
+}
+
+/// The hand-over of `verify` (P4-8b): the derivation of a revert, read only, without its
+/// refusals.
+fn verify_shares(
+    j: &Journal<'_>,
+    t: &TxnId,
+    plan: &Plan,
+    b: &Bindings,
+    v: &crate::journal::TxnView,
+) -> Shares {
+    let Ok(listing) = j.list() else {
+        return Shares::default();
+    };
+    let rebound = !v.rebinds.is_empty();
+    let keeps = b
+        .objects_by_op(plan)
+        .ok()
+        .and_then(|by_op| {
+            let objects: Vec<Object> = by_op.iter().map(|(_, o)| o.clone()).collect();
+            let me = stack::Me {
+                plan,
+                objs: &by_op,
+                rebound,
+            };
+            stack::for_revert(j, &listing, t, &objects, Some(&me)).ok()
+        })
+        .unwrap_or_default();
+    let inherit = if v.state == TxnState::Applied && !rebound && share::may_inherit(plan, &v.ops) {
+        share::read(j, &listing, t, true)
+            .ok()
+            .and_then(|o| share::duties(&o, t, plan, &v.ops).ok())
+            .unwrap_or_default()
+    } else {
+        share::Inherit::default()
+    };
+    Shares { keeps, inherit }
 }
 
 /// Forgets transaction `t` (module docs). Backups stay. Every error before its record or
@@ -2182,6 +2612,10 @@ mod fw_crash_tests;
 pub(crate) mod fw_tests;
 #[cfg(test)]
 mod halt_tests;
+#[cfg(test)]
+mod handover_crash_tests;
+#[cfg(test)]
+mod handover_tests;
 #[cfg(test)]
 mod hold_tests;
 #[cfg(test)]

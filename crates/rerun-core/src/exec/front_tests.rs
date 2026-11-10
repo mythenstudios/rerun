@@ -393,12 +393,9 @@ fn revert_check_refuses_as_the_revert_does() {
     assert!(matches!(c, Err(Refusal::Busy(_))));
     same(&app0, &snap_app(&env.sys));
     drop(image);
-    // A later transaction on the same file: `Later` for both.
-    let t2 = env.applied(&env.plan(&spec(vec![entry(
-        "new.dll",
-        r"mods\a\y.dll",
-        super::tests::N,
-    )])));
+    // A later transaction that replaces a file of it: `Later` for both. (A new file in a
+    // folder it created would be handed over, P4-8b.)
+    let t2 = env.applied(&env.plan(&spec(vec![entry("d3d9.dll", "new.dll", super::tests::NEW)])));
     let c = env.with(|cx| super::revert_check(cx, &t));
     assert!(
         matches!(&c, Err(Refusal::Later { txn }) if *txn == t2),

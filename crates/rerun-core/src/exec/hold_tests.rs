@@ -1,6 +1,5 @@
 //! `Hold` (P4-8, ADR 0020 amendment P4-8) against the fake: H1 a shared file held by a later
-//! transaction (the revert of the earlier one refused with its own text, newest first, then the
-//! game folder identical), H2 a plan of nothing but holds changes nothing, H3 the held file
+//! transaction, reverted newest first (the other order is the hand-over, `handover_tests`), H2 a plan of nothing but holds changes nothing, H3 the held file
 //! changed before the apply, H4 tampering at the hold of a head touches only the transaction's own
 //! objects, H5 a DLL slot of another package's transaction (`Refusal::SlotTaken`, at the plan
 //! and the apply).
@@ -45,11 +44,11 @@ fn kinds(env: &Env, h: &plan::PlanHash) -> Vec<&'static str> {
         .collect()
 }
 
-/// H1: the round trip of a shared file. T2 holds `new.dll` of T1: the revert of T1 is refused
-/// (`Held`, nothing written) while T2 is there; T2 reverted leaves `new.dll` as T1 left it; then
-/// T1 reverted leaves the game folder identical to before both.
+/// H1: the round trip of a shared file in the newest-first order. T2 holds `new.dll` of T1;
+/// T2 reverted leaves `new.dll` as T1 left it; then T1 reverted leaves the game folder identical
+/// to before both. (The other order hands the file over: `handover_tests` HO1.)
 #[test]
-fn h1_a_held_file_keeps_the_earlier_transaction_until_the_later_is_reverted() {
+fn h1_a_held_file_reverted_newest_first() {
     let env = Env::new(finish(base()));
     let floor = env.snap();
     let a = env.applied(&env.plan(&t1()));
@@ -62,20 +61,6 @@ fn h1_a_held_file_keeps_the_earlier_transaction_until_the_later_is_reverted() {
         [(0, Observed::After), (1, Observed::After)],
         "the hold is observed After while the file holds its content"
     );
-    let both = env.snap();
-    // The wrong order: refused before anything is written, with the text of a shared file.
-    match env.revert(&a) {
-        Err(ExecError::Refused(Refusal::Held { txn })) if txn == b => {}
-        r => panic!("{r:?}"),
-    }
-    let text = Refusal::Held { txn: b }.to_string();
-    assert!(
-        text.contains("uses a file this transaction installed"),
-        "{text}"
-    );
-    assert!(text.contains(&format!("revert {b} first")), "{text}");
-    same(&both, &env.snap());
-    // The right order.
     let rep = env.revert(&b).unwrap();
     assert_eq!(rep.closed, Some(Closing::Reverted));
     assert_eq!(read_abs(&env.sys, &game("new.dll")), N);

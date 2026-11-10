@@ -47,6 +47,41 @@ pub struct TxnStatus {
     pub ops: Vec<OpStatus>,
     /// Its `Rebind` records, in order (P2-14b condition d; the last one of a root holds).
     pub rebinds: Vec<RebindLine>,
+    /// P4-8b (E6): files and folders other transactions created that its ops rely on, and what
+    /// becomes of them (journal only; an applied transaction that is not forgotten).
+    pub shares: Vec<ShareLine>,
+}
+
+/// A file or folder another transaction created that an op relies on (P4-8b), journal only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareLine {
+    /// The op that relies on it.
+    pub op: u16,
+    /// The path below the root (escaped).
+    pub path: Shown<'static>,
+    /// A folder.
+    pub dir: bool,
+    /// What becomes of it.
+    pub kind: ShareKind,
+}
+
+/// What becomes of a shared file or folder (P4-8b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareKind {
+    /// Handed over: this transaction's revert removes it if it is unchanged; `forget` leaves it
+    /// until a later transaction that relies on it is reverted.
+    Inherits {
+        /// The transaction that created it.
+        from: TxnId,
+    },
+    /// The revert of `by` removes it once nothing else relies on it (the creator, or another
+    /// transaction that relies on it): after `forget` this transaction no longer keeps it.
+    RemovedBy {
+        /// The transaction that created it.
+        from: TxnId,
+        /// The transaction whose revert removes it.
+        by: TxnId,
+    },
 }
 
 /// A `Rebind` of a transaction as `status` shows it (journal only, never observed).
@@ -135,7 +170,7 @@ pub fn status(app: &AppDir<'_>) -> Result<Status, JournalError> {
     let txns = listing
         .txns
         .iter()
-        .map(|l| one(&j, app, l, false))
+        .map(|l| one(&j, app, l, false, &listing))
         .collect();
     Ok(Status {
         txns,
@@ -152,10 +187,16 @@ pub fn txn_status(app: &AppDir<'_>, t: &TxnId) -> Result<TxnStatus, JournalError
         .iter()
         .find(|l| l.id == *t)
         .ok_or(JournalError::NotFound(*t))?;
-    Ok(one(&j, app, l, true))
+    Ok(one(&j, app, l, true, &listing))
 }
 
-fn one(j: &Journal<'_>, app: &AppDir<'_>, l: &Listed, always: bool) -> TxnStatus {
+fn one(
+    j: &Journal<'_>,
+    app: &AppDir<'_>,
+    l: &Listed,
+    always: bool,
+    listing: &crate::journal::Listing,
+) -> TxnStatus {
     let folder = escape::path(&format!(r"{}\journal\{}", app.path(), l.id)).into_owned();
     let v = match &l.view {
         Ok(v) => v,
@@ -168,6 +209,7 @@ fn one(j: &Journal<'_>, app: &AppDir<'_>, l: &Listed, always: bool) -> TxnStatus
                 preview: None,
                 ops: Vec::new(),
                 rebinds: Vec::new(),
+                shares: Vec::new(),
             };
         }
     };
@@ -212,6 +254,31 @@ fn one(j: &Journal<'_>, app: &AppDir<'_>, l: &Listed, always: bool) -> TxnStatus
             old: r.old,
         })
         .collect();
+    let shares = match plan {
+        Some(p)
+            if !l.forgotten
+                && v.state == TxnState::Applied
+                && super::share::may_inherit(p, &v.ops) =>
+        {
+            super::share::read(j, listing, &l.id, true)
+                .map(|o| super::share::lines(&o, &l.id, p, &v.ops))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(op, path, dir, line)| ShareLine {
+                    op,
+                    path: escape::path(path.as_str()).into_owned(),
+                    dir,
+                    kind: match line {
+                        super::share::Line::Inherits { from } => ShareKind::Inherits { from },
+                        super::share::Line::RemovedBy { from, by } => {
+                            ShareKind::RemovedBy { from, by }
+                        }
+                    },
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
     TxnStatus {
         id: l.id,
         state,
@@ -220,6 +287,7 @@ fn one(j: &Journal<'_>, app: &AppDir<'_>, l: &Listed, always: bool) -> TxnStatus
         preview: head.map(|h| h.map(|(_, p)| p)),
         ops,
         rebinds,
+        shares,
     }
 }
 

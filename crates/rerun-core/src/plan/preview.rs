@@ -87,7 +87,7 @@ place: remove it in Windows Defender Firewall with Advanced Security (group Reru
 pub const HOLD_ACTION: &str = "keep shared file";
 
 /// What a plan with `Hold` ops says once (P4-8, ADR 0020 amendment P4-8; rule 5).
-pub const HOLD_NOTE: &str = "shared files: a package file the game folder holds already with exactly this content (installed by an earlier Rerun transaction, such as a loader several fixes need, or by you) is kept as it is, not written again. This transaction relies on it: a Rerun transaction that installed it can be reverted only after this one is (newest first), and reverting this one leaves the file as it is";
+pub const HOLD_NOTE: &str = "shared files: a package file the game folder holds already with exactly this content (installed by an earlier Rerun transaction, such as a loader several fixes need, or by you) is kept as it is, not written again. This transaction relies on it: if the transaction that installed it is reverted first, it keeps the file for this one, and the last revert that relies on it removes it if it is unchanged; a file no transaction of Rerun installed is left";
 
 /// The part of [`PROFILE_NOTE`] and [`PROFILE_WATCH_NOTE`] both methods share: the start path,
 /// one launch option per game, Steam as administrator (ADR 0022).

@@ -119,6 +119,7 @@ fn st(
         preview: preview.map(|p| p.map_err(|e| escape::text(e).into_owned())),
         ops,
         rebinds: Vec::new(),
+        shares: Vec::new(),
     }
 }
 
@@ -852,4 +853,117 @@ fn orphan_rules_are_worded_for_this_account() {
         "{s}"
     );
     assert!(!s.contains("firewall cannot be read"), "{s}");
+}
+
+/// P4-8b (E6): the lines of a hand-over in `verify`, the report and `status`, every outcome,
+/// with hostile paths escaped and standing last on their line.
+#[test]
+fn hand_over_lines_are_golden_and_escaped() {
+    use rerun_core::exec::{Inherited, InheritedOutcome as O, LeftWhy, ShareKind, ShareLine};
+    let (t1, t2, t3) = (txn(1), txn(2), txn(3));
+    let hostile = "mods\u{1b}[31m\u{202e}x";
+    let item = |outcome, dir| Inherited {
+        from: t1,
+        path: escape::path(hostile).into_owned(),
+        dir,
+        outcome,
+    };
+    let items = vec![
+        item(O::Removed, false),
+        item(O::Removed, true),
+        item(O::StillRelied(t3), false),
+        item(O::Gone, false),
+        item(O::Left(LeftWhy::Changed), false),
+        item(O::Left(LeftWhy::OtherFileId), false),
+        item(O::Left(LeftWhy::NotEmpty), true),
+    ];
+    let mut st = st(t2, TxnLine::Applied, None, Vec::new());
+    let p = escape::path(hostile).to_string();
+    assert!(!p.contains('\u{1b}') && !p.contains('\u{202e}'), "{p}");
+    let v = Verified {
+        ops: vec![(0, Observed::After), (1, Observed::Kept)],
+        halted: None,
+        details: BTreeMap::from([
+            (0, Detail::Inherited(items.clone())),
+            (1, Detail::Kept { by: vec![t2, t3] }),
+        ]),
+        cleanup: Vec::new(),
+        profiles_moved: None,
+        virtual_store: Vec::new(),
+    };
+    let now = shown(&now_lines(&st, &v));
+    for want in [
+        format!(
+            "  op 1, kept for a later transaction that relies on it (the last revert that relies on it removes it)\n    kept for {t2}, {t3}, which relies on it (the last revert that relies on it removes it)\n"
+        ),
+        format!("    removes the file {t1} installed and handed over (unchanged): {p}\n"),
+        format!("    removes the folder {t1} installed and handed over (unchanged): {p}\n"),
+        format!("    keeps the file {t1} installed: {t3} still relies on it: {p}\n"),
+        format!("    the file {t1} installed is gone already: {p}\n"),
+        format!("    leaves the file {t1} installed (it changed since): {p}\n"),
+        format!(
+            "    leaves the file {t1} installed (the same content, but not the same file any more): {p}\n"
+        ),
+        format!("    leaves the folder {t1} installed (it holds something else): {p}\n"),
+    ] {
+        assert!(now.contains(&want), "{want:?} not in\n{now}");
+    }
+    let rep = RevertReport {
+        txn: t2,
+        closed: Some(Closing::Reverted),
+        ops: vec![OpReport {
+            op: 0,
+            observed: Observed::After,
+            left: Vec::new(),
+            backup: None,
+            detail: Some(Detail::Inherited(items)),
+        }],
+        halted: None,
+        cleanup: Vec::new(),
+        profiles_moved: None,
+    };
+    let did = shown(&report_lines(&st, &rep, &v));
+    assert!(
+        did.contains(&format!(
+            "    removed the file {t1} installed and handed over: {p}\n"
+        )),
+        "{did}"
+    );
+    assert!(
+        did.contains(&format!(
+            "    left the folder {t1} installed (it holds something else): {p}\n"
+        )),
+        "{did}"
+    );
+    st.shares = vec![
+        ShareLine {
+            op: 0,
+            path: escape::path(hostile).into_owned(),
+            dir: false,
+            kind: ShareKind::Inherits { from: t1 },
+        },
+        ShareLine {
+            op: 0,
+            path: escape::path("mods").into_owned(),
+            dir: true,
+            kind: ShareKind::RemovedBy { from: t1, by: t3 },
+        },
+    ];
+    let s = shown(&render_status(
+        &Status {
+            txns: vec![st],
+            foreign_entries: 0,
+        },
+        false,
+    ));
+    for want in [
+        format!(
+            "  relies on the file {t1} installed and handed over; its revert removes it if unchanged: {p}\n"
+        ),
+        format!(
+            "  relies on the folder {t1} installed; the revert of {t3} removes it once nothing else relies on it: mods\n"
+        ),
+    ] {
+        assert!(s.contains(&want), "{want:?} not in\n{s}");
+    }
 }

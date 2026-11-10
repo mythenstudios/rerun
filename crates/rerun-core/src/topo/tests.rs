@@ -1587,57 +1587,96 @@ fn store_plan(env: &Env, tp: &super::TopoPlan) -> crate::plan::PlanHash {
     crate::plan::store(&a, &tp.plan.encode().unwrap()).unwrap()
 }
 
-/// TS1 (the acceptance of P4-8): EaglePatch and a widescreen fix share the ASI loader, planned
-/// in two plans. The second holds the loader (`Hold`, nothing written); the revert of the first
-/// is refused while the second is there (with the text of a shared file); the right order
-/// leaves the game folder identical to before both.
+/// TS1 (the acceptance of P4-8 and P4-8b, user decision E6): EaglePatch and a widescreen fix
+/// share the ASI loader (and the `scripts` folder), planned in two plans. The second holds the
+/// loader (`Hold`, nothing written). Reverted oldest first, the first removes its own plugin and
+/// keeps the loader and the folder for the second; the second's revert removes them; reverted
+/// newest first as before. Either order leaves the game folder identical to before both.
 #[test]
-fn ts1_two_fixes_share_the_loader_and_revert_newest_first() {
-    let env = Env::new(game_sys());
-    let sys = &env.sys;
-    let t = shared_topo();
-    let pkgs = shared_pkgs(sys);
-    let before = snap_at(sys, STEAM_GAME);
-    let a = plan_pkgs(sys, &t, &pkgs, &["eagle/patch"]).unwrap();
-    let a = env.applied(&store_plan(&env, &a));
-    let b = plan_pkgs(sys, &t, &pkgs, &["wide/fix"]).unwrap();
-    let held: Vec<&str> = b
-        .plan
-        .ops
-        .iter()
-        .filter_map(|o| match o {
-            crate::plan::Op::Hold { path, .. } => Some(path.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(held, ["dinput8.dll"]);
-    let shown = crate::plan::preview(&b.plan).to_string();
-    assert!(
-        shown.contains("keep shared file 0:dinput8.dll from invented-loader 1.0: dinput8.dll"),
-        "{shown}"
-    );
-    assert!(
-        shown.contains("(not written)") && shown.contains("note: shared files:"),
-        "{shown}"
-    );
-    let b = env.applied(&store_plan(&env, &b));
-    let both = snap_at(sys, STEAM_GAME);
-    match env.revert(&a) {
-        Err(crate::exec::ExecError::Refused(crate::exec::Refusal::Held { txn })) if txn == b => {}
-        r => panic!("{r:?}"),
+fn ts1_two_fixes_share_the_loader_in_either_order() {
+    use crate::exec::{Detail, Inherited, InheritedOutcome};
+    for oldest_first in [true, false] {
+        let env = Env::new(game_sys());
+        let sys = &env.sys;
+        let t = shared_topo();
+        let pkgs = shared_pkgs(sys);
+        let before = snap_at(sys, STEAM_GAME);
+        let a = plan_pkgs(sys, &t, &pkgs, &["eagle/patch"]).unwrap();
+        let a = env.applied(&store_plan(&env, &a));
+        let b = plan_pkgs(sys, &t, &pkgs, &["wide/fix"]).unwrap();
+        let held: Vec<&str> = b
+            .plan
+            .ops
+            .iter()
+            .filter_map(|o| match o {
+                crate::plan::Op::Hold { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(held, ["dinput8.dll"]);
+        let shown = crate::plan::preview(&b.plan).to_string();
+        assert!(
+            shown.contains("keep shared file 0:dinput8.dll from invented-loader 1.0: dinput8.dll"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("(not written)") && shown.contains("note: shared files:"),
+            "{shown}"
+        );
+        let b = env.applied(&store_plan(&env, &b));
+        let read = |rel: &str| crate::exec::tests::exists_abs(sys, &format!(r"{STEAM_GAME}\{rel}"));
+        if oldest_first {
+            let rep = env.revert(&a).unwrap();
+            assert_eq!(rep.closed, Some(Closing::Reverted));
+            let kept: Vec<u16> = rep
+                .ops
+                .iter()
+                .filter(|o| o.observed == Observed::Kept)
+                .map(|o| o.op)
+                .collect();
+            assert_eq!(kept.len(), 2, "the loader and the folder: {rep:?}");
+            assert!(
+                rep.ops.iter().all(|o| o.observed != Observed::Kept
+                    || o.detail == Some(Detail::Kept { by: vec![b] }))
+            );
+            assert!(read("dinput8.dll") && read(r"scripts\Wide.asi"));
+            assert!(!read(r"scripts\Eagle.asi"));
+            // What the second revert will do, before it does it (rule 5).
+            let v = env.verified(&b).unwrap();
+            let inherited: Vec<&Inherited> = v
+                .details
+                .values()
+                .filter_map(|d| match d {
+                    Detail::Inherited(x) => Some(x),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert_eq!(inherited.len(), 2, "{v:?}");
+            assert!(
+                inherited
+                    .iter()
+                    .all(|i| i.from == a && i.outcome == InheritedOutcome::Removed)
+            );
+            let rep = env.revert(&b).unwrap();
+            assert_eq!(rep.closed, Some(Closing::Reverted));
+            let removed = rep
+                .ops
+                .iter()
+                .filter_map(|o| match &o.detail {
+                    Some(Detail::Inherited(x)) => Some(x.len()),
+                    _ => None,
+                })
+                .sum::<usize>();
+            assert_eq!(removed, 2, "{rep:?}");
+        } else {
+            assert_eq!(env.revert(&b).unwrap().closed, Some(Closing::Reverted));
+            assert!(read("dinput8.dll"));
+            assert_eq!(env.revert(&a).unwrap().closed, Some(Closing::Reverted));
+        }
+        let after = snap_at(sys, STEAM_GAME);
+        assert!(before == after, "not identical: {:#?}", before.diff(&after));
     }
-    assert!(
-        both == snap_at(sys, STEAM_GAME),
-        "the refused revert wrote nothing"
-    );
-    assert_eq!(env.revert(&b).unwrap().closed, Some(Closing::Reverted));
-    assert_eq!(
-        crate::exec::tests::read_abs(sys, &format!(r"{STEAM_GAME}\dinput8.dll")),
-        b"asi loader"
-    );
-    assert_eq!(env.revert(&a).unwrap().closed, Some(Closing::Reverted));
-    let after = snap_at(sys, STEAM_GAME);
-    assert!(before == after, "not identical: {:#?}", before.diff(&after));
 }
 
 /// TS2: two packages with the same DLL slot: in one plan the engine refuses (no chainloading);

@@ -12,14 +12,18 @@
 //! (a revert has begun), its objects lie at the head's roots and at the bound folders until it
 //! is closed, and rebinds that do not fit the head make it `Blocked` (`Bindings::of`).
 //!
-//! Holds and slots (P4-8): a later transaction that holds one of the revert's objects (a `Hold`:
-//! a shared package file of the earlier one) relies on it: the revert is refused with its own
-//! text (`Refusal::Held`), newest first as for every overlap. An apply whose package
+//! Holds and slots (P4-8, P4-8b): a later transaction that meets the revert's objects only
+//! through relying ops (`share::relies`: a hold of a created file, a file or folder below a
+//! created folder) takes them over (E6): `for_revert` returns them as keeps instead of refusing.
+//! Any other overlap stays newest first; one through a `Hold` (a file this one replaced) has its
+//! own text (`Refusal::Held`). An apply that would change a held file is `Refusal::HeldChange`
+//! (S2). An apply whose package
 //! DLL (a slot) lies where a live transaction has a DLL of another package is refused
 //! (`Refusal::SlotTaken`): Rerun does not chainload DLLs.
 
 use super::Refusal;
 use super::bind::Bindings;
+use super::share::{self, Keeps, Relier};
 use crate::escape::Shown;
 use crate::journal::{Journal, Listed, Listing, TxnId, TxnState, VerifyBackups};
 use crate::plan::{Object, Op, Plan, Target, overlap};
@@ -34,6 +38,15 @@ impl Objs {
                 .map(|(k, o)| (o, matches!(p.ops.get(k), Some(Op::Hold { .. }))))
                 .collect(),
         )
+    }
+
+    /// A held object of these overlaps an object of `mine` whose op changes it (`changes`,
+    /// aligned with `mine`).
+    fn holds_changed(&self, mine: &[Object], changes: &[bool]) -> bool {
+        self.0
+            .iter()
+            .filter(|(_, held)| *held)
+            .any(|(o, _)| mine.iter().zip(changes).any(|(m, ch)| *ch && m.overlaps(o)))
     }
 
     /// Whether these objects overlap `mine`, and if so whether a `Hold` is among them.
@@ -132,13 +145,23 @@ fn classify(j: &Journal<'_>, l: &Listed) -> Class {
 }
 
 /// Apply: no blocked transaction at all, no open one on an object of `mine`.
-pub(super) fn for_apply(j: &Journal<'_>, l: &Listing, mine: &[Object]) -> Result<(), Refusal> {
+pub(super) fn for_apply(
+    j: &Journal<'_>,
+    l: &Listing,
+    mine: &[Object],
+    changes: &[bool],
+) -> Result<(), Refusal> {
     for t in &l.txns {
         match classify(j, t) {
             Class::Blocked => return Err(Refusal::Blocked { txn: t.id }),
             Class::Damaged(o) if overlap(&o, mine) => return Err(Refusal::Blocked { txn: t.id }),
             Class::Open(o) if o.meets(mine) != Meets::No => {
                 return Err(Refusal::Interrupted { txn: t.id });
+            }
+            // P4-8b (S2): a file a live `Hold` holds is not changed under it (a replace or an INI
+            // edit); the holder relies on its content.
+            Class::Active(o) if o.holds_changed(mine, changes) => {
+                return Err(Refusal::HeldChange { txn: t.id });
             }
             Class::Cleanup(o) if overlap(&o, mine) => {
                 return Err(Refusal::CleanupPending { txn: t.id });
@@ -251,22 +274,94 @@ pub(super) fn for_revert(
     l: &Listing,
     own: &TxnId,
     mine: &[Object],
-) -> Result<(), Refusal> {
+    me: Option<&Me<'_>>,
+) -> Result<Keeps, Refusal> {
+    let mut keeps = Keeps::new();
     for t in l.txns.iter().filter(|t| t.id > *own) {
         match classify(j, t) {
             Class::Blocked => return Err(Refusal::Blocked { txn: t.id }),
             Class::Damaged(o) if overlap(&o, mine) => return Err(Refusal::Blocked { txn: t.id }),
-            Class::Open(o) | Class::Active(o) => match o.meets(mine) {
-                Meets::No => {}
-                // P4-8 (L7): it relies on a file of this one; LIFO with its own text.
-                Meets::Held => return Err(Refusal::Held { txn: t.id }),
-                Meets::Changed => return Err(Refusal::Later { txn: t.id }),
-            },
+            Class::Open(o) | Class::Active(o) => {
+                let m = o.meets(mine);
+                if m == Meets::No {
+                    continue;
+                }
+                // P4-8b (E6): a later transaction that meets this one only through relying ops
+                // takes the objects over; anything else stays newest first.
+                if let Some(me) = me.filter(|m| !m.rebound)
+                    && let Some(other) = share::load(j, t)
+                    && other.applied
+                    && !other.damaged
+                    && let Some(rel) = relying_pairs(&other, me)
+                {
+                    for (k, r) in rel {
+                        keeps.entry(k).or_default().push(r);
+                    }
+                    continue;
+                }
+                return Err(match m {
+                    Meets::Held => Refusal::Held { txn: t.id },
+                    Meets::Changed | Meets::No => Refusal::Later { txn: t.id },
+                });
+            }
             Class::Cleanup(o) if overlap(&o, mine) => {
                 return Err(Refusal::CleanupPending { txn: t.id });
             }
             Class::Ignore | Class::Cleanup(_) | Class::Damaged(_) => {}
         }
     }
-    Ok(())
+    Ok(keeps)
+}
+
+/// The reverting transaction as [`for_revert`] compares it with later ones (P4-8b); without it
+/// the plain LIFO holds (a rebind's check).
+pub(super) struct Me<'a> {
+    /// Its head.
+    pub(super) plan: &'a Plan,
+    /// Its objects with their ops (as stacking sees them).
+    pub(super) objs: &'a [(usize, Object)],
+    /// It recorded a `Rebind`: no hand-over (X14).
+    pub(super) rebound: bool,
+}
+
+/// Every pair of an object of `other` and one of `me` that overlap is a relying op of `other`
+/// (applied: `Done`, no revert begun) on a created object of `me`: the reliers by op of `me`;
+/// `None` if any pair is not.
+fn relying_pairs(other: &share::Other, me: &Me<'_>) -> Option<Vec<(u16, Relier)>> {
+    let mut out = Vec::new();
+    for (k2, o2) in other.objs.iter().enumerate() {
+        let k2 = super::op_ix(k2);
+        for (k, mo) in me.objs {
+            if !mo.overlaps(o2) {
+                continue;
+            }
+            let later = other.plan.ops.get(usize::from(k2))?;
+            let mine = me.plan.ops.get(*k)?;
+            let log = other.ops.get(&k2)?;
+            // Two holds of one file: neither changed anything, no order between them (P4-8b §2).
+            if matches!(mine, Op::Hold { .. })
+                && matches!(later, Op::Hold { .. })
+                && share::same_file(mo, o2)
+            {
+                continue;
+            }
+            let name = share::relies(later, o2, mine, mo)?;
+            let done = log.done?;
+            if !log.reverts.is_empty() || log.reverted.is_some() {
+                return None;
+            }
+            out.push((
+                super::op_ix(*k),
+                Relier {
+                    txn: other.id,
+                    op: k2,
+                    held_id: matches!(later, Op::Hold { .. })
+                        .then_some(done.file_id)
+                        .flatten(),
+                    name,
+                },
+            ));
+        }
+    }
+    Some(out)
 }
