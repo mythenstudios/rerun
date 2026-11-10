@@ -12,8 +12,8 @@
 //! Direction, action, profiles and protocol stay raw numbers; the constants below name the
 //! values Rerun uses (`netfw.h`, pinned against `windows-sys` by a test in `sys::win`).
 //!
-//! The write side ([`FirewallWrite`]: add, remove; P4-2d with the fake, P4-5b on Windows) is reached only by the
-//! elevated helper through `policy::firewall`.
+//! The write side ([`FirewallWrite`]: add, remove; P4-2d with the fake, P4-5b on Windows) is
+//! reached only by the elevated helper through `policy::firewall`.
 
 use super::SysResult;
 
@@ -128,9 +128,8 @@ pub trait Firewall: Send + Sync {
 }
 
 /// The firewall's write side (ADR 0023 §6, §12): the elevated helper's alone, reached only
-/// through `policy::firewall` (`HelperSystem::firewall_write`). P4-2d brings the trait and the
-/// fake's rules as data; the real one (`INetFwRules::Add`, `Remove`) comes with P4-5b, until
-/// then the real helper's write side refuses every call (`NoFirewall`).
+/// through `policy::firewall` (`HelperSystem::firewall_write`). The fake's rules as data
+/// (P4-2d), the real one `sys::win::WinFirewallWrite` (`INetFwRules::Add`, `Remove`; P4-5b).
 pub trait FirewallWrite: Send + Sync {
     /// Adds `rule` (`INetFwRules::Add`).
     ///

@@ -8,9 +8,10 @@
 //!   come from `SHGetKnownFolderPath` with the helper's token: `LocalAppData`, `RoamingAppData`
 //!   and `Profile` may follow the helper account's `User Shell Folders`, which the shell reads.
 //!   For `ForbiddenRoots` that only adds folders: the defaults from `ProfileList` stay in the
-//!   list, so a redirection can make the list stricter, never shorter; [`NoGpu`], [`NoTopology`], [`NoRegistry`] (as `registry()` and
-//!   `registry_write()`), `NoElevation`, and in P4-2c [`NoFirewall`]: the COM binding enters the
-//!   helper with the write side in P4-5b, so its imports stay without COM until then.
+//!   list, so a redirection can make the list stricter, never shorter; the firewall's read side
+//!   ([`WinFirewall`]) and, since P4-5b, its write side ([`WinFirewallWrite`], reached only
+//!   through `policy::firewall`); [`NoGpu`], [`NoTopology`], [`NoRegistry`] (as `registry()`
+//!   and `registry_write()`) and `NoElevation`.
 //!
 //! Nothing here references `WinSystem`, `WinGpu`, `dxgi` or `loader`'s DLL loading: the helper
 //! links only what it uses, which the import and content tests of
@@ -21,10 +22,10 @@ use std::sync::Arc;
 
 use super::registry::WinRegistry;
 use super::status::kind_of_win32;
-use super::{WinFs, WinKnownFolders, process, token};
+use super::{WinFirewall, WinFirewallWrite, WinFs, WinKnownFolders, process, token};
 use crate::sys::{
-    Elevation, Firewall, Fs, Gpu, HelperSystem, HelperToken, InstanceLock, KnownFolders,
-    NoElevation, NoFirewall, NoGpu, NoRegistry, NoTopology, Registry, RegistryWrite, SysError,
+    Elevation, Firewall, FirewallWrite, Fs, Gpu, HelperSystem, HelperToken, InstanceLock,
+    KnownFolders, NoElevation, NoGpu, NoRegistry, NoTopology, Registry, RegistryWrite, SysError,
     SysErrorKind, SysResult, System, Topology,
 };
 
@@ -119,7 +120,7 @@ impl System for WinHelperSystem {
         &NoGpu
     }
     fn firewall(&self) -> &dyn Firewall {
-        &NoFirewall
+        &WinFirewall
     }
     fn elevation(&self) -> &dyn Elevation {
         &NoElevation
@@ -130,8 +131,8 @@ impl HelperSystem for WinHelperSystem {
     fn token(&self) -> &dyn HelperToken {
         &self.token
     }
-    fn firewall_write(&self) -> &dyn crate::sys::FirewallWrite {
-        // The COM write side arrives with P4-5b (ADR 0023 §3 step 6).
-        &NoFirewall
+    fn firewall_write(&self) -> &dyn FirewallWrite {
+        // ADR 0023 §3 step 6, §12: COM in-proc through `sys::win::com::create_inproc`.
+        &WinFirewallWrite
     }
 }

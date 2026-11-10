@@ -1663,6 +1663,16 @@ fn banned_gpu_and_com_items_resolve() {
     let _ = windows_sys::Win32::Foundation::SysStringLen;
     #[expect(
         clippy::disallowed_methods,
+        reason = "ban check: SysAllocStringLen must be banned"
+    )]
+    let _ = windows_sys::Win32::Foundation::SysAllocStringLen;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: SysAllocString must be banned"
+    )]
+    let _ = windows_sys::Win32::Foundation::SysAllocString;
+    #[expect(
+        clippy::disallowed_methods,
         reason = "ban check: VariantClear must be banned"
     )]
     let _ = windows_sys::Win32::System::Variant::VariantClear;

@@ -1,7 +1,8 @@
-//! The fake firewall (P4-5a): the read contract, and that the contract bites.
+//! The fake firewall (P4-5a, P4-5b): the read and write contracts, that they bite, and the
+//! durability models.
 
 use super::super::{FakeFirewall, FakeSystem};
-use crate::sys::contract::firewall_read_contract;
+use crate::sys::contract::{RemoveFacts, firewall_read_contract, firewall_write_contract};
 use crate::sys::firewall::{ACTION_BLOCK, DIR_OUT, FwSelection, PROFILES_ALL, PROTOCOL_ANY};
 use crate::sys::{Firewall, FwRule, SysErrorKind, SysResult, System};
 
@@ -118,4 +119,101 @@ fn the_fake_bounds_texts_like_windows() {
         SysErrorKind::TooLarge,
         "a name is read for every rule"
     );
+}
+
+/// The write contract against the fake (P4-5b): its `Remove` takes every rule of the name,
+/// folded, and a missing name is no error (the worst case the design assumes, ADR 0023 §6;
+/// Windows' answer is the [SB] measurement).
+#[test]
+fn fake_fulfils_firewall_write_contract() {
+    let sys = FakeSystem::builder()
+        .fw_rule(rule("Core Networking - DHCP", "@FirewallAPI.dll,-25000"))
+        .build()
+        .unwrap();
+    let fw = sys.fake_firewall();
+    let a = rule(
+        "Rerun - contract-a - 00000001-0000000000000001-001",
+        "Rerun",
+    );
+    let b = rule(
+        "Rerun - contract-B - 00000001-0000000000000001-002",
+        "Rerun",
+    );
+    let facts = firewall_write_contract(fw, fw, &a, &b).unwrap();
+    assert_eq!(
+        facts,
+        RemoveFacts {
+            takes_every_rule_of_the_name: true,
+            ignores_case: true,
+            missing_name_is_ok: true,
+        }
+    );
+    assert_eq!(
+        fw.rules(),
+        vec![rule("Core Networking - DHCP", "@FirewallAPI.dll,-25000")]
+    );
+}
+
+/// The write contract bites: a firewall that stores another fact than it was given fails W1,
+/// and the contract still removes what it added.
+#[test]
+fn the_write_contract_catches_a_normalising_add() {
+    let fw = FakeFirewall::default();
+    fw.normalise_adds(Some(|r: &mut FwRule| r.program.make_ascii_uppercase()));
+    let mut a = rule("Rerun - c - 00000001-0000000000000001-001", "Rerun");
+    a.program = r"C:\Games\game.exe".to_owned();
+    let b = rule("Rerun - C2 - 00000001-0000000000000001-002", "Rerun");
+    let e = firewall_write_contract(&fw, &fw, &a, &b).unwrap_err();
+    assert!(e.starts_with("W1"), "{e}");
+    assert!(
+        fw.rules().is_empty(),
+        "the contract cleans up after a failure"
+    );
+}
+
+/// The durability models (ADR 0023 §6, P4-5b): durable on return by default; lazy: the helper's
+/// writes since the last flush are lost by a power loss, a test's own changes never.
+#[test]
+fn the_fake_firewall_models_durable_and_lazy_writes() {
+    use crate::sys::FirewallWrite;
+    let sys = FakeSystem::builder()
+        .fw_rule(rule("fixture", ""))
+        .build()
+        .unwrap();
+    let fw = sys.fake_firewall();
+    let a = rule("Rerun - a - 1", "Rerun");
+    let b = rule("Rerun - b - 1", "Rerun");
+    let cut = || sys.power_loss(&std::collections::BTreeMap::new());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test: the fake's write side itself"
+    )]
+    let add = |r: &FwRule| fw.add(r).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test: the fake's write side itself"
+    )]
+    let remove = |n: &str| fw.remove_named(n).unwrap();
+    add(&a);
+    cut();
+    assert_eq!(
+        fw.rules(),
+        vec![rule("fixture", ""), a.clone()],
+        "durable on return"
+    );
+    fw.set_lazy(true);
+    add(&b);
+    remove(&a.name);
+    fw.push(rule("admin", ""));
+    cut();
+    assert_eq!(
+        fw.rules(),
+        vec![rule("fixture", ""), a.clone(), rule("admin", "")],
+        "lazy: the add is lost, the removed rule is back, the test's own push stays"
+    );
+    add(&b);
+    fw.lazy_flush();
+    remove(&b.name);
+    cut();
+    assert!(fw.rules().contains(&b), "flushed, then a lost remove");
 }

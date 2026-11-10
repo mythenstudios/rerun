@@ -4,10 +4,10 @@
 //! (§7). No console (an elevated process cannot attach to the user's), no output, no files.
 //!
 //! `restrict_dll_search` first (ADR 0008, H2), then `rerun_core::elevate::serve` with the
-//! helper's own system (`WinHelperSystem`: no GPU, no topology, no registry, P4-2c): privileges
+//! helper's own system (`WinHelperSystem`: no GPU, no topology, no registry): privileges
 //! dropped, elevation required, its own image checked, the instance lock taken, then the request
-//! read by identity and validated (ADR 0023 §5). Until P4-5b it changes nothing: every validated
-//! add ends in `Refused(Firewall)`. This crate never names the full system or the GPU
+//! read by identity and validated (ADR 0023 §5), then the batch written through COM (P4-5b,
+//! `policy::firewall` on `WinFirewallWrite`). This crate never names the full system or the GPU
 //! (`tests/source_rules.rs`).
 
 #![windows_subsystem = "windows"]

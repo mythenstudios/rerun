@@ -319,17 +319,36 @@ fn last_seen(fw: &dyn Firewall, rules: &[FwRule]) -> Vec<Option<Observed>> {
     )
 }
 
-/// Removes every rule of `rules` that is exactly Rerun's (`After`), newest first, then reads
-/// again: `RolledBack` if every one is gone, else `LeftOpen`.
+/// A rule of `found` is the helper's own add of `expected` for the undo (ADR 0023 §15, security
+/// L3 of the P4-2d review): the name was counted free before the add, and now exactly one rule
+/// holds it (folded), with exactly that name, in group [`GROUP`]. Its other facts are not
+/// compared: a rule the firewall normalised on the add (a fact that reads back other than set)
+/// is still the helper's own and is taken back, never left as `Foreign` under a rolled-back
+/// transaction. A same-named rule an administrator adds in between is removed too (the race of
+/// §6, needs admin; accepted).
+fn own_add(expected: &FwRule, found: &[FwRule]) -> bool {
+    let name = fold(&expected.name);
+    let mut same = found.iter().filter(|r| fold(&r.name) == name);
+    match (same.next(), same.next()) {
+        (Some(r), None) => r.name == expected.name && r.grouping == GROUP,
+        _ => false,
+    }
+}
+
+/// The undo of an add batch whose names were all counted free: every rule of `rules` that is
+/// the helper's own add ([`own_add`]) is removed, newest first, then the batch is read again:
+/// `RolledBack` if every one is gone, else `LeftOpen`.
 fn undo(fw: &dyn Firewall, w: &dyn FirewallWrite, rules: &[FwRule]) -> Written {
-    if let Ok(seen) = observe_all(fw, rules) {
-        for (r, s) in rules.iter().zip(&seen).rev() {
-            if *s != Observed::After {
+    let names: Vec<String> = rules.iter().map(|r| fold(&r.name)).collect();
+    if let Ok(sel) = fw.select(&|n, _| names.contains(&fold(n))) {
+        for r in rules.iter().rev() {
+            if !own_add(r, &sel.rules) {
                 continue;
             }
             #[expect(
                 clippy::disallowed_methods,
-                reason = "ADR 0023 §6: the undo of the helper's own adds, each exactly Rerun's"
+                reason = "ADR 0023 §6, §15 (L3): the undo of the helper's own adds, names counted \
+                          free before"
             )]
             let removed = w.remove_named(&r.name);
             if removed.is_err() {
@@ -347,7 +366,8 @@ fn undo(fw: &dyn Firewall, w: &dyn FirewallWrite, rules: &[FwRule]) -> Written {
 
 /// The add of a batch (ADR 0023 §6): one enumeration, every name free (else `Duplicate`); each
 /// rule added in order; one enumeration again, every rule exactly Rerun's (`Done`); on any
-/// failure the helper's own adds are removed again, newest first (`RolledBack`, or `LeftOpen`).
+/// failure, also a rule that reads back other than it was set, the helper's own adds are removed
+/// again, newest first ([`own_add`]: `RolledBack`, or `LeftOpen`).
 pub fn add_all(sys: &dyn HelperSystem, rules: &[FwRule]) -> Written {
     let fw = sys.firewall();
     let seen = match observe_all(fw, rules) {

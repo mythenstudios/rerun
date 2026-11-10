@@ -326,8 +326,8 @@ fn the_instance_mutex_admits_one_holder() {
 
 /// The helper's own system (ADR 0023 §11) reads what its chain needs, read only: every known
 /// folder (`ProgramData` and `UserProfiles` from the machine's `ProfileList` without a user
-/// hive), the forbidden list, the helper pre-check; it has no GPU, no topology, no registry and
-/// no firewall yet (P4-2c).
+/// hive), the forbidden list, the helper pre-check, the firewall's rules (P4-5b; read only here,
+/// the write side is the [SB] contract's); it has no GPU, no topology and no registry.
 #[test]
 fn the_helper_system_has_what_the_chain_needs_and_nothing_else() {
     use super::super::WinHelperSystem;
@@ -353,7 +353,10 @@ fn the_helper_system_has_what_the_chain_needs_and_nothing_else() {
     let unsupported = |k| assert_eq!(k, SysErrorKind::Unsupported);
     unsupported(h.gpu().adapters().unwrap_err().kind);
     unsupported(h.topology().read().unwrap_err().kind);
-    unsupported(h.firewall().select(&|_, _| true).unwrap_err().kind);
+    assert_eq!(
+        h.firewall().select(&|_, _| false).unwrap().total,
+        full.firewall().select(&|_, _| false).unwrap().total
+    );
     let key = RegKey::new(Hive::LocalMachine, RegView::Native, "SOFTWARE");
     unsupported(h.registry().key_exists(&key).unwrap_err().kind);
     unsupported(h.elevation().token_kind().unwrap_err().kind);

@@ -1,8 +1,8 @@
 //! `exec` with the helper batch under crashes and power losses (P4-2d; ADR 0023 §9, §14; the
 //! conventions of docs/09 "Crash and power-loss matrices"), on the two-process fake of
 //! `fw_tests`. The helper runs outside the CLI's fault sequence (another process); the fake
-//! firewall keeps a rule once its call returned (the "durable on return" model of §6; the lazy
-//! model follows with the P4-5b write contract).
+//! firewall keeps a rule once its call returned (the "durable on return" model of §6), except in
+//! FC5, which runs the FC3 matrix in the lazy model.
 //!
 //! Phases: `Apply` (the plan applied), `Rollback` (the apply's prompt declined: the batch and the
 //! earlier ops rolled back), `Revert` (an applied plan reverted); kinds `Rules` (one rule alone,
@@ -21,6 +21,8 @@
 //!   (like the flush of the `elevate` folder after the request) has no observable effect: a
 //!   lost `RevertBatch` only makes the next revert observe again; it is kept for symmetry with
 //!   `RevertIntent` (ADR 0019 amendment P4-2d) and pinned by its place in the code only.
+//! - FC5 the lazy model (P4-5b): the FC3 matrix finds exactly its two outcomes, a lost add under
+//!   a durable `Applied` and a rule back under a recorded removal, and nothing else.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -50,7 +52,13 @@ struct Case {
 }
 
 fn setup(k: Kind) -> Case {
+    setup_with(k, false)
+}
+
+/// [`setup`], with the fake firewall in the lazy durability model if `lazy` (FC5).
+fn setup_with(k: Kind, lazy: bool) -> Case {
     let fw = Fw::new();
+    fw.sys.fake_firewall().set_lazy(lazy);
     let before = fw.snap();
     let h = plan(&fw.sys, fw.index, k);
     // `journal\lock` and `elevate` in place, so every run's calls are the same.
@@ -338,11 +346,22 @@ fn violations(c: &Case, got: Got) -> Vec<String> {
 /// FC3 for `k` and `p`, with the journal flush `skip` switched off; stops at the first
 /// violation containing `want`.
 fn matrix(k: Kind, p: Phase, skip: Option<FlushSite>, want: Option<&str>) -> (Vec<String>, usize) {
+    matrix_with(k, p, skip, want, false)
+}
+
+/// [`matrix`] in the durability model `lazy` of the fake firewall (FC5).
+fn matrix_with(
+    k: Kind,
+    p: Phase,
+    skip: Option<FlushSite>,
+    want: Option<&str>,
+    lazy: bool,
+) -> (Vec<String>, usize) {
     let mut found = Vec::new();
     let mut runs = 0;
     for a in points(k, p) {
         let (pc, pd) = {
-            let c = setup(k);
+            let c = setup_with(k, lazy);
             journal_knob::skip(skip);
             run(&c, p, Some(a));
             journal_knob::skip(None);
@@ -353,7 +372,7 @@ fn matrix(k: Kind, p: Phase, skip: Option<FlushSite>, want: Option<&str>) -> (Ve
         };
         for cut_c in 0..=pc {
             for cut_d in 0..=pd {
-                let c = setup(k);
+                let c = setup_with(k, lazy);
                 journal_knob::skip(skip);
                 let got = run(&c, p, Some(a));
                 journal_knob::skip(None);
@@ -414,5 +433,83 @@ fn fc4_without_the_helper_batch_flush_a_rule_is_left_behind() {
                 .any(|x| x.contains("not identical after recovery")),
             "{found:#?}"
         );
+    });
+}
+
+/// FC5 (ADR 0023 §6, P4-5b): the lazy durability model, the firewall service persisting the
+/// helper's writes some time after its call returned (whether Windows does is the N8 measurement
+/// of the [SB] write contract). The FC3 matrix then finds exactly two kinds of violation, never a
+/// damaged journal, a `Foreign` rule, a changed game folder or a lost `Ok` of the journal: a
+/// durable `Applied` whose rule is gone (the revert observes `Before` and closes), and a recorded
+/// removal (a durable `Closed`, or a durable `RevertDone` the recovery does not redo) whose rule
+/// is back: a Rerun rule under a closed transaction, which `rerun status` lists as owned by no
+/// transaction of this account (ADR 0023 §6, N6; the X row of ADR 0020).
+#[test]
+fn fc5_the_lazy_model_loses_a_rule_or_brings_one_back_and_nothing_else() {
+    seams(|| {
+        let t = Instant::now();
+        let (mut lost_add, mut back, mut total) = (0, 0, 0);
+        // One rule alone: a file op before the batch adds nothing to the firewall's model.
+        let k = Kind::Rules;
+        for p in PHASES {
+            let (found, runs) = matrix_with(k, p, None, None, true);
+            total += runs;
+            for x in &found {
+                if x.contains("Applied durable, change lost") {
+                    lost_add += 1;
+                } else if x.contains("Closed durable, revert lost")
+                    || x.contains("not identical after recovery: game [],")
+                {
+                    // The removal recorded (`Closed`, or a durable `RevertDone` the
+                    // recovery does not redo), the rule back: the game folder is identical.
+                    back += 1;
+                } else {
+                    panic!("FC5: another violation than the lazy model's two: {x}");
+                }
+            }
+        }
+        eprintln!(
+            "FC5: {total} power losses in {:.1} s; an Applied add lost {lost_add}, a closed remove lost {back}",
+            t.elapsed().as_secs_f64()
+        );
+        assert!(
+            lost_add > 0 && back > 0,
+            "the lazy model must bite: {lost_add} {back}"
+        );
+    });
+}
+
+/// FC5, the two outcomes one by one: an apply whose rule a power loss takes is reverted without a
+/// helper (the rule is `Before`) and ends identical; a revert whose removal a power loss undoes
+/// leaves the rule under a closed transaction, listed by `firewall_orphans` (ADR 0023 §6, N6).
+#[test]
+fn fc5_lazy_outcomes_one_by_one() {
+    seams(|| {
+        let c = setup_with(Kind::Rules, true);
+        let t = match c.fw.apply(&c.h, Vec::new()).0 {
+            Ok(Outcome::Applied(t)) => t,
+            other => panic!("apply: {other:?}"),
+        };
+        c.fw.sys.power_loss(&BTreeMap::new());
+        assert_eq!(c.fw.state(&t), Some(TxnState::Applied));
+        assert!(c.fw.verify(&t).iter().all(|(_, o)| *o == Observed::Before));
+        let (r, runs) = c.fw.revert(&t, Vec::new());
+        assert!(r.unwrap().closed.is_some());
+        assert_eq!(runs, 0, "no helper for a rule that is gone");
+        assert_eq!(c.fw.snap(), c.before);
+
+        let c = setup_with(Kind::Rules, true);
+        let t = match c.fw.apply(&c.h, Vec::new()).0 {
+            Ok(Outcome::Applied(t)) => t,
+            other => panic!("apply: {other:?}"),
+        };
+        c.fw.sys.fake_firewall().lazy_flush();
+        let (r, _) = c.fw.revert(&t, Vec::new());
+        assert!(r.unwrap().closed.is_some());
+        c.fw.sys.power_loss(&BTreeMap::new());
+        assert!(matches!(c.fw.state(&t), Some(TxnState::Closed(_))));
+        let app = crate::prim::tests::app(&c.fw.sys);
+        let orphans = super::firewall_orphans(&c.fw.sys, &app).unwrap();
+        assert_eq!(orphans.len(), 1, "{orphans:?}");
     });
 }

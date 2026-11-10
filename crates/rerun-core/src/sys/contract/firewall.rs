@@ -1,5 +1,7 @@
 //! Read contract of the firewall (ADR 0023 §8 outcome A, §14; P4-5a), against the fake and the
-//! real Windows Firewall (read only: it never adds, changes or removes a rule).
+//! real Windows Firewall (read only: it never adds, changes or removes a rule); and the write
+//! contract (P4-5b, [`firewall_write_contract`]), against the fake and, in the [SB] only, the
+//! real firewall.
 //!
 //! - **F1** one call is one enumeration: `keep` sees every rule once, `total` counts them, and
 //!   only the rules `keep` chose come back, in enumeration order.
@@ -15,8 +17,8 @@
 use std::cell::RefCell;
 
 use super::{ContractResult, ensure, ok};
-use crate::sys::Firewall;
 use crate::sys::firewall::{ACTION_ALLOW, ACTION_BLOCK, DIR_IN, DIR_OUT, FwRule, PROTOCOL_ANY};
+use crate::sys::{Firewall, FirewallWrite};
 
 fn texts(r: &FwRule) -> Vec<&str> {
     let mut t = vec![
@@ -112,4 +114,128 @@ pub fn firewall_read_contract(fw: &dyn Firewall) -> ContractResult {
         )?;
     }
     Ok(())
+}
+
+/// What the write contract saw of `INetFwRules::Remove` (measured on Windows by the [SB] write
+/// contract; fixed in the fake).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoveFacts {
+    /// `Remove(name)` with two rules of that name took both (B12 c, R10: the design assumes it
+    /// does and counts first).
+    pub takes_every_rule_of_the_name: bool,
+    /// `Remove(name)` took a rule whose name differs from `name` in ASCII case only (A4 S6 c).
+    pub ignores_case: bool,
+    /// `Remove(name)` of a name no rule holds returned success.
+    pub missing_name_is_ok: bool,
+}
+
+/// The write contract of the firewall (ADR 0023 §6, §14; P4-5b), against the fake and, in the
+/// [SB] only, the real Windows Firewall (it adds and removes real rules).
+///
+/// - **W1** an added rule reads back with exactly the facts it was added with (one rule of its
+///   name; every fact Rerun compares, A4 S6 d).
+/// - **W2** two adds of one name are two rules (the firewall does not refuse a duplicate);
+///   `Remove(name)` leaves no rule of that exact name ([`RemoveFacts`] says whether one call
+///   took both, R10).
+/// - **W3** `Remove` with the name in another ASCII case: measured ([`RemoveFacts`]); the rule
+///   is removed by its exact name afterwards if it is still there.
+/// - **W4** `Remove` of a name no rule holds: measured.
+///
+/// `a` and `b` are two rules of different names that no rule of the firewall holds (folded);
+/// `b`'s name has an upper-case ASCII letter. Every rule the contract adds is removed again,
+/// also when a case fails (by exact name).
+///
+/// # Errors
+/// The first broken rule.
+pub fn firewall_write_contract(
+    fw: &dyn Firewall,
+    w: &dyn FirewallWrite,
+    a: &FwRule,
+    b: &FwRule,
+) -> Result<RemoveFacts, String> {
+    let lower = b.name.to_ascii_lowercase();
+    if lower == b.name || a.name.eq_ignore_ascii_case(&b.name) {
+        return Err("setup: b's name needs an upper-case letter, a and b other names".into());
+    }
+    let r = write_cases(fw, w, a, b, &lower);
+    // Clean up whatever the cases left, by exact name (twice: a duplicate may be left).
+    for name in [&a.name, &a.name, &b.name] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "write contract: removes the rules the contract itself added"
+        )]
+        let _ = w.remove_named(name);
+    }
+    let left = ok(
+        fw.select(&|n, _| n.eq_ignore_ascii_case(&a.name) || n.eq_ignore_ascii_case(&b.name)),
+        "select after the clean-up",
+    )?;
+    ensure(left.rules.is_empty(), "the contract leaves no rule behind")?;
+    r
+}
+
+/// The rules of exactly `name`.
+fn named(fw: &dyn Firewall, name: &str) -> Result<Vec<FwRule>, String> {
+    Ok(ok(fw.select(&|n, _| n == name), "select by name")?.rules)
+}
+
+fn write_cases(
+    fw: &dyn Firewall,
+    w: &dyn FirewallWrite,
+    a: &FwRule,
+    b: &FwRule,
+    lower: &str,
+) -> Result<RemoveFacts, String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "write contract: the add under test"
+    )]
+    let add = |r: &FwRule| w.add(r);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "write contract: the remove under test"
+    )]
+    let remove = |n: &str| w.remove_named(n);
+    for r in [a, b] {
+        ensure(named(fw, &r.name)?.is_empty(), "setup: the names are free")?;
+    }
+    // W1.
+    ok(add(a), "add a")?;
+    let got = named(fw, &a.name)?;
+    if got.as_slice() != std::slice::from_ref(a) {
+        return Err(format!(
+            "W1: an added rule reads back with the facts it was added with:\n  set  {a:?}\n  read {got:?}"
+        ));
+    }
+    // W2.
+    ok(add(a), "add a again")?;
+    ensure(
+        named(fw, &a.name)?.len() == 2,
+        "W2: a second add of one name is a second rule",
+    )?;
+    ok(remove(&a.name), "remove a")?;
+    let left = named(fw, &a.name)?.len();
+    let takes_every_rule_of_the_name = left == 0;
+    if left == 1 {
+        ok(remove(&a.name), "remove a, the second rule")?;
+    }
+    ensure(
+        named(fw, &a.name)?.is_empty(),
+        "W2: Remove leaves no rule of the exact name",
+    )?;
+    // W3.
+    ok(add(b), "add b")?;
+    ok(remove(lower), "remove b by its name in lower case")?;
+    let ignores_case = named(fw, &b.name)?.is_empty();
+    if !ignores_case {
+        ok(remove(&b.name), "remove b by its exact name")?;
+    }
+    ensure(named(fw, &b.name)?.is_empty(), "W3: b removed")?;
+    // W4.
+    let missing_name_is_ok = remove(&b.name).is_ok();
+    Ok(RemoveFacts {
+        takes_every_rule_of_the_name,
+        ignores_case,
+        missing_name_is_ok,
+    })
 }

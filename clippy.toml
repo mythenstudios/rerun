@@ -518,6 +518,8 @@ disallowed-methods = [
   # (one call site each), so every string and variant a COM call returns is freed exactly once.
   { path = "windows_sys::Win32::Foundation::SysFreeString", reason = "BSTRs only via sys::win::com::Bstr (ADR 0008 amendment P4-5a)", allow-invalid = true },
   { path = "windows_sys::Win32::Foundation::SysStringLen", reason = "BSTRs only via sys::win::com::Bstr (ADR 0008 amendment P4-5a)", allow-invalid = true },
+  { path = "windows_sys::Win32::Foundation::SysAllocStringLen", reason = "BSTRs only via sys::win::com::Bstr::new (ADR 0008 amendment P4-5b)", allow-invalid = true },
+  { path = "windows_sys::Win32::Foundation::SysAllocString", reason = "BSTRs only via sys::win::com::Bstr::new (ADR 0008 amendment P4-5b)", allow-invalid = true },
   { path = "windows_sys::Win32::System::Variant::VariantClear", reason = "VARIANTs only via sys::win::com::Variant (ADR 0008 amendment P4-5a)", allow-invalid = true },
   # Security review of step 10 (2026-11-05): the remaining process-start, delay-load symbol and
   # COM activation paths. CoGetInstanceFromFile, CoGetClassObjectFromURL, OleInitialize and

@@ -59,7 +59,7 @@ mod snapshot;
 mod write;
 mod write_race;
 
-pub use firewall::firewall_read_contract;
+pub use firewall::{RemoveFacts, firewall_read_contract, firewall_write_contract};
 pub use identity::fs_identity_contract;
 pub use reg_write::registry_write_contract;
 pub use snapshot::snapshot_contract;

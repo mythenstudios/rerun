@@ -28,7 +28,7 @@ use std::mem::ManuallyDrop;
 use std::ptr;
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::NetworkManagement::WindowsFirewall::NetFwPolicy2;
+use windows_sys::Win32::NetworkManagement::WindowsFirewall::{NetFwPolicy2, NetFwRule};
 use windows_sys::Win32::System::Variant::{VARIANT, VT_DISPATCH, VT_EMPTY};
 use windows_sys::core::{BSTR, GUID, HRESULT};
 
@@ -37,7 +37,7 @@ use super::com::{
     Variant, Vtable, create_inproc,
 };
 use crate::sys::firewall::{FwRest, FwRule, FwRule3, FwSelection, MAX_RULES, MAX_TEXT_UTF16};
-use crate::sys::{Firewall, SysError, SysErrorKind, SysResult};
+use crate::sys::{Firewall, FirewallWrite, SysError, SysErrorKind, SysResult};
 
 /// `IID_INetFwPolicy2` (netfw.h).
 pub(super) const IID_POLICY2: GUID = GUID::from_u128(0x9832_5047_c671_4174_8d81_defc_d3f0_3186);
@@ -69,6 +69,10 @@ type GetLong = unsafe extern "system" fn(this: *mut c_void, out: *mut i32) -> HR
 type GetBool = unsafe extern "system" fn(this: *mut c_void, out: *mut i16) -> HRESULT;
 type GetVariant = unsafe extern "system" fn(this: *mut c_void, out: *mut VARIANT) -> HRESULT;
 type GetObject = unsafe extern "system" fn(this: *mut c_void, out: *mut *mut c_void) -> HRESULT;
+type PutBstr = unsafe extern "system" fn(this: *mut c_void, value: BSTR) -> HRESULT;
+type PutLong = unsafe extern "system" fn(this: *mut c_void, value: i32) -> HRESULT;
+type PutBool = unsafe extern "system" fn(this: *mut c_void, value: i16) -> HRESULT;
+type PutObject = unsafe extern "system" fn(this: *mut c_void, value: *mut c_void) -> HRESULT;
 
 /// The `INetFwPolicy2Vtbl` prefix up to `get_Rules`.
 #[repr(C)]
@@ -86,26 +90,31 @@ struct RulesVtbl {
     dispatch: DispatchVtbl,
     /// Slot 7.
     get_count: GetLong,
-    /// Slots 8 to 10: `Add`, `Remove`, `Item`.
-    _add_remove_item: [Slot; 3],
+    /// Slot 8: `Add(INetFwRule*)`.
+    add: PutObject,
+    /// Slot 9: `Remove(BSTR name)`.
+    remove: PutBstr,
+    /// Slot 10: `Item`.
+    _item: Slot,
     /// Slot 11.
     get_new_enum: GetObject,
 }
 
-/// `INetFwRuleVtbl` up to `get_Action`: every getter typed, every setter a placeholder.
+/// `INetFwRuleVtbl`: every getter typed; the setters of the fields Rerun's one
+/// rule form sets typed (P4-5b), the others placeholders.
 #[repr(C)]
 struct RuleVtbl {
     dispatch: DispatchVtbl,
     get_name: GetBstr,
-    _put_name: Slot,
+    put_name: PutBstr,
     get_description: GetBstr,
-    _put_description: Slot,
+    put_description: PutBstr,
     get_application_name: GetBstr,
-    _put_application_name: Slot,
+    put_application_name: PutBstr,
     get_service_name: GetBstr,
     _put_service_name: Slot,
     get_protocol: GetLong,
-    _put_protocol: Slot,
+    put_protocol: PutLong,
     get_local_ports: GetBstr,
     _put_local_ports: Slot,
     get_remote_ports: GetBstr,
@@ -117,28 +126,29 @@ struct RuleVtbl {
     get_icmp_types_and_codes: GetBstr,
     _put_icmp_types_and_codes: Slot,
     get_direction: GetLong,
-    _put_direction: Slot,
+    put_direction: PutLong,
     get_interfaces: GetVariant,
     _put_interfaces: Slot,
     get_interface_types: GetBstr,
     _put_interface_types: Slot,
     get_enabled: GetBool,
-    _put_enabled: Slot,
+    put_enabled: PutBool,
     get_grouping: GetBstr,
-    _put_grouping: Slot,
+    put_grouping: PutBstr,
     get_profiles: GetLong,
-    _put_profiles: Slot,
+    put_profiles: PutLong,
     get_edge_traversal: GetBool,
     _put_edge_traversal: Slot,
     /// Slot 41.
     get_action: GetLong,
+    /// Slot 42, the last of `INetFwRule`.
+    put_action: PutLong,
 }
 
 /// `INetFwRule2Vtbl` up to `get_EdgeTraversalOptions`.
 #[repr(C)]
 struct Rule2Vtbl {
     rule: RuleVtbl,
-    _put_action: Slot,
     /// Slot 43.
     get_edge_traversal_options: GetLong,
 }
@@ -197,6 +207,9 @@ enum Fail {
     /// The call returned a text longer than `MAX_TEXT_UTF16`: Rerun's own bound, never mixed
     /// up with an `HRESULT` a getter returns itself.
     TooLong(&'static str),
+    /// A text to set holds a NUL or is longer than `MAX_TEXT_UTF16` (or its `BSTR` could not
+    /// be allocated): nothing was set.
+    Text(&'static str),
 }
 
 /// `$com.$slot(out)` for a `BSTR` property, bounded: `Result<String, Fail>`. `$slot` must be a
@@ -249,6 +262,54 @@ macro_rules! flag {
     }};
 }
 
+/// `$com.$slot(value)` for a `BSTR` property: `Result<(), Fail>`. The `BSTR` is allocated for
+/// the call and freed afterwards (the callee copies it).
+macro_rules! put_text {
+    ($com:expr, $slot:ident, $call:literal, $value:expr) => {{
+        let c = &$com;
+        let b = Bstr::new($value, MAX_TEXT_UTF16).ok_or(Fail::Text($call))?;
+        // SAFETY: `c` is a live interface whose vtable types `$slot` as a BSTR setter (netfw.h,
+        // pinned by the slot test); `b.0` is a valid BSTR that outlives the call.
+        let hr = unsafe { (c.vtbl().$slot)(c.as_raw(), b.0) };
+        if hr < 0 {
+            Err(Fail::Hr($call, hr))
+        } else {
+            Ok(())
+        }
+    }};
+}
+
+/// `$com.$slot(value)` for a `long` or enum property: `Result<(), Fail>`.
+macro_rules! put_long {
+    ($com:expr, $slot:ident, $call:literal, $value:expr) => {{
+        let c = &$com;
+        // SAFETY: `c` is a live interface whose vtable types `$slot` as a `long` setter (netfw.h,
+        // pinned by the slot test); the value is passed by value.
+        let hr = unsafe { (c.vtbl().$slot)(c.as_raw(), $value) };
+        if hr < 0 {
+            Err(Fail::Hr($call, hr))
+        } else {
+            Ok(())
+        }
+    }};
+}
+
+/// `$com.$slot(value)` for a `VARIANT_BOOL` property (`VARIANT_TRUE` = -1): `Result<(), Fail>`.
+macro_rules! put_flag {
+    ($com:expr, $slot:ident, $call:literal, $value:expr) => {{
+        let c = &$com;
+        let v: i16 = if $value { -1 } else { 0 };
+        // SAFETY: `c` is a live interface whose vtable types `$slot` as a `VARIANT_BOOL` setter
+        // (netfw.h, pinned by the slot test); the value is passed by value.
+        let hr = unsafe { (c.vtbl().$slot)(c.as_raw(), v) };
+        if hr < 0 {
+            Err(Fail::Hr($call, hr))
+        } else {
+            Ok(())
+        }
+    }};
+}
+
 /// `QueryInterface` that maps `E_NOINTERFACE` to `None`.
 ///
 /// # Safety
@@ -267,6 +328,26 @@ unsafe fn optional<V: Vtable, W: Vtable>(
 }
 
 impl Com<RuleVtbl> {
+    /// Sets the fields of Rerun's rule form on a fresh rule object (P4-5b); every other field
+    /// keeps the object's default. Protocol before anything that depends on it (`netfw.h`:
+    /// ports and ICMP types need the protocol first; none is set here).
+    fn fill(&self, r: &FwRule) -> Result<(), Fail> {
+        put_text!(self, put_name, "put_Name", &r.name)?;
+        put_text!(self, put_description, "put_Description", &r.description)?;
+        put_text!(
+            self,
+            put_application_name,
+            "put_ApplicationName",
+            &r.program
+        )?;
+        put_text!(self, put_grouping, "put_Grouping", &r.grouping)?;
+        put_long!(self, put_protocol, "put_Protocol", r.protocol)?;
+        put_long!(self, put_direction, "put_Direction", r.direction)?;
+        put_long!(self, put_action, "put_Action", r.action)?;
+        put_long!(self, put_profiles, "put_Profiles", r.profiles)?;
+        put_flag!(self, put_enabled, "put_Enabled", r.enabled)
+    }
+
     fn name_and_group(&self) -> Result<(String, String), Fail> {
         Ok((
             text!(self, get_name, "get_Name")?,
@@ -344,7 +425,7 @@ impl Com<RuleVtbl> {
     }
 }
 
-/// Why an enumeration stopped.
+/// Why an enumeration or a write stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EnumError {
     Create(CreateError),
@@ -354,6 +435,9 @@ enum EnumError {
     Element(u16),
     TooMany,
     Deadline,
+    /// A rule to add whose fields beyond the rule form differ from a fresh rule object's: the
+    /// write side sets only the form's fields (P4-5b), so it refuses rather than add another.
+    Rest,
 }
 
 impl From<Fail> for EnumError {
@@ -362,10 +446,8 @@ impl From<Fail> for EnumError {
     }
 }
 
-/// One enumeration (module docs).
-fn enumerate(keep: &dyn Fn(&str, &str) -> bool) -> Result<FwSelection, EnumError> {
-    let start = Instant::now();
-    let _apartment = Apartment::enter().map_err(EnumError::Apartment)?;
+/// The rule collection of `HNetCfg.FwPolicy2` (the caller is in an [`Apartment`]).
+fn rule_collection() -> Result<Com<RulesVtbl>, EnumError> {
     // SAFETY: `PolicyVtbl` is the vtable prefix of INetFwPolicy2, the interface IID_POLICY2
     // names.
     let policy = unsafe { create_inproc::<PolicyVtbl>(&NetFwPolicy2, &IID_POLICY2) }
@@ -377,8 +459,14 @@ fn enumerate(keep: &dyn Fn(&str, &str) -> bool) -> Result<FwSelection, EnumError
         return Err(Fail::Hr("get_Rules", hr).into());
     }
     // SAFETY: on success `raw` is an INetFwRules with one reference owned by the caller.
-    let rules =
-        unsafe { Com::<RulesVtbl>::from_raw(raw) }.ok_or(Fail::Hr("get_Rules", E_POINTER))?;
+    Ok(unsafe { Com::<RulesVtbl>::from_raw(raw) }.ok_or(Fail::Hr("get_Rules", E_POINTER))?)
+}
+
+/// One enumeration (module docs).
+fn enumerate(keep: &dyn Fn(&str, &str) -> bool) -> Result<FwSelection, EnumError> {
+    let start = Instant::now();
+    let _apartment = Apartment::enter().map_err(EnumError::Apartment)?;
+    let rules = rule_collection()?;
     let count = long!(rules, get_count, "get_Count")?;
     if !usize::try_from(count).is_ok_and(|c| c <= MAX_RULES) {
         return Err(EnumError::TooMany);
@@ -445,38 +533,77 @@ fn enumerate(keep: &dyn Fn(&str, &str) -> bool) -> Result<FwSelection, EnumError
     }
 }
 
-fn sys_error(e: EnumError) -> SysError {
-    const T: &str = "firewall rules";
+/// `INetFwRules::Add` of a fresh `HNetCfg.FWRule` object with the fields of `r` (P4-5b). The
+/// fields beyond the rule form are never set: `r.rest` must be what the fresh object holds
+/// (`policy::firewall::rest`), else [`EnumError::Rest`] before anything is added.
+fn add_rule(r: &FwRule) -> Result<(), EnumError> {
+    let _apartment = Apartment::enter().map_err(EnumError::Apartment)?;
+    let rules = rule_collection()?;
+    // SAFETY: `RuleVtbl` is the vtable of INetFwRule, the interface IID_RULE names.
+    let obj =
+        unsafe { create_inproc::<RuleVtbl>(&NetFwRule, &IID_RULE) }.map_err(EnumError::Create)?;
+    let (name, grouping) = obj.name_and_group()?;
+    if obj.read(name, grouping)?.rest != r.rest {
+        return Err(EnumError::Rest);
+    }
+    obj.fill(r)?;
+    // SAFETY: `rules` is a live INetFwRules; slot 8 is Add; `obj` is a live INetFwRule, which
+    // the collection takes its own reference to (ours is released when `obj` drops).
+    let hr = unsafe { (rules.vtbl().add)(rules.as_raw(), obj.as_raw()) };
+    if hr < 0 {
+        return Err(Fail::Hr("INetFwRules::Add", hr).into());
+    }
+    Ok(())
+}
+
+/// `INetFwRules::Remove(name)` (P4-5b): what it removes (every rule of the name, or one; the
+/// case of the name) is the [SB] write contract's measurement.
+fn remove_rule(name: &str) -> Result<(), EnumError> {
+    let _apartment = Apartment::enter().map_err(EnumError::Apartment)?;
+    let rules = rule_collection()?;
+    put_text!(rules, remove, "INetFwRules::Remove", name)?;
+    Ok(())
+}
+
+fn sys_error(e: EnumError, t: &str) -> SysError {
     match e {
         EnumError::Create(CreateError::Env(EnvMismatch::Var(v))) => SysError::new(
             SysErrorKind::Other,
-            format!("{T}: the environment variable {v} does not name the Windows folder"),
+            format!("{t}: the environment variable {v} does not name the Windows folder"),
         ),
         EnumError::Create(CreateError::Env(EnvMismatch::Windows(c))) => {
-            SysError::new(SysErrorKind::Other, format!("{T}: the Windows folder")).with_win32(c)
+            SysError::new(SysErrorKind::Other, format!("{t}: the Windows folder")).with_win32(c)
         }
         EnumError::Create(CreateError::Com(hr)) => {
-            SysError::new(kind_of_hresult(hr), format!("{T}: HNetCfg.FwPolicy2")).with_hresult(hr)
+            SysError::new(kind_of_hresult(hr), format!("{t}: HNetCfg.FwPolicy2")).with_hresult(hr)
         }
         EnumError::Create(CreateError::NotAllowed) => SysError::new(
             SysErrorKind::Unsupported,
-            format!("{T}: a COM class outside the allowlist"),
+            format!("{t}: a COM class outside the allowlist"),
         ),
         EnumError::Apartment(hr) => {
-            SysError::new(SysErrorKind::Other, format!("{T}: CoInitializeEx")).with_hresult(hr)
+            SysError::new(SysErrorKind::Other, format!("{t}: CoInitializeEx")).with_hresult(hr)
         }
         EnumError::Call(Fail::TooLong(call)) => {
-            SysError::too_large(format!("{T}: {call}"), MAX_TEXT_UTF16 as u64)
+            SysError::too_large(format!("{t}: {call}"), MAX_TEXT_UTF16 as u64)
         }
         EnumError::Call(Fail::Hr(call, hr)) => {
-            SysError::new(kind_of_hresult(hr), format!("{T}: {call}")).with_hresult(hr)
+            SysError::new(kind_of_hresult(hr), format!("{t}: {call}")).with_hresult(hr)
         }
         EnumError::Element(vt) => {
-            SysError::new(SysErrorKind::Other, format!("{T}: an element of type {vt}"))
+            SysError::new(SysErrorKind::Other, format!("{t}: an element of type {vt}"))
         }
-        EnumError::TooMany => SysError::too_large(T, MAX_RULES as u64),
+        EnumError::TooMany => SysError::too_large(t, MAX_RULES as u64),
+        EnumError::Call(Fail::Text(call)) => SysError::new(
+            SysErrorKind::Other,
+            format!("{t}: {call}: a text with a NUL or longer than {MAX_TEXT_UTF16} units"),
+        ),
+        EnumError::Rest => SysError::new(
+            SysErrorKind::Unsupported,
+            format!("{t}: fields beyond Rerun's rule form are not set by this write side"),
+        ),
         EnumError::Deadline => {
-            SysError::too_large(format!("{T}: seconds"), ENUM_DEADLINE.as_secs())
+            SysError::too_large(format!("{t}: seconds"), ENUM_DEADLINE.as_secs())
         }
     }
 }
@@ -495,7 +622,23 @@ pub struct WinFirewall;
 
 impl Firewall for WinFirewall {
     fn select(&self, keep: &dyn Fn(&str, &str) -> bool) -> SysResult<FwSelection> {
-        enumerate(keep).map_err(sys_error)
+        enumerate(keep).map_err(|e| sys_error(e, "firewall rules"))
+    }
+}
+
+/// The real [`FirewallWrite`] (P4-5b): only `WinHelperSystem` hands it out, and only
+/// `policy::firewall` calls it (`clippy.toml`). Without administrator rights the firewall
+/// service refuses every write (`E_ACCESSDENIED`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WinFirewallWrite;
+
+impl FirewallWrite for WinFirewallWrite {
+    fn add(&self, rule: &FwRule) -> SysResult<()> {
+        add_rule(rule).map_err(|e| sys_error(e, "firewall rules, add"))
+    }
+
+    fn remove_named(&self, name: &str) -> SysResult<()> {
+        remove_rule(name).map_err(|e| sys_error(e, "firewall rules, remove"))
     }
 }
 
@@ -514,6 +657,8 @@ mod tests {
         let slot = |n: usize| n * size_of::<usize>();
         assert_eq!(offset_of!(PolicyVtbl, get_rules), slot(18));
         assert_eq!(offset_of!(RulesVtbl, get_count), slot(7));
+        assert_eq!(offset_of!(RulesVtbl, add), slot(8));
+        assert_eq!(offset_of!(RulesVtbl, remove), slot(9));
         assert_eq!(offset_of!(RulesVtbl, get_new_enum), slot(11));
         assert_eq!(offset_of!(RuleVtbl, get_name), slot(7));
         assert_eq!(offset_of!(RuleVtbl, get_description), slot(9));
@@ -533,6 +678,17 @@ mod tests {
         assert_eq!(offset_of!(RuleVtbl, get_profiles), slot(37));
         assert_eq!(offset_of!(RuleVtbl, get_edge_traversal), slot(39));
         assert_eq!(offset_of!(RuleVtbl, get_action), slot(41));
+        // The setters of the rule form (P4-5b): each right after its getter.
+        assert_eq!(offset_of!(RuleVtbl, put_name), slot(8));
+        assert_eq!(offset_of!(RuleVtbl, put_description), slot(10));
+        assert_eq!(offset_of!(RuleVtbl, put_application_name), slot(12));
+        assert_eq!(offset_of!(RuleVtbl, put_protocol), slot(16));
+        assert_eq!(offset_of!(RuleVtbl, put_direction), slot(28));
+        assert_eq!(offset_of!(RuleVtbl, put_enabled), slot(34));
+        assert_eq!(offset_of!(RuleVtbl, put_grouping), slot(36));
+        assert_eq!(offset_of!(RuleVtbl, put_profiles), slot(38));
+        assert_eq!(offset_of!(RuleVtbl, put_action), slot(42));
+        assert_eq!(size_of::<RuleVtbl>(), slot(43));
         assert_eq!(offset_of!(Rule2Vtbl, get_edge_traversal_options), slot(43));
         assert_eq!(offset_of!(Rule3Vtbl, get_local_app_package_id), slot(45));
         assert_eq!(offset_of!(Rule3Vtbl, get_local_user_owner), slot(47));
@@ -615,6 +771,34 @@ mod tests {
         let fresh = rule.read(name, grouping).unwrap();
         eprintln!("MEASURED fresh rule object: {fresh:?}");
         assert_eq!(fresh.rest, crate::policy::firewall::rest());
+    }
+
+    /// P4-5b, the setters without the firewall: a fresh `HNetCfg.FWRule` object in this process
+    /// (never added to the policy, so nothing on the machine changes) takes Rerun's rule form
+    /// through `fill` and reads it back exactly through the getters. That an *added* rule reads
+    /// back the same is the [SB] write contract (`sb_firewall_write_contract`).
+    #[test]
+    fn a_fresh_rule_object_takes_rerun_s_form() {
+        use crate::catalog::model::Id;
+        use crate::policy::firewall::{Direction, Program, rule};
+        let _apartment = Apartment::enter().unwrap();
+        let topo = Id::parse("setter-check").unwrap();
+        let txn = "00000001-00000000000000ab".parse().unwrap();
+        let program = Program::parse(r"C:\Games\Setter Check\bin\Game.exe").unwrap();
+        let want = rule(&topo, &txn, 7, &program, Direction::Out);
+        // SAFETY: `RuleVtbl` is the vtable of INetFwRule, the interface IID_RULE names.
+        let obj = unsafe { create_inproc::<RuleVtbl>(&wf::NetFwRule, &IID_RULE) }.unwrap();
+        obj.fill(&want).unwrap();
+        let (name, grouping) = obj.name_and_group().unwrap();
+        let got = obj.read(name, grouping).unwrap();
+        eprintln!("MEASURED filled rule object: {got:?}");
+        assert_eq!(got, want);
+        // A text with a NUL is refused before anything is set.
+        let nul = FwRule {
+            name: "Rerun - a\0b".to_owned(),
+            ..want
+        };
+        assert_eq!(obj.fill(&nul), Err(Fail::Text("put_Name")));
     }
 
     #[test]

@@ -98,9 +98,10 @@ pub const CLI_IMPORTS: &[&str] = &[
 /// `SHGetKnownFolderPath` (`Program Files` for the own image check and the forbidden list),
 /// `combase.dll` for `CoTaskMemFree` of its result (no COM is initialised or activated), and
 /// `bcryptprimitives.dll` from `std` (`ProcessPrng`, the seed of the `HashMap`/`HashSet` of the
-/// registry and file system reads), the same three as in [`CLI_IMPORTS`]. `ole32` and
-/// `oleaut32` follow with the firewall COM in P4-5b. Never a graphics DLL
-/// ([`forbidden_import`]).
+/// registry and file system reads), the same three as in [`CLI_IMPORTS`]. P4-5b (the firewall
+/// COM, reviewed for the CLI in P4-5a): `ole32.dll` for `CoInitializeEx`, `CoUninitialize` and
+/// `CoCreateInstance`, `oleaut32.dll` for `SysAllocStringLen`, `SysStringLen`, `SysFreeString`
+/// and `VariantClear`. Never a graphics DLL ([`forbidden_import`]).
 pub const HELPER_IMPORTS: &[&str] = &[
     "kernel32.dll",
     "ntdll.dll",
@@ -109,6 +110,8 @@ pub const HELPER_IMPORTS: &[&str] = &[
     "shell32.dll",
     "combase.dll",
     "bcryptprimitives.dll",
+    "ole32.dll",
+    "oleaut32.dll",
 ];
 
 /// The run-time loaders `std` itself names in every binary: its backtrace support loads
@@ -404,10 +407,11 @@ fn the_helper_content_checks_have_teeth() {
         let e = check_helper_content(bad).unwrap_err();
         assert!(e.contains("run-time loaders"), "{e}");
     }
-    // The CLI's own imports beyond the helper's fail the helper's list (until P4-5b: no COM).
-    for dll in ["ole32.dll", "oleaut32.dll", "userenv.dll"] {
+    // The CLI's own imports beyond the helper's fail the helper's list (the COM DLLs joined it
+    // with the firewall write side in P4-5b).
+    {
         use pe_image::image;
-        let img = image(&["kernel32.dll", dll], &[], SEARCH_SYSTEM32);
+        let img = image(&["kernel32.dll", "userenv.dll"], &[], SEARCH_SYSTEM32);
         let e = check_hardened(std::io::Cursor::new(img), HELPER_IMPORTS).unwrap_err();
         assert!(e.contains("not in the allowlist"), "{e}");
     }
@@ -431,11 +435,17 @@ fn each_binary_has_its_own_allowlist() {
         let e = check(&["kernel32.dll", dll], LAUNCH_IMPORTS).unwrap_err();
         assert!(e.contains("not in the allowlist"), "{e}");
     }
-    // COM around ShellExecuteExW: the shim (B2) and, since P4-2b, the CLI (the helper start,
-    // ADR 0023 N3) both import ole32.dll; the helper does not (no COM before P4-5b).
+    // COM: the shim (B2, around ShellExecuteExW), the CLI (the helper start, ADR 0023 N3, and
+    // the firewall read) and, since P4-5b, the helper (the firewall write) import ole32.dll;
+    // the shim has no oleaut32.dll (no BSTR, no VARIANT).
     check(&["kernel32.dll", "ole32.dll"], LAUNCH_IMPORTS).unwrap();
     check(&["kernel32.dll", "ole32.dll"], CLI_IMPORTS).unwrap();
-    let e = check(&["kernel32.dll", "ole32.dll"], HELPER_IMPORTS).unwrap_err();
+    check(
+        &["kernel32.dll", "ole32.dll", "oleaut32.dll"],
+        HELPER_IMPORTS,
+    )
+    .unwrap();
+    let e = check(&["kernel32.dll", "oleaut32.dll"], LAUNCH_IMPORTS).unwrap_err();
     assert!(e.contains("not in the allowlist"), "{e}");
     // An import outside both lists fails both, a forbidden one fails both.
     for allowed in [LAUNCH_IMPORTS, CLI_IMPORTS] {

@@ -289,3 +289,65 @@ fn orphans_are_rerun_rules_no_open_transaction_names() {
         .collect();
     assert_eq!(left, [&b.name[..], &look_alike.name, &grouped.name]);
 }
+
+/// The helper's view of `sys` (an elevated fake token).
+fn helper(sys: &FakeSystem) -> crate::sys::fake::FakeHelperSystem<'_> {
+    crate::sys::fake::FakeHelperSystem::new(sys, crate::sys::fake::FakeHelperToken::new(true))
+}
+
+/// Security L3 of the P4-2d review (ADR 0023 §15): a firewall that stores a fact of an added rule
+/// other than it was set (here the program in lower case beyond the drive, then a changed
+/// description) makes the add's read-back fail; the undo still takes the helper's own adds back
+/// (exactly one rule of the name, in group `Rerun`), so the batch ends `RolledBack` with every
+/// rule gone, never `LeftOpen` with a `Foreign` rule under a rolled-back transaction.
+#[test]
+fn an_add_the_firewall_normalises_is_rolled_back_not_left_foreign() {
+    let rules = [ours(1), ours(2)];
+    for f in [
+        (|r: &mut FwRule| r.description.push('.')) as fn(&mut FwRule),
+        |r: &mut FwRule| r.profiles = 7,
+        |r: &mut FwRule| r.program = format!("%SystemDrive%{}", &r.program[2..]),
+    ] {
+        let sys = fw_with(vec![foreign("Core Networking - DHCP")]);
+        sys.fake_firewall().normalise_adds(Some(f));
+        assert_eq!(add_all(&helper(&sys), &rules), Written::RolledBack);
+        assert_eq!(
+            sys.fake_firewall().rules(),
+            vec![foreign("Core Networking - DHCP")]
+        );
+    }
+    // A rule of the name in another group is not the helper's add: never removed (the race of
+    // §6 with an administrator's rule of another group).
+    let sys = fw_with(Vec::new());
+    sys.fake_firewall()
+        .normalise_adds(Some(|r: &mut FwRule| r.grouping = "Other".to_owned()));
+    let w = add_all(&helper(&sys), &rules[..1]);
+    assert_eq!(w, Written::LeftOpen(vec![Some(Observed::Foreign)]));
+    assert_eq!(sys.fake_firewall().rules().len(), 1);
+}
+
+/// The undo removes a name only while exactly one rule holds it, with exactly that name, in
+/// group `Rerun`: a second rule of the name (an administrator's, added between the count and the
+/// undo, §6) or a case twin is never taken for the helper's own add.
+#[test]
+fn the_undo_takes_only_the_one_rule_of_the_exact_name() {
+    let r = ours(1);
+    assert!(own_add(&r, std::slice::from_ref(&r)));
+    assert!(!own_add(&r, &[r.clone(), r.clone()]));
+    assert!(!own_add(&r, &[]));
+    let mut twin = r.clone();
+    twin.name = twin.name.to_ascii_lowercase();
+    assert!(!own_add(&r, &[twin]), "a case twin is not the exact name");
+    let other_group = FwRule {
+        grouping: "Other".to_owned(),
+        ..r.clone()
+    };
+    assert!(!own_add(&r, &[other_group]));
+    // Facts beyond name and group are not compared (L3).
+    let changed = FwRule {
+        description: "changed".to_owned(),
+        profiles: 1,
+        ..r.clone()
+    };
+    assert!(own_add(&r, &[changed]));
+}

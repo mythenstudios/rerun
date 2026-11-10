@@ -107,7 +107,9 @@ impl FakeSystem {
     /// A power loss (ADR 0019 amendment, P2-9): per domain the durable changes plus
     /// `keep[domain]` (default 0) more survive, the rest is undone newest first, volumes and
     /// hives under both locks (file system first, then registry); every handle is gone and the
-    /// process starts fresh (see `FakeFs` and `FakeRegistry`).
+    /// process starts fresh (see `FakeFs` and `FakeRegistry`). The firewall keeps what its
+    /// durability model made durable ([`FakeFirewall::set_lazy`]; nothing is lost in the
+    /// default model).
     pub fn power_loss(&self, keep: &BTreeMap<Domain, usize>) {
         let mut volumes = BTreeMap::new();
         let mut hives = BTreeMap::new();
@@ -123,6 +125,8 @@ impl FakeSystem {
         }
         self.fs
             .power_loss_with(&volumes, || self.registry.cut(&hives));
+        // The firewall's own model (durable on return, or lazy: `FakeFirewall::set_lazy`).
+        self.firewall.power_loss();
     }
 
     /// Changes of `d` that a power loss could drop (logged, not durable).
@@ -139,10 +143,12 @@ impl FakeSystem {
         self.fs.restart();
     }
 
-    /// Makes every change so far durable on every volume and in every hive.
+    /// Makes every change so far durable on every volume, in every hive and in the firewall
+    /// (its lazy model's flush).
     pub fn sync_all(&self) {
         self.fs.sync_all();
         self.registry.sync_all();
+        self.firewall.lazy_flush();
     }
 
     /// Builder for an initial state.

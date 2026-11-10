@@ -34,7 +34,7 @@ use std::ffi::{OsString, c_void};
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 
-use windows_sys::Win32::Foundation::{SysFreeString, SysStringLen};
+use windows_sys::Win32::Foundation::{SysAllocStringLen, SysFreeString, SysStringLen};
 use windows_sys::Win32::NetworkManagement::WindowsFirewall::{NetFwPolicy2, NetFwRule};
 use windows_sys::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_DISABLE_OLE1DDE, COINIT_MULTITHREADED, CoCreateInstance,
@@ -160,6 +160,28 @@ impl Bstr {
     /// An empty slot for an `[out] BSTR*` parameter.
     pub(super) fn null() -> Self {
         Self(ptr::null())
+    }
+
+    /// A new `BSTR` holding `s` for an `[in] BSTR` parameter (the caller keeps ownership and
+    /// frees it on drop). `None` for a text with a NUL (the firewall would cut it there) or
+    /// longer than `max` UTF-16 units, or when the allocation fails.
+    pub(super) fn new(s: &str, max: usize) -> Option<Self> {
+        if s.contains('\0') {
+            return None;
+        }
+        let units: Vec<u16> = s.encode_utf16().collect();
+        if units.len() > max {
+            return None;
+        }
+        let len = u32::try_from(units.len()).ok()?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the one SysAllocStringLen call site (ADR 0008 amendment P4-5b)"
+        )]
+        // SAFETY: `units` is `len` initialised UTF-16 units, alive for the call; the function
+        // copies them into a new BSTR (with a terminating NUL) and returns null on failure.
+        let b = unsafe { SysAllocStringLen(units.as_ptr(), len) };
+        (!b.is_null()).then_some(Self(b))
     }
 
     /// The text (`NULL` is empty), lossy for text that is not valid UTF-16; `None` if longer

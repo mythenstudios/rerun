@@ -27,8 +27,9 @@
 //! reads again and reports `Done` with every op `After`, or removes its own adds again, newest
 //! first (`RolledBack`, else `LeftOpen` with what it saw); a remove takes away each rule that is
 //! exactly Rerun's, leaves `Foreign` ones, and reports `Done` per op (`Before` or `Foreign`).
-//! The real helper's firewall is `NoFirewall` until P4-5b binds COM: every validated real batch
-//! still ends in `Refused(Firewall)` there.
+//! The undo of an add takes back only the helper's own adds (exactly one rule of the exact name
+//! in group `Rerun`), also one the firewall stored with other facts (security L3 of P4-2d). The
+//! real helper writes through COM (`WinFirewallWrite`, P4-5b).
 
 use std::ffi::OsString;
 use std::path::Path;

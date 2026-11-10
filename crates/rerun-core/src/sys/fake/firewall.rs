@@ -4,8 +4,18 @@
 //! name allowed as on Windows. Tests change it at any time through `&self` (an administrator
 //! adding or changing a rule between two observations). Every [`Firewall::select`] is counted,
 //! so a test can show that an observation enumerates once (A4 S11). The write side (P4-2d) has one
-//! armed fault ([`WriteFault`]) and the "durable on return" model; the lazy model of ADR 0023 §6
-//! comes with the P4-5b write contract.
+//! armed fault ([`WriteFault`]).
+//!
+//! **Durability (ADR 0023 §6, P4-5b).** Two models: "durable on return" (the default: a write
+//! survives a power loss once its call returned) and "lazy" ([`FakeFirewall::set_lazy`]): the
+//! helper's writes since the last [`FakeFirewall::lazy_flush`] are lost by a power loss
+//! ([`FakeSystem::power_loss`](super::FakeSystem::power_loss) cuts the firewall too). Changes a
+//! test makes itself (`push`, `set_rules`, `edit`: an administrator, a fixture) are always
+//! durable. Which model is real is the N8 measurement of the [SB] write contract.
+//!
+//! **Normalisation** ([`FakeFirewall::normalise_adds`]): a function applied to every rule the
+//! write side adds, so a test can stand in for a firewall that stores a fact other than it was
+//! set (security L3 of the P4-2d review).
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -25,6 +35,10 @@ pub struct FakeFirewall {
     writes: AtomicUsize,
     fault: Mutex<Option<(usize, WriteFault)>>,
     crashed: AtomicBool,
+    /// The rules a power loss keeps.
+    durable: Mutex<Vec<FwRule>>,
+    lazy: AtomicBool,
+    normalise: Mutex<Option<fn(&mut FwRule)>>,
 }
 
 /// What an armed fault of the write side does at its call (P4-2d).
@@ -38,19 +52,65 @@ pub enum WriteFault {
 }
 
 impl FakeFirewall {
-    /// Appends a rule (also one whose name another rule has).
+    /// Appends a rule (also one whose name another rule has); durable.
     pub fn push(&self, rule: FwRule) {
+        self.durable_lock().push(rule.clone());
         self.lock().push(rule);
     }
 
-    /// Replaces every rule.
+    /// Replaces every rule; durable.
     pub fn set_rules(&self, rules: Vec<FwRule>) {
+        *self.durable_lock() = rules.clone();
         *self.lock() = rules;
     }
 
-    /// Changes every rule `pick` returns `true` for.
+    /// Changes every rule `pick` returns `true` for; durable.
     pub fn edit(&self, pick: impl Fn(&FwRule) -> bool, change: impl Fn(&mut FwRule)) {
+        self.durable_lock()
+            .iter_mut()
+            .filter(|r| pick(r))
+            .for_each(&change);
         self.lock().iter_mut().filter(|r| pick(r)).for_each(change);
+    }
+
+    /// The lazy model (module docs) from now on (`false`: durable on return again; the rules
+    /// as they are now become durable either way).
+    pub fn set_lazy(&self, lazy: bool) {
+        self.lazy_flush();
+        self.lazy.store(lazy, Ordering::Relaxed);
+    }
+
+    /// The firewall service persists what it holds (the lazy model's flush).
+    pub fn lazy_flush(&self) {
+        let now = self.lock().clone();
+        *self.durable_lock() = now;
+    }
+
+    /// A power loss: the rules go back to what is durable.
+    pub fn power_loss(&self) {
+        let kept = self.durable_lock().clone();
+        *self.lock() = kept;
+        self.crashed.store(false, Ordering::Relaxed);
+    }
+
+    /// Every rule the write side adds from now on goes through `f` first (`None`: stored as
+    /// set).
+    pub fn normalise_adds(&self, f: Option<fn(&mut FwRule)>) {
+        *self
+            .normalise
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = f;
+    }
+
+    fn durable_lock(&self) -> std::sync::MutexGuard<'_, Vec<FwRule>> {
+        self.durable.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// After a write of the helper: durable at once unless the model is lazy.
+    fn written(&self) {
+        if !self.lazy.load(Ordering::Relaxed) {
+            self.lazy_flush();
+        }
     }
 
     /// Every rule, in enumeration order.
@@ -125,11 +185,20 @@ impl FakeFirewall {
 }
 
 impl FirewallWrite for FakeFirewall {
-    /// Appends the rule (durable on return, ADR 0023 §6: the assumed model; the lazy model
-    /// follows with the P4-5b write contract).
+    /// Appends the rule (normalised if a test asks for it), durable on return unless the model
+    /// is lazy (module docs).
     fn add(&self, rule: &FwRule) -> SysResult<()> {
         let crash = self.enter_write()?;
-        self.lock().push(rule.clone());
+        let mut stored = rule.clone();
+        if let Some(f) = *self
+            .normalise
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            f(&mut stored);
+        }
+        self.lock().push(stored);
+        self.written();
         if crash {
             self.crashed.store(true, Ordering::Relaxed);
         }
@@ -141,6 +210,7 @@ impl FirewallWrite for FakeFirewall {
         let crash = self.enter_write()?;
         let n = fold(name);
         self.lock().retain(|r| fold(&r.name) != n);
+        self.written();
         if crash {
             self.crashed.store(true, Ordering::Relaxed);
         }

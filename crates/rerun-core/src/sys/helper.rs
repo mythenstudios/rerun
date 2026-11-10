@@ -11,9 +11,8 @@
 //! `open_by_id`, the known folders, the firewall and its token. What it must not have refuses:
 //! [`NoGpu`] (docs/08 acceptance: the helper's system has no GPU), [`NoTopology`],
 //! [`NoRegistry`] (no registry in phase 4, read or write) and `NoElevation` (no nested
-//! elevation). [`NoFirewall`] is the firewall of a system that has none yet: the real helper
-//! until the COM binding enters it with the write side (P4-5b), so its imports stay without COM
-//! in P4-2c.
+//! elevation). [`NoFirewall`] is the firewall of a system that has none (the real helper had it
+//! until the COM binding entered it with the write side in P4-5b).
 
 use std::fmt;
 
@@ -81,7 +80,7 @@ pub trait HelperSystem: System {
     /// The helper's own token.
     fn token(&self) -> &dyn HelperToken;
     /// The firewall's write side (ADR 0023 §12): `clippy.toml` bans it outside
-    /// `policy::firewall`. `NoFirewall` in the real helper until P4-5b.
+    /// `policy::firewall`. `WinFirewallWrite` in the real helper (P4-5b).
     fn firewall_write(&self) -> &dyn FirewallWrite;
 }
 
@@ -162,7 +161,7 @@ impl RegistryWrite for NoRegistry {
     }
 }
 
-/// No firewall: `Unsupported` (the real helper until P4-5b binds COM in it).
+/// No firewall: `Unsupported` (a system without one; the real helper's until P4-5b).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoFirewall;
 
