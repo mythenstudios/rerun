@@ -1,0 +1,50 @@
+# DRAFT (P4-13): the game folder holds `pb` (PunkBuster) and both executables (singleplayer
+# CoDWaW.exe and multiplayer CoDWaWmp.exe), so the anti-cheat rule applies (lead rule L1):
+# only CPU `direct`, ini_set and registry_set steps, never package, laa_patch, compat_layer or
+# firewall_rule here. PunkBuster is not released as dead (multiplayer is still played).
+# Not taken over: Plutonium (replacement client), the PunkBuster file set and the unofficial
+# patch on file hosters (docs/05, excluded or a protected folder).
+format: 1
+id: call-of-duty-world-at-war
+title: "Call of Duty: World at War"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 10090
+  exes:
+    # SHA-1/SHA-256 of an unmodified Steam copy (rerun-workbench draft --hashes-from, P4-13)
+    - { path: "CoDWaW.exe", sha1: "4F1D675C9FC97A0A0AE8B8230DB706D8F3FC7620", sha256: "53C48CCEE6444048F00F92324D6DEC15ECE42E6F9CF77F91D8CF654894408144", api: d3d9 }
+    - { path: "CoDWaWmp.exe", sha1: "F15D2D8439CFB0C1D7F2AD4C543B0E295DE3E387", sha256: "BC49B3C9103D028D9893CBBADAF442E3F12CE55D01A0E5B5FF635B547152954B", api: d3d9 }
+
+launch:
+  chain: [steam]
+  method: auto
+  start: "TODO"                # Steam's launch entry: observe, never guess
+
+issues:
+  - id: multi-core
+    title: "Problems with modern multi-core processors"
+    when: {}                   # TODO: the source names no thread threshold; do not invent one
+    variants:
+      - id: limit-cores
+        status: unverified     # a single statement, no independent report
+        kind: fix
+        steps:
+          - cpu: { smt: false }
+        tradeoffs:
+          - "Limits the game to one thread per core (the page suggests the number of real cores)"
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Call_of_Duty:_World_at_War#The_game_has_problems_with_modern_multi-core_processors" }
+
+tips:
+  launch_options: []
+  notes:
+    - text: "The same page suggests the console command +set sys_smp_allowed 0 as the first step (a launch option with spaces, which a Topo cannot hold)."
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Call_of_Duty:_World_at_War#The_game_has_problems_with_modern_multi-core_processors" }
+    - text: "Multiplayer on protected servers needs a PunkBuster update that is no longer hosted by Even Balance."
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Call_of_Duty:_World_at_War#PunkBuster" }
+
+links:
+  pcgw: "Call_of_Duty:_World_at_War"
