@@ -1358,3 +1358,135 @@ fn sandbox_laa_patch_round_trip_starts_the_patched_exe() {
         original.len()
     ));
 }
+
+// ---------- gpu_preference (P4-11) ----------
+
+/// `reg.exe query` of the value `name` below `UserGpuPreferences`: its `REG_SZ` data as another
+/// reader than Rerun sees it (`None`: missing).
+fn reg_query_pref(name: &str) -> Option<String> {
+    let key = format!(r"HKCU\{}", crate::exec::gpu_pref_tests::PREFS_KEY);
+    let o = Command::new("reg")
+        .args(["query", &key, "/v", name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("reg query: {e}"));
+    if !o.status.success() {
+        return None;
+    }
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    out.lines()
+        .find_map(|l| l.split_once("REG_SZ").map(|(_, d)| d.trim().to_owned()))
+}
+
+/// Another program writing the value: `reg.exe add`.
+fn reg_add_pref(name: &str, data: &str) {
+    let key = format!(r"HKCU\{}", crate::exec::gpu_pref_tests::PREFS_KEY);
+    let st = Command::new("reg")
+        .args(["add", &key, "/v", name, "/t", "REG_SZ", "/d", data, "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("reg add: {e}"));
+    assert!(st.success(), "reg add {name} = {data}: {st}");
+}
+
+/// SB-G2 (P4-11): `gpu_preference` on the real `HKCU`. (a) A round trip without a value (the
+/// `DirectX` and `UserGpuPreferences` keys as found: created and deleted again when they were
+/// absent); (b) a value with foreign pairs written by `reg add`: the apply appends only Rerun's
+/// pair (`reg query` sees it), the revert restores the bytes exactly; (c) a drift: `reg add`
+/// changes `AutoHDREnable` after the apply, the revert takes back only Rerun's pair and closes.
+/// At the end the value goes, and the keys if they were absent at the start and are empty
+/// plain keys now. `ci-sandbox.ps1` fails pass 1 without its `MEASURED gpu_preference` line.
+/// Whether Windows or a game honours the value is not tested here (SB-G1 and the hybrid row
+/// of the manual matrix, `docs/09-testing.md`).
+#[test]
+#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
+fn sandbox_sb_g2_gpu_preference_round_trip_on_the_real_hkcu() {
+    sandbox_guard();
+    let w = Sb::new("sb-g2");
+    let h = AppHive::real_user().unwrap_or_else(|e| panic!("{e}"));
+    let name = layer_name(&w);
+    let prefs = hkcu(crate::exec::gpu_pref_tests::PREFS_KEY);
+    let directx = hkcu(crate::exec::gpu_pref_tests::DIRECTX);
+    let reg = w.sys.registry();
+    let directx_existed = reg.key_exists(&directx).unwrap_or_else(|e| panic!("{e}"));
+    let prefs_existed = reg.key_exists(&prefs).unwrap_or_else(|e| panic!("{e}"));
+    if prefs_existed && reg.get(&prefs, &name).unwrap().is_some() {
+        h.delete_value(&prefs, &name).unwrap();
+    }
+    let profile = crate::hw::read(&w.sys, crate::hw::GpuArchTable::builtin().ok());
+    let hybrid = profile.gpu_hybrid();
+    let adapters = profile.gpu.as_ref().map_or(0, |g| g.adapters.len());
+    let step = || vec![crate::exec::gpu_pref_tests::pref_step("game.exe")];
+
+    // (a) No value.
+    let before = w.snap(vec![directx.clone()]);
+    let hash = w.plan_steps(&step());
+    let t = w.apply_ok(&hash);
+    assert_eq!(reg_query_pref(&name).as_deref(), Some("GpuPreference=2;"));
+    let v = w.with(|cx, _| verify(cx, &t)).unwrap();
+    assert!(v.ops.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    let after = w.snap(vec![directx.clone()]);
+    assert!(before == after, "{:#?}", before.diff(&after));
+    if !directx_existed {
+        assert!(
+            !reg.key_exists(&directx).unwrap(),
+            "DirectX created by Rerun and empty: the revert deletes it"
+        );
+    }
+
+    // (b) Foreign pairs, restored byte for byte.
+    let old = "AutoHDREnable=1;SwapEffectUpgradeEnable=1;";
+    reg_add_pref(&name, old);
+    let t = w.apply_ok(&w.plan_steps(&step()));
+    assert_eq!(
+        reg_query_pref(&name),
+        Some(format!("{old}GpuPreference=2;"))
+    );
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    assert_eq!(
+        reg.get(&prefs, &name).unwrap(),
+        Some(RegValue::String(old.into())),
+        "byte for byte"
+    );
+
+    // (c) Drift: Auto HDR switched off after the apply.
+    let t = w.apply_ok(&w.plan_steps(&step()));
+    reg_add_pref(
+        &name,
+        "AutoHDREnable=0;SwapEffectUpgradeEnable=1;GpuPreference=2;",
+    );
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    let pref_op = rep.ops.iter().max_by_key(|o| o.op).map(|o| o.observed);
+    assert_eq!(pref_op, Some(Observed::Drifted), "{rep:?}");
+    assert_eq!(
+        reg_query_pref(&name).as_deref(),
+        Some("AutoHDREnable=0;SwapEffectUpgradeEnable=1;")
+    );
+
+    // Clean up: the value, then the keys that were absent at the start, if empty and plain.
+    h.delete_value(&prefs, &name).unwrap();
+    if !prefs_existed && empty_plain_key(reg, &prefs) {
+        h.delete_key(&prefs).unwrap();
+    }
+    if !directx_existed && empty_plain_key(reg, &directx) {
+        h.delete_key(&directx).unwrap();
+    }
+    note(&format!(
+        "MEASURED gpu_preference: DirectX key present={directx_existed}, UserGpuPreferences \
+         present={prefs_existed}, hardware adapters={adapters}, gpu.hybrid={hybrid:?}; new, \
+         merge (restored byte for byte) and drift round trips passed"
+    ));
+}
