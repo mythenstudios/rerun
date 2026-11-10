@@ -1111,6 +1111,13 @@ impl RegSeen {
                 "a compatibility-layer value is never set, only tokens are added",
             ));
         }
+        // P4-11: a graphics preference is shared as well; both rule sets.
+        if matches!(slot, RegSlot::GpuPreference { .. }) {
+            return Err(invalid(
+                Some(k),
+                "a graphics preference is never set as a whole, only its own pair",
+            ));
+        }
         if rules == Rules::Current {
             RegPolicy
                 .check_new(&av, &new.value())

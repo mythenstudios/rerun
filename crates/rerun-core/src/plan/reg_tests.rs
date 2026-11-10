@@ -227,7 +227,8 @@ fn p7_registry_ops_break_no_rule() {
         }),
         "no path or variable characters",
     );
-    // Slots: a compatibility-layer value is never set (N2, P2-11), the reserved GPU slot.
+    // Slots: a compatibility-layer value is never set (N2, P2-11), nor a graphics preference
+    // (P4-11: only its own pair, through gpu_pref).
     refused(
         &with(&|p| {
             p.ops.push(Op::SetValue {
@@ -252,7 +253,7 @@ fn p7_registry_ops_break_no_rule() {
                 new: NewValue::Dword(1),
             });
         }),
-        "reserved",
+        "a graphics preference is never set as a whole",
     );
     // E2, M1: registry ops need a root, and a main executable for every root.
     refused(

@@ -212,21 +212,121 @@ fn compat_layers_name_the_executable_in_its_root() {
     )));
 }
 
+fn gpu_slot() -> AllowedValue {
+    RegPolicy
+        .check(
+            &RegSlot::GpuPreference {
+                root: RootIx(0),
+                exe: RelPath::parse(r"bin\g.exe").unwrap(),
+            },
+            &[RootPath::new(r"D:\G").unwrap()],
+        )
+        .unwrap()
+}
+
+/// P4-11: the `UserGpuPreferences` slot is released: its key, anchor and value name like a
+/// `CompatLayers` value; shared keys; never set as a whole. `HKLM` still needs the helper.
 #[test]
-fn gpu_preference_is_reserved_and_hklm_needs_the_helper() {
-    let slot = RegSlot::GpuPreference {
-        root: RootIx(0),
-        exe: RelPath::parse("g.exe").unwrap(),
-    };
-    let roots = [RootPath::new(r"D:\G").unwrap()];
+fn gpu_preference_slot_and_hklm_needs_the_helper() {
+    let v = gpu_slot();
+    assert_eq!(
+        v.key().key(),
+        &hkcu(r"Software\Microsoft\DirectX\UserGpuPreferences")
+    );
+    assert_eq!(v.name(), r"D:\G\bin\g.exe");
+    assert!(v.shared_keys());
+    assert!(!value("Lang").shared_keys());
+    assert!(is_denied(
+        RegPolicy.check_new(&v, &RegValue::String("GpuPreference=2;".into()))
+    ));
+    // Tokens and preferences do not cross slots.
+    assert!(is_denied(RegPolicy.check_pref(
+        &value("Lang"),
+        None,
+        GpuPref::HighPerformance
+    )));
+    assert!(is_denied(RegPolicy.check_tokens(
+        &v,
+        None,
+        &[TokenName::parse("HIGHDPIAWARE").unwrap()]
+    )));
+    // An unknown root is refused like for every slot.
     assert!(matches!(
-        RegPolicy.check(&slot, &roots),
-        Err(RegPolicyError::Reserved(_))
+        RegPolicy.check(
+            &RegSlot::GpuPreference {
+                root: RootIx(1),
+                exe: RelPath::parse("g.exe").unwrap(),
+            },
+            &[RootPath::new(r"D:\G").unwrap()],
+        ),
+        Err(RegPolicyError::UnknownRoot(1))
     ));
     assert!(matches!(
         AllowedKey::new(Hive::LocalMachine, r"SOFTWARE\Rerun", 1),
         Err(RegPolicyError::NeedsHelper(_))
     ));
+}
+
+/// P4-11: `DirectX` and `UserGpuPreferences` may be created below `Software\Microsoft`;
+/// `set_pref` forms the value itself and checks it again, `unset_pref` takes back only Rerun's
+/// pair and deletes a value without a pair left; both refuse a value that changed.
+#[test]
+fn the_writer_sets_and_unsets_only_rerun_s_pair() {
+    let ms = hkcu(r"Software\Microsoft");
+    let sys = FakeSystem::builder().key(ms.clone()).build().unwrap();
+    let w = RegPolicy.writer(&sys);
+    let v = gpu_slot();
+    let k = v.key();
+    let missing = w.missing_keys(k).unwrap();
+    assert_eq!(
+        missing,
+        [ms.join("DirectX"), ms.join(r"DirectX\UserGpuPreferences")]
+    );
+    assert_eq!(
+        w.create_key(&ms, k).unwrap_err().kind,
+        SysErrorKind::InvalidPath
+    );
+    for m in &missing {
+        assert!(w.create_key(m, k).unwrap());
+    }
+    let hp = GpuPref::HighPerformance;
+    w.set_pref(&v, None, hp).unwrap();
+    let new = RegValue::String("GpuPreference=2;".into());
+    assert_eq!(w.get(&v).unwrap(), Some(new.clone()));
+    // Set again: the preference is there already.
+    assert!(matches!(
+        w.set_pref(&v, Some(&new), hp),
+        Err(RegWriteError::Policy(RegPolicyError::Denied { .. }))
+    ));
+    // Another type is never merged.
+    assert!(matches!(
+        w.set_pref(&v, Some(&RegValue::Dword(2)), hp),
+        Err(RegWriteError::Policy(_))
+    ));
+    // Windows added a pair: only Rerun's pair goes, the rest stays.
+    let drifted = RegValue::String("AutoHDREnable=0;GpuPreference=2;".into());
+    w.restore(&v, &new, Some(&drifted)).unwrap();
+    assert!(!w.unset_pref(&v, &drifted, hp, None).unwrap());
+    let rest = RegValue::String("AutoHDREnable=0;".into());
+    assert_eq!(w.get(&v).unwrap(), Some(rest.clone()));
+    // Nothing of Rerun's left: refused, nothing written.
+    assert!(w.unset_pref(&v, &rest, hp, None).is_err());
+    // A value with only Rerun's pair and no old value is deleted.
+    w.restore(&v, &rest, Some(&new)).unwrap();
+    assert!(w.unset_pref(&v, &new, hp, None).unwrap());
+    assert_eq!(w.get(&v).unwrap(), None);
+    // A stale `expected` is a mismatch.
+    assert_eq!(
+        match w.set_pref(&v, Some(&rest), hp) {
+            Err(RegWriteError::Sys(e)) => e.kind,
+            other => panic!("{other:?}"),
+        },
+        SysErrorKind::Mismatch
+    );
+    // The shared keys are left for the caller (exec deletes them only when empty).
+    w.delete_empty_key(&ms.join(r"DirectX\UserGpuPreferences"), k)
+        .unwrap();
+    w.delete_empty_key(&ms.join("DirectX"), k).unwrap();
 }
 
 /// `missing_keys` lists only the keys below the anchor, top-down; `create_key` and

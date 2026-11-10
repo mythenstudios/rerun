@@ -20,16 +20,23 @@
 //!   `<Vendor>` not on the deny list (folded); value names printable ASCII without `\ / : %`;
 //!   new values `REG_DWORD`, `REG_QWORD` or a `REG_SZ` of printable ASCII (review M1: no best-fit
 //!   or bidi characters) without `\ / : %` (G1: no paths, no variables), at most 1,024 units.
-//! - `GpuPreference`: reserved (phase 4), refused.
+//! - `GpuPreference` (P4-11): `HKCU\Software\Microsoft\DirectX\UserGpuPreferences`, the value
+//!   name the canonical path of an executable in a plan root, built like a `CompatLayers` name.
+//!   No value is set there either: [`RegWriter::set_pref`] changes only the `GpuPreference`
+//!   pair of the old value ([`gpu_pref`]), [`RegWriter::unset_pref`] takes it back;
+//!   [`RegPolicy::check_new`] refuses every `GpuPreference` value. The keys `DirectX` and
+//!   `UserGpuPreferences` are shared Windows keys ([`AllowedValue::shared_keys`]).
 //!
 //! The rules guard what a Topo may ask for (phase 4); they are never loosened for a caller.
 //! Old values are restored exactly whatever they are ([`RegWriter::restore`] does not apply
 //! [`RegPolicy::check_new`]).
 
+pub mod gpu_pref;
 pub mod layers;
 
 use std::fmt;
 
+pub use gpu_pref::{GpuPref, Unset};
 pub use layers::{Group, TokenName, Unmerged};
 
 use crate::fold::fold;
@@ -46,8 +53,11 @@ const LAYERS: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFla
 /// Segments of [`LAYERS`] that must exist (`…\CurrentVersion`): `AppCompatFlags` and `Layers`
 /// may be created.
 const LAYERS_ANCHOR: usize = 4;
-/// The reserved key of `UserGpuPreferences` below `HKCU`.
-const GPU_PREFERENCES: &str = r"Software\Microsoft\DirectX\UserGpuPreferences";
+/// The key of `UserGpuPreferences` below `HKCU` (P4-11).
+pub const GPU_PREFERENCES: &str = r"Software\Microsoft\DirectX\UserGpuPreferences";
+/// Segments of [`GPU_PREFERENCES`] that must exist (`Software\Microsoft`): `DirectX` and
+/// `UserGpuPreferences` may be created.
+const GPU_PREFERENCES_ANCHOR: usize = 2;
 /// Segments of a game key that must exist (`Software`).
 const GAME_ANCHOR: usize = 1;
 
@@ -84,9 +94,6 @@ pub enum RegPolicyError {
     /// A key outside `HKCU`: only the elevated helper (phase 3) writes there.
     #[error("{0}: needs the elevated helper (phase 3)")]
     NeedsHelper(String),
-    /// A slot reserved for a later phase.
-    #[error("{0}: reserved until its phase")]
-    Reserved(String),
     /// Allowed in principle, not yet (`compat_layer` lands in P2-11).
     #[error("{0}: not supported yet")]
     Unsupported(String),
@@ -292,7 +299,8 @@ pub enum RegSlot {
         /// The value name.
         name: AsciiName,
     },
-    /// `UserGpuPreferences` (reserved, D8): refused until phase 4.
+    /// `UserGpuPreferences` (P4-11), value name the canonical path of `exe` in plan root
+    /// `root`.
     GpuPreference {
         /// The plan root.
         root: RootIx,
@@ -435,10 +443,14 @@ impl AllowedValue {
     }
 
     /// The keys below the anchor are shared Windows keys (`AppCompatFlags`, `Layers`; user
-    /// decisions E6 and E7): created by Rerun, they hold the values of other programs too, so
-    /// they are only one object each for stacking, and a revert leaves one that is not empty.
+    /// decisions E6 and E7; `DirectX`, `UserGpuPreferences`, P4-11): created by Rerun, they hold
+    /// the values of other programs too, so they are only one object each for stacking, and a
+    /// revert leaves one that is not empty.
     pub fn shared_keys(&self) -> bool {
-        matches!(self.slot, RegSlot::CompatLayers { .. })
+        matches!(
+            self.slot,
+            RegSlot::CompatLayers { .. } | RegSlot::GpuPreference { .. }
+        )
     }
 }
 
@@ -493,8 +505,17 @@ impl RegPolicy {
                 name: name.as_str().to_owned(),
                 slot: slot.clone(),
             }),
-            RegSlot::GpuPreference { .. } => {
-                Err(RegPolicyError::Reserved(format!(r"HKCU\{GPU_PREFERENCES}")))
+            RegSlot::GpuPreference { root, exe } => {
+                let name = exe_name(root_of(*root)?, exe)?;
+                Ok(AllowedValue {
+                    key: AllowedKey::new(
+                        Hive::CurrentUser,
+                        GPU_PREFERENCES,
+                        GPU_PREFERENCES_ANCHOR,
+                    )?,
+                    name,
+                    slot: slot.clone(),
+                })
             }
         }
     }
@@ -508,7 +529,10 @@ impl RegPolicy {
                 "{}: compatibility layers land with compat_layer (P2-11)",
                 what()
             ))),
-            RegSlot::GpuPreference { .. } => Err(RegPolicyError::Reserved(what())),
+            RegSlot::GpuPreference { .. } => Err(denied(
+                what(),
+                "a graphics preference is never set as a whole, only its own pair (gpu_pref)",
+            )),
             RegSlot::GameValue { .. } => match new {
                 RegValue::Dword(_) | RegValue::Qword(_) => Ok(()),
                 RegValue::String(s) => {
@@ -559,6 +583,26 @@ impl RegPolicy {
             ));
         }
         layers::check(old, add)
+    }
+
+    /// May `pref` be set on a `GpuPreference` value holding `old` (`None`: missing)? `old` in
+    /// the strict grammar of [`gpu_pref`], its `GpuPreference` not `1` (the user's "Power
+    /// saving", user decision E-G3 a) and not `pref` already; the new value at most
+    /// [`gpu_pref::MAX_PREF_BYTES`]. Returns the new value ([`gpu_pref::set`]). Current rules
+    /// only: a recorded head is never checked against it.
+    pub fn check_pref(
+        &self,
+        v: &AllowedValue,
+        old: Option<&str>,
+        pref: GpuPref,
+    ) -> Result<String, RegPolicyError> {
+        if !matches!(v.slot, RegSlot::GpuPreference { .. }) {
+            return Err(denied(
+                format!("{} @ {:?}", v.key.key, v.name),
+                "only a UserGpuPreferences value takes a graphics preference",
+            ));
+        }
+        gpu_pref::check(old, pref)
     }
 
     /// The read side of the write side, for planners: state, value and missing keys without
@@ -769,6 +813,63 @@ impl RegWriter<'_> {
                 .set(&v.key.key, &v.name, Some(expected), &RegValue::String(rest))
                 .map(|()| false)?),
             Unmerged::Rest(None) => Ok(self
+                .r
+                .w
+                .delete_value(&v.key.key, &v.name, expected)
+                .map(|()| true)?),
+        }
+    }
+
+    /// Sets Rerun's `GpuPreference` pair in the `UserGpuPreferences` value if it is still
+    /// `expected` (`None`: missing) and [`RegPolicy::check_pref`] allows it: the new value is
+    /// formed here ([`gpu_pref::set`]), never by the caller.
+    pub fn set_pref(
+        &self,
+        v: &AllowedValue,
+        expected: Option<&RegValue>,
+        pref: GpuPref,
+    ) -> Result<(), RegWriteError> {
+        let old = match expected {
+            None => None,
+            Some(RegValue::String(s)) => Some(s.as_str()),
+            Some(_) => {
+                return Err(denied(
+                    "the UserGpuPreferences value",
+                    "not a REG_SZ; Rerun leaves it alone",
+                )
+                .into());
+            }
+        };
+        let new = RegValue::String(self.policy.check_pref(v, old, pref)?);
+        Ok(self.r.w.set(&v.key.key, &v.name, expected, &new)?)
+    }
+
+    /// Revert of a value someone changed since the apply (`Drifted`): sets Rerun's pair `ours`
+    /// back to what `old` held, or removes it ([`gpu_pref::unset`]), if the value is still
+    /// `expected`; deletes the value when no pair is left. Nothing else is ever written:
+    /// `Foreign` or `NotOurs` is refused. `true`: the value was deleted.
+    pub fn unset_pref(
+        &self,
+        v: &AllowedValue,
+        expected: &RegValue,
+        ours: GpuPref,
+        old: Option<&str>,
+    ) -> Result<bool, RegWriteError> {
+        let refuse = |why| Err(denied(format!("{} @ {:?}", v.key.key, v.name), why).into());
+        if !matches!(v.slot, RegSlot::GpuPreference { .. }) {
+            return refuse("only a UserGpuPreferences value takes a graphics preference");
+        }
+        let RegValue::String(cur) = expected else {
+            return refuse("not a REG_SZ");
+        };
+        match gpu_pref::unset(cur, ours, old) {
+            Unset::Foreign | Unset::NotOurs => refuse("nothing of Rerun's to take back"),
+            Unset::Rest(Some(rest)) => Ok(self
+                .r
+                .w
+                .set(&v.key.key, &v.name, Some(expected), &RegValue::String(rest))
+                .map(|()| false)?),
+            Unset::Rest(None) => Ok(self
                 .r
                 .w
                 .delete_value(&v.key.key, &v.name, expected)
