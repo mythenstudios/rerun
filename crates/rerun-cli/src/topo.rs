@@ -21,7 +21,7 @@ use rerun_core::escape;
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::plan::{Pick, PlanBytes, Preview};
 use rerun_core::policy::registry::RegPolicy;
-use rerun_core::policy::root::{AppDir, Create, Shadow, preview_with_shadows};
+use rerun_core::policy::root::{AppDir, Create, Shadow, UserDataDir, preview_with_shadows};
 use rerun_core::prim::{GameRef, MethodSpec, PlanCtx};
 use rerun_core::topo::{
     self, AntiCheatState, ExeState, Facts, GameFacts, Report, Selection, Warning,
@@ -348,6 +348,22 @@ fn run<W: Write, E: Write>(
                 Err(e) => Outcome::Failed(Vec::new(), e.to_string()),
             };
         }
+        let heading = vec![Message::Topo(TopoMsg::Heading {
+            id: t.id.to_string(),
+            rev: t.rev,
+            status: status(t.status),
+            title: escape::text(&t.title).into_owned(),
+        })];
+        // P4-12: the game's folder below Documents only if a picked step sets a file there.
+        let user_data = match &t.user_data {
+            Some(u) if topo::needs_user_data(t, picks) => {
+                match UserDataDir::open(sys, &fr, u.base(), u.sub()) {
+                    Ok(d) => Some(d),
+                    Err(e) => return Outcome::Failed(heading, e.to_string()),
+                }
+            }
+            _ => None,
+        };
         let ctx = PlanCtx {
             game,
             app: app.as_ref(),
@@ -355,14 +371,8 @@ fn run<W: Write, E: Write>(
             main_exe: None,
             reg: RegPolicy.reader(sys),
             app_path: app_path.as_ref(),
-            user_data: None,
+            user_data: user_data.as_ref(),
         };
-        let heading = vec![Message::Topo(TopoMsg::Heading {
-            id: t.id.to_string(),
-            rev: t.rev,
-            status: status(t.status),
-            title: escape::text(&t.title).into_owned(),
-        })];
         let tp = match topo::plan(&index, t, &facts, picks, &ctx) {
             Ok(tp) => tp,
             Err(e) => return Outcome::Failed(heading, e.to_string()),

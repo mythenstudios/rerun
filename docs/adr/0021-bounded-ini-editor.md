@@ -49,7 +49,7 @@ The dialect decides which recorded edits can be reverted. A narrower dialect (re
 ## Consequences
 - A file Rerun refuses is reported, never guessed; the planner names the reason. A revert meeting such a file (the game rewrote it as UTF-16, a duplicate of Rerun's key) finds it `Foreign`.
 - Exactness rests on the line-based rebuild: untouched lines are copied byte for byte.
-- Known limits: no sectionless targets, no inline comments, no more than 8 keys per file, no UTF-16 (phase 4), `Documents\My Games` only with `UserData` (phase 4).
+- Known limits: no sectionless targets, no inline comments, no more than 8 keys per file, no UTF-16 (still refused after P4-12: no Topo needs it yet; it comes as a dialect of its own with its own fixtures when one does). `Documents\My Games` since P4-12 through the `UserData` root (`ini_set` with `root: user_data`, the Topo's or step file's `user_data`; ADR 0020 amendment P4-12): the same editor and the same rules there.
 
 ## Alternatives considered
 - **A map-based parser that writes its own format:** loses comments, order and line endings; no exact revert.

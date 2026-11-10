@@ -240,6 +240,15 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
     if let Some(l) = &t.launch {
         launch(l)?;
     }
+    // P4-12: the user data folder's allowlist (`policy::root::user_dir_ok`), at load as at plan.
+    if let Some(u) = &t.user_data
+        && let Err(e) = crate::policy::root::user_dir_ok(u.base(), u.sub())
+    {
+        return Err(err(
+            &format!("user_data.{}", u.base().as_str()),
+            e.to_string(),
+        ));
+    }
     if let Some(a) = &t.anti_cheat {
         ensure(
             !a.dead.is_empty() && unique(a.dead.iter()),
@@ -292,6 +301,14 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
                 }
                 if let TopoStep::GpuPreference(g) = s {
                     gpu_preference(t, issue.when.as_ref(), g, &format!("{at}.gpu_preference"))?;
+                }
+                // P4-12: a file in the user data folder needs the Topo's `user_data`.
+                if let TopoStep::IniSet(x) = s {
+                    ensure(
+                        x.root.is_game() || t.user_data.is_some(),
+                        &format!("{at}.ini_set.root"),
+                        "user_data needs the Topo's user_data folder",
+                    )?;
                 }
             }
             for (k, x) in v.tradeoffs.iter().enumerate() {
@@ -620,12 +637,6 @@ fn compat_layer(c: &CompatLayerSpec, at: &str) -> R {
 }
 
 fn ini_set(s: &IniSetSpec, at: &str) -> R {
-    // P4-12: the user data folder of a Topo comes with the Topo's `user_data` (second cut).
-    ensure(
-        s.root.is_game(),
-        &format!("{at}.root"),
-        "the game folder (a Topo cannot name a user data folder yet)",
-    )?;
     ensure(
         ends_with_ci(s.file.as_str(), ".ini"),
         &format!("{at}.file"),

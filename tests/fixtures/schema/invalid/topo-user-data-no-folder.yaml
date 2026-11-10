@@ -1,0 +1,18 @@
+# Invalid: root user_data without the Topo's user_data
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues:
+  - id: issue
+    title: "Issue"
+    variants:
+      - id: v
+        status: unverified
+        kind: fix
+        steps:
+          - ini_set: { root: user_data, file: 'FALLOUT.INI', values: [ { section: General, key: iNumHWThreads, value: "2" } ] }

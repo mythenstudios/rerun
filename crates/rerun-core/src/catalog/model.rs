@@ -23,6 +23,7 @@ use crate::path::RelPath;
 use crate::policy::firewall::Direction;
 use crate::prim::{
     CompatLayerSpec, CpuRuleSpec, GpuPreferenceSpec, IniSetSpec, PrioritySpec, RegistrySetSpec,
+    UserDataSpec,
 };
 
 /// The one value of `format` (Topo, package, index).
@@ -259,6 +260,14 @@ pub struct Topo {
         skip_serializing_if = "Option::is_none"
     )]
     pub anti_cheat: Option<AntiCheatRelease>,
+    /// The game's own folder below a known folder of the user (P4-12): `{documents: 'My
+    /// Games\X'}`, named once; an `ini_set` with `root: user_data` sets keys of a file there.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub user_data: Option<UserDataSpec>,
     /// The problems and their solutions.
     pub issues: Vec<Issue>,
     /// Hints.

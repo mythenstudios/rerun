@@ -28,6 +28,45 @@
           }
         }
       }
+    },
+    {
+      "description": "An ini_set with root user_data needs the Topo's user_data (P4-12).",
+      "if": {
+        "not": {
+          "required": [
+            "user_data"
+          ]
+        }
+      },
+      "then": {
+        "properties": {
+          "issues": {
+            "items": {
+              "properties": {
+                "variants": {
+                  "items": {
+                    "properties": {
+                      "steps": {
+                        "items": {
+                          "properties": {
+                            "ini_set": {
+                              "properties": {
+                                "root": {
+                                  "const": "game"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "properties": {
@@ -67,6 +106,9 @@
     },
     "anti_cheat": {
       "$ref": "#/$defs/antiCheatRelease"
+    },
+    "user_data": {
+      "$ref": "#/$defs/userData"
     },
     "issues": {
       "type": "array",
@@ -377,6 +419,40 @@
           }
         }
       ]
+    },
+    "userData": {
+      "description": "The game's own folder below a known folder of the user (P4-12, docs/02-topo-format.md, ADR 0007 amendment P4-12): exactly one key, the base (v1 only documents), with the folder below it. The schema checks the form and the allowlist's patterns; the loader checks the allowlist again (user_dir_ok), the opening rules are policy::root's.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "documents"
+      ],
+      "properties": {
+        "documents": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/relPath"
+            },
+            {
+              "description": "1 to 4 segments.",
+              "pattern": "^[^\\\\/]+([\\\\/][^\\\\/]+){0,3}$"
+            },
+            {
+              "description": "Not the shared My Games alone, not below PowerShell's folder.",
+              "not": {
+                "anyOf": [
+                  {
+                    "pattern": "^[Mm][Yy] [Gg][Aa][Mm][Ee][Ss]$"
+                  },
+                  {
+                    "pattern": "^([Ww][Ii][Nn][Dd][Oo][Ww][Ss])?[Pp][Oo][Ww][Ee][Rr][Ss][Hh][Ee][Ll][Ll]([\\\\/]|$)"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
     },
     "antiCheatRelease": {
       "description": "Anti-cheat systems of the game that are verifiably dead (P4-4): the engine does not enforce the anti-cheat rule for them. Draft only until reviewed.",
@@ -758,7 +834,7 @@
       }
     },
     "iniSet": {
-      "description": "Keys of an existing INI file of the game folder (docs/02-topo-format.md, ADR 0021, ADR 0020 amendment P2-12). The schema checks the form; the rule for new values (none of \\ / : % ; # [ ], no ..), unique sections and keys, desktop.ini and the file itself are checked by the loader and the planner.",
+      "description": "Keys of an existing INI file of the game folder, or of the Topo's user_data folder with root: user_data (docs/02-topo-format.md, ADR 0021, ADR 0020 amendments P2-12 and P4-12). The schema checks the form; the rule for new values (none of \\ / : % ; # [ ], no ..), unique sections and keys, desktop.ini and the file itself are checked by the loader and the planner.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -766,6 +842,13 @@
         "values"
       ],
       "properties": {
+        "root": {
+          "description": "Where the file lies (P4-12): the game folder (default) or the Topo's user_data folder.",
+          "enum": [
+            "game",
+            "user_data"
+          ]
+        },
         "file": {
           "allOf": [
             {

@@ -671,6 +671,26 @@ pub enum EngineError {
         /// Why.
         why: String,
     },
+    /// A picked step sets a file in the Topo's user data folder (P4-12), but the folder the
+    /// caller opened is not that folder (or none): the caller opens it with
+    /// [`needs_user_data`] and the Topo's `user_data`.
+    #[error("the picked variants need the Topo's user data folder, opened as the Topo names it")]
+    UserData,
+}
+
+/// A picked variant of `topo` sets a file in its user data folder (P4-12): the caller opens
+/// `topo.user_data` (`policy::root::UserDataDir`) for [`plan`] then, and only then. Unknown
+/// picks count as none (`plan` refuses them).
+pub fn needs_user_data(topo: &Topo, picks: &[Pick]) -> bool {
+    picks.iter().any(|p| {
+        topo.issues
+            .iter()
+            .filter(|i| i.id.as_str() == p.issue)
+            .flat_map(|i| i.variants.iter())
+            .filter(|v| v.id.as_str() == p.variant)
+            .flat_map(|v| v.steps.iter())
+            .any(|s| matches!(s, TopoStep::IniSet(x) if x.root == prim::StepRoot::UserData))
+    })
 }
 
 /// Every `gpu.arch` of the Topo is declared by `table` (none to check without a table).
@@ -993,6 +1013,16 @@ pub fn plan(
         }
     }
     slots_free(&steps, &planned_packages)?;
+    // P4-12: the user data folder the caller opened is the Topo's (base and folder as named).
+    if prim::needs_user_data(&steps) {
+        let same = match (&topo.user_data, ctx.user_data) {
+            (Some(spec), Some(u)) => u.base() == spec.base() && u.sub() == spec.sub(),
+            _ => false,
+        };
+        if !same {
+            return Err(EngineError::UserData);
+        }
+    }
     let ctx = PlanCtx {
         main_exe: Some(main_exe),
         ..*ctx
@@ -1156,3 +1186,5 @@ mod gpu_tests;
 mod laa_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod user_data_tests;

@@ -308,3 +308,79 @@ fn c_te8_digits_out_of_range() {
         );
     }
 }
+
+/// C-TE9 (P4-12): a Topo with `user_data` and a variant with `ini_set` in it: the CLI opens
+/// the folder only for that pick, the preview names it; a missing folder refuses the plan.
+#[test]
+fn c_te9_a_topo_with_a_user_data_folder() {
+    let sys = lm_sys(false, &steps(8));
+    let sha = sha256_of(&sys, "game.exe");
+    let ix = format!(
+        r#"{{"format":1,"seq":1,"issued":"2026-11-09T12:00:00Z","topos":[{{"format":1,"id":"invented-game","title":"Invented Game","status":"active","rev":1,
+"match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d9"}}]}},
+"user_data":{{"documents":"My Games\\Invented"}},
+"issues":[
+ {{"id":"threads","title":"Threads","variants":[{{"id":"ini","status":"unverified","kind":"fix","steps":[{{"ini_set":{{"root":"user_data","file":"settings.ini","values":[{{"section":"Display","key":"Width","value":"1920"}}]}}}}]}}]}},
+ {{"id":"display","title":"Display","variants":[{{"id":"layer","status":"unverified","kind":"fix","steps":[{{"compat_layer":{{"exe":"game.exe","layers":["HIGHDPIAWARE"]}}}}]}}]}}
+]}}],"packages":[]}}"#
+    );
+    sys.fake_fs()
+        .put_file(Path::new(INDEX), ix.as_bytes())
+        .unwrap();
+    sys.fake_fs()
+        .put_file(Path::new(SIG), &test_key::sign(ix.as_bytes()))
+        .unwrap();
+    sys.fake_fs().sync_all();
+    expect(
+        &sys,
+        &["index", "import", INDEX, SIG],
+        Answer::No,
+        Exit::Report,
+    );
+    // The folder is missing: the pick in it is refused, another pick plans without it.
+    let r = expect(
+        &sys,
+        &["plan", "220", "--pick", "threads/ini", "--dry-run"],
+        Answer::No,
+        Exit::Refused,
+    );
+    assert!(
+        r.stdout.is_empty() || !r.stdout.contains("op 0"),
+        "{}",
+        r.stdout
+    );
+    expect(
+        &sys,
+        &["plan", "220", "--pick", "display/layer", "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    sys.fake_fs()
+        .put_file(
+            Path::new(r"C:\Users\Player\Documents\My Games\Invented\settings.ini"),
+            b"[Display]\r\nWidth=1280\r\n",
+        )
+        .unwrap();
+    let r = expect(
+        &sys,
+        &["plan", "220", "--pick", "threads/ini", "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    assert!(
+        r.stdout
+            .contains(r"root 1: C:\Users\Player\Documents\My Games\Invented"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("  your Documents folder:"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("note: your Documents folder"),
+        "{}",
+        r.stdout
+    );
+}

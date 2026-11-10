@@ -71,6 +71,7 @@ fn topo(name: &str, pkg: &str) -> Topo {
         rev: 1,
         tested_on: vec![],
         anti_cheat: None,
+        user_data: None,
         matches: Match {
             steam_appid: Some(440),
             exes: vec![Exe {
