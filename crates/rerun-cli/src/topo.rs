@@ -181,6 +181,11 @@ fn warning_text(w: &Warning) -> String {
                 GpuRequirement::Vulkan => "a Vulkan driver for the graphics card",
             }
         ),
+        Warning::SignedExe { exe } => format!(
+            "warning: {} is digitally signed; the patch makes the signature invalid (the revert \
+             restores it)",
+            rerun_core::escape::path(exe.as_str())
+        ),
     }
 }
 

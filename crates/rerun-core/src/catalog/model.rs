@@ -649,6 +649,19 @@ pub enum TopoStep {
     IniSet(IniSetSpec),
     /// `firewall_rule` (P4-5a): Rerun's block rule for one executable of `match.exes`.
     FirewallRule(FirewallRuleSpec),
+    /// `laa_patch` (P4-10): the Large Address Aware flag of one 32-bit executable of
+    /// `match.exes`.
+    LaaPatch(LaaPatchStep),
+}
+
+/// `laa_patch` (P4-10, ADR 0020 amendment P4-10): set the Large Address Aware flag of one
+/// executable of `match.exes` that carries a `sha256` (the loader rule of ADR 0024, P4 R6, in
+/// exactly its spelling). Draft only until reviewed ([`super::check::LAA_PATCH_REVIEWED`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaaPatchStep {
+    /// The executable, a `match.exes` path.
+    pub exe: RelPath,
 }
 
 /// `firewall_rule` (ADR 0023 §6, P4-5a): block the network of one executable of `match.exes`

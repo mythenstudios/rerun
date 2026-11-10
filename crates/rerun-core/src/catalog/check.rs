@@ -11,8 +11,8 @@
 use std::collections::BTreeSet;
 
 use super::model::{
-    ArchList, Compare, FirewallRuleSpec, Id, Launch, Method, Package, PackageOption, Source,
-    SourceType, Status, TODO, Tier, Topo, TopoStep, When,
+    ArchList, Compare, FirewallRuleSpec, Id, LaaPatchStep, Launch, Method, Package, PackageOption,
+    Source, SourceType, Status, TODO, Tier, Topo, TopoStep, When,
 };
 use crate::fold::fold;
 use crate::policy::ini::IniName;
@@ -30,6 +30,11 @@ pub const ANTI_CHEAT_RELEASE_REVIEWED: bool = false;
 /// installed helper passed on 2026-11-10 (P4-5b, ADR 0023 §15), the agreed condition. Setting it
 /// back to `false` makes the step draft only again (the signed index then holds none).
 pub const FIREWALL_RULE_REVIEWED: bool = true;
+
+/// Whether a Topo outside a draft may hold a `laa_patch` step (P4-10). `false` until the step is
+/// reviewed and the Smart App Control behaviour is decided (an open user decision of P4-10): the
+/// signed index holds none until then.
+pub const LAA_PATCH_REVIEWED: bool = false;
 
 /// Most executables of `match.exes` (P4-4: each is hashed when the engine reads a game).
 pub const MAX_EXES: usize = 8;
@@ -271,6 +276,9 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
                 if let TopoStep::FirewallRule(f) = s {
                     firewall_rule(t, f, &format!("{at}.firewall_rule"))?;
                 }
+                if let TopoStep::LaaPatch(l) = s {
+                    laa_patch(t, l, &format!("{at}.laa_patch"))?;
+                }
             }
             for (k, x) in v.tradeoffs.iter().enumerate() {
                 ensure(!x.is_empty(), &format!("{at}.tradeoffs[{k}]"), "not empty")?;
@@ -418,6 +426,11 @@ fn step(s: &TopoStep, at: &str) -> R {
             &format!("{at}.firewall_rule.exe"),
             "an .exe",
         ),
+        TopoStep::LaaPatch(l) => ensure(
+            fold(l.exe.as_str()).ends_with(".EXE"),
+            &format!("{at}.laa_patch.exe"),
+            "an .exe",
+        ),
     }
 }
 
@@ -443,6 +456,29 @@ fn firewall_rule(t: &Topo, f: &FirewallRuleSpec, at: &str) -> R {
         anchor.is_some_and(|e| e.sha256.is_some()),
         &format!("{at}.exe"),
         "its match.exes entry needs a sha256 (an elevated anchor, ADR 0024)",
+    )
+}
+
+/// `laa_patch` against its Topo (P4-10): draft only while not reviewed ([`LAA_PATCH_REVIEWED`]),
+/// and the executable is an entry of `match.exes` in exactly its spelling, with a `sha256` (the
+/// rule of `firewall_rule`: the planner patches only the build whose SHA-256 the Topo names; `sha1`
+/// alone never anchors a change of an executable, P4 R6).
+fn laa_patch(t: &Topo, l: &LaaPatchStep, at: &str) -> R {
+    ensure(
+        LAA_PATCH_REVIEWED || t.status == Status::Draft,
+        at,
+        "draft only until laa_patch is reviewed (P4-10)",
+    )?;
+    let anchor = t.matches.exes.iter().find(|e| e.path.same_spelling(&l.exe));
+    ensure(
+        anchor.is_some(),
+        &format!("{at}.exe"),
+        "an executable of match.exes",
+    )?;
+    ensure(
+        anchor.is_some_and(|e| e.sha256.is_some()),
+        &format!("{at}.exe"),
+        "its match.exes entry needs a sha256 (the build the patch is for, ADR 0024)",
     )
 }
 

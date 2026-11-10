@@ -59,6 +59,10 @@ pub enum StepFileError {
     /// More bytes than [`MAX_STEP_FILE`].
     #[error("the step file is larger than {MAX_STEP_FILE} bytes")]
     TooLarge,
+    /// A step that only a Topo of the signed index may carry (P4-10: `laa_patch`, whose
+    /// executable and hash come from the Topo's `match.exes`).
+    #[error("the step {0} comes only from a Topo of the signed index, not from a step file")]
+    TopoOnly(&'static str),
     /// Not a step file: where and what kind of problem, never the text.
     #[error("the step file is not valid at line {line}, column {column}: {class}")]
     Parse {
@@ -119,7 +123,11 @@ impl StepFile {
         if probe.format != STEP_FILE_FORMAT {
             return Err(StepFileError::Format(probe.format).into());
         }
-        Ok(serde_json::from_slice(b).map_err(|e| parse_error(&e))?)
+        let f: Self = serde_json::from_slice(b).map_err(|e| parse_error(&e))?;
+        if f.steps.iter().any(|s| matches!(s, Step::LaaPatch(_))) {
+            return Err(StepFileError::TopoOnly("laa_patch").into());
+        }
+        Ok(f)
     }
 }
 

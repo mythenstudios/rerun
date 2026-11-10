@@ -139,7 +139,7 @@ fn missing(id: &str, version: &str) -> PlanError {
 
 /// A plain file that may be read: not restricted, no reparse tag (an allowlisted data tag
 /// other than a cloud placeholder is a plain file, ADR 0007).
-fn readable_file(m: &Metadata) -> Result<(), &'static str> {
+pub(crate) fn readable_file(m: &Metadata) -> Result<(), &'static str> {
     if m.restricted {
         return Err("cannot be opened by the current user");
     }

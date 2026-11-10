@@ -667,6 +667,29 @@
         },
         "firewall_rule": {
           "$ref": "#/$defs/firewallRule"
+        },
+        "laa_patch": {
+          "$ref": "#/$defs/laaPatch"
+        }
+      }
+    },
+    "laaPatch": {
+      "description": "The Large Address Aware flag of one 32-bit executable of match.exes (docs/02-topo-format.md, ADR 0020 amendment P4-10). The schema checks the form; the loader checks that exe is a match.exes entry, in exactly its spelling, with a sha256 (ADR 0024); the planner refuses 64-bit, .NET, protected (SteamStub, SecuROM, SafeDisc, StarForce) and already patched images. Draft only until reviewed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exe"
+      ],
+      "properties": {
+        "exe": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/relPath"
+            },
+            {
+              "pattern": "\\.[Ee][Xx][Ee]$"
+            }
+          ]
         }
       }
     },

@@ -46,7 +46,7 @@ use super::{Acted, ExecCtx, ExecError, Hint, roots};
 use crate::fold::fold;
 use crate::journal::{Before, BeforeArg, Digest, Observed, OpLog, Reverting, Semantic, TxnWriter};
 use crate::path::RelPath;
-use crate::plan::{ByteEdit, ContentRef, Op, Plan, Target};
+use crate::plan::{ContentRef, Op, Patched, Plan, Target};
 use crate::policy::root::AppSub;
 use crate::prim::file_install::open_package;
 use crate::sys::fs::{Attrs, EntryKind, NewFile, TmpName};
@@ -377,51 +377,6 @@ fn not_a_patch_target(k: u16) -> ExecError {
     ExecError::Op {
         op: k,
         source: SysError::new(SysErrorKind::Other, "a patch only replaces a file"),
-    }
-}
-
-/// The old bytes with a patch's edits applied while they are streamed (P4-10): every edited
-/// byte must hold its `old` value (else `InvalidData`: the source is not the base), and becomes
-/// `new`. The edits are sorted by offset (`plan::patch_check`).
-pub(super) struct Patched<'e, R> {
-    inner: R,
-    at: u64,
-    edits: &'e [ByteEdit],
-}
-
-impl<'e, R> Patched<'e, R> {
-    pub(super) fn new(inner: R, edits: &'e [ByteEdit]) -> Self {
-        Self {
-            inner,
-            at: 0,
-            edits,
-        }
-    }
-}
-
-impl<R: std::io::Read> std::io::Read for Patched<'_, R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        let end = self.at.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
-        for e in self.edits {
-            if e.offset < self.at || e.offset >= end {
-                continue;
-            }
-            let i = usize::try_from(e.offset - self.at)
-                .map_err(|_| std::io::Error::other("a patch offset outside the buffer"))?;
-            let Some(b) = buf.get_mut(i) else {
-                return Err(std::io::Error::other("a patch offset outside the buffer"));
-            };
-            if *b != e.old {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "the file to patch has another byte at a patched offset",
-                ));
-            }
-            *b = e.new;
-        }
-        self.at = end;
-        Ok(n)
     }
 }
 

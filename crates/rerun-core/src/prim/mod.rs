@@ -18,6 +18,8 @@
 //!   `<LocalAppData>\Rerun\profiles` (root 1), op 0 of the plan.
 //! - [`package`] (P4-7, ADR 0025 part 2): a Topo's `package` step as the `file_install` step of
 //!   the package's files for this game's architecture and graphics API; pure, no I/O.
+//! - [`laa_patch`] (P4-10): the Large Address Aware flag of a 32-bit executable of the Topo's
+//!   `match.exes` as one `ReplaceFile` with a patch (`ContentRef::Patch`); only from a Topo.
 //! - [`StepFile`]: the phase 2 step file `rerun plan <steps.json>` reads (P2-13); since the Topo
 //!   engine (P4-4) the local, unsigned input (L8), removed at the earliest before A6.
 //!
@@ -28,6 +30,7 @@
 pub mod compat_layer;
 pub mod file_install;
 pub mod ini_set;
+pub mod laa_patch;
 pub mod launch_method;
 pub mod package;
 pub mod registry_set;
@@ -38,6 +41,7 @@ use serde::{Deserialize, Serialize};
 pub use compat_layer::CompatLayerSpec;
 pub use file_install::{FileEntry, FileInstallSpec};
 pub use ini_set::{IniSetSpec, IniSetValue};
+pub use laa_patch::{LaaFacts, LaaPatchSpec};
 pub use launch_method::{
     CpuRuleSpec, LaunchMethodSpec, MachineView, MachineWhy, MethodSpec, ModeSpec, PreferL3Spec,
     PreferSpec, PrioritySpec, SHIM, SelectionShown, on_this_machine, steam_option_text,
@@ -73,6 +77,8 @@ pub enum Step {
     IniSet(IniSetSpec),
     /// [`launch_method`] (at most one per plan).
     LaunchMethod(LaunchMethodSpec),
+    /// [`laa_patch`] (P4-10): only from a Topo, the step file refuses it.
+    LaaPatch(LaaPatchSpec),
 }
 
 /// What a planner reads: the game folder, Rerun's folder (packages), and what identifies the
@@ -179,6 +185,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
             Step::CompatLayer(spec) => compat_layer::plan_into(spec, ctx, &mut b)?,
             Step::IniSet(spec) => ini_set::plan_into(spec, ctx, &mut b)?,
             Step::LaunchMethod(spec) => launch_method::plan_into(spec, ctx, &mut b)?,
+            Step::LaaPatch(spec) => laa_patch::plan_into(spec, ctx, &mut b)?,
         }
     }
     // One file is either installed or edited in one plan (the plan format allows one op per

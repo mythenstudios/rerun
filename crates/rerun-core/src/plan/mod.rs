@@ -725,6 +725,59 @@ pub struct ByteEdit {
     pub new: u8,
 }
 
+/// The old bytes with a patch's edits applied while they are streamed (P4-10): every edited
+/// byte must hold its `old` value (else `InvalidData`: the source is not the base), and becomes
+/// `new`. The edits are sorted by offset (`patch_check`). `exec` streams a backup through it,
+/// `prim::laa_patch` the file it plans for.
+pub(crate) struct Patched<'e, R> {
+    inner: R,
+    at: u64,
+    edits: &'e [ByteEdit],
+}
+
+impl<'e, R> Patched<'e, R> {
+    pub(crate) fn new(inner: R, edits: &'e [ByteEdit]) -> Self {
+        Self {
+            inner,
+            at: 0,
+            edits,
+        }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for Patched<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        let chunk = buf.get_mut(..n).unwrap_or_default();
+        apply_edits(self.edits, self.at, chunk)?;
+        self.at = self.at.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        Ok(n)
+    }
+}
+
+/// Applies the edits that fall into `chunk`, the bytes of the file from offset `at`: each edited
+/// byte must hold the edit's `old` value (else `InvalidData`) and becomes its `new` one.
+pub(crate) fn apply_edits(edits: &[ByteEdit], at: u64, chunk: &mut [u8]) -> std::io::Result<()> {
+    let end = at.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+    for e in edits {
+        if e.offset < at || e.offset >= end {
+            continue;
+        }
+        let b = usize::try_from(e.offset - at)
+            .ok()
+            .and_then(|i| chunk.get_mut(i))
+            .ok_or_else(|| std::io::Error::other("a patch offset outside the buffer"))?;
+        if *b != e.old {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the file to patch has another byte at a patched offset",
+            ));
+        }
+        *b = e.new;
+    }
+    Ok(())
+}
+
 impl ContentRef {
     /// SHA-256 of the content.
     pub fn sha256(&self) -> &[u8; 32] {

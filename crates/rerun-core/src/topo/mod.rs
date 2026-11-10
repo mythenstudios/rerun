@@ -349,6 +349,7 @@ fn step_kind(s: &TopoStep, launch: &Result<LaunchPlan, LaunchProblem>) -> StepKi
         TopoStep::CompatLayer(_) => StepKind::CompatLayer,
         TopoStep::IniSet(_) => StepKind::IniSet,
         TopoStep::FirewallRule(_) => StepKind::FirewallRule,
+        TopoStep::LaaPatch(_) => StepKind::LaaPatch,
     }
 }
 
@@ -359,6 +360,7 @@ pub fn prim_step_kind(s: &Step) -> StepKind {
         Step::RegistrySet(_) => StepKind::RegistrySet,
         Step::CompatLayer(_) => StepKind::CompatLayer,
         Step::IniSet(_) => StepKind::IniSet,
+        Step::LaaPatch(_) => StepKind::LaaPatch,
         Step::LaunchMethod(l) => match l.method {
             MethodSpec::Watch => StepKind::LaunchWatch,
             // `auto` is refused by the planner; counted as the stricter of its results.
@@ -594,6 +596,14 @@ pub enum EngineError {
     /// The firewall rules of the picked variants cannot be planned here (A4 S7, P4-2d).
     #[error(transparent)]
     Firewall(Box<crate::elevate::PlanRefusal>),
+    /// A `laa_patch` step cannot be planned for this game (P4-10).
+    #[error("laa_patch of {exe}: {why}")]
+    LaaPatch {
+        /// The executable (escaped).
+        exe: String,
+        /// Why.
+        why: &'static str,
+    },
     /// A package step cannot be planned for this game (P4-7).
     #[error("package {id}: {why}")]
     Package {
@@ -685,6 +695,12 @@ pub enum Warning {
     SteamInput {
         /// The issue.
         issue: String,
+    },
+    /// `laa_patch` of an executable with an Authenticode signature (P4-10): the patch makes the
+    /// signature invalid.
+    SignedExe {
+        /// The executable.
+        exe: RelPath,
     },
     /// A planned package needs a GPU feature Rerun does not check (`requires_gpu`, P4-8): v1
     /// `vulkan`, a Vulkan driver for the game's adapter.
@@ -826,6 +842,21 @@ pub fn plan(
                 TopoStep::RegistrySet(r) => steps.push(Step::RegistrySet(r.clone())),
                 TopoStep::CompatLayer(c) => steps.push(Step::CompatLayer(c.clone())),
                 TopoStep::IniSet(x) => steps.push(Step::IniSet(x.clone())),
+                TopoStep::LaaPatch(l) => {
+                    let spec = laa_step(topo, facts, l)?;
+                    // The planner checks everything again; a refusal here is its refusal there.
+                    if prim::laa_patch::inspect(ctx.game, &spec.exe).is_ok_and(|f| f.signed) {
+                        warnings.push(Warning::SignedExe {
+                            exe: spec.exe.clone(),
+                        });
+                    }
+                    if !steps
+                        .iter()
+                        .any(|s| matches!(s, Step::LaaPatch(x) if x.exe == spec.exe))
+                    {
+                        steps.push(Step::LaaPatch(spec));
+                    }
+                }
             }
         }
     }
@@ -882,6 +913,41 @@ pub fn plan(
         steps,
         launch: planned_launch,
         warnings,
+    })
+}
+
+/// A `laa_patch` step (P4-10): the executable is the `match.exes` entry in exactly the step's
+/// spelling (the loader's rule, ADR 0024), it matched here, and its `sha256` is what the planner
+/// checks the file against; the path and hash come from the entry, never from the step.
+fn laa_step(
+    topo: &Topo,
+    facts: &Facts<'_>,
+    l: &crate::catalog::model::LaaPatchStep,
+) -> Result<prim::LaaPatchSpec, EngineError> {
+    let refused = |why: &'static str| EngineError::LaaPatch {
+        exe: crate::escape::path(l.exe.as_str()).into_owned().to_string(),
+        why,
+    };
+    let (entry, check) = topo
+        .matches
+        .exes
+        .iter()
+        .zip(&facts.game.exes)
+        .find(|(e, _)| e.path.same_spelling(&l.exe))
+        .ok_or_else(|| refused("it is no executable of the Topo's match.exes"))?;
+    if check.state != ExeState::Match {
+        return Err(refused(
+            "it is not the build the Topo names in this game folder (its hashes differ)",
+        ));
+    }
+    let sha256 = entry
+        .sha256
+        .as_ref()
+        .and_then(|h| h.bytes())
+        .ok_or_else(|| refused("its match.exes entry names no sha256"))?;
+    Ok(prim::LaaPatchSpec {
+        exe: entry.path.clone(),
+        sha256: *sha256,
     })
 }
 
@@ -957,5 +1023,7 @@ fn slots_free(steps: &[Step], packages: &[&Package]) -> Result<(), EngineError> 
     Ok(())
 }
 
+#[cfg(test)]
+mod laa_tests;
 #[cfg(test)]
 mod tests;
