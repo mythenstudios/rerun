@@ -84,10 +84,19 @@ fn unclosed_and_stray_braces() {
         Err(ScanError::UnclosedTemplate)
     );
     assert_eq!(one("{{API|x={{y}}"), Err(ScanError::UnclosedTemplate));
-    // Stray closers at the top level are text; a link left open ends with its template.
+    // Stray closers at the top level are text; a link left open at its template's end is an
+    // error (it would hide the template's `|` and `=`, review 1a).
     assert_eq!(
-        vals("}} ]] {{API|direct3d versions=[[a|b}}")[0].as_deref(),
-        Some("[[a|b")
+        one("}} ]] {{API|direct3d versions=[[a|b}}"),
+        Err(ScanError::UnclosedLink)
+    );
+    assert_eq!(
+        one("{{API|direct3d versions=12|x=[[|direct3d versions=9}}"),
+        Err(ScanError::UnclosedLink)
+    );
+    assert_eq!(
+        vals("}} ]] {{API|direct3d versions=[[a|b]] 9}}")[0].as_deref(),
+        Some("[[a|b]] 9")
     );
     assert_eq!(
         vals("{{API|direct3d versions=9]]}}")[0].as_deref(),
@@ -206,5 +215,76 @@ fn every_prefix_and_garbage_never_panics() {
             s.push_str(alphabet[usize::try_from(seed % alphabet.len() as u64).unwrap()]);
         }
         let _ = one(&s);
+    }
+}
+
+#[test]
+fn ref_and_other_opaque_elements_hide_what_they_hold() {
+    // A `|` inside a <ref> does not split the template (review 1b).
+    assert_eq!(
+        vals("{{API|x=<ref>|direct3d versions=12|</ref>}}"),
+        [None, None]
+    );
+    for text in [
+        "{{API|x=<REF name=\"a\">|direct3d versions=12|</Ref>}}",
+        "{{API|x=<syntaxhighlight lang=x>|direct3d versions=12|</syntaxhighlight>}}",
+        "{{API|x=<source>|direct3d versions=12|</source>}}",
+        "{{API|x=<math>|direct3d versions=12|</math>}}",
+    ] {
+        assert_eq!(vals(text), [None, None], "{text}");
+    }
+    // Self-closing: one opaque character, the rest is read.
+    let v = vals("{{API|direct3d versions=9<ref name=\"a\" />|windows 32-bit exe=true}}");
+    assert_eq!(v, [Some("9\u{FFFD}".into()), Some("true".into())]);
+    // `<references/>` is no <ref>.
+    assert_eq!(
+        vals("{{API|direct3d versions=<references/>}}")[0].as_deref(),
+        Some("<references/>")
+    );
+    // Unclosed, or an opening tag without its `>` within the bound: an error, never text.
+    assert_eq!(
+        one("{{API|x=<ref>|direct3d versions=12}}"),
+        Err(ScanError::UnclosedTag)
+    );
+    let open = format!(
+        "{{{{API|x=<ref {}|direct3d versions=12}}}}",
+        "a".repeat(300)
+    );
+    assert_eq!(one(&open), Err(ScanError::UnclosedTag));
+    assert_eq!(one("x <ref "), Err(ScanError::UnclosedTag));
+    // `<ref` at the very end opens nothing: text.
+    assert_eq!(one("x <ref"), Ok(None));
+    // Transclusion tags anywhere: an error.
+    for text in [
+        "<includeonly>{{API|direct3d versions=12}}</includeonly>",
+        "x <ONLYINCLUDE>",
+        "{{API|direct3d versions=9}}<includeonly/>",
+    ] {
+        assert_eq!(one(text), Err(ScanError::Transclusion), "{text}");
+    }
+    // Inside a comment it is gone with the comment.
+    assert!(one("<!-- <includeonly> -->{{API}}").is_ok());
+}
+
+#[test]
+fn a_template_prefix_names_the_same_template() {
+    assert_eq!(
+        one("{{Template:API|direct3d versions=12}}{{API|direct3d versions=9}}"),
+        Err(ScanError::DuplicateTemplate("API"))
+    );
+    for text in [
+        "{{template:API|direct3d versions=9}}",
+        "{{ TEMPLATE : API |direct3d versions=9}}",
+        "{{Template_:_API|direct3d versions=9}}",
+    ] {
+        assert_eq!(vals(text)[0].as_deref(), Some("9"), "{text}");
+    }
+    // Only the prefix: `Templates:API`, `Template API` and `Template:Video` are other names.
+    for text in [
+        "{{Templates:API|direct3d versions=9}}",
+        "{{Template API|direct3d versions=9}}",
+        "{{Template:Video|direct3d versions=9}}",
+    ] {
+        assert_eq!(one(text), Ok(None), "{text}");
     }
 }

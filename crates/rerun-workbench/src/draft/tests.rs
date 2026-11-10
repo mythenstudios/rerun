@@ -15,10 +15,8 @@ use serde_json::Value;
 
 use super::*;
 use crate::bundle::{SourceFile, build as bundle_build};
-use crate::pcgw::tests::{QUEST, RACER, RACER_LOOKUP, RACER_URL};
+use crate::pcgw::tests::{QUEST, QUEST_URL, RACER, RACER_LOOKUP, RACER_URL, with_wikitext};
 use crate::pcgw::{ApiFacts, PageName};
-
-const QUEST_URL: &str = "https://www.pcgamingwiki.com/w/api.php?action=parse&format=json&formatversion=2&prop=wikitext%7Csections&page=Invented_Quest%3A_Gold_Edition";
 
 const RACER_GOLDEN: &str = r#"# Draft from PCGamingWiki (rerun-workbench draft): facts and links only.
 # Curate it (docs/02-topo-format.md) before it leaves status draft.
@@ -124,7 +122,10 @@ fn t2_an_app_id_the_page_does_not_name_is_refused() {
         FakeReply::redirect(302, "https://www.pcgamingwiki.com/wiki/Invented_Racer_2"),
     );
     let e = run(&h, &req(Target::SteamApp(99))).unwrap_err();
-    assert!(e.contains("does not name Steam app 99"), "{e}");
+    assert!(
+        e.contains("does not name Steam app 99") && e.contains("--page"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -158,6 +159,7 @@ fn t2_ids_titles_and_apis() {
         opengl,
         vulkan,
         glide: false,
+        unclear: Vec::new(),
     };
     assert_eq!(stub_api(&api(&[9], false, false, false)), Some(Api::D3d9));
     assert_eq!(stub_api(&api(&[7], true, false, false)), Some(Api::Ddraw));
@@ -296,7 +298,6 @@ fn schema() -> jsonschema::Validator {
 
 #[test]
 fn t6_drafts_load_as_source_never_as_release() {
-    let v = schema();
     let (h, r) = quest_one_api();
     for (h, r) in [
         (http(), req(Target::SteamApp(1_234_560))),
@@ -304,25 +305,32 @@ fn t6_drafts_load_as_source_never_as_release() {
         (h, r),
     ] {
         let (d, text) = run(&h, &r).unwrap();
-        let doc = load_yaml(&text).unwrap();
-        let errors: Vec<String> = v.iter_errors(&doc).map(|e| e.to_string()).collect();
-        assert!(errors.is_empty(), "{errors:?}");
-        let t: Topo = serde_json::from_value(doc).unwrap();
-        check::topo(&t, Rules::Source).unwrap();
-        assert!(check::topo(&t, Rules::Release).is_err());
-        let b = bundle_build(
-            &[SourceFile {
-                name: format!("{}.yaml", d.id),
-                text: text.clone(),
-            }],
-            &[],
-            1,
-            "2026-11-10T12:00:00Z",
-        )
-        .unwrap();
-        assert_eq!(b.excluded, [format!("topo {}", d.id)]);
-        assert!(b.index.topos.is_empty());
+        loads_as_draft_only(&text, &d.id);
     }
+}
+
+/// T6 for one draft (also T8's): valid against the schema, `Rules::Source` yes,
+/// `Rules::Release` no, left out of a bundle.
+pub(crate) fn loads_as_draft_only(text: &str, id: &Id) -> Topo {
+    let doc = load_yaml(text).unwrap();
+    let errors: Vec<String> = schema().iter_errors(&doc).map(|e| e.to_string()).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let t: Topo = serde_json::from_value(doc).unwrap();
+    check::topo(&t, Rules::Source).unwrap();
+    assert!(check::topo(&t, Rules::Release).is_err());
+    let b = bundle_build(
+        &[SourceFile {
+            name: format!("{id}.yaml"),
+            text: text.to_owned(),
+        }],
+        &[],
+        1,
+        "2026-11-10T12:00:00Z",
+    )
+    .unwrap();
+    assert_eq!(b.excluded, [format!("topo {id}")]);
+    assert!(b.index.topos.is_empty());
+    t
 }
 
 // ---------- T7 ----------
@@ -365,4 +373,44 @@ fn t7_nothing_on_an_error() {
     let e = run(&h, &req(page("Invented Racer 2"))).unwrap_err();
     assert!(e.contains("www.pcgamingwiki.com"), "{e}");
     assert_eq!(h.requests(), [RACER_URL]);
+}
+
+#[test]
+fn an_unread_version_list_needs_the_executable() {
+    for d3d in ["true", "9Ex"] {
+        let h = FakeHttp::default();
+        let wt = format!(
+            "{{{{Infobox game|steam appid=1234560}}}}{{{{API|direct3d versions = {d3d}|opengl versions = true}}}}"
+        );
+        h.reply(RACER_URL, FakeReply::ok(&with_wikitext(&wt)));
+        let e = run(&h, &req(page("Invented Racer 2"))).unwrap_err();
+        assert!(e.contains("pass --hashes-from"), "{e}");
+        assert!(e.contains("Direct3D (version not read); OpenGL"), "{e}");
+    }
+}
+
+#[test]
+fn the_stub_api_of_each_direct3d_major() {
+    for major in 0..=13u8 {
+        let a = ApiFacts {
+            d3d: vec![major],
+            ..ApiFacts::default()
+        };
+        let want = match major {
+            0..=7 => Some(Api::Ddraw),
+            8 => Some(Api::D3d8),
+            9 => Some(Api::D3d9),
+            10 => Some(Api::D3d10),
+            11 => Some(Api::D3d11),
+            _ => None,
+        };
+        assert_eq!(stub_api(&a), want, "{major}");
+    }
+    // A list that was not read never gives a placeholder, also next to a read one.
+    let a = ApiFacts {
+        d3d: vec![9],
+        unclear: vec!["OpenGL"],
+        ..ApiFacts::default()
+    };
+    assert_eq!(stub_api(&a), None);
 }

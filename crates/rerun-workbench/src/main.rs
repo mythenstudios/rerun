@@ -248,7 +248,7 @@ fn create_new(path: &Path, text: &str, secret: bool) -> Result<(), String> {
 /// The request of `draft`, checked before any request is made.
 fn draft_request(a: &DraftArgs) -> Result<draft::Request, String> {
     use rerun_core::catalog::model::Id;
-    let target = match (&a.target, &a.page) {
+    let target = match (a.target.as_deref().map(str::trim), &a.page) {
         (_, Some(p)) => pcgw::Target::Page(pcgw::PageName::parse(p).map_err(|e| e.to_string())?),
         (Some(t), None) if !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit()) => {
             match t.parse::<u32>() {

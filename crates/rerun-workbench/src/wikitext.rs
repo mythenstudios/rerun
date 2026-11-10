@@ -5,12 +5,15 @@
 //! The wikitext is untrusted input. The scanner is two linear passes over its bytes, no regex
 //! and no recursion:
 //!
-//! 1. **Clean:** HTML comments `<!-- … -->` are removed (as MediaWiki does); a `<nowiki>` or
-//!    `<pre>` element (case ignored, also self-closing) becomes one [`OPAQUE`] character, so
-//!    braces inside it count for nothing and a value holding one is never whitelisted. An
-//!    unclosed comment or element is an error, never "to the end".
+//! 1. **Clean:** HTML comments `<!-- … -->` are removed (as MediaWiki does); a `<nowiki>`,
+//!    `<pre>`, `<ref>`, `<syntaxhighlight>`, `<source>` or `<math>` element (case ignored, also
+//!    self-closing) becomes one [`OPAQUE`] character, so braces and `|` inside it count for
+//!    nothing and a value holding one is never whitelisted. An unclosed comment or element, and
+//!    an opening tag without its `>`, is an error, never "to the end"; `<includeonly>` and
+//!    `<onlyinclude>` anywhere are an error (what the page shows would depend on transclusion).
 //! 2. **Scan:** `{{` opens and `}}` closes a template, `[[`/`]]` a link inside a template (a
-//!    `|` inside a link or a nested template does not split the outer template). Only templates
+//!    `|` inside a link or a nested template does not split the outer template; a link still
+//!    open when its template closes is an error). Only templates
 //!    at the top level are read: their first segment is the name, every `key = value` segment
 //!    a named parameter (split at the first `=` of the template's own level), positional ones
 //!    are skipped. Nesting is at most [`MAX_DEPTH`], a template has at most [`MAX_SEGMENTS`]
@@ -20,7 +23,8 @@
 //! Only the wanted templates and keys are kept: a wanted template twice, a wanted key twice in
 //! one template, or a wanted value above [`MAX_VALUE`] bytes is an error (fail closed, never a
 //! guess between two values). Names compare as MediaWiki's do in the parts that matter here: `_`
-//! is a space, the first letter's case is ignored, the rest is exact; keys are exact after
+//! is a space, an optional `Template:` prefix is dropped, the first letter's case is ignored,
+//! the rest is exact; keys are exact after
 //! trimming ASCII white space, so a look-alike key (a zero-width or full-width character) never
 //! matches.
 
@@ -32,9 +36,9 @@ pub const MAX_SEGMENTS: usize = 1024;
 pub const MAX_TEMPLATES: usize = 4096;
 /// Most bytes of one wanted value (after trimming).
 pub const MAX_VALUE: usize = 4096;
-/// Most bytes of the opening tag of a `<nowiki>` or `<pre>` element (`<nowiki attr…>`).
+/// Most bytes of the opening tag of an opaque element (`<ref name=…>`).
 const MAX_TAG: usize = 256;
-/// What a `<nowiki>` or `<pre>` element becomes: no value that holds it is whitelisted.
+/// What an opaque element becomes: no value that holds it is whitelisted.
 pub const OPAQUE: char = '\u{FFFD}';
 
 /// Why the wikitext was refused.
@@ -42,10 +46,15 @@ pub const OPAQUE: char = '\u{FFFD}';
 pub enum ScanError {
     /// `<!--` without `-->`.
     UnclosedComment,
-    /// `<nowiki>` or `<pre>` without its closing tag.
+    /// An opaque element (`<nowiki>`, `<pre>`, `<ref>`, …) without the end of its opening tag
+    /// or without its closing tag.
     UnclosedTag,
+    /// `<includeonly>` or `<onlyinclude>`: the page's content would depend on transclusion.
+    Transclusion,
     /// A template still open at the end.
     UnclosedTemplate,
+    /// A link `[[` still open when its template closes.
+    UnclosedLink,
     /// Nested deeper than [`MAX_DEPTH`].
     TooDeep,
     /// A template with more than [`MAX_SEGMENTS`] segments.
@@ -64,8 +73,12 @@ impl std::fmt::Display for ScanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnclosedComment => f.write_str("an HTML comment is not closed"),
-            Self::UnclosedTag => f.write_str("a <nowiki> or <pre> element is not closed"),
+            Self::UnclosedTag => {
+                f.write_str("a <nowiki>, <pre>, <ref> or similar element is not closed")
+            }
+            Self::Transclusion => f.write_str("<includeonly> or <onlyinclude> on the page"),
             Self::UnclosedTemplate => f.write_str("a template is not closed"),
+            Self::UnclosedLink => f.write_str("a link [[ is not closed inside a template"),
             Self::TooDeep => write!(f, "templates nested deeper than {MAX_DEPTH}"),
             Self::TooManyParams => write!(f, "a template with more than {MAX_SEGMENTS} parameters"),
             Self::TooManyTemplates => write!(f, "more than {MAX_TEMPLATES} templates"),
@@ -124,12 +137,20 @@ pub fn read(text: &str, wanted: &[Wanted]) -> Result<Vec<Found>, ScanError> {
     Ok(found)
 }
 
-/// `a` names the template `b`: `_` is a space, the first letter's case ignored, ASCII white
-/// space around it trimmed.
+/// `a` names the template `b`: `_` is a space, an optional `Template:` prefix (case ignored,
+/// white space around `:`) dropped, the first letter's case ignored, ASCII white space around
+/// it trimmed.
 fn same_name(a: &str, b: &str) -> bool {
-    let a = a
-        .trim_matches(|c: char| c.is_ascii_whitespace())
-        .replace('_', " ");
+    let a = a.replace('_', " ");
+    let mut a = trim(&a);
+    if a.get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case("template"))
+        && let Some(rest) = a[8..]
+            .trim_start_matches(|c: char| c.is_ascii_whitespace())
+            .strip_prefix(':')
+    {
+        a = trim(rest);
+    }
     let (mut x, mut y) = (a.chars(), b.chars());
     match (x.next(), y.next()) {
         (Some(p), Some(q)) => p.to_lowercase().eq(q.to_lowercase()) && x.eq(y),
@@ -147,27 +168,45 @@ fn find_ci(b: &[u8], from: usize, pat: &[u8]) -> Option<usize> {
     (from..b.len().saturating_sub(pat.len() - 1)).find(|&i| starts_ci(b, i, pat))
 }
 
-/// An opening `<nowiki…>` or `<pre…>` tag at `at`: its closing tag, where the opening tag ends
-/// (exclusive) and whether it closes itself.
-fn opaque_tag(b: &[u8], at: usize) -> Option<(&'static [u8], usize, bool)> {
-    for (name, close) in [
-        (&b"nowiki"[..], &b"</nowiki>"[..]),
-        (&b"pre"[..], &b"</pre>"[..]),
-    ] {
-        if !starts_ci(b, at + 1, name) {
+/// The elements whose content is opaque (MediaWiki does not parse templates in them the way
+/// the page's own text is parsed), with their closing tags.
+const OPAQUE_TAGS: [(&[u8], &[u8]); 6] = [
+    (b"nowiki", b"</nowiki>"),
+    (b"pre", b"</pre>"),
+    (b"ref", b"</ref>"),
+    (b"syntaxhighlight", b"</syntaxhighlight>"),
+    (b"source", b"</source>"),
+    (b"math", b"</math>"),
+];
+
+/// Tags that make a page's content depend on transclusion: refused wherever they are.
+const TRANSCLUSION_TAGS: [&[u8]; 2] = [b"includeonly", b"onlyinclude"];
+
+/// The tag `name` opens at `at` (`<name` followed by `>`, `/` or white space, case ignored).
+fn opens(b: &[u8], at: usize, name: &[u8]) -> bool {
+    starts_ci(b, at + 1, name)
+        && b.get(at + 1 + name.len())
+            .is_some_and(|c| *c == b'>' || *c == b'/' || c.is_ascii_whitespace())
+}
+
+/// An opaque element: its closing tag, where its opening tag ends, whether it closes itself.
+type Opaque = (&'static [u8], usize, bool);
+
+/// An opening opaque tag at `at`: its closing tag, where the opening tag ends (exclusive) and
+/// whether it closes itself. An opening tag without its `>` within [`MAX_TAG`] bytes is an
+/// error, never text.
+fn opaque_tag(b: &[u8], at: usize) -> Result<Option<Opaque>, ScanError> {
+    for (name, close) in OPAQUE_TAGS {
+        if !opens(b, at, name) {
             continue;
         }
         let after = at + 1 + name.len();
-        if !b
-            .get(after)
-            .is_some_and(|c| *c == b'>' || *c == b'/' || c.is_ascii_whitespace())
-        {
-            continue;
-        }
-        let end = (after..b.len().min(after + MAX_TAG)).find(|&i| b[i] == b'>')?;
-        return Some((close, end + 1, b[end - 1] == b'/'));
+        let end = (after..b.len().min(after + MAX_TAG))
+            .find(|&i| b[i] == b'>')
+            .ok_or(ScanError::UnclosedTag)?;
+        return Ok(Some((close, end + 1, b[end - 1] == b'/')));
     }
-    None
+    Ok(None)
 }
 
 /// Pass 1 (module docs).
@@ -183,7 +222,9 @@ fn clean(t: &str) -> Result<String, ScanError> {
             let end = find_ci(b, at + 4, b"-->").ok_or(ScanError::UnclosedComment)?;
             i = end + 3;
             copied = i;
-        } else if let Some((close, end, closes_itself)) = opaque_tag(b, at) {
+        } else if TRANSCLUSION_TAGS.iter().any(|n| opens(b, at, n)) {
+            return Err(ScanError::Transclusion);
+        } else if let Some((close, end, closes_itself)) = opaque_tag(b, at)? {
             out.push_str(&t[copied..at]);
             out.push(OPAQUE);
             i = if closes_itself {
@@ -254,9 +295,9 @@ fn scan(t: &str, each: &mut Each<'_>) -> Result<(), ScanError> {
                 i += 2;
             }
             (b'}', Some(b'}')) if !stack.is_empty() => {
-                // Links left open inside the template end with it.
-                while stack.last() == Some(&Open::Link) {
-                    stack.pop();
+                // A link still open would hide the template's `|` and `=`: refused.
+                if stack.last() == Some(&Open::Link) {
+                    return Err(ScanError::UnclosedLink);
                 }
                 stack.pop();
                 if stack.is_empty() {

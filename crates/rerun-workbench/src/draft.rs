@@ -135,10 +135,11 @@ pub fn apis(a: &ApiFacts) -> (BTreeSet<Api>, Vec<String>) {
     (set, other)
 }
 
-/// The API of the placeholder: exactly one API on the page, and one a Topo can name.
+/// The API of the placeholder: exactly one API on the page, one a Topo can name, and every
+/// version list of the page read.
 pub fn stub_api(a: &ApiFacts) -> Option<Api> {
     let (set, other) = apis(a);
-    match (set.len(), other.is_empty()) {
+    match (set.len(), other.is_empty() && a.unclear.is_empty()) {
         (1, true) => set.into_iter().next(),
         _ => None,
     }
@@ -209,8 +210,7 @@ pub fn render(d: &Draft) -> String {
         }
         Exes::Local(v) => {
             o.push_str(
-                "    # hashes from a local copy of the game: verify its files in Steam first
-",
+                "    # hashes from a local copy of the game: verify its files in Steam first\n",
             );
             for e in v {
                 let _ = writeln!(
@@ -303,7 +303,10 @@ pub fn self_check(text: &str, d: &Draft) -> Result<Topo, String> {
 
 fn api_facts_line(a: &ApiFacts, bits: (Option<bool>, Option<bool>)) -> String {
     let mut parts = Vec::new();
-    if !a.d3d.is_empty() {
+    let unclear = |name: &str| a.unclear.contains(&name);
+    if unclear("Direct3D") {
+        parts.push("Direct3D (version not read)".to_owned());
+    } else if !a.d3d.is_empty() {
         let v: Vec<String> = a.d3d.iter().map(u8::to_string).collect();
         parts.push(format!("Direct3D {}", v.join(", ")));
     }
@@ -313,7 +316,9 @@ fn api_facts_line(a: &ApiFacts, bits: (Option<bool>, Option<bool>)) -> String {
         (a.vulkan, "Vulkan"),
         (a.glide, "Glide"),
     ] {
-        if on {
+        if unclear(name) {
+            parts.push(format!("{name} (version not read)"));
+        } else if on {
             parts.push(name.into());
         }
     }
@@ -337,7 +342,9 @@ pub fn build(req: &Request, facts: &GameFacts, fixes: &Fixes) -> Result<Draft, S
     let steam_appid = match (&req.target, facts.steam.as_slice()) {
         (Target::SteamApp(n), ids) => {
             if !ids.contains(n) {
-                return Err(format!("{url} does not name Steam app {n}"));
+                return Err(format!(
+                    "{url} does not name Steam app {n} (the app ID lookup led elsewhere): pass the page with --page"
+                ));
             }
             Some(*n)
         }
@@ -480,4 +487,4 @@ pub fn write_into(dir: &Path, d: &Draft, text: &str) -> Result<PathBuf, String> 
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

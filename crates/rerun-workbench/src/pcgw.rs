@@ -144,15 +144,19 @@ pub fn encode(s: &str, keep: &[u8]) -> String {
     out
 }
 
-/// Decodes `%XX` (bounded by the input); `None` for a broken escape or non-UTF-8.
+/// Decodes `%XX` (bounded by the input); `None` for a broken escape (anything but two hex
+/// digits after `%`, so no sign `from_str_radix` would take) or non-UTF-8.
 fn decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' {
-            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
+            let hex = b.get(i + 1..i + 3)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
             i += 3;
         } else {
             out.push(b[i]);
@@ -175,6 +179,9 @@ pub struct ApiFacts {
     pub vulkan: bool,
     /// Glide.
     pub glide: bool,
+    /// The APIs whose version list holds an item that is neither a version nor `true`/`false`
+    /// (for Direct3D also `true`): named, but not read; no placeholder executable then.
+    pub unclear: Vec<&'static str>,
 }
 
 /// What a page says about the game, read from its wikitext.
@@ -402,19 +409,34 @@ fn major(s: &str) -> Option<u8> {
         .flatten()
 }
 
-/// The Direct3D majors of a value; items that are no version are not counted.
-fn d3d(v: &str) -> Result<Vec<u8>, PcgwError> {
-    let mut out: Vec<u8> = items(v)?.into_iter().filter_map(major).collect();
+/// The Direct3D majors of a value, and whether an item was neither a version nor `false`
+/// (`true`, `9Ex`, `9.0C`, markup: the list is not read).
+fn d3d(v: &str) -> Result<(Vec<u8>, bool), PcgwError> {
+    let mut out = Vec::new();
+    let mut unclear = false;
+    for s in items(v)? {
+        match major(s) {
+            Some(m) => out.push(m),
+            None => unclear |= s != "false",
+        }
+    }
     out.sort_unstable();
     out.dedup();
-    Ok(out)
+    Ok((out, unclear))
 }
 
-/// A version list that names at least one version (or `true`).
-fn listed(v: &str) -> Result<bool, PcgwError> {
-    Ok(items(v)?
-        .into_iter()
-        .any(|s| s == "true" || major(s).is_some()))
+/// Whether a version list names the API (a version or `true`), and whether an item was
+/// neither a version nor `true`/`false` (the list is not read).
+fn listed(v: &str) -> Result<(bool, bool), PcgwError> {
+    let (mut named, mut unclear) = (false, false);
+    for s in items(v)? {
+        if s == "true" || major(s).is_some() {
+            named = true;
+        } else if s != "false" {
+            unclear = true;
+        }
+    }
+    Ok((named, unclear))
 }
 
 fn flag(v: Option<&str>) -> Option<bool> {
@@ -468,13 +490,30 @@ pub fn parse_page(body: &[u8], asked: &PageName) -> Result<(GameFacts, Fixes), P
         }
         Some(v) => {
             let get = |i: usize| v[i].as_deref().unwrap_or("");
+            let mut unclear = Vec::new();
+            let (d3d, d3d_unclear) = d3d(get(0))?;
+            if d3d_unclear {
+                unclear.push("Direct3D");
+            }
+            let mut list = |i: usize, name: &'static str| -> Result<bool, PcgwError> {
+                let (named, not_read) = listed(get(i))?;
+                if not_read {
+                    unclear.push(name);
+                }
+                Ok(named)
+            };
+            let ddraw = list(1, "DirectDraw")?;
+            let opengl = list(2, "OpenGL")?;
+            let glide = list(3, "Glide")?;
+            let vulkan = list(4, "Vulkan")?;
             (
                 Some(ApiFacts {
-                    d3d: d3d(get(0))?,
-                    ddraw: listed(get(1))?,
-                    opengl: listed(get(2))?,
-                    glide: listed(get(3))?,
-                    vulkan: listed(get(4))?,
+                    d3d,
+                    ddraw,
+                    opengl,
+                    glide,
+                    vulkan,
+                    unclear,
                 }),
                 (flag(v[5].as_deref()), flag(v[6].as_deref())),
             )

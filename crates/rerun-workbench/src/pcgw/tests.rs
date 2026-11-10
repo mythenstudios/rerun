@@ -13,6 +13,7 @@ pub(crate) const QUEST: &[u8] =
     include_bytes!("../../../../tests/fixtures/pcgw/invented-quest.json");
 
 pub(crate) const RACER_URL: &str = "https://www.pcgamingwiki.com/w/api.php?action=parse&format=json&formatversion=2&prop=wikitext%7Csections&page=Invented_Racer_2";
+pub(crate) const QUEST_URL: &str = "https://www.pcgamingwiki.com/w/api.php?action=parse&format=json&formatversion=2&prop=wikitext%7Csections&page=Invented_Quest%3A_Gold_Edition";
 pub(crate) const RACER_LOOKUP: &str = "https://www.pcgamingwiki.com/api/appid.php?appid=1234560";
 
 fn page(s: &str) -> PageName {
@@ -128,6 +129,9 @@ fn t1_the_location_must_be_a_page_of_the_wiki() {
         "https://www.pcgamingwiki.com/wiki/A%E2%80%AEb",
         "https://www.pcgamingwiki.com/wiki/A%FF",
         "https://www.pcgamingwiki.com/wiki/A%2",
+        "https://www.pcgamingwiki.com/wiki/A%+F",
+        "https://www.pcgamingwiki.com/wiki/A%-1",
+        "https://www.pcgamingwiki.com/wiki/A% F",
         "https://www.pcgamingwiki.com/wiki/A%zz",
         "/wiki/A",
     ] {
@@ -216,18 +220,29 @@ fn the_quest_facts() {
 
 #[test]
 fn version_items() {
-    for (v, want) in [
-        ("9.0c, 10, 10.1", vec![9, 10]),
-        ("11, 9", vec![9, 11]),
-        ("true", vec![]),
-        ("12, 7, 5", vec![5, 7, 12]),
-        ("9.0cc, 9..1, .9, 999, x9, 9x", vec![]),
-        ("", vec![]),
+    for (v, want, unclear) in [
+        ("9.0c, 10, 10.1", vec![9, 10], false),
+        ("10.1", vec![10], false),
+        ("11.1", vec![11], false),
+        ("11, 9", vec![9, 11], false),
+        ("12, 7, 5", vec![5, 7, 12], false),
+        ("false", vec![], false),
+        ("", vec![], false),
+        // Not a version: the list is not read (review, senior-dev 1).
+        ("true", vec![], true),
+        ("9Ex", vec![], true),
+        ("9.0C", vec![], true),
+        ("9, {{note}}", vec![9], true),
+        ("9.0cc, 9..1, .9, 999, x9, 9x", vec![], true),
     ] {
-        assert_eq!(d3d(v).unwrap(), want, "{v}");
+        assert_eq!(d3d(v).unwrap(), (want, unclear), "{v}");
     }
-    assert!(listed("1.1, 2.0").unwrap() && listed("true").unwrap());
-    assert!(!listed("false").unwrap() && !listed("").unwrap() && !listed("n/a").unwrap());
+    assert_eq!(listed("1.1, 2.0").unwrap(), (true, false));
+    assert_eq!(listed("true").unwrap(), (true, false));
+    assert_eq!(listed("false").unwrap(), (false, false));
+    assert_eq!(listed("").unwrap(), (false, false));
+    assert_eq!(listed("n/a").unwrap(), (false, true));
+    assert_eq!(listed("true, ES").unwrap(), (true, true));
     assert_eq!(steam_ids("1, 2, 1").unwrap(), [1, 2]);
     for bad in ["0", "x", "4294967296", "\u{FF11}", "1 2", "-1", "+1"] {
         assert!(steam_ids(bad).is_err(), "{bad}");
@@ -238,7 +253,7 @@ fn version_items() {
 
 // ---------- T3 ----------
 
-fn with_wikitext(wt: &str) -> Vec<u8> {
+pub(crate) fn with_wikitext(wt: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "parse": { "title": "Invented Racer 2", "pageid": 1, "sections": [], "wikitext": wt }
     }))
@@ -434,5 +449,18 @@ fn t4_every_prefix_and_seeded_changes_never_panic() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn an_unread_version_list_is_named() {
+    for d3d in ["true", "9Ex", "9.0C"] {
+        let wt = format!(
+            "{{{{Infobox game|steam appid=1234560}}}}{{{{API|direct3d versions = {d3d}|opengl versions = true}}}}"
+        );
+        let (f, _) = parse_page(&with_wikitext(&wt), &racer()).unwrap();
+        let api = f.api.unwrap();
+        assert_eq!(api.unclear, ["Direct3D"], "{d3d}");
+        assert!(api.opengl && api.d3d.is_empty(), "{d3d}");
     }
 }
