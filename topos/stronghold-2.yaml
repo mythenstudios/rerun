@@ -1,0 +1,33 @@
+# DRAFT (P4-13): facts only. No documented multi-core problem for this game has a
+# source yet, so there is no CPU variant (a rule without a reported problem would be a guess).
+# Candidate for a DEV test (S1): reproduce a crash/hang/slowdown with all 32 threads, then
+# retry with `direct` + {max_threads, smt: false}.
+format: 1
+id: stronghold-2
+title: "Stronghold 2"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 40960
+  exes:
+    # SHA-1/SHA-256 of an unmodified Steam copy (rerun-workbench draft --hashes-from, P4-13)
+    - { path: "Stronghold2.exe", sha1: "4E0F4D29CD5CB553B9CDB6D2149B7C37325281EB", sha256: "F3CCDF9BB41158202DFFC000E5F2036A82F4C1CE8C5C89462F6140000F32D34B", api: d3d9 }
+
+launch:
+  chain: [steam]
+  method: direct
+  start: "FFLauncher.exe"      # Steam's launch entry (a launcher), observed in P3 (P3 acceptance, D-W1)
+  # no priority: a launcher does not pass a priority class on to the game (D-W1)
+
+issues: []                     # TODO: a sourced problem with a measurable before/after is needed (L3)
+
+tips:
+  launch_options: []
+  notes:
+    - text: "The Steam edition has its own patch line (it reports 1.5 Steam), separate from the retail patches."
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Stronghold_2#Patches" }
+
+links:
+  pcgw: "Stronghold_2"
