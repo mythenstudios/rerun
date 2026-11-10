@@ -49,7 +49,7 @@ The FFI lives in one module per binary: `rerun-core::sys::win::cpu` now (size qu
 
 | Case | Detection | Rule effect |
 |---|---|---|
-| SMT | several `LogicalCpu` with the same `core` | `smt: off` → one thread per core |
+| SMT (Intel markets it as Hyper-Threading; Windows reports both as `LTP_PC_SMT`) | several `LogicalCpu` with the same `core` | `smt: off` → one thread per core, on Intel and AMD alike |
 | Multiple CCDs (Ryzen 9, Threadripper) | several `llc` groups | `single_l3: true` → all threads from one group |
 | X3D with 2 CCDs | `llcs` sizes unequal | `prefer_l3: largest` → V-Cache CCD |
 | Intel hybrid (P/E) | several `efficiency_class` | `prefer: performance` → highest class |
