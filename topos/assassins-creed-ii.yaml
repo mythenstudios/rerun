@@ -1,0 +1,41 @@
+# Draft from PCGamingWiki (rerun-workbench draft): facts and links only.
+# Curate it (docs/02-topo-format.md) before it leaves status draft.
+# Page: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II
+format: 1
+id: "assassins-creed-ii"
+title: "Assassin's Creed II"
+status: "draft"
+rev: 1
+match:
+  steam_appid: 33230
+  exes:
+    # hashes from a local copy of the game: verify its files in Steam first
+    - { path: "AssassinsCreedIIGame.exe", sha1: "FDFDD9B80641DFE9C4AB6A63BD5247A2BDD2BE26", sha256: "A4BA454B0E2A9190A42DB631574B694CC0DBDCEC750106C1B0364B70A6E4D17E", api: "d3d9" }
+    # UPlayBrowser.exe (also in the folder) is the Ubisoft browser helper, not the game: left out
+# hashes from a local copy: a modified copy (mods, patches) gives wrong hashes
+# PCGW API: Direct3D 9; OpenGL; 32-bit exe yes, 64-bit exe no
+# TODO: PCGW: field of view hackable - https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Video
+# TODO: PCGW: 120 FPS hackable - https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Video
+# TODO launch: chain, method and start (docs/02-topo-format.md, launch.start); never guessed.
+issues: []
+# TODO issue (stutter, excessive load on CPU 0 with Vsync): the known fix is an affinity without
+# CPU 0 (PCGW "Stuttering and/or screen tearing with Vsync on or off"). The CPU rule cannot express
+# "all logical processors except CPU 0" yet (format extension planned), so no cpu variant is written.
+# Planned variant when it exists: id exclude-cpu0, kind fix, unverified, launch.method direct,
+# steps: [{ cpu: <exclude CPU 0> }], source pcgw #Stuttering_and%2For_screen_tearing_with_Vsync_on_or_off.
+# Not taken: a YouTube video as the only source of the "-USEALLAVAILABLECORES -high" launch options
+# (PCGW "How to stop the stuttering and low FPS"); needs a source of an allowed type.
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Patches
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#EaglePatchAC2
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Final_Sequence_music_doesn't_play_when_you_have_high_notoriety
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#!!!Game.Startup.AwaitingFirstOsiConnection!!!_error_when_starting_story_mode
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Ubisoft_Connect_runs_InstallShield_installer_from_the_disc_when_trying_to_update
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#How_to_stop_the_stuttering_and_low_FPS
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Stuttering_and%2For_screen_tearing_with_Vsync_on_or_off
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Lights_shine_through_walls_and_other_objects
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Game_freezes_when_given_the_hidden_blade
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#%22A_Ubisoft_service_is_unavailable_at_the_moment%22_error
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Game_hangs_and_screen_flashes_repeatedly_on_launch
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#No_background_music
+links:
+  pcgw: "Assassin's_Creed_II"
