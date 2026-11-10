@@ -1263,3 +1263,98 @@ fn sandbox_package_dxvk_and_asi_loader_round_trip() {
     leftovers(&asi);
     note("sandbox_package_dxvk_and_asi_loader_round_trip: passed, cache and packages removed");
 }
+
+// ---------- laa_patch (P4-10) ----------
+
+/// Starts `exe` and returns its exit code and first output line.
+fn run_stub(exe: &Path) -> (i32, String) {
+    let o = Command::new(exe)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("cannot start {}: {e}", exe.display()));
+    let line = String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    (o.status.code().unwrap_or(-1), line)
+}
+
+/// `laa_patch` on real Windows (P4-10 [SB]): the repository's own 32-bit test program
+/// (`tests/support/laa_stub.rs`, staged next to this test binary by `sandbox-launch.ps1`; linked
+/// without the flag and with a stored checksum) is copied into the game folder, started (16: no
+/// large address space), patched through the real `WinSystem` (the flag set, the checksum as
+/// `CheckSumMappedFile` computes it), started again (32: Windows gave it the large address
+/// space), reverted bit for bit and started a third time (16). `ci-sandbox.ps1` fails pass 1
+/// without its `MEASURED laa_patch` line.
+#[test]
+#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
+fn sandbox_laa_patch_round_trip_starts_the_patched_exe() {
+    sandbox_guard();
+    let w = Sb::new("laa");
+    let stub = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("laa-stub.exe");
+    assert!(
+        stub.exists(),
+        "{} is missing (staged by scripts/sandbox-launch.ps1)",
+        stub.display()
+    );
+    let exe = w.game.join("Game32.exe");
+    std::fs::copy(&stub, &exe).unwrap();
+    let original = read(&exe);
+    let (before_code, before_line) = run_stub(&exe);
+    assert_eq!(before_code, 16, "before the patch: {before_line}");
+    let pe = |b: &[u8]| {
+        let p = crate::detect::pe::Pe::parse(
+            std::io::Cursor::new(b.to_vec()),
+            &crate::detect::pe::Limits::DEFAULT,
+        )
+        .unwrap();
+        (p.headers().large_address_aware(), p.image_fields().checksum)
+    };
+    let (laa, stored) = pe(&original);
+    assert!(!laa && stored != 0, "the stub has no flag and a checksum");
+
+    let before = w.snap(vec![]);
+    let step = Step::LaaPatch(crate::prim::LaaPatchSpec {
+        exe: rel("Game32.exe"),
+        sha256: Sha256::digest(&original).into(),
+    });
+    let h = w.plan_steps(std::slice::from_ref(&step));
+    let t = w.apply_ok(&h);
+    let patched = read(&exe);
+    let (laa, new_sum) = pe(&patched);
+    assert!(laa, "the flag is set");
+    let (w_stored, w_computed) = super::checksum::windows_of(&patched).unwrap();
+    assert_eq!(
+        (w_stored, w_computed),
+        (new_sum, new_sum),
+        "CheckSumMappedFile agrees"
+    );
+    let changed = (0..original.len())
+        .filter(|&i| original[i] != patched[i])
+        .count();
+    let (after_code, after_line) = run_stub(&exe);
+    assert_eq!(after_code, 32, "after the patch: {after_line}");
+    let v = w.with(|cx, _| verify(cx, &t)).unwrap();
+    assert!(v.ops.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    assert_eq!(read(&exe), original, "bit for bit");
+    let after = w.snap(vec![]);
+    assert!(before == after, "{:#?}", before.diff(&after));
+    let (again_code, again_line) = run_stub(&exe);
+    assert_eq!(again_code, 16, "after the revert: {again_line}");
+    note(&format!(
+        "MEASURED laa_patch: {} bytes, {changed} bytes changed, checksum {stored:#x} -> \
+         {new_sum:#x} (CheckSumMappedFile agrees); exit before {before_code} ({before_line}), \
+         patched {after_code} ({after_line}), reverted {again_code}; reverted bit for bit",
+        original.len()
+    ));
+}

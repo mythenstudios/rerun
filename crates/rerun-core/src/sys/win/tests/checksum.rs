@@ -16,7 +16,7 @@ use crate::detect::pe::layout as l;
 use crate::detect::pe::testfx::{Builder, put32};
 
 /// `(stored, computed)` as `CheckSumMappedFile` reports them for `image`; `None` if it fails.
-fn windows_of(image: &[u8]) -> Option<(u32, u32)> {
+pub(super) fn windows_of(image: &[u8]) -> Option<(u32, u32)> {
     let len = u32::try_from(image.len()).ok()?;
     // One spare zero byte: for an odd length the function reads the second byte of the last
     // word past the end (it sums `(len + 1) / 2` words, as a mapped view allows).

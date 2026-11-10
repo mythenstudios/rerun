@@ -62,7 +62,7 @@ Section 'stage binaries and scripts (C:\sandbox)'
 # target\sandbox\bin (the builds of the previous workflow steps are reused from the cache).
 & (Join-Path $PSScriptRoot 'sandbox-launch.ps1') -StageOnly
 $staged = Join-Path $repo 'target\sandbox\bin'
-foreach ($f in 'rerun-core-tests.exe', 'rerun.exe', 'rerun-launch.exe', 'vstore-stub.exe') {
+foreach ($f in 'rerun-core-tests.exe', 'rerun.exe', 'rerun-launch.exe', 'vstore-stub.exe', 'laa-stub.exe') {
     if (-not (Test-Path -LiteralPath (Join-Path $staged $f))) { throw "not staged: $f" }
 }
 New-Item -ItemType Directory -Force -Path "$sb\scripts", "$sb\bin", "$sb\out\nonelevated", "$sb\out\elevated", $game | Out-Null
@@ -248,6 +248,16 @@ if (-not $r1) {
     }
     if ($pk.Count -eq 0) { Fail 'pass 1: the package round trip did not run or measured nothing (no MEASURED package line in sandbox-test.log)' }
     else { $pk | ForEach-Object { Write-Host "::notice::$_" } }
+
+    # P4-10: laa_patch of the repository's own 32-bit test program (tests\support\laa_stub.rs):
+    # started before the patch, after it and after the revert, it reports whether Windows gave it
+    # the large address space (sys::win::tests::sandbox, the same run, as the standard user).
+    $la = @()
+    if (Test-Path -LiteralPath "$out1\sandbox-test.log") {
+        $la = @(Get-Content -LiteralPath "$out1\sandbox-test.log" | Where-Object { $_ -like 'MEASURED laa_patch*' })
+    }
+    if ($la.Count -eq 0) { Fail 'pass 1: the laa_patch round trip did not run or measured nothing (no MEASURED laa_patch line in sandbox-test.log)' }
+    else { $la | ForEach-Object { Write-Host "::notice::$_" } }
 
     # B12 b (ADR 0023): firewall rules readable by the standard user? A measurement, never a failure.
     $fw = if ($r1.cli) { $r1.cli.firewall_read } else { $null }

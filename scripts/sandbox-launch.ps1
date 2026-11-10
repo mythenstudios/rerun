@@ -54,6 +54,16 @@ $ErrorActionPreference = 'Continue'
 $exit = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 if ($exit -ne 0 -or -not (Test-Path -LiteralPath $stubExe)) { throw "building the VirtualStore test program failed (run: rustc --edition 2024 --target i686-pc-windows-msvc -o $stubExe $stubSrc)" }
+# The 32-bit test program of the laa_patch case (P4-10), from the source in the repo: i686, linked
+# with /LARGEADDRESSAWARE:NO (rustc sets the flag for i686 by default) and /RELEASE (a stored
+# image checksum, so the case covers the checksum update). Into target\sandbox\stub as well.
+$laaSrc = Join-Path $repo 'tests\support\laa_stub.rs'
+$laaExe = Join-Path $root 'stub\laa-stub.exe'
+$ErrorActionPreference = 'Continue'
+& rustc --edition 2024 --target i686-pc-windows-msvc -C opt-level=s -C link-arg=/LARGEADDRESSAWARE:NO -C link-arg=/RELEASE -o $laaExe $laaSrc 2>$null | Out-Null
+$exit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($exit -ne 0 -or -not (Test-Path -LiteralPath $laaExe)) { throw "building the laa_patch test program failed (run: rustc --edition 2024 --target i686-pc-windows-msvc -C link-arg=/LARGEADDRESSAWARE:NO -C link-arg=/RELEASE -o $laaExe $laaSrc)" }
 $cliExe = Join-Path $repo 'target\release\rerun.exe'
 $shimExe = Join-Path $repo 'target\release\rerun-launch.exe'
 if (-not (Test-Path -LiteralPath $cliExe)) { throw "release rerun.exe missing: $cliExe" }
@@ -80,6 +90,8 @@ Copy-Item -LiteralPath $shimExe -Destination (Join-Path $bin 'rerun-launch.exe')
 Write-Host "staged $shimExe -> $bin\rerun-launch.exe"
 Copy-Item -LiteralPath $stubExe -Destination (Join-Path $bin 'vstore-stub.exe') -Force
 Write-Host "staged $stubExe -> $bin\vstore-stub.exe"
+Copy-Item -LiteralPath $laaExe -Destination (Join-Path $bin 'laa-stub.exe') -Force
+Write-Host "staged $laaExe -> $bin\laa-stub.exe"
 if (Test-Path -LiteralPath (Join-Path $tools 'Procmon64.exe')) { Write-Host 'Procmon64.exe found: the probes will use it' }
 if ($StageOnly) { return }
 
