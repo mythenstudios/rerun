@@ -17,8 +17,8 @@
 //!    `<canonical LocalAppData>\Rerun` on the same volume (else [`RootError::Escaped`]).
 //!
 //! Below it, [`AppDir::sub`] and [`AppDir::sub_write`] open `journal`, `plans`,
-//! `packages` and `index` (ADR 0024), and `launch` read side only, the same way, one
-//! directory at a time;
+//! `packages`, `index` (ADR 0024), `elevate` (ADR 0023) and `cache` (ADR 0025), and `launch`
+//! read side only, the same way, one directory at a time;
 //! [`AppDir::profiles`] opens `profiles` as a [`ProfilesDir`], the root of a plan's launch
 //! profile ops (P3-3), and checks that its final path is exactly `<AppDir>\profiles`.
 //!
@@ -63,6 +63,9 @@ pub(crate) enum AppSub {
     /// `elevate`: the request files of the elevated helper (ADR 0023 §4, P4-2d), written
     /// under the journal lock and never read back by the CLI.
     Elevate,
+    /// `cache`: downloaded package archives by their SHA-256 (ADR 0025, P4-6), hashed again
+    /// before every use.
+    Cache,
 }
 
 /// Name of the launch profiles folder (ADR 0022 D2) below [`AppDir`]: deliberately no
@@ -79,6 +82,7 @@ impl AppSub {
             Self::Launch => "launch",
             Self::Index => "index",
             Self::Elevate => "elevate",
+            Self::Cache => "cache",
         };
         match RelPath::from_segment(name) {
             Ok(p) => p,

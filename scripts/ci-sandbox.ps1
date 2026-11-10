@@ -6,8 +6,8 @@
 # Why two passes: the runner's administrator is elevated, and Rerun refuses every apply, revert
 # and forget in an elevated process (S2) and plan in the CLI (user decision E3). So
 #  1. non-elevated pass: a freshly created local standard user `rerunci` runs
-#     `sandbox-run.ps1 -Ci` (the Rust sandbox tests, the CLI round trip, launch_method direct
-#     and watch). A
+#     `sandbox-run.ps1 -Ci` (the Rust sandbox tests, among them the real package download of
+#     P4-6, the CLI round trip, launch_method direct and watch). A
 #     standard user cannot hold an elevated token, so no trick is needed, and its profile and
 #     HKCU are new, like a fresh Sandbox. A restricted token of the runner's administrator
 #     (`runas /trustlevel`, SAFER) was rejected: in the Sandbox it kept the high integrity
@@ -229,6 +229,15 @@ if (-not $r1) {
             default { Fail "VirtualStore: the case failed (verdict $($vs.verdict)): $($vs.detail)" }
         }
     }
+
+    # P4-6 (ADR 0025): the real package download (sys::win::tests::http, a sandbox_ test of the run
+    # above, as the standard user): GitHub release asset -> redirect -> cache, the hash measured.
+    $dl = @()
+    if (Test-Path -LiteralPath "$out1\sandbox-test.log") {
+        $dl = @(Get-Content -LiteralPath "$out1\sandbox-test.log" | Where-Object { $_ -like 'MEASURED download*' })
+    }
+    if ($dl.Count -eq 0) { Fail 'pass 1: the package download test did not run or measured nothing (no MEASURED download line in sandbox-test.log)' }
+    else { $dl | ForEach-Object { Write-Host "::notice::$_" } }
 
     # B12 b (ADR 0023): firewall rules readable by the standard user? A measurement, never a failure.
     $fw = if ($r1.cli) { $r1.cli.firewall_read } else { $null }

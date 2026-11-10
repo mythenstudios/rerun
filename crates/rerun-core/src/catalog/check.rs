@@ -76,11 +76,6 @@ fn deceptive(c: char) -> bool {
         | '\u{FF01}'..='\u{FF5E}' | '\u{A5}' | '\u{20A9}' | '\u{2215}' | '\u{2044}' | '\u{29F8}')
 }
 
-/// `\s` of ECMA-262.
-fn space(c: char) -> bool {
-    c.is_whitespace() || c == '\u{FEFF}'
-}
-
 fn chars_between(s: &str, min: usize, max: usize) -> bool {
     (min..=max).contains(&s.chars().count())
 }
@@ -124,66 +119,9 @@ fn status_rule<T: serde::Serialize>(entry: &T, status: Status, rules: Rules) -> 
 
 // ---------- URLs ----------
 
-/// One host label: `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`.
-fn label(l: &str) -> bool {
-    let b = l.as_bytes();
-    let inner = |c: &u8| c.is_ascii_lowercase() || c.is_ascii_digit();
-    (1..=63).contains(&b.len())
-        && b.first().is_some_and(inner)
-        && b.last().is_some_and(inner)
-        && b.iter().all(|c| inner(c) || *c == b'-')
-}
-
-/// A host of `$defs/httpsUrl`: labels, then a TLD of 2 to 63 letters.
-fn host(h: &str) -> bool {
-    let mut parts: Vec<&str> = h.split('.').collect();
-    let Some(tld) = parts.pop() else { return false };
-    !parts.is_empty()
-        && (2..=63).contains(&tld.len())
-        && tld.bytes().all(|c| c.is_ascii_lowercase())
-        && parts.iter().all(|l| label(l))
-}
-
-/// Splits `https://<host><rest>`; `rest` is empty or starts with `/`.
-fn split_https(u: &str) -> Option<(&str, &str)> {
-    let r = u.strip_prefix("https://")?;
-    let end = r.find('/').unwrap_or(r.len());
-    Some((&r[..end], &r[end..]))
-}
-
-/// `$defs/httpsUrl`: `https://`, a plain host, an optional path without spaces or `\`.
-pub fn https_url(u: &str) -> bool {
-    u.chars().count() <= 2048
-        && split_https(u)
-            .is_some_and(|(h, rest)| host(h) && rest.chars().all(|c| !space(c) && c != '\\'))
-}
-
-/// `owner/repo` segments `[A-Za-z0-9_.-]+`.
-fn repo_seg(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
-}
-
-const FORGES: [&str; 3] = ["github.com", "gitlab.com", "codeberg.org"];
-
-/// `https://<forge>/<owner>/<repo>` and the rest after it.
-fn forge(u: &str) -> Option<(&str, &str, &str)> {
-    let (h, rest) = split_https(u)?;
-    if !FORGES.contains(&h) {
-        return None;
-    }
-    let rest = rest.strip_prefix('/')?;
-    let (owner, rest) = rest.split_once('/')?;
-    let end = rest.find('/').unwrap_or(rest.len());
-    let (repo, tail) = (&rest[..end], &rest[end..]);
-    (repo_seg(owner) && repo_seg(repo)).then_some((owner, repo, tail))
-}
-
-/// `$defs/repoUrl`: `https://<forge>/<owner>/<repo>` with an optional `/`.
-pub fn repo_url(u: &str) -> bool {
-    forge(u).is_some_and(|(_, _, tail)| tail.is_empty() || tail == "/")
-}
+// The URL grammar lives in `policy::url` (one rule for the loader and the downloader, ADR 0025).
+use crate::policy::url::{belongs, forge, space, split_https};
+pub use crate::policy::url::{https_url, release_download, repo_url};
 
 fn digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit())
@@ -861,56 +799,14 @@ fn option(o: &PackageOption, at: &str) -> R {
     Ok(())
 }
 
-/// The path part of a forge release download.
-const RELEASES: &str = "/releases/download/";
-
-/// After [`RELEASES`]: exactly `<tag>/<file>`, each of `[A-Za-z0-9._+-]`, neither `.` nor `..`
-/// (so no `%`, `?`, `#`, no further `/`).
-fn tag_and_file(rest: &str) -> bool {
-    let seg = |s: &str| {
-        !s.is_empty()
-            && s != "."
-            && s != ".."
-            && s.bytes()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'+' | b'-'))
-    };
-    rest.split_once('/')
-        .is_some_and(|(tag, file)| seg(tag) && seg(file))
-}
-
-/// A download URL that names a release download must be exactly
-/// `https://<forge>/<owner>/<repo>/releases/download/<tag>/<file>` (schema
-/// `$defs/downloadUrl`); any other https URL is left to [`provenance`].
-pub fn release_download(u: &str) -> bool {
-    let Some(at) = u.find(RELEASES) else {
-        return true;
-    };
-    repo_url(&u[..at]) && tag_and_file(&u[at + RELEASES.len()..])
-}
-
 /// docs/02 "Provenance": a download belongs to the releases of `source.repo` or to the host of
-/// `source.page`.
+/// `source.page` ([`belongs`]).
 fn provenance(p: &Package) -> R {
     let mut urls: Vec<&str> = p.source.release.iter().map(String::as_str).collect();
     urls.extend(p.assets.iter().flatten().map(|a| a.url.as_str()));
-    let page_host = p
-        .source
-        .page
-        .as_deref()
-        .and_then(split_https)
-        .map(|(h, _)| h);
     for u in urls.into_iter().filter(|u| *u != TODO) {
-        let from_repo = p.source.repo.as_deref().is_some_and(|r| {
-            u.strip_prefix(r.trim_end_matches('/'))
-                .and_then(|rest| rest.strip_prefix(RELEASES))
-                .is_some_and(tag_and_file)
-        });
-        // A release download counts only for its own repository, never by the host of a page
-        // (a page on github.com would otherwise admit any repository there).
-        let from_page = !u.contains(RELEASES)
-            && page_host.is_some_and(|h| split_https(u).is_some_and(|(uh, _)| uh == h));
         ensure(
-            from_repo || from_page,
+            belongs(u, p.source.repo.as_deref(), p.source.page.as_deref()),
             "source",
             "a download is not from the original source (releases of source.repo or the host of source.page)",
         )?;

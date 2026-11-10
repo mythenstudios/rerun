@@ -42,6 +42,7 @@ mod dev_firewall;
 mod elevation;
 mod exec;
 mod firewall;
+mod http;
 mod sandbox;
 
 /// A [`TestRoot`] for the smoke tests; `.0` is its verbatim path (`\\?\X:\…`), as

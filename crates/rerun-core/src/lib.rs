@@ -18,6 +18,7 @@
 //! - [`catalog`]: the signed index and the typed Topos and packages (ADR 0024, ADR 0005).
 //! - [`topo`]: the Topo engine (P4-4): match, `when`, variants, anti-cheat rule, plan.
 //! - [`elevate`]: the elevated helper's side (ADR 0023): its exit code and `serve`.
+//! - [`pkg`]: packages: the download into the cache (ADR 0025).
 //!
 //! See `docs/01-architecture.md`, ADR 0004, ADR 0007 and ADR 0011.
 
@@ -30,6 +31,7 @@ mod fold;
 pub mod hw;
 pub mod journal;
 pub mod path;
+pub mod pkg;
 pub mod plan;
 pub mod policy;
 pub mod prim;

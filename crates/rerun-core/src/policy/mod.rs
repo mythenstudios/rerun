@@ -9,11 +9,14 @@
 //!   §6, P4-5a).
 //! - [`ini`]: the bounded INI editor (ADR 0021): dialect, `edit` and `unedit`.
 //! - [`registry`]: the registry allowlist and the only way to the registry write side (ADR 0018).
+//! - [`url`]: the URL rules of the loader and the downloader: form, provenance, redirects
+//!   (docs/02, ADR 0024, ADR 0025).
 
 pub mod firewall;
 pub mod ini;
 pub mod registry;
 pub mod root;
+pub mod url;
 
 /// Lexical path rules; see [`crate::path`].
 pub mod path {
