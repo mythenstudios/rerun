@@ -38,6 +38,7 @@ use crate::sys::snapshot::SnapRoot;
 use crate::sys::{Gpu, KnownFolder, KnownFolders, SysErrorKind, System, Topology};
 
 mod app;
+mod dev_firewall;
 mod elevation;
 mod exec;
 mod firewall;

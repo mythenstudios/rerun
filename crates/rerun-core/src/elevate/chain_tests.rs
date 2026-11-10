@@ -548,8 +548,7 @@ fn request_names_have_one_form() {
 
 // ---------- R: the refusal matrix ----------
 
-/// The whole chain passes: the helper reaches step 8 and adds the rule (P4-2d: the fake's write
-/// side; the real helper refuses with `Firewall` until P4-5b).
+/// The whole chain passes: the helper reaches step 8 and adds the rule (the fake's write side).
 #[test]
 fn r_every_step_passes_up_to_the_write() {
     seam(|| {
@@ -567,14 +566,17 @@ fn r_every_step_passes_up_to_the_write() {
         shipped.keys.trusted = crate::catalog::key::release_keys();
         assert_eq!(run_on(&shipped, &at, &sha, 1), refused(Reason::Index));
     });
-    // Without the review seam the same index is no valid index: `firewall_rule` is draft only
-    // until reviewed, so even a test-key helper stops at the index.
+    // Without the review seam: `firewall_rule` is draft only until reviewed. A release build
+    // stops at the index; a `test-key` build (user decision A of 2026-11-10, the [DEV] round
+    // trip) releases it for this index, which the test key signed, and reaches the write.
     let (sys, req) = ready();
     let (at, sha) = write(&sys, &req);
-    assert_eq!(
-        run_on(&Wire::new(&sys), &at, &sha, 1),
-        refused(Reason::Index)
-    );
+    let got = run_on(&Wire::new(&sys), &at, &sha, 1);
+    if crate::catalog::check::TEST_KEY_BUILD {
+        assert_added(&sys, got);
+    } else {
+        assert_eq!(got, refused(Reason::Index));
+    }
 }
 
 /// A request with a direction the helper does not derive (today the only one is `out`, so the

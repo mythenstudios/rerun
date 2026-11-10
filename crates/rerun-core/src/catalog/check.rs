@@ -40,6 +40,12 @@ fn firewall_rule_reviewed() -> bool {
     FIREWALL_RULE_REVIEWED
 }
 
+/// Whether this is a `test-key` build (ADR 0023 §2; never an optimised one, `compile_error!` in
+/// `catalog::key`). Only then can an index signed by the published test key release a
+/// `firewall_rule` step outside a draft (user decision A of 2026-11-10, the [DEV] round trip of
+/// P4-5b): a release build keeps [`FIREWALL_RULE_REVIEWED`] as its only gate.
+pub(crate) const TEST_KEY_BUILD: bool = cfg!(feature = "test-key");
+
 /// Test only: pretends `firewall_rule` is reviewed on this thread (P4-2c chain tests).
 #[cfg(test)]
 pub(crate) mod review_seam {
@@ -272,6 +278,14 @@ fn source(s: &Source, at: &str) -> R {
 
 /// Checks a Topo.
 pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
+    topo_signed(t, rules, false)
+}
+
+/// [`topo`] for an entry of an index the published test key signed when `test_signed`: in a
+/// `test-key` build ([`TEST_KEY_BUILD`]) such an index may hold `firewall_rule` outside a draft
+/// before [`FIREWALL_RULE_REVIEWED`] (user decision A of 2026-11-10); every other rule is the
+/// same, and a release build ignores `test_signed`.
+pub(crate) fn topo_signed(t: &Topo, rules: Rules, test_signed: bool) -> Result<(), RuleError> {
     ensure(
         t.format == super::model::FORMAT,
         "format",
@@ -358,7 +372,7 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
                 let at = format!("{at}.steps[{k}]");
                 step(s, &at)?;
                 if let TopoStep::FirewallRule(f) = s {
-                    firewall_rule(t, f, &format!("{at}.firewall_rule"))?;
+                    firewall_rule(t, f, &format!("{at}.firewall_rule"), test_signed)?;
                 }
             }
             for (k, x) in v.tradeoffs.iter().enumerate() {
@@ -513,9 +527,9 @@ fn step(s: &TopoStep, at: &str) -> R {
 /// `firewall_rule` against its Topo: draft only until reviewed, and the executable is an entry
 /// of `match.exes` in exactly its spelling, with a `sha256` (ADR 0024 "sha256 for elevated anchors", P4 R6: `sha1` alone
 /// never anchors anything elevated; a `TODO` only in a draft, like every `TODO`).
-fn firewall_rule(t: &Topo, f: &FirewallRuleSpec, at: &str) -> R {
+fn firewall_rule(t: &Topo, f: &FirewallRuleSpec, at: &str, test_signed: bool) -> R {
     ensure(
-        firewall_rule_reviewed() || t.status == Status::Draft,
+        firewall_rule_reviewed() || (TEST_KEY_BUILD && test_signed) || t.status == Status::Draft,
         at,
         "draft only until firewall_rule is reviewed (P4-5a)",
     )?;

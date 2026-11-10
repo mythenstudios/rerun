@@ -1,6 +1,7 @@
 # Shared part of the [DEV] helper hand tests (docs/09-testing.md, "Elevated helper on the
 # developer machine"; ADR 0023 section 14): dot-sourced by scripts/dev-helper-sac.ps1,
-# scripts/dev-helper-uac.ps1 and scripts/dev-helper-chain.ps1, never run on its own.
+# scripts/dev-helper-uac.ps1, scripts/dev-helper-chain.ps1 and scripts/dev-helper-firewall.ps1,
+# never run on its own.
 #
 # What it changes on the machine, and only through the two elevated steps below, each started
 # by its full path and named in the window title:
@@ -210,8 +211,10 @@ function Get-AclVerdict($paths) {
 }
 
 # The elevated removal (one prompt, named by $prompt), then the check that the folder is gone.
+# $extra (optional) is more elevated cleanup run first in the same prompt (dev-helper-firewall.ps1:
+# the test's firewall rules); its failure does not stop the folder's removal.
 # Returns 'PASS: ...' or 'FAIL: ...'; never throws (it runs in a `finally`).
-function Remove-Helper($paths, [string]$prompt) {
+function Remove-Helper($paths, [string]$prompt, [string]$extra = '') {
     if ($script:HelperForeign) { return "SKIPPED: $($paths.Dir) existed before the test and is not this test's (a link, not admin-only, other content, or a helper of another build); left alone" }
     if (-not $script:HelperInstalled) {
         # Nothing of this run was installed (the install was not reached, declined or failed):
@@ -222,6 +225,9 @@ function Remove-Helper($paths, [string]$prompt) {
     if (-not (Test-Path -LiteralPath $paths.Dir)) { return "PASS: $($paths.Dir) is gone (nothing to remove)" }
     Title "${prompt}: allow Windows PowerShell to remove Program Files\Rerun again"
     $body = $script:ElevatedPrelude + @"
+try {
+$extra
+} catch { }
 `$ErrorActionPreference = 'Stop'
 `$dir = $(Quote $paths.Dir)
 `$dst = $(Quote $paths.Exe)

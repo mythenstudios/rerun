@@ -609,3 +609,54 @@ fn firewall_rule_needs_a_draft_and_a_sha256_anchor() {
         "never released as a draft"
     );
 }
+
+/// User decision A of 2026-11-10 (P4-5b, the [DEV] round trip): an index signed by the published
+/// test key may hold `firewall_rule` outside a draft, but only in a `test-key` build; a release
+/// build refuses it whoever signed, and `FIREWALL_RULE_REVIEWED` stays the release gate.
+#[test]
+fn only_a_test_key_build_releases_firewall_rule_for_a_test_key_index() {
+    use super::check::{self, FIREWALL_RULE_REVIEWED, Rules, TEST_KEY_BUILD};
+    use super::model::FirewallRuleSpec;
+    use crate::policy::firewall::Direction;
+
+    const { assert!(!FIREWALL_RULE_REVIEWED, "the release gate is still locked") };
+    let mut t = topo("game", "fix-pack");
+    t.issues[0].variants[0].steps = vec![TopoStep::FirewallRule(FirewallRuleSpec {
+        exe: rel("game.exe"),
+        direction: Direction::Out,
+    })];
+    t.status = Status::Active;
+    // Signed by any other key: refused in every build.
+    let e = check::topo_signed(&t, Rules::Release, false).unwrap_err();
+    assert!(e.what.starts_with("draft only"), "{e}");
+    assert!(check::topo(&t, Rules::Release).is_err());
+    // Signed by the test key: released only in a test-key build.
+    assert_eq!(
+        check::topo_signed(&t, Rules::Release, true).is_ok(),
+        TEST_KEY_BUILD
+    );
+    assert_eq!(TEST_KEY_BUILD, cfg!(feature = "test-key"));
+    // Through the index: the test key's signature counts, a foreign key's never.
+    let index = |tt: &Topo| super::Index {
+        format: 1,
+        seq: 1,
+        issued: "2026-11-10T12:00:00Z".to_owned(),
+        topos: vec![tt.clone()],
+        packages: Vec::new(),
+    };
+    assert!(super::check_index_signed(&index(&t), false).is_err());
+    assert_eq!(
+        super::check_index_signed(&index(&t), true).is_ok(),
+        TEST_KEY_BUILD
+    );
+    let bytes = serde_json::to_vec(&index(&t)).unwrap();
+    let foreign = test_key::sign_foreign(&bytes);
+    let v = super::verify(&bytes, &foreign, &[test_key::foreign_public()]).unwrap();
+    assert!(
+        super::Catalog::from_verified(&v).is_err(),
+        "a foreign signer releases nothing"
+    );
+    let ours = test_key::sign(&bytes);
+    let v = super::verify(&bytes, &ours, &[test_key::public()]).unwrap();
+    assert_eq!(super::Catalog::from_verified(&v).is_ok(), TEST_KEY_BUILD);
+}
