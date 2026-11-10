@@ -1365,7 +1365,9 @@ impl fmt::Display for TxnMsg<'_> {
                  touched.",
             ),
             Self::RebindScopeNote => f.write_str(
-                "Only the folder bound now is reverted; a copy of the game elsewhere (a renamed                  old folder, a library removed from Steam while its drive was away) keeps                  Rerun's files.",
+                "Only the folder bound now is reverted; a copy of the game elsewhere (a renamed \
+                 old folder, a library removed from Steam while its drive was away) keeps \
+                 Rerun's files.",
             ),
             Self::RebindPermanentNote => f.write_str(
                 "The binding is permanent: every later revert of this transaction uses the new \

@@ -198,7 +198,8 @@ fn every_ignored_sandbox_test_starts_with_the_guard() {
                 !l.trim_start().starts_with("//") && !l.trim_start().starts_with("const IGNORED");
             assert!(
                 !code || bad.iter().all(|b| !l.contains(b.as_str())),
-                "line {}: use the one ignore attribute with the Sandbox hint, on its own line                  (no conditional ignore, no second attribute on the line)",
+                "line {}: use the one ignore attribute with the Sandbox hint, on its own line \
+                 (no conditional ignore, no second attribute on the line)",
                 i + 1
             );
             continue;

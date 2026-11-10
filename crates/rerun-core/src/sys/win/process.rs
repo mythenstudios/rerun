@@ -207,7 +207,8 @@ pub(super) fn lock_state(name: &str) -> Result<HelperLock, u32> {
     let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
     #[expect(
         clippy::disallowed_methods,
-        reason = "rerun-core's one OpenMutexW call site: the CLI reads the helper's lock (ADR \n                  0023, A4 S8)"
+        reason = "rerun-core's one OpenMutexW call site: the CLI reads the helper's lock (ADR \
+                  0023, A4 S8)"
     )]
     // SAFETY: no security attributes; `bInheritHandle` FALSE; `wide` is a NUL-terminated buffer
     // alive for the call; returns a new handle or null.
