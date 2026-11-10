@@ -25,44 +25,11 @@ use crate::prim::{CompatLayerSpec, CpuRuleSpec, IniSetSpec, RegistrySetSpec};
 /// engine enforces the anti-cheat rule for every system it finds.
 pub const ANTI_CHEAT_RELEASE_REVIEWED: bool = false;
 
-/// Whether a Topo outside a draft may hold a `firewall_rule` step (P4-5a). `false` until the step
-/// is reviewed with the helper chain (P4-2c, P4-5b): the signed index then holds none.
-pub const FIREWALL_RULE_REVIEWED: bool = false;
-
-/// [`FIREWALL_RULE_REVIEWED`], or in this crate's own tests a thread that set the review seam
-/// (`review_seam::firewall_rule`): the elevated helper's chain (P4-2c) needs a signed index
-/// with a `firewall_rule` step before the step is reviewed. Never true in a shipped build.
-fn firewall_rule_reviewed() -> bool {
-    #[cfg(test)]
-    if review_seam::FIREWALL_RULE.with(std::cell::Cell::get) {
-        return true;
-    }
-    FIREWALL_RULE_REVIEWED
-}
-
-/// Whether this is a `test-key` build (ADR 0023 §2; never an optimised one, `compile_error!` in
-/// `catalog::key`). Only then can an index signed by the published test key release a
-/// `firewall_rule` step outside a draft (user decision A of 2026-11-10, the [DEV] round trip of
-/// P4-5b): a release build keeps [`FIREWALL_RULE_REVIEWED`] as its only gate.
-pub(crate) const TEST_KEY_BUILD: bool = cfg!(feature = "test-key");
-
-/// Test only: pretends `firewall_rule` is reviewed on this thread (P4-2c chain tests).
-#[cfg(test)]
-pub(crate) mod review_seam {
-    use std::cell::Cell;
-
-    thread_local! {
-        pub(super) static FIREWALL_RULE: Cell<bool> = const { Cell::new(false) };
-    }
-
-    /// Runs `f` with `firewall_rule` counted as reviewed on this thread.
-    pub(crate) fn firewall_rule<R>(f: impl FnOnce() -> R) -> R {
-        FIREWALL_RULE.with(|c| c.set(true));
-        let r = f();
-        FIREWALL_RULE.with(|c| c.set(false));
-        r
-    }
-}
+/// Whether a Topo outside a draft may hold a `firewall_rule` step (P4-5a). `true` since the
+/// step was reviewed with the helper chain: the [DEV] round trip through the real prompt and the
+/// installed helper passed on 2026-11-10 (P4-5b, ADR 0023 §15), the agreed condition. Setting it
+/// back to `false` makes the step draft only again (the signed index then holds none).
+pub const FIREWALL_RULE_REVIEWED: bool = true;
 
 /// Most executables of `match.exes` (P4-4: each is hashed when the engine reads a game).
 pub const MAX_EXES: usize = 8;
@@ -278,14 +245,6 @@ fn source(s: &Source, at: &str) -> R {
 
 /// Checks a Topo.
 pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
-    topo_signed(t, rules, false)
-}
-
-/// [`topo`] for an entry of an index the published test key signed when `test_signed`: in a
-/// `test-key` build ([`TEST_KEY_BUILD`]) such an index may hold `firewall_rule` outside a draft
-/// before [`FIREWALL_RULE_REVIEWED`] (user decision A of 2026-11-10); every other rule is the
-/// same, and a release build ignores `test_signed`.
-pub(crate) fn topo_signed(t: &Topo, rules: Rules, test_signed: bool) -> Result<(), RuleError> {
     ensure(
         t.format == super::model::FORMAT,
         "format",
@@ -372,7 +331,7 @@ pub(crate) fn topo_signed(t: &Topo, rules: Rules, test_signed: bool) -> Result<(
                 let at = format!("{at}.steps[{k}]");
                 step(s, &at)?;
                 if let TopoStep::FirewallRule(f) = s {
-                    firewall_rule(t, f, &format!("{at}.firewall_rule"), test_signed)?;
+                    firewall_rule(t, f, &format!("{at}.firewall_rule"))?;
                 }
             }
             for (k, x) in v.tradeoffs.iter().enumerate() {
@@ -524,12 +483,13 @@ fn step(s: &TopoStep, at: &str) -> R {
     }
 }
 
-/// `firewall_rule` against its Topo: draft only until reviewed, and the executable is an entry
+/// `firewall_rule` against its Topo: draft only while not reviewed ([`FIREWALL_RULE_REVIEWED`]),
+/// and the executable is an entry
 /// of `match.exes` in exactly its spelling, with a `sha256` (ADR 0024 "sha256 for elevated anchors", P4 R6: `sha1` alone
 /// never anchors anything elevated; a `TODO` only in a draft, like every `TODO`).
-fn firewall_rule(t: &Topo, f: &FirewallRuleSpec, at: &str, test_signed: bool) -> R {
+fn firewall_rule(t: &Topo, f: &FirewallRuleSpec, at: &str) -> R {
     ensure(
-        firewall_rule_reviewed() || (TEST_KEY_BUILD && test_signed) || t.status == Status::Draft,
+        FIREWALL_RULE_REVIEWED || t.status == Status::Draft,
         at,
         "draft only until firewall_rule is reviewed (P4-5a)",
     )?;

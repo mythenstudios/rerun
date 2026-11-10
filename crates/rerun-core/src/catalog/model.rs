@@ -641,8 +641,8 @@ pub enum TopoStep {
 }
 
 /// `firewall_rule` (ADR 0023 §6, P4-5a): block the network of one executable of `match.exes`
-/// that carries a `sha256` (the loader rule of ADR 0024, P4 R6). Draft only until reviewed
-/// ([`super::check::FIREWALL_RULE_REVIEWED`]); the engine plans it from P4-2d.
+/// that carries a `sha256` (the loader rule of ADR 0024, P4 R6). Reviewed since P4-5b
+/// ([`super::check::FIREWALL_RULE_REVIEWED`]; draft only before); the engine plans it from P4-2d.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FirewallRuleSpec {

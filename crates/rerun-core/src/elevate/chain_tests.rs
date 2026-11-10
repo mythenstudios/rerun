@@ -13,7 +13,7 @@
 //! - D the shared derivation and the CLI's plan check (A4 S7); S the process check (A4 S8).
 //!
 //! Every Topo, folder, hash and ID is invented. The `firewall_rule` step is signed into the test
-//! index under the test-only review seam (`catalog::check::review_seam`).
+//! index like any reviewed step (P4-5b; until then a test-only review seam allowed it).
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -29,7 +29,6 @@ use super::request::{
     encode,
 };
 use super::serve::{Keys, serve_with};
-use crate::catalog::check::review_seam;
 use crate::catalog::key::test_key;
 use crate::catalog::model::{Id, Topo};
 use crate::detect::exe::{AntiCheat, AntiCheatHit, AntiCheatScan};
@@ -322,9 +321,9 @@ fn ready() -> (FakeSystem, Request) {
     (sys, req)
 }
 
-/// Runs `f` with `firewall_rule` counted as reviewed (module docs).
+/// Runs `f` (the review seam of P4-2c is gone: `firewall_rule` is reviewed since P4-5b).
 fn seam(f: impl FnOnce()) {
-    review_seam::firewall_rule(f);
+    f();
 }
 
 // ---------- H: §3 ----------
@@ -566,17 +565,6 @@ fn r_every_step_passes_up_to_the_write() {
         shipped.keys.trusted = crate::catalog::key::release_keys();
         assert_eq!(run_on(&shipped, &at, &sha, 1), refused(Reason::Index));
     });
-    // Without the review seam: `firewall_rule` is draft only until reviewed. A release build
-    // stops at the index; a `test-key` build (user decision A of 2026-11-10, the [DEV] round
-    // trip) releases it for this index, which the test key signed, and reaches the write.
-    let (sys, req) = ready();
-    let (at, sha) = write(&sys, &req);
-    let got = run_on(&Wire::new(&sys), &at, &sha, 1);
-    if crate::catalog::check::TEST_KEY_BUILD {
-        assert_added(&sys, got);
-    } else {
-        assert_eq!(got, refused(Reason::Index));
-    }
 }
 
 /// A request with a direction the helper does not derive (today the only one is `out`, so the

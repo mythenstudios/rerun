@@ -1012,7 +1012,7 @@ fn rf_step_files_get_the_same_rule() {
 /// anchors of `elevate::check_plan` only (A4 S7), and refuses them where the helper would.
 #[test]
 fn tf_firewall_rules_are_planned_last_from_the_anchors() {
-    crate::catalog::check::review_seam::firewall_rule(|| {
+    {
         let sys = game_sys();
         let json = topo_json(&sha256(&pe(false)), DIRECT).replace(
             r#" {"id":"wrapper""#,
@@ -1062,5 +1062,5 @@ fn tf_firewall_rules_are_planned_last_from_the_anchors() {
             Err(EngineError::Firewall(e))
                 if matches!(*e, crate::elevate::PlanRefusal::ExeMismatch(_))
         ));
-    });
+    }
 }

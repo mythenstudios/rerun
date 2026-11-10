@@ -200,7 +200,7 @@ impl Catalog {
             return Err(IndexError::Format(f.format));
         }
         let index: Index = serde_json::from_slice(v.bytes).map_err(|e| parse_error(&e))?;
-        let (topos, packages) = check_index_signed(&index, signed_by_test_key(v.key))?;
+        let (topos, packages) = check_index(&index)?;
         Ok(Self {
             index,
             key: v.key,
@@ -258,31 +258,9 @@ impl Catalog {
 
 type Lookup = BTreeMap<String, usize>;
 
-/// Whether `key` is the published test key in a `test-key` build (always `false` otherwise).
-fn signed_by_test_key(key: KeyId) -> bool {
-    #[cfg(feature = "test-key")]
-    {
-        key == key::test_key::public().id()
-    }
-    #[cfg(not(feature = "test-key"))]
-    {
-        let _ = key;
-        false
-    }
-}
-
 /// The bundle rules (module docs, step 2) on a parsed index. Also run by the workbench on
 /// what it builds.
 pub fn check_index(index: &Index) -> Result<(Lookup, Lookup), IndexError> {
-    check_index_signed(index, false)
-}
-
-/// [`check_index`] for an index the published test key signed when `test_signed`
-/// (`check::topo_signed`).
-pub(crate) fn check_index_signed(
-    index: &Index,
-    test_signed: bool,
-) -> Result<(Lookup, Lookup), IndexError> {
     let rule = |what: String| IndexError::Rule(what);
     if index.format != INDEX_FORMAT {
         return Err(IndexError::Format(index.format));
@@ -308,8 +286,7 @@ pub(crate) fn check_index_signed(
         "packages",
     )?;
     for t in &index.topos {
-        check::topo_signed(t, Rules::Release, test_signed)
-            .map_err(|e| rule(format!("topo {}: {e}", t.id)))?;
+        check::topo(t, Rules::Release).map_err(|e| rule(format!("topo {}: {e}", t.id)))?;
     }
     for p in &index.packages {
         check::package(p, Rules::Release).map_err(|e| rule(format!("package {}: {e}", p.id)))?;

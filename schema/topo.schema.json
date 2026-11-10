@@ -28,42 +28,6 @@
           }
         }
       }
-    },
-    {
-      "description": "firewall_rule is draft only until reviewed (P4-5a).",
-      "if": {
-        "required": [
-          "issues"
-        ],
-        "properties": {
-          "issues": {
-            "contains": {
-              "properties": {
-                "variants": {
-                  "contains": {
-                    "properties": {
-                      "steps": {
-                        "contains": {
-                          "required": [
-                            "firewall_rule"
-                          ]
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "status": {
-            "const": "draft"
-          }
-        }
-      }
     }
   ],
   "properties": {

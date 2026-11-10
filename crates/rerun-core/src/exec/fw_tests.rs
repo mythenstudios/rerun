@@ -27,7 +27,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use sha2::{Digest, Sha256};
 
 use super::{ApplyError, ExecCtx, ExecError, HelperFailure, Outcome, Refusal, RevertReport};
-use crate::catalog::check::review_seam;
 use crate::catalog::key::test_key;
 use crate::elevate::serve::{Keys, serve_with};
 use crate::journal::{Closing, InstanceTag, Journal, Observed, TxnId, TxnState};
@@ -134,7 +133,7 @@ pub(crate) fn world() -> (FakeSystem, [u8; 32]) {
 /// add (both per thread).
 pub(crate) fn seams<R>(f: impl FnOnce() -> R) -> R {
     super::helper::knob::set_index_keys(Some(vec![test_key::public()]));
-    let r = review_seam::firewall_rule(f);
+    let r = f();
     super::helper::knob::set_index_keys(None);
     r
 }

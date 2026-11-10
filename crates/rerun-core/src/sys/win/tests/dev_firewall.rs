@@ -126,7 +126,7 @@ fn dev_helper_firewall_round_trip() {
         mode == "accept" || mode == "decline",
         "set RERUN_DEV_FIREWALL=accept or decline (scripts/dev-helper-firewall.ps1)"
     );
-    if !crate::catalog::check::TEST_KEY_BUILD {
+    if !cfg!(feature = "test-key") {
         panic!("build the test binary with --features test-key (scripts/dev-helper-firewall.ps1)");
     }
     assert!(!is_elevated(), "run from a non-elevated process");

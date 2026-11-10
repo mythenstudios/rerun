@@ -554,8 +554,9 @@ fn retired_keys_serve_reverts_only_and_revoked_keys_nothing() {
     );
 }
 
-/// `firewall_rule` (P4-5a): draft only until reviewed, and its executable is a `match.exes`
-/// entry with a `sha256` (ADR 0024, P4 R6); the release rules refuse it with every draft.
+/// `firewall_rule` (P4-5a): its executable is a `match.exes` entry with a `sha256` (ADR 0024,
+/// P4 R6), in a draft and, since it was reviewed (P4-5b), outside one too; the release rules
+/// refuse a draft as they refuse every draft.
 #[test]
 fn firewall_rule_needs_a_draft_and_a_sha256_anchor() {
     use super::check::{self, Rules};
@@ -572,7 +573,12 @@ fn firewall_rule_needs_a_draft_and_a_sha256_anchor() {
     let what = |t: &Topo| check::topo(t, Rules::Source).unwrap_err().what;
     let mut active = t.clone();
     active.status = Status::Active;
-    assert!(what(&active).starts_with("draft only"), "{}", what(&active));
+    assert_eq!(check::topo(&active, Rules::Source), Ok(()));
+    assert_eq!(check::topo(&active, Rules::Release), Ok(()));
+    assert!(
+        check::topo(&t, Rules::Release).is_err(),
+        "a draft is never released"
+    );
     let mut other = t.clone();
     other.issues[0].variants[0].steps = vec![TopoStep::FirewallRule(FirewallRuleSpec {
         exe: rel("other.exe"),
@@ -610,33 +616,25 @@ fn firewall_rule_needs_a_draft_and_a_sha256_anchor() {
     );
 }
 
-/// User decision A of 2026-11-10 (P4-5b, the [DEV] round trip): an index signed by the published
-/// test key may hold `firewall_rule` outside a draft, but only in a `test-key` build; a release
-/// build refuses it whoever signed, and `FIREWALL_RULE_REVIEWED` stays the release gate.
+/// `firewall_rule` is reviewed (P4-5b, after the [DEV] round trip of 2026-11-10): an index
+/// releases it when one of this build's trusted keys signed it (the release slots, and the
+/// published test key only in a `test-key` build); a foreign key's index is not verified at all,
+/// so it releases nothing; a draft stays a draft (never in a signed index).
 #[test]
-fn only_a_test_key_build_releases_firewall_rule_for_a_test_key_index() {
-    use super::check::{self, FIREWALL_RULE_REVIEWED, Rules, TEST_KEY_BUILD};
+fn firewall_rule_is_released_only_by_a_trusted_signed_index() {
+    use super::check::{self, FIREWALL_RULE_REVIEWED, Rules};
+    use super::key::{release_keys, trusted_keys};
     use super::model::FirewallRuleSpec;
     use crate::policy::firewall::Direction;
 
-    const { assert!(!FIREWALL_RULE_REVIEWED, "the release gate is still locked") };
+    const { assert!(FIREWALL_RULE_REVIEWED, "firewall_rule is reviewed") };
     let mut t = topo("game", "fix-pack");
     t.issues[0].variants[0].steps = vec![TopoStep::FirewallRule(FirewallRuleSpec {
         exe: rel("game.exe"),
         direction: Direction::Out,
     })];
     t.status = Status::Active;
-    // Signed by any other key: refused in every build.
-    let e = check::topo_signed(&t, Rules::Release, false).unwrap_err();
-    assert!(e.what.starts_with("draft only"), "{e}");
-    assert!(check::topo(&t, Rules::Release).is_err());
-    // Signed by the test key: released only in a test-key build.
-    assert_eq!(
-        check::topo_signed(&t, Rules::Release, true).is_ok(),
-        TEST_KEY_BUILD
-    );
-    assert_eq!(TEST_KEY_BUILD, cfg!(feature = "test-key"));
-    // Through the index: the test key's signature counts, a foreign key's never.
+    check::topo(&t, Rules::Release).unwrap();
     let index = |tt: &Topo| super::Index {
         format: 1,
         seq: 1,
@@ -644,19 +642,22 @@ fn only_a_test_key_build_releases_firewall_rule_for_a_test_key_index() {
         topos: vec![tt.clone()],
         packages: Vec::new(),
     };
-    assert!(super::check_index_signed(&index(&t), false).is_err());
-    assert_eq!(
-        super::check_index_signed(&index(&t), true).is_ok(),
-        TEST_KEY_BUILD
-    );
     let bytes = serde_json::to_vec(&index(&t)).unwrap();
+    // A foreign key: refused by the signature check against this build's keys.
     let foreign = test_key::sign_foreign(&bytes);
-    let v = super::verify(&bytes, &foreign, &[test_key::foreign_public()]).unwrap();
-    assert!(
-        super::Catalog::from_verified(&v).is_err(),
-        "a foreign signer releases nothing"
-    );
+    assert!(super::verify(&bytes, &foreign, &trusted_keys()).is_err());
+    // The test key: trusted only by a test-key build; the release slots alone refuse it.
     let ours = test_key::sign(&bytes);
+    assert_eq!(
+        super::verify(&bytes, &ours, &trusted_keys()).is_ok(),
+        cfg!(feature = "test-key")
+    );
+    assert!(super::verify(&bytes, &ours, &release_keys()).is_err());
+    // Verified by a key the caller trusts, the index releases the step.
     let v = super::verify(&bytes, &ours, &[test_key::public()]).unwrap();
-    assert_eq!(super::Catalog::from_verified(&v).is_ok(), TEST_KEY_BUILD);
+    super::Catalog::from_verified(&v).unwrap();
+    // A draft is never in a signed index, with or without the step.
+    let mut draft = t.clone();
+    draft.status = Status::Draft;
+    assert!(super::check_index(&index(&draft)).is_err());
 }
