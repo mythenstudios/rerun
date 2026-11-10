@@ -1,0 +1,105 @@
+//! The lines of `rerun package fetch` (ADR 0025). Package IDs, versions and hashes are checked
+//! before they reach a line (the ID and version rules of docs/02); every error comes as
+//! [`Shown`] and stands last.
+
+use std::fmt;
+
+use rerun_core::escape::Shown;
+
+/// How a download got into the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchedHow {
+    /// It was there already (hashed again).
+    Cached,
+    /// Downloaded now.
+    Downloaded {
+        /// Redirects followed.
+        redirects: usize,
+        /// A cache entry with other content was replaced.
+        replaced: bool,
+    },
+}
+
+/// One line about a package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageMsg<'a> {
+    /// A download of the package is in the cache with its pinned hash.
+    Fetched {
+        /// The package ID.
+        id: Shown<'a>,
+        /// Its version.
+        version: Shown<'a>,
+        /// The architecture of a per-architecture asset.
+        arch: Option<&'static str>,
+        /// How.
+        how: FetchedHow,
+        /// Its length in bytes.
+        len: u64,
+        /// Its SHA-256 (64 hex digits).
+        sha256: String,
+    },
+    /// No signed index has been imported.
+    NoIndex,
+    /// The current index has no package of this ID.
+    Unknown {
+        /// The ID asked for.
+        id: Shown<'a>,
+    },
+    /// The current index has the package at another version (one package is one version).
+    OtherVersion {
+        /// The ID.
+        id: Shown<'a>,
+        /// The version in the index.
+        version: Shown<'a>,
+    },
+    /// The fetch was refused or failed.
+    Failed {
+        /// Why.
+        error: Shown<'a>,
+    },
+}
+
+impl fmt::Display for PackageMsg<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fetched {
+                id,
+                version,
+                arch,
+                how,
+                len,
+                sha256,
+            } => {
+                write!(f, "{id} {version}")?;
+                if let Some(a) = arch {
+                    write!(f, " ({a})")?;
+                }
+                match how {
+                    FetchedHow::Cached => f.write_str(": already in the cache")?,
+                    FetchedHow::Downloaded {
+                        redirects,
+                        replaced,
+                    } => {
+                        write!(f, ": downloaded (redirects: {redirects}")?;
+                        if *replaced {
+                            f.write_str(", a damaged cache entry replaced")?;
+                        }
+                        f.write_str(")")?;
+                    }
+                }
+                write!(f, ", {len} bytes, sha256 {sha256}")
+            }
+            Self::NoIndex => f.write_str(
+                "rerun: no signed index has been imported yet (rerun index import <index.json> <index.json.sig>)",
+            ),
+            Self::Unknown { id } => {
+                write!(f, "rerun: the current index has no package {id}")
+            }
+            Self::OtherVersion { id, version } => write!(
+                f,
+                "rerun: the current index has package {id} at version {version} only"
+            ),
+            Self::Failed { error } => write!(f, "rerun: package not fetched: {error}"),
+        }
+    }
+}

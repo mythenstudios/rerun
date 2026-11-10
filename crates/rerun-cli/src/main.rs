@@ -1,6 +1,6 @@
 //! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system` and `rerun scan`;
 //! phase 2 (P2-13): `rerun plan`, `apply`, `revert`, `status` and `forget`; phase 4 (P4-3):
-//! `rerun index import` and `rerun index show` (ADR 0024).
+//! `rerun index import` and `rerun index show` (ADR 0024); P4-6: `rerun package fetch` (ADR 0025).
 //!
 //! Order in `main`: `restrict_dll_search` first (ADR 0008), then clap parses (`--help`,
 //! `--version` and usage errors, a malformed plan hash or transaction included, end there,
@@ -18,6 +18,7 @@ mod host;
 mod index;
 mod messages;
 mod out;
+mod package;
 mod plan;
 mod preview;
 mod scan;
@@ -33,14 +34,14 @@ use clap::Parser;
 
 use rerun_core::escape;
 
-use crate::cli::{Cli, Command, Exit, IndexCommand};
+use crate::cli::{Cli, Command, Exit, IndexCommand, PackageCommand};
 use crate::host::Host;
 use crate::messages::Message;
 use crate::out::Out;
 
 #[cfg(windows)]
 fn main() -> ExitCode {
-    use rerun_core::sys::win::{WinSystem, restrict_dll_search};
+    use rerun_core::sys::win::{WinHttp, WinSystem, restrict_dll_search};
 
     // First statement (ADR 0008, H2): no later DLL load may come from the install folder, the
     // current directory or `PATH`. Fail closed.
@@ -67,8 +68,10 @@ fn main() -> ExitCode {
         }
     };
     let mut console = confirm::Console;
+    let http = WinHttp::new();
     let mut host = Host {
         sys: &sys,
+        http: &http,
         install: install_dir(),
         confirm: &mut console,
     };
@@ -169,6 +172,9 @@ fn run<W: io::Write, E: io::Write>(
         Command::Index {
             command: IndexCommand::Show,
         } => index::show(host, out, err),
+        Command::Package {
+            command: PackageCommand::Fetch { package: spec },
+        } => package::fetch(host, &spec, out, err),
     }
 }
 
@@ -184,6 +190,8 @@ fn install_dir() -> Result<PathBuf, String> {
 mod index_tests;
 #[cfg(test)]
 mod lm_tests;
+#[cfg(test)]
+mod package_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

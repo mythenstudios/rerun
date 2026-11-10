@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use rerun_core::escape::{self, Shown};
 use rerun_core::exec::{self, ApplyError, ExecError};
 use rerun_core::policy::root::{AppDir, Create, ForbiddenRoots};
-use rerun_core::sys::System;
+use rerun_core::sys::{Http, System};
 
 use crate::cli::Exit;
 use crate::confirm::{Answer, Confirm};
@@ -20,6 +20,8 @@ use crate::out::{Out, OutError, failed};
 pub struct Host<'a> {
     /// The system.
     pub sys: &'a dyn System,
+    /// HTTPS, for package downloads only (ADR 0025).
+    pub http: &'a dyn Http,
     /// Rerun's install folder (the folder of `rerun.exe`), or why it is unknown.
     pub install: Result<PathBuf, String>,
     /// Asks the user.

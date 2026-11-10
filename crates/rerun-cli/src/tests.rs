@@ -13,7 +13,7 @@ use rerun_core::detect::steam::RootSource;
 use rerun_core::journal::{InstanceTag, Journal};
 use rerun_core::policy::root::{AppDir, Create};
 use rerun_core::sys::System;
-use rerun_core::sys::fake::{FakeSystem, FakeSystemBuilder, Fault, Prim, RegPrim};
+use rerun_core::sys::fake::{FakeHttp, FakeSystem, FakeSystemBuilder, Fault, Prim, RegPrim};
 use rerun_core::sys::registry::{Hive, RegKey, RegValue, RegView};
 use rerun_core::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
 
@@ -128,6 +128,17 @@ pub struct Ran {
 
 /// Runs `rerun <args>` with `answer` from the console and stdout into `w`.
 pub fn run_to<W: Write>(sys: &FakeSystem, args: &[&str], answer: Answer, w: W) -> (Ran, W) {
+    run_to_http(sys, &FakeHttp::default(), args, answer, w)
+}
+
+/// [`run_to`] with scripted HTTPS replies (`rerun package fetch`).
+pub fn run_to_http<W: Write>(
+    sys: &FakeSystem,
+    http: &FakeHttp,
+    args: &[&str],
+    answer: Answer,
+    w: W,
+) -> (Ran, W) {
     let cli = Cli::try_parse_from(std::iter::once("rerun").chain(args.iter().copied()))
         .unwrap_or_else(|e| panic!("{args:?}: {e}"));
     let mut c = FakeConfirm {
@@ -136,6 +147,7 @@ pub fn run_to<W: Write>(sys: &FakeSystem, args: &[&str], answer: Answer, w: W) -
     };
     let mut host = Host {
         sys,
+        http,
         install: Ok(INSTALL.into()),
         confirm: &mut c,
     };

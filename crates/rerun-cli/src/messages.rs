@@ -10,6 +10,7 @@
 mod helper;
 mod index;
 mod launch;
+mod package;
 mod profile;
 mod topo;
 mod txn;
@@ -26,6 +27,7 @@ use rerun_core::hw::GpuVendor;
 pub use helper::HelperMsg;
 pub use index::IndexMsg;
 pub use launch::{LaunchMsg, Utc};
+pub use package::{FetchedHow, PackageMsg};
 #[cfg(test)]
 pub(crate) use profile::size as size_text;
 pub use profile::{ProfileMsg, ranges};
@@ -434,6 +436,8 @@ pub enum Message<'a> {
     Helper(HelperMsg<'a>),
     /// A line of the Topo engine (P4-4).
     Topo(TopoMsg<'a>),
+    /// A line about a package download (P4-6).
+    Package(PackageMsg<'a>),
     /// A usage error, formatted by Rerun (security review N5): the user's own value only
     /// through `escape::text`, last on the line.
     Usage {
@@ -874,6 +878,7 @@ impl fmt::Display for Message<'_> {
             Self::Index(m) => write!(f, "{m}"),
             Self::Helper(m) => write!(f, "{m}"),
             Self::Topo(m) => write!(f, "{m}"),
+            Self::Package(m) => write!(f, "{m}"),
             Self::Usage { what, why, value } => {
                 write!(f, "rerun: {what}")?;
                 if let Some(why) = why {

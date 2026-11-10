@@ -100,6 +100,49 @@ pub enum Command {
         #[command(subcommand)]
         command: IndexCommand,
     },
+    /// Packages of the signed index.
+    Package {
+        /// What to do with them.
+        #[command(subcommand)]
+        command: PackageCommand,
+    },
+}
+
+/// `rerun package`.
+#[derive(Debug, Subcommand)]
+pub enum PackageCommand {
+    /// Downloads a package of the current index into Rerun's cache and checks its SHA-256
+    /// (nothing is kept unless it matches).
+    Fetch {
+        /// The package as <id>@<version>, exactly as the index names it.
+        #[arg(value_parser = package_spec)]
+        package: PackageSpec,
+    },
+}
+
+/// A package as `<id>@<version>`, checked before any system access.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageSpec {
+    /// The package ID.
+    pub id: Id,
+    /// The version (the rule of `version` in docs/02).
+    pub version: String,
+}
+
+/// `<id>@<version>`: an ID of the Topo form and a version of the package form.
+fn package_spec(s: &str) -> Result<PackageSpec, String> {
+    let bad = || {
+        "not <id>@<version> (an ID of a-z, 0-9 and single hyphens; a version of A-Z a-z 0-9 . _ + -)"
+            .to_owned()
+    };
+    let (id, version) = s.split_once('@').ok_or_else(bad)?;
+    match Id::parse(id) {
+        Some(id) if rerun_core::catalog::check::version(version) => Ok(PackageSpec {
+            id,
+            version: version.to_owned(),
+        }),
+        _ => Err(bad()),
+    }
 }
 
 /// `rerun index`.
