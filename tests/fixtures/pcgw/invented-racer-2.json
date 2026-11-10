@@ -1,0 +1,131 @@
+{
+ "parse": {
+  "title": "Invented Racer 2",
+  "pageid": 900001,
+  "sections": [
+   {
+    "toclevel": 1,
+    "level": "2",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "1",
+    "index": "1",
+    "fromtitle": "Invented",
+    "byteoffset": 10,
+    "anchor": "Essential_improvements",
+    "linkAnchor": "Essential_improvements"
+   },
+   {
+    "toclevel": 2,
+    "level": "3",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "2",
+    "index": "2",
+    "fromtitle": "Invented",
+    "byteoffset": 20,
+    "anchor": "Skip_intro_videos",
+    "linkAnchor": "Skip_intro_videos"
+   },
+   {
+    "toclevel": 1,
+    "level": "2",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "3",
+    "index": "3",
+    "fromtitle": "Invented",
+    "byteoffset": 30,
+    "anchor": "Video",
+    "linkAnchor": "Video"
+   },
+   {
+    "toclevel": 1,
+    "level": "2",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "4",
+    "index": "4",
+    "fromtitle": "Invented",
+    "byteoffset": 40,
+    "anchor": "Input",
+    "linkAnchor": "Input"
+   },
+   {
+    "toclevel": 1,
+    "level": "2",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "5",
+    "index": "5",
+    "fromtitle": "Invented",
+    "byteoffset": 50,
+    "anchor": "Issues_fixed",
+    "linkAnchor": "Issues_fixed"
+   },
+   {
+    "toclevel": 2,
+    "level": "3",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "6",
+    "index": "6",
+    "fromtitle": "Invented",
+    "byteoffset": 60,
+    "anchor": "Crash_on_start",
+    "linkAnchor": "Crash_on_start"
+   },
+   {
+    "toclevel": 2,
+    "level": "3",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "7",
+    "index": "7",
+    "fromtitle": "Invented",
+    "byteoffset": 70,
+    "anchor": "Stutter_with_many_cores",
+    "linkAnchor": "Stutter_with_many_cores"
+   },
+   {
+    "toclevel": 1,
+    "level": "2",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "8",
+    "index": "8",
+    "fromtitle": "Invented",
+    "byteoffset": 80,
+    "anchor": "Issues_unresolved",
+    "linkAnchor": "Issues_unresolved"
+   },
+   {
+    "toclevel": 2,
+    "level": "3",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "9",
+    "index": "9",
+    "fromtitle": "Invented",
+    "byteoffset": 90,
+    "anchor": "Audio_desync",
+    "linkAnchor": "Audio_desync"
+   },
+   {
+    "toclevel": 1,
+    "level": "2",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "10",
+    "index": "10",
+    "fromtitle": "Invented",
+    "byteoffset": 100,
+    "anchor": "Other_information",
+    "linkAnchor": "Other_information"
+   },
+   {
+    "toclevel": 2,
+    "level": "3",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "11",
+    "index": "11",
+    "fromtitle": "Invented",
+    "byteoffset": 110,
+    "anchor": "API",
+    "linkAnchor": "API"
+   }
+  ],
+  "showtoc": true,
+  "wikitext": "{{Infobox game\n|title           = Invented Racer 2\n|cover           = Invented Racer 2 cover.jpg\n|developers      =\n{{Infobox game/row/developer|Nobody Studio}}\n|steam appid     = 1234560\n|license         = commercial\n}}\n{{Introduction\n|introduction    = INTRO-TEXT-NEVER-COPIED\n}}\n==Essential improvements==\n===Skip intro videos===\n{{Fixbox|description=FIX-TEXT-NEVER-COPIED|fix=\n# Step one [[Some Link|label = x]] <!-- a comment with }} and | inside -->\n}}\n==Video==\n{{Video\n|widescreen resolution = true\n|widescreen resolution notes = NOTE-TEXT-NEVER-COPIED\n|fov = hackable\n|fov notes = {{Fixbox/fix|NOTE-TEXT-NEVER-COPIED}}\n|windowed = false\n|60 fps = hackable\n|120 fps = <nowiki>hackable</nowiki>\n}}\n==Input==\n{{Input\n|controller support = true\n|controller hotplug = false\n}}\n==Issues fixed==\n===Crash on start===\n===Stutter with many cores===\n==Issues unresolved==\n===Audio desync===\n==Other information==\n===API===\n{{API\n|direct3d versions = 9.0c\n|direct3d notes = NOTE-TEXT-NEVER-COPIED\n|directdraw versions =\n|opengl versions =\n|glide versions =\n|vulkan versions =\n|windows 32-bit exe = true\n|windows 64-bit exe = false\n}}\n"
+ }
+}

@@ -9,7 +9,7 @@ A package (`docs/02-topo-format.md`) names an upstream release archive by URL an
 
 ### Part 1: download and cache (P4-6)
 
-**One network path.** `sys::Http` (one `get(host, path)`: exactly one HTTPS request, no redirect followed, status, `Location`, `Content-Length` and the body as a stream) with the real `sys::win::WinHttp` and the scripted `sys::fake::FakeHttp`. `Http` is not part of `System`: the elevated helper's system can never reach the network (its source rule forbids `WinHttp` and `http::`), and the curator tool (P4-14) uses the same wrapper without a system.
+**One network path.** `sys::Http` (one `get(host, path)`: exactly one HTTPS request, no redirect followed, status, `Location`, `Content-Length` and the body as a stream) with the real `sys::win::WinHttp` and the scripted `sys::fake::FakeHttp`. `Http` is not part of `System`: the elevated helper's system can never reach the network (its source rule forbids `WinHttp` and `http::`), and the curator tool (P4-14) uses the same wrapper without a system: `rerun-workbench draft`, its second user, keeps its own host rule (only `www.pcgamingwiki.com`, two fixed paths, no redirect followed; ADR 0024 amendment P4-14) instead of `policy::url`, which is the rule for packages.
 
 **WinHTTP, fixed settings** (`sys::win::http`, the only WinHTTP calls; `windows-sys` feature `Win32_Networking_WinHttp`, no new crate; `winhttp.dll` joins `CLI_IMPORTS`, ADR 0008 amendment P4-6):
 - a fresh session, connection and request per call, closed in that order when the body drops (owned handles);

@@ -1,0 +1,32 @@
+{
+ "parse": {
+  "title": "Invented Quest: Gold Edition",
+  "pageid": 900002,
+  "sections": [
+   {
+    "toclevel": 1,
+    "level": "2",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "1",
+    "index": "1",
+    "fromtitle": "Invented",
+    "byteoffset": 10,
+    "anchor": "Issues_fixed",
+    "linkAnchor": "Issues_fixed"
+   },
+   {
+    "toclevel": 2,
+    "level": "3",
+    "line": "SECTION-LINE-NEVER-COPIED",
+    "number": "2",
+    "index": "2",
+    "fromtitle": "Invented",
+    "byteoffset": 20,
+    "anchor": ".22modern.22_GPUs_and_é",
+    "linkAnchor": ".22modern.22_GPUs_and_é"
+   }
+  ],
+  "showtoc": true,
+  "wikitext": "{{Infobox game\n|title           = Invented Quest: Gold Edition\n|steam appid     = 2345670, 2345671\n}}\n==Issues fixed==\n===Black screen on \"modern\" GPUs===\n{{API\n|direct3d versions = 9.0c, 10, 10.1\n|opengl versions = true\n|windows 32-bit exe = true\n|windows 64-bit exe = unknown\n}}\n"
+ }
+}

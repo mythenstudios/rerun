@@ -1,6 +1,6 @@
 [package]
 name = "rerun-workbench"
-description = "Curator tool (signed index, later PCGamingWiki drafts). Not shipped."
+description = "Curator tool (signed index, Topo drafts from PCGamingWiki). Not shipped."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -38,8 +38,8 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 jsonschema.workspace = true
-# Tests sign with the published test key (ADR 0024).
-rerun-core = { workspace = true, features = ["test-key"] }
+# Tests sign with the published test key (ADR 0024); `draft` runs against FakeHttp (P4-14).
+rerun-core = { workspace = true, features = ["test-key", "fake"] }
 
 [lints]
 workspace = true

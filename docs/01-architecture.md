@@ -11,7 +11,7 @@ rerun_/
 │  ├─ rerun-launch/    Binary `rerun-launch.exe` – launch shim, only windows-sys + rerun-proto
 │  ├─ rerun-helper/    Binary `rerun-helper.exe` – the elevated helper (ADR 0023): only Rerun's own firewall rules; P4-2c: validation chain; P4-2d: the batch in `exec`; P4-5b: writes through COM
 │  ├─ rerun-cpu/       cdylib `rerun-cpu.asi` – inproc CPU fix, x86 + x64
-│  └─ rerun-workbench/ Curator tool, not shipped: build and sign the index (P4-3), later query PCGamingWiki for Topo drafts
+│  └─ rerun-workbench/ Curator tool, not shipped: build and sign the index (P4-3), Topo drafts from PCGamingWiki (P4-14)
 ├─ app/                Tauri 2 + Svelte 5 + TypeScript (Vite); `app/src-tauri` joins the Cargo workspace only in Phase 5
 ├─ topos/              Game recipes (YAML)
 ├─ packages/           Upstream tools (YAML)
@@ -119,4 +119,4 @@ revert: journal ─► observe each op (never overwrite a foreign state) ─► 
 
 ## Network
 
-Only two destinations: the signed Topo index (GitHub Releases of `mythenstudios/rerun-topos`; until phase 6 imported from files, user decision E5) and package downloads from the hosts in `packages/` (P4-6, ADR 0025: one wrapper `sys::win::http` over WinHTTP, TLS with Windows certificate validation, the system proxy, redirects checked by hand against a fixed host list, nothing kept unless it hashes to its pin; never from the elevated helper). No telemetry. Feedback = pre-filled GitHub issue in the browser. The curator tool `rerun-workbench` is not shipped; its PCGamingWiki query (P4-14) will use the same wrapper and is outside this rule.
+Only two destinations: the signed Topo index (GitHub Releases of `mythenstudios/rerun-topos`; until phase 6 imported from files, user decision E5) and package downloads from the hosts in `packages/` (P4-6, ADR 0025: one wrapper `sys::win::http` over WinHTTP, TLS with Windows certificate validation, the system proxy, redirects checked by hand against a fixed host list, nothing kept unless it hashes to its pin; never from the elevated helper). No telemetry. Feedback = pre-filled GitHub issue in the browser. The curator tool `rerun-workbench` is not shipped and outside this rule: `rerun-workbench draft` (P4-14), its only online command, uses the same wrapper for at most two GETs to `www.pcgamingwiki.com` (the paths `/api/appid.php` and `/w/api.php` only, built by the tool), follows no redirect, downloads nothing a page links to and reads no key file; `index` and `key` stay offline (ADR 0024 amendment P4-14).

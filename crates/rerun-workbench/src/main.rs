@@ -4,7 +4,12 @@
 //!   `topos/` and `packages/` into the canonical bundle `index.json` (drafts left out).
 //! - `index sign <bundle> <private-key>`: writes `<bundle>.sig` (64 raw bytes).
 //! - `key generate <out-dir>`: a new index key pair, never inside a Git working tree.
+//! - `draft <steam-appid|pcgw-page> [--page <name>] [--id <id>] [--title <text>] [--into <dir>]`:
+//!   a Topo draft from PCGamingWiki, the only command that goes online (at most two GETs to
+//!   `www.pcgamingwiki.com`, ADR 0024 amendment P4-14); YAML on stdout, or a new
+//!   `<dir>\<id>.yaml`. It never reads a key file.
 //!
+//! `main` restricts the DLL search path first (ADR 0008; WinHTTP refuses without it).
 //! A curator tool reads and writes the files it is pointed at with `std::fs` (the system layer
 //! of `rerun-core` is for the shipped program, ADR 0004).
 
@@ -16,7 +21,10 @@
 #[cfg(windows)]
 mod acl;
 mod bundle;
+mod draft;
 mod keys;
+mod pcgw;
+mod wikitext;
 
 use std::fs;
 use std::io::Write;
@@ -25,7 +33,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-/// Rerun curator tool: builds and signs the Topo index.
+/// Rerun curator tool: builds and signs the Topo index, drafts Topos from PCGamingWiki.
 #[derive(Debug, Parser)]
 #[command(name = "rerun-workbench", version)]
 struct Cli {
@@ -45,6 +53,27 @@ enum Command {
         #[command(subcommand)]
         command: KeyCommand,
     },
+    /// A Topo draft from a PCGamingWiki page (online: www.pcgamingwiki.com only).
+    Draft(DraftArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct DraftArgs {
+    /// A Steam app ID (digits only) or a PCGamingWiki page name.
+    #[arg(required_unless_present = "page", conflicts_with = "page")]
+    target: Option<String>,
+    /// A page name, also one of digits only.
+    #[arg(long)]
+    page: Option<String>,
+    /// The Topo ID (default: from the page name).
+    #[arg(long)]
+    id: Option<String>,
+    /// The title (default: the page name).
+    #[arg(long)]
+    title: Option<String>,
+    /// Writes <dir>\<id>.yaml (never over a file) instead of printing the YAML.
+    #[arg(long)]
+    into: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -82,6 +111,11 @@ enum KeyCommand {
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if let Err(e) = rerun_core::sys::win::restrict_dll_search() {
+        eprintln!("rerun-workbench: the DLL search path: {e}");
+        return ExitCode::FAILURE;
+    }
     let cli = Cli::parse();
     let r = match cli.command {
         Command::Index {
@@ -99,6 +133,7 @@ fn main() -> ExitCode {
         Command::Key {
             command: KeyCommand::Generate { out_dir },
         } => generate(&out_dir),
+        Command::Draft(args) => draft_cmd(&args),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
@@ -202,6 +237,73 @@ fn create_new(path: &Path, text: &str, secret: bool) -> Result<(), String> {
     f.write_all(text.as_bytes())
         .and_then(|()| f.sync_all())
         .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The request of `draft`, checked before any request is made.
+fn draft_request(a: &DraftArgs) -> Result<draft::Request, String> {
+    use rerun_core::catalog::model::Id;
+    let target = match (&a.target, &a.page) {
+        (_, Some(p)) => pcgw::Target::Page(pcgw::PageName::parse(p).map_err(|e| e.to_string())?),
+        (Some(t), None) if !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit()) => {
+            match t.parse::<u32>() {
+                Ok(n) if n >= 1 => pcgw::Target::SteamApp(n),
+                _ => return Err("a Steam app ID is 1 to 4294967295".into()),
+            }
+        }
+        (Some(t), None) => pcgw::Target::Page(pcgw::PageName::parse(t).map_err(|e| e.to_string())?),
+        (None, None) => return Err("name a Steam app ID or a page".into()),
+    };
+    let id = match &a.id {
+        Some(s) => Some(Id::parse(s).ok_or("--id: a-z, 0-9 and single hyphens, at most 64")?),
+        None => None,
+    };
+    if let Some(t) = &a.title {
+        draft::check_title(t).ok_or(
+            "--title: 1 to 200 characters, none of them control, format or bidi characters",
+        )?;
+    }
+    if let Some(dir) = &a.into
+        && !fs::metadata(dir).is_ok_and(|m| m.is_dir())
+    {
+        return Err(format!("--into {}: not a folder", dir.display()));
+    }
+    Ok(draft::Request {
+        target,
+        id,
+        title: a.title.clone(),
+    })
+}
+
+fn draft_cmd(a: &DraftArgs) -> Result<(), String> {
+    let req = draft_request(a)?;
+    #[cfg(windows)]
+    let http = rerun_core::sys::win::WinHttp::new();
+    #[cfg(not(windows))]
+    let http = rerun_core::sys::NoHttp;
+    let (d, text) = draft::make(&http, &req, draft::SPACING, draft::DEADLINE)?;
+    match &a.into {
+        None => {
+            std::io::stdout()
+                .write_all(text.as_bytes())
+                .map_err(|e| format!("stdout: {e}"))?;
+        }
+        Some(dir) => {
+            if let Some(n) = d.steam_appid {
+                for f in draft::same_app(dir, n) {
+                    eprintln!("warning: {f} names Steam app {n} too");
+                }
+            }
+            let p = draft::write_into(dir, &d, &text)?;
+            eprintln!("wrote {}", p.display());
+        }
+    }
+    eprintln!(
+        "draft {} from {}: {} TODO comments, curate before it leaves status draft",
+        d.id,
+        d.url,
+        text.lines().filter(|l| l.contains("TODO")).count()
+    );
+    Ok(())
 }
 
 fn generate(out_dir: &Path) -> Result<(), String> {

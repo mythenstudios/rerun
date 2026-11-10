@@ -18,7 +18,8 @@
 
 ## PCGamingWiki
 
-- Research basis via the API (MediaWiki + Cargo). Status `hackable` = candidate for a fix.
+- Research basis via the API (MediaWiki; anonymous Cargo queries are refused by the wiki, checked 2026-11-10). Status `hackable` = candidate for a fix.
+- `rerun-workbench draft` (P4-14, curator tool, never shipped) reads a page's template parameters (app ID, API versions, `hackable` flags) and section anchors and writes a Topo draft of facts and links only: never a step, never a download of what the page links, never text of the page (`docs/02-topo-format.md`, "Drafts from PCGamingWiki").
 - Content is licensed CC BY-NC-SA: do not copy, use own wording, link as source.
 - PCGW is never evaluated live in the client. Topos are the reviewed form.
 

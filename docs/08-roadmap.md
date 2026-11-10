@@ -48,7 +48,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - One package = one pinned version; another verified version of the same tool is its own package (e.g. `dxvk-1.10`), a Topo variant chooses it (no free version choice, rule 4)
 - Shared package files are reference counted: a revert removes its own files, a file another open transaction still holds stays until the last one is reverted (done in P4-8b, ADR 0020 amendment P4-8b; a file a transaction replaced, not created, stays newest first)
 - 20 Topos, at least 5 of them `verified` on the developer machine
-- `rerun-workbench`: PCGW query → draft
+- `rerun-workbench`: PCGW query → draft. Built in P4-14 (`rerun-workbench draft`, ADR 0024 amendment P4-14): the page's templates (anonymous Cargo queries are refused by the wiki), facts and links only, a placeholder executable (D1 a), fix sections as `# TODO issue:` links (D2 a), synthetic test replies only (D3 b); the one [DEV] run against the real wiki is open (docs/09)
 
 **Acceptance:** Install and revert of DXVK, dgVoodoo 2, Ultimate ASI Loader + EaglePatch leave a bit-identical game folder.
 
