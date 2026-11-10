@@ -1017,7 +1017,11 @@ fn real_packages() -> (Package, Package) {
         arch: ArchList::List(vec![Arch::X86, Arch::X64]),
         apis: Some(vec![Api::D3d9, Api::D3d11]),
         slots: vec![],
-        slots_by_api: None,
+        // Every DLL a package installs is one of its slots (P4-8, catalog::check::slots_bound).
+        slots_by_api: Some(std::collections::BTreeMap::from([
+            (Api::D3d9, vec!["d3d9.dll".to_owned()]),
+            (Api::D3d11, vec!["dxgi.dll".to_owned()]),
+        ])),
         requires: vec![],
         requires_gpu: vec![],
         supports_exe_sha1: vec![],
@@ -1058,6 +1062,8 @@ fn real_packages() -> (Package, Package) {
     asi.sha256 = None;
     asi.license = "MIT".into();
     asi.apis = None;
+    asi.slots = vec!["dinput8.dll".to_owned()];
+    asi.slots_by_api = None;
     asi.assets = Some(vec![
         Asset {
             arch: Arch::X86,
