@@ -685,6 +685,23 @@ pub enum TopoStep {
     GpuPreference(GpuPreferenceSpec),
 }
 
+impl TopoStep {
+    /// The root the step's file lies in (P4-12), as [`crate::prim::Step::root`].
+    pub fn root(&self) -> crate::prim::StepRoot {
+        match self {
+            Self::IniSet(i) => i.root,
+            Self::Package(_)
+            | Self::SteamInput(_)
+            | Self::Cpu(_)
+            | Self::RegistrySet(_)
+            | Self::CompatLayer(_)
+            | Self::FirewallRule(_)
+            | Self::LaaPatch(_)
+            | Self::GpuPreference(_) => crate::prim::StepRoot::Game,
+        }
+    }
+}
+
 /// `laa_patch` (P4-10, ADR 0020 amendment P4-10): set the Large Address Aware flag of one
 /// executable of `match.exes` that carries a `sha256` (the loader rule of ADR 0024, P4 R6, in
 /// exactly its spelling). Draft only until reviewed ([`super::check::LAA_PATCH_REVIEWED`]).

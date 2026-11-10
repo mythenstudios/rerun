@@ -107,6 +107,9 @@ fn ud_p1_the_allowlist() {
         "WindowsPowerShell",
         r"WindowsPowerShell\Modules",
         r"powershell\x",
+        // Review M1: Rainmeter's skin INIs run commands.
+        r"Rainmeter\Skins\x",
+        "rainmeter",
     ] {
         assert!(
             matches!(user_dir_ok(d, &rel(bad)), Err(UserDirError::Denied(_))),
@@ -155,10 +158,14 @@ fn ud_p2_opens_the_folder_below_documents() {
 #[test]
 fn ud_p3_a_missing_base_or_folder_is_not_found() {
     let sys = base().build().unwrap();
-    assert_eq!(
-        sys_kind(open(&sys, r"My Games\Other")),
-        SysErrorKind::NotFound
-    );
+    // A missing folder names the canonical base (exec tells a moved Documents from it).
+    match open(&sys, r"My Games\Other") {
+        Err(RootError::UserDirMissing { base, sub }) => {
+            assert_eq!(base.to_string(), DOCS);
+            assert_eq!(sub.as_str(), r"My Games\Other");
+        }
+        other => panic!("{other:?}"),
+    }
     let sys = base()
         .without_known_folder(KnownFolder::Documents)
         .build()
@@ -171,7 +178,10 @@ fn ud_p3_a_missing_base_or_folder_is_not_found() {
         .build()
         .unwrap();
     // `windows_layout` made `D:\NoDocs`, but not the folder below it.
-    assert_eq!(sys_kind(open(&sys, SUB)), SysErrorKind::NotFound);
+    assert!(matches!(
+        open(&sys, SUB),
+        Err(RootError::UserDirMissing { .. })
+    ));
 }
 
 #[test]
@@ -311,7 +321,7 @@ fn ud_p7_a_registered_sync_root_over_it_is_refused() {
         match open(&sys, SUB) {
             Err(RootError::CloudSynced { path, why }) => {
                 assert_eq!(path.to_string(), want, "{sr}");
-                assert_eq!(why, CloudWhy::SyncRoot(RootPath::new(sr).unwrap()));
+                assert_eq!(why, CloudWhy::SyncRoot(sr.to_owned()));
             }
             other => panic!("{sr}: {other:?}"),
         }
@@ -325,7 +335,7 @@ fn ud_p7_a_registered_sync_root_over_it_is_refused() {
     let sys = synced(moved(), r"D:\OneDrive").build().unwrap();
     assert_eq!(
         cloud(open(&sys, SUB)),
-        CloudWhy::SyncRoot(RootPath::new(r"D:\OneDrive").unwrap())
+        CloudWhy::SyncRoot(r"D:\OneDrive".to_owned())
     );
     // The `\\?\` form a provider may write counts as well.
     let sys = synced(moved(), r"\\?\D:\OneDrive").build().unwrap();
@@ -333,7 +343,46 @@ fn ud_p7_a_registered_sync_root_over_it_is_refused() {
         open(&sys, SUB),
         Err(RootError::CloudSynced { .. })
     ));
+    // Review L1: a text on the drive that is no plain folder counts as the whole drive (the
+    // drive root, an 8.3 name, a deceptive character, too long); a volume or device path and a
+    // relative text as everywhere: all refuse (fail closed).
+    let on_d = || {
+        base()
+            .known_folder(KnownFolder::Documents, r"D:\Documents")
+            .dir(format!(r"D:\Documents\{SUB}"))
+    };
+    let long = format!(r"D:\{}", "x".repeat(300));
+    for sr in [
+        r"D:\",
+        r"d:",
+        r"D:\ONEDRI~1",
+        "D:\\One\u{202E}Drive",
+        long.as_str(),
+        r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\OneDrive",
+        r"\\.\HarddiskVolume3\OneDrive",
+        "OneDrive",
+    ] {
+        let sys = synced(on_d(), sr).build().unwrap();
+        assert!(
+            matches!(open(&sys, SUB), Err(RootError::CloudSynced { .. })),
+            "{sr:?}: {:?}",
+            open(&sys, SUB)
+        );
+    }
+    // A text on another drive that is no plain folder: that drive only.
+    let sys = synced(on_d(), r"E:\").build().unwrap();
+    assert!(open(&sys, SUB).is_ok());
+    // The displayed text is escaped.
+    let sys = synced(on_d(), "D:\\One\u{202E}Drive").build().unwrap();
+    match cloud(open(&sys, SUB)) {
+        CloudWhy::SyncRoot(t) => assert!(!t.contains('\u{202E}'), "{t:?}"),
+        other => panic!("{other:?}"),
+    }
     // A sync root elsewhere, a value of another type, a share: no reason to refuse.
+    let sys = synced(on_d(), r"\\?\UNC\server\share\OneDrive")
+        .build()
+        .unwrap();
+    assert!(open(&sys, SUB).is_ok());
     let sys = synced(base(), r"C:\Users\Player\OneDrive")
         .value(
             sync_key("Dropbox!S-1-5-21-1-2-3-1001!x"),

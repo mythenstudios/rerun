@@ -60,7 +60,7 @@ pub use helper::{
 pub use input::{file_present, read_input};
 pub use user_data::{
     CloudWhy, MAX_SYNC_PROVIDERS, MAX_SYNC_ROOTS_PER_KEY, MAX_USER_DIR_SEGS, SYNC_ROOT_MANAGER,
-    UserBase, UserDataDir, UserDirError, sync_roots, user_dir_ok,
+    SyncRoot, UserBase, UserDataDir, UserDirError, sync_roots, user_dir_ok,
 };
 pub use vstore::{Shadow, VIRTUAL_STORE, check_root, preview_with_shadows, shadows};
 
@@ -174,6 +174,24 @@ pub enum RootError {
         path: RootPath,
         /// Which signal.
         why: CloudWhy,
+    },
+    /// The folder below a user folder's base does not exist (P4-12); `base` is the base's
+    /// canonical path, so a caller can tell a moved base from a missing folder.
+    #[error("{base}\\{sub} does not exist; start the game once so it makes it")]
+    UserDirMissing {
+        /// Canonical path of the base (Documents).
+        base: RootPath,
+        /// The folder below it.
+        sub: RelPath,
+    },
+    /// A user data folder's handle is not where it was opened below its base (P4-12): changed
+    /// while it was opened. Fails closed.
+    #[error("{child} is not the folder opened below {base}")]
+    NotBelow {
+        /// Canonical path of the base.
+        base: RootPath,
+        /// Canonical path found.
+        child: RootPath,
     },
     /// The folder below a user folder's base breaks its allowlist (P4-12).
     #[error("{sub}: {why}")]

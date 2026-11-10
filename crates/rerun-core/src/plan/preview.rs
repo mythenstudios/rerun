@@ -98,8 +98,9 @@ the game itself)";
 
 /// What a plan with a user data root says once (P4-12, ADR 0020 amendment P4-12; rule 5).
 pub const USER_DATA_NOTE: &str = "your Documents folder: the game's folder there lies outside \
-the game folder and was checked not to be synchronised with a cloud (OneDrive, Dropbox, ...). A \
-revert needs Documents at the same place: if it moves (or a cloud backup of it is switched on) \
+the game folder. No Windows cloud-files sync (OneDrive, Dropbox, iCloud, ...) was found for it; \
+other sync tools (Google Drive, Syncthing, Nextcloud, ...) cannot be detected. A revert needs \
+Documents at the same place: if it moves (or a cloud backup of it is switched on) \
 in between, the revert refuses until it is back, or the transaction is closed with forget (its \
 backup stays in Rerun's journal). A cloud save of the game (Steam Cloud) may write the file again: \
 then only the keys that still hold Rerun's value are set back. Controlled folder access may block \

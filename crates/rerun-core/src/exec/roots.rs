@@ -41,8 +41,10 @@
 //! base resolved anew, the folder handle-relative below it, never cloud-synchronised. Apply,
 //! `check`, revert and `verify` alike: a path other than the head's is [`Refusal::UserDataMoved`]
 //! (undecided, before the identity is compared, so the reason is the right one; no rebind, no
-//! revert at the new place), another folder at the same path `IdentityMismatch` (undecided),
-//! one that is not found absent (a revert halts at its op without a record). Nothing is created.
+//! revert at the new place; also when the folder is missing below the base as it resolves now
+//! while the old one may still exist), another folder at the same path `IdentityMismatch`
+//! (undecided), one that is not found where the head has it absent (a revert halts at its op
+//! without a record). Nothing is created.
 
 use super::bind::{Binding, Bindings, Proof};
 use super::{ExecCtx, ProfilesMoved, Refusal, op_ix};
@@ -543,6 +545,27 @@ fn open_user_data<'g>(
         Ok(u) => u,
         Err(RootError::Sys(s)) if s.kind == SysErrorKind::NotFound => {
             return Err(Failed::Absent(NoFiles::Root(Box::new(RootError::Sys(s)))));
+        }
+        // The folder is missing below the base as it resolves now: gone (absent) only where
+        // the head has it; a base that resolves elsewhere is a moved Documents (L6), even if the
+        // old folder is still there.
+        Err(RootError::UserDirMissing {
+            base: now_base,
+            sub: missing,
+        }) => {
+            let now = sub.segments().try_fold(now_base.clone(), |p, s| p.child(s));
+            let e = RootError::UserDirMissing {
+                base: now_base,
+                sub: missing,
+            };
+            return Err(match now {
+                Ok(now) if now == r.path => Failed::Absent(NoFiles::Root(Box::new(e))),
+                Ok(now) => Failed::Undecided(Refusal::UserDataMoved {
+                    planned: escape::path(&r.path.to_string()).into_owned(),
+                    now: escape::path(&now.to_string()).into_owned(),
+                }),
+                Err(_) => Failed::Undecided(e.into()),
+            });
         }
         Err(e) => return Err(Failed::Undecided(e.into())),
     };

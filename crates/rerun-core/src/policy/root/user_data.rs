@@ -7,8 +7,8 @@
 //! Rules, in this order (each one fails closed):
 //! 1. **The folder below the base** passes [`user_dir_ok`] (pure; also the plan fence and the
 //!    Topo loader): 1 to [`MAX_USER_DIR_SEGS`] plain segments ([`classify`]), not the shared
-//!    container `My Games` alone, not below `WindowsPowerShell` or `PowerShell` (profile
-//!    scripts are code).
+//!    container `My Games` alone, not below the folder of a known program that runs an INI
+//!    file's content or scripts (`WindowsPowerShell`, `PowerShell`, `Rainmeter`).
 //! 2. **The base** comes from [`KnownFolders`](crate::sys::KnownFolders) (process token, never
 //!    the environment, never `User Shell Folders` raw), passes [`RootPath::new`] lexically
 //!    (a share, an 8.3 name, a drive root are `InvalidPath`) and the forbidden list, and is
@@ -33,7 +33,9 @@
 //!    (`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager\*\UserSyncRoots`,
 //!    every SID, `REG_SZ` only, at most [`MAX_SYNC_PROVIDERS`] keys of
 //!    [`MAX_SYNC_ROOTS_PER_KEY`] values) contains the base (lexical or canonical) or the
-//!    folder. A missing `SyncRootManager` is "none"; one that cannot be read refuses. No path
+//!    folder ([`SyncRoot`]: fail closed, a text on a drive that is no plain folder is the whole
+//!    drive, any other text but a share everywhere). A missing `SyncRootManager` is "none"; one
+//!    that cannot be read refuses. Sync tools outside the cloud files API cannot be seen. No path
 //!    name heuristic, never `%OneDrive%`. The INI file below the folder is refused as a cloud
 //!    placeholder by `ini_set` and `exec` already.
 //!
@@ -114,8 +116,10 @@ pub enum UserDirError {
     Denied(&'static str),
 }
 
-/// Folder names never allowed as the first segment (folded): profile scripts are code.
-const DENIED_FIRST: [&str; 2] = ["WINDOWSPOWERSHELL", "POWERSHELL"];
+/// Folder names never allowed as the first segment (folded): known programs that run an INI
+/// file's content or scripts below Documents (PowerShell's profile scripts; Rainmeter's skin
+/// INIs, whose `RunCommand` plugin and `OnRefreshAction` run commands at every logon).
+const DENIED_FIRST: [&str; 3] = ["WINDOWSPOWERSHELL", "POWERSHELL", "RAINMETER"];
 
 /// Containers shared by many games (folded): allowed only with a folder below them.
 const SHARED: [&str; 1] = ["MY GAMES"];
@@ -137,7 +141,8 @@ pub fn user_dir_ok(base: UserBase, sub: &RelPath) -> Result<(), UserDirError> {
     let first = segs.first().map(|s| fold(s)).unwrap_or_default();
     if DENIED_FIRST.contains(&first.as_str()) {
         return Err(UserDirError::Denied(
-            "PowerShell's folder holds profile scripts, not game data",
+            "the folder of a program that runs an INI file's content or scripts (PowerShell \
+             profiles, Rainmeter skins), not game data",
         ));
     }
     if segs.len() == 1 && SHARED.contains(&first.as_str()) {
@@ -153,8 +158,9 @@ pub enum CloudWhy {
     /// The folder (the base, one on the way, or the user data folder) is part of a cloud files
     /// sync root: a cloud files tag or a recall, offline or pin attribute of its handle.
     Folder(RootPath),
-    /// A registered sync root (`SyncRootManager`) contains it.
-    SyncRoot(RootPath),
+    /// A registered sync root (`SyncRootManager`) contains it (or may: a drive root, a name
+    /// that is no plain path, a volume path). The registry text as found, escaped for display.
+    SyncRoot(String),
 }
 
 impl fmt::Display for CloudWhy {
@@ -162,6 +168,59 @@ impl fmt::Display for CloudWhy {
         match self {
             Self::Folder(p) => write!(f, "{p} is a cloud files folder"),
             Self::SyncRoot(p) => write!(f, "it lies in the sync root {p}"),
+        }
+    }
+}
+
+/// A registered sync root as far as Rerun can tell where it is ([`sync_roots`]): fail closed,
+/// so whatever is not a plain folder and not a share counts as wider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncRoot {
+    /// A plain drive-letter folder: it contains what lies at or below it.
+    Folder(RootPath),
+    /// A text on a drive that is no plain folder (the drive root, an 8.3 name, too long, a
+    /// deceptive character): the whole drive.
+    Drive(char),
+    /// Anything else that is no share (a volume GUID path, a device path, a relative text):
+    /// every folder.
+    Anywhere,
+}
+
+impl SyncRoot {
+    /// Classifies one `UserSyncRoots` string; `None` for a share (`\\server\…`,
+    /// `\\?\UNC\…`), which cannot contain a drive-letter folder.
+    pub fn of(s: &str) -> Option<Self> {
+        let starts = |t: &str, p: &str| t.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
+        let rest = if let Some(r) = s.strip_prefix(r"\\?\") {
+            if starts(r, r"UNC\") {
+                return None;
+            }
+            r
+        } else if s.starts_with(r"\\") && !s.starts_with(r"\\.\") {
+            return None;
+        } else {
+            s
+        };
+        let b = rest.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return Some(match RootPath::new(rest) {
+                Ok(p) => Self::Folder(p),
+                Err(_) => Self::Drive(char::from(b[0]).to_ascii_uppercase()),
+            });
+        }
+        Some(Self::Anywhere)
+    }
+
+    /// `p` lies at or below this sync root (as far as it can be told: module docs).
+    pub fn contains(&self, p: &RootPath) -> bool {
+        match self {
+            Self::Folder(r) => r.contains(p),
+            Self::Drive(d) => p
+                .path()
+                .to_str()
+                .and_then(|s| s.chars().next())
+                .is_some_and(|c| c.to_ascii_uppercase() == *d),
+            Self::Anywhere => true,
         }
     }
 }
@@ -176,21 +235,25 @@ pub struct UserDataDir<'s> {
     sub: RelPath,
 }
 
-/// Opens `name` (relative to `parent`, never through a reparse point), read side.
+/// Opens `name` (relative to `parent`, never through a reparse point), read side. A missing
+/// folder is [`RootError::UserDirMissing`] with the canonical base, so `exec` can tell a moved
+/// base from a missing folder (ADR 0020 amendment P4-12, L6).
 fn open_rel<'d>(
     parent: &'d dyn Dir,
     at: &RelPath,
     base: &RootPath,
+    sub: &RelPath,
 ) -> Result<Box<dyn Dir + 'd>, RootError> {
-    parent.open_dir(at).map_err(|e| {
-        if e.kind == SysErrorKind::ReparsePoint {
-            RootError::Reparse {
-                store: base.clone(),
-                at: at.clone(),
-            }
-        } else {
-            RootError::Sys(e)
-        }
+    parent.open_dir(at).map_err(|e| match e.kind {
+        SysErrorKind::ReparsePoint => RootError::Reparse {
+            store: base.clone(),
+            at: at.clone(),
+        },
+        SysErrorKind::NotFound => RootError::UserDirMissing {
+            base: base.clone(),
+            sub: sub.clone(),
+        },
+        _ => RootError::Sys(e),
     })
 }
 
@@ -253,12 +316,12 @@ impl<'s> UserDataDir<'s> {
                 Some(p) => p.child(seg)?,
             };
             expected = expected.child(seg)?;
-            let d = open_rel(&*docs, &next, &docs_path)?;
+            let d = open_rel(&*docs, &next, &docs_path, sub)?;
             let info = d.info().map_err(raced)?;
             plain(&expected, &info, &next)?;
             at = Some(next);
         }
-        let rel = open_rel(&*docs, sub, &docs_path)?;
+        let rel = open_rel(&*docs, sub, &docs_path, sub)?;
         let rel_id = RootId::of(&rel.info().map_err(raced)?);
         drop(rel);
         let dir = open_abs_write(sys, expected.path())?;
@@ -271,8 +334,8 @@ impl<'s> UserDataDir<'s> {
         }
         let path = RootPath::from_final_path(&info.final_path)?;
         if path != expected || info.volume_serial != docs_info.volume_serial {
-            return Err(RootError::Escaped {
-                store: docs_path,
+            return Err(RootError::NotBelow {
+                base: docs_path,
                 child: path,
             });
         }
@@ -286,12 +349,12 @@ impl<'s> UserDataDir<'s> {
         }
         // Rule 4 (b): the registered sync roots.
         if !knob::cloud_unchecked() {
-            for sr in sync_roots(sys)? {
+            for (text, sr) in sync_roots(sys)? {
                 for p in [&lexical, &docs_path, &path] {
                     if sr.contains(p) {
                         return Err(RootError::CloudSynced {
                             path: p.clone(),
-                            why: CloudWhy::SyncRoot(sr),
+                            why: CloudWhy::SyncRoot(text),
                         });
                     }
                 }
@@ -359,10 +422,11 @@ impl<'s> UserDataDir<'s> {
 }
 
 /// The registered cloud sync roots (module docs, rule 4 b): every `REG_SZ` of every
-/// `SyncRootManager\<provider>\UserSyncRoots` that is a drive-letter path. A missing
-/// `SyncRootManager` or `UserSyncRoots` is none; any other failure, or more than the bounds,
-/// refuses.
-pub fn sync_roots(sys: &dyn System) -> Result<Vec<RootPath>, RootError> {
+/// `SyncRootManager\<provider>\UserSyncRoots` that is no share, as [`SyncRoot`] (fail closed: a
+/// text on a drive that is no plain folder counts as the whole drive, anything else as
+/// everywhere), with the text escaped for display. A missing `SyncRootManager` or
+/// `UserSyncRoots` is none; any other failure, or more than the bounds, refuses.
+pub fn sync_roots(sys: &dyn System) -> Result<Vec<(String, SyncRoot)>, RootError> {
     let reg = sys.registry();
     let top = RegKey::new(Hive::LocalMachine, RegView::Native, SYNC_ROOT_MANAGER);
     let providers = match reg.subkeys(&top) {
@@ -391,11 +455,10 @@ pub fn sync_roots(sys: &dyn System) -> Result<Vec<RootPath>, RootError> {
             )));
         }
         for (_, v) in values {
-            // Only a string names a folder; a share or any other form cannot contain a
-            // drive-letter folder.
+            // Only a string names a folder; a share cannot contain a drive-letter folder.
             let RegValue::String(s) = v else { continue };
-            if let Ok(r) = RootPath::new(&s).or_else(|_| RootPath::from_final_path(&s)) {
-                out.push(r);
+            if let Some(r) = SyncRoot::of(&s) {
+                out.push((crate::escape::path(&s).into_owned().to_string(), r));
             }
         }
     }

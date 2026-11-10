@@ -158,6 +158,13 @@ fn p_u2_every_rule_of_the_fence() {
         }),
         "a user data root whose path does not end in its folder",
     );
+    // Review N2: a user data root without an op on it.
+    refused(
+        &with(&|p| {
+            p.ops.pop();
+        }),
+        "a user data root without an op on it",
+    );
     refused(
         &with(&|p| p.roots[1].origin = PlanOrigin::Manual),
         "the user data root, and only it, comes from a user folder",

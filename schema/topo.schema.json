@@ -438,7 +438,7 @@
               "pattern": "^[^\\\\/]+([\\\\/][^\\\\/]+){0,3}$"
             },
             {
-              "description": "Not the shared My Games alone, not below PowerShell's folder.",
+              "description": "Not the shared My Games alone, not below the folder of a known program that runs an INI file's content or scripts (PowerShell profiles, Rainmeter skins).",
               "not": {
                 "anyOf": [
                   {
@@ -446,6 +446,9 @@
                   },
                   {
                     "pattern": "^([Ww][Ii][Nn][Dd][Oo][Ww][Ss])?[Pp][Oo][Ww][Ee][Rr][Ss][Hh][Ee][Ll][Ll]([\\\\/]|$)"
+                  },
+                  {
+                    "pattern": "^[Rr][Aa][Ii][Nn][Mm][Ee][Tt][Ee][Rr]([\\\\/]|$)"
                   }
                 ]
               }

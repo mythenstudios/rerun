@@ -25,7 +25,7 @@ use crate::prim::{IniSetSpec, IniSetValue, PlanCtx, Step, StepRoot};
 use crate::sys::fake::FakeSystemBuilder;
 use crate::sys::fs::tag;
 use crate::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
-use crate::sys::{KnownFolder, SysErrorKind, System};
+use crate::sys::{KnownFolder, System};
 
 /// The fake's Documents.
 pub(crate) const DOCS: &str = r"C:\Users\Player\Documents";
@@ -264,6 +264,44 @@ fn r_u4_documents_moved_refuses_without_a_record() {
     assert_eq!(ud_now(&env, DOCS_D), applied);
 }
 
+/// R-U4b (review S1, L6): Documents redirected to an empty folder while the old one stays: the
+/// game's folder is missing below the new Documents, which is a moved Documents (refused), not
+/// a gone folder (a halt).
+#[test]
+fn r_u4b_documents_redirected_to_an_empty_folder_is_moved_not_gone() {
+    const LINK: &str = r"C:\Users\Player\Docs";
+    let b = base()
+        .known_folder(KnownFolder::Documents, LINK)
+        .file(ud_ini(DOCS_D), INI_TEXT.to_vec())
+        .dir(r"E:\Docs")
+        .junction(LINK, DOCS_D);
+    let env = Env::new(finish(b));
+    let fx = env.sys.fake_fs();
+    let h = plan_ud(&env, &[ud_three()]);
+    fx.retarget(Path::new(LINK), r"E:\Docs").unwrap();
+    match refused(env.apply(&h)) {
+        Refusal::UserDataMoved { planned, now } => {
+            assert_eq!(planned.as_str(), format!(r"{DOCS_D}\{UD_SUB}"));
+            assert_eq!(now.as_str(), format!(r"E:\Docs\{UD_SUB}"));
+        }
+        other => panic!("{other:?}"),
+    }
+    fx.retarget(Path::new(LINK), DOCS_D).unwrap();
+    let t = env.applied(&h);
+    let applied = ud_now(&env, DOCS_D);
+    fx.retarget(Path::new(LINK), r"E:\Docs").unwrap();
+    assert!(matches!(
+        revert_refused(env.revert(&t)),
+        Refusal::UserDataMoved { .. }
+    ));
+    assert_eq!(env.state(&t), Some(TxnState::Applied));
+    assert_eq!(ud_now(&env, DOCS_D), applied);
+    // Back in place: the revert runs.
+    fx.retarget(Path::new(LINK), DOCS_D).unwrap();
+    assert_eq!(closed(&env.revert(&t)), Some(Closing::Reverted));
+    assert_eq!(ud_now(&env, DOCS_D).as_deref(), Some(INI_TEXT));
+}
+
 #[test]
 fn r_u5_a_cloud_sync_switched_on_after_the_apply_refuses_the_revert() {
     let env = ud_env(DOCS, INI_TEXT);
@@ -303,7 +341,7 @@ fn r_u6_the_folder_gone_halts_another_one_refuses() {
             assert_eq!(h.root, 1);
             assert!(matches!(
                 &*h.why,
-                Refusal::Root(e) if matches!(&**e, RootError::Sys(s) if s.kind == SysErrorKind::NotFound)
+                Refusal::Root(e) if matches!(&**e, RootError::UserDirMissing { .. })
             ));
         }
         other => panic!("{other:?}"),

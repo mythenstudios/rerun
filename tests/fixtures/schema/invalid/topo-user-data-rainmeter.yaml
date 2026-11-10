@@ -1,0 +1,20 @@
+# Invalid: user_data below Rainmeter's folder (skin INIs run commands)
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+user_data:
+  documents: 'Rainmeter\Skins\Clock'
+issues:
+  - id: issue
+    title: "Issue"
+    variants:
+      - id: v
+        status: unverified
+        kind: fix
+        steps:
+          - ini_set: { root: user_data, file: 'FALLOUT.INI', values: [ { section: General, key: iNumHWThreads, value: "2" } ] }

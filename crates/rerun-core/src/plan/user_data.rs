@@ -8,8 +8,8 @@
 //!   `WindowsPowerShell`), and a path that ends, folded, in `\<sub>`.
 //! - At most one, and last: root 0 is a game root, the user data root has an index of 1 or more
 //!   (after the profiles root, if there is one; `plan::profile`).
-//! - On it only `IniValue` ops (user decision U1 a, L7): no folder, no package file, no inline
-//!   content, no hold, no patch. Registry slots and firewall rules name game roots only
+//! - At least one op on it, and only `IniValue` ops (user decision U1 a, L7; the one place of
+//!   that rule): no folder, no package file, no inline content, no hold, no patch. Registry slots and firewall rules name game roots only
 //!   (`plan::slot_on_game`, `plan::rule_check`).
 //!
 //! Exactly how `exec` opens it again (never by the head's path) is `exec::roots`.
@@ -73,14 +73,21 @@ pub(super) fn fence(plan: &Plan) -> Result<(), PlanError> {
             "a user data root comes last, after the game root at index 0",
         ));
     }
+    let mut ops = 0usize;
     for (k, op) in plan.ops.iter().enumerate() {
         let on_it = match op.target() {
             Target::File { root, .. } | Target::Rule { root, .. } => usize::from(root.0) == i,
             Target::Key { .. } | Target::Value { .. } => false,
         };
+        // The one place that says which op kinds a user data root takes (U1 a, L7).
         if on_it && !matches!(op, Op::IniValue { .. }) {
             return Err(invalid(Some(k), "only INI values in a user data folder"));
         }
+        ops += usize::from(on_it);
+    }
+    // Review N2: a user data root is in a plan only for its ops (apply and revert open it).
+    if ops == 0 {
+        return Err(invalid(None, "a user data root without an op on it"));
     }
     Ok(())
 }

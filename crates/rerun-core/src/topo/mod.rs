@@ -679,17 +679,16 @@ pub enum EngineError {
 }
 
 /// A picked variant of `topo` sets a file in its user data folder (P4-12): the caller opens
-/// `topo.user_data` (`policy::root::UserDataDir`) for [`plan`] then, and only then. Unknown
-/// picks count as none (`plan` refuses them).
-pub fn needs_user_data(topo: &Topo, picks: &[Pick]) -> bool {
-    picks.iter().any(|p| {
-        topo.issues
-            .iter()
-            .filter(|i| i.id.as_str() == p.issue)
-            .flat_map(|i| i.variants.iter())
-            .filter(|v| v.id.as_str() == p.variant)
-            .flat_map(|v| v.steps.iter())
-            .any(|s| matches!(s, TopoStep::IniSet(x) if x.root == prim::StepRoot::UserData))
+/// `topo.user_data` (`policy::root::UserDataDir`) for [`plan`] then, and only then (review N5:
+/// after the picks resolve; picks that do not resolve need nothing, `plan` refuses them, and an
+/// issue whose `when` is no on `profile` needs nothing either).
+pub fn needs_user_data(topo: &Topo, picks: &[Pick], profile: &SystemProfile) -> bool {
+    let Ok(resolved) = resolve_picks(topo, picks) else {
+        return false;
+    };
+    resolved.iter().any(|(issue, v)| {
+        when::eval(issue.when.as_ref(), profile) != Tri::No
+            && v.steps.iter().any(|s| s.root() == prim::StepRoot::UserData)
     })
 }
 

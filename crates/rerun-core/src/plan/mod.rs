@@ -617,6 +617,23 @@ impl Op {
         self.target().is_registry() || matches!(self, Self::IniValue { .. })
     }
 
+    /// The plan root a file op (or a firewall rule) names, to renumber it while a plan is built
+    /// (`prim::plan`: the user data root, P4-12); `None` for a registry op.
+    pub(crate) fn root_mut(&mut self) -> Option<&mut RootIx> {
+        match self {
+            Self::CreateDir { root, .. }
+            | Self::CreateFile { root, .. }
+            | Self::ReplaceFile { root, .. }
+            | Self::IniValue { root, .. }
+            | Self::Hold { root, .. }
+            | Self::FirewallRule { root, .. } => Some(root),
+            Self::CreateKey { .. }
+            | Self::SetValue { .. }
+            | Self::TokenList { .. }
+            | Self::GpuPref { .. } => None,
+        }
+    }
+
     /// The content a file op writes (`None` for a [`Self::Hold`], which writes nothing).
     pub fn content(&self) -> Option<&ContentRef> {
         match self {

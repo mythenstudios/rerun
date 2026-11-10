@@ -139,12 +139,27 @@ impl UserDataSpec {
     }
 }
 
+impl Step {
+    /// The root the step's file lies in (P4-12): its own `root` for a step that has one (v1:
+    /// `ini_set`), the game folder for every other. Which op kinds a user data root takes is the
+    /// plan fence's alone (`plan::user_data`).
+    pub fn root(&self) -> StepRoot {
+        match self {
+            Self::IniSet(i) => i.root,
+            Self::FileInstall(_)
+            | Self::RegistrySet(_)
+            | Self::CompatLayer(_)
+            | Self::LaunchMethod(_)
+            | Self::LaaPatch(_)
+            | Self::GpuPreference(_) => StepRoot::Game,
+        }
+    }
+}
+
 /// A step of `steps` has its file in the user data folder: the front end opens it then (and
 /// only then).
 pub fn needs_user_data(steps: &[Step]) -> bool {
-    steps
-        .iter()
-        .any(|s| matches!(s, Step::IniSet(i) if i.root == StepRoot::UserData))
+    steps.iter().any(|s| s.root() == StepRoot::UserData)
 }
 
 /// The root index an op on the user data folder carries while the plan is built; replaced by
@@ -323,7 +338,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
         };
         let ix = RootIx(u16::try_from(roots.len()).unwrap_or(u16::MAX));
         for o in &mut ops {
-            if let Op::IniValue { root, .. } = o
+            if let Some(root) = o.root_mut()
                 && *root == USER_DATA_PENDING
             {
                 *root = ix;

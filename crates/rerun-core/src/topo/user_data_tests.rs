@@ -77,6 +77,11 @@ fn sha1_of(sys: &FakeSystem) -> String {
         .collect::<String>()
 }
 
+/// A system profile (no `when` of these Topos depends on it).
+fn prof() -> hw::SystemProfile {
+    hw::read(&FakeSystem::builder().build().unwrap(), None)
+}
+
 fn picks() -> Vec<Pick> {
     vec![Pick {
         issue: "threads".to_owned(),
@@ -126,7 +131,7 @@ fn tu1_round_trip_in_the_user_data_folder() {
     let sys = &env.sys;
     let t = topo_with(Some(UD), Some("user_data"), &sha1_of(sys));
     check::topo(&t, Rules::Source).unwrap();
-    assert!(needs_user_data(&t, &picks()));
+    assert!(needs_user_data(&t, &picks(), &prof()));
     let before = snap_ud(&env, DOCS);
     let tp = plan_with(sys, &t, Some(UD_SUB)).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(tp.plan.roots.len(), 2);
@@ -168,14 +173,15 @@ fn tu2_the_folder_is_the_topo_s_and_only_when_needed() {
     assert!(plan_with(&sys, &t, Some(r"my games\g")).is_ok());
     // A variant of the game folder needs none, even with a `user_data` in the Topo.
     let g = topo_with(Some(UD), None, &sha1_of(&sys));
-    assert!(!needs_user_data(&g, &picks()));
-    assert!(!needs_user_data(&t, &[]));
+    assert!(!needs_user_data(&g, &picks(), &prof()));
+    assert!(!needs_user_data(&t, &[], &prof()));
     assert!(!needs_user_data(
         &t,
         &[Pick {
             issue: "threads".to_owned(),
             variant: "other".to_owned()
-        }]
+        }],
+        &prof()
     ));
 }
 

@@ -356,7 +356,7 @@ fn run<W: Write, E: Write>(
         })];
         // P4-12: the game's folder below Documents only if a picked step sets a file there.
         let user_data = match &t.user_data {
-            Some(u) if topo::needs_user_data(t, picks) => {
+            Some(u) if topo::needs_user_data(t, picks, &profile) => {
                 match UserDataDir::open(sys, &fr, u.base(), u.sub()) {
                     Ok(d) => Some(d),
                     Err(e) => return Outcome::Failed(heading, e.to_string()),

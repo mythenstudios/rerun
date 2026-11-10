@@ -303,13 +303,11 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
                     gpu_preference(t, issue.when.as_ref(), g, &format!("{at}.gpu_preference"))?;
                 }
                 // P4-12: a file in the user data folder needs the Topo's `user_data`.
-                if let TopoStep::IniSet(x) = s {
-                    ensure(
-                        x.root.is_game() || t.user_data.is_some(),
-                        &format!("{at}.ini_set.root"),
-                        "user_data needs the Topo's user_data folder",
-                    )?;
-                }
+                ensure(
+                    s.root().is_game() || t.user_data.is_some(),
+                    &format!("{at}.{}.root", step_key(s)),
+                    "user_data needs the Topo's user_data folder",
+                )?;
             }
             for (k, x) in v.tradeoffs.iter().enumerate() {
                 ensure(!x.is_empty(), &format!("{at}.tradeoffs[{k}]"), "not empty")?;
@@ -634,6 +632,21 @@ fn compat_layer(c: &CompatLayerSpec, at: &str) -> R {
         )?;
     }
     Ok(())
+}
+
+/// The key of a step in the Topo (`ini_set`, ...), for a field path.
+fn step_key(s: &TopoStep) -> &'static str {
+    match s {
+        TopoStep::Package(_) => "package",
+        TopoStep::SteamInput(_) => "steam_input",
+        TopoStep::Cpu(_) => "cpu",
+        TopoStep::RegistrySet(_) => "registry_set",
+        TopoStep::CompatLayer(_) => "compat_layer",
+        TopoStep::IniSet(_) => "ini_set",
+        TopoStep::FirewallRule(_) => "firewall_rule",
+        TopoStep::LaaPatch(_) => "laa_patch",
+        TopoStep::GpuPreference(_) => "gpu_preference",
+    }
 }
 
 fn ini_set(s: &IniSetSpec, at: &str) -> R {
