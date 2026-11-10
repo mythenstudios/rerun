@@ -239,6 +239,16 @@ if (-not $r1) {
     if ($dl.Count -eq 0) { Fail 'pass 1: the package download test did not run or measured nothing (no MEASURED download line in sandbox-test.log)' }
     else { $dl | ForEach-Object { Write-Host "::notice::$_" } }
 
+    # P4-7 (ADR 0025 part 2): DXVK (tar.gz) and Ultimate ASI Loader (zip) downloaded, unpacked,
+    # measured against System32's tar.exe, installed into a game folder and reverted
+    # (sys::win::tests::sandbox, the same run, as the standard user).
+    $pk = @()
+    if (Test-Path -LiteralPath "$out1\sandbox-test.log") {
+        $pk = @(Get-Content -LiteralPath "$out1\sandbox-test.log" | Where-Object { $_ -like 'MEASURED package*' })
+    }
+    if ($pk.Count -eq 0) { Fail 'pass 1: the package round trip did not run or measured nothing (no MEASURED package line in sandbox-test.log)' }
+    else { $pk | ForEach-Object { Write-Host "::notice::$_" } }
+
     # B12 b (ADR 0023): firewall rules readable by the standard user? A measurement, never a failure.
     $fw = if ($r1.cli) { $r1.cli.firewall_read } else { $null }
     if (-not $fw -or $fw -is [string]) { Write-Host '::warning::B12 b: the firewall read probe did not run (no cli.firewall_read object in result.json)' }

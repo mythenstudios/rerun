@@ -27,16 +27,24 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
+use sha2::{Digest, Sha256};
+
 use super::super::testfx::{
-    AppHive, is_elevated, process_account, sandbox_decision, sandbox_guard,
+    AppHive, is_elevated, note, process_account, sandbox_decision, sandbox_guard,
 };
-use super::super::{WinRegistry, WinSystem};
+use super::super::{WinHttp, WinRegistry, WinSystem};
+use crate::catalog::model::{
+    Api, Arch, ArchList, Asset, Hex, Id, Package, PackageFile, PackageSource, Status, Tier,
+};
 use crate::exec::reg_tests::{SUB, VENDOR_GAME, rt1_steps};
 use crate::exec::tests::{N, NEW, OLD, X, t1_spec};
 use crate::exec::{ApplyError, ExecCtx, Outcome, Refusal, apply, forget, revert, verify};
 use crate::journal::{Closing, InstanceTag, Observed};
+use crate::pkg::download::{cache_name, downloads, fetch};
+use crate::pkg::extract::{How, extract, layout};
 use crate::plan::{PlanHash, store};
 use crate::policy::root::{AppDir, Create, ForbiddenRoots, GameDir};
+use crate::prim::GameBuild;
 use crate::prim::tests::rel;
 use crate::prim::{PlanCtx, Step, plan};
 use crate::sys::contract::{RegFixture, registry_read_contract, registry_write_contract};
@@ -953,4 +961,298 @@ fn sandbox_sb_l5_a_link_key_at_layers_is_refused() {
     if !flags_existed && empty_plain_key(reg, &appcompat_key()) {
         h.delete_key(&appcompat_key()).unwrap();
     }
+}
+
+// ---------- Packages (P4-7, ADR 0025 part 2) ----------
+
+/// DXVK 2.7.1 (`tar.gz`) from `doitsujin/dxvk`: the archive's SHA-256 is the `digest` GitHub
+/// reports for the asset in its release API (read 2026-11-10); the files' SHA-256 were measured
+/// from that archive with Rerun's reader and, independently, Python's `tarfile` (2026-11-10).
+/// The test measures them a third time with System32's `tar.exe`.
+const DXVK_URL: &str =
+    "https://github.com/doitsujin/dxvk/releases/download/v2.7.1/dxvk-2.7.1.tar.gz";
+const DXVK_SHA256: &str = "D85CE7C79F57ECD765AAA1B9E7007CB875E6FDE9F6D331DF799BCE73D513CE87";
+const DXVK_X64_D3D9: &str = "2740233A94774FA64A1E07C6EAF94F67027A3C7594FF3B48F7A1C9801777E5A9";
+const DXVK_X32_D3D9: &str = "00ECD422B3B12E9D3B309785F3F19431405389D80EB4A37018EBC63E2D87D900";
+const DXVK_X64_DXGI: &str = "EC02EB37620FF52361CB45376A4611FC4210D96E71D0363F1CC9807F151C01BE";
+/// Ultimate ASI Loader v10.0.2 (`zip`, one asset per architecture) from
+/// `ThirteenAG/Ultimate-ASI-Loader`; the same provenance of the hashes (Python's `zipfile`).
+const ASI_X86_URL: &str = "https://github.com/ThirteenAG/Ultimate-ASI-Loader/releases/download/v10.0.2/Ultimate-ASI-Loader.zip";
+const ASI_X86_SHA256: &str = "A8F76A891F9BEEEF3B02BABF1062C128B00E0285FA17C227A45EC4F81F45116F";
+const ASI_X64_URL: &str = "https://github.com/ThirteenAG/Ultimate-ASI-Loader/releases/download/v10.0.2/Ultimate-ASI-Loader_x64.zip";
+const ASI_X64_SHA256: &str = "A99E188E1F40D7AAC9DB9C0339990332152D372E0359FAA06A52FA339E8B218F";
+const ASI_X86_DINPUT8: &str = "63B465DBC1BF9C5AB4E33C3CCAD099D9EDB702F2C51587AC8D4F196497396437";
+const ASI_X64_DINPUT8: &str = "FA2B9BD317BB597906BC2C4CC2008C1444E50BFDC367E648D18F36F015812E27";
+
+fn hex_upper(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect()
+}
+
+/// The two packages as a signed index would hold them.
+fn real_packages() -> (Package, Package) {
+    let f = |from: &str, to: &str, sha: &str, arch: Arch, api: Option<Api>| PackageFile {
+        from: rel(from),
+        to: rel(to),
+        sha256: Hex::parse(sha).unwrap(),
+        config: false,
+        arch: Some(vec![arch]),
+        api: api.map(|a| vec![a]),
+    };
+    let dxvk: Package = Package {
+        format: 1,
+        id: Id::parse("dxvk").unwrap(),
+        name: "DXVK".into(),
+        status: Status::Active,
+        tier: Tier::Established,
+        source: PackageSource {
+            repo: Some("https://github.com/doitsujin/dxvk".into()),
+            page: None,
+            release: Some(DXVK_URL.into()),
+        },
+        version: "2.7.1".into(),
+        sha256: Some(Hex::parse(DXVK_SHA256).unwrap()),
+        assets: None,
+        license: "Zlib".into(),
+        arch: ArchList::List(vec![Arch::X86, Arch::X64]),
+        apis: Some(vec![Api::D3d9, Api::D3d11]),
+        slots: vec![],
+        slots_by_api: None,
+        requires: vec![],
+        requires_gpu: vec![],
+        supports_exe_sha1: vec![],
+        files: vec![
+            f(
+                "dxvk-2.7.1/x64/d3d9.dll",
+                "d3d9.dll",
+                DXVK_X64_D3D9,
+                Arch::X64,
+                Some(Api::D3d9),
+            ),
+            f(
+                "dxvk-2.7.1/x32/d3d9.dll",
+                "d3d9.dll",
+                DXVK_X32_D3D9,
+                Arch::X86,
+                Some(Api::D3d9),
+            ),
+            f(
+                "dxvk-2.7.1/x64/dxgi.dll",
+                "dxgi.dll",
+                DXVK_X64_DXGI,
+                Arch::X64,
+                Some(Api::D3d11),
+            ),
+        ],
+        options: Default::default(),
+    };
+    let mut asi = dxvk.clone();
+    asi.id = Id::parse("ultimate-asi-loader").unwrap();
+    asi.name = "Ultimate ASI Loader".into();
+    asi.source = PackageSource {
+        repo: Some("https://github.com/ThirteenAG/Ultimate-ASI-Loader".into()),
+        page: None,
+        release: None,
+    };
+    asi.version = "10.0.2".into();
+    asi.sha256 = None;
+    asi.license = "MIT".into();
+    asi.apis = None;
+    asi.assets = Some(vec![
+        Asset {
+            arch: Arch::X86,
+            url: ASI_X86_URL.into(),
+            sha256: Hex::parse(ASI_X86_SHA256).unwrap(),
+        },
+        Asset {
+            arch: Arch::X64,
+            url: ASI_X64_URL.into(),
+            sha256: Hex::parse(ASI_X64_SHA256).unwrap(),
+        },
+    ]);
+    asi.files = vec![
+        f(
+            "dinput8.dll",
+            "dinput8.dll",
+            ASI_X86_DINPUT8,
+            Arch::X86,
+            None,
+        ),
+        f(
+            "dinput8.dll",
+            "dinput8.dll",
+            ASI_X64_DINPUT8,
+            Arch::X64,
+            None,
+        ),
+    ];
+    for p in [&dxvk, &asi] {
+        crate::catalog::check::package(p, crate::catalog::check::Rules::Release)
+            .unwrap_or_else(|e| panic!("{}: {e}", p.id));
+    }
+    (dxvk, asi)
+}
+
+/// Extracts `archive` with System32's `tar.exe` (bsdtar: zip and tar.gz) into `into` and returns
+/// the SHA-256 of `name` there: a reader independent of Rerun's.
+fn bsdtar_sha256(windows: &Path, archive: &Path, into: &Path, name: &str) -> String {
+    let _ = std::fs::remove_dir_all(into);
+    std::fs::create_dir_all(into).unwrap();
+    let st = Command::new(windows.join(r"System32\tar.exe"))
+        .arg("-xf")
+        .arg(archive)
+        .arg("-C")
+        .arg(into)
+        .arg(name)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("tar.exe: {e}"));
+    assert!(
+        st.success(),
+        "tar.exe -xf {} {name}: {st}",
+        archive.display()
+    );
+    hex_upper(&Sha256::digest(read(&into.join(name))))
+}
+
+/// [SB] P4-7: DXVK (`tar.gz`) and Ultimate ASI Loader (`zip`, per architecture) downloaded
+/// through the product path, unpacked (only the named files), measured against `tar.exe`,
+/// installed into a sandbox game folder by the `package` planner's steps, verified, reverted:
+/// the game folder identical. Network: the CI sandbox job only (the local Windows Sandbox has
+/// none); `ci-sandbox.ps1` fails pass 1 without its `MEASURED package` lines. Leaves the cache
+/// and the packages folder as it found them.
+#[test]
+#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
+fn sandbox_package_dxvk_and_asi_loader_round_trip() {
+    sandbox_guard();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test gate: the CI opt-in is an environment variable by design, not a path"
+    )]
+    let ci = std::env::var("RERUN_CI_SANDBOX").is_ok_and(|v| v == "1");
+    if !ci {
+        note(
+            "sandbox_package_dxvk_and_asi_loader_round_trip: skipped (no network outside the CI job)",
+        );
+        return;
+    }
+    super::super::restrict_dll_search().unwrap();
+    let w = Sb::new("pkg");
+    let (dxvk, asi) = real_packages();
+    let windows = w.sys.known_folders().get(KnownFolder::Windows).unwrap();
+    let lad = w
+        .sys
+        .known_folders()
+        .get(KnownFolder::LocalAppData)
+        .unwrap();
+    let cache = lad.join(r"Rerun\cache");
+    let packages = lad.join(r"Rerun\packages");
+    let leftovers = |p: &Package| {
+        let _ = std::fs::remove_dir_all(packages.join(p.id.as_str()));
+        for d in downloads(p).unwrap() {
+            let _ = std::fs::remove_file(cache.join(cache_name(d.sha256())));
+        }
+    };
+    leftovers(&dxvk);
+    leftovers(&asi);
+
+    // 1. Download, unpack, measure.
+    let x64 = GameBuild {
+        arch: Some(Arch::X64),
+        api: Api::D3d9,
+    };
+    let mut steps = Vec::new();
+    for p in [&dxvk, &asi] {
+        w.with(|cx, _| {
+            for d in downloads(p).unwrap() {
+                let got = fetch(&w.sys, &WinHttp::new(), cx.app, &d)
+                    .unwrap_or_else(|e| panic!("{}: {e}", p.id));
+                note(&format!(
+                    "MEASURED package {} {} archive {}: {} bytes, sha256 {}",
+                    p.id,
+                    p.version,
+                    d.url(),
+                    got.len,
+                    cache_name(&got.sha256).to_ascii_uppercase()
+                ));
+            }
+            let unpacked = extract(&w.sys, cx.app, p).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(unpacked.len(), layout(p).unwrap().len(), "{unpacked:?}");
+            for u in &unpacked {
+                assert_eq!(u.how, How::Extracted, "{u:?}");
+            }
+        });
+        // Only the named files are there, and tar.exe reads the same bytes.
+        let version = packages.join(p.id.as_str()).join(&p.version);
+        let mut on_disk = Vec::new();
+        let mut todo = vec![version.clone()];
+        while let Some(d) = todo.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let e = e.unwrap();
+                if e.file_type().unwrap().is_dir() {
+                    todo.push(e.path());
+                } else {
+                    on_disk.push(e.path());
+                }
+            }
+        }
+        let placed = layout(p).unwrap();
+        assert_eq!(on_disk.len(), placed.len(), "{on_disk:?}");
+        for x in &placed {
+            let ours = hex_upper(&Sha256::digest(read(&version.join(x.dest.as_str()))));
+            let d = downloads(p)
+                .unwrap()
+                .into_iter()
+                .find(|d| d.arch() == x.arch)
+                .unwrap();
+            let theirs = bsdtar_sha256(
+                &windows,
+                &cache.join(cache_name(d.sha256())),
+                &w.game.parent().unwrap().join("bsdtar"),
+                &x.from.as_str().replace('\\', "/"),
+            );
+            note(&format!(
+                "MEASURED package {} {} file {}: sha256 {ours} (tar.exe {theirs}, pinned {})",
+                p.id,
+                p.version,
+                x.dest,
+                hex_upper(&x.sha256)
+            ));
+            assert_eq!(ours, theirs, "{}", x.dest);
+            assert_eq!(ours, hex_upper(&x.sha256), "{}", x.dest);
+        }
+        steps.push(Step::FileInstall(
+            crate::prim::package::file_install(p, &x64).unwrap_or_else(|e| panic!("{e}")),
+        ));
+    }
+
+    // 2. Installed into the game folder by the planner's steps, verified, reverted.
+    let before = w.snap(vec![]);
+    let h = w.plan_steps(&steps);
+    let t = w.apply_ok(&h);
+    assert_eq!(
+        hex_upper(&Sha256::digest(read(&w.game.join("d3d9.dll")))),
+        DXVK_X64_D3D9
+    );
+    assert_eq!(
+        hex_upper(&Sha256::digest(read(&w.game.join("dinput8.dll")))),
+        ASI_X64_DINPUT8
+    );
+    assert!(
+        !w.game.join("dxgi.dll").exists(),
+        "a d3d11 file for a d3d9 game"
+    );
+    let v = w.with(|cx, _| verify(cx, &t)).unwrap();
+    assert!(v.halted.is_none(), "{v:?}");
+    assert!(v.ops.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    let after = w.snap(vec![]);
+    assert!(before == after, "{:#?}", before.diff(&after));
+    leftovers(&dxvk);
+    leftovers(&asi);
+    note("sandbox_package_dxvk_and_asi_loader_round_trip: passed, cache and packages removed");
 }
