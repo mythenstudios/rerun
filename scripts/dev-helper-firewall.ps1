@@ -69,7 +69,15 @@ function Invoke-FirewallTest([string]$mode) {
         Remove-Item Env:RERUN_DEV_FIREWALL -ErrorAction SilentlyContinue
     }
     $result = $lines | Where-Object { $_ -like 'RERUN_DEV_FW_RESULT:*' } | Select-Object -Last 1
-    $panic = $lines | Where-Object { $_ -match 'panicked at|assertion' } | Select-Object -First 3
+    # The panic line and the message on the line after it.
+    $panic = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match 'panicked at') {
+            $panic += $lines[$i]
+            if ($i + 1 -lt $lines.Count) { $panic += $lines[$i + 1] }
+            break
+        }
+    }
     if ($code -eq 0 -and $result -like '*PASS*') {
         return ($result -replace '^RERUN_DEV_FW_RESULT: ', '')
     }

@@ -28,15 +28,14 @@ use crate::policy::root::{AppDir, Create, ForbiddenRoots, GameDir};
 use crate::prim::{PlanCtx, plan as plan_steps};
 use crate::sys::firewall::{ACTION_BLOCK, DIR_OUT};
 use crate::sys::{
-    Elevation, Firewall, Fs, FwRule, Gpu, KnownFolder, KnownFolders, NoGpu, NoRegistry, Registry,
+    Elevation, Firewall, Fs, FwRule, Gpu, KnownFolder, KnownFolders, NoGpu, Registry,
     RegistryWrite, SysResult, System, Topology,
 };
 
 /// The name prefix of this test's rules (the Topo ID is `dev-firewall`).
 const PREFIX: &str = "Rerun - dev-firewall - ";
 
-/// The real system with `LocalAppData` redirected into the test folder; no GPU, no registry
-/// write side (the plan holds no registry op).
+/// The real system with `LocalAppData` redirected into the test folder; no GPU.
 struct DevSys {
     full: WinSystem,
     kf: DevFolders,
@@ -64,8 +63,11 @@ impl System for DevSys {
     fn registry(&self) -> &dyn Registry {
         self.full.registry()
     }
+    // The real write side: `exec::standard_user` asks it whether this process is elevated
+    // (`NoRegistry` answers "refused" and reads as elevated). The plan holds no registry op, so
+    // nothing is written through it.
     fn registry_write(&self) -> &dyn RegistryWrite {
-        &NoRegistry
+        self.full.registry_write()
     }
     fn topology(&self) -> &dyn Topology {
         self.full.topology()
