@@ -185,6 +185,15 @@ fn warning_text(w: &Warning) -> String {
                 GpuRequirement::Vulkan => "a Vulkan driver for the graphics card",
             }
         ),
+        Warning::SmartAppControl { state } => format!(
+            "warning: Smart App Control is {}; if Windows turns it on, it blocks the patched \
+             executable and the game does not start until the revert (or Steam's \"Verify \
+             integrity of game files\") restores it",
+            match state {
+                rerun_core::hw::SacState::Evaluation => "in evaluation mode",
+                _ => "in a state Rerun cannot read",
+            }
+        ),
         Warning::SignedExe { exe } => format!(
             "warning: {} is digitally signed; the patch makes the signature invalid (the revert \
              restores it)",

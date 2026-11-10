@@ -45,7 +45,7 @@ use crate::detect::exe::{
     AntiCheat, AntiCheatScan, ExeError, HashLimits, HashOutcome, inspect_exe,
 };
 use crate::detect::pe::{self, Machine, PeReadError};
-use crate::hw::{GpuArchTable, SystemProfile};
+use crate::hw::{GpuArchTable, SacState, SystemProfile};
 use crate::path::RelPath;
 use crate::plan::{MAX_PICKS, Op, Pick, Plan, PlanError, PlanSource, RootIx};
 use crate::policy::root::GameDir;
@@ -487,6 +487,8 @@ pub enum Refusal {
     AntiCheat(StepKind),
     /// A `cpu` step, but the Topo's launch cannot carry it.
     Launch(LaunchProblem),
+    /// A `laa_patch` step while Smart App Control enforces (P4-10).
+    SmartAppControl,
 }
 
 impl fmt::Display for Refusal {
@@ -498,6 +500,10 @@ impl fmt::Display for Refusal {
                 k.as_str()
             ),
             Self::Launch(p) => write!(f, "refused: {p}"),
+            Self::SmartAppControl => f.write_str(
+                "refused: Smart App Control is on and blocks a patched executable; the game \
+                 would not start until the revert (laa_patch)",
+            ),
         }
     }
 }
@@ -556,6 +562,7 @@ fn assess(
     v: &Variant,
     launch: &Result<LaunchPlan, LaunchProblem>,
     ac: &AntiCheatState,
+    sac: SacState,
 ) -> (Option<Refusal>, Vec<StepKind>) {
     let mut refused = None;
     let mut warned = Vec::new();
@@ -568,6 +575,11 @@ fn assess(
         };
         let why = match (r, k, s) {
             (AcRule::Refuse, ..) => Some(Refusal::AntiCheat(k)),
+            // P4-10: measured on the developer machine, Smart App Control blocks a patched
+            // executable while it enforces; the game would not start until the revert.
+            (_, _, TopoStep::LaaPatch(_)) if sac == SacState::Enforce => {
+                Some(Refusal::SmartAppControl)
+            }
             (_, _, TopoStep::Cpu(_)) => launch.as_ref().err().map(|p| Refusal::Launch(*p)),
             _ => None,
         };
@@ -693,7 +705,7 @@ pub fn report<'t>(topo: &'t Topo, facts: &Facts<'_>) -> Result<Report<'t>, Engin
                 .variants
                 .iter()
                 .map(|variant| {
-                    let (refused, warned) = assess(variant, &launch, &ac);
+                    let (refused, warned) = assess(variant, &launch, &ac, facts.profile.sac);
                     VariantReport {
                         variant,
                         refused,
@@ -737,6 +749,12 @@ pub enum Warning {
     SteamInput {
         /// The issue.
         issue: String,
+    },
+    /// `laa_patch` while Smart App Control is in evaluation or its state cannot be read (P4-10):
+    /// if Windows turns it on, it blocks the patched executable until the revert.
+    SmartAppControl {
+        /// The state read (`Evaluation` or `Unknown`).
+        state: SacState,
     },
     /// `laa_patch` of an executable with an Authenticode signature (P4-10): the patch makes the
     /// signature invalid.
@@ -841,7 +859,7 @@ pub fn plan(
             }),
             Tri::Yes => {}
         }
-        let (refused, warned) = assess(variant, &launch, &ac);
+        let (refused, warned) = assess(variant, &launch, &ac, facts.profile.sac);
         if let Some(why) = refused {
             return Err(EngineError::Refused {
                 issue: p.issue.clone(),
@@ -886,6 +904,14 @@ pub fn plan(
                 TopoStep::IniSet(x) => steps.push(Step::IniSet(x.clone())),
                 TopoStep::LaaPatch(l) => {
                     let spec = laa_step(topo, facts, l)?;
+                    let sac = facts.profile.sac;
+                    if matches!(sac, SacState::Evaluation | SacState::Unknown)
+                        && !warnings
+                            .iter()
+                            .any(|w| matches!(w, Warning::SmartAppControl { .. }))
+                    {
+                        warnings.push(Warning::SmartAppControl { state: sac });
+                    }
                     // The planner checks everything again; a refusal here is its refusal there.
                     if prim::laa_patch::inspect(ctx.game, &spec.exe).is_ok_and(|f| f.signed) {
                         warnings.push(Warning::SignedExe {

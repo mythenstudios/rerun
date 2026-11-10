@@ -21,6 +21,7 @@ use crate::sys::{SysError, System};
 pub mod arch;
 pub mod gpu;
 pub mod os;
+pub mod sac;
 
 pub use arch::{ArchId, GpuArchTable};
 pub use gpu::{GpuArch, GpuEntry, GpuProfile, GpuVendor};
@@ -28,6 +29,7 @@ pub use os::OsBuild;
 /// The CPU topology type of [`SystemProfile::cpu`], re-exported so output layers need no
 /// direct dependency on `rerun-proto` (ADR 0016 amendment).
 pub use rerun_proto::cpu::CpuTopology;
+pub use sac::SacState;
 
 /// The source a [`ProfileError`] is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,6 +86,8 @@ pub struct SystemProfile {
     pub cpu: Result<CpuTopology, ProfileError>,
     /// Windows build.
     pub os: Result<OsBuild, ProfileError>,
+    /// Smart App Control (P4-10): `laa_patch` is refused while it enforces.
+    pub sac: SacState,
     /// Whether an architecture table was given: without one `gpu_arch` is `Unavailable`.
     has_table: bool,
 }
@@ -131,6 +135,7 @@ pub fn read(sys: &dyn System, table: Option<&GpuArchTable>) -> SystemProfile {
             .read()
             .map_err(|e| ProfileError::Sys(ProfileSource::CpuTopology, e)),
         os: os::read(sys.registry()),
+        sac: sac::read(sys.registry()),
         has_table: table.is_some(),
     }
 }

@@ -559,3 +559,90 @@ fn la8_a_live_patch_still_matches_its_build() {
     env.forget(&txn).unwrap();
     assert!(facts_now().2.is_empty());
 }
+
+// ---------- LA9 ----------
+
+/// LA9 (user decision of 2026-11-10 after the [DEV] measurement): while Smart App Control
+/// enforces, `laa_patch` is refused (the plan and the report); in evaluation mode, or when its
+/// state cannot be read, it is planned with a warning; off (or absent) changes nothing.
+#[test]
+fn la9_smart_app_control_refuses_or_warns() {
+    use crate::hw::SacState;
+    use crate::sys::registry::{Hive, RegKey, RegValue, RegView};
+    let exe = game_exe(true);
+    let sys = sys_with(&exe);
+    let t = topo(&exe);
+    let profile_with = |v: Option<RegValue>| {
+        let key = RegKey::new(
+            Hive::LocalMachine,
+            RegView::Native,
+            r"SYSTEM\CurrentControlSet\Control\CI\Policy",
+        );
+        let mut b = FakeSystem::builder().key(key.clone());
+        if let Some(v) = v {
+            b = b.value(key, "VerifiedAndReputablePolicyState", v);
+        }
+        hw::read(&b.build().unwrap(), Some(GpuArchTable::builtin().unwrap()))
+    };
+    let run = |p: &SystemProfile| {
+        let fr = fr(&sys);
+        let store = StoreDir::open(&sys, &fr, Path::new(STEAM_LIB)).unwrap();
+        let g = store.game(&fr, "G").unwrap();
+        let gf = read_game(&g, &t);
+        let a = app(&sys);
+        let ctx = PlanCtx {
+            game: &g,
+            app: Some(&a),
+            steam_app: Some(APP),
+            main_exe: None,
+            reg: RegPolicy.reader(&sys),
+            app_path: None,
+        };
+        let facts = Facts {
+            profile: p,
+            table: Some(GpuArchTable::builtin().unwrap()),
+            game: &gf,
+            packages: &[],
+        };
+        let report = super::report(&t, &facts).unwrap();
+        let refused = report.issues[0].variants[0].refused;
+        let planned = plan(
+            &INDEX,
+            &t,
+            &facts,
+            &[Pick {
+                issue: "memory".to_owned(),
+                variant: "laa".to_owned(),
+            }],
+            &ctx,
+        );
+        (refused, planned.map(|tp| tp.warnings))
+    };
+    // Enforcing: refused in the report and the plan.
+    let p = profile_with(Some(RegValue::Dword(1)));
+    assert_eq!(p.sac, SacState::Enforce);
+    let (refused, planned) = run(&p);
+    assert_eq!(refused, Some(Refusal::SmartAppControl));
+    match planned {
+        Err(EngineError::Refused {
+            why: Refusal::SmartAppControl,
+            ..
+        }) => {}
+        r => panic!("{r:?}"),
+    }
+    // Evaluation, an unreadable or undocumented state: planned with the warning.
+    for (v, state) in [
+        (RegValue::Dword(2), SacState::Evaluation),
+        (RegValue::Dword(7), SacState::Unknown),
+    ] {
+        let (refused, planned) = run(&profile_with(Some(v)));
+        assert_eq!(refused, None);
+        assert_eq!(planned.unwrap(), [Warning::SmartAppControl { state }]);
+    }
+    // Off, or absent: nothing.
+    for v in [Some(RegValue::Dword(0)), None] {
+        let (refused, planned) = run(&profile_with(v));
+        assert_eq!(refused, None);
+        assert!(planned.unwrap().is_empty());
+    }
+}
