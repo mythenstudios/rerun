@@ -665,3 +665,40 @@ fn mutated_headers_never_panic_and_stay_within_limits() {
     }
     assert!(ok > 1000 && failed > 1000, "ok {ok}, failed {failed}");
 }
+
+// ---------- Image fields (P4-10) ----------
+
+/// The offsets `laa_patch` edits, the stored checksum, the certificate table and the section
+/// names, for both formats and an `e_lfanew` that is not the usual one.
+#[test]
+fn image_fields_name_the_offsets_and_names() {
+    for (mut b, e) in [(Builder::x86(), 0x80u32), (Builder::x64(), 0xE8)] {
+        b.e_lfanew = e;
+        b.checksum = 0x0001_2345;
+        b.extra_sections = 2;
+        b.extra_names = vec![*b".bind\0\0\0"];
+        b.dirs = vec![(l::DIR_SECURITY, 0x0000_0400, 0x30)];
+        let img = b.build();
+        let f = parse(&img.bytes).unwrap().image_fields();
+        assert_eq!(f.characteristics_at, off(img.coff + 18).unwrap());
+        assert_eq!(f.checksum_at, off(img.opt + 64).unwrap());
+        assert_eq!(f.checksum, 0x0001_2345);
+        assert_eq!(f.certificates, Some((0x400, 0x30)));
+        assert_eq!(
+            f.section_names,
+            [*b".rdata\0\0", *b".bind\0\0\0", *b".bss\0\0\0\0"]
+        );
+        let at = usize::try_from(f.characteristics_at).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([img.bytes[at], img.bytes[at + 1]]),
+            b.characteristics
+        );
+    }
+    // No certificate table: a directory entry with a zero size is none.
+    let mut b = Builder::x86();
+    b.dirs = vec![(l::DIR_SECURITY, 0x400, 0)];
+    assert_eq!(
+        parse(&b.build().bytes).unwrap().image_fields().certificates,
+        None
+    );
+}

@@ -62,6 +62,12 @@ pub(crate) struct Builder {
     pub load_config: Option<(u32, u16)>,
     /// Resource directory: the entries of the root table.
     pub resources: Option<Vec<(ResId, Node)>>,
+    /// The name of the data section.
+    pub data_name: [u8; 8],
+    /// The names of the empty sections after it (`.bss` for the rest).
+    pub extra_names: Vec<[u8; 8]>,
+    /// `CheckSum` of the optional header.
+    pub checksum: u32,
 }
 
 /// A built image and where its parts are.
@@ -108,6 +114,9 @@ impl Builder {
             delay: None,
             load_config: None,
             resources: None,
+            data_name: *b".rdata\0\0",
+            extra_names: Vec::new(),
+            checksum: 0,
         }
     }
 
@@ -293,6 +302,7 @@ impl Builder {
         }
         let soh = u32::try_from(size_of_headers).unwrap();
         opt_field(&mut b, l::OPT_SIZE_OF_HEADERS, &soh.to_le_bytes());
+        opt_field(&mut b, l::OPT_CHECKSUM, &self.checksum.to_le_bytes());
         opt_field(&mut b, l::OPT_SUBSYSTEM, &self.subsystem.to_le_bytes());
         opt_field(
             &mut b,
@@ -317,7 +327,7 @@ impl Builder {
         section(
             &mut b,
             0,
-            b".rdata\0\0",
+            &self.data_name,
             DATA_RVA,
             u32::try_from(data_len).unwrap(),
             u32::try_from(raw_size).unwrap(),
@@ -325,7 +335,8 @@ impl Builder {
         );
         for i in 0..self.extra_sections {
             let va = 0x0100_0000 + u32::try_from(i).unwrap() * 0x1000;
-            section(&mut b, i + 1, b".bss\0\0\0\0", va, 0x1000, 0, 0);
+            let name = self.extra_names.get(i).copied().unwrap_or(*b".bss\0\0\0\0");
+            section(&mut b, i + 1, &name, va, 0x1000, 0, 0);
         }
         b.resize(size_of_headers + raw_size, 0);
         put(&mut b, size_of_headers, &data);

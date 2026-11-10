@@ -53,6 +53,8 @@ pub const OPT32_IMAGE_BASE: usize = 28;
 pub const OPT64_IMAGE_BASE: usize = 24;
 /// `SizeOfHeaders`, the same in both formats.
 pub const OPT_SIZE_OF_HEADERS: usize = 60;
+/// `CheckSum`, the same in both formats.
+pub const OPT_CHECKSUM: usize = 64;
 /// `Subsystem`, the same in both formats.
 pub const OPT_SUBSYSTEM: usize = 68;
 /// `DllCharacteristics`, the same in both formats.
@@ -74,6 +76,9 @@ pub const NUMBER_OF_DIRECTORY_ENTRIES: usize = 16;
 pub const DIR_IMPORT: usize = 1;
 /// `IMAGE_DIRECTORY_ENTRY_RESOURCE`.
 pub const DIR_RESOURCE: usize = 2;
+/// `IMAGE_DIRECTORY_ENTRY_SECURITY` (the attribute certificate table: its `VirtualAddress` is a
+/// file offset, not an RVA).
+pub const DIR_SECURITY: usize = 4;
 /// `IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG`.
 pub const DIR_LOAD_CONFIG: usize = 10;
 /// `IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT`.
@@ -83,6 +88,10 @@ pub const DIR_COM_DESCRIPTOR: usize = 14;
 
 /// `IMAGE_SIZEOF_SECTION_HEADER`.
 pub const SECTION_HEADER_SIZE: usize = 40;
+/// `IMAGE_SECTION_HEADER::Name` (8 bytes, NUL-padded, not always NUL-terminated).
+pub const SECTION_NAME: usize = 0;
+/// `IMAGE_SIZEOF_SHORT_NAME`.
+pub const SECTION_NAME_SIZE: usize = 8;
 /// `IMAGE_SECTION_HEADER::Misc.VirtualSize`.
 pub const SECTION_VIRTUAL_SIZE: usize = 8;
 /// `IMAGE_SECTION_HEADER::VirtualAddress`.

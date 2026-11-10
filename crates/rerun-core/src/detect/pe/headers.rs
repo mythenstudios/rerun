@@ -17,9 +17,11 @@ pub(super) struct DataDir {
     pub entry: u64,
 }
 
-/// One section, reduced to what the mapping needs.
+/// One section, reduced to what the mapping and the section names need.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Section {
+    /// `Name`, the 8 bytes as stored.
+    name: [u8; l::SECTION_NAME_SIZE],
     va: u64,
     /// `VirtualSize`, or `SizeOfRawData` when `VirtualSize` is 0.
     extent: u64,
@@ -51,6 +53,12 @@ pub(super) struct Layout {
     /// The first `min(NumberOfRvaAndSizes, 16)` data directories.
     pub dirs: Vec<DataDir>,
     sections: Vec<Section>,
+    /// File offset of the COFF file header.
+    pub coff: u64,
+    /// File offset of the optional header.
+    pub opt: u64,
+    /// `CheckSum` of the optional header.
+    pub checksum: u32,
 }
 
 /// Outcome of `need`: the header buffer does not reach `end`.
@@ -170,6 +178,7 @@ pub(super) fn parse(buf: &[u8], eof: bool, limits: &Limits) -> Result<Layout, Pe
     };
     let size_of_headers = field32(opt + l::OPT_SIZE_OF_HEADERS)?;
     let subsystem = field16(opt + l::OPT_SUBSYSTEM)?;
+    let checksum = field32(opt + l::OPT_CHECKSUM)?;
     let dll_characteristics = field16(opt + l::OPT_DLL_CHARACTERISTICS)?;
     let dirs = (0..dir_count)
         .map(|i| {
@@ -195,7 +204,13 @@ pub(super) fn parse(buf: &[u8], eof: bool, limits: &Limits) -> Result<Layout, Pe
             } else {
                 virtual_size
             };
+            let mut name = [0u8; l::SECTION_NAME_SIZE];
+            name.copy_from_slice(
+                buf.get(s + l::SECTION_NAME..s + l::SECTION_NAME + l::SECTION_NAME_SIZE)
+                    .ok_or_else(|| short(eof, s))?,
+            );
             Ok(Section {
+                name,
                 va: u64::from(field32(s + l::SECTION_VIRTUAL_ADDRESS)?),
                 extent,
                 raw_ptr: u64::from(field32(s + l::SECTION_POINTER_TO_RAW_DATA)?),
@@ -221,10 +236,18 @@ pub(super) fn parse(buf: &[u8], eof: bool, limits: &Limits) -> Result<Layout, Pe
         },
         dirs,
         sections,
+        coff: off(coff),
+        opt: off(opt),
+        checksum,
     })
 }
 
 impl Layout {
+    /// The names of the sections in table order.
+    pub(super) fn section_names(&self) -> Vec<[u8; l::SECTION_NAME_SIZE]> {
+        self.sections.iter().map(|s| s.name).collect()
+    }
+
     /// The data directory `index` if it is present (`VirtualAddress` not 0).
     pub(super) fn dir(&self, index: usize) -> Option<DataDir> {
         self.dirs.get(index).copied().filter(|d| d.rva != 0)

@@ -17,6 +17,9 @@
 //! - [`Pe::version_info`]: the version resource ([`VersionInfo`]: the fixed part and six
 //!   strings of one string table, as [`RawText`](crate::detect::text::RawText)), tolerant of
 //!   the quirks of old toolchains.
+//! - [`Pe::image_fields`] (P4-10): the file offsets of `Characteristics` and `CheckSum`, the
+//!   stored checksum, the certificate table and the section names; [`checksum`] computes the
+//!   image checksum as `CheckSumMappedFile` does.
 //! - [`Pe::info`]: all of it at once ([`PeInfo`]); a broken version resource does not hide
 //!   the headers and imports, a broken import table fails the file.
 //! - Errors ([`PeError`]) carry a kind and a file offset, never file content.
@@ -26,6 +29,7 @@
 //! Facts read here are hints for display, matching and suggestions, never authorization
 //! (ADR 0013, Consequences).
 
+pub mod checksum;
 mod error;
 mod headers;
 mod imports;
@@ -222,8 +226,43 @@ impl<R: Read + Seek> Pe<R> {
         })
     }
 
+    /// Where the header fields `laa_patch` changes lie, and what it checks (P4-10).
+    pub fn image_fields(&self) -> ImageFields {
+        let l = &self.layout;
+        ImageFields {
+            characteristics_at: l.coff + reader::off(layout::FILE_CHARACTERISTICS),
+            checksum_at: l.opt + reader::off(layout::OPT_CHECKSUM),
+            checksum: l.checksum,
+            certificates: l
+                .dirs
+                .get(layout::DIR_SECURITY)
+                .copied()
+                .filter(|d| d.rva != 0 && d.size != 0)
+                .map(|d| (d.rva, d.size)),
+            section_names: l.section_names(),
+        }
+    }
+
     /// Hands the reader back (e.g. to hash the very handle that was parsed).
     pub fn into_inner(self) -> R {
         self.source.into_inner()
     }
+}
+
+/// Header facts of an image for `laa_patch` (P4-10): file offsets of the fields it may change,
+/// the stored checksum, the attribute certificate table (an Authenticode signature) and the
+/// section names (protection wrappers name their sections).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageFields {
+    /// File offset of `IMAGE_FILE_HEADER::Characteristics` (2 bytes, little-endian; Large
+    /// Address Aware is bit 5 of its first byte).
+    pub characteristics_at: u64,
+    /// File offset of the optional header's `CheckSum` (4 bytes, little-endian).
+    pub checksum_at: u64,
+    /// `CheckSum` as stored (0: none was written).
+    pub checksum: u32,
+    /// The certificate table directory, file offset and size, if present (both not 0).
+    pub certificates: Option<(u32, u32)>,
+    /// `IMAGE_SECTION_HEADER::Name` of every section, in table order, as stored.
+    pub section_names: Vec<[u8; layout::SECTION_NAME_SIZE]>,
 }
