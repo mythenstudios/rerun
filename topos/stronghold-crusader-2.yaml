@@ -1,0 +1,35 @@
+# DRAFT (P4-13): facts only. The workbench could not pick an API from the executable's imports,
+# so match.exes was written by hand: path and hashes from an unmodified Steam copy
+# (sha1sum/sha256sum of bin\win32_release\Crusader2.exe), api from the PCGamingWiki API template
+# (Direct3D 9.0c, 32-bit exe).
+format: 1
+id: stronghold-crusader-2
+title: "Stronghold Crusader 2"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 232890
+  exes:
+    - { path: "bin/win32_release/Crusader2.exe", sha1: "83F49C8C387EA72CA771554A23DAA28E9D148FD8", sha256: "341D914B2BEF4E324B88650312B34E3C7539239634E10D8C4948203D8E5953C3", api: d3d9 }
+
+launch:
+  chain: [steam]
+  method: auto
+  start: "TODO"                # Steam's launch entry: observe, never guess
+
+issues:
+  - id: flickering-shadows
+    title: "Flickering shadows and lines on the screen"
+    when: {}
+    variants: []               # the only reported remedy is an in-game setting (see tips), no file or registry step
+
+tips:
+  launch_options: []
+  notes:
+    - text: "Reported against flickering shadows and lines: set Ambient Occlusion to Off in the in-game options."
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Stronghold_Crusader_2#Flickering_shadows_/_lines_on_the_screen" }
+
+links:
+  pcgw: "Stronghold_Crusader_2"
