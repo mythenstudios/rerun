@@ -418,6 +418,7 @@ fn plan_with(
         main_exe: None,
         reg: RegPolicy.reader(sys),
         app_path: None,
+        user_data: None,
     };
     let facts = Facts {
         profile,
@@ -904,6 +905,7 @@ fn tb_the_plan_has_the_bytes_of_the_same_step_file() {
             main_exe: Some(&sf.main_exe),
             reg: RegPolicy.reader(&sys),
             app_path: None,
+            user_data: None,
         },
     )
     .unwrap();
@@ -980,6 +982,7 @@ fn tc_from_a_signed_index() {
         main_exe: None,
         reg: RegPolicy.reader(&sys),
         app_path: None,
+        user_data: None,
     };
     let profile = full();
     let facts = Facts {
@@ -1331,6 +1334,7 @@ fn plan_pkgs(
         main_exe: None,
         reg: RegPolicy.reader(sys),
         app_path: None,
+        user_data: None,
     };
     let profile = full();
     let facts = Facts {

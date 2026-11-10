@@ -37,6 +37,7 @@ impl FakeKnownFolders {
             KnownFolder::Profile => r"C:\Users\Player",
             KnownFolder::LocalAppData => r"C:\Users\Player\AppData\Local",
             KnownFolder::RoamingAppData => r"C:\Users\Player\AppData\Roaming",
+            KnownFolder::Documents => r"C:\Users\Player\Documents",
         }
     }
 

@@ -1934,3 +1934,86 @@ fn c_cl_a_copy_in_use_is_asked_for_before_it_may_be_deleted() {
     );
     same(&before, &snap_game(&sys));
 }
+
+// ---------- C-U: the user data folder below Documents (P4-12) ----------
+
+const DOCS_G: &str = r"C:\Users\Player\Documents\My Games\G";
+
+/// One INI key of `settings.ini` in `Documents\My Games\G`, and one of the game folder's.
+fn user_data_steps() -> String {
+    r#"{"format":1,"game":{"folder":"D:\\Games\\G"},"main_exe":"game.exe","user_data":{"documents":"My Games\\G"},"steps":[{"ini_set":{"root":"user_data","file":"settings.ini","values":[{"section":"Display","key":"Width","value":"1920"}]}},{"ini_set":{"file":"game.ini","values":[{"section":"Display","key":"Width","value":"1920"}]}}]}"#.to_owned()
+}
+
+#[test]
+fn c_u1_plan_shows_the_documents_root_and_the_round_trip_restores_it() {
+    let sys = build(
+        bare().file(format!(r"{DOCS_G}\settings.ini"), INI_TEXT.to_vec()),
+        &user_data_steps(),
+    );
+    let before = snap_dirs(&sys, &[GAME, DOCS_G]);
+    let p = expect(
+        &sys,
+        &["plan", STEPS, "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    assert!(
+        p.stdout
+            .contains(&format!("root 1: {DOCS_G}\n  your Documents folder:")),
+        "{}",
+        p.stdout
+    );
+    assert!(
+        p.stdout.contains("op 0: edit ini in root 1: settings.ini"),
+        "{}",
+        p.stdout
+    );
+    assert_eq!(p.stdout.matches("note: your Documents folder").count(), 1);
+    let t = applied(&sys);
+    expect(&sys, &["revert", &t, "--yes"], Answer::No, Exit::Report);
+    same(&before, &snap_dirs(&sys, &[GAME, DOCS_G]));
+}
+
+/// Documents is opened only for a step in it: without one, a step file naming `user_data`
+/// plans with Documents gone; with one, Documents gone refuses the plan.
+#[test]
+fn c_u2_documents_only_when_a_step_needs_it() {
+    let game_only = user_data_steps().replace(
+        r#"{"ini_set":{"root":"user_data","file":"settings.ini","values":[{"section":"Display","key":"Width","value":"1920"}]}},"#,
+        "",
+    );
+    let sys = build(
+        bare().without_known_folder(rerun_core::sys::KnownFolder::Documents),
+        &game_only,
+    );
+    expect(
+        &sys,
+        &["plan", STEPS, "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    put_steps(&sys, &user_data_steps());
+    let r = expect(
+        &sys,
+        &["plan", STEPS, "--dry-run"],
+        Answer::No,
+        Exit::Refused,
+    );
+    assert!(r.stdout.is_empty(), "{}", r.stdout);
+    // A step in it without `user_data`: the planner's refusal.
+    let sys = build(
+        bare().file(format!(r"{DOCS_G}\settings.ini"), INI_TEXT.to_vec()),
+        &user_data_steps().replace(r#""user_data":{"documents":"My Games\\G"},"#, ""),
+    );
+    let r = expect(
+        &sys,
+        &["plan", STEPS, "--dry-run"],
+        Answer::No,
+        Exit::Refused,
+    );
+    assert!(
+        r.stderr.contains("names no user data folder"),
+        "{}",
+        r.stderr
+    );
+}

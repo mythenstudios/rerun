@@ -20,6 +20,10 @@
 //! - [`helper_image`], [`admin_only`], [`dir_by_id`] (P4-2b, ADR 0023): the pre-check of the
 //!   installed elevated helper before any UAC prompt, the admin-only rule on security-descriptor
 //!   facts, and the only open by `{volume GUID, file ID}` ([`crate::sys::Fs::open_by_id`]).
+//! - [`UserDataDir`] (P4-12): a game's own folder below the user's `Documents`, named by the
+//!   Topo (`My Games\Fallout3`): the known folder by absolute path, the folder below it
+//!   handle-relative with its own allowlist ([`user_dir_ok`]) **and** the forbidden list, never
+//!   cloud-synchronised, never created.
 //! - [`RootId`]: volume serial and file ID. Plans store it; apply and revert reopen the root
 //!   and abort on a mismatch ([`StoreDir::ensure_id`], [`GameDir::ensure_id`]).
 //!
@@ -37,6 +41,7 @@ mod app;
 mod forbidden;
 mod helper;
 mod input;
+mod user_data;
 mod vstore;
 
 use std::fmt;
@@ -53,6 +58,10 @@ pub use helper::{
     root_by_id,
 };
 pub use input::{file_present, read_input};
+pub use user_data::{
+    CloudWhy, MAX_SYNC_PROVIDERS, MAX_SYNC_ROOTS_PER_KEY, MAX_USER_DIR_SEGS, SYNC_ROOT_MANAGER,
+    UserBase, UserDataDir, UserDirError, sync_roots, user_dir_ok,
+};
 pub use vstore::{Shadow, VIRTUAL_STORE, check_root, preview_with_shadows, shadows};
 
 use crate::path::{Anomaly, PathError, RelPath, RootPath, classify};
@@ -156,6 +165,23 @@ pub enum RootError {
         path: RootPath,
         /// Why.
         reason: String,
+    },
+    /// A user data folder (P4-12) is or lies in a cloud-synchronised folder (OneDrive folder
+    /// backup, Dropbox, …): never written (D6).
+    #[error("{path} is synchronised with a cloud ({why}); Rerun does not change files there")]
+    CloudSynced {
+        /// The folder checked.
+        path: RootPath,
+        /// Which signal.
+        why: CloudWhy,
+    },
+    /// The folder below a user folder's base breaks its allowlist (P4-12).
+    #[error("{sub}: {why}")]
+    UserDir {
+        /// The folder below the base.
+        sub: RelPath,
+        /// The rule.
+        why: UserDirError,
     },
     /// Error of the system layer.
     #[error(transparent)]

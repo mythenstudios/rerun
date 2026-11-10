@@ -100,6 +100,7 @@
 mod preview;
 mod profile;
 mod store;
+mod user_data;
 
 use std::fmt;
 use std::str::FromStr;
@@ -111,7 +112,7 @@ pub use preview::{
     FIREWALL_NOTE, FirewallShown, GPU_PREF_ACTION, GPU_PREF_NOTE, HOLD_ACTION, HOLD_NOTE, INI_NOTE,
     IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, PATCH_ACTION, PATCH_NOTE, PROFILE_NOTE,
     PROFILE_WATCH_NOTE, PatchByte, Preview, PreviewOp, PreviewRoot, ProfilePreview, ProfileShown,
-    REGISTRY_NOTE, RegShown, preview, preview_head, preview_stored,
+    REGISTRY_NOTE, RegShown, USER_DATA_NOTE, preview, preview_head, preview_stored,
 };
 #[cfg(test)]
 pub(crate) use profile::knob as profile_knob;
@@ -125,7 +126,7 @@ use crate::policy::ini::{self, IniEdit, IniError};
 use crate::policy::registry::{
     GpuPref, RegPolicy, RegPolicyError, RegSlot, TokenName, gpu_pref, layers,
 };
-use crate::policy::root::{RootError, RootId};
+use crate::policy::root::{RootError, RootId, UserBase};
 use crate::sys::SysError;
 use crate::sys::fs::Attrs;
 use crate::sys::registry::{MAX_VALUE_BYTES, RegKey, RegValue};
@@ -245,7 +246,7 @@ pub struct PlanRoot {
     pub main_exe: Option<RelPath>,
 }
 
-/// Kind of a plan root (`UserData` is reserved for phase 4, D6).
+/// Kind of a plan root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RootKind {
@@ -254,6 +255,9 @@ pub enum RootKind {
     /// Rerun's launch profiles, `<LocalAppData>\Rerun\profiles` (P3-3): origin
     /// [`PlanOrigin::AppDir`], identity [`PROFILES_ROOT_ID`], no main executable.
     Profiles,
+    /// A game's own folder below the user's `Documents` (P4-12, D6): origin
+    /// [`PlanOrigin::UserFolder`], no main executable, only `IniValue` ops (`user_data` fence).
+    UserData,
 }
 
 /// Where a plan root came from.
@@ -276,6 +280,15 @@ pub enum PlanOrigin {
     /// Rerun's profiles folder (P3-3), reopened only through `AppDir` (handle-relative, no
     /// reparse point, its final path checked), never by the head's path or identity.
     AppDir,
+    /// A folder below a known folder of the user (P4-12): reopened only through
+    /// `policy::root::UserDataDir` from `base` and `sub` (never by the head's path), its path and
+    /// identity then compared with the head's.
+    UserFolder {
+        /// The known folder.
+        base: UserBase,
+        /// The folder below it, as the Topo or step file names it.
+        sub: RelPath,
+    },
 }
 
 /// Index into [`Plan::roots`].
@@ -645,6 +658,32 @@ pub(crate) fn allowed(
     RegPolicy
         .check(slot, &roots)
         .map_err(|source| PlanError::Registry { op, source })
+}
+
+/// The plan root a registry slot names, if any (the executable of a `CompatLayers` or
+/// `GpuPreference` slot).
+pub(crate) fn slot_root(s: &RegSlot) -> Option<RootIx> {
+    match s {
+        RegSlot::CompatLayers { root, .. } | RegSlot::GpuPreference { root, .. } => Some(*root),
+        RegSlot::GameValue { .. } => None,
+    }
+}
+
+/// A registry slot that names a plan root names a game root (P4-12, both rule sets: the value
+/// name is the canonical path of an executable of a game folder, never one of Rerun's profiles
+/// or of a user data folder).
+fn slot_on_game(plan: &Plan, k: usize, slot: &RegSlot) -> Result<(), PlanError> {
+    let Some(root) = slot_root(slot) else {
+        return Ok(());
+    };
+    match plan.roots.get(usize::from(root.0)) {
+        Some(r) if r.kind == RootKind::Game => Ok(()),
+        Some(_) => Err(invalid(
+            Some(k),
+            "a registry slot names an executable outside a game folder",
+        )),
+        None => Err(invalid(Some(k), "root index outside the plan's roots")),
+    }
 }
 
 /// The key a `CreateKey` op creates.
@@ -1588,6 +1627,8 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
     }
     // P3-3: the fence of the profiles root and of inline content (both rule sets).
     profile::fence(plan, rules)?;
+    // P4-12: the fence of the user data root (both rule sets).
+    user_data::fence(plan)?;
     for (i, r) in plan.roots.iter().enumerate() {
         if plan.roots[..i].iter().any(|o| o.id == r.id) {
             return Err(invalid(None, "a root is listed twice"));
@@ -1642,8 +1683,14 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
                 }
                 seen.push(key);
             }
-            Target::Key { slot, segs } => reg.key(plan, k, slot, segs)?,
-            Target::Value { slot } => reg.value(plan, k, op, slot, rules)?,
+            Target::Key { slot, segs } => {
+                slot_on_game(plan, k, slot)?;
+                reg.key(plan, k, slot, segs)?;
+            }
+            Target::Value { slot } => {
+                slot_on_game(plan, k, slot)?;
+                reg.value(plan, k, op, slot, rules)?;
+            }
             Target::Rule { root, program } => {
                 rule_check(plan, k, root, program)?;
                 let key = (root, fold(program.as_str()));

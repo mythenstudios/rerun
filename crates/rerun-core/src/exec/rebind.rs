@@ -241,8 +241,9 @@ fn target(
     for (i, x) in b.iter().enumerate() {
         // The profiles root is never rebound (ADR 0020 amendment P3-3): a missing or moved
         // `profiles` is the revert's matter (a halt at op 0, or `profiles_moved`), never a
-        // second root that needs a rebind (review F3 of P3-3a).
-        if matches!(x.origin, PlanOrigin::AppDir) {
+        // second root that needs a rebind (review F3 of P3-3a). A user data root (P4-12) is
+        // never rebound either: a gone or moved one halts or refuses the revert on its own.
+        if matches!(x.origin, PlanOrigin::AppDir | PlanOrigin::UserFolder { .. }) {
             continue;
         }
         match roots::probe(cx, x) {

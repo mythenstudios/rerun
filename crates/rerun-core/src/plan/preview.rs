@@ -96,6 +96,15 @@ same value as Rerun is set back too. A file that is gone at the time of the reve
 The main executable must be the program that writes the file when it exits (with a launcher, \
 the game itself)";
 
+/// What a plan with a user data root says once (P4-12, ADR 0020 amendment P4-12; rule 5).
+pub const USER_DATA_NOTE: &str = "your Documents folder: the game's folder there lies outside \
+the game folder and was checked not to be synchronised with a cloud (OneDrive, Dropbox, ...). A \
+revert needs Documents at the same place: if it moves (or a cloud backup of it is switched on) \
+in between, the revert refuses until it is back, or the transaction is closed with forget (its \
+backup stays in Rerun's journal). A cloud save of the game (Steam Cloud) may write the file again: \
+then only the keys that still hold Rerun's value are set back. Controlled folder access may block \
+the change: the apply then changes nothing";
+
 /// What a plan with firewall rules says once (P4-2d, ADR 0023 §7, §9, §11; rule 5).
 pub const FIREWALL_NOTE: &str = "firewall rules: Rerun's helper adds them with administrator \
 rights after every other change of the plan, in one run with one Windows administrator prompt \
@@ -376,6 +385,8 @@ pub struct Preview {
     pub patched: Option<&'static str>,
     /// [`GPU_PREF_NOTE`], once per plan with a graphics preference (P4-11).
     pub gpu_pref: Option<&'static str>,
+    /// [`USER_DATA_NOTE`], once per plan with a user data root (P4-12).
+    pub user_data: Option<&'static str>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -587,7 +598,7 @@ pub fn preview(p: &Plan) -> Preview {
                 PlanOrigin::Steam { store, app_id, .. } => {
                     Some((*app_id, escape::path(&store.to_string()).into_owned()))
                 }
-                PlanOrigin::Manual | PlanOrigin::AppDir => None,
+                PlanOrigin::Manual | PlanOrigin::AppDir | PlanOrigin::UserFolder { .. } => None,
             },
             main_exe: r
                 .main_exe
@@ -814,6 +825,11 @@ pub fn preview(p: &Plan) -> Preview {
         .iter()
         .any(|o| matches!(o, Op::GpuPref { .. }))
         .then_some(GPU_PREF_NOTE);
+    let user_data = p
+        .roots
+        .iter()
+        .any(|r| r.kind == RootKind::UserData)
+        .then_some(USER_DATA_NOTE);
     let profiles = ops.iter().find_map(|o| match &o.profile {
         Some(ProfilePreview::Decoded(s)) if s.decoded.method == Method::Watch => {
             Some(PROFILE_WATCH_NOTE)
@@ -833,6 +849,7 @@ pub fn preview(p: &Plan) -> Preview {
         held,
         patched,
         gpu_pref,
+        user_data,
     }
 }
 
@@ -842,6 +859,9 @@ impl fmt::Display for Preview {
             write!(f, "root {}: {}", r.index, r.path)?;
             if r.kind == RootKind::Profiles {
                 write!(f, " (Rerun's launch profiles)")?;
+            }
+            if r.kind == RootKind::UserData {
+                write!(f, " (in your Documents folder)")?;
             }
             if let Some((app, store)) = &r.steam {
                 write!(f, " (Steam app {app} in {store})")?;
@@ -957,6 +977,9 @@ impl fmt::Display for Preview {
             writeln!(f, "note: {n}")?;
         }
         if let Some(n) = self.patched {
+            writeln!(f, "note: {n}")?;
+        }
+        if let Some(n) = self.user_data {
             writeln!(f, "note: {n}")?;
         }
         Ok(())

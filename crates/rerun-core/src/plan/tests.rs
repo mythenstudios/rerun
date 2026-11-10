@@ -366,6 +366,9 @@ pub(crate) mod profiles_tests;
 #[cfg(test)]
 #[path = "reg_tests.rs"]
 pub(crate) mod reg_tests;
+#[cfg(test)]
+#[path = "user_data_tests.rs"]
+mod user_data_tests;
 
 /// P2-15 (audit A2 nit N2): nested roots in one plan are refused on encode and decode; a
 /// recorded head keeps the rules it was applied with (E4), so its decode does not add the rule.

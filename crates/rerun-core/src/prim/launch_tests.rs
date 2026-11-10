@@ -130,6 +130,7 @@ fn plan_lm(sys: &FakeSystem, steps: &[Step], main: &str) -> Result<Plan, PlanErr
             main_exe: Some(&main),
             reg: RegPolicy.reader(sys),
             app_path: None,
+            user_data: None,
         },
     )
 }
@@ -391,6 +392,7 @@ fn lp2_every_refusal_of_the_planner() {
             main_exe: Some(&main),
             reg: RegPolicy.reader(&sys),
             app_path: None,
+            user_data: None,
         },
     );
     assert!(e(r).contains("only for a Steam game"));
@@ -409,6 +411,7 @@ fn lp2_every_refusal_of_the_planner() {
             main_exe: Some(&main),
             reg: RegPolicy.reader(&sys),
             app_path: None,
+            user_data: None,
         },
     );
     assert!(e(r).contains("through a link"));
@@ -446,6 +449,7 @@ fn lp4_a_dry_run_without_rerun_s_folder_gives_the_same_plan() {
     let g = store.game(&fr, "G").unwrap();
     let main = rel("game.exe");
     let ctx = |app, app_path| PlanCtx {
+        user_data: None,
         game: &g,
         app,
         steam_app: Some(220),
@@ -641,6 +645,7 @@ fn lp9_another_app_path_is_refused_and_259_characters_are_accepted() {
             main_exe: Some(&main),
             reg: RegPolicy.reader(&sys),
             app_path: Some(&other),
+            user_data: None,
         },
     );
     let e = r.expect_err("another app path").to_string();
@@ -981,6 +986,7 @@ fn lw3_every_refusal_of_watch() {
             main_exe: Some(&main),
             reg: RegPolicy.reader(&sys),
             app_path: None,
+            user_data: None,
         },
     );
     assert!(e(r).contains("only for a Steam game"));

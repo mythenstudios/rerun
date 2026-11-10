@@ -84,7 +84,7 @@ fn profiles_root() -> PlanRoot {
 }
 
 /// A plan of app 220: its profile (op 0) and a package file in the game folder.
-fn lm_plan() -> Plan {
+pub(crate) fn lm_plan() -> Plan {
     Plan {
         format: 1,
         source: None,

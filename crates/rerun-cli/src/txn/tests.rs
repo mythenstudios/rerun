@@ -93,6 +93,7 @@ fn head() -> Preview {
         held: None,
         patched: None,
         gpu_pref: None,
+        user_data: None,
     }
 }
 

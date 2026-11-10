@@ -115,6 +115,7 @@ impl Env {
                 main_exe: Some(&main),
                 reg: crate::policy::registry::RegPolicy.reader(&self.sys),
                 app_path: None,
+                user_data: None,
             },
         )
         .unwrap_or_else(|e| panic!("{e}"));

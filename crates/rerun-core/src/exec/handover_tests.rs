@@ -604,6 +604,7 @@ fn ho_the_slot_stays_with_the_holder() {
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(&env.sys),
             app_path: None,
+            user_data: None,
         },
     )
     .unwrap_err()

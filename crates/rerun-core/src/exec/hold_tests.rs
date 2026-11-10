@@ -187,6 +187,7 @@ fn plan_pkg(env: &Env, id: &str, s: &FileInstallSpec) -> Result<plan::PlanHash, 
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(&env.sys),
             app_path: None,
+            user_data: None,
         },
     )
     .map_err(|e| e.to_string())?;

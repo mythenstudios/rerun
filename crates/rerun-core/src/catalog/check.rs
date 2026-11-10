@@ -620,6 +620,12 @@ fn compat_layer(c: &CompatLayerSpec, at: &str) -> R {
 }
 
 fn ini_set(s: &IniSetSpec, at: &str) -> R {
+    // P4-12: the user data folder of a Topo comes with the Topo's `user_data` (second cut).
+    ensure(
+        s.root.is_game(),
+        &format!("{at}.root"),
+        "the game folder (a Topo cannot name a user data folder yet)",
+    )?;
     ensure(
         ends_with_ci(s.file.as_str(), ".ini"),
         &format!("{at}.file"),

@@ -5,8 +5,9 @@
 //! untrusted; senior-dev condition B1 on which rule belongs to which set):
 //! - Form, both sets: `kind: profiles` exactly with `origin: app_dir`; such a root has the
 //!   identity [`PROFILES_ROOT_ID`], no main executable and a path that ends, folded, in
-//!   `\Rerun\profiles`; at most one of it, and a plan with it has exactly two roots: one game
-//!   root at index 0 from a Steam library, the profiles root at index 1. No game root carries
+//!   `\Rerun\profiles`; at most one of it, and a plan with it has one game root at index 0 from
+//!   a Steam library, the profiles root at index 1 and at most a user data root after it (P4-12,
+//!   `plan::user_data`). No game root carries
 //!   [`PROFILES_ROOT_ID`] (condition A2). On the profiles root only `CreateFile` and
 //!   `ReplaceFile`, as op 0 (a revert, newest first, reaches it last: a missing `profiles`
 //!   halts only once everything else is reverted, F3), named `<32 lower-case hex>.profile`
@@ -29,11 +30,10 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ContentRef, MAX_INLINE_BYTES, Op, PROFILES_ROOT_ID, Plan, PlanError, PlanOrigin, RootIx,
-    RootKind, Rules, Target, invalid,
+    RootKind, Rules, Target, invalid, slot_root,
 };
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
-use crate::policy::registry::RegSlot;
 use crate::sys::fs::Attrs;
 
 /// Largest old file a profile op replaces (the shim's read limit, `rerun_proto`): anything
@@ -90,14 +90,6 @@ fn below(abs: &str, root: &RootPath) -> bool {
     fold(abs)
         .strip_prefix(&fold(&root.to_string()))
         .is_some_and(|rest| rest.starts_with('\\') && rest.len() > 1)
-}
-
-/// The plan root a registry slot names, if any.
-fn slot_root(s: &RegSlot) -> Option<RootIx> {
-    match s {
-        RegSlot::CompatLayers { root, .. } | RegSlot::GpuPreference { root, .. } => Some(*root),
-        RegSlot::GameValue { .. } => None,
-    }
 }
 
 /// The fence (module docs).
@@ -163,7 +155,7 @@ fn profiles_root(plan: &Plan) -> Result<Option<usize>, PlanError> {
                     ));
                 }
             }
-            (RootKind::Profiles, _) | (RootKind::Game, PlanOrigin::AppDir) => {
+            (RootKind::Profiles, _) | (RootKind::Game | RootKind::UserData, PlanOrigin::AppDir) => {
                 return Err(invalid(
                     None,
                     "the profiles root, and only it, comes from Rerun's folder",
@@ -177,17 +169,25 @@ fn profiles_root(plan: &Plan) -> Result<Option<usize>, PlanError> {
                     ));
                 }
             }
+            // P4-12: the fence of `plan::user_data`.
+            (RootKind::UserData, _) | (RootKind::Game, PlanOrigin::UserFolder { .. }) => {}
         }
     }
     if let Some(p) = profiles {
         let steam0 = plan.roots.first().is_some_and(|r| {
             r.kind == RootKind::Game && matches!(r.origin, PlanOrigin::Steam { .. })
         });
-        if !steam0 || plan.roots.len() != 2 || p != 1 {
+        // P4-12: a user data root may follow (`plan::user_data` keeps it last and single).
+        let rest_ok = plan
+            .roots
+            .iter()
+            .skip(2)
+            .all(|r| r.kind == RootKind::UserData);
+        if !steam0 || p != 1 || !rest_ok {
             return Err(invalid(
                 None,
-                "a plan with a profiles root has one Steam game root at index 0 and the \
-                 profiles root at index 1",
+                "a plan with a profiles root has one Steam game root at index 0, the profiles \
+                 root at index 1 and at most a user data root after it",
             ));
         }
     }

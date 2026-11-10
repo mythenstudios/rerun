@@ -221,6 +221,8 @@ pub enum TxnMsg<'a> {
         /// Relative to the root.
         path: Shown<'a>,
     },
+    /// The root above is the game's folder in the user's Documents (P4-12).
+    UserDataRoot,
     /// An op.
     Op {
         /// Index.
@@ -941,6 +943,9 @@ impl fmt::Display for TxnMsg<'_> {
                 write!(f, "  Steam app {app_id}, library: {library}")
             }
             Self::RootMainExe { path } => write!(f, "  main executable: {path}"),
+            Self::UserDataRoot => f.write_str(
+                "  your Documents folder: the game's own folder there, outside the game folder",
+            ),
             Self::Op { index, op } => write!(f, "op {index}: {op}"),
             Self::ValueName { name } => write!(f, "  value: {name}"),
             Self::OpValue { name } => write!(f, "    value: {name}"),

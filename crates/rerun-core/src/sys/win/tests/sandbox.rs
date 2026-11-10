@@ -310,6 +310,7 @@ impl Sb {
                     main_exe: Some(&main),
                     reg: crate::policy::registry::RegPolicy.reader(&self.sys),
                     app_path: None,
+                    user_data: None,
                 },
             )
             .map_err(|e| e.to_string())?;
@@ -1488,5 +1489,140 @@ fn sandbox_sb_g2_gpu_preference_round_trip_on_the_real_hkcu() {
         "MEASURED gpu_preference: DirectX key present={directx_existed}, UserGpuPreferences \
          present={prefs_existed}, hardware adapters={adapters}, gpu.hybrid={hybrid:?}; new, \
          merge (restored byte for byte) and drift round trips passed"
+    ));
+}
+
+// ---------- The user data root (P4-12) ----------
+
+/// SB-U1 (P4-12): `ini_set` in the real `Documents` of the CI user through the real `WinSystem`:
+/// `Documents\My Games\RerunSbU1\settings.ini` (Documents made first if the fresh profile has
+/// none, and measured), planned from a user data folder, applied, verified, reverted, the
+/// folder identical; a junction `My Games\RerunSbU1J` (`mklink /J`, as the user) is refused as
+/// a user data folder. Everything made here is removed at the end. `ci-sandbox.ps1` fails pass 1
+/// without its `MEASURED user_data` line. Whether Documents on OneDrive carries the cloud tag is
+/// not measured here (no OneDrive in the Sandbox; `docs/09-testing.md`, open row).
+#[test]
+#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
+fn sandbox_sb_u1_ini_set_in_the_real_documents() {
+    sandbox_guard();
+    use crate::policy::root::{SYNC_ROOT_MANAGER, UserBase, UserDataDir, sync_roots};
+    use crate::prim::{IniSetSpec, IniSetValue, StepRoot};
+    let w = Sb::new("sb-u1");
+    let docs = w.sys.known_folders().get(KnownFolder::Documents).unwrap();
+    let docs_existed = docs.is_dir();
+    if !docs_existed {
+        std::fs::create_dir_all(&docs).unwrap();
+    }
+    let my_games = docs.join("My Games");
+    let my_games_existed = my_games.is_dir();
+    let folder = my_games.join("RerunSbU1");
+    let link = my_games.join("RerunSbU1J");
+    let _ = std::fs::remove_dir(&link);
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("settings.ini"),
+        crate::prim::ini_tests::INI_TEXT,
+    )
+    .unwrap();
+    let info = w
+        .sys
+        .fs()
+        .open_dir(&docs)
+        .and_then(|d| d.info())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let srm = RegKey::new(Hive::LocalMachine, RegView::Native, SYNC_ROOT_MANAGER);
+    let sync = match (w.sys.registry().key_exists(&srm), sync_roots(&w.sys)) {
+        (Ok(false), _) => "absent".to_owned(),
+        (_, Ok(v)) => format!("readable ({} roots)", v.len()),
+        (_, Err(e)) => format!("unreadable ({e})"),
+    };
+    let step = |sub: &str| {
+        let sub = rel(sub);
+        let steps = [Step::IniSet(IniSetSpec {
+            root: StepRoot::UserData,
+            file: rel("settings.ini"),
+            values: vec![IniSetValue {
+                section: "Display".into(),
+                key: "Width".into(),
+                value: "1920".into(),
+            }],
+        })];
+        w.with(|cx, fr| {
+            let g = GameDir::open_manual(&w.sys, fr, &w.game).unwrap();
+            let u = UserDataDir::open(&w.sys, fr, UserBase::Documents, &sub)
+                .map_err(|e| e.to_string())?;
+            let main = rel("game.exe");
+            let p = plan(
+                &steps,
+                &PlanCtx {
+                    game: &g,
+                    app: Some(cx.app),
+                    steam_app: None,
+                    main_exe: Some(&main),
+                    reg: crate::policy::registry::RegPolicy.reader(&w.sys),
+                    app_path: None,
+                    user_data: Some(&u),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            Ok::<_, String>(store(cx.app, &p.encode().unwrap()).unwrap())
+        })
+    };
+    let snap_folder = || {
+        w.with(|_, fr| {
+            let d = GameDir::open_manual(&w.sys, fr, &folder).unwrap();
+            snapshot(
+                w.sys.registry(),
+                &Scope {
+                    dirs: vec![SnapRoot::new(d.dir(), "user data")],
+                    keys: vec![],
+                },
+            )
+            .unwrap()
+        })
+    };
+    let before = snap_folder();
+    let h = step(r"My Games\RerunSbU1").unwrap_or_else(|e| panic!("{e}"));
+    let t = w.apply_ok(&h);
+    assert!(
+        String::from_utf8_lossy(&read(&folder.join("settings.ini"))).contains("Width=1920"),
+        "the apply wrote the real file"
+    );
+    let v = w.with(|cx, _| verify(cx, &t)).unwrap();
+    assert!(v.ops.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    let rep = w
+        .with(|cx, _| revert(cx, &t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    let after = snap_folder();
+    assert!(before == after, "{:#?}", before.diff(&after));
+    // A junction made by the user below My Games: never a user data folder.
+    let st = Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(&folder)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("mklink: {e}"));
+    assert!(st.success(), "mklink /J: {st}");
+    let refused = step(r"My Games\RerunSbU1J").expect_err("a junction is refused");
+    assert!(refused.contains("reparse point"), "{refused}");
+    // Clean up: the junction (the link only), the folder, what this test made.
+    std::fs::remove_dir(&link).unwrap();
+    std::fs::remove_dir_all(&folder).unwrap();
+    if !my_games_existed {
+        std::fs::remove_dir(&my_games).unwrap();
+    }
+    if !docs_existed {
+        std::fs::remove_dir(&docs).unwrap();
+    }
+    note(&format!(
+        "MEASURED user_data: documents={} (existed={docs_existed}), cloud={}, sync_roots={sync}; \
+         round trip passed, junction refused",
+        docs.display(),
+        info.cloud
     ));
 }

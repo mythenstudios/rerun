@@ -254,7 +254,7 @@ fn one(
                 .and_then(|p| p.roots.get(usize::from(r.root)))
                 .and_then(|h| match &h.origin {
                     PlanOrigin::Steam { installdir, .. } => Some(installdir),
-                    PlanOrigin::Manual | PlanOrigin::AppDir => None,
+                    PlanOrigin::Manual | PlanOrigin::AppDir | PlanOrigin::UserFolder { .. } => None,
                 })
                 .map(|d| escape::path(&format!(r"{}\steamapps\common\{d}", r.store)).into_owned()),
             id: r.id,

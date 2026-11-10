@@ -230,6 +230,12 @@ pub struct RootInfo {
     /// The volume keeps ACLs (`FILE_PERSISTENT_ACLS`): without it no security descriptor
     /// means anything, and `policy::root` never calls an object on it admin-only (A4 N1).
     pub persistent_acls: bool,
+    /// The directory itself is part of a cloud files sync root (P4-12, ADR 0007 amendment
+    /// P4-12): a reparse tag of the cloud files family (`0x9000_x01A`) or one of the attributes
+    /// `FILE_ATTRIBUTE_RECALL_ON_OPEN`, `RECALL_ON_DATA_ACCESS`, `OFFLINE`, `PINNED`,
+    /// `UNPINNED` on the handle (`sys::win`: `FileAttributeTagInformation`). A fact; whether it
+    /// matters is `policy::root`'s (a `UserData` root refuses it).
+    pub cloud: bool,
 }
 
 /// The GUID of a volume as in its volume GUID path `\\?\Volume{…}\` (ADR 0023 §4, A4 S1).

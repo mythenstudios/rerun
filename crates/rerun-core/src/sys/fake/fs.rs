@@ -177,6 +177,8 @@ struct DirData {
     tag: Option<u32>,
     /// Its DACL denies the current user every open ([`FakeFs::set_restricted`]).
     restricted: bool,
+    /// A recall or pin attribute of a cloud files folder ([`FakeFs::set_cloud_attrs`], P4-12).
+    cloud_attrs: bool,
 }
 
 impl DirData {
@@ -189,6 +191,7 @@ impl DirData {
             volume_root: false,
             tag: None,
             restricted: false,
+            cloud_attrs: false,
         }
     }
 
@@ -989,6 +992,7 @@ impl State {
             volume_guid: Some(volume_guid(serial)),
             supports_open_by_id: modern,
             persistent_acls: modern,
+            cloud: d.cloud_attrs || d.tag.is_some_and(|t| t & 0xFFFF_0FFF == tag::CLOUD),
         })
     }
 
@@ -1691,6 +1695,18 @@ impl FakeFs {
         let mut st = self.lock();
         let id = st.require_abs(abs)?;
         st.dir_mut(id, &shown)?.tag = Some(reparse_tag);
+        Ok(())
+    }
+
+    /// Gives an existing directory (or takes away) a recall or pin attribute of a cloud files
+    /// folder (`FILE_ATTRIBUTE_PINNED` and friends without a tag, P4-12): [`Dir::info`] reports
+    /// it as `cloud`.
+    pub fn set_cloud_attrs(&self, abs: &Path, on: bool) -> SysResult<()> {
+        let _flushed = self.fixture_scope(abs);
+        let shown = abs.display().to_string();
+        let mut st = self.lock();
+        let id = st.require_abs(abs)?;
+        st.dir_mut(id, &shown)?.cloud_attrs = on;
         Ok(())
     }
 

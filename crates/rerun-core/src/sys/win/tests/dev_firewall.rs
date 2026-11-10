@@ -181,6 +181,7 @@ fn dev_helper_firewall_round_trip() {
             main_exe: Some(&main),
             reg: RegPolicy.reader(&sys),
             app_path: None,
+            user_data: None,
         },
     )
     .unwrap();

@@ -25,6 +25,12 @@
 //! - [`StepFile`]: the phase 2 step file `rerun plan <steps.json>` reads (P2-13); since the Topo
 //!   engine (P4-4) the local, unsigned input (L8), removed at the earliest before A6.
 //!
+//! A file of a step lies in the game folder, or (P4-12, [`StepRoot::UserData`]; v1 only
+//! `ini_set`) in the plan's user data folder below the user's `Documents`, which the step file
+//! or the Topo names once ([`UserDataSpec`]) and the front end opens only when a step needs it
+//! ([`needs_user_data`], [`PlanCtx::user_data`]). Its root follows the game root and the profiles
+//! root, if any.
+//!
 //! The builder orders the ops: every file op first (an `IniValue` is one), then every registry
 //! op, whatever the order of the steps (6b-d; `plan::check` refuses anything else). An
 //! `ini_set` and a `file_install` of the same file in one plan are refused.
@@ -59,10 +65,10 @@ pub use step_file::{
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 use crate::plan::{
-    FORMAT, Op, PROFILES_ROOT_ID, Plan, PlanError, PlanOrigin, PlanRoot, RootKind, Target,
+    FORMAT, Op, PROFILES_ROOT_ID, Plan, PlanError, PlanOrigin, PlanRoot, RootIx, RootKind, Target,
 };
 use crate::policy::registry::RegReader;
-use crate::policy::root::{AppDir, GameDir, GameOrigin};
+use crate::policy::root::{AppDir, GameDir, GameOrigin, UserBase, UserDataDir};
 use crate::sys::SysErrorKind;
 use crate::sys::fs::EntryKind;
 use crate::sys::registry::RegKey;
@@ -87,6 +93,64 @@ pub enum Step {
     GpuPreference(GpuPreferenceSpec),
 }
 
+/// The root a step's file lies in (P4-12). On the wire omitted for the game folder, so a step
+/// of the game folder keeps its bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepRoot {
+    /// The game folder (plan root 0).
+    #[default]
+    Game,
+    /// The plan's user data folder ([`UserDataSpec`], [`PlanCtx::user_data`]).
+    UserData,
+}
+
+impl StepRoot {
+    /// The game folder (serde: omitted on the wire).
+    pub fn is_game(&self) -> bool {
+        *self == Self::Game
+    }
+}
+
+/// The user data folder of a plan (P4-12): exactly one key, its base, with the folder below it
+/// (`{"documents":"My Games\Fallout3"}`). The root kind is independent of the primitive: v1
+/// only `ini_set` uses it (user decision U1 a); a later bounded config primitive can name it the
+/// same way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum UserDataSpec {
+    /// A folder below the user's `Documents`.
+    Documents(RelPath),
+}
+
+impl UserDataSpec {
+    /// The base.
+    pub fn base(&self) -> UserBase {
+        match self {
+            Self::Documents(_) => UserBase::Documents,
+        }
+    }
+
+    /// The folder below the base.
+    pub fn sub(&self) -> &RelPath {
+        match self {
+            Self::Documents(s) => s,
+        }
+    }
+}
+
+/// A step of `steps` has its file in the user data folder: the front end opens it then (and
+/// only then).
+pub fn needs_user_data(steps: &[Step]) -> bool {
+    steps
+        .iter()
+        .any(|s| matches!(s, Step::IniSet(i) if i.root == StepRoot::UserData))
+}
+
+/// The root index an op on the user data folder carries while the plan is built; replaced by
+/// the real index (after the game root and the profiles root) when the roots are known.
+pub(crate) const USER_DATA_PENDING: RootIx = RootIx(u16::MAX);
+
 /// What a planner reads: the game folder, Rerun's folder (packages), and what identifies the
 /// game for apply and revert.
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +174,9 @@ pub struct PlanCtx<'a> {
     /// and this, if given, must be the same. Only `launch_method` needs it (the path of the
     /// profiles root, so a plan's bytes are the same with and without `--dry-run`).
     pub app_path: Option<&'a RootPath>,
+    /// The user data folder (P4-12), opened by the front end only if a step needs it
+    /// ([`needs_user_data`]); a step with [`StepRoot::UserData`] is refused without it.
+    pub user_data: Option<&'a UserDataDir<'a>>,
 }
 
 /// The ops planned so far, shared by the steps of one plan.
@@ -126,8 +193,10 @@ pub(crate) struct Builder {
     pub(crate) reg_keys: Vec<RegKey>,
     /// Key and folded name of every value of a step (also of the omitted ones).
     pub(crate) reg_values: Vec<(RegKey, String)>,
-    /// Folded paths of the files of the `ini_set` steps.
+    /// Folded paths of the files of the `ini_set` steps in the game folder.
     pub(crate) ini_files: Vec<String>,
+    /// Folded paths of the files of the `ini_set` steps in the user data folder (P4-12).
+    pub(crate) user_ini_files: Vec<String>,
     /// The profile op of the one `launch_method` step and the path of the profiles root
     /// (`None`: no such step, or its profile is there already: nothing to do).
     pub(crate) profile: Option<(Op, RootPath)>,
@@ -245,6 +314,32 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
         });
         ops.insert(0, op);
     }
+    // P4-12: the user data root last, its ops renumbered to its index.
+    if ops.iter().any(on_pending) {
+        let Some(u) = ctx.user_data else {
+            return Err(PlanError::Step(
+                "a step for the user data folder without that folder".to_owned(),
+            ));
+        };
+        let ix = RootIx(u16::try_from(roots.len()).unwrap_or(u16::MAX));
+        for o in &mut ops {
+            if let Op::IniValue { root, .. } = o
+                && *root == USER_DATA_PENDING
+            {
+                *root = ix;
+            }
+        }
+        roots.push(PlanRoot {
+            kind: RootKind::UserData,
+            path: u.path().clone(),
+            id: u.id(),
+            origin: PlanOrigin::UserFolder {
+                base: u.base(),
+                sub: u.sub().clone(),
+            },
+            main_exe: None,
+        });
+    }
     let plan = Plan {
         format: FORMAT,
         source: None,
@@ -261,6 +356,11 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
     // The bounds of the format (ops, op size, backups): the same check as when applied.
     plan.encode()?;
     Ok(plan)
+}
+
+/// An op planned on the user data folder (its root still [`USER_DATA_PENDING`]).
+fn on_pending(o: &Op) -> bool {
+    matches!(o.target(), Target::File { root, .. } if root == USER_DATA_PENDING)
 }
 
 /// `m` is a plain file of the game folder (not missing, not a folder, link or other reparse

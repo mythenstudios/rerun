@@ -405,6 +405,8 @@ pub fn fs_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsContr
         "final_path is a drive-letter path",
     )?;
     ensure(!info.case_sensitive, "work dir is case-insensitive")?;
+    // P4-12: a plain folder is no cloud files folder (no cloud tag, no recall or pin attribute).
+    ensure(!info.cloud, "work dir is no cloud files folder")?;
     ensure(!info.is_volume_root(), "work dir is not a volume root")?;
     // The work dir lies on a drive-letter volume (no folder mount above it), so its
     // volume-relative path is the final path without `\\?\X:\`: long names, no device prefix.

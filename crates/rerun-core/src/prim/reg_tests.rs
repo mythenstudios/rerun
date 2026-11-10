@@ -87,6 +87,7 @@ pub(crate) fn plan_steps(
             main_exe: main.as_ref(),
             reg: RegPolicy.reader(sys),
             app_path: None,
+            user_data: None,
         },
     )
 }

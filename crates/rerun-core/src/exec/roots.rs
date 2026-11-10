@@ -35,6 +35,14 @@
 //! names (senior-dev condition A1: every profile op is decided by its hashes alone), reporting a
 //! different path ([`Roots::profiles_moved`]). `check` (read only) never creates it either: a
 //! missing one counts as empty there.
+//!
+//! A user data root (P4-12, ADR 0020 amendment P4-12) is opened only through
+//! `policy::root::UserDataDir` from the head's base and folder (never by the head's path): the
+//! base resolved anew, the folder handle-relative below it, never cloud-synchronised. Apply,
+//! `check`, revert and `verify` alike: a path other than the head's is [`Refusal::UserDataMoved`]
+//! (undecided, before the identity is compared, so the reason is the right one; no rebind, no
+//! revert at the new place), another folder at the same path `IdentityMismatch` (undecided),
+//! one that is not found absent (a revert halts at its op without a record). Nothing is created.
 
 use super::bind::{Binding, Bindings, Proof};
 use super::{ExecCtx, ProfilesMoved, Refusal, op_ix};
@@ -43,7 +51,7 @@ use crate::escape;
 use crate::path::{RelPath, RootPath};
 use crate::plan::{ContentRef, Op, Plan, PlanOrigin, Target};
 use crate::policy::registry::RegSlot;
-use crate::policy::root::{AppSub, Create, GameDir, ProfilesDir, RootError, StoreDir};
+use crate::policy::root::{AppSub, Create, GameDir, ProfilesDir, RootError, StoreDir, UserDataDir};
 use crate::prim::file_install::{hash_file, open_package};
 use crate::sys::Dir;
 use crate::sys::fs::FileGuard;
@@ -64,7 +72,7 @@ pub(super) fn open_stores<'s>(
                 s.ensure_id(*store_id)?;
                 Ok(s)
             })),
-            PlanOrigin::Manual | PlanOrigin::AppDir => None,
+            PlanOrigin::Manual | PlanOrigin::AppDir | PlanOrigin::UserFolder { .. } => None,
         })
         .collect()
 }
@@ -112,6 +120,8 @@ pub(super) enum Opened<'g> {
     Game(GameDir<'g>),
     /// `<AppDir>\profiles`, opened through `AppDir` (no identity, F1).
     Profiles(ProfilesDir<'g>),
+    /// A user data folder (P4-12), opened through `UserDataDir`, checked by path and identity.
+    UserData(UserDataDir<'g>),
 }
 
 impl Opened<'_> {
@@ -120,6 +130,7 @@ impl Opened<'_> {
         match self {
             Self::Game(g) => g.dir(),
             Self::Profiles(p) => p.dir(),
+            Self::UserData(u) => u.dir(),
         }
     }
 
@@ -128,6 +139,7 @@ impl Opened<'_> {
         match self {
             Self::Game(g) => g.info(),
             Self::Profiles(p) => p.info(),
+            Self::UserData(u) => u.info(),
         }
     }
 }
@@ -398,7 +410,7 @@ pub(super) fn probe(cx: &ExecCtx<'_>, b: &Binding) -> Probe {
             s.ensure_id(*store_id)?;
             Ok(s)
         })),
-        PlanOrigin::Manual | PlanOrigin::AppDir => None,
+        PlanOrigin::Manual | PlanOrigin::AppDir | PlanOrigin::UserFolder { .. } => None,
     };
     let mismatch = |r: &Refusal| matches!(r, Refusal::Root(e) if matches!(**e, RootError::IdentityMismatch { .. }));
     match open_root(cx, b, store.as_ref(), Use::Revert) {
@@ -519,6 +531,31 @@ fn open_profiles<'g>(
     }
 }
 
+/// Opens a user data root (module docs): through `UserDataDir`, then the path (before the
+/// identity, so a moved base is reported as such) and the identity of the head.
+fn open_user_data<'g>(
+    cx: &ExecCtx<'g>,
+    r: &Binding,
+    base: crate::policy::root::UserBase,
+    sub: &RelPath,
+) -> Result<Opened<'g>, Failed> {
+    let u = match UserDataDir::open(cx.sys, cx.fr, base, sub) {
+        Ok(u) => u,
+        Err(RootError::Sys(s)) if s.kind == SysErrorKind::NotFound => {
+            return Err(Failed::Absent(NoFiles::Root(Box::new(RootError::Sys(s)))));
+        }
+        Err(e) => return Err(Failed::Undecided(e.into())),
+    };
+    if *u.path() != r.path {
+        return Err(Failed::Undecided(Refusal::UserDataMoved {
+            planned: escape::path(&r.path.to_string()).into_owned(),
+            now: escape::path(&u.path().to_string()).into_owned(),
+        }));
+    }
+    u.ensure_id(r.id).map_err(|e| Failed::Undecided(e.into()))?;
+    Ok(Opened::UserData(u))
+}
+
 /// K-LM2 (tests): the path of the profiles root is not compared with the head's.
 fn paths_unchecked() -> bool {
     #[cfg(test)]
@@ -589,7 +626,11 @@ fn open_root<'g>(
             GameDir::open_manual(cx.sys, cx.fr, r.path.path()).map_err(by_root)?
         }
         (PlanOrigin::AppDir, None) => return open_profiles(cx, r, how),
-        (PlanOrigin::Steam { .. }, None) | (PlanOrigin::Manual | PlanOrigin::AppDir, Some(_)) => {
+        (PlanOrigin::UserFolder { base, sub }, None) => {
+            return open_user_data(cx, r, *base, sub).map(|u| (u, None));
+        }
+        (PlanOrigin::Steam { .. }, None)
+        | (PlanOrigin::Manual | PlanOrigin::AppDir | PlanOrigin::UserFolder { .. }, Some(_)) => {
             return Err(Failed::Undecided(Refusal::Plan(
                 crate::plan::PlanError::Invalid {
                     op: None,
@@ -608,12 +649,13 @@ fn open_root<'g>(
 /// `journal`, the profiles folder's only for `exec`).
 #[expect(
     clippy::disallowed_methods,
-    reason = "ADR 0020 and its amendment P3-3: exec writes the roots of a plan"
+    reason = "ADR 0020 and its amendments P3-3 and P4-12: exec writes the roots of a plan"
 )]
 pub(super) fn write_handle<'g>(root: &'g Opened<'_>) -> crate::sys::SysResult<&'g dyn DirWrite> {
     match root {
         Opened::Game(g) => g.dir_write(),
         Opened::Profiles(p) => p.dir_write(),
+        Opened::UserData(u) => u.dir_write(),
     }
 }
 

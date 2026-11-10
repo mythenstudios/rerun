@@ -166,6 +166,7 @@ fn try_plan(env: &Env, steps: &[Step]) -> Result<PlanHash, plan::PlanError> {
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(&env.sys),
             app_path: None,
+            user_data: None,
         },
     )?;
     store(&a, &p.encode()?)
@@ -704,6 +705,7 @@ fn good_plan(env: &Env, g: &crate::policy::root::GameDir<'_>) -> Plan {
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(&env.sys),
             app_path: None,
+            user_data: None,
         },
     )
     .unwrap()

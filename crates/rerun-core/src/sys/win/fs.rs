@@ -26,9 +26,9 @@ use windows_sys::Wdk::Storage::FileSystem::{
     FileProcessIdsUsingFileInformation, FileStandardInformation,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_OFFLINE,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED,
     FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_UNPINNED,
 };
 
 use super::name::{self, DirLayout, Listed, Seg16};
@@ -128,6 +128,14 @@ impl TagInfo {
                 | FILE_ATTRIBUTE_RECALL_ON_OPEN
                 | FILE_ATTRIBUTE_OFFLINE)
             != 0
+    }
+
+    /// Part of a cloud files sync root (P4-12, `RootInfo::cloud`): a tag of the cloud files
+    /// family, or a recall, offline or pin attribute.
+    fn cloud(self) -> bool {
+        self.tag.is_some_and(|t| t & 0xFFFF_0FFF == tag::CLOUD)
+            || self.needs_recall()
+            || self.attrs & (FILE_ATTRIBUTE_PINNED | FILE_ATTRIBUTE_UNPINNED) != 0
     }
 }
 
@@ -688,6 +696,7 @@ impl Dir for WinDir {
         let user_writable = token::user_writable(h).map_err(|c| win32_error(c, t))?;
         let case_sensitive = case_sensitive(h, t)?;
         let (fs_name, flags) = nt::volume_info(h).map_err(|c| win32_info_error(c, t))?;
+        let cloud = tag_info(h, t)?.cloud();
         Ok(RootInfo {
             final_path,
             volume_serial,
@@ -702,6 +711,7 @@ impl Dir for WinDir {
                 .and_then(|w| VolumeGuid::from_volume_path(&String::from_utf16_lossy(&w))),
             supports_open_by_id: flags & FILE_SUPPORTS_OPEN_BY_FILE_ID != 0,
             persistent_acls: flags & FILE_PERSISTENT_ACLS != 0,
+            cloud,
         })
     }
 

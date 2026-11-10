@@ -10,12 +10,16 @@
 //! `main_exe` is required (user decision E4 a): every plan names the program `users()` asks
 //! before apply and revert. An error names its class, line and column, never the input text
 //! (serde's own messages can quote it).
+//!
+//! P4-12: an optional `"user_data":{"documents":"My Games\X"}` names the game's folder below
+//! the user's `Documents`, for a step with `"root":"user_data"` (the folder is opened only then;
+//! such a step without it is refused by the planner).
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::Step;
+use super::{Step, UserDataSpec};
 use crate::path::{RelPath, RootPath};
 use crate::plan::PlanError;
 
@@ -35,6 +39,9 @@ pub struct StepFile {
     pub game: GameRef,
     /// The game's main executable below the game folder.
     pub main_exe: RelPath,
+    /// The game's folder below a known folder of the user (P4-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_data: Option<UserDataSpec>,
     /// The steps, in order.
     pub steps: Vec<Step>,
 }

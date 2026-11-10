@@ -35,6 +35,7 @@ pub(crate) fn ini_builder(text: &[u8]) -> FakeSystemBuilder {
 
 pub(crate) fn ini_step(file: &str, values: &[(&str, &str, &str)]) -> Step {
     Step::IniSet(IniSetSpec {
+        root: super::StepRoot::Game,
         file: rel(file),
         values: values
             .iter()

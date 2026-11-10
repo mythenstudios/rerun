@@ -38,6 +38,7 @@ disallowed-methods = [
   { path = "rerun_core::policy::root::AppDir::dir_write", reason = "Rerun's own folder is written only through AppDir::sub_write (ADR 0019)", allow-invalid = true },
   { path = "rerun_core::policy::root::AppDir::profiles", reason = "Rerun's launch profiles are opened and written only by exec (ADR 0020 amendment P3-3)", allow-invalid = true },
   { path = "rerun_core::policy::root::ProfilesDir::dir_write", reason = "Rerun's launch profiles are written only by exec (ADR 0020 amendment P3-3)", allow-invalid = true },
+  { path = "rerun_core::policy::root::UserDataDir::dir_write", reason = "a user data folder is written only by exec (ADR 0020 amendment P4-12)", allow-invalid = true },
   # ADR 0018: the registry write side. Only policy::registry reaches it (tests carry an expect).
   # ADR 0023: opens by identity only through policy::root::dir_by_id (A4 S1); the helper is started only by elevate (from P4-2c).
   { path = "rerun_core::sys::fs::Fs::open_by_id", reason = "open by identity only through policy::root::dir_by_id (ADR 0023, A4 S1)", allow-invalid = true },

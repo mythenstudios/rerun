@@ -2618,6 +2618,7 @@ impl Dir for NaiveDir {
             volume_guid: None,
             supports_open_by_id: false,
             persistent_acls: true,
+            cloud: false,
         })
     }
 

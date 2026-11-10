@@ -355,6 +355,7 @@ fn run<W: Write, E: Write>(
             main_exe: None,
             reg: RegPolicy.reader(sys),
             app_path: app_path.as_ref(),
+            user_data: None,
         };
         let heading = vec![Message::Topo(TopoMsg::Heading {
             id: t.id.to_string(),

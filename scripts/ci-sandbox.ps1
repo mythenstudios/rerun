@@ -268,6 +268,16 @@ if (-not $r1) {
     if ($gp.Count -eq 0) { Fail 'pass 1: the gpu_preference round trip did not run or measured nothing (no MEASURED gpu_preference line in sandbox-test.log)' }
     else { $gp | ForEach-Object { Write-Host "::notice::$_" } }
 
+    # P4-12: ini_set in the real Documents of the standard user (SB-U1): a round trip, a junction
+    # below My Games refused, Documents, its cloud flag and SyncRootManager measured
+    # (sys::win::tests::sandbox, the same run, as the standard user).
+    $ud = @()
+    if (Test-Path -LiteralPath "$out1\sandbox-test.log") {
+        $ud = @(Get-Content -LiteralPath "$out1\sandbox-test.log" | Where-Object { $_ -like 'MEASURED user_data*' })
+    }
+    if ($ud.Count -eq 0) { Fail 'pass 1: the user data round trip did not run or measured nothing (no MEASURED user_data line in sandbox-test.log)' }
+    else { $ud | ForEach-Object { Write-Host "::notice::$_" } }
+
     # B12 b (ADR 0023): firewall rules readable by the standard user? A measurement, never a failure.
     $fw = if ($r1.cli) { $r1.cli.firewall_read } else { $null }
     if (-not $fw -or $fw -is [string]) { Write-Host '::warning::B12 b: the firewall read probe did not run (no cli.firewall_read object in result.json)' }

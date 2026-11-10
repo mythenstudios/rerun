@@ -310,6 +310,19 @@ pub enum Refusal {
     /// since planning): an apply writes nothing then (P3-3, senior-dev condition A1).
     #[error("Rerun's profiles folder is {} now, the plan names {}; plan again", .0.now, .0.planned)]
     ProfilesMoved(ProfilesMoved),
+    /// A user data folder (P4-12) resolves to another path than the plan names: the user's
+    /// `Documents` was moved or redirected since. Apply and revert refuse (no rebind, no revert
+    /// at the new place): move it back, or `forget` the transaction (its backup stays).
+    #[error(
+        "the game's folder in your Documents is {now} now, the plan names {planned}; move \
+         Documents back, or plan again (a transaction: forget it, its backup stays in the journal)"
+    )]
+    UserDataMoved {
+        /// The path the plan names.
+        planned: Shown<'static>,
+        /// The path now.
+        now: Shown<'static>,
+    },
     /// The main executable of a root is missing or no plain file (audit A2 should-item 8):
     /// the game-closed check would ask nothing about it.
     #[error("the main executable {0} is missing or not a file; plan again")]
@@ -2665,3 +2678,5 @@ mod reg_crash_tests;
 pub(crate) mod reg_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+pub(crate) mod user_data_tests;

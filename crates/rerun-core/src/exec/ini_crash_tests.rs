@@ -16,6 +16,10 @@
 //! The recovery then either closes with exactly the rewritten old file, or leaves the op
 //! `Foreign` with the user's old file kept in the named `.old` (S6); never is the old file lost.
 //!
+//! P4-12: R-I4 and R-I5 run once more with the file on the user data root on `D:`
+//! (`Place::UserData`: `D:\Docs\My Games\G\settings.ini`, Documents on the game folder's volume,
+//! so the cuts of `D:` cut both): R-U10, R-U11. M1 and the controls stay on the game folder.
+//!
 //! Size: measured 2026-11-07 (see `docs/09-testing.md`).
 
 use std::collections::BTreeMap;
@@ -25,6 +29,7 @@ use super::Outcome;
 use super::ini_tests::{APPLIED, ini_env, ini_now, put_ini};
 use super::reg_tests::{Reset, plan_all};
 use super::tests::{Env, try_read_abs};
+use super::user_data_tests::{DOCS_D, plan_ud, snap_ud, ud_env, ud_ini, ud_now, ud_step, ud_three};
 use super::{Detail, Flush, knob as exec_knob};
 use crate::journal::{Closing, Observed, TxnId, TxnState};
 use crate::plan::PlanHash;
@@ -47,6 +52,17 @@ enum Kind {
 
 const KINDS: [Kind; 3] = [Kind::IniEdit, Kind::IniDrift, Kind::IniStacked];
 
+/// Where the INI file lies (P4-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// `D:\Games\G\cfg\game.ini`.
+    Game,
+    /// `D:\Docs\My Games\G\settings.ini`, the user data root on `D:`.
+    UserData,
+}
+
+const PLACES: [Place; 2] = [Place::Game, Place::UserData];
+
 /// What the game writes over a file (`IniDrift`, `IniStacked`, the M1 fixture).
 fn drifted(b: &[u8]) -> Vec<u8> {
     String::from_utf8_lossy(b)
@@ -61,6 +77,7 @@ const GAME_NEW: &[u8] = b"[Display]\r\nWidth=640\r\n";
 struct Case {
     env: Env,
     kind: Kind,
+    place: Place,
     /// The plan under test.
     h: PlanHash,
     /// The state before every transaction.
@@ -74,21 +91,34 @@ struct Case {
 }
 
 fn setup(k: Kind) -> Case {
-    let env = ini_env(INI_TEXT);
-    let before = env.snap();
+    setup_at(k, Place::Game)
+}
+
+fn setup_at(k: Kind, place: Place) -> Case {
+    let env = match place {
+        Place::Game => ini_env(INI_TEXT),
+        Place::UserData => ud_env(DOCS_D, INI_TEXT),
+    };
+    let width = |v: &str| match place {
+        Place::Game => ini_step(INI, &[("Display", "Width", v)]),
+        Place::UserData => ud_step(&[("Display", "Width", v)]),
+    };
+    let plan = |steps: &[crate::prim::Step]| match place {
+        Place::Game => plan_all(&env, steps),
+        Place::UserData => plan_ud(&env, steps),
+    };
+    let before = snap_of(&env, place);
     let mut t1 = None;
-    let steps: Vec<_> = match k {
-        Kind::IniEdit | Kind::IniDrift => vec![three()],
-        Kind::IniStacked => {
-            let t = env.applied(&plan_all(
-                &env,
-                &[ini_step(INI, &[("Display", "Width", "1920")])],
-            ));
+    let steps: Vec<_> = match (k, place) {
+        (Kind::IniEdit | Kind::IniDrift, Place::Game) => vec![three()],
+        (Kind::IniEdit | Kind::IniDrift, Place::UserData) => vec![ud_three()],
+        (Kind::IniStacked, _) => {
+            let t = env.applied(&plan(&[width("1920")]));
             t1 = Some(t);
-            vec![ini_step(INI, &[("Display", "Width", "2560")])]
+            vec![width("2560")]
         }
     };
-    let h = plan_all(&env, &steps);
+    let h = plan(&steps);
     // `journal\lock` in place, so every run's calls are the same.
     drop(
         crate::journal::Journal::new(&app(&env.sys), crate::journal::InstanceTag::fixed(9))
@@ -96,11 +126,12 @@ fn setup(k: Kind) -> Case {
             .unwrap(),
     );
     env.sys.sync_all();
-    let start = env.snap();
-    let start_ini = ini_now(&env).unwrap();
+    let start = snap_of(&env, place);
+    let start_ini = now_at(&env, place).unwrap();
     Case {
         env,
         kind: k,
+        place,
         h,
         before,
         start,
@@ -125,10 +156,38 @@ struct Got {
     drifted: bool,
 }
 
+/// The snapshot of a place: the game folder, and Documents for the user data root.
+fn snap_of(env: &Env, place: Place) -> Snapshot {
+    match place {
+        Place::Game => env.snap(),
+        Place::UserData => snap_ud(env, DOCS_D),
+    }
+}
+
+/// The INI file of a place.
+fn now_at(env: &Env, place: Place) -> Option<Vec<u8>> {
+    match place {
+        Place::Game => ini_now(env),
+        Place::UserData => ud_now(env, DOCS_D),
+    }
+}
+
+fn now(c: &Case) -> Option<Vec<u8>> {
+    now_at(&c.env, c.place)
+}
+
+/// Writes the INI file of the case (fixture writes are durable).
+fn put(c: &Case, b: &[u8]) {
+    match c.place {
+        Place::Game => put_ini(&c.env, b),
+        Place::UserData => super::tests::sys_put(&c.env.sys, &ud_ini(DOCS_D), b),
+    }
+}
+
 /// The game rewrites the file (`IniDrift`, `IniStacked`); fixture writes are durable.
-fn drift(env: &Env) {
-    let now = ini_now(env).unwrap();
-    put_ini(env, &drifted(&now));
+fn drift(c: &Case) {
+    let now = now(c).unwrap();
+    put(c, &drifted(&now));
 }
 
 fn drifts(k: Kind) -> bool {
@@ -157,7 +216,7 @@ fn run(c: &Case, at: Option<At>) -> Got {
     };
     got.applied = true;
     if drifts(c.kind) {
-        drift(env);
+        drift(c);
         got.drifted = true;
     }
     let r = match at {
@@ -172,8 +231,8 @@ fn run(c: &Case, at: Option<At>) -> Got {
 }
 
 /// The calls of the apply and of the revert of the plan under test.
-fn trace(k: Kind) -> (Vec<Prim>, Vec<Prim>) {
-    let c = setup(k);
+fn trace(k: Kind, place: Place) -> (Vec<Prim>, Vec<Prim>) {
+    let c = setup_at(k, place);
     let fx = c.env.sys.fake_fs();
     let rec = |f: &crate::sys::fake::FakeFs| f.record_calls(true);
     let t = match c.env.apply_armed(&c.h, rec) {
@@ -183,7 +242,7 @@ fn trace(k: Kind) -> (Vec<Prim>, Vec<Prim>) {
     fx.record_calls(false);
     let a = fx.take_calls();
     if drifts(k) {
-        drift(&c.env);
+        drift(&c);
     }
     assert!(c.env.revert_armed(&t, rec).unwrap().closed.is_some());
     fx.record_calls(false);
@@ -191,8 +250,8 @@ fn trace(k: Kind) -> (Vec<Prim>, Vec<Prim>) {
 }
 
 /// Every interruption point: after each call of the apply and of the revert, and the end.
-fn points(k: Kind, fault: Fault) -> Vec<Option<At>> {
-    let (a, r) = trace(k);
+fn points(k: Kind, place: Place, fault: Fault) -> Vec<Option<At>> {
+    let (a, r) = trace(k, place);
     let mut v = Vec::new();
     for (revert, calls) in [(false, &a), (true, &r)] {
         for (i, call) in calls.iter().enumerate() {
@@ -218,18 +277,17 @@ fn settled(
     want_ini: &[u8],
     what: &str,
 ) -> Option<String> {
-    let env = &c.env;
     if drifted_now {
-        let v = ini_now(env);
+        let v = now(c);
         if v.as_deref() != Some(&drifted(want_ini)[..]) {
             return Some(format!(
                 "{what}: after the drift the file is {:?}",
                 v.map(|b| String::from_utf8_lossy(&b).into_owned())
             ));
         }
-        put_ini(env, want_ini);
+        put(c, want_ini);
     }
-    let now = env.snap();
+    let now = snap_of(&c.env, c.place);
     (now != *want).then(|| format!("{what}: {:?}", want.diff(&now)))
 }
 
@@ -355,15 +413,15 @@ fn r_i4_a_failure_at_any_call_rolls_back_or_leaves_it_for_revert() {
     let t = Instant::now();
     let mut runs = 0;
     let mut outcomes: BTreeMap<&str, usize> = BTreeMap::new();
-    for k in KINDS {
-        for at in points(k, Fault::Fail(SysErrorKind::Other)) {
+    for (k, place) in KINDS.into_iter().flat_map(|k| PLACES.map(|p| (k, p))) {
+        for at in points(k, place, Fault::Fail(SysErrorKind::Other)) {
             let Some(a) = at else { continue };
-            let c = setup(k);
+            let c = setup_at(k, place);
             let mut drifted_now = false;
             let r = if a.revert {
                 let t = c.env.applied(&c.h);
                 if drifts(k) {
-                    drift(&c.env);
+                    drift(&c);
                     drifted_now = true;
                 }
                 let r = c
@@ -397,7 +455,7 @@ fn r_i4_a_failure_at_any_call_rolls_back_or_leaves_it_for_revert() {
             *outcomes.entry(r).or_default() += 1;
             c.env.sys.fake_fs().clear_faults();
             let v = recover(&c, drifted_now);
-            assert!(v.is_empty(), "{k:?} fail at {a:?}: {v:?}");
+            assert!(v.is_empty(), "{k:?} {place:?} fail at {a:?}: {v:?}");
             runs += 1;
         }
     }
@@ -413,20 +471,20 @@ fn r_i4_a_failure_at_any_call_rolls_back_or_leaves_it_for_revert() {
 /// R-I4, crashes: a crash after every call, a restart, the recovery: as expected, never
 /// `Damaged` or `Foreign`. The rewrite and the restore each go through the phases A to D of
 /// their replace sequence (crashes after `CreateTmp`, the renames and the delete among them).
-fn i4_check(kinds: &[Kind]) -> Vec<String> {
+fn i4_check(kinds: &[Kind], place: Place) -> Vec<String> {
     let mut f = Vec::new();
     for &k in kinds {
-        for at in points(k, Fault::CrashAfter) {
+        for at in points(k, place, Fault::CrashAfter) {
             let Some(a) = at else { continue };
-            let c = setup(k);
+            let c = setup_at(k, place);
             let got = run(&c, at);
             if !c.env.sys.fake_fs().crashed() {
-                f.push(format!("{k:?} {a:?}: no crash"));
+                f.push(format!("{k:?} {place:?} {a:?}: no crash"));
                 continue;
             }
             c.env.sys.restart();
             for x in recover(&c, got.drifted) {
-                f.push(format!("{k:?} crash after {a:?}: {x}"));
+                f.push(format!("{k:?} {place:?} crash after {a:?}: {x}"));
             }
         }
     }
@@ -436,7 +494,7 @@ fn i4_check(kinds: &[Kind]) -> Vec<String> {
 #[test]
 fn r_i4_a_crash_after_any_call_recovers() {
     let t = Instant::now();
-    let f = i4_check(&KINDS);
+    let f = i4_check(&KINDS, Place::Game);
     eprintln!("R-I4 crash: {:.1} s", t.elapsed().as_secs_f64());
     assert!(f.is_empty(), "{f:#?}");
 }
@@ -448,7 +506,7 @@ fn r_i4_a_crash_after_any_call_recovers() {
 fn k_i1_a_rewrite_without_from_and_to_breaks_ri4() {
     let _r = Reset(|| super::ini::knob::unrecorded(false));
     super::ini::knob::unrecorded(true);
-    let f = i4_check(&[Kind::IniDrift]);
+    let f = i4_check(&[Kind::IniDrift], Place::Game);
     assert!(
         f.iter()
             .any(|x| x.contains("Foreign") || x.contains("after the drift the file is None")),
@@ -466,12 +524,12 @@ struct Size {
 
 /// R-I5 for `k` (with the flush `skip` of `exec` switched off for the runs): every point, every
 /// cut of `C:` and `D:`.
-fn matrix(k: Kind, skip: Option<Flush>) -> (Vec<String>, Size) {
+fn matrix(k: Kind, place: Place, skip: Option<Flush>) -> (Vec<String>, Size) {
     let mut found = Vec::new();
     let mut size = Size::default();
-    for at in points(k, Fault::CrashAfter) {
+    for at in points(k, place, Fault::CrashAfter) {
         let (pc, pd) = {
-            let c = setup(k);
+            let c = setup_at(k, place);
             run(&c, at);
             let s = &c.env.sys;
             (
@@ -483,7 +541,7 @@ fn matrix(k: Kind, skip: Option<Flush>) -> (Vec<String>, Size) {
         size.max_d = size.max_d.max(pd);
         for cut_c in 0..=pc {
             for cut_d in 0..=pd {
-                let c = setup(k);
+                let c = setup_at(k, place);
                 exec_knob::skip(skip);
                 let got = run(&c, at);
                 exec_knob::skip(None);
@@ -493,7 +551,9 @@ fn matrix(k: Kind, skip: Option<Flush>) -> (Vec<String>, Size) {
                 ]));
                 size.runs += 1;
                 for x in violations(&c, got) {
-                    found.push(format!("{k:?} after {at:?}, cut C {cut_c} D {cut_d}: {x}"));
+                    found.push(format!(
+                        "{k:?} {place:?} after {at:?}, cut C {cut_c} D {cut_d}: {x}"
+                    ));
                 }
             }
         }
@@ -501,10 +561,13 @@ fn matrix(k: Kind, skip: Option<Flush>) -> (Vec<String>, Size) {
     (found, size)
 }
 
-fn r_i5(k: Kind) {
+fn r_i5(k: Kind, place: Place) {
     let t = Instant::now();
-    let (found, size) = matrix(k, None);
-    eprintln!("R-I5 {k:?}: {size:?} in {:.1} s", t.elapsed().as_secs_f64());
+    let (found, size) = matrix(k, place, None);
+    eprintln!(
+        "R-I5 {k:?} {place:?}: {size:?} in {:.1} s",
+        t.elapsed().as_secs_f64()
+    );
     assert!(
         found.is_empty(),
         "{k:?}: {} violations: {:#?}",
@@ -516,24 +579,53 @@ fn r_i5(k: Kind) {
 
 #[test]
 fn r_i5_ini_edit_every_power_loss_cut_recovers() {
-    r_i5(Kind::IniEdit);
+    r_i5(Kind::IniEdit, Place::Game);
 }
 
 #[test]
 fn r_i5_ini_drift_every_power_loss_cut_recovers() {
-    r_i5(Kind::IniDrift);
+    r_i5(Kind::IniDrift, Place::Game);
 }
 
 #[test]
 fn r_i5_ini_stacked_every_power_loss_cut_recovers() {
-    r_i5(Kind::IniStacked);
+    r_i5(Kind::IniStacked, Place::Game);
+}
+
+/// R-U10 (P4-12): R-I4's crashes with the file on the user data root on `D:`.
+#[test]
+fn r_u10_a_crash_after_any_call_recovers_on_the_user_data_root() {
+    let t = Instant::now();
+    let f = i4_check(&KINDS, Place::UserData);
+    eprintln!("R-U10 crash: {:.1} s", t.elapsed().as_secs_f64());
+    assert!(f.is_empty(), "{f:#?}");
+}
+
+/// R-U11 (P4-12): R-I5 with the file on the user data root on `D:`.
+#[test]
+fn r_u11_ini_edit_on_the_user_data_root_every_power_loss_cut_recovers() {
+    r_i5(Kind::IniEdit, Place::UserData);
+}
+
+#[test]
+fn r_u11_ini_drift_on_the_user_data_root_every_power_loss_cut_recovers() {
+    r_i5(Kind::IniDrift, Place::UserData);
+}
+
+#[test]
+fn r_u11_ini_stacked_on_the_user_data_root_every_power_loss_cut_recovers() {
+    r_i5(Kind::IniStacked, Place::UserData);
 }
 
 /// J6 bites on the rewrite (no new flush site): without the game folder's flush before
 /// `RevertDone`, a power loss keeps `Closed` and loses the rewrite.
 #[test]
 fn j6_the_game_flush_before_revert_done_covers_the_rewrite() {
-    let (found, _) = matrix(Kind::IniDrift, Some(Flush::GameBeforeRevertDone));
+    let (found, _) = matrix(
+        Kind::IniDrift,
+        Place::Game,
+        Some(Flush::GameBeforeRevertDone),
+    );
     assert!(
         found
             .iter()
@@ -547,7 +639,7 @@ fn j6_the_game_flush_before_revert_done_covers_the_rewrite() {
 fn m1_check() -> Vec<String> {
     let mut f = Vec::new();
     let k = Kind::IniEdit;
-    for at in points(k, Fault::CrashAfter) {
+    for at in points(k, Place::Game, Fault::CrashAfter) {
         let Some(a) = at else { continue };
         if a.revert {
             continue;

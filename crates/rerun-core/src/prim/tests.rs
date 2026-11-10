@@ -78,6 +78,7 @@ pub(crate) fn plan_manual(sys: &FakeSystem, s: &FileInstallSpec) -> Result<Plan,
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(sys),
             app_path: None,
+            user_data: None,
         },
     )
 }
@@ -248,6 +249,7 @@ fn t9_a_steam_root_needs_its_app_and_a_manual_root_has_none() {
         main_exe: None,
         reg: crate::policy::registry::RegPolicy.reader(&sys),
         app_path: None,
+        user_data: None,
     };
     let p = plan(&[], &ctx(Some(220))).unwrap();
     assert!(matches!(
@@ -266,6 +268,7 @@ fn t9_a_steam_root_needs_its_app_and_a_manual_root_has_none() {
         main_exe: None,
         reg: crate::policy::registry::RegPolicy.reader(&sys),
         app_path: None,
+        user_data: None,
     };
     assert!(matches!(plan(&[], &c), Err(PlanError::Step(_))));
 }

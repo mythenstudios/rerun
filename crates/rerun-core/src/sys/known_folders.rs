@@ -43,11 +43,16 @@ pub enum KnownFolder {
     /// `…\AppData\Roaming` of the own profile (`FOLDERID_RoamingAppData`). The only folder
     /// that may be redirected to a network path (folder redirection).
     RoamingAppData,
+    /// `…\Documents` of the own profile (`FOLDERID_Documents`, P4-12): the base of a `UserData`
+    /// root (`policy::root::UserDataDir`), deliberately not a source of the forbidden list. It
+    /// may be redirected (another drive, OneDrive folder backup); `policy::root` refuses a
+    /// network or cloud-synchronised form.
+    Documents,
 }
 
 impl KnownFolder {
     /// All known folders, in declaration order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Windows,
         Self::ProgramFiles,
         Self::ProgramFilesX86,
@@ -58,6 +63,7 @@ impl KnownFolder {
         Self::Profile,
         Self::LocalAppData,
         Self::RoamingAppData,
+        Self::Documents,
     ];
 }
 
@@ -74,6 +80,7 @@ impl fmt::Display for KnownFolder {
             Self::Profile => "Profile",
             Self::LocalAppData => "LocalAppData",
             Self::RoamingAppData => "RoamingAppData",
+            Self::Documents => "Documents",
         })
     }
 }

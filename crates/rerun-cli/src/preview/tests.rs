@@ -69,6 +69,7 @@ fn preview(root_path: &str, ops: Vec<PreviewOp>) -> Preview {
         held: None,
         patched: None,
         gpu_pref: None,
+        user_data: None,
     }
 }
 

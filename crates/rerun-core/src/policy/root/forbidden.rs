@@ -60,8 +60,8 @@ pub enum Forbidden {
 }
 
 /// The known folders the forbidden list is resolved from, explicitly (audit A1 should-item
-/// 10). Not [`KnownFolder::ALL`]: a known folder added later (`Documents`, the base of the
-/// `UserData` root of phase 4) can then be a root itself without becoming forbidden. Every
+/// 10). Not [`KnownFolder::ALL`]: `Documents`, the base of the `UserData` root (P4-12), is a
+/// known folder without becoming forbidden. Every
 /// folder the rules below name must be listed here; a folder missing here would resolve to
 /// no path and its rule would silently protect nothing (pinned by a test).
 pub(super) const FORBIDDEN_SOURCES: [KnownFolder; 10] = [
@@ -331,8 +331,9 @@ mod tests {
     use super::{DERIVED, FORBIDDEN_SOURCES, OVERLAP_KNOWN, UPWARD_KNOWN};
     use crate::sys::KnownFolder;
 
-    /// The sources are pinned: changing them changes what is forbidden. Today they are the
-    /// same set as `KnownFolder::ALL`, so the split changed no behaviour.
+    /// The sources are pinned: changing them changes what is forbidden. They are
+    /// `KnownFolder::ALL` without `Documents` (P4-12: the base of the user data root, never a
+    /// source of the forbidden list).
     #[test]
     fn forbidden_sources_are_pinned() {
         use KnownFolder as K;
@@ -351,6 +352,8 @@ mod tests {
                 K::RoamingAppData,
             ]
         );
+        assert!(!FORBIDDEN_SOURCES.contains(&K::Documents));
+        assert_eq!(FORBIDDEN_SOURCES.len() + 1, K::ALL.len());
         let mut sorted = FORBIDDEN_SOURCES.to_vec();
         sorted.sort();
         sorted.dedup();

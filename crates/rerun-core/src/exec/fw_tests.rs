@@ -161,6 +161,7 @@ pub(crate) fn plan(sys: &FakeSystem, index: [u8; 32], k: Kind) -> PlanHash {
             main_exe: Some(&main),
             reg: crate::policy::registry::RegPolicy.reader(sys),
             app_path: None,
+            user_data: None,
         },
     )
     .unwrap();
@@ -1248,6 +1249,7 @@ fn f8_a_rule_first_then_the_patch() {
                     main_exe: Some(&main),
                     reg: crate::policy::registry::RegPolicy.reader(&fw.sys),
                     app_path: None,
+                    user_data: None,
                 },
             )
             .unwrap();

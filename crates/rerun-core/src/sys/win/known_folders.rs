@@ -25,8 +25,9 @@ use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::E_INVALIDARG;
 use windows_sys::Win32::UI::Shell::{
-    FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesCommon,
-    FOLDERID_ProgramFilesCommonX86, FOLDERID_ProgramFilesX86, FOLDERID_RoamingAppData,
+    FOLDERID_Documents, FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_ProgramFiles,
+    FOLDERID_ProgramFilesCommon, FOLDERID_ProgramFilesCommonX86, FOLDERID_ProgramFilesX86,
+    FOLDERID_RoamingAppData,
 };
 use windows_sys::core::{GUID, HRESULT};
 
@@ -63,6 +64,7 @@ fn source(folder: KnownFolder) -> Source {
         KnownFolder::Profile => Source::Shell(FOLDERID_Profile),
         KnownFolder::LocalAppData => Source::Shell(FOLDERID_LocalAppData),
         KnownFolder::RoamingAppData => Source::Shell(FOLDERID_RoamingAppData),
+        KnownFolder::Documents => Source::Shell(FOLDERID_Documents),
     }
 }
 
@@ -402,9 +404,16 @@ mod tests {
                     .any(|q| q.as_os_str().eq_ignore_ascii_case(p.as_os_str())),
                 "{f} duplicates another folder: {s}"
             );
-            let dir = fs
-                .open_dir(&p)
-                .unwrap_or_else(|e| panic!("open {f} ({s}): {e:?}"));
+            // A fresh profile (the CI user of the Sandbox) may have no Documents folder yet:
+            // `KF_FLAG_DONT_VERIFY` names it without creating it (P4-12).
+            let dir = match fs.open_dir(&p) {
+                Err(e) if f == KnownFolder::Documents && e.kind == SysErrorKind::NotFound => {
+                    note(&format!("{f} ({s}) does not exist; not opened"));
+                    seen.push(p);
+                    continue;
+                }
+                d => d.unwrap_or_else(|e| panic!("open {f} ({s}): {e:?}")),
+            };
             let info = dir.info().unwrap_or_else(|e| panic!("info {f}: {e:?}"));
             assert!(
                 RootPath::from_final_path(&info.final_path).is_ok(),

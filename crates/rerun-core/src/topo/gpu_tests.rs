@@ -128,6 +128,7 @@ fn plan_with(
         main_exe: None,
         reg: RegPolicy.reader(sys),
         app_path: None,
+        user_data: None,
     };
     plan(
         &INDEX,

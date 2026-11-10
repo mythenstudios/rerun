@@ -131,6 +131,7 @@ fn plan_picks(sys: &FakeSystem, t: &Topo, p: &[&str]) -> Result<super::TopoPlan,
         main_exe: None,
         reg: RegPolicy.reader(sys),
         app_path: None,
+        user_data: None,
     };
     let picks: Vec<Pick> = p
         .iter()
@@ -510,6 +511,7 @@ fn la8_a_live_patch_still_matches_its_build() {
             main_exe: None,
             reg: RegPolicy.reader(sys),
             app_path: None,
+            user_data: None,
         };
         let r = plan(
             &INDEX,
@@ -594,6 +596,7 @@ fn la9_smart_app_control_refuses_or_warns() {
             main_exe: None,
             reg: RegPolicy.reader(&sys),
             app_path: None,
+            user_data: None,
         };
         let facts = Facts {
             profile: p,

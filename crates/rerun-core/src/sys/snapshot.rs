@@ -994,6 +994,7 @@ mod tests {
                 volume_guid: None,
                 supports_open_by_id: true,
                 persistent_acls: true,
+                cloud: false,
             })
         }
         fn open_dir(&self, _: &RelPath) -> SysResult<Box<dyn Dir + '_>> {

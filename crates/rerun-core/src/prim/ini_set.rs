@@ -1,5 +1,7 @@
 //! `ini_set` (P2-12; ADR 0020 amendment P2-12, ADR 0021): keys of an existing INI file of the
-//! game folder.
+//! game folder, or (P4-12, `"root":"user_data"`) of the plan's user data folder below the
+//! user's `Documents` (`super::UserDataSpec`): the same rules there, read through that folder's
+//! handle; its op names the user data root.
 //!
 //! The step `{"ini_set":{"file":"cfg\\game.ini","values":[{"section":"Display","key":"Width",
 //! "value":"1920"}]}}` (`deny_unknown_fields`): `file` a `RelPath` with the extension `.ini`
@@ -26,21 +28,24 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Builder, PlanCtx, folded};
+use super::{Builder, PlanCtx, StepRoot, USER_DATA_PENDING, folded};
 use crate::path::RelPath;
 use crate::plan::{FileHash, FileState, Op, PlanError, RootIx};
 use crate::policy::ini::{
     self, Found, IniEdit, IniError, IniName, IniText, MAX_EDITS, MAX_INI_BYTES, Old,
 };
-use crate::policy::root::GameDir;
-use crate::sys::SysErrorKind;
 use crate::sys::fs::{EntryKind, Metadata};
+use crate::sys::{Dir, SysErrorKind};
 
 /// The `ini_set` step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IniSetSpec {
-    /// The INI file, relative to the game folder.
+    /// The folder the file lies in (P4-12): the game folder (default, omitted on the wire) or
+    /// the plan's user data folder.
+    #[serde(default, skip_serializing_if = "StepRoot::is_game")]
+    pub root: StepRoot,
+    /// The INI file, relative to its root.
     pub file: RelPath,
     /// The keys, 1 to 8.
     pub values: Vec<IniSetValue>,
@@ -101,8 +106,8 @@ fn values(spec: &IniSetSpec) -> Result<Vec<(IniName, IniName, IniText)>, PlanErr
 }
 
 /// `file` in the stored spelling of every segment and its metadata, if it is a plain file of
-/// the game folder below plain folders (module docs).
-fn stored_file(game: &GameDir<'_>, file: &RelPath) -> Result<(RelPath, Metadata), PlanError> {
+/// the root `dir` below plain folders (module docs).
+fn stored_file(dir: &dyn Dir, file: &RelPath) -> Result<(RelPath, Metadata), PlanError> {
     let bad = |why: &str| refuse(format!("ini_set: {}: {why}", shown(file.as_str())));
     let segs: Vec<&str> = file.segments().collect();
     let mut asked: Option<RelPath> = None;
@@ -115,7 +120,7 @@ fn stored_file(game: &GameDir<'_>, file: &RelPath) -> Result<(RelPath, Metadata)
         }
         .map_err(|e| bad(&e.to_string()))?;
         let last = i + 1 == segs.len();
-        let meta = match game.dir().metadata(&next) {
+        let meta = match dir.metadata(&next) {
             Ok(Some(m)) => m,
             Ok(None) => {
                 return Err(bad(
@@ -141,8 +146,7 @@ fn stored_file(game: &GameDir<'_>, file: &RelPath) -> Result<(RelPath, Metadata)
             }));
         }
         if !last
-            && game
-                .dir()
+            && dir
                 .open_dir(&next)
                 .and_then(|d| d.info())
                 .map_err(|e| bad(&e.to_string()))?
@@ -150,8 +154,7 @@ fn stored_file(game: &GameDir<'_>, file: &RelPath) -> Result<(RelPath, Metadata)
         {
             return Err(bad("a case-sensitive folder on the way"));
         }
-        let name = game
-            .dir()
+        let name = dir
             .stored_name(&next)
             .map_err(|e| bad(&e.to_string()))?
             .ok_or_else(|| bad("changed while it was planned"))?;
@@ -202,7 +205,18 @@ pub(crate) fn plan_into(
     ctx: &PlanCtx<'_>,
     b: &mut Builder,
 ) -> Result<(), PlanError> {
-    let game = ctx.game;
+    let (dir, info, root, files) = match spec.root {
+        StepRoot::Game => (ctx.game.dir(), ctx.game.info(), RootIx(0), &mut b.ini_files),
+        StepRoot::UserData => {
+            let u = ctx.user_data.ok_or_else(|| {
+                refuse(
+                    "ini_set: root user_data, but the plan names no user data folder \
+                     (user_data)",
+                )
+            })?;
+            (u.dir(), u.info(), USER_DATA_PENDING, &mut b.user_ini_files)
+        }
+    };
     if !ini::path_ok(&spec.file) {
         return Err(refuse(format!(
             "ini_set: {} is no .ini file (or is desktop.ini)",
@@ -211,19 +225,19 @@ pub(crate) fn plan_into(
     }
     let vals = values(spec)?;
     let f = folded(&spec.file);
-    if b.ini_files.contains(&f) {
+    if files.contains(&f) {
         return Err(refuse(format!(
             "ini_set: two steps for {}; put the values into one step",
             shown(spec.file.as_str())
         )));
     }
-    b.ini_files.push(f);
-    if game.info().case_sensitive {
-        return Err(refuse("ini_set: the game folder is case-sensitive"));
+    files.push(f);
+    if info.case_sensitive {
+        return Err(refuse("ini_set: the folder is case-sensitive"));
     }
-    let (path, meta) = stored_file(game, &spec.file)?;
+    let (path, meta) = stored_file(dir, &spec.file)?;
     let max = u64::try_from(MAX_INI_BYTES).unwrap_or(u64::MAX);
-    let bytes = match game.dir().read_limited(&path, max) {
+    let bytes = match dir.read_limited(&path, max) {
         Ok(b) => b,
         Err(e) if e.kind == SysErrorKind::TooLarge => {
             return Err(refuse(format!(
@@ -277,7 +291,7 @@ pub(crate) fn plan_into(
     let (old_sha, old_len) = hash(&bytes);
     let (new_sha, new_len) = hash(&new);
     b.ops.push(Op::IniValue {
-        root: RootIx(0),
+        root,
         path,
         old: FileState {
             sha256: old_sha,

@@ -194,6 +194,7 @@ fn t9g_a_game_folder_reached_through_a_link_is_refused() {
         main_exe: Some(&main),
         reg: RegPolicy.reader(&sys),
         app_path: None,
+        user_data: None,
     };
     let e = plan(&[pref_step("game.exe")], &ctx).unwrap_err();
     assert!(e.to_string().contains("reached through a link"), "{e}");

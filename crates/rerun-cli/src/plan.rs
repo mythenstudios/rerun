@@ -5,7 +5,8 @@
 //! Order: the elevated guard (user decision E3), the forbidden roots, the step file
 //! (`read_input`, 1 MiB, `StepFile::parse`), Rerun's folder without creating it (review S6),
 //! the game folder (`steam`: exactly one installed app in the libraries; `folder`: opened like
-//! a manually added folder), the planner, `encode`, the preview of the encoded bytes. A plan
+//! a manually added folder), the game's folder below the user's `Documents` only if a step names
+//! it (P4-12, `user_data`), the planner, `encode`, the preview of the encoded bytes. A plan
 //! without ops is not stored. The preview is written and flushed before anything is stored:
 //! a preview that did not arrive stores nothing (exit 3). `--dry-run` creates nothing at all.
 
@@ -18,7 +19,7 @@ use rerun_core::path::RootPath;
 use rerun_core::plan::{self, PlanBytes, Preview};
 use rerun_core::policy::registry::RegPolicy;
 use rerun_core::policy::root::{
-    AppDir, Create, ForbiddenRoots, GameDir, Shadow, preview_with_shadows, read_input,
+    AppDir, Create, ForbiddenRoots, GameDir, Shadow, UserDataDir, preview_with_shadows, read_input,
 };
 use rerun_core::prim::{self, GameRef, MAX_STEP_FILE, PlanCtx, StepFile};
 use rerun_core::sys::System;
@@ -70,6 +71,14 @@ fn run<W: Write, E: Write>(
         let scan = anti_cheat::find(game, &topo::step_file_dirs(&sf.steps, &sf.main_exe));
         let warned = topo::anti_cheat_steps(&sf.steps, &scan)
             .map_err(|r| plan::PlanError::Step(r.to_string()))?;
+        // P4-12: the user data folder only if a step needs it (nothing below Documents is
+        // touched otherwise); without `user_data` such a step is the planner's refusal.
+        let user_data = match &sf.user_data {
+            Some(u) if prim::needs_user_data(&sf.steps) => {
+                Some(UserDataDir::open(sys, &fr, u.base(), u.sub())?)
+            }
+            _ => None,
+        };
         let ctx = PlanCtx {
             game,
             app: app.as_ref(),
@@ -77,6 +86,7 @@ fn run<W: Write, E: Write>(
             main_exe: Some(&sf.main_exe),
             reg: RegPolicy.reader(sys),
             app_path: app_path.as_ref(),
+            user_data: user_data.as_ref(),
         };
         let p = prim::plan(&sf.steps, &ctx)?;
         let b = p.encode()?;
