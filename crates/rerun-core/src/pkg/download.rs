@@ -29,6 +29,7 @@
 //! own handle.
 
 use std::io::{self, Read};
+use std::time::{Duration, Instant};
 
 use crate::catalog::model::{Arch, Package, Sha256, Tier};
 use crate::journal::InstanceTag;
@@ -44,20 +45,45 @@ use crate::wire::hex32;
 pub const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 /// Most redirects followed for one download (GitHub needs one).
 pub const MAX_REDIRECTS: usize = 3;
+/// Most time one download may take, from its first request to its last byte (ADR 0025). Generous:
+/// 64 MiB in 10 minutes is about 110 KB/s. WinHTTP's 30 s timeouts bound each step; this bounds
+/// a server that keeps sending slowly.
+pub const MAX_DOWNLOAD_TIME: Duration = Duration::from_secs(600);
 /// Most entries of `cache` listed when temp files are swept; a larger folder is not swept.
 const MAX_CACHE_ENTRIES: usize = 4096;
 /// The lock file of the cache.
 const LOCK: &str = "lock";
 
-/// One download of a package: an archive at a URL with its pinned SHA-256.
+/// One download of a package: an archive at a URL with its pinned SHA-256. Built only by
+/// [`downloads`] (from a package of the signed index, form and provenance checked).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Download {
+    arch: Option<Arch>,
+    url: HttpsUrl,
+    sha256: [u8; 32],
+}
+
+impl Download {
     /// The architecture of a per-architecture asset (`assets[]`), `None` for `source.release`.
-    pub arch: Option<Arch>,
+    pub fn arch(&self) -> Option<Arch> {
+        self.arch
+    }
+
     /// Where it is fetched from.
-    pub url: HttpsUrl,
+    pub fn url(&self) -> &HttpsUrl {
+        &self.url
+    }
+
     /// What it must hash to.
-    pub sha256: [u8; 32],
+    pub fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+
+    /// A download without a package (tests only: the fake and the [SB] test).
+    #[cfg(test)]
+    pub(crate) fn for_test(arch: Option<Arch>, url: HttpsUrl, sha256: [u8; 32]) -> Self {
+        Self { arch, url, sha256 }
+    }
 }
 
 /// How a fetch ended.
@@ -139,6 +165,14 @@ pub enum FetchError {
         /// The limit.
         limit: u64,
     },
+    /// The download took longer than [`MAX_DOWNLOAD_TIME`].
+    #[error("https://{host}: the download took longer than {secs} s")]
+    TimedOut {
+        /// The host asked last.
+        host: String,
+        /// The limit in seconds.
+        secs: u64,
+    },
     /// The body ended before or ran past its `Content-Length`.
     #[error("https://{host}: the download does not match its Content-Length of {expected} bytes")]
     Length {
@@ -156,9 +190,17 @@ pub enum FetchError {
     /// The network or WinHTTP (the error carries the Win32 code).
     #[error("network: {0}")]
     Network(SysError),
-    /// A cache entry that cannot be checked or removed (a link, a directory, a reparse point).
+    /// A cache entry Rerun never uses (a hard link, a directory, a reparse point).
     #[error("the cache entry {name} cannot be used ({error}); remove it from the cache folder")]
     CacheEntry {
+        /// Its name below `cache`.
+        name: String,
+        /// Why.
+        error: SysError,
+    },
+    /// A cache entry that cannot be read or removed now (in use, or another passing error).
+    #[error("the cache entry {name} cannot be used now ({error}); try again")]
+    CacheBusy {
         /// Its name below `cache`.
         name: String,
         /// Why.
@@ -170,6 +212,25 @@ pub enum FetchError {
     /// The file system of the cache.
     #[error(transparent)]
     Sys(SysError),
+}
+
+impl FetchError {
+    /// Whether the failure is passing or lies in the environment (ADR 0025, exit 1 of `package
+    /// fetch`): the network, HTTP 5xx and 429, a body that does not match its `Content-Length`,
+    /// the overall deadline, a cache entry in use, the file system. Everything else is a refusal
+    /// by policy or integrity (exit 3 when nothing was changed).
+    pub fn transient(&self) -> bool {
+        match self {
+            Self::Network(_)
+            | Self::Length { .. }
+            | Self::TimedOut { .. }
+            | Self::CacheBusy { .. }
+            | Self::Root(_)
+            | Self::Sys(_) => true,
+            Self::Status { status, .. } => *status >= 500 || *status == 429,
+            _ => false,
+        }
+    }
 }
 
 impl From<RootError> for FetchError {
@@ -243,7 +304,8 @@ struct Tap<'a> {
     host: String,
     read: u64,
     expected: Option<u64>,
-    limit: u64,
+    limits: Limits,
+    started: Instant,
     failed: Option<FetchError>,
 }
 
@@ -256,6 +318,9 @@ impl Tap<'_> {
 
 impl Read for Tap<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(why) = self.limits.past(self.started, &self.host) {
+            return Err(self.stop(why));
+        }
         let n = match self.body.read(buf) {
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
@@ -268,8 +333,8 @@ impl Read for Tap<'_> {
             .read
             .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
         let host = self.host.clone();
-        if self.read > self.limit {
-            let limit = self.limit;
+        if self.read > self.limits.bytes {
+            let limit = self.limits.bytes;
             return Err(self.stop(FetchError::TooLarge { host, limit }));
         }
         if let Some(expected) = self.expected
@@ -278,6 +343,43 @@ impl Read for Tap<'_> {
             return Err(self.stop(FetchError::Length { host, expected }));
         }
         Ok(n)
+    }
+}
+
+/// The bounds of one download.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    /// Most bytes ([`MAX_DOWNLOAD_BYTES`]).
+    pub(crate) bytes: u64,
+    /// Most time from the first request ([`MAX_DOWNLOAD_TIME`]).
+    pub(crate) time: Duration,
+}
+
+impl Limits {
+    const PRODUCT: Self = Self {
+        bytes: MAX_DOWNLOAD_BYTES,
+        time: MAX_DOWNLOAD_TIME,
+    };
+
+    /// `TimedOut` once `time` has passed since `started`.
+    fn past(&self, started: Instant, host: &str) -> Option<FetchError> {
+        (started.elapsed() >= self.time).then(|| FetchError::TimedOut {
+            host: host.to_owned(),
+            secs: self.time.as_secs(),
+        })
+    }
+}
+
+/// A guard error at a cache entry: a link, a directory or a reparse point is never used
+/// ([`FetchError::CacheEntry`], remove it); anything else is passing ([`FetchError::CacheBusy`]).
+fn entry_error(name: &RelPath, error: SysError) -> FetchError {
+    let name = name.to_string();
+    match error.kind {
+        SysErrorKind::Linked
+        | SysErrorKind::ReparsePoint
+        | SysErrorKind::AccessDenied
+        | SysErrorKind::InvalidPath => FetchError::CacheEntry { name, error },
+        _ => FetchError::CacheBusy { name, error },
     }
 }
 
@@ -308,10 +410,7 @@ fn check_cached(
     sha256: &[u8; 32],
     replaced: &mut bool,
 ) -> Result<Option<u64>, FetchError> {
-    let entry = |error: SysError| FetchError::CacheEntry {
-        name: name.to_string(),
-        error,
-    };
+    let entry = |error: SysError| entry_error(name, error);
     let mut g = match dir.guard(name) {
         Ok(g) => g,
         Err(e) if e.kind == SysErrorKind::NotFound => return Ok(None),
@@ -333,17 +432,30 @@ pub fn fetch(
     app: &AppDir<'_>,
     d: &Download,
 ) -> Result<Fetched, FetchError> {
-    fetch_limited(sys, http, app, d, MAX_DOWNLOAD_BYTES)
+    fetch_noting(sys, http, app, d, &mut false)
 }
 
-/// [`fetch`] with another limit than [`MAX_DOWNLOAD_BYTES`] (tests: a small limit instead of a
-/// 64 MiB body).
-pub(crate) fn fetch_limited(
+/// [`fetch`] that sets `changed` once it stored or deleted anything in the cache (a new archive,
+/// a damaged entry removed), also when it fails afterwards: `package fetch` then reports progress
+/// instead of "nothing changed" (ADR 0025, exit codes).
+pub fn fetch_noting(
     sys: &dyn System,
     http: &dyn Http,
     app: &AppDir<'_>,
     d: &Download,
-    limit: u64,
+    changed: &mut bool,
+) -> Result<Fetched, FetchError> {
+    fetch_with(sys, http, app, d, Limits::PRODUCT, changed)
+}
+
+/// [`fetch`] with other limits (tests: a small byte limit, a zero deadline).
+pub(crate) fn fetch_with(
+    sys: &dyn System,
+    http: &dyn Http,
+    app: &AppDir<'_>,
+    d: &Download,
+    limits: Limits,
+    changed: &mut bool,
 ) -> Result<Fetched, FetchError> {
     crate::exec::standard_user(sys).map_err(|_| FetchError::Elevated)?;
     let dir = app
@@ -353,16 +465,22 @@ pub(crate) fn fetch_limited(
     sweep(&*dir);
     let name = seg(&cache_name(&d.sha256));
     let mut replaced = false;
-    if let Some(len) = check_cached(&*dir, &name, &d.sha256, &mut replaced)? {
+    let hit = check_cached(&*dir, &name, &d.sha256, &mut replaced);
+    *changed |= replaced;
+    if let Some(len) = hit? {
         return Ok(Fetched {
             sha256: d.sha256,
             len,
             how: How::Cached,
         });
     }
+    let started = Instant::now();
     let mut url = d.url.clone();
     let mut redirects = 0;
     let resp = loop {
+        if let Some(why) = limits.past(started, url.host()) {
+            return Err(why);
+        }
         let resp = http
             .get(url.host(), url.path())
             .map_err(FetchError::Network)?;
@@ -391,22 +509,26 @@ pub(crate) fn fetch_limited(
         }
     };
     let host = url.host().to_owned();
-    if resp.length.is_some_and(|n| n > limit) {
-        return Err(FetchError::TooLarge { host, limit });
+    if resp.length.is_some_and(|n| n > limits.bytes) {
+        return Err(FetchError::TooLarge {
+            host,
+            limit: limits.bytes,
+        });
     }
     let mut tap = Tap {
         body: resp.body,
         host,
         read: 0,
         expected: resp.length,
-        limit,
+        limits,
+        started,
         failed: None,
     };
     let new = NewFile {
         tmp: TmpName::new(InstanceTag::new().get(), 0),
         attrs: Attrs::default(),
         sha256: d.sha256,
-        max_len: limit,
+        max_len: limits.bytes,
     };
     let written = dir.create_new(&name, &mut tap, &new);
     if let Some(why) = tap.failed.take() {
@@ -422,11 +544,12 @@ pub(crate) fn fetch_limited(
         Err(e) if e.kind == SysErrorKind::TooLarge => {
             return Err(FetchError::TooLarge {
                 host: tap.host,
-                limit,
+                limit: limits.bytes,
             });
         }
         Err(e) => return Err(FetchError::Sys(e)),
     };
+    *changed = true;
     dir.flush()?;
     Ok(Fetched {
         sha256: written.sha256,

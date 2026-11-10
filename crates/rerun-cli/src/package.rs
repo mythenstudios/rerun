@@ -6,6 +6,12 @@
 //! decision E2 a: another version is another package), its downloads (a community package has
 //! none: its page is the way), then each download in turn. The first failure ends the command;
 //! what was fetched before it stays in the cache (each entry only under its pinned hash).
+//!
+//! Exit codes (ADR 0025): 0 when every download is in the cache, and also when a download fails
+//! after this run stored an archive or removed a damaged entry (the lines of what was done, then
+//! the failure); otherwise 1 for a passing or environment failure (`FetchError::transient`: the
+//! network, HTTP 5xx and 429, a body that does not match its length, the deadline, a cache entry
+//! in use, the file system) and 3 for a refusal by policy or integrity (nothing changed).
 
 use std::io::Write;
 
@@ -25,10 +31,12 @@ fn note<E: Write>(err: &mut Out<E>, m: PackageMsg<'_>, exit: Exit) -> Exit {
     exit
 }
 
+/// The exit code of a failure when nothing was changed in this run.
 fn failed<E: Write>(err: &mut Out<E>, e: &FetchError) -> Exit {
-    let exit = match e {
-        FetchError::Network(_) | FetchError::Root(_) | FetchError::Sys(_) => Exit::Fatal,
-        _ => Exit::Refused,
+    let exit = if e.transient() {
+        Exit::Fatal
+    } else {
+        Exit::Refused
     };
     note(err, PackageMsg::Failed { error: shown(e) }, exit)
 }
@@ -103,16 +111,28 @@ fn run<W: Write, E: Write>(
     let p = package(&catalog, spec, err)?;
     let downloads = download::downloads(p).map_err(|e| failed(err, &e))?;
     let mut lines = Vec::new();
+    let mut changed = false;
     for d in &downloads {
-        let got = download::fetch(host.sys, host.http, &app, d).map_err(|e| {
-            // What was fetched before the failure is reported first.
-            let _ = out.lines(&lines).and_then(|()| out.flush());
-            failed(err, &e)
-        })?;
+        let got = match download::fetch_noting(host.sys, host.http, &app, d, &mut changed) {
+            Ok(got) => got,
+            Err(e) if changed => {
+                // Progress in this run: what was done, then the failure; not "nothing changed".
+                let exit = out
+                    .lines(&lines)
+                    .and_then(|()| out.flush())
+                    .map_or_else(|o| after_change(err, o, Exit::Report), |()| Exit::Report);
+                return Err(note(err, PackageMsg::Failed { error: shown(&e) }, exit));
+            }
+            Err(e) => {
+                // Nothing changed, but earlier downloads may have been cache hits: list them.
+                let _ = out.lines(&lines).and_then(|()| out.flush());
+                return Err(failed(err, &e));
+            }
+        };
         lines.push(Message::Package(PackageMsg::Fetched {
             id: escape::text(p.id.as_str()).into_owned(),
             version: escape::text(&p.version).into_owned(),
-            arch: d.arch.map(arch),
+            arch: d.arch().map(arch),
             how: match got.how {
                 How::Cached => FetchedHow::Cached,
                 How::Downloaded {

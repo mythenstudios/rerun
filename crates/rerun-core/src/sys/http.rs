@@ -29,8 +29,9 @@ pub const MAX_LOCATION: usize = MAX_PATH + 512;
 pub struct Response<'a> {
     /// The HTTP status code.
     pub status: u16,
-    /// The `Location` header as sent (at most [`MAX_LOCATION`] bytes, ASCII only; anything else
-    /// is an error of the request), if there was one.
+    /// The `Location` header of a 3xx response as sent (at most [`MAX_LOCATION`] bytes, ASCII
+    /// only; anything else is an error of the request), if there was one; never read for another
+    /// status.
     pub location: Option<String>,
     /// `Content-Length`, if the server sent a valid one. Advisory: the body may end earlier or
     /// run longer; the reader decides by what it reads.
@@ -68,12 +69,7 @@ pub fn check_request(host: &str, path: &str) -> SysResult<()> {
         && host
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'.');
-    let path_ok = path.starts_with('/')
-        && path.len() <= MAX_PATH
-        && path
-            .bytes()
-            .all(|c| c.is_ascii_graphic() && c != b'\\' && c != b'#');
-    if host_ok && path_ok {
+    if host_ok && path_ok(path) {
         Ok(())
     } else {
         Err(SysError::new(
@@ -81,6 +77,16 @@ pub fn check_request(host: &str, path: &str) -> SysResult<()> {
             "an HTTPS request with an invalid host or path",
         ))
     }
+}
+
+/// The path rule of [`check_request`], also `policy::url`'s for every URL it admits: starts with
+/// `/`, at most [`MAX_PATH`] bytes of printable ASCII without `\`, `#` or a space.
+pub fn path_ok(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() <= MAX_PATH
+        && path
+            .bytes()
+            .all(|c| c.is_ascii_graphic() && c != b'\\' && c != b'#')
 }
 
 /// No network: every request is refused (`Unsupported`). For systems and tests that must

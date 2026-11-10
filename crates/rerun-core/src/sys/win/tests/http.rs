@@ -106,11 +106,7 @@ fn sandbox_package_download_of_a_github_release_asset() {
     let sys = WinSystem::new().unwrap();
     let app = AppDir::open(&sys, Create::IfMissing).unwrap().unwrap();
     let pinned = *Hex::<32>::parse(ASSET_SHA256).unwrap().bytes().unwrap();
-    let d = Download {
-        arch: None,
-        url: url.clone(),
-        sha256: pinned,
-    };
+    let d = Download::for_test(None, url.clone(), pinned);
     let cache = app
         .sub_write(AppSub::Cache, Create::IfMissing)
         .unwrap()
@@ -139,10 +135,7 @@ fn sandbox_package_download_of_a_github_release_asset() {
     assert_eq!(again.how, How::Cached);
 
     // 4. A wrong pin downloads, refuses and keeps nothing.
-    let wrong = Download {
-        sha256: [0; 32],
-        ..d.clone()
-    };
+    let wrong = Download::for_test(None, url.clone(), [0; 32]);
     let e = fetch(&sys, &WinHttp::new(), &app, &wrong).unwrap_err();
     assert!(matches!(e, FetchError::Mismatch { .. }), "{e:?}");
     let left: Vec<String> = cache

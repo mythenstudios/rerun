@@ -155,7 +155,10 @@ impl Http for FakeHttp {
         }
         Ok(Response {
             status: reply.status,
-            location: reply.location,
+            // As `WinHttp`: a Location is reported only with a 3xx status.
+            location: reply
+                .location
+                .filter(|_| (300..400).contains(&reply.status)),
             length: reply.length,
             body: Box::new(Body {
                 data: reply.body,

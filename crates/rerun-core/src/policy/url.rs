@@ -16,7 +16,7 @@
 //!   requested: no redirect to the same host (it could leave the repository the provenance rule
 //!   checked), no `http`, no relative `Location`.
 
-use crate::sys::http::MAX_PATH;
+use crate::sys::http::path_ok;
 
 /// `\s` of ECMA-262 (the schemas' pattern language).
 pub(crate) fn space(c: char) -> bool {
@@ -183,13 +183,10 @@ pub struct HttpsUrl {
     path: String,
 }
 
-/// A request path: starts with `/`, at most [`MAX_PATH`] bytes of printable ASCII without
+/// A request path ([`path_ok`]): starts with `/`, at most 8 KiB of printable ASCII without
 /// `\` and `#` (a fragment is never sent).
 fn wire_path(p: &str) -> bool {
-    p.starts_with('/')
-        && p.len() <= MAX_PATH
-        && p.bytes()
-            .all(|c| c.is_ascii_graphic() && c != b'\\' && c != b'#')
+    path_ok(p)
 }
 
 impl HttpsUrl {

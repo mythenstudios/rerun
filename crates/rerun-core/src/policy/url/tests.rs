@@ -1,6 +1,7 @@
 //! The URL rules of the downloader (ADR 0025): package URLs, redirects, provenance.
 
 use super::*;
+use crate::sys::http::MAX_PATH;
 
 const ASSET: &str = "https://github.com/owner/fix-pack/releases/download/v1.0/fix-pack.zip";
 

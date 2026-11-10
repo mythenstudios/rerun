@@ -3,11 +3,13 @@
 //! on the bytes read, and nothing is left behind by a failure.
 
 use std::path::Path;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
 use super::download::{
-    Download, FetchError, How, MAX_DOWNLOAD_BYTES, cache_name, downloads, fetch, fetch_limited,
+    Download, FetchError, Fetched, How, Limits, MAX_DOWNLOAD_BYTES, MAX_DOWNLOAD_TIME, cache_name,
+    downloads, fetch, fetch_noting, fetch_with,
 };
 use crate::catalog::model::{Arch, ArchList, Asset, Hex, Id, Package, PackageSource, Status, Tier};
 use crate::path::RelPath;
@@ -35,11 +37,22 @@ fn app(sys: &FakeSystem) -> AppDir<'_> {
 }
 
 fn download(content: &[u8]) -> Download {
-    Download {
-        arch: None,
-        url: HttpsUrl::download(ASSET).unwrap(),
-        sha256: sha(content),
-    }
+    Download::for_test(None, HttpsUrl::download(ASSET).unwrap(), sha(content))
+}
+
+/// [`fetch`] with a byte limit of `bytes`.
+fn fetch_limited(
+    sys: &FakeSystem,
+    http: &FakeHttp,
+    app: &AppDir<'_>,
+    d: &Download,
+    bytes: u64,
+) -> Result<Fetched, FetchError> {
+    let limits = Limits {
+        bytes,
+        time: MAX_DOWNLOAD_TIME,
+    };
+    fetch_with(sys, http, app, d, limits, &mut false)
 }
 
 /// GitHub's answer: a redirect to its asset storage, which serves `body`.
@@ -181,8 +194,11 @@ fn statuses_other_than_200_and_redirects_fail() {
 fn the_limit_counts_the_bytes_read_not_the_header() {
     let body = vec![0x5A; 100];
     let sys = sys();
-    // An honest Content-Length above the limit: refused before reading.
-    let http = github(FakeReply::ok(&body));
+    // An honest Content-Length above the limit: refused before reading (the body would fail at
+    // its first byte, so without the pre-check this is a network error).
+    let mut honest = FakeReply::ok(&body);
+    honest.cut_after = Some(0);
+    let http = github(honest);
     let e = fetch_limited(&sys, &http, &app(&sys), &download(&body), 99).unwrap_err();
     assert!(matches!(e, FetchError::TooLarge { limit: 99, .. }), "{e:?}");
     // No Content-Length: the bytes read count.
@@ -347,8 +363,8 @@ fn a_package_names_its_downloads() {
     let p = package();
     let d = downloads(&p).unwrap();
     assert_eq!(d.len(), 1);
-    assert_eq!((d[0].arch, d[0].sha256), (None, [0xAB; 32]));
-    assert_eq!(d[0].url.to_string(), ASSET);
+    assert_eq!((d[0].arch(), *d[0].sha256()), (None, [0xAB; 32]));
+    assert_eq!(d[0].url().to_string(), ASSET);
 
     let mut per_arch = package();
     per_arch.source.release = None;
@@ -367,7 +383,9 @@ fn a_package_names_its_downloads() {
     ]);
     let d = downloads(&per_arch).unwrap();
     assert_eq!(
-        d.iter().map(|d| (d.arch, d.sha256[0])).collect::<Vec<_>>(),
+        d.iter()
+            .map(|d| (d.arch(), d.sha256()[0]))
+            .collect::<Vec<_>>(),
         [(Some(Arch::X86), 1), (Some(Arch::X64), 2)]
     );
 }
@@ -406,4 +424,133 @@ fn a_package_without_a_direct_download_has_none() {
     port.source.release =
         Some("https://github.com:444/owner/fix-pack/releases/download/v1/a".into());
     assert_eq!(downloads(&port), Err(FetchError::Url(UrlError::Form)));
+}
+
+#[test]
+fn the_overall_deadline_ends_a_download() {
+    let sys = sys();
+    let http = github(FakeReply::ok(BODY));
+    let limits = Limits {
+        bytes: MAX_DOWNLOAD_BYTES,
+        time: Duration::ZERO,
+    };
+    let e = fetch_with(&sys, &http, &app(&sys), &download(BODY), limits, &mut false).unwrap_err();
+    assert!(matches!(e, FetchError::TimedOut { secs: 0, .. }), "{e:?}");
+    assert!(e.transient());
+    assert_eq!(cached(&sys), Vec::<String>::new());
+    const { assert!(MAX_DOWNLOAD_TIME.as_secs() == 600) };
+}
+
+#[test]
+fn a_held_cache_lock_refuses_and_sweeps_nothing() {
+    let sys = sys();
+    let a = app(&sys);
+    let tmp = format!(r"{CACHE}\.rerun-00000000000000aa-0.tmp");
+    sys.fake_fs().put_file(Path::new(&tmp), b"left").unwrap();
+    let dir = a.sub_write(AppSub::Cache, Create::Never).unwrap().unwrap();
+    let _held = dir.lock(&RelPath::from_segment("lock").unwrap()).unwrap();
+    let http = github(FakeReply::ok(BODY));
+    let e = fetch(&sys, &http, &a, &download(BODY)).unwrap_err();
+    match &e {
+        FetchError::Sys(s) => assert_eq!(s.kind, SysErrorKind::Busy),
+        other => panic!("{other:?}"),
+    }
+    assert!(e.transient());
+    assert!(http.requests().is_empty());
+    assert_eq!(cached(&sys), [".rerun-00000000000000aa-0.tmp"]);
+}
+
+#[test]
+fn changed_reports_what_a_failed_fetch_did_to_the_cache() {
+    let sys = sys();
+    // Nothing stored, nothing replaced: a wrong hash leaves `changed` false.
+    let http = github(FakeReply::ok(b"PK other"));
+    let mut changed = false;
+    assert!(fetch_noting(&sys, &http, &app(&sys), &download(BODY), &mut changed).is_err());
+    assert!(!changed);
+    // A damaged entry is removed, then the download fails: `changed`.
+    sys.fake_fs()
+        .put_file(Path::new(&cache_file(BODY)), b"PK tampered")
+        .unwrap();
+    let mut cut = FakeReply::ok(BODY);
+    cut.cut_after = Some(3);
+    let http = github(cut);
+    let e = fetch_noting(&sys, &http, &app(&sys), &download(BODY), &mut changed).unwrap_err();
+    assert!(matches!(e, FetchError::Network(_)), "{e:?}");
+    assert!(changed);
+    // A stored archive: `changed`.
+    let http = github(FakeReply::ok(BODY));
+    let mut changed = false;
+    fetch_noting(&sys, &http, &app(&sys), &download(BODY), &mut changed).unwrap();
+    assert!(changed);
+    // A cache hit changes nothing.
+    let mut changed = false;
+    fetch_noting(&sys, &http, &app(&sys), &download(BODY), &mut changed).unwrap();
+    assert!(!changed);
+}
+
+#[test]
+fn failures_are_refusals_or_transient() {
+    let host = || "github.com".to_owned();
+    for (e, transient) in [
+        (
+            FetchError::Status {
+                host: host(),
+                status: 503,
+            },
+            true,
+        ),
+        (
+            FetchError::Status {
+                host: host(),
+                status: 429,
+            },
+            true,
+        ),
+        (
+            FetchError::Status {
+                host: host(),
+                status: 404,
+            },
+            false,
+        ),
+        (
+            FetchError::Status {
+                host: host(),
+                status: 403,
+            },
+            false,
+        ),
+        (
+            FetchError::Length {
+                host: host(),
+                expected: 1,
+            },
+            true,
+        ),
+        (
+            FetchError::TimedOut {
+                host: host(),
+                secs: 1,
+            },
+            true,
+        ),
+        (
+            FetchError::TooLarge {
+                host: host(),
+                limit: 1,
+            },
+            false,
+        ),
+        (
+            FetchError::Mismatch {
+                expected: String::new(),
+            },
+            false,
+        ),
+        (FetchError::Url(UrlError::Port), false),
+        (FetchError::Elevated, false),
+    ] {
+        assert_eq!(e.transient(), transient, "{e:?}");
+    }
 }

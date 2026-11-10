@@ -24,11 +24,14 @@ fn hex(b: &[u8]) -> String {
 }
 
 fn sys_with_index(sha: &str) -> FakeSystem {
+    sys_with_package(&format!(
+        r#"{{"format":1,"id":"fix-pack","name":"Fix pack","status":"active","tier":"established","source":{{"repo":"https://github.com/owner/fix-pack","release":"{ASSET}"}},"version":"1.0","sha256":"{sha}","license":"MIT","arch":["x86"]}}"#
+    ))
+}
+
+fn sys_with_package(pkg: &str) -> FakeSystem {
     let sys = bare().dir(r"D:\Work").build().unwrap();
     sys.fake_fs().sync_all();
-    let pkg = format!(
-        r#"{{"format":1,"id":"fix-pack","name":"Fix pack","status":"active","tier":"established","source":{{"repo":"https://github.com/owner/fix-pack","release":"{ASSET}"}},"version":"1.0","sha256":"{sha}","license":"MIT","arch":["x86"]}}"#
-    );
     let index = format!(
         r#"{{"format":1,"seq":1,"issued":"2026-11-10T12:00:00Z","topos":[],"packages":[{pkg}]}}"#
     );
@@ -186,4 +189,85 @@ fn a_malformed_spec_is_a_usage_error_before_any_access() {
             <crate::cli::Cli as clap::Parser>::try_parse_from(["rerun", "package", "fetch", bad]);
         assert!(e.is_err(), "{bad}");
     }
+}
+
+fn upper(b: &[u8]) -> String {
+    let sha: [u8; 32] = Sha256::digest(b).into();
+    hex(&sha).to_ascii_uppercase()
+}
+
+#[test]
+fn passing_failures_exit_1() {
+    let sys = sys_with_index(&upper(BODY));
+    // 503 from the asset host.
+    let http = FakeHttp::default();
+    http.reply(ASSET, FakeReply::redirect(302, STORE));
+    http.reply(STORE, FakeReply::status(503));
+    let r = run(
+        &sys,
+        &http,
+        &["package", "fetch", "fix-pack@1.0"],
+        Exit::Fatal,
+    );
+    assert!(r.stderr.contains("HTTP status 503"), "{}", r.stderr);
+    // A body shorter than its Content-Length.
+    let mut short = FakeReply::ok(BODY);
+    short.length = Some(BODY.len() as u64 + 5);
+    http.reply(STORE, short);
+    let r = run(
+        &sys,
+        &http,
+        &["package", "fetch", "fix-pack@1.0"],
+        Exit::Fatal,
+    );
+    assert!(r.stderr.contains("Content-Length"), "{}", r.stderr);
+    // Another 4xx is a refusal.
+    http.reply(STORE, FakeReply::status(404));
+    run(
+        &sys,
+        &http,
+        &["package", "fetch", "fix-pack@1.0"],
+        Exit::Refused,
+    );
+}
+
+#[test]
+fn a_failure_after_progress_reports_what_was_done() {
+    const X86: &str = "https://github.com/owner/fix-pack/releases/download/v1.0/x86.zip";
+    const X64: &str = "https://github.com/owner/fix-pack/releases/download/v1.0/x64.zip";
+    let (a, b): (&[u8], &[u8]) = (b"PK x86 build", b"PK x64 build");
+    let sys = sys_with_package(&format!(
+        r#"{{"format":1,"id":"fix-pack","name":"Fix pack","status":"active","tier":"established","source":{{"repo":"https://github.com/owner/fix-pack"}},"version":"1.0","assets":[{{"arch":"x86","url":"{X86}","sha256":"{}"}},{{"arch":"x64","url":"{X64}","sha256":"{}"}}],"license":"MIT","arch":["x86","x64"]}}"#,
+        upper(a),
+        upper(b)
+    ));
+    let http = FakeHttp::default();
+    http.reply(X86, FakeReply::ok(a));
+    http.reply(X64, FakeReply::ok(b"PK not the x64 build"));
+    // The first asset is stored, the second does not match: exit 0 with the line and the failure.
+    let r = run(
+        &sys,
+        &http,
+        &["package", "fetch", "fix-pack@1.0"],
+        Exit::Report,
+    );
+    assert!(
+        r.stdout.starts_with("fix-pack 1.0 (x86): downloaded"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stderr.contains("pinned SHA-256"), "{}", r.stderr);
+    // Again: the first is a cache hit, nothing changes, the mismatch alone is exit 3.
+    let r = run(
+        &sys,
+        &http,
+        &["package", "fetch", "fix-pack@1.0"],
+        Exit::Refused,
+    );
+    assert!(
+        r.stdout
+            .starts_with("fix-pack 1.0 (x86): already in the cache"),
+        "{}",
+        r.stdout
+    );
 }

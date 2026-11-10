@@ -387,7 +387,12 @@ impl Http for WinHttp {
         )
         .ok()
         .flatten();
-        let location = query_location(&req, host)?;
+        // Only a redirect's Location is read (the fake does the same).
+        let location = if (300..400).contains(&status) {
+            query_location(&req, host)?
+        } else {
+            None
+        };
         Ok(Response {
             status,
             location,

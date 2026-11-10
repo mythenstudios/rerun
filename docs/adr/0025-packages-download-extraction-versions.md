@@ -1,6 +1,6 @@
 # ADR 0025 · Packages: download, extraction, versions
 
-**Status:** accepted · 2026-11-10, part 1 (download and cache, P4-6); part 2 (extraction, the `package` step) follows with P4-7 · extends ADR 0008, ADR 0019, ADR 0024 · phase 4
+**Status:** accepted · 2026-11-10, part 1 (download and cache, P4-6; amended the same day by the reviews of P4-6: exit codes per error, overall deadline, revocation); part 2 (extraction, the `package` step) follows with P4-7 · extends ADR 0008, ADR 0019, ADR 0024 · phase 4
 
 ## Context
 A package (`docs/02-topo-format.md`) names an upstream release archive by URL and pins its SHA-256. Phase 4 must bring that archive onto the machine without a new crate (plan P4, L5: "HTTP over WinHTTP, redirects by hand only to fixed forge hosts, non-elevated only"), without trusting anything the network or the user-writable `<LocalAppData>\Rerun` holds, and so that the later steps (extraction, P4-7; the elevated helper never downloads) can rely on one property: an archive in the cache is used only after it hashed to its pin. One package is one version (user decision E2 a); the download is per package URL, so a version is just another package.
@@ -15,9 +15,10 @@ A package (`docs/02-topo-format.md`) names an upstream release archive by URL an
 - a fresh session, connection and request per call, closed in that order when the body drops (owned handles);
 - `WINHTTP_FLAG_SECURE`, port 443, TLS 1.2 or 1.3; Schannel validates the certificate as WinHTTP does by default, and nothing ever sets `WINHTTP_OPTION_SECURITY_FLAGS` (a workspace source rule fails on `SECURITY_FLAG_IGNORE_*` and on WinINet's `INTERNET_FLAG_IGNORE_CERT_*`);
 - no automatic redirect (`WINHTTP_OPTION_REDIRECT_POLICY_NEVER`, `WINHTTP_DISABLE_REDIRECTS`), no cookie (`WINHTTP_DISABLE_COOKIES`), no authentication (`WINHTTP_DISABLE_AUTHENTICATION`), no automatic logon with the user's credentials (`WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH`; a proxy that asks for credentials answers 407, which is an error);
-- the system proxy (`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`), synchronous, 30 s per resolve, connect, send and receive, response headers at most 64 KiB, a `Location` at most 8.5 KiB of printable ASCII;
+- the system proxy (`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`), synchronous, 30 s per resolve, connect, send and receive, response headers at most 64 KiB; a `Location` is read only for a 3xx status (the fake does the same), at most 8.5 KiB of printable ASCII;
 - the path is sent as given (`WINHTTP_FLAG_ESCAPE_DISABLE`, `…_QUERY`) after `sys::http::check_request` (plain host, path from `/`, printable ASCII without space, `\` or `#`, at most 8 KiB);
 - the user agent is `Rerun/<version>` and nothing else; no other request header of Rerun's own;
+- certificate revocation is not checked (no `WINHTTP_ENABLE_SSL_REVOCATION`), deliberately: integrity rests on the pinned SHA-256 and the fixed hosts, and a CRL/OCSP fetch would break offline and proxied setups where the asset itself is reachable;
 - refused unless the process restricted its DLL search path first (`restrict_dll_search`, ADR 0008), because WinHTTP loads further system DLLs at run time.
 - `clippy.toml` bans `WinHttpOpen` and `WinHttpSetOption` outside `sys::win::http`, and the URLMon download helpers (`URLDownloadToFileW`, `URLDownloadToCacheFileW`, `URLOpenBlockingStreamW`, `URLOpenStreamW`; they follow redirects and use the browser cache) everywhere.
 
@@ -30,12 +31,23 @@ A package (`docs/02-topo-format.md`) names an upstream release archive by URL an
 2. opens `<AppDir>\cache` handle-relative (created if missing, never through a reparse point) and holds `cache\lock` (share 0) for the whole fetch; deletes temp files (`.rerun-<tag>-<n>.tmp`) an interrupted fetch left, which under the lock none can be using;
 3. a cache entry `<sha256>` (64 lower-case hex digits) is hashed on a guard every time: used if it hashes to its name, deleted on that guard and downloaded again if not; an entry that cannot be guarded (hard link, directory, reparse point) is an error that names it;
 4. requests the package URL and follows at most three redirects (301, 302, 303, 307, 308) as `HttpsUrl::redirect` allows; a refused `Location` is never requested; any other status than 200 is an error;
-5. refuses a `Content-Length` above `MAX_DOWNLOAD_BYTES` (64 MiB) before reading; otherwise the length is advisory, the limit is counted on the bytes read, and a body that ends before or runs past its `Content-Length` is refused;
+5. ends the download when `MAX_DOWNLOAD_TIME` (10 minutes, from the first request to the last byte; about 110 KB/s for 64 MiB) has passed, checked before every request and every read (WinHTTP's timeouts bound each step, this a server that keeps sending slowly); refuses a `Content-Length` above `MAX_DOWNLOAD_BYTES` (64 MiB) before reading; otherwise the length is advisory, the limit is counted on the bytes read, and a body that ends before or runs past its `Content-Length` is refused;
 6. streams the body through `DirWrite::create_new` (ADR 0017): a temp file next to the target, hashed on the way; a hash other than the pin, a transport error, the limit or any write error deletes the temp file, so the name `<sha256>` only ever holds exactly the pinned bytes; then the rename without replace and a flush of the folder.
+
+`Download` has private fields: only `downloads` builds one (tests through a `cfg(test)` constructor). `fetch_noting` reports whether the run stored an archive or removed a damaged entry, also when it then fails.
 
 A cached archive stays untrusted: its user (extraction, P4-7) hashes it again on its own handle before reading an entry.
 
-**CLI:** `rerun package fetch <id>@<version>`: the elevated guard, the current signed index (read back and checked like `index show`; none is exit 3), the package by ID and its one version (another version is exit 3 and names the one in the index), then every download of it; one line per download (cached or downloaded, length, SHA-256). A refusal is exit 3, a network or file system failure exit 1.
+**CLI:** `rerun package fetch <id>@<version>`: the elevated guard, the current signed index (read back and checked like `index show`; none is exit 3), the package by ID and its one version (another version is exit 3 and names the one in the index), then every download of it; one line per download (cached or downloaded, length, SHA-256).
+
+**Exit codes** (`FetchError::transient` decides; amended after the reviews of P4-6):
+
+| Outcome | Errors | Exit |
+|---|---|---|
+| Every download in the cache | none | 0 |
+| A failure after this run stored an archive or removed a damaged cache entry | any | 0, the lines of what was done, then the failure on stderr |
+| A refusal by policy or integrity, nothing changed | `Elevated`, no index, unknown package, other version, `NoDownload`, `Provenance`, `Url` (form or redirect rule), `TooManyRedirects`, `NoLocation`, `Status` 4xx other than 429, `TooLarge`, `Mismatch`, `CacheEntry` (a hard link, directory or reparse point at the entry's name: remove it) | 3 |
+| Passing or in the environment, nothing changed | `Network` (WinHTTP code), `Status` 5xx and 429, `Length` (a body shorter or longer than its `Content-Length`), `TimedOut`, `CacheBusy` (an entry in use or another passing guard error: try again, never "remove it"), `Root`, `Sys` (also `cache\lock` held by another fetch) | 1 |
 
 ### Part 2: extraction and the `package` step (P4-7)
 Follows with P4-7: bounded zip/tar.gz readers, only the entries `files[].from` names, each with `files[].sha256`, below `<AppDir>\packages\<id>\<version>`.
