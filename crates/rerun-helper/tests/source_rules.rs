@@ -2,8 +2,8 @@
 //! helper's sources (`crates/rerun-helper/src`) and its one entry into `rerun-core`
 //! (`crates/rerun-core/src/elevate`, without its `tests.rs` files) never name `WinSystem` or
 //! `WinGpu` (the helper builds its own system without GPU, P4-2c), DXGI, the system profile
-//! (`hw::`), the journal, `exec`, `pkg`, the Steam detection or `topo::when`. Comment lines are
-//! not code and are skipped; the scan has teeth.
+//! (`hw::`), the journal, `exec`, `pkg`, the network (`WinHttp`, `http::`, ADR 0025), the Steam
+//! detection or `topo::when`. Comment lines are not code and are skipped; the scan has teeth.
 
 #![allow(
     clippy::disallowed_methods,
@@ -25,6 +25,8 @@ const FORBIDDEN: &[&str] = &[
     "journal::",
     "exec::",
     "pkg::",
+    "WinHttp",
+    "http::",
     "detect::steam",
     "topo::when",
 ];

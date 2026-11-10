@@ -15,15 +15,17 @@
 //!   the real registry with its write side ([`RegistryWrite`], ADR 0018, reached only through
 //!   `policy::registry`); the real known folders;
 //!   the real CPU topology (ADR 0010); the real graphics adapters (DXGI, ADR 0008
-//!   amendment); and the real firewall rules (read side, COM, ADR 0008 amendment P4-5a). `unsafe`
-//!   exists only in its modules `nt`, `token`, `reg`, `shell`, `cpu`, `loader`, `dxgi`,
-//!   `elevation`, `com` and `firewall`.
+//!   amendment); the real firewall rules (read side, COM, ADR 0008 amendment P4-5a); and
+//!   HTTPS GET through WinHTTP (`WinHttp`, ADR 0025). `unsafe` exists only in its modules `nt`,
+//!   `token`, `reg`, `shell`, `cpu`, `loader`, `dxgi`, `elevation`, `process`, `com`,
+//!   `firewall` and `http`.
 //!
 //! - [`KnownFolders`] never reads environment variables (ADR 0007, ADR 0009).
 //!
 //! `sys::win::WinSystem` bundles the real parts into one [`System`]. [`HelperToken`] is the
 //! elevated helper's own token (ADR 0023, P4-2a) and [`HelperSystem`] its system (P4-2c); [`Firewall`] the firewall's read side (ADR 0023
-//! §8, P4-5a).
+//! §8, P4-5a). [`Http`] (ADR 0025, P4-6) is HTTPS GET, deliberately outside [`System`]: the
+//! helper's system can never reach the network.
 
 pub mod elevation;
 mod error;
@@ -31,6 +33,7 @@ pub mod firewall;
 pub mod fs;
 pub mod gpu;
 pub mod helper;
+pub mod http;
 pub mod known_folders;
 pub mod registry;
 pub mod topology;
@@ -57,6 +60,7 @@ pub use gpu::{DriverVersion, Gpu, GpuAdapter};
 pub use helper::{
     HelperSystem, HelperToken, InstanceLock, NoFirewall, NoGpu, NoRegistry, NoTopology,
 };
+pub use http::{Http, NoHttp, Response};
 pub use known_folders::{KnownFolder, KnownFolders};
 pub use registry::{Registry, RegistryWrite};
 pub use topology::Topology;

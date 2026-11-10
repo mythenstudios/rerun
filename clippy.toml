@@ -547,5 +547,14 @@ disallowed-methods = [
   { path = "windows_sys::Win32::System::SystemInformation::VerSetConditionMask", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
   { path = "windows_sys::Wdk::System::SystemServices::RtlGetVersion", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
   { path = "windows_sys::Wdk::System::SystemServices::RtlVerifyVersionInfo", reason = "the OS build only via hw::os from the registry; compatibility shims bend the version APIs (ADR 0015)", allow-invalid = true },
+  # ADR 0025 (P4-6): one network path. WinHTTP sessions and options only in sys::win::http (no
+  # certificate errors ignored, no automatic redirect, no credentials); the URLMon download
+  # helpers (they follow redirects and use the IE cache) nowhere.
+  { path = "windows_sys::Win32::Networking::WinHttp::WinHttpOpen", reason = "the network only through rerun-core sys::win::http (WinHttp: TLS, no redirect, no credentials; ADR 0025)", allow-invalid = true },
+  { path = "windows_sys::Win32::Networking::WinHttp::WinHttpSetOption", reason = "WinHTTP options only in rerun-core sys::win::http (certificate validation stays on, no redirect, no credentials; ADR 0025)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::Urlmon::URLDownloadToFileW", reason = "the network only through rerun-core sys::win::http (ADR 0025)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::Urlmon::URLDownloadToCacheFileW", reason = "the network only through rerun-core sys::win::http (ADR 0025)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::Urlmon::URLOpenBlockingStreamW", reason = "the network only through rerun-core sys::win::http (ADR 0025)", allow-invalid = true },
+  { path = "windows_sys::Win32::System::Com::Urlmon::URLOpenStreamW", reason = "the network only through rerun-core sys::win::http (ADR 0025)", allow-invalid = true },
   { path = "std::thread::available_parallelism", reason = "limited by the process affinity and CPU Sets, not the machine; use sys::Topology (ADR 0010)" },
 ]

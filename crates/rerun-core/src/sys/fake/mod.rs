@@ -21,6 +21,7 @@ mod firewall;
 mod fs;
 mod gpu;
 mod helper;
+mod http;
 mod known_folders;
 mod registry;
 mod topology;
@@ -41,6 +42,7 @@ pub use fs::{
 };
 pub use gpu::FakeGpu;
 pub use helper::{FakeHelperSystem, FakeHelperToken, TokenCall};
+pub use http::{FakeHttp, FakeReply};
 pub use known_folders::FakeKnownFolders;
 pub use registry::{FakeRegistry, MAX_LINK_HOPS, RegHook};
 pub use topology::FakeTopology;

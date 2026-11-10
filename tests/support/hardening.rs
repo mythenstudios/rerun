@@ -76,8 +76,10 @@ pub const LAUNCH_IMPORTS: &[&str] = &[
 /// around the helper's `ShellExecuteExW` (`sys::win::elevation`), a KnownDLL like in
 /// [`LAUNCH_IMPORTS`]. P4-5a (ADR 0023 §8 outcome A, ADR 0008 amendment P4-5a): `ole32.dll` also
 /// for `CoCreateInstance` and `oleaut32.dll` (a KnownDLL) for `SysStringLen`, `SysFreeString`
-/// and `VariantClear` of the firewall read (`sys::win::com`). A new import fails the tests: review it, then extend this list and ADR 0008
-/// (amendment "import allowlist per binary").
+/// and `VariantClear` of the firewall read (`sys::win::com`). P4-6 (ADR 0025, ADR 0008 amendment
+/// P4-6): `winhttp.dll` for the package download (`sys::win::http`; not a KnownDLL, loaded from
+/// System32 by `/DEPENDENTLOADFLAG:0x800`). A new import fails the tests: review it, then extend
+/// this list and ADR 0008 (amendment "import allowlist per binary").
 pub const CLI_IMPORTS: &[&str] = &[
     "kernel32.dll",
     "ntdll.dll",
@@ -89,6 +91,7 @@ pub const CLI_IMPORTS: &[&str] = &[
     "userenv.dll",
     "ole32.dll",
     "oleaut32.dll",
+    "winhttp.dll",
 ];
 
 /// The static imports `rerun-helper.exe` may have (ADR 0023 §13, docs/08 "Acceptance

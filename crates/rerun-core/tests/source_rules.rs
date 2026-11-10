@@ -146,3 +146,60 @@ fn the_scanner_finds_every_import_form() {
     );
     assert_eq!(ffi_imports(&fine), Vec::<String>::new());
 }
+
+/// What would switch off TLS certificate validation (ADR 0025): WinHTTP's security flags option
+/// and its `SECURITY_FLAG_IGNORE_*` values, WinINet's `INTERNET_FLAG_IGNORE_CERT_*`.
+const TLS_OFF: &[&str] = &[
+    "WINHTTP_OPTION_SECURITY_FLAGS",
+    "SECURITY_FLAG_IGNORE_",
+    "INTERNET_FLAG_IGNORE_CERT_",
+];
+
+/// The lines of `src` (comments skipped) that name one of [`TLS_OFF`].
+fn tls_off(src: &str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    for line in src.lines() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        let code = line.split("//").next().unwrap_or(line);
+        found.extend(TLS_OFF.iter().copied().filter(|p| code.contains(p)));
+    }
+    found
+}
+
+#[test]
+fn certificate_validation_is_never_switched_off() {
+    let root = workspace();
+    let mut files = Vec::new();
+    for r in ROOTS {
+        rust_files(&root.join(r), &mut files);
+    }
+    assert!(files.len() > 50, "found only {} .rs files", files.len());
+    let mut bad = Vec::new();
+    for f in files {
+        let rel = f
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == SELF {
+            continue;
+        }
+        let src = std::fs::read_to_string(&f).unwrap();
+        for what in tls_off(&src) {
+            bad.push(format!("{rel}: {what}"));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "TLS certificate validation must stay on (ADR 0025):\n{}",
+        bad.join("\n")
+    );
+    // The scanner has teeth.
+    assert_eq!(
+        tls_off("set(h, WINHTTP_OPTION_SECURITY_FLAGS, SECURITY_FLAG_IGNORE_UNKNOWN_CA);"),
+        ["WINHTTP_OPTION_SECURITY_FLAGS", "SECURITY_FLAG_IGNORE_"]
+    );
+    assert!(tls_off("// WINHTTP_OPTION_SECURITY_FLAGS in a comment").is_empty());
+}

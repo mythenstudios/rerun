@@ -74,12 +74,15 @@
 //! - `registry`: `WinRegistry`, input rules, limits, retries and enumeration restarts, and the
 //!   write primitives of `sys::seq::reg` (`WinKey`, ADR 0018); no `unsafe`.
 //!
+//! - `http` (ADR 0025, P4-6): `WinHttp`, the only WinHTTP calls: one HTTPS GET per call (TLS
+//!   1.2/1.3 with Schannel's certificate validation, no redirect, no cookie, no credential, the
+//!   system proxy, fixed timeouts), handles closed on drop; `unsafe`.
 //! - `process`: the helper's own image, its instance mutex (the one `CreateMutexW`) and the CLI's
 //!   check whether a helper process runs (the one `CreateToolhelp32Snapshot` and `OpenProcess` of
 //!   `rerun-core`; ADR 0023, A4 S8); `unsafe`.
 //!
 //! `unsafe` lives only in `nt`, `token`, `reg`, `shell`, `cpu`, `loader`, `dxgi`, `elevation`, `process`,
-//! `com` and `firewall`. Path-based Win32 file APIs
+//! `com`, `firewall` and `http`. Path-based Win32 file APIs
 //! (`CreateFileW`, `DeleteFileW`, `MoveFileExW`, `GetFileAttributesW`, …) and every
 //! environment-based path source (`std::env::var`, `GetEnvironmentVariableW`,
 //! `ExpandEnvironmentStringsW`, `SHGetFolderPathW`, `GetWindowsDirectoryW`, …) are banned in
@@ -118,6 +121,7 @@ mod firewall;
 mod fs;
 mod gpu;
 mod helper;
+mod http;
 mod known_folders;
 mod loader;
 mod name;
@@ -148,6 +152,7 @@ pub use firewall::{WinFirewall, WinFirewallWrite};
 pub use fs::{WinDir, WinFs};
 pub use gpu::WinGpu;
 pub use helper::{WinHelperSystem, WinHelperToken};
+pub use http::WinHttp;
 pub use known_folders::WinKnownFolders;
 pub use loader::restrict_dll_search;
 pub(crate) use registry::WinRegistry;

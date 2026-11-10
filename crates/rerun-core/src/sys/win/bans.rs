@@ -1731,6 +1731,36 @@ fn banned_step10_review_items_resolve() {
         reason = "ban check: OleInitialize must be banned"
     )]
     let _ = windows_sys::Win32::System::Ole::OleInitialize;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: WinHttpOpen must be banned"
+    )]
+    let _ = windows_sys::Win32::Networking::WinHttp::WinHttpOpen;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: WinHttpSetOption must be banned"
+    )]
+    let _ = windows_sys::Win32::Networking::WinHttp::WinHttpSetOption;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: URLDownloadToFileW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::Urlmon::URLDownloadToFileW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: URLDownloadToCacheFileW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::Urlmon::URLDownloadToCacheFileW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: URLOpenBlockingStreamW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::Urlmon::URLOpenBlockingStreamW;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ban check: URLOpenStreamW must be banned"
+    )]
+    let _ = windows_sys::Win32::System::Com::Urlmon::URLOpenStreamW;
 }
 
 /// The version API bans of ADR 0015: the OS build comes from the registry only (`hw::os`).

@@ -47,7 +47,9 @@ sha2.workspace = true
 # security review N4): GetStdHandle, FlushConsoleInputBuffer (Win32_System_Console; a feature
 # of the existing dependency, no console mode is ever changed). The helper process check of the
 # CLI (ADR 0023, A4 S8): CreateToolhelp32Snapshot, Process32FirstW/NextW
-# (Win32_System_Diagnostics_ToolHelp, a feature of the existing dependency, read only).
+# (Win32_System_Diagnostics_ToolHelp, a feature of the existing dependency, read only). Package
+# downloads (ADR 0025, P4-6): WinHTTP (Win32_Networking_WinHttp, a feature of the existing
+# dependency; Schannel and the system proxy, no new crate).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
   "Wdk_Foundation",
@@ -55,6 +57,7 @@ windows-sys = { workspace = true, features = [
   "Wdk_System_Registry",
   "Win32_Foundation",
   "Win32_NetworkManagement_WindowsFirewall",
+  "Win32_Networking_WinHttp",
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
