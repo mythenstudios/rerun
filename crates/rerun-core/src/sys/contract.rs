@@ -1596,6 +1596,25 @@ pub fn fs_link_read_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> Fs
         "both links report two links and the same file id",
     )?;
     read_is(&*root, "b.bin", b"shared", "read through the second link")?;
+    // The metadata of the reading handle itself (ADR 0023 §5 step 5, N2 of P4-2c): the same
+    // file ID and link count as by name, and the content of that file.
+    let (mut reader, mr) = ok(
+        root.open_read_identified(&rel("b.bin")?),
+        "open_read_identified b",
+    )?;
+    ensure(
+        mr.links == Some(2) && mr.file_id == ma.file_id && mr.kind == EntryKind::File,
+        "open_read_identified reports the read file's own links and file id",
+    )?;
+    let mut buf = Vec::new();
+    ok(
+        reader
+            .read_to_end(&mut buf)
+            .map_err(|e| crate::sys::SysError::io(&e, "b.bin")),
+        "read the identified reader",
+    )?;
+    ensure(buf == b"shared", "open_read_identified reads that file")?;
+    drop(reader);
 
     // Case-sensitive directory: reported.
     if ok(

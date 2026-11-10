@@ -13,6 +13,9 @@
 //!   handle-relative below it, neither a reparse point, the file a plain single-link file, and
 //!   all three admin-only. Returns the canonical image path the start and `elevate::judge`
 //!   use.
+//! - [`helper_for_this_build`]: [`helper_image`] for the CLI's start (security N5 of P4-2c): a
+//!   helper built with the published index test key is refused unless the CLI is such a test
+//!   build itself.
 //! - [`dir_by_id`]: the only caller of [`crate::sys::Fs::open_by_id`] (`clippy.toml`): a
 //!   directory by `{volume GUID, file ID}`, never by path (the helper's `elevate` and `index`
 //!   folders and its root, from P4-2c).
@@ -211,6 +214,88 @@ pub fn helper_image(sys: &dyn System) -> Result<HelperImage, RootError> {
         path: image,
         nt_name,
     })
+}
+
+/// The largest helper image [`helper_for_this_build`] reads (a debug test-key build is some
+/// tens of MiB; a release helper a few).
+pub const MAX_HELPER_BYTES: u64 = 256 << 20;
+
+/// The seed of the published index test key as hex text (`catalog::key::test_key::SEED_HEX`),
+/// each byte XOR `0xA5`: a release CLI must find the seed in a helper without holding it itself
+/// (the release byte check `holds_test_key` searches every shipped binary for it). Unmasked at
+/// run time behind `black_box`; a test pins it to the seed.
+const MASKED_TEST_SEED: [u8; 64] = [
+    0x97, 0xc3, 0xc4, 0x91, 0x94, 0x96, 0x94, 0xc7, 0x96, 0x94, 0x96, 0xc7, 0x93, 0x90, 0x90, 0xc0,
+    0xc6, 0x90, 0xc7, 0xc1, 0x95, 0x93, 0xc7, 0x94, 0x9d, 0x9c, 0x96, 0x9d, 0xc6, 0x95, 0x96, 0xc6,
+    0x97, 0xc3, 0x91, 0xc7, 0xc4, 0x97, 0x95, 0x97, 0xc1, 0xc6, 0x96, 0x9d, 0x9c, 0xc4, 0xc7, 0xc7,
+    0x96, 0x9d, 0x94, 0xc1, 0xc1, 0x9d, 0x93, 0x92, 0x94, 0x95, 0x95, 0xc4, 0xc7, 0xc4, 0x95, 0x90,
+];
+
+/// The seed text of the published test key, unmasked (see [`MASKED_TEST_SEED`]).
+fn test_seed() -> [u8; 64] {
+    let mut seed = std::hint::black_box(MASKED_TEST_SEED);
+    for b in &mut seed {
+        *b ^= 0xA5;
+    }
+    seed
+}
+
+/// Whether `image` (the bytes of a helper) holds the published index test key's seed: a
+/// `test-key` build, which trusts that key for an add (ADR 0023 §2, A4 S3).
+pub fn holds_test_key(image: &[u8]) -> bool {
+    let seed = test_seed();
+    image.windows(seed.len()).any(|w| w == seed)
+}
+
+/// [`helper_image`] for a start by this CLI (security N5 of P4-2c): also refused when the
+/// installed helper is a `test-key` build and this CLI is not. Whoever holds the published test
+/// key could otherwise have a Rerun block rule added through a forgotten test helper with a
+/// release CLI's prompt. A `test-key` CLI (a test build itself, [SB] and [DEV]) accepts it. The
+/// image is read bounded through its folder's handle (at most [`MAX_HELPER_BYTES`]); the helper's
+/// own image check does not use this (it cannot judge itself).
+///
+/// # Errors
+/// The errors of [`helper_image`]; [`RootError::HelperUnsafe`] for a test-key helper or an image
+/// larger than the bound.
+pub fn helper_for_this_build(sys: &dyn System) -> Result<HelperImage, RootError> {
+    let image = helper_image(sys)?;
+    check_test_key(sys, &image, cfg!(feature = "test-key"))?;
+    Ok(image)
+}
+
+/// The test-key part of [`helper_for_this_build`], with the build's answer as `allow`.
+pub(crate) fn check_test_key(
+    sys: &dyn System,
+    image: &HelperImage,
+    allow: bool,
+) -> Result<(), RootError> {
+    if allow {
+        return Ok(());
+    }
+    let folder = image
+        .path
+        .path()
+        .parent()
+        .ok_or_else(|| unsafe_at(&image.path, "no folder"))?;
+    let dir = open_abs(sys, folder)?;
+    let exe = RelPath::from_segment(HELPER_EXE)?;
+    let bytes = match dir.read_limited(&exe, MAX_HELPER_BYTES) {
+        Ok(b) => b,
+        Err(e) if e.kind == SysErrorKind::TooLarge => {
+            return Err(unsafe_at(
+                &image.path,
+                format!("larger than {MAX_HELPER_BYTES} bytes"),
+            ));
+        }
+        Err(e) => return Err(RootError::Sys(e)),
+    };
+    if holds_test_key(&bytes) {
+        return Err(unsafe_at(
+            &image.path,
+            "a test build that trusts the published index test key; remove it",
+        ));
+    }
+    Ok(())
 }
 
 /// Opens a directory by `{volume GUID, file ID}` (module docs), read side only. A volume

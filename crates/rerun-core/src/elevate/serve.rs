@@ -178,18 +178,19 @@ fn read_request(
 }
 
 /// SHA-256 of `rel` below `dir`, hashed on one handle opened handle-relative (no reparse point
-/// followed), a plain single-link file before and after with the same file ID; bounded like
-/// `--hashes` (R6). `None` for anything else.
+/// followed) whose own metadata (read on that handle, security N2 of P4-2c) says a plain
+/// single-link file; afterwards the name must still lead to that file (same file ID, plain), so
+/// the rule's path names the file that was hashed at that moment. Bounded like `--hashes` (R6).
+/// `None` for anything else.
 fn sha256_on_handle(dir: &dyn Dir, rel: &RelPath) -> Option<[u8; 32]> {
-    let before = dir.metadata(rel).ok()??;
-    if !plain(&before) {
+    let (reader, hashed) = dir.open_read_identified(rel).ok()?;
+    if !plain(&hashed) {
         return None;
     }
-    let reader = dir.open_read(rel).ok()?;
     let limits = HashLimits::DEFAULT;
     let h = stream(reader, limits.max_file_bytes, limits.chunk_bytes).ok()?;
-    let after = dir.metadata(rel).ok()??;
-    if !plain(&after) || after.file_id != before.file_id {
+    let named = dir.metadata(rel).ok()??;
+    if !plain(&named) || named.file_id != hashed.file_id {
         return None;
     }
     Sha256::parse(&h.sha256)?.bytes().copied()

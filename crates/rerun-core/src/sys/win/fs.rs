@@ -631,6 +631,46 @@ impl WinDir {
     }
 }
 
+impl WinDir {
+    /// The handle [`Dir::open_read`] reads: opened handle-relative, never through a reparse point,
+    /// a plain file (an allowlisted data tag reopened for its data), never a placeholder.
+    fn read_handle(&self, p: &RelPath) -> SysResult<OwnedHandle> {
+        let t = p.as_str();
+        self.ensure_live()?;
+        let (parent, last) = self.split(p)?;
+        let parent = parent.as_ref().map_or(self.h(), AsHandle::as_handle);
+        let s = seg16(last, t)?;
+        let first = open_entry(parent, &s, Access::Read, t)?;
+        match first.tag.kind() {
+            EntryKind::Dir => return Err(err(SysErrorKind::AccessDenied, t)),
+            EntryKind::Reparse => return Err(err(SysErrorKind::ReparsePoint, t)),
+            EntryKind::File => {}
+        }
+        // Never hydrate a placeholder (ADR 0007, M4).
+        if first.tag.needs_recall() {
+            return Err(err(SysErrorKind::Unsupported, t));
+        }
+        let handle = if first.tag.tag.is_some() {
+            // Allowlisted data tag: the data is only visible without FILE_OPEN_REPARSE_POINT.
+            // Reopen relative to the same parent and require the same object.
+            let data =
+                nt::open_relative(parent, &s, RelOpen::Data).map_err(|st| nt_error(st, t))?;
+            if file_id(data.as_handle(), t)? != file_id(first.handle.as_handle(), t)? {
+                return Err(err(SysErrorKind::Busy, t));
+            }
+            // The attributes seen through the data handle may differ (a cloud placeholder in
+            // compatibility mode, a recall flag set in between): check them again.
+            if tag_info(data.as_handle(), t)?.needs_recall() {
+                return Err(err(SysErrorKind::Unsupported, t));
+            }
+            data
+        } else {
+            first.handle
+        };
+        Ok(handle)
+    }
+}
+
 impl Dir for WinDir {
     fn info(&self) -> SysResult<RootInfo> {
         let t = HANDLE_TARGET;
@@ -725,39 +765,15 @@ impl Dir for WinDir {
     }
 
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>> {
+        Ok(Box::new(std::fs::File::from(self.read_handle(p)?)))
+    }
+
+    fn open_read_identified(&self, p: &RelPath) -> SysResult<(Box<dyn ReadSeek + '_>, Metadata)> {
         let t = p.as_str();
-        self.ensure_live()?;
-        let (parent, last) = self.split(p)?;
-        let parent = parent.as_ref().map_or(self.h(), AsHandle::as_handle);
-        let s = seg16(last, t)?;
-        let first = open_entry(parent, &s, Access::Read, t)?;
-        match first.tag.kind() {
-            EntryKind::Dir => return Err(err(SysErrorKind::AccessDenied, t)),
-            EntryKind::Reparse => return Err(err(SysErrorKind::ReparsePoint, t)),
-            EntryKind::File => {}
-        }
-        // Never hydrate a placeholder (ADR 0007, M4).
-        if first.tag.needs_recall() {
-            return Err(err(SysErrorKind::Unsupported, t));
-        }
-        let handle = if first.tag.tag.is_some() {
-            // Allowlisted data tag: the data is only visible without FILE_OPEN_REPARSE_POINT.
-            // Reopen relative to the same parent and require the same object.
-            let data =
-                nt::open_relative(parent, &s, RelOpen::Data).map_err(|st| nt_error(st, t))?;
-            if file_id(data.as_handle(), t)? != file_id(first.handle.as_handle(), t)? {
-                return Err(err(SysErrorKind::Busy, t));
-            }
-            // The attributes seen through the data handle may differ (a cloud placeholder in
-            // compatibility mode, a recall flag set in between): check them again.
-            if tag_info(data.as_handle(), t)?.needs_recall() {
-                return Err(err(SysErrorKind::Unsupported, t));
-            }
-            data
-        } else {
-            first.handle
-        };
-        Ok(Box::new(std::fs::File::from(handle)))
+        let handle = self.read_handle(p)?;
+        // On the reading handle itself (ADR 0023 §5 step 5, security N2 of P4-2c).
+        let meta = meta_of(handle.as_handle(), tag_info(handle.as_handle(), t)?, t)?;
+        Ok((Box::new(std::fs::File::from(handle)), meta))
     }
 
     fn read_dir_limited(

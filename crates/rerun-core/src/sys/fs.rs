@@ -488,6 +488,18 @@ pub trait Dir: Send + Sync + std::fmt::Debug {
     /// Opens a file for reading. A directory or a restricted entry yields `AccessDenied`.
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>>;
 
+    /// [`Self::open_read`], with the [`Metadata`] read on the **reading handle itself** (kind,
+    /// link count, file ID, reparse tag of the very object that is read), so a caller that hashes
+    /// the content knows which file it hashed without a second open by name (ADR 0023 §5 step 5,
+    /// the elevated helper's program hash; security N2 of P4-2c). Errors as in
+    /// [`Self::open_read`].
+    ///
+    /// The default refuses (`Unsupported`): a test double cannot tie metadata to its reader, and
+    /// the helper then refuses the program (fail closed).
+    fn open_read_identified(&self, p: &RelPath) -> SysResult<(Box<dyn ReadSeek + '_>, Metadata)> {
+        Err(SysError::new(SysErrorKind::Unsupported, p.as_str()))
+    }
+
     /// Reads a whole file. Unbounded: input that someone else can make large goes through
     /// [`Self::read_limited`] instead.
     fn read(&self, p: &RelPath) -> SysResult<Vec<u8>> {

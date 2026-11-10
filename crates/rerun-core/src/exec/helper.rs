@@ -5,7 +5,8 @@
 //! without administrator rights) and records the batch in the journal:
 //!
 //! - **Before the lock** ([`ready`]): the installed helper passes the pre-check of §2
-//!   (`policy::root::helper_image`, else [`Refusal::HelperUnsafe`]), and Windows allows an
+//!   (`policy::root::helper_for_this_build`: also no test-key helper for a release CLI, N5 of
+//!   P4-2c; else [`Refusal::HelperUnsafe`]), and Windows allows an
 //!   elevation at all (`elevate::prompt`: `Denied` and `UacOff` are
 //!   [`Refusal::NoElevation`]). No prompt is shown for a plan that is refused anyway.
 //! - **Before `begin`** ([`recheck`], A4 S7): the engine's derivation again, non-elevated, from
@@ -268,8 +269,9 @@ pub(super) fn ready(sys: &dyn System, plan: &Plan) -> Result<Option<Ready>, Refu
 }
 
 fn ready_now(sys: &dyn System) -> Result<Ready, Refusal> {
-    let image =
-        crate::policy::root::helper_image(sys).map_err(|e| Refusal::HelperUnsafe(Box::new(e)))?;
+    // N5 (P4-2c security review): a test-key helper is refused unless this is a test-key CLI.
+    let image = crate::policy::root::helper_for_this_build(sys)
+        .map_err(|e| Refusal::HelperUnsafe(Box::new(e)))?;
     match crate::elevate::prompt::read(sys).kind {
         k @ (PromptKind::Denied | PromptKind::UacOff) => Err(Refusal::NoElevation(k)),
         PromptKind::Elevated => Err(Refusal::Elevated),

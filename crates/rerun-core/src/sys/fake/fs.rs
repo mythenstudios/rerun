@@ -2134,6 +2134,42 @@ impl FakeDir {
     }
 }
 
+impl FakeDir {
+    /// [`Dir::open_read`] and the metadata of the node it opened (one lookup under the lock).
+    fn open_read_node(&self, p: &RelPath) -> SysResult<(Box<dyn ReadSeek + '_>, Metadata)> {
+        self.check(FsOp::OpenRead)?;
+        let t = p.as_str();
+        let (parent, name) = self.split(FsOp::OpenRead, p)?;
+        let mut st = self.fs.lock();
+        let id = Self::require(&st, parent, name, t)?;
+        st.openable(id, t)?;
+        match (st.rel_kind(id), st.nodes.get(&id).map(|n| &n.body)) {
+            (EntryKind::File, Some(Body::File(ino))) => {
+                let data = st.inode(*ino, t)?.data.clone();
+                let meta = st.meta(id, t)?;
+                let obj = st.obj_of(id);
+                st.check_share(obj, Access::READ, Share::R, t)?;
+                let open = st.register(
+                    obj,
+                    Access::READ,
+                    Share::R,
+                    std::process::id(),
+                    Origin::Rerun,
+                );
+                drop(st);
+                let reader: Box<dyn ReadSeek + '_> = Box::new(Counted {
+                    data: Cursor::new(data),
+                    served: Arc::clone(&self.fs.shared.served),
+                    _open: self.fs.token(open),
+                });
+                Ok((reader, meta))
+            }
+            (EntryKind::Dir, _) => Err(err(SysErrorKind::AccessDenied, t)),
+            _ => Err(err(SysErrorKind::ReparsePoint, t)),
+        }
+    }
+}
+
 impl Dir for FakeDir {
     fn info(&self) -> SysResult<RootInfo> {
         self.check(FsOp::Info)?;
@@ -2192,34 +2228,11 @@ impl Dir for FakeDir {
     }
 
     fn open_read(&self, p: &RelPath) -> SysResult<Box<dyn ReadSeek + '_>> {
-        self.check(FsOp::OpenRead)?;
-        let t = p.as_str();
-        let (parent, name) = self.split(FsOp::OpenRead, p)?;
-        let mut st = self.fs.lock();
-        let id = Self::require(&st, parent, name, t)?;
-        st.openable(id, t)?;
-        match (st.rel_kind(id), st.nodes.get(&id).map(|n| &n.body)) {
-            (EntryKind::File, Some(Body::File(ino))) => {
-                let data = st.inode(*ino, t)?.data.clone();
-                let obj = st.obj_of(id);
-                st.check_share(obj, Access::READ, Share::R, t)?;
-                let open = st.register(
-                    obj,
-                    Access::READ,
-                    Share::R,
-                    std::process::id(),
-                    Origin::Rerun,
-                );
-                drop(st);
-                Ok(Box::new(Counted {
-                    data: Cursor::new(data),
-                    served: Arc::clone(&self.fs.shared.served),
-                    _open: self.fs.token(open),
-                }))
-            }
-            (EntryKind::Dir, _) => Err(err(SysErrorKind::AccessDenied, t)),
-            _ => Err(err(SysErrorKind::ReparsePoint, t)),
-        }
+        self.open_read_node(p).map(|(r, _)| r)
+    }
+
+    fn open_read_identified(&self, p: &RelPath) -> SysResult<(Box<dyn ReadSeek + '_>, Metadata)> {
+        self.open_read_node(p)
     }
 
     fn read_dir_limited(

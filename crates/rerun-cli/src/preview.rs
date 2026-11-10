@@ -187,7 +187,7 @@ pub fn helper_lines(sys: &dyn System, p: &Preview) -> Vec<Message<'static>> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    if let Err(e) = rerun_core::policy::root::helper_image(sys) {
+    if let Err(e) = rerun_core::policy::root::helper_for_this_build(sys) {
         out.push(Message::Helper(HelperMsg::NotInstalled {
             error: escape::text(&e.to_string()).into_owned(),
         }));

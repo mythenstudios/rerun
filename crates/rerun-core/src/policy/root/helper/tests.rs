@@ -342,3 +342,34 @@ fn dir_by_id_opens_only_plain_directories_of_that_volume() {
         SysErrorKind::Unsupported
     );
 }
+
+/// Security N5 of P4-2c: a helper built with the published index test key is refused for a
+/// release CLI and accepted by a test-key CLI; the seed the check looks for is exactly the test
+/// key's (masked in the binary, so a release CLI never holds it).
+#[test]
+fn a_test_key_helper_is_refused_unless_the_cli_is_a_test_build() {
+    use super::{check_test_key, holds_test_key};
+    use crate::catalog::key::test_key;
+    assert!(holds_test_key(test_key::SEED_HEX.as_bytes()));
+    assert!(!holds_test_key(test_key::FOREIGN_SEED_HEX.as_bytes()));
+    let sys = installed();
+    let image = helper_image(&sys).unwrap();
+    check_test_key(&sys, &image, false).unwrap();
+    // The seed somewhere inside the image, as a test-key build holds it.
+    let mut bytes = b"MZ helper ".to_vec();
+    bytes.extend_from_slice(test_key::SEED_HEX.as_bytes());
+    bytes.extend_from_slice(b" more");
+    sys.fake_fs().remove_abs(Path::new(EXE)).unwrap();
+    sys.fake_fs().put_file(Path::new(EXE), &bytes).unwrap();
+    set_admin_only(&sys, &[EXE]);
+    let image = helper_image(&sys).unwrap();
+    let (path, why) = reason(check_test_key(&sys, &image, false));
+    assert_eq!(path, EXE);
+    assert!(why.contains("test key"), "{why}");
+    check_test_key(&sys, &image, true).unwrap();
+    // The product entry answers for this build.
+    assert_eq!(
+        super::helper_for_this_build(&sys).is_ok(),
+        cfg!(feature = "test-key")
+    );
+}
