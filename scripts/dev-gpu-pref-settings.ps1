@@ -14,7 +14,8 @@
 # %LOCALAPPDATA%\RerunTest\gpupref\RerunGpuPrefProbe.exe (never started; Settings only needs a
 # path), and the one value Settings and step 5 write for that path. At the end, always (also
 # after Ctrl+C), it deletes that value, the copy and its folder, and the DirectX and
-# UserGpuPreferences keys only if it created them and they are empty. No other value is read by
+# UserGpuPreferences keys only if it created them and they are empty. It closes the Settings app
+# before the cleanup (an open Settings page writes the value again). No other value is read by
 # name or written; no security setting is touched.
 #
 # Step 4 (security review P4-11, finding 1): how Settings stores "a specific GPU" (Windows 11
@@ -150,9 +151,17 @@ try {
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
 } finally {
     $host.UI.RawUI.WindowTitle = 'SB-G1: raeumt auf'
-    $k = $hkcu.OpenSubKey($keyPath, $true)
-    if ($null -ne $k) { $k.DeleteValue($probe, $false); $k.Close() }
-    $results['cleanup: value removed'] = $null -eq (Read-Probe)
+    # Settings still open writes the value again after it was deleted (first run, 2026-11-10):
+    # close it first, delete, then look again a few seconds later.
+    Get-Process -Name SystemSettings -ErrorAction SilentlyContinue | Stop-Process -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    for ($i = 0; $i -lt 3; $i++) {
+        $k = $hkcu.OpenSubKey($keyPath, $true)
+        if ($null -ne $k) { $k.DeleteValue($probe, $false); $k.Close() }
+        Start-Sleep -Seconds 3
+        if ($null -eq (Read-Probe)) { break }
+    }
+    $results['cleanup: value removed (checked 3 s after the delete)'] = $null -eq (Read-Probe)
     if (-not $hadKey) {
         $k = $hkcu.OpenSubKey($keyPath)
         if ($null -ne $k -and $k.ValueCount -eq 0 -and $k.SubKeyCount -eq 0) {
