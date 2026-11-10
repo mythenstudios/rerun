@@ -11,8 +11,10 @@
 //! case-only rename between plan and apply does not make Rerun's rule `Foreign`. A `%` is
 //! refused (the firewall expands environment variables in `ApplicationName`; built-in rules use
 //! `%SystemRoot%`), as is U+FFFD (what `sys` reads for text that is no valid UTF-16). At most
-//! [`MAX_PROGRAM_CHARS`]: a drive and a [`RelPath`]. The firewall's own limit is measured with
-//! the write contract (P4-5b); this bound stays below `MAX_PATH`.
+//! [`MAX_PROGRAM_CHARS`] characters (a drive and a [`RelPath`]) and at most
+//! [`MAX_PROGRAM_UTF16`] UTF-16 units, the firewall's own limit (`Add` refuses 260 and more,
+//! measured by the write contract, P4-5b): refused at plan time, before `begin` and by the
+//! helper, all through this type.
 //!
 //! **Observation** ([`observe_all`], A4 S11): one enumeration for any number of planned rules.
 //! A rule whose name equals a planned name **folded** counts as that name (until the P4-5b
@@ -36,7 +38,8 @@ use crate::fold::fold;
 pub use crate::journal::TxnId;
 use crate::path::{RelPath, RootPath};
 use crate::sys::firewall::{
-    ACTION_BLOCK, DIR_OUT, FwRest, FwRule, FwRule3, PROFILES_ALL, PROTOCOL_ANY,
+    ACTION_BLOCK, DIR_OUT, FwRest, FwRule, FwRule3, MAX_APPLICATION_NAME_UTF16, PROFILES_ALL,
+    PROTOCOL_ANY,
 };
 use crate::sys::{Firewall, FirewallWrite, HelperSystem, SysResult};
 
@@ -46,6 +49,11 @@ pub const GROUP: &str = "Rerun";
 pub const NAME_PREFIX: &str = "Rerun - ";
 /// The longest program path: a drive (`X:\`) and a [`RelPath`].
 pub const MAX_PROGRAM_CHARS: usize = 3 + RelPath::MAX_LEN;
+/// The longest program path the Windows Firewall takes, in UTF-16 units: `INetFwRules::Add`
+/// refuses an `ApplicationName` of 260 units or more (measured, [SB] pass 4, CI run
+/// 42738344112; ADR 0023 §6). [`MAX_PROGRAM_CHARS`] counts characters, so a path with
+/// characters outside the BMP (two units each) can pass that bound and still be too long here.
+pub const MAX_PROGRAM_UTF16: usize = MAX_APPLICATION_NAME_UTF16;
 
 /// The direction a `firewall_rule` step blocks. Only `out` for now (lead decision after the
 /// P4-5a review): `in` can be added without a format break when a Topo needs it.
@@ -151,6 +159,12 @@ pub enum ProgramError {
     /// Not an `.exe`.
     #[error("the program is not an .exe: {0}")]
     NotExe(String),
+    /// `MAX_PROGRAM_UTF16` UTF-16 units exceeded: the firewall would refuse the rule.
+    #[error(
+        "the program path is {1} UTF-16 units long; Windows Firewall takes at most \
+         {MAX_PROGRAM_UTF16}, so no firewall rule can name it (a shorter game path is needed): {0}"
+    )]
+    FirewallLimit(String, usize),
 }
 
 /// The program of a Rerun rule (module docs, A4 S6 a, b).
@@ -177,6 +191,10 @@ impl Program {
         }
         if s.chars().count() > MAX_PROGRAM_CHARS {
             return Err(ProgramError::TooLong(shown()));
+        }
+        let units = s.encode_utf16().count();
+        if units > MAX_PROGRAM_UTF16 {
+            return Err(ProgramError::FirewallLimit(shown(), units));
         }
         let b = s.as_bytes();
         let drive = b.len() > 3 && b[0].is_ascii_uppercase() && b[1] == b':' && b[2] == b'\\';

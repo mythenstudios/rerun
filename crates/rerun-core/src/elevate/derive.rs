@@ -22,9 +22,9 @@
 use super::MAX_BATCH_OPS;
 use crate::catalog::model::{Sha256, Status, Topo, TopoStep};
 use crate::fold::fold;
-use crate::path::RelPath;
+use crate::path::{RelPath, RootPath};
 use crate::plan::Pick;
-use crate::policy::firewall::Direction;
+use crate::policy::firewall::{Direction, Program, ProgramError};
 use crate::sys::fs::RootInfo;
 use crate::topo::{EngineError, ExeState, GameFacts, anti_cheat_state, resolve_picks};
 
@@ -126,6 +126,13 @@ pub enum PlanRefusal {
     /// The anti-cheat rule applies (E4): no firewall rule.
     #[error("anti-cheat found: no firewall rule for this game")]
     AntiCheat,
+    /// The game folder's path cannot be a rule's program, or the program would be longer than
+    /// the firewall takes (`policy::firewall::MAX_PROGRAM_UTF16`, measured in P4-5b).
+    #[error("no firewall rule for this program: {0}")]
+    Program(#[from] ProgramError),
+    /// The game folder's canonical path is not a drive path Rerun can name.
+    #[error("the game folder's path cannot be a firewall rule's program")]
+    RootPath,
 }
 
 /// The CLI's check of a plan's helper ops (module docs): what the helper will check later, from
@@ -151,6 +158,13 @@ pub fn check_plan(
     }
     if anti_cheat_state(topo, &game.anti_cheat).enforced() {
         return Err(PlanRefusal::AntiCheat);
+    }
+    // The program as the helper forms it (`Program::new` on the request's root path, which the
+    // CLI takes from the same canonical path): refused here, before any prompt.
+    let root_path =
+        RootPath::from_final_path(&root.final_path).map_err(|_| PlanRefusal::RootPath)?;
+    for a in &anchors {
+        Program::new(&root_path, &a.exe)?;
     }
     for a in &anchors {
         let ok = game

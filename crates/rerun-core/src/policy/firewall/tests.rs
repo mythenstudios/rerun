@@ -351,3 +351,27 @@ fn the_undo_takes_only_the_one_rule_of_the_exact_name() {
     };
     assert!(own_add(&r, &[changed]));
 }
+
+/// The firewall's own limit (P4-5b, measured: `Add` keeps 259 UTF-16 units, refuses 260): a
+/// program within Rerun's 243 characters can still pass 259 units with characters outside the
+/// BMP (two units each), and is refused with the length named.
+#[test]
+fn a_program_of_260_utf16_units_is_refused() {
+    let astral = "\u{1D400}".repeat(20); // 20 characters, 40 units
+    let path = |filler: usize| format!(r"C:\{astral}{}.exe", "a".repeat(filler));
+    let ok = path(212);
+    assert_eq!(ok.encode_utf16().count(), 259);
+    assert!(ok.chars().count() <= MAX_PROGRAM_CHARS);
+    Program::parse(&ok).unwrap();
+    let long = path(213);
+    assert_eq!(long.encode_utf16().count(), 260);
+    assert!(long.chars().count() <= MAX_PROGRAM_CHARS);
+    match Program::parse(&long) {
+        Err(e @ ProgramError::FirewallLimit(_, 260)) => {
+            assert!(e.to_string().contains("260 UTF-16 units"), "{e}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // Plain ASCII never reaches the limit: Rerun's own bound comes first.
+    const { assert!(MAX_PROGRAM_CHARS < MAX_PROGRAM_UTF16) };
+}

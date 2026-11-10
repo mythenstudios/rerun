@@ -20,7 +20,9 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
-use crate::sys::firewall::{FwRule, FwSelection, MAX_RULES, MAX_TEXT_UTF16};
+use crate::sys::firewall::{
+    FwRule, FwSelection, MAX_APPLICATION_NAME_UTF16, MAX_RULES, MAX_TEXT_UTF16,
+};
 use crate::sys::{Firewall, FirewallWrite, SysError, SysErrorKind, SysResult};
 
 /// The fake firewall: rules as data, an optional fixed error, and the write side of the helper
@@ -188,6 +190,14 @@ impl FirewallWrite for FakeFirewall {
     /// is lazy (module docs).
     fn add(&self, rule: &FwRule) -> SysResult<()> {
         let crash = self.enter_write()?;
+        // Like Windows: an `ApplicationName` of 260 UTF-16 units or more is refused, nothing
+        // added.
+        if rule.program.encode_utf16().count() > MAX_APPLICATION_NAME_UTF16 {
+            return Err(SysError::new(
+                SysErrorKind::Other,
+                "fake: INetFwRules::Add refuses an ApplicationName of 260 UTF-16 units or more",
+            ));
+        }
         let mut stored = rule.clone();
         if let Some(f) = *self
             .normalise

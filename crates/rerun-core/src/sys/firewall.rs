@@ -35,6 +35,9 @@ pub const PROTOCOL_ANY: i32 = 256;
 pub const MAX_RULES: usize = 200_000;
 /// Longest text of one rule field in UTF-16 units; a longer one is `TooLarge`.
 pub const MAX_TEXT_UTF16: usize = 1 << 20;
+/// The longest `ApplicationName` the Windows Firewall takes, in UTF-16 units: `INetFwRules::Add`
+/// refuses 260 and more (measured, [SB] pass 4, CI run 42738344112). The fake refuses the same.
+pub const MAX_APPLICATION_NAME_UTF16: usize = 259;
 
 /// The facts of one rule (`INetFwRule`, `INetFwRule2`, `INetFwRule3`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

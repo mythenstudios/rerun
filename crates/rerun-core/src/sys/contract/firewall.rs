@@ -18,7 +18,9 @@ use std::cell::RefCell;
 
 use super::{ContractResult, ensure, ok};
 use crate::fold::fold;
-use crate::sys::firewall::{ACTION_ALLOW, ACTION_BLOCK, DIR_IN, DIR_OUT, FwRule, PROTOCOL_ANY};
+use crate::sys::firewall::{
+    ACTION_ALLOW, ACTION_BLOCK, DIR_IN, DIR_OUT, FwRule, MAX_APPLICATION_NAME_UTF16, PROTOCOL_ANY,
+};
 use crate::sys::{Firewall, FirewallWrite};
 
 fn texts(r: &FwRule) -> Vec<&str> {
@@ -152,6 +154,8 @@ pub struct WriteFacts {
 ///   the rule is removed by its exact name afterwards if it is still there.
 /// - **W3b** `Remove` with the name's `i` as U+0131: measured the same way.
 /// - **W4** `Remove` of a name no rule holds: measured.
+/// - **W5** an `ApplicationName` of 260 UTF-16 units is refused by `Add` and nothing is added
+///   (measured on Windows in P4-5b; the fake refuses the same).
 ///
 /// `a` and `b` are two rules of different names whose names no rule of the firewall holds,
 /// compared folded; `a`'s name has an ASCII `i`, `b`'s an upper-case ASCII letter. Every rule
@@ -273,6 +277,24 @@ fn write_cases(
     ensure(named(fw, &a.name)?.is_empty(), "W3b: a removed")?;
     // W4.
     let missing_name_is_ok = remove(&b.name).is_ok();
+    // W5: a program of 260 UTF-16 units is refused and leaves nothing.
+    let long = FwRule {
+        program: format!(r"C:\{}.exe", "p".repeat(MAX_APPLICATION_NAME_UTF16 + 1 - 7)),
+        ..a.clone()
+    };
+    debug_assert_eq!(
+        long.program.encode_utf16().count(),
+        MAX_APPLICATION_NAME_UTF16 + 1
+    );
+    let refused = add(&long).is_err();
+    let left = named(fw, &a.name)?;
+    if !left.is_empty() {
+        ok(remove(&a.name), "remove the long rule")?;
+    }
+    ensure(
+        refused && left.is_empty(),
+        "W5: an ApplicationName of 260 UTF-16 units is refused and nothing is added",
+    )?;
     Ok(WriteFacts {
         program_case_drift,
         takes_every_rule_of_the_name,

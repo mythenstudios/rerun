@@ -1331,3 +1331,37 @@ fn s_a_running_helper_makes_the_cli_wait() {
     e.set_helper_lock(Ok(HelperLock::Free));
     assert!(client::ensure_idle(&e, &img).is_ok());
 }
+
+/// The firewall's limit at plan time (P4-5b): a game folder whose canonical path makes the
+/// program 260 UTF-16 units or longer is refused by `check_plan` with the length named; 259 is
+/// planned. The helper forms the program through the same `Program::new` and refuses it as
+/// `Program`.
+#[test]
+fn d_a_program_the_firewall_would_refuse_is_refused_at_plan_time() {
+    let sys = world();
+    let t = parsed(&topo_json("invented-game", 3, "active", &game_sha()));
+    let good = facts(ExeState::Match, AntiCheatScan::default());
+    let mut info = info_of(&sys, GAME);
+    // `D:\` + 20 characters outside the BMP (40 units) + filler, then `\bin\game.exe`.
+    let root = |filler: usize| {
+        std::path::PathBuf::from(format!(
+            r"D:\{}{}",
+            "\u{1D400}".repeat(20),
+            "a".repeat(filler)
+        ))
+    };
+    info.final_path = root(203);
+    assert_eq!(
+        check_plan(&t, &picks(&["net/block"]), &info, &good)
+            .unwrap()
+            .len(),
+        1
+    );
+    info.final_path = root(204);
+    match check_plan(&t, &picks(&["net/block"]), &info, &good) {
+        Err(e @ PlanRefusal::Program(_)) => {
+            assert!(e.to_string().contains("260 UTF-16 units"), "{e}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
