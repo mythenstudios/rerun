@@ -11,7 +11,9 @@
 //!   damaged) no longer refuses the revert; the ops it relies on are [`Keeps`]. The loop records
 //!   such an op `Observed::Kept` when the object is exactly as the op left it with the op's file
 //!   ID (and, for a file, every relying `Hold` recorded that ID): nothing is deleted.
-//! - **Inheritor side** ([`duties`]): for an applied transaction `R`, an object handed over
+//! - **Inheritor side** ([`duties`]): for a transaction `R` that is reverted (applied, or an
+//!   interrupted apply: it counted as relying, so another revert may have left the object to
+//!   it; review follow-up, security 1; never the in-process rollback of an apply), an object handed over
 //!   (`RevertDone { Kept }` of a creator that is not forgotten) that an op of `R` relies on (for a
 //!   file: its `Hold` recorded the creator's file ID) is `R`'s **duty** once no other transaction
 //!   that is not closed (the creator included) has an op on it (a folder: at or below it) without
@@ -93,6 +95,10 @@ fn other_of(
         return None;
     }
     let plan = super::decode_head(full.head.as_deref()?).ok()?;
+    // Review follow-up (security 3): the records fit the head, as for a revert of it.
+    if !super::records_fit(&plan, &full.ops) {
+        return None;
+    }
     Bindings::of(&plan, &full.rebinds)?;
     let objs = Object::of(&plan).ok()?;
     let reverting = full.ops.values().any(|o| !o.reverts.is_empty());
@@ -109,10 +115,19 @@ fn other_of(
 
 /// Reads the transactions of `l` other than `own` that the hand-over of `own` can depend on
 /// (module docs, S4). `closed`: also closed ones whose listed records hold a `Kept` op.
+///
+/// What cannot be used goes into [`Others::blocked`] (review follow-ups, security 3, senior
+/// S-3): a view error (its records are unknown), a damaged transaction (its listing holds only
+/// the valid prefix of its records: a `Kept` may follow the damage; one with a usable head also
+/// counts as relying, condition d), a transaction that is not closed whose head cannot be used
+/// (its reliance is unknown), and a closed one with a `Kept` op whose head cannot be used (a
+/// creator whose objects are unknown). A readable, undamaged entry lists every record (the
+/// reader stops only at damage), so a closed one without `Kept` handed nothing over and is
+/// neither read nor blocking. Nothing in `blocked` is ever a basis of a deletion.
 pub(super) fn read(
     j: &Journal<'_>,
     l: &Listing,
-    own: &TxnId,
+    own: Option<&TxnId>,
     closed: bool,
 ) -> Result<Others, Refusal> {
     let mut out = Others::default();
@@ -121,28 +136,26 @@ pub(super) fn read(
     for t in l
         .txns
         .iter()
-        .filter(|t| t.id != *own && (!t.forgotten || forgotten_too))
+        .filter(|t| Some(&t.id) != own && (!t.forgotten || forgotten_too))
     {
         let Ok(v) = &t.view else {
             out.blocked.push(t.id);
             continue;
         };
+        let has_kept = v.ops.values().any(|o| {
+            o.reverted
+                .as_ref()
+                .is_some_and(|r| r.observed == Observed::Kept)
+        });
         let wanted = match &v.state {
             TxnState::Empty | TxnState::Closed(Closing::RolledBack) => false,
             TxnState::Closed(Closing::Forgotten) if !forgotten_too => false,
-            TxnState::Closed(Closing::Reverted | Closing::Forgotten) => {
-                closed
-                    && v.ops.values().any(|o| {
-                        o.reverted
-                            .as_ref()
-                            .is_some_and(|r| r.observed == Observed::Kept)
-                    })
-            }
-            TxnState::Damaged(_) if !v.head_usable() => {
+            TxnState::Closed(Closing::Reverted | Closing::Forgotten) => closed && has_kept,
+            TxnState::Damaged(_) => {
                 out.blocked.push(t.id);
-                false
+                v.head_usable()
             }
-            TxnState::Open | TxnState::Applied | TxnState::Damaged(_) => true,
+            TxnState::Open | TxnState::Applied => true,
         };
         if !wanted {
             continue;
@@ -154,8 +167,11 @@ pub(super) fn read(
         }
         match load_or_err(j, t)? {
             Some(o) => out.txns.push(o),
-            None if matches!(v.state, TxnState::Closed(_)) => {}
-            None => out.blocked.push(t.id),
+            None => {
+                if !out.blocked.contains(&t.id) {
+                    out.blocked.push(t.id);
+                }
+            }
         }
     }
     Ok(out)
@@ -370,25 +386,29 @@ pub(super) fn may_inherit(plan: &Plan, ops: &BTreeMap<u16, OpLog>) -> bool {
 
 /// Another transaction that is not closed has an op on `obj` (a folder: at or below it) without
 /// `RevertDone` (condition d); `None` if none.
-fn live_on(others: &Others, obj: &Object, dir: bool) -> Option<TxnId> {
+fn live_on(others: &Others, own: &TxnId, obj: &Object, dir: bool) -> Option<TxnId> {
     // K-HO2 (tests): condition (d) off.
     if super::knob_ho(2) {
         return None;
     }
-    others.txns.iter().filter(|o| o.live).find_map(|o| {
-        o.objs.iter().enumerate().find_map(|(k, x)| {
-            let on = if dir {
-                at_or_below(x, obj)
-            } else {
-                same_file(x, obj)
-            };
-            let open = o
-                .ops
-                .get(&super::op_ix(k))
-                .is_some_and(|l| l.reverted.is_none());
-            (on && open).then_some(o.id)
+    others
+        .txns
+        .iter()
+        .filter(|o| o.live && o.id != *own)
+        .find_map(|o| {
+            o.objs.iter().enumerate().find_map(|(k, x)| {
+                let on = if dir {
+                    at_or_below(x, obj)
+                } else {
+                    same_file(x, obj)
+                };
+                let open = o
+                    .ops
+                    .get(&super::op_ix(k))
+                    .is_some_and(|l| l.reverted.is_none());
+                (on && open).then_some(o.id)
+            })
         })
-    })
 }
 
 /// The duties and the still-relied objects of the applied transaction `own` (module docs).
@@ -420,7 +440,8 @@ pub(super) fn duties(
         }) else {
             continue;
         };
-        for c in others.txns.iter().filter(|c| c.id < *own) {
+        // A damaged creator is never a basis of a deletion (it is in `blocked`).
+        for c in others.txns.iter().filter(|c| c.id < *own && !c.damaged) {
             for (ck, cop) in c.plan.ops.iter().enumerate() {
                 let ck16 = super::op_ix(ck);
                 let kept = c
@@ -452,7 +473,7 @@ pub(super) fn duties(
                         let Some(content) = created(cop) else {
                             continue;
                         };
-                        match live_on(others, co, false) {
+                        match live_on(others, own, co, false) {
                             Some(by) => {
                                 stills.entry((c.id, ck16)).or_insert((
                                     k,
@@ -487,7 +508,7 @@ pub(super) fn duties(
                         let Ok(dir_path) = RelPath::parse(&segs.join("\\")) else {
                             continue;
                         };
-                        match live_on(others, co, true) {
+                        match live_on(others, own, co, true) {
                             Some(by) => {
                                 // The lowest op of `own` below it reports it.
                                 let e = stills.entry((c.id, ck16)).or_insert((
@@ -596,7 +617,11 @@ pub(super) fn lines(
         let crate::plan::Target::File { path, .. } = op.target() else {
             continue;
         };
-        for c in others.txns.iter().filter(|c| c.live && c.id < *own) {
+        for c in others
+            .txns
+            .iter()
+            .filter(|c| c.live && c.id < *own && c.id != *own)
+        {
             for (ck, cop) in c.plan.ops.iter().enumerate() {
                 let open = c
                     .ops

@@ -11,7 +11,7 @@
 //! `CreateDir`, top-down and once; a missing target a `CreateFile`; an existing plain file
 //! with the same content is a `Hold` whatever its attributes (senior-dev B1: a replace needs
 //! two different hashes, ADR 0017 A2; P4-8: nothing is written, but the transaction relies on the
-//! file, so stacking keeps an earlier transaction that installed it from being reverted first),
+//! file: an earlier transaction that created it hands it over if it is reverted first, P4-8b),
 //! any other content a `ReplaceFile` with the old hash, length and attributes. A plan of nothing
 //! but holds is "nothing to do" (`prim::plan`). New files get no read-only, hidden or system attribute.
 //! Every existing segment of a target goes into the plan in its stored spelling (audit A2-B1),
@@ -317,8 +317,8 @@ pub(crate) fn plan_into(
                 let (old_sha, old_len) = hash_file(game, &to)?;
                 if old_sha == sha && old_len == len {
                     // B1: the same content is no change, whatever the attributes. P4-8: the
-                    // plan holds it (`Hold`, nothing written), so an earlier transaction that
-                    // installed it is not reverted under this one (stacking, LIFO).
+                    // plan holds it (`Hold`, nothing written); an earlier transaction that created
+                    // it hands it over to this one if it is reverted first (P4-8b).
                     b.ops.push(Op::Hold {
                         root: RootIx(0),
                         path: to,

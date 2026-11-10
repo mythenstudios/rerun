@@ -120,6 +120,7 @@ fn st(
         ops,
         rebinds: Vec::new(),
         shares: Vec::new(),
+        shares_error: None,
     }
 }
 

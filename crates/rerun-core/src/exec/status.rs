@@ -48,8 +48,11 @@ pub struct TxnStatus {
     /// Its `Rebind` records, in order (P2-14b condition d; the last one of a root holds).
     pub rebinds: Vec<RebindLine>,
     /// P4-8b (E6): files and folders other transactions created that its ops rely on, and what
-    /// becomes of them (journal only; an applied transaction that is not forgotten).
+    /// becomes of them (journal only; an applied or interrupted transaction, not forgotten).
     pub shares: Vec<ShareLine>,
+    /// The other transactions could not be read for [`Self::shares`] (escaped), e.g. more than
+    /// `MAX_SHARE_HEADS` (review follow-up, senior N-6): shown, never swallowed.
+    pub shares_error: Option<Shown<'static>>,
 }
 
 /// A file or folder another transaction created that an op relies on (P4-8b), journal only.
@@ -167,10 +170,12 @@ pub enum OpState {
 pub fn status(app: &AppDir<'_>) -> Result<Status, JournalError> {
     let j = Journal::new(app, InstanceTag::new());
     let listing = j.list()?;
+    // Review follow-up (senior N-6): the other transactions read once for every line.
+    let others = super::share::read(&j, &listing, None, true);
     let txns = listing
         .txns
         .iter()
-        .map(|l| one(&j, app, l, false, &listing))
+        .map(|l| one(&j, app, l, false, &others))
         .collect();
     Ok(Status {
         txns,
@@ -187,7 +192,8 @@ pub fn txn_status(app: &AppDir<'_>, t: &TxnId) -> Result<TxnStatus, JournalError
         .iter()
         .find(|l| l.id == *t)
         .ok_or(JournalError::NotFound(*t))?;
-    Ok(one(&j, app, l, true, &listing))
+    let others = super::share::read(&j, &listing, None, true);
+    Ok(one(&j, app, l, true, &others))
 }
 
 fn one(
@@ -195,7 +201,7 @@ fn one(
     app: &AppDir<'_>,
     l: &Listed,
     always: bool,
-    listing: &crate::journal::Listing,
+    others: &Result<super::share::Others, super::Refusal>,
 ) -> TxnStatus {
     let folder = escape::path(&format!(r"{}\journal\{}", app.path(), l.id)).into_owned();
     let v = match &l.view {
@@ -210,6 +216,7 @@ fn one(
                 ops: Vec::new(),
                 rebinds: Vec::new(),
                 shares: Vec::new(),
+                shares_error: None,
             };
         }
     };
@@ -254,29 +261,30 @@ fn one(
             old: r.old,
         })
         .collect();
-    let shares = match plan {
-        Some(p)
-            if !l.forgotten
-                && v.state == TxnState::Applied
-                && super::share::may_inherit(p, &v.ops) =>
-        {
-            super::share::read(j, listing, &l.id, true)
-                .map(|o| super::share::lines(&o, &l.id, p, &v.ops))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(op, path, dir, line)| ShareLine {
-                    op,
-                    path: escape::path(path.as_str()).into_owned(),
-                    dir,
-                    kind: match line {
-                        super::share::Line::Inherits { from } => ShareKind::Inherits { from },
-                        super::share::Line::RemovedBy { from, by } => {
-                            ShareKind::RemovedBy { from, by }
-                        }
-                    },
-                })
-                .collect()
-        }
+    // P4-8b: what becomes of the shared objects of a transaction that is not closed (applied, or
+    // an interrupted apply: it counts as relying and inherits as well, review follow-up 1).
+    let wanted = plan.filter(|p| {
+        !l.forgotten
+            && matches!(v.state, TxnState::Applied | TxnState::Open)
+            && super::share::may_inherit(p, &v.ops)
+    });
+    let shares_error = match (wanted, others) {
+        (Some(_), Err(e)) => Some(escape::text(&e.to_string()).into_owned()),
+        _ => None,
+    };
+    let shares = match (wanted, others) {
+        (Some(p), Ok(o)) => super::share::lines(o, &l.id, p, &v.ops)
+            .into_iter()
+            .map(|(op, path, dir, line)| ShareLine {
+                op,
+                path: escape::path(path.as_str()).into_owned(),
+                dir,
+                kind: match line {
+                    super::share::Line::Inherits { from } => ShareKind::Inherits { from },
+                    super::share::Line::RemovedBy { from, by } => ShareKind::RemovedBy { from, by },
+                },
+            })
+            .collect(),
         _ => Vec::new(),
     };
     TxnStatus {
@@ -288,6 +296,7 @@ fn one(
         ops,
         rebinds,
         shares,
+        shares_error,
     }
 }
 

@@ -73,8 +73,9 @@
 //! `Hold` (P4-8, ADR 0020 amendment P4-8): a package file the game folder already holds with
 //! exactly the content of the step (a shared dependency another transaction installed, such as
 //! the ASI loader's `dinput8.dll`, or the user's own copy). Nothing is written: the op names the
-//! file as an object of the transaction, so stacking keeps the earlier transaction from being
-//! reverted (LIFO) while this one relies on it. Its content is a [`ContentRef::Package`] (the
+//! file as an object of the transaction it relies on: an earlier transaction that created it
+//! hands it over when it is reverted first, and the last revert that relies on it removes it
+//! (P4-8b, `exec::share`; a file an earlier transaction replaced stays newest first). Its content is a [`ContentRef::Package`] (the
 //! package and the place it comes from, for the preview and the slots of later plans), never
 //! inline, on a [`RootKind::Game`] root; it is a file op (`Target::File`, before every registry
 //! op). Its revert changes nothing.
@@ -371,8 +372,9 @@ pub enum Op {
         edits: Vec<IniEdit>,
     },
     /// A package file the game folder holds already with exactly this content (P4-8): nothing is
-    /// written, the file is an object of the transaction (stacking, LIFO); its revert changes
-    /// nothing.
+    /// written, the file is an object the transaction relies on (handed over to it if its creator
+    /// is reverted first, P4-8b); the revert of the hold itself changes nothing, the last revert
+    /// that relies on a handed-over file removes it.
     Hold {
         /// Root.
         root: RootIx,

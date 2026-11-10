@@ -1590,6 +1590,60 @@ pub(super) fn keep_seen(
     }
 }
 
+/// A file duty on one guard (review follow-up, security 2): the file there with the creator's
+/// content, length, R/H/S, one link, the planned spelling and the creator's file ID is deleted
+/// through that very guard (expected hash); gone is `Gone`; anything else is left.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the facts a creator recorded for one file"
+)]
+fn inherit_file(
+    dirs: &mut Dirs<'_>,
+    root: u16,
+    path: &RelPath,
+    sha256: &[u8; 32],
+    len: u64,
+    attrs: &Attrs,
+    file_id: u128,
+    act: bool,
+) -> SysResult<super::InheritedOutcome> {
+    use super::{InheritedOutcome as O, LeftWhy};
+    let Some((parent, name)) = dirs.parent(root, path, act)? else {
+        return Ok(O::Gone);
+    };
+    let Some(m) = parent.metadata(&name)? else {
+        return Ok(O::Gone);
+    };
+    if m.kind != EntryKind::File || m.restricted || m.reparse.is_some() {
+        return Ok(O::Left(LeftWhy::Changed));
+    }
+    let mut g = match parent.guard(&name) {
+        Ok(g) => g,
+        Err(x) if x.kind == SysErrorKind::NotFound => return Ok(O::Gone),
+        Err(x)
+            if matches!(
+                x.kind,
+                SysErrorKind::Linked | SysErrorKind::ReparsePoint | SysErrorKind::AccessDenied
+            ) =>
+        {
+            return Ok(O::Left(LeftWhy::Changed));
+        }
+        Err(x) => return Err(x),
+    };
+    let gm = g.metadata()?;
+    let sha = g.sha256()?;
+    if sha != *sha256 || gm.len != len || gm.attrs != *attrs || !g.name().same_spelling(&name) {
+        return Ok(O::Left(LeftWhy::Changed));
+    }
+    if gm.file_id != file_id && !super::knob_ho(1) {
+        return Ok(O::Left(LeftWhy::OtherFileId));
+    }
+    if act {
+        g.delete(sha256)?;
+    }
+    Ok(O::Removed)
+}
+
 /// The inheritor side (P4-8b): carries out (`act`) or predicts (`verify`) the duties of op `k`
 /// after its own act, a file first, then folders deepest first; and reports the objects another
 /// transaction still relies on. `gone`: the folded names below a folder that this revert's own
@@ -1619,40 +1673,13 @@ pub(super) fn inherit(
                 file_id,
                 ..
             } => {
-                let o = match find(dirs, *root, path).map_err(&e)? {
-                    Found::Absent => O::Gone,
-                    Found::File {
-                        sha,
-                        len: l,
-                        attrs: a,
-                        id,
-                        exact,
-                    } if sha == *sha256 && l == *len && a == *attrs && exact => {
-                        if id != *file_id && !super::knob_ho(1) {
-                            O::Left(LeftWhy::OtherFileId)
-                        } else {
-                            if act {
-                                let Some((parent, name)) =
-                                    dirs.parent(*root, path, true).map_err(&e)?
-                                else {
-                                    return Err(e(SysError::new(
-                                        SysErrorKind::NotFound,
-                                        path.as_str(),
-                                    )));
-                                };
-                                parent
-                                    .guard(&name)
-                                    .and_then(|g| g.delete(sha256))
-                                    .map_err(&e)?;
-                            }
-                            removed.push(fold(path.as_str()));
-                            O::Removed
-                        }
-                    }
-                    Found::File { .. } | Found::Dir { .. } | Found::Other => {
-                        O::Left(LeftWhy::Changed)
-                    }
-                };
+                // Review follow-up (security 2, senior N-4): one guard observes and deletes, so
+                // nothing can be swapped in between.
+                let o = inherit_file(dirs, *root, path, sha256, *len, attrs, *file_id, act)
+                    .map_err(&e)?;
+                if o == O::Removed {
+                    removed.push(fold(path.as_str()));
+                }
                 (o, false)
             }
             Duty::Dir {

@@ -734,3 +734,252 @@ fn ho_cost_with_500_closed_transactions() {
     let dt = cost(500);
     println!("MEASURED S4: the revert after 500 hand-overs took {dt:?}");
 }
+
+// ---------- Review follow-ups (P4-8b) ----------
+
+/// Review follow-up 1 (security 1): the last transaction that relies on a handed-over folder is
+/// an interrupted apply. T1 keeps `new.dll` and `mods` for T2; T3 holds `new.dll`, creates
+/// `mods\sub` and crashes; T2's revert leaves both to T3 (`status` and the report say so); T3's
+/// revert (the recovery of its apply) removes them: identical.
+#[test]
+fn ho_an_interrupted_reliant_carries_the_hand_over() {
+    let env = Env::new(sys());
+    let floor = env.snap();
+    let a = env.applied(&env.plan(&c_dir()));
+    let b = env.applied(&env.plan(&h_y()));
+    reverted(&env, &a);
+    let h = env.plan(&h_sub());
+    // The second folder created is `mods\sub` (the first is the transaction's own).
+    let r = env.apply_armed(&h, |fx| fx.fault(Prim::CreateDir, 2, Fault::CrashAfter));
+    assert!(r.is_err(), "{r:?}");
+    env.sys.fake_fs().restart();
+    let c = *env
+        .states()
+        .iter()
+        .map(|(t, _)| t)
+        .max()
+        .expect("the interrupted transaction");
+    let r = reverted(&env, &b);
+    let still: Vec<InheritedOutcome> = inherited(&r).iter().map(|i| i.outcome).collect();
+    assert!(
+        !still.is_empty() && still.iter().all(|o| *o == InheritedOutcome::StillRelied(c)),
+        "{r:?}"
+    );
+    assert!(exists(&env, "new.dll") && exists(&env, "mods"));
+    // The status of the interrupted transaction is truthful: it inherits both.
+    let s = shares(&env, &c);
+    assert!(
+        s.iter().all(|(_, k)| *k == ShareKind::Inherits { from: a }) && s.len() == 2,
+        "{s:?}"
+    );
+    let r = env.revert(&c).unwrap();
+    assert!(r.closed.is_some(), "{r:?}");
+    same(&floor, &env.snap());
+}
+
+/// Review follow-up 2 (security 2, senior N-4): a same-content swap of a handed-over file right
+/// before the guard that would delete it: the guard sees another file ID and leaves it.
+#[test]
+fn ho_a_swap_before_the_deleting_guard_is_left() {
+    use std::sync::{Arc, Mutex};
+    let count_guards = |env: &Env, t: &TxnId| -> usize {
+        let n = Arc::new(Mutex::new(0usize));
+        let m = Arc::clone(&n);
+        env.sys.fake_fs().on_step(move |_, ev| {
+            if ev.call == Some(Prim::OpenGuard) && ev.name.eq_ignore_ascii_case("new.dll") {
+                *m.lock().unwrap() += 1;
+            }
+        });
+        reverted(env, t);
+        env.sys.fake_fs().clear_on_step();
+        *n.lock().unwrap()
+    };
+    // A dry run counts the guards of `new.dll` in the holder's revert.
+    let env = Env::new(sys());
+    let a = env.applied(&env.plan(&c_file()));
+    let b = env.applied(&env.plan(&h_rep()));
+    reverted(&env, &a);
+    let last = count_guards(&env, &b);
+    assert!(last >= 1);
+    // The run: before the last guard of `new.dll`, the file is rewritten with the same content.
+    let env = Env::new(sys());
+    let a = env.applied(&env.plan(&c_file()));
+    let b = env.applied(&env.plan(&h_rep()));
+    reverted(&env, &a);
+    let seen = Arc::new(Mutex::new(0usize));
+    let s2 = Arc::clone(&seen);
+    let abs = game("new.dll");
+    env.sys.fake_fs().on_step(move |f, ev| {
+        if ev.call == Some(Prim::OpenGuard) && ev.name.eq_ignore_ascii_case("new.dll") {
+            let mut k = s2.lock().unwrap();
+            *k += 1;
+            if *k == last {
+                f.remove_abs(Path::new(&abs)).unwrap();
+                f.put_file(Path::new(&abs), N).unwrap();
+            }
+        }
+    });
+    let r = env.revert(&b).unwrap();
+    env.sys.fake_fs().clear_on_step();
+    assert_eq!(r.closed, Some(Closing::Reverted));
+    let i = inherited(&r);
+    assert_eq!(
+        i.iter().map(|x| x.outcome).collect::<Vec<_>>(),
+        [InheritedOutcome::Left(LeftWhy::OtherFileId)],
+        "{r:?}"
+    );
+    assert!(
+        exists(&env, "new.dll"),
+        "the swapped-in file is not Rerun's"
+    );
+}
+
+/// Review follow-up 3 (security 3, senior S-2): a closed creator whose records do not fit its
+/// head (`Kept` on a replace) is never a basis of a deletion: it is blocked, and the holder's
+/// revert is refused while the held file is there.
+#[test]
+fn ho_a_creator_that_does_not_fit_its_records_is_blocked() {
+    use crate::journal::tests::rewrite;
+    let env = Env::new(sys());
+    let a = env.applied(&env.plan(&c_file()));
+    let b = env.applied(&env.plan(&h_rep()));
+    reverted(&env, &a);
+    // Rewrite T1's head (records rewritten consistently) so op 0 is a replace: `Kept` on it does
+    // not fit.
+    let dir = env.txn_dir(&a);
+    let head = String::from_utf8(read_abs(&env.sys, &format!(r"{dir}\head.json"))).unwrap();
+    let start = head.find(r#"{"create_file":"#).unwrap();
+    let forged = head[..start].to_owned()
+        + &head[start..].replacen(
+            r#"{"create_file":{"root":0,"path":"new.dll","#,
+            &format!(
+                r#"{{"replace_file":{{"root":0,"path":"new.dll","old":{{"sha256":"{}","len":3,"attrs":{{"readonly":false,"hidden":false,"system":false}}}},"#,
+                "ab".repeat(32)
+            ),
+            1,
+        );
+    rewrite(env.sys.fake_fs(), &dir, Some(forged.as_bytes()), |_| {});
+    let mid = env.snap();
+    match env.revert(&b) {
+        Err(ExecError::Refused(Refusal::Blocked { txn })) if txn == a => {}
+        r => panic!("{r:?}"),
+    }
+    same(&mid, &env.snap());
+}
+
+/// Review follow-up 4 (security 4): the ID chain breaks after the check before the first record
+/// (a same-content rewrite while the revert runs): the revert halts there with `Held` (open,
+/// resumable), it does not fail after its records.
+#[test]
+fn ho_a_chain_broken_mid_revert_is_a_halt() {
+    use std::sync::{Arc, Mutex};
+    let env = Env::new(sys());
+    let a = env.applied(&env.plan(&c_dir()));
+    let b = env.applied(&env.plan(&h_y()));
+    // The second guard of `new.dll` in T1's revert is the loop's (the first is the check).
+    let seen = Arc::new(Mutex::new(0usize));
+    let s2 = Arc::clone(&seen);
+    let abs = game("new.dll");
+    env.sys.fake_fs().on_step(move |f, ev| {
+        if ev.call == Some(Prim::OpenGuard) && ev.name.eq_ignore_ascii_case("new.dll") {
+            let mut k = s2.lock().unwrap();
+            *k += 1;
+            if *k == 2 {
+                f.remove_abs(Path::new(&abs)).unwrap();
+                f.put_file(Path::new(&abs), N).unwrap();
+            }
+        }
+    });
+    let r = env.revert(&a);
+    env.sys.fake_fs().clear_on_step();
+    let r = r.unwrap();
+    assert_eq!(r.closed, None);
+    let h = r.halted.as_ref().expect("a halt");
+    assert_eq!(h.op, 0);
+    assert!(matches!(*h.why, Refusal::Held { txn } if txn == b), "{h:?}");
+    assert!(!r.ops.is_empty(), "the ops above were reverted first");
+    // Newest first then closes both.
+    reverted(&env, &b);
+    reverted(&env, &a);
+}
+
+/// Review follow-up 5 (senior S-1): a changed held file inside a handed-over folder: `verify`
+/// predicts exactly what the revert then does (the file left, the folder not empty).
+#[test]
+fn ho7_verify_predicts_the_revert_for_a_changed_file_in_the_folder() {
+    let env = Env::new(sys());
+    let a = env.applied(&env.plan(&spec(vec![entry(r"mods\x.dll", r"mods\x.dll", X)])));
+    let b = env.applied(&env.plan(&spec(vec![
+        entry(r"mods\x.dll", r"mods\x.dll", X),
+        entry(r"mods\y.dll", r"mods\y.dll", Y),
+    ])));
+    reverted(&env, &a);
+    let fx = env.sys.fake_fs();
+    fx.remove_abs(Path::new(&game(r"mods\x.dll"))).unwrap();
+    fx.put_file(Path::new(&game(r"mods\x.dll")), b"edited")
+        .unwrap();
+    let key = |v: Vec<Inherited>| {
+        let mut x: Vec<(String, InheritedOutcome)> = v
+            .into_iter()
+            .map(|i| (i.path.to_string(), i.outcome))
+            .collect();
+        x.sort_by(|p, q| p.0.cmp(&q.0));
+        x
+    };
+    let predicted = key(verified_inherited(&env, &b));
+    let r = reverted(&env, &b);
+    let done = key(inherited(&r));
+    assert_eq!(predicted, done);
+    assert_eq!(
+        done,
+        [
+            ("mods".to_owned(), InheritedOutcome::Left(LeftWhy::NotEmpty)),
+            (
+                r"mods\x.dll".to_owned(),
+                InheritedOutcome::Left(LeftWhy::Changed)
+            ),
+        ]
+    );
+}
+
+/// Review follow-up 9 (senior N-1, N3): an heir that recorded a `Rebind` gets no duty (X14):
+/// after its library moved, its revert inherits nothing and reports nothing inherited.
+#[test]
+fn ho_an_heir_after_a_rebind_inherits_nothing() {
+    use super::rebind_tests::{LIB_E, move_lib, rb_plan, rb_sys};
+    use crate::prim::Step;
+    use crate::prim::tests::{STEAM_GAME, STEAM_LIB};
+    let env = Env::new(rb_sys());
+    let a = env.applied(&rb_plan(&env, &[Step::FileInstall(c_file())]));
+    let b = env.applied(&rb_plan(&env, &[Step::FileInstall(h_rep())]));
+    reverted(&env, &a);
+    assert!(super::tests::exists_abs(
+        &env.sys,
+        &format!(r"{STEAM_GAME}\new.dll")
+    ));
+    move_lib(&env.sys, STEAM_LIB, LIB_E);
+    let p = env.rebind_check(&b).unwrap();
+    // A crash right after the `Rebind` record; the next revert is a plain one with the record.
+    let r = env.revert_rebound_armed(&b, &p.to, |fx| {
+        fx.fault(Prim::FlushDir, 1, Fault::CrashAfter);
+    });
+    assert!(r.is_err(), "{r:?}");
+    env.sys.fake_fs().restart();
+    let r = env.revert(&b).unwrap();
+    assert!(r.closed.is_some(), "{r:?}");
+    assert!(inherited(&r).is_empty(), "no duty after a rebind: {r:?}");
+    let moved = format!(r"{LIB_E}\steamapps\common\G\new.dll");
+    assert!(super::tests::exists_abs(&env.sys, &moved), "X14: left");
+}
+
+/// Review follow-up 8 (senior N-3): the text of `TooManyTransactions` says what helps.
+#[test]
+fn ho_too_many_transactions_says_what_helps() {
+    let t = Refusal::TooManyTransactions {
+        limit: super::share::MAX_SHARE_HEADS,
+    }
+    .to_string();
+    assert!(t.contains("nothing was changed"), "{t}");
+    assert!(t.contains("prunes its journal"), "{t}");
+    assert!(!t.contains("  "), "one space between words: {t}");
+}

@@ -290,8 +290,6 @@ pub(super) fn for_revert(
                 // takes the objects over; anything else stays newest first.
                 if let Some(me) = me.filter(|m| !m.rebound)
                     && let Some(other) = share::load(j, t)
-                    && other.applied
-                    && !other.damaged
                     && let Some(rel) = relying_pairs(&other, me)
                 {
                     for (k, r) in rel {
@@ -328,6 +326,9 @@ pub(super) struct Me<'a> {
 /// (applied: `Done`, no revert begun) on a created object of `me`: the reliers by op of `me`;
 /// `None` if any pair is not.
 fn relying_pairs(other: &share::Other, me: &Me<'_>) -> Option<Vec<(u16, Relier)>> {
+    // A hand-over needs an applied later transaction; two holds of one file need nothing (an
+    // interrupted holder is no reason to wait for: neither changed the file; review follow-up 1).
+    let takes_over = other.applied && !other.damaged;
     let mut out = Vec::new();
     for (k2, o2) in other.objs.iter().enumerate() {
         let k2 = super::op_ix(k2);
@@ -344,6 +345,9 @@ fn relying_pairs(other: &share::Other, me: &Me<'_>) -> Option<Vec<(u16, Relier)>
                 && share::same_file(mo, o2)
             {
                 continue;
+            }
+            if !takes_over {
+                return None;
             }
             let name = share::relies(later, o2, mine, mo)?;
             let done = log.done?;

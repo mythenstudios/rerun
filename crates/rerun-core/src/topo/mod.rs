@@ -945,7 +945,8 @@ fn slots_free(steps: &[Step], packages: &[&Package]) -> Result<(), EngineError> 
                 return Err(EngineError::Package {
                     id: p.id.to_string(),
                     why: format!(
-                        "its DLL {} is the slot of package {other} too; one of them only                          (Rerun does not chainload DLLs)",
+                        "its DLL {} is the slot of package {other} too; one of them only \
+                         (Rerun does not chainload DLLs)",
                         crate::escape::path(f.to.as_str())
                     ),
                 });

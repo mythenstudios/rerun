@@ -766,7 +766,8 @@ fn detail_lines(d: Option<&Detail>, will: bool) -> Vec<Message<'_>> {
 
 /// The shared files and folders of `st` (P4-8b): in `status`, or what `forget` means for them.
 fn share_lines(st: &TxnStatus, forget: bool) -> Vec<Message<'_>> {
-    st.shares
+    let mut out: Vec<Message<'_>> = st
+        .shares
         .iter()
         .map(|s| {
             m(TxnMsg::Share {
@@ -776,7 +777,12 @@ fn share_lines(st: &TxnStatus, forget: bool) -> Vec<Message<'_>> {
                 path: s.path.clone(),
             })
         })
-        .collect()
+        .collect();
+    // Review follow-up (senior N-6): never swallowed.
+    if let Some(e) = &st.shares_error {
+        out.push(m(TxnMsg::SharesUnread { error: e.clone() }));
+    }
+    out
 }
 
 /// The report of a revert.

@@ -640,6 +640,11 @@ pub enum TxnMsg<'a> {
         /// The path (escaped, last on its line).
         path: Shown<'a>,
     },
+    /// P4-8b: the other transactions could not be read for the shared files of this one.
+    SharesUnread {
+        /// Why (escaped, last on its line).
+        error: Shown<'a>,
+    },
     /// A name the revert left in the op's folder.
     Left {
         /// The name, escaped.
@@ -1178,6 +1183,10 @@ impl fmt::Display for TxnMsg<'_> {
                 }
             }
             Self::Left { path } => write!(f, "    left: {path}"),
+            Self::SharesUnread { error } => write!(
+                f,
+                "  what becomes of the files it shares with other transactions cannot be shown: {error}"
+            ),
             Self::KeptFor { by } => write!(
                 f,
                 "    kept for {by}, which relies on it (the last revert that relies on it removes it)"

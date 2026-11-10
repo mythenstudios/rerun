@@ -175,7 +175,11 @@ pub enum Refusal {
     #[error("another Rerun is applying or reverting; try again when it has finished")]
     JournalBusy,
     /// A transaction is damaged, unreadable or has a head that cannot be parsed: nothing is
-    /// applied (and no earlier one reverted) until it is forgotten (fail closed, E2).
+    /// applied (and no earlier one reverted) until it is forgotten (fail closed, E2). P4-8b: also
+    /// the revert of a transaction that may inherit a shared file or folder from it (its records
+    /// cannot be read, it is damaged, or it handed something over or relies on something and its
+    /// head cannot be used) while that file (with the ID the reverting transaction recorded) or a
+    /// folder above one of its relying ops that it did not create is still there.
     #[error(
         "transaction {txn} is damaged; rerun status shows what it left; only rerun forget {txn} \
          closes it"
@@ -200,7 +204,9 @@ pub enum Refusal {
     /// (P4-8, P4-8b): a file this one replaced (its old content would need this one's backup), or
     /// one whose identity changed since (rewritten with the same content); newest first.
     #[error(
-        "transaction {txn} relies on a shared file this transaction replaced, or one that is          no longer the file it installed, so it cannot be handed over; revert {txn} first, then          this one (newest first)"
+        "transaction {txn} relies on a shared file this transaction replaced, or one that is \
+         no longer the file it installed, so it cannot be handed over; revert {txn} first, then \
+         this one (newest first)"
     )]
     Held {
         /// The later transaction.
@@ -208,7 +214,8 @@ pub enum Refusal {
     },
     /// The plan would replace or edit a file a live transaction holds (P4-8b, S2).
     #[error(
-        "transaction {txn} relies on a shared file this plan would change; revert {txn} first,          then plan again"
+        "transaction {txn} relies on a shared file this plan would change; revert {txn} first, \
+         then plan again"
     )]
     HeldChange {
         /// The transaction that holds it.
@@ -216,7 +223,10 @@ pub enum Refusal {
     },
     /// More transactions than one revert reads for the hand-over of shared files (P4-8b, S4).
     #[error(
-        "more than {limit} transactions would have to be read to hand over shared files; forget          transactions you no longer need, then try again"
+        "more than {limit} transactions of Rerun would have to be read to hand over shared \
+         files; nothing was changed. Closed transactions that handed files over are kept until \
+         Rerun prunes its journal (a later version); forgetting transactions that are not \
+         closed and that you no longer need lowers the count"
     )]
     TooManyTransactions {
         /// The bound.
@@ -225,7 +235,9 @@ pub enum Refusal {
     /// A DLL of a package of the plan lies where a live transaction has a DLL of another
     /// package (P4-8): one DLL of a name per folder is loaded, and Rerun does not chainload.
     #[error(
-        "op {op}: {path} is the DLL slot of package {package} from transaction {txn}; two          packages cannot share a DLL (Rerun does not chainload): revert {txn} first, or keep          that fix instead"
+        "op {op}: {path} is the DLL slot of package {package} from transaction {txn}; two \
+         packages cannot share a DLL (Rerun does not chainload): revert {txn} first, or keep \
+         that fix instead"
     )]
     SlotTaken {
         /// The transaction.
@@ -1897,6 +1909,11 @@ fn gone_below(plan: &Plan, seen: &BTreeMap<u16, Seen>) -> BTreeMap<String, Vec<S
         if !matches!(s.observed(), Observed::After | Observed::Before) {
             continue;
         }
+        // Review follow-up (senior S-1): a hold never removes its file (an inherited file duty
+        // records its own removal).
+        if matches!(plan.ops.get(usize::from(*k)), Some(Op::Hold { .. })) {
+            continue;
+        }
         let Some(Target::File { path, .. }) = plan.ops.get(usize::from(*k)).map(Op::target) else {
             continue;
         };
@@ -1953,9 +1970,26 @@ fn revert_loop<W: Reverting>(
             return Ok((reports, Some(h)));
         }
         let none = BTreeMap::new();
-        let seen = match keep_of(plan, t, k, op, &log, mode, &none)? {
-            Some(s) => s,
-            None => observe(plan, t, k, op, &log, mode, hints.get(&k).copied(), &none)?,
+        let seen = match keep_of(plan, t, k, op, &log, mode, &none) {
+            Ok(Some(s)) => s,
+            Ok(None) => observe(plan, t, k, op, &log, mode, hints.get(&k).copied(), &none)?,
+            // Review follow-up (security 4): the ID chain broke after the check before the first
+            // record: a halt (open, resumable newest first), never an error after records.
+            Err(ExecError::Refused(r @ Refusal::Held { .. })) => {
+                let root = match op.target() {
+                    Target::File { root, .. } => root.0,
+                    _ => 0,
+                };
+                return Ok((
+                    reports,
+                    Some(Halt {
+                        op: k,
+                        root,
+                        why: Box::new(r),
+                    }),
+                ));
+            }
+            Err(e) => return Err(e),
         };
         let observed = seen.observed();
         // K-HO5 (tests): the inherited act before this op's `RevertIntent` (what S1 forbids).
@@ -2088,7 +2122,6 @@ fn revert_roots<'g>(
     t: &TxnId,
     ops: &BTreeMap<u16, OpLog>,
     stores: &'g [Option<Result<StoreDir<'g>, RootError>>],
-    applied: bool,
     rebound: bool,
 ) -> Result<(roots::Roots<'g>, Shares), Refusal> {
     let by_op = b
@@ -2104,8 +2137,10 @@ fn revert_roots<'g>(
     let roots = roots::Roots::each(cx, b, stores)?;
     let intended: Vec<u16> = ops.keys().copied().collect();
     roots::game_closed(plan, &roots, &intended)?;
-    let (inherit, blocked) = if applied && !rebound && share::may_inherit(plan, ops) {
-        let others = share::read(j, listing, t, true)?;
+    // Review follow-up (security 1): also an interrupted apply carries what it inherits (it
+    // counted as relying); the in-process rollback of an apply never does (`Mode::Rollback`).
+    let (inherit, blocked) = if !rebound && share::may_inherit(plan, ops) {
+        let others = share::read(j, listing, Some(t), true)?;
         (share::duties(&others, t, plan, ops)?, others.blocked)
     } else {
         (share::Inherit::default(), Vec::new())
@@ -2169,41 +2204,12 @@ fn shares_hold(
             }
         }
     }
-    let Some(first) = blocked.first() else {
-        return Ok(());
-    };
-    for (k, duties) in &shares.inherit.duties {
-        for d in duties {
-            let (root, path, want) = match d {
-                share::Duty::File {
-                    root,
-                    path,
-                    file_id,
-                    ..
-                }
-                | share::Duty::Dir {
-                    root,
-                    path,
-                    file_id,
-                    ..
-                } => (*root, path, *file_id),
-            };
-            let found = file::find(&mut dirs, root, path)
-                .map_err(|source| Refusal::Observe { op: *k, source })?;
-            let ours = match found {
-                file::Found::File { id, .. } | file::Found::Dir { id } => id == want,
-                file::Found::Absent | file::Found::Other => false,
-            };
-            if ours {
-                return Err(Refusal::Blocked { txn: *first });
-            }
-        }
-    }
-    // An unreadable entry earlier than this transaction may be the creator of an object it
-    // relies on (its records cannot be read): a held file that still has the ID this transaction
-    // recorded, or a folder above one of its relying ops that it did not create, is refused
-    // too (fail closed; `forget` of that entry ends it).
-    let Some(earlier) = blocked.iter().find(|b| *b < own) else {
+    // An entry that cannot be used (`share::read`: its records unknown, damaged, or a creator or
+    // holder whose head cannot be used) may have handed over, or rely on, an object this
+    // transaction relies on: while a held file still has the ID this transaction recorded, or a
+    // folder above one of its relying ops that it did not create is there, the revert is
+    // refused (fail closed; `forget` of that entry ends it). This covers every duty object.
+    let Some(earlier) = blocked.iter().find(|b| **b != *own) else {
         return Ok(());
     };
     let created: Vec<String> = plan
@@ -2273,7 +2279,6 @@ pub fn revert_check(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), Refusal> {
     let before = |k: u16, d: &crate::journal::Digest, max: u64| j.read_backup(t, k, d, max);
     let (plan, b) = revert_plan(t, &head, &v.ops, &v.rebinds, &before)?;
     let stores = roots::open_stores(cx, &b);
-    let applied = v.state == TxnState::Applied;
     let (roots, _) = revert_roots(
         cx,
         &plan,
@@ -2283,7 +2288,6 @@ pub fn revert_check(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), Refusal> {
         t,
         &v.ops,
         &stores,
-        applied,
         !v.rebinds.is_empty(),
     )?;
     drop(roots);
@@ -2358,7 +2362,6 @@ pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
         t,
         w.ops(),
         &stores,
-        w.is_applied(),
         !w.rebinds().is_empty(),
     )?;
     let plan = knob_rewrite_head(&plan, &b).unwrap_or(plan);
@@ -2538,8 +2541,11 @@ fn verify_shares(
             stack::for_revert(j, &listing, t, &objects, Some(&me)).ok()
         })
         .unwrap_or_default();
-    let inherit = if v.state == TxnState::Applied && !rebound && share::may_inherit(plan, &v.ops) {
-        share::read(j, &listing, t, true)
+    let inherit = if !matches!(v.state, TxnState::Closed(_))
+        && !rebound
+        && share::may_inherit(plan, &v.ops)
+    {
+        share::read(j, &listing, Some(t), true)
             .ok()
             .and_then(|o| share::duties(&o, t, plan, &v.ops).ok())
             .unwrap_or_default()
