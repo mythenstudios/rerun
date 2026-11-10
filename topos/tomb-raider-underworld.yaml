@@ -1,0 +1,54 @@
+# DRAFT (P4-13): hashes are from an unmodified, never-started Steam copy. Per-user files and
+# registry keys the game writes on its first start do not exist on the dev machine yet.
+format: 1
+id: tomb-raider-underworld
+title: "Tomb Raider: Underworld"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 8140
+  exes:
+    # SHA-1/SHA-256 of an unmodified Steam copy (rerun-workbench draft --hashes-from, P4-13).
+    # API from PCGW (Direct3D 9); the import scan names no single API, so it was written by hand.
+    - { path: "tru.exe", sha1: "67B0C64CF58F723979C8551D43D201B1D27063F9", sha256: "D554EE8BD38985F08092C8A0D0F7192B0AC583B38D93083326901CAE0D1F8507", api: d3d9 }
+
+launch:
+  chain: [steam]
+  method: direct
+  start: "TODO"                # Steam's launch entry not observed yet (likely tru.exe); never guessed
+
+issues:
+  - id: crash-many-threads
+    title: "Crashes at start on CPUs with more than 31 logical processors"
+    when:
+      cpu.threads: { gt: 31 }
+    variants:
+      - id: limit-threads
+        status: unverified     # one Steam thread plus PCGW; to reproduce on the 32-thread dev PC
+        kind: fix
+        steps:
+          - cpu: { max_threads: 31, mode: hard }
+        tradeoffs: ["The game may use at most 31 logical processors"]
+        sources:
+          - { type: steam-thread, url: "https://steamcommunity.com/app/8140/discussions/0/2791621786941084149/" }
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Tomb_Raider:_Underworld#Crash_on_startup_when_CPU_has_%3E31_threads" }
+
+# TODO issue: low frame rate/stuttering: PCGW cites a Steam guide that sets two Graphics values
+# under HKCU\Software\Crystal Dynamics\Tomb Raider: Underworld to 0. Not written as registry_set:
+# the key exists only after the first start (not seen yet) and the guide gives no defaults.
+#   https://www.pcgamingwiki.com/wiki/Tomb_Raider:_Underworld#Low_frame_rate%2Fstuttering
+# TODO: the TRLAU Menu Hook (repo of TheIndra55) is a second fix for the crash; needs a package
+# (version, release URL, SHA-256, license) before it can be a variant.
+
+tips:
+  launch_options: []
+  notes:
+    - text: "Audio crackling: lowering the Windows output sample rate to 96000 Hz or below is reported to help (system setting, not a Rerun step)."
+      source: { type: steam-thread, url: "https://steamcommunity.com/app/8140/discussions/0/537402115090619340/" }
+    - text: "A repo-hosted menu hook exists that is listed as an alternative fix for the start crash (not packaged yet)."
+      source: { type: repo, url: "https://github.com/TheIndra55/TRLAU-menu-hook" }
+
+links:
+  pcgw: "Tomb_Raider:_Underworld"
