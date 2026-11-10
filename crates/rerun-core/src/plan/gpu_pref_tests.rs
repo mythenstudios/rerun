@@ -188,5 +188,11 @@ fn p_g4_the_preview_names_the_value() {
     let v = preview(&new_plan());
     let o = v.ops.last().unwrap();
     assert_eq!(o.action, "set gpu preference");
-    assert!(v.gpu_pref.is_some());
+    let note = v.gpu_pref.unwrap();
+    // X3 (ADR 0020): the shared keys can stay behind, empty, after another revert order.
+    assert!(
+        note.contains("DirectX and UserGpuPreferences are shared")
+            && note.contains("another order than newest first can leave them empty for good"),
+        "{note}"
+    );
 }

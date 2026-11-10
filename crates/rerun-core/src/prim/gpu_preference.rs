@@ -31,9 +31,9 @@ use serde::{Deserialize, Serialize};
 use super::compat_layer::stored_exe;
 use super::{Builder, PlanCtx, Step};
 use crate::fold::fold;
-use crate::journal::{InstanceTag, Journal, TxnId, TxnState, VerifyBackups};
+use crate::journal::TxnId;
 use crate::path::RelPath;
-use crate::plan::{self, Op, Plan, PlanError, RootIx, ValueState};
+use crate::plan::{Op, Plan, PlanError, RootIx, ValueState};
 use crate::policy::registry::gpu_pref::{self, Current};
 use crate::policy::registry::{AllowedValue, GpuPref, RegPolicy, RegSlot};
 use crate::sys::SysErrorKind;
@@ -187,24 +187,10 @@ pub(crate) fn plan_into(
 /// The open Rerun transaction whose `GpuPref` set the value of `av` (for a message only:
 /// anything unreadable is "none").
 fn set_by_rerun(ctx: &PlanCtx<'_>, av: &AllowedValue) -> Option<TxnId> {
-    let j = Journal::new(ctx.app?, InstanceTag::new());
-    let listing = j.list().ok()?;
-    let name = fold(av.name());
-    listing.txns.iter().rev().find_map(|l| {
-        let v = l.view.as_ref().ok()?;
-        if l.forgotten || matches!(v.state, TxnState::Closed(_) | TxnState::Empty) {
-            return None;
-        }
-        let full = j.load(&l.id, VerifyBackups::Length).ok()?;
-        let p = plan::decode_recorded(full.head.as_deref()?).ok()?;
-        p.ops.iter().enumerate().find_map(|(k, op)| {
-            let Op::GpuPref { slot, .. } = op else {
-                return None;
-            };
-            let other = plan::allowed(&p, slot, k).ok()?;
-            (other.key().key() == av.key().key() && fold(other.name()) == name).then_some(l.id)
-        })
-    })
+    super::open_txn_with(
+        ctx,
+        |p, k, op| matches!(op, Op::GpuPref { slot, .. } if super::same_value(p, slot, k, av)),
+    )
 }
 
 /// A `gpu_preference` step of `steps` that `plan` leaves out because the preference is set
@@ -230,9 +216,7 @@ pub fn already_set(steps: &[Step], plan: &Plan, ctx: &PlanCtx<'_>) -> Vec<Alread
             continue;
         };
         let planned = plan.ops.iter().enumerate().any(|(k, op)| {
-            matches!(op, Op::GpuPref { slot, .. }
-                if plan::allowed(plan, slot, k).is_ok_and(|o| o.key().key() == av.key().key()
-                    && fold(o.name()) == fold(av.name())))
+            matches!(op, Op::GpuPref { slot, .. } if super::same_value(plan, slot, k, &av))
         });
         let set = gpu_pref::parse(&old)
             .is_ok_and(|p| gpu_pref::current(&p) == Current::Digit(spec.preference.digit()));

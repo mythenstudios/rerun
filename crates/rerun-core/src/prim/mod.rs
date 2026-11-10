@@ -284,6 +284,42 @@ fn main_exe_is_a_file(game: &GameDir<'_>, m: &RelPath) -> Result<(), PlanError> 
     }
 }
 
+/// The newest open Rerun transaction (not forgotten, not closed, its head readable) with an
+/// op for which `f(head, index, op)` holds; for messages only: anything unreadable is "none"
+/// (`compat_layer` review N2, `gpu_preference` N2).
+pub(crate) fn open_txn_with(
+    ctx: &PlanCtx<'_>,
+    f: impl Fn(&Plan, usize, &Op) -> bool,
+) -> Option<crate::journal::TxnId> {
+    use crate::journal::{InstanceTag, Journal, TxnState, VerifyBackups};
+    let j = Journal::new(ctx.app?, InstanceTag::new());
+    let listing = j.list().ok()?;
+    listing.txns.iter().rev().find_map(|l| {
+        let v = l.view.as_ref().ok()?;
+        if l.forgotten || matches!(v.state, TxnState::Closed(_) | TxnState::Empty) {
+            return None;
+        }
+        let full = j.load(&l.id, VerifyBackups::Length).ok()?;
+        let p = crate::plan::decode_recorded(full.head.as_deref()?).ok()?;
+        p.ops
+            .iter()
+            .enumerate()
+            .any(|(k, op)| f(&p, k, op))
+            .then_some(l.id)
+    })
+}
+
+/// `slot` (op `k` of `p`) names the same registry value as `av` (key, folded name).
+pub(crate) fn same_value(
+    p: &Plan,
+    slot: &crate::policy::registry::RegSlot,
+    k: usize,
+    av: &crate::policy::registry::AllowedValue,
+) -> bool {
+    crate::plan::allowed(p, slot, k)
+        .is_ok_and(|o| o.key().key() == av.key().key() && fold(o.name()) == fold(av.name()))
+}
+
 /// `p` folded, for comparisons between targets.
 pub(crate) fn folded(p: &RelPath) -> String {
     fold(p.as_str())

@@ -14,7 +14,9 @@
 //!   as a `REG_SZ` with its NUL. A name that folds to [`PREF_KEY`] must be spelled exactly so
 //!   and hold `0`, `1` or `2`. Anything else is unusual: the planner leaves it alone, a revert
 //!   finds it `Foreign` (also a value of another type, or another `GpuPreference` value such as
-//!   a specific adapter: its form is not measured).
+//!   a specific adapter encoded in the value: its form is not measured; a specific adapter
+//!   stored as a pair of its own would pass as a foreign pair, SB-G1 decides, ADR 0018
+//!   amendment P4-11).
 //! - **Merge** ([`set`]): no value gives `GpuPreference=2;`; an existing `GpuPreference=0;`
 //!   changes in its place; a value without the pair gets it appended. `=2` already there is no
 //!   op (the planner's call); `=1`, the user's "Power saving", is refused (user decision E-G3
@@ -197,9 +199,30 @@ pub enum Unset {
     Foreign,
 }
 
+/// The `GpuPreference` digit of a recorded old value, read without the grammar (review
+/// follow-up: a grammar tightened since the plan must not turn a drifted value `Foreign`): the
+/// first piece (split after each `;`) that starts with `GpuPreference=` and ends with `;`, the
+/// same piece logic as `plan::pref_relation`. `None`: a pair whose value is not `0`, `1` or
+/// `2` (nothing is guessed).
+pub fn old_digit(old: &str) -> Option<Current> {
+    let head = format!("{PREF_KEY}=");
+    let Some(piece) = old
+        .split_inclusive(';')
+        .find(|p| p.starts_with(&head) && p.ends_with(';'))
+    else {
+        return Some(Current::Absent);
+    };
+    match &piece[head.len()..piece.len() - 1] {
+        "0" => Some(Current::Digit(0)),
+        "1" => Some(Current::Digit(1)),
+        "2" => Some(Current::Digit(2)),
+        _ => None,
+    }
+}
+
 /// The current value `cur` with Rerun's `ours` taken back to what `old` held (module docs).
-/// An `old` that does not parse (a rule tightened since the plan) is `Foreign`: nothing is
-/// guessed.
+/// `cur` must be in the grammar (Rerun writes into it); `old`, the journal's value, is read
+/// without the grammar ([`old_digit`]); an old pair of another value is `Foreign`.
 pub fn unset(cur: &str, ours: GpuPref, old: Option<&str>) -> Unset {
     let Ok(mut p) = parse(cur) else {
         return Unset::Foreign;
@@ -209,9 +232,9 @@ pub fn unset(cur: &str, ours: GpuPref, old: Option<&str>) -> Unset {
     }
     let before = match old {
         None => Current::Absent,
-        Some(o) => match parse(o) {
-            Ok(op) => current(&op),
-            Err(_) => return Unset::Foreign,
+        Some(o) => match old_digit(o) {
+            Some(c) => c,
+            None => return Unset::Foreign,
         },
     };
     match before {

@@ -758,15 +758,15 @@ fn system_profile_of_this_machine() {
             let primary = gpu.primary().unwrap();
             assert_eq!(&&primary.adapter, first);
             assert_eq!(
-                p.gpu_vendor(),
+                p.gpu_facts()[0].vendor,
                 VendorFact::Known(hw::GpuVendor::from_id(first.vendor_id))
             );
-            assert_ne!(p.gpu_arch(), ArchFact::NoAdapter);
+            assert_ne!(p.gpu_facts()[0].arch, ArchFact::NoAdapter);
         }
         None => {
             assert_eq!(gpu.primary(), None);
-            assert_eq!(p.gpu_vendor(), VendorFact::NoAdapter);
-            assert_eq!(p.gpu_arch(), ArchFact::NoAdapter);
+            assert_eq!(p.gpu_facts()[0].vendor, VendorFact::NoAdapter);
+            assert_eq!(p.gpu_facts()[0].arch, ArchFact::NoAdapter);
             note(&format!(
                 "system_profile_of_this_machine: no hardware adapter among {} DXGI adapters \
                  (GitHub runner or a VM without a GPU): gpu facts are NoAdapter",

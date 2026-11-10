@@ -42,9 +42,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{Builder, PlanCtx};
 use crate::fold::fold;
-use crate::journal::{InstanceTag, Journal, TxnId, TxnState, VerifyBackups};
+use crate::journal::TxnId;
 use crate::path::RelPath;
-use crate::plan::{self, LayerView, MachineLayers, Op, PlanError, RootIx, ValueState};
+use crate::plan::{LayerView, MachineLayers, Op, PlanError, RootIx, ValueState};
 use crate::policy::registry::{
     AllowedValue, RegPolicy, RegSlot, TokenName,
     layers::{self, MAX_ADD},
@@ -168,26 +168,11 @@ pub(crate) fn stored_exe(
 /// The open Rerun transaction whose `TokenList` on the value of `av` added `token` (review N2),
 /// for the message only: anything unreadable is "none".
 fn added_by_rerun(ctx: &PlanCtx<'_>, av: &AllowedValue, token: &str) -> Option<TxnId> {
-    let j = Journal::new(ctx.app?, InstanceTag::new());
-    let listing = j.list().ok()?;
-    let name = fold(av.name());
-    listing.txns.iter().rev().find_map(|l| {
-        let v = l.view.as_ref().ok()?;
-        if l.forgotten || matches!(v.state, TxnState::Closed(_) | TxnState::Empty) {
-            return None;
-        }
-        let full = j.load(&l.id, VerifyBackups::Length).ok()?;
-        let p = plan::decode_recorded(full.head.as_deref()?).ok()?;
-        p.ops.iter().enumerate().find_map(|(k, op)| {
-            let Op::TokenList { slot, add, .. } = op else {
-                return None;
-            };
-            let other = plan::allowed(&p, slot, k).ok()?;
-            (other.key().key() == av.key().key()
-                && fold(other.name()) == name
-                && add.iter().any(|t| t.as_str() == token))
-            .then_some(l.id)
-        })
+    super::open_txn_with(ctx, |p, k, op| {
+        let Op::TokenList { slot, add, .. } = op else {
+            return false;
+        };
+        super::same_value(p, slot, k, av) && add.iter().any(|t| t.as_str() == token)
     })
 }
 

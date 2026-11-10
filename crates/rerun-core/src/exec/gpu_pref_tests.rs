@@ -337,3 +337,101 @@ fn r_g_a_change_after_the_plan_is_a_mismatch() {
     put_pref(&env.sys, &sz("AutoHDREnable=1;"));
     assert!(matches!(env.apply(&h), Ok(Outcome::Applied(_))));
 }
+
+/// The records of the transaction directory `dir`.
+fn records(env: &Env, t: &crate::journal::TxnId) -> usize {
+    crate::journal::tests::rewrite(env.sys.fake_fs(), &env.txn_dir(t), None, |_| {}).into()
+}
+
+/// R-G6, tampering (review follow-up, `records_fit`): an `Intent.before` other than the planned
+/// old value, a `.bin` for it, none although there is an old value: `Blocked` for verify and
+/// revert, nothing written.
+#[test]
+fn r_g6_records_that_do_not_fit_a_gpu_pref_are_blocked() {
+    use crate::journal::tests::rewrite;
+    use crate::journal::{Before, Digest};
+    type Tamper = (&'static str, fn(&Env, &str));
+    let tampers: [Tamper; 3] = [
+        ("before other than old", |env, dir| {
+            rewrite(env.sys.fake_fs(), dir, None, |e| {
+                e.intent_inline(0, &sz("AutoHDREnable=0;").encode().unwrap().1);
+            });
+        }),
+        ("before as a .bin", |env, dir| {
+            let old = sz("AutoHDREnable=1;").encode().unwrap().1;
+            rewrite(env.sys.fake_fs(), dir, None, |e| {
+                e.intent_before(
+                    0,
+                    Some(Before::Bin(Digest {
+                        sha256: crate::plan::tests::sha(&old),
+                        len: u64::try_from(old.len()).unwrap(),
+                    })),
+                );
+            });
+        }),
+        ("no before for an old value", |env, dir| {
+            rewrite(env.sys.fake_fs(), dir, None, |e| e.intent_before(0, None));
+        }),
+    ];
+    for (what, tamper) in tampers {
+        let env = Env::new(finish(pref_base_with("AutoHDREnable=1;")));
+        let t = env.applied(&plan_all(&env, &[pref_step("game.exe")]));
+        tamper(&env, &env.txn_dir(&t));
+        let after = snap_all(&env);
+        let n = records(&env, &t);
+        assert!(
+            matches!(
+                env.try_verify(&t),
+                Err(ExecError::Refused(Refusal::Blocked { .. }))
+            ),
+            "{what}: verify"
+        );
+        let r = env.revert(&t);
+        assert!(
+            matches!(&r, Err(ExecError::Refused(Refusal::Blocked { .. }))),
+            "{what}: {r:?}"
+        );
+        assert_eq!(after, snap_all(&env), "{what}");
+        assert_eq!(records(&env, &t), n, "{what}: no record written");
+    }
+}
+
+/// `NotWritten` (the counterpart of R-T3): Settings writes exactly `GpuPreference=2;` between
+/// the apply's read and `set_pref`; `set_pref` refuses (`Mismatch`, nothing written), so the
+/// value there is not Rerun's: the rollback finds it `Foreign` and leaves it, never "restores"
+/// over it.
+#[test]
+fn r_g7_a_value_settings_wrote_before_our_set_is_left() {
+    use crate::sys::fake::RegPrim;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let env = Env::new(finish(pref_base().key(hkcu(PREFS_KEY))));
+    let h = plan_all(&env, &[pref_step("game.exe")]);
+    let fired = Arc::new(AtomicBool::new(false));
+    let f2 = Arc::clone(&fired);
+    // The first kernel-name check is the one of `set_pref`, after the apply's own read.
+    env.sys.fake_registry().on_step(move |r, call| {
+        if call == RegPrim::KernelName && !f2.swap(true, Ordering::SeqCst) {
+            r.put_value(
+                &hkcu(PREFS_KEY),
+                &exe_name("game.exe"),
+                &sz("GpuPreference=2;"),
+            )
+            .unwrap();
+        }
+    });
+    let r = env.apply(&h);
+    env.sys.fake_registry().clear_on_step();
+    assert!(fired.load(Ordering::SeqCst));
+    let Err(ApplyError::LeftOpen { txn, cause, .. }) = r else {
+        panic!("{r:?}");
+    };
+    assert!(
+        matches!(&*cause, ExecError::Op { op: 0, source }
+            if source.kind == crate::sys::SysErrorKind::Mismatch),
+        "{cause:?}"
+    );
+    assert_eq!(pref_value(&env.sys), Some(sz("GpuPreference=2;")));
+    assert!(env.revert(&txn).is_ok_and(|r| r.closed.is_none()));
+    assert_eq!(pref_value(&env.sys), Some(sz("GpuPreference=2;")));
+}

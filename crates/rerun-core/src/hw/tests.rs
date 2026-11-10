@@ -102,8 +102,8 @@ fn dev_machine() -> FakeSystem {
 #[test]
 fn developer_machine() {
     let p = read(&dev_machine(), Some(GpuArchTable::builtin().unwrap()));
-    assert_eq!(p.gpu_vendor(), VendorFact::Known(GpuVendor::Amd));
-    assert_eq!(p.gpu_arch(), ArchFact::Known(id("rdna4")));
+    assert_eq!(p.gpu_facts()[0].vendor, VendorFact::Known(GpuVendor::Amd));
+    assert_eq!(p.gpu_facts()[0].arch, ArchFact::Known(id("rdna4")));
     assert_eq!(p.cpu_threads(), Fact::Known(32));
     assert_eq!(p.cpu_hybrid(), Fact::Known(false));
     assert_eq!(p.os_build(), Fact::Known(26300));
@@ -133,11 +133,11 @@ fn ci_runner_has_no_hardware_adapter() {
         .unwrap();
     let p = read(&sys, Some(GpuArchTable::builtin().unwrap()));
     assert_eq!(p.gpu.as_ref().unwrap().adapters, Vec::new());
-    assert_eq!(p.gpu_vendor(), VendorFact::NoAdapter);
-    assert_eq!(p.gpu_arch(), ArchFact::NoAdapter);
+    assert_eq!(p.gpu_facts()[0].vendor, VendorFact::NoAdapter);
+    assert_eq!(p.gpu_facts()[0].arch, ArchFact::NoAdapter);
     // No adapter at all (the fake's default) is the same.
     let p = read(&FakeSystem::new(), Some(GpuArchTable::builtin().unwrap()));
-    assert_eq!(p.gpu_vendor(), VendorFact::NoAdapter);
+    assert_eq!(p.gpu_facts()[0].vendor, VendorFact::NoAdapter);
 }
 
 #[test]
@@ -152,8 +152,11 @@ fn software_adapters_of_any_vendor_are_dropped() {
         .build()
         .unwrap();
     let p = read(&sys, Some(&synthetic_table()));
-    assert_eq!(p.gpu_vendor(), VendorFact::Known(GpuVendor::Nvidia));
-    assert_eq!(p.gpu_arch(), ArchFact::Known(id("ada")));
+    assert_eq!(
+        p.gpu_facts()[0].vendor,
+        VendorFact::Known(GpuVendor::Nvidia)
+    );
+    assert_eq!(p.gpu_facts()[0].arch, ArchFact::Known(id("ada")));
 }
 
 #[test]
@@ -168,8 +171,8 @@ fn a_gpu_error_makes_both_gpu_facts_unavailable() {
     // Checked before the missing table and before the adapters.
     for table in [Some(GpuArchTable::builtin().unwrap()), None] {
         let p = read(&sys, table);
-        assert_eq!(p.gpu_vendor(), VendorFact::Unavailable);
-        assert_eq!(p.gpu_arch(), ArchFact::Unavailable);
+        assert_eq!(p.gpu_facts()[0].vendor, VendorFact::Unavailable);
+        assert_eq!(p.gpu_facts()[0].arch, ArchFact::Unavailable);
         let e = p.gpu.as_ref().unwrap_err();
         assert!(
             matches!(e, ProfileError::Sys(ProfileSource::Gpu, s) if s.kind == SysErrorKind::Unsupported),
@@ -185,14 +188,14 @@ fn a_gpu_error_makes_both_gpu_facts_unavailable() {
 #[test]
 fn without_a_table_the_arch_is_unavailable_and_the_vendor_known() {
     let p = read(&dev_machine(), None);
-    assert_eq!(p.gpu_vendor(), VendorFact::Known(GpuVendor::Amd));
-    assert_eq!(p.gpu_arch(), ArchFact::Unavailable);
+    assert_eq!(p.gpu_facts()[0].vendor, VendorFact::Known(GpuVendor::Amd));
+    assert_eq!(p.gpu_facts()[0].arch, ArchFact::Unavailable);
     let primary = p.gpu.as_ref().unwrap().primary().unwrap();
     assert_eq!(primary.arch, GpuArch::Unknown);
     assert_eq!(primary.integrated, None);
     // No adapter is checked before the missing table.
     let p = read(&FakeSystem::new(), None);
-    assert_eq!(p.gpu_arch(), ArchFact::NoAdapter);
+    assert_eq!(p.gpu_facts()[0].arch, ArchFact::NoAdapter);
 }
 
 #[test]
@@ -202,8 +205,8 @@ fn an_unknown_device_is_unknown_with_integrated_none() {
         .build()
         .unwrap();
     let p = read(&sys, Some(GpuArchTable::builtin().unwrap()));
-    assert_eq!(p.gpu_vendor(), VendorFact::Known(GpuVendor::Amd));
-    assert_eq!(p.gpu_arch(), ArchFact::Unknown);
+    assert_eq!(p.gpu_facts()[0].vendor, VendorFact::Known(GpuVendor::Amd));
+    assert_eq!(p.gpu_facts()[0].arch, ArchFact::Unknown);
     let primary = p.gpu.as_ref().unwrap().primary().unwrap();
     assert_eq!(primary.arch, GpuArch::Unknown);
     assert_eq!(primary.integrated, None);
@@ -222,7 +225,7 @@ fn revision_and_subsystem_do_not_matter() {
             .build()
             .unwrap();
         let p = read(&sys, Some(GpuArchTable::builtin().unwrap()));
-        assert_eq!(p.gpu_arch(), ArchFact::Known(id("rdna4")));
+        assert_eq!(p.gpu_facts()[0].arch, ArchFact::Known(id("rdna4")));
     }
 }
 
@@ -249,8 +252,8 @@ fn igpu_before_dgpu_keeps_the_dxgi_order() {
     assert_eq!(gpu.adapters[0].vram_mb(), 128);
     assert_eq!(gpu.adapters[1].integrated, Some(false));
     assert_eq!(gpu.adapters[1].arch, GpuArch::Known(id("ada")));
-    assert_eq!(p.gpu_vendor(), VendorFact::Known(GpuVendor::Intel));
-    assert_eq!(p.gpu_arch(), ArchFact::Known(id("xe_lp")));
+    assert_eq!(p.gpu_facts()[0].vendor, VendorFact::Known(GpuVendor::Intel));
+    assert_eq!(p.gpu_facts()[0].arch, ArchFact::Known(id("xe_lp")));
     assert_eq!(
         p.gpu_facts(),
         vec![
@@ -339,8 +342,11 @@ fn another_vendor_is_other() {
         .build()
         .unwrap();
     let p = read(&sys, Some(&synthetic_table()));
-    assert_eq!(p.gpu_vendor(), VendorFact::Known(GpuVendor::Other(0x5143)));
-    assert_eq!(p.gpu_arch(), ArchFact::Unknown);
+    assert_eq!(
+        p.gpu_facts()[0].vendor,
+        VendorFact::Known(GpuVendor::Other(0x5143))
+    );
+    assert_eq!(p.gpu_facts()[0].arch, ArchFact::Unknown);
     assert_eq!(GpuVendor::Other(0x5143).to_string(), "vendor 0x5143");
 }
 
@@ -421,7 +427,7 @@ fn parts_are_independent() {
     // No topology, no OS values, the developer machine's GPU.
     let sys = FakeSystem::builder().gpu(rx_9070_xt()).build().unwrap();
     let p = read(&sys, Some(GpuArchTable::builtin().unwrap()));
-    assert_eq!(p.gpu_arch(), ArchFact::Known(id("rdna4")));
+    assert_eq!(p.gpu_facts()[0].arch, ArchFact::Known(id("rdna4")));
     assert_eq!(p.cpu_threads(), Fact::Unavailable);
     assert_eq!(p.cpu_hybrid(), Fact::Unavailable);
     assert_eq!(p.os_build(), Fact::Unavailable);
@@ -451,7 +457,7 @@ fn parts_are_independent() {
     );
     assert_eq!(p.os_build(), Fact::Unavailable);
     assert_eq!(p.cpu_threads(), Fact::Known(32));
-    assert_eq!(p.gpu_vendor(), VendorFact::Known(GpuVendor::Amd));
+    assert_eq!(p.gpu_facts()[0].vendor, VendorFact::Known(GpuVendor::Amd));
 }
 
 /// A profile read with a table equals one read again: no hidden state.

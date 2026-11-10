@@ -212,6 +212,53 @@ fn tw_gpu_keys_are_one_block_per_adapter() {
         when::eval(Some(&w(r#"{"gpu.arch":["rdna4","ada","xe_lp"]}"#)), &three),
         Tri::Yes
     );
+    // The laptop without a table: gpu.arch is unavailable on both (unknown); gpu.vendor: amd is
+    // no on both (no).
+    let lap_adapters = || {
+        FakeSystem::builder()
+            .gpu(GpuAdapter {
+                vendor_id: 0x8086,
+                device_id: 0xB001,
+                ..GpuAdapter::default()
+            })
+            .gpu(GpuAdapter {
+                vendor_id: 0x10DE,
+                device_id: 0xA0FF,
+                ..GpuAdapter::default()
+            })
+    };
+    let blind = hw::read(&lap_adapters().build().unwrap(), None);
+    assert_eq!(
+        when::eval(Some(&w(r#"{"gpu.arch":["ada"]}"#)), &blind),
+        Tri::Unknown
+    );
+    assert_eq!(
+        when::eval(Some(&w(r#"{"gpu.vendor":"amd"}"#)), &blind),
+        Tri::No
+    );
+    // An iGPU the table has no entry for: gpu.integrated is no there (no entry), yes on the
+    // dGPU: unknown.
+    let table = hw::tests::synthetic_table();
+    let unlisted = hw::read(
+        &FakeSystem::builder()
+            .gpu(GpuAdapter {
+                vendor_id: 0x8086,
+                device_id: 0xB0FE,
+                ..GpuAdapter::default()
+            })
+            .gpu(GpuAdapter {
+                vendor_id: 0x10DE,
+                device_id: 0xA0FF,
+                ..GpuAdapter::default()
+            })
+            .build()
+            .unwrap(),
+        Some(&table),
+    );
+    assert_eq!(
+        when::eval(Some(&w(r#"{"gpu.integrated":false}"#)), &unlisted),
+        Tri::Unknown
+    );
 }
 
 #[test]

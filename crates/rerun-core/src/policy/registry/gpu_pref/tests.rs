@@ -150,8 +150,25 @@ fn unset_takes_back_only_rerun_s_pair() {
     );
     assert_eq!(unset("GpuPreference=0;", HP, None), Unset::NotOurs);
     assert_eq!(unset("AutoHDREnable=1;", HP, None), Unset::NotOurs);
-    // An old value that no longer parses is not guessed at.
-    assert_eq!(unset("GpuPreference=2;", HP, Some("odd")), Unset::Foreign);
+    // The journal's old value is read without the grammar (a grammar tightened since the plan
+    // must not make a drifted value Foreign): only its GpuPreference piece counts.
+    assert_eq!(
+        unset(
+            "AutoHDREnable=0;GpuPreference=2;",
+            HP,
+            Some("AutoHDREnable=1; X = y;GpuPreference=0;")
+        ),
+        Unset::Rest(Some("AutoHDREnable=0;GpuPreference=0;".to_owned()))
+    );
+    assert_eq!(
+        unset("AutoHDREnable=0;GpuPreference=2;", HP, Some("odd text")),
+        Unset::Rest(Some("AutoHDREnable=0;".to_owned()))
+    );
+    // An old pair of another value is not guessed at.
+    assert_eq!(
+        unset("GpuPreference=2;", HP, Some("GpuPreference=7;")),
+        Unset::Foreign
+    );
 }
 
 /// Property: for every grammatical old value whose pair is missing or `0`,

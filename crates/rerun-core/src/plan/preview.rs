@@ -74,7 +74,18 @@ pub const GPU_PREF_ACTION: &str = "set gpu preference";
 
 /// What a plan with a graphics preference says once (P4-11, ADR 0020 amendment P4-11; rule 5;
 /// senior-dev conditions S3 and N2).
-pub const GPU_PREF_NOTE: &str = "graphics preference: only the GpuPreference pair of the value changes, to High performance; every other setting of the executable in Settings > System > Display > Graphics (such as Auto HDR) stays as it is. It takes effect at the next start of the game. A revert restores the old value exactly if nobody changed it; if Windows or you changed the value since, it sets back only Rerun's preference while it is still High performance, and a preference you chose since stays. If you choose High performance yourself after the apply, Rerun cannot tell it from its own: the revert sets the old preference back. A preference that is High performance already is left as it is, also one an earlier Rerun transaction set: reverting that transaction takes it back. The keys DirectX and UserGpuPreferences are shared with Windows: a revert deletes one Rerun created only when it is empty. Whether OpenGL and Vulkan games follow the setting depends on the graphics driver";
+pub const GPU_PREF_NOTE: &str = "graphics preference: only the GpuPreference pair of the \
+value changes, to High performance; every other setting of the executable in Settings > System > \
+Display > Graphics (such as Auto HDR) stays as it is. It takes effect at the next start of the \
+game. A revert restores the old value exactly if nobody changed it; if Windows or you changed \
+the value since, it sets back only Rerun's preference while it is still High performance, and a \
+preference you chose since stays. If you choose High performance yourself after the apply, \
+Rerun cannot tell it from its own: the revert sets the old preference back. A preference that \
+is High performance already is left as it is, also one an earlier Rerun transaction set: \
+reverting that transaction takes it back. The keys DirectX and UserGpuPreferences are shared \
+with Windows: a revert deletes one Rerun created only when it is empty, so reverting \
+transactions in another order than newest first can leave them empty for good. Whether OpenGL \
+and Vulkan games follow the setting depends on the graphics driver";
 
 /// What a plan with INI ops says once (P2-12, ADR 0020 amendment P2-12; user decisions E1 b, E2
 /// a, E5 a).

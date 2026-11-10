@@ -737,7 +737,18 @@ pub(super) fn act<W: Reverting>(
             let Op::GpuPref { old, pref, .. } = op else {
                 return Err(not_a_registry_op(k));
             };
-            let old = old.as_ref().and_then(plan::pref_old);
+            // Security review: an old value that is no usable inline `REG_SZ` never falls back to
+            // "there was none" (which would remove the pair); the observation sees it `Foreign`
+            // already, this is the second line.
+            let old = match old.as_ref() {
+                None => None,
+                Some(s) => Some(plan::pref_old(s).ok_or_else(|| {
+                    e(SysError::new(
+                        SysErrorKind::Other,
+                        "the recorded old graphics preference value is no inline REG_SZ",
+                    ))
+                })?),
+            };
             reg.unset_pref(av, expected, *pref, old.as_deref())
                 .map_err(|x| match x {
                     RegWriteError::Sys(s) => e(s),

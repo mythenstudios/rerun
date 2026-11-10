@@ -90,7 +90,7 @@ pub struct SystemProfile {
     pub os: Result<OsBuild, ProfileError>,
     /// Smart App Control (P4-10): `laa_patch` is refused while it enforces.
     pub sac: SacState,
-    /// Whether an architecture table was given: without one `gpu_arch` is `Unavailable`.
+    /// Whether an architecture table was given: without one `gpu.arch` and `gpu.integrated` are `Unavailable`.
     has_table: bool,
 }
 
@@ -153,7 +153,7 @@ pub enum Fact<T> {
 }
 
 /// Reads the profile. `table` is the architecture table the Topos are validated with (the
-/// built-in one until the phase 4 index); `None` makes `gpu_arch` `Unavailable`.
+/// built-in one until the phase 4 index); `None` makes `gpu.arch` and `gpu.integrated` `Unavailable`.
 pub fn read(sys: &dyn System, table: Option<&GpuArchTable>) -> SystemProfile {
     SystemProfile {
         gpu: gpu::read(sys.gpu(), table),
@@ -211,24 +211,6 @@ impl SystemProfile {
             arch,
             integrated,
         }
-    }
-
-    /// The first adapter's vendor (the only one's on a system with one hardware adapter); a
-    /// `when` uses [`Self::gpu_facts`]. Checks in order: adapters not read, no hardware adapter.
-    pub fn gpu_vendor(&self) -> VendorFact {
-        self.first_gpu().vendor
-    }
-
-    /// The first adapter's architecture (the only one's on a system with one hardware
-    /// adapter); a `when` uses [`Self::gpu_facts`]. Checks in order: adapters not read, no
-    /// hardware adapter, no table, no table entry.
-    pub fn gpu_arch(&self) -> ArchFact {
-        self.first_gpu().arch
-    }
-
-    fn first_gpu(&self) -> GpuFacts {
-        // `gpu_facts` is never empty.
-        self.gpu_facts().swap_remove(0)
     }
 
     /// `gpu.hybrid` (P4-11, user decision E-G1 c): at least two hardware adapters. Not whether
