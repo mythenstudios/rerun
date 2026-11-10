@@ -87,13 +87,17 @@ links:
   when:
     gpu.vendor: amd                 # amd | nvidia | intel
     gpu.arch: [vega, rdna1, rdna2]  # identifiers declared in data/gpu-arch.yaml (archs)
+    gpu.integrated: false           # the table's integrated flag of the adapter
+    gpu.hybrid: true                # at least two hardware adapters
     cpu.threads: { gt: 12 }         # gt | gte | lt | lte | eq; several in one object = AND (range)
     cpu.hybrid: true
     os.build: { gte: 22000 }
   ```
-  - GPU keys use the **conditions adapter**: the first hardware adapter in DXGI order (software adapters and vendor `0x1414` skipped). A per-game adapter comes with `gpu_preference` (`03b-gpu-display.md`).
+  - `gpu.vendor`, `gpu.arch` and `gpu.integrated` are one **block**, checked on each hardware adapter (software adapters and vendor `0x1414` skipped; P4-11, ADR 0015 amendment): the block is yes when it holds on every adapter, no when it fails on every adapter, else unknown; then it is ANDed with the other keys. With one adapter that is simply each key ANDed. On a laptop with an Intel iGPU and an NVIDIA dGPU, `gpu.vendor: nvidia` is unknown (planned only on an explicit pick, with a warning) and `gpu.vendor: nvidia` with `gpu.integrated: true` is no. Rerun does not guess which adapter a game will use; the report says so when the PC has several adapters.
   - `gpu.vendor`: from the PCI vendor ID (`0x1002` amd, `0x10DE` nvidia, `0x8086` intel); any other vendor matches none.
   - `gpu.arch`: identifiers matching `^[a-z][a-z0-9_]{0,31}$`, never `unknown`, each declared in `archs` of `data/gpu-arch.yaml` (`03b-gpu-display.md`); from phase 4 the loader rejects an undeclared one. A device the table does not know matches no list.
+  - `gpu.integrated`: the `integrated` flag of the adapter's entry in the architecture table; a device without an entry matches neither `true` nor `false`. Until the full table is imported it practically matches nothing (`03b-gpu-display.md`).
+  - `gpu.hybrid`: `true` when the PC has at least two hardware adapters (an iGPU next to a dGPU, also on a desktop, or two discrete cards); system-wide.
   - `cpu.threads`: logical processors available system-wide (`CpuTopology::logical_count`, CPU Sets flagged `RealTime` or `Allocated` excluded, ADR 0010), not Rerun's process affinity. Above 64, a game that asks `GetSystemInfo` sees only its processor group.
   - `cpu.hybrid`: `true` when Windows reports more than one efficiency class.
   - `os.build`: `CurrentBuildNumber` of `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion` (e.g. 22000, the first Windows 11 build); the update revision (`UBR`) is never compared.

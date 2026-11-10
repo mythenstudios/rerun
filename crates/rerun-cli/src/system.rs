@@ -7,8 +7,8 @@ use std::io::Write;
 use rerun_core::escape;
 use rerun_core::hw::arch::TableError;
 use rerun_core::hw::{
-    self, ArchFact, CpuTopology, Fact, GpuArch, GpuArchTable, GpuProfile, ProfileError,
-    SystemProfile, VendorFact,
+    self, ArchFact, CpuTopology, Fact, GpuArch, GpuArchTable, GpuFacts, GpuProfile, IntegratedFact,
+    ProfileError, SystemProfile, VendorFact,
 };
 use rerun_core::sys::System;
 
@@ -89,7 +89,6 @@ fn gpu<'a>(
     for (i, a) in g.adapters.iter().enumerate() {
         m.push(Message::Adapter {
             number: i,
-            conditions: g.primary().is_some_and(|p| std::ptr::eq(p, a)),
             name: escape::text(&a.adapter.name),
         });
         let arch = match (&a.arch, table_error) {
@@ -222,31 +221,60 @@ fn cpu(m: &mut Vec<Message<'_>>, t: &CpuTopology) {
     });
 }
 
-fn conditions<'a>(m: &mut Vec<Message<'a>>, p: &'a SystemProfile) {
-    let vendor = match p.gpu_vendor() {
+fn vendor_text<'a>(v: VendorFact) -> FactText<'a> {
+    match v {
         VendorFact::Known(v) => FactText::Vendor(v),
         VendorFact::NoAdapter => FactText::NoAdapter,
         VendorFact::Unavailable => FactText::Unavailable,
-    };
-    let arch = match p.gpu_arch() {
+    }
+}
+
+fn arch_text<'a>(a: &ArchFact) -> FactText<'a> {
+    match a {
         ArchFact::Known(id) => FactText::Arch(owned(id.as_str())),
         ArchFact::Unknown => FactText::Unknown,
         ArchFact::NoAdapter => FactText::NoAdapter,
         ArchFact::Unavailable => FactText::Unavailable,
+    }
+}
+
+fn integrated_text<'a>(i: IntegratedFact) -> FactText<'a> {
+    match i {
+        IntegratedFact::Known(b) => FactText::Bool(b),
+        IntegratedFact::Unknown => FactText::Unknown,
+        IntegratedFact::NoAdapter => FactText::NoAdapter,
+        IntegratedFact::Unavailable => FactText::Unavailable,
+    }
+}
+
+/// One value, or one per hardware adapter (P4-11, E-G2 d).
+fn per_adapter<'a>(facts: &[GpuFacts], f: impl Fn(&GpuFacts) -> FactText<'a>) -> FactText<'a> {
+    match facts {
+        [one] => f(one),
+        many => FactText::PerAdapter(many.iter().map(f).collect()),
+    }
+}
+
+fn conditions<'a>(m: &mut Vec<Message<'a>>, p: &'a SystemProfile) {
+    let gpus = p.gpu_facts();
+    let flag = |f: Fact<bool>| match f {
+        Fact::Known(b) => FactText::Bool(b),
+        Fact::Unavailable => FactText::Unavailable,
     };
     let number = |f: Fact<u32>| match f {
         Fact::Known(n) => FactText::Number(n),
         Fact::Unavailable => FactText::Unavailable,
     };
-    let hybrid = match p.cpu_hybrid() {
-        Fact::Known(b) => FactText::Bool(b),
-        Fact::Unavailable => FactText::Unavailable,
-    };
     for (key, value) in [
-        ("gpu.vendor", vendor),
-        ("gpu.arch", arch),
+        ("gpu.vendor", per_adapter(&gpus, |g| vendor_text(g.vendor))),
+        ("gpu.arch", per_adapter(&gpus, |g| arch_text(&g.arch))),
+        (
+            "gpu.integrated",
+            per_adapter(&gpus, |g| integrated_text(g.integrated)),
+        ),
+        ("gpu.hybrid", flag(p.gpu_hybrid())),
         ("cpu.threads", number(p.cpu_threads())),
-        ("cpu.hybrid", hybrid),
+        ("cpu.hybrid", flag(p.cpu_hybrid())),
         ("os.build", number(p.os_build())),
     ] {
         m.push(Message::Condition { key, value });

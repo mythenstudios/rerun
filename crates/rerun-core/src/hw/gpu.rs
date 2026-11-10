@@ -2,8 +2,8 @@
 //!
 //! Only hardware adapters count, in DXGI order: an adapter with the software flag **or** the
 //! Microsoft vendor ID `0x1414` is dropped (CI runners list the Basic Render Driver without the
-//! flag). The first remaining one is [`GpuProfile::primary`], the adapter `when` conditions are
-//! evaluated against in step 15. Vendor from the PCI vendor ID; architecture and `integrated`
+//! flag). The first remaining one is [`GpuProfile::primary`]; `when` checks its GPU keys on
+//! every remaining adapter (P4-11, ADR 0015 amendment). Vendor from the PCI vendor ID; architecture and `integrated`
 //! from the table by `(vendor, device)`; revision and subsystem IDs are never consulted.
 
 use std::fmt;
@@ -120,9 +120,14 @@ impl GpuProfile {
         }
     }
 
-    /// The conditions adapter: the first hardware adapter in DXGI order.
+    /// The first hardware adapter in DXGI order (the one that drives the primary display).
     pub fn primary(&self) -> Option<&GpuEntry> {
         self.adapters.first()
+    }
+
+    /// `gpu.hybrid` (P4-11, E-G1 c): at least two hardware adapters.
+    pub fn hybrid(&self) -> bool {
+        self.adapters.len() >= 2
     }
 }
 

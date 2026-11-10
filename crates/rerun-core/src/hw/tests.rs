@@ -46,7 +46,7 @@ fn basic_render_driver(software: bool) -> GpuAdapter {
 }
 
 /// SYNTHETIC test-only table: invented device IDs, never shipped data.
-fn synthetic_table() -> GpuArchTable {
+pub(crate) fn synthetic_table() -> GpuArchTable {
     let entry = |vendor, arch: &str, integrated, ids: &[u32], ranges: &[(u32, u32)]| ArchEntry {
         vendor,
         arch: id(arch),
@@ -226,8 +226,8 @@ fn revision_and_subsystem_do_not_matter() {
     }
 }
 
-/// A laptop: DXGI lists the iGPU first. The order is kept and the iGPU is the conditions
-/// adapter (the per-game choice comes with `gpu_preference`).
+/// A laptop: DXGI lists the iGPU first. The order is kept; `gpu_vendor`/`gpu_arch` are the
+/// first adapter's, `gpu_facts` has one entry per adapter (P4-11) and the system is hybrid.
 #[test]
 fn igpu_before_dgpu_keeps_the_dxgi_order() {
     let sys = FakeSystem::builder()
@@ -251,6 +251,84 @@ fn igpu_before_dgpu_keeps_the_dxgi_order() {
     assert_eq!(gpu.adapters[1].arch, GpuArch::Known(id("ada")));
     assert_eq!(p.gpu_vendor(), VendorFact::Known(GpuVendor::Intel));
     assert_eq!(p.gpu_arch(), ArchFact::Known(id("xe_lp")));
+    assert_eq!(
+        p.gpu_facts(),
+        vec![
+            GpuFacts {
+                vendor: VendorFact::Known(GpuVendor::Intel),
+                arch: ArchFact::Known(id("xe_lp")),
+                integrated: IntegratedFact::Known(true),
+            },
+            GpuFacts {
+                vendor: VendorFact::Known(GpuVendor::Nvidia),
+                arch: ArchFact::Known(id("ada")),
+                integrated: IntegratedFact::Known(false),
+            },
+        ]
+    );
+    assert!(gpu.hybrid());
+    assert_eq!(p.gpu_hybrid(), Fact::Known(true));
+}
+
+/// `gpu.hybrid` (P4-11, E-G1 c): at least two hardware adapters; the Basic Render Driver does
+/// not count; a failed read is unavailable. `gpu_facts` is never empty.
+#[test]
+fn gpu_hybrid_counts_hardware_adapters_and_facts_are_never_empty() {
+    let p = read(&dev_machine(), Some(&synthetic_table()));
+    assert_eq!(p.gpu_hybrid(), Fact::Known(false));
+    assert_eq!(p.gpu_facts().len(), 1);
+    assert_eq!(p.gpu_facts()[0].integrated, IntegratedFact::Known(false));
+
+    let ci = FakeSystem::builder()
+        .gpu(basic_render_driver(false))
+        .gpu(basic_render_driver(true))
+        .build()
+        .unwrap();
+    let p = read(&ci, Some(&synthetic_table()));
+    assert_eq!(p.gpu_hybrid(), Fact::Known(false));
+    assert_eq!(
+        p.gpu_facts(),
+        vec![GpuFacts {
+            vendor: VendorFact::NoAdapter,
+            arch: ArchFact::NoAdapter,
+            integrated: IntegratedFact::NoAdapter,
+        }]
+    );
+
+    let broken = FakeSystem::builder()
+        .gpu_error(SysErrorKind::Unsupported)
+        .build()
+        .unwrap();
+    let p = read(&broken, Some(&synthetic_table()));
+    assert_eq!(p.gpu_hybrid(), Fact::Unavailable);
+    assert_eq!(
+        p.gpu_facts(),
+        vec![GpuFacts {
+            vendor: VendorFact::Unavailable,
+            arch: ArchFact::Unavailable,
+            integrated: IntegratedFact::Unavailable,
+        }]
+    );
+
+    // Two identical discrete cards are hybrid as well (two hardware adapters).
+    let twins = FakeSystem::builder()
+        .gpu(rx_9070_xt())
+        .gpu(rx_9070_xt())
+        .build()
+        .unwrap();
+    let p = read(&twins, Some(&synthetic_table()));
+    assert_eq!(p.gpu_hybrid(), Fact::Known(true));
+    assert_eq!(p.gpu_facts().len(), 2);
+
+    // Without a table `integrated` is unavailable; with one but no entry it is unknown.
+    let unknown = FakeSystem::builder()
+        .gpu(adapter("synthetic unknown", 0x1002, 0x7551, 0))
+        .build()
+        .unwrap();
+    let p = read(&unknown, None);
+    assert_eq!(p.gpu_facts()[0].integrated, IntegratedFact::Unavailable);
+    let p = read(&unknown, Some(&synthetic_table()));
+    assert_eq!(p.gpu_facts()[0].integrated, IntegratedFact::Unknown);
 }
 
 #[test]

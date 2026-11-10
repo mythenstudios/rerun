@@ -454,7 +454,8 @@ pub struct Issue {
     pub variants: Vec<Variant>,
 }
 
-/// `when` (ADR 0015): several keys are AND.
+/// `when` (ADR 0015): several keys are AND; the GPU keys `gpu.vendor`, `gpu.arch` and
+/// `gpu.integrated` are checked together on each hardware adapter (P4-11).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct When {
@@ -474,6 +475,22 @@ pub struct When {
         skip_serializing_if = "Option::is_none"
     )]
     pub gpu_arch: Option<Vec<ArchIdText>>,
+    /// `gpu.integrated` (P4-11): the table's `integrated` of the adapter.
+    #[serde(
+        rename = "gpu.integrated",
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gpu_integrated: Option<bool>,
+    /// `gpu.hybrid` (P4-11): at least two hardware adapters.
+    #[serde(
+        rename = "gpu.hybrid",
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gpu_hybrid: Option<bool>,
     /// `cpu.threads`.
     #[serde(
         rename = "cpu.threads",

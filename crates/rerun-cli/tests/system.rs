@@ -45,6 +45,8 @@ fn rerun_system_on_this_machine() {
     for key in [
         "gpu.vendor",
         "gpu.arch",
+        "gpu.integrated",
+        "gpu.hybrid",
         "cpu.threads",
         "cpu.hybrid",
         "os.build",

@@ -83,7 +83,7 @@ fn the_developer_machine() {
     let expected = format!(
         "\
 GPU
-  adapter 0 (conditions adapter): AMD Radeon RX 9070 XT
+  adapter 0: AMD Radeon RX 9070 XT
     AMD, PCI 0x1002:0x7550, 16384 MiB VRAM, integrated: no, architecture: rdna4
 
 {DEV_CPU}
@@ -92,6 +92,8 @@ OS
 
 {CONDITIONS}  gpu.vendor: amd
   gpu.arch: rdna4
+  gpu.integrated: false
+  gpu.hybrid: false
   cpu.threads: 32
   cpu.hybrid: false
   os.build: 26300
@@ -131,7 +133,7 @@ fn system_on_a_closed_pipe_exits_0_and_on_a_write_error_1() {
         assert_eq!(String::from_utf8(err.into_inner()).unwrap(), stderr);
         assert_eq!(
             String::from_utf8(out.into_inner().written).unwrap(),
-            "GPU\n  adapter 0 (conditions adapter): AMD Radeon RX 9070 XT\n"
+            "GPU\n  adapter 0: AMD Radeon RX 9070 XT\n"
         );
     }
 }
@@ -148,7 +150,7 @@ fn entry(a: GpuAdapter, arch: Option<&str>, integrated: Option<bool>) -> GpuEntr
     }
 }
 
-/// The GPU block and the two GPU conditions of `p`.
+/// The GPU block and the four GPU conditions of `p`.
 fn gpu_part(p: &SystemProfile, table_error: Option<&TableError>) -> (String, String) {
     let all = shown(p, table_error);
     let gpu = all.split("\n\n").next().unwrap().to_owned();
@@ -157,7 +159,7 @@ fn gpu_part(p: &SystemProfile, table_error: Option<&TableError>) -> (String, Str
 }
 
 #[test]
-fn two_hardware_adapters_mark_the_conditions_adapter_and_add_the_note() {
+fn two_hardware_adapters_show_each_value_and_the_rule() {
     let mut p = read(dev_machine(), Some(table()));
     p.gpu = Ok(GpuProfile {
         adapters: vec![
@@ -174,17 +176,20 @@ fn two_hardware_adapters_mark_the_conditions_adapter_and_add_the_note() {
         gpu,
         "\
 GPU
-  adapter 0 (conditions adapter): Synthetic iGPU
+  adapter 0: Synthetic iGPU
     Intel, PCI 0x8086:0x0f01, 128 MiB VRAM, integrated: unknown, architecture: unknown \
 (0x8086:0x0f01 not in the table)
   adapter 1: AMD Radeon RX 9070 XT
     AMD, PCI 0x1002:0x7550, 16384 MiB VRAM, integrated: no, architecture: rdna4
-  note: conditions use the first hardware adapter in DXGI order; a game's GPU preference \
-may choose another"
+  note: GPU conditions (gpu.vendor, gpu.arch, gpu.integrated) are checked on each hardware \
+adapter: yes if every one says yes, no if every one says no, else unknown"
     );
     assert_eq!(
         conditions,
-        "  gpu.vendor: intel\n  gpu.arch: unknown (matches no value)"
+        "  gpu.vendor: adapter 0: intel; adapter 1: amd\n  \
+         gpu.arch: adapter 0: unknown (matches no value); adapter 1: rdna4\n  \
+         gpu.integrated: adapter 0: unknown (matches no value); adapter 1: false\n  \
+         gpu.hybrid: true"
     );
 }
 
@@ -203,12 +208,13 @@ fn an_integrated_adapter_from_the_table_and_another_vendor() {
         gpu,
         "\
 GPU
-  adapter 0 (conditions adapter): Synthetic Adreno
+  adapter 0: Synthetic Adreno
     vendor 0x5143, PCI 0x5143:0x0001, 0 MiB VRAM, integrated: yes, architecture: xe2"
     );
     assert_eq!(
         conditions,
-        "  gpu.vendor: other (vendor 0x5143, matches no value)\n  gpu.arch: xe2"
+        "  gpu.vendor: other (vendor 0x5143, matches no value)\n  gpu.arch: xe2\n  \
+         gpu.integrated: true\n  gpu.hybrid: false"
     );
 }
 
@@ -236,7 +242,9 @@ fn no_hardware_adapter() {
     assert_eq!(
         conditions,
         "  gpu.vendor: no hardware adapter (matches no value)\n  \
-         gpu.arch: no hardware adapter (matches no value)"
+         gpu.arch: no hardware adapter (matches no value)\n  \
+         gpu.integrated: no hardware adapter (matches no value)\n  \
+         gpu.hybrid: false"
     );
 }
 
@@ -257,7 +265,9 @@ fn the_adapters_could_not_be_read() {
     assert_eq!(
         conditions,
         "  gpu.vendor: unavailable (a condition on it is unknown)\n  \
-         gpu.arch: unavailable (a condition on it is unknown)"
+         gpu.arch: unavailable (a condition on it is unknown)\n  \
+         gpu.integrated: unavailable (a condition on it is unknown)\n  \
+         gpu.hybrid: unavailable (a condition on it is unknown)"
     );
 }
 
@@ -276,13 +286,14 @@ fn an_invalid_table_makes_every_architecture_unavailable() {
 GPU
   the built-in GPU architecture table is invalid, no architecture is available: gpu arch \
 table: entries[0]: a device is also covered by entries[0]
-  adapter 0 (conditions adapter): AMD Radeon RX 9070 XT
+  adapter 0: AMD Radeon RX 9070 XT
     AMD, PCI 0x1002:0x7550, 16384 MiB VRAM, integrated: unknown, architecture: unavailable \
 (no valid architecture table)"
     );
     assert_eq!(
         conditions,
-        "  gpu.vendor: amd\n  gpu.arch: unavailable (a condition on it is unknown)"
+        "  gpu.vendor: amd\n  gpu.arch: unavailable (a condition on it is unknown)\n  \
+         gpu.integrated: unavailable (a condition on it is unknown)\n  gpu.hybrid: false"
     );
 }
 
@@ -300,7 +311,7 @@ fn a_hostile_adapter_name_is_escaped() {
     let (gpu, _) = gpu_part(&p, None);
     assert_eq!(
         gpu.lines().nth(1).unwrap(),
-        r#"  adapter 0 (conditions adapter): "Evil\u{1b}]0;title\u{7}\u{202e}GPU\u{e0041}\u{2028}x""#
+        r#"  adapter 0: "Evil\u{1b}]0;title\u{7}\u{202e}GPU\u{e0041}\u{2028}x""#
     );
     // A full-width or right-to-left name is legitimate and stays readable.
     p.gpu = Ok(GpuProfile {
@@ -313,7 +324,7 @@ fn a_hostile_adapter_name_is_escaped() {
     let (gpu, _) = gpu_part(&p, None);
     assert_eq!(
         gpu.lines().nth(1).unwrap(),
-        "  adapter 0 (conditions adapter): Ｒａｄｅｏｎ שלום"
+        "  adapter 0: Ｒａｄｅｏｎ שלום"
     );
 }
 

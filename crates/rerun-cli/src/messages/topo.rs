@@ -49,6 +49,8 @@ pub enum TopoMsg<'a> {
     },
     /// `launch.cpu` is shown, not planned (ADR 0020 amendment P4-4).
     LaunchCpuNotPlanned,
+    /// Several hardware adapters and a GPU condition (P4-11, E-G2 d).
+    SeveralGpus,
     /// Several Topos match this installation.
     Several {
         /// Their IDs.
@@ -145,6 +147,10 @@ impl fmt::Display for TopoMsg<'_> {
             Self::LaunchCpuNotPlanned => {
                 f.write_str("  launch.cpu: not planned (pick a cpu step)")
             }
+            Self::SeveralGpus => f.write_str(
+                "  note: this PC has several graphics adapters; GPU conditions are checked on \
+                 each of them and are unknown where your GPUs differ",
+            ),
             Self::Several { ids } => write!(
                 f,
                 "several Topos match this installation ({ids}): refused, nothing is offered"

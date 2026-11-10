@@ -1,6 +1,7 @@
 //! The Topo engine (P4-4) against the fake. Every Topo, folder, hash and ID is invented.
 //!
-//! - TW `when`: each key yes, no and unknown; the Kleene AND; empty and missing are yes.
+//! - TW `when`: each key yes, no and unknown; the Kleene AND; empty and missing are yes; the
+//!   GPU block per hardware adapter (P4-11, E-G2 d).
 //! - TM match: SHA-256 and SHA-1 on the parsed handle; another content, a missing file and a
 //!   wrong second hash are no match; the first match is the main executable.
 //! - TL `launch`: `auto` resolves to `direct` with `chain: [steam]`, else `watch`; the loader
@@ -117,6 +118,17 @@ fn tw_each_key_is_yes_no_or_unknown() {
         (r#"{"gpu.arch":["rdna4"]}"#, &none, Tri::No),
         (r#"{"gpu.arch":["rdna4"]}"#, &unknown, Tri::No),
         (r#"{"gpu.arch":["rdna4"]}"#, &no_table, Tri::Unknown),
+        (r#"{"gpu.integrated":false}"#, &full, Tri::Yes),
+        (r#"{"gpu.integrated":true}"#, &full, Tri::No),
+        (r#"{"gpu.integrated":false}"#, &blind, Tri::Unknown),
+        (r#"{"gpu.integrated":false}"#, &none, Tri::No),
+        (r#"{"gpu.integrated":false}"#, &unknown, Tri::No),
+        (r#"{"gpu.integrated":true}"#, &unknown, Tri::No),
+        (r#"{"gpu.integrated":false}"#, &no_table, Tri::Unknown),
+        (r#"{"gpu.hybrid":false}"#, &full, Tri::Yes),
+        (r#"{"gpu.hybrid":true}"#, &full, Tri::No),
+        (r#"{"gpu.hybrid":false}"#, &none, Tri::Yes),
+        (r#"{"gpu.hybrid":true}"#, &blind, Tri::Unknown),
         (r#"{"cpu.threads":{"gt":16}}"#, &full, Tri::Yes),
         (r#"{"cpu.threads":{"lt":16}}"#, &full, Tri::No),
         (r#"{"cpu.threads":{"gte":32,"lte":32}}"#, &full, Tri::Yes),
@@ -132,6 +144,74 @@ fn tw_each_key_is_yes_no_or_unknown() {
     for (json, p, want) in cases {
         assert_eq!(when::eval(Some(&w(json)), p), *want, "{json}");
     }
+}
+
+/// A laptop: a synthetic iGPU (Intel `xe_lp`, integrated) and dGPU (NVIDIA `ada`) of the
+/// test-only table; with `amd` a third adapter for "all no".
+fn laptop(also_amd: bool) -> SystemProfile {
+    let mut b = FakeSystem::builder()
+        .gpu(GpuAdapter {
+            name: "synthetic iGPU".to_owned(),
+            vendor_id: 0x8086,
+            device_id: 0xB001,
+            ..GpuAdapter::default()
+        })
+        .gpu(GpuAdapter {
+            name: "synthetic dGPU".to_owned(),
+            vendor_id: 0x10DE,
+            device_id: 0xA0FF,
+            ..GpuAdapter::default()
+        });
+    if also_amd {
+        b = b.gpu(rx_9070_xt());
+    }
+    let table = hw::tests::synthetic_table();
+    hw::read(&b.build().unwrap(), Some(&table))
+}
+
+/// E-G2 d: the GPU keys of one `when` are one block per adapter: all yes is yes, all no is no,
+/// else unknown; then ANDed with the other keys. Never "any adapter" or "first adapter".
+#[test]
+fn tw_gpu_keys_are_one_block_per_adapter() {
+    let lap = laptop(false);
+    let cases: &[(&str, Tri)] = &[
+        // One adapter says yes, the other no.
+        (r#"{"gpu.vendor":"nvidia"}"#, Tri::Unknown),
+        (r#"{"gpu.integrated":false}"#, Tri::Unknown),
+        (r#"{"gpu.arch":["ada"]}"#, Tri::Unknown),
+        // Every adapter says no / yes.
+        (r#"{"gpu.vendor":"amd"}"#, Tri::No),
+        (r#"{"gpu.arch":["ada","xe_lp"]}"#, Tri::Yes),
+        // A block, not per key: on the iGPU intel+integrated is yes, on the dGPU no.
+        (
+            r#"{"gpu.vendor":"intel","gpu.integrated":true}"#,
+            Tri::Unknown,
+        ),
+        // Per key this would be unknown AND unknown; as a block it is no on both adapters.
+        (r#"{"gpu.vendor":"nvidia","gpu.integrated":true}"#, Tri::No),
+        // The block is ANDed with the rest: no elsewhere wins, yes elsewhere keeps unknown.
+        (r#"{"gpu.vendor":"nvidia","gpu.hybrid":false}"#, Tri::No),
+        (r#"{"gpu.vendor":"nvidia","gpu.hybrid":true}"#, Tri::Unknown),
+        (r#"{"gpu.hybrid":true}"#, Tri::Yes),
+        (
+            r#"{"gpu.hybrid":true,"gpu.arch":["ada","xe_lp"]}"#,
+            Tri::Yes,
+        ),
+    ];
+    for (json, want) in cases {
+        assert_eq!(when::eval(Some(&w(json)), &lap), *want, "{json}");
+    }
+    // Three adapters: intel, nvidia, amd; no one says yes on all, no one no on all.
+    let three = laptop(true);
+    assert_eq!(
+        when::eval(Some(&w(r#"{"gpu.integrated":false}"#)), &three),
+        Tri::Unknown
+    );
+    // Every adapter's architecture is listed: yes.
+    assert_eq!(
+        when::eval(Some(&w(r#"{"gpu.arch":["rdna4","ada","xe_lp"]}"#)), &three),
+        Tri::Yes
+    );
 }
 
 #[test]
@@ -534,6 +614,60 @@ fn tp_pick_rules() {
         plan_on(&sys, &odd, &["cores/limit"]),
         Err(EngineError::UndeclaredArch { arch, .. }) if arch == "invented_arch"
     ));
+}
+
+/// P4-11 (E-G2 d): on a system with several hardware adapters the report says that GPU
+/// conditions are unknown where they differ, when an issue has one; `nvidia` is unknown on the
+/// laptop (one adapter is NVIDIA, the other Intel) and is planned only with a warning.
+#[test]
+fn tw_several_gpus_are_named_in_the_report() {
+    let sys = game_sys();
+    let t = game_topo(DIRECT);
+    let gf = facts_of(&sys, &t);
+    let lap = laptop(false);
+    let run = |profile: &SystemProfile| {
+        report(
+            &t,
+            &Facts {
+                profile,
+                table: Some(table()),
+                game: &gf,
+                packages: &[],
+            },
+        )
+        .unwrap()
+    };
+    let r = run(&lap);
+    assert!(r.several_gpus);
+    let nvidia = r
+        .issues
+        .iter()
+        .find(|i| i.issue.id.as_str() == "nvidia")
+        .unwrap();
+    assert_eq!(nvidia.when, Tri::Unknown);
+    assert!(!run(&full()).several_gpus, "one adapter");
+
+    // Without a GPU condition in the Topo there is nothing to say.
+    let mut j: serde_json::Value =
+        serde_json::from_str(&topo_json(&sha256(&pe(false)), DIRECT)).unwrap();
+    j["issues"][3].as_object_mut().unwrap().remove("when");
+    let plain: Topo = serde_json::from_value(j).unwrap();
+    let r = report(
+        &plain,
+        &Facts {
+            profile: &lap,
+            table: Some(table()),
+            game: &gf,
+            packages: &[],
+        },
+    )
+    .unwrap();
+    assert!(!r.several_gpus);
+
+    let p = plan_with(&sys, &t, &lap, &["nvidia/input"]).unwrap();
+    assert!(p.warnings.contains(&Warning::WhenUnknown {
+        issue: "nvidia".into()
+    }));
 }
 
 // ---------- TA ----------

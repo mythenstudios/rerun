@@ -33,17 +33,17 @@ pub struct GpuEntry {
 
 Target, added later:
 
-- `GpuProfile::hybrid` (an integrated and a discrete adapter are both present) and a game adapter chosen per game (see "Which adapter"): with `gpu_preference` (phase 4, user decision D8 of 2026-11-05, ADR 0020). Until then conditions use `primary()`.
+- Built in P4-11 (ADR 0015 amendment P4-11): `GpuProfile::hybrid` (at least two hardware adapters, user decision E-G1 c) and `SystemProfile::gpu_facts` (the GPU facts of each adapter). No game adapter is chosen per game (see "Which adapter").
 - `GpuEntry::vulkan` (table estimate until a query exists) and `GpuEntry::dx9` (`Native | D3d9On12 | Unknown`, from the table entry): with the keys that use them. The table carries both fields from step 15 on.
 
-`when` keys (extends `02-topo-format.md`; evaluated against the conditions adapter: `primary()` in step 15, the game adapter once `gpu_preference` exists):
+`when` keys (extends `02-topo-format.md`; from P4-11 the GPU keys of one `when` are checked together on every hardware adapter, see "Which adapter"):
 
 | Key | Values | Note | Since |
 |---|---|---|---|
 | `gpu.vendor` | `amd`, `nvidia`, `intel`; `other` later (additive) | from `vendor_id`; until `other` exists, any other vendor matches none | step 15 |
 | `gpu.arch` | identifiers declared in the table (`archs`) | `unknown` is a profile state, not a value: an unknown device matches no list | step 15 |
-| `gpu.integrated` | bool | | phase 4 |
-| `gpu.hybrid` | bool | system-wide | phase 4 |
+| `gpu.integrated` | bool | from the table entry; no entry matches neither value, so until the full table is imported it practically selects nothing | P4-11 |
+| `gpu.hybrid` | bool | system-wide: at least two hardware adapters | P4-11 |
 | `gpu.vram_mb` | number, compared with `gt`/`lt` | | later |
 | `gpu.vulkan` | `"1.1"`, `"1.3"`, … | estimate until queried | phase 4 |
 | `gpu.dx9` | `native`, `d3d9on12` | Intel only differs | later |
@@ -55,9 +55,9 @@ Driver versions are **not** a `when` key in v1: their format differs per vendor,
 
 ### Which adapter
 
-The game adapter is the one the game will actually use: on a hybrid system the high-performance adapter once Rerun applies `gpu_preference` (below) or recommends it; otherwise the first hardware adapter in DXGI order, which drives the primary display. The LUID changes with every reboot and is never stored in a profile or the journal.
+Rerun cannot know which adapter a game will use: Windows' per-app preference belongs to the game's executable, a driver profile can override it, and a game may pick an adapter itself. From P4-11 (user decision E-G2 d) Rerun therefore does not choose one: the GPU keys of one `when` (`gpu.vendor`, `gpu.arch`, `gpu.integrated`) are evaluated as a block on **each** hardware adapter (software adapters and vendor `0x1414` skipped; CI runners report the Basic Render Driver without the software flag). The block is yes when it holds on every adapter, no when it fails on every adapter, otherwise unknown, and an unknown condition is planned only on an explicit pick with a warning. On a one-adapter system this is exactly the step 15 rule. The engine's report says once that GPU conditions are unknown where the adapters differ. The LUID changes with every reboot and is never stored in a profile or the journal.
 
-Step 15 implements only the second half: conditions use `primary()`, the first hardware adapter in DXGI order (software adapters and vendor `0x1414` skipped; CI runners report the Basic Render Driver without the software flag). That is the order Rerun's own process sees; Windows' per-app preference belongs to the game's executable and can pick another adapter on a hybrid system, so the per-game choice comes with `gpu_preference`.
+Not chosen (P4-11 plan): Windows' adapter order for "High performance" (`IDXGIFactory6::EnumAdapterByGpuPreference`, a new binding, ADR 0015 "Alternatives"), and a per-game adapter from the game's current `UserGpuPreferences` value (a registry read per game; the condition would depend on the pick). Either may come later if a Topo needs it.
 
 ## Architecture identifiers (as of 2026-11-05)
 
@@ -176,7 +176,7 @@ Amendments, approved 2026-11-05 (details in ADR 0015):
 
 Scheduled later:
 
-- `gpu.hybrid` and `gpu.integrated` as `when` keys: with the `gpu_preference` primitive (phase 4; moved from phase 2 by user decision D8, 2026-11-05).
+- `gpu.hybrid` and `gpu.integrated` as `when` keys: built in P4-11 (ADR 0015 amendment P4-11), with the `gpu_preference` primitive. `gpu.integrated` practically selects nothing until the full table is imported.
 - `gpu.vulkan`: with the DXVK packages (phase 4).
 - `display.*`: a separate step, once a Topo needs it.
 

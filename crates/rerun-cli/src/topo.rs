@@ -123,6 +123,9 @@ fn report_lines(r: &Report<'_>, g: &GameFacts) -> Vec<Message<'static>> {
             }));
         }
     }
+    if r.several_gpus {
+        m.push(Message::Topo(TopoMsg::SeveralGpus));
+    }
     for i in &r.issues {
         m.push(Message::Topo(TopoMsg::Issue {
             id: i.issue.id.to_string(),

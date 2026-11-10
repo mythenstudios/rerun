@@ -522,7 +522,7 @@
       }
     },
     "when": {
-      "description": "Conditions against the system profile; multiple fields = AND.",
+      "description": "Conditions against the system profile; multiple fields = AND. gpu.vendor, gpu.arch and gpu.integrated are checked together on each hardware adapter: yes if every adapter says yes, no if every one says no, else unknown (P4-11).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -541,6 +541,14 @@
           "items": {
             "$ref": "#/$defs/archId"
           }
+        },
+        "gpu.integrated": {
+          "description": "The architecture table's integrated flag of the adapter; a device without a table entry matches neither value (P4-11).",
+          "type": "boolean"
+        },
+        "gpu.hybrid": {
+          "description": "At least two hardware adapters (P4-11).",
+          "type": "boolean"
         },
         "cpu.threads": {
           "$ref": "#/$defs/compare"

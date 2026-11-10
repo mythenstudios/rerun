@@ -29,6 +29,8 @@ issues:
     when:
       gpu.vendor: amd
       gpu.arch: [rdna2]
+      gpu.integrated: false
+      gpu.hybrid: true
       cpu.threads: { gt: 12 }
       cpu.hybrid: false
       os.build: { gte: 22000 }

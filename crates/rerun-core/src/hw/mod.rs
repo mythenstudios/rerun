@@ -1,13 +1,15 @@
 //! System profile (ADR 0015): the facts the `when` keys `gpu.vendor`, `gpu.arch`,
-//! `cpu.threads`, `cpu.hybrid` and `os.build` are evaluated against (phase 4), and what
-//! `rerun system` shows.
+//! `gpu.integrated`, `gpu.hybrid`, `cpu.threads`, `cpu.hybrid` and `os.build` are evaluated
+//! against (phase 4), and what `rerun system` shows.
 //!
 //! - [`read`] builds a [`SystemProfile`] and never fails as a whole: GPU ([`gpu`]), CPU
 //!   (`sys::Topology`) and OS ([`os`]) are read independently, each a `Result`.
 //! - [`arch`]: the GPU architecture table that maps PCI IDs to an architecture.
 //! - The accessors turn the parts into facts; a fact that could not be read is `Unavailable`
 //!   (a condition on it is `Unknown`), a missing adapter `NoAdapter` and an unknown device
-//!   `Unknown` (both `No`).
+//!   `Unknown` (both `No`). The per-adapter GPU facts come one entry per hardware adapter
+//!   ([`SystemProfile::gpu_facts`], P4-11, ADR 0015 amendment): `when` checks its GPU keys on
+//!   each of them.
 //!
 //! `hw` sits above `sys` and only consumes it: no FFI, no `unsafe`, no serde. Everything it
 //! reads is untrusted (driver strings and IDs, an admin-writable `HKLM` value); errors name the
@@ -116,6 +118,31 @@ pub enum ArchFact {
     Known(ArchId),
 }
 
+/// The `gpu.integrated` fact of one adapter (P4-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegratedFact {
+    /// The adapters could not be read, or no table was given.
+    Unavailable,
+    /// No hardware adapter.
+    NoAdapter,
+    /// The table has no entry for the adapter.
+    Unknown,
+    /// From the adapter's table entry.
+    Known(bool),
+}
+
+/// The GPU facts of one hardware adapter, or of the one stand-in entry when the adapters could
+/// not be read (every fact `Unavailable`) or there is none (every fact `NoAdapter`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GpuFacts {
+    /// `gpu.vendor`.
+    pub vendor: VendorFact,
+    /// `gpu.arch`.
+    pub arch: ArchFact,
+    /// `gpu.integrated`.
+    pub integrated: IntegratedFact,
+}
+
 /// A plain fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fact<T> {
@@ -141,32 +168,76 @@ pub fn read(sys: &dyn System, table: Option<&GpuArchTable>) -> SystemProfile {
 }
 
 impl SystemProfile {
-    /// The primary adapter's vendor. Checks in order: adapters not read, no hardware adapter.
-    pub fn gpu_vendor(&self) -> VendorFact {
-        match &self.gpu {
-            Err(_) => VendorFact::Unavailable,
-            Ok(g) => g
-                .primary()
-                .map_or(VendorFact::NoAdapter, |e| VendorFact::Known(e.vendor)),
+    /// The GPU facts, one entry per hardware adapter in DXGI order (P4-11). Never empty: when
+    /// the adapters could not be read one entry with every fact `Unavailable`, without a
+    /// hardware adapter one with every fact `NoAdapter`. Per adapter the checks run in the
+    /// order of ADR 0015 ("Facts"): no table, then no table entry.
+    pub fn gpu_facts(&self) -> Vec<GpuFacts> {
+        let g = match &self.gpu {
+            Err(_) => {
+                return vec![GpuFacts {
+                    vendor: VendorFact::Unavailable,
+                    arch: ArchFact::Unavailable,
+                    integrated: IntegratedFact::Unavailable,
+                }];
+            }
+            Ok(g) => g,
+        };
+        if g.adapters.is_empty() {
+            return vec![GpuFacts {
+                vendor: VendorFact::NoAdapter,
+                arch: ArchFact::NoAdapter,
+                integrated: IntegratedFact::NoAdapter,
+            }];
+        }
+        g.adapters.iter().map(|e| self.facts_of(e)).collect()
+    }
+
+    fn facts_of(&self, e: &GpuEntry) -> GpuFacts {
+        let (arch, integrated) = if self.has_table {
+            (
+                match &e.arch {
+                    GpuArch::Known(id) => ArchFact::Known(id.clone()),
+                    GpuArch::Unknown => ArchFact::Unknown,
+                },
+                e.integrated
+                    .map_or(IntegratedFact::Unknown, IntegratedFact::Known),
+            )
+        } else {
+            (ArchFact::Unavailable, IntegratedFact::Unavailable)
+        };
+        GpuFacts {
+            vendor: VendorFact::Known(e.vendor),
+            arch,
+            integrated,
         }
     }
 
-    /// The primary adapter's architecture. Checks in order: adapters not read, no hardware
-    /// adapter, no table, no table entry.
+    /// The first adapter's vendor (the only one's on a system with one hardware adapter); a
+    /// `when` uses [`Self::gpu_facts`]. Checks in order: adapters not read, no hardware adapter.
+    pub fn gpu_vendor(&self) -> VendorFact {
+        self.first_gpu().vendor
+    }
+
+    /// The first adapter's architecture (the only one's on a system with one hardware
+    /// adapter); a `when` uses [`Self::gpu_facts`]. Checks in order: adapters not read, no
+    /// hardware adapter, no table, no table entry.
     pub fn gpu_arch(&self) -> ArchFact {
-        let primary = match &self.gpu {
-            Err(_) => return ArchFact::Unavailable,
-            Ok(g) => match g.primary() {
-                None => return ArchFact::NoAdapter,
-                Some(p) => p,
-            },
-        };
-        if !self.has_table {
-            return ArchFact::Unavailable;
-        }
-        match &primary.arch {
-            GpuArch::Known(id) => ArchFact::Known(id.clone()),
-            GpuArch::Unknown => ArchFact::Unknown,
+        self.first_gpu().arch
+    }
+
+    fn first_gpu(&self) -> GpuFacts {
+        // `gpu_facts` is never empty.
+        self.gpu_facts().swap_remove(0)
+    }
+
+    /// `gpu.hybrid` (P4-11, user decision E-G1 c): at least two hardware adapters. Not whether
+    /// one is integrated, not Windows' adapter order; an iGPU next to a dGPU on a desktop
+    /// counts as well (a game can land on either).
+    pub fn gpu_hybrid(&self) -> Fact<bool> {
+        match &self.gpu {
+            Ok(g) => Fact::Known(g.hybrid()),
+            Err(_) => Fact::Unavailable,
         }
     }
 
@@ -196,4 +267,4 @@ impl SystemProfile {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

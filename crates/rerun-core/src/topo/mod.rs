@@ -45,7 +45,7 @@ use crate::detect::exe::{
     AntiCheat, AntiCheatScan, ExeError, HashLimits, HashOutcome, inspect_exe,
 };
 use crate::detect::pe::{self, Machine, PeReadError};
-use crate::hw::{GpuArchTable, SacState, SystemProfile};
+use crate::hw::{Fact, GpuArchTable, SacState, SystemProfile};
 use crate::path::RelPath;
 use crate::plan::{MAX_PICKS, Op, Pick, Plan, PlanError, PlanSource, RootIx};
 use crate::policy::root::GameDir;
@@ -543,6 +543,9 @@ pub struct Report<'t> {
     pub anti_cheat: AntiCheatState,
     /// Every issue.
     pub issues: Vec<IssueReport<'t>>,
+    /// The system has several hardware adapters and an issue has a GPU condition: the report
+    /// says that GPU conditions are unknown where the adapters differ (P4-11, E-G2 d).
+    pub several_gpus: bool,
 }
 
 /// What the engine works with.
@@ -715,12 +718,19 @@ pub fn report<'t>(topo: &'t Topo, facts: &Facts<'_>) -> Result<Report<'t>, Engin
                 .collect(),
         })
         .collect();
+    let several_gpus = facts.profile.gpu_hybrid() == Fact::Known(true)
+        && topo
+            .issues
+            .iter()
+            .filter_map(|i| i.when.as_ref())
+            .any(when::has_gpu_block);
     Ok(Report {
         topo,
         main_exe: facts.game.main_exe().cloned(),
         launch,
         anti_cheat: ac,
         issues,
+        several_gpus,
     })
 }
 

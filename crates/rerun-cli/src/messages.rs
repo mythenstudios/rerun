@@ -76,10 +76,12 @@ pub enum FactText<'a> {
     Bool(bool),
     /// No hardware adapter: matches no value.
     NoAdapter,
-    /// The table has no entry for the conditions adapter: matches no value.
+    /// The table has no entry for the adapter: matches no value.
     Unknown,
     /// Could not be read: a condition on it is unknown.
     Unavailable,
+    /// One value per hardware adapter, in DXGI order (P4-11).
+    PerAdapter(Vec<FactText<'a>>),
 }
 
 /// The cache level of a group of logical processors: `Some(3)` for L3, `None` when the groups
@@ -170,8 +172,6 @@ pub enum Message<'a> {
     Adapter {
         /// Position in DXGI order, from 0.
         number: usize,
-        /// The conditions adapter.
-        conditions: bool,
         /// Name from the driver.
         name: Shown<'a>,
     },
@@ -565,6 +565,15 @@ impl fmt::Display for FactText<'_> {
             Self::NoAdapter => f.write_str("no hardware adapter (matches no value)"),
             Self::Unknown => f.write_str("unknown (matches no value)"),
             Self::Unavailable => f.write_str("unavailable (a condition on it is unknown)"),
+            Self::PerAdapter(each) => {
+                for (i, v) in each.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str("; ")?;
+                    }
+                    write!(f, "adapter {i}: {v}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -646,17 +655,7 @@ impl fmt::Display for Message<'_> {
                 "  the built-in GPU architecture table is invalid, no architecture is \
                  available: {error}"
             ),
-            Self::Adapter {
-                number,
-                conditions,
-                name,
-            } => {
-                if *conditions {
-                    write!(f, "  adapter {number} (conditions adapter): {name}")
-                } else {
-                    write!(f, "  adapter {number}: {name}")
-                }
-            }
+            Self::Adapter { number, name } => write!(f, "  adapter {number}: {name}"),
             Self::AdapterFacts {
                 vendor,
                 vendor_id,
@@ -673,8 +672,9 @@ impl fmt::Display for Message<'_> {
                 )
             }
             Self::SeveralAdapters => f.write_str(
-                "  note: conditions use the first hardware adapter in DXGI order; a game's GPU \
-                 preference may choose another",
+                "  note: GPU conditions (gpu.vendor, gpu.arch, gpu.integrated) are checked on \
+                 each hardware adapter: yes if every one says yes, no if every one says no, \
+                 else unknown",
             ),
 
             Self::CpuUnreadable { error } => {
