@@ -17,9 +17,10 @@
 //! helper, all through this type.
 //!
 //! **Observation** ([`observe_all`], A4 S11): one enumeration for any number of planned rules.
-//! A rule whose name equals a planned name **folded** counts as that name (until the P4-5b
-//! write contract shows how `INetFwRules::Remove` compares names, A4 S6 c, the wider match is
-//! the safe one): none is [`Observed::Before`]; exactly one with the exact name and every fact
+//! A rule whose name equals a planned name **folded** counts as that name, on purpose: the
+//! fold is a superset of the ASCII-case match `INetFwRules::Remove` uses (measured in \[SB\]
+//! pass 4, A4 S6 c), so a name counted once is the one rule `Remove` takes (ADR 0023 §6). Do
+//! not narrow it. None is [`Observed::Before`]; exactly one with the exact name and every fact
 //! equal is [`Observed::After`]; anything else (two or more, another group, a fact changed,
 //! disabled) is [`Observed::Foreign`] and never touched (ADR 0020 D10).
 //!

@@ -57,7 +57,7 @@ Phase 2: `file_install` (local package files under `<AppDir>\packages`; `prim::f
 |---|---|---|
 | `compat_layer` | `HKCU\…\AppCompatFlags\Layers` (mode, DISABLEDXMAXIMIZEDWINDOWEDMODE, HIGHDPIAWARE, 16BITCOLOR …) | no |
 | `priority` | Not a primitive of its own: a field of the launch profile (`launch_method`); `rerun-launch` sets the priority class of the process it starts or finds, which ends with that process (user decision D6 a; no IFEO `PerfOptions`) | no |
-| `firewall_rule` | Rerun's block rule (outbound or inbound) for one exe of `match.exes` with a `sha256` (INetFwPolicy2, ADR 0023); format and read side P4-5a, the helper batch P4-2d (planned last from `elevate::check_plan`, `exec::helper`), the real write P4-5b (`WinFirewallWrite`); reviewed after the [DEV] round trip (`FIREWALL_RULE_REVIEWED`, 2026-11-10), so a signed Topo may hold it | yes |
+| `firewall_rule` | Rerun's outbound block rule (only `out` for now) for one exe of `match.exes` with a `sha256` (INetFwPolicy2, ADR 0023); format and read side P4-5a, the helper batch P4-2d (planned last from `elevate::check_plan`, `exec::helper`), the real write P4-5b (`WinFirewallWrite`); reviewed after the [DEV] round trip (`FIREWALL_RULE_REVIEWED`, 2026-11-10), so a signed Topo may hold it | yes |
 | `file_install` | Files from a package into the game folder, occupy slots, backups | no* |
 | `ini_set` | Set individual keys of an existing `.ini` file (ANSI or UTF-8; UTF-16 from phase 4) | no* |
 | `registry_set` | Values under allowed game keys | depends on hive |
