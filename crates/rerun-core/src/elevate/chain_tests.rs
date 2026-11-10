@@ -1365,3 +1365,37 @@ fn d_a_program_the_firewall_would_refuse_is_refused_at_plan_time() {
         other => panic!("{other:?}"),
     }
 }
+
+/// P4-10 review S2: two builds name `bin\game.exe` (another build first, the installed one
+/// second). The derivation keeps the SHA-256 of both, so the helper adds the rule for the build
+/// that is there instead of refusing it after the prompt; a third content is still refused.
+#[test]
+fn r_two_builds_of_one_path_anchor_either() {
+    seam(|| {
+        let sys = world();
+        let other = hex_upper(&Sha256::digest(b"MZ another build"));
+        let mut topo: serde_json::Value =
+            serde_json::from_str(&topo_json("invented-game", 3, "active", &game_sha())).unwrap();
+        let mut first = topo["match"]["exes"][0].clone();
+        first["sha256"] = other.clone().into();
+        topo["match"]["exes"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, first);
+        let json = topo.to_string();
+        let a = derive_add(&parsed(&json), &picks(&["net/block"])).unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].sha256.len(), 2, "{a:?}");
+        let idx = put_index(&sys, 1, &[json], test_key::sign);
+        let req = add_request(&sys, idx);
+        let (at, sha) = write(&sys, &req);
+        let wire = Wire::new(&sys);
+        assert_added(&sys, run_on(&wire, &at, &sha, 1));
+        sys.fake_fs().remove_abs(Path::new(EXE)).unwrap();
+        sys.fake_fs()
+            .put_file(Path::new(EXE), b"MZ a third build")
+            .unwrap();
+        let (at, sha) = write(&sys, &req);
+        assert_eq!(run_on(&wire, &at, &sha, 1), refused(Reason::Program));
+    });
+}

@@ -247,7 +247,7 @@ fn validate_add(
     let mut programs = Vec::with_capacity(anchors.len());
     for a in &anchors {
         let program = Program::new(&root.path, &a.exe).map_err(|_| Reason::Program)?;
-        if sha256_on_handle(game.dir(), &a.exe) != Some(a.sha256) {
+        if !sha256_on_handle(game.dir(), &a.exe).is_some_and(|h| a.sha256.contains(&h)) {
             return Err(Reason::Program);
         }
         programs.push(program);

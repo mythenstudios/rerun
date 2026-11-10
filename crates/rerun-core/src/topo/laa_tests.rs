@@ -646,3 +646,58 @@ fn la9_smart_app_control_refuses_or_warns() {
         assert!(planned.unwrap().is_empty());
     }
 }
+
+// ---------- LA10, LA11 (P4-10 review follow-ups) ----------
+
+/// LA10 (review S2): two builds name `Game.exe`; the step patches the one that matched, with its
+/// SHA-256. The loader wants a `sha256` on every entry of that spelling.
+#[test]
+fn la10_two_builds_of_one_path() {
+    let installed = game_exe(true);
+    let mut other = game_exe(true);
+    other[0x350] ^= 0xFF;
+    let sys = sys_with(&installed);
+    let mut v: serde_json::Value =
+        serde_json::to_value(topo_with(&installed, "Game.exe", false)).unwrap();
+    let mut first = v["match"]["exes"][0].clone();
+    first["sha256"] = hex(&sha(&other)).into();
+    v["match"]["exes"].as_array_mut().unwrap().insert(0, first);
+    let t: Topo = serde_json::from_value(v.clone()).unwrap();
+    check::topo(&t, Rules::Source).unwrap();
+    let tp = plan_on(&sys, &t).unwrap();
+    match tp.steps.as_slice() {
+        [crate::prim::Step::LaaPatch(s)] => assert_eq!(s.sha256, sha(&installed)),
+        other => panic!("{other:?}"),
+    }
+    patch_of(&tp);
+    // One entry of that spelling without a sha256: refused by the loader.
+    let e = v["match"]["exes"][0].as_object_mut().unwrap();
+    e.remove("sha256");
+    e.insert("sha1".to_owned(), "0".repeat(40).into());
+    let t: Topo = serde_json::from_value(v).unwrap();
+    let e = check::topo(&t, Rules::Source).unwrap_err();
+    assert!(
+        e.what
+            .contains("every match.exes entry of it needs a sha256"),
+        "{e}"
+    );
+}
+
+/// LA11 (review, both): a `laa_patch` and a `firewall_rule` of the same executable in one plan
+/// are refused with the way that works (the rule first, in its own plan; `exec/fw_tests.rs`
+/// `f8_a_rule_first_then_the_patch` shows that order).
+#[test]
+fn la11_a_patch_and_a_rule_of_one_exe_in_one_plan() {
+    let exe = game_exe(true);
+    let sys = sys_with(&exe);
+    let mut v: serde_json::Value =
+        serde_json::to_value(topo_with(&exe, "Game.exe", false)).unwrap();
+    v["issues"][1]["variants"][0]["steps"] =
+        serde_json::json!([{"firewall_rule": {"exe": "Game.exe", "direction": "out"}}]);
+    let t: Topo = serde_json::from_value(v).unwrap();
+    check::topo(&t, Rules::Source).unwrap();
+    refused(
+        plan_picks(&sys, &t, &["memory/laa", "again/laa"]),
+        "plan and apply the firewall rule on its own first, then laa_patch in a second plan",
+    );
+}

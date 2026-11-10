@@ -850,6 +850,7 @@ pub fn plan(
     let mut steps = Vec::new();
     let mut planned_launch = None;
     let mut rules = false;
+    let mut rule_exes: Vec<String> = Vec::new();
     let mut planned_packages: Vec<&Package> = Vec::new();
     for (p, (issue, variant)) in picks.iter().zip(resolved) {
         match when::eval(issue.when.as_ref(), facts.profile) {
@@ -882,7 +883,10 @@ pub fn plan(
                     }
                 }
                 // Planned below from `elevate::check_plan` (the helper's own derivation).
-                TopoStep::FirewallRule(_) => rules = true,
+                TopoStep::FirewallRule(f) => {
+                    rules = true;
+                    rule_exes.push(crate::fold::fold(f.exe.as_str()));
+                }
                 TopoStep::SteamInput(_) => warnings.push(Warning::SteamInput {
                     issue: p.issue.clone(),
                 }),
@@ -912,16 +916,18 @@ pub fn plan(
                     {
                         warnings.push(Warning::SmartAppControl { state: sac });
                     }
-                    // The planner checks everything again; a refusal here is its refusal there.
-                    if prim::laa_patch::inspect(ctx.game, &spec.exe).is_ok_and(|f| f.signed) {
-                        warnings.push(Warning::SignedExe {
-                            exe: spec.exe.clone(),
-                        });
-                    }
+                    // Once per executable (two picks may patch the same one).
                     if !steps
                         .iter()
                         .any(|s| matches!(s, Step::LaaPatch(x) if x.exe == spec.exe))
                     {
+                        // The planner checks everything again; a refusal here is its refusal
+                        // there.
+                        if prim::laa_patch::inspect(ctx.game, &spec.exe).is_ok_and(|f| f.signed) {
+                            warnings.push(Warning::SignedExe {
+                                exe: spec.exe.clone(),
+                            });
+                        }
                         steps.push(Step::LaaPatch(spec));
                     }
                 }
@@ -947,6 +953,20 @@ pub fn plan(
             warnings.push(Warning::RequiresGpu {
                 package: p.id.to_string(),
                 needs: *needs,
+            });
+        }
+    }
+    // P4-10 review: a rule for the executable a patch changes in the same plan would fail the
+    // helper's hash check after the prompt. The rule binds the executable by its path and only
+    // its add hashes it, so the rule first (its own plan), then the patch, works.
+    for s in &steps {
+        if let Step::LaaPatch(x) = s
+            && rule_exes.contains(&crate::fold::fold(x.exe.as_str()))
+        {
+            return Err(EngineError::LaaPatch {
+                exe: crate::escape::path(x.exe.as_str()).into_owned().to_string(),
+                why: "a picked firewall_rule blocks the same executable; plan and apply the \
+                      firewall rule on its own first, then laa_patch in a second plan",
             });
         }
     }
@@ -996,18 +1016,22 @@ fn laa_step(
         exe: crate::escape::path(l.exe.as_str()).into_owned().to_string(),
         why,
     };
-    let (entry, check) = topo
+    // Two builds may share the path (review S2): the entry of exactly this spelling that matched.
+    let mut same = topo
         .matches
         .exes
         .iter()
         .zip(&facts.game.exes)
-        .find(|(e, _)| e.path.same_spelling(&l.exe))
-        .ok_or_else(|| refused("it is no executable of the Topo's match.exes"))?;
-    if check.state != ExeState::Match {
-        return Err(refused(
-            "it is not the build the Topo names in this game folder (its hashes differ)",
-        ));
+        .filter(|(e, _)| e.path.same_spelling(&l.exe))
+        .peekable();
+    if same.peek().is_none() {
+        return Err(refused("it is no executable of the Topo's match.exes"));
     }
+    let (entry, check) = same
+        .find(|(_, c)| c.state == ExeState::Match)
+        .ok_or_else(|| {
+            refused("it is not a build the Topo names in this game folder (its hashes differ)")
+        })?;
     if check.patched_by.is_some() {
         return Err(refused(
             "a Rerun transaction has patched it already; revert that one first",

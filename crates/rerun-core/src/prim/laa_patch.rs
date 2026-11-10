@@ -246,9 +246,11 @@ pub(crate) fn plan_into(
     let mut sum = PeChecksum::new();
     let mut at = 0u64;
     let mut failed = None;
+    let mut patched = Vec::new();
     let len = stream(&mut r, &[], exe, |c| {
         h.update(c);
-        let mut patched = c.to_vec();
+        patched.clear();
+        patched.extend_from_slice(c);
         if let Err(e) = apply_edits(&[flag], at, &mut patched) {
             failed.get_or_insert(e);
         }

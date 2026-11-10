@@ -1436,6 +1436,11 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
             "registry and INI ops need the main executable of every game root",
         ));
     }
+    // P4-10: a patch only on a game root, before the profile fence (which refuses any
+    // non-inline content on the profiles root with its own words).
+    for (k, op) in plan.ops.iter().enumerate() {
+        patch_check(plan, k, op)?;
+    }
     // P3-3: the fence of the profiles root and of inline content (both rule sets).
     profile::fence(plan, rules)?;
     for (i, r) in plan.roots.iter().enumerate() {
@@ -1517,7 +1522,6 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
         if let Op::Hold { root, content, .. } = op {
             hold_check(plan, k, *root, content)?;
         }
-        patch_check(plan, k, op)?;
         if let Some((
             _,
             ContentRef::Package {

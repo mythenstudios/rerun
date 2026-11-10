@@ -1216,3 +1216,57 @@ fn f7_a_failed_game_flush_before_the_batch_rolls_back_without_a_helper() {
         assert!(v.ops.values().all(|o| !o.intent.batch), "no HelperBatch");
     });
 }
+
+// ---------- F8 (P4-10 review) ----------
+
+/// The order the engine names when a plan has a `laa_patch` and a `firewall_rule` of one
+/// executable (`topo/laa_tests.rs` LA11): the rule first, in its own plan, then the patch. The
+/// rule is bound to the executable by its path; only its add hashes the file, so the patched
+/// file does not disturb it: either revert order ends identical.
+#[test]
+fn f8_a_rule_first_then_the_patch() {
+    seams(|| {
+        for rule_reverted_first in [false, true] {
+            let fw = Fw::new();
+            let before = fw.snap();
+            let (r, _) = fw.apply(&plan(&fw.sys, fw.index, Kind::Rules), Vec::new());
+            let rule = applied(&r);
+            // The patch of the same game.exe, in a plan of its own.
+            let fr = fr(&fw.sys);
+            let g = GameDir::open_manual(&fw.sys, &fr, Path::new(GAME)).unwrap();
+            let a = app(&fw.sys);
+            let main = rel("game.exe");
+            let p = plan_steps(
+                &[Step::LaaPatch(crate::prim::LaaPatchSpec {
+                    exe: rel("game.exe"),
+                    sha256: Sha256::digest(game_exe()).into(),
+                })],
+                &PlanCtx {
+                    game: &g,
+                    app: Some(&a),
+                    steam_app: None,
+                    main_exe: Some(&main),
+                    reg: crate::policy::registry::RegPolicy.reader(&fw.sys),
+                    app_path: None,
+                },
+            )
+            .unwrap();
+            let h = store(&a, &p.encode().unwrap()).unwrap();
+            drop((g, a));
+            let (r, runs) = fw.apply(&h, Vec::new());
+            let patch = applied(&r);
+            assert_eq!(runs, 0, "the patch needs no helper");
+            assert_eq!(fw_scope(&fw.sys).len(), 1);
+            let order = if rule_reverted_first {
+                [rule, patch]
+            } else {
+                [patch, rule]
+            };
+            for t in order {
+                let (r, _) = fw.revert(&t, Vec::new());
+                assert_eq!(r.unwrap().closed, Some(Closing::Reverted), "{t}");
+            }
+            assert_eq!(fw.snap(), before, "rule first: {rule_reverted_first}");
+        }
+    });
+}

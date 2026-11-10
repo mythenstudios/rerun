@@ -33,8 +33,9 @@ use crate::topo::{EngineError, ExeState, GameFacts, anti_cheat_state, resolve_pi
 pub struct Anchor {
     /// The `match.exes` path, in the entry's spelling.
     pub exe: RelPath,
-    /// Its signed SHA-256.
-    pub sha256: [u8; 32],
+    /// The signed SHA-256 of every `match.exes` entry of exactly this spelling (two builds may
+    /// share one path, P4-10 review S2): the file must hash to one of them.
+    pub sha256: Vec<[u8; 32]>,
     /// The step's direction.
     pub direction: Direction,
 }
@@ -78,16 +79,21 @@ pub fn derive_add(topo: &Topo, picks: &[Pick]) -> Result<Vec<Anchor>, DeriveErro
             let TopoStep::FirewallRule(f) = step else {
                 continue;
             };
-            let entry = topo
+            // Every entry of exactly this spelling (two builds may share the path; the loader
+            // requires a sha256 on each), so the build that matched is among them (P4-10 S2).
+            let entries: Vec<_> = topo
                 .matches
                 .exes
                 .iter()
-                .find(|e| e.path.same_spelling(&f.exe))
+                .filter(|e| e.path.same_spelling(&f.exe))
+                .collect();
+            let entry = entries
+                .first()
                 .ok_or_else(|| DeriveError::NotAnExe(f.exe.clone()))?;
-            let sha256 = entry
-                .sha256
-                .as_ref()
-                .and_then(Sha256::bytes)
+            let sha256 = entries
+                .iter()
+                .map(|e| e.sha256.as_ref().and_then(Sha256::bytes).copied())
+                .collect::<Option<Vec<[u8; 32]>>>()
                 .ok_or_else(|| DeriveError::NoSha256(entry.path.clone()))?;
             let folded = fold(entry.path.as_str());
             if out.iter().any(|a| fold(a.exe.as_str()) == folded) {
@@ -95,7 +101,7 @@ pub fn derive_add(topo: &Topo, picks: &[Pick]) -> Result<Vec<Anchor>, DeriveErro
             }
             out.push(Anchor {
                 exe: entry.path.clone(),
-                sha256: *sha256,
+                sha256,
                 direction: f.direction,
             });
         }

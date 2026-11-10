@@ -1641,9 +1641,6 @@ fn preflight<'g>(
     Ok(roots)
 }
 
-/// The DLL slot check of an apply (P4-8), for the planner, so a plan names a taken slot before
-/// its preview: the journal read without the lock (anything unreadable is "nothing found"; the
-/// apply checks again under the lock).
 /// The executables of game folder `root` that live transactions patched (P4-10, R5): the Topo
 /// engine counts such a file as its base build (`topo::read_game_with`), so a game patched by
 /// `laa_patch` is still found until the revert. Read without the lock (like the plan's slot check);
@@ -1656,6 +1653,9 @@ pub fn patched_now(app: &AppDir<'_>, root: crate::policy::root::RootId) -> Vec<P
     }
 }
 
+/// The DLL slot check of an apply (P4-8), for the planner, so a plan names a taken slot before
+/// its preview: the journal read without the lock (anything unreadable is "nothing found"; the
+/// apply checks again under the lock).
 pub(crate) fn slot_taken_now(app: &AppDir<'_>, plan: &Plan) -> Option<Refusal> {
     let j = Journal::new(app, crate::journal::InstanceTag::new());
     let l = j.list().ok()?;

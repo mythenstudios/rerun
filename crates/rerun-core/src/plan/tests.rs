@@ -538,6 +538,32 @@ fn p8_patch_form_rules_and_preview() {
         attrs: Attrs::default(),
     };
     refused(&create, "a created patch");
+    // A patch outside a game folder (the profiles root): refused by the patch rule itself, with
+    // its words (it runs before the profile fence).
+    let mut profiles = p.clone();
+    profiles.roots[1] = PlanRoot {
+        kind: RootKind::Profiles,
+        path: RootPath::new(r"C:\Users\Player\AppData\Local\Rerun\profiles").unwrap(),
+        id: super::PROFILES_ROOT_ID,
+        origin: PlanOrigin::AppDir,
+        main_exe: None,
+    };
+    let bytes = serde_json::to_vec(&profiles).unwrap();
+    for e in [
+        profiles.encode().unwrap_err(),
+        super::decode_recorded(&bytes).unwrap_err(),
+    ] {
+        assert!(
+            matches!(
+                e,
+                PlanError::Invalid {
+                    why: "a patch outside a game folder",
+                    ..
+                }
+            ),
+            "{e}"
+        );
+    }
 
     // The preview: the action, the bytes, the new hash and the note once.
     let text = preview(&p).to_string();

@@ -446,16 +446,23 @@ fn firewall_rule(t: &Topo, f: &FirewallRuleSpec, at: &str) -> R {
     )?;
     // The exact spelling: `RelPath` equality folds Unicode (U+0131 equals `I`), which NTFS does
     // not; the program of the rule is derived from this entry (P4-2d), never from the step.
-    let anchor = t.matches.exes.iter().find(|e| e.path.same_spelling(&f.exe));
+    // Every entry of exactly this spelling (two builds may share a path, P4-10 review S2): the
+    // build that matches is one of them, and it must carry a sha256 whichever it is.
+    let mut anchors = t
+        .matches
+        .exes
+        .iter()
+        .filter(|e| e.path.same_spelling(&f.exe))
+        .peekable();
     ensure(
-        anchor.is_some(),
+        anchors.peek().is_some(),
         &format!("{at}.exe"),
         "an executable of match.exes",
     )?;
     ensure(
-        anchor.is_some_and(|e| e.sha256.is_some()),
+        anchors.all(|e| e.sha256.is_some()),
         &format!("{at}.exe"),
-        "its match.exes entry needs a sha256 (an elevated anchor, ADR 0024)",
+        "every match.exes entry of it needs a sha256 (an elevated anchor, ADR 0024)",
     )
 }
 
@@ -469,16 +476,23 @@ fn laa_patch(t: &Topo, l: &LaaPatchStep, at: &str) -> R {
         at,
         "draft only until laa_patch is reviewed (P4-10)",
     )?;
-    let anchor = t.matches.exes.iter().find(|e| e.path.same_spelling(&l.exe));
+    // Every entry of exactly this spelling (two builds may share a path, P4-10 review S2): the
+    // build that matches is one of them, and it must carry a sha256 whichever it is.
+    let mut anchors = t
+        .matches
+        .exes
+        .iter()
+        .filter(|e| e.path.same_spelling(&l.exe))
+        .peekable();
     ensure(
-        anchor.is_some(),
+        anchors.peek().is_some(),
         &format!("{at}.exe"),
         "an executable of match.exes",
     )?;
     ensure(
-        anchor.is_some_and(|e| e.sha256.is_some()),
+        anchors.all(|e| e.sha256.is_some()),
         &format!("{at}.exe"),
-        "its match.exes entry needs a sha256 (the build the patch is for, ADR 0024)",
+        "every match.exes entry of it needs a sha256 (the build the patch is for, ADR 0024)",
     )
 }
 
