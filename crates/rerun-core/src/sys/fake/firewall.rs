@@ -20,6 +20,7 @@ use crate::sys::{Firewall, FirewallWrite, SysError, SysErrorKind, SysResult};
 pub struct FakeFirewall {
     rules: Mutex<Vec<FwRule>>,
     error: Mutex<Option<SysErrorKind>>,
+    fail_next: Mutex<usize>,
     selects: AtomicUsize,
     writes: AtomicUsize,
     fault: Mutex<Option<(usize, WriteFault)>>,
@@ -60,6 +61,14 @@ impl FakeFirewall {
     /// From now on [`Firewall::select`] fails with `kind` (`None`: works again).
     pub fn fail_with(&self, kind: Option<SysErrorKind>) {
         *self.error.lock().unwrap_or_else(PoisonError::into_inner) = kind;
+    }
+
+    /// The next `n` enumerations fail with `AccessDenied` (a passing failure).
+    pub fn fail_next(&self, n: usize) {
+        *self
+            .fail_next
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = n;
     }
 
     /// How many enumerations ran.
@@ -144,6 +153,18 @@ impl Firewall for FakeFirewall {
         self.selects.fetch_add(1, Ordering::Relaxed);
         if self.crashed.load(Ordering::Relaxed) {
             return Err(Self::crashed_err());
+        }
+        let once = {
+            let mut n = self
+                .fail_next
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let fail = *n > 0;
+            *n = n.saturating_sub(1);
+            fail
+        };
+        if once {
+            return Err(SysError::new(SysErrorKind::AccessDenied, "firewall rules"));
         }
         if let Some(kind) = *self.error.lock().unwrap_or_else(PoisonError::into_inner) {
             return Err(SysError::new(kind, "firewall rules"));

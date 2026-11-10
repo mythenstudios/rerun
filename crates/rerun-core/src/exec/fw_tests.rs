@@ -68,6 +68,8 @@ pub(crate) enum Kind {
     Rules,
     /// A new file, then two firewall rules.
     Mixed,
+    /// Two firewall rules, nothing else.
+    TwoRules,
 }
 
 fn hex_upper(b: &[u8]) -> String {
@@ -144,7 +146,7 @@ pub(crate) fn plan(sys: &FakeSystem, index: [u8; 32], k: Kind) -> PlanHash {
     let app = app(sys);
     let main = rel("game.exe");
     let steps = match k {
-        Kind::Rules => Vec::new(),
+        Kind::Rules | Kind::TwoRules => Vec::new(),
         Kind::Mixed => vec![Step::FileInstall(spec(vec![entry(
             "new.dll",
             "new.dll",
@@ -165,7 +167,7 @@ pub(crate) fn plan(sys: &FakeSystem, index: [u8; 32], k: Kind) -> PlanHash {
     .unwrap();
     let (picks, exes): (Vec<&str>, Vec<&str>) = match k {
         Kind::Rules => (vec!["net/block"], vec!["game.exe"]),
-        Kind::Mixed => (
+        Kind::Mixed | Kind::TwoRules => (
             vec!["net/block", "other/also"],
             vec!["game.exe", "tool.exe"],
         ),
@@ -205,6 +207,13 @@ pub(crate) enum Script {
     Before(fn(&FakeSystem)),
     /// The helper runs, then the world changes before the CLI observes.
     After(fn(&FakeSystem)),
+    /// The prompt is declined, and the world changes (P4-2d review follow-up 5).
+    DeclineAnd(fn(&FakeSystem)),
+    /// `ShellExecuteExW` succeeded without a process handle: nothing ran here, but the CLI
+    /// cannot know (`HelperRun::Lost`, review follow-up 1).
+    LostBeforeRun,
+    /// The helper ran, then the wait or the exit code failed (`HelperRun::Lost`).
+    LostAfterRun,
 }
 
 /// The fake transport (module docs).
@@ -280,6 +289,21 @@ impl Elevation for Wire<'_> {
         let next = self.script.lock().unwrap().pop_front();
         let code = match next {
             Some(Script::Decline) => return Ok(HelperRun::Declined),
+            Some(Script::DeclineAnd(f)) => {
+                f(self.world);
+                return Ok(HelperRun::Declined);
+            }
+            Some(Script::LostBeforeRun) => {
+                return Ok(HelperRun::Lost {
+                    why: SysError::new(SysErrorKind::Other, "fake: no process handle"),
+                });
+            }
+            Some(Script::LostAfterRun) => {
+                let _ = self.serve(args);
+                return Ok(HelperRun::Lost {
+                    why: SysError::new(SysErrorKind::Other, "fake: the wait failed"),
+                });
+            }
             Some(Script::Unknown) => 0,
             Some(Script::StartFails) => {
                 return Err(SysError::new(
@@ -802,21 +826,64 @@ fn f5_rules_are_last_need_a_source_and_are_rechecked_at_begin() {
         let app = app(&fw.sys);
         let bytes = crate::plan::load(&app, &h).unwrap();
         let p = crate::plan::decode(bytes.bytes()).unwrap();
-        // A rule before another op, a rule without a source, a rule for a folder: refused.
+        // The format's rules, each refused with its own words (review follow-up 10).
+        let refused = |q: &crate::plan::Plan, why: &str| {
+            let e = q.encode().expect_err(why).to_string();
+            assert!(e.contains(why), "{e} (wanted: {why})");
+        };
         let mut q = p.clone();
         q.ops.swap(0, 1);
-        assert!(q.encode().is_err(), "{:?}", q.ops);
+        refused(&q, "an op after a firewall rule");
         let mut q = p.clone();
         q.source = None;
-        assert!(q.encode().is_err());
+        refused(&q, "a firewall rule needs the plan's source");
         let mut q = p.clone();
         if let Op::FirewallRule { program, .. } = &mut q.ops[1] {
             *program = rel(r"bin\%x%.exe");
         }
-        assert!(q.encode().is_err());
+        refused(&q, "a program a firewall rule cannot name");
         let mut q = p.clone();
         q.ops.push(q.ops[1].clone());
-        assert!(q.encode().is_err(), "two rules for one executable");
+        refused(&q, "two firewall rules for one executable");
+        // More than one helper batch holds.
+        let mut q = p.clone();
+        for i in 0..7 {
+            q.ops.push(Op::FirewallRule {
+                root: RootIx(0),
+                program: rel(&format!("extra{i}.exe")),
+                direction: Direction::Out,
+            });
+        }
+        refused(&q, "more than 8 firewall rules");
+        // A rule outside a game folder (Rerun's profiles root).
+        let mut q = p.clone();
+        q.roots[0].origin = crate::plan::PlanOrigin::Steam {
+            store: crate::path::RootPath::new(r"D:\SteamLibrary").unwrap(),
+            store_id: crate::policy::root::RootId {
+                volume_serial: 9,
+                file_id: 9,
+            },
+            app_id: 220,
+            installdir: rel("G"),
+        };
+        q.roots.push(crate::plan::PlanRoot {
+            kind: crate::plan::RootKind::Profiles,
+            path: crate::path::RootPath::new(r"C:\Users\Player\AppData\Local\Rerun\profiles")
+                .unwrap(),
+            id: crate::plan::PROFILES_ROOT_ID,
+            origin: crate::plan::PlanOrigin::AppDir,
+            main_exe: None,
+        });
+        if let Op::FirewallRule { root, .. } = &mut q.ops[2] {
+            *root = RootIx(1);
+        }
+        refused(&q, "a firewall rule outside a game folder");
+        // Security review N2: a rule for an executable a file op of the same plan writes.
+        let mut q = p.clone();
+        if let Op::CreateFile { path, .. } = &mut q.ops[0] {
+            *path = rel("tool.exe");
+        }
+        refused(&q, "a firewall rule for an executable the plan writes");
         // The game changed since planning: refused before `begin`, nothing written, no prompt.
         let p = format!(r"{GAME}\tool.exe");
         fw.sys.fake_fs().remove_abs(Path::new(&p)).unwrap();
@@ -913,4 +980,240 @@ fn f6_the_op_has_one_wire_form() {
         serde_json::to_string(&op).unwrap(),
         r#"{"firewall_rule":{"root":0,"program":"bin\\game.exe","direction":"out"}}"#
     );
+}
+
+// ---------- F7: review follow-ups of P4-2d ----------
+
+/// The CLI side with the helper presence `p` (A4 S8 tests).
+fn revert_with_presence(fw: &Fw, t: &TxnId, p: HelperPresence) -> Result<RevertReport, ExecError> {
+    let two = TwoProc {
+        world: &fw.sys,
+        wire: Wire::new(&fw.sys),
+    };
+    *two.wire.presence.lock().unwrap() = p;
+    let fr_ = fr(&fw.sys);
+    let app_ = app(&fw.sys);
+    let cx = ExecCtx {
+        sys: &two,
+        fr: &fr_,
+        app: &app_,
+        tag: InstanceTag::fixed(TAG + 70),
+    };
+    super::revert(&cx, t)
+}
+
+fn log_len(fw: &Fw, t: &TxnId) -> usize {
+    let app = app(&fw.sys);
+    let j = Journal::new(&app, InstanceTag::fixed(3));
+    j.load(t, crate::journal::VerifyBackups::Length)
+        .unwrap()
+        .log
+        .len()
+}
+
+/// 1: once the start succeeded, a missing process handle or a failed wait is `Unknown`, never
+/// `Start`: no rollback (a helper may still add a rule), open, exit 5; the revert finishes it.
+#[test]
+fn f7_a_lost_result_after_the_start_stays_open() {
+    use crate::elevate::{Judged, judge};
+    let fw = Fw::new();
+    let image = helper_image(&fw.sys).unwrap();
+    let lost = HelperRun::Lost {
+        why: SysError::new(SysErrorKind::Other, "wait"),
+    };
+    assert_eq!(judge(&lost, &image, 1), Judged::Unknown);
+    seams(|| {
+        for (script, left) in [(Script::LostBeforeRun, 0), (Script::LostAfterRun, 2)] {
+            let fw = Fw::new();
+            let before = fw.snap();
+            let h = plan(&fw.sys, fw.index, Kind::Mixed);
+            let (r, runs) = fw.apply(&h, vec![script]);
+            let e = r.unwrap_err();
+            assert!(matches!(e, ApplyError::HelperOpen { .. }), "{e:?}");
+            assert!(
+                matches!(helper_cause(&e), Some(HelperFailure::Unknown)),
+                "{e:?}"
+            );
+            assert_eq!(runs, 1);
+            assert_eq!(fw.state(&txn1()), Some(TxnState::Open));
+            assert_eq!(fw_scope(&fw.sys).len(), left);
+            let (r, _) = fw.revert(&txn1(), Vec::new());
+            assert_eq!(r.unwrap().closed, Some(Closing::RolledBack));
+            assert_eq!(fw.snap(), before);
+        }
+    });
+}
+
+/// 2 (security L2): before an unfinished batch is observed, the request files of earlier runs
+/// go first, then `ensure_idle`; `forget` sweeps them too.
+#[test]
+fn f7_leftover_requests_are_swept_before_ensure_idle_and_by_forget() {
+    seams(|| {
+        let fw = Fw::new();
+        let h = plan(&fw.sys, fw.index, Kind::Rules);
+        let (r, _) = fw.apply(&h, vec![Script::Unknown]);
+        assert!(matches!(r, Err(ApplyError::HelperOpen { .. })));
+        let stale = format!(r"{ELEVATE}\{}-1.req", txn1());
+        fw.sys
+            .fake_fs()
+            .put_file(Path::new(&stale), b"stale")
+            .unwrap();
+        let r = revert_with_presence(&fw, &txn1(), HelperPresence::Running);
+        assert!(
+            matches!(
+                r,
+                Err(ExecError::Refused(Refusal::Helper(HelperFailure::Busy(_))))
+            ),
+            "{r:?}"
+        );
+        assert!(
+            names(&fw.sys, ELEVATE).is_empty(),
+            "swept before the refusal"
+        );
+        // Forget.
+        let fw = Fw::new();
+        let h = plan(&fw.sys, fw.index, Kind::Rules);
+        let t = applied(&fw.apply(&h, Vec::new()).0);
+        let stale = format!(r"{ELEVATE}\{t}-4.req");
+        fw.sys
+            .fake_fs()
+            .put_file(Path::new(&stale), b"stale")
+            .unwrap();
+        assert!(fw.run(Vec::new(), |cx| super::forget(cx, &t)).0.is_ok());
+        assert!(names(&fw.sys, ELEVATE).is_empty());
+    });
+}
+
+/// 3: a `RevertBatch` without its `RevertDone` (a declined revert) is a batch without a result:
+/// `ensure_idle` refuses while a helper runs, before the first record of the run.
+#[test]
+fn f7_a_revert_batch_without_its_done_is_unfinished() {
+    seams(|| {
+        let fw = Fw::new();
+        let h = plan(&fw.sys, fw.index, Kind::Rules);
+        let t = applied(&fw.apply(&h, Vec::new()).0);
+        let (r, _) = fw.revert(&t, vec![Script::Decline]);
+        assert!(r.unwrap().halted.is_some());
+        let n = log_len(&fw, &t);
+        let r = revert_with_presence(&fw, &t, HelperPresence::Running);
+        assert!(
+            matches!(
+                r,
+                Err(ExecError::Refused(Refusal::Helper(HelperFailure::Busy(_))))
+            ),
+            "{r:?}"
+        );
+        assert_eq!(log_len(&fw, &t), n, "nothing written");
+    });
+}
+
+/// 4: a `HelperBatch` cut short of the head's rule ops does not fit the head: `Blocked`.
+#[test]
+fn f7_a_truncated_helper_batch_does_not_fit_the_head() {
+    seams(|| {
+        let fw = Fw::new();
+        let h = plan(&fw.sys, fw.index, Kind::TwoRules);
+        let t = {
+            let app_ = app(&fw.sys);
+            let bytes = crate::plan::load(&app_, &h).unwrap();
+            let j = Journal::new(&app_, InstanceTag::fixed(TAG + 80));
+            let lock = j.lock().unwrap();
+            let mut w = lock.begin(bytes.bytes()).unwrap();
+            let t = *w.id();
+            let d = crate::journal::Digest {
+                sha256: [1; 32],
+                len: 1,
+            };
+            w.helper_batch(0, 0, d).unwrap();
+            t
+        };
+        let r = fw.run(Vec::new(), |cx| super::verify(cx, &t)).0;
+        assert!(
+            matches!(r, Err(ExecError::Refused(Refusal::Blocked { .. }))),
+            "{r:?}"
+        );
+        let (r, runs) = fw.revert(&t, Vec::new());
+        assert!(
+            matches!(r, Err(ExecError::Refused(Refusal::Blocked { .. }))),
+            "{r:?}"
+        );
+        assert_eq!(runs, 0);
+    });
+}
+
+/// 5: the run's verdict before any observation: after a declined prompt the batch itself reads
+/// nothing (the rollback's observation is the only one, exit 4), and a firewall that cannot be
+/// read then leaves the cause `Declined` (the rollback, which must observe before it records
+/// `Before`, stays open: exit 5), never `Unreadable` or `HelperOpen`.
+#[test]
+fn f7_declined_is_decided_before_the_firewall_is_read() {
+    seams(|| {
+        let fw = Fw::new();
+        let h = plan(&fw.sys, fw.index, Kind::Mixed);
+        let n = fw.sys.fake_firewall().selects();
+        let (r, _) = fw.apply(&h, vec![Script::Decline]);
+        let e = r.unwrap_err();
+        assert!(matches!(e, ApplyError::RolledBack { .. }), "{e:?}");
+        assert_eq!(
+            fw.sys.fake_firewall().selects() - n,
+            1,
+            "the rollback's read only"
+        );
+        let fw = Fw::new();
+        let h = plan(&fw.sys, fw.index, Kind::Mixed);
+        let (r, _) = fw.apply(
+            &h,
+            vec![Script::DeclineAnd(|s| s.fake_firewall().fail_next(1))],
+        );
+        let e = r.unwrap_err();
+        assert!(matches!(e, ApplyError::LeftOpen { .. }), "{e:?}");
+        assert!(
+            matches!(helper_cause(&e), Some(HelperFailure::Declined)),
+            "{e:?}"
+        );
+    });
+}
+
+/// 9: a game-folder flush that fails before `HelperBatch` (the mixed apply's `flush_all`) rolls
+/// the apply back without any helper run.
+#[test]
+fn f7_a_failed_game_flush_before_the_batch_rolls_back_without_a_helper() {
+    use std::sync::{Arc, Mutex as M};
+    seams(|| {
+        // Which directory flush is the game folder's: the one that runs while `D:` has pending
+        // changes (the file op's), traced on a clean run.
+        let fw = Fw::new();
+        let h = plan(&fw.sys, fw.index, Kind::Mixed);
+        let seen: Arc<M<Vec<usize>>> = Arc::new(M::new(Vec::new()));
+        let s2 = Arc::clone(&seen);
+        fw.sys.fake_fs().on_step(move |fx, ev| {
+            if ev.call == Some(crate::sys::fake::Prim::FlushDir) {
+                s2.lock().unwrap().push(fx.pending('D'));
+            }
+        });
+        let _ = applied(&fw.apply(&h, Vec::new()).0);
+        fw.sys.fake_fs().clear_on_step();
+        let flushes = seen.lock().unwrap().clone();
+        let nth = flushes.iter().position(|p| *p > 0).expect("a flush of D:") + 1;
+        // The same apply with that flush failing.
+        let fw = Fw::new();
+        let before = fw.snap();
+        let h = plan(&fw.sys, fw.index, Kind::Mixed);
+        let (r, runs) = fw.run(Vec::new(), |cx| {
+            fw.sys.fake_fs().clear_faults();
+            fw.sys
+                .fake_fs()
+                .fail_at(crate::sys::fake::Prim::FlushDir, nth, SysErrorKind::Other);
+            super::apply(cx, &h)
+        });
+        assert!(matches!(r, Err(ApplyError::RolledBack { .. })), "{r:?}");
+        assert_eq!(runs, 0);
+        assert_eq!(fw.snap(), before);
+        let app_ = app(&fw.sys);
+        let j = Journal::new(&app_, InstanceTag::fixed(4));
+        let v = j
+            .load(&txn1(), crate::journal::VerifyBackups::Length)
+            .unwrap();
+        assert!(v.ops.values().all(|o| !o.intent.batch), "no HelperBatch");
+    });
 }

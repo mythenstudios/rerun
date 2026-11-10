@@ -489,7 +489,7 @@ pub fn status<W: Write, E: Write>(
 /// The `status` lines of the Rerun firewall rules no transaction of this account owns (A4 N6):
 /// nothing when there are none; an unreadable firewall is one line, never an error of `status`.
 pub(crate) fn orphan_lines(
-    r: &Result<Vec<exec::OrphanRule>, rerun_core::sys::SysError>,
+    r: &Result<Vec<exec::OrphanRule>, exec::OrphansError>,
 ) -> Vec<Message<'_>> {
     use crate::messages::HelperMsg;
     match r {
@@ -504,6 +504,11 @@ pub(crate) fn orphan_lines(
             }));
             out.push(Message::Helper(HelperMsg::OrphansHint));
             out
+        }
+        Err(e @ exec::OrphansError::Journal(_)) => {
+            vec![Message::Helper(HelperMsg::OrphansNoJournal {
+                error: shown(e),
+            })]
         }
         Err(e) => vec![Message::Helper(HelperMsg::OrphansUnreadable {
             error: shown(e),

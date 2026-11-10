@@ -17,9 +17,10 @@
 //!   game): a durable `Applied` has every change (`verify` all `After`, the rules too), a durable
 //!   `Closed` has the state before, an `Ok` survives, and the recovery ends identical.
 //! - FC4 J6 for the batch: without the flush of `HelperBatch` the matrix finds a rule the
-//!   recovery cannot see (the journal lost the batch, the rule stays); `RevertBatch`'s flush is
-//!   not observable in a synchronous fake (it orders the record before a helper that could
-//!   outlive the CLI, A4 S8) and is pinned by its place in the code only.
+//!   recovery cannot see (the journal lost the batch, the rule stays); `RevertBatch`'s flush
+//!   (like the flush of the `elevate` folder after the request) has no observable effect: a
+//!   lost `RevertBatch` only makes the next revert observe again; it is kept for symmetry with
+//!   `RevertIntent` (ADR 0019 amendment P4-2d) and pinned by its place in the code only.
 
 use std::collections::BTreeMap;
 use std::time::Instant;

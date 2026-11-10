@@ -827,12 +827,27 @@ fn orphan_rules_are_worded_for_this_account() {
     assert!(s.contains("group Rerun); a non-elevated Rerun never removes it."));
     assert!(!s.contains("orphan") && !s.contains("left behind"), "{s}");
     assert_eq!(shown(&super::orphan_lines(&Ok(Vec::new()))), "");
-    let e = Err(rerun_core::sys::SysError::new(
-        rerun_core::sys::SysErrorKind::AccessDenied,
-        "firewall rules",
+    let e = Err(rerun_core::exec::OrphansError::Firewall(
+        rerun_core::sys::SysError::new(
+            rerun_core::sys::SysErrorKind::AccessDenied,
+            "firewall rules",
+        ),
     ));
     assert!(
         shown(&super::orphan_lines(&e))
             .starts_with("Rerun firewall rules: the firewall cannot be read now: ")
     );
+    // Review follow-up N1: a journal that cannot be listed has its own words.
+    let e = Err(rerun_core::exec::OrphansError::Journal(
+        rerun_core::journal::JournalError::Busy,
+    ));
+    let s = shown(&super::orphan_lines(&e));
+    assert!(
+        s.starts_with(
+            "Rerun firewall rules: which belong to this account cannot be told: the journal \
+             cannot be read now: "
+        ),
+        "{s}"
+    );
+    assert!(!s.contains("firewall cannot be read"), "{s}");
 }

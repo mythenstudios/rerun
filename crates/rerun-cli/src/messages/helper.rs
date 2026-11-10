@@ -61,6 +61,11 @@ pub enum HelperMsg<'a> {
         /// Why.
         error: Shown<'a>,
     },
+    /// The journal could not be read for the list (security review N1 of P4-2d).
+    OrphansNoJournal {
+        /// Why.
+        error: Shown<'a>,
+    },
 }
 
 impl fmt::Display for HelperMsg<'_> {
@@ -110,9 +115,10 @@ impl fmt::Display for HelperMsg<'_> {
                 "warning: Rerun's helper is not installed safely, so this plan cannot be applied \
                  yet: {error}"
             ),
-            Self::OrphansUnreadable { error } => write!(
+            Self::OrphansUnreadable { error } => write!(f, "Rerun firewall rules: {error}"),
+            Self::OrphansNoJournal { error } => write!(
                 f,
-                "Rerun firewall rules: the firewall cannot be read now: {error}"
+                "Rerun firewall rules: which belong to this account cannot be told: {error}"
             ),
         }
     }

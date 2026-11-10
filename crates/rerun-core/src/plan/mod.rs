@@ -1305,6 +1305,14 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
             Target::Rule { root, program } => {
                 rule_check(plan, k, root, program)?;
                 let key = (root, fold(program.as_str()));
+                // Security review N2 of P4-2d: the helper hashes the executable it blocks; a
+                // plan that writes that very file would make its own rule fail the check.
+                if seen.contains(&key) {
+                    return Err(invalid(
+                        Some(k),
+                        "a firewall rule for an executable the plan writes",
+                    ));
+                }
                 if rules_seen.contains(&key) {
                     return Err(invalid(Some(k), "two firewall rules for one executable"));
                 }

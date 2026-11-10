@@ -33,6 +33,7 @@ pub enum Judged {
 pub fn judge(run: &HelperRun, image: &HelperImage, batch: usize) -> Judged {
     let (code, proc) = match run {
         HelperRun::Declined => return Judged::Declined,
+        HelperRun::Lost { .. } => return Judged::Unknown,
         HelperRun::Exited { code, proc } => (*code, proc),
     };
     let same_image = proc

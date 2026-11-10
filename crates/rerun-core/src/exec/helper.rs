@@ -44,7 +44,7 @@ use crate::elevate::request::{
 use crate::elevate::{ExitClass, Judged, OpResult, PlanRefusal, PromptKind, Reason, check_plan};
 use crate::journal::{Digest, JournalError, Observed, OpLog, Reverting, TxnId, TxnWriter};
 use crate::path::RelPath;
-use crate::plan::{Op, Plan, RootKind};
+use crate::plan::{Op, Plan, RootIx, RootKind};
 use crate::policy::firewall::{self as pf, Program};
 use crate::policy::root::{AppSub, Create, HelperImage, RootId};
 use crate::sys::fs::{Attrs, NewFile, TmpName};
@@ -76,8 +76,9 @@ pub enum HelperFailure {
     /// The helper's report and the CLI's own observation of the firewall differ.
     #[error("the firewall does not hold what the helper reported")]
     Disagree,
-    /// The helper could not be started (`ShellExecuteExW`; blocked by WDAC or Smart App
-    /// Control: os error 4551).
+    /// No helper process was created (`ShellExecuteExW` failed; blocked by WDAC or Smart App
+    /// Control: os error 4551). Only then: once a process may exist, a missing handle or a
+    /// failed wait is `HelperRun::Lost`, judged [`Self::Unknown`] (P4-2d review follow-up).
     #[error("the helper could not be started: {0}")]
     Start(SysError),
     /// The firewall cannot be read now.
@@ -138,10 +139,20 @@ fn topo_of(plan: &Plan) -> Option<Id> {
     plan.source.as_ref().and_then(|s| Id::parse(&s.topo))
 }
 
+/// One rule of the batch: the rule, its program and direction as the head records them.
+pub(super) struct RuleOf {
+    /// The rule of Rerun's form.
+    pub(super) rule: FwRule,
+    /// Its program.
+    pub(super) program: Program,
+    /// Its direction.
+    pub(super) direction: pf::Direction,
+}
+
 /// The rule of op `k` of `plan` in transaction `txn`: the head's planned root path and program
 /// (R1, A4 S6 a), never a rebound root. `None` for an op that is no rule (never in a decoded
 /// plan's batch).
-pub(super) fn rule_of(plan: &Plan, txn: &TxnId, k: u16) -> Option<(FwRule, Program)> {
+pub(super) fn rule_of(plan: &Plan, txn: &TxnId, k: u16) -> Option<RuleOf> {
     let Some(Op::FirewallRule {
         root,
         program,
@@ -152,19 +163,55 @@ pub(super) fn rule_of(plan: &Plan, txn: &TxnId, k: u16) -> Option<(FwRule, Progr
     };
     let r = plan.roots.get(usize::from(root.0))?;
     let p = Program::new(&r.path, program).ok()?;
-    Some((pf::rule(&topo_of(plan)?, txn, k, &p, *direction), p))
+    Some(RuleOf {
+        rule: pf::rule(&topo_of(plan)?, txn, k, &p, *direction),
+        program: p,
+        direction: *direction,
+    })
 }
 
 /// The rules of ops `first..=last`.
-fn rules_of(
-    plan: &Plan,
-    txn: &TxnId,
-    first: u16,
-    last: u16,
-) -> Result<Vec<(FwRule, Program)>, ExecError> {
+fn rules_of(plan: &Plan, txn: &TxnId, first: u16, last: u16) -> Result<Vec<RuleOf>, ExecError> {
     (first..=last)
         .map(|k| rule_of(plan, txn, k).ok_or_else(|| not_a_rule(k)))
         .collect()
+}
+
+/// A rule op as the plan names it: its index, program and direction.
+type NamedRule<'p> = (u16, &'p RelPath, pf::Direction);
+
+/// The rule ops `first..=last` as the plan names them, all on one root (the engine plans root
+/// 0): the root and per op its index, program and direction; `Err(k)` at the first op that is no
+/// rule or names another root.
+fn rule_ops(plan: &Plan, first: u16, last: u16) -> Result<(RootIx, Vec<NamedRule<'_>>), u16> {
+    let mut root_ix = None;
+    let mut out = Vec::new();
+    for k in first..=last {
+        let Some(Op::FirewallRule {
+            root,
+            program,
+            direction,
+        }) = plan.ops.get(usize::from(k))
+        else {
+            return Err(k);
+        };
+        if root_ix.is_some_and(|r| r != *root) {
+            return Err(k);
+        }
+        root_ix = Some(*root);
+        out.push((k, program, *direction));
+    }
+    root_ix.map(|r| (r, out)).ok_or(first)
+}
+
+/// What a decoded helper report says beyond `Done` (`None` for `Done`).
+fn failure_of(e: &crate::elevate::HelperExit) -> Option<HelperFailure> {
+    match e.class {
+        ExitClass::Done => None,
+        ExitClass::Refused => Some(HelperFailure::Refused(e.reason.unwrap_or(Reason::Internal))),
+        ExitClass::RolledBack => Some(HelperFailure::RolledBack),
+        ExitClass::LeftOpen => Some(HelperFailure::LeftOpen),
+    }
 }
 
 fn not_a_rule(k: u16) -> ExecError {
@@ -192,8 +239,10 @@ pub(super) fn observe_rules(
     let Some((first, last)) = batch_of(plan) else {
         return Ok(Vec::new());
     };
-    let rules = rules_of(plan, txn, first, last)?;
-    let fw: Vec<FwRule> = rules.into_iter().map(|(r, _)| r).collect();
+    let fw: Vec<FwRule> = rules_of(plan, txn, first, last)?
+        .into_iter()
+        .map(|r| r.rule)
+        .collect();
     let seen = pf::observe_all(sys.firewall(), &fw).map_err(|e| ExecError::Op {
         op: first,
         source: e,
@@ -267,24 +316,7 @@ pub(super) fn recheck(
         .ok_or(Refusal::Mismatch { op: first })?;
     // Every rule op names the same game root (`plan::rule_check`: a game root; the engine
     // plans root 0).
-    let mut root_ix = None;
-    let mut want = Vec::new();
-    for k in first..=last {
-        let Some(Op::FirewallRule {
-            root,
-            program,
-            direction,
-        }) = plan.ops.get(usize::from(k))
-        else {
-            return Err(Refusal::Mismatch { op: k });
-        };
-        if root_ix.is_some_and(|r| r != *root) {
-            return Err(Refusal::Mismatch { op: k });
-        }
-        root_ix = Some(*root);
-        want.push((program.clone(), *direction));
-    }
-    let root = root_ix.ok_or(Refusal::Mismatch { op: first })?;
+    let (root, want) = rule_ops(plan, first, last).map_err(|k| Refusal::Mismatch { op: k })?;
     let Some(super::roots::Opened::Game(game)) = roots.opened(usize::from(root.0)) else {
         return Err(Refusal::Mismatch { op: first });
     };
@@ -294,7 +326,7 @@ pub(super) fn recheck(
         && anchors
             .iter()
             .zip(&want)
-            .all(|(a, (p, d))| a.exe.same_spelling(p) && a.direction == *d);
+            .all(|(a, (_, p, d))| a.exe.same_spelling(p) && a.direction == *d);
     if !same {
         return Err(Refusal::Mismatch { op: first });
     }
@@ -328,6 +360,15 @@ fn sweep(dir: &dyn crate::sys::DirWrite) {
         if let Ok(name) = RelPath::from_segment(&e.name) {
             delete(dir, &name);
         }
+    }
+}
+
+/// Deletes the request files of earlier runs in `<AppDir>\elevate` if the folder exists (N9; a
+/// revert of a batch without a result and `forget`, under the journal lock; security review L2).
+/// Best effort: nothing is created and no error is reported.
+pub(super) fn sweep_leftovers(cx: &ExecCtx<'_>) {
+    if let Ok(Some(dir)) = cx.app.sub_write(AppSub::Elevate, Create::Never) {
+        sweep(&*dir);
     }
 }
 
@@ -439,25 +480,15 @@ fn add_request(
         .map_err(|e| ExecError::Sys(SysError::new(SysErrorKind::Other, e.to_string())))?
         .ok_or_else(|| SysError::new(SysErrorKind::NotFound, "index"))?
         .info()?;
-    let mut ops = Vec::new();
-    let mut root_ix = None;
-    for k in first..=last {
-        let Some(Op::FirewallRule {
-            root,
-            program,
-            direction,
-        }) = plan.ops.get(usize::from(k))
-        else {
-            return Err(not_a_rule(k));
-        };
-        root_ix = Some(*root);
-        ops.push(AddOp {
+    let (root, named) = rule_ops(plan, first, last).map_err(not_a_rule)?;
+    let ops: Vec<AddOp> = named
+        .into_iter()
+        .map(|(k, program, direction)| AddOp {
             op: k,
             program: program.clone(),
-            direction: *direction,
-        });
-    }
-    let root = root_ix.ok_or_else(|| not_a_rule(first))?;
+            direction,
+        })
+        .collect();
     let planned = plan
         .roots
         .get(usize::from(root.0))
@@ -507,29 +538,26 @@ pub(super) fn run_batch(
     let txn = *w.id();
     let rules: Vec<FwRule> = rules_of(plan, &txn, first, last)?
         .into_iter()
-        .map(|(r, _)| r)
+        .map(|r| r.rule)
         .collect();
     let req = add_request(cx, plan, roots, txn, first, last)?;
     let written = write_request(cx, || w.tmp(), &req)?;
     w.helper_batch(first, last, written.digest)?;
+    // `Err` only when no process was created (`Elevation::run_helper`): `Start`, rolled back.
     let judged = run_helper(cx, &ready.image, &written)
         .map_err(|e| ExecError::Helper(HelperFailure::Start(e)))?;
-    let seen = pf::observe_all(cx.sys.firewall(), &rules)
-        .map_err(|e| ExecError::Helper(HelperFailure::Unreadable(e)))?;
+    // The run's own verdict first (review follow-up): a declined prompt stays `Declined` (exit 4)
+    // even if the firewall cannot be read afterwards; the rollback observes again anyway.
     let report = match judged {
         Judged::Declined => return Err(ExecError::Helper(HelperFailure::Declined)),
         Judged::Unknown => return Err(ExecError::Helper(HelperFailure::Unknown)),
         Judged::Exit(e) => e,
     };
-    let failure = match (report.class, report.reason) {
-        (ExitClass::Done, _) => None,
-        (ExitClass::Refused, r) => Some(HelperFailure::Refused(r.unwrap_or(Reason::Internal))),
-        (ExitClass::RolledBack, _) => Some(HelperFailure::RolledBack),
-        (ExitClass::LeftOpen, _) => Some(HelperFailure::LeftOpen),
-    };
-    if let Some(f) = failure {
+    if let Some(f) = failure_of(&report) {
         return Err(ExecError::Helper(f));
     }
+    let seen = pf::observe_all(cx.sys.firewall(), &rules)
+        .map_err(|e| ExecError::Helper(HelperFailure::Unreadable(e)))?;
     let agree = seen.iter().all(|o| *o == pf::Observed::After)
         && report.ops[..rules.len()]
             .iter()
@@ -583,13 +611,16 @@ pub(super) fn revert_batch<W: Reverting>(
     let txn = *w.id();
     let rules = rules_of(plan, &txn, first, last)?;
     // A4 S8: a batch without a result may still be acted on by a helper of an earlier run.
+    // Its request file goes first (security review L2): a helper that starts late, after this
+    // revert observed no rule, then finds no request to act on; then no helper may run.
     if start && unfinished(w.ops()) {
+        sweep_leftovers(cx);
         let image = crate::policy::root::helper_image(cx.sys)
             .map_err(|e| Refusal::HelperUnsafe(Box::new(e)))?;
         crate::elevate::client::ensure_idle(cx.sys.elevation(), &image)
             .map_err(|e| Refusal::Helper(HelperFailure::Busy(e)))?;
     }
-    let fw: Vec<FwRule> = rules.iter().map(|(r, _)| r.clone()).collect();
+    let fw: Vec<FwRule> = rules.iter().map(|r| r.rule.clone()).collect();
     let seen = pf::observe_all(cx.sys.firewall(), &fw).map_err(|e| ExecError::Op {
         op: last,
         source: e,
@@ -619,10 +650,10 @@ pub(super) fn revert_batch<W: Reverting>(
             ops: ops
                 .iter()
                 .zip(&rules)
-                .map(|(k, (_, p))| RemoveOp {
+                .map(|(k, r)| RemoveOp {
                     op: *k,
-                    program: p.clone(),
-                    direction: direction_at(plan, *k),
+                    program: r.program.clone(),
+                    direction: r.direction,
                 })
                 .collect(),
         },
@@ -640,13 +671,7 @@ pub(super) fn revert_batch<W: Reverting>(
         Judged::Unknown => return Ok((Vec::new(), Some(halt(plan, last, HelperFailure::Unknown)))),
         Judged::Exit(e) => e,
     };
-    let failure = match (exit.class, exit.reason) {
-        (ExitClass::Done, _) => None,
-        (ExitClass::Refused, r) => Some(HelperFailure::Refused(r.unwrap_or(Reason::Internal))),
-        (ExitClass::RolledBack, _) => Some(HelperFailure::RolledBack),
-        (ExitClass::LeftOpen, _) => Some(HelperFailure::LeftOpen),
-    };
-    if let Some(f) = failure {
+    if let Some(f) = failure_of(&exit) {
         return Ok((Vec::new(), Some(halt(plan, last, f))));
     }
     let now = match pf::observe_all(cx.sys.firewall(), &fw) {
@@ -676,14 +701,6 @@ pub(super) fn revert_batch<W: Reverting>(
         reports.push(report(*k, observed));
     }
     Ok((reports, None))
-}
-
-/// The direction op `k` records (a rule op of the batch; `out` is the only one today).
-fn direction_at(plan: &Plan, k: u16) -> pf::Direction {
-    match plan.ops.get(usize::from(k)) {
-        Some(Op::FirewallRule { direction, .. }) => *direction,
-        _ => pf::Direction::Out,
-    }
 }
 
 fn report(op: u16, observed: Observed) -> OpReport {

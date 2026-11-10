@@ -299,6 +299,18 @@ fn op_status(
     }
 }
 
+/// Why [`firewall_orphans`] has no list (security review N1 of P4-2d: each with its own words).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OrphansError {
+    /// The firewall cannot be read.
+    #[error("the firewall cannot be read now: {0}")]
+    Firewall(crate::sys::SysError),
+    /// The journal cannot be listed.
+    #[error("the journal cannot be read now: {0}")]
+    Journal(JournalError),
+}
+
 /// A Rerun firewall rule that no transaction of this account owns (ADR 0023 §6, A4 N6; P4-2d).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrphanRule {
@@ -314,20 +326,18 @@ pub struct OrphanRule {
 /// cannot be read names nothing (its rules are listed rather than hidden). Read only.
 ///
 /// # Errors
-/// The firewall or the journal cannot be read.
+/// [`OrphansError`]: the firewall or the journal cannot be read.
 pub fn firewall_orphans(
     sys: &dyn crate::sys::System,
     app: &AppDir<'_>,
-) -> Result<Vec<OrphanRule>, crate::sys::SysError> {
+) -> Result<Vec<OrphanRule>, OrphansError> {
     use crate::policy::firewall::{RuleName, orphans, rerun_rules};
-    let rules = rerun_rules(sys.firewall())?;
+    let rules = rerun_rules(sys.firewall()).map_err(OrphansError::Firewall)?;
     if rules.is_empty() {
         return Ok(Vec::new());
     }
     let j = Journal::new(app, InstanceTag::new());
-    let listing = j
-        .list()
-        .map_err(|e| crate::sys::SysError::new(crate::sys::SysErrorKind::Other, e.to_string()))?;
+    let listing = j.list().map_err(OrphansError::Journal)?;
     let mut owned = Vec::new();
     for l in &listing.txns {
         let open = !l.forgotten
@@ -351,7 +361,7 @@ pub fn firewall_orphans(
             owned.extend(
                 (first..=last)
                     .filter_map(|k| super::helper::rule_of(&plan, &l.id, k))
-                    .filter_map(|(r, _)| RuleName::parse(&r.name)),
+                    .filter_map(|r| RuleName::parse(&r.rule.name)),
             );
         }
     }

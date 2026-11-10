@@ -125,10 +125,20 @@ impl Drop for Com {
     }
 }
 
+/// Why [`start`] returned no process handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NoProcess {
+    /// `ShellExecuteExW` failed with this Win32 error: no process was created.
+    Failed(u32),
+    /// `ShellExecuteExW` succeeded but handed back no `hProcess`.
+    NoHandle,
+}
+
 /// One `ShellExecuteExW` with `SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC |
 /// SEE_MASK_FLAG_NO_UI | SEE_MASK_CLASSKEY` and `hkeyClass` = `class`: `verb` on `file` with
-/// `params` in `dir`, owner the console window, `SW_HIDE`. The started process's handle, or the
-/// Win32 error; a successful call without a process (`hProcess` null) is `ERROR_INVALID_HANDLE`.
+/// `params` in `dir`, owner the console window, `SW_HIDE`. The started process's handle, or why
+/// there is none ([`NoProcess`]): the call failed (no process was created), or it succeeded
+/// without a handle (a process may exist, so its result is unknown; P4-2d review follow-up).
 /// Product code passes `runas` only ([`WinElevation::run_helper`]); tests pass other verbs to
 /// measure the class key without a prompt.
 pub(super) fn start(
@@ -137,7 +147,7 @@ pub(super) fn start(
     params: &str,
     dir: &Path,
     class: &OwnedKey,
-) -> Result<OwnedHandle, u32> {
+) -> Result<OwnedHandle, NoProcess> {
     let verb = wide(OsStr::new(verb));
     let file = wide(file.as_os_str());
     let params = wide(OsStr::new(params));
@@ -171,11 +181,12 @@ pub(super) fn start(
     let code = if ok == 0 { last_error() } else { 0 };
     drop(com);
     if ok == 0 {
-        return Err(code);
+        return Err(NoProcess::Failed(code));
     }
     let raw: HANDLE = info.hProcess;
     if raw.is_null() {
-        return Err(6); // ERROR_INVALID_HANDLE: no process to check or wait for.
+        // Started, but no handle to check or wait for: whatever ran, its result is unknown.
+        return Err(NoProcess::NoHandle);
     }
     // SAFETY: with SEE_MASK_NOCLOSEPROCESS a successful call hands `hProcess` to the caller;
     // nothing else closes it.
@@ -260,12 +271,24 @@ impl Elevation for WinElevation {
         let class = exefile_class().map_err(|c| sys_err(r"HKLM\SOFTWARE\Classes\exefile", c))?;
         let process = match start("runas", image.path(), &params, dir, &class) {
             Ok(p) => p,
-            Err(ERROR_CANCELLED) => return Ok(HelperRun::Declined),
-            Err(c) => return Err(sys_err(&shown, c)),
+            Err(NoProcess::Failed(ERROR_CANCELLED)) => return Ok(HelperRun::Declined),
+            // No process was created: an error (the caller's `HelperFailure::Start`).
+            Err(NoProcess::Failed(c)) => return Err(sys_err(&shown, c)),
+            // Started without a handle: a process may run; its result is unknown.
+            Err(NoProcess::NoHandle) => {
+                return Ok(HelperRun::Lost {
+                    why: sys_err(&shown, 6), // ERROR_INVALID_HANDLE
+                });
+            }
         };
         let proc = facts(process.as_handle());
-        let code = wait(process.as_handle()).map_err(|c| sys_err(&shown, c))?;
-        Ok(HelperRun::Exited { code, proc })
+        // A process exists from here on: a failed wait or exit code is no start failure.
+        match wait(process.as_handle()) {
+            Ok(code) => Ok(HelperRun::Exited { code, proc }),
+            Err(c) => Ok(HelperRun::Lost {
+                why: sys_err(&shown, c),
+            }),
+        }
     }
 
     fn helper_running(&self, nt_name: &str) -> SysResult<HelperPresence> {

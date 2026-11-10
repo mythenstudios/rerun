@@ -53,6 +53,13 @@ pub enum HelperRun {
     },
     /// The UAC prompt was declined (`ERROR_CANCELLED`, 1223): nothing was started.
     Declined,
+    /// The start succeeded, but there is no result: no process handle came back, or the wait
+    /// or the exit code failed (P4-2d review follow-up). A process may have run and may still
+    /// run, so this is never "not started": `elevate::judge` makes it `Unknown`.
+    Lost {
+        /// What failed, with its Win32 code.
+        why: crate::sys::SysError,
+    },
 }
 
 /// Processes of the helper image ([`Elevation::helper_running`]).
@@ -95,8 +102,10 @@ pub trait Elevation: Send + Sync {
     /// Only `elevate` calls this (`clippy.toml`; from P4-2c).
     ///
     /// # Errors
-    /// An argument is not plain; the start fails for another reason than a declined prompt
-    /// (the Win32 code in the error); the wait or the exit code fails.
+    /// Only when **no process was created**: an argument is not plain, or the start fails for
+    /// another reason than a declined prompt (the Win32 code in the error). Once the start
+    /// succeeded, a missing process handle and a failed wait or exit code are
+    /// [`HelperRun::Lost`], never an error (P4-2d review follow-up: a helper may be running).
     fn run_helper(&self, image: &RootPath, args: &[&str]) -> SysResult<HelperRun>;
 
     /// Whether a process of the helper image runs now (A4 S8): before the CLI observes a batch

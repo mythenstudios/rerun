@@ -101,8 +101,8 @@ pub use rebind::{
     CreatedDir, RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,
 };
 pub use status::{
-    OpState, OpStatus, OrphanRule, RebindLine, Status, TxnLine, TxnStatus, firewall_orphans,
-    status, txn_status,
+    OpState, OpStatus, OrphanRule, OrphansError, RebindLine, Status, TxnLine, TxnStatus,
+    firewall_orphans, status, txn_status,
 };
 
 use bind::Bindings;
@@ -1349,6 +1349,21 @@ fn act<W: Reverting>(
 /// The records fit the head (ADR 0019: the journal is op-agnostic; condition 5): every
 /// intended op exists, and its records have the form of its kind.
 fn records_fit(plan: &Plan, ops: &BTreeMap<u16, OpLog>) -> bool {
+    // P4-2d review follow-up (ADR 0023 §9): a logged batch is exactly the head's rule ops, which
+    // end at the head's last op (a `HelperBatch` cut short of them does not fit).
+    let logged: Vec<u16> = ops
+        .iter()
+        .filter(|(_, l)| l.intent.batch)
+        .map(|(k, _)| *k)
+        .collect();
+    if !logged.is_empty() {
+        let whole = helper::batch_of(plan).is_some_and(|(f, l)| {
+            logged.iter().copied().eq(f..=l) && usize::from(l) + 1 == plan.ops.len()
+        });
+        if !whole {
+            return false;
+        }
+    }
     ops.iter()
         .all(|(k, log)| match plan.ops.get(usize::from(*k)) {
             None => false,
@@ -2054,6 +2069,8 @@ pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
     standard_user(cx.sys)?;
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
+    // P4-2d review follow-up (security L2): no request file stays for a late helper to find.
+    helper::sweep_leftovers(cx);
     let listing = j.list().map_err(Refusal::from)?;
     let l = listing
         .txns
