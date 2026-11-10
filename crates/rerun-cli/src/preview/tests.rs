@@ -38,6 +38,7 @@ fn op(index: usize, action: &'static str, root: Option<usize>, path: &str) -> Pr
         profile: None,
         replaces: false,
         firewall: None,
+        held: false,
     }
 }
 
@@ -64,6 +65,7 @@ fn preview(root_path: &str, ops: Vec<PreviewOp>) -> Preview {
         ini: Some(INI_NOTE),
         profiles: None,
         firewall: None,
+        held: None,
     }
 }
 
@@ -608,4 +610,34 @@ fn a_firewall_rule_and_the_prompt_lines() {
     ] {
         assert_eq!(shown(&super::prompt_lines_of(&st)), want, "{st:?}");
     }
+}
+
+/// P4-8: a `keep shared file` op shows what the file holds, that nothing is written, and the
+/// note once.
+#[test]
+fn a_held_file_is_shown_as_kept() {
+    let sha = "cd".repeat(32);
+    let mut hold = op(0, rerun_core::plan::HOLD_ACTION, Some(0), "dinput8.dll");
+    hold.source = Some(escape::path(r"ultimate-asi-loader 10.0.2: x86\dinput8.dll").into_owned());
+    hold.content = Some((sha.clone(), 14));
+    hold.held = true;
+    let mut p = preview(r"D:\Games\G", vec![hold]);
+    p.registry = None;
+    p.layers = None;
+    p.ini = None;
+    p.held = Some(rerun_core::plan::HOLD_NOTE);
+    let text = shown(&render(&p));
+    for want in [
+        "op 0: keep shared file in root 0: dinput8.dll\n",
+        "  from package: ultimate-asi-loader 10.0.2: x86\\dinput8.dll\n",
+        &format!("  holds: sha256 {sha}, 14 bytes (kept as it is, not written)\n"),
+    ] {
+        assert!(text.contains(want), "{want:?} not in\n{text}");
+    }
+    assert!(!text.contains("  new: sha256"), "{text}");
+    assert_eq!(
+        text.matches("shared files: a package file").count(),
+        1,
+        "{text}"
+    );
 }

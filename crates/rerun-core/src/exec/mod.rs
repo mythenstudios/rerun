@@ -188,6 +188,30 @@ pub enum Refusal {
         /// The transaction.
         txn: TxnId,
     },
+    /// A later transaction relies on a file of the one to revert (P4-8, L7): it keeps a shared
+    /// package file this one installed (`Hold`), so this one is reverted after it.
+    #[error(
+        "transaction {txn} uses a file this transaction installed (a shared package file, such          as a loader several fixes need); revert {txn} first, then this one (newest first)"
+    )]
+    Held {
+        /// The later transaction.
+        txn: TxnId,
+    },
+    /// A DLL of a package of the plan lies where a live transaction has a DLL of another
+    /// package (P4-8): one DLL of a name per folder is loaded, and Rerun does not chainload.
+    #[error(
+        "op {op}: {path} is the DLL slot of package {package} from transaction {txn}; two          packages cannot share a DLL (Rerun does not chainload): revert {txn} first, or keep          that fix instead"
+    )]
+    SlotTaken {
+        /// The transaction.
+        txn: TxnId,
+        /// Op index of the plan.
+        op: u16,
+        /// The DLL.
+        path: Shown<'static>,
+        /// The package of the transaction there.
+        package: Shown<'static>,
+    },
     /// A transaction on an object of this plan is reverted, but its journal still names a file
     /// Rerun left (in use, or kept next to a file that changed: the journal does not say which),
     /// so it stays open until a revert deletes that file (P2-15): it blocks applies on its
@@ -1448,6 +1472,15 @@ fn preflight<'g>(
 ) -> Result<roots::Roots<'g>, Refusal> {
     let objects = Object::of(plan).map_err(Refusal::Plan)?;
     stack::for_apply(j, listing, &objects)?;
+    // P4-8: no DLL slot of another package's live transaction.
+    if let Some(s) = stack::slot_taken(j, listing, plan) {
+        return Err(Refusal::SlotTaken {
+            txn: s.txn,
+            op: s.op,
+            path: s.path,
+            package: s.package,
+        });
+    }
     let roots = roots::Roots::all(cx, plan, &Bindings::head(plan), stores, run)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
     roots::main_exe_present(plan, &roots)?;
@@ -1457,6 +1490,20 @@ fn preflight<'g>(
     // A4 S7: the firewall rules are still what the signed Topo authorises here.
     helper::recheck(cx, plan, &roots)?;
     Ok(roots)
+}
+
+/// The DLL slot check of an apply (P4-8), for the planner, so a plan names a taken slot before
+/// its preview: the journal read without the lock (anything unreadable is "nothing found"; the
+/// apply checks again under the lock).
+pub(crate) fn slot_taken_now(app: &AppDir<'_>, plan: &Plan) -> Option<Refusal> {
+    let j = Journal::new(app, crate::journal::InstanceTag::new());
+    let l = j.list().ok()?;
+    stack::slot_taken(&j, &l, plan).map(|s| Refusal::SlotTaken {
+        txn: s.txn,
+        op: s.op,
+        path: s.path,
+        package: s.package,
+    })
 }
 
 /// Applies the stored plan `h` (module docs).
@@ -2125,6 +2172,8 @@ mod fw_crash_tests;
 pub(crate) mod fw_tests;
 #[cfg(test)]
 mod halt_tests;
+#[cfg(test)]
+mod hold_tests;
 #[cfg(test)]
 mod ini_crash_tests;
 #[cfg(test)]

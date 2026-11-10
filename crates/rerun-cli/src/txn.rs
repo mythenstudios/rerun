@@ -753,6 +753,7 @@ fn report_lines<'a>(st: &TxnStatus, rep: &'a RevertReport, v: &Verified) -> Vec<
             op: o.op,
             observed: o.observed,
             changed: seen != Some(o.observed),
+            held: op_at(head(st), o.op).is_some_and(|r| r.action == rerun_core::plan::HOLD_ACTION),
         }));
         out.extend(detail_lines(o.detail.as_ref()));
         out.extend(backup(o.backup.as_ref()));

@@ -764,6 +764,7 @@ pub fn package(p: &Package, rules: Rules) -> Result<(), RuleError> {
         }
     }
     files_placed_once(p)?;
+    slots_bound(p)?;
     // By position until the name is checked: an error never carries an unchecked map key.
     for (i, (name, o)) in p.options.iter().enumerate() {
         let ok = !name.is_empty()
@@ -800,6 +801,82 @@ fn files_placed_once(p: &Package) -> R {
             } else {
                 placed.push((key, &f.sha256));
             }
+        }
+    }
+    Ok(())
+}
+
+/// The file of `to` is a DLL (`.dll`, ASCII case ignored): a slot of the package (P4-8).
+pub fn is_dll(to: &crate::path::RelPath) -> bool {
+    ends_with_ci(to.file_name(), ".dll")
+}
+
+/// The slot names of `p` for `api` (folded): `slots`, and `slots_by_api` of that API.
+pub fn slot_names(p: &Package, api: Option<super::model::Api>) -> Vec<String> {
+    let mut v: Vec<String> = p.slots.iter().map(|s| fold(s)).collect();
+    if let (Some(m), Some(a)) = (&p.slots_by_api, api)
+        && let Some(s) = m.get(&a)
+    {
+        v.extend(s.iter().map(|s| fold(s)));
+    }
+    v
+}
+
+/// The APIs a file is installed for: its `api`, else the package's `apis`; `[None]` for a
+/// package that wraps no API.
+fn file_apis(p: &Package, f: &super::model::PackageFile) -> Vec<Option<super::model::Api>> {
+    match (&f.api, &p.apis) {
+        (Some(a), _) | (None, Some(a)) => a.iter().copied().map(Some).collect(),
+        (None, None) => vec![None],
+    }
+}
+
+/// Slots bound to files (P4-8, ADR 0025 open point; the A5 topic): every DLL a package installs
+/// is one of its slots for each API it is installed for (`slots`, or `slots_by_api` of that
+/// API), and, once the package names files, every slot is the name of a DLL it installs (for
+/// each API of `slots_by_api`, one installed for that API). So the slots a plan sees in a
+/// transaction's head (its package files that are DLLs) are exactly the declared ones.
+fn slots_bound(p: &Package) -> R {
+    for (i, f) in p.files.iter().enumerate() {
+        if !is_dll(&f.to) {
+            continue;
+        }
+        let name = fold(f.to.file_name());
+        for api in file_apis(p, f) {
+            ensure(
+                slot_names(p, api).contains(&name),
+                &format!("files[{i}].to"),
+                "a DLL the package installs must be one of its slots (slots, or slots_by_api of each API it is for)",
+            )?;
+        }
+    }
+    if p.files.is_empty() {
+        return Ok(());
+    }
+    let installs = |s: &str, api: Option<super::model::Api>| {
+        p.files.iter().any(|f| {
+            is_dll(&f.to)
+                && fold(f.to.file_name()) == fold(s)
+                && (api.is_none() || file_apis(p, f).contains(&api))
+        })
+    };
+    for (i, s) in p.slots.iter().enumerate() {
+        ensure(
+            installs(s, None),
+            &format!("slots[{i}]"),
+            "a slot no file of the package installs",
+        )?;
+    }
+    for (api, slots) in p.slots_by_api.iter().flatten() {
+        for s in slots {
+            ensure(
+                installs(s, Some(*api)),
+                &format!(
+                    "slots_by_api.{}",
+                    serde_json::to_string(api).unwrap_or_default()
+                ),
+                "a slot no file of the package installs for that API",
+            )?;
         }
     }
     Ok(())

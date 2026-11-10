@@ -712,3 +712,79 @@ fn a_package_places_each_file_once() {
     p.files = vec![f("dinput8.dll", 1, Some(vec![Arch::X64]))];
     assert_eq!(ok(&p).unwrap_err().at, "files[0].arch");
 }
+
+/// P4-8: slots bound to files. Every DLL a package installs is a slot for each API it is for,
+/// and once the package names files, every slot is installed by one of them.
+#[test]
+fn slots_are_bound_to_the_files() {
+    use super::check::{Rules, package as check_package};
+    use std::collections::BTreeMap;
+    let ok = |p: &Package| check_package(p, Rules::Release);
+    let f = |to: &str, api: Option<Vec<Api>>| PackageFile {
+        from: rel(to),
+        to: rel(to),
+        sha256: Hex::new([0xCD; 32]),
+        config: false,
+        arch: None,
+        api,
+    };
+    // The fixture: `d3d9.dll` is its slot.
+    let mut p = package("fix-pack");
+    ok(&p).unwrap();
+    // A DLL that is no slot (also in a folder, also in another case of `.dll`).
+    p.files.push(f(r"bin\extra.DLL", None));
+    assert_eq!(ok(&p).unwrap_err().at, "files[1].to");
+    p.slots.push("extra.dll".into());
+    ok(&p).unwrap();
+    // A slot nothing installs.
+    p.slots.push("dxgi.dll".into());
+    assert_eq!(ok(&p).unwrap_err().at, "slots[2]");
+    // No files yet (a draft being curated): slots alone are fine.
+    p.files.clear();
+    ok(&p).unwrap();
+    // Per API: a file for d3d9 is a slot of d3d9; one without `api` of every API of the package.
+    let mut p = package("fix-pack");
+    p.slots.clear();
+    p.apis = Some(vec![Api::D3d9, Api::D3d11]);
+    p.slots_by_api = Some(BTreeMap::from([
+        (Api::D3d9, vec!["d3d9.dll".to_owned()]),
+        (
+            Api::D3d11,
+            vec!["d3d11.dll".to_owned(), "dxgi.dll".to_owned()],
+        ),
+    ]));
+    p.files = vec![
+        f("d3d9.dll", Some(vec![Api::D3d9])),
+        f("d3d11.dll", Some(vec![Api::D3d11])),
+        f("dxgi.dll", Some(vec![Api::D3d11])),
+        f("readme.txt", None),
+    ];
+    ok(&p).unwrap();
+    p.files[0].api = None;
+    assert_eq!(
+        ok(&p).unwrap_err().at,
+        "files[0].to",
+        "d3d9.dll is no slot of d3d11"
+    );
+    p.files[0].api = Some(vec![Api::D3d9]);
+    p.files.remove(2);
+    let e = ok(&p).unwrap_err();
+    assert!(e.at.starts_with("slots_by_api."), "{e}");
+}
+
+/// P4-8: a package that lists the builds it supports lists every SHA-1 of a Topo that names
+/// it (the engine checks the matched build as well).
+#[test]
+fn supports_exe_sha1_covers_the_topos_builds() {
+    let mut i = index(4);
+    i.topos[0].matches.exes[0].sha1 = Some(Hex::new([0x22; 20]));
+    super::check_index(&i).unwrap();
+    i.packages[0].supports_exe_sha1 = vec![Hex::new([0x33; 20])];
+    let e = super::check_index(&i).unwrap_err().to_string();
+    assert!(
+        e.contains("package fix-pack does not list the SHA-1 of game.exe"),
+        "{e}"
+    );
+    i.packages[0].supports_exe_sha1.push(Hex::new([0x22; 20]));
+    super::check_index(&i).unwrap();
+}

@@ -25,6 +25,9 @@
 //!   restored from the backup with the backup's SHA-256 and length as the expected ones and the
 //!   old R/H/S. `X.old` holding `h0` next to a decided state is the pending cleanup of `Done`'s
 //!   `old_left` and deleted with `h0` expected, after a restore only once it succeeded.
+//! - `Hold` (P4-8): nothing is written; the apply re-observes the held content on a guard
+//!   (`roots::holds`) before its intent. The held content in the planned spelling is `After`,
+//!   anything else `Before`, never `Foreign`; its revert acts on nothing.
 //!
 //! The table of B2 is generic over the sequences of an op ([`phases`], P2-12): `S0` from its
 //! start to its end state, and each `Si` from its recorded `from` to its `to` when its
@@ -326,6 +329,21 @@ pub(super) fn apply_op(
             w.done(k, Some(r.new.file_id), r.old_left.is_some())?;
             Ok(())
         }
+        Op::Hold { content, .. } => {
+            // P4-8: nothing is written; the file must hold the content, as planned.
+            let mut g = parent.guard(&name).map_err(&e)?;
+            if !g.name().same_spelling(&name) || !roots::holds(&mut *g, content).map_err(&e)? {
+                return Err(e(SysError::new(
+                    SysErrorKind::Mismatch,
+                    format!("{path}: changed since the preview"),
+                )));
+            }
+            let id = g.metadata().map_err(&e)?.file_id;
+            drop(g);
+            w.intent(k, None, None)?;
+            w.done(k, Some(id), false)?;
+            Ok(())
+        }
         Op::CreateKey { .. }
         | Op::SetValue { .. }
         | Op::TokenList { .. }
@@ -532,6 +550,8 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
         && match op {
             Op::CreateDir { .. } => i.tmp.is_none() && i.before.is_none() && no_restore && no_old,
             Op::CreateFile { .. } => i.tmp.is_some() && i.before.is_none() && no_restore && no_old,
+            // P4-8: nothing written, so no temp name, no old state, no restore, no `.old`.
+            Op::Hold { .. } => i.tmp.is_none() && i.before.is_none() && no_restore && no_old,
             Op::ReplaceFile { old, .. } => {
                 i.tmp.is_some()
                     && i.before
@@ -687,6 +707,19 @@ pub(super) fn observe(
             };
             replace_seen(parent, &name, log, &x, old, content, attrs).map_err(&e)
         }
+        // P4-8: the held content there (in the planned spelling) is `After`; anything else is
+        // `Before`: a hold changed nothing, so nothing of it can be foreign, and its revert
+        // has nothing to do either way.
+        Op::Hold { content, .. } => {
+            let t = see_file(parent, &name).map_err(&e)?;
+            let there = matches!(t, FileSeen::File { sha, len, exact: true, .. }
+                if sha == *content.sha256() && len == content.len());
+            Ok(Seen::new(if there {
+                Observed::After
+            } else {
+                Observed::Before
+            }))
+        }
         Op::CreateKey { .. }
         | Op::SetValue { .. }
         | Op::TokenList { .. }
@@ -707,6 +740,7 @@ pub(super) fn trusted(op: &Op, log: &OpLog) -> Seen {
             None => Seen::new(Observed::Foreign),
         },
         Op::CreateFile { content, .. } => s.act(Action::DeleteTarget(*content.sha256())),
+        Op::Hold { .. } => s,
         Op::ReplaceFile { .. } | Op::IniValue { .. } => Seen { restore: true, ..s },
         Op::CreateKey { .. }
         | Op::SetValue { .. }

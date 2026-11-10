@@ -15,7 +15,9 @@
 //!   warns per step kind. A `package` step (P4-7) becomes the `file_install` step of the
 //!   package's files for the main executable's architecture (read from its PE header) and the
 //!   Topo's API for it ([`prim::package`]); a package's `requires` must be planned in the same
-//!   plan (shared packages across plans come with P4-8). The `firewall_rule` steps (P4-2d) become
+//!   plan (a file another transaction installed with the same content is held, P4-8); a package
+//!   with `supports_exe_sha1` only for a listed build, `requires_gpu` a warning, no two packages
+//!   with a DLL at one place (no chainloading, P4-8). The `firewall_rule` steps (P4-2d) become
 //!   `FirewallRule` ops after every other op, built only from the anchors of
 //!   `elevate::check_plan` (the helper's own derivation on the game folder as read, A4 S7). A `cpu` step becomes the one `launch_method` step: the Topo's method (`auto` is `direct` when the chain is exactly `[steam]`, else
 //!   `watch`, L10), its `launch.start`, and its `launch.priority`. The steps go to
@@ -35,7 +37,8 @@ pub use when::Tri;
 
 use crate::catalog::Catalog;
 use crate::catalog::model::{
-    Api, Arch, Chain, Exe, Issue, Method, Package, Status, Topo, TopoStep, Variant, When,
+    Api, Arch, Chain, Exe, GpuRequirement, Issue, Method, Package, Sha1, Status, Topo, TopoStep,
+    Variant, When,
 };
 use crate::detect::exe::anti_cheat;
 use crate::detect::exe::{
@@ -86,6 +89,9 @@ pub struct ExeCheck {
     /// The `api` of this very `match.exes` entry when it matched (`None` otherwise): two
     /// entries may name one path with different builds, so the path alone never says it.
     pub api: Option<Api>,
+    /// Its SHA-1, hashed on the handle it was parsed on, when it matched (`None` otherwise; P4-8:
+    /// a package's `supports_exe_sha1`).
+    pub sha1: Option<Sha1>,
 }
 
 /// What the engine read from the game folder for one Topo.
@@ -118,6 +124,11 @@ impl GameFacts {
         self.main().and_then(|e| e.api)
     }
 
+    /// The SHA-1 of [`Self::main_exe`].
+    pub fn main_sha1(&self) -> Option<&Sha1> {
+        self.main().and_then(|e| e.sha1.as_ref())
+    }
+
     fn main(&self) -> Option<&ExeCheck> {
         self.exes.iter().find(|e| e.state == ExeState::Match)
     }
@@ -130,13 +141,14 @@ pub fn read_game(game: &GameDir<'_>, topo: &Topo) -> GameFacts {
         .exes
         .iter()
         .map(|e| {
-            let (state, arch) = check_exe(game, e);
+            let (state, arch, sha1) = check_exe(game, e);
             let api = (state == ExeState::Match).then_some(e.api);
             ExeCheck {
                 path: e.path.clone(),
                 state,
                 arch,
                 api,
+                sha1,
             }
         })
         .collect();
@@ -167,7 +179,7 @@ pub fn anti_cheat_dirs(topo: &Topo) -> Vec<RelPath> {
     dirs
 }
 
-fn check_exe(game: &GameDir<'_>, e: &Exe) -> (ExeState, Option<Arch>) {
+fn check_exe(game: &GameDir<'_>, e: &Exe) -> (ExeState, Option<Arch>, Option<Sha1>) {
     let r = inspect_exe(
         game,
         &e.path,
@@ -182,6 +194,7 @@ fn check_exe(game: &GameDir<'_>, e: &Exe) -> (ExeState, Option<Arch>) {
         },
         Err(_) => None,
     };
+    let mut matched_sha1 = None;
     let state = match r {
         Err(ExeError::Pe(PeReadError::Open { source, .. }))
             if source.kind == SysErrorKind::NotFound =>
@@ -196,6 +209,7 @@ fn check_exe(game: &GameDir<'_>, e: &Exe) -> (ExeState, Option<Arch>) {
                 let sha1 = e.sha1.as_ref().map(|x| x.to_string() == h.sha1);
                 let any = sha256.is_some() || sha1.is_some();
                 if any && sha256 != Some(false) && sha1 != Some(false) {
+                    matched_sha1 = Sha1::parse(&h.sha1);
                     ExeState::Match
                 } else {
                     ExeState::Mismatch
@@ -205,7 +219,7 @@ fn check_exe(game: &GameDir<'_>, e: &Exe) -> (ExeState, Option<Arch>) {
         },
     };
     let arch = if state == ExeState::Match { arch } else { None };
-    (state, arch)
+    (state, arch, matched_sha1)
 }
 
 // ---------- Anti-cheat and launch ----------
@@ -672,6 +686,14 @@ pub enum Warning {
         /// The issue.
         issue: String,
     },
+    /// A planned package needs a GPU feature Rerun does not check (`requires_gpu`, P4-8): v1
+    /// `vulkan`, a Vulkan driver for the game's adapter.
+    RequiresGpu {
+        /// The package.
+        package: String,
+        /// What it needs.
+        needs: GpuRequirement,
+    },
 }
 
 /// A plan of a Topo with what the user should know.
@@ -807,7 +829,8 @@ pub fn plan(
             }
         }
     }
-    // A package's shared dependencies come with it in this plan (P4-8 brings them across plans).
+    // A package's shared dependencies come with it in this plan; a file another transaction
+    // installed with the same content becomes a `Hold` of this plan (P4-8, `prim::file_install`).
     for p in &planned_packages {
         if let Some(r) = p
             .requires
@@ -821,7 +844,14 @@ pub fn plan(
                 ),
             });
         }
+        for needs in &p.requires_gpu {
+            warnings.push(Warning::RequiresGpu {
+                package: p.id.to_string(),
+                needs: *needs,
+            });
+        }
     }
+    slots_free(&steps, &planned_packages)?;
     let ctx = PlanCtx {
         main_exe: Some(main_exe),
         ..*ctx
@@ -877,9 +907,53 @@ fn package_step<'p>(
         arch: facts.game.main_arch(),
         api,
     };
+    // P4-8: a package that names the builds it supports is planned only for one of them.
+    if !p.supports_exe_sha1.is_empty()
+        && facts
+            .game
+            .main_sha1()
+            .is_none_or(|h| !p.supports_exe_sha1.contains(h))
+    {
+        return Err(refused(
+            "it does not list this build of the game (its SHA-1) in supports_exe_sha1".to_owned(),
+        ));
+    }
     let spec = prim::package::file_install(p, &build)
         .map_err(|e: PackageRefusal| refused(e.to_string()))?;
     Ok((p, spec))
+}
+
+/// Slot conflicts inside one plan (P4-8): no two packages of the plan put a DLL (a slot, bound
+/// by the loader) at the same place of the game folder. Rerun has no chainloading: one DLL of a
+/// name per folder is loaded, so two packages that both need it are refused, whichever comes
+/// first. Conflicts with open transactions are the planner's (`prim::file_install`, from their
+/// heads), and `exec` checks them again before an apply.
+fn slots_free(steps: &[Step], packages: &[&Package]) -> Result<(), EngineError> {
+    let mut taken: Vec<(String, &str)> = Vec::new();
+    for s in steps {
+        let Step::FileInstall(spec) = s else { continue };
+        let Some(p) = packages.iter().find(|p| p.id.as_str() == spec.package) else {
+            continue;
+        };
+        for f in spec
+            .files
+            .iter()
+            .filter(|f| crate::catalog::check::is_dll(&f.to))
+        {
+            let at = crate::fold::fold(f.to.as_str());
+            if let Some((_, other)) = taken.iter().find(|(t, o)| *t == at && *o != p.id.as_str()) {
+                return Err(EngineError::Package {
+                    id: p.id.to_string(),
+                    why: format!(
+                        "its DLL {} is the slot of package {other} too; one of them only                          (Rerun does not chainload DLLs)",
+                        crate::escape::path(f.to.as_str())
+                    ),
+                });
+            }
+            taken.push((at, p.id.as_str()));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

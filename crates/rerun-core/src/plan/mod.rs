@@ -69,6 +69,15 @@
 //! root 0 and each at most [`MAX_EXE_PATH_UNITS`] UTF-16 units, the target of a `watch` profile
 //! equal to `<root 0>\<main executable of root 0>` (P3-4), and its file name from the Steam app
 //! ID ([`profile_id`]).
+//!
+//! `Hold` (P4-8, ADR 0020 amendment P4-8): a package file the game folder already holds with
+//! exactly the content of the step (a shared dependency another transaction installed, such as
+//! the ASI loader's `dinput8.dll`, or the user's own copy). Nothing is written: the op names the
+//! file as an object of the transaction, so stacking keeps the earlier transaction from being
+//! reverted (LIFO) while this one relies on it. Its content is a [`ContentRef::Package`] (the
+//! package and the place it comes from, for the preview and the slots of later plans), never
+//! inline, on a [`RootKind::Game`] root; it is a file op (`Target::File`, before every registry
+//! op). Its revert changes nothing.
 
 mod preview;
 mod profile;
@@ -81,9 +90,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use preview::{
-    FIREWALL_NOTE, FirewallShown, INI_NOTE, IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED,
-    PROFILE_NOTE, PROFILE_WATCH_NOTE, Preview, PreviewOp, PreviewRoot, ProfilePreview,
-    ProfileShown, REGISTRY_NOTE, RegShown, preview, preview_head, preview_stored,
+    FIREWALL_NOTE, FirewallShown, HOLD_ACTION, HOLD_NOTE, INI_NOTE, IniOldShown, IniShown,
+    LAYERS_NOTE, NOT_RESTORED, PROFILE_NOTE, PROFILE_WATCH_NOTE, Preview, PreviewOp, PreviewRoot,
+    ProfilePreview, ProfileShown, REGISTRY_NOTE, RegShown, preview, preview_head, preview_stored,
 };
 #[cfg(test)]
 pub(crate) use profile::knob as profile_knob;
@@ -361,6 +370,17 @@ pub enum Op {
         /// The keys, in canonical order.
         edits: Vec<IniEdit>,
     },
+    /// A package file the game folder holds already with exactly this content (P4-8): nothing is
+    /// written, the file is an object of the transaction (stacking, LIFO); its revert changes
+    /// nothing.
+    Hold {
+        /// Root.
+        root: RootIx,
+        /// Path below the root, in its stored spelling.
+        path: RelPath,
+        /// The package file it is (a [`ContentRef::Package`]).
+        content: ContentRef,
+    },
     /// Rerun's block rule in the Windows Firewall for an executable of a game folder (P4-2d,
     /// ADR 0023 §6, §9): added and removed only by the elevated helper, as the last ops of a
     /// plan with a [`Plan::source`]. The rule's name follows from the Topo, the transaction and
@@ -523,6 +543,7 @@ impl Op {
             },
             Self::CreateFile { root, path, .. }
             | Self::ReplaceFile { root, path, .. }
+            | Self::Hold { root, path, .. }
             | Self::IniValue { root, path, .. } => Target::File {
                 root: *root,
                 path,
@@ -545,16 +566,31 @@ impl Op {
         self.target().is_registry() || matches!(self, Self::IniValue { .. })
     }
 
-    /// The content of a file op.
+    /// The content a file op writes (`None` for a [`Self::Hold`], which writes nothing).
     pub fn content(&self) -> Option<&ContentRef> {
         match self {
             Self::CreateDir { .. }
             | Self::IniValue { .. }
+            | Self::Hold { .. }
             | Self::CreateKey { .. }
             | Self::SetValue { .. }
             | Self::TokenList { .. }
             | Self::FirewallRule { .. } => None,
             Self::CreateFile { content, .. } | Self::ReplaceFile { content, .. } => Some(content),
+        }
+    }
+
+    /// The package file a file op puts or holds at its target (P4-8: slots): the content of a
+    /// `CreateFile`, `ReplaceFile` or `Hold` from a package.
+    pub fn package_file(&self) -> Option<(&str, &ContentRef)> {
+        match self {
+            Self::CreateFile { content, .. }
+            | Self::ReplaceFile { content, .. }
+            | Self::Hold { content, .. } => match content {
+                ContentRef::Package { id, .. } => Some((id.as_str(), content)),
+                ContentRef::Inline { .. } => None,
+            },
+            _ => None,
         }
     }
 }
@@ -1186,6 +1222,21 @@ fn ini_rules(
     Ok(())
 }
 
+/// The rules of a `Hold` (P4-8, module docs): a package file on a game root.
+fn hold_check(plan: &Plan, k: usize, root: RootIx, content: &ContentRef) -> Result<(), PlanError> {
+    if !matches!(content, ContentRef::Package { .. }) {
+        return Err(invalid(Some(k), "a held file that is no package file"));
+    }
+    let r = plan
+        .roots
+        .get(usize::from(root.0))
+        .ok_or_else(|| invalid(Some(k), "root index outside the plan's roots"))?;
+    if r.kind != RootKind::Game {
+        return Err(invalid(Some(k), "a held file outside a game folder"));
+    }
+    Ok(())
+}
+
 /// Most `FirewallRule` ops of a plan: one helper batch (`elevate::MAX_BATCH_OPS`).
 pub const MAX_RULE_OPS: usize = crate::elevate::MAX_BATCH_OPS;
 
@@ -1322,9 +1373,15 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
                 }
             }
         }
-        if let Some(ContentRef::Package {
-            id, version, len, ..
-        }) = op.content()
+        if let Op::Hold { root, content, .. } = op {
+            hold_check(plan, k, *root, content)?;
+        }
+        if let Some((
+            _,
+            ContentRef::Package {
+                id, version, len, ..
+            },
+        )) = op.package_file()
         {
             if !package_id_ok(id) || !package_version_ok(version) {
                 return Err(invalid(Some(k), "not a valid package ID and version"));

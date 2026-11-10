@@ -89,10 +89,10 @@ A cached archive stays untrusted: its user (extraction, P4-7) hashes it again on
 - **Format by magic bytes alone:** the URL's name is signed in the index and says what the curator meant; both must agree.
 
 ### Open points after part 2 (reviews of P4-7)
-- `supports_exe_sha1` and `requires_gpu` are not enforced (P4-8/P4-13). Suggested loader rule: the SHA-1 values of a Topo's `match.exes` that names the package are a subset of its `supports_exe_sha1`.
-- `slots`/`slots_by_api` are not bound to `files[].to` (P4-8, A5).
+- `supports_exe_sha1` and `requires_gpu` are not enforced (P4-8/P4-13). Suggested loader rule: the SHA-1 values of a Topo's `match.exes` that names the package are a subset of its `supports_exe_sha1`. **Closed (P4-8, ADR 0020 amendment P4-8):** the loader rule as suggested, and the engine plans a package only for a matched build whose SHA-1 it lists; `requires_gpu` is a warning of the plan (not evaluated).
+- `slots`/`slots_by_api` are not bound to `files[].to` (P4-8, A5). **Closed (P4-8):** every DLL a package installs is one of its slots for each API it is for, and every slot is installed by a file (`catalog::check::slots_bound`); two packages never share a slot (no chainloading).
 - The workbench must refuse an index update that changes a package's `version` under the same ID (E2 a: another version is another package).
-- Until P4-8: a plan B that skips a file because it already holds the same content (a shared loader of plan A) leaves it to A, so reverting A removes it under B (the E6 case; `Op::Hold` in P4-8).
+- Until P4-8: a plan B that skips a file because it already holds the same content (a shared loader of plan A) leaves it to A, so reverting A removes it under B (the E6 case; `Op::Hold` in P4-8). **Closed (P4-8):** B holds the file (`Op::Hold`), so A is reverted only after B (LIFO); the handover of E6 (A's revert removes its own files first) stays open (ADR 0020 amendment P4-8).
 - A zip whose names use `\` is refused (fail closed); a curator notices it when adding the package.
 
 ## Alternatives

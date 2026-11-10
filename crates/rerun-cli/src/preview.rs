@@ -85,7 +85,9 @@ pub fn op(o: &PreviewOp) -> Vec<Message<'_>> {
             source: source.clone(),
         }));
     }
-    if let Some((sha256, len)) = &o.content {
+    if let (true, Some((sha256, len))) = (o.held, &o.content) {
+        out.push(m(TxnMsg::HeldContent { sha256, len: *len }));
+    } else if let Some((sha256, len)) = &o.content {
         out.push(m(TxnMsg::NewContent {
             sha256,
             len: *len,
@@ -228,7 +230,7 @@ pub fn render(p: &Preview) -> Vec<Message<'_>> {
         out.extend(op(o));
     }
     out.push(m(TxnMsg::Note(p.not_restored)));
-    for note in [p.registry, p.layers, p.ini, p.profiles, p.firewall]
+    for note in [p.registry, p.layers, p.ini, p.profiles, p.firewall, p.held]
         .into_iter()
         .flatten()
     {

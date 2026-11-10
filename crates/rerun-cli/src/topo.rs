@@ -15,7 +15,7 @@
 
 use std::io::Write;
 
-use rerun_core::catalog::model::{Kind, Status, VariantStatus};
+use rerun_core::catalog::model::{GpuRequirement, Kind, Status, VariantStatus};
 use rerun_core::catalog::{store, trusted_keys};
 use rerun_core::escape;
 use rerun_core::hw::{self, GpuArchTable};
@@ -174,6 +174,13 @@ fn warning_text(w: &Warning) -> String {
             "hint: issue {issue}: turn on Steam Input for this game in Steam (Rerun changes \
              nothing)"
         ),
+        Warning::RequiresGpu { package, needs } => format!(
+            "warning: package {package} needs {}; Rerun does not check it, the game may not \
+             start without it",
+            match needs {
+                GpuRequirement::Vulkan => "a Vulkan driver for the graphics card",
+            }
+        ),
     }
 }
 
@@ -183,7 +190,7 @@ enum Outcome {
     Planned {
         before: Vec<Message<'static>>,
         bytes: PlanBytes,
-        view: Preview,
+        view: Box<Preview>,
         shadows: Vec<Shadow>,
     },
     Failed(Vec<Message<'static>>, String),
@@ -347,7 +354,7 @@ fn run<W: Write, E: Write>(
                 Outcome::Planned {
                     before,
                     bytes,
-                    view,
+                    view: Box::new(view),
                     shadows,
                 }
             }
@@ -380,7 +387,7 @@ fn run<W: Write, E: Write>(
                 app,
                 app_path,
                 bytes,
-                view,
+                view: *view,
                 shadows,
             },
             &before,

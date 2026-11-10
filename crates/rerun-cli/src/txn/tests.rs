@@ -62,6 +62,7 @@ fn file_op(index: usize, action: &'static str, path: &str) -> PreviewOp {
         profile: None,
         replaces: false,
         firewall: None,
+        held: false,
     }
 }
 
@@ -88,6 +89,7 @@ fn head() -> Preview {
         ini: None,
         profiles: None,
         firewall: None,
+        held: None,
     }
 }
 

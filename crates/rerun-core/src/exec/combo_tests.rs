@@ -7,8 +7,9 @@
 //!   replace in the root and a create in a folder below (the cased kinds spell the replaced
 //!   files in another case than the disk).
 //! - CM2 stacked transactions: T1 is applied and durable, T2 (the same file, another file in the
-//!   same folder, a file in the folder T1 created) is applied and reverted with the fault; the
-//!   recovery reverts T2, then T1, and the game folder is the one before T1.
+//!   same folder, a file in the folder T1 created, a hold of T1's file next to a replace, P4-8)
+//!   is applied and reverted with the fault; the recovery reverts T2, then T1, and the game
+//!   folder is the one before T1.
 //! - Axes: the fault (a failure `Other`, a crash after the call), the point (a call of the apply
 //!   or of the revert of T2), the cuts of `C:` times the cuts of `D:`, and the moment of the
 //!   cut: right after the run ("direct"), or after a full recovery of the run ("recovered": the
@@ -76,6 +77,8 @@ enum Kind {
     StackAdjacent,
     /// T1 creates `mods\x.dll` (and `mods`), T2 creates `mods\y.dll`.
     StackBelow,
+    /// T1 creates `new.dll`, T2 holds it (P4-8) and replaces `dinput8.dll`.
+    StackHold,
 }
 
 const MULTI: [Kind; 5] = [
@@ -85,11 +88,12 @@ const MULTI: [Kind; 5] = [
     Kind::ReplaceCreateCased,
     Kind::ReplaceDeep,
 ];
-const STACKED: [Kind; 4] = [
+const STACKED: [Kind; 5] = [
     Kind::StackSame,
     Kind::StackSameCased,
     Kind::StackAdjacent,
     Kind::StackBelow,
+    Kind::StackHold,
 ];
 
 /// The step of T1 (the only one for the multi-op kinds) and of T2.
@@ -149,6 +153,13 @@ fn specs(k: Kind) -> (FileInstallSpec, Option<FileInstallSpec>) {
         Kind::StackBelow => (
             spec(vec![entry(r"mods\x.dll", r"mods\x.dll", super::tests::X)]),
             Some(spec(vec![entry(r"mods\y.dll", r"mods\y.dll", Y)])),
+        ),
+        Kind::StackHold => (
+            spec(vec![entry("new.dll", "new.dll", super::tests::N)]),
+            Some(spec(vec![
+                entry("new.dll", "new.dll", super::tests::N),
+                entry("dinput8.dll", "dinput8.dll", NEW2),
+            ])),
         ),
     }
 }

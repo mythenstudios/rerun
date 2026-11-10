@@ -83,6 +83,12 @@ the program, not its content. Declining the prompt at an apply undoes the other 
 plan; declining it at a revert leaves the whole transaction as it is. Forget leaves a rule in \
 place: remove it in Windows Defender Firewall with Advanced Security (group Rerun)";
 
+/// The action of a `Hold` op (P4-8).
+pub const HOLD_ACTION: &str = "keep shared file";
+
+/// What a plan with `Hold` ops says once (P4-8, ADR 0020 amendment P4-8; rule 5).
+pub const HOLD_NOTE: &str = "shared files: a package file the game folder holds already with exactly this content (installed by an earlier Rerun transaction, such as a loader several fixes need, or by you) is kept as it is, not written again. This transaction relies on it: a Rerun transaction that installed it can be reverted only after this one is (newest first), and reverting this one leaves the file as it is";
+
 /// The part of [`PROFILE_NOTE`] and [`PROFILE_WATCH_NOTE`] both methods share: the start path,
 /// one launch option per game, Steam as administrator (ADR 0022).
 macro_rules! profile_note_tail {
@@ -256,6 +262,9 @@ pub struct PreviewOp {
     pub replaces: bool,
     /// The firewall rule a `FirewallRule` op adds (P4-2d).
     pub firewall: Option<FirewallShown>,
+    /// A `Hold` (P4-8): [`Self::content`] is the content the file holds already, nothing is
+    /// written.
+    pub held: bool,
 }
 
 /// The rule of a `FirewallRule` op for display (P4-2d, ADR 0023 §6, rule 5).
@@ -311,6 +320,8 @@ pub struct Preview {
     pub profiles: Option<&'static str>,
     /// [`FIREWALL_NOTE`], once per plan with firewall rules (P4-2d).
     pub firewall: Option<&'static str>,
+    /// [`HOLD_NOTE`], once per plan with `Hold` ops (P4-8).
+    pub held: Option<&'static str>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -546,6 +557,7 @@ pub fn preview(p: &Plan) -> Preview {
                 Op::TokenList { .. } => ("add tokens", None, None),
                 Op::IniValue { old: o, .. } => ("edit ini", Some(rhs(&o.attrs)), Some(old(o))),
                 Op::FirewallRule { .. } => ("block in firewall", None, None),
+                Op::Hold { .. } => (HOLD_ACTION, None, None),
             };
             let (old_value, new_value, type_change) = match op {
                 Op::SetValue { old: o, new, .. } => {
@@ -601,7 +613,12 @@ pub fn preview(p: &Plan) -> Preview {
                     .collect(),
                 _ => Vec::new(),
             };
-            let (source, content, config) = match op.content() {
+            let held = matches!(op, Op::Hold { .. });
+            let shown_content = match op {
+                Op::Hold { content, .. } => Some(content),
+                _ => op.content(),
+            };
+            let (source, content, config) = match shown_content {
                 Some(ContentRef::Package {
                     id,
                     version,
@@ -687,6 +704,7 @@ pub fn preview(p: &Plan) -> Preview {
                 profile,
                 replaces: matches!(op, Op::ReplaceFile { .. }),
                 firewall,
+                held,
             }
         })
         .collect();
@@ -712,6 +730,11 @@ pub fn preview(p: &Plan) -> Preview {
         .iter()
         .any(|o| o.target().is_helper())
         .then_some(FIREWALL_NOTE);
+    let held = p
+        .ops
+        .iter()
+        .any(|o| matches!(o, Op::Hold { .. }))
+        .then_some(HOLD_NOTE);
     let profiles = ops.iter().find_map(|o| match &o.profile {
         Some(ProfilePreview::Decoded(s)) if s.decoded.method == Method::Watch => {
             Some(PROFILE_WATCH_NOTE)
@@ -728,6 +751,7 @@ pub fn preview(p: &Plan) -> Preview {
         ini,
         profiles,
         firewall,
+        held,
     }
 }
 
@@ -759,7 +783,9 @@ impl fmt::Display for Preview {
                 write!(f, " from {s}")?;
             }
             writeln!(f)?;
-            if let Some((sha, len)) = &o.content {
+            if let (true, Some((sha, len))) = (o.held, &o.content) {
+                writeln!(f, "     holds sha256 {sha}, {len} bytes (not written)")?;
+            } else if let Some((sha, len)) = &o.content {
                 write!(f, "     new sha256 {sha}, {len} bytes")?;
                 if let Some(a) = &o.attrs {
                     write!(f, ", attributes {a}")?;
@@ -838,6 +864,9 @@ impl fmt::Display for Preview {
             writeln!(f, "note: {n}")?;
         }
         if let Some(n) = self.firewall {
+            writeln!(f, "note: {n}")?;
+        }
+        if let Some(n) = self.held {
             writeln!(f, "note: {n}")?;
         }
         Ok(())

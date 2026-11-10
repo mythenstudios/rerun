@@ -20,6 +20,7 @@ requires_gpu: [vulkan]
 supports_exe_sha1: ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
 files:
   - { from: "dinput8.dll", to: "dinput8.dll", sha256: "0000000000000000000000000000000000000000000000000000000000000000", arch: [x86] }
+  - { from: "d3d9.dll", to: "d3d9.dll", sha256: "0000000000000000000000000000000000000000000000000000000000000000", arch: [x86], api: [d3d9] }
   - { from: "tool.ini", to: "scripts/tool.ini", sha256: "TODO", config: true }
 options:
   skip_intros: { ini: { file: "scripts/tool.ini", section: "Main", key: "SkipIntro" }, default: true, kind: enhancement }

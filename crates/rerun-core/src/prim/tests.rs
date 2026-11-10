@@ -170,6 +170,11 @@ fn t9_plans_folders_top_down_new_files_and_replaces() {
                 content: content("y.txt", b"y", false),
                 attrs: Attrs::default(),
             },
+            Op::Hold {
+                root,
+                path: rel("same.txt"),
+                content: content("same.txt", b"same", false),
+            },
             Op::CreateDir {
                 root,
                 path: rel(r"existing\New"),
@@ -187,7 +192,7 @@ fn t9_plans_folders_top_down_new_files_and_replaces() {
                 attrs: Attrs::default(),
             },
         ],
-        "B1: same.txt has the content already (other attributes): no op"
+        "B1: same.txt has the content already (other attributes): no change, held (P4-8)"
     );
     // A2-B1 (`==` on a path folds, so the spelling is compared on its own): an existing
     // segment in its stored spelling whatever the step says, a segment the plan creates in
@@ -210,6 +215,7 @@ fn t9_plans_folders_top_down_new_files_and_replaces() {
             r"mods\a",
             r"mods\a\x.ini",
             r"mods\a\y.txt",
+            "same.txt",
             r"existing\New",
             r"existing\New\y.txt",
             r"existing\New\z.txt",

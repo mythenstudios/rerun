@@ -273,9 +273,14 @@ fn a_failure_after_progress_reports_what_was_done() {
 }
 
 /// A package of the index whose one download is `archive`, with the file `from` (hash of `data`).
+/// A DLL is one of the package's slots (P4-8, the loader binds them).
 fn sys_with_files(archive: &[u8], from: &str, data: &[u8]) -> FakeSystem {
+    let slots = match from.rsplit('/').next() {
+        Some(name) if name.ends_with(".dll") => format!(r#","slots":["{name}"]"#),
+        _ => String::new(),
+    };
     sys_with_package(&format!(
-        r#"{{"format":1,"id":"fix-pack","name":"Fix pack","status":"active","tier":"established","source":{{"repo":"https://github.com/owner/fix-pack","release":"{ASSET}"}},"version":"1.0","sha256":"{}","license":"MIT","arch":["x86"],"files":[{{"from":"{from}","to":"{from}","sha256":"{}"}}]}}"#,
+        r#"{{"format":1,"id":"fix-pack","name":"Fix pack","status":"active","tier":"established","source":{{"repo":"https://github.com/owner/fix-pack","release":"{ASSET}"}},"version":"1.0","sha256":"{}","license":"MIT","arch":["x86"]{slots},"files":[{{"from":"{from}","to":"{from}","sha256":"{}"}}]}}"#,
         upper(archive),
         upper(data)
     ))

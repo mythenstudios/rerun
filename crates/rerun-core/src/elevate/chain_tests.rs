@@ -1208,6 +1208,7 @@ fn facts(tool: ExeState, anti_cheat: AntiCheatScan) -> GameFacts {
         state,
         arch: None,
         api: None,
+        sha1: None,
     };
     GameFacts {
         exes: vec![

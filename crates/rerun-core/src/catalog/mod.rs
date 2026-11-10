@@ -320,6 +320,29 @@ pub fn check_index(index: &Index) -> Result<(Lookup, Lookup), IndexError> {
             )));
         }
     }
+    // P4-8 (ADR 0025 open point): a package that names the builds it supports
+    // (`supports_exe_sha1`) supports every build a Topo that installs it names by SHA-1; the
+    // engine checks the matched build itself as well (an entry may name only a SHA-256).
+    for t in &index.topos {
+        for id in check::package_refs(t) {
+            let Some(p) = packages.get(id.as_str()).map(|i| &index.packages[*i]) else {
+                continue;
+            };
+            if p.supports_exe_sha1.is_empty() {
+                continue;
+            }
+            if let Some(e) = t.matches.exes.iter().find(|e| {
+                e.sha1
+                    .as_ref()
+                    .is_some_and(|h| !p.supports_exe_sha1.contains(h))
+            }) {
+                return Err(rule(format!(
+                    "topo {}: package {id} does not list the SHA-1 of {} in supports_exe_sha1",
+                    t.id, e.path
+                )));
+            }
+        }
+    }
     for p in &index.packages {
         if let Some(id) = p
             .requires

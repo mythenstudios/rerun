@@ -14,6 +14,8 @@
 //! - TK `package` (P4-7): the planner's architecture and API filter and refusals; the round trip
 //!   from the cached archive through extraction, the engine, apply, verify and revert; `requires`
 //!   and the anti-cheat rule.
+//! - TS shared files and slots (P4-8): two fixes share the loader across two plans (a hold, the
+//!   revert newest first); two packages of one DLL slot; `supports_exe_sha1`; `requires_gpu`.
 
 use std::path::Path;
 
@@ -1514,4 +1516,193 @@ fn tk_assets_package_round_trip_restores_the_game_folder() {
     assert_eq!(rep.closed, Some(Closing::Reverted));
     let after = snap_at(sys, STEAM_GAME);
     assert!(before == after, "not identical: {:#?}", before.diff(&after));
+}
+
+// ---------- TS shared files and slots (P4-8) ----------
+
+/// A package `id` with one zip of `entries` (`from`, `to`, content), cached and extracted.
+fn shared_pkg(sys: &FakeSystem, id: &str, entries: &[(&str, &str, &[u8])]) -> Package {
+    let archive = zip(&entries
+        .iter()
+        .map(|(from, _, data)| ZipEntry::file(from, data))
+        .collect::<Vec<_>>());
+    let files = entries
+        .iter()
+        .map(|(from, to, data)| file(from, to, data))
+        .collect();
+    let mut p = package("zip", &archive, files);
+    p.id = crate::catalog::model::Id::parse(id).unwrap();
+    cache(sys, &archive);
+    extract(sys, &app(sys), &p).unwrap();
+    p
+}
+
+/// The loader and two plugins that need it (EaglePatch and a widescreen fix), and a second
+/// loader of the same DLL name.
+fn shared_pkgs(sys: &FakeSystem) -> Vec<Package> {
+    let loader = shared_pkg(
+        sys,
+        "invented-loader",
+        &[("dinput8.dll", "dinput8.dll", b"asi loader")],
+    );
+    let mut eagle = shared_pkg(
+        sys,
+        "invented-eagle",
+        &[("Eagle.asi", r"scripts\Eagle.asi", b"eagle patch")],
+    );
+    eagle.requires = vec![loader.id.clone()];
+    let mut wide = shared_pkg(
+        sys,
+        "invented-wide",
+        &[("Wide.asi", r"scripts\Wide.asi", b"widescreen fix")],
+    );
+    wide.requires = vec![loader.id.clone()];
+    let other = shared_pkg(
+        sys,
+        "invented-other-loader",
+        &[("dinput8.dll", "dinput8.dll", b"another loader")],
+    );
+    vec![eagle, loader, other, wide]
+}
+
+/// The Topo with issues `eagle` and `wide`, each with the loader, and `other` (a second loader
+/// next to the first in one variant).
+fn shared_topo() -> Topo {
+    let mut v = topo_value();
+    v["issues"].as_array_mut().unwrap().extend([
+        serde_json::json!({"id":"eagle","title":"Eagle","variants":[{"id":"patch","status":"unverified","kind":"fix",
+            "steps":[{"package":"invented-loader"},{"package":"invented-eagle"}]}]}),
+        serde_json::json!({"id":"wide","title":"Wide","variants":[{"id":"fix","status":"unverified","kind":"enhancement",
+            "steps":[{"package":"invented-loader"},{"package":"invented-wide"}]}]}),
+        serde_json::json!({"id":"two","title":"Two loaders","variants":[{"id":"both","status":"unverified","kind":"fix",
+            "steps":[{"package":"invented-loader"},{"package":"invented-other-loader"}]}]}),
+        serde_json::json!({"id":"other","title":"Other loader","variants":[{"id":"alone","status":"unverified","kind":"fix",
+            "steps":[{"package":"invented-other-loader"}]}]}),
+    ]);
+    topo_of(v)
+}
+
+fn store_plan(env: &Env, tp: &super::TopoPlan) -> crate::plan::PlanHash {
+    let a = app(&env.sys);
+    crate::plan::store(&a, &tp.plan.encode().unwrap()).unwrap()
+}
+
+/// TS1 (the acceptance of P4-8): EaglePatch and a widescreen fix share the ASI loader, planned
+/// in two plans. The second holds the loader (`Hold`, nothing written); the revert of the first
+/// is refused while the second is there (with the text of a shared file); the right order
+/// leaves the game folder identical to before both.
+#[test]
+fn ts1_two_fixes_share_the_loader_and_revert_newest_first() {
+    let env = Env::new(game_sys());
+    let sys = &env.sys;
+    let t = shared_topo();
+    let pkgs = shared_pkgs(sys);
+    let before = snap_at(sys, STEAM_GAME);
+    let a = plan_pkgs(sys, &t, &pkgs, &["eagle/patch"]).unwrap();
+    let a = env.applied(&store_plan(&env, &a));
+    let b = plan_pkgs(sys, &t, &pkgs, &["wide/fix"]).unwrap();
+    let held: Vec<&str> = b
+        .plan
+        .ops
+        .iter()
+        .filter_map(|o| match o {
+            crate::plan::Op::Hold { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(held, ["dinput8.dll"]);
+    let shown = crate::plan::preview(&b.plan).to_string();
+    assert!(
+        shown.contains("keep shared file 0:dinput8.dll from invented-loader 1.0: dinput8.dll"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("(not written)") && shown.contains("note: shared files:"),
+        "{shown}"
+    );
+    let b = env.applied(&store_plan(&env, &b));
+    let both = snap_at(sys, STEAM_GAME);
+    match env.revert(&a) {
+        Err(crate::exec::ExecError::Refused(crate::exec::Refusal::Held { txn })) if txn == b => {}
+        r => panic!("{r:?}"),
+    }
+    assert!(
+        both == snap_at(sys, STEAM_GAME),
+        "the refused revert wrote nothing"
+    );
+    assert_eq!(env.revert(&b).unwrap().closed, Some(Closing::Reverted));
+    assert_eq!(
+        crate::exec::tests::read_abs(sys, &format!(r"{STEAM_GAME}\dinput8.dll")),
+        b"asi loader"
+    );
+    assert_eq!(env.revert(&a).unwrap().closed, Some(Closing::Reverted));
+    let after = snap_at(sys, STEAM_GAME);
+    assert!(before == after, "not identical: {:#?}", before.diff(&after));
+}
+
+/// TS2: two packages with the same DLL slot: in one plan the engine refuses (no chainloading);
+/// against an open transaction the planner refuses with the transaction and its package.
+#[test]
+fn ts2_two_packages_of_one_slot_are_refused() {
+    let env = Env::new(game_sys());
+    let sys = &env.sys;
+    let t = shared_topo();
+    let pkgs = shared_pkgs(sys);
+    match plan_pkgs(sys, &t, &pkgs, &["two/both"]) {
+        Err(EngineError::Package { id, why }) => {
+            assert_eq!(id, "invented-other-loader");
+            assert!(
+                why.contains("dinput8.dll is the slot of package invented-loader"),
+                "{why}"
+            );
+            assert!(why.contains("does not chainload"), "{why}");
+        }
+        r => panic!("{r:?}"),
+    }
+    let a = env.applied(&store_plan(
+        &env,
+        &plan_pkgs(sys, &t, &pkgs, &["eagle/patch"]).unwrap(),
+    ));
+    match plan_pkgs(sys, &t, &pkgs, &["other/alone"]) {
+        Err(EngineError::Plan(e)) => {
+            let e = e.to_string();
+            assert!(
+                e.contains(&format!(
+                    "dinput8.dll is the DLL slot of package invented-loader from transaction {a}"
+                )),
+                "{e}"
+            );
+        }
+        r => panic!("{r:?}"),
+    }
+}
+
+/// TS3: `supports_exe_sha1` (the matched build's SHA-1 listed, or refused) and `requires_gpu`
+/// (not checked: a warning).
+#[test]
+fn ts3_supported_builds_and_gpu_requirements() {
+    let sys = game_sys();
+    let t = shared_topo();
+    let mut pkgs = shared_pkgs(&sys);
+    let sha1_of = |b: &[u8]| crate::catalog::model::Sha1::parse(&sha1(b)).unwrap();
+    pkgs[0].supports_exe_sha1 = vec![sha1_of(b"another build")];
+    match plan_pkgs(&sys, &t, &pkgs, &["eagle/patch"]) {
+        Err(EngineError::Package { id, why }) => {
+            assert_eq!(id, "invented-eagle");
+            assert!(why.contains("supports_exe_sha1"), "{why}");
+        }
+        r => panic!("{r:?}"),
+    }
+    pkgs[0].supports_exe_sha1 = vec![sha1_of(b"another build"), sha1_of(&pe(false))];
+    let tp = plan_pkgs(&sys, &t, &pkgs, &["eagle/patch"]).unwrap();
+    assert!(tp.warnings.is_empty(), "{:?}", tp.warnings);
+    pkgs[3].requires_gpu = vec![crate::catalog::model::GpuRequirement::Vulkan];
+    let tp = plan_pkgs(&sys, &t, &pkgs, &["wide/fix"]).unwrap();
+    assert_eq!(
+        tp.warnings,
+        [Warning::RequiresGpu {
+            package: "invented-wide".into(),
+            needs: crate::catalog::model::GpuRequirement::Vulkan,
+        }]
+    );
 }

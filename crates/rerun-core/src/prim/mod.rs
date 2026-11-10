@@ -193,6 +193,10 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
     // 6b-d: every registry op after every file op.
     let reg_ops = std::mem::take(&mut b.reg_ops);
     b.ops.extend(reg_ops);
+    // P4-8: holds only alongside a change; a plan that changes nothing starts no transaction.
+    if b.ops.iter().all(|o| matches!(o, Op::Hold { .. })) && b.profile.is_none() {
+        b.ops.clear();
+    }
     // E2, E5 of P2-12: ops that need it (registry and INI ops) need the main executable.
     if ctx.main_exe.is_none() && b.ops.iter().any(Op::needs_main_exe) {
         return Err(PlanError::Step(
@@ -233,6 +237,13 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
         roots,
         ops,
     };
+    // P4-8: a DLL of a package where a live transaction has another package's DLL (a slot) is
+    // refused here already; the apply checks it again under the lock.
+    if let Some(app) = ctx.app
+        && let Some(r) = crate::exec::slot_taken_now(app, &plan)
+    {
+        return Err(PlanError::Step(r.to_string()));
+    }
     // The bounds of the format (ops, op size, backups): the same check as when applied.
     plan.encode()?;
     Ok(plan)

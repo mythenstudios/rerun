@@ -381,3 +381,70 @@ fn p2_nested_roots_are_refused_for_a_new_plan() {
     p.roots[0].path = p.roots[1].path.clone();
     assert!(p.encode().is_err());
 }
+
+/// P4-8: a `Hold` in the wire form, its rules on encode and decode alike, its object (a file,
+/// so it stacks), and its preview line (nothing written) with the note once.
+#[test]
+fn p6_hold_form_rules_object_and_preview() {
+    let mut p = sample();
+    p.ops.push(Op::Hold {
+        root: RootIx(0),
+        path: r("dinput8.dll"),
+        content: content("dinput8.dll", b"loader"),
+    });
+    let b = p.encode().unwrap();
+    assert_eq!(decode(b.bytes()).unwrap(), p);
+    let s = std::str::from_utf8(b.bytes()).unwrap();
+    assert!(
+        s.contains(
+            r#"{"hold":{"root":0,"path":"dinput8.dll","content":{"package":{"id":"fix-pack""#
+        ),
+        "{s}"
+    );
+    // The object of a hold is its file: another plan's create of it overlaps.
+    let other = Plan {
+        ops: vec![Op::CreateFile {
+            root: RootIx(0),
+            path: r("DINPUT8.dll"),
+            content: content("dinput8.dll", b"loader"),
+            attrs: Attrs::default(),
+        }],
+        ..sample()
+    };
+    assert!(overlap(
+        &Object::of(&p).unwrap(),
+        &Object::of(&other).unwrap()
+    ));
+    // Inline content (a launch profile's form) is never held; nor is a file twice.
+    let mut inline = p.clone();
+    if let Some(Op::Hold { content: c, .. }) = inline.ops.last_mut() {
+        *c = ContentRef::Inline {
+            bytes: b"x".to_vec(),
+            sha256: sha(b"x"),
+        };
+    }
+    assert!(matches!(inline.encode(), Err(PlanError::Invalid { .. })));
+    let mut twice = p.clone();
+    twice.ops.push(Op::Hold {
+        root: RootIx(0),
+        path: r("DInput8.dll"),
+        content: content("dinput8.dll", b"loader"),
+    });
+    assert!(matches!(twice.encode(), Err(PlanError::Invalid { .. })));
+    // A recorded head keeps the rules of a hold (a package ID out of form is refused).
+    let tampered = s.replace(
+        r#""id":"fix-pack","version":"1.0.2","file":"dinput8.dll""#,
+        r#""id":"Fix Pack","version":"1.0.2","file":"dinput8.dll""#,
+    );
+    assert!(super::decode_recorded(tampered.as_bytes()).is_err());
+    // The preview: what it holds, not written, and the note once.
+    let text = preview(&p).to_string();
+    for want in [
+        "  3. keep shared file 0:dinput8.dll from fix-pack 1.0.2: dinput8.dll",
+        &format!("holds sha256 {}, 6 bytes (not written)", hex(b"loader")),
+        "note: shared files:",
+    ] {
+        assert!(text.contains(want), "{want:?} not in\n{text}");
+    }
+    assert_eq!(text.matches("note: shared files").count(), 1);
+}

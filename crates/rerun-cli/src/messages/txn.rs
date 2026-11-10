@@ -133,6 +133,16 @@ fn will(o: Observed) -> &'static str {
     }
 }
 
+/// What a revert does with a `keep shared file` op (P4-8): nothing, whatever it finds.
+fn held_will(o: Observed) -> &'static str {
+    match o {
+        Observed::After => "nothing to undo (the shared file stays as it is)",
+        Observed::Before | Observed::Drifted | Observed::Foreign => {
+            "nothing to undo (the shared file is no longer as it was kept)"
+        }
+    }
+}
+
 /// What a revert did with an op.
 fn did(o: Observed) -> &'static str {
     match o {
@@ -226,6 +236,14 @@ pub enum TxnMsg<'a> {
         len: u64,
         /// R/H/S letters.
         attrs: Option<&'a str>,
+    },
+    /// The content the file of a `keep shared file` op above holds already (P4-8): nothing is
+    /// written.
+    HeldContent {
+        /// SHA-256, hex.
+        sha256: &'a str,
+        /// Length.
+        len: u64,
     },
     /// The old content of the file op above.
     OldContent {
@@ -574,6 +592,8 @@ pub enum TxnMsg<'a> {
         observed: Observed,
         /// It observed otherwise than the preview showed.
         changed: bool,
+        /// A `keep shared file` op (P4-8): its revert changes nothing.
+        held: bool,
     },
     /// A name the revert left in the op's folder.
     Left {
@@ -884,6 +904,10 @@ impl fmt::Display for TxnMsg<'_> {
                     None => Ok(()),
                 }
             }
+            Self::HeldContent { sha256, len } => write!(
+                f,
+                "  holds: sha256 {sha256}, {len} bytes (kept as it is, not written)"
+            ),
             Self::OldContent {
                 sha256,
                 len,
@@ -1036,6 +1060,9 @@ impl fmt::Display for TxnMsg<'_> {
 
             Self::NowHeading => f.write_str("on disk now, newest op first:"),
             Self::Will { op, observed, at } => match at {
+                Some(at) if at.action == rerun_core::plan::HOLD_ACTION => {
+                    write!(f, "  op {op}, {}: {at}", held_will(*observed))
+                }
                 Some(at) => write!(f, "  op {op}, {}: {at}", will(*observed)),
                 None => write!(f, "  op {op}, {}", will(*observed)),
             },
@@ -1091,8 +1118,14 @@ impl fmt::Display for TxnMsg<'_> {
                 op,
                 observed,
                 changed,
+                held,
             } => {
-                write!(f, "  op {op}: {}", did(*observed))?;
+                let words = if *held {
+                    "nothing to undo (the shared file stays as it is)"
+                } else {
+                    did(*observed)
+                };
+                write!(f, "  op {op}: {words}")?;
                 if *changed {
                     f.write_str(" (changed since the preview)")
                 } else {

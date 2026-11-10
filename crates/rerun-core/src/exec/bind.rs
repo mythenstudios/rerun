@@ -199,10 +199,20 @@ impl Bindings {
     /// rebound, also at the bound folders, until the transaction is closed. Registry objects
     /// always from the head.
     pub(super) fn objects(&self, plan: &Plan) -> Result<Vec<Object>, PlanError> {
-        let mut objs = Object::of(plan)?;
+        Ok(self
+            .objects_by_op(plan)?
+            .into_iter()
+            .map(|(_, o)| o)
+            .collect())
+    }
+
+    /// [`Self::objects`], each with the index of its op (P4-8: a `Hold` and the package of a
+    /// file are found by the op).
+    pub(super) fn objects_by_op(&self, plan: &Plan) -> Result<Vec<(usize, Object)>, PlanError> {
+        let mut objs: Vec<(usize, Object)> = Object::of(plan)?.into_iter().enumerate().collect();
         if self.rebound && super::knob_objects_from_binding_only() {
             // K-RB4 (tests): the objects at the old identity dropped (what E-R3 forbids).
-            objs.retain(|o| !matches!(o, Object::File { .. }));
+            objs.retain(|(_, o)| !matches!(o, Object::File { .. }));
         }
         if self.rebound && !super::knob_objects_from_head() {
             let roots: Vec<FileRoot> = self
@@ -216,7 +226,8 @@ impl Bindings {
             objs.extend(
                 Object::of_bound(plan, &roots)?
                     .into_iter()
-                    .filter(|o| matches!(o, Object::File { .. })),
+                    .enumerate()
+                    .filter(|(_, o)| matches!(o, Object::File { .. })),
             );
         }
         Ok(objs)

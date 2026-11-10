@@ -714,7 +714,7 @@ pub(super) fn old_state(cx: &ExecCtx<'_>, plan: &Plan, roots: &Roots<'_>) -> Res
                     return Err(mismatch());
                 }
             }
-            Op::ReplaceFile { path, old, .. } | Op::IniValue { path, old, .. } => {
+            Op::ReplaceFile { path, .. } | Op::IniValue { path, .. } | Op::Hold { path, .. } => {
                 let base = write_handle(g)?;
                 let name = RelPath::from_segment(path.file_name()).map_err(|_| mismatch())?;
                 let parent;
@@ -741,7 +741,14 @@ pub(super) fn old_state(cx: &ExecCtx<'_>, plan: &Plan, roots: &Roots<'_>) -> Res
                     Err(e) => return Err(e.into()),
                 };
                 // A2-B1: the plan holds the stored spelling; another one since is a change.
-                if !guard.name().same_spelling(&name) || !same_state(&mut *guard, old)? {
+                let same = match op {
+                    Op::ReplaceFile { old, .. } | Op::IniValue { old, .. } => {
+                        same_state(&mut *guard, old)?
+                    }
+                    Op::Hold { content, .. } => holds(&mut *guard, content)?,
+                    _ => false,
+                };
+                if !guard.name().same_spelling(&name) || !same {
                     return Err(mismatch());
                 }
             }
@@ -781,6 +788,16 @@ pub(super) fn same_state(
         && m.attrs == old.attrs
         && m.is_single_link()
         && g.sha256()? == old.sha256)
+}
+
+/// The guard holds the held content of a `Hold` (P4-8): its hash and length, whatever the
+/// R/H/S (the planner's rule B1: the same content is no change), one link, no placeholder.
+pub(super) fn holds(g: &mut dyn FileGuard, content: &ContentRef) -> crate::sys::SysResult<bool> {
+    let m = g.metadata()?;
+    Ok(!is_placeholder(&m)
+        && m.len == content.len()
+        && m.is_single_link()
+        && g.sha256()? == *content.sha256())
 }
 
 /// A cloud files placeholder (`0x9000_x01A`): never hashed or read here, it would be
