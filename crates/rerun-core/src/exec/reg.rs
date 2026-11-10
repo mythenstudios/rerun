@@ -45,8 +45,24 @@
 //!   tokens twice or in another case) → `Foreign`. No `from`/`to` in the `RevertIntent`
 //!   (E8): a crash after `remove_tokens` leaves a value without Rerun's tokens, which the next
 //!   run observes as `Before`, `Drifted` (none left) or `Drifted` (missing), never `Foreign`.
+//! - `GpuPref` (P4-11; user decision E-G3 a; senior-dev condition S3): apply like `TokenList`
+//!   (the old bytes always inline, at most 1 KiB), the write `RegWriter::set_pref(expected = the
+//!   value read, pref)`: `policy` forms the new value. Observed, in this order: a link, volatile
+//!   key or a value too large on the way → `Foreign`; exactly `new` (and no `NotWritten`) →
+//!   `After`, the old value restored exactly from the journal (or deleted); this is also the
+//!   row when the user chose "High performance" in Settings after the apply (the same bytes,
+//!   not distinguishable, S3): the revert sets the old value back; the old value (missing for
+//!   none) → `Before`; with `NotWritten` anything else is `Foreign`; missing → `Drifted`,
+//!   nothing written (Settings' "Remove"); a `REG_SZ` in the grammar holding Rerun's
+//!   `GpuPreference=2` once → `Drifted`, `RegWriter::unset_pref(expected = the value seen)` sets
+//!   the pair back to the old digit or removes it (deleted when no pair is left); in the grammar
+//!   without Rerun's pair (the user chose another preference) → `Drifted`, nothing written (D10:
+//!   the user's choice wins); anything else (another type, no NUL, outside the grammar, the
+//!   pair twice) → `Foreign`. A crash after `unset_pref` leaves a value without Rerun's pair,
+//!   which the next run observes as `Before` or `Drifted` (nothing to write), never `Foreign`.
 //! - `CreateKey` of a shared Windows key (`AppCompatFlags`, `Layers`; `AllowedValue::shared_keys`,
-//!   E6 b, E7): a key that is not empty, or that existed (`Existed`), is `Drifted` and left, the
+//!   E6 b, E7; `DirectX`, `UserGpuPreferences`, P4-11): a key that is not empty, or that existed
+//!   (`Existed`), is `Drifted` and left, the
 //!   transaction still closes; a game key keeps 6a (`Foreign`). `verify` counts a value of a
 //!   later `TokenList` as gone when its revert deletes it (`After` or `Before` with no old
 //!   value, `Drifted` with a rest of prefix words or already missing), not when it stays.
@@ -61,7 +77,8 @@ use crate::journal::{
 };
 use crate::plan::{self, Op, Plan, Target, ValueState};
 use crate::policy::registry::{
-    AllowedKey, AllowedValue, RegWriteError, RegWriter, TokenName, Unmerged, layers,
+    AllowedKey, AllowedValue, GpuPref, RegWriteError, RegWriter, TokenName, Unmerged, Unset,
+    gpu_pref, layers,
 };
 use crate::sys::registry::{KeyState, MAX_VALUE_BYTES, RegKey, RegValue};
 use crate::sys::{SysError, SysErrorKind, System};
@@ -90,6 +107,12 @@ enum Action {
     /// Remove Rerun's tokens from a value someone changed since the apply, `expected` the value
     /// seen (P2-11, S5).
     RemoveTokens {
+        av: AllowedValue,
+        expected: RegValue,
+    },
+    /// Set Rerun's graphics preference back in a value someone changed since the apply,
+    /// `expected` the value seen (P4-11).
+    UnsetPref {
         av: AllowedValue,
         expected: RegValue,
     },
@@ -250,7 +273,7 @@ pub(super) fn old_state(w: &RegWriter<'_>, plan: &Plan) -> Result<(), Refusal> {
                     Err(e) => return Err(reg(e)),
                 }
             }
-            Op::SetValue { old, .. } | Op::TokenList { old, .. } => {
+            Op::SetValue { old, .. } | Op::TokenList { old, .. } | Op::GpuPref { old, .. } => {
                 let av = value_of(plan, k, op).map_err(to_refusal)?;
                 let cur = current(w, &av).map_err(reg)?;
                 if !ValueState::is(old.as_ref(), cur.as_ref()) {
@@ -308,7 +331,7 @@ pub(super) fn apply_op(
                 }
             }
         }
-        Op::SetValue { old, .. } | Op::TokenList { old, .. } => {
+        Op::SetValue { old, .. } | Op::TokenList { old, .. } | Op::GpuPref { old, .. } => {
             let av = value_of(plan, k, op)?;
             let cur = current(reg, &av).map_err(&e)?;
             if !ValueState::is(old.as_ref(), cur.as_ref()) {
@@ -342,6 +365,8 @@ pub(super) fn apply_op(
                 Op::SetValue { new, .. } => reg.set(&av, cur.as_ref(), &new.value()),
                 // `policy` forms the new value from the value read (P2-11, S5).
                 Op::TokenList { add, .. } => reg.add_tokens(&av, cur.as_ref(), add),
+                // `policy` forms the new value from the value read (P4-11).
+                Op::GpuPref { pref, .. } => reg.set_pref(&av, cur.as_ref(), *pref),
                 _ => return Err(not_a_registry_op(k)),
             };
             match r {
@@ -544,6 +569,36 @@ pub(super) fn observe(
                 restore,
             ))
         }
+        Op::GpuPref { old, pref, new, .. } => {
+            let av = value_of(plan, k, op)?;
+            let object = Object::Value(av.key().key().clone(), fold(av.name()));
+            let new = RegValue::String(new.clone());
+            let restore = Action::Restore {
+                av: av.clone(),
+                expected: new.clone(),
+            };
+            if super::trusting_records() {
+                return Ok(match log.done {
+                    Some(_) => Seen::new(Observed::After, object).act(restore),
+                    None => Seen::new(Observed::Before, object),
+                });
+            }
+            let cur = match current(reg, &av) {
+                Ok(v) => v,
+                Err(x) if not_ours(&x) => return Ok(Seen::new(Observed::Foreign, object)),
+                Err(x) => return Err(e(x)),
+            };
+            Ok(gpu_pref_seen(
+                &av,
+                object,
+                old.as_ref(),
+                *pref,
+                &new,
+                cur,
+                hint,
+                restore,
+            ))
+        }
         Op::CreateDir { .. }
         | Op::CreateFile { .. }
         | Op::ReplaceFile { .. }
@@ -600,6 +655,57 @@ fn token_list_seen(
     }
 }
 
+/// The observation of a `GpuPref` from the current value `cur` (module docs).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the fields of the op, the value seen and the action"
+)]
+fn gpu_pref_seen(
+    av: &AllowedValue,
+    object: Object,
+    old: Option<&ValueState>,
+    pref: GpuPref,
+    new: &RegValue,
+    cur: Option<RegValue>,
+    hint: Option<Hint>,
+    restore: Action,
+) -> Seen {
+    let written = hint != Some(Hint::NotWritten);
+    if cur.as_ref() == Some(new) && written {
+        return Seen::new(Observed::After, object)
+            .act(restore)
+            .gone(old.is_none());
+    }
+    if ValueState::is(old, cur.as_ref()) {
+        return Seen::new(Observed::Before, object).gone(old.is_none());
+    }
+    if !written || drift_foreign() {
+        return Seen::new(Observed::Foreign, object);
+    }
+    match cur {
+        // Settings' "Remove": nothing of Rerun's is left.
+        None => Seen::new(Observed::Drifted, object).gone(true),
+        Some(RegValue::String(s)) => {
+            let old_text = old.and_then(plan::pref_old);
+            if old.is_some() && old_text.is_none() {
+                return Seen::new(Observed::Foreign, object);
+            }
+            match gpu_pref::unset(&s, pref, old_text.as_deref()) {
+                Unset::Foreign => Seen::new(Observed::Foreign, object),
+                // D10: the user chose another preference; theirs wins.
+                Unset::NotOurs => Seen::new(Observed::Drifted, object),
+                Unset::Rest(rest) => Seen::new(Observed::Drifted, object)
+                    .act(Action::UnsetPref {
+                        av: av.clone(),
+                        expected: RegValue::String(s.clone()),
+                    })
+                    .gone(rest.is_none()),
+            }
+        }
+        Some(_) => Seen::new(Observed::Foreign, object),
+    }
+}
+
 /// Carries out what `seen` says for op `k`, after its `RevertIntent`.
 pub(super) fn act<W: Reverting>(
     w: &W,
@@ -627,8 +733,24 @@ pub(super) fn act<W: Reverting>(
                 )),
             })?;
         }
+        Some(Action::UnsetPref { av, expected }) => {
+            let Op::GpuPref { old, pref, .. } = op else {
+                return Err(not_a_registry_op(k));
+            };
+            let old = old.as_ref().and_then(plan::pref_old);
+            reg.unset_pref(av, expected, *pref, old.as_deref())
+                .map_err(|x| match x {
+                    RegWriteError::Sys(s) => e(s),
+                    RegWriteError::Policy(p) => e(SysError::new(
+                        SysErrorKind::Other,
+                        format!("policy::registry refused to take back the preference: {p}"),
+                    )),
+                })?;
+        }
         Some(Action::Restore { av, expected }) => {
-            let (Op::SetValue { old, .. } | Op::TokenList { old, .. }) = op else {
+            let (Op::SetValue { old, .. } | Op::TokenList { old, .. } | Op::GpuPref { old, .. }) =
+                op
+            else {
                 return Err(not_a_registry_op(k));
             };
             let old = match old {
@@ -690,6 +812,15 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
                 let len = usize::try_from(s.len).unwrap_or(usize::MAX);
                 matches!(&i.before, Some(Before::Inline(v))
                     if len <= layers::MAX_LAYERS_BYTES
+                        && v.len() == len
+                        && <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(v))
+                            == s.sha256)
+            }
+            Op::GpuPref { old: None, .. } => i.before.is_none(),
+            Op::GpuPref { old: Some(s), .. } => {
+                let len = usize::try_from(s.len).unwrap_or(usize::MAX);
+                matches!(&i.before, Some(Before::Inline(v))
+                    if len <= gpu_pref::MAX_PREF_BYTES
                         && v.len() == len
                         && <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(v))
                             == s.sha256)

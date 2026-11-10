@@ -55,6 +55,8 @@ The anti-cheat markers (`detect::exe::anti_cheat::MARKERS`, P4-4, user decision 
 | `xigncode` | folder `XIGNCODE` | TODO (no vendor source yet) |
 | `ea-anticheat` | file `EAAntiCheat.GameServiceLauncher.exe` | TODO (no vendor source yet) |
 
+The graphics preference values (`policy::registry::gpu_pref`, ADR 0018 amendment P4-11) follow the same standard. `GpuPreference` `0` (let Windows decide), `1` (power saving), `2` (high performance) and the pair `AutoHDREnable` come from Microsoft Q&A and Kapil Arya, "Set Graphics Preference for Apps in Windows 11" (checked 2026-11-05, `03b-gpu-display.md` "Sources"); the raw values Settings > System > Display > Graphics writes are still to be dumped in Windows Sandbox (SB-G1, `docs/09-testing.md`) as the fixture `tests/fixtures/gpu-pref/sb-g1-<date>.txt`. Until then Rerun writes only `2` and refuses any other form (a specific adapter, another digit) as unusual.
+
 ## Links in the app
 
 Every variant links directly to its source: the specific Steam guide, the thread, the repo, the PCGW section. Never just the home page.

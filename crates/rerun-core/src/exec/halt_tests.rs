@@ -279,6 +279,7 @@ fn reroot(op: &mut Op, to: u16) {
         Op::CreateKey { .. }
         | Op::SetValue { .. }
         | Op::TokenList { .. }
+        | Op::GpuPref { .. }
         | Op::FirewallRule { .. } => {}
     }
 }

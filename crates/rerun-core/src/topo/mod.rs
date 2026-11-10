@@ -392,6 +392,7 @@ fn step_kind(s: &TopoStep, launch: &Result<LaunchPlan, LaunchProblem>) -> StepKi
         TopoStep::IniSet(_) => StepKind::IniSet,
         TopoStep::FirewallRule(_) => StepKind::FirewallRule,
         TopoStep::LaaPatch(_) => StepKind::LaaPatch,
+        TopoStep::GpuPreference(_) => StepKind::GpuPreference,
     }
 }
 
@@ -403,6 +404,7 @@ pub fn prim_step_kind(s: &Step) -> StepKind {
         Step::CompatLayer(_) => StepKind::CompatLayer,
         Step::IniSet(_) => StepKind::IniSet,
         Step::LaaPatch(_) => StepKind::LaaPatch,
+        Step::GpuPreference(_) => StepKind::GpuPreference,
         Step::LaunchMethod(l) => match l.method {
             MethodSpec::Watch => StepKind::LaunchWatch,
             // `auto` is refused by the planner; counted as the stricter of its results.
@@ -772,6 +774,14 @@ pub enum Warning {
         /// The executable.
         exe: RelPath,
     },
+    /// A `gpu_preference` step plans nothing: the executable's preference is High performance
+    /// already (P4-11, N2), set by the open Rerun transaction `by` if one did.
+    GpuPreferenceSet {
+        /// The executable.
+        exe: RelPath,
+        /// The open transaction that set it.
+        by: Option<crate::journal::TxnId>,
+    },
     /// A planned package needs a GPU feature Rerun does not check (`requires_gpu`, P4-8): v1
     /// `vulkan`, a Vulkan driver for the game's adapter.
     RequiresGpu {
@@ -916,6 +926,8 @@ pub fn plan(
                 TopoStep::RegistrySet(r) => steps.push(Step::RegistrySet(r.clone())),
                 TopoStep::CompatLayer(c) => steps.push(Step::CompatLayer(c.clone())),
                 TopoStep::IniSet(x) => steps.push(Step::IniSet(x.clone())),
+                // Two picks for one executable: the planner refuses the second step.
+                TopoStep::GpuPreference(g) => steps.push(Step::GpuPreference(g.clone())),
                 TopoStep::LaaPatch(l) => {
                     let spec = laa_step(topo, facts, l)?;
                     let sac = facts.profile.sac;
@@ -986,6 +998,14 @@ pub fn plan(
         ..*ctx
     };
     let mut plan = prim::plan(&steps, &ctx)?;
+    // N2 (P4-11): a preference that is set already plans no op; the user is told, and by which
+    // open transaction if Rerun's.
+    for a in prim::gpu_preference::already_set(&steps, &plan, &ctx) {
+        warnings.push(Warning::GpuPreferenceSet {
+            exe: a.exe,
+            by: a.by,
+        });
+    }
     // P4-2d (ADR 0023 §9, A4 S7): the firewall rules last, built only from the anchors of the
     // derivation the helper repeats, on the game folder as read here.
     if rules {
@@ -1130,6 +1150,8 @@ fn slots_free(steps: &[Step], packages: &[&Package]) -> Result<(), EngineError> 
     Ok(())
 }
 
+#[cfg(test)]
+mod gpu_tests;
 #[cfg(test)]
 mod laa_tests;
 #[cfg(test)]

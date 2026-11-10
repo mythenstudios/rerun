@@ -2630,6 +2630,10 @@ mod fw_crash_tests;
 #[cfg(test)]
 pub(crate) mod fw_tests;
 #[cfg(test)]
+mod gpu_pref_crash_tests;
+#[cfg(test)]
+pub(crate) mod gpu_pref_tests;
+#[cfg(test)]
 mod halt_tests;
 #[cfg(test)]
 mod handover_crash_tests;

@@ -197,6 +197,17 @@ fn warning_text(w: &Warning) -> String {
                 _ => "in a state Rerun cannot read",
             }
         ),
+        Warning::GpuPreferenceSet { exe, by } => match by {
+            Some(t) => format!(
+                "hint: the graphics preference of {} is High performance already, set by Rerun \
+                 transaction {t}; nothing to do (reverting that transaction takes it back)",
+                rerun_core::escape::path(exe.as_str())
+            ),
+            None => format!(
+                "hint: the graphics preference of {} is High performance already; nothing to do",
+                rerun_core::escape::path(exe.as_str())
+            ),
+        },
         Warning::SignedExe { exe } => format!(
             "warning: {} is digitally signed; the patch makes the signature invalid (the revert \
              restores it)",

@@ -644,7 +644,8 @@ fn unused(roots: &Roots<'_>, root: usize, p: &RelPath) -> Result<(), Refusal> {
 }
 
 /// D4: the game is closed: no existing file target of the ops `ops`, no executable of a
-/// compatibility layer (P2-11) and no main executable of an open root is in use.
+/// compatibility layer (P2-11) or of a graphics preference (P4-11) and no main executable of an
+/// open root is in use.
 pub(super) fn game_closed(plan: &Plan, roots: &Roots<'_>, ops: &[u16]) -> Result<(), Refusal> {
     for k in ops {
         let Some(op) = plan.ops.get(usize::from(*k)) else {
@@ -656,9 +657,10 @@ pub(super) fn game_closed(plan: &Plan, roots: &Roots<'_>, ops: &[u16]) -> Result
                 path,
                 dir: false,
             } => unused(roots, usize::from(root.0), path)?,
-            // P2-11: the executable a compatibility layer is for (not always the main one).
+            // P2-11: the executable a compatibility layer is for (not always the main one);
+            // P4-11: the same for a graphics preference (it takes effect at the next start).
             Target::Value {
-                slot: RegSlot::CompatLayers { root, exe },
+                slot: RegSlot::CompatLayers { root, exe } | RegSlot::GpuPreference { root, exe },
             } => unused(roots, usize::from(root.0), exe)?,
             // A registry op has no file to ask: the main executables below are (E2).
             Target::File { dir: true, .. } | Target::Key { .. } | Target::Value { .. } => {}
@@ -755,6 +757,7 @@ pub(super) fn old_state(cx: &ExecCtx<'_>, plan: &Plan, roots: &Roots<'_>) -> Res
             Op::CreateKey { .. }
             | Op::SetValue { .. }
             | Op::TokenList { .. }
+            | Op::GpuPref { .. }
             | Op::FirewallRule { .. } => {}
         }
         if let Some(ContentRef::Package {

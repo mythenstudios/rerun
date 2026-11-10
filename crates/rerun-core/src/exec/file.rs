@@ -367,6 +367,7 @@ pub(super) fn apply_op(
         Op::CreateKey { .. }
         | Op::SetValue { .. }
         | Op::TokenList { .. }
+        | Op::GpuPref { .. }
         | Op::IniValue { .. }
         | Op::FirewallRule { .. } => Err(not_a_file_op(k)),
     }
@@ -591,6 +592,7 @@ pub(super) fn records_fit(op: &Op, log: &OpLog) -> bool {
             Op::CreateKey { .. }
             | Op::SetValue { .. }
             | Op::TokenList { .. }
+            | Op::GpuPref { .. }
             | Op::IniValue { .. }
             | Op::FirewallRule { .. } => false,
         }
@@ -751,6 +753,7 @@ pub(super) fn observe(
         Op::CreateKey { .. }
         | Op::SetValue { .. }
         | Op::TokenList { .. }
+        | Op::GpuPref { .. }
         | Op::IniValue { .. }
         | Op::FirewallRule { .. } => Err(not_a_file_op(k)),
     }
@@ -773,6 +776,7 @@ pub(super) fn trusted(op: &Op, log: &OpLog) -> Seen {
         Op::CreateKey { .. }
         | Op::SetValue { .. }
         | Op::TokenList { .. }
+        | Op::GpuPref { .. }
         | Op::FirewallRule { .. } => Seen::new(Observed::Foreign),
     }
 }

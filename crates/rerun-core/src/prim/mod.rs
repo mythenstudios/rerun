@@ -20,6 +20,8 @@
 //!   the package's files for this game's architecture and graphics API; pure, no I/O.
 //! - [`laa_patch`] (P4-10): the Large Address Aware flag of a 32-bit executable of the Topo's
 //!   `match.exes` as one `ReplaceFile` with a patch (`ContentRef::Patch`); only from a Topo.
+//! - [`gpu_preference`] (P4-11): Windows' graphics preference of an executable of the game
+//!   folder in `HKCU\…\DirectX\UserGpuPreferences` (only Rerun's pair of the value).
 //! - [`StepFile`]: the phase 2 step file `rerun plan <steps.json>` reads (P2-13); since the Topo
 //!   engine (P4-4) the local, unsigned input (L8), removed at the earliest before A6.
 //!
@@ -29,6 +31,7 @@
 
 pub mod compat_layer;
 pub mod file_install;
+pub mod gpu_preference;
 pub mod ini_set;
 pub mod laa_patch;
 pub mod launch_method;
@@ -40,6 +43,7 @@ use serde::{Deserialize, Serialize};
 
 pub use compat_layer::CompatLayerSpec;
 pub use file_install::{FileEntry, FileInstallSpec};
+pub use gpu_preference::{AlreadySet, GpuPreferenceSpec};
 pub use ini_set::{IniSetSpec, IniSetValue};
 pub use laa_patch::{LaaFacts, LaaPatchSpec};
 pub use launch_method::{
@@ -79,6 +83,8 @@ pub enum Step {
     LaunchMethod(LaunchMethodSpec),
     /// [`laa_patch`] (P4-10): only from a Topo, the step file refuses it.
     LaaPatch(LaaPatchSpec),
+    /// [`gpu_preference`] (P4-11).
+    GpuPreference(GpuPreferenceSpec),
 }
 
 /// What a planner reads: the game folder, Rerun's folder (packages), and what identifies the
@@ -186,6 +192,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
             Step::IniSet(spec) => ini_set::plan_into(spec, ctx, &mut b)?,
             Step::LaunchMethod(spec) => launch_method::plan_into(spec, ctx, &mut b)?,
             Step::LaaPatch(spec) => laa_patch::plan_into(spec, ctx, &mut b)?,
+            Step::GpuPreference(spec) => gpu_preference::plan_into(spec, ctx, &mut b)?,
         }
     }
     // One file is either installed or edited in one plan (the plan format allows one op per
@@ -282,6 +289,8 @@ pub(crate) fn folded(p: &RelPath) -> String {
     fold(p.as_str())
 }
 
+#[cfg(test)]
+mod gpu_pref_tests;
 #[cfg(test)]
 pub(crate) mod ini_tests;
 #[cfg(test)]

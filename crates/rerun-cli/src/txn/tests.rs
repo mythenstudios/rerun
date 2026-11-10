@@ -92,6 +92,7 @@ fn head() -> Preview {
         firewall: None,
         held: None,
         patched: None,
+        gpu_pref: None,
     }
 }
 

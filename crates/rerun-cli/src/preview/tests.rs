@@ -68,6 +68,7 @@ fn preview(root_path: &str, ops: Vec<PreviewOp>) -> Preview {
         firewall: None,
         held: None,
         patched: None,
+        gpu_pref: None,
     }
 }
 

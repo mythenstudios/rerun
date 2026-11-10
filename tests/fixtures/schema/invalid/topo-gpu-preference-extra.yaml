@@ -1,0 +1,19 @@
+# Invalid: gpu_preference (extra)
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "bin/game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues:
+  - id: issue
+    title: "Issue"
+    when: { gpu.hybrid: true }
+    variants:
+      - id: v
+        status: unverified
+        kind: fix
+        steps:
+          - gpu_preference: { exe: 'bin/game.exe', preference: high_performance, adapter: 1 }

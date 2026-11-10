@@ -50,6 +50,16 @@
 //! at most one per view in view order, each in the grammar; [`Rules::Current`] adds that none
 //! holds a word of a group of an added token.
 //!
+//! `GpuPref` (P4-11, ADR 0020 amendment P4-11): only on a `GpuPreference` slot; the old value
+//! missing or an inline `REG_SZ` (at most `gpu_pref::MAX_PREF_BYTES`, so always inline); with an
+//! old value not in a key the plan creates; the new value other than the old one and exactly
+//! the old one with Rerun's pair set to `pref` (in its place, or appended; none: the pair alone),
+//! a version-independent string relation checked by both rule sets (the S-1 analogue: a
+//! recorded head can never make the restore of `After` write a pair the plan did not set).
+//! [`Rules::Current`] adds the grammar of the old and the new value and
+//! `RegPolicy::check_pref` (not "Power saving", not set already) with `new` equal to
+//! `gpu_pref::set(old, pref)`. A later, tighter grammar never blocks a revert.
+//!
 //! `IniValue` (P2-12, ADR 0020 amendment P2-12, ADR 0021): a file op on an existing `.ini` file
 //! (`policy::ini::path_ok`: not `desktop.ini`); its edits pass `policy::ini::check_edits` (1 to
 //! 8, canonical order, unique, a section new or existing as a whole, every new value not empty
@@ -98,10 +108,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use preview::{
-    FIREWALL_NOTE, FirewallShown, HOLD_ACTION, HOLD_NOTE, INI_NOTE, IniOldShown, IniShown,
-    LAYERS_NOTE, NOT_RESTORED, PATCH_ACTION, PATCH_NOTE, PROFILE_NOTE, PROFILE_WATCH_NOTE,
-    PatchByte, Preview, PreviewOp, PreviewRoot, ProfilePreview, ProfileShown, REGISTRY_NOTE,
-    RegShown, preview, preview_head, preview_stored,
+    FIREWALL_NOTE, FirewallShown, GPU_PREF_ACTION, GPU_PREF_NOTE, HOLD_ACTION, HOLD_NOTE, INI_NOTE,
+    IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, PATCH_ACTION, PATCH_NOTE, PROFILE_NOTE,
+    PROFILE_WATCH_NOTE, PatchByte, Preview, PreviewOp, PreviewRoot, ProfilePreview, ProfileShown,
+    REGISTRY_NOTE, RegShown, preview, preview_head, preview_stored,
 };
 #[cfg(test)]
 pub(crate) use profile::knob as profile_knob;
@@ -112,7 +122,9 @@ use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
 use crate::policy::firewall::{Direction, Program};
 use crate::policy::ini::{self, IniEdit, IniError};
-use crate::policy::registry::{RegPolicy, RegPolicyError, RegSlot, TokenName, layers};
+use crate::policy::registry::{
+    GpuPref, RegPolicy, RegPolicyError, RegSlot, TokenName, gpu_pref, layers,
+};
 use crate::policy::root::{RootError, RootId};
 use crate::sys::SysError;
 use crate::sys::fs::Attrs;
@@ -364,6 +376,20 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         machine: Vec<MachineLayers>,
     },
+    /// Sets Windows' graphics preference of the executable of `slot` (P4-11): only the
+    /// `GpuPreference` pair of the `UserGpuPreferences` value changes, every other pair keeps
+    /// its bytes and place; a revert restores the old value exactly, or sets back only Rerun's
+    /// pair in a value someone changed since (when it is still Rerun's).
+    GpuPref {
+        /// The value (a `GpuPreference` slot).
+        slot: RegSlot,
+        /// The old value as planned, re-observed before the change (`None`: missing).
+        old: Option<ValueState>,
+        /// The preference set.
+        pref: GpuPref,
+        /// The new value: `old` with Rerun's pair (`policy::registry::gpu_pref::set`).
+        new: String,
+    },
     /// Sets keys of an existing INI file whose state was `old` when planned (P2-12): only the
     /// edits change (`policy::ini::edit`); a revert restores the old content exactly, or puts
     /// back only Rerun's keys in a file the game rewrote since.
@@ -560,7 +586,9 @@ impl Op {
                 dir: false,
             },
             Self::CreateKey { slot, segs } => Target::Key { slot, segs: *segs },
-            Self::SetValue { slot, .. } | Self::TokenList { slot, .. } => Target::Value { slot },
+            Self::SetValue { slot, .. }
+            | Self::TokenList { slot, .. }
+            | Self::GpuPref { slot, .. } => Target::Value { slot },
             Self::FirewallRule { root, program, .. } => Target::Rule {
                 root: *root,
                 program,
@@ -585,6 +613,7 @@ impl Op {
             | Self::CreateKey { .. }
             | Self::SetValue { .. }
             | Self::TokenList { .. }
+            | Self::GpuPref { .. }
             | Self::FirewallRule { .. } => None,
             Self::CreateFile { content, .. } | Self::ReplaceFile { content, .. } => Some(content),
         }
@@ -1102,6 +1131,11 @@ impl RegSeen {
                 self.values.push(obj);
                 return Ok(());
             }
+            Op::GpuPref { old, pref, new, .. } => {
+                self.pref(k, &av, &obj.0, old.as_ref(), *pref, new, rules)?;
+                self.values.push(obj);
+                return Ok(());
+            }
             _ => return Err(invalid(Some(k), "a value target of no value op")),
         };
         // Review N2, P2-11: a compatibility-layer value is shared; Rerun only adds tokens.
@@ -1237,6 +1271,110 @@ impl RegSeen {
             }
         }
         Ok(())
+    }
+}
+
+impl RegSeen {
+    /// The rules of a `GpuPref` (module docs).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fields of the op and its context"
+    )]
+    fn pref(
+        &self,
+        k: usize,
+        av: &crate::policy::registry::AllowedValue,
+        key: &RegKey,
+        old: Option<&ValueState>,
+        pref: GpuPref,
+        new: &str,
+        rules: Rules,
+    ) -> Result<(), PlanError> {
+        if !matches!(av.slot(), RegSlot::GpuPreference { .. }) {
+            return Err(invalid(
+                Some(k),
+                "a graphics preference only on a UserGpuPreferences value",
+            ));
+        }
+        let old = match old {
+            None => None,
+            Some(s) => Some(pref_old(s).ok_or_else(|| {
+                invalid(
+                    Some(k),
+                    "an old graphics preference value that is no inline REG_SZ",
+                )
+            })?),
+        };
+        if old.is_some() && self.created.iter().any(|c| key_at_or_below(key, c)) {
+            return Err(invalid(
+                Some(k),
+                "a value in a created key with an old value",
+            ));
+        }
+        // Both rule sets (the S-1 analogue): `new` is `old` with Rerun's pair, whatever the
+        // grammar of a later version says.
+        if old.as_deref() == Some(new) || !pref_relation(old.as_deref(), new, pref) {
+            return Err(invalid(
+                Some(k),
+                "a new value that is not the old one with Rerun's graphics preference",
+            ));
+        }
+        if rules == Rules::Current {
+            let formed = RegPolicy
+                .check_pref(av, old.as_deref(), pref)
+                .map_err(|source| PlanError::Registry { op: k, source })?;
+            if formed != new || gpu_pref::parse(new).is_err() {
+                return Err(invalid(
+                    Some(k),
+                    "a new value other than the old one with Rerun's graphics preference",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `new` is `old` with the pair `GpuPreference=<pref>;`: the first piece of `old` (split after
+/// each `;`) that starts with `GpuPreference=` replaced by it, or it appended; without `old` the
+/// pair alone. Plain string pieces, no grammar (module docs: both rule sets).
+pub(crate) fn pref_relation(old: Option<&str>, new: &str, pref: GpuPref) -> bool {
+    let pair = format!("{}={};", gpu_pref::PREF_KEY, pref.digit());
+    let Some(old) = old else {
+        return new == pair;
+    };
+    let head = format!("{}=", gpu_pref::PREF_KEY);
+    let mut out = String::with_capacity(old.len() + pair.len());
+    let mut replaced = false;
+    for piece in old.split_inclusive(';') {
+        if !replaced && piece.starts_with(&head) && piece.ends_with(';') {
+            out.push_str(&pair);
+            replaced = true;
+        } else {
+            out.push_str(piece);
+        }
+    }
+    if !replaced {
+        out.push_str(&pair);
+    }
+    out == new
+}
+
+/// The old value of a `GpuPref`: a `REG_SZ` with its NUL, inline with the length and hash it
+/// claims, at most `gpu_pref::MAX_PREF_BYTES`. No grammar here (the recorded rules; the current
+/// ones parse it).
+pub(crate) fn pref_old(s: &ValueState) -> Option<String> {
+    let d = s.data.as_ref()?;
+    let len = usize::try_from(s.len).ok()?;
+    if s.kind != crate::sys::registry::reg_type::REG_SZ
+        || len > gpu_pref::MAX_PREF_BYTES
+        || d.len() != len
+        || <[u8; 32]>::from(Sha256::digest(d)) != s.sha256
+    {
+        return None;
+    }
+    match RegValue::decode(s.kind, d) {
+        RegValue::String(t) => Some(t),
+        _ => None,
     }
 }
 

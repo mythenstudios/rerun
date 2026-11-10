@@ -15,6 +15,10 @@
 //! "all users" (`HKLM`) value of the same executable the planner saw (P3-6) is named per view,
 //! marked as not changed; a recorded head masks it like every registry value.
 //!
+//! A `set gpu preference` op (P4-11) shows the value name (the executable's path), the old
+//! value and the new one; a plan with such an op adds [`GPU_PREF_NOTE`] once; a recorded head
+//! masks old and new (the new value holds the old one's other pairs).
+//!
 //! An `edit ini` op (P2-12) shows the file with its old and new hash, length and R/H/S (kept),
 //! and per key `[section] key`, the old value (`missing`, `new section`) and the new one, every
 //! name and value through `escape::text`; a plan with such an op adds [`INI_NOTE`] once.
@@ -64,6 +68,13 @@ shared with Windows: a revert deletes one Rerun created only when it is empty, s
 transactions in another order than newest first can leave them empty for good. A layer applies \
 only when Windows starts the game by exactly the path shown as the value name (not by a path \
 through a link or junction); a revert takes effect from the next start";
+
+/// The action of a `GpuPref` op (P4-11).
+pub const GPU_PREF_ACTION: &str = "set gpu preference";
+
+/// What a plan with a graphics preference says once (P4-11, ADR 0020 amendment P4-11; rule 5;
+/// senior-dev conditions S3 and N2).
+pub const GPU_PREF_NOTE: &str = "graphics preference: only the GpuPreference pair of the value changes, to High performance; every other setting of the executable in Settings > System > Display > Graphics (such as Auto HDR) stays as it is. It takes effect at the next start of the game. A revert restores the old value exactly if nobody changed it; if Windows or you changed the value since, it sets back only Rerun's preference while it is still High performance, and a preference you chose since stays. If you choose High performance yourself after the apply, Rerun cannot tell it from its own: the revert sets the old preference back. A preference that is High performance already is left as it is, also one an earlier Rerun transaction set: reverting that transaction takes it back. The keys DirectX and UserGpuPreferences are shared with Windows: a revert deletes one Rerun created only when it is empty. Whether OpenGL and Vulkan games follow the setting depends on the graphics driver";
 
 /// What a plan with INI ops says once (P2-12, ADR 0020 amendment P2-12; user decisions E1 b, E2
 /// a, E5 a).
@@ -352,6 +363,8 @@ pub struct Preview {
     pub held: Option<&'static str>,
     /// [`PATCH_NOTE`], once per plan with a patch (P4-10).
     pub patched: Option<&'static str>,
+    /// [`GPU_PREF_NOTE`], once per plan with a graphics preference (P4-11).
+    pub gpu_pref: Option<&'static str>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -591,6 +604,7 @@ pub fn preview(p: &Plan) -> Preview {
                 Op::CreateKey { .. } => ("create key", None, None),
                 Op::SetValue { .. } => ("set value", None, None),
                 Op::TokenList { .. } => ("add tokens", None, None),
+                Op::GpuPref { .. } => (GPU_PREF_ACTION, None, None),
                 Op::IniValue { old: o, .. } => ("edit ini", Some(rhs(&o.attrs)), Some(old(o))),
                 Op::FirewallRule { .. } => ("block in firewall", None, None),
                 Op::Hold { .. } => (HOLD_ACTION, None, None),
@@ -610,7 +624,7 @@ pub fn preview(p: &Plan) -> Preview {
                         .is_some_and(|o| v.encode().is_some_and(|(k, _)| k != o.kind));
                     (Some(old_value(o.as_ref())), Some(shown), changed)
                 }
-                Op::TokenList { old: o, new, .. } => {
+                Op::TokenList { old: o, new, .. } | Op::GpuPref { old: o, new, .. } => {
                     let v = RegValue::String(new.clone());
                     let shown = ValueState::of(&v).map_or_else(
                         || RegShown {
@@ -784,6 +798,11 @@ pub fn preview(p: &Plan) -> Preview {
         .iter()
         .any(|o| matches!(o.content(), Some(ContentRef::Patch { .. })))
         .then_some(PATCH_NOTE);
+    let gpu_pref = p
+        .ops
+        .iter()
+        .any(|o| matches!(o, Op::GpuPref { .. }))
+        .then_some(GPU_PREF_NOTE);
     let profiles = ops.iter().find_map(|o| match &o.profile {
         Some(ProfilePreview::Decoded(s)) if s.decoded.method == Method::Watch => {
             Some(PROFILE_WATCH_NOTE)
@@ -802,6 +821,7 @@ pub fn preview(p: &Plan) -> Preview {
         firewall,
         held,
         patched,
+        gpu_pref,
     }
 }
 
@@ -922,6 +942,9 @@ impl fmt::Display for Preview {
         if let Some(n) = self.held {
             writeln!(f, "note: {n}")?;
         }
+        if let Some(n) = self.gpu_pref {
+            writeln!(f, "note: {n}")?;
+        }
         if let Some(n) = self.patched {
             writeln!(f, "note: {n}")?;
         }
@@ -952,6 +975,12 @@ pub fn preview_head(b: &[u8]) -> Result<Preview, PlanError> {
                 for (m, (_, v)) in machine.iter().zip(shown.machine.iter_mut()) {
                     *v = masked(ValueState::of(&RegValue::String(m.value.clone())).as_ref());
                 }
+                shown.old_value = Some(masked(old.as_ref()));
+                shown.new_value = Some(masked(
+                    ValueState::of(&RegValue::String(new.clone())).as_ref(),
+                ));
+            }
+            Op::GpuPref { old, new, .. } => {
                 shown.old_value = Some(masked(old.as_ref()));
                 shown.new_value = Some(masked(
                     ValueState::of(&RegValue::String(new.clone())).as_ref(),

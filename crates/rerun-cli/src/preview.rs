@@ -234,7 +234,7 @@ pub fn render(p: &Preview) -> Vec<Message<'_>> {
     }
     out.push(m(TxnMsg::Note(p.not_restored)));
     for note in [
-        p.registry, p.layers, p.ini, p.profiles, p.firewall, p.held, p.patched,
+        p.registry, p.layers, p.ini, p.profiles, p.firewall, p.held, p.patched, p.gpu_pref,
     ]
     .into_iter()
     .flatten()

@@ -17,6 +17,7 @@ use super::model::{
 use crate::fold::fold;
 use crate::policy::ini::IniName;
 use crate::policy::registry::{AsciiName, AsciiSeg, GameKey};
+use crate::prim::GpuPreferenceSpec;
 use crate::prim::registry_set::{KEY_PREFIX, MAX_VALUES};
 use crate::prim::{CompatLayerSpec, CpuRuleSpec, IniSetSpec, RegistrySetSpec};
 
@@ -37,6 +38,11 @@ pub const FIREWALL_RULE_REVIEWED: bool = true;
 /// condition. Setting it back to `false` makes the step draft only again (the signed index then
 /// holds none).
 pub const LAA_PATCH_REVIEWED: bool = true;
+
+/// Whether a Topo outside a draft may hold a `gpu_preference` step (P4-11). `false` until the
+/// step is reviewed and the Sandbox dump of what Settings writes (SB-G1, `docs/09-testing.md`)
+/// confirms the grammar: the signed index holds none until then.
+pub const GPU_PREFERENCE_REVIEWED: bool = false;
 
 /// Most executables of `match.exes` (P4-4: each is hashed when the engine reads a game).
 pub const MAX_EXES: usize = 8;
@@ -281,6 +287,9 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
                 if let TopoStep::LaaPatch(l) = s {
                     laa_patch(t, l, &format!("{at}.laa_patch"))?;
                 }
+                if let TopoStep::GpuPreference(g) = s {
+                    gpu_preference(t, issue.when.as_ref(), g, &format!("{at}.gpu_preference"))?;
+                }
             }
             for (k, x) in v.tradeoffs.iter().enumerate() {
                 ensure(!x.is_empty(), &format!("{at}.tradeoffs[{k}]"), "not empty")?;
@@ -433,7 +442,35 @@ fn step(s: &TopoStep, at: &str) -> R {
             &format!("{at}.laa_patch.exe"),
             "an .exe",
         ),
+        TopoStep::GpuPreference(g) => ensure(
+            fold(g.exe.as_str()).ends_with(".EXE"),
+            &format!("{at}.gpu_preference.exe"),
+            "an .exe",
+        ),
     }
+}
+
+/// `gpu_preference` against its Topo and issue (P4-11): draft only while not reviewed
+/// ([`GPU_PREFERENCE_REVIEWED`]); the executable an entry of `match.exes` in exactly its spelling
+/// (no `sha256` needed: an `HKCU` value naming a path, not a change of the executable, nothing
+/// elevated); the issue's `when` has `gpu.hybrid: true`, so it is never offered on a PC with one
+/// graphics adapter.
+fn gpu_preference(t: &Topo, w: Option<&When>, g: &GpuPreferenceSpec, at: &str) -> R {
+    ensure(
+        GPU_PREFERENCE_REVIEWED || t.status == Status::Draft,
+        at,
+        "draft only until gpu_preference is reviewed (P4-11)",
+    )?;
+    ensure(
+        t.matches.exes.iter().any(|e| e.path.same_spelling(&g.exe)),
+        &format!("{at}.exe"),
+        "an executable of match.exes, in exactly its spelling",
+    )?;
+    ensure(
+        w.is_some_and(|w| w.gpu_hybrid == Some(true)),
+        at,
+        "only in an issue whose when has gpu.hybrid: true",
+    )
 }
 
 /// `firewall_rule` against its Topo: draft only while not reviewed ([`FIREWALL_RULE_REVIEWED`]),

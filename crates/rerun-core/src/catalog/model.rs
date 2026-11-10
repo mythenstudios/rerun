@@ -21,7 +21,9 @@ use crate::detect::exe::AntiCheat;
 use crate::hw::arch::ArchId;
 use crate::path::RelPath;
 use crate::policy::firewall::Direction;
-use crate::prim::{CompatLayerSpec, CpuRuleSpec, IniSetSpec, PrioritySpec, RegistrySetSpec};
+use crate::prim::{
+    CompatLayerSpec, CpuRuleSpec, GpuPreferenceSpec, IniSetSpec, PrioritySpec, RegistrySetSpec,
+};
 
 /// The one value of `format` (Topo, package, index).
 pub const FORMAT: u32 = 1;
@@ -669,6 +671,9 @@ pub enum TopoStep {
     /// `laa_patch` (P4-10): the Large Address Aware flag of one 32-bit executable of
     /// `match.exes`.
     LaaPatch(LaaPatchStep),
+    /// `gpu_preference` (P4-11): Windows' graphics preference of one executable of
+    /// `match.exes` (draft only until reviewed, [`super::check::GPU_PREFERENCE_REVIEWED`]).
+    GpuPreference(GpuPreferenceSpec),
 }
 
 /// `laa_patch` (P4-10, ADR 0020 amendment P4-10): set the Large Address Aware flag of one
