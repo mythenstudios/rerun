@@ -71,14 +71,6 @@ impl Format {
             None
         }
     }
-
-    /// Its name in messages.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Zip => "zip",
-            Self::TarGz => "tar.gz",
-        }
-    }
 }
 
 /// The bounds of one archive (ADR 0025 part 2). Tests pass smaller ones.
@@ -334,11 +326,6 @@ impl<'a> Archive<'a> {
             limits: *limits,
             entries,
         })
-    }
-
-    /// The format.
-    pub fn format(&self) -> Format {
-        self.format
     }
 
     /// Every entry, in archive order.

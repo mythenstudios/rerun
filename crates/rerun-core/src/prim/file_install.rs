@@ -117,13 +117,21 @@ pub(crate) fn open_package<'d>(
     }
 }
 
-fn missing(id: &str, version: &str) -> PlanError {
-    refuse(format!(
-        "package {} {} is not in Rerun's packages folder (rerun package fetch {}@{} downloads          and unpacks a package of the signed index)",
-        crate::escape::text(id),
-        crate::escape::text(version),
+/// The command that puts a package of the signed index into the packages folder.
+pub(crate) fn fetch_hint(id: &str, version: &str) -> String {
+    format!(
+        "rerun package fetch {}@{} downloads and unpacks a package of the signed index",
         crate::escape::text(id),
         crate::escape::text(version)
+    )
+}
+
+fn missing(id: &str, version: &str) -> PlanError {
+    refuse(format!(
+        "package {} {} is not in Rerun's packages folder ({})",
+        crate::escape::text(id),
+        crate::escape::text(version),
+        fetch_hint(id, version)
     ))
 }
 
@@ -190,14 +198,22 @@ pub(crate) fn plan_into(
     for f in &spec.files {
         // The source.
         let bad_src = |why: &str| refuse(format!("source {}: {why}", shown(&f.from)));
+        // Missing or changed: unpacking the package again puts the pinned file there.
+        let refetch = |why: &str| {
+            refuse(format!(
+                "source {}: {why} ({})",
+                shown(&f.from),
+                fetch_hint(&spec.package, &spec.version)
+            ))
+        };
         let meta = src
             .metadata(&f.from)
             .map_err(|e| bad_src(&e.to_string()))?
-            .ok_or_else(|| bad_src("missing"))?;
+            .ok_or_else(|| refetch("missing"))?;
         readable_file(&meta).map_err(bad_src)?;
         let (sha, len) = hash_file(&*src, &f.from)?;
         if sha != f.sha256 {
-            return Err(bad_src("does not have the SHA-256 of the step"));
+            return Err(refetch("does not have the SHA-256 of the step"));
         }
         // The way to the target, top-down. Every segment that exists is written into the
         // plan in its stored spelling (A2-B1): the plan names the objects as they are, a

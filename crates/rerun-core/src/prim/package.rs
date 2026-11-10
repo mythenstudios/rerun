@@ -9,24 +9,24 @@
 //! - **Architecture** of the game's main executable, from its PE header (`detect`): the
 //!   package's `arch` must name it; a file with `arch` only for it. Unknown (ARM64, another
 //!   machine) is refused.
-//! - **Graphics API** of the main executable as the Topo states it (`match.exes[].api`,
-//!   curated for exactly that hash; detection can only guess it, ADR 0014): a package with
-//!   `apis` must name it; a file with `api` only for it.
+//! - **Graphics API** of the main executable as the Topo states it: the `api` of exactly the
+//!   `match.exes` entry whose hashes matched (two entries may name one path with different
+//!   builds; detection can only guess the API, ADR 0014). A package with `apis` must name it; a
+//!   file with `api` only for it.
 //! - **Source** below the version folder: `from`, or `<arch>\<from>` for a package with one
-//!   asset per architecture (`pkg::extract::source_path`).
+//!   asset per architecture (`Package::place`, the rule the loader and the extraction share).
 //! - Refused: a community package (the user downloads it; that way is not built), a `TODO`
 //!   hash, a package of which nothing is for this game.
 
 use super::{FileEntry, FileInstallSpec};
 use crate::catalog::model::{Api, Arch, ArchList, Package, Tier};
-use crate::pkg::extract::source_path;
 
 /// What the planner knows of the game's build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameBuild {
     /// The main executable's architecture (`None`: not x86 or x64, or not read).
     pub arch: Option<Arch>,
-    /// The main executable's graphics API (the Topo's `match.exes[].api`).
+    /// The main executable's graphics API (the `api` of the `match.exes` entry that matched).
     pub api: Api,
 }
 
@@ -54,10 +54,6 @@ pub enum PackageRefusal {
     Empty,
 }
 
-fn arch_name(a: Arch) -> &'static str {
-    crate::pkg::extract::arch_folder(a)
-}
-
 fn api_name(a: Api) -> &'static str {
     match a {
         Api::Ddraw => "ddraw",
@@ -77,7 +73,7 @@ pub fn file_install(p: &Package, build: &GameBuild) -> Result<FileInstallSpec, P
     let arch = build.arch.ok_or(PackageRefusal::UnknownArch)?;
     match &p.arch {
         ArchList::List(a) if a.contains(&arch) => {}
-        ArchList::List(_) => return Err(PackageRefusal::Arch(arch_name(arch))),
+        ArchList::List(_) => return Err(PackageRefusal::Arch(arch.as_str())),
         ArchList::Todo(_) => return Err(PackageRefusal::Draft),
     }
     if let Some(apis) = &p.apis
@@ -92,7 +88,7 @@ pub fn file_install(p: &Package, build: &GameBuild) -> Result<FileInstallSpec, P
         {
             continue;
         }
-        let Some(from) = source_path(p, f, arch) else {
+        let Some(from) = p.place(f, Some(arch)) else {
             continue;
         };
         let sha256 = *f.sha256.bytes().ok_or(PackageRefusal::Draft)?;

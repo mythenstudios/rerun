@@ -11,7 +11,8 @@
 //!    asset; one with `arch` only from those. One place never gets two hashes.
 //! 3. **The packages folder** `<AppDir>\packages` is opened (created) handle-relative, never
 //!    through a reparse point, and `packages\.lock` is held (share 0) for the whole run; the
-//!    version folder and every folder below it are created one level at a time.
+//!    version folder and every folder below it are created one level at a time, the version
+//!    folder only right before the first file is written.
 //! 4. **Per download:** if every file it provides is there with its pinned SHA-256 (hashed on a
 //!    guard), the archive is not read at all. Otherwise the cached archive `cache\<sha256>` is
 //!    read whole (at most the download limit) and hashed again; another hash is refused
@@ -32,7 +33,7 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::catalog::model::{Arch, Package, PackageFile};
+use crate::catalog::model::{Arch, Package};
 use crate::journal::InstanceTag;
 use crate::path::RelPath;
 use crate::policy::root::{AppDir, AppSub, Create, RootError};
@@ -47,33 +48,6 @@ const LOCK: &str = ".lock";
 /// Most entries of a folder listed when temp files are swept.
 const MAX_SWEEP_ENTRIES: usize = 4096;
 
-/// The folder name of an architecture below the version folder of an `assets` package.
-pub fn arch_folder(a: Arch) -> &'static str {
-    match a {
-        Arch::X86 => "x86",
-        Arch::X64 => "x64",
-    }
-}
-
-/// Where a package file lies below its version folder for `arch` (module docs, step 2): its
-/// `from` for a package with one download; `<arch>\<from>` for an `assets` package, `None` if
-/// the file is not for `arch` there or the package has no asset for it.
-pub fn source_path(p: &Package, f: &PackageFile, arch: Arch) -> Option<RelPath> {
-    match &p.assets {
-        None => Some(f.from.clone()),
-        Some(assets) => {
-            let for_arch = f.arch.as_ref().is_none_or(|a| a.contains(&arch));
-            let has_asset = assets.iter().any(|a| a.arch == arch);
-            if !for_arch || !has_asset {
-                return None;
-            }
-            RelPath::from_segment(arch_folder(arch))
-                .and_then(|d| RelPath::parse(&format!("{}\\{}", d.as_str(), f.from.as_str())))
-                .ok()
-        }
-    }
-}
-
 /// One file of a package at its place below the version folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placed {
@@ -87,7 +61,8 @@ pub struct Placed {
     pub sha256: [u8; 32],
 }
 
-/// Every file of `p` at its place (module docs, step 2), each place once.
+/// Every file of `p` at its place (module docs, step 2; `Package::place`, the rule the loader
+/// and the planner share), each place once.
 pub fn layout(p: &Package) -> Result<Vec<Placed>, ExtractError> {
     let bad = |why: String| ExtractError::Layout {
         id: p.id.to_string(),
@@ -99,35 +74,12 @@ pub fn layout(p: &Package) -> Result<Vec<Placed>, ExtractError> {
             .sha256
             .bytes()
             .ok_or_else(|| bad(format!("{}: its SHA-256 is TODO", f.from)))?;
-        let archs: Vec<Option<Arch>> = match &p.assets {
-            None => vec![None],
-            Some(assets) => {
-                let wanted: Vec<Arch> = match &f.arch {
-                    Some(a) => a.clone(),
-                    None => assets.iter().map(|a| a.arch).collect(),
-                };
-                if let Some(a) = wanted
-                    .iter()
-                    .find(|a| !assets.iter().any(|x| x.arch == **a))
-                {
-                    return Err(bad(format!(
-                        "{}: no asset for {}",
-                        crate::escape::path(f.from.as_str()),
-                        arch_folder(*a)
-                    )));
-                }
-                wanted.into_iter().map(Some).collect()
-            }
-        };
-        for arch in archs {
-            let dest = match arch {
-                None => Some(f.from.clone()),
-                Some(a) => source_path(p, f, a),
-            }
-            .ok_or_else(|| {
+        for arch in p.file_archs(f) {
+            let dest = p.place(f, arch).ok_or_else(|| {
                 bad(format!(
-                    "{}: no place",
-                    crate::escape::path(f.from.as_str())
+                    "{}: no asset for {}",
+                    crate::escape::path(f.from.as_str()),
+                    arch.map_or("its architecture", Arch::as_str)
                 ))
             })?;
             if let Some(o) = out.iter().find(|o| o.dest == dest) {
@@ -159,6 +111,9 @@ pub enum How {
     Extracted,
     /// Extracted now over a file with other content, which was deleted.
     Replaced,
+    /// A file with other content was deleted, and the run failed before its replacement was
+    /// written (a change all the same: `package fetch` reports it).
+    Removed,
 }
 
 /// One file of the version folder after [`extract`].
@@ -477,23 +432,39 @@ pub(crate) fn extract_with(
             id: id.to_owned(),
             why: "not a valid version folder".to_owned(),
         })?;
-    ensure_dirs(&*packages, &version_rel)?;
-    let version = packages
-        .open_dir_write(&version_rel)
-        .map_err(|e| entry_error(&version_rel, e))?;
+    // The version folder is created only right before the first file is written (a refused
+    // archive leaves none, and the planner's refusal then names `package fetch`).
+    let mut version: Option<Box<dyn DirWrite + '_>> = match packages.open_dir_write(&version_rel) {
+        Ok(d) => Some(d),
+        Err(e) if e.kind == SysErrorKind::NotFound => None,
+        Err(e) => return Err(entry_error(&version_rel, e)),
+    };
     let tag = InstanceTag::new().get();
     let mut n = 0u64;
     for d in &dls {
         let mut todo: Vec<(&Placed, bool)> = Vec::new();
         for x in placed.iter().filter(|x| x.arch == d.arch()) {
+            let Some(v) = version.as_deref() else {
+                todo.push((x, false));
+                continue;
+            };
             let mut replaced = false;
-            match check_present(&*version, &x.dest, &x.sha256, &mut replaced)? {
+            match check_present(v, &x.dest, &x.sha256, &mut replaced)? {
                 Some(len) => done.push(Unpacked {
                     dest: x.dest.clone(),
                     len,
                     how: How::Present,
                 }),
-                None => todo.push((x, replaced)),
+                None => {
+                    if replaced {
+                        done.push(Unpacked {
+                            dest: x.dest.clone(),
+                            len: 0,
+                            how: How::Removed,
+                        });
+                    }
+                    todo.push((x, replaced));
+                }
             }
         }
         if todo.is_empty() {
@@ -510,6 +481,17 @@ pub(crate) fn extract_with(
         for (x, _) in &todo {
             wanted.push(archive.find(&x.from).map_err(archive_err)?);
         }
+        if version.is_none() {
+            ensure_dirs(&*packages, &version_rel)?;
+            version = Some(
+                packages
+                    .open_dir_write(&version_rel)
+                    .map_err(|e| entry_error(&version_rel, e))?,
+            );
+        }
+        let version: &dyn DirWrite = version
+            .as_deref()
+            .ok_or_else(|| SysError::new(SysErrorKind::NotFound, version_rel.as_str()))?;
         let mut sink = |e: &Entry, r: &mut EntryReader<'_>| -> Result<(), WriteStop> {
             let other = WriteStop::Other;
             let Some((x, replaced)) = todo
@@ -523,10 +505,10 @@ pub(crate) fn extract_with(
                 ))));
             };
             if let Some(parent) = x.dest.parent() {
-                ensure_dirs(&*version, &parent).map_err(other)?;
+                ensure_dirs(version, &parent).map_err(other)?;
             }
-            let parent = sub(&*version, x.dest.parent().as_ref()).map_err(other)?;
-            let dir: &dyn DirWrite = parent.as_deref().unwrap_or(&*version);
+            let parent = sub(version, x.dest.parent().as_ref()).map_err(other)?;
+            let dir: &dyn DirWrite = parent.as_deref().unwrap_or(version);
             sweep(dir);
             let name = seg(x.dest.file_name()).map_err(other)?;
             n += 1;
@@ -544,7 +526,7 @@ pub(crate) fn extract_with(
                 Err(err) => return Err(other(entry_error(&x.dest, err))),
             };
             dir.flush().map_err(|e| other(e.into()))?;
-            done.push(Unpacked {
+            let now = Unpacked {
                 dest: x.dest.clone(),
                 len: written.len,
                 how: if replaced {
@@ -552,7 +534,14 @@ pub(crate) fn extract_with(
                 } else {
                     How::Extracted
                 },
-            });
+            };
+            match done
+                .iter_mut()
+                .find(|u| u.how == How::Removed && u.dest == x.dest)
+            {
+                Some(u) => *u = now,
+                None => done.push(now),
+            }
             Ok(())
         };
         match archive.extract(&wanted, &mut sink) {

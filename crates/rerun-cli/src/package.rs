@@ -165,6 +165,7 @@ fn run<W: Write, E: Write>(
                 extract::How::Present => UnpackedHow::Present,
                 extract::How::Extracted => UnpackedHow::Unpacked,
                 extract::How::Replaced => UnpackedHow::Replaced,
+                extract::How::Removed => UnpackedHow::Removed,
             },
             len: u.len,
         }));

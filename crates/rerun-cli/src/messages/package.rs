@@ -29,6 +29,8 @@ pub enum UnpackedHow {
     Unpacked,
     /// Unpacked now over a file with other content.
     Replaced,
+    /// A file with other content was removed; the run failed before it was unpacked again.
+    Removed,
 }
 
 /// One line about a package.
@@ -130,6 +132,7 @@ impl fmt::Display for PackageMsg<'_> {
                     UnpackedHow::Present => "already unpacked",
                     UnpackedHow::Unpacked => "unpacked",
                     UnpackedHow::Replaced => "unpacked (a changed file replaced)",
+                    UnpackedHow::Removed => "removed (it had changed; not unpacked again)",
                 })?;
                 write!(f, ", {len} bytes")
             }

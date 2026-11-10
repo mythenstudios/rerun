@@ -35,7 +35,7 @@ pub use when::Tri;
 
 use crate::catalog::Catalog;
 use crate::catalog::model::{
-    Arch, Chain, Exe, Issue, Method, Package, Status, Topo, TopoStep, Variant, When,
+    Api, Arch, Chain, Exe, Issue, Method, Package, Status, Topo, TopoStep, Variant, When,
 };
 use crate::detect::exe::anti_cheat;
 use crate::detect::exe::{
@@ -83,6 +83,9 @@ pub struct ExeCheck {
     /// Its architecture from the PE header when it matched (`None`: no match, or neither x86
     /// nor x64).
     pub arch: Option<Arch>,
+    /// The `api` of this very `match.exes` entry when it matched (`None` otherwise): two
+    /// entries may name one path with different builds, so the path alone never says it.
+    pub api: Option<Api>,
 }
 
 /// What the engine read from the game folder for one Topo.
@@ -110,6 +113,11 @@ impl GameFacts {
         self.main().and_then(|e| e.arch)
     }
 
+    /// The Topo's `api` of the entry that matched as [`Self::main_exe`].
+    pub fn main_api(&self) -> Option<Api> {
+        self.main().and_then(|e| e.api)
+    }
+
     fn main(&self) -> Option<&ExeCheck> {
         self.exes.iter().find(|e| e.state == ExeState::Match)
     }
@@ -123,10 +131,12 @@ pub fn read_game(game: &GameDir<'_>, topo: &Topo) -> GameFacts {
         .iter()
         .map(|e| {
             let (state, arch) = check_exe(game, e);
+            let api = (state == ExeState::Match).then_some(e.api);
             ExeCheck {
                 path: e.path.clone(),
                 state,
                 arch,
+                api,
             }
         })
         .collect();
@@ -767,7 +777,7 @@ pub fn plan(
         for s in &variant.steps {
             match s {
                 TopoStep::Package(id) => {
-                    let (pkg, spec) = package_step(topo, facts, main_exe, id.as_str())?;
+                    let (pkg, spec) = package_step(facts, id.as_str())?;
                     if !planned_packages.iter().any(|q| q.id == pkg.id) {
                         planned_packages.push(pkg);
                         steps.push(Step::FileInstall(spec));
@@ -847,9 +857,7 @@ pub fn plan(
 
 /// A `package` step: the package of the index and its `file_install` step for this game.
 fn package_step<'p>(
-    topo: &Topo,
     facts: &Facts<'p>,
-    main_exe: &RelPath,
     id: &str,
 ) -> Result<(&'p Package, prim::FileInstallSpec), EngineError> {
     let refused = |why: String| EngineError::Package {
@@ -861,13 +869,10 @@ fn package_step<'p>(
         .iter()
         .find(|p| p.id.as_str() == id)
         .ok_or_else(|| refused("not in the signed index".to_owned()))?;
-    let api = topo
-        .matches
-        .exes
-        .iter()
-        .find(|e| e.path.same_spelling(main_exe))
-        .map(|e| e.api)
-        .ok_or_else(|| refused("the main executable is not in match.exes (internal)".to_owned()))?;
+    let api = facts
+        .game
+        .main_api()
+        .ok_or_else(|| refused("the main executable has no API (internal)".to_owned()))?;
     let build = GameBuild {
         arch: facts.game.main_arch(),
         api,

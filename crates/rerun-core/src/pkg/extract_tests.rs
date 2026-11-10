@@ -6,7 +6,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use super::extract::{ExtractError, How, Unpacked, extract, extract_with, layout, source_path};
+use super::extract::{ExtractError, How, Unpacked, extract, extract_with, layout};
 
 fn extract_limited(
     sys: &FakeSystem,
@@ -156,23 +156,40 @@ fn read(sys: &FakeSystem, rel_below_version: &str) -> Vec<u8> {
         .unwrap()
 }
 
+/// [`EMPTY`] and an empty version folder.
+fn empty_version() -> Vec<String> {
+    let mut v = with_empty(&[]);
+    v.extend([
+        r"packages\fix-pack\".to_owned(),
+        r"packages\fix-pack\1.0\".to_owned(),
+    ]);
+    v.sort();
+    v
+}
+
 fn hows(v: &[Unpacked]) -> Vec<(String, How)> {
     v.iter()
         .map(|u| (u.dest.as_str().to_owned(), u.how))
         .collect()
 }
 
-/// What an empty version folder looks like in Rerun's folder.
-const EMPTY: &[&str] = &[
-    r"cache\",
-    r"packages\",
-    r"packages\.lock",
-    r"packages\fix-pack\",
-    r"packages\fix-pack\1.0\",
-];
+/// Rerun's folder after a run that wrote nothing: no version folder (it is created only
+/// right before the first file is written).
+const EMPTY: &[&str] = &[r"cache\", r"packages\", r"packages\.lock"];
 
+/// [`EMPTY`], and with `extra` files the version folder that holds them.
 fn with_empty(extra: &[&str]) -> Vec<String> {
-    let mut v: Vec<String> = EMPTY.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+    let version: &[&str] = if extra.is_empty() {
+        &[]
+    } else {
+        &[r"packages\fix-pack\", r"packages\fix-pack\1.0\"]
+    };
+    let mut v: Vec<String> = EMPTY
+        .iter()
+        .chain(version)
+        .chain(extra)
+        .map(|s| (*s).to_owned())
+        .collect();
     v.sort();
     v
 }
@@ -245,6 +262,31 @@ fn only_the_named_files_of_a_zip_are_extracted() {
     assert_eq!(read(&sys, r"bin\d3d9.dll"), b"the d3d9");
 }
 
+/// A changed file deleted before the run fails is reported as progress (`Removed`), so
+/// `package fetch` exits 0 with that line, never "nothing changed".
+#[test]
+fn a_deleted_file_counts_also_when_the_run_fails() {
+    let z = zip(&[ZipEntry::file("good.dll", b"good")]);
+    let p = package("zip", &z, vec![file("good.dll", "good.dll", b"good")]);
+    let sys = sys();
+    cache(&sys, &z);
+    extract(&sys, &app(&sys), &p).unwrap();
+    let f = format!(r"{LAD}\Rerun\packages\fix-pack\1.0\good.dll");
+    sys.fake_fs().remove_abs(Path::new(&f)).unwrap();
+    sys.fake_fs().put_file(Path::new(&f), b"changed").unwrap();
+    let c = format!(r"{CACHE}\{}", cache_name(&sha(&z)));
+    sys.fake_fs().remove_abs(Path::new(&c)).unwrap();
+    sys.sync_all();
+    let mut done = Vec::new();
+    let e = extract_with(&sys, &app(&sys), &p, &Limits::DEFAULT, &mut done).unwrap_err();
+    assert!(matches!(e, ExtractError::NotCached { .. }), "{e:?}");
+    assert_eq!(hows(&done), [("good.dll".to_owned(), How::Removed)]);
+    // With the archive back, the next run unpacks it (a plain extraction now).
+    cache(&sys, &z);
+    let again = extract(&sys, &app(&sys), &p).unwrap();
+    assert_eq!(hows(&again), [("good.dll".to_owned(), How::Extracted)]);
+}
+
 #[test]
 fn a_tar_gz_is_extracted_in_one_pass() {
     let t = tar_gz(&[
@@ -294,12 +336,12 @@ fn an_assets_package_puts_each_build_below_its_architecture() {
     let both = file("readme.txt", "scripts/readme.txt", b"same text");
     let p = assets_package(&x86, &x64, vec![a86.clone(), a64.clone(), both.clone()]);
     assert_eq!(
-        source_path(&p, &a86, Arch::X86),
+        p.place(&a86, Some(Arch::X86)),
         Some(rel(r"x86\dinput8.dll"))
     );
-    assert_eq!(source_path(&p, &a86, Arch::X64), None);
+    assert_eq!(p.place(&a86, Some(Arch::X64)), None);
     assert_eq!(
-        source_path(&p, &both, Arch::X64),
+        p.place(&both, Some(Arch::X64)),
         Some(rel(r"x64\readme.txt"))
     );
     let sys = sys();
@@ -377,7 +419,14 @@ fn a_refused_archive_writes_nothing() {
             panic!("{want}: {e:?}");
         };
         assert!(format!("{error:?}").starts_with(want), "{want}: {error:?}");
-        assert_eq!(app_tree(&sys), with_empty(&[]), "{want}");
+        // A refused structure creates no version folder; a bad CRC is found while the file is
+        // written, after the folder was made: it stays empty.
+        let want_tree = if want == "Crc" {
+            empty_version()
+        } else {
+            with_empty(&[])
+        };
+        assert_eq!(app_tree(&sys), want_tree, "{want}");
     }
 }
 
@@ -394,7 +443,7 @@ fn a_file_without_its_pinned_hash_is_not_kept() {
             file: "good.dll".into()
         }
     );
-    assert_eq!(app_tree(&sys), with_empty(&[]));
+    assert_eq!(app_tree(&sys), empty_version());
 }
 
 #[test]

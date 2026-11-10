@@ -785,25 +785,20 @@ pub fn package(p: &Package, rules: Rules) -> Result<(), RuleError> {
 /// file is for (its `arch`, or every asset's). Two entries of one place must pin the same
 /// SHA-256 (a `TODO` counts as its own value).
 fn files_placed_once(p: &Package) -> R {
-    let archs = |f: &super::model::PackageFile| -> Vec<Option<super::model::Arch>> {
-        match (&p.assets, &f.arch) {
-            (None, _) => vec![None],
-            (Some(_), Some(a)) => a.iter().copied().map(Some).collect(),
-            (Some(assets), None) => assets.iter().map(|a| Some(a.arch)).collect(),
-        }
-    };
-    let mut placed: Vec<(Option<super::model::Arch>, String, &super::model::Sha256)> = Vec::new();
+    let mut placed: Vec<(String, &super::model::Sha256)> = Vec::new();
     for (i, f) in p.files.iter().enumerate() {
-        for a in archs(f) {
-            let key = fold(f.from.as_str());
-            if let Some((_, _, sha)) = placed.iter().find(|(x, k, _)| *x == a && *k == key) {
+        for a in p.file_archs(f) {
+            // No place: an architecture without an asset, refused above.
+            let Some(at) = p.place(f, a) else { continue };
+            let key = fold(at.as_str());
+            if let Some((_, sha)) = placed.iter().find(|(k, _)| *k == key) {
                 ensure(
                     *sha == &f.sha256,
                     &format!("files[{i}].from"),
                     "a file of the package twice with another sha256",
                 )?;
             } else {
-                placed.push((a, key, &f.sha256));
+                placed.push((key, &f.sha256));
             }
         }
     }

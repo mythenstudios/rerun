@@ -1207,6 +1207,7 @@ fn facts(tool: ExeState, anti_cheat: AntiCheatScan) -> GameFacts {
         path: RelPath::parse(p).unwrap(),
         state,
         arch: None,
+        api: None,
     };
     GameFacts {
         exes: vec![

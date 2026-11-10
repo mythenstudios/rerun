@@ -1268,11 +1268,13 @@ fn tk_package_round_trip_restores_the_game_folder() {
     let pkg = wrapper(&archive);
     let before = snap_at(sys, STEAM_GAME);
 
-    // Not extracted yet: the planner names the command that does it.
+    // Not extracted yet: the planner names the command that does it (the exact text).
     let e = plan_pkgs(sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap_err();
     assert!(
-        e.to_string()
-            .contains("rerun package fetch invented-wrapper@1.0"),
+        e.to_string().ends_with(
+            "package invented-wrapper 1.0 is not in Rerun's packages folder (rerun package \
+             fetch invented-wrapper@1.0 downloads and unpacks a package of the signed index)"
+        ),
         "{e}"
     );
 
@@ -1339,4 +1341,177 @@ fn tk_requires_and_anti_cheat_hold_for_packages() {
             ..
         })
     ));
+}
+
+/// The Topo of [`game_topo`] as JSON, to be changed by a test.
+fn topo_value() -> serde_json::Value {
+    serde_json::from_str(&topo_json(&sha256(&pe(false)), DIRECT)).unwrap()
+}
+
+fn topo_of(v: serde_json::Value) -> Topo {
+    let t: Topo = serde_json::from_value(v).unwrap();
+    check::topo(&t, Rules::Release).unwrap();
+    t
+}
+
+/// The `file_install` steps of a Topo plan, as (package, sources).
+fn installs(tp: &super::TopoPlan) -> Vec<(String, Vec<String>)> {
+    tp.steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::FileInstall(f) => Some((
+                f.package.clone(),
+                f.files.iter().map(|x| x.from.as_str().to_owned()).collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Security follow-up 1: the API comes from the very `match.exes` entry whose hash matched.
+/// Two entries name `game.exe`: another build (d3d9) first, this build (d3d11) second.
+#[test]
+fn tk_the_api_is_the_matched_entrys() {
+    let sys = game_sys();
+    let mut v = topo_value();
+    v["match"]["exes"] = serde_json::json!([
+        {"path":"game.exe","sha256":sha256(b"another build"),"api":"d3d9"},
+        {"path":"game.exe","sha256":sha256(&pe(false)),"api":"d3d11"}
+    ]);
+    let t = topo_of(v);
+    let archive = wrapper_zip();
+    let pkg = wrapper(&archive);
+    cache(&sys, &archive);
+    extract(&sys, &app(&sys), &pkg).unwrap();
+    let tp = plan_pkgs(&sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap();
+    assert_eq!(
+        installs(&tp),
+        [(
+            "invented-wrapper".to_owned(),
+            vec![r"x64\d3d11.dll".to_owned(), "wrapper.ini".to_owned()]
+        )]
+    );
+}
+
+/// Senior follow-up 2: a version folder that exists but lacks a file (or holds another
+/// content) also names `package fetch`.
+#[test]
+fn tk_an_empty_version_folder_names_package_fetch() {
+    let sys = game_sys();
+    let t = game_topo(DIRECT);
+    let pkg = wrapper(&wrapper_zip());
+    sys.fake_fs()
+        .mkdir_all(Path::new(
+            r"C:\Users\Player\AppData\Local\Rerun\packages\invented-wrapper\1.0",
+        ))
+        .unwrap();
+    sys.sync_all();
+    let e = plan_pkgs(&sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap_err();
+    assert!(
+        e.to_string().ends_with(
+            r"source x64\d3d9.dll: missing (rerun package fetch invented-wrapper@1.0 downloads and unpacks a package of the signed index)"
+        ),
+        "{e}"
+    );
+    // Another content there: the same hint.
+    let f = r"C:\Users\Player\AppData\Local\Rerun\packages\invented-wrapper\1.0\x64\d3d9.dll";
+    sys.fake_fs().put_file(Path::new(f), b"changed").unwrap();
+    sys.sync_all();
+    let e = plan_pkgs(&sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap_err();
+    assert!(
+        e.to_string().ends_with(
+            r"source x64\d3d9.dll: does not have the SHA-256 of the step (rerun package fetch invented-wrapper@1.0 downloads and unpacks a package of the signed index)"
+        ),
+        "{e}"
+    );
+}
+
+/// Senior follow-up 3: one package picked twice is planned once; `requires` met in the plan.
+#[test]
+fn tk_twice_once_and_requires_in_the_plan() {
+    let sys = game_sys();
+    let archive = wrapper_zip();
+    let mut pkg = wrapper(&archive);
+    cache(&sys, &archive);
+    extract(&sys, &app(&sys), &pkg).unwrap();
+    // Twice: a second issue whose variant names the same package.
+    let mut v = topo_value();
+    v["issues"].as_array_mut().unwrap().push(serde_json::json!(
+        {"id":"again","title":"Again","variants":[
+            {"id":"pkg","status":"unverified","kind":"fix","steps":[{"package":"invented-wrapper"}]}]}
+    ));
+    let t = topo_of(v);
+    let tp = plan_pkgs(
+        &sys,
+        &t,
+        std::slice::from_ref(&pkg),
+        &["wrapper/pkg", "again/pkg"],
+    )
+    .unwrap();
+    assert_eq!(installs(&tp).len(), 1, "{:?}", tp.steps);
+    // `requires` met: the loader in the same variant (after the wrapper, order free).
+    let loader_zip = zip(&[ZipEntry::file("dinput8.dll", b"loader")]);
+    let mut loader = package(
+        "zip",
+        &loader_zip,
+        vec![file("dinput8.dll", "dinput8.dll", b"loader")],
+    );
+    loader.id = crate::catalog::model::Id::parse("invented-loader").unwrap();
+    cache(&sys, &loader_zip);
+    extract(&sys, &app(&sys), &loader).unwrap();
+    pkg.requires = vec![loader.id.clone()];
+    let mut v = topo_value();
+    v["issues"][4]["variants"][0]["steps"] = serde_json::json!([
+        {"package":"invented-wrapper"},{"package":"invented-loader"}
+    ]);
+    let t = topo_of(v);
+    let both = [loader.clone(), pkg.clone()];
+    let tp = plan_pkgs(&sys, &t, &both, &["wrapper/pkg"]).unwrap();
+    let names: Vec<String> = installs(&tp).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(names, ["invented-wrapper", "invented-loader"]);
+    assert!(tp.plan.ops.iter().any(
+        |o| matches!(o, crate::plan::Op::CreateFile { path, .. } if path.as_str() == "dinput8.dll")
+    ));
+}
+
+/// Senior follow-up 3: the round trip with a package of one asset per architecture.
+#[test]
+fn tk_assets_package_round_trip_restores_the_game_folder() {
+    let env = Env::new(game_sys());
+    let sys = &env.sys;
+    let t = game_topo(DIRECT);
+    let x86 = zip(&[ZipEntry::file("dinput8.dll", b"loader x86")]);
+    let x64 = zip(&[ZipEntry::file("dinput8.dll", b"loader x64")]);
+    let mut a86 = file("dinput8.dll", "dinput8.dll", b"loader x86");
+    a86.arch = Some(vec![Arch::X86]);
+    let mut a64 = file("dinput8.dll", "dinput8.dll", b"loader x64");
+    a64.arch = Some(vec![Arch::X64]);
+    let mut pkg = assets_package(&x86, &x64, vec![a86, a64]);
+    pkg.id = crate::catalog::model::Id::parse("invented-wrapper").unwrap();
+    let before = snap_at(sys, STEAM_GAME);
+    cache(sys, &x86);
+    cache(sys, &x64);
+    extract(sys, &app(sys), &pkg).unwrap();
+    let tp = plan_pkgs(sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap();
+    assert_eq!(
+        installs(&tp),
+        [(
+            "invented-wrapper".to_owned(),
+            vec![r"x64\dinput8.dll".to_owned()]
+        )]
+    );
+    let a = app(sys);
+    let h = crate::plan::store(&a, &tp.plan.encode().unwrap()).unwrap();
+    drop(a);
+    let txn = env.applied(&h);
+    assert_eq!(
+        crate::exec::tests::read_abs(sys, &format!(r"{STEAM_GAME}\dinput8.dll")),
+        b"loader x64"
+    );
+    let v = env.verify(&txn);
+    assert!(v.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    let rep = env.revert(&txn).unwrap();
+    assert_eq!(rep.closed, Some(Closing::Reverted));
+    let after = snap_at(sys, STEAM_GAME);
+    assert!(before == after, "not identical: {:#?}", before.diff(&after));
 }

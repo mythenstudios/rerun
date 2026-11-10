@@ -198,6 +198,17 @@ pub enum Arch {
     X64,
 }
 
+impl Arch {
+    /// Its spelling (`x86`, `x64`): also the folder of its build below the version folder of a
+    /// package with `assets` (ADR 0025 part 2).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::X86 => "x86",
+            Self::X64 => "x64",
+        }
+    }
+}
+
 /// `fix` or `enhancement`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -797,6 +808,35 @@ pub struct Package {
     /// INI toggles.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, PackageOption>,
+}
+
+impl Package {
+    /// The downloads a file comes from (ADR 0025 part 2, the one placement rule of the loader,
+    /// the extraction and the planner): `[None]` for a package with one download; with
+    /// `assets`, the file's `arch`, or every asset's architecture when it has none (whether an
+    /// asset exists for each is the caller's check).
+    pub fn file_archs(&self, f: &PackageFile) -> Vec<Option<Arch>> {
+        match (&self.assets, &f.arch) {
+            (None, _) => vec![None],
+            (Some(_), Some(a)) => a.iter().copied().map(Some).collect(),
+            (Some(assets), None) => assets.iter().map(|a| Some(a.arch)).collect(),
+        }
+    }
+
+    /// Where `f` lies below the version folder for `arch` (pure): its `from` for a package with
+    /// one download (whatever `arch`); `<arch>\<from>` with `assets`, `None` if `arch` is
+    /// `None`, the file is not for it, or no asset is.
+    pub fn place(&self, f: &PackageFile, arch: Option<Arch>) -> Option<RelPath> {
+        let Some(assets) = &self.assets else {
+            return Some(f.from.clone());
+        };
+        let arch = arch?;
+        let for_arch = f.arch.as_ref().is_none_or(|a| a.contains(&arch));
+        if !for_arch || !assets.iter().any(|a| a.arch == arch) {
+            return None;
+        }
+        RelPath::parse(&format!("{}\\{}", arch.as_str(), f.from.as_str())).ok()
+    }
 }
 
 /// The source tier.
