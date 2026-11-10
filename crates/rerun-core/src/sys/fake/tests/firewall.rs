@@ -121,10 +121,9 @@ fn the_fake_bounds_texts_like_windows() {
     );
 }
 
-/// The write contract against the fake (P4-5b): its `Remove` takes every rule of the name,
-/// folded (also a Unicode case twin: `fold` upper-cases U+0131 to `I`), and a missing name is
-/// no error (the worst case the design assumes, ADR 0023 §6; Windows' answer is the [SB]
-/// measurement).
+/// The write contract against the fake (P4-5b): its `Remove` behaves as Windows was measured to
+/// ([SB] pass 4, CI run 42738344112): one rule per call, ASCII case ignored, a U+0131 twin of `i`
+/// is another name, a missing name is no error.
 #[test]
 fn fake_fulfils_firewall_write_contract() {
     let sys = FakeSystem::builder()
@@ -145,10 +144,10 @@ fn fake_fulfils_firewall_write_contract() {
         facts,
         WriteFacts {
             program_case_drift: false,
-            takes_every_rule_of_the_name: true,
+            takes_every_rule_of_the_name: false,
             case_remove_ok: true,
             ignores_case: true,
-            unicode_twin_removes: true,
+            unicode_twin_removes: false,
             missing_name_is_ok: true,
         }
     );

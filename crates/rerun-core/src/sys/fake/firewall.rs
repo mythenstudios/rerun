@@ -20,7 +20,6 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
-use crate::fold::fold;
 use crate::sys::firewall::{FwRule, FwSelection, MAX_RULES, MAX_TEXT_UTF16};
 use crate::sys::{Firewall, FirewallWrite, SysError, SysErrorKind, SysResult};
 
@@ -205,11 +204,18 @@ impl FirewallWrite for FakeFirewall {
         Ok(())
     }
 
-    /// Removes every rule whose name equals `name` folded (the worst case of ADR 0023 §6).
+    /// Removes the first rule (in enumeration order) whose name equals `name` with ASCII case
+    /// ignored, and only that one; a missing name is no error. This is what Windows does
+    /// (measured, [SB] pass 4, CI run 42738344112: one rule per call, a lower-case name
+    /// removes, a U+0131 twin of `i` does not, a missing name succeeds; ADR 0023 §6).
     fn remove_named(&self, name: &str) -> SysResult<()> {
         let crash = self.enter_write()?;
-        let n = fold(name);
-        self.lock().retain(|r| fold(&r.name) != n);
+        {
+            let mut rules = self.lock();
+            if let Some(i) = rules.iter().position(|r| r.name.eq_ignore_ascii_case(name)) {
+                rules.remove(i);
+            }
+        }
         self.written();
         if crash {
             self.crashed.store(true, Ordering::Relaxed);

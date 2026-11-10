@@ -137,8 +137,10 @@ pub trait FirewallWrite: Send + Sync {
     /// The firewall refuses the rule or cannot be reached.
     fn add(&self, rule: &FwRule) -> SysResult<()>;
 
-    /// Removes **every** rule of the name `name` (`INetFwRules::Remove`; the design assumes
-    /// the worst, ADR 0023 §6, R10: the caller counts first).
+    /// `INetFwRules::Remove(name)`: removes **one** rule whose name equals `name` with ASCII
+    /// case ignored (which one of several is the firewall's choice), and succeeds when there is
+    /// none (measured, [SB] pass 4, CI run 42738344112; ADR 0023 §6). The caller counts first
+    /// (R10): `policy::firewall` removes only a name exactly one rule holds.
     ///
     /// # Errors
     /// The firewall refuses or cannot be reached.
