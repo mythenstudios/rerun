@@ -1,0 +1,41 @@
+# DRAFT (P4-13): hashes are from an unmodified, never-started Steam copy. Per-user files and
+# registry keys the game writes on its first start do not exist on the dev machine yet.
+# testapp.exe in the folder is a helper, not the game, and is left out.
+format: 1
+id: tomb-raider-anniversary
+title: "Tomb Raider: Anniversary"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 8000
+  exes:
+    # API from PCGW (Direct3D 9); the import scan names no single API, so it was written by hand.
+    - { path: "tra.exe", sha1: "3655FE97E3CDBB8C526E33036F2551781A441813", sha256: "7461663A67BC3B9E7324AFBD1E0AC8D4E092BD7083DDF147231A42A790814B0E", api: d3d9 }
+
+launch:
+  chain: [steam]
+  method: direct
+  start: "TODO"                # Steam's launch entry not observed yet (likely tra.exe); never guessed
+
+issues:
+  - id: audio-crackle
+    title: "Sound clicks and pops during gameplay"
+    when: {}
+    variants:
+      - id: single-thread
+        status: unverified     # single PCGW statement (a user check); not reproduced here yet
+        kind: fix
+        steps:
+          - cpu: { max_threads: 1, mode: hard }
+        tradeoffs: ["The game runs on one logical processor only; performance may drop on some CPUs"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Tomb_Raider:_Anniversary#Sound_clicks_and_pops_during_gameplay" }
+
+tips:
+  launch_options: []
+  notes: []
+
+links:
+  pcgw: "Tomb_Raider:_Anniversary"
