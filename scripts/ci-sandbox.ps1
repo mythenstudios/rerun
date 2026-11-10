@@ -16,8 +16,11 @@
 #     Start-Process -Credential died at once on the runner (presumably no desktop for the new logon).
 #  2. elevated pass: `sandbox-run.ps1 -Ci -CliOnly` as the runner's administrator; the only
 #     thing checked is that `plan` refuses (exit 3) and nothing changes (E3).
-#  3. the runas probe of ADR 0023 section 7 (A4 S2), elevated, last: a HKCU exefile runas
+#  3. the runas probe of ADR 0023 section 7 (A4 S2), elevated: a HKCU exefile runas
 #     redirection is measured with and without the HKLM class key (s2-probe.log, `MEASURED S2`).
+#  4. the firewall write contract and the test-key helper (ADR 0023 sections 6 and 14, P4-5b),
+#     elevated, last: real rules of group Rerun added and removed, the helper installed in
+#     Program Files\Rerun and removed again (fw-contract.log, `MEASURED` lines).
 # The wrapper's UAC restart (Sandbox only) is off with -Ci.
 #
 # Layout (the same paths as in the Sandbox, so the scripts need no second variant): C:\sandbox
@@ -284,6 +287,63 @@ $probe | ForEach-Object { Write-Host $_ }
 $probe | Where-Object { $_ -like 'MEASURED S2*' } | ForEach-Object { Write-Host "::notice::$_" }
 Set-Content -LiteralPath "$sb\out\elevated\s2-probe.log" -Value $probe -Encoding UTF8
 if ($probeCode -ne 0) { Fail 'pass 3: a runas start through the HKLM exefile class key was redirected, or the probe failed (see s2-probe.log)' }
+EndSection
+
+# ---- pass 4: the firewall write contract and the test-key helper (ADR 0023 sections 6, 14) -----
+# Elevated, as the runner's administrator. Installs the TEST-KEY helper (the debug build with the
+# feature test-key from the workflow step, ADR 0023 section 2, A4 S3) into
+# C:\Program Files\Rerun, then runs two ignored tests of rerun-core-tests.exe:
+#  - sb_firewall_write_contract: adds and removes real rules of group Rerun (the write contract:
+#    facts read back, Remove with two rules of one name, the name's case, a missing name; the
+#    product path add_all/remove_all for several program forms; name and program lengths; N8);
+#  - sb_test_key_helper_removes_a_rule: starts the installed helper through Rerun's own start for
+#    an unknown Topo of a test-key index (Refused(Topo)) and for the removal of a rule the test
+#    added (Done, rule gone).
+# Their MEASURED lines go to fw-contract.log and the log as notices. Afterwards, also after a
+# failure: every rule of group Rerun, the helper folder and C:\RerunSandbox\fw are removed.
+Section 'pass 4: the firewall write contract and the test-key helper (elevated)'
+$helperSrc = Join-Path $repo 'target\debug\rerun-helper.exe'
+$pfRerun = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'Rerun'
+$fwDir = Join-Path $game 'fw'
+$fwLog = @()
+$env:RERUN_SANDBOX = '1'
+$env:RERUN_CI_SANDBOX = '1'
+$previous = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    if (-not (Test-Path -LiteralPath $helperSrc -PathType Leaf)) {
+        Fail "pass 4: the test-key helper was not built: $helperSrc (workflow step 'build the sandbox binaries')"
+    } else {
+        if (Test-Path -LiteralPath $pfRerun) { Remove-Item -LiteralPath $pfRerun -Recurse -Force }
+        New-Item -ItemType Directory -Path $pfRerun | Out-Null
+        Copy-Item -LiteralPath $helperSrc -Destination (Join-Path $pfRerun 'rerun-helper.exe')
+        New-Item -ItemType Directory -Force -Path $fwDir | Out-Null
+        & icacls $pfRerun | ForEach-Object { Write-Host $_ }
+        & icacls (Join-Path $pfRerun 'rerun-helper.exe') | ForEach-Object { Write-Host $_ }
+        foreach ($t in 'sys::win::tests::firewall::sb_firewall_write_contract', 'sys::win::tests::firewall::sb_test_key_helper_removes_a_rule') {
+            $out = @(& "$sb\bin\rerun-core-tests.exe" --ignored --exact $t --nocapture --test-threads=1 2>&1 | ForEach-Object { "$_" })
+            $code = $LASTEXITCODE
+            $out | ForEach-Object { Write-Host $_ }
+            $out | Where-Object { $_ -like 'MEASURED*' } | ForEach-Object { Write-Host "::notice::$_" }
+            $fwLog += "== $t (exit $code)"
+            $fwLog += $out
+            if ($code -ne 0) { Fail "pass 4: $t failed (exit $code; see fw-contract.log)" }
+        }
+    }
+} finally {
+    $ErrorActionPreference = $previous
+    Remove-Item Env:RERUN_SANDBOX, Env:RERUN_CI_SANDBOX -ErrorAction SilentlyContinue
+    $left = @(Get-NetFirewallRule -Group 'Rerun' -ErrorAction SilentlyContinue)
+    if ($left.Count -gt 0) {
+        Write-Host "removing $($left.Count) rule(s) of group Rerun left by pass 4: $(($left | ForEach-Object { $_.DisplayName }) -join '; ')"
+        $left | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $pfRerun -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $fwDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+Set-Content -LiteralPath "$sb\out\elevated\fw-contract.log" -Value $fwLog -Encoding UTF8
+if (@(Get-NetFirewallRule -Group 'Rerun' -ErrorAction SilentlyContinue).Count -gt 0) { Fail 'pass 4: rules of group Rerun are left' }
+if (Test-Path -LiteralPath $pfRerun) { Fail "pass 4: $pfRerun could not be removed" }
 EndSection
 
 # ---- clean up and verdict ---------------------------------------------------------------------

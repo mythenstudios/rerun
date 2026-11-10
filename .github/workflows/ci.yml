@@ -210,13 +210,18 @@ jobs:
           # Its own key (the windows job builds with --profile ci, this one with the dev profile
           # of scripts/sandbox-launch.ps1, which stages the same binaries as the Sandbox gets).
           key: windows-sandbox-p1
-      - name: build the sandbox binaries (rerun-core tests, rerun.exe, rerun-launch.exe)
+      - name: build the sandbox binaries (rerun-core tests, rerun.exe, rerun-launch.exe, test-key helper)
         # Visible here; scripts/sandbox-launch.ps1 -StageOnly (run by ci-sandbox.ps1) repeats
-        # exactly these builds, which are then up to date, and stages the results.
+        # exactly the first three builds, which are then up to date, and stages the results.
+        # The test-key helper (debug, feature test-key; ADR 0023 section 2, A4 S3) is for pass 4
+        # of ci-sandbox.ps1 only: installed into Program Files\Rerun on this throwaway runner and
+        # removed again. No RERUN_BUILD_ID here: the helper and the test binary share the dev
+        # build ID of the same sources (ADR 0023 section 2).
         run: |
           cargo test -p rerun-core --lib --no-run --locked
           cargo build -p rerun-cli --release --locked
           cargo build -p rerun-launch --release --locked
+          cargo build -p rerun-helper --features test-key --locked
       - name: sandbox suite (non-elevated as a new standard user, then elevated)
         # Windows PowerShell 5.1, like the Sandbox. Creates the local user `rerunci`, writes the
         # real HKCU of that user and of the runner account (disposable VM).
