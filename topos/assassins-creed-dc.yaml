@@ -1,4 +1,4 @@
-# DRAFT - exe hashes are from the EaglePatch README (SHA-1); package data is still missing.
+# DRAFT - SHA-1 from the EaglePatch README; SHA-256 from a local copy via rerun-workbench draft --hashes-from (P4-13); package data is still missing.
 format: 1
 id: assassins-creed-dc
 title: "Assassin's Creed: Director's Cut Edition"
@@ -9,8 +9,8 @@ tested_on: [x64]
 match:
   steam_appid: 15100          # TODO: verify
   exes:
-    - { path: "AssassinsCreed_Dx9.exe",  sha1: "A9EA476E70F076709CCA59A802E26EC894432120", api: d3d9 }
-    - { path: "AssassinsCreed_Dx10.exe", sha1: "601475FD5EFA02BBAE80D1C06DFA25A0A1E7FD2F", api: d3d10 }
+    - { path: "AssassinsCreed_Dx9.exe",  sha1: "A9EA476E70F076709CCA59A802E26EC894432120", sha256: "2FA8D50C60398CC249C6D908DE46B15F48E445DD0C605B5956E94FA2F445A713", api: d3d9 }
+    - { path: "AssassinsCreed_Dx10.exe", sha1: "601475FD5EFA02BBAE80D1C06DFA25A0A1E7FD2F", sha256: "576A04841C37BE5A819974ABD59EA3ECD818F0BC36ACAB71C62EE0313DCA0129", api: d3d10 }
 
 launch:
   chain: [steam, upc]
