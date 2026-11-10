@@ -31,10 +31,12 @@ pub const ANTI_CHEAT_RELEASE_REVIEWED: bool = false;
 /// back to `false` makes the step draft only again (the signed index then holds none).
 pub const FIREWALL_RULE_REVIEWED: bool = true;
 
-/// Whether a Topo outside a draft may hold a `laa_patch` step (P4-10). `false` until the step is
-/// reviewed and the Smart App Control behaviour is decided (an open user decision of P4-10): the
-/// signed index holds none until then.
-pub const LAA_PATCH_REVIEWED: bool = false;
+/// Whether a Topo outside a draft may hold a `laa_patch` step (P4-10). `true` since the step was
+/// reviewed, the Smart App Control behaviour decided (user decision A of 2026-11-10: refused while
+/// it enforces) and the [SB] case passed (CI run 42788275603, reverted bit for bit), the agreed
+/// condition. Setting it back to `false` makes the step draft only again (the signed index then
+/// holds none).
+pub const LAA_PATCH_REVIEWED: bool = true;
 
 /// Most executables of `match.exes` (P4-4: each is hashed when the engine reads a game).
 pub const MAX_EXES: usize = 8;

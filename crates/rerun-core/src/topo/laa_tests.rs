@@ -441,19 +441,16 @@ fn la5_a_signed_exe_is_planned_with_a_warning() {
 // ---------- LA6 ----------
 
 #[test]
-fn la6_the_loader_wants_a_draft_and_a_sha256_anchor() {
+fn la6_the_loader_wants_a_sha256_anchor() {
     let exe = game_exe(true);
     let draft = topo_with(&exe, "Game.exe", false);
     check::topo(&draft, Rules::Source).unwrap();
-    // Not reviewed yet: no release index holds it, and only a draft carries it.
-    const { assert!(!check::LAA_PATCH_REVIEWED, "laa_patch is not reviewed yet") };
+    // Reviewed (P4-10): an active Topo carries it, also by the release rules.
+    const { assert!(check::LAA_PATCH_REVIEWED, "laa_patch is reviewed") };
     let mut active = draft.clone();
     active.status = crate::catalog::model::Status::Active;
-    let e = check::topo(&active, Rules::Source).unwrap_err();
-    assert!(
-        e.what.contains("draft only until laa_patch is reviewed"),
-        "{e}"
-    );
+    check::topo(&active, Rules::Source).unwrap();
+    check::topo(&active, Rules::Release).unwrap();
     // Exactly the spelling of a match.exes entry, and that entry with a sha256.
     let e = check::topo(&topo_with(&exe, "game.exe", false), Rules::Source).unwrap_err();
     assert!(e.what.contains("an executable of match.exes"), "{e}");

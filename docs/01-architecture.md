@@ -63,7 +63,7 @@ Phase 2: `file_install` (local package files under `<AppDir>\packages`; `prim::f
 | `registry_set` | Values under allowed game keys | depends on hive |
 | `launch_option` | Steam launch option (localconfig.vdf, only while Steam is closed) | no |
 | `launch_method` | `direct` / `watch` / `hold` / `ifeo` / `inproc` + CPU rule (see `04`) | ifeo: yes |
-| `laa_patch` | Large Address Aware flag of a 32-bit exe of `match.exes` with a `sha256` (P4-10): one `ReplaceFile` with `ContentRef::Patch` (the flag byte and, if one is stored, the image checksum as `CheckSumMappedFile` computes it), backup in the journal, SHA-256 before (the Topo's) and after (planned); refused for 64-bit, already patched, DLL, .NET, protected (SteamStub, SecuROM, SafeDisc, StarForce sections) and anti-cheat games; draft only until reviewed (`LAA_PATCH_REVIEWED`, the Smart App Control decision open) | no** |
+| `laa_patch` | Large Address Aware flag of a 32-bit exe of `match.exes` with a `sha256` (P4-10): one `ReplaceFile` with `ContentRef::Patch` (the flag byte and, if one is stored, the image checksum as `CheckSumMappedFile` computes it), backup in the journal, SHA-256 before (the Topo's) and after (planned); refused for 64-bit, already patched, DLL, .NET, protected (SteamStub, SecuROM, SafeDisc, StarForce sections) and anti-cheat games; refused while Smart App Control enforces (user decision A); reviewed since P4-10 after the [SB] case (`LAA_PATCH_REVIEWED`, CI run 42788275603), so a signed Topo may hold it | no** |
 | `steam_input` | Hint/link: enable Steam Input per game | no |
 
 \* unless the game is located under `Program Files` → then via the helper.
