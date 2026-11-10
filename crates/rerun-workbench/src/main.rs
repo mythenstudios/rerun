@@ -7,7 +7,8 @@
 //! - `draft <steam-appid|pcgw-page> [--page <name>] [--id <id>] [--title <text>] [--into <dir>]`:
 //!   a Topo draft from PCGamingWiki, the only command that goes online (at most two GETs to
 //!   `www.pcgamingwiki.com`, ADR 0024 amendment P4-14); YAML on stdout, or a new
-//!   `<dir>\<id>.yaml`. It never reads a key file.
+//!   `<dir>\<id>.yaml`. It never reads a key file. `--hashes-from <game folder>` takes the
+//!   executables and their hashes from a local copy of the game (read only).
 //!
 //! `main` restricts the DLL search path first (ADR 0008; WinHTTP refuses without it).
 //! A curator tool reads and writes the files it is pointed at with `std::fs` (the system layer
@@ -23,6 +24,7 @@ mod acl;
 mod bundle;
 mod draft;
 mod keys;
+mod local;
 mod pcgw;
 mod wikitext;
 
@@ -74,6 +76,10 @@ struct DraftArgs {
     /// Writes <dir>\<id>.yaml (never over a file) instead of printing the YAML.
     #[arg(long)]
     into: Option<PathBuf>,
+    /// The executables and their hashes from this local copy of the game (absolute path; read
+    /// only; verify the game files in Steam first).
+    #[arg(long)]
+    hashes_from: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -267,11 +273,36 @@ fn draft_request(a: &DraftArgs) -> Result<draft::Request, String> {
     {
         return Err(format!("--into {}: not a folder", dir.display()));
     }
+    let local = match &a.hashes_from {
+        None => None,
+        Some(f) if !f.is_absolute() => {
+            return Err("--hashes-from: an absolute path".into());
+        }
+        Some(f) => Some(hashes_from(f)?),
+    };
     Ok(draft::Request {
         target,
         id,
         title: a.title.clone(),
+        local,
     })
+}
+
+/// `--hashes-from` on the real system, before any request.
+#[cfg(windows)]
+fn hashes_from(folder: &Path) -> Result<local::Local, String> {
+    let sys = rerun_core::sys::win::WinSystem::new().map_err(|e| e.to_string())?;
+    let exe = std::env::current_exe().map_err(|e| format!("the workbench's own path: {e}"))?;
+    let install = exe
+        .parent()
+        .ok_or("the workbench's own folder")?
+        .to_path_buf();
+    local::exes_from(&sys, &install, folder)
+}
+
+#[cfg(not(windows))]
+fn hashes_from(_: &Path) -> Result<local::Local, String> {
+    Err("--hashes-from: Windows only".into())
 }
 
 fn draft_cmd(a: &DraftArgs) -> Result<(), String> {

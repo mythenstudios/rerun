@@ -25,6 +25,7 @@ use rerun_core::path::RelPath;
 use rerun_core::sys::Http;
 
 use crate::bundle::load_yaml;
+use crate::local::{Local, LocalExe};
 use crate::pcgw::{ApiFacts, Client, Fixes, GameFacts, PageName, Target};
 
 /// The spacing between the two requests.
@@ -41,6 +42,8 @@ pub struct Request {
     pub id: Option<Id>,
     /// `--title`.
     pub title: Option<String>,
+    /// `--hashes-from`: the local copy's executables, scanned before any request.
+    pub local: Option<Local>,
 }
 
 /// The executables of the draft.
@@ -48,6 +51,8 @@ pub struct Request {
 pub enum Exes {
     /// One placeholder `{ path: TODO, sha256: TODO, api }` (user decision D1 a).
     Stub(Api),
+    /// The main executables of a local copy with their real hashes (`--hashes-from`).
+    Local(Vec<LocalExe>),
 }
 
 /// A draft before it is rendered.
@@ -202,6 +207,22 @@ pub fn render(d: &Draft) -> String {
                 yq(api_name(*api))
             );
         }
+        Exes::Local(v) => {
+            o.push_str(
+                "    # hashes from a local copy of the game: verify its files in Steam first
+",
+            );
+            for e in v {
+                let _ = writeln!(
+                    o,
+                    "    - {{ path: {}, sha1: {}, sha256: {}, api: {} }}",
+                    yq(e.path.as_str()),
+                    yq(&e.sha1.to_string()),
+                    yq(&e.sha256.to_string()),
+                    yq(api_name(e.api))
+                );
+            }
+        }
     }
     for n in &d.notes {
         comment(&mut o, n);
@@ -230,6 +251,15 @@ fn intended(d: &Draft) -> Result<Topo, String> {
             sha256: Some(todo),
             api: *api,
         }],
+        Exes::Local(v) => v
+            .iter()
+            .map(|e| Exe {
+                path: e.path.clone(),
+                sha1: Some(e.sha1.clone()),
+                sha256: Some(e.sha256.clone()),
+                api: e.api,
+            })
+            .collect(),
     };
     Ok(Topo {
         format: FORMAT,
@@ -333,12 +363,28 @@ pub fn build(req: &Request, facts: &GameFacts, fixes: &Fixes) -> Result<Draft, S
         None => check_title(page.as_str()).ok_or("no title from the page name: pass --title")?,
     };
     let api = facts.api.clone().unwrap_or_default();
-    let (_, other) = apis(&api);
-    let exes = match stub_api(&api) {
-        Some(a) => Exes::Stub(a),
-        None => {
+    let (named, other) = apis(&api);
+    let exes = match (&req.local, stub_api(&api)) {
+        (Some((v, left_out)), _) => {
+            notes.push(
+                "hashes from a local copy: a modified copy (mods, patches) gives wrong hashes"
+                    .into(),
+            );
+            notes.extend(left_out.iter().cloned());
+            if facts.api.is_some() {
+                for e in v.iter().filter(|e| !named.contains(&e.api)) {
+                    notes.push(format!(
+                        "TODO: the local executable uses {}, PCGW does not name it",
+                        api_name(e.api)
+                    ));
+                }
+            }
+            Exes::Local(v.clone())
+        }
+        (None, Some(a)) => Exes::Stub(a),
+        (None, None) => {
             return Err(format!(
-                "PCGamingWiki names no single graphics API a Topo can hold ({}): write match.exes by hand",
+                "PCGamingWiki names no single graphics API a Topo can hold ({}): pass --hashes-from <game folder>",
                 api_facts_line(&api, facts.bits)
             ));
         }

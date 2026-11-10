@@ -62,6 +62,7 @@ fn req(target: Target) -> Request {
         target,
         id: None,
         title: None,
+        local: None,
     }
 }
 
@@ -130,7 +131,7 @@ fn t2_an_app_id_the_page_does_not_name_is_refused() {
 fn t2_several_apis_need_the_executable() {
     let e = run(&http(), &req(page("Invented Quest: Gold Edition"))).unwrap_err();
     assert!(e.contains("Direct3D 9, 10; OpenGL"), "{e}");
-    assert!(e.contains("match.exes"), "{e}");
+    assert!(e.contains("pass --hashes-from"), "{e}");
 }
 
 #[test]
