@@ -1,0 +1,41 @@
+# DRAFT (P4-13): hashes are from an unmodified, never-started Steam copy. Per-user files and
+# registry keys the game writes on its first start do not exist on the dev machine yet.
+# testapp.exe in the folder is a helper, not the game, and is left out.
+format: 1
+id: tomb-raider-legend
+title: "Tomb Raider: Legend"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 7000
+  exes:
+    # API from PCGW (Direct3D 9); the import scan names no single API, so it was written by hand.
+    - { path: "trl.exe", sha1: "0E448A88B5B5B7A18E43CD34CB886395C1162FB5", sha256: "A1ED2CD21B03764935F3A12F9BE89B6FF3D0D5D2849CAEFE2E15282CA0B2731E", api: d3d9 }
+
+launch:
+  chain: [steam]
+  method: direct
+  start: "TODO"                # Steam's launch entry not observed yet (likely trl.exe); never guessed
+
+issues:
+  - id: audio-crackle
+    title: "Sound clicks and pops during gameplay"
+    when: {}
+    variants:
+      - id: single-thread
+        status: unverified     # single PCGW statement (a user check); not reproduced here yet
+        kind: fix
+        steps:
+          - cpu: { max_threads: 1, mode: hard }
+        tradeoffs: ["The game runs on one logical processor only; performance may drop on some CPUs"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Tomb_Raider:_Legend#Sound_clicks_and_pops_during_gameplay" }
+
+tips:
+  launch_options: []
+  notes: []
+
+links:
+  pcgw: "Tomb_Raider:_Legend"
