@@ -32,8 +32,8 @@ use rerun_proto::cpu::rule::{Bitness, CpuRule, Mode, Prefer, PreferL3};
 use rerun_proto::profile::{self as proto, LaunchProfile, Method, Priority};
 
 use super::{
-    ContentRef, FileState, LayerView, Op, Plan, PlanBytes, PlanError, PlanOrigin, RootKind, Target,
-    ValueState, allowed, created_key,
+    ByteEdit, ContentRef, FileState, LayerView, Op, Plan, PlanBytes, PlanError, PlanOrigin,
+    RootKind, Target, ValueState, allowed, created_key,
 };
 use crate::escape::{self, Shown};
 use crate::policy::ini::Old;
@@ -88,6 +88,31 @@ pub const HOLD_ACTION: &str = "keep shared file";
 
 /// What a plan with `Hold` ops says once (P4-8, ADR 0020 amendment P4-8; rule 5).
 pub const HOLD_NOTE: &str = "shared files: a package file the game folder holds already with exactly this content (installed by an earlier Rerun transaction, such as a loader several fixes need, or by you) is kept as it is, not written again. This transaction relies on it: if the transaction that installed it is reverted first, it keeps the file for this one, and the last revert that relies on it removes it if it is unchanged; a file no transaction of Rerun installed is left";
+
+/// The action of a `ReplaceFile` whose content is a [`ContentRef::Patch`] (P4-10).
+pub const PATCH_ACTION: &str = "patch file";
+
+/// What a plan with a patch says once (P4-10, ADR 0020 amendment P4-10; rule 5).
+pub const PATCH_NOTE: &str = "patched files: only the bytes shown change; the whole file as it \
+is now is kept in Rerun's journal, and a revert restores exactly it. If Steam (\"Verify integrity \
+of game files\") or the game's own repair puts the original back first, the revert finds it as it \
+was and changes nothing; any other content (an update) is left as it is and the transaction \
+stays open until forget. A patch makes a digital signature of the file invalid";
+
+/// One changed byte of a patch, as the preview prints it: `byte at 0x<offset>: 0x<old> ->
+/// 0x<new>`.
+pub struct PatchByte<'a>(pub &'a ByteEdit);
+
+impl fmt::Display for PatchByte<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let e = self.0;
+        write!(
+            f,
+            "byte at 0x{:x}: 0x{:02x} -> 0x{:02x}",
+            e.offset, e.old, e.new
+        )
+    }
+}
 
 /// The part of [`PROFILE_NOTE`] and [`PROFILE_WATCH_NOTE`] both methods share: the start path,
 /// one launch option per game, Steam as administrator (ADR 0022).
@@ -265,6 +290,9 @@ pub struct PreviewOp {
     /// A `Hold` (P4-8): [`Self::content`] is the content the file holds already, nothing is
     /// written.
     pub held: bool,
+    /// The bytes a patch changes (P4-10, `laa_patch`): offset, old and new byte; empty for every
+    /// other op. Numbers only, nothing of the file's text.
+    pub patch: Vec<ByteEdit>,
 }
 
 /// The rule of a `FirewallRule` op for display (P4-2d, ADR 0023 §6, rule 5).
@@ -322,6 +350,8 @@ pub struct Preview {
     pub firewall: Option<&'static str>,
     /// [`HOLD_NOTE`], once per plan with `Hold` ops (P4-8).
     pub held: Option<&'static str>,
+    /// [`PATCH_NOTE`], once per plan with a patch (P4-10).
+    pub patched: Option<&'static str>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -549,6 +579,12 @@ pub fn preview(p: &Plan) -> Preview {
             let (action, attrs, old_state) = match op {
                 Op::CreateDir { .. } => ("create folder", None, None),
                 Op::CreateFile { attrs, .. } => ("create file", Some(rhs(attrs)), None),
+                Op::ReplaceFile {
+                    attrs,
+                    old: o,
+                    content: ContentRef::Patch { .. },
+                    ..
+                } => (PATCH_ACTION, Some(rhs(attrs)), Some(old(o))),
                 Op::ReplaceFile { attrs, old: o, .. } => {
                     ("replace file", Some(rhs(attrs)), Some(old(o)))
                 }
@@ -631,6 +667,9 @@ pub fn preview(p: &Plan) -> Preview {
                     Some((hex32::to_string(sha256), *len)),
                     *config,
                 ),
+                Some(c @ ContentRef::Patch { sha256, .. }) => {
+                    (None, Some((hex32::to_string(sha256), c.len())), false)
+                }
                 Some(c @ ContentRef::Inline { sha256, .. }) => (
                     Some(escape::path("inline (launch profile)").into_owned()),
                     Some((hex32::to_string(sha256), c.len())),
@@ -684,6 +723,10 @@ pub fn preview(p: &Plan) -> Preview {
                 ),
             };
             let firewall = firewall_of(p, index, op);
+            let patch = match op.content() {
+                Some(ContentRef::Patch { edits, .. }) => edits.clone(),
+                _ => Vec::new(),
+            };
             PreviewOp {
                 index,
                 action,
@@ -705,6 +748,7 @@ pub fn preview(p: &Plan) -> Preview {
                 replaces: matches!(op, Op::ReplaceFile { .. }),
                 firewall,
                 held,
+                patch,
             }
         })
         .collect();
@@ -735,6 +779,11 @@ pub fn preview(p: &Plan) -> Preview {
         .iter()
         .any(|o| matches!(o, Op::Hold { .. }))
         .then_some(HOLD_NOTE);
+    let patched = p
+        .ops
+        .iter()
+        .any(|o| matches!(o.content(), Some(ContentRef::Patch { .. })))
+        .then_some(PATCH_NOTE);
     let profiles = ops.iter().find_map(|o| match &o.profile {
         Some(ProfilePreview::Decoded(s)) if s.decoded.method == Method::Watch => {
             Some(PROFILE_WATCH_NOTE)
@@ -752,6 +801,7 @@ pub fn preview(p: &Plan) -> Preview {
         profiles,
         firewall,
         held,
+        patched,
     }
 }
 
@@ -794,6 +844,9 @@ impl fmt::Display for Preview {
             }
             if let Some((sha, len, a)) = &o.old {
                 writeln!(f, "     old sha256 {sha}, {len} bytes, attributes {a}")?;
+            }
+            for e in &o.patch {
+                writeln!(f, "     {}", PatchByte(e))?;
             }
             if let Some(t) = &o.tokens {
                 writeln!(f, "     adds {t}")?;
@@ -867,6 +920,9 @@ impl fmt::Display for Preview {
             writeln!(f, "note: {n}")?;
         }
         if let Some(n) = self.held {
+            writeln!(f, "note: {n}")?;
+        }
+        if let Some(n) = self.patched {
             writeln!(f, "note: {n}")?;
         }
         Ok(())

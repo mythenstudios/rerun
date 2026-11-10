@@ -39,6 +39,7 @@ fn op(index: usize, action: &'static str, root: Option<usize>, path: &str) -> Pr
         replaces: false,
         firewall: None,
         held: false,
+        patch: Vec::new(),
     }
 }
 
@@ -66,6 +67,7 @@ fn preview(root_path: &str, ops: Vec<PreviewOp>) -> Preview {
         profiles: None,
         firewall: None,
         held: None,
+        patched: None,
     }
 }
 
@@ -640,4 +642,41 @@ fn a_held_file_is_shown_as_kept() {
         1,
         "{text}"
     );
+}
+
+/// P4-10: a `patch file` op shows the new and the old content, every changed byte, and the
+/// note once.
+#[test]
+fn a_patch_shows_its_bytes() {
+    let (new, old) = ("ab".repeat(32), "cd".repeat(32));
+    let mut patch = op(0, rerun_core::plan::PATCH_ACTION, Some(0), "game.exe");
+    patch.content = Some((new.clone(), 4096));
+    patch.attrs = Some("-".to_owned());
+    patch.old = Some((old.clone(), 4096, "-".to_owned()));
+    patch.replaces = true;
+    patch.patch = vec![
+        rerun_core::plan::ByteEdit {
+            offset: 0x96,
+            old: 0x02,
+            new: 0x22,
+        },
+        rerun_core::plan::ByteEdit {
+            offset: 0xd8,
+            old: 0x01,
+            new: 0x7f,
+        },
+    ];
+    let mut p = preview(r"D:\Games\G", vec![patch]);
+    p.registry = None;
+    p.layers = None;
+    p.ini = None;
+    p.patched = Some(rerun_core::plan::PATCH_NOTE);
+    let text = shown(&render(&p));
+    let want = format!(
+        "op 0: patch file in root 0: game.exe\n  new: sha256 {new}, 4096 bytes, attributes -\n  \
+         old: sha256 {old}, 4096 bytes, attributes -\n  byte at 0x96: 0x02 -> 0x22\n  byte at \
+         0xd8: 0x01 -> 0x7f\n"
+    );
+    assert!(text.contains(&want), "{want:?} not in\n{text}");
+    assert_eq!(text.matches("patched files: only").count(), 1, "{text}");
 }

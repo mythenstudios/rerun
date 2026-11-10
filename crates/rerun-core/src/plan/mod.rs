@@ -79,6 +79,13 @@
 //! package and the place it comes from, for the preview and the slots of later plans), never
 //! inline, on a [`RootKind::Game`] root; it is a file op (`Target::File`, before every registry
 //! op). Its revert changes nothing.
+//!
+//! [`ContentRef::Patch`] (P4-10, `laa_patch`, ADR 0020 amendment P4-10): the content of a
+//! `ReplaceFile` that is the old file with single bytes changed ([`ByteEdit`]: offset, old byte,
+//! new byte; 1 to [`MAX_PATCH_EDITS`], strictly ascending, inside the file, each a change) and
+//! the SHA-256 of the result. `patch_check` holds on encode and decode alike: only in a
+//! `ReplaceFile` on a game root, its `base` exactly the op's `old`. The op is otherwise a plain
+//! replace: backup, observation and revert are those of `ReplaceFile`.
 
 mod preview;
 mod profile;
@@ -92,8 +99,9 @@ use sha2::{Digest, Sha256};
 
 pub use preview::{
     FIREWALL_NOTE, FirewallShown, HOLD_ACTION, HOLD_NOTE, INI_NOTE, IniOldShown, IniShown,
-    LAYERS_NOTE, NOT_RESTORED, PROFILE_NOTE, PROFILE_WATCH_NOTE, Preview, PreviewOp, PreviewRoot,
-    ProfilePreview, ProfileShown, REGISTRY_NOTE, RegShown, preview, preview_head, preview_stored,
+    LAYERS_NOTE, NOT_RESTORED, PATCH_ACTION, PATCH_NOTE, PROFILE_NOTE, PROFILE_WATCH_NOTE,
+    PatchByte, Preview, PreviewOp, PreviewRoot, ProfilePreview, ProfileShown, REGISTRY_NOTE,
+    RegShown, preview, preview_head, preview_stored,
 };
 #[cfg(test)]
 pub(crate) use profile::knob as profile_knob;
@@ -590,7 +598,7 @@ impl Op {
             | Self::ReplaceFile { content, .. }
             | Self::Hold { content, .. } => match content {
                 ContentRef::Package { id, .. } => Some((id.as_str(), content)),
-                ContentRef::Inline { .. } => None,
+                ContentRef::Inline { .. } | ContentRef::Patch { .. } => None,
             },
             _ => None,
         }
@@ -685,13 +693,45 @@ pub enum ContentRef {
         #[serde(with = "crate::wire::hex32")]
         sha256: [u8; 32],
     },
+    /// The file as it is (`base`, the old state of its `ReplaceFile`) with single bytes changed
+    /// (P4-10, `laa_patch`): the same length, every byte the old one except at the offsets of
+    /// `edits`. `sha256` is the SHA-256 of the result, computed by the planner; `exec` streams
+    /// the old bytes from the journal's backup, applies the edits and checks the result's hash
+    /// before the rename (ADR 0017). Only in a `ReplaceFile` on a game root.
+    Patch {
+        /// The file the edits apply to: the op's `old` exactly.
+        base: FileState,
+        /// The changed bytes, 1 to [`MAX_PATCH_EDITS`], strictly ascending by offset.
+        edits: Vec<ByteEdit>,
+        /// SHA-256 of the patched file.
+        #[serde(with = "crate::wire::hex32")]
+        sha256: [u8; 32],
+    },
+}
+
+/// Most bytes one [`ContentRef::Patch`] changes (`laa_patch`: one byte of `Characteristics`
+/// and the four of `CheckSum`).
+pub const MAX_PATCH_EDITS: usize = 8;
+
+/// One changed byte of a [`ContentRef::Patch`]: at `offset`, `old` becomes `new`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ByteEdit {
+    /// File offset.
+    pub offset: u64,
+    /// The byte there in the base file.
+    pub old: u8,
+    /// The byte written instead.
+    pub new: u8,
 }
 
 impl ContentRef {
     /// SHA-256 of the content.
     pub fn sha256(&self) -> &[u8; 32] {
         match self {
-            Self::Package { sha256, .. } | Self::Inline { sha256, .. } => sha256,
+            Self::Package { sha256, .. }
+            | Self::Inline { sha256, .. }
+            | Self::Patch { sha256, .. } => sha256,
         }
     }
 
@@ -700,6 +740,7 @@ impl ContentRef {
         match self {
             Self::Package { len, .. } => *len,
             Self::Inline { bytes, .. } => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            Self::Patch { base, .. } => base.len,
         }
     }
 
@@ -1239,6 +1280,51 @@ fn hold_check(plan: &Plan, k: usize, root: RootIx, content: &ContentRef) -> Resu
     Ok(())
 }
 
+/// The rules of a [`ContentRef::Patch`] (P4-10, both rule sets: the head is untrusted): only the
+/// content of a `ReplaceFile` on a game root, its base exactly the op's old state, 1 to
+/// [`MAX_PATCH_EDITS`] edits strictly ascending by offset, each inside the file and changing its
+/// byte. That the edits are the ones `laa_patch` derives is the planner's (`prim::laa_patch`);
+/// `exec` checks the result's hash, so a recorded patch writes nothing but its own result.
+fn patch_check(plan: &Plan, k: usize, op: &Op) -> Result<(), PlanError> {
+    let (root, old, content) = match op {
+        Op::ReplaceFile {
+            root, old, content, ..
+        } => (*root, old, content),
+        Op::CreateFile {
+            content: ContentRef::Patch { .. },
+            ..
+        } => {
+            return Err(invalid(Some(k), "a patch only replaces an existing file"));
+        }
+        _ => return Ok(()),
+    };
+    let ContentRef::Patch { base, edits, .. } = content else {
+        return Ok(());
+    };
+    let r = plan
+        .roots
+        .get(usize::from(root.0))
+        .ok_or_else(|| invalid(Some(k), "root index outside the plan's roots"))?;
+    if r.kind != RootKind::Game {
+        return Err(invalid(Some(k), "a patch outside a game folder"));
+    }
+    if base != old {
+        return Err(invalid(Some(k), "a patch of another file than the old one"));
+    }
+    if edits.is_empty() || edits.len() > MAX_PATCH_EDITS {
+        return Err(invalid(Some(k), "a patch changes 1 to 8 bytes"));
+    }
+    if edits.windows(2).any(|w| w[0].offset >= w[1].offset)
+        || edits.iter().any(|e| e.offset >= base.len || e.old == e.new)
+    {
+        return Err(invalid(
+            Some(k),
+            "patch edits ascending, inside the file, each changing its byte",
+        ));
+    }
+    Ok(())
+}
+
 /// Most `FirewallRule` ops of a plan: one helper batch (`elevate::MAX_BATCH_OPS`).
 pub const MAX_RULE_OPS: usize = crate::elevate::MAX_BATCH_OPS;
 
@@ -1378,6 +1464,7 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
         if let Op::Hold { root, content, .. } = op {
             hold_check(plan, k, *root, content)?;
         }
+        patch_check(plan, k, op)?;
         if let Some((
             _,
             ContentRef::Package {

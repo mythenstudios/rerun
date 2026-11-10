@@ -101,6 +101,9 @@ pub fn op(o: &PreviewOp) -> Vec<Message<'_>> {
             attrs,
         }));
     }
+    for e in &o.patch {
+        out.push(m(TxnMsg::PatchByte(e)));
+    }
     if let Some(t) = &o.tokens {
         out.push(m(TxnMsg::Tokens { tokens: tokens(t) }));
     }
@@ -230,9 +233,11 @@ pub fn render(p: &Preview) -> Vec<Message<'_>> {
         out.extend(op(o));
     }
     out.push(m(TxnMsg::Note(p.not_restored)));
-    for note in [p.registry, p.layers, p.ini, p.profiles, p.firewall, p.held]
-        .into_iter()
-        .flatten()
+    for note in [
+        p.registry, p.layers, p.ini, p.profiles, p.firewall, p.held, p.patched,
+    ]
+    .into_iter()
+    .flatten()
     {
         out.push(m(TxnMsg::Note(note)));
     }

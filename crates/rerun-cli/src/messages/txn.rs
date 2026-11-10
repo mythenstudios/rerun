@@ -260,6 +260,8 @@ pub enum TxnMsg<'a> {
         /// Length.
         len: u64,
     },
+    /// One byte a `patch file` op above changes (P4-10).
+    PatchByte(&'a rerun_core::plan::ByteEdit),
     /// The old content of the file op above.
     OldContent {
         /// SHA-256, hex.
@@ -963,6 +965,7 @@ impl fmt::Display for TxnMsg<'_> {
                 len,
                 attrs,
             } => write!(f, "  old: sha256 {sha256}, {len} bytes, attributes {attrs}"),
+            Self::PatchByte(e) => write!(f, "  {}", rerun_core::plan::PatchByte(e)),
             Self::Tokens { tokens } => write!(f, "  adds tokens: {tokens}"),
             Self::MachineValue { view, value } => {
                 write!(f, "  all users (HKLM, {view}), not changed: {value}")

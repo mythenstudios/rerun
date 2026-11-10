@@ -24,7 +24,11 @@
 //!   `Yi.old` exists decides (else `S0`), by the table of A3 for its direction (B2). `After` is
 //!   restored from the backup with the backup's SHA-256 and length as the expected ones and the
 //!   old R/H/S. `X.old` holding `h0` next to a decided state is the pending cleanup of `Done`'s
-//!   `old_left` and deleted with `h0` expected, after a restore only once it succeeded.
+//!   `old_left` and deleted with `h0` expected, after a restore only once it succeeded. A
+//!   `ReplaceFile` with a patch (P4-10, [`Patched`]): the guard is held until the rename, so the
+//!   old bytes are streamed from the backup the op has just written and read back (`h0`), with
+//!   the edits applied (an edited byte that is not the edit's old byte is an error); `replace`
+//!   checks `h1` and the length before the rename. Observation and revert are the replace's.
 //! - `Hold` (P4-8): nothing is written; the apply re-observes the held content on a guard
 //!   (`roots::holds`) before its intent. The held content in the planned spelling is `After`,
 //!   anything else `Before`, never `Foreign`; its revert acts on nothing.
@@ -42,7 +46,7 @@ use super::{Acted, ExecCtx, ExecError, Hint, roots};
 use crate::fold::fold;
 use crate::journal::{Before, BeforeArg, Digest, Observed, OpLog, Reverting, Semantic, TxnWriter};
 use crate::path::RelPath;
-use crate::plan::{ContentRef, Op, Plan, Target};
+use crate::plan::{ByteEdit, ContentRef, Op, Plan, Target};
 use crate::policy::root::AppSub;
 use crate::prim::file_install::open_package;
 use crate::sys::fs::{Attrs, EntryKind, NewFile, TmpName};
@@ -215,7 +219,7 @@ pub(super) fn apply_op(
             .app
             .sub(AppSub::Packages)
             .map_err(|x| ExecError::Refused(super::Refusal::from(x)))?,
-        Some(ContentRef::Inline { .. }) | None => None,
+        Some(ContentRef::Inline { .. } | ContentRef::Patch { .. }) | None => None,
     };
     let source = |id: &str, version: &str| -> Result<_, ExecError> {
         let pk = packages
@@ -261,6 +265,8 @@ pub(super) fn apply_op(
                     from_plan = std::io::Cursor::new(bytes.as_slice());
                     &mut from_plan
                 }
+                // `plan::patch_check`: a patch only replaces (both rule sets).
+                ContentRef::Patch { .. } => return Err(not_a_patch_target(k)),
             };
             let x = w.tmp();
             w.intent(k, Some(x.clone()), None)?;
@@ -303,18 +309,20 @@ pub(super) fn apply_op(
                     format!("{path} is in use"),
                 )));
             }
-            let src: &mut dyn std::io::Read = match content {
+            let src: Option<&mut dyn std::io::Read> = match content {
                 ContentRef::Package {
                     id, version, file, ..
                 } => {
                     pkg = source(id, version)?;
                     from_pkg = pkg.open_read(file).map_err(&e)?;
-                    &mut from_pkg
+                    Some(&mut from_pkg)
                 }
                 ContentRef::Inline { bytes, .. } => {
                     from_plan = std::io::Cursor::new(bytes.as_slice());
-                    &mut from_plan
+                    Some(&mut from_plan)
                 }
+                // P4-10: the old bytes come from the backup below.
+                ContentRef::Patch { .. } => None,
             };
             let b = w.backup(&mut *g)?;
             let x = w.tmp();
@@ -325,7 +333,19 @@ pub(super) fn apply_op(
                 sha256: *content.sha256(),
                 max_len: content.len(),
             };
-            let r = g.replace(&old.sha256, src, &new).map_err(&e)?;
+            let r = match (src, content) {
+                (Some(src), _) => g.replace(&old.sha256, src, &new).map_err(&e)?,
+                // P4-10: the guard is held until the rename, so the old content is streamed from
+                // the backup just written (read back and compared with `old` by `backup`), with
+                // the edits applied; `replace` checks the result's SHA-256 and length before the
+                // rename, so a backup changed in between writes nothing (`Mismatch`, rollback).
+                (None, ContentRef::Patch { edits, .. }) => {
+                    let backup = w.backup_reader(k)?;
+                    let mut patched = Patched::new(std::io::Read::take(backup, old.len), edits);
+                    g.replace(&old.sha256, &mut patched, &new).map_err(&e)?
+                }
+                (None, _) => return Err(not_a_patch_target(k)),
+            };
             w.done(k, Some(r.new.file_id), r.old_left.is_some())?;
             Ok(())
         }
@@ -349,6 +369,59 @@ pub(super) fn apply_op(
         | Op::TokenList { .. }
         | Op::IniValue { .. }
         | Op::FirewallRule { .. } => Err(not_a_file_op(k)),
+    }
+}
+
+/// A patch where it cannot be (`plan::patch_check` refuses it on encode and decode).
+fn not_a_patch_target(k: u16) -> ExecError {
+    ExecError::Op {
+        op: k,
+        source: SysError::new(SysErrorKind::Other, "a patch only replaces a file"),
+    }
+}
+
+/// The old bytes with a patch's edits applied while they are streamed (P4-10): every edited
+/// byte must hold its `old` value (else `InvalidData`: the source is not the base), and becomes
+/// `new`. The edits are sorted by offset (`plan::patch_check`).
+pub(super) struct Patched<'e, R> {
+    inner: R,
+    at: u64,
+    edits: &'e [ByteEdit],
+}
+
+impl<'e, R> Patched<'e, R> {
+    pub(super) fn new(inner: R, edits: &'e [ByteEdit]) -> Self {
+        Self {
+            inner,
+            at: 0,
+            edits,
+        }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for Patched<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        let end = self.at.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        for e in self.edits {
+            if e.offset < self.at || e.offset >= end {
+                continue;
+            }
+            let i = usize::try_from(e.offset - self.at)
+                .map_err(|_| std::io::Error::other("a patch offset outside the buffer"))?;
+            let Some(b) = buf.get_mut(i) else {
+                return Err(std::io::Error::other("a patch offset outside the buffer"));
+            };
+            if *b != e.old {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the file to patch has another byte at a patched offset",
+                ));
+            }
+            *b = e.new;
+        }
+        self.at = end;
+        Ok(n)
     }
 }
 

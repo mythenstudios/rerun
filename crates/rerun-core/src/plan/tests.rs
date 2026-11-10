@@ -448,3 +448,107 @@ fn p6_hold_form_rules_object_and_preview() {
     }
     assert_eq!(text.matches("note: shared files").count(), 1);
 }
+
+/// P4-10: `ContentRef::Patch`: its wire form, the bounds of `patch_check` on encode and on the
+/// recorded decode, and its preview.
+#[test]
+fn p8_patch_form_rules_and_preview() {
+    use super::{ByteEdit, MAX_PATCH_EDITS};
+    let old = FileState {
+        sha256: sha(b"old"),
+        len: 3,
+        attrs: Attrs::default(),
+    };
+    let edit = |offset: u64, old: u8, new: u8| ByteEdit { offset, old, new };
+    let with = |edits: Vec<ByteEdit>, base: FileState| {
+        let mut p = sample();
+        p.ops[2] = Op::ReplaceFile {
+            root: RootIx(1),
+            path: r("game.exe"),
+            old,
+            content: ContentRef::Patch {
+                base,
+                edits,
+                sha256: sha(b"Old"),
+            },
+            attrs: Attrs::default(),
+        };
+        p
+    };
+    let p = with(vec![edit(0, b'o', b'O')], old);
+    let b = p.encode().unwrap();
+    assert_eq!(decode(b.bytes()).unwrap(), p);
+    let s = std::str::from_utf8(b.bytes()).unwrap();
+    let want = format!(
+        r#"{{"replace_file":{{"root":1,"path":"game.exe","old":{{"sha256":"{o}","len":3,"attrs":{{"readonly":false,"hidden":false,"system":false}}}},"content":{{"patch":{{"base":{{"sha256":"{o}","len":3,"attrs":{{"readonly":false,"hidden":false,"system":false}}}},"edits":[{{"offset":0,"old":111,"new":79}}],"sha256":"{n}"}}}},"attrs":{{"readonly":false,"hidden":false,"system":false}}}}}}"#,
+        o = hex(b"old"),
+        n = hex(b"Old")
+    );
+    assert!(s.contains(&want), "{s}");
+
+    // Every rule, refused on encode and on the recorded decode alike.
+    let refused = |p: &Plan, why: &str| {
+        assert!(
+            matches!(p.encode(), Err(PlanError::Invalid { .. })),
+            "{why}: encoded"
+        );
+        let bytes = serde_json::to_vec(p).unwrap();
+        assert!(super::decode_recorded(&bytes).is_err(), "{why}: decoded");
+    };
+    refused(&with(Vec::new(), old), "no edit");
+    refused(
+        &with(
+            (0..=u64::try_from(MAX_PATCH_EDITS).unwrap())
+                .map(|i| edit(i, 0, 1))
+                .collect(),
+            FileState { len: 100, ..old },
+        ),
+        "nine edits",
+    );
+    refused(
+        &with(vec![edit(1, b'l', b'L'), edit(0, b'o', b'O')], old),
+        "descending",
+    );
+    refused(
+        &with(vec![edit(0, b'o', b'O'), edit(0, b'o', b'0')], old),
+        "an offset twice",
+    );
+    refused(&with(vec![edit(3, 0, 1)], old), "past the end");
+    refused(&with(vec![edit(0, b'o', b'o')], old), "no change");
+    refused(
+        &with(
+            vec![edit(0, b'o', b'O')],
+            FileState {
+                sha256: sha(b"another"),
+                ..old
+            },
+        ),
+        "another base",
+    );
+    // A patch never creates a file.
+    let mut create = sample();
+    create.ops[1] = Op::CreateFile {
+        root: RootIx(0),
+        path: r(r"mods\a.dll"),
+        content: ContentRef::Patch {
+            base: old,
+            edits: vec![edit(0, b'o', b'O')],
+            sha256: sha(b"Old"),
+        },
+        attrs: Attrs::default(),
+    };
+    refused(&create, "a created patch");
+
+    // The preview: the action, the bytes, the new hash and the note once.
+    let text = preview(&p).to_string();
+    for want in [
+        "  2. patch file 1:game.exe\n",
+        "     byte at 0x0: 0x6f -> 0x4f\n",
+        &format!("new sha256 {}, 3 bytes", hex(b"Old")),
+        &format!("old sha256 {}, 3 bytes", hex(b"old")),
+        "note: patched files:",
+    ] {
+        assert!(text.contains(want), "{want:?} not in\n{text}");
+    }
+    assert_eq!(text.matches("note: patched files").count(), 1);
+}

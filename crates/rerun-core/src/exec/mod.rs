@@ -2633,6 +2633,8 @@ mod layer_crash_tests;
 #[cfg(test)]
 pub(crate) mod layer_tests;
 #[cfg(test)]
+mod patch_tests;
+#[cfg(test)]
 mod profiles_crash_tests;
 #[cfg(test)]
 mod profiles_tests;

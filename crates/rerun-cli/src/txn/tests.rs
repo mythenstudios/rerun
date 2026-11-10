@@ -63,6 +63,7 @@ fn file_op(index: usize, action: &'static str, path: &str) -> PreviewOp {
         replaces: false,
         firewall: None,
         held: false,
+        patch: Vec::new(),
     }
 }
 
@@ -90,6 +91,7 @@ fn head() -> Preview {
         profiles: None,
         firewall: None,
         held: None,
+        patched: None,
     }
 }
 
