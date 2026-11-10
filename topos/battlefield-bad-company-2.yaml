@@ -1,0 +1,48 @@
+# DRAFT (P4-13): facts and sourced notes only.
+#
+# PunkBuster: the game folder holds `pb` and `dinput8.dll`, so the anti-cheat rule applies
+# (package, laa_patch, firewall_rule, compat_layer and watch/hold/ifeo/inproc are refused).
+# anti_cheat.dead is NOT set. Official notice found (EA, Online Services Shutdown, PC listed,
+# December 8, 2023): https://www.ea.com/legal/service-updates/a-h
+# That notice does not mention PunkBuster, and the community revival "Project Rome"
+# (https://veniceunleashed.net/project-rome) runs multiplayer again, so "PunkBuster checks are
+# off" is not shown. Do not release without an answer to that (decision for the lead).
+format: 1
+id: battlefield-bad-company-2
+title: "Battlefield: Bad Company 2"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 24960
+  exes:
+    # SHA-1/SHA-256 of an unmodified Steam copy (rerun-workbench draft --hashes-from, P4-13)
+    - { path: "BFBC2Game.exe", sha1: "B1D06272B7F0F113576F939CCA56C77AB84D882E", sha256: "22E96001382EB847D3AB0A02B59EC7BB79BA47E04146E74C6C49E38465F38C96", api: d3d9 }
+
+launch:
+  chain: [steam]
+  method: auto
+  start: "TODO"                # Steam's launch entry: observe, never guess
+
+issues:
+  - id: high-frame-rate
+    title: "High frame rates break animation scripts"
+    when: {}
+    variants: []               # TODO: the remedy named is a 60 FPS cap (needs a limiter, no Rerun step); the source is a video, not an allowed source type
+
+  - id: blinking-black-screen
+    title: "Blinking black screen"
+    when: {}
+    variants: []               # TODO: reported remedy is HSAO=false in Documents\BFBC2\settings.ini (user_data + ini_set); settings.ini needs a [section] header to be a valid ini_set target: unchecked, and the report itself is unsourced
+
+tips:
+  launch_options: []
+  notes:
+    - text: "The EA online services for the PC version were shut down on December 8, 2023; the single-player campaign still works offline."
+      source: { type: official, url: "https://www.ea.com/legal/service-updates/a-h" }
+    - text: 'The DirectX level can be forced in settings.ini in the BFBC2 folder of your Documents (DxVersion = 9, 10 or 11).'
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Battlefield:_Bad_Company_2#Force_DirectX_Level" }
+
+links:
+  pcgw: "Battlefield:_Bad_Company_2"
