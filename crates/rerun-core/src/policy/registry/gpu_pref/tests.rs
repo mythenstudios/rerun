@@ -1,6 +1,6 @@
-//! G-P1: the grammar, merge and revert of a `UserGpuPreferences` value (P4-11). Every value is
-//! of the documented form (`docs/03b-gpu-display.md`, "Sources"); the SB-G1 dump of what
-//! Settings writes is pending (`tests/fixtures/gpu-pref/`).
+//! G-P1: the grammar, merge and revert of a `UserGpuPreferences` value (P4-11), and the golden
+//! values Settings wrote in SB-G1 (`tests/fixtures/gpu-pref/sb-g1-2026-11-10.txt`, build
+//! 26300.9711) with the planner's verdict on each.
 
 use super::*;
 
@@ -106,7 +106,7 @@ fn check_refuses_power_saving_and_a_set_preference() {
     assert!(e.to_string().contains("Power saving"), "{e}");
     // `=2` already: the planner makes no op; the check itself refuses a write.
     assert!(check(Some("GpuPreference=2;"), HP).is_err());
-    // The merged value must fit as well: 500 characters plus 16 do not.
+    // Pairs other than the known ones refuse the plan (and this one would not fit either).
     let big: String = (0..8)
         .map(|i| format!("A{i}={};", "1".repeat(59)))
         .collect(); // 8 x 63 = 504
@@ -205,4 +205,118 @@ fn the_preference_on_the_wire() {
     assert_eq!(serde_json::to_string(&HP).unwrap(), r#""high_performance""#);
     assert!(serde_json::from_str::<GpuPref>(r#""power_saving""#).is_err());
     assert_eq!(HP.digit(), 2);
+}
+
+/// The SB-G1 dump: what Settings > System > Display > Graphics wrote (build 26300.9711,
+/// 2026-11-10, one GPU).
+const SB_G1: &str = include_str!("../../../../../../tests/fixtures/gpu-pref/sb-g1-2026-11-10.txt");
+
+/// Every `String "…"` value of the dump, in order.
+fn sb_g1_values() -> Vec<&'static str> {
+    SB_G1
+        .lines()
+        .filter_map(|l| l.split_once("String \"")?.1.strip_suffix('"'))
+        .collect()
+}
+
+/// G-P1 golden (SB-G1): every value Settings wrote is in the grammar, and the planner's verdict
+/// on each is pinned.
+#[test]
+fn sb_g1_every_dumped_value_parses_and_its_verdict_is_pinned() {
+    let values = sb_g1_values();
+    assert_eq!(values.len(), 13, "{values:?}");
+    for v in &values {
+        assert!(parse(v).is_ok(), "{v}");
+    }
+    let mut seen: Vec<&str> = values.clone();
+    seen.sort_unstable();
+    seen.dedup();
+    let verdict = |v: &str| match check(Some(v), HP) {
+        Ok(new) => format!("set {new}"),
+        Err(e) if e.to_string().contains("set already") => "no op".to_owned(),
+        Err(e) if e.to_string().contains("Power saving") => "refused: power saving".to_owned(),
+        Err(e) => format!("refused: {e}"),
+    };
+    let got: Vec<(&str, String)> = seen.iter().map(|v| (*v, verdict(v))).collect();
+    let want: Vec<(&str, String)> = vec![
+        (
+            "AutoHDREnable=1;SwapEffectUpgradeEnable=1;GpuPreference=2;",
+            "no op".to_owned(),
+        ),
+        ("GpuPreference=0;", "set GpuPreference=2;".to_owned()),
+        ("GpuPreference=1;", "refused: power saving".to_owned()),
+        (
+            "GpuPreference=1;AutoHDREnable=1;SwapEffectUpgradeEnable=1;",
+            "refused: power saving".to_owned(),
+        ),
+        ("GpuPreference=2;", "no op".to_owned()),
+        (
+            "SwapEffectUpgradeEnable=0;GpuPreference=2;",
+            "no op".to_owned(),
+        ),
+        (
+            "SwapEffectUpgradeEnable=1;GpuPreference=2;",
+            "no op".to_owned(),
+        ),
+    ];
+    assert_eq!(got, want);
+    // The windowed-games toggle writes its pair first; with "Let Windows decide" Rerun changes
+    // only the pair in its place.
+    assert_eq!(
+        check(Some("SwapEffectUpgradeEnable=1;GpuPreference=0;"), HP).unwrap(),
+        "SwapEffectUpgradeEnable=1;GpuPreference=2;"
+    );
+}
+
+/// SB-G1 S4: Settings moves `GpuPreference` to the front when it changes the value. Back on
+/// High performance after Rerun's apply, the value is not Rerun's `new` (another order): the
+/// drift row takes back only Rerun's pair, the other pairs keep Settings' order.
+#[test]
+fn sb_g1_settings_reorder_is_a_drift_handled_by_unset() {
+    let old = "AutoHDREnable=1;SwapEffectUpgradeEnable=1;";
+    let new = set(Some(old), HP).unwrap();
+    assert_eq!(
+        new,
+        "AutoHDREnable=1;SwapEffectUpgradeEnable=1;GpuPreference=2;"
+    );
+    let settings = "GpuPreference=2;AutoHDREnable=1;SwapEffectUpgradeEnable=1;";
+    assert_ne!(settings, new);
+    assert_eq!(
+        unset(settings, HP, Some(old)),
+        Unset::Rest(Some(old.to_owned()))
+    );
+    // Settings switched to Power saving since: the user's choice stays.
+    assert_eq!(
+        unset(
+            "GpuPreference=1;AutoHDREnable=1;SwapEffectUpgradeEnable=1;",
+            HP,
+            Some(old)
+        ),
+        Unset::NotOurs
+    );
+}
+
+/// HYPOTHETICAL pair (not measured: a specific GPU was not offered on the one-GPU dump
+/// machine): an unknown pair next to `GpuPreference` refuses the plan, but a value that holds
+/// one since the apply reverts fine (only Rerun's pair is taken back).
+#[test]
+fn an_unknown_pair_refuses_the_plan_but_never_the_revert() {
+    let hypothetical = "SpecificAdapter=1;GpuPreference=0;";
+    assert!(parse(hypothetical).is_ok());
+    let e = check(Some(hypothetical), HP).unwrap_err().to_string();
+    assert!(
+        e.contains("SpecificAdapter") && e.contains("unknown setting"),
+        "{e}"
+    );
+    assert_eq!(
+        unset("SpecificAdapter=1;GpuPreference=2;", HP, Some(hypothetical)),
+        Unset::Rest(Some(hypothetical.to_owned()))
+    );
+    assert_eq!(
+        unset("SpecificAdapter=1;GpuPreference=2;", HP, None),
+        Unset::Rest(Some("SpecificAdapter=1;".to_owned()))
+    );
+    for k in KNOWN_PAIRS {
+        assert!(check(Some(&format!("{k}=0;")), HP).is_ok(), "{k}");
+    }
 }

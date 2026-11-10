@@ -17,6 +17,10 @@
 //!   a specific adapter encoded in the value: its form is not measured; a specific adapter
 //!   stored as a pair of its own would pass as a foreign pair, SB-G1 decides, ADR 0018
 //!   amendment P4-11).
+//! - **Planning only next to known pairs** ([`KNOWN_PAIRS`], P4-11 after SB-G1): a new value
+//!   is planned only when every other pair is `AutoHDREnable` or `SwapEffectUpgradeEnable`;
+//!   another pair refuses the plan (fail closed: a specific GPU's form is not measured). The
+//!   grammar and the revert ([`unset`], [`old_digit`]) never refuse because of it.
 //! - **Merge** ([`set`]): no value gives `GpuPreference=2;`; an existing `GpuPreference=0;`
 //!   changes in its place; a value without the pair gets it appended. `=2` already there is no
 //!   op (the planner's call); `=1`, the user's "Power saving", is refused (user decision E-G3
@@ -47,6 +51,15 @@ const _: () = assert!(MAX_PREF_BYTES <= crate::plan::OLD_INLINE);
 pub const MAX_PAIR_NAME: usize = 64;
 /// Longest pair value.
 pub const MAX_PAIR_VALUE: usize = 64;
+
+/// The pairs a value may hold next to `GpuPreference` when Rerun plans a new value (P4-11, lead
+/// decision after SB-G1, closing security finding 1 fail-closed). Sources: `SwapEffectUpgradeEnable`
+/// in the SB-G1 dump (`tests/fixtures/gpu-pref/sb-g1-2026-11-10.txt`: the "Optimizations for
+/// windowed games" toggle, build 26300.9711); `AutoHDREnable` from Microsoft Q&A and Kapil Arya
+/// (`docs/03b-gpu-display.md`, "Sources"; no per-app Auto HDR on the dump machine). Any other
+/// pair (maybe a specific GPU chosen in Settings, whose form is not measured) refuses the plan;
+/// the grammar and the revert are not affected.
+pub const KNOWN_PAIRS: &[&str] = &["AutoHDREnable", "SwapEffectUpgradeEnable"];
 
 /// The preference a `gpu_preference` step sets. On the wire `snake_case`
 /// (`"high_performance"`); `power_saving` may follow without a format break.
@@ -282,6 +295,16 @@ pub(super) fn check(old: Option<&str>, pref: GpuPref) -> Result<String, RegPolic
                 ));
             }
             _ => {}
+        }
+        if let Some((n, _)) =
+            p.0.iter()
+                .find(|(n, _)| *n != PREF_KEY && !KNOWN_PAIRS.contains(n))
+        {
+            return Err(denied(
+                format!("the UserGpuPreferences pair {n}"),
+                "an unknown setting next to GpuPreference, maybe a specific GPU chosen in \
+                 Settings > Display > Graphics; Rerun leaves the value alone",
+            ));
         }
     }
     let new = set(old, pref)?;

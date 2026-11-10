@@ -1,0 +1,28 @@
+﻿SB-G1 gpu_preference, Settings > System > Display > Graphics
+Windows build 26300.9711 (26H2), 2026-11-10
+Probe path written as: C:\Games\Probe\RerunGpuPrefProbe.exe
+Keys before: DirectX=True UserGpuPreferences=True
+1 added: <absent>
+1 added: String "GpuPreference=0;"
+2 high performance: String "GpuPreference=0;"
+2 high performance: String "GpuPreference=2;"
+3 power saving: String "GpuPreference=2;"
+3 power saving: String "GpuPreference=1;"
+4 specific GPU: String "GpuPreference=1;"
+4 specific GPU: String "GpuPreference=2;"
+INFO 4 specific GPU, last value: GpuPreference=2;
+5 toggles: String "GpuPreference=2;"
+5 toggles: String "SwapEffectUpgradeEnable=0;GpuPreference=2;"
+5 toggles: String "SwapEffectUpgradeEnable=1;GpuPreference=2;"
+6 written by the script (Rerun form): String "AutoHDREnable=1;SwapEffectUpgradeEnable=1;GpuPreference=2;"
+6 after the change in Settings: String "AutoHDREnable=1;SwapEffectUpgradeEnable=1;GpuPreference=2;"
+6 after the change in Settings: String "GpuPreference=1;AutoHDREnable=1;SwapEffectUpgradeEnable=1;"
+
+PASS: 1 added
+PASS: 2 high performance = GpuPreference=2
+PASS: 3 power saving = GpuPreference=1
+PASS: 6 Settings reads Rerun form and writes GpuPreference=1
+PASS: 6 foreign pairs kept (AutoHDREnable, SwapEffectUpgradeEnable)
+PASS: 6 value kind REG_SZ
+PASS: cleanup: value removed
+PASS: cleanup: probe folder removed

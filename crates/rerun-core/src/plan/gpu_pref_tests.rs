@@ -84,7 +84,10 @@ fn p_g1_gpu_prefs_round_trip_in_one_form() {
     for p in [
         new_plan(),
         merge_plan("AutoHDREnable=1;", "AutoHDREnable=1;GpuPreference=2;"),
-        merge_plan("A=1;GpuPreference=0;B=1;", "A=1;GpuPreference=2;B=1;"),
+        merge_plan(
+            "AutoHDREnable=1;GpuPreference=0;SwapEffectUpgradeEnable=1;",
+            "AutoHDREnable=1;GpuPreference=2;SwapEffectUpgradeEnable=1;",
+        ),
     ] {
         let b = p.encode().unwrap();
         assert_eq!(decode(b.bytes()).unwrap(), p);

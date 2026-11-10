@@ -135,6 +135,11 @@ fn t9g_set_already_is_no_op_and_power_saving_is_refused() {
         &with_value(sz("GpuPreference=1;")),
         pref_step("game.exe"),
         "\"Power saving\"",
+    ); // SB-G1 lead decision: only next to known pairs (a HYPOTHETICAL unknown pair here).
+    refused(
+        &with_value(sz("SpecificAdapter=1;GpuPreference=0;")),
+        pref_step("game.exe"),
+        "unknown setting",
     );
 }
 

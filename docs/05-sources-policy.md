@@ -55,7 +55,7 @@ The anti-cheat markers (`detect::exe::anti_cheat::MARKERS`, P4-4, user decision 
 | `xigncode` | folder `XIGNCODE` | TODO (no vendor source yet) |
 | `ea-anticheat` | file `EAAntiCheat.GameServiceLauncher.exe` | TODO (no vendor source yet) |
 
-The graphics preference values (`policy::registry::gpu_pref`, ADR 0018 amendment P4-11) follow the same standard. `GpuPreference` `0` (let Windows decide), `1` (power saving), `2` (high performance) and the pair `AutoHDREnable` come from Microsoft Q&A and Kapil Arya, "Set Graphics Preference for Apps in Windows 11" (checked 2026-11-05, `03b-gpu-display.md` "Sources"); the raw values Settings > System > Display > Graphics writes are still to be dumped in Windows Sandbox (SB-G1, `docs/09-testing.md`) as the fixture `tests/fixtures/gpu-pref/sb-g1-<date>.txt`. Until then Rerun writes only `2` and refuses any other form (a specific adapter, another digit) as unusual.
+The graphics preference values (`policy::registry::gpu_pref`, ADR 0018 amendment P4-11) follow the same standard. `GpuPreference` `0` (let Windows decide), `1` (power saving), `2` (high performance) and the pair `AutoHDREnable` come from Microsoft Q&A and Kapil Arya, "Set Graphics Preference for Apps in Windows 11" (checked 2026-11-05, `03b-gpu-display.md` "Sources"); the digits and `SwapEffectUpgradeEnable` are confirmed by the dump of what Settings > System > Display > Graphics writes (SB-G1, developer machine, build 26300.9711, 2026-11-10: `tests/fixtures/gpu-pref/sb-g1-2026-11-10.txt`). Rerun writes only `2`, and plans only next to the known pairs `gpu_pref::KNOWN_PAIRS` (`AutoHDREnable`, `SwapEffectUpgradeEnable`); any other form or pair (a specific GPU, not measured) is refused.
 
 ## Links in the app
 
