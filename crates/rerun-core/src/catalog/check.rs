@@ -39,10 +39,13 @@ pub const FIREWALL_RULE_REVIEWED: bool = true;
 /// holds none).
 pub const LAA_PATCH_REVIEWED: bool = true;
 
-/// Whether a Topo outside a draft may hold a `gpu_preference` step (P4-11). `false` until the
-/// step is reviewed and the Sandbox dump of what Settings writes (SB-G1, `docs/09-testing.md`)
-/// confirms the grammar: the signed index holds none until then.
-pub const GPU_PREFERENCE_REVIEWED: bool = false;
+/// Whether a Topo outside a draft may hold a `gpu_preference` step (P4-11). `true` since the
+/// step was reviewed, the dump of what Settings writes confirmed the grammar (SB-G1, 2026-11-10,
+/// build 26300.9711; unknown pairs refused at plan time) and the [SB] case passed (CI run
+/// 42877527771, SB-G2), the agreed condition. Setting it back to `false` makes the step draft
+/// only again (the signed index then holds none). Topos with it stay `unverified` until a test
+/// on a hybrid machine (R1).
+pub const GPU_PREFERENCE_REVIEWED: bool = true;
 
 /// Most executables of `match.exes` (P4-4: each is hashed when the engine reads a game).
 pub const MAX_EXES: usize = 8;
@@ -450,8 +453,8 @@ fn step(s: &TopoStep, at: &str) -> R {
     }
 }
 
-/// `gpu_preference` against its Topo and issue (P4-11): draft only while not reviewed
-/// ([`GPU_PREFERENCE_REVIEWED`]); the executable an entry of `match.exes` in exactly its spelling
+/// `gpu_preference` against its Topo and issue (P4-11): draft only while not reviewed (reviewed
+/// since P4-11, [`GPU_PREFERENCE_REVIEWED`]); the executable an entry of `match.exes` in exactly its spelling
 /// (no `sha256` needed: an `HKCU` value naming a path, not a change of the executable, nothing
 /// elevated); the issue's `when` has `gpu.hybrid: true`, so it is never offered on a PC with one
 /// graphics adapter.

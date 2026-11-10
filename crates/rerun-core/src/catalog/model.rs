@@ -672,7 +672,7 @@ pub enum TopoStep {
     /// `match.exes`.
     LaaPatch(LaaPatchStep),
     /// `gpu_preference` (P4-11): Windows' graphics preference of one executable of
-    /// `match.exes` (draft only until reviewed, [`super::check::GPU_PREFERENCE_REVIEWED`]).
+    /// `match.exes` (reviewed since P4-11, [`super::check::GPU_PREFERENCE_REVIEWED`]).
     GpuPreference(GpuPreferenceSpec),
 }
 

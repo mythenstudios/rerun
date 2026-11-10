@@ -5,7 +5,8 @@
 //!   and one `set gpu preference`) → apply → the value → `verify` `After` → revert → the game
 //!   folder and `HKCU\Software` identical.
 //! - GP2 one adapter: the issue's `when` (`gpu.hybrid: true`) is no, the pick refused.
-//! - GP3 the loader: draft only until reviewed, a `match.exes` entry in exactly its spelling
+//! - GP3 the loader: reviewed (an active Topo passes the source and release rules), a
+//!   `match.exes` entry in exactly its spelling
 //!   (no `sha256` needed), only in an issue whose `when` has `gpu.hybrid: true`.
 //! - GP4 anti-cheat warns (E4); a preference set already plans nothing and says so, naming the
 //!   open Rerun transaction that set it (N2).
@@ -201,12 +202,11 @@ fn gp3_the_loader() {
         let e = check::topo(&t, Rules::Source).unwrap_err().to_string();
         assert!(e.contains(want), "{want}: {e}");
     };
-    // Draft only until reviewed.
-    const { assert!(!GPU_PREFERENCE_REVIEWED) };
-    refused(
-        topo_with("active", hybrid, "game.exe"),
-        "draft only until gpu_preference is reviewed",
-    );
+    // Reviewed (P4-11): an active Topo carries it, also by the release rules.
+    const { assert!(GPU_PREFERENCE_REVIEWED, "gpu_preference is reviewed") };
+    let active = topo_with("active", hybrid, "game.exe");
+    check::topo(&active, Rules::Source).unwrap();
+    check::topo(&active, Rules::Release).unwrap();
     // A match.exes entry in exactly its spelling.
     refused(
         topo_with("draft", hybrid, "GAME.exe"),

@@ -685,7 +685,7 @@
       }
     },
     "gpuPreference": {
-      "description": "Windows' graphics preference (Settings > System > Display > Graphics) of one executable of match.exes: only the GpuPreference pair of its HKCU UserGpuPreferences value (docs/02-topo-format.md, ADR 0020 amendment P4-11). The schema checks the form; the loader checks that exe is a match.exes entry in exactly its spelling and that the issue's when has gpu.hybrid: true. Draft only until reviewed.",
+      "description": "Windows' graphics preference (Settings > System > Display > Graphics) of one executable of match.exes: only the GpuPreference pair of its HKCU UserGpuPreferences value (docs/02-topo-format.md, ADR 0020 amendment P4-11). The schema checks the form; the loader checks that exe is a match.exes entry in exactly its spelling and that the issue's when has gpu.hybrid: true. Reviewed since P4-11.",
       "type": "object",
       "additionalProperties": false,
       "required": [
