@@ -20,6 +20,8 @@ test-key = []
 [dependencies]
 # The signed index (ADR 0024): Ed25519 verification only, no default features.
 ed25519-compact.workspace = true
+# Package archives (ADR 0025 part 2): raw DEFLATE inside Rerun's own zip/gzip/tar readers.
+miniz_oxide.workspace = true
 rerun-proto = { workspace = true, features = ["serde"] }
 thiserror.workspace = true
 # Snapshot hashes and, with sha1, exe hashes (detect::exe::hash, ADR 0014).

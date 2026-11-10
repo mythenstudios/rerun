@@ -40,6 +40,11 @@ windows-sys = "0.61.2"
 # features (no `random`, `pem`, `x25519`); verification in rerun-core, signing in the workbench.
 # Pinned exactly: every binary that verifies (rerun, later the helper) decides edge cases alike.
 ed25519-compact = { version = "=2.6.1", default-features = false }
+# Inflate for package archives (ADR 0025 part 2, P4-7): raw DEFLATE only; the zip, gzip and tar
+# readers around it are Rerun's own (pkg::archive). Pure Rust (`#![forbid(unsafe_code)]`), MIT OR
+# Zlib OR Apache-2.0, one dependency (adler2); the default `with-alloc` only. Pinned exactly: it
+# decides how untrusted archives decode.
+miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
 # The seed of the index key in `rerun-workbench key generate` (OS RNG; workbench only).
 getrandom = "0.3.4"
 

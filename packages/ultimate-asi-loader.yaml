@@ -15,5 +15,7 @@ assets:
 license: "TODO"
 arch: [x86, x64]
 slots: [dinput8.dll]       # default proxy; other names possible depending on the game
+# Each asset is its own build: the same name with another hash per architecture (ADR 0025).
 files:
-  - { from: "dinput8.dll", to: "dinput8.dll", sha256: "TODO" }
+  - { from: "dinput8.dll", to: "dinput8.dll", sha256: "TODO", arch: [x86] }
+  - { from: "dinput8.dll", to: "dinput8.dll", sha256: "TODO", arch: [x64] }

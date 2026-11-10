@@ -197,6 +197,7 @@
         ],
         "properties": {
           "from": {
+            "description": "The entry's name in the archive, exactly (case included; / or \\ as separator). Below the version folder it lies at the same path, or at <arch>\\<from> for a package with assets (ADR 0025).",
             "$ref": "#/$defs/relPath"
           },
           "to": {
@@ -211,6 +212,7 @@
             "description": "May be changed by the user; revert asks first."
           },
           "arch": {
+            "description": "Only for these architectures (of the package's arch). With assets: taken from these assets only; without arch, from every asset. One place has one sha256 (loader rule).",
             "type": "array",
             "minItems": 1,
             "uniqueItems": true,

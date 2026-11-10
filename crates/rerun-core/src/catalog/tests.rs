@@ -661,3 +661,54 @@ fn firewall_rule_is_released_only_by_a_trusted_signed_index() {
     draft.status = Status::Draft;
     assert!(super::check_index(&index(&draft)).is_err());
 }
+
+#[test]
+fn a_package_places_each_file_once() {
+    use super::check::{Rules, package as check_package};
+    use super::model::Asset;
+    let f = |from: &str, sha: u8, arch: Option<Vec<Arch>>| PackageFile {
+        from: rel(from),
+        to: rel("d3d9.dll"),
+        sha256: Hex::new([sha; 32]),
+        config: false,
+        arch,
+        api: None,
+    };
+    let ok = |p: &Package| check_package(p, Rules::Release);
+    // One download: one `from`, one hash (the same twice is fine; case counts as the same name).
+    let mut p = package("fix-pack");
+    p.files = vec![f("d3d9.dll", 1, None), f("d3d9.dll", 1, None)];
+    ok(&p).unwrap();
+    p.files = vec![f("d3d9.dll", 1, None), f("D3D9.DLL", 2, None)];
+    assert_eq!(ok(&p).unwrap_err().at, "files[1].from");
+    // An architecture the package does not name.
+    p.files = vec![f("d3d9.dll", 1, Some(vec![Arch::X64]))];
+    assert_eq!(ok(&p).unwrap_err().at, "files[0].arch");
+    // Assets: one build per architecture, the same name with two hashes, each in its own place.
+    let mut p = package("fix-pack");
+    p.source.release = None;
+    p.sha256 = None;
+    p.arch = ArchList::List(vec![Arch::X86, Arch::X64]);
+    let asset = |arch, file: &str| Asset {
+        arch,
+        url: format!("https://github.com/owner/fix-pack/releases/download/v1.0/{file}"),
+        sha256: Hex::new([0xAB; 32]),
+    };
+    p.assets = Some(vec![asset(Arch::X86, "a.zip"), asset(Arch::X64, "b.zip")]);
+    p.files = vec![
+        f("dinput8.dll", 1, Some(vec![Arch::X86])),
+        f("dinput8.dll", 2, Some(vec![Arch::X64])),
+        f("readme.txt", 3, None),
+    ];
+    ok(&p).unwrap();
+    // Without `arch` a file comes from every asset: then one hash for both is wrong.
+    p.files = vec![
+        f("dinput8.dll", 1, None),
+        f("dinput8.dll", 2, Some(vec![Arch::X64])),
+    ];
+    assert_eq!(ok(&p).unwrap_err().at, "files[1].from");
+    // An architecture without an asset.
+    p.assets = Some(vec![asset(Arch::X86, "a.zip")]);
+    p.files = vec![f("dinput8.dll", 1, Some(vec![Arch::X64]))];
+    assert_eq!(ok(&p).unwrap_err().at, "files[0].arch");
+}

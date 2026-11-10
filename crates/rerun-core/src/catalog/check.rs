@@ -748,7 +748,22 @@ pub fn package(p: &Package, rules: Rules) -> Result<(), RuleError> {
                 "at least one, unique",
             )?;
         }
+        if let (Some(a), ArchList::List(of_package)) = (&f.arch, &p.arch) {
+            ensure(
+                a.iter().all(|x| of_package.contains(x)),
+                &format!("{at}.arch"),
+                "only architectures of the package's arch",
+            )?;
+        }
+        if let (Some(a), Some(assets)) = (&f.arch, &p.assets) {
+            ensure(
+                a.iter().all(|x| assets.iter().any(|s| s.arch == *x)),
+                &format!("{at}.arch"),
+                "an architecture without an asset",
+            )?;
+        }
     }
+    files_placed_once(p)?;
     // By position until the name is checked: an error never carries an unchecked map key.
     for (i, (name, o)) in p.options.iter().enumerate() {
         let ok = !name.is_empty()
@@ -763,6 +778,36 @@ pub fn package(p: &Package, rules: Rules) -> Result<(), RuleError> {
         option(o, &format!("options.{name}"))?;
     }
     status_rule(p, p.status, rules)
+}
+
+/// One place below the version folder holds one file (ADR 0025 part 2): with one download a
+/// file's place is its `from`; with `assets` it is `<arch>\<from>` for each architecture the
+/// file is for (its `arch`, or every asset's). Two entries of one place must pin the same
+/// SHA-256 (a `TODO` counts as its own value).
+fn files_placed_once(p: &Package) -> R {
+    let archs = |f: &super::model::PackageFile| -> Vec<Option<super::model::Arch>> {
+        match (&p.assets, &f.arch) {
+            (None, _) => vec![None],
+            (Some(_), Some(a)) => a.iter().copied().map(Some).collect(),
+            (Some(assets), None) => assets.iter().map(|a| Some(a.arch)).collect(),
+        }
+    };
+    let mut placed: Vec<(Option<super::model::Arch>, String, &super::model::Sha256)> = Vec::new();
+    for (i, f) in p.files.iter().enumerate() {
+        for a in archs(f) {
+            let key = fold(f.from.as_str());
+            if let Some((_, _, sha)) = placed.iter().find(|(x, k, _)| *x == a && *k == key) {
+                ensure(
+                    *sha == &f.sha256,
+                    &format!("files[{i}].from"),
+                    "a file of the package twice with another sha256",
+                )?;
+            } else {
+                placed.push((a, key, &f.sha256));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn option(o: &PackageOption, at: &str) -> R {
