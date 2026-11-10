@@ -27,7 +27,7 @@ use rerun_core::hw::GpuVendor;
 pub use helper::HelperMsg;
 pub use index::IndexMsg;
 pub use launch::{LaunchMsg, Utc};
-pub use package::{FetchedHow, PackageMsg};
+pub use package::{FetchedHow, PackageMsg, UnpackedHow};
 #[cfg(test)]
 pub(crate) use profile::size as size_text;
 pub use profile::{ProfileMsg, ranges};

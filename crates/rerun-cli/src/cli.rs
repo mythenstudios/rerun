@@ -112,7 +112,8 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum PackageCommand {
     /// Downloads a package of the current index into Rerun's cache and checks its SHA-256
-    /// (nothing is kept unless it matches).
+    /// (nothing is kept unless it matches), then unpacks the files the package names, each
+    /// with its own SHA-256, into Rerun's packages folder.
     Fetch {
         /// The package as <id>@<version>, exactly as the index names it.
         #[arg(value_parser = package_spec)]

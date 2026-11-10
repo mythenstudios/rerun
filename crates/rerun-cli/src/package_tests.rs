@@ -271,3 +271,95 @@ fn a_failure_after_progress_reports_what_was_done() {
         r.stdout
     );
 }
+
+/// A package of the index whose one download is `archive`, with the file `from` (hash of `data`).
+fn sys_with_files(archive: &[u8], from: &str, data: &[u8]) -> FakeSystem {
+    sys_with_package(&format!(
+        r#"{{"format":1,"id":"fix-pack","name":"Fix pack","status":"active","tier":"established","source":{{"repo":"https://github.com/owner/fix-pack","release":"{ASSET}"}},"version":"1.0","sha256":"{}","license":"MIT","arch":["x86"],"files":[{{"from":"{from}","to":"{from}","sha256":"{}"}}]}}"#,
+        upper(archive),
+        upper(data)
+    ))
+}
+
+fn github_with(body: &[u8]) -> FakeHttp {
+    let http = FakeHttp::default();
+    http.reply(ASSET, FakeReply::redirect(302, STORE));
+    http.reply(STORE, FakeReply::ok(body));
+    http
+}
+
+#[test]
+fn fetch_unpacks_the_named_files() {
+    use rerun_core::pkg::archive::testfx::{ZipEntry, zip};
+    let archive = zip(&[
+        ZipEntry::file("bin/fix.dll", b"the fix"),
+        ZipEntry::file("readme.txt", b"not named"),
+    ]);
+    let sys = sys_with_files(&archive, "bin/fix.dll", b"the fix");
+    let http = github_with(&archive);
+    let r = run(
+        &sys,
+        &http,
+        &["package", "fetch", "fix-pack@1.0"],
+        Exit::Report,
+    );
+    let lines: Vec<&str> = r.stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{}", r.stdout);
+    assert!(
+        lines[0].starts_with("fix-pack 1.0: downloaded"),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(lines[1], r"fix-pack 1.0: bin\fix.dll unpacked, 7 bytes");
+    // Again: both checked, nothing done.
+    let r = run(
+        &sys,
+        &http,
+        &["package", "fetch", "fix-pack@1.0"],
+        Exit::Report,
+    );
+    assert!(
+        r.stdout
+            .trim_end()
+            .ends_with(r"fix-pack 1.0: bin\fix.dll already unpacked, 7 bytes"),
+        "{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_refused_archive_is_reported_after_the_download() {
+    use rerun_core::pkg::archive::testfx::{ZipEntry, zip};
+    let mut slip = ZipEntry::file("../evil.dll", b"evil");
+    slip.flags = 0x0800;
+    let archive = zip(&[ZipEntry::file("bin/fix.dll", b"the fix"), slip]);
+    let sys = sys_with_files(&archive, "bin/fix.dll", b"the fix");
+    let http = github_with(&archive);
+    // The download stored the archive in this run: exit 0, its line, then the refusal.
+    let r = run(
+        &sys,
+        &http,
+        &["package", "fetch", "fix-pack@1.0"],
+        Exit::Report,
+    );
+    assert!(
+        r.stdout.starts_with("fix-pack 1.0: downloaded"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains(
+            "rerun: package not unpacked: package fix-pack: the archive holds an entry named"
+        ),
+        "{}",
+        r.stderr
+    );
+    // Again: nothing changes, a refusal (exit 3).
+    let r = run(
+        &sys,
+        &http,
+        &["package", "fetch", "fix-pack@1.0"],
+        Exit::Refused,
+    );
+    assert!(r.stderr.contains("package not unpacked"), "{}", r.stderr);
+}

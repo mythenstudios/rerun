@@ -1,6 +1,6 @@
-//! The lines of `rerun package fetch` (ADR 0025). Package IDs, versions and hashes are checked
-//! before they reach a line (the ID and version rules of docs/02); every error comes as
-//! [`Shown`] and stands last.
+//! The lines of `rerun package fetch` (ADR 0025): downloads, then unpacked files. Package IDs,
+//! versions and hashes are checked before they reach a line (the ID and version rules of
+//! docs/02), a file name is shown escaped; every error comes as [`Shown`] and stands last.
 
 use std::fmt;
 
@@ -18,6 +18,17 @@ pub enum FetchedHow {
         /// A cache entry with other content was replaced.
         replaced: bool,
     },
+}
+
+/// How a file got into the version folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnpackedHow {
+    /// It was there with its pinned hash (hashed again).
+    Present,
+    /// Unpacked now.
+    Unpacked,
+    /// Unpacked now over a file with other content.
+    Replaced,
 }
 
 /// One line about a package.
@@ -38,6 +49,19 @@ pub enum PackageMsg<'a> {
         /// Its SHA-256 (64 hex digits).
         sha256: String,
     },
+    /// A file of the package is in its version folder with its pinned hash.
+    Unpacked {
+        /// The package ID.
+        id: Shown<'a>,
+        /// Its version.
+        version: Shown<'a>,
+        /// The file below the version folder.
+        file: Shown<'a>,
+        /// How.
+        how: UnpackedHow,
+        /// Its length in bytes.
+        len: u64,
+    },
     /// No signed index has been imported.
     NoIndex,
     /// The current index has no package of this ID.
@@ -54,6 +78,11 @@ pub enum PackageMsg<'a> {
     },
     /// The fetch was refused or failed.
     Failed {
+        /// Why.
+        error: Shown<'a>,
+    },
+    /// Unpacking was refused or failed.
+    NotUnpacked {
         /// Why.
         error: Shown<'a>,
     },
@@ -89,6 +118,21 @@ impl fmt::Display for PackageMsg<'_> {
                 }
                 write!(f, ", {len} bytes, sha256 {sha256}")
             }
+            Self::Unpacked {
+                id,
+                version,
+                file,
+                how,
+                len,
+            } => {
+                write!(f, "{id} {version}: {file} ")?;
+                f.write_str(match how {
+                    UnpackedHow::Present => "already unpacked",
+                    UnpackedHow::Unpacked => "unpacked",
+                    UnpackedHow::Replaced => "unpacked (a changed file replaced)",
+                })?;
+                write!(f, ", {len} bytes")
+            }
             Self::NoIndex => f.write_str(
                 "rerun: no signed index has been imported yet (rerun index import <index.json> <index.json.sig>)",
             ),
@@ -100,6 +144,7 @@ impl fmt::Display for PackageMsg<'_> {
                 "rerun: the current index has package {id} at version {version} only"
             ),
             Self::Failed { error } => write!(f, "rerun: package not fetched: {error}"),
+            Self::NotUnpacked { error } => write!(f, "rerun: package not unpacked: {error}"),
         }
     }
 }

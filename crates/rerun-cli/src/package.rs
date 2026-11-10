@@ -1,15 +1,18 @@
 //! `rerun package fetch <id>@<version>` (ADR 0025): every download of a package of the current
-//! signed index into `<LocalAppData>\Rerun\cache`, through `rerun_core::pkg::download`.
+//! signed index into `<LocalAppData>\Rerun\cache`, through `rerun_core::pkg::download`, then
+//! the files the package names into `<LocalAppData>\Rerun\packages\<id>\<version>`, through
+//! `rerun_core::pkg::extract` (only after every download is in the cache).
 //!
 //! The elevated guard first (user decision E3), then the current index (read back and checked
 //! like `index show`; none is "nothing done"), the package by ID and its one version (user
 //! decision E2 a: another version is another package), its downloads (a community package has
-//! none: its page is the way), then each download in turn. The first failure ends the command;
-//! what was fetched before it stays in the cache (each entry only under its pinned hash).
+//! none: its page is the way), then each download in turn, then the unpacking (one line per
+//! file). The first failure ends the command; what was fetched or unpacked before it stays (each
+//! cache entry only under its pinned hash, each file only with its own).
 //!
 //! Exit codes (ADR 0025): 0 when every download is in the cache, and also when a download fails
-//! after this run stored an archive or removed a damaged entry (the lines of what was done, then
-//! the failure); otherwise 1 for a passing or environment failure (`FetchError::transient`: the
+//! after this run stored an archive, removed a damaged entry or unpacked a file (the lines of
+//! what was done, then the failure); otherwise 1 for a passing or environment failure (`FetchError::transient`: the
 //! network, HTTP 5xx and 429, a body that does not match its length, the deadline, a cache entry
 //! in use, the file system) and 3 for a refusal by policy or integrity (nothing changed).
 
@@ -19,11 +22,12 @@ use rerun_core::catalog::store;
 use rerun_core::catalog::{Package, model::Arch, trusted_keys};
 use rerun_core::escape;
 use rerun_core::pkg::download::{self, FetchError, How};
+use rerun_core::pkg::extract::{self, ExtractError};
 use rerun_core::policy::root::{AppDir, Create};
 
 use crate::cli::{Exit, PackageSpec};
 use crate::host::{Host, after_change, shown, standard_user};
-use crate::messages::{FetchedHow, Message, PackageMsg, TxnMsg};
+use crate::messages::{FetchedHow, Message, PackageMsg, TxnMsg, UnpackedHow};
 use crate::out::Out;
 
 fn note<E: Write>(err: &mut Out<E>, m: PackageMsg<'_>, exit: Exit) -> Exit {
@@ -147,8 +151,50 @@ fn run<W: Write, E: Write>(
             sha256: download::cache_name(&got.sha256),
         }));
     }
-    Ok(out
-        .lines(&lines)
-        .and_then(|()| out.flush())
-        .map_or_else(|e| after_change(err, e, Exit::Report), |()| Exit::Report))
+    let mut unpacked = Vec::new();
+    let result = extract::extract_noting(host.sys, &app, p, &mut unpacked);
+    for u in &unpacked {
+        if u.how != extract::How::Present {
+            changed = true;
+        }
+        lines.push(Message::Package(PackageMsg::Unpacked {
+            id: escape::text(p.id.as_str()).into_owned(),
+            version: escape::text(&p.version).into_owned(),
+            file: escape::path(u.dest.as_str()).into_owned(),
+            how: match u.how {
+                extract::How::Present => UnpackedHow::Present,
+                extract::How::Extracted => UnpackedHow::Unpacked,
+                extract::How::Replaced => UnpackedHow::Replaced,
+            },
+            len: u.len,
+        }));
+    }
+    let written = out.lines(&lines).and_then(|()| out.flush());
+    match result {
+        Ok(()) => {
+            Ok(written.map_or_else(|e| after_change(err, e, Exit::Report), |()| Exit::Report))
+        }
+        Err(e) => {
+            let exit = if changed {
+                Exit::Report
+            } else {
+                unpack_exit(&e)
+            };
+            let exit = written.map_or_else(|o| after_change(err, o, exit), |()| exit);
+            Err(note(
+                err,
+                PackageMsg::NotUnpacked { error: shown(&e) },
+                exit,
+            ))
+        }
+    }
+}
+
+/// The exit code of an unpacking failure when nothing was changed in this run.
+fn unpack_exit(e: &ExtractError) -> Exit {
+    if e.transient() {
+        Exit::Fatal
+    } else {
+        Exit::Refused
+    }
 }
