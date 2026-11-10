@@ -344,10 +344,16 @@ impl RootPath {
             return fail("not valid Unicode");
         };
         let rest = s.strip_prefix(r"\\?\").unwrap_or(s);
-        if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(r"UNC\") {
+        // `get`, never a byte slice: the text after the prefix may start with a character that
+        // is longer than one byte (a folder named `ü…` at a drive root).
+        let starts = |p: &str| {
+            rest.get(..p.len())
+                .is_some_and(|h| h.eq_ignore_ascii_case(p))
+        };
+        if starts(r"UNC\") {
             return fail("network paths are not supported");
         }
-        if rest.len() >= 7 && rest[..7].eq_ignore_ascii_case("Volume{") {
+        if starts("Volume{") {
             return fail("volume without a drive letter is not supported");
         }
         Self::new(rest)
@@ -468,6 +474,17 @@ mod tests {
         assert!(RootPath::from_final_path(r"\\?\UNC\server\share\g").is_err());
         assert!(RootPath::from_final_path(r"\\?\Volume{1234}\g").is_err());
         assert!(RootPath::from_final_path(r"\\?\C:\").is_err());
+        // A first segment that starts with a multi-byte character (P4-5b: this panicked on a
+        // byte slice), and short texts after the prefix.
+        for ok in [
+            "\\\\?\\D:\\\u{fc}ber",
+            "\\\\?\\D:\\\u{1D400}x",
+            "D:\\\u{1D400}",
+        ] {
+            assert!(RootPath::from_final_path(ok).is_ok(), "{ok}");
+        }
+        assert!(RootPath::from_final_path("\\\\?\\\u{fc}").is_err());
+        assert!(RootPath::from_final_path(r"\\?\U").is_err());
     }
 
     #[test]
