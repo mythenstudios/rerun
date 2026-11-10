@@ -614,7 +614,7 @@ fn fate_of(replace: bool, o: Observed) -> Fate {
     match o {
         Observed::Before | Observed::After if replace => Fate::PreviousBack,
         Observed::Before | Observed::After => Fate::Gone,
-        Observed::Drifted | Observed::Foreign => Fate::Stays,
+        Observed::Drifted | Observed::Foreign | Observed::Kept => Fate::Stays,
     }
 }
 

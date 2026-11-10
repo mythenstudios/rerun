@@ -50,6 +50,11 @@ pub enum Observed {
     Drifted,
     /// Anything else; never overwritten or deleted (D10).
     Foreign,
+    /// P4-8b (E6): a file or folder the op created is exactly as the op left it, and a later
+    /// transaction relies on it: the revert leaves it to them (a hand-over; only `CreateFile` and
+    /// `CreateDir`, `exec::records_fit`). It names no other transaction: the later transactions'
+    /// own records say who relies on it.
+    Kept,
 }
 
 /// How a transaction was closed.
@@ -395,6 +400,12 @@ mod tests {
                 last: 3,
                 request: None,
             },
+            // P4-8b (B1): a created object kept for a later transaction.
+            Record::RevertDone {
+                op: 1,
+                observed: Observed::Kept,
+                old_left: Vec::new(),
+            },
         ]
     }
 
@@ -429,6 +440,26 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// P4-8b (B1): `Kept` is one more value of `RevertDone.observed`, in one written form.
+    #[test]
+    fn a_kept_revert_done_has_one_form() {
+        let head = [9u8; 32];
+        let r = Record::RevertDone {
+            op: 4,
+            observed: Observed::Kept,
+            old_left: Vec::new(),
+        };
+        let bytes = encode(3, &head, &r).unwrap();
+        let s = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            s.ends_with(r#""record":{"revert_done":{"op":4,"observed":"kept","old_left":[]}}}"#),
+            "{s}"
+        );
+        assert_eq!(decode(&bytes, 3, &head), Ok(r));
+        let other = s.replace(r#""kept""#, r#""Kept""#);
+        assert!(decode(other.as_bytes(), 3, &head).is_err());
     }
 
     #[test]

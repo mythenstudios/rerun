@@ -119,6 +119,7 @@ impl fmt::Display for OpText {
             Self::Reverted(Observed::Before | Observed::After) => "reverted",
             Self::Reverted(Observed::Drifted) => "reverted (Rerun's part)",
             Self::Reverted(Observed::Foreign) => "left as found (changed by someone else)",
+            Self::Reverted(Observed::Kept) => "reverted (kept for a later transaction)",
         })
     }
 }
@@ -130,6 +131,9 @@ fn will(o: Observed) -> &'static str {
         Observed::Before => "nothing to do (as before)",
         Observed::Drifted => "Rerun's part will be set back, the rest stays",
         Observed::Foreign => "left as it is (changed by someone else); the transaction stays open",
+        Observed::Kept => {
+            "kept for a later transaction that relies on it (the last revert that relies on it removes it)"
+        }
     }
 }
 
@@ -137,7 +141,7 @@ fn will(o: Observed) -> &'static str {
 fn held_will(o: Observed) -> &'static str {
     match o {
         Observed::After => "nothing to undo (the shared file stays as it is)",
-        Observed::Before | Observed::Drifted | Observed::Foreign => {
+        Observed::Before | Observed::Drifted | Observed::Foreign | Observed::Kept => {
             "nothing to undo (the shared file is no longer as it was kept)"
         }
     }
@@ -150,6 +154,7 @@ fn did(o: Observed) -> &'static str {
         Observed::Before => "was already as before",
         Observed::Drifted => "Rerun's part set back, the rest stays",
         Observed::Foreign => "left as found (changed by someone else)",
+        Observed::Kept => "kept for a later transaction that relies on it",
     }
 }
 

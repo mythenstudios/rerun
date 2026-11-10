@@ -1393,6 +1393,16 @@ fn records_fit(plan: &Plan, ops: &BTreeMap<u16, OpLog>) -> bool {
             None => false,
             // P4-2d: an op of the helper batch exactly when the head says it is a firewall rule.
             Some(op) if log.intent.batch != op.target().is_helper() => false,
+            // P4-8b (B1): only a created file or folder is ever kept for a later transaction.
+            Some(op)
+                if log
+                    .reverted
+                    .as_ref()
+                    .is_some_and(|r| r.observed == Observed::Kept)
+                    && !matches!(op, Op::CreateFile { .. } | Op::CreateDir { .. }) =>
+            {
+                false
+            }
             Some(op) => match op.target() {
                 Target::File { .. } if matches!(op, Op::IniValue { .. }) => {
                     ini::records_fit(op, log)
