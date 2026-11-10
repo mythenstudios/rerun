@@ -351,7 +351,9 @@ fn a_test_key_helper_is_refused_unless_the_cli_is_a_test_build() {
     use super::{check_test_key, holds_test_key};
     use crate::catalog::key::test_key;
     assert!(holds_test_key(test_key::SEED_HEX.as_bytes()));
+    assert!(holds_test_key(test_key::public().bytes()));
     assert!(!holds_test_key(test_key::FOREIGN_SEED_HEX.as_bytes()));
+    assert!(!holds_test_key(test_key::foreign_public().bytes()));
     let sys = installed();
     let image = helper_image(&sys).unwrap();
     check_test_key(&sys, &image, false).unwrap();

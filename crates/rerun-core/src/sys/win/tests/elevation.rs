@@ -353,10 +353,8 @@ fn the_helper_system_has_what_the_chain_needs_and_nothing_else() {
     let unsupported = |k| assert_eq!(k, SysErrorKind::Unsupported);
     unsupported(h.gpu().adapters().unwrap_err().kind);
     unsupported(h.topology().read().unwrap_err().kind);
-    assert_eq!(
-        h.firewall().select(&|_, _| false).unwrap().total,
-        full.firewall().select(&|_, _| false).unwrap().total
-    );
+    // Readable (two enumerations may see different totals: an installer can add a rule).
+    assert!(h.firewall().select(&|_, _| false).unwrap().total > 0);
     let key = RegKey::new(Hive::LocalMachine, RegView::Native, "SOFTWARE");
     unsupported(h.registry().key_exists(&key).unwrap_err().kind);
     unsupported(h.elevation().token_kind().unwrap_err().kind);

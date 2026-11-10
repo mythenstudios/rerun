@@ -17,7 +17,7 @@ use super::super::testfx::{TestRoot, is_elevated, loaded_module, note, sandbox_g
 use super::super::{WinFirewall, WinFirewallWrite, WinHelperSystem, WinRegistry, WinSystem};
 use crate::sys::contract::firewall_read_contract;
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView};
-use crate::sys::{Firewall, FirewallWrite, FwRule, Registry, SysResult, System};
+use crate::sys::{Firewall, FirewallWrite, FwRule, Registry, System};
 
 /// The read contract against this machine's firewall, through `WinFirewall` and `WinSystem`.
 #[test]
@@ -157,6 +157,9 @@ fn com_and_the_process_environment() {
 /// Where the [SB] firewall tests keep their folders (the CI runner's sandbox layout).
 const SB_BASE: &str = r"C:\RerunSandbox\fw";
 
+/// The name prefix of the length probes: every rule of it is the probe's own.
+const SB_LEN: &str = "Rerun - sb-len - ";
+
 /// A Rerun rule of the one form for `program`, op `op` of a fixed [SB] transaction.
 fn sb_rule(topo: &str, op: u16, program: &str) -> FwRule {
     use crate::catalog::model::Id;
@@ -177,38 +180,85 @@ fn sb_named(name: &str) -> Vec<FwRule> {
     WinFirewall.select(&|n, _| n == name).unwrap().rules
 }
 
-/// Adds `r` directly (no read-back check), runs `f` on what reads back, removes it by name.
-fn sb_probe<T>(r: &FwRule, f: impl FnOnce(SysResult<()>, Vec<FwRule>) -> T) -> T {
+/// Every rule whose name starts with [`SB_LEN`] (ASCII case ignored, so a rule the firewall
+/// stored with a changed or cut name is found too).
+fn sb_len_rules() -> Vec<FwRule> {
+    WinFirewall
+        .select(&|n, _| {
+            n.get(..SB_LEN.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(SB_LEN))
+        })
+        .unwrap()
+        .rules
+}
+
+/// Removes every rule of [`SB_LEN`] by the name it reads back with.
+fn sb_len_clean() {
+    for r in sb_len_rules() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "[SB] write contract: removes the length probe's own rule"
+        )]
+        let _ = WinFirewallWrite.remove_named(&r.name);
+    }
+}
+
+/// A length probe: adds `r` (its name starts with [`SB_LEN`]), says what reads back, removes
+/// every rule of the prefix by its read-back name. `kept` means exactly one rule with the name
+/// and program as set; `rejected` that the add failed and nothing is there; `truncated` and
+/// `changed` name the lengths that came back.
+fn sb_len_probe(r: &FwRule) -> String {
+    assert!(r.name.starts_with(SB_LEN));
+    sb_len_clean();
     #[expect(
         clippy::disallowed_methods,
-        reason = "[SB] write contract: the probe's own add"
+        reason = "[SB] write contract: the length probe's own add"
     )]
     let added = WinFirewallWrite.add(r);
-    let got = sb_named(&r.name);
-    let out = f(added, got);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "[SB] write contract: removes the probe's own rule"
-    )]
-    let _ = WinFirewallWrite.remove_named(&r.name);
-    assert!(sb_named(&r.name).is_empty(), "probe rule left: {}", r.name);
-    out
+    let got = sb_len_rules();
+    sb_len_clean();
+    assert!(sb_len_rules().is_empty(), "a length probe rule was left");
+    let len = |s: &str| s.encode_utf16().count();
+    match (added, got.as_slice()) {
+        (Err(e), []) => format!("rejected ({e})"),
+        (Ok(()), [one]) if one.name == r.name && one.program == r.program => "kept".to_owned(),
+        (_, [one]) if r.name.starts_with(&one.name) && r.program.starts_with(&one.program) => {
+            format!(
+                "truncated (name {} of {}, program {} of {})",
+                len(&one.name),
+                len(&r.name),
+                len(&one.program),
+                len(&r.program)
+            )
+        }
+        (added, got) => format!(
+            "changed (add {added:?}; read back {:?})",
+            got.iter()
+                .map(|g| (len(&g.name), len(&g.program)))
+                .collect::<Vec<_>>()
+        ),
+    }
 }
 
 /// [SB] (`scripts/ci-sandbox.ps1` pass 4, the runner's elevated administrator): the firewall
 /// write contract on the real Windows Firewall (ADR 0023 §6, §14; B12 c, A4 S6 c and d, N8). It
 /// adds and removes rules of group `Rerun` named `Rerun - sb-… - 00000001-00000000000005b0-…`
 /// and leaves none behind (the script removes group `Rerun` again afterwards, also after a
-/// failure). Measured and logged as `MEASURED`:
-/// - the contract (`firewall_write_contract`): every fact of an added rule reads back as set
-///   (fails otherwise, with both rules in the message); `Remove` of a name two rules hold, with
-///   the name in another case, of a missing name;
+/// failure). Every part runs even if an earlier one fails (review S2 of P4-5b): the failures are
+/// collected and asserted at the end, so one mismatch does not hide the other measurements.
+/// Measured and logged as `MEASURED`:
+/// - the contract (`firewall_write_contract`): every fact of an added rule as set (a program
+///   only in another ASCII case is reported as drift, not failed); `Remove` of a name two rules
+///   hold, with the name in lower case, with U+0131 for `i`, of a missing name;
 /// - the product path `policy::firewall::{add_all, remove_all}` on `WinHelperSystem` for
 ///   programs of several forms (spaces, `Program Files`, Rerun's longest): `Done` both ways, or
 ///   the rule as it reads back (normalisation, security L3);
-/// - the longest name and program the firewall takes and returns unchanged;
+/// - the longest name and program the firewall keeps: `kept`, `rejected`, `truncated` or
+///   `changed` per length; only Rerun's own longest (a 106-character name, a 243-character
+///   program) must be kept;
 /// - N8: whether the rule is in the service's registry key when `Add` returns, and whether
-///   `RegFlushKey` on that key opened for reading succeeds;
+///   `RegFlushKey` on that key opened for reading succeeds (a measurement only: the helper
+///   never touches the registry, lead decision, ADR 0023 §15);
 /// - the cost of one add and one remove.
 #[test]
 #[ignore = "[SB] adds and removes real firewall rules; CI runner only (scripts/ci-sandbox.ps1)"]
@@ -220,17 +270,29 @@ fn sb_firewall_write_contract() {
         is_elevated(),
         "[SB] pass 4 runs as the runner's elevated administrator"
     );
+    let mut failures: Vec<String> = Vec::new();
     let exe = format!(r"{SB_BASE}\game.exe");
-    // W1 to W4.
-    let a = sb_rule("sb-contract", 1, &exe);
+
+    // W1 to W4 (the Topo ID holds an `i` for W3b).
+    let a = sb_rule("sb-contract-i", 1, &exe);
     let b = sb_rule("sb-contract", 2, &format!(r"{SB_BASE}\Other.exe"));
-    let facts = firewall_write_contract(&WinFirewall, &WinFirewallWrite, &a, &b)
-        .unwrap_or_else(|e| panic!("MEASURED write contract FAILED: {e}"));
-    note(&format!(
-        "MEASURED B12c/S6c Remove: takes every rule of the name {}, ignores ASCII case {}, a \
-         missing name is ok {}",
-        facts.takes_every_rule_of_the_name, facts.ignores_case, facts.missing_name_is_ok
-    ));
+    match firewall_write_contract(&WinFirewall, &WinFirewallWrite, &a, &b) {
+        Ok(f) => note(&format!(
+            "MEASURED write contract: program case drift {}; B12c/S6c Remove: takes every rule \
+             of the name {}, lower-case name call ok {} and removed {}, U+0131 twin removed {}, \
+             a missing name ok {}",
+            f.program_case_drift,
+            f.takes_every_rule_of_the_name,
+            f.case_remove_ok,
+            f.ignores_case,
+            f.unicode_twin_removes,
+            f.missing_name_is_ok
+        )),
+        Err(e) => {
+            note(&format!("MEASURED write contract FAILED: {e}"));
+            failures.push(format!("write contract: {e}"));
+        }
+    }
 
     // The product path for programs of several forms (L3: normalised facts end RolledBack).
     let longest = {
@@ -239,7 +301,6 @@ fn sb_firewall_write_contract() {
         format!("{head}{}.exe", "a".repeat(fill))
     };
     let hs = WinHelperSystem::new();
-    let mut normalised = Vec::new();
     for (i, program) in [
         format!(r"{SB_BASE}\Game Folder\bin\Game.exe"),
         r"C:\Program Files\RerunFwProbe\Game.exe".to_owned(),
@@ -263,106 +324,97 @@ fn sb_firewall_write_contract() {
         ));
         if added != Written::Done(vec![Observed::After]) {
             note(&format!("MEASURED normalised: set {r:?}\n  read {seen:?}"));
-            normalised.push(program.clone());
+            failures.push(format!("product path {program}: {added:?}"));
         }
         // Whatever happened, nothing of it stays.
         if !sb_named(&r.name).is_empty() {
             #[expect(clippy::disallowed_methods, reason = "[SB] clean-up of its own rule")]
             let _ = WinFirewallWrite.remove_named(&r.name);
         }
-        assert!(sb_named(&r.name).is_empty(), "left: {}", r.name);
+        if !sb_named(&r.name).is_empty() {
+            failures.push(format!("left: {}", r.name));
+        }
     }
 
-    // The longest name and program the firewall returns unchanged.
+    // The longest name and program the firewall keeps.
     let base = sb_rule("sb-len", 30, &exe);
     for n in [106_usize, 255, 256, 260, 1024, 4096, 10_000] {
         let mut r = base.clone();
-        r.name = format!(
-            "Rerun - sb-len - {}",
-            "n".repeat(n - "Rerun - sb-len - ".len())
-        );
-        let verdict = sb_probe(&r, |added, got| match added {
-            Err(e) => format!("refused ({e})"),
-            Ok(()) if got.len() == 1 && got[0].name == r.name => "kept".to_owned(),
-            Ok(()) => format!(
-                "changed: {:?}",
-                got.iter().map(|g| g.name.len()).collect::<Vec<_>>()
-            ),
-        });
+        r.name = format!("{SB_LEN}{}", "n".repeat(n - SB_LEN.len()));
+        let verdict = sb_len_probe(&r);
         note(&format!("MEASURED name length {n}: {verdict}"));
-        if n == 106 {
-            assert_eq!(
-                verdict, "kept",
-                "Rerun's longest rule name (106 characters)"
-            );
+        if n == 106 && verdict != "kept" {
+            failures.push(format!("Rerun's longest rule name (106): {verdict}"));
         }
     }
     for n in [243_usize, 259, 260, 261, 300, 1024, 4096, 32_000] {
         let mut r = base.clone();
-        r.name = format!("Rerun - sb-len - program-{n}");
+        r.name = format!("{SB_LEN}program-{n}");
         let head = format!(r"{SB_BASE}\");
         r.program = format!("{head}{}.exe", "p".repeat(n - head.len() - ".exe".len()));
-        let verdict = sb_probe(&r, |added, got| match added {
-            Err(e) => format!("refused ({e})"),
-            Ok(()) if got.len() == 1 && got[0].program == r.program => "kept".to_owned(),
-            Ok(()) => format!(
-                "changed: {:?}",
-                got.iter()
-                    .map(|g| g.program.chars().count())
-                    .collect::<Vec<_>>()
-            ),
-        });
+        let verdict = sb_len_probe(&r);
         note(&format!("MEASURED program length {n}: {verdict}"));
-        if n == 243 {
-            assert_eq!(verdict, "kept", "Rerun's longest program (243 characters)");
+        if n == 243 && verdict != "kept" {
+            failures.push(format!("Rerun's longest program (243): {verdict}"));
         }
     }
 
     // N8: the service's registry key right after Add returns, and RegFlushKey on it.
-    let key = RegKey::new(
-        Hive::LocalMachine,
-        RegView::Native,
-        r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules",
-    );
+    const RULES_KEY: &str =
+        r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules";
+    let key = RegKey::new(Hive::LocalMachine, RegView::Native, RULES_KEY);
     let r = sb_rule("sb-n8", 40, &exe);
-    let in_registry = sb_probe(&r, |added, _| {
-        added.unwrap();
-        let marker = format!("|Name={}|", r.name);
-        WinRegistry::new()
-            .unwrap()
-            .values(&key)
-            .map(|vals| {
-                vals.iter().any(|(_, v)| match v {
-                    RegValue::String(s) | RegValue::ExpandString(s) => s.contains(&marker),
-                    _ => false,
-                })
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "[SB] write contract: the N8 probe's own add"
+    )]
+    let added = WinFirewallWrite.add(&r);
+    let marker = format!("|Name={}|", r.name);
+    let in_registry = WinRegistry::new()
+        .map_err(|e| e.to_string())
+        .and_then(|reg| reg.values(&key).map_err(|e| e.to_string()))
+        .map(|vals| {
+            vals.iter().any(|(_, v)| match v {
+                RegValue::String(s) | RegValue::ExpandString(s) => s.contains(&marker),
+                _ => false,
             })
-            .map_err(|e| e.to_string())
-    });
+        });
     let flushed = super::super::reg::open(
         &super::super::reg::Root::LocalMachine,
-        r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules",
+        RULES_KEY,
         super::super::reg::ReadAccess::Query,
         super::super::reg::View::Native,
     )
     .and_then(|k| super::super::reg::flush(&k));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "[SB] write contract: removes the N8 probe's own rule"
+    )]
+    let _ = WinFirewallWrite.remove_named(&r.name);
     note(&format!(
-        "MEASURED N8: the rule is in FirewallRules when Add returns: {in_registry:?}; \
-         RegFlushKey on that key opened for KEY_QUERY_VALUE: {flushed:?}"
+        "MEASURED N8: add {added:?}; the rule is in FirewallRules when Add returns: \
+         {in_registry:?}; RegFlushKey on that key opened for KEY_QUERY_VALUE: {flushed:?}"
     ));
+    if added.is_err() {
+        failures.push(format!("N8 add: {added:?}"));
+    }
+
+    let left: Vec<String> = WinFirewall
+        .select(&|_, g| g == GROUP)
+        .unwrap()
+        .rules
+        .into_iter()
+        .map(|r| r.name)
+        .filter(|n| n.contains(" - sb-"))
+        .collect();
+    if !left.is_empty() {
+        failures.push(format!("[SB] rules left behind: {left:?}"));
+    }
     assert!(
-        WinFirewall
-            .select(&|_, g| g == GROUP)
-            .unwrap()
-            .rules
-            .iter()
-            .all(|r| !r.name.contains(" - sb-")),
-        "a [SB] rule was left behind"
-    );
-    assert!(
-        normalised.is_empty(),
-        "MEASURED: the firewall normalises facts of an added rule for {normalised:?} (see the \
-         lines above); policy::firewall must compare the normalised form (security L3)"
+        failures.is_empty(),
+        "{} failure(s), see the MEASURED lines:\n{}",
+        failures.len(),
+        failures.join("\n")
     );
 }
 
@@ -373,7 +425,8 @@ fn sb_firewall_write_contract() {
 /// helper says `Refused(Index)`), and (2) a remove request for a rule of Rerun's form this test
 /// added: `Done` with the op `Before`, the rule gone, through the helper's own COM write side
 /// with every privilege but `SeChangeNotifyPrivilege` dropped (ADR 0023 §3 step 2: "the firewall
-/// needs none", measured here).
+/// needs none", measured here). First (N5 of P4-2c on the real binary): the installed helper's
+/// bytes hold the test key, and the check a release CLI runs refuses it.
 #[test]
 #[ignore = "[SB] adds and removes a real firewall rule and starts the installed helper; CI runner only"]
 fn sb_test_key_helper_removes_a_rule() {
@@ -401,6 +454,14 @@ fn sb_test_key_helper_removes_a_rule() {
     );
     let sys = WinSystem::new().unwrap();
     let image = helper_image(&sys).unwrap_or_else(|e| panic!("the helper is not installed: {e}"));
+    // N5 on the real installed binary: a release CLI would refuse this test-key helper.
+    let bytes = std::fs::read(image.path.path()).unwrap();
+    assert!(
+        crate::policy::root::holds_test_key(&bytes),
+        "the installed test-key helper does not hold the test key"
+    );
+    assert!(crate::policy::root::check_test_key(&sys, &image, false).is_err());
+    crate::policy::root::check_test_key(&sys, &image, true).unwrap();
     let base = std::path::PathBuf::from(format!(r"{SB_BASE}\helper"));
     let _ = std::fs::remove_dir_all(&base);
     for d in ["elevate", "index", "game"] {

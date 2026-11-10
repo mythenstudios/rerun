@@ -346,16 +346,22 @@ fn violations(c: &Case, got: Got) -> Vec<String> {
 /// FC3 for `k` and `p`, with the journal flush `skip` switched off; stops at the first
 /// violation containing `want`.
 fn matrix(k: Kind, p: Phase, skip: Option<FlushSite>, want: Option<&str>) -> (Vec<String>, usize) {
-    matrix_with(k, p, skip, want, false)
+    matrix_with(k, p, skip, want, false, |_, _, v| v)
 }
 
-/// [`matrix`] in the durability model `lazy` of the fake firewall (FC5).
+/// What a case of the matrix reports, from the violations [`violations`] found (FC5 judges them
+/// itself).
+type Judge = fn(&Case, Phase, Vec<String>) -> Vec<String>;
+
+/// [`matrix`] in the durability model `lazy` of the fake firewall, with `judge` over each case's
+/// violations (FC5).
 fn matrix_with(
     k: Kind,
     p: Phase,
     skip: Option<FlushSite>,
     want: Option<&str>,
     lazy: bool,
+    judge: Judge,
 ) -> (Vec<String>, usize) {
     let mut found = Vec::new();
     let mut runs = 0;
@@ -381,7 +387,8 @@ fn matrix_with(
                     (Domain::Volume('D'), cut_d),
                 ]));
                 runs += 1;
-                for x in violations(&c, got) {
+                let v = violations(&c, got);
+                for x in judge(&c, p, v) {
                     let hit = want.is_some_and(|w| x.contains(w));
                     found.push(format!(
                         "{k:?} {p:?} after {a:?}, cut C {cut_c} D {cut_d}: {x}"
@@ -436,40 +443,95 @@ fn fc4_without_the_helper_batch_flush_a_rule_is_left_behind() {
     });
 }
 
+/// FC5's judge of one case in the lazy model (review S4 of P4-5b). Exactly two outcomes are
+/// expected, each in its own phase, and each is followed to its end:
+/// - `Apply`: a durable `Applied` whose rules a power loss took (`LAZY lost-add`): the recovery
+///   then ends identical (the revert observes `Before`).
+/// - `Revert`: a recorded removal (a durable `Closed`, or a durable `RevertDone` the recovery
+///   does not redo) whose rules came back (`LAZY back`): the recovery ends with the game folder
+///   identical, every rule left is one of the plan's (Rerun's name form, this transaction), and
+///   `firewall_orphans` lists exactly those (`rerun status`, ADR 0023 §6, N6).
+///
+/// Anything else is `UNEXPECTED …`.
+fn lazy_judge(c: &Case, p: Phase, v: Vec<String>) -> Vec<String> {
+    use crate::policy::firewall::RuleName;
+    if v.is_empty() {
+        return v;
+    }
+    let all = |pat: &[&str]| v.iter().all(|x| pat.iter().any(|q| x.contains(q)));
+    if p == Phase::Apply && all(&["Applied durable, change lost"]) {
+        let r = recover(c);
+        return vec![if r.is_empty() {
+            "LAZY lost-add".to_owned()
+        } else {
+            format!("UNEXPECTED: the recovery after a lost add: {r:?}")
+        }];
+    }
+    if p == Phase::Revert
+        && all(&[
+            "Closed durable, revert lost",
+            "not identical after recovery: game [],",
+        ])
+    {
+        // `violations` ran the recovery unless the transaction was durably closed; run it in
+        // that case too (it skips a closed transaction).
+        if v.iter().any(|x| x.contains("Closed durable")) {
+            let _ = recover(c);
+        }
+        let (game, scope) = c.fw.snap();
+        let app = crate::prim::tests::app(&c.fw.sys);
+        let mut orphans: Vec<String> = super::firewall_orphans(&c.fw.sys, &app)
+            .map(|o| o.into_iter().map(|r| r.name.to_string()).collect())
+            .unwrap_or_default();
+        let mut names: Vec<String> = scope.iter().map(|r| r.name.clone()).collect();
+        orphans.sort();
+        names.sort();
+        let ours = scope
+            .iter()
+            .all(|r| RuleName::parse(&r.name).is_some_and(|n| n.txn() == super::fw_tests::txn1()));
+        return vec![
+            if game == c.before.0 && !scope.is_empty() && ours && orphans == names {
+                "LAZY back".to_owned()
+            } else {
+                format!(
+                    "UNEXPECTED after a lost removal: game {:?}, rules {names:?}, orphans {orphans:?}",
+                    c.before.0.diff(&game)
+                )
+            },
+        ];
+    }
+    v.into_iter().map(|x| format!("UNEXPECTED: {x}")).collect()
+}
+
 /// FC5 (ADR 0023 §6, P4-5b): the lazy durability model, the firewall service persisting the
 /// helper's writes some time after its call returned (whether Windows does is the N8 measurement
-/// of the [SB] write contract). The FC3 matrix then finds exactly two kinds of violation, never a
-/// damaged journal, a `Foreign` rule, a changed game folder or a lost `Ok` of the journal: a
-/// durable `Applied` whose rule is gone (the revert observes `Before` and closes), and a recorded
-/// removal (a durable `Closed`, or a durable `RevertDone` the recovery does not redo) whose rule
-/// is back: a Rerun rule under a closed transaction, which `rerun status` lists as owned by no
-/// transaction of this account (ADR 0023 §6, N6; the X row of ADR 0020).
+/// of the [SB] write contract). The FC3 matrix for both plans (one rule; a file op and two
+/// rules) then finds exactly the two outcomes of [`lazy_judge`], each in its phase and followed
+/// to its end, never a damaged journal, a `Foreign` rule, a changed game folder or a lost `Ok`
+/// of the journal. The second is a Rerun rule under a closed transaction, which `rerun status`
+/// lists as owned by no transaction of this account (the X row of ADR 0020 once N8 is measured).
 #[test]
 fn fc5_the_lazy_model_loses_a_rule_or_brings_one_back_and_nothing_else() {
     seams(|| {
         let t = Instant::now();
         let (mut lost_add, mut back, mut total) = (0, 0, 0);
-        // One rule alone: a file op before the batch adds nothing to the firewall's model.
-        let k = Kind::Rules;
-        for p in PHASES {
-            let (found, runs) = matrix_with(k, p, None, None, true);
-            total += runs;
-            for x in &found {
-                if x.contains("Applied durable, change lost") {
-                    lost_add += 1;
-                } else if x.contains("Closed durable, revert lost")
-                    || x.contains("not identical after recovery: game [],")
-                {
-                    // The removal recorded (`Closed`, or a durable `RevertDone` the
-                    // recovery does not redo), the rule back: the game folder is identical.
-                    back += 1;
-                } else {
-                    panic!("FC5: another violation than the lazy model's two: {x}");
+        for k in KINDS {
+            for p in PHASES {
+                let (found, runs) = matrix_with(k, p, None, None, true, lazy_judge);
+                total += runs;
+                for x in &found {
+                    if x.ends_with("LAZY lost-add") {
+                        lost_add += 1;
+                    } else if x.ends_with("LAZY back") {
+                        back += 1;
+                    } else {
+                        panic!("FC5: {x}");
+                    }
                 }
             }
         }
         eprintln!(
-            "FC5: {total} power losses in {:.1} s; an Applied add lost {lost_add}, a closed remove lost {back}",
+            "FC5: {total} power losses in {:.1} s; an Applied add lost {lost_add}, a recorded removal lost {back}",
             t.elapsed().as_secs_f64()
         );
         assert!(

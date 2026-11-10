@@ -1,12 +1,15 @@
-//! [`WinFirewall`]: the firewall's read side (ADR 0023 §6, §8 outcome A, §13; P4-5a), a
-//! hand-written binding of the few `netfw.h` methods Rerun reads, on `windows-sys` types (no
-//! `windows` crate, ADR 0008 amendment P4-5a).
+//! [`WinFirewall`]: the firewall's read side (ADR 0023 §6, §8 outcome A, §13; P4-5a), and
+//! [`WinFirewallWrite`]: its write side (P4-5b); a hand-written binding of the few `netfw.h`
+//! methods Rerun uses, on `windows-sys` types (no `windows` crate, ADR 0008 amendments P4-5a
+//! and P4-5b).
 //!
 //! Bound from `netfw.h` and `oaidl.h` (SDK 10.0.26100), slot numbers pinned by tests: the
 //! `INetFwPolicy2` prefix up to `get_Rules` (slot 18), `INetFwRules` up to `get__NewEnum`
-//! (slot 11), every getter of `INetFwRule` (slots 7 to 41, the setters are placeholders and
-//! never read), `INetFwRule2::get_EdgeTraversalOptions` (43), the getters of `INetFwRule3`
-//! (45 to 55), and `IEnumVARIANT::Next` (3). The IIDs are pinned against the header too.
+//! (slot 11) with `Add` (8) and `Remove` (9), every getter of `INetFwRule` (slots 7 to 41) and
+//! the nine setters of Rerun's rule form (`put_Name` to `put_Action`, slot 42; the other setters
+//! are placeholders and never called), `INetFwRule2::get_EdgeTraversalOptions` (43), the getters
+//! of `INetFwRule3` (45 to 55), and `IEnumVARIANT::Next` (3). The IIDs are pinned against the
+//! header too.
 //!
 //! One [`Firewall::select`] is one enumeration (A4 S11): the MTA is entered for the call
 //! ([`Apartment`]), `HNetCfg.FwPolicy2` is created through `com::create_inproc` (after the
@@ -15,7 +18,11 @@
 //! before `keep` decides whether the rest is read. More than [`MAX_RULES`] rules, a text longer
 //! than [`MAX_TEXT_UTF16`] or an enumeration longer than [`ENUM_DEADLINE`] is `TooLarge`,
 //! never a partial list (the deadline is checked between batches, module constant docs).
-//! Nothing here writes: no setter slot is typed.
+//!
+//! The typed setters, `Add` and `Remove` are reached only through [`WinFirewallWrite`] (a fresh
+//! `HNetCfg.FWRule` object filled with the form's fields, then `Add`; `Remove` by name), which
+//! only `WinHelperSystem` hands out and only `policy::firewall` calls (`clippy.toml`); the read
+//! side never calls them.
 
 #![allow(
     unsafe_code,
@@ -33,8 +40,8 @@ use windows_sys::Win32::System::Variant::{VARIANT, VT_DISPATCH, VT_EMPTY};
 use windows_sys::core::{BSTR, GUID, HRESULT};
 
 use super::com::{
-    Apartment, Bstr, Com, CreateError, DispatchVtbl, E_POINTER, EnvMismatch, Slot, UnknownVtbl,
-    Variant, Vtable, create_inproc,
+    Apartment, Bstr, BstrError, Com, CreateError, DispatchVtbl, E_POINTER, EnvMismatch, Slot,
+    UnknownVtbl, Variant, Vtable, create_inproc,
 };
 use crate::sys::firewall::{FwRest, FwRule, FwRule3, FwSelection, MAX_RULES, MAX_TEXT_UTF16};
 use crate::sys::{Firewall, FirewallWrite, SysError, SysErrorKind, SysResult};
@@ -207,9 +214,11 @@ enum Fail {
     /// The call returned a text longer than `MAX_TEXT_UTF16`: Rerun's own bound, never mixed
     /// up with an `HRESULT` a getter returns itself.
     TooLong(&'static str),
-    /// A text to set holds a NUL or is longer than `MAX_TEXT_UTF16` (or its `BSTR` could not
-    /// be allocated): nothing was set.
+    /// A text to set holds a NUL or is longer than `MAX_TEXT_UTF16`: nothing was set.
     Text(&'static str),
+    /// The `BSTR` of a text to set could not be allocated (`SysAllocStringLen`): nothing was
+    /// set.
+    Alloc(&'static str),
 }
 
 /// `$com.$slot(out)` for a `BSTR` property, bounded: `Result<String, Fail>`. `$slot` must be a
@@ -267,7 +276,10 @@ macro_rules! flag {
 macro_rules! put_text {
     ($com:expr, $slot:ident, $call:literal, $value:expr) => {{
         let c = &$com;
-        let b = Bstr::new($value, MAX_TEXT_UTF16).ok_or(Fail::Text($call))?;
+        let b = Bstr::new($value, MAX_TEXT_UTF16).map_err(|e| match e {
+            BstrError::Text => Fail::Text($call),
+            BstrError::Alloc => Fail::Alloc($call),
+        })?;
         // SAFETY: `c` is a live interface whose vtable types `$slot` as a BSTR setter (netfw.h,
         // pinned by the slot test); `b.0` is a valid BSTR that outlives the call.
         let hr = unsafe { (c.vtbl().$slot)(c.as_raw(), b.0) };
@@ -428,7 +440,8 @@ impl Com<RuleVtbl> {
 /// Why an enumeration or a write stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EnumError {
-    Create(CreateError),
+    /// The class (`HNetCfg.FwPolicy2` or `HNetCfg.FWRule`) was not created.
+    Create(&'static str, CreateError),
     Apartment(HRESULT),
     Call(Fail),
     /// A collection element that is no `VT_DISPATCH`.
@@ -451,7 +464,7 @@ fn rule_collection() -> Result<Com<RulesVtbl>, EnumError> {
     // SAFETY: `PolicyVtbl` is the vtable prefix of INetFwPolicy2, the interface IID_POLICY2
     // names.
     let policy = unsafe { create_inproc::<PolicyVtbl>(&NetFwPolicy2, &IID_POLICY2) }
-        .map_err(EnumError::Create)?;
+        .map_err(|e| EnumError::Create("HNetCfg.FwPolicy2", e))?;
     let mut raw = ptr::null_mut();
     // SAFETY: `policy` is a live INetFwPolicy2; slot 18 is get_Rules; `raw` is a valid location.
     let hr = unsafe { (policy.vtbl().get_rules)(policy.as_raw(), &mut raw) };
@@ -540,8 +553,8 @@ fn add_rule(r: &FwRule) -> Result<(), EnumError> {
     let _apartment = Apartment::enter().map_err(EnumError::Apartment)?;
     let rules = rule_collection()?;
     // SAFETY: `RuleVtbl` is the vtable of INetFwRule, the interface IID_RULE names.
-    let obj =
-        unsafe { create_inproc::<RuleVtbl>(&NetFwRule, &IID_RULE) }.map_err(EnumError::Create)?;
+    let obj = unsafe { create_inproc::<RuleVtbl>(&NetFwRule, &IID_RULE) }
+        .map_err(|e| EnumError::Create("HNetCfg.FWRule", e))?;
     let (name, grouping) = obj.name_and_group()?;
     if obj.read(name, grouping)?.rest != r.rest {
         return Err(EnumError::Rest);
@@ -567,19 +580,19 @@ fn remove_rule(name: &str) -> Result<(), EnumError> {
 
 fn sys_error(e: EnumError, t: &str) -> SysError {
     match e {
-        EnumError::Create(CreateError::Env(EnvMismatch::Var(v))) => SysError::new(
+        EnumError::Create(_, CreateError::Env(EnvMismatch::Var(v))) => SysError::new(
             SysErrorKind::Other,
             format!("{t}: the environment variable {v} does not name the Windows folder"),
         ),
-        EnumError::Create(CreateError::Env(EnvMismatch::Windows(c))) => {
+        EnumError::Create(_, CreateError::Env(EnvMismatch::Windows(c))) => {
             SysError::new(SysErrorKind::Other, format!("{t}: the Windows folder")).with_win32(c)
         }
-        EnumError::Create(CreateError::Com(hr)) => {
-            SysError::new(kind_of_hresult(hr), format!("{t}: HNetCfg.FwPolicy2")).with_hresult(hr)
+        EnumError::Create(class, CreateError::Com(hr)) => {
+            SysError::new(kind_of_hresult(hr), format!("{t}: {class}")).with_hresult(hr)
         }
-        EnumError::Create(CreateError::NotAllowed) => SysError::new(
+        EnumError::Create(class, CreateError::NotAllowed) => SysError::new(
             SysErrorKind::Unsupported,
-            format!("{t}: a COM class outside the allowlist"),
+            format!("{t}: {class}, a COM class outside the allowlist"),
         ),
         EnumError::Apartment(hr) => {
             SysError::new(SysErrorKind::Other, format!("{t}: CoInitializeEx")).with_hresult(hr)
@@ -597,6 +610,10 @@ fn sys_error(e: EnumError, t: &str) -> SysError {
         EnumError::Call(Fail::Text(call)) => SysError::new(
             SysErrorKind::Other,
             format!("{t}: {call}: a text with a NUL or longer than {MAX_TEXT_UTF16} units"),
+        ),
+        EnumError::Call(Fail::Alloc(call)) => SysError::new(
+            SysErrorKind::Other,
+            format!("{t}: {call}: SysAllocStringLen failed (out of memory)"),
         ),
         EnumError::Rest => SysError::new(
             SysErrorKind::Unsupported,

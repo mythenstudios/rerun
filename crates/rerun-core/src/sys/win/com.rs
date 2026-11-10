@@ -153,6 +153,15 @@ impl<V: Vtable> Drop for Com<V> {
     }
 }
 
+/// Why [`Bstr::new`] made no `BSTR`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BstrError {
+    /// The text holds a NUL or is too long: refused before any allocation.
+    Text,
+    /// `SysAllocStringLen` returned null (out of memory).
+    Alloc,
+}
+
 /// A `BSTR` the caller owns, freed with `SysFreeString` on drop (null allowed).
 pub(super) struct Bstr(pub(super) BSTR);
 
@@ -163,17 +172,17 @@ impl Bstr {
     }
 
     /// A new `BSTR` holding `s` for an `[in] BSTR` parameter (the caller keeps ownership and
-    /// frees it on drop). `None` for a text with a NUL (the firewall would cut it there) or
-    /// longer than `max` UTF-16 units, or when the allocation fails.
-    pub(super) fn new(s: &str, max: usize) -> Option<Self> {
+    /// frees it on drop). [`BstrError::Text`] for a text with a NUL (the firewall would cut it
+    /// there) or longer than `max` UTF-16 units, [`BstrError::Alloc`] when the allocation fails.
+    pub(super) fn new(s: &str, max: usize) -> Result<Self, BstrError> {
         if s.contains('\0') {
-            return None;
+            return Err(BstrError::Text);
         }
         let units: Vec<u16> = s.encode_utf16().collect();
         if units.len() > max {
-            return None;
+            return Err(BstrError::Text);
         }
-        let len = u32::try_from(units.len()).ok()?;
+        let len = u32::try_from(units.len()).map_err(|_| BstrError::Text)?;
         #[expect(
             clippy::disallowed_methods,
             reason = "the one SysAllocStringLen call site (ADR 0008 amendment P4-5b)"
@@ -181,7 +190,11 @@ impl Bstr {
         // SAFETY: `units` is `len` initialised UTF-16 units, alive for the call; the function
         // copies them into a new BSTR (with a terminating NUL) and returns null on failure.
         let b = unsafe { SysAllocStringLen(units.as_ptr(), len) };
-        (!b.is_null()).then_some(Self(b))
+        if b.is_null() {
+            Err(BstrError::Alloc)
+        } else {
+            Ok(Self(b))
+        }
     }
 
     /// The text (`NULL` is empty), lossy for text that is not valid UTF-16; `None` if longer
@@ -265,7 +278,7 @@ impl Drop for Variant {
     }
 }
 
-/// The multithreaded apartment for one firewall read on this thread: `CoUninitialize` on drop
+/// The multithreaded apartment for one firewall call (read or write) on this thread: `CoUninitialize` on drop
 /// if the call took a reference (`S_OK` or `S_FALSE`). A thread already in another apartment
 /// (`RPC_E_CHANGED_MODE`) is used as it is.
 pub(super) struct Apartment(bool);
@@ -276,8 +289,8 @@ impl Apartment {
         let flags = (COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE).cast_unsigned();
         #[expect(
             clippy::disallowed_methods,
-            reason = "rerun-core's second CoInitializeEx call site: the firewall read (ADR 0008 \
-                      amendment P4-5a, ADR 0023 §3 step 6)"
+            reason = "rerun-core's second CoInitializeEx call site: the firewall binding, read and \
+                      write (ADR 0008 amendments P4-5a and P4-5b, ADR 0023 §3 step 6)"
         )]
         // SAFETY: the reserved pointer must be null; the flags are documented COINIT values.
         let hr = unsafe { CoInitializeEx(ptr::null(), flags) };

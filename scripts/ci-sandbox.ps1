@@ -342,7 +342,14 @@ try {
     Remove-Item -LiteralPath $fwDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 Set-Content -LiteralPath "$sb\out\elevated\fw-contract.log" -Value $fwLog -Encoding UTF8
-if (@(Get-NetFirewallRule -Group 'Rerun' -ErrorAction SilentlyContinue).Count -gt 0) { Fail 'pass 4: rules of group Rerun are left' }
+# The final check must not pass because the read failed: every rule is read with -ErrorAction Stop
+# (an empty group would make -Group itself throw), and a failed read fails the pass.
+try {
+    $leftRules = @(Get-NetFirewallRule -ErrorAction Stop | Where-Object { $_.Group -eq 'Rerun' })
+    if ($leftRules.Count -gt 0) { Fail "pass 4: rules of group Rerun are left: $(($leftRules | ForEach-Object { $_.DisplayName }) -join '; ')" }
+} catch {
+    Fail "pass 4: the firewall could not be read for the final check: $($_.Exception.Message)"
+}
 if (Test-Path -LiteralPath $pfRerun) { Fail "pass 4: $pfRerun could not be removed" }
 EndSection
 

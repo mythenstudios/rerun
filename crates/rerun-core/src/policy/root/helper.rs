@@ -231,20 +231,31 @@ const MASKED_TEST_SEED: [u8; 64] = [
     0x96, 0x9d, 0x94, 0xc1, 0xc1, 0x9d, 0x93, 0x92, 0x94, 0x95, 0x95, 0xc4, 0xc7, 0xc4, 0x95, 0x90,
 ];
 
-/// The seed text of the published test key, unmasked (see [`MASKED_TEST_SEED`]).
-fn test_seed() -> [u8; 64] {
-    let mut seed = std::hint::black_box(MASKED_TEST_SEED);
-    for b in &mut seed {
+/// The published test key's public key (`test_key::public()`), each byte XOR `0xA5`, for the
+/// same reason as [`MASKED_TEST_SEED`]: an optimised test build might compute the key at build
+/// time and keep only these 32 bytes instead of the seed text.
+const MASKED_TEST_PUBLIC: [u8; 32] = [
+    0xc9, 0x75, 0xa5, 0x23, 0x71, 0x2c, 0x72, 0x9a, 0x5a, 0x2b, 0x99, 0x86, 0x96, 0x0b, 0xc2, 0x70,
+    0x89, 0x12, 0xbf, 0x56, 0x17, 0x3f, 0x2d, 0x4a, 0xa9, 0xa5, 0x51, 0xea, 0x81, 0x33, 0x08, 0xef,
+];
+
+/// `masked` with every byte XOR `0xA5`, behind `black_box` so it is never folded back into the
+/// binary.
+fn unmask<const N: usize>(masked: [u8; N]) -> [u8; N] {
+    let mut v = std::hint::black_box(masked);
+    for b in &mut v {
         *b ^= 0xA5;
     }
-    seed
+    v
 }
 
-/// Whether `image` (the bytes of a helper) holds the published index test key's seed: a
+/// Whether `image` (the bytes of a helper) holds the published index test key: its seed as hex
+/// text or its public key bytes (the same two forms as the release byte check), i.e. a
 /// `test-key` build, which trusts that key for an add (ADR 0023 §2, A4 S3).
 pub fn holds_test_key(image: &[u8]) -> bool {
-    let seed = test_seed();
-    image.windows(seed.len()).any(|w| w == seed)
+    let seed = unmask(MASKED_TEST_SEED);
+    let public = unmask(MASKED_TEST_PUBLIC);
+    image.windows(seed.len()).any(|w| w == seed) || image.windows(public.len()).any(|w| w == public)
 }
 
 /// [`helper_image`] for a start by this CLI (security N5 of P4-2c): also refused when the

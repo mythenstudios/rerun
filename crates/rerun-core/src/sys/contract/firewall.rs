@@ -17,6 +17,7 @@
 use std::cell::RefCell;
 
 use super::{ContractResult, ensure, ok};
+use crate::fold::fold;
 use crate::sys::firewall::{ACTION_ALLOW, ACTION_BLOCK, DIR_IN, DIR_OUT, FwRule, PROTOCOL_ANY};
 use crate::sys::{Firewall, FirewallWrite};
 
@@ -116,34 +117,45 @@ pub fn firewall_read_contract(fw: &dyn Firewall) -> ContractResult {
     Ok(())
 }
 
-/// What the write contract saw of `INetFwRules::Remove` (measured on Windows by the [SB] write
-/// contract; fixed in the fake).
+/// What the write contract saw (measured on Windows by the [SB] write contract; fixed in the
+/// fake). Every field is a measurement, none fails the contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RemoveFacts {
-    /// `Remove(name)` with two rules of that name took both (B12 c, R10: the design assumes it
-    /// does and counts first).
+pub struct WriteFacts {
+    /// W1: the program of the added rule read back in another ASCII case (every other fact
+    /// exact). `policy::firewall` compares the program with ASCII case ignored, so this is
+    /// drift Rerun tolerates, reported rather than failed (review S2 of P4-5b).
+    pub program_case_drift: bool,
+    /// W2: `Remove(name)` with two rules of that name took both (B12 c, R10: the design assumes
+    /// it does and counts first).
     pub takes_every_rule_of_the_name: bool,
-    /// `Remove(name)` took a rule whose name differs from `name` in ASCII case only (A4 S6 c).
+    /// W3: `Remove` with the name in lower case returned success.
+    pub case_remove_ok: bool,
+    /// W3: after that call no rule of the exact name was left (A4 S6 c).
     pub ignores_case: bool,
-    /// `Remove(name)` of a name no rule holds returned success.
+    /// W3b: `Remove` with every `i` of the name replaced by U+0131 (dotless i, which Unicode
+    /// upper-cases to `I`) took the rule (security review 4 of P4-5b).
+    pub unicode_twin_removes: bool,
+    /// W4: `Remove(name)` of a name no rule holds returned success.
     pub missing_name_is_ok: bool,
 }
 
 /// The write contract of the firewall (ADR 0023 §6, §14; P4-5b), against the fake and, in the
 /// [SB] only, the real Windows Firewall (it adds and removes real rules).
 ///
-/// - **W1** an added rule reads back with exactly the facts it was added with (one rule of its
-///   name; every fact Rerun compares, A4 S6 d).
+/// - **W1** an added rule reads back with the facts it was added with: one rule of its name,
+///   every fact equal, the program equal with ASCII case ignored (as `policy::firewall`
+///   compares it; a case-only difference is [`WriteFacts::program_case_drift`]).
 /// - **W2** two adds of one name are two rules (the firewall does not refuse a duplicate);
-///   `Remove(name)` leaves no rule of that exact name ([`RemoveFacts`] says whether one call
+///   `Remove(name)` leaves no rule of that exact name ([`WriteFacts`] says whether one call
 ///   took both, R10).
-/// - **W3** `Remove` with the name in another ASCII case: measured ([`RemoveFacts`]); the rule
-///   is removed by its exact name afterwards if it is still there.
+/// - **W3** `Remove` with the name in lower case: its result and the read-back are measured;
+///   the rule is removed by its exact name afterwards if it is still there.
+/// - **W3b** `Remove` with the name's `i` as U+0131: measured the same way.
 /// - **W4** `Remove` of a name no rule holds: measured.
 ///
-/// `a` and `b` are two rules of different names that no rule of the firewall holds (folded);
-/// `b`'s name has an upper-case ASCII letter. Every rule the contract adds is removed again,
-/// also when a case fails (by exact name).
+/// `a` and `b` are two rules of different names whose names no rule of the firewall holds,
+/// compared folded; `a`'s name has an ASCII `i`, `b`'s an upper-case ASCII letter. Every rule
+/// the contract adds is removed again, also when a case fails (by exact name).
 ///
 /// # Errors
 /// The first broken rule.
@@ -152,13 +164,20 @@ pub fn firewall_write_contract(
     w: &dyn FirewallWrite,
     a: &FwRule,
     b: &FwRule,
-) -> Result<RemoveFacts, String> {
+) -> Result<WriteFacts, String> {
     let lower = b.name.to_ascii_lowercase();
-    if lower == b.name || a.name.eq_ignore_ascii_case(&b.name) {
-        return Err("setup: b's name needs an upper-case letter, a and b other names".into());
+    if lower == b.name || !a.name.contains('i') || fold(&a.name) == fold(&b.name) {
+        return Err(
+            "setup: a's name needs an `i`, b's an upper-case letter, a and b other names".into(),
+        );
+    }
+    // Before anything is added, so the clean-up below can only meet the contract's own rules.
+    for r in [a, b] {
+        let taken = ok(fw.select(&|n, _| fold(n) == fold(&r.name)), "select folded")?;
+        ensure(taken.rules.is_empty(), "setup: the names are free (folded)")?;
     }
     let r = write_cases(fw, w, a, b, &lower);
-    // Clean up whatever the cases left, by exact name (twice: a duplicate may be left).
+    // Clean up whatever the cases left, by exact name (twice for a: a duplicate may be left).
     for name in [&a.name, &a.name, &b.name] {
         #[expect(
             clippy::disallowed_methods,
@@ -167,7 +186,7 @@ pub fn firewall_write_contract(
         let _ = w.remove_named(name);
     }
     let left = ok(
-        fw.select(&|n, _| n.eq_ignore_ascii_case(&a.name) || n.eq_ignore_ascii_case(&b.name)),
+        fw.select(&|n, _| fold(n) == fold(&a.name) || fold(n) == fold(&b.name)),
         "select after the clean-up",
     )?;
     ensure(left.rules.is_empty(), "the contract leaves no rule behind")?;
@@ -179,13 +198,24 @@ fn named(fw: &dyn Firewall, name: &str) -> Result<Vec<FwRule>, String> {
     Ok(ok(fw.select(&|n, _| n == name), "select by name")?.rules)
 }
 
+/// `got` is `want` with the program equal with ASCII case ignored: `Some(true)` for a
+/// case-only drift of the program, `Some(false)` for exact, `None` otherwise.
+fn same_facts(want: &FwRule, got: &FwRule) -> Option<bool> {
+    let strip = |r: &FwRule| FwRule {
+        program: String::new(),
+        ..r.clone()
+    };
+    (strip(want) == strip(got) && want.program.eq_ignore_ascii_case(&got.program))
+        .then(|| want.program != got.program)
+}
+
 fn write_cases(
     fw: &dyn Firewall,
     w: &dyn FirewallWrite,
     a: &FwRule,
     b: &FwRule,
     lower: &str,
-) -> Result<RemoveFacts, String> {
+) -> Result<WriteFacts, String> {
     #[expect(
         clippy::disallowed_methods,
         reason = "write contract: the add under test"
@@ -196,17 +226,18 @@ fn write_cases(
         reason = "write contract: the remove under test"
     )]
     let remove = |n: &str| w.remove_named(n);
-    for r in [a, b] {
-        ensure(named(fw, &r.name)?.is_empty(), "setup: the names are free")?;
-    }
     // W1.
     ok(add(a), "add a")?;
     let got = named(fw, &a.name)?;
-    if got.as_slice() != std::slice::from_ref(a) {
-        return Err(format!(
-            "W1: an added rule reads back with the facts it was added with:\n  set  {a:?}\n  read {got:?}"
-        ));
+    let program_case_drift = match got.as_slice() {
+        [one] => same_facts(a, one),
+        _ => None,
     }
+    .ok_or_else(|| {
+        format!(
+            "W1: an added rule reads back with the facts it was added with:\n  set  {a:?}\n  read {got:?}"
+        )
+    })?;
     // W2.
     ok(add(a), "add a again")?;
     ensure(
@@ -223,19 +254,31 @@ fn write_cases(
         named(fw, &a.name)?.is_empty(),
         "W2: Remove leaves no rule of the exact name",
     )?;
-    // W3.
+    // W3: the result is recorded, never propagated, and the read-back decides.
     ok(add(b), "add b")?;
-    ok(remove(lower), "remove b by its name in lower case")?;
+    let case_remove_ok = remove(lower).is_ok();
     let ignores_case = named(fw, &b.name)?.is_empty();
     if !ignores_case {
         ok(remove(&b.name), "remove b by its exact name")?;
     }
     ensure(named(fw, &b.name)?.is_empty(), "W3: b removed")?;
+    // W3b.
+    ok(add(a), "add a for W3b")?;
+    let twin = a.name.replace('i', "\u{131}");
+    let _ = remove(&twin);
+    let unicode_twin_removes = named(fw, &a.name)?.is_empty();
+    if !unicode_twin_removes {
+        ok(remove(&a.name), "remove a by its exact name after W3b")?;
+    }
+    ensure(named(fw, &a.name)?.is_empty(), "W3b: a removed")?;
     // W4.
     let missing_name_is_ok = remove(&b.name).is_ok();
-    Ok(RemoveFacts {
+    Ok(WriteFacts {
+        program_case_drift,
         takes_every_rule_of_the_name,
+        case_remove_ok,
         ignores_case,
+        unicode_twin_removes,
         missing_name_is_ok,
     })
 }

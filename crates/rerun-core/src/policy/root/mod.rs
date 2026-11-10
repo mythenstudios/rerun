@@ -45,6 +45,8 @@ use std::path::Path;
 pub(crate) use app::AppSub;
 pub use app::{AppDir, Create, ProfilesDir};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
+#[cfg(test)]
+pub(crate) use helper::check_test_key;
 pub use helper::{
     ADMIN_SIDS, HELPER_EXE, HELPER_FOLDER, HelperImage, MAX_HELPER_BYTES, NotAdminOnly, RootById,
     WRITE_MASK, admin_only, dir_by_id, helper_for_this_build, helper_image, holds_test_key,

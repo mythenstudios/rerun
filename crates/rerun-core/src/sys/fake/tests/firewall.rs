@@ -2,7 +2,7 @@
 //! durability models.
 
 use super::super::{FakeFirewall, FakeSystem};
-use crate::sys::contract::{RemoveFacts, firewall_read_contract, firewall_write_contract};
+use crate::sys::contract::{WriteFacts, firewall_read_contract, firewall_write_contract};
 use crate::sys::firewall::{ACTION_BLOCK, DIR_OUT, FwSelection, PROFILES_ALL, PROTOCOL_ANY};
 use crate::sys::{Firewall, FwRule, SysErrorKind, SysResult, System};
 
@@ -122,8 +122,9 @@ fn the_fake_bounds_texts_like_windows() {
 }
 
 /// The write contract against the fake (P4-5b): its `Remove` takes every rule of the name,
-/// folded, and a missing name is no error (the worst case the design assumes, ADR 0023 §6;
-/// Windows' answer is the [SB] measurement).
+/// folded (also a Unicode case twin: `fold` upper-cases U+0131 to `I`), and a missing name is
+/// no error (the worst case the design assumes, ADR 0023 §6; Windows' answer is the [SB]
+/// measurement).
 #[test]
 fn fake_fulfils_firewall_write_contract() {
     let sys = FakeSystem::builder()
@@ -132,7 +133,7 @@ fn fake_fulfils_firewall_write_contract() {
         .unwrap();
     let fw = sys.fake_firewall();
     let a = rule(
-        "Rerun - contract-a - 00000001-0000000000000001-001",
+        "Rerun - contract-i - 00000001-0000000000000001-001",
         "Rerun",
     );
     let b = rule(
@@ -142,9 +143,12 @@ fn fake_fulfils_firewall_write_contract() {
     let facts = firewall_write_contract(fw, fw, &a, &b).unwrap();
     assert_eq!(
         facts,
-        RemoveFacts {
+        WriteFacts {
+            program_case_drift: false,
             takes_every_rule_of_the_name: true,
+            case_remove_ok: true,
             ignores_case: true,
+            unicode_twin_removes: true,
             missing_name_is_ok: true,
         }
     );
@@ -155,20 +159,32 @@ fn fake_fulfils_firewall_write_contract() {
 }
 
 /// The write contract bites: a firewall that stores another fact than it was given fails W1,
-/// and the contract still removes what it added.
+/// and the contract still removes what it added; a program read back in another ASCII case only
+/// is reported, not failed (it is how `policy::firewall` compares, review S2 of P4-5b); a setup
+/// whose names are taken folded is refused.
 #[test]
 fn the_write_contract_catches_a_normalising_add() {
-    let fw = FakeFirewall::default();
-    fw.normalise_adds(Some(|r: &mut FwRule| r.program.make_ascii_uppercase()));
-    let mut a = rule("Rerun - c - 00000001-0000000000000001-001", "Rerun");
+    let mut a = rule("Rerun - c-i - 00000001-0000000000000001-001", "Rerun");
     a.program = r"C:\Games\game.exe".to_owned();
     let b = rule("Rerun - C2 - 00000001-0000000000000001-002", "Rerun");
+    let fw = FakeFirewall::default();
+    fw.normalise_adds(Some(|r: &mut FwRule| r.description.push('.')));
     let e = firewall_write_contract(&fw, &fw, &a, &b).unwrap_err();
     assert!(e.starts_with("W1"), "{e}");
     assert!(
         fw.rules().is_empty(),
         "the contract cleans up after a failure"
     );
+    let fw = FakeFirewall::default();
+    fw.normalise_adds(Some(|r: &mut FwRule| r.program.make_ascii_uppercase()));
+    let facts = firewall_write_contract(&fw, &fw, &a, &b).unwrap();
+    assert!(facts.program_case_drift);
+    assert!(fw.rules().is_empty());
+    let fw = FakeFirewall::default();
+    fw.push(rule(&a.name.to_ascii_uppercase(), "Other"));
+    let e = firewall_write_contract(&fw, &fw, &a, &b).unwrap_err();
+    assert!(e.contains("setup"), "{e}");
+    assert_eq!(fw.rules().len(), 1, "a refused setup touches no rule");
 }
 
 /// The durability models (ADR 0023 §6, P4-5b): durable on return by default; lazy: the helper's

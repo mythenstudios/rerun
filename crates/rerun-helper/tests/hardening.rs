@@ -92,6 +92,23 @@ fn release_rerun_helper_exe_is_hardened_and_holds_no_test_key() {
         !test_key::holds_test_key(&image),
         "the release rerun-helper.exe holds the index test key"
     );
+    // N5 (P4-2c security review): the CLI's own runtime check agrees on the shipped binary.
+    assert!(!rerun_core::policy::root::holds_test_key(&image));
+}
+
+/// N5 on built binaries: the runtime check a release CLI runs before it starts the installed
+/// helper (`policy::root::holds_test_key`, the seed or the public key, masked in the CLI) finds
+/// the test key in this test build of the helper, which has the feature through the
+/// dev-dependency (the same build as `rerun-cli`'s `only_the_test_build_trusts_the_test_key`),
+/// and agrees with the release byte check of `tests/support/test_key.rs`.
+#[test]
+fn the_cli_s_runtime_check_finds_the_test_key_in_a_test_key_helper() {
+    let image = std::fs::read(env!("CARGO_BIN_EXE_rerun-helper")).unwrap();
+    assert!(
+        test_key::holds_test_key(&image),
+        "the test build should hold the test key: the check would not bite"
+    );
+    assert!(rerun_core::policy::root::holds_test_key(&image));
 }
 
 /// Started from this test (no `runas`), the helper gets past `restrict_dll_search` and drops
