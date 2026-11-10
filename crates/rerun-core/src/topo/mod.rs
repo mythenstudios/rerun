@@ -12,7 +12,10 @@
 //!   nothing.
 //! - [`plan`] (reads through the planners only): the picked variants, at most one per issue.
 //!   `when = no` is refused, `unknown` is planned with a warning; the anti-cheat rule refuses or
-//!   warns per step kind; `package` waits for P4-7. The `firewall_rule` steps (P4-2d) become
+//!   warns per step kind. A `package` step (P4-7) becomes the `file_install` step of the
+//!   package's files for the main executable's architecture (read from its PE header) and the
+//!   Topo's API for it ([`prim::package`]); a package's `requires` must be planned in the same
+//!   plan (shared packages across plans come with P4-8). The `firewall_rule` steps (P4-2d) become
 //!   `FirewallRule` ops after every other op, built only from the anchors of
 //!   `elevate::check_plan` (the helper's own derivation on the game folder as read, A4 S7). A `cpu` step becomes the one `launch_method` step: the Topo's method (`auto` is `direct` when the chain is exactly `[steam]`, else
 //!   `watch`, L10), its `launch.start`, and its `launch.priority`. The steps go to
@@ -31,17 +34,19 @@ pub use policy::{ANTI_CHEAT_RULES, AcRule, StepKind, anti_cheat_rule};
 pub use when::Tri;
 
 use crate::catalog::Catalog;
-use crate::catalog::model::{Chain, Exe, Issue, Method, Status, Topo, TopoStep, Variant, When};
+use crate::catalog::model::{
+    Arch, Chain, Exe, Issue, Method, Package, Status, Topo, TopoStep, Variant, When,
+};
 use crate::detect::exe::anti_cheat;
 use crate::detect::exe::{
     AntiCheat, AntiCheatScan, ExeError, HashLimits, HashOutcome, inspect_exe,
 };
-use crate::detect::pe::{self, PeReadError};
+use crate::detect::pe::{self, Machine, PeReadError};
 use crate::hw::{GpuArchTable, SystemProfile};
 use crate::path::RelPath;
 use crate::plan::{MAX_PICKS, Op, Pick, Plan, PlanError, PlanSource, RootIx};
 use crate::policy::root::GameDir;
-use crate::prim::{self, LaunchMethodSpec, MethodSpec, PlanCtx, Step};
+use crate::prim::{self, GameBuild, LaunchMethodSpec, MethodSpec, PackageRefusal, PlanCtx, Step};
 use crate::sys::SysErrorKind;
 
 /// The Topos of the index that name this Steam app, sorted by ID.
@@ -75,6 +80,9 @@ pub struct ExeCheck {
     pub path: RelPath,
     /// What it is.
     pub state: ExeState,
+    /// Its architecture from the PE header when it matched (`None`: no match, or neither x86
+    /// nor x64).
+    pub arch: Option<Arch>,
 }
 
 /// What the engine read from the game folder for one Topo.
@@ -94,10 +102,16 @@ impl GameFacts {
 
     /// The first executable that matches.
     pub fn main_exe(&self) -> Option<&RelPath> {
-        self.exes
-            .iter()
-            .find(|e| e.state == ExeState::Match)
-            .map(|e| &e.path)
+        self.main().map(|e| &e.path)
+    }
+
+    /// The architecture of [`Self::main_exe`].
+    pub fn main_arch(&self) -> Option<Arch> {
+        self.main().and_then(|e| e.arch)
+    }
+
+    fn main(&self) -> Option<&ExeCheck> {
+        self.exes.iter().find(|e| e.state == ExeState::Match)
     }
 }
 
@@ -107,9 +121,13 @@ pub fn read_game(game: &GameDir<'_>, topo: &Topo) -> GameFacts {
         .matches
         .exes
         .iter()
-        .map(|e| ExeCheck {
-            path: e.path.clone(),
-            state: check_exe(game, e),
+        .map(|e| {
+            let (state, arch) = check_exe(game, e);
+            ExeCheck {
+                path: e.path.clone(),
+                state,
+                arch,
+            }
         })
         .collect();
     GameFacts {
@@ -139,13 +157,22 @@ pub fn anti_cheat_dirs(topo: &Topo) -> Vec<RelPath> {
     dirs
 }
 
-fn check_exe(game: &GameDir<'_>, e: &Exe) -> ExeState {
-    match inspect_exe(
+fn check_exe(game: &GameDir<'_>, e: &Exe) -> (ExeState, Option<Arch>) {
+    let r = inspect_exe(
         game,
         &e.path,
         &pe::Limits::DEFAULT,
         Some(&HashLimits::DEFAULT),
-    ) {
+    );
+    let arch = match &r {
+        Ok(f) => match f.info.headers.machine {
+            Machine::X86 => Some(Arch::X86),
+            Machine::X64 => Some(Arch::X64),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    let state = match r {
         Err(ExeError::Pe(PeReadError::Open { source, .. }))
             if source.kind == SysErrorKind::NotFound =>
         {
@@ -166,7 +193,9 @@ fn check_exe(game: &GameDir<'_>, e: &Exe) -> ExeState {
             }
             other => ExeState::Unreadable(other.to_string()),
         },
-    }
+    };
+    let arch = if state == ExeState::Match { arch } else { None };
+    (state, arch)
 }
 
 // ---------- Anti-cheat and launch ----------
@@ -388,8 +417,6 @@ pub fn select<'t>(read: Vec<(&'t Topo, GameFacts)>) -> (Vec<&'t Topo>, Selection
 pub enum Refusal {
     /// The anti-cheat rule refuses a step of this kind.
     AntiCheat(StepKind),
-    /// A step kind the engine cannot plan yet (`package`: P4-7).
-    NotYet(StepKind),
     /// A `cpu` step, but the Topo's launch cannot carry it.
     Launch(LaunchProblem),
 }
@@ -402,7 +429,6 @@ impl fmt::Display for Refusal {
                 "refused: anti-cheat found, no {} for this game",
                 k.as_str()
             ),
-            Self::NotYet(k) => write!(f, "not yet: {} steps come in a later step", k.as_str()),
             Self::Launch(p) => write!(f, "refused: {p}"),
         }
     }
@@ -454,6 +480,8 @@ pub struct Facts<'a> {
     pub table: Option<&'a GpuArchTable>,
     /// The game folder.
     pub game: &'a GameFacts,
+    /// The packages of the signed index the Topo comes from (sorted by ID).
+    pub packages: &'a [Package],
 }
 
 fn assess(
@@ -472,9 +500,6 @@ fn assess(
         };
         let why = match (r, k, s) {
             (AcRule::Refuse, ..) => Some(Refusal::AntiCheat(k)),
-            // `package` waits for P4-7 (`firewall_rule` is planned since P4-2d, from the anchors of
-            // `elevate::check_plan`).
-            (_, StepKind::Package, _) => Some(Refusal::NotYet(k)),
             (_, _, TopoStep::Cpu(_)) => launch.as_ref().err().map(|p| Refusal::Launch(*p)),
             _ => None,
         };
@@ -545,6 +570,14 @@ pub enum EngineError {
     /// The firewall rules of the picked variants cannot be planned here (A4 S7, P4-2d).
     #[error(transparent)]
     Firewall(Box<crate::elevate::PlanRefusal>),
+    /// A package step cannot be planned for this game (P4-7).
+    #[error("package {id}: {why}")]
+    Package {
+        /// The package ID.
+        id: String,
+        /// Why.
+        why: String,
+    },
 }
 
 /// Every `gpu.arch` of the Topo is declared by `table` (none to check without a table).
@@ -709,6 +742,7 @@ pub fn plan(
     let mut steps = Vec::new();
     let mut planned_launch = None;
     let mut rules = false;
+    let mut planned_packages: Vec<&Package> = Vec::new();
     for (p, (issue, variant)) in picks.iter().zip(resolved) {
         match when::eval(issue.when.as_ref(), facts.profile) {
             Tri::No => return Err(EngineError::WhenNo(p.issue.clone())),
@@ -732,8 +766,13 @@ pub fn plan(
         }));
         for s in &variant.steps {
             match s {
-                // Refused by `assess` above.
-                TopoStep::Package(_) => {}
+                TopoStep::Package(id) => {
+                    let (pkg, spec) = package_step(topo, facts, main_exe, id.as_str())?;
+                    if !planned_packages.iter().any(|q| q.id == pkg.id) {
+                        planned_packages.push(pkg);
+                        steps.push(Step::FileInstall(spec));
+                    }
+                }
                 // Planned below from `elevate::check_plan` (the helper's own derivation).
                 TopoStep::FirewallRule(_) => rules = true,
                 TopoStep::SteamInput(_) => warnings.push(Warning::SteamInput {
@@ -756,6 +795,21 @@ pub fn plan(
                 TopoStep::CompatLayer(c) => steps.push(Step::CompatLayer(c.clone())),
                 TopoStep::IniSet(x) => steps.push(Step::IniSet(x.clone())),
             }
+        }
+    }
+    // A package's shared dependencies come with it in this plan (P4-8 brings them across plans).
+    for p in &planned_packages {
+        if let Some(r) = p
+            .requires
+            .iter()
+            .find(|r| !planned_packages.iter().any(|q| q.id == **r))
+        {
+            return Err(EngineError::Package {
+                id: p.id.to_string(),
+                why: format!(
+                    "it needs package {r}; pick a variant that installs it in the same plan"
+                ),
+            });
         }
     }
     let ctx = PlanCtx {
@@ -789,6 +843,38 @@ pub fn plan(
         launch: planned_launch,
         warnings,
     })
+}
+
+/// A `package` step: the package of the index and its `file_install` step for this game.
+fn package_step<'p>(
+    topo: &Topo,
+    facts: &Facts<'p>,
+    main_exe: &RelPath,
+    id: &str,
+) -> Result<(&'p Package, prim::FileInstallSpec), EngineError> {
+    let refused = |why: String| EngineError::Package {
+        id: id.to_owned(),
+        why,
+    };
+    let p = facts
+        .packages
+        .iter()
+        .find(|p| p.id.as_str() == id)
+        .ok_or_else(|| refused("not in the signed index".to_owned()))?;
+    let api = topo
+        .matches
+        .exes
+        .iter()
+        .find(|e| e.path.same_spelling(main_exe))
+        .map(|e| e.api)
+        .ok_or_else(|| refused("the main executable is not in match.exes (internal)".to_owned()))?;
+    let build = GameBuild {
+        arch: facts.game.main_arch(),
+        api,
+    };
+    let spec = prim::package::file_install(p, &build)
+        .map_err(|e: PackageRefusal| refused(e.to_string()))?;
+    Ok((p, spec))
 }
 
 #[cfg(test)]

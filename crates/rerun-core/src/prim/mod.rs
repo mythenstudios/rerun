@@ -16,6 +16,8 @@
 //! - [`launch_method`]: the launch profile of a Steam game for `rerun-launch` (P3-3c, ADR 0022
 //!   amendment P3-3): one `CreateFile`/`ReplaceFile` with inline content on the plan root
 //!   `<LocalAppData>\Rerun\profiles` (root 1), op 0 of the plan.
+//! - [`package`] (P4-7, ADR 0025 part 2): a Topo's `package` step as the `file_install` step of
+//!   the package's files for this game's architecture and graphics API; pure, no I/O.
 //! - [`StepFile`]: the phase 2 step file `rerun plan <steps.json>` reads (P2-13); since the Topo
 //!   engine (P4-4) the local, unsigned input (L8), removed at the earliest before A6.
 //!
@@ -27,6 +29,7 @@ pub mod compat_layer;
 pub mod file_install;
 pub mod ini_set;
 pub mod launch_method;
+pub mod package;
 pub mod registry_set;
 mod step_file;
 
@@ -39,6 +42,7 @@ pub use launch_method::{
     CpuRuleSpec, LaunchMethodSpec, MachineView, MachineWhy, MethodSpec, ModeSpec, PreferL3Spec,
     PreferSpec, PrioritySpec, SHIM, SelectionShown, on_this_machine, steam_option_text,
 };
+pub use package::{GameBuild, PackageRefusal};
 pub use registry_set::{RegValueEntry, RegistrySetSpec};
 pub use step_file::{
     GameRef, MAX_STEP_FILE, ParseClass, STEP_FILE_FORMAT, StepFile, StepFileError,

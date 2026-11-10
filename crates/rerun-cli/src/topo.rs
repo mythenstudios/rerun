@@ -293,6 +293,7 @@ fn run<W: Write, E: Write>(
             profile: &profile,
             table,
             game: g,
+            packages: catalog.packages(),
         };
         if picks.is_empty() {
             return match topo::report(t, &facts) {

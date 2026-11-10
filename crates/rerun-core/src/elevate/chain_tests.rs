@@ -1206,6 +1206,7 @@ fn facts(tool: ExeState, anti_cheat: AntiCheatScan) -> GameFacts {
     let check = |p: &str, state| ExeCheck {
         path: RelPath::parse(p).unwrap(),
         state,
+        arch: None,
     };
     GameFacts {
         exes: vec![

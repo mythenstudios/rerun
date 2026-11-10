@@ -4,7 +4,8 @@
 //! Sources are files below `<AppDir>\packages\<id>\<version>\` (`id` and `version` by the
 //! rules of `docs/02-topo-format.md`), reached handle-relative through `AppDir` (a reparse
 //! point anywhere on the way is refused), each a plain file of at most 2 GiB whose SHA-256,
-//! streamed here, equals the step's. In phase 2 only test fixtures put files there.
+//! streamed here, equals the step's. `pkg::extract` puts them there (P4-7); before that only
+//! test fixtures did.
 //!
 //! Per target `to` (relative to the game folder): every missing ancestor gets its own
 //! `CreateDir`, top-down and once; a missing target a `CreateFile`; an existing plain file
@@ -118,7 +119,9 @@ pub(crate) fn open_package<'d>(
 
 fn missing(id: &str, version: &str) -> PlanError {
     refuse(format!(
-        "package {} {} is not in Rerun's packages folder",
+        "package {} {} is not in Rerun's packages folder (rerun package fetch {}@{} downloads          and unpacks a package of the signed index)",
+        crate::escape::text(id),
+        crate::escape::text(version),
         crate::escape::text(id),
         crate::escape::text(version)
     ))

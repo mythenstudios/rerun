@@ -6,11 +6,14 @@
 //! - TL `launch`: `auto` resolves to `direct` with `chain: [steam]`, else `watch`; the loader
 //!   requires `start` for `auto`, `direct` and `watch`.
 //! - TP picks: unknown issue or variant, two variants of one issue, `when = no` refused,
-//!   `unknown` planned with a warning, no pick, `package` not yet.
+//!   `unknown` planned with a warning, no pick, a package the index does not hold.
 //! - TA anti-cheat: refused and warned exactly per user decision E4, also the step kinds that
 //!   come later; a dead system released by the Topo; the release is draft only until reviewed.
 //! - TB the plan has the bytes of a step file with the same steps (apart from `source`).
 //! - TC the whole way from a signed index (test key): the source names the index.
+//! - TK `package` (P4-7): the planner's architecture and API filter and refusals; the round trip
+//!   from the cached archive through extraction, the engine, apply, verify and revert; `requires`
+//!   and the anti-cheat rule.
 
 use std::path::Path;
 
@@ -291,6 +294,7 @@ fn plan_with(
         profile,
         table: Some(table()),
         game: &gf,
+        packages: &[],
     };
     plan(&INDEX, t, &facts, &picks(p), &ctx)
 }
@@ -325,6 +329,7 @@ fn tm_matches_by_every_hash_on_the_parsed_handle() {
             profile: &full(),
             table: Some(table()),
             game: &f,
+            packages: &[],
         },
     )
     .unwrap();
@@ -463,13 +468,10 @@ fn tp_pick_rules() {
     ));
     // `when = no` (an AMD system, an NVIDIA issue) is refused.
     assert!(matches!(err(&["nvidia/input"]), EngineError::WhenNo(i) if i == "nvidia"));
-    // `package` waits for P4-7.
+    // A package the index does not hold (the package step itself: `package_tests.rs`).
     assert!(matches!(
         err(&["wrapper/pkg"]),
-        EngineError::Refused {
-            why: Refusal::NotYet(StepKind::Package),
-            ..
-        }
+        EngineError::Package { id, .. } if id == "invented-wrapper"
     ));
 
     // `when = unknown` (no build readable) only on an explicit pick, with a warning.
@@ -491,6 +493,7 @@ fn tp_pick_rules() {
             profile: &blind,
             table: Some(table()),
             game: &facts_of(&sys, &t),
+            packages: &[],
         },
     )
     .unwrap();
@@ -617,6 +620,7 @@ fn ta_anti_cheat_refuses_and_warns_per_e4() {
             profile: &full(),
             table: Some(table()),
             game: &f,
+            packages: &[],
         },
     )
     .unwrap();
@@ -799,6 +803,7 @@ fn tc_from_a_signed_index() {
         profile: &profile,
         table: Some(table()),
         game: &gf,
+        packages: &[],
     };
     let p = plan(c.sha256(), found[0], &facts, &picks(&["cores/limit"]), &ctx).unwrap();
     assert_eq!(&p.plan.source.unwrap().index, c.sha256());
@@ -1063,4 +1068,275 @@ fn tf_firewall_rules_are_planned_last_from_the_anchors() {
                 if matches!(*e, crate::elevate::PlanRefusal::ExeMismatch(_))
         ));
     }
+}
+
+// ---------- TK `package` (P4-7) ----------
+
+use crate::catalog::model::{Api, Arch, Package, PackageFile};
+use crate::exec::tests::{Env, snap_at};
+use crate::journal::{Closing, Observed};
+use crate::path::RelPath;
+use crate::pkg::archive::testfx::{ZipEntry, zip};
+use crate::pkg::extract::extract;
+use crate::pkg::extract_tests::{assets_package, cache, file, package};
+use crate::prim::{FileEntry, FileInstallSpec, GameBuild, PackageRefusal, Step};
+
+/// The wrapper's archive: an x64 and an x86 build of `d3d9.dll`, a `d3d11.dll` and a config.
+fn wrapper_zip() -> Vec<u8> {
+    zip(&[
+        ZipEntry::file("x64/d3d9.dll", b"wrapper d3d9 x64"),
+        ZipEntry::file("x32/d3d9.dll", b"wrapper d3d9 x86"),
+        ZipEntry::file("x64/d3d11.dll", b"wrapper d3d11 x64"),
+        ZipEntry::file("wrapper.ini", b"[wrapper]\r\n"),
+        ZipEntry::file("readme.md", b"never extracted"),
+    ])
+}
+
+fn only(mut f: PackageFile, arch: Option<Arch>, api: Option<Api>) -> PackageFile {
+    f.arch = arch.map(|a| vec![a]);
+    f.api = api.map(|a| vec![a]);
+    f
+}
+
+/// `invented-wrapper` with [`wrapper_zip`]: per architecture and API.
+fn wrapper(archive: &[u8]) -> Package {
+    let mut p = package(
+        "zip",
+        archive,
+        vec![
+            only(
+                file("x64/d3d9.dll", "d3d9.dll", b"wrapper d3d9 x64"),
+                Some(Arch::X64),
+                Some(Api::D3d9),
+            ),
+            only(
+                file("x32/d3d9.dll", "d3d9.dll", b"wrapper d3d9 x86"),
+                Some(Arch::X86),
+                Some(Api::D3d9),
+            ),
+            only(
+                file("x64/d3d11.dll", "d3d11.dll", b"wrapper d3d11 x64"),
+                Some(Arch::X64),
+                Some(Api::D3d11),
+            ),
+            {
+                let mut c = file("wrapper.ini", r"cfg\wrapper.ini", b"[wrapper]\r\n");
+                c.config = true;
+                c
+            },
+        ],
+    );
+    p.id = crate::catalog::model::Id::parse("invented-wrapper").unwrap();
+    p
+}
+
+fn plan_pkgs(
+    sys: &FakeSystem,
+    t: &Topo,
+    packages: &[Package],
+    p: &[&str],
+) -> Result<super::TopoPlan, EngineError> {
+    let gf = facts_of(sys, t);
+    let fr = fr(sys);
+    let store = StoreDir::open(sys, &fr, Path::new(STEAM_LIB)).unwrap();
+    let g = store.game(&fr, "G").unwrap();
+    let a = app(sys);
+    let ctx = PlanCtx {
+        game: &g,
+        app: Some(&a),
+        steam_app: Some(APP),
+        main_exe: None,
+        reg: RegPolicy.reader(sys),
+        app_path: None,
+    };
+    let profile = full();
+    let facts = Facts {
+        profile: &profile,
+        table: Some(table()),
+        game: &gf,
+        packages,
+    };
+    plan(&INDEX, t, &facts, &picks(p), &ctx)
+}
+
+fn sha_of(b: &[u8]) -> [u8; 32] {
+    Sha256::digest(b).into()
+}
+
+#[test]
+fn tk_the_package_planner_filters_by_architecture_and_api() {
+    let p = wrapper(&wrapper_zip());
+    let x64_d3d9 = GameBuild {
+        arch: Some(Arch::X64),
+        api: Api::D3d9,
+    };
+    let spec = crate::prim::package::file_install(&p, &x64_d3d9).unwrap();
+    assert_eq!(
+        spec,
+        FileInstallSpec {
+            package: "invented-wrapper".into(),
+            version: "1.0".into(),
+            files: vec![
+                FileEntry {
+                    from: RelPath::parse("x64/d3d9.dll").unwrap(),
+                    to: RelPath::parse("d3d9.dll").unwrap(),
+                    sha256: sha_of(b"wrapper d3d9 x64"),
+                    config: false,
+                },
+                FileEntry {
+                    from: RelPath::parse("wrapper.ini").unwrap(),
+                    to: RelPath::parse(r"cfg\wrapper.ini").unwrap(),
+                    sha256: sha_of(b"[wrapper]\r\n"),
+                    config: true,
+                },
+            ],
+        }
+    );
+    let x86 = GameBuild {
+        arch: Some(Arch::X86),
+        ..x64_d3d9
+    };
+    let spec = crate::prim::package::file_install(&p, &x86).unwrap();
+    assert_eq!(spec.files[0].from.as_str(), r"x32\d3d9.dll");
+    // Refusals: an unknown architecture, one the package does not name, an API it does not
+    // wrap, nothing left, a community package, a TODO.
+    let refuse = |p: &Package, b: GameBuild| crate::prim::package::file_install(p, &b).unwrap_err();
+    assert_eq!(
+        refuse(
+            &p,
+            GameBuild {
+                arch: None,
+                ..x64_d3d9
+            }
+        ),
+        PackageRefusal::UnknownArch
+    );
+    let mut only_x86 = p.clone();
+    only_x86.arch = crate::catalog::model::ArchList::List(vec![Arch::X86]);
+    assert_eq!(refuse(&only_x86, x64_d3d9), PackageRefusal::Arch("x64"));
+    let mut d3d9_only = p.clone();
+    d3d9_only.apis = Some(vec![Api::D3d9]);
+    assert_eq!(
+        refuse(
+            &d3d9_only,
+            GameBuild {
+                api: Api::D3d11,
+                ..x64_d3d9
+            }
+        ),
+        PackageRefusal::Api("d3d11")
+    );
+    let mut nothing = p.clone();
+    nothing.files.retain(|f| f.api.is_some());
+    assert_eq!(
+        refuse(
+            &nothing,
+            GameBuild {
+                api: Api::Opengl,
+                ..x64_d3d9
+            }
+        ),
+        PackageRefusal::Empty
+    );
+    let mut community = p.clone();
+    community.tier = crate::catalog::model::Tier::Community;
+    assert_eq!(refuse(&community, x64_d3d9), PackageRefusal::Community);
+    let mut todo = p.clone();
+    todo.files[0].sha256 = crate::catalog::model::Hex::parse("TODO").unwrap();
+    assert_eq!(refuse(&todo, x64_d3d9), PackageRefusal::Draft);
+    // An assets package: the build's own folder.
+    let mut a86 = file("dinput8.dll", "dinput8.dll", b"x86 loader");
+    a86.arch = Some(vec![Arch::X86]);
+    let mut a64 = file("dinput8.dll", "dinput8.dll", b"x64 loader");
+    a64.arch = Some(vec![Arch::X64]);
+    let assets = assets_package(b"a", b"b", vec![a86, a64]);
+    let spec = crate::prim::package::file_install(&assets, &x64_d3d9).unwrap();
+    assert_eq!(spec.files.len(), 1);
+    assert_eq!(spec.files[0].from.as_str(), r"x64\dinput8.dll");
+    assert_eq!(spec.files[0].sha256, sha_of(b"x64 loader"));
+}
+
+/// The acceptance round trip of P4-7: a Topo's `package` step from the archive in the cache,
+/// extracted, planned by the engine, applied, verified and reverted; the game folder is then
+/// identical, and only the named files were ever extracted.
+#[test]
+fn tk_package_round_trip_restores_the_game_folder() {
+    let env = Env::new(game_sys());
+    let sys = &env.sys;
+    let t = game_topo(DIRECT);
+    let archive = wrapper_zip();
+    let pkg = wrapper(&archive);
+    let before = snap_at(sys, STEAM_GAME);
+
+    // Not extracted yet: the planner names the command that does it.
+    let e = plan_pkgs(sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("rerun package fetch invented-wrapper@1.0"),
+        "{e}"
+    );
+
+    cache(sys, &archive);
+    extract(sys, &app(sys), &pkg).unwrap();
+    let tp = plan_pkgs(sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap();
+    // The plan is the one of the same file_install step (TB); x64 + d3d9 (the Topo's API).
+    let Step::FileInstall(spec) = &tp.steps[0] else {
+        panic!("{:?}", tp.steps);
+    };
+    let froms: Vec<&str> = spec.files.iter().map(|f| f.from.as_str()).collect();
+    assert_eq!(froms, [r"x64\d3d9.dll", "wrapper.ini"]);
+    // A replace of the game's read-only d3d9.dll and a new config file in the existing cfg.
+    let kinds: Vec<&str> = tp
+        .plan
+        .ops
+        .iter()
+        .map(|o| match o {
+            crate::plan::Op::ReplaceFile { .. } => "replace",
+            crate::plan::Op::CreateFile { .. } => "create",
+            crate::plan::Op::CreateDir { .. } => "dir",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, ["replace", "create"]);
+
+    let a = app(sys);
+    let h = crate::plan::store(&a, &tp.plan.encode().unwrap()).unwrap();
+    drop(a);
+    let txn = env.applied(&h);
+    assert_eq!(
+        crate::exec::tests::read_abs(sys, &format!(r"{STEAM_GAME}\d3d9.dll")),
+        b"wrapper d3d9 x64"
+    );
+    let v = env.verify(&txn);
+    assert!(v.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    let rep = env.revert(&txn).unwrap();
+    assert_eq!(rep.closed, Some(Closing::Reverted));
+    let after = snap_at(sys, STEAM_GAME);
+    assert!(before == after, "not identical: {:#?}", before.diff(&after));
+}
+
+#[test]
+fn tk_requires_and_anti_cheat_hold_for_packages() {
+    let sys = game_sys();
+    let archive = wrapper_zip();
+    let mut pkg = wrapper(&archive);
+    pkg.requires = vec![crate::catalog::model::Id::parse("invented-loader").unwrap()];
+    cache(&sys, &archive);
+    extract(&sys, &app(&sys), &pkg).unwrap();
+    let t = game_topo(DIRECT);
+    let e = plan_pkgs(&sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap_err();
+    assert!(
+        matches!(&e, EngineError::Package { id, why } if id == "invented-wrapper" && why.contains("invented-loader")),
+        "{e}"
+    );
+    // An anti-cheat marker refuses the step before anything else (E4).
+    mkdir(&sys, "EasyAntiCheat");
+    pkg.requires.clear();
+    assert!(matches!(
+        plan_pkgs(&sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]),
+        Err(EngineError::Refused {
+            why: Refusal::AntiCheat(StepKind::Package),
+            ..
+        })
+    ));
 }
