@@ -1,18 +1,16 @@
-# Draft from PCGamingWiki (rerun-workbench draft): facts and links only.
-# Curate it (docs/02-topo-format.md) before it leaves status draft.
 # Page: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II
 format: 1
 id: "assassins-creed-ii"
 title: "Assassin's Creed II"
-status: "draft"
+status: "active"
 rev: 1
+tested_on: [x64]
 match:
   steam_appid: 33230
   exes:
-    # hashes from a local copy of the game: verify its files in Steam first
+    # hashes from an unmodified Steam copy
     - { path: "AssassinsCreedIIGame.exe", sha1: "FDFDD9B80641DFE9C4AB6A63BD5247A2BDD2BE26", sha256: "A4BA454B0E2A9190A42DB631574B694CC0DBDCEC750106C1B0364B70A6E4D17E", api: "d3d9" }
     # UPlayBrowser.exe (also in the folder) is the Ubisoft browser helper, not the game: left out
-# hashes from a local copy: a modified copy (mods, patches) gives wrong hashes
 # PCGW API: Direct3D 9; OpenGL; 32-bit exe yes, 64-bit exe no
 # TODO: PCGW: field of view hackable - https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Video
 # TODO: PCGW: 120 FPS hackable - https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Video
