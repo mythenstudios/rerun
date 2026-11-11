@@ -1265,6 +1265,373 @@ fn sandbox_package_dxvk_and_asi_loader_round_trip() {
     note("sandbox_package_dxvk_and_asi_loader_round_trip: passed, cache and packages removed");
 }
 
+// ---------- The real packages of `packages/` (P4-13b: SB-P1 to SB-P3) ----------
+
+/// The pinned package files of the repository, as the signed index will hold them. The test
+/// parses the file itself, so a changed pin or hash is what the sandbox case runs against.
+const PKG_DGVOODOO2: &str = include_str!("../../../../../../packages/dgvoodoo2.yaml");
+const PKG_LOADER: &str = include_str!("../../../../../../packages/ultimate-asi-loader.yaml");
+const PKG_EAGLEPATCH: &str = include_str!("../../../../../../packages/eaglepatch-ac1.yaml");
+const PKG_SILENTPATCH: &str = include_str!("../../../../../../packages/silentpatch-sa.yaml");
+
+fn repo_package(text: &str) -> Package {
+    let p: Package = serde_saphyr::from_str(text).unwrap_or_else(|e| panic!("{e}"));
+    crate::catalog::check::package(&p, crate::catalog::check::Rules::Release)
+        .unwrap_or_else(|e| panic!("{}: {e}", p.id));
+    p
+}
+
+/// The pinned SHA-256 (upper-case hex) of the file a package puts at `to` for `arch`.
+fn pinned(p: &Package, to: &str, arch: Arch) -> String {
+    let f = p
+        .files
+        .iter()
+        .find(|f| {
+            f.to.as_str().eq_ignore_ascii_case(to)
+                && f.arch.as_ref().is_none_or(|a| a.contains(&arch))
+        })
+        .unwrap_or_else(|| panic!("{} puts nothing at {to} for {arch:?}", p.id));
+    f.sha256.to_string().to_ascii_uppercase()
+}
+
+/// What `file_install` plans for `p` in an x86 game of `api`. `supports_exe_sha1` is cleared: it
+/// asks for the real executable of the game (EaglePatch: AC1), which never goes into CI, so the
+/// case builds the step file by hand, as the plan of P4-13 says.
+fn x86_step(p: &Package, api: Api) -> Step {
+    let mut p = p.clone();
+    p.supports_exe_sha1.clear();
+    let build = GameBuild {
+        arch: Some(Arch::X86),
+        api,
+    };
+    Step::FileInstall(
+        crate::prim::package::file_install(&p, &build).unwrap_or_else(|e| panic!("{}: {e}", p.id)),
+    )
+}
+
+/// Removes a package's folder and its cache entries.
+fn package_leftovers(w: &Sb, p: &Package) {
+    let lad = w
+        .sys
+        .known_folders()
+        .get(KnownFolder::LocalAppData)
+        .unwrap();
+    let _ = std::fs::remove_dir_all(lad.join(r"Rerun\packages").join(p.id.as_str()));
+    for d in downloads(p).unwrap() {
+        let _ = std::fs::remove_file(lad.join(r"Rerun\cache").join(cache_name(d.sha256())));
+    }
+}
+
+/// Downloads `p` through the product path into the real cache, unpacks it into the real
+/// packages folder, and prints what was measured (`MEASURED package` lines, which
+/// `ci-sandbox.ps1` requires): the archive and, per file, our SHA-256 against `tar.exe`'s and
+/// the pin.
+fn fetch_and_measure(w: &Sb, p: &Package) {
+    let windows = w.sys.known_folders().get(KnownFolder::Windows).unwrap();
+    let lad = w
+        .sys
+        .known_folders()
+        .get(KnownFolder::LocalAppData)
+        .unwrap();
+    let cache = lad.join(r"Rerun\cache");
+    w.with(|cx, _| {
+        for d in downloads(p).unwrap() {
+            let got = fetch(&w.sys, &WinHttp::new(), cx.app, &d)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.id));
+            note(&format!(
+                "MEASURED package {} {} archive {}: {} bytes, sha256 {}",
+                p.id,
+                p.version,
+                d.url(),
+                got.len,
+                cache_name(&got.sha256).to_ascii_uppercase()
+            ));
+        }
+        let unpacked = extract(&w.sys, cx.app, p).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(unpacked.len(), layout(p).unwrap().len(), "{unpacked:?}");
+    });
+    let version = lad
+        .join(r"Rerun\packages")
+        .join(p.id.as_str())
+        .join(&p.version);
+    for x in &layout(p).unwrap() {
+        let ours = hex_upper(&Sha256::digest(read(&version.join(x.dest.as_str()))));
+        let d = downloads(p)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.arch() == x.arch)
+            .unwrap();
+        let theirs = bsdtar_sha256(
+            &windows,
+            &cache.join(cache_name(d.sha256())),
+            &w.game.parent().unwrap().join("bsdtar"),
+            &x.from.as_str().replace('\\', "/"),
+        );
+        note(&format!(
+            "MEASURED package {} {} file {}: sha256 {ours} (tar.exe {theirs}, pinned {})",
+            p.id,
+            p.version,
+            x.dest,
+            hex_upper(&x.sha256)
+        ));
+        assert_eq!(ours, theirs, "{}", x.dest);
+        assert_eq!(ours, hex_upper(&x.sha256), "{}", x.dest);
+    }
+}
+
+/// Applies the stored plan `h`, checks `files` (relative path, pinned SHA-256) in the game
+/// folder and that every op is `After` in `verify`, and returns the transaction.
+fn apply_and_check(w: &Sb, h: &PlanHash, files: &[(&str, String)]) -> crate::journal::TxnId {
+    let t = w.apply_ok(h);
+    for (rel_path, sha) in files {
+        assert_eq!(
+            hex_upper(&Sha256::digest(read(&w.game.join(rel_path)))),
+            *sha,
+            "{rel_path}"
+        );
+    }
+    let v = w.with(|cx, _| verify(cx, &t)).unwrap();
+    assert!(v.halted.is_none(), "{v:?}");
+    assert!(v.ops.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    t
+}
+
+/// Reverts `t` and returns how many ops the revert kept for another transaction.
+fn revert_closed(w: &Sb, t: &crate::journal::TxnId) -> usize {
+    let rep = w
+        .with(|cx, _| revert(cx, t))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
+    rep.ops
+        .iter()
+        .filter(|o| o.observed == Observed::Kept)
+        .count()
+}
+
+/// Not a sandbox test: the repository's own package files parse, pass the release rules and
+/// plan for the x86 games the cases below use, so a broken file fails `cargo test`, not only CI.
+#[test]
+fn the_sandbox_package_cases_find_their_packages() {
+    let dg = repo_package(PKG_DGVOODOO2);
+    let loader = repo_package(PKG_LOADER);
+    let eagle = repo_package(PKG_EAGLEPATCH);
+    let silent = repo_package(PKG_SILENTPATCH);
+    for api in [Api::Ddraw, Api::D3d9] {
+        let _ = x86_step(&dg, api);
+    }
+    for p in [&loader, &eagle, &silent] {
+        let _ = x86_step(p, Api::D3d9);
+    }
+    assert_eq!(eagle.requires, std::slice::from_ref(&loader.id));
+    assert_eq!(silent.requires, std::slice::from_ref(&loader.id));
+    assert!(!eagle.supports_exe_sha1.is_empty());
+    assert_eq!(pinned(&dg, "d3d9.dll", Arch::X86).len(), 64);
+}
+
+/// [SB] SB-P1 (P4-13b): dgVoodoo 2.87.6 (`zip`, from the author's release) into an x86 game
+/// folder: a DirectDraw game (`DDraw.dll`, `D3DImm.dll`, `dgVoodoo.conf`) and a Direct3D 9 game
+/// whose old read-only `d3d9.dll` the wrapper replaces (the file's case differs: `D3D9.dll`);
+/// each applied, verified, reverted, the folder identical. Network: the CI sandbox job only;
+/// `ci-sandbox.ps1` fails pass 1 without the `MEASURED package dgvoodoo2` lines.
+#[test]
+#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
+fn sandbox_sb_p1_dgvoodoo2_round_trip() {
+    sandbox_guard();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test gate: the CI opt-in is an environment variable by design, not a path"
+    )]
+    let ci = std::env::var("RERUN_CI_SANDBOX").is_ok_and(|v| v == "1");
+    if !ci {
+        note("sandbox_sb_p1_dgvoodoo2_round_trip: skipped (no network outside the CI job)");
+        return;
+    }
+    super::super::restrict_dll_search().unwrap();
+    let w = Sb::new("sb-p1");
+    let dg = repo_package(PKG_DGVOODOO2);
+    package_leftovers(&w, &dg);
+    fetch_and_measure(&w, &dg);
+
+    let rounds: [(Api, &[&str]); 2] = [
+        (Api::Ddraw, &["DDraw.dll", "D3DImm.dll", "dgVoodoo.conf"]),
+        (Api::D3d9, &["D3D9.dll", "dgVoodoo.conf"]),
+    ];
+    for (api, names) in rounds {
+        let before = w.snap(vec![]);
+        let h = w.plan_steps(&[x86_step(&dg, api)]);
+        let files: Vec<(&str, String)> = names
+            .iter()
+            .map(|n| (*n, pinned(&dg, n, Arch::X86)))
+            .collect();
+        let t = apply_and_check(&w, &h, &files);
+        if api == Api::Ddraw {
+            assert!(!w.game.join("D3D8.dll").exists(), "a d3d8 file for ddraw");
+        }
+        revert_closed(&w, &t);
+        let after = w.snap(vec![]);
+        assert!(before == after, "{api:?}: {:#?}", before.diff(&after));
+    }
+    package_leftovers(&w, &dg);
+    note("sandbox_sb_p1_dgvoodoo2_round_trip: passed, cache and packages removed");
+}
+
+/// [SB] SB-P2 (P4-13b): Ultimate ASI Loader v10.0.2 and EaglePatchAC1 1.1 in one plan, as a
+/// step file (`supports_exe_sha1` asks for the real AC1 executable, which never goes into CI):
+/// `dinput8.dll`, `scripts\EaglePatchAC1.asi` and `.ini` in an x86 game folder, verified,
+/// reverted, identical (the `scripts` folder is gone again). `ci-sandbox.ps1` fails pass 1
+/// without the `MEASURED package eaglepatch-ac1` lines.
+#[test]
+#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
+fn sandbox_sb_p2_asi_loader_and_eaglepatch_round_trip() {
+    sandbox_guard();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test gate: the CI opt-in is an environment variable by design, not a path"
+    )]
+    let ci = std::env::var("RERUN_CI_SANDBOX").is_ok_and(|v| v == "1");
+    if !ci {
+        note(
+            "sandbox_sb_p2_asi_loader_and_eaglepatch_round_trip: skipped (no network outside the CI job)",
+        );
+        return;
+    }
+    super::super::restrict_dll_search().unwrap();
+    let w = Sb::new("sb-p2");
+    let loader = repo_package(PKG_LOADER);
+    let eagle = repo_package(PKG_EAGLEPATCH);
+    for p in [&loader, &eagle] {
+        package_leftovers(&w, p);
+        fetch_and_measure(&w, p);
+    }
+    let before = w.snap(vec![]);
+    let h = w.plan_steps(&[x86_step(&loader, Api::D3d9), x86_step(&eagle, Api::D3d9)]);
+    let t = apply_and_check(
+        &w,
+        &h,
+        &[
+            ("dinput8.dll", pinned(&loader, "dinput8.dll", Arch::X86)),
+            (
+                r"scripts\EaglePatchAC1.asi",
+                pinned(&eagle, "scripts/EaglePatchAC1.asi", Arch::X86),
+            ),
+            (
+                r"scripts\EaglePatchAC1.ini",
+                pinned(&eagle, "scripts/EaglePatchAC1.ini", Arch::X86),
+            ),
+        ],
+    );
+    revert_closed(&w, &t);
+    assert!(
+        !w.game.join("scripts").exists(),
+        "the scripts folder is left"
+    );
+    let after = w.snap(vec![]);
+    assert!(before == after, "{:#?}", before.diff(&after));
+    for p in [&loader, &eagle] {
+        package_leftovers(&w, p);
+    }
+    note("sandbox_sb_p2_asi_loader_and_eaglepatch_round_trip: passed, cache and packages removed");
+}
+
+/// [SB] SB-P3 (P4-13b, the phase 4 acceptance of the hand-over, ADR 0020 amendment P4-8b): two
+/// plugins share the loader. T1 = loader + EaglePatchAC1, T2 = loader + SilentPatch SA (a
+/// second, independent plugin; T2 holds the loader, nothing written for it). In either order
+/// the first revert removes only its own plugin and keeps `dinput8.dll` and the `scripts`
+/// folder for the other, whose revert removes them; the folder is identical to before both.
+/// `ci-sandbox.ps1` fails pass 1 without the `MEASURED sb-p3` lines.
+#[test]
+#[ignore = "only in Windows Sandbox (RERUN_SANDBOX=1), see scripts/sandbox-test.wsb"]
+fn sandbox_sb_p3_two_plugins_share_the_loader() {
+    sandbox_guard();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test gate: the CI opt-in is an environment variable by design, not a path"
+    )]
+    let ci = std::env::var("RERUN_CI_SANDBOX").is_ok_and(|v| v == "1");
+    if !ci {
+        note("sandbox_sb_p3_two_plugins_share_the_loader: skipped (no network outside the CI job)");
+        return;
+    }
+    super::super::restrict_dll_search().unwrap();
+    let w = Sb::new("sb-p3");
+    let loader = repo_package(PKG_LOADER);
+    let eagle = repo_package(PKG_EAGLEPATCH);
+    let silent = repo_package(PKG_SILENTPATCH);
+    for p in [&loader, &eagle, &silent] {
+        package_leftovers(&w, p);
+        fetch_and_measure(&w, p);
+    }
+    let loader_sha = pinned(&loader, "dinput8.dll", Arch::X86);
+    let eagle_asi = pinned(&eagle, "scripts/EaglePatchAC1.asi", Arch::X86);
+    let silent_asi = pinned(&silent, "scripts/SilentPatchSA.asi", Arch::X86);
+    let exists = |rel_path: &str| w.game.join(rel_path).exists();
+    for oldest_first in [true, false] {
+        let before = w.snap(vec![]);
+        let h1 = w.plan_steps(&[x86_step(&loader, Api::D3d9), x86_step(&eagle, Api::D3d9)]);
+        let t1 = apply_and_check(
+            &w,
+            &h1,
+            &[
+                ("dinput8.dll", loader_sha.clone()),
+                (r"scripts\EaglePatchAC1.asi", eagle_asi.clone()),
+            ],
+        );
+        // T2 is planned against the open T1: the loader is held, only the plugin is written.
+        let h2 = w.plan_steps(&[x86_step(&loader, Api::D3d9), x86_step(&silent, Api::D3d9)]);
+        let t2 = apply_and_check(
+            &w,
+            &h2,
+            &[
+                ("dinput8.dll", loader_sha.clone()),
+                (r"scripts\SilentPatchSA.asi", silent_asi.clone()),
+            ],
+        );
+        let (first, second, gone, stays) = if oldest_first {
+            (
+                &t1,
+                &t2,
+                r"scripts\EaglePatchAC1.asi",
+                r"scripts\SilentPatchSA.asi",
+            )
+        } else {
+            (
+                &t2,
+                &t1,
+                r"scripts\SilentPatchSA.asi",
+                r"scripts\EaglePatchAC1.asi",
+            )
+        };
+        let kept = revert_closed(&w, first);
+        assert!(!exists(gone), "{gone} is left");
+        assert!(exists(stays), "{stays} was removed with the other plugin");
+        assert!(
+            exists("dinput8.dll"),
+            "the loader went with the first revert"
+        );
+        assert!(
+            exists("scripts"),
+            "the scripts folder went with the first revert"
+        );
+        let v = w.with(|cx, _| verify(cx, second)).unwrap();
+        assert!(v.halted.is_none(), "{v:?}");
+        revert_closed(&w, second);
+        assert!(!exists("dinput8.dll") && !exists("scripts"));
+        let after = w.snap(vec![]);
+        assert!(
+            before == after,
+            "oldest first {oldest_first}: {:#?}",
+            before.diff(&after)
+        );
+        note(&format!(
+            "MEASURED sb-p3 oldest_first={oldest_first}: the first revert kept {kept} op(s) for the other plugin; the folder is identical after both"
+        ));
+    }
+    for p in [&loader, &eagle, &silent] {
+        package_leftovers(&w, p);
+    }
+    note("sandbox_sb_p3_two_plugins_share_the_loader: passed, cache and packages removed");
+}
+
 // ---------- laa_patch (P4-10) ----------
 
 /// Starts `exe` and returns its exit code and first output line.

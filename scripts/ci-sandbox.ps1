@@ -249,6 +249,17 @@ if (-not $r1) {
     if ($pk.Count -eq 0) { Fail 'pass 1: the package round trip did not run or measured nothing (no MEASURED package line in sandbox-test.log)' }
     else { $pk | ForEach-Object { Write-Host "::notice::$_" } }
 
+    # P4-13b (SB-P1 to SB-P3): the pinned packages of packages/ (dgVoodoo 2, loader + EaglePatch as a
+    # step file, two plugins sharing the loader in both revert orders), each fetched, measured and
+    # round-tripped (sys::win::tests::sandbox, the same run, as the standard user).
+    $pp = @()
+    if (Test-Path -LiteralPath "$out1\sandbox-test.log") {
+        $pp = @(Get-Content -LiteralPath "$out1\sandbox-test.log" | Where-Object { $_ -like 'MEASURED package*' -or $_ -like 'MEASURED sb-p3*' })
+    }
+    foreach ($need in 'MEASURED package dgvoodoo2 ', 'MEASURED package eaglepatch-ac1 ', 'MEASURED package silentpatch-sa ', 'MEASURED sb-p3 oldest_first=True', 'MEASURED sb-p3 oldest_first=False') {
+        if (-not ($pp | Where-Object { $_ -like "$need*" })) { Fail "pass 1: SB-P1..P3 did not run or measured nothing (no '$need' line in sandbox-test.log)" }
+    }
+
     # P4-10: laa_patch of the repository's own 32-bit test program (tests\support\laa_stub.rs):
     # started before the patch, after it and after the revert, it reports whether Windows gave it
     # the large address space (sys::win::tests::sandbox, the same run, as the standard user).
