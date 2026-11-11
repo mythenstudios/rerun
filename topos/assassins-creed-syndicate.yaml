@@ -1,0 +1,61 @@
+# Draft from PCGamingWiki (rerun-workbench draft), completed by hand: facts and links only.
+# Curate it (docs/02-topo-format.md) before it leaves status draft.
+# Page: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_Syndicate
+format: 1
+id: "assassins-creed-syndicate"
+title: "Assassin's Creed Syndicate"
+status: "draft"
+rev: 1
+match:
+  steam_appid: 368500
+  exes:
+    # hashes from a local copy of the game (workbench draft refused: its import scan finds no single API);
+    # api is the page's Direct3D 11, not yet confirmed on a running game. Verify the files in Steam first.
+    - { path: "ACS.exe", sha1: "6666805A1E83D06001D7265CA18D9579C22DC822", sha256: "6E25F759242252F93ACDD79C7E8BE10D5BEDEEE94CE429FF5274D942CA10C5A2", api: "d3d11" }
+    # UplayBrowser.exe (also in the folder) is the Ubisoft browser helper, not the game: left out
+# PCGW API: Direct3D 11; 64-bit exe (the page's community patch needs the x64 ASI loader)
+# TODO launch: chain, method and start (docs/02-topo-format.md, launch.start); never guessed.
+launch:
+  start: "TODO"   # Steam's launch entry: observe, never guess; chain and method are not observed either (game never started; Ubisoft Connect is involved)
+# AC.ini lies in Documents\Assassin's Creed Syndicate (PCGW "Game data"). The game has never been started on the
+# dev machine, so the folder and file do not exist yet; ini_set needs both (it never creates them).
+user_data:
+  documents: "Assassin's Creed Syndicate"
+issues:
+  - id: title-screen-freeze
+    title: "Freeze on the title screen after pressing a key (exclusive fullscreen above 60 Hz)"
+    # No `when`: the source reports Windows 11 (24H2) but PCGW states the cause for any high refresh rate; left empty.
+    when: {}
+    variants:
+      - id: refresh-rate-60
+        status: unverified     # a single Steam thread report, repeated by PCGW
+        kind: fix
+        steps:
+          - ini_set:
+              file: "AC.ini"
+              root: user_data
+              values:
+                - { section: Graphics, key: RefreshRate, value: "60" }
+        tradeoffs: ["The game is limited to 60 Hz in exclusive fullscreen"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Assassin's_Creed_Syndicate#Game_Freezes_on_Main_Title_Screen" }
+          - { type: steam-thread, url: "https://steamcommunity.com/app/368500/discussions/0/601892852260193436/" }
+      - id: borderless
+        status: unverified     # a single user check named by PCGW
+        kind: fix
+        steps:
+          - ini_set:
+              file: "AC.ini"
+              root: user_data
+              values:
+                - { section: Graphics, key: WindowMode, value: "1" }
+        tradeoffs: ["Borderless fullscreen instead of exclusive fullscreen"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Assassin's_Creed_Syndicate#Game_Freezes_on_Main_Title_Screen" }
+# Not taken yet: the open-source PatchFix (ASI plugin, needs Ultimate ASI Loader x64) also stubs the cause of this
+# freeze; it needs packages (repo, release, license, hashes not yet read) and is no Topo step until then.
+# Source named by PCGW: https://github.com/playday3008/PatchFix
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_Syndicate#Black_bars_during_cutscenes_or_squished_image
+# TODO: PCGW: ultrawidescreen hackable - https://www.pcgamingwiki.com/wiki/Assassin's_Creed_Syndicate#Video
+links:
+  pcgw: "Assassin's_Creed_Syndicate"
