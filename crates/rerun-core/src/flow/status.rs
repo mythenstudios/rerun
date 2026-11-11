@@ -59,7 +59,7 @@ pub struct Holder {
 
 /// Per profile ID the newest transaction whose profile op is not reverted, forgotten included
 /// (review S2; a head the status did not build is read on its own).
-pub fn holders(app: &AppDir<'_>, s: &exec::Status) -> Vec<Holder> {
+pub(crate) fn holders(app: &AppDir<'_>, s: &exec::Status) -> Vec<Holder> {
     let mut out: Vec<Holder> = Vec::new();
     for st in &s.txns {
         let read;

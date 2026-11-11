@@ -15,8 +15,6 @@ use std::path::Path;
 use rerun_core::detect::exe::{Candidate, ExeLimits, GameExes, HashOutcome, Main, Role};
 use rerun_core::detect::steam::{self, SteamApp, SteamScan};
 use rerun_core::escape::{self, Shown};
-#[cfg(test)]
-use rerun_core::flow::tally;
 use rerun_core::flow::{self, LibraryEvent, RowScan, failed_games};
 use rerun_core::path::RootPath;
 use rerun_core::policy::root::{ForbiddenRoots, RootError};

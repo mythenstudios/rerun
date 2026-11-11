@@ -89,7 +89,7 @@ pub fn failed_games(exes: &GameExes) -> impl Iterator<Item = &Candidate> {
 }
 
 /// Counts one scanned game.
-pub fn tally(facts: &mut LibraryCounts, exes: &GameExes) {
+pub(crate) fn tally(facts: &mut LibraryCounts, exes: &GameExes) {
     match &exes.main {
         Main::One(_) => facts.one += 1,
         Main::Tied(_) => facts.tied += 1,

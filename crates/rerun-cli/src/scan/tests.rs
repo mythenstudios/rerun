@@ -344,9 +344,6 @@ fn failed_game_executables_are_issues_whatever_the_main_executable() {
     issue: game_dx12.exe: file ends inside a structure at offset 0x3c
 "
     );
-    let mut counts = ScanCounts::default();
-    super::tally(&mut counts, &e);
-    assert_eq!((counts.one, counts.issues), (1, 1));
 }
 
 #[test]

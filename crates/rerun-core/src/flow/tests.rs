@@ -3,11 +3,14 @@
 //! `flow::game` on an index signed with the test key. Here:
 //! - FG1 the guard order: an elevated process stops at the first gate and nothing is read; an
 //!   unknown install folder stops before the forbidden roots; unresolvable forbidden roots stop
-//!   before Rerun's folder; a passed guard never creates Rerun's folder.
+//!   before a Rerun folder that cannot be opened (control: that folder alone is
+//!   `Gate::AppDir`); a passed guard never creates Rerun's folder.
 //! - FF1 to FF3 the fixes of a report: one fix per variant ID with one `Solved` per issue that
 //!   names it (`when` per issue), the refusal per variant kept, warned kinds merged once.
 //! - FL1 the library without Steam: the Steam event, no library, the requested app IDs missing
 //!   once each in the order asked; a `Break` stops the stream and is returned.
+//! - FL2 (moved from `rerun-cli`) the counts: a failed game candidate is an issue whatever
+//!   the main executable, a failed installer is not.
 //! - FS1 the status of an empty Rerun folder: no transaction, no launch folder, no holder.
 
 use std::ops::ControlFlow;
@@ -67,10 +70,12 @@ fn fg1_the_guard_order() {
     assert!(matches!(g, Err(Gate::InstallUnknown(e)) if e == "no current exe"));
     let calls = s.fake_fs().take_calls();
     assert!(calls.is_empty(), "{calls:?}");
-    // Forbidden roots that do not resolve (the Windows folder unknown): before Rerun's folder.
+    // Forbidden roots that do not resolve (the Windows folder unknown) while Rerun's folder
+    // cannot be opened either (a file at its name): the forbidden roots come first.
     let bare = FakeSystem::builder()
         .windows_layout()
         .dir(INSTALL)
+        .file(RERUN, b"not a folder".to_vec())
         .without_known_folder(KnownFolder::Windows)
         .build()
         .unwrap();
@@ -80,6 +85,9 @@ fn fg1_the_guard_order() {
         install: &ok,
     });
     assert!(matches!(g, Err(Gate::Forbidden(_))));
+    // Control: in that world Rerun's folder alone is refused, so a swapped order would give
+    // `Gate::AppDir`.
+    assert!(matches!(open_app(&bare), Err(Gate::AppDir(_))));
     // Passed: Rerun's folder is opened only if it exists, never created.
     let g = guard(Env {
         sys: &s,
@@ -91,7 +99,7 @@ fn fg1_the_guard_order() {
     // Control: a guard that passes reads (the record above bites).
     assert!(!s.fake_fs().take_calls().is_empty());
     s.fake_fs().record_calls(false);
-    assert!(g.app.is_none());
+    assert!(g.app().is_none());
     drop(g);
     assert!(AppDir::open(&s, Create::Never).unwrap().is_none());
     assert!(open_app(&s).unwrap().is_none());
@@ -225,6 +233,48 @@ fn fl1_the_library_without_steam() {
     assert_eq!(facts.counts.apps, 0);
     let stopped = library(&s, &fr, &[], false, &mut |_| ControlFlow::Break("closed"));
     assert_eq!(stopped, Err("closed"));
+}
+
+#[test]
+fn fl2_a_failed_game_candidate_is_an_issue_whatever_the_main_executable() {
+    use crate::detect::exe::{Candidate, ExeError, GameExes, Main, Role, WalkStats};
+    use crate::detect::pe::{PeError, PeErrorKind, PeReadError};
+    use crate::path::RelPath;
+    let failed = |path: &str, role| Candidate {
+        path: RelPath::parse(path).unwrap(),
+        depth: 0,
+        listed_len: 1 << 20,
+        similarity: 0,
+        role,
+        facts: Err(ExeError::Pe(PeReadError::Parse {
+            file: RelPath::parse(path).unwrap(),
+            error: PeError {
+                kind: PeErrorKind::Truncated,
+                offset: Some(0x3c),
+            },
+        })),
+    };
+    let exes = GameExes {
+        stats: WalkStats {
+            complete: true,
+            listed_dirs: 1,
+            entries: 2,
+            exes_found: 2,
+            depth_cut: 0,
+            skipped_dirs: Vec::new(),
+        },
+        candidates: vec![
+            failed("game_dx12.exe", Role::Game),
+            failed("setup.exe", Role::Installer),
+        ],
+        main: Main::One(0),
+        issues: Vec::new(),
+        anti_cheat: crate::detect::exe::AntiCheatScan::default(),
+    };
+    let mut counts = super::LibraryCounts::default();
+    super::library::tally(&mut counts, &exes);
+    // One main executable; the failed game candidate is an issue, the installer is not.
+    assert_eq!((counts.one, counts.issues), (1, 1));
 }
 
 #[test]

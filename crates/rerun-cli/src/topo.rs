@@ -386,7 +386,7 @@ fn run<W: Write, E: Write>(
         // P4-12: the game's folder below Documents only if a picked step sets a file there.
         let user_data = match &t.user_data {
             Some(u) if topo::needs_user_data(t, picks, m.profile) => {
-                match UserDataDir::open(sys, &g.fr, u.base(), u.sub()) {
+                match UserDataDir::open(sys, g.fr(), u.base(), u.sub()) {
                     Ok(d) => Some(d),
                     Err(e) => return Outcome::Failed(heading, e.to_string()),
                 }
@@ -395,7 +395,7 @@ fn run<W: Write, E: Write>(
         };
         let ctx = PlanCtx {
             game: m.game,
-            app: g.app.as_ref(),
+            app: g.app(),
             steam_app: m.steam_app,
             main_exe: None,
             reg: RegPolicy.reader(sys),
@@ -456,7 +456,7 @@ fn run<W: Write, E: Write>(
             show_and_store(
                 host,
                 Stored {
-                    app: g.app,
+                    app: g.into_app(),
                     app_path,
                     bytes,
                     view: *view,

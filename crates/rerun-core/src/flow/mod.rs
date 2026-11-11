@@ -33,12 +33,8 @@ pub use game::{
     Fix, Found, GameRefusal, GameView, IssueView, Lookup, MatchView, Matched, OwnedReport, Solved,
     VariantView, fixes, game, with_topo,
 };
-pub use library::{
-    LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_games, library, tally,
-};
-pub use status::{
-    Holder, StatusView, head, holders, profile_id_of, profile_of, profile_op, status,
-};
+pub use library::{LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_games, library};
+pub use status::{Holder, StatusView, head, profile_id_of, profile_of, profile_op, status};
 
 /// What a job runs against.
 #[derive(Clone, Copy)]
@@ -64,14 +60,34 @@ pub enum Gate {
     AppDir(Box<RootError>),
 }
 
-/// A job past its guards: the forbidden roots, and Rerun's folder if it exists.
+/// A job past its guards: the forbidden roots, and Rerun's folder if it exists. Only
+/// [`guard`] builds one (private fields), so a `Guarded` always went through elevation first.
 pub struct Guarded<'a> {
+    env: Env<'a>,
+    fr: ForbiddenRoots,
+    app: Option<AppDir<'a>>,
+}
+
+impl<'a> Guarded<'a> {
     /// What the job runs against.
-    pub env: Env<'a>,
+    pub fn env(&self) -> Env<'a> {
+        self.env
+    }
+
     /// The forbidden roots, resolved for this job.
-    pub fr: ForbiddenRoots,
+    pub fn fr(&self) -> &ForbiddenRoots {
+        &self.fr
+    }
+
     /// Rerun's folder, opened if it exists (never created by a guard, review S6 of P2-13).
-    pub app: Option<AppDir<'a>>,
+    pub fn app(&self) -> Option<&AppDir<'a>> {
+        self.app.as_ref()
+    }
+
+    /// Rerun's folder, for the step that stores (it may create it then).
+    pub fn into_app(self) -> Option<AppDir<'a>> {
+        self.app
+    }
 }
 
 /// The guards of every job that may lead to a change, in the CLI's order: elevation first (an
@@ -84,7 +100,9 @@ pub fn guard(env: Env<'_>) -> Result<Guarded<'_>, Gate> {
 }
 
 /// The forbidden roots from Rerun's install folder; an unknown folder or roots that do not
-/// resolve stop the job (fail closed). Elevation is not checked (`rerun scan`).
+/// resolve stop the job (fail closed). A read-only part of [`guard`] that skips the elevation
+/// check (E3): only for the CLI's read commands that run elevated (`rerun scan`); a job that
+/// may lead to a change takes [`guard`].
 pub fn forbidden_roots(
     sys: &dyn System,
     install: &Result<PathBuf, String>,
@@ -95,8 +113,9 @@ pub fn forbidden_roots(
     ForbiddenRoots::resolve(sys, dir).map_err(|e| Gate::Forbidden(Box::new(e)))
 }
 
-/// Rerun's folder if it exists, never created. Elevation is not checked (`rerun status`,
-/// `rerun index show`).
+/// Rerun's folder if it exists, never created. A read-only part of [`guard`] that skips the
+/// elevation check (E3): only for the CLI's read commands that run elevated (`rerun status`,
+/// `rerun index show`); a job that may lead to a change takes [`guard`].
 pub fn open_app(sys: &dyn System) -> Result<Option<AppDir<'_>>, Gate> {
     AppDir::open(sys, Create::Never).map_err(|e| Gate::AppDir(Box::new(e)))
 }

@@ -23,7 +23,7 @@ crates/
   rerun-launch/ rerun-helper/ rerun-cpu/ rerun-proto/ rerun-workbench/   unchanged
 app/            the Tauri skeleton, removed once ADR 0026 is decided
 ```
-- Dependencies: `rerun-app → rerun-core` (and `rerun-proto`), never back. Only `rerun-app::ui` names the framework (source rule test). `rerun-helper` never names `flow` (its source rule grows by one name).
+- Dependencies: `rerun-app → rerun-core` (and `rerun-proto`), never back. Only `rerun-app::ui` names the framework (source rule test). `rerun-helper` never names `flow` (its source rule grows by one name, also as a whole word after `rerun_core`).
 - `flow` is a **module of `rerun-core`**, not a crate: it has two users today, and a crate boundary would add nothing but a second public API to keep stable.
 
 ### `rerun_core::flow`
@@ -34,11 +34,13 @@ pub struct Env<'a> { pub sys: &'a dyn System, pub http: &'a dyn Http, pub instal
 
 /// The guards every command runs first, in the CLI's order: elevation (E3), forbidden roots,
 /// Rerun's folder opened if it exists, never created.
-pub struct Guarded<'a> { pub env: Env<'a>, pub fr: ForbiddenRoots, pub app: Option<AppDir<'a>> }
+pub struct Guarded<'a> { env: Env<'a>, fr: ForbiddenRoots, app: Option<AppDir<'a>> } // getters; only `guard` builds one
 pub enum Gate { Elevated(Refusal), InstallUnknown(String), Forbidden(RootError), AppDir(RootError) }
 pub fn guard<'a>(env: Env<'a>) -> Result<Guarded<'a>, Gate>;
-/// The same, but an elevated process passes: only for the CLI's `scan`, `system` and `status`.
-pub fn guard_read<'a>(env: Env<'a>) -> Result<Guarded<'a>, Gate>;
+/// Read-only parts of `guard` without the elevation check (amendment P5-1): only for the CLI's
+/// elevated read commands (`scan`; `status`, `index show`).
+pub fn forbidden_roots(sys: &dyn System, install: &Result<PathBuf, String>) -> Result<ForbiddenRoots, Gate>;
+pub fn open_app(sys: &dyn System) -> Result<Option<AppDir<'_>>, Gate>;
 
 // ---- read side
 pub enum IndexState { None, Current(CatalogFacts), Refused(IndexError) }
@@ -96,7 +98,7 @@ pub fn index_import_bytes(g: &Guarded, index: &[u8], sig: &[u8]) -> Result<Catal
 ```
 
 - **No text, no question.** `flow` returns values; the CLI turns them into `messages` and asks through `confirm`, the app into view models and dialogs. Refusals the user meets often are typed (the game runs, Steam is updating, anti-cheat, an admin-only folder, the helper missing or unsafe, a slot taken, a file held, a foreign change, the index refused, offline); anything else is shown as a generic localized message with the core's English text (escaped) as detail.
-- **Guard order.** `guard` runs the CLI's order unchanged: elevation first (an elevated process reads nothing), then the forbidden roots (fail closed), then Rerun's folder opened, never created (review S6 of P2-13). `guard_read` exists for the CLI's elevated read commands only (user decision E3); `rerun-app` never calls it (source rule).
+- **Guard order.** `guard` runs the CLI's order unchanged: elevation first (an elevated process reads nothing), then the forbidden roots (fail closed), then Rerun's folder opened, never created (review S6 of P2-13). The CLI's elevated read commands (user decision E3) take the read-only parts `forbidden_roots` and `open_app` instead, each only the part it needs (amendment P5-1); `rerun-app` never calls them (source rule).
 - **`Guarded` per job.** Every job builds its own `Guarded`: forbidden roots and the `AppDir` handle are fresh, since Rerun's folder can appear (a CLI run) or vanish between two clicks. Nothing of it is kept for the session.
 - **Plan, shown, store, apply.** `plan` reads only and stores nothing; the app stores a plan only when it is applied (S6: looking at fixes never creates Rerun's folder), the CLI's `plan` stores at once as today. `Previewed` owns the `PlanBytes`, so what is stored and applied is exactly the bytes whose preview was built. The CLI path is `load_stored` → render → `shown` → ask → `apply`; the app path is `plan` → render → `shown` → click → `apply`.
 - **Revert, rebind and forget have a preview too.** `*_preview` runs every check of the operation read only (`revert_check`, `rebind_check`, `verify`) and returns the fates per op, the X12 lines, the prompt state and the cleanup question. `RevertShown`, `RebindShown` and `ForgetShown` carry the transaction and a SHA-256 digest of the fates that were shown; the operation observes again under the lock and returns `Changed` (nothing written, show the preview again) when the fates differ. The closing-line logic of the CLI moves into `revert`.
@@ -182,7 +184,7 @@ pub struct Settings { pub format: u32, pub lang: Option<Lang>, pub theme: ThemeI
 
 ## Consequences
 - `rerun-core` gains `flow` (P5-1 read side, P5-2a plan/store/apply, P5-2b revert/rebind/forget, P5-5b `fetch`), a public settings write path with a new `AppSub` (P5-10) and `WinSystem::with_prompt_owner` (P5-5c, ADR 0023 amendment). The CLI's command modules shrink to rendering; its tests stay as they are.
-- `rerun-app` is created in P5-3, after ADR 0026 and this ADR are accepted; `app/` is removed then. New source rules: `rerun-app` names neither `guard_read` nor `as_raw_str`, and no framework outside `ui`; `rerun-helper` never names `flow`.
+- `rerun-app` is created in P5-3, after ADR 0026 and this ADR are accepted; `app/` is removed then. New source rules: `rerun-app` names neither `flow::forbidden_roots`, `flow::open_app`, `ForbiddenRoots::resolve` nor `AppDir::open` (a `Guarded` comes only from `guard`), nor `as_raw_str`, and no framework outside `ui`; `rerun-helper` never names `flow`.
 - Tests: `flow` against the fake world (the guard order: elevated means nothing read; AC1 shows EaglePatch once with two `Solved`; a Steam update between preview and apply is refused; a state change between revert preview and click is `Changed` with nothing written); the frozen golden plan; `compile_fail` doctests; view models in en and de without a window; worker order, cancellation, closing while writing, waiting for UAC (fake elevation); theme contrast; the loader rule fixtures; hardening checks on the built `rerun-app.exe`. Details in `docs/09-testing.md` with the steps.
 - Docs with the steps: `docs/01-architecture.md` (workspace, `flow`, the frontend section), `docs/07-ui.md`, `docs/08-roadmap.md` (phase 5), `docs/02-topo-format.md` (fix identity), `docs/06-security.md` (the GUI process, the settings file, links), `docs/09-testing.md`; ADR 0016 (the GUI display), ADR 0020 (the executable hash), ADR 0023 (the prompt owner), ADR 0024 (the loader rule) amended; ADR 0001 superseded by ADR 0026.
 
@@ -192,3 +194,13 @@ pub struct Settings { pub format: u32, pub lang: Option<Lang>, pub theme: ThemeI
 - The size limit of the settings file is fixed with P5-10.
 - The CLI and the app at once: the journal lock keeps them apart; the app reloads its views after every write and when "Applied" gains focus, and a held lock is the message "another Rerun operation is running".
 - Which core errors get their own typed refusal beyond the list above follows from the view-model tests; the rest stays generic with the English detail.
+
+## Amendment P5-1 (2026-11-11): the read side as built
+
+The read side of `flow` exists (P5-1); where it differs from the sketch above, this holds:
+
+- **No `guard_read`.** The CLI's read commands each need a different part of the guards today (`scan` the forbidden roots without Rerun's folder, `status` and `index show` Rerun's folder without the forbidden roots, none of them the elevation check); one `guard_read` would have changed their behaviour on errors. They take the read-only parts `forbidden_roots(sys, install)` and `open_app(sys)`, documented as skipping E3. `Guarded` has private fields with getters (`env`, `fr`, `app`, `into_app`): only `guard` builds one. The planned source rule of `rerun-app`: it names neither `flow::forbidden_roots`/`flow::open_app` nor `ForbiddenRoots::resolve`/`AppDir::open`, and builds no `Guarded` but through `guard`.
+- **Signatures.** `library(sys, fr, app_ids, hashes, on: &mut dyn FnMut(LibraryEvent) -> ControlFlow<B>) -> Result<LibraryFacts, B>` (the caller may stop the stream, e.g. a closed output; `LibraryFacts` = counts and the missing app IDs); `status(sys, &AppDir) -> Result<StatusView, JournalError>`; `index_state(Option<&AppDir>) -> IndexState` with `Current(Box<Catalog>)` and `Refused(StoreError)`.
+- **`game`.** `GameView = { app_id, lookup: Lookup<Box<MatchView>> }` (`Lookup`: no index, no Topo, or the Topos read: retired ones aside, then no match, several, or one `MatchView` = the owned report, what was read, the fixes). `GameRow`, `TopoMatch`, `live`, `last_launch` and `warnings` follow in P5-3. `with_topo` (the same lookup with a closure on the one match) is public as a transition, for the CLI's `--pick`, until `flow::plan` (P5-2a).
+- **`Fix`.** Variant and issue IDs as `String`; `packages` and `needs_helper` follow (P5-5); `refused` is the first refusal of any copy of the ID (fail closed) until the loader rule of P5-4 makes the copies identical; the warned kinds are merged.
+- **Untrusted text.** `flow` returns Topo and Steam text as the core holds it; it reaches the app's view models only as `Shown`: the escape happens in the view-model mapping, not in `flow` (as the CLI escapes in its renderers).

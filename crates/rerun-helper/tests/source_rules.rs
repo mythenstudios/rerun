@@ -3,8 +3,9 @@
 //! (`crates/rerun-core/src/elevate`, without its `tests.rs` files) never name `WinSystem` or
 //! `WinGpu` (the helper builds its own system without GPU, P4-2c), DXGI, the system profile
 //! (`hw::`), the journal, `exec`, `pkg`, the network (`WinHttp`, `http::`, ADR 0025), the Steam
-//! detection, `topo::when` or `flow` (ADR 0027). Comment lines are not code and are skipped;
-//! the scan has teeth.
+//! detection, `topo::when` or `flow` (ADR 0027); a module also as a whole word after
+//! `rerun_core` or `crate::` (braces, an alias, a `use` over several lines). Comment lines are
+//! not code and are skipped; the scan has teeth.
 
 #![allow(
     clippy::disallowed_methods,
@@ -33,20 +34,62 @@ const FORBIDDEN: &[&str] = &[
     "flow::",
 ];
 
+/// Modules of `rerun-core` the helper must not name, as a whole word after `rerun_core` or
+/// `crate::` (also through braces or an alias: `use rerun_core::{flow, sys}`,
+/// `use rerun_core::flow as f;`, a `use` over several lines), with the name reported.
+const MODULES: &[(&str, &str)] = &[
+    ("flow", "flow::"),
+    ("exec", "exec::"),
+    ("hw", "hw::"),
+    ("journal", "journal::"),
+    ("pkg", "pkg::"),
+    ("http", "http::"),
+];
+
+/// The identifiers of `code` after its first `rerun_core` or `crate::` (every identifier of a
+/// line inside a `use` that started on an earlier line).
+fn path_words(code: &str, in_use: bool) -> Vec<&str> {
+    let rest = if in_use {
+        Some(code)
+    } else {
+        ["rerun_core", "crate::"]
+            .iter()
+            .find_map(|p| code.find(p).map(|i| &code[i..]))
+    };
+    rest.map_or_else(Vec::new, |r| {
+        r.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|w| !w.is_empty())
+            .collect()
+    })
+}
+
 /// The forbidden names in one source text: `(line number, name)`. Lines that are comments
 /// (`//`, `//!`, `///` after indentation) are skipped.
 fn violations(src: &str) -> Vec<(usize, &'static str)> {
     let mut found = Vec::new();
+    let mut in_use = false;
     for (i, line) in src.lines().enumerate() {
         if line.trim_start().starts_with("//") {
             continue;
         }
         let code = line.split("//").next().unwrap_or(line);
+        let mut names: Vec<&'static str> = Vec::new();
         for name in FORBIDDEN {
             if code.contains(name) {
-                found.push((i + 1, *name));
+                names.push(name);
             }
         }
+        let words = path_words(code, in_use);
+        for (module, name) in MODULES {
+            if words.contains(module) && !names.contains(name) {
+                names.push(name);
+            }
+        }
+        let t = code.trim_start();
+        let opens = (t.starts_with("use ") || t.starts_with("pub use "))
+            && (code.contains("rerun_core") || code.contains("crate::"));
+        in_use = (in_use || opens) && !code.contains(';');
+        found.extend(names.into_iter().map(|n| (i + 1, n)));
     }
     found
 }
@@ -102,6 +145,9 @@ fn the_rule_has_teeth() {
         ("let s = detect::steam::scan(sys, fr);", "detect::steam"),
         ("topo::when::eval(&w)", "topo::when"),
         ("let g = rerun_core::flow::guard(env)?;", "flow::"),
+        ("use rerun_core::flow as f;", "flow::"),
+        ("use rerun_core::{flow, sys::System};", "flow::"),
+        ("use crate::{exec, policy};", "exec::"),
         ("load_system32(\"dxgi.dll\")", "dxgi"),
         (
             "let x = 1; // fine so far, but WinGpu here is a comment",
@@ -123,4 +169,11 @@ fn the_rule_has_teeth() {
     assert!(violations("//! `WinSystem` and `exec::standard_user` are for the CLI").is_empty());
     assert!(violations("    /// never `WinGpu`").is_empty());
     assert_eq!(violations("a\nb\nWinGpu"), [(3, "WinGpu")]);
+    // A `use` over several lines.
+    assert_eq!(
+        violations("use rerun_core::{\n    sys::System,\n    hw,\n};\nlet hw = 1;"),
+        [(3, "hw::")]
+    );
+    // A word that only contains a module name is no module.
+    assert!(violations("use rerun_core::sys::{HelperSystem, Https};").is_empty());
 }

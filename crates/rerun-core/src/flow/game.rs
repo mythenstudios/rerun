@@ -98,13 +98,19 @@ pub enum GameRefusal {
 }
 
 /// Looks up the Topo of `app_id` (module docs) and runs `f` on it if exactly one matches.
+/// Public until P5-2a (the CLI's `--pick` plans inside it), then `pub(crate)` behind
+/// `flow::plan`.
 pub fn with_topo<R>(
     g: &Guarded<'_>,
     app_id: u32,
     f: impl FnOnce(Matched<'_>) -> R,
 ) -> Result<Lookup<R>, GameRefusal> {
-    let sys = g.env.sys;
-    let catalog = match index_state(g.app.as_ref()) {
+    let sys = g.env().sys;
+    // No Rerun folder, no index.
+    let Some(dir) = g.app() else {
+        return Ok(Lookup::NoIndex);
+    };
+    let catalog = match index_state(Some(dir)) {
         IndexState::None => return Ok(Lookup::NoIndex),
         IndexState::Refused(e) => return Err(GameRefusal::Index(e)),
         IndexState::Current(c) => c,
@@ -116,13 +122,9 @@ pub fn with_topo<R>(
     let app_path = AppDir::path_of(sys).ok();
     let table = GpuArchTable::builtin().ok();
     let profile = hw::read(sys, table);
-    with_game(sys, &g.fr, &GameRef::Steam(app_id), |game, steam_app| {
+    with_game(sys, g.fr(), &GameRef::Steam(app_id), |game, steam_app| {
         // P4-10 (R5): an executable a live laa_patch changed still counts as its build.
-        let patched = g
-            .app
-            .as_ref()
-            .map(|dir| crate::exec::patched_now(dir, game.id()))
-            .unwrap_or_default();
+        let patched = crate::exec::patched_now(dir, game.id());
         let read: Vec<(&Topo, GameFacts)> = topos
             .iter()
             .map(|t| (*t, topo::read_game_with(game, t, &patched)))
