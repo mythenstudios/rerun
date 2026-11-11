@@ -1,0 +1,40 @@
+# DRAFT (P4-13): not installed on the dev PC, so no executable hash (never invented); Steam's launch entry and
+# the Ubisoft Connect hand-over are not observed (AC II, same engine line, was: watch).
+format: 1
+id: assassins-creed-brotherhood
+title: "Assassin's Creed: Brotherhood"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 48190
+  exes:
+    - { path: "ACBSP.exe", sha256: "TODO", api: d3d9 }
+
+launch:
+  chain: [steam, upc]
+  method: auto
+  start: "TODO"                # Steam's launch entry: observe, never guess
+
+issues:
+  - id: vsync-stutter
+    title: "Stuttering and frame dips with Vsync (the game loads CPU 0 almost alone)"
+    # No `when`: the source names CPU shapes (4/4 to 8/16 and larger), but cpu.threads counts logical processors.
+    when: {}
+    variants:
+      - id: exclude-cpu0
+        status: unverified     # one Steam thread, repeated by PCGW; same fix as AC II (verified there on the dev PC), not tried on this game
+        kind: fix
+        steps:
+          - cpu: { exclude_first: thread, mode: hard }
+        sources:
+          - { type: steam-thread, url: "https://steamcommunity.com/app/48190/discussions/0/1727575977550197630/" }
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Assassin's_Creed:_Brotherhood#In-game_stuttering,_freezing_issues" }
+
+# Not taken: the Windows XP SP3 compatibility layer for error 0xc0000142 (a YouTube video is the only source),
+# and frame-rate caps for two missions (an in-game Vsync setting, no step).
+# TODO issue: https://www.pcgamingwiki.com/wiki/Assassin's_Creed:_Brotherhood#Camera_shaking_and%2For_flickering_visual_effects
+
+links:
+  pcgw: "Assassin's_Creed:_Brotherhood"
