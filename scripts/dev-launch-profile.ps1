@@ -239,7 +239,8 @@ try {
     $newResult = $false
     while (-not $game -and -not $newResult) {
         if ((Get-Date) -gt $deadline) { Fail "the game did not start within $WaitMinutes minutes" }
-        Start-Sleep -Seconds 1
+        # -Cold: a launcher that ends within a second must still be seen, for its start time.
+        Start-Sleep -Milliseconds $(if ($Cold) { 100 } else { 1000 })
         $game = Get-Process -ErrorAction SilentlyContinue | Where-Object {
             try { $_.Path -and [string]::Equals($_.Path, $Exe, [StringComparison]::OrdinalIgnoreCase) -and $_.StartTime -gt $started } catch { $false }
         } | Select-Object -First 1
