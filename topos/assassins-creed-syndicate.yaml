@@ -14,17 +14,24 @@ match:
     - { path: "ACS.exe", sha1: "6666805A1E83D06001D7265CA18D9579C22DC822", sha256: "6E25F759242252F93ACDD79C7E8BE10D5BEDEEE94CE429FF5274D942CA10C5A2", api: "d3d11" }
     # UplayBrowser.exe (also in the folder) is the Ubisoft browser helper, not the game: left out
 # PCGW API: Direct3D 11; 64-bit exe (the page's community patch needs the x64 ASI loader)
-# TODO launch: chain, method and start (docs/02-topo-format.md, launch.start); never guessed.
+# Launch observed on the dev PC (P4-13 S1, 2026-11-11): steam.exe starts ACS.exe, which ends after
+# a few seconds and starts again through Ubisoft Connect (UbisoftGameLauncher.exe is the parent of
+# the second ACS.exe): watch with start = the game itself, like AC Black Flag Resynced.
 launch:
-  start: "TODO"   # Steam's launch entry: observe, never guess; chain and method are not observed either (game never started; Ubisoft Connect is involved)
-# AC.ini lies in Documents\Assassin's Creed Syndicate (PCGW "Game data"). The game has never been started on the
-# dev machine, so the folder and file do not exist yet; ini_set needs both (it never creates them).
+  chain: [steam, upc]
+  method: watch
+  start: "ACS.exe"
+# AC.ini lies in Documents\Assassin's Creed Syndicate (PCGW "Game data"). The game writes it on its first start; on the
+# dev PC (S1) it holds [Graphics] RefreshRate=144 and WindowMode=2 once each, and `plan --dry-run` with the
+# refresh-rate-60 step plans exactly that one key.
 user_data:
   documents: "Assassin's Creed Syndicate"
 issues:
   - id: title-screen-freeze
     title: "Freeze on the title screen after pressing a key (exclusive fullscreen above 60 Hz)"
     # No `when`: the source reports Windows 11 (24H2) but PCGW states the cause for any high refresh rate; left empty.
+    # Not reproduced on the dev PC (S1, 2026-11-11: Windows 11 26300, RX 9070 XT, exclusive fullscreen at 144 Hz,
+    # the title screen passed without a freeze), so neither variant can be verified there.
     when: {}
     variants:
       - id: refresh-rate-60

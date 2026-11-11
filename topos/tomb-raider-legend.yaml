@@ -24,7 +24,7 @@ issues:
     when: {}
     variants:
       - id: single-thread
-        status: unverified     # single PCGW statement (a user check); not reproduced here yet
+        status: unverified     # single PCGW statement (a user check); not reproduced on the dev PC (S1 2026-11-11: no crackling in the main menu)
         kind: fix
         steps:
           - cpu: { max_threads: 1, mode: hard }

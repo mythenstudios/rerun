@@ -16,9 +16,13 @@ match:
 # PCGW API: Direct3D 9; OpenGL; 32-bit exe yes, 64-bit exe no
 # TODO: PCGW: field of view hackable - https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Video
 # TODO: PCGW: 120 FPS hackable - https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Video
-# TODO launch: chain, method and start (docs/02-topo-format.md, launch.start); never guessed.
+# Launch observed on the dev PC (P4-13 S1, 2026-11-11): steam.exe starts AssassinsCreedIIGame.exe, which ends after
+# a few seconds and starts again through Ubisoft Connect (UbisoftGameLauncher.exe is the parent of
+# the second AssassinsCreedIIGame.exe): watch with start = the game itself, like AC Black Flag Resynced.
 launch:
-  start: "TODO"   # Steam's launch entry: observe, never guess; chain and method are not observed either (game never started; Ubisoft Connect is involved)
+  chain: [steam, upc]
+  method: watch
+  start: "AssassinsCreedIIGame.exe"
 issues:
   - id: vsync-stutter
     title: "Stuttering or screen tearing with Vsync on or off"
