@@ -65,7 +65,13 @@ Every variant links directly to its source: the specific Steam guide, the thread
 ## Review on inclusion
 
 1. Original source found and documented.
-2. License permits use (Rerun hosts nothing, only links).
+2. License permits use (Rerun hosts nothing, only links). A package without a license file is allowed only if all of these hold:
+   - the author publishes the file openly as a release, and the package points at that original release URL (pinned version + SHA256);
+   - Rerun installs it unmodified and exactly as the author's own README/install instructions say, and rehosts nothing (the user's machine fetches it on the user's request);
+   - the package states `license: "LicenseRef-NoLicense-UpstreamRelease"` (the schema accepts any SPDX-style word, so `LicenseRef-…` values pass) and a comment/`notes` names the author's install instructions (README section);
+   - if the author objects, the package is removed.
+
+   Same reasoning for dgVoodoo 2: its readme forbids bundling inside launchers or frameworks, but Rerun bundles nothing; it downloads the author's original zip and unpacks the DLLs the author's instructions name. License value `LicenseRef-dgVoodoo2-Freeware`.
 3. Hash computed ourselves.
 4. File run once through a malware scan during curation (not at runtime).
 5. Trade-offs and side effects entered.
