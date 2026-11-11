@@ -61,7 +61,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - Before A6: a frame-time log (Adrenalin) of Assassin's Creed II with and without `exclude-cpu0`; without it the variant goes back to `unverified` (docs/09)
 - Before A6: the DLLs `winhttp.dll` loads, measured on the release `rerun.exe` (docs/09); the firewall read contract as `rerunci` in pass 1 of the sandbox suite (docs/09)
 - Before A6: the dgVoodoo 2 author's written OK (`docs/05-sources-policy.md`); a source type `forum`; matching of Steam per-user (CEG) executables (architect), and until then no CEG executable in an `active` Topo
-- Before phase 5: the cold start of D2 (docs/09)
+- Done 2026-11-11 (was: before phase 5): the cold start of D2 measured, D2 kept (docs/09, ADR 0022 amendment D2)
 - Later: the round-trip script's 20-minute wait after an early game crash; the workbench draft for a game with no single API; the anti-cheat release (locked, see above); the VirtualStore case for admin-only roots (phase 6); EaglePatchAC2 for Assassin's Creed II (same repository, Sergeanur/EaglePatch) as a package and a variant (user idea, phase 5 or later)
 
 ## Phase 5 – App
