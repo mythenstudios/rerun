@@ -18,5 +18,6 @@ Rerun by Mythen Studios.
 ## License
 
 The Rerun source code is licensed under the [GNU General Public License v3.0 or later](LICENSE) (`GPL-3.0-or-later`).
+The app binary `rerun-app.exe` links the Slint UI toolkit under its GPL-3.0-only option, so the distributed `rerun-app.exe` is effectively `GPL-3.0-only`; `rerun.exe`, `rerun-launch.exe`, `rerun-helper.exe` and `rerun-cpu.asi` do not link Slint and stay `GPL-3.0-or-later` (ADR 0026).
 Game recipes (topos) and package descriptions will be licensed separately.
-The Rerun name, logo and brand assets in `brand/` are not covered by the code license; see `brand/BRAND.md`.
+The Rerun name, logo and brand assets in `brand/` (and their copies in `crates/rerun-app/assets/`) are not covered by the code license; see `brand/BRAND.md`.

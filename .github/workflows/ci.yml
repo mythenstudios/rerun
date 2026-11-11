@@ -94,6 +94,13 @@ jobs:
         env:
           RERUN_BUILD_ID: ${{ github.sha }}
         run: cargo build -p rerun-helper --release --locked
+      - name: rerun-app - release build
+        # Built with -p (no dev-dependencies, so without rerun-core/fake and test-key), before the
+        # tests: crates/rerun-app/tests/hardening.rs checks this binary (RERUN_RELEASE_APP_EXE):
+        # imports, DependentLoadFlags, the asInvoker manifest, no index test key (ADR 0026, P5-3).
+        env:
+          RERUN_BUILD_ID: ${{ github.sha }}
+        run: cargo build -p rerun-app --release --locked
       - name: test (incl. schema validation of topos/ and packages/)
         # Opt-in for the machine-wide fs contract fixtures (mount point, subst, 8.3 names) and
         # the elevated run; only honoured together with RUNNER_ENVIRONMENT=github-hosted
@@ -107,6 +114,8 @@ jobs:
           RERUN_RELEASE_CLI_EXE: ${{ github.workspace }}/target/release/rerun.exe
           # The release rerun-helper.exe built above, checked by crates/rerun-helper/tests/hardening.rs.
           RERUN_RELEASE_HELPER_EXE: ${{ github.workspace }}/target/release/rerun-helper.exe
+          # The release rerun-app.exe built above, checked by crates/rerun-app/tests/hardening.rs.
+          RERUN_RELEASE_APP_EXE: ${{ github.workspace }}/target/release/rerun-app.exe
         # --profile ci: dev with optimisation (Cargo.toml), debug assertions stay on (docs/09-testing.md).
         run: cargo test --workspace --all-features --locked --profile ci
       - name: rerun-core fake and test-key features never in shipped binaries
@@ -120,12 +129,27 @@ jobs:
               echo "::error::sanity check failed: the grep pattern no longer matches cargo tree output ($f)"
               exit 1
             fi
-            for p in rerun-cli rerun-helper; do  # add the Tauri app crate in phase 5
+            for p in rerun-cli rerun-helper rerun-app; do
               if cargo tree -p "$p" -e normal,build,features -i rerun-core --locked | grep -q "feature \"$f\""; then
                 echo "::error::$p enables rerun-core/$f"
                 exit 1
               fi
             done
+          done
+      - name: Slint only in rerun-app
+        # ADR 0026: rerun-app.exe links Slint under its GPL-3.0-only option; rerun.exe,
+        # rerun-launch.exe, rerun-helper.exe and rerun-cpu.asi stay GPL-3.0-or-later and must not
+        # link it. -e normal: what the shipped binary links (no build or dev dependencies).
+        run: |
+          if ! cargo tree -p rerun-app -e normal --prefix none --locked | grep -q -E '^(slint|i-slint-core) '; then
+            echo "::error::sanity check failed: the grep pattern no longer matches cargo tree output"
+            exit 1
+          fi
+          for p in rerun-cli rerun-launch rerun-helper rerun-cpu; do
+            if cargo tree -p "$p" -e normal --prefix none --locked | grep -q -E '^(slint|i-slint-[a-z-]+) '; then
+              echo "::error::$p depends on Slint"
+              exit 1
+            fi
           done
       - name: clap without the color feature
         # ADR 0016: clap's `color` feature (anstream) calls SetConsoleMode on the console the

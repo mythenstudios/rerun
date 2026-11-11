@@ -1,0 +1,1700 @@
+// The window of rerun-app (docs/07-ui.md, layout C, theme "Mythen"). Only `rerun-app::ui` and
+// `build.rs` know this file (ADR 0026). Every colour and size comes from the global `Theme`,
+// which `ui` fills from `theme::tokens`; every string comes from `Str` or a view model, both
+// filled from `text` and `vm`. Untrusted text (Steam names, paths, Topo texts, error details)
+// is always drawn in its own `Text` element (ADR 0016, ADR 0026).
+
+import { ScrollView, LineEdit } from "std-widgets.slint";
+
+// ---------------------------------------------------------------- data from the view models
+
+export struct BadgeData {
+    sym: string,
+    word: string,
+    quiet: bool,
+}
+
+export struct RowData {
+    app-id: int,
+    name: string,
+    detail: string,
+    exe: string,
+    badge: BadgeData,
+}
+
+export struct SectionData {
+    title: string,
+    rows: [RowData],
+}
+
+export struct DetailData {
+    who: string,
+    what: string,
+}
+
+export struct NoticeData {
+    title: string,
+    body: string,
+    details: [DetailData],
+}
+
+export struct FactData {
+    label: string,
+    value: string,
+    mono: bool,
+}
+
+export struct ProblemData {
+    title: string,
+    when: BadgeData,
+    fixes: [string],
+    quiet: bool,
+}
+
+export struct SolvedData {
+    issue: string,
+    when: BadgeData,
+    status: BadgeData,
+}
+
+export struct FixData {
+    id: string,
+    kind: string,
+    state: BadgeData,
+    refused: string,
+    refused-detail: string,
+    warned: string,
+    solves: [SolvedData],
+}
+
+export struct GameData {
+    app-id: int,
+    title: string,
+    hero-sym: string,
+    hero-line: string,
+    hero-sub: string,
+    facts: [FactData],
+    notes: [string],
+    detail: string,
+    problems: [ProblemData],
+    fixes: [FixData],
+}
+
+export struct AppliedData {
+    sym: string,
+    title: string,
+    sub: string,
+    detail: string,
+}
+
+export struct SysLineData {
+    label: string,
+    values: [string],
+}
+
+// ---------------------------------------------------------------- tokens and strings
+
+export global Theme {
+    in property <color> bg;
+    in property <color> raised;
+    in property <color> raised2;
+    in property <color> raised3;
+    in property <color> raised4;
+    in property <color> line-soft;
+    in property <color> line;
+    in property <color> line-strong;
+    in property <color> text;
+    in property <color> strong;
+    in property <color> muted;
+    in property <color> faint;
+    in property <color> on-strong;
+    in property <color> danger;
+    in property <length> hair;
+    in property <length> radius-s;
+    in property <length> radius-m;
+    in property <length> s1;
+    in property <length> s2;
+    in property <length> s3;
+    in property <length> s4;
+    in property <length> s5;
+    in property <length> s6;
+    in property <length> s7;
+    in property <length> s8;
+    in property <length> fs-xs;
+    in property <length> fs-s;
+    in property <length> fs-m;
+    in property <length> fs-l;
+    in property <length> fs-group;
+    in property <length> fs-page;
+    in property <length> fs-hero;
+    in property <length> row-h;
+    in property <length> title-h;
+    in property <length> caption-w;
+    in property <length> nav-w;
+    in property <string> font-sans;
+    in property <string> font-display;
+    in property <string> font-mono;
+    in property <string> font-symbol;
+    in property <string> font-icons;
+}
+
+export global Str {
+    in property <string> app-name;
+    in property <string> by;
+    in property <string> minimize;
+    in property <string> maximize;
+    in property <string> restore;
+    in property <string> close;
+    in property <string> nav-label;
+    in property <[string]> nav;
+    in property <string> no-background;
+    in property <string> first-run-title;
+    in property <[string]> first-run-leads;
+    in property <[string]> first-run-texts;
+    in property <string> first-run-dismiss;
+    in property <string> library-title;
+    in property <string> library-reading;
+    in property <string> search-label;
+    in property <string> search-placeholder;
+    in property <string> group-by-status;
+    in property <string> view-label;
+    in property <string> view-list;
+    in property <string> no-search-match;
+    in property <string> rescan;
+    in property <string> show-problems;
+    in property <string> hide-problems;
+    in property <string> detail;
+    in property <string> back;
+    in property <string> eyebrow;
+    in property <string> game-reading;
+    in property <string> facts-label;
+    in property <string> problems-title;
+    in property <string> problem-fixes;
+    in property <string> problem-no-fix;
+    in property <string> fixes-title;
+    in property <string> fixes-intro;
+    in property <string> fixes-read-only;
+    in property <string> fix-solves;
+    in property <string> applied-title;
+    in property <string> applied-intro;
+    in property <string> history-title;
+    in property <string> history-intro;
+    in property <string> history-later;
+    in property <string> system-title;
+    in property <string> system-intro;
+    in property <string> system-reading;
+    in property <string> settings-title;
+    in property <string> settings-intro;
+    in property <string> settings-safety;
+    in property <string> set-preview;
+    in property <string> set-preview-desc;
+    in property <string> set-sources;
+    in property <string> set-sources-desc;
+    in property <string> always-on;
+    in property <string> settings-look;
+    in property <string> set-theme;
+    in property <string> theme-name;
+    in property <string> set-language;
+    in property <string> language-name;
+    in property <string> settings-about;
+    in property <string> about-version;
+    in property <string> about-licence;
+}
+
+// Keeps the focused element visible: every focusable element asks for it, `ui` hands it to
+// `AppWindow.reveal`, which scrolls the page.
+export global Reveal {
+    callback request(length, length);
+}
+
+// ---------------------------------------------------------------- building blocks
+
+// Focusable and keyboard-clickable (Enter, Space), with a focus ring after keyboard focus only.
+component Pressable inherits FocusScope {
+    in property <length> radius: Theme.radius-m;
+    in property <length> ring-inset: 0px;
+    out property <bool> kb-focus;
+    out property <bool> hovered: ta.has-hover;
+    out property <bool> pressed: ta.pressed;
+    callback activated();
+    focus-gained(reason) => {
+        root.kb-focus = reason == FocusReason.tab-navigation;
+        Reveal.request(self.absolute-position.y, self.height);
+    }
+    focus-lost(reason) => {
+        root.kb-focus = false;
+    }
+    key-pressed(e) => {
+        if (e.text == Key.Return || e.text == " ") {
+            root.activated();
+            return accept;
+        }
+        reject
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.activated();
+        }
+    }
+
+    @children
+    Rectangle {
+        x: root.ring-inset;
+        y: root.ring-inset;
+        width: root.width - 2 * root.ring-inset;
+        height: root.height - 2 * root.ring-inset;
+        border-width: root.kb-focus ? 2 * Theme.hair : 0px;
+        border-color: Theme.strong;
+        border-radius: root.radius;
+    }
+}
+
+// A page or section title that takes the focus when its page opens, so a screen reader reads
+// the page's name (Slint has no heading role, ADR 0026).
+component PageTitle inherits FocusScope {
+    in property <string> text;
+    in property <length> size: Theme.fs-page;
+    in property <string> family: Theme.font-display;
+    focus-on-tab-navigation: false;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    init => {
+        self.focus();
+    }
+    Text {
+        width: 100%;
+        text: root.text;
+        font-family: root.family;
+        font-size: root.size;
+        font-weight: 700;
+        color: Theme.strong;
+        wrap: word-wrap;
+        accessible-role: none;
+    }
+}
+
+component Badge inherits Rectangle {
+    in property <BadgeData> data;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.data.word;
+    background: root.data.quiet ? Theme.raised2 : Theme.line-soft;
+    border-width: root.data.quiet ? Theme.hair : 0px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.radius-s;
+    HorizontalLayout {
+        padding-left: Theme.s2;
+        padding-right: Theme.s2;
+        padding-top: Theme.hair * 2;
+        padding-bottom: Theme.hair * 2;
+        spacing: Theme.s1 + Theme.hair * 2;
+        Text {
+            text: root.data.sym;
+            color: Theme.muted;
+            font-size: Theme.fs-s;
+            font-family: Theme.font-symbol;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+
+        Text {
+            text: root.data.word;
+            color: Theme.strong;
+            font-size: Theme.fs-s;
+            font-weight: 500;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+component Button inherits Pressable {
+    in property <string> text;
+    in property <bool> primary;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.activated();
+    }
+    ring-inset: -3px;
+    min-height: Theme.s6 + Theme.s1 + Theme.hair * 2;
+    Rectangle {
+        border-radius: Theme.radius-m;
+        background: root.primary ? (root.hovered ? Theme.text : Theme.strong) : (root.hovered ? Theme.raised4 : Theme.raised3);
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.s4;
+        padding-right: Theme.s4;
+        Text {
+            text: root.text;
+            color: root.primary ? Theme.on-strong : Theme.strong;
+            font-size: Theme.fs-m;
+            font-weight: root.primary ? 600 : 500;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+component Toggle inherits Pressable {
+    in-out property <bool> checked;
+    in property <string> text;
+    callback toggled(bool);
+    ring-inset: -3px;
+    accessible-role: switch;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.activated();
+    }
+    activated => {
+        root.checked = !root.checked;
+        root.toggled(root.checked);
+    }
+    HorizontalLayout {
+        spacing: Theme.s3;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Theme.s6 + Theme.s1;
+                height: Theme.s4 + Theme.s1;
+                border-radius: self.height / 2;
+                background: root.checked ? Theme.strong : Theme.line;
+                Rectangle {
+                    width: parent.height - 6px;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    x: root.checked ? parent.width - self.width - 3px : 3px;
+                    y: 3px;
+                    background: root.checked ? Theme.bg : Theme.muted;
+                }
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+component NavItem inherits Pressable {
+    in property <string> sym;
+    in property <string> text;
+    in property <string> count;
+    in property <bool> active;
+    height: Theme.s7 + Theme.s1;
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.active;
+    accessible-action-default => {
+        root.activated();
+    }
+    Rectangle {
+        border-radius: Theme.radius-m;
+        background: root.active ? Theme.raised2 : (root.hovered ? Theme.raised : transparent);
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.s3 + Theme.hair * 2;
+        padding-right: Theme.s3 + Theme.hair * 2;
+        spacing: Theme.s3;
+        Text {
+            width: Theme.s4 + Theme.s1;
+            text: root.sym;
+            color: Theme.muted;
+            font-family: Theme.font-symbol;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: root.active ? Theme.strong : Theme.text;
+            font-size: Theme.fs-m;
+            font-weight: root.active ? 600 : 500;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+
+        Text {
+            text: root.count;
+            color: Theme.muted;
+            font-size: Theme.fs-s;
+            font-family: Theme.font-mono;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+component CaptionButton inherits Pressable {
+    in property <string> glyph;
+    in property <string> label;
+    in property <bool> danger;
+    // Set by `ui::chrome` while Windows owns the mouse over the maximise button (HTMAXBUTTON
+    // for the snap layouts): Slint does not see those mouse moves.
+    in property <bool> nc-hover;
+    width: Theme.caption-w;
+    radius: 0px;
+    focus-on-tab-navigation: false;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => {
+        root.activated();
+    }
+    Rectangle {
+        background: (root.hovered || root.nc-hover) ? (root.danger ? Theme.danger : Theme.raised3) : transparent;
+    }
+
+    Text {
+        text: root.glyph;
+        font-family: Theme.font-icons;
+        font-size: Theme.fs-xs - Theme.hair;
+        color: Theme.strong;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+component Hairline inherits Rectangle {
+    background: Theme.line-soft;
+}
+
+component Muted inherits Text {
+    color: Theme.muted;
+    font-size: Theme.fs-m;
+    wrap: word-wrap;
+}
+
+component GroupHeading inherits Text {
+    color: Theme.strong;
+    font-size: Theme.fs-group;
+    font-weight: 600;
+    wrap: word-wrap;
+}
+
+// One detail: what it is about and the core's text, each in its own element.
+component DetailLine inherits HorizontalLayout {
+    in property <DetailData> d;
+    spacing: Theme.s2;
+    if root.d.who != "": Text {
+        text: root.d.who;
+        color: Theme.text;
+        font-size: Theme.fs-s;
+        font-weight: 600;
+        vertical-alignment: top;
+    }
+    Text {
+        horizontal-stretch: 1;
+        text: root.d.what;
+        color: Theme.muted;
+        font-size: Theme.fs-s;
+        font-family: Theme.font-mono;
+        wrap: word-wrap;
+    }
+}
+
+component NoticeCard inherits Rectangle {
+    in property <NoticeData> n;
+    in-out property <bool> open;
+    background: Theme.raised;
+    border-radius: Theme.radius-m;
+    accessible-role: groupbox;
+    accessible-label: root.n.title;
+    // The strong left rule of a callout.
+    Rectangle {
+        x: 0;
+        width: Theme.hair * 2;
+        background: Theme.strong;
+    }
+
+    VerticalLayout {
+        padding: Theme.s5;
+        padding-left: Theme.s5 + Theme.hair * 2;
+        spacing: Theme.s2;
+        Text {
+            text: root.n.title;
+            color: Theme.strong;
+            font-size: Theme.fs-l;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+
+        Muted {
+            text: root.n.body;
+        }
+
+        if root.n.details.length > 0 && root.n.details.length <= 1: VerticalLayout {
+            spacing: Theme.s1;
+            for d in root.n.details: DetailLine {
+                d: d;
+            }
+        }
+        if root.n.details.length > 1: HorizontalLayout {
+            alignment: start;
+            Button {
+                text: root.open ? Str.hide-problems : Str.show-problems;
+                activated => {
+                    root.open = !root.open;
+                }
+            }
+        }
+        if root.n.details.length > 1 && root.open: VerticalLayout {
+            spacing: Theme.s1;
+            for d in root.n.details: DetailLine {
+                d: d;
+            }
+        }
+    }
+}
+
+component RowItem inherits Pressable {
+    in property <RowData> item;
+    in property <int> index;
+    in property <int> count;
+    radius: 0px;
+    ring-inset: Theme.hair;
+    min-height: Theme.row-h;
+    accessible-role: list-item;
+    accessible-label: root.item.name + ", " + root.item.detail + ", " + root.item.badge.word;
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
+    accessible-action-default => {
+        root.activated();
+    }
+    Rectangle {
+        background: root.hovered ? Theme.raised2 : transparent;
+    }
+
+    if root.index > 0: Hairline {
+        y: 0;
+        height: Theme.hair;
+    }
+    HorizontalLayout {
+        padding-left: Theme.s5;
+        padding-right: Theme.s5;
+        padding-top: Theme.s3;
+        padding-bottom: Theme.s3;
+        spacing: Theme.s4;
+        Text {
+            width: Theme.s5;
+            text: root.item.badge.sym;
+            color: Theme.muted;
+            font-family: Theme.font-symbol;
+            font-size: Theme.fs-l;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: Theme.hair * 2;
+            Text {
+                text: root.item.name;
+                color: Theme.strong;
+                font-size: Theme.fs-l;
+                font-weight: 600;
+                overflow: elide;
+                accessible-role: none;
+            }
+
+            HorizontalLayout {
+                spacing: Theme.s2;
+                alignment: start;
+                Text {
+                    text: root.item.detail;
+                    color: Theme.muted;
+                    font-size: Theme.fs-m;
+                    accessible-role: none;
+                }
+
+                if root.item.exe != "": Text {
+                    text: root.item.exe;
+                    color: Theme.muted;
+                    font-size: Theme.fs-s;
+                    font-family: Theme.font-mono;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Badge {
+                data: root.item.badge;
+                accessible-role: none;
+            }
+        }
+
+        Text {
+            text: "\u{203A}";
+            color: Theme.muted;
+            font-size: Theme.fs-l;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+component Card inherits Rectangle {
+    background: Theme.raised;
+    border-radius: Theme.radius-m;
+}
+
+component Setting inherits Rectangle {
+    in property <string> title;
+    in property <string> desc;
+    in property <string> value;
+    in property <bool> first;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.title + ", " + root.value;
+    accessible-description: root.desc;
+    if !root.first: Hairline {
+        y: 0;
+        height: Theme.hair;
+    }
+    HorizontalLayout {
+        padding: Theme.s5;
+        spacing: Theme.s4;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.s1;
+            Text {
+                text: root.title;
+                color: Theme.strong;
+                font-size: Theme.fs-l;
+                font-weight: 600;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+
+            if root.desc != "": Text {
+                text: root.desc;
+                color: Theme.muted;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+        }
+
+        Text {
+            text: root.value;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- pages
+
+component FirstRunCard inherits Rectangle {
+    callback dismiss();
+    background: Theme.raised;
+    border-radius: Theme.radius-m;
+    accessible-role: groupbox;
+    accessible-label: Str.first-run-title;
+    Rectangle {
+        x: 0;
+        width: Theme.hair * 2;
+        background: Theme.strong;
+    }
+
+    VerticalLayout {
+        padding: Theme.s5;
+        padding-left: Theme.s5 + Theme.hair * 2;
+        spacing: Theme.s3;
+        Text {
+            text: Str.first-run-title;
+            color: Theme.strong;
+            font-size: Theme.fs-l + Theme.s1;
+            font-weight: 600;
+        }
+
+        for lead[i] in Str.first-run-leads: HorizontalLayout {
+            spacing: Theme.s3;
+            Text {
+                text: i + 1;
+                width: Theme.s4;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-m;
+                accessible-role: none;
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: Theme.hair * 2;
+                Text {
+                    text: lead;
+                    color: Theme.strong;
+                    font-size: Theme.fs-m;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+
+                Muted {
+                    text: Str.first-run-texts[i];
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                text: Str.first-run-dismiss;
+                activated => {
+                    root.dismiss();
+                }
+            }
+        }
+    }
+}
+
+component LibraryPage inherits VerticalLayout {
+    in property <bool> reading;
+    in property <string> summary;
+    in property <[NoticeData]> notices;
+    in property <[SectionData]> sections;
+    in property <int> shown;
+    in property <string> list-label;
+    in-out property <string> query;
+    in-out property <bool> group;
+    in-out property <bool> first-run;
+    callback query-edited(string);
+    callback group-toggled(bool);
+    callback open-game(int, string);
+    callback rescan();
+    spacing: Theme.s4;
+    PageTitle {
+        text: Str.library-title;
+    }
+
+    if root.first-run: FirstRunCard {
+        dismiss => {
+            root.first-run = false;
+        }
+    }
+    Muted {
+        text: root.reading ? Str.library-reading : root.summary;
+    }
+
+    for n in root.notices: NoticeCard {
+        n: n;
+    }
+    HorizontalLayout {
+        spacing: Theme.s5;
+        alignment: start;
+        VerticalLayout {
+            spacing: Theme.s1;
+            width: Theme.s8 * 6;
+            Text {
+                text: Str.search-label;
+                color: Theme.muted;
+                font-size: Theme.fs-s;
+                accessible-role: none;
+            }
+
+            LineEdit {
+                text <=> root.query;
+                placeholder-text: Str.search-placeholder;
+                accessible-label: Str.search-label;
+                edited(t) => {
+                    root.query-edited(t);
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: end;
+            Toggle {
+                text: Str.group-by-status;
+                checked <=> root.group;
+                toggled(v) => {
+                    root.group-toggled(v);
+                }
+            }
+        }
+    }
+
+    if !root.reading && root.shown == 0 && root.query != "": Muted {
+        text: Str.no-search-match;
+    }
+    VerticalLayout {
+        spacing: Theme.s3;
+        accessible-role: list;
+        accessible-label: root.list-label;
+        for s in root.sections: VerticalLayout {
+            spacing: Theme.s3;
+            padding-top: Theme.s3;
+            GroupHeading {
+                text: s.title;
+            }
+
+            Card {
+                VerticalLayout {
+                    for r[i] in s.rows: RowItem {
+                        item: r;
+                        index: i;
+                        count: s.rows.length;
+                        activated => {
+                            root.open-game(r.app-id, r.name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !root.reading: HorizontalLayout {
+        alignment: start;
+        padding-top: Theme.s3;
+        Button {
+            text: Str.rescan;
+            activated => {
+                root.rescan();
+            }
+        }
+    }
+}
+
+component GamePage inherits VerticalLayout {
+    in property <bool> loading;
+    in property <GameData> game;
+    in property <string> loading-title;
+    callback back();
+    spacing: Theme.s4;
+    HorizontalLayout {
+        alignment: start;
+        back-button := Pressable {
+            accessible-role: button;
+            accessible-label: Str.back;
+            accessible-action-default => {
+                self.activated();
+            }
+            ring-inset: -3px;
+            activated => {
+                root.back();
+            }
+            HorizontalLayout {
+                padding-top: Theme.s1;
+                padding-bottom: Theme.s1;
+                spacing: Theme.s1;
+                Text {
+                    text: "\u{2039} " + Str.back;
+                    color: back-button.hovered ? Theme.strong : Theme.muted;
+                    font-size: Theme.fs-m;
+                    accessible-role: none;
+                }
+            }
+        }
+    }
+
+    Text {
+        text: Str.eyebrow;
+        color: Theme.muted;
+        font-size: Theme.fs-s;
+    }
+
+    PageTitle {
+        text: root.loading ? root.loading-title : root.game.title;
+        size: Theme.fs-hero;
+    }
+
+    if root.loading: Muted {
+        text: Str.game-reading;
+    }
+    if !root.loading: HorizontalLayout {
+        spacing: Theme.s3;
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.game.hero-line;
+        accessible-description: root.game.hero-sub;
+        Text {
+            text: root.game.hero-sym;
+            color: Theme.muted;
+            font-family: Theme.font-symbol;
+            font-size: Theme.fs-l + Theme.hair;
+            accessible-role: none;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.s1;
+            Text {
+                text: root.game.hero-line;
+                color: Theme.strong;
+                font-size: Theme.fs-l + Theme.hair;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+
+            if root.game.hero-sub != "": Text {
+                text: root.game.hero-sub;
+                color: Theme.muted;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+        }
+    }
+    if !root.loading && root.game.detail != "": Text {
+        text: root.game.detail;
+        color: Theme.muted;
+        font-family: Theme.font-mono;
+        font-size: Theme.fs-s;
+        wrap: word-wrap;
+    }
+    for note in root.game.notes: Rectangle {
+        background: Theme.raised2;
+        border-radius: Theme.radius-s;
+        accessible-role: AccessibleRole.text;
+        accessible-label: note;
+        Rectangle {
+            x: 0;
+            width: Theme.hair * 2;
+            background: Theme.line-strong;
+        }
+
+        VerticalLayout {
+            padding: Theme.s3;
+            padding-left: Theme.s4;
+            Text {
+                text: note;
+                color: Theme.text;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+        }
+    }
+    if !root.loading: VerticalLayout {
+        padding-top: Theme.s4;
+        spacing: Theme.s4;
+        Hairline {
+            height: Theme.hair;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s6;
+            alignment: start;
+            accessible-role: groupbox;
+            accessible-label: Str.facts-label;
+            for f in root.game.facts: VerticalLayout {
+                spacing: Theme.hair * 2;
+                accessible-role: AccessibleRole.text;
+                accessible-label: f.label + ": " + f.value;
+                Text {
+                    text: f.label;
+                    color: Theme.muted;
+                    font-size: Theme.fs-s;
+                    accessible-role: none;
+                }
+
+                Text {
+                    text: f.value;
+                    color: Theme.text;
+                    font-size: f.mono ? Theme.fs-s + Theme.hair : Theme.fs-m;
+                    font-family: f.mono ? Theme.font-mono : Theme.font-sans;
+                    accessible-role: none;
+                }
+            }
+        }
+    }
+
+    if !root.loading && root.game.problems.length > 0: VerticalLayout {
+        spacing: Theme.s3;
+        padding-top: Theme.s5;
+        GroupHeading {
+            text: Str.problems-title;
+        }
+
+        Card {
+            accessible-role: list;
+            accessible-label: Str.problems-title;
+            VerticalLayout {
+                for p[i] in root.game.problems: Rectangle {
+                    accessible-role: list-item;
+                    accessible-label: p.title + ", " + p.when.word;
+                    accessible-item-index: i;
+                    accessible-item-count: root.game.problems.length;
+                    if i > 0: Hairline {
+                        y: 0;
+                        height: Theme.hair;
+                    }
+                    VerticalLayout {
+                        padding: Theme.s5;
+                        spacing: Theme.s2;
+                        HorizontalLayout {
+                            spacing: Theme.s4;
+                            Text {
+                                horizontal-stretch: 1;
+                                text: p.title;
+                                color: p.quiet ? Theme.muted : Theme.strong;
+                                font-size: Theme.fs-l;
+                                font-weight: 600;
+                                wrap: word-wrap;
+                                accessible-role: none;
+                            }
+
+                            VerticalLayout {
+                                alignment: start;
+                                Badge {
+                                    data: p.when;
+                                    accessible-role: none;
+                                }
+                            }
+                        }
+
+                        if !p.quiet && p.fixes.length == 0: Text {
+                            text: Str.problem-no-fix;
+                            color: Theme.muted;
+                            font-size: Theme.fs-m;
+                            accessible-role: none;
+                        }
+                        if !p.quiet && p.fixes.length > 0: HorizontalLayout {
+                            spacing: Theme.s2;
+                            alignment: start;
+                            Text {
+                                text: Str.problem-fixes;
+                                color: Theme.muted;
+                                font-size: Theme.fs-m;
+                                accessible-role: none;
+                            }
+
+                            for fx in p.fixes: Text {
+                                text: fx;
+                                color: Theme.text;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.fs-s + Theme.hair;
+                                vertical-alignment: center;
+                                accessible-role: none;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !root.loading && root.game.fixes.length > 0: VerticalLayout {
+        spacing: Theme.s3;
+        padding-top: Theme.s5;
+        GroupHeading {
+            text: Str.fixes-title;
+        }
+
+        Muted {
+            text: Str.fixes-intro;
+        }
+
+        Muted {
+            text: Str.fixes-read-only;
+        }
+
+        for fx in root.game.fixes: Card {
+            accessible-role: groupbox;
+            accessible-label: fx.id + ", " + fx.kind + ", " + fx.state.word;
+            VerticalLayout {
+                padding: Theme.s5;
+                spacing: Theme.s3;
+                HorizontalLayout {
+                    spacing: Theme.s3;
+                    Text {
+                        text: fx.id;
+                        color: Theme.strong;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.fs-l;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        accessible-role: none;
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: fx.kind;
+                        color: Theme.muted;
+                        font-size: Theme.fs-m;
+                        vertical-alignment: center;
+                        accessible-role: none;
+                    }
+
+                    Badge {
+                        data: fx.state;
+                        accessible-role: none;
+                    }
+                }
+
+                if fx.refused != "": Text {
+                    text: fx.refused;
+                    color: Theme.text;
+                    font-size: Theme.fs-m;
+                    wrap: word-wrap;
+                }
+                if fx.refused-detail != "": Text {
+                    text: fx.refused-detail;
+                    color: Theme.muted;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-s;
+                    wrap: word-wrap;
+                }
+                if fx.warned != "": Text {
+                    text: fx.warned;
+                    color: Theme.text;
+                    font-size: Theme.fs-m;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: Str.fix-solves;
+                    color: Theme.muted;
+                    font-size: Theme.fs-s;
+                    accessible-role: none;
+                }
+
+                for s in fx.solves: HorizontalLayout {
+                    spacing: Theme.s3;
+                    accessible-role: AccessibleRole.text;
+                    accessible-label: s.issue + ", " + s.when.word + ", " + s.status.word;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: s.issue;
+                        color: Theme.text;
+                        font-size: Theme.fs-m;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                        accessible-role: none;
+                    }
+
+                    Badge {
+                        data: s.when;
+                        accessible-role: none;
+                    }
+
+                    Badge {
+                        data: s.status;
+                        accessible-role: none;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component AppliedPage inherits VerticalLayout {
+    in property <AppliedData> applied;
+    spacing: Theme.s4;
+    PageTitle {
+        text: Str.applied-title;
+    }
+
+    Muted {
+        text: Str.applied-intro;
+    }
+
+    Card {
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.applied.title;
+        accessible-description: root.applied.sub;
+        HorizontalLayout {
+            padding: Theme.s5;
+            spacing: Theme.s4;
+            Text {
+                text: root.applied.sym;
+                color: Theme.muted;
+                font-family: Theme.font-symbol;
+                font-size: Theme.fs-l;
+                accessible-role: none;
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: Theme.s1;
+                Text {
+                    text: root.applied.title;
+                    color: Theme.strong;
+                    font-size: Theme.fs-l;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+
+                if root.applied.sub != "": Text {
+                    text: root.applied.sub;
+                    color: Theme.muted;
+                    font-size: Theme.fs-m;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+                if root.applied.detail != "": Text {
+                    text: root.applied.detail;
+                    color: Theme.muted;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-s;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+component HistoryPage inherits VerticalLayout {
+    spacing: Theme.s4;
+    PageTitle {
+        text: Str.history-title;
+    }
+
+    Muted {
+        text: Str.history-intro;
+    }
+
+    Card {
+        VerticalLayout {
+            padding: Theme.s5;
+            Muted {
+                text: Str.history-later;
+            }
+        }
+    }
+}
+
+component SystemPage inherits VerticalLayout {
+    in property <bool> loading;
+    in property <[SysLineData]> lines;
+    spacing: Theme.s4;
+    PageTitle {
+        text: Str.system-title;
+    }
+
+    Muted {
+        text: root.loading ? Str.system-reading : Str.system-intro;
+    }
+
+    if !root.loading: Card {
+        VerticalLayout {
+            for l[i] in root.lines: Rectangle {
+                accessible-role: AccessibleRole.text;
+                accessible-label: l.label;
+                if i > 0: Hairline {
+                    y: 0;
+                    height: Theme.hair;
+                }
+                HorizontalLayout {
+                    padding: Theme.s5;
+                    spacing: Theme.s4;
+                    Text {
+                        width: Theme.s8 * 3;
+                        text: l.label;
+                        color: Theme.muted;
+                        font-size: Theme.fs-m;
+                        accessible-role: none;
+                    }
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: Theme.s1;
+                        for v in l.values: Text {
+                            text: v;
+                            color: Theme.text;
+                            font-size: Theme.fs-m;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component SettingsPage inherits VerticalLayout {
+    spacing: Theme.s4;
+    PageTitle {
+        text: Str.settings-title;
+    }
+
+    Muted {
+        text: Str.settings-intro;
+    }
+
+    GroupHeading {
+        text: Str.settings-safety;
+    }
+
+    Card {
+        VerticalLayout {
+            Setting {
+                first: true;
+                title: Str.set-preview;
+                desc: Str.set-preview-desc;
+                value: Str.always-on;
+            }
+
+            Setting {
+                title: Str.set-sources;
+                desc: Str.set-sources-desc;
+                value: Str.always-on;
+            }
+        }
+    }
+
+    GroupHeading {
+        text: Str.settings-look;
+    }
+
+    Card {
+        VerticalLayout {
+            Setting {
+                first: true;
+                title: Str.set-theme;
+                value: Str.theme-name;
+            }
+
+            Setting {
+                title: Str.set-language;
+                value: Str.language-name;
+            }
+        }
+    }
+
+    GroupHeading {
+        text: Str.settings-about;
+    }
+
+    Card {
+        VerticalLayout {
+            Setting {
+                first: true;
+                title: Str.about-version;
+                desc: Str.about-licence;
+            }
+        }
+    }
+}
+
+component BlockedPage inherits Rectangle {
+    in property <NoticeData> n;
+    background: Theme.bg;
+    VerticalLayout {
+        alignment: center;
+        padding: Theme.s8;
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                max-width: Theme.s8 * 11;
+                spacing: Theme.s4;
+                PageTitle {
+                    text: root.n.title;
+                }
+
+                Muted {
+                    text: root.n.body;
+                    font-size: Theme.fs-l;
+                }
+
+                for d in root.n.details: DetailLine {
+                    d: d;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- the window
+
+export component AppWindow inherits Window {
+    no-frame: true;
+    resize-border-width: Theme.s1 + Theme.hair * 2;
+    preferred-width: 1200px;
+    preferred-height: 800px;
+    min-width: 860px;
+    min-height: 560px;
+    background: Theme.bg;
+    title: Str.app-name;
+    default-font-family: Theme.font-sans;
+    default-font-size: Theme.fs-m;
+    icon: @image-url("../assets/rerun-icon.svg");
+
+    // 0 library, 1 applied, 2 history, 3 system, 4 settings; the game page is on 0.
+    in-out property <int> page: 0;
+    in-out property <bool> game-open: false;
+    in property <bool> max-nc-hover;
+    in property <bool> blocked;
+    in property <NoticeData> blocked-notice;
+    in property <string> status-index;
+    in property <string> status-signature;
+    in property <string> status-build;
+    in property <string> nav-library-count;
+    in property <string> nav-applied-count;
+    // Library.
+    in property <bool> library-reading: true;
+    in property <string> library-summary;
+    in property <[NoticeData]> library-notices;
+    in property <[SectionData]> sections;
+    in property <int> shown-rows;
+    in property <string> list-label;
+    in-out property <string> query;
+    in-out property <bool> group: true;
+    in-out property <bool> first-run: true;
+    // Game page.
+    in property <bool> game-loading;
+    in property <string> game-loading-title;
+    in property <GameData> game;
+    // Applied and system.
+    in property <AppliedData> applied;
+    in property <bool> system-loading: true;
+    in property <[SysLineData]> system-lines;
+
+    callback navigate(int);
+    callback open-game(int, string);
+    callback query-edited(string);
+    callback group-toggled(bool);
+    callback rescan();
+    callback poll();
+
+    // `Reveal.request`, routed back by `ui` (a global's callback is set from Rust).
+    public function reveal(y: length, h: length) {
+        if (!root.blocked) {
+            scroller.reveal(y, h);
+        }
+    }
+    changed page => {
+        scroller.content-y = 0;
+    }
+    changed game-open => {
+        scroller.content-y = 0;
+    }
+
+    VerticalLayout {
+        // ---------- title bar
+        Rectangle {
+            height: Theme.title-h;
+            background: Theme.bg;
+            accessible-role: window-title-bar;
+            accessible-label: Str.app-name;
+            WindowMoveArea {
+                TouchArea {
+                    double-clicked => {
+                        root.maximized = !root.maximized;
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-left: Theme.s4 + Theme.hair * 2;
+                    spacing: Theme.s4;
+                    VerticalLayout {
+                        alignment: center;
+                        Image {
+                            source: @image-url("../assets/rerun-lockup-schnee.svg");
+                            height: Theme.s4;
+                            width: self.height * 425.27 / 70;
+                            accessible-role: image;
+                            accessible-label: Str.app-name;
+                        }
+                    }
+
+                    Text {
+                        text: Str.by;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.fs-xs;
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                        accessible-role: none;
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    CaptionButton {
+                        glyph: "\u{E921}";
+                        label: Str.minimize;
+                        activated => {
+                            root.minimized = true;
+                        }
+                    }
+
+                    CaptionButton {
+                        glyph: root.maximized ? "\u{E923}" : "\u{E922}";
+                        label: root.maximized ? Str.restore : Str.maximize;
+                        nc-hover: root.max-nc-hover;
+                        activated => {
+                            root.maximized = !root.maximized;
+                        }
+                    }
+
+                    CaptionButton {
+                        glyph: "\u{E8BB}";
+                        label: Str.close;
+                        danger: true;
+                        activated => {
+                            root.close();
+                        }
+                    }
+                }
+            }
+        }
+
+        Hairline {
+            height: Theme.hair;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            Rectangle {
+                visible: !root.blocked;
+                HorizontalLayout {
+                    // ---------- navigation
+                    Rectangle {
+                        width: Theme.nav-w;
+                        accessible-role: tab-list;
+                        accessible-label: Str.nav-label;
+                        VerticalLayout {
+                            padding: Theme.s4;
+                            spacing: Theme.s1;
+                            alignment: start;
+                            Text {
+                                text: Str.app-name;
+                                color: Theme.muted;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.fs-s;
+                                accessible-role: none;
+                            }
+
+                            Rectangle {
+                                height: Theme.s3;
+                            }
+
+                            for label[i] in Str.nav: NavItem {
+                                sym: i == 0 ? "\u{25A4}" : i == 1 ? "\u{25A0}" : i == 2 ? "\u{21BA}" : i == 3 ? "\u{25A3}" : "\u{2699}";
+                                text: label;
+                                count: i == 0 ? root.nav-library-count : i == 1 ? root.nav-applied-count : "";
+                                active: root.page == i;
+                                accessible-item-index: i;
+                                accessible-item-count: Str.nav.length;
+                                activated => {
+                                    root.navigate(i);
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: Theme.hair;
+                        background: Theme.line-soft;
+                    }
+
+                    // ---------- the page
+                    scroller := ScrollView {
+                        horizontal-stretch: 1;
+                        accessible-role: main;
+                        accessible-label: root.page == 0 ? (root.game-open ? root.game.title : Str.library-title) : root.page == 1 ? Str.applied-title : root.page == 2 ? Str.history-title : root.page == 3 ? Str.system-title : Str.settings-title;
+                        function reveal(y: length, h: length) {
+                            let top = y - self.absolute-position.y;
+                            if (top < 0) {
+                                self.content-y = min(0px, self.content-y - top);
+                            } else if (top + h > self.visible-height) {
+                                self.content-y = self.content-y - (top + h - self.visible-height);
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: Theme.s8;
+                            padding-right: Theme.s8;
+                            padding-top: Theme.s7;
+                            padding-bottom: Theme.s8;
+                            VerticalLayout {
+                                max-width: Theme.s8 * 16;
+                                horizontal-stretch: 1;
+                                alignment: start;
+                                if root.page == 0 && !root.game-open: LibraryPage {
+                                    reading: root.library-reading;
+                                    summary: root.library-summary;
+                                    notices: root.library-notices;
+                                    sections: root.sections;
+                                    shown: root.shown-rows;
+                                    list-label: root.list-label;
+                                    query <=> root.query;
+                                    group <=> root.group;
+                                    first-run <=> root.first-run;
+                                    query-edited(t) => {
+                                        root.query-edited(t);
+                                    }
+                                    group-toggled(v) => {
+                                        root.group-toggled(v);
+                                    }
+                                    open-game(id, name) => {
+                                        root.open-game(id, name);
+                                    }
+                                    rescan => {
+                                        root.rescan();
+                                    }
+                                }
+                                if root.page == 0 && root.game-open: GamePage {
+                                    loading: root.game-loading;
+                                    loading-title: root.game-loading-title;
+                                    game: root.game;
+                                    back => {
+                                        root.navigate(0);
+                                    }
+                                }
+                                if root.page == 1: AppliedPage {
+                                    applied: root.applied;
+                                }
+                                if root.page == 2: HistoryPage { }
+                                if root.page == 3: SystemPage {
+                                    loading: root.system-loading;
+                                    lines: root.system-lines;
+                                }
+                                if root.page == 4: SettingsPage { }
+                            }
+                        }
+                    }
+                }
+
+            }
+            if root.blocked: BlockedPage {
+                width: 100%;
+                height: 100%;
+                n: root.blocked-notice;
+            }
+        }
+
+        Hairline {
+            height: Theme.hair;
+        }
+
+        // ---------- status bar
+        Rectangle {
+            height: Theme.s5 + Theme.s1;
+            accessible-role: content-info;
+            HorizontalLayout {
+                padding-left: Theme.s4 + Theme.hair * 2;
+                padding-right: Theme.s4 + Theme.hair * 2;
+                spacing: Theme.s4;
+                for part in [Str.no-background, root.status-index, root.status-signature, root.status-build]: Text {
+                    visible: part != "";
+                    text: part;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-xs;
+                    color: Theme.faint;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+}

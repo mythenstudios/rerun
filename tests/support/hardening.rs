@@ -1,7 +1,7 @@
 //! Test policy for the DLL hardening of the shipped executables (ADR 0008, H2; ADR 0013,
 //! "Hardening tests"), included with `#[path]` by `crates/rerun-cli/tests/hardening.rs`,
-//! `crates/rerun-launch/tests/hardening.rs`, `crates/rerun-helper/tests/hardening.rs` and
-//! `crates/rerun-core/tests/win_gpu_restricted.rs`.
+//! `crates/rerun-launch/tests/hardening.rs`, `crates/rerun-helper/tests/hardening.rs`,
+//! `crates/rerun-app/tests/hardening.rs` and `crates/rerun-core/tests/win_gpu_restricted.rs`.
 //! The executables are read with `rerun_core::detect::pe` over a `std::fs::File` of the build
 //! output; this file keeps only what is checked. Its teeth test writes its images with the
 //! minimal PE writer in `tests/support/pe_image.rs` (independent of `detect::pe`), which the
@@ -10,7 +10,8 @@
 //! One allowlist per shipped binary (ADR 0008 amendment "import allowlist per binary", ADR
 //! 0016): [`LAUNCH_IMPORTS`] for `rerun-launch.exe`, [`CLI_IMPORTS`] for `rerun.exe` (and for
 //! the `WinSystem` test binary, so the two cannot drift apart), [`HELPER_IMPORTS`] for
-//! `rerun-helper.exe` (ADR 0023), whose image must also pass [`check_helper_content`].
+//! `rerun-helper.exe` (ADR 0023), whose image must also pass [`check_helper_content`], and
+//! [`APP_IMPORTS`] for `rerun-app.exe` (ADR 0026).
 
 #![allow(
     dead_code,
@@ -115,6 +116,39 @@ pub const HELPER_IMPORTS: &[&str] = &[
     "bcryptprimitives.dll",
     "ole32.dll",
     "oleaut32.dll",
+];
+
+/// The static imports `rerun-app.exe` may have (ADR 0026, ADR 0027), found on 2026-11-11 with
+/// P5-3 (Slint 1.18.1, winit backend, software renderer, AccessKit), debug and release, x64:
+/// [`CLI_IMPORTS`] without `userenv.dll` (the app links all of `WinSystem` as well), plus what
+/// the window needs: `user32.dll`, `gdi32.dll` (softbuffer's GDI blit), `comctl32.dll` (the
+/// snap-layout subclass of `ui::chrome` and winit), `dwmapi.dll`, `uxtheme.dll` and `imm32.dll`
+/// (winit), `shlwapi.dll`, `dwrite.dll` (the system font lookup), `uiautomationcore.dll`
+/// (AccessKit's UI Automation provider) and `api-ms-win-core-winrt-error-l1-1-0.dll` (the
+/// `windows` crate under AccessKit). No graphics DLL (the software renderer loads no OpenGL or
+/// Direct3D), no dynamic CRT. Every one is resolved from System32 by `/DEPENDENTLOADFLAG:0x800`.
+/// A new import fails the test: review it, then extend this list and docs/06-security.md.
+pub const APP_IMPORTS: &[&str] = &[
+    "kernel32.dll",
+    "ntdll.dll",
+    "api-ms-win-core-synch-l1-2-0.dll",
+    "advapi32.dll",
+    "combase.dll",
+    "shell32.dll",
+    "bcryptprimitives.dll",
+    "ole32.dll",
+    "oleaut32.dll",
+    "winhttp.dll",
+    "user32.dll",
+    "gdi32.dll",
+    "comctl32.dll",
+    "dwmapi.dll",
+    "uxtheme.dll",
+    "imm32.dll",
+    "shlwapi.dll",
+    "dwrite.dll",
+    "uiautomationcore.dll",
+    "api-ms-win-core-winrt-error-l1-1-0.dll",
 ];
 
 /// The run-time loaders `std` itself names in every binary: its backtrace support loads

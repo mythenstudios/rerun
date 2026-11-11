@@ -1,0 +1,66 @@
+[package]
+name = "rerun-app"
+description = "The Rerun app `rerun-app.exe` (ADR 0027): a window over `rerun_core::flow`; Slint (ADR 0026)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+# The sources are GPL-3.0-or-later like the workspace. The built rerun-app.exe links Slint under
+# its GPL-3.0-only option and is therefore effectively GPL-3.0-only (ADR 0026, README).
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rerun-app"
+path = "src/main.rs"
+
+[features]
+# The [DEV] test-key app (as the CLI's feature of the same name, ADR 0024 amendment P4-13): trusts
+# the published index test key and keeps its index state in `<AppDir>\index-test`. Never default,
+# never shipped: `compile_error!` without debug assertions (here and in rerun-core), a banner in
+# the status bar, and CI checks that `-e normal,build` of rerun-app does not enable
+# rerun-core/test-key.
+test-key = ["rerun-core/test-key"]
+
+[dependencies]
+rerun-core.workspace = true
+# The UI framework (ADR 0026), only in `ui` and `build.rs` (source rule). Pinned exactly; an
+# update is a commit of its own that repeats the spike's measures. No femtovg (software renderer
+# always, P5-3), no Qt, no Skia, no system tray, no `unstable-*` feature.
+slint = { version = "=1.18.1", default-features = false, features = [
+  "std",
+  "compat-1-2",
+  "backend-winit",
+  "renderer-software",
+  "accessibility",
+  "raw-window-handle-06",
+] }
+# The window handle for the snap-layout subclass (`ui::chrome`, ADR 0026); the version Slint's
+# winit backend already pulls in, no new crate.
+raw-window-handle = "0.6.2"
+
+[target.'cfg(windows)'.dependencies]
+# `ui::chrome` only (ADR 0026): the window subclass for the snap layouts and the Windows display
+# language.
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+slint-build = "=1.18.1"
+
+# View-model tests against the fake system layer with an index signed by the published test
+# key, and the hardening test's PE reader. Never in the shipped build: CI checks that
+# `-e normal,build` of rerun-app enables neither `fake` nor `test-key`.
+[dev-dependencies]
+rerun-core = { workspace = true, features = ["fake", "test-key"] }
+
+[lints]
+workspace = true
