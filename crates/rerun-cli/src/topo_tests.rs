@@ -436,3 +436,180 @@ fn c_te10_test_key_index_state_is_index_test() {
         assert!(!r.stdout.contains("TEST-KEY"), "{}", r.stdout);
     }
 }
+
+/// The lines `scripts/dev-topo-roundtrip.ps1` parses (plan P4-13, the binding test of §6): its
+/// regex constants and exit codes are pinned here by their exact text, and rerun's real output
+/// of the script's sequence (index import, plan by app ID with a pick, apply, status, revert)
+/// is checked line by line against what those regexes accept. Change both together.
+#[test]
+fn the_dev_topo_script_parses_rerun_s_lines() {
+    use rerun_core::escape;
+
+    use crate::messages::{HelperMsg, Message};
+
+    let script = include_str!("../../../scripts/dev-topo-roundtrip.ps1");
+    for line in [
+        format!("$script:Banner = '{}'", crate::messages::TEST_KEY_BANNER),
+        r"$script:ReApplyWith = '^apply with: rerun apply (?<hash>[0-9a-f]{64})$'".to_owned(),
+        r"$script:ReRevertWith = '^revert with: rerun revert (?<txn>[0-9]{8}-[0-9a-f]{16})$'"
+            .to_owned(),
+        r"$script:ReReverted = '^transaction (?<txn>[0-9]{8}-[0-9a-f]{16}) reverted and closed$'"
+            .to_owned(),
+        r#"$script:ReOption = '^  (?<option>"(?<install>[^"]+)\\rerun-launch\.exe" --profile (?<id>[0-9a-f]{32}) %command%)$'"#
+            .to_owned(),
+        r"$script:ReProfile = '^     launch profile (?<id>[0-9a-f]{32}): method (?<method>[a-z]+), '"
+            .to_owned(),
+        r"$script:ReMainExe = '^  main executable: (?<exe>.+)$'".to_owned(),
+        r"$script:ReFirewallRule = '^  firewall rule: '".to_owned(),
+        r"$script:ReNoTransactions = '^no transactions$'".to_owned(),
+        r"$script:ReStatusCounts = '^[0-9]+ transactions?: (?<open>[0-9]+) not closed, [0-9]+ closed, [0-9]+ forgotten'"
+            .to_owned(),
+        r"$script:ReOrphans = '^Rerun firewall rules'".to_owned(),
+        r"$script:ReImported = '^index [0-9]+ imported'".to_owned(),
+    ] {
+        assert!(script.contains(&line), "the script lacks `{line}`");
+    }
+    for (name, exit) in [
+        ("Report", Exit::Report),
+        ("Fatal", Exit::Fatal),
+        ("Usage", Exit::Usage),
+        ("Refused", Exit::Refused),
+        ("RolledBack", Exit::RolledBack),
+        ("Open", Exit::Open),
+    ] {
+        let line = format!("$Exit{name} = {}", exit as u8);
+        assert!(script.contains(&line), "the script lacks `{line}`");
+    }
+
+    let hex = |s: &str, n: usize| {
+        s.len() == n
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let txn_ok = |s: &str| {
+        s.len() == 25
+            && s[..8].bytes().all(|b| b.is_ascii_digit())
+            && &s[8..9] == "-"
+            && hex(&s[9..], 16)
+    };
+    let line_after = |text: &str, prefix: &str| -> String {
+        text.lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("no line {prefix} in:\n{text}"))
+            .to_owned()
+    };
+
+    let sys = lm_sys(false, &steps(8));
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout.lines().any(|l| l == "no transactions"),
+        "{}",
+        s.stdout
+    );
+    let ix = index(&sha256_of(&sys, "game.exe"));
+    sys.fake_fs()
+        .put_file(Path::new(INDEX), ix.as_bytes())
+        .unwrap();
+    sys.fake_fs()
+        .put_file(Path::new(SIG), &test_key::sign(ix.as_bytes()))
+        .unwrap();
+    sys.fake_fs().sync_all();
+    let i = expect(
+        &sys,
+        &["index", "import", INDEX, SIG],
+        Answer::No,
+        Exit::Report,
+    );
+    let seq = line_after(&i.stdout, "index ");
+    let seq = seq.strip_suffix(" imported").unwrap_or(&seq);
+    assert!(seq.bytes().all(|b| b.is_ascii_digit()), "{}", i.stdout);
+
+    let p = expect(
+        &sys,
+        &["plan", "220", "--pick", "cores/limit"],
+        Answer::No,
+        Exit::Report,
+    );
+    let hash = line_after(&p.stdout, "apply with: rerun apply ");
+    assert!(hex(&hash, 64), "{hash}");
+    assert_eq!(line_after(&p.stdout, "  main executable: "), "game.exe");
+    let profile = line_after(&p.stdout, "     launch profile ");
+    assert!(hex(&profile[..32], 32), "{profile}");
+    assert!(profile[32..].starts_with(": method direct, "), "{profile}");
+    for out in [
+        &p.stdout,
+        &crate::tests::expect(
+            &sys,
+            &["apply", &hash, "--dry-run"],
+            Answer::No,
+            Exit::Report,
+        )
+        .stdout,
+    ] {
+        let option = line_after(
+            out,
+            &format!("  \"{INSTALL}\\rerun-launch.exe\" --profile "),
+        );
+        let id = option
+            .strip_suffix(" %command%")
+            .unwrap_or_else(|| panic!("{option}"));
+        assert!(hex(id, 32), "{option}");
+        assert_eq!(id, &profile[..32]);
+    }
+
+    let a = expect(&sys, &["apply", &hash, "--yes"], Answer::No, Exit::Report);
+    let txn = line_after(&a.stdout, "revert with: rerun revert ");
+    assert!(txn_ok(&txn), "{txn}");
+    assert!(
+        a.stdout
+            .contains(&format!("  \"{INSTALL}\\rerun-launch.exe\" --profile ")),
+        "{}",
+        a.stdout
+    );
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout
+            .lines()
+            .any(|l| l.starts_with("1 transaction: 1 not closed, 0 closed, 0 forgotten")),
+        "{}",
+        s.stdout
+    );
+    assert!(!s.stdout.contains("Rerun firewall rules"), "{}", s.stdout);
+    let v = expect(&sys, &["revert", &txn, "--yes"], Answer::No, Exit::Report);
+    assert!(
+        v.stdout
+            .lines()
+            .any(|l| l == format!("transaction {txn} reverted and closed")),
+        "{}",
+        v.stdout
+    );
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout
+            .lines()
+            .any(|l| l.starts_with("1 transaction: 0 not closed, 1 closed, 0 forgotten")),
+        "{}",
+        s.stdout
+    );
+
+    // The firewall lines (rendered: the fake world of these tests has no firewall plan).
+    let rule = Message::Helper(HelperMsg::Rule {
+        direction: "outbound",
+        group: "Rerun",
+        name: escape::text("Rerun - invented-game - 00000001-00000000000000ab-001"),
+    })
+    .to_string();
+    assert!(rule.starts_with("  firewall rule: "), "{rule}");
+    for m in [
+        HelperMsg::OrphansHeading,
+        HelperMsg::OrphansUnreadable {
+            error: escape::text("x"),
+        },
+        HelperMsg::OrphansNoJournal {
+            error: escape::text("x"),
+        },
+    ] {
+        let l = Message::Helper(m).to_string();
+        assert!(l.starts_with("Rerun firewall rules"), "{l}");
+    }
+}
