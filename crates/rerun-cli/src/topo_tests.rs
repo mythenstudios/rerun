@@ -8,7 +8,8 @@
 //! - C-TE4 another content of the game: no match, nothing offered; with `--pick` refused.
 //! - C-TE5 an anti-cheat folder: the report says so, `compat_layer` is refused.
 //! - C-TE6 `--pick` with a step file is a usage error; a pick of the wrong form too.
-//! - C-TE11 the golden plan (P5-1): frozen bytes and hash in `tests/fixtures/plan/`.
+//! - C-TE11 to C-TE13 the golden plans (P5-1): frozen bytes and hashes in `tests/fixtures/plan/`
+//!   (a launch profile and a compat layer; an `ini_set` on the user data folder; a package).
 
 use std::path::Path;
 
@@ -17,12 +18,12 @@ use rerun_core::detect::exe::{HashLimits, HashOutcome, inspect_exe};
 use rerun_core::detect::pe::Limits;
 use rerun_core::path::RelPath;
 use rerun_core::policy::root::{ForbiddenRoots, GameDir};
-use rerun_core::sys::fake::FakeSystem;
+use rerun_core::sys::fake::{FakeHttp, FakeReply, FakeSystem};
 
 use crate::cli::Exit;
 use crate::confirm::Answer;
 use crate::lm_tests::{G, lm_sys, steps};
-use crate::tests::{INSTALL, RERUN, expect};
+use crate::tests::{INSTALL, RERUN, expect, run_to_http};
 
 const INDEX: &str = r"D:\Work\index.json";
 const SIG: &str = r"D:\Work\index.json.sig";
@@ -654,23 +655,48 @@ fn the_dev_topo_script_parses_rerun_s_lines() {
     }
 }
 
-/// The golden plan (P5-1, ADR 0027): the bytes and the hash `rerun plan 220 --pick cores/limit
-/// --pick display/layer` stores for this fake world, frozen before the CLI became a renderer
-/// over `rerun_core::flow`, so the extraction of the write side (P5-2a) can prove it plans
-/// exactly the same bytes. A changed plan fails here and writes the new bytes to
-/// `target/plan-topo-220.golden.json`; check them, then copy them over
-/// `tests/fixtures/plan/topo-220.json` and the hash into `topo-220.sha256` only for an intended
-/// change of the plan format or the planners.
-#[test]
+/// The golden plans (P5-1, ADR 0027): the bytes and the hash a `rerun plan <app-id> --pick …`
+/// stores for a fake world, frozen before the CLI became a renderer over `rerun_core::flow`, so
+/// the extraction of the write side (P5-2a) can prove it plans exactly the same bytes. A changed
+/// plan fails here and writes the new bytes to `target/plan-<name>.golden.json`; check them, then
+/// copy them over `tests/fixtures/plan/<name>.json` and the hash into `<name>.sha256` only for an
+/// intended change of the plan format or the planners.
 #[expect(
     clippy::disallowed_methods,
-    reason = "test: the golden fixture lives in the repository, not in the fake"
+    reason = "test: the golden fixtures live in the repository, not in the fake"
 )]
-fn c_te11_the_golden_plan() {
+fn golden(sys: &FakeSystem, http: &FakeHttp, args: &[&str], name: &str) {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/plan");
-    let sys = sys();
-    let r = expect(
-        &sys,
+    let (mut r, out) = run_to_http(sys, http, args, Answer::No, Vec::new());
+    r.stdout = String::from_utf8(out).unwrap();
+    assert_eq!(r.exit, Exit::Report, "{}\n{}", r.stdout, r.stderr);
+    let hash = crate::tests::hash_of(&r);
+    let app = rerun_core::policy::root::AppDir::open(sys, rerun_core::policy::root::Create::Never)
+        .unwrap()
+        .unwrap();
+    let bytes = rerun_core::plan::load(&app, &hash.parse().unwrap()).unwrap();
+    let golden = std::fs::read(fixtures.join(format!("{name}.json"))).unwrap_or_default();
+    if bytes.bytes() != golden.as_slice() {
+        let out = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../target/plan-{name}.golden.json"));
+        std::fs::write(&out, bytes.bytes()).unwrap();
+        panic!(
+            "the plan differs from tests/fixtures/plan/{name}.json (hash {hash}); the new bytes \
+             are in {}",
+            out.display()
+        );
+    }
+    let want = std::fs::read_to_string(fixtures.join(format!("{name}.sha256"))).unwrap();
+    assert_eq!(hash, want.trim());
+    assert_eq!(bytes.hash().to_string(), hash);
+}
+
+/// C-TE11: a launch profile on the profiles root and a compat layer.
+#[test]
+fn c_te11_the_golden_plan() {
+    golden(
+        &sys(),
+        &FakeHttp::default(),
         &[
             "plan",
             "220",
@@ -679,26 +705,111 @@ fn c_te11_the_golden_plan() {
             "--pick",
             "display/layer",
         ],
+        "topo-220",
+    );
+}
+
+/// C-TE12: the C-TE9 world: an `ini_set` on the Topo's user data folder below Documents (the
+/// folder opened by the CLI for that pick, P4-12) and a compat layer.
+#[test]
+fn c_te12_the_golden_plan_with_a_user_data_folder() {
+    let sys = lm_sys(false, &steps(8));
+    let sha = sha256_of(&sys, "game.exe");
+    let ix = format!(
+        r#"{{"format":1,"seq":1,"issued":"2026-11-09T12:00:00Z","topos":[{{"format":1,"id":"invented-game","title":"Invented Game","status":"active","rev":1,
+"match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d9"}}]}},
+"user_data":{{"documents":"My Games\\Invented"}},
+"issues":[
+ {{"id":"threads","title":"Threads","variants":[{{"id":"ini","status":"unverified","kind":"fix","steps":[{{"ini_set":{{"root":"user_data","file":"settings.ini","values":[{{"section":"Display","key":"Width","value":"1920"}}]}}}}]}}]}},
+ {{"id":"display","title":"Display","variants":[{{"id":"layer","status":"unverified","kind":"fix","steps":[{{"compat_layer":{{"exe":"game.exe","layers":["HIGHDPIAWARE"]}}}}]}}]}}
+]}}],"packages":[]}}"#
+    );
+    import(&sys, ix.as_bytes());
+    sys.fake_fs()
+        .put_file(
+            Path::new(r"C:\Users\Player\Documents\My Games\Invented\settings.ini"),
+            b"[Display]\r\nWidth=1280\r\n",
+        )
+        .unwrap();
+    sys.fake_fs().sync_all();
+    golden(
+        &sys,
+        &FakeHttp::default(),
+        &[
+            "plan",
+            "220",
+            "--pick",
+            "threads/ini",
+            "--pick",
+            "display/layer",
+        ],
+        "topo-220-user-data",
+    );
+}
+
+/// C-TE13 (TK): a `package` step of the signed index, fetched and unpacked from its release
+/// zip (`rerun package fetch`), planned as a `file_install` of the package's files for the
+/// game's architecture.
+#[test]
+fn c_te13_the_golden_plan_with_a_package() {
+    use rerun_core::pkg::archive::testfx::{ZipEntry, zip};
+    const ASSET: &str = "https://github.com/owner/fix-pack/releases/download/v1.0/fix-pack.zip";
+    const STORE: &str =
+        "https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sp=r";
+    let upper = |b: &[u8]| -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(b)
+            .iter()
+            .map(|x| format!("{x:02X}"))
+            .collect()
+    };
+    let archive = zip(&[
+        ZipEntry::file("bin/fix.dll", b"the fix"),
+        ZipEntry::file("fix.ini", b"[Fix]\r\nOn=1\r\n"),
+    ]);
+    let sys = lm_sys(false, &steps(8));
+    let sha = sha256_of(&sys, "game.exe");
+    let ix = format!(
+        r#"{{"format":1,"seq":1,"issued":"2026-11-09T12:00:00Z","topos":[{{"format":1,"id":"invented-game","title":"Invented Game","status":"active","rev":1,
+"match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d9"}}]}},
+"issues":[
+ {{"id":"crash","title":"Crash","variants":[{{"id":"fix-pack","status":"unverified","kind":"fix","steps":[{{"package":"fix-pack"}}]}}]}}
+]}}],"packages":[{{"format":1,"id":"fix-pack","name":"Fix pack","status":"active","tier":"established","source":{{"repo":"https://github.com/owner/fix-pack","release":"{ASSET}"}},"version":"1.0","sha256":"{a}","license":"MIT","arch":["x86"],"slots":["fix.dll"],"files":[{{"from":"bin/fix.dll","to":"fix.dll","sha256":"{d}"}},{{"from":"fix.ini","to":"fix.ini","sha256":"{i}","config":true}}]}}]}}"#,
+        a = upper(&archive),
+        d = upper(b"the fix"),
+        i = upper(b"[Fix]\r\nOn=1\r\n"),
+    );
+    import(&sys, ix.as_bytes());
+    let http = FakeHttp::default();
+    http.reply(ASSET, FakeReply::redirect(302, STORE));
+    http.reply(STORE, FakeReply::ok(&archive));
+    let (r, _) = run_to_http(
+        &sys,
+        &http,
+        &["package", "fetch", "fix-pack@1.0"],
+        Answer::No,
+        Vec::new(),
+    );
+    assert_eq!(r.exit, Exit::Report, "{}", r.stderr);
+    golden(
+        &sys,
+        &http,
+        &["plan", "220", "--pick", "crash/fix-pack"],
+        "topo-220-package",
+    );
+}
+
+/// Imports `ix`, signed with the test key.
+fn import(sys: &FakeSystem, ix: &[u8]) {
+    sys.fake_fs().put_file(Path::new(INDEX), ix).unwrap();
+    sys.fake_fs()
+        .put_file(Path::new(SIG), &test_key::sign(ix))
+        .unwrap();
+    sys.fake_fs().sync_all();
+    expect(
+        sys,
+        &["index", "import", INDEX, SIG],
         Answer::No,
         Exit::Report,
     );
-    let hash = crate::tests::hash_of(&r);
-    let app = rerun_core::policy::root::AppDir::open(&sys, rerun_core::policy::root::Create::Never)
-        .unwrap()
-        .unwrap();
-    let bytes = rerun_core::plan::load(&app, &hash.parse().unwrap()).unwrap();
-    let golden = std::fs::read(fixtures.join("topo-220.json")).unwrap_or_default();
-    if bytes.bytes() != golden.as_slice() {
-        let out =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/plan-topo-220.golden.json");
-        std::fs::write(&out, bytes.bytes()).unwrap();
-        panic!(
-            "the plan differs from tests/fixtures/plan/topo-220.json (hash {hash}); the new \
-             bytes are in {}",
-            out.display()
-        );
-    }
-    let want = std::fs::read_to_string(fixtures.join("topo-220.sha256")).unwrap();
-    assert_eq!(hash, want.trim());
-    assert_eq!(bytes.hash().to_string(), hash);
 }
