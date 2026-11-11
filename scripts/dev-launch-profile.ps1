@@ -5,7 +5,10 @@
 #
 # Optional: -Threads 8 (default), -Smt, -Mode hard|soft, -Priority none|normal|above_normal|high,
 # -Launcher <path of rerun-launch.exe> (default: builds the release shim and copies it to
-# %LOCALAPPDATA%\RerunTest\rerun-launch.exe, a fixed place for the launch option), -WaitMinutes 15.
+# %LOCALAPPDATA%\RerunTest\rerun-launch.exe, a fixed place for the launch option), -WaitMinutes 15,
+# -Cold (D2, cold start right after a reboot: no build, no copy and no decode run through the
+# shim before the game, so the game's start is the shim's first run since boot; uses the copy
+# already in %LOCALAPPDATA%\RerunTest unless -Launcher names one).
 #
 # What it does, without a single question (the current instruction is in the window title):
 #  1. checks itself: its profile writer against its copy of the codec golden (a Rust test binds
@@ -29,7 +32,8 @@ param(
     [ValidateSet('hard', 'soft')][string]$Mode = 'hard',
     [ValidateSet('none', 'normal', 'above_normal', 'high')][string]$Priority = 'none',
     [string]$Launcher,
-    [ValidateRange(1, 120)][int]$WaitMinutes = 15
+    [ValidateRange(1, 120)][int]$WaitMinutes = 15,
+    [switch]$Cold
 )
 
 $ErrorActionPreference = 'Stop'
@@ -106,6 +110,11 @@ function Exe-Bitness([string]$path) {
     }
 }
 
+# The result file's last write time; MinValue while it does not exist (-Cold: no decode run).
+function Result-Time([string]$path) {
+    if (Test-Path -LiteralPath $path -PathType Leaf) { (Get-Item -LiteralPath $path).LastWriteTimeUtc } else { [DateTime]::MinValue }
+}
+
 function Read-Result([string]$path) {
     $map = @{}
     $text = [IO.File]::ReadAllText($path, (New-Object System.Text.UTF8Encoding($false)))
@@ -144,6 +153,10 @@ try {
     $bitness = Exe-Bitness $Exe
     $exeName = [IO.Path]::GetFileNameWithoutExtension($Exe)
 
+    if ($Cold -and -not $Launcher) {
+        # -Cold: building or copying would put the shim into the file cache before the game starts.
+        $Launcher = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'RerunTest\rerun-launch.exe'
+    }
     if (-not $Launcher) {
         Title 'building the release shim (cargo build -p rerun-launch --release)'
         Push-Location $repo
@@ -193,6 +206,11 @@ try {
     if ([Array]::IndexOf($back, [byte]13) -ge 0) { Fail 'self-check: the profile has a CR' }
     Write-Host "profile written: $profilePath ($($back.Length) bytes, $bitness)"
 
+    if ($Cold) {
+        # The decode run below would be the shim's first start since boot, not the game's.
+        Write-Host '-Cold: no decode run through the shim before the game (its result file checks the profile)'
+        $selfCheckTime = [DateTime]::MinValue
+    } else {
     Title 'letting rerun-launch decode the profile (cmd.exe /c exit 0)'
     $cmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
     $p = Start-Process -FilePath $Launcher -ArgumentList @('--profile', $id, "`"$cmd`"", '/c', 'exit', '0') -PassThru -Wait -WindowStyle Hidden
@@ -202,6 +220,7 @@ try {
     if ($r['rule'] -ne 'skipped:path_mismatch') { Fail "self-check: the shim recorded rule=$($r['rule']), expected skipped:path_mismatch (profile_invalid means the profile does not decode)" }
     Write-Host 'self-check: rerun-launch decodes the profile (path_mismatch for cmd.exe, as expected)'
     $selfCheckTime = (Get-Item -LiteralPath $resultPath).LastWriteTimeUtc
+    }
 
     # ---------- 2: the launch option ----------
     $option = "`"$Launcher`" --profile $id %command%"
@@ -224,7 +243,7 @@ try {
         $game = Get-Process -ErrorAction SilentlyContinue | Where-Object {
             try { $_.Path -and [string]::Equals($_.Path, $Exe, [StringComparison]::OrdinalIgnoreCase) -and $_.StartTime -gt $started } catch { $false }
         } | Select-Object -First 1
-        $newResult = (Get-Item -LiteralPath $resultPath).LastWriteTimeUtc -gt $selfCheckTime
+        $newResult = (Result-Time $resultPath) -gt $selfCheckTime
     }
     if ($game) {
         $gameStart = $game.StartTime
@@ -247,10 +266,10 @@ try {
     # start. Its `cpu=<mode>:<threads>:<of>` is what the shim selected on this machine, which
     # the affinity is compared with (it may be fewer than -Threads).
     $resultDeadline = (Get-Date).AddSeconds(15)
-    while (((Get-Item -LiteralPath $resultPath).LastWriteTimeUtc -le $selfCheckTime) -and ((Get-Date) -lt $resultDeadline)) { Start-Sleep -Milliseconds 500 }
+    while (((Result-Time $resultPath) -le $selfCheckTime) -and ((Get-Date) -lt $resultDeadline)) { Start-Sleep -Milliseconds 500 }
     $selected = $null
     $checkValue = ''
-    if ((Get-Item -LiteralPath $resultPath).LastWriteTimeUtc -le $selfCheckTime) {
+    if ((Result-Time $resultPath) -le $selfCheckTime) {
         Row 'result file' $false 'not written for this start (the shim did not run with this profile?)'
     } else {
         $r = Read-Result $resultPath
