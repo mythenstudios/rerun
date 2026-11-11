@@ -12,10 +12,19 @@ match:
     - { path: "AssassinsCreed_Dx9.exe",  sha1: "A9EA476E70F076709CCA59A802E26EC894432120", sha256: "2FA8D50C60398CC249C6D908DE46B15F48E445DD0C605B5956E94FA2F445A713", api: d3d9 }
     - { path: "AssassinsCreed_Dx10.exe", sha1: "601475FD5EFA02BBAE80D1C06DFA25A0A1E7FD2F", sha256: "576A04841C37BE5A819974ABD59EA3ECD818F0BC36ACAB71C62EE0313DCA0129", api: d3d10 }
 
+# Launch observed on the dev PC (P4-13 S1, 2026-11-11): steam.exe starts AssassinsCreed_Game.exe (a D3D detector, no
+# Ubisoft Connect), which runs Detection\Detection.exe and then starts AssassinsCreed_Dx10.exe without a choice dialog.
+# TODO issue: on the dev PC (5950X, 32 logical processors, RX 9070 XT, Windows 11 26300) Detection.exe crashes in
+# systemtests_rd.tst (0xc0000005) and AssassinsCreed_Dx10.exe then crashes at offset 0x00010c74, every start; started
+# directly (Dx9 or Dx10, also with affinity FF) the same happens. Sourced candidates: more than 8 processors
+# (https://steamcommunity.com/app/15100/discussions/0/3369279631097585577, fix msconfig "Number of processors", OS-wide)
+# and PCGW "Game does not start with 32 cores". An affinity mask does not change the processor count the detector
+# reads, so a cpu step is not expected to help; a reported core count (rerun-cpu report_cores, method inproc,
+# phase 6) would. Cause not confirmed yet.
 launch:
-  chain: [steam, upc]
+  chain: [steam]
   method: auto
-  start: "TODO"              # TODO: Steam's launch entry, read from rerun status (path_mismatch) or the process tree; never guessed
+  start: "AssassinsCreed_Game.exe"
   fallback: inproc
 
 issues:
