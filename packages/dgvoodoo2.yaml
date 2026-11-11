@@ -1,0 +1,33 @@
+# dgVoodoo 2.87.6 by Dege (closed-source freeware, author and site known), pinned to the release tag 2.87.6.
+# Source: official release on the author's GitHub (dege-diosg/dgVoodoo2); documentation at https://dege.fw.hu/dgVoodoo2/ReadmeGeneral/
+# License: no license file; the General Readme (section 1, "Redistribution rights") allows shipping individual
+# unmodified files with a game or mod, requires the original, unmodified .zip for any standalone redistribution, and
+# forbids bundling dgVoodoo inside launchers or frameworks for general use across applications. Rerun hosts nothing and
+# downloads the original zip from the author's release, but the last point is open for the maintainer.
+# The author re-uploaded the 2.87.6 zip on 2026-10-26 under the same tag: a pinned hash fails closed if that happens again.
+# Only the x86 DirectX wrappers and the text config are unpacked, never dgVoodooCpl.exe (the control panel). The x64
+# build has D3D9 only and is not used (this package is for 32-bit games). Slot mapping follows the archive layout:
+# DDraw.dll + D3DImm.dll (DirectDraw/D3D1-7), D3D8.dll, D3D9.dll; the exact set a D3D8 game needs is not confirmed.
+format: 1
+id: dgvoodoo2
+name: dgVoodoo 2
+status: active
+tier: established
+source:
+  repo: "https://github.com/dege-diosg/dgVoodoo2"
+  release: "https://github.com/dege-diosg/dgVoodoo2/releases/download/2.87.6/dgVoodoo2_87_6.zip"
+version: "2.87.6"
+sha256: "9AFA493396FEEC7108F42A2D97661EEF96BBAAC5ADDF0DFB5CFBC3001CD76A0A"
+license: "LicenseRef-dgVoodoo2-Freeware"
+arch: [x86]
+apis: [ddraw, d3d8, d3d9]
+slots_by_api:
+  ddraw: [ddraw.dll, d3dimm.dll]
+  d3d8:  [d3d8.dll]
+  d3d9:  [d3d9.dll]
+files:
+  - { from: "MS/x86/DDraw.dll",  to: "DDraw.dll",  sha256: "F68CD82BFB585C9B6676C6282B0FAC713C9567EAE624BC991C5BCFE5881C7BEF", arch: [x86], api: [ddraw] }
+  - { from: "MS/x86/D3DImm.dll", to: "D3DImm.dll", sha256: "85AA1D15D6880DBE927458F6A045A631264BA128528010B7296EC5C3A640E0AC", arch: [x86], api: [ddraw] }
+  - { from: "MS/x86/D3D8.dll",   to: "D3D8.dll",   sha256: "25A0CEEB85FCC4675C6F964442EECC14FEDD504EFFD39C931A627249AD4685E2", arch: [x86], api: [d3d8] }
+  - { from: "MS/x86/D3D9.dll",   to: "D3D9.dll",   sha256: "060CB161EB7A0C608A520185F0B334DB325AD71D69016BC26060C9D5B9651F7D", arch: [x86], api: [d3d9] }
+  - { from: "dgVoodoo.conf",     to: "dgVoodoo.conf", sha256: "45CC0EB8E6ED4F067ACA1B2E4AC1268DFBD164BBBD06D264C53E8A60642C4DBF", arch: [x86], config: true }
