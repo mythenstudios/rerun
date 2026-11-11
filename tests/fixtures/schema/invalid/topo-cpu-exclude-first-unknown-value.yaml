@@ -1,0 +1,20 @@
+# Invalid: cpu.exclude_first is thread or core (unknown-value)
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+issues:
+  - id: issue
+    title: "Issue"
+    variants:
+      - id: v
+        status: unverified
+        kind: fix
+        steps: [{ cpu: { exclude_first: cpu0 } }]
+        tradeoffs: ["Side effect"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Far_Cry_2#High_core_count" }

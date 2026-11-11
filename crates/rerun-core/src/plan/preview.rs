@@ -408,7 +408,7 @@ fn cpu_words(r: &CpuRule) -> String {
     let max = r
         .max_threads
         .map_or_else(|| "none".to_owned(), |n| n.to_string());
-    format!(
+    let words = format!(
         "max_threads {max}, prefer {}, single_l3 {}, prefer_l3 {}, smt {}, mode {}",
         match r.prefer {
             Prefer::Performance => "performance",
@@ -424,7 +424,12 @@ fn cpu_words(r: &CpuRule) -> String {
             Mode::Hard => "hard",
             Mode::Soft => "soft",
         },
-    )
+    );
+    // Only when given: every preview of a rule without it keeps its words.
+    match r.exclude_first {
+        Some(e) => format!("{words}, exclude_first {}", e.name()),
+        None => words,
+    }
 }
 
 /// The profile written by an op with inline bytes at `path`.

@@ -487,7 +487,7 @@
       }
     },
     "cpuRule": {
-      "description": "CPU rule without report_cores (as a step). Never thread numbers.",
+      "description": "CPU rule without report_cores (as a step). Never thread numbers; the one fixed identity is CPU 0, through exclude_first.",
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
@@ -520,6 +520,13 @@
             "hard",
             "soft"
           ]
+        },
+        "exclude_first": {
+          "enum": [
+            "thread",
+            "core"
+          ],
+          "description": "thread = never CPU 0 (logical processor 0 of group 0, as Task Manager names it); core = never any thread of the physical core that holds CPU 0. Applied after the L3 choice; a no-op when CPU 0 is not in the chosen group. Use mode: hard for the community fix \"remove CPU 0 access\"."
         }
       }
     },
@@ -557,6 +564,13 @@
             "hard",
             "soft"
           ]
+        },
+        "exclude_first": {
+          "enum": [
+            "thread",
+            "core"
+          ],
+          "description": "thread = never CPU 0 (logical processor 0 of group 0, as Task Manager names it); core = never any thread of the physical core that holds CPU 0. Applied after the L3 choice; a no-op when CPU 0 is not in the chosen group. Use mode: hard for the community fix \"remove CPU 0 access\"."
         },
         "report_cores": {
           "type": "integer",

@@ -222,12 +222,16 @@ cpu:
   prefer_l3: largest      # prefer the V-Cache CCD
   smt: false              # false = only one thread per core
   mode: hard              # hard (affinity) | soft (CPU Sets)
+  exclude_first: thread   # thread = never CPU 0 | core = never the core of CPU 0
   report_cores: 8         # only in launch.cpu and only with method: inproc
 ```
 
-Every field is optional, at least one is given (`cpu: {}` is refused). A missing field does not restrict: `max_threads` none, `prefer: any`, `single_l3: false`, `prefer_l3` none, `smt: true`, `mode: hard` (ADR 0022 amendment P3-3, F8). `report_cores` is refused outside `method: inproc` (phase 6). `mode: soft` sets the default CPU Sets of the started program only, a preference Windows may override, and never reaches programs it starts.
+Every field is optional, at least one is given (`cpu: {}` is refused). A missing field does not restrict: `max_threads` none, `prefer: any`, `single_l3: false`, `prefer_l3` none, `smt: true`, `mode: hard`, no `exclude_first` (ADR 0022 amendment P3-3, F8). `report_cores` is refused outside `method: inproc` (phase 6). `mode: soft` sets the default CPU Sets of the started program only, a preference Windows may override, and never reaches programs it starts.
 
-Never concrete thread numbers in Topos. See `03-cpu-topology.md`. `single_l3` keeps the game on the LLC with the most threads, which is not always the one with full-size cores: on CPUs with compact cores (Zen 5c next to Zen 5, Ryzen AI 300) it picks the larger Zen 5c cluster. For full-size cores (or the V-Cache CCD) write `prefer_l3: largest`. `shim_single` (`04-launch-methods.md`) enters the enum `method` only with Phase 6.
+`exclude_first` (ADR 0022 amendment P4-13) states the community fix "remove CPU 0 access" (stutter in old games with load on CPU 0, e.g. Assassin's Creed II): `thread` keeps the game off CPU 0, the logical processor Task Manager calls "CPU 0" (processor 0 of group 0), and leaves its SMT sibling; `core` keeps it off every thread of the physical core that holds CPU 0 (without SMT the same as `thread`). Write the fix as the source states it, never as the mask a guide shows: `fffe` is "all but CPU 0" only on a 16-thread machine; read literally on a larger one it would mean CPUs 1–15 only. It is applied after the L3 choice (it never moves the game to another CCD) and before `smt` and `max_threads`, which fill up from what is left: with `smt: false` and `thread` CPU 1 stands in for core 0, with `core` core 0 is gone. A no-op when CPU 0 is not in the group the game gets (more than 64 logical processors in unequal groups); on a one-processor machine the rule selects nothing and the game starts unchanged. Use `mode: hard` for this fix: the sources set a hard affinity, while `soft` is a preference Windows may ignore. A Topo offers the variant its source names; when the sources differ, `thread` and `core` are two variants of one issue. A launch profile with `exclude_first` is written as format 2 (ADR 0022 amendment P4-13); every other stays format 1.
+
+Never concrete thread numbers in Topos; CPU 0 through `exclude_first` is the one fixed identity (the same processor on every machine). See `03-cpu-topology.md`.
+ `single_l3` keeps the game on the LLC with the most threads, which is not always the one with full-size cores: on CPUs with compact cores (Zen 5c next to Zen 5, Ryzen AI 300) it picks the larger Zen 5c cluster. For full-size cores (or the V-Cache CCD) write `prefer_l3: largest`. `shim_single` (`04-launch-methods.md`) enters the enum `method` only with Phase 6.
 
 ## Package
 

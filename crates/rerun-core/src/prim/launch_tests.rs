@@ -33,8 +33,8 @@ use rerun_proto::profile::{self as proto, LaunchProfile, Method};
 
 use super::launch_method::{WATCH_TIMEOUT_S, on_this_machine};
 use super::{
-    CpuRuleSpec, LaunchMethodSpec, MachineWhy, MethodSpec, ModeSpec, PlanCtx, PrioritySpec, Step,
-    plan,
+    CpuRuleSpec, ExcludeFirstSpec, LaunchMethodSpec, MachineWhy, MethodSpec, ModeSpec, PlanCtx,
+    PrioritySpec, Step, plan,
 };
 use crate::detect::pe::layout::MACHINE_ARM64;
 use crate::detect::pe::testfx::Builder as PeBuilder;
@@ -1075,5 +1075,189 @@ fn lw5_direct_to_watch_replaces_the_profile_and_a_watch_profile_round_trips() {
         before == snap_all(&env.sys),
         "{:#?}",
         before.diff(&snap_all(&env.sys))
+    );
+}
+
+/// `spec` with `exclude_first` added (ADR 0022 amendment P4-13).
+fn spec_excl(e: ExcludeFirstSpec) -> LaunchMethodSpec {
+    let mut s = spec("FFLauncher.exe");
+    if let Some(c) = &mut s.cpu {
+        c.exclude_first = Some(e);
+    }
+    s
+}
+
+#[test]
+fn lx1_exclude_first_writes_format_2_and_a_revert_restores_the_format_1_bytes() {
+    let env = Env::new(lp_sys(&pe_x86(), &pe_x86()));
+    env.sys.fake_fs().mkdir_all(Path::new(PROFILES)).unwrap();
+    let before = snap_all(&env.sys);
+    // A format-1 profile first.
+    let t1 = env.applied(&stored(&env, &one(spec("FFLauncher.exe"))));
+    let name = format!(r"{PROFILES}\{}", profile_file(profile_id(220)));
+    let v1 = try_read_abs(&env.sys, &name).unwrap();
+    assert!(v1.starts_with(b"rerun-profile 1\n"));
+    // The same rule with `exclude_first: thread` replaces it with format 2.
+    let p = plan_lm(
+        &env.sys,
+        &one(spec_excl(ExcludeFirstSpec::Thread)),
+        "game.exe",
+    )
+    .unwrap();
+    assert!(
+        matches!(&p.ops[0], Op::ReplaceFile { .. }),
+        "{:?}",
+        p.ops[0]
+    );
+    let pr = profile_of(&p);
+    assert_eq!(
+        pr.cpu.unwrap().exclude_first,
+        Some(rerun_proto::cpu::rule::ExcludeFirst::Thread)
+    );
+    let (pv, _) = shown_of(&p);
+    let text = pv.to_string();
+    assert!(
+        text.contains(
+            "cpu max_threads 8, prefer any, single_l3 true, prefer_l3 none, smt false, mode hard, exclude_first thread"
+        ),
+        "{text}"
+    );
+    let t2 = env.applied(&store(&app(&env.sys), &p.encode().unwrap()).unwrap());
+    assert_eq!(env.verify(&t2), [(0, Observed::After)]);
+    let v2 = try_read_abs(&env.sys, &name).unwrap();
+    assert!(v2.starts_with(b"rerun-profile 2\n"));
+    assert!(v2.ends_with(b"cpu.max_threads=8\ncpu.exclude_first=thread\n"));
+    // The same rule again: nothing to do.
+    let p = plan_lm(
+        &env.sys,
+        &one(spec_excl(ExcludeFirstSpec::Thread)),
+        "game.exe",
+    )
+    .unwrap();
+    assert!(p.ops.is_empty(), "{:?}", p.ops);
+    // Revert the format-2 profile: exactly the format-1 bytes, which the shim's reader takes.
+    assert_eq!(env.revert(&t2).unwrap().closed, Some(Closing::Reverted));
+    let back = try_read_abs(&env.sys, &name).unwrap();
+    assert_eq!(back, v1);
+    assert_eq!(
+        proto::decode(&back).unwrap().cpu.unwrap().exclude_first,
+        None
+    );
+    assert_eq!(env.revert(&t1).unwrap().closed, Some(Closing::Reverted));
+    assert!(
+        before == snap_all(&env.sys),
+        "{:#?}",
+        before.diff(&snap_all(&env.sys))
+    );
+    // A format-2 profile alone (`core`): apply → verify → revert → identical.
+    let t = env.applied(&stored(&env, &one(spec_excl(ExcludeFirstSpec::Core))));
+    assert_eq!(env.verify(&t), [(0, Observed::After)]);
+    let bytes = try_read_abs(&env.sys, &name).unwrap();
+    assert!(bytes.ends_with(b"cpu.exclude_first=core\n"));
+    assert_eq!(env.revert(&t).unwrap().closed, Some(Closing::Reverted));
+    assert!(
+        before == snap_all(&env.sys),
+        "{:#?}",
+        before.diff(&snap_all(&env.sys))
+    );
+}
+
+#[test]
+fn lx2_exclude_first_alone_is_a_rule_and_keeps_old_plans_unchanged() {
+    // `exclude_first` alone restricts: a valid rule.
+    let alone = CpuRuleSpec {
+        exclude_first: Some(ExcludeFirstSpec::Thread),
+        ..CpuRuleSpec::default()
+    };
+    let r = alone.rule().unwrap();
+    assert_eq!(
+        r.exclude_first,
+        Some(rerun_proto::cpu::rule::ExcludeFirst::Thread)
+    );
+    assert!(r.smt && r.max_threads.is_none() && !r.single_l3);
+    // Serialised only when given: a rule without it keeps the bytes of before P4-13.
+    let old = spec("FFLauncher.exe").cpu.unwrap();
+    let json = serde_json::to_string(&old).unwrap();
+    assert!(!json.contains("exclude_first"), "{json}");
+    assert_eq!(
+        serde_json::to_string(&alone).unwrap(),
+        r#"{"exclude_first":"thread"}"#
+    );
+    // The step file: thread and core parse, anything else is refused.
+    for (v, want) in [
+        ("thread", ExcludeFirstSpec::Thread),
+        ("core", ExcludeFirstSpec::Core),
+    ] {
+        let sf = format!(
+            r#"{{"format":1,"game":{{"steam":40960}},"main_exe":"a.exe","steps":[{{"launch_method":{{"method":"direct","start":"a.exe","cpu":{{"exclude_first":"{v}"}}}}}}]}}"#
+        );
+        let f = super::StepFile::parse(sf.as_bytes()).unwrap();
+        assert!(
+            matches!(&f.steps[0], Step::LaunchMethod(s) if s.cpu.unwrap().exclude_first == Some(want)),
+            "{v}"
+        );
+    }
+    for bad in [r#"true"#, r#""cpu0""#, r#"0"#, r#""Thread""#] {
+        let sf = format!(
+            r#"{{"format":1,"game":{{"steam":40960}},"main_exe":"a.exe","steps":[{{"launch_method":{{"method":"direct","start":"a.exe","cpu":{{"exclude_first":{bad}}}}}}}]}}"#
+        );
+        assert!(super::StepFile::parse(sf.as_bytes()).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn lx3_exclude_first_on_this_machine() {
+    let r5950x = || topo(RYZEN_5950X);
+    for (e, smt, mask, threads) in [
+        (ExcludeFirstSpec::Thread, None, 0xFFFF_FFFE, 31),
+        (ExcludeFirstSpec::Thread, Some(false), 0x5555_5556, 16),
+        (ExcludeFirstSpec::Core, None, 0xFFFF_FFFC, 30),
+        (ExcludeFirstSpec::Core, Some(false), 0x5555_5554, 15),
+    ] {
+        let rule = CpuRuleSpec {
+            exclude_first: Some(e),
+            smt,
+            mode: Some(ModeSpec::Hard),
+            ..CpuRuleSpec::default()
+        };
+        for b in [Bitness::X86, Bitness::X64] {
+            let v = on_this_machine(Ok(r5950x()), &profile(rule, b));
+            let s = v.selection.unwrap();
+            assert_eq!(
+                (s.group, s.mask, s.threads, s.of),
+                (0, mask, threads, 32),
+                "{e:?} {smt:?}"
+            );
+        }
+    }
+    // A one-processor machine: nothing left, named.
+    let one_lp = CpuTopology {
+        cpus: vec![LogicalCpu {
+            cpu_set_id: 0x100,
+            group: 0,
+            index: 0,
+            core: 0,
+            llc: 0,
+            efficiency_class: 0,
+        }],
+        llcs: vec![Llc {
+            level: 3,
+            size: 1 << 20,
+        }],
+    };
+    let rule = CpuRuleSpec {
+        exclude_first: Some(ExcludeFirstSpec::Thread),
+        ..CpuRuleSpec::default()
+    };
+    let v = on_this_machine(Ok(one_lp), &profile(rule, Bitness::X64));
+    assert!(
+        matches!(
+            v.selection,
+            Err(MachineWhy::Empty {
+                after: SelectStep::ExcludeFirst
+            })
+        ),
+        "{:?}",
+        v.selection
     );
 }

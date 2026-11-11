@@ -28,7 +28,10 @@
 //!   PE parser (ADR 0013).
 //! - **The rule** (F8): every field of `cpu` optional, at least one given; missing fields do not
 //!   restrict (`prefer: any`, `single_l3: false`, `prefer_l3` none, `smt: true`, no
-//!   `max_threads`, `mode: hard`); `max_threads` 1 to 1024; `report_cores` refused (`inproc`,
+//!   `max_threads`, `mode: hard`, no `exclude_first`); `max_threads` 1 to 1024; a rule with
+//!   `exclude_first` is written as profile format 2, every other as format 1 (ADR 0022
+//!   amendment P4-13); `report_cores` refused (`inproc`,
+
 //!   phase 6); `method: auto` refused (the Topo engine chooses, phase 4). Neither `cpu` nor
 //!   `priority` is refused (F9), and so is a second `launch_method` step.
 //! - **`watch_timeout_s`** of every profile is [`WATCH_TIMEOUT_S`] (120, the format's largest
@@ -45,7 +48,9 @@
 //! every start).
 
 use rerun_proto::cpu::CpuTopology;
-use rerun_proto::cpu::rule::{Bitness, CpuRule, Mode, Prefer, PreferL3, SelectError, select};
+use rerun_proto::cpu::rule::{
+    Bitness, CpuRule, ExcludeFirst, Mode, Prefer, PreferL3, SelectError, select,
+};
 use rerun_proto::profile::{
     self as proto, LaunchProfile, MAX_WATCH_TIMEOUT_S, Method, Priority, ProfileId,
 };
@@ -132,6 +137,11 @@ pub struct CpuRuleSpec {
     /// Default `hard`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ModeSpec>,
+    /// Default none (nothing excluded): keep the game off CPU 0 (`thread`) or off its whole
+    /// core (`core`); ADR 0022 amendment P4-13. Not written when not given, so existing plans,
+    /// Topos and index bundles keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_first: Option<ExcludeFirstSpec>,
     /// Only with `inproc` (phase 6): refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_cores: Option<u16>,
@@ -153,6 +163,16 @@ pub enum PreferSpec {
 pub enum PreferL3Spec {
     /// The largest last-level cache.
     Largest,
+}
+
+/// `cpu.exclude_first`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExcludeFirstSpec {
+    /// Logical processor 0 of group 0 ("CPU 0"); its SMT sibling stays.
+    Thread,
+    /// Every thread of the physical core that holds CPU 0.
+    Core,
 }
 
 /// `cpu.mode`.
@@ -217,7 +237,10 @@ impl CpuRuleSpec {
                 Some(ModeSpec::Soft) => Mode::Soft,
                 Some(ModeSpec::Hard) | None => Mode::Hard,
             },
-            exclude_first: None,
+            exclude_first: self.exclude_first.map(|e| match e {
+                ExcludeFirstSpec::Thread => ExcludeFirst::Thread,
+                ExcludeFirstSpec::Core => ExcludeFirst::Core,
+            }),
         })
     }
 }

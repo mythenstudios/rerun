@@ -405,6 +405,7 @@ fn cpu_rule(c: &CpuRuleSpec, at: &str) -> R {
         || c.prefer_l3.is_some()
         || c.smt.is_some()
         || c.mode.is_some()
+        || c.exclude_first.is_some()
         || c.report_cores.is_some();
     ensure(given, at, "at least one field")?;
     ensure(

@@ -1,0 +1,32 @@
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  steam_appid: 40960
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+launch:
+  chain: [steam, upc]
+  method: watch
+  start: "game.exe"
+  cpu: { exclude_first: core }
+issues:
+  - id: issue
+    title: "Issue"
+    variants:
+      - id: thread
+        status: unverified
+        kind: fix
+        steps: [{ cpu: { exclude_first: thread, mode: hard } }]
+        tradeoffs: ["Side effect"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Far_Cry_2#High_core_count" }
+      - id: core
+        status: unverified
+        kind: fix
+        steps: [{ cpu: { exclude_first: core, smt: false } }]
+        tradeoffs: ["Side effect"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Far_Cry_2#High_core_count" }
