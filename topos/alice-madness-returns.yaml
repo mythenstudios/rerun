@@ -1,0 +1,61 @@
+# Hashes are of the Steam copy on the dev PC (files unchanged there; the game runs through ZLUDA by a Steam
+# launch option only). Nothing here is verified on that PC.
+format: 1
+id: alice-madness-returns
+title: "Alice: Madness Returns"
+status: active
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 19680
+  exes:
+    # rerun-workbench draft --hashes-from, P4-13; API from PCGW (Direct3D 9)
+    - { path: "Binaries\\Win32\\AliceMadnessReturns.exe", sha1: "7B67A0BC34D7C5AE6FBE895112A4D6FC6618EE43", sha256: "DBFA581B60540658C0A3E315DC521BAEC07ECFF41361DA506BB34C93D0DAA2EF", api: d3d9 }
+
+# AliceEngine.ini lives below Documents\My Games\Alice Madness Returns (it exists after the first start).
+user_data:
+  documents: "My Games\\Alice Madness Returns"
+
+issues:
+  - id: complete-collection-extras
+    title: "Complete Collection outfits and weapons left in the files are locked"
+    when: {}
+    variants:
+      - id: special-pc-edition
+        status: unverified     # a Steam guide, named by PCGW; one statement
+        kind: enhancement
+        steps:
+          - ini_set:
+              file: "AliceGame\\Config\\AliceEngine.ini"
+              root: user_data
+              values:
+                - { section: "AliceGame.AliceGameEngine", key: GIsSpecialPCEdition, value: "TRUE" }
+        tradeoffs:
+          - "PCGW notes that the January 2022 Steam executable keeps the extra DLC weapons from working fully (the guide covers a downgrade, which Rerun does not do)"
+        sources:
+          - { type: steam-guide, url: "https://steamcommunity.com/sharedfiles/filedetails/?id=2771334992" }
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Alice:_Madness_Returns#Activate_Complete_Collection_extras" }
+
+# Not taken as a step:
+# - MadnessPatch (repo of Wemino) fixes many PC-port issues and has its own installer; it needs a package
+#   (version, release URL, SHA-256, license), none exists yet.
+#   https://github.com/Wemino/MadnessPatch
+# - AESylum: needs an older executable (downgrade), not a Rerun step.
+# - Fixed control files on a OneDrive link, Larger Subtitle Font on Nexus Mods: not allowed source types.
+# TODO issue: https://www.pcgamingwiki.com/wiki/Alice:_Madness_Returns#Infinite_loading_screens
+
+tips:
+  launch_options: ["-nostartupmovies"]
+  notes:
+    - text: "On AMD GPUs the NVIDIA GPU PhysX effects can be run through ZLUDA (32-bit PhysX): set the Steam launch option to \"<ZLUDA folder>\\32\\zluda.exe\" -- %command%. The ZLUDA docs list Alice: Madness Returns as tested. Install the current PhysX System Software (link below) first. Rerun does not ship ZLUDA; Windows Smart App Control may block it."
+      source: { type: official, url: "https://zluda.readthedocs.io/latest/physx32.html" }
+    - text: "NVIDIA's official PhysX System Software page (download)."
+      source: { type: official, url: "https://www.nvidia.com/en-us/drivers/physx/physx-9-19-0218-driver/" }
+    - text: "On an uncapped frame rate, reloading a save can hang on an infinite loading screen; lowering the resolution while loading is the reported workaround."
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Alice:_Madness_Returns#Infinite_loading_screens" }
+    - text: "-nostartupmovies skips the intro videos."
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Alice:_Madness_Returns#Skip_intro_videos" }
+
+links:
+  pcgw: "Alice:_Madness_Returns"
