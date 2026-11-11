@@ -1287,7 +1287,10 @@ fn pinned(p: &Package, to: &str, arch: Arch) -> String {
         .files
         .iter()
         .find(|f| {
-            f.to.as_str().eq_ignore_ascii_case(to)
+            // `RelPath` keeps the separator Windows uses; compare with `/` and `\` alike.
+            f.to.as_str()
+                .replace('\\', "/")
+                .eq_ignore_ascii_case(&to.replace('\\', "/"))
                 && f.arch.as_ref().is_none_or(|a| a.contains(&arch))
         })
         .unwrap_or_else(|| panic!("{} puts nothing at {to} for {arch:?}", p.id));
@@ -1426,6 +1429,19 @@ fn the_sandbox_package_cases_find_their_packages() {
     assert_eq!(silent.requires, std::slice::from_ref(&loader.id));
     assert!(!eagle.supports_exe_sha1.is_empty());
     assert_eq!(pinned(&dg, "d3d9.dll", Arch::X86).len(), 64);
+    // The lookups SB-P2 and SB-P3 make, in the spelling they use (a path below `scripts`).
+    assert_eq!(
+        pinned(&eagle, "scripts/EaglePatchAC1.asi", Arch::X86).len(),
+        64
+    );
+    assert_eq!(
+        pinned(&eagle, "scripts/EaglePatchAC1.ini", Arch::X86).len(),
+        64
+    );
+    assert_eq!(
+        pinned(&silent, "scripts/SilentPatchSA.asi", Arch::X86).len(),
+        64
+    );
 }
 
 /// [SB] SB-P1 (P4-13b): dgVoodoo 2.87.6 (`zip`, from the author's release) into an x86 game
