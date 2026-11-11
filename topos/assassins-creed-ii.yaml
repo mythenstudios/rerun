@@ -29,7 +29,7 @@ issues:
     when: {}
     variants:
       - id: exclude-cpu0
-        status: unverified     # a single statement on the page
+        status: verified       # 2026-11-11, Ryzen 9 5950X (32 LP) / RX 9070 XT / Windows 11 26300, Vsync on at 120 Hz: small stutters without Rerun, noticeably smoother with the plan applied (rerun-launch watch through Ubisoft Connect, 0xFFFFFFFE); one tester's judgement, no frame-time log; revert bit-identical (docs/09)
         kind: fix
         steps:
           - cpu: { exclude_first: thread, mode: hard }

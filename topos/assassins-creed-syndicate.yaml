@@ -34,7 +34,7 @@ issues:
     when: {}
     variants:
       - id: refresh-rate-60
-        status: unverified     # a single Steam thread report, repeated by PCGW
+        status: unverified     # a single Steam thread report, repeated by PCGW; the freeze does not occur on the dev PC, the step itself was applied and reverted bit-identically there (2026-11-11, docs/09)
         kind: fix
         steps:
           - ini_set:

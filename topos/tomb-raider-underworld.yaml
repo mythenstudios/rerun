@@ -25,7 +25,7 @@ issues:
       cpu.threads: { gt: 31 }
     variants:
       - id: limit-threads
-        status: unverified     # one Steam thread plus PCGW; crash reproduced without Rerun on the 32-thread dev PC (S1: tru.exe ends after 4.3 s)
+        status: verified       # 2026-11-11, Ryzen 9 5950X (32 LP) / RX 9070 XT / Windows 11 26300: without Rerun tru.exe ends after 4 s; with the plan applied (rerun-launch direct, 0x7FFFFFFF) the game reaches the main menu; revert bit-identical (docs/09)
         kind: fix
         steps:
           - cpu: { max_threads: 31, mode: hard }

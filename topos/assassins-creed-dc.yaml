@@ -38,7 +38,7 @@ issues:
       cpu.threads: { gt: 8 }
     variants:
       - id: limit-8-threads
-        status: unverified      # reproduced by hand on the dev PC through rerun-launch; Rerun apply not done yet
+        status: verified        # 2026-11-11, Ryzen 9 5950X (32 LP) / RX 9070 XT / Windows 11 26300: without a limit AssassinsCreed_Dx10.exe crashes ~2.5 s after its start (0xc0000005); with the plan applied (rerun-launch direct, 8 threads) it passes that point and reaches the Ubisoft intro (and the menu when offline, issue below); revert bit-identical (docs/09)
         kind: fix
         # Exactly the rule the dev PC test wrote (the script's fixed profile: prefer performance, one L3,
         # no SMT, hard, 8 threads). The sources only name "8 processors"; the other fields are not sourced.
@@ -55,7 +55,7 @@ issues:
     when: {}
     variants:
       - id: block-network
-        status: unverified      # reproduced by hand on the dev PC (offline: menu reached); Rerun apply not done yet
+        status: unverified      # the problem is reproduced on the dev PC (offline: menu reached), but these rules did NOT help there: 2026-11-11, with both rules applied and active (and 8 threads) the game still crashed at the intro (0x80000003) while online; the rules were added and removed bit-identically (docs/09). A blocked connection is not the same as no network for the game; EaglePatch (P4-13b) removes the server request instead
         kind: fix
         steps:
           - { firewall_rule: { exe: "AssassinsCreed_Dx10.exe", direction: out } }
