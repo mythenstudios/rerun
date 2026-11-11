@@ -1,0 +1,40 @@
+# DRAFT (P4-13): not installed on the dev PC, so no executable hash (never invented); Steam's launch entry and
+# the Ubisoft Connect hand-over are not observed (AC II, same engine line, was: watch).
+format: 1
+id: assassins-creed-revelations
+title: "Assassin's Creed: Revelations"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 201870
+  exes:
+    - { path: "ACRSP.exe", sha256: "TODO", api: d3d9 }
+
+launch:
+  chain: [steam, upc]
+  method: auto
+  start: "TODO"                # Steam's launch entry: observe, never guess
+
+issues:
+  - id: vsync-stutter
+    title: "Stuttering and frame dips with Vsync (the game loads CPU 0 almost alone)"
+    # No `when`: the source names CPU shapes (4/4 to 8/16 and larger), but cpu.threads counts logical processors.
+    when: {}
+    variants:
+      - id: exclude-cpu0
+        status: unverified     # one Steam thread (of the Brotherhood page), repeated by PCGW; same fix as AC II (verified there on the dev PC), not tried on this game
+        kind: fix
+        steps:
+          - cpu: { exclude_first: thread, mode: hard }
+        sources:
+          - { type: steam-thread, url: "https://steamcommunity.com/app/48190/discussions/0/1727575977550197630/" }
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Assassin's_Creed:_Revelations#In-game_stuttering,_freezing_issues" }
+
+# Not taken: renaming systemdetection.dll (a file deletion, and the 2024 Steam build does not hold the file),
+# Windows 98/Me compatibility mode (not on the token allowlist, no source), frame-rate caps for two fights
+# (an in-game setting, no step), a patch checksum list for 1.02 (Wayback download, no longer needed).
+
+links:
+  pcgw: "Assassin's_Creed:_Revelations"
