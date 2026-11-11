@@ -71,7 +71,7 @@ Every variant links directly to its source: the specific Steam guide, the thread
    - the package states `license: "LicenseRef-NoLicense-UpstreamRelease"` (the schema accepts any SPDX-style word, so `LicenseRef-…` values pass) and a comment/`notes` names the author's install instructions (README section);
    - if the author objects, the package is removed.
 
-   Same reasoning for dgVoodoo 2: its readme forbids bundling inside launchers or frameworks, but Rerun bundles nothing; it downloads the author's original zip and unpacks the DLLs the author's instructions name. License value `LicenseRef-dgVoodoo2-Freeware`.
+   Same reasoning for dgVoodoo 2: its readme forbids bundling inside launchers or frameworks, but Rerun bundles nothing; it downloads the author's original zip and unpacks the DLLs the author's instructions name. License value `LicenseRef-dgVoodoo2-Freeware`. Risk noted: an automated per-game installer can be read as the "framework" that clause names; a short written OK from the author is to be obtained before the first release (A6), otherwise the package goes back to draft.
 3. Hash computed ourselves.
 4. File run once through a malware scan during curation (not at runtime).
 5. Trade-offs and side effects entered.

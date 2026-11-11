@@ -1,9 +1,12 @@
 # EaglePatchAC1 1.1 by Sergeanur (release v1.1, 2025-12-02). The repository has no license file; allowed under
 # docs/05 "Review on inclusion" 2 (maintainer decision 2026-11-11): the author's own release zip, installed as the
-# README's install steps say (copy EaglePatchAC1.asi + .ini into scripts/ next to an ASI loader), nothing modified or
+# README's install steps say (README section "Installation", steps 1-6: dinput8.dll from Ultimate ASI Loader into the
+# game folder, EaglePatchAC1.asi + .ini into scripts/), nothing modified or
 # rehosted. If the author objects, the package is removed.
 # Everything else below is real: URL, hashes (computed ourselves), INI keys (from the INI shipped in the zip).
 # The README names loader v4.68; this package set pins ultimate-asi-loader 10.0.2 (no source says 4.68 is required; untested with AC1).
+# Accepted deviation from the README: loader 10.0.2 instead of 4.68, to be checked on [DEV] before the eaglepatch
+# variant can become verified.
 # Tradeoffs for the Topo: removes DInput controller support (DisableXInputPatch=1 re-enables it); the in-game
 # controls layout has no effect (KeyboardLayout in the INI instead); removes telemetry.
 format: 1

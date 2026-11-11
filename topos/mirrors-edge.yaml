@@ -49,7 +49,7 @@ tips:
       source: { type: official, url: "https://zluda.readthedocs.io/latest/physx32.html" }
     - text: "NVIDIA's official PhysX System Software page (download)."
       source: { type: official, url: "https://www.nvidia.com/en-us/drivers/physx/physx-9-19-0218-driver/" }
-    - text: "If the game does not start, a Steam thread reports that disabling Mandatory ASLR for MirrorsEdge.exe in Windows Security (Exploit protection) helped (system setting, not a Rerun step)."
+    - text: "If the game does not start and Mandatory ASLR was turned on system-wide, a Steam thread reports that disabling it for MirrorsEdge.exe in Windows Security (Exploit protection) helped (system setting, not a Rerun step)."
       source: { type: steam-thread, url: "https://steamcommunity.com/app/17410/discussions/0/3833171151458736010/" }
     - text: "-nostartupmovies skips the intro videos."
       source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Mirror's_Edge#Skip_intro_videos" }
