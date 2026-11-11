@@ -1,0 +1,61 @@
+# DRAFT (P4-13): not installed on the dev PC, so no executable hashes (never invented).
+# PCGW names two executables of the bin folder (Direct3D 9 and Direct3D 11); Steam's launch entry is not observed.
+format: 1
+id: far-cry-3
+title: "Far Cry 3"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 220240
+  exes:
+    - { path: "bin\\FarCry3.exe", sha256: "TODO", api: d3d9 }
+    - { path: "bin\\farcry3_d3d11.exe", sha256: "TODO", api: d3d11 }
+
+launch:
+  chain: [steam, upc]
+  method: auto
+  start: "TODO"                # Steam's launch entry: observe, never guess
+
+issues:
+  - id: random-crashes
+    title: "Random crashes, more often after the first cutscene (32-bit address space)"
+    when: {}
+    variants:
+      - id: laa-patch
+        status: unverified     # PCGW lists the manual large-address-aware step without a further source
+        kind: fix
+        steps:
+          - laa_patch: { exe: "bin\\FarCry3.exe" }
+          - laa_patch: { exe: "bin\\farcry3_d3d11.exe" }
+        tradeoffs: ["Changes both executables (a revert restores them); Steam's file check puts the originals back"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Far_Cry_3#Random_crashing" }
+  - id: microstutter
+    title: "Micro-stuttering on many-core CPUs"
+    when: {}
+    variants:
+      - id: no-smt
+        status: unverified     # PCGW cites a Process Lasso tip ("citation needed"); one statement
+        kind: fix
+        steps:
+          - cpu: { smt: false, mode: hard }
+        tradeoffs: ["The game uses one thread per core"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Far_Cry_3#Microstutter" }
+
+# Not taken:
+# - Registry language fix: HKLM key, needs the elevated helper and is not allowed for registry_set.
+# - Mods (Nexus Mods) and RadeonPro profiles: not allowed sources / not Rerun steps.
+# TODO: PCGW also names switching the renderer to DirectX 9 (an in-game setting, no step).
+# TODO: gamerprofile.xml tweaks (D3D11MultithreadedRendering) need an XML step that does not exist.
+
+tips:
+  launch_options: []
+  notes:
+    - text: "The -skipintro argument is documented for this game but, per PCGW, no longer works through Ubisoft Connect launch arguments, so it is not offered as a launch option."
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Far_Cry_3#Skip_intro_videos" }
+
+links:
+  pcgw: "Far_Cry_3"
