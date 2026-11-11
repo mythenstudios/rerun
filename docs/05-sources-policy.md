@@ -75,3 +75,14 @@ Every variant links directly to its source: the specific Steam guide, the thread
 3. Hash computed ourselves.
 4. File run once through a malware scan during curation (not at runtime).
 5. Trade-offs and side effects entered.
+
+## Exception: fonts in the repository
+
+Rerun's repository holds no third-party binaries (packages point to upstream releases). The one
+exception, by user decision 2026-11-12, are the brand fonts of the app in
+`crates/rerun-app/assets/fonts/`: font files (`.ttf`) under the SIL Open Font License 1.1, taken
+unmodified from the original source (the Archivo repository at a pinned commit, IBM's own `IBM/plex`
+releases), each family with its `OFL.txt`. `FONTS.md` next to them records the source, version
+and SHA-256 of every file, and a test (`tests/fonts.rs`) fails when a file or a licence text
+differs or is missing. Never an executable, never a font from a mirror or a font site, never a
+modified font. A new font needs the same record and a decision of its own.

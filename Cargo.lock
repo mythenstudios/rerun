@@ -3946,6 +3946,7 @@ version = "0.1.0"
 dependencies = [
  "raw-window-handle",
  "rerun-core",
+ "sha2",
  "slint",
  "slint-build",
  "windows-sys 0.61.2",

@@ -115,7 +115,8 @@ pub struct Tokens {
     pub font_icons: &'static str,
 }
 
-/// The tokens of `t`. System fonts only in P5-3 (embedding is an open point of P5-10).
+/// The tokens of `t`. Text, display and mono fonts are embedded (`assets/fonts`, `ui` imports them);
+/// a glyph they lack falls back to a system font. The symbol and icon fonts are Windows'.
 pub fn tokens(t: ThemeId) -> Tokens {
     match t {
         ThemeId::Mythen => Tokens {
@@ -142,9 +143,9 @@ pub fn tokens(t: ThemeId) -> Tokens {
             caption_w: 46.0,
             resize_border: 6.0,
             nav_w: 264.0,
-            font_sans: "Segoe UI Variable Text",
-            font_display: "Segoe UI Variable Display",
-            font_mono: "Consolas",
+            font_sans: "IBM Plex Sans",
+            font_display: "Archivo Expanded",
+            font_mono: "IBM Plex Mono",
             font_symbol: "Segoe UI Symbol",
             font_icons: "Segoe Fluent Icons",
         },

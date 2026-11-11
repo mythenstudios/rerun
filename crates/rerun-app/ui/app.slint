@@ -6,6 +6,15 @@
 
 import { ScrollView, LineEdit } from "std-widgets.slint";
 
+// The brand fonts (OFL, assets/fonts/FONTS.md), embedded into the binary at build time. Only the
+// weights the theme uses. A glyph they lack (Cyrillic, CJK) falls back to a system font.
+import "../assets/fonts/archivo/ArchivoExpanded-ExtraBold.ttf";
+import "../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf";
+import "../assets/fonts/ibm-plex-sans/IBMPlexSans-Medium.ttf";
+import "../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf";
+import "../assets/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf";
+import "../assets/fonts/ibm-plex-mono/IBMPlexMono-Medium.ttf";
+
 // ---------------------------------------------------------------- data from the view models
 
 export struct BadgeData {
@@ -270,7 +279,7 @@ component PageTitle inherits FocusScope {
         text: root.text;
         font-family: root.family;
         font-size: root.size;
-        font-weight: 700;
+        font-weight: 800;
         color: Theme.strong;
         wrap: word-wrap;
         accessible-role: none;

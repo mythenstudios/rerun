@@ -61,6 +61,8 @@ slint-build = "=1.18.1"
 # `-e normal,build` of rerun-app enables neither `fake` nor `test-key`.
 [dev-dependencies]
 rerun-core = { workspace = true, features = ["fake", "test-key"] }
+# SHA-256 of the bundled font files (`tests/fonts.rs`); already in the dependency graph via rerun-core.
+sha2.workspace = true
 
 [lints]
 workspace = true
