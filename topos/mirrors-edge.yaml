@@ -1,0 +1,58 @@
+# Hashes are of the Steam copy on the dev PC (files unchanged there; the game runs through ZLUDA by a Steam
+# launch option only). Nothing here is verified on that PC.
+format: 1
+id: mirrors-edge
+title: "Mirror's Edge"
+status: active
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 17410
+  exes:
+    # rerun-workbench draft --hashes-from, P4-13; API from PCGW (Direct3D 9)
+    - { path: "Binaries\\MirrorsEdge.exe", sha1: "9538DD552D8ACDC5498E7B37A59EA5C434A2FB08", sha256: "A0F653B63B299D5D3899B8B4FA6E4D47EEB390BF26B1F020710482EABFE297F0", api: d3d9 }
+
+# TdEngine.ini lives below Documents\EA Games\Mirror's Edge (it exists after the first start).
+user_data:
+  documents: "EA Games\\Mirror's Edge"
+
+issues:
+  - id: crash-after-splash
+    title: "Crash right after the splash screen"
+    when: {}
+    variants:
+      - id: no-multisampling
+        status: unverified     # PCGW names an old Steam forum post; a single statement
+        kind: fix
+        steps:
+          - ini_set:
+              file: "TdGame\\Config\\TdEngine.ini"
+              root: user_data
+              values:
+                - { section: SystemSettings, key: MaxMultisamples, value: "1" }
+        tradeoffs: ["Turns off multisample anti-aliasing"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Mirror's_Edge#Crash_just_after_splash_screen" }
+
+# Not taken as a step:
+# - Setting ResX/ResY to the monitor's size (a per-PC value).
+# - OpenAL Soft / more audio channels (PCGW cites a video only).
+# - PhysX library clean-up (deleting game files), Mirror's Edge Tweaks, MedgeNet: not packages yet / not file steps.
+# TODO issue: https://www.pcgamingwiki.com/wiki/Mirror's_Edge#PhysX_causes_issues
+# TODO issue: https://www.pcgamingwiki.com/wiki/Mirror's_Edge#The_game_does_not_launch
+
+tips:
+  launch_options: ["-nostartupmovies"]
+  notes:
+    - text: "On AMD GPUs the NVIDIA GPU PhysX effects can be run through ZLUDA (32-bit PhysX): set the Steam launch option to \"<ZLUDA folder>\\32\\zluda.exe\" -- %command%. The ZLUDA docs list Mirror's Edge as tested. Install the current PhysX System Software (link below) first. Rerun does not ship ZLUDA; Windows Smart App Control may block it."
+      source: { type: official, url: "https://zluda.readthedocs.io/latest/physx32.html" }
+    - text: "NVIDIA's official PhysX System Software page (download)."
+      source: { type: official, url: "https://www.nvidia.com/en-us/drivers/physx/physx-9-19-0218-driver/" }
+    - text: "If the game does not start, a Steam thread reports that disabling Mandatory ASLR for MirrorsEdge.exe in Windows Security (Exploit protection) helped (system setting, not a Rerun step)."
+      source: { type: steam-thread, url: "https://steamcommunity.com/app/17410/discussions/0/3833171151458736010/" }
+    - text: "-nostartupmovies skips the intro videos."
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Mirror's_Edge#Skip_intro_videos" }
+
+links:
+  pcgw: "Mirror's_Edge"
