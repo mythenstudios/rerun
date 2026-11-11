@@ -3,6 +3,8 @@
 //! - `index build --seq <n> --issued <YYYY-MM-DDTHH:MM:SSZ> [--root <repo>] <out>`: the YAML of
 //!   `topos/` and `packages/` into the canonical bundle `index.json` (drafts left out).
 //! - `index sign <bundle> <private-key>`: writes `<bundle>.sig` (64 raw bytes).
+//! - `index sign-test <bundle>` (feature `test-key` only; ADR 0024 amendment P4-13): the same
+//!   with the published test key, for the [DEV] test-key `rerun.exe` and its `index-test`.
 //! - `key generate <out-dir>`: a new index key pair, never inside a Git working tree.
 //! - `draft <steam-appid|pcgw-page> [--page <name>] [--id <id>] [--title <text>] [--into <dir>]`:
 //!   a Topo draft from PCGamingWiki, the only command that goes online (at most two GETs to
@@ -105,6 +107,13 @@ enum IndexCommand {
         /// The private key file (outside any Git working tree).
         key: PathBuf,
     },
+    /// Signs a built index.json with the published test key (DEV only: trusted by test-key
+    /// builds alone); writes <bundle>.sig next to it.
+    #[cfg(feature = "test-key")]
+    SignTest {
+        /// The index.json to sign.
+        bundle: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -136,6 +145,10 @@ fn main() -> ExitCode {
         Command::Index {
             command: IndexCommand::Sign { bundle, key },
         } => sign(&bundle, &key),
+        #[cfg(feature = "test-key")]
+        Command::Index {
+            command: IndexCommand::SignTest { bundle },
+        } => sign_test(&bundle),
         Command::Key {
             command: KeyCommand::Generate { out_dir },
         } => generate(&out_dir),
@@ -201,6 +214,20 @@ fn sign(bundle: &Path, key: &Path) -> Result<(), String> {
         keys::parse_key(&fs::read_to_string(key).map_err(|e| format!("{}: {e}", key.display()))?)?;
     let bytes = fs::read(bundle).map_err(|e| format!("{}: {e}", bundle.display()))?;
     let s = keys::sign(&bytes, &kp)?;
+    write_sig(bundle, &s)
+}
+
+/// `index sign-test`: like [`sign`] with the published test key instead of a key file (the
+/// same release rules, so a draft or a `TODO` is refused), verified back under that key.
+#[cfg(feature = "test-key")]
+fn sign_test(bundle: &Path) -> Result<(), String> {
+    let bytes = fs::read(bundle).map_err(|e| format!("{}: {e}", bundle.display()))?;
+    let s = keys::sign_test(&bytes)?;
+    write_sig(bundle, &s)
+}
+
+/// Writes `<bundle>.sig` and the line naming what was signed.
+fn write_sig(bundle: &Path, s: &keys::Signed) -> Result<(), String> {
     let mut out = bundle.as_os_str().to_owned();
     out.push(".sig");
     let out = PathBuf::from(out);
@@ -354,4 +381,29 @@ fn generate(out_dir: &Path) -> Result<(), String> {
     println!("for RELEASE_KEYS in crates/rerun-core/src/catalog/key.rs:");
     println!("    {}", keys::release_line(&pk));
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use clap::Parser;
+
+    use super::Cli;
+
+    /// `index sign-test` exists exactly in a build with the feature `test-key` (ADR 0024
+    /// amendment P4-13).
+    #[test]
+    fn sign_test_exists_only_with_the_feature() {
+        let r = Cli::try_parse_from(["rerun-workbench", "index", "sign-test", "index.json"]);
+        #[cfg(feature = "test-key")]
+        assert!(matches!(
+            r.unwrap().command,
+            super::Command::Index {
+                command: super::IndexCommand::SignTest { .. }
+            }
+        ));
+        #[cfg(not(feature = "test-key"))]
+        assert!(r.is_err());
+        // `index sign` still needs its key file.
+        assert!(Cli::try_parse_from(["rerun-workbench", "index", "sign", "index.json"]).is_err());
+    }
 }

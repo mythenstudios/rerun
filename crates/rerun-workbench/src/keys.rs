@@ -164,6 +164,17 @@ pub fn sign(bundle: &[u8], kp: &KeyPair) -> Result<Signed, String> {
     })
 }
 
+/// [`sign`] with the published test key (feature `test-key`, ADR 0024 amendment P4-13): the
+/// same release rules, then the signature verified again under the test key alone.
+#[cfg(feature = "test-key")]
+pub fn sign_test(bundle: &[u8]) -> Result<Signed, String> {
+    use rerun_core::catalog::key::test_key;
+    let s = sign(bundle, &parse_key(test_key::SEED_HEX)?)?;
+    verify(bundle, &s.sig, &[test_key::public()])
+        .map_err(|e| format!("the test key's signature does not verify: {e}"))?;
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{generate, key_text, outside_repo, parse_key, pub_text, release_line, sign};
@@ -220,5 +231,41 @@ mod tests {
         let draft =
             br#"{"format":1,"seq":0,"issued":"2026-11-09T00:00:00Z","topos":[],"packages":[]}"#;
         assert!(sign(draft, &kp).is_err(), "seq 0");
+    }
+
+    /// One Topo in an index, with `status`.
+    #[cfg(feature = "test-key")]
+    fn with_topo(status: &str) -> Vec<u8> {
+        // An invented hash.
+        let sha = "AB".repeat(32);
+        format!(
+            r#"{{"format":1,"seq":7,"issued":"2026-11-11T00:00:00Z","topos":[{{"format":1,"id":"invented-game","title":"Invented Game","status":"{status}","rev":1,"match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d9"}}]}},"issues":[]}}],"packages":[]}}"#
+        )
+        .into_bytes()
+    }
+
+    /// ADR 0024 amendment P4-13: `index sign-test` signs only what `index sign` signs, and the
+    /// signature is the published test key's (a test-key build trusts it, a release build not).
+    #[cfg(feature = "test-key")]
+    #[test]
+    fn sign_test_uses_the_test_key_and_the_release_rules() {
+        use rerun_core::catalog::key::test_key;
+        let bundle = with_topo("active");
+        let s = super::sign_test(&bundle).unwrap();
+        assert_eq!(s.seq, 7);
+        assert_eq!(s.key, test_key::public());
+        assert_eq!(s.sig, test_key::sign(&bundle));
+        rerun_core::catalog::verify(&bundle, &s.sig, &[test_key::public()]).unwrap();
+        assert!(
+            rerun_core::catalog::verify(&bundle, &s.sig, &[test_key::foreign_public()]).is_err()
+        );
+        // The release rules: a draft, a `TODO` and a malformed index are refused.
+        let e = super::sign_test(&with_topo("draft")).unwrap_err();
+        assert!(e.contains("draft"), "{e}");
+        let todo = String::from_utf8(bundle.clone())
+            .unwrap()
+            .replace("Invented Game", "TODO");
+        assert!(super::sign_test(todo.as_bytes()).is_err());
+        assert!(super::sign_test(b"{}").is_err());
     }
 }

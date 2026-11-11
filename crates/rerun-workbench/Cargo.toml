@@ -14,6 +14,12 @@ publish.workspace = true
 # crate rerun-core verifies with), and the key seed comes from the OS RNG (getrandom 0.3, already
 # in the lock file through jsonschema; ed25519-compact's own `random` feature would add
 # getrandom 0.4).
+[features]
+# `index sign-test`: signs an index with the published test key (ADR 0024 amendment P4-13), for
+# the [DEV] test-key rerun.exe of scripts/dev-topo-roundtrip.ps1. rerun-core's compile_error!
+# refuses it without debug assertions. No new dependency.
+test-key = ["rerun-core/test-key"]
+
 [dependencies]
 rerun-core.workspace = true
 clap.workspace = true
