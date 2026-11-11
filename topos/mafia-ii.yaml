@@ -31,6 +31,10 @@ issues:
           - { type: steam-thread, url: "https://steamcommunity.com/app/50130/discussions/0/3880470997339108924/" }
           - { type: steam-thread, url: "https://steamcommunity.com/app/50130/discussions/0/3115908865098451740/" }
 
+# Checked (lead finding): the exe has a Valve "VLV" header at 0x40 but none of the section names laa_patch refuses
+# (sections: .text .textnc BINK .rdata .data .tls BINKCONS BINKDATA .version .rsrc; no .bind), so the planner
+# does not refuse it. The same flag was set by NTCore on the dev PC and the game was allowed to run (HANDOFF).
+# Still unverified; if a run shows the wrapper rejects the patched file, drop the variant.
 # Not taken as a step:
 # - DXVK for stuttering (PCGW cites a video only; no package yet).
 # - Depth of field remover and the ATI flicker DLL (a file host and a Steam guide download, no repo or release).
