@@ -5,7 +5,7 @@
 #
 # Optional: -UserDataFolder "<folder name below Documents>" -IniFile AC.ini (reports the INI the
 # game writes: section headers and key names with values), -WaitMinutes 20, -OutDir <folder>
-# (default: .claude\s1 in the repository, which is never committed).
+# (default: .dev\s1 in the repository, which is never committed).
 #
 # What it does, without a single question (the current instruction is in the window title):
 #  1. remembers which processes run now, then asks you (window title) to start the game in Steam;
@@ -30,7 +30,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-if (-not $OutDir) { $OutDir = Join-Path $repo '.claude\s1' }
+if (-not $OutDir) { $OutDir = Join-Path $repo '.dev\s1' }
 
 function Title([string]$text) {
     $Host.UI.RawUI.WindowTitle = "Rerun DEV - $text"
@@ -168,4 +168,4 @@ $text = $lines -join "`r`n"
 Set-Content -LiteralPath $out -Value $text -Encoding UTF8
 Set-Clipboard -Value $text
 Write-Host $text
-Title "DONE - report saved to $out and copied; tell Claude what you saw"
+Title "DONE - report saved to $out and copied; report what you saw"

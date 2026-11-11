@@ -14,3 +14,4 @@ app/src-tauri/gen/
 .idea/
 /dist/
 *.profraw
+/.dev/

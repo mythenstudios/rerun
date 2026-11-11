@@ -7,7 +7,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev-topo-roundtrip.ps1 -RevertOnly <txn> [-WithHelper]
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev-topo-roundtrip.ps1 -Cleanup
 #
-# The cases come from a local file (default .claude\p4-13\cases.psd1; never committed, it holds
+# The cases come from a local file (default .dev\p4-13\cases.psd1; never committed, it holds
 # paths of this machine; -CaseFile names another one, and -Prepare -Case <file.psd1> too):
 #
 #   @{ Cases = @(
@@ -33,7 +33,7 @@
 #    %LOCALAPPDATA%\RerunTest\p4-13; writes target\dev-index\index.json(.sig), imports it into
 #    <AppDir>\index-test (the test-key state; the real <AppDir>\index is never touched); stores
 #    one plan per case in <AppDir>\plans (Rerun's own state, never deleted by a script); writes
-#    .claude\p4-13\stage.json and S<n>-plans.txt. No game folder, no firewall rule, no profile.
+#    .dev\p4-13\stage.json and S<n>-plans.txt. No game folder, no firewall rule, no profile.
 #  -Case: applies exactly the plan the user released by its SHA-256 (rerun apply), lets you start
 #    the game through Steam, reverts it (rerun revert) and compares four snapshots of the game
 #    folder, the user data folder, Rerun's firewall rules, <AppDir>\profiles and <AppDir>\elevate.
@@ -42,7 +42,7 @@
 #    The launch option goes to the clipboard; you paste it in Steam and remove it again (the one
 #    Enter of the run confirms that). Only the hash -Prepare stored for that case is accepted,
 #    and a plan with a registry op is refused (the snapshots do not cover the registry yet).
-#    The test-key helper stays installed while the game runs. Writes .claude\p4-13\results\<case>-<time>.txt.
+#    The test-key helper stays installed while the game runs. Writes .dev\p4-13\results\<case>-<time>.txt.
 #  -RevertOnly: rerun revert <txn> (with -WithHelper: helper installed before, removed after).
 #  -Cleanup: deletes %LOCALAPPDATA%\RerunTest\p4-13 and <AppDir>\index-test (only when no
 #    transaction is open, no launch profile exists, the staged rerun.exe is there and no helper
@@ -95,7 +95,7 @@ $ExitRolledBack = 4
 $ExitOpen = 5
 
 # ---------- places ----------
-$script:Local = Join-Path $repo '.claude\p4-13'
+$script:Local = Join-Path $repo '.dev\p4-13'
 $script:StageFile = Join-Path $script:Local 'stage.json'
 $script:Lad = [Environment]::GetFolderPath('LocalApplicationData')
 $script:AppDir = Join-Path $script:Lad 'Rerun'
@@ -573,7 +573,7 @@ function Invoke-Prepare {
     $table | ForEach-Object { Write-Host $_ }
     Write-Host ''
     Write-Host "Table and previews in the clipboard and in $file"
-    Title 'DONE: paste the table to Claude'
+    Title 'DONE: the table is in the clipboard, report it'
 }
 
 # ======================================================================
