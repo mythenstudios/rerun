@@ -1,16 +1,15 @@
-# Draft from PCGamingWiki (rerun-workbench draft), completed by hand: facts and links only.
-# Curate it (docs/02-topo-format.md) before it leaves status draft.
 # Page: https://www.pcgamingwiki.com/wiki/Assassin's_Creed_Syndicate
 format: 1
 id: "assassins-creed-syndicate"
 title: "Assassin's Creed Syndicate"
-status: "draft"
+status: "active"
 rev: 1
+tested_on: [x64]
 match:
   steam_appid: 368500
   exes:
-    # hashes from a local copy of the game (workbench draft refused: its import scan finds no single API);
-    # api is the page's Direct3D 11, not yet confirmed on a running game. Verify the files in Steam first.
+    # hashes from an unmodified Steam copy (the import scan finds no single API);
+    # api is the page's Direct3D 11, not yet confirmed on a running game.
     - { path: "ACS.exe", sha1: "6666805A1E83D06001D7265CA18D9579C22DC822", sha256: "6E25F759242252F93ACDD79C7E8BE10D5BEDEEE94CE429FF5274D942CA10C5A2", api: "d3d11" }
     # UplayBrowser.exe (also in the folder) is the Ubisoft browser helper, not the game: left out
 # PCGW API: Direct3D 11; 64-bit exe (the page's community patch needs the x64 ASI loader)
