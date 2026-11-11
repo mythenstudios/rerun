@@ -8,6 +8,7 @@
 //! - C-TE4 another content of the game: no match, nothing offered; with `--pick` refused.
 //! - C-TE5 an anti-cheat folder: the report says so, `compat_layer` is refused.
 //! - C-TE6 `--pick` with a step file is a usage error; a pick of the wrong form too.
+//! - C-TE11 the golden plan (P5-1): frozen bytes and hash in `tests/fixtures/plan/`.
 
 use std::path::Path;
 
@@ -651,4 +652,53 @@ fn the_dev_topo_script_parses_rerun_s_lines() {
         let l = Message::Helper(m).to_string();
         assert!(l.starts_with("Rerun firewall rules"), "{l}");
     }
+}
+
+/// The golden plan (P5-1, ADR 0027): the bytes and the hash `rerun plan 220 --pick cores/limit
+/// --pick display/layer` stores for this fake world, frozen before the CLI became a renderer
+/// over `rerun_core::flow`, so the extraction of the write side (P5-2a) can prove it plans
+/// exactly the same bytes. A changed plan fails here and writes the new bytes to
+/// `target/plan-topo-220.golden.json`; check them, then copy them over
+/// `tests/fixtures/plan/topo-220.json` and the hash into `topo-220.sha256` only for an intended
+/// change of the plan format or the planners.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test: the golden fixture lives in the repository, not in the fake"
+)]
+fn c_te11_the_golden_plan() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/plan");
+    let sys = sys();
+    let r = expect(
+        &sys,
+        &[
+            "plan",
+            "220",
+            "--pick",
+            "cores/limit",
+            "--pick",
+            "display/layer",
+        ],
+        Answer::No,
+        Exit::Report,
+    );
+    let hash = crate::tests::hash_of(&r);
+    let app = rerun_core::policy::root::AppDir::open(&sys, rerun_core::policy::root::Create::Never)
+        .unwrap()
+        .unwrap();
+    let bytes = rerun_core::plan::load(&app, &hash.parse().unwrap()).unwrap();
+    let golden = std::fs::read(fixtures.join("topo-220.json")).unwrap_or_default();
+    if bytes.bytes() != golden.as_slice() {
+        let out =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/plan-topo-220.golden.json");
+        std::fs::write(&out, bytes.bytes()).unwrap();
+        panic!(
+            "the plan differs from tests/fixtures/plan/topo-220.json (hash {hash}); the new \
+             bytes are in {}",
+            out.display()
+        );
+    }
+    let want = std::fs::read_to_string(fixtures.join("topo-220.sha256")).unwrap();
+    assert_eq!(hash, want.trim());
+    assert_eq!(bytes.hash().to_string(), hash);
 }
