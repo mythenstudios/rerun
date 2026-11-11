@@ -1,0 +1,53 @@
+# Hash is of the unmodified original executable (Steam copy, restored from the NTCore backup on the dev PC;
+# the installed pc/mafia2.exe there is the patched copy and does not match this Topo).
+# The dev PC also runs this game through ZLUDA (Steam launch option), so nothing here is verified on it.
+format: 1
+id: mafia-ii
+title: "Mafia II (Classic)"
+status: active
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 50130
+  exes:
+    # SHA-1/SHA-256 of the unmodified executable (P4-13). API from PCGW (Direct3D 9).
+    - { path: "pc/mafia2.exe", sha1: "97B446D138DB41AC44D9869243BE9C6D63F445EC", sha256: "C7B719906AA0105998AF3255F96F4C553214FD925880AC0EB69555D9649EBCE9", api: d3d9 }
+
+issues:
+  - id: random-crashes-address-space
+    title: "Random crashes after some time of play, often with the sky flickering black (32-bit address space)"
+    when: {}
+    variants:
+      - id: laa-patch
+        status: unverified     # Steam forum reports only (two threads, 2023-2024, mixed results); not on PCGW; the dev PC game is modified for ZLUDA
+        kind: fix
+        steps:
+          - laa_patch: { exe: "pc/mafia2.exe" }
+        tradeoffs:
+          - "Changes the executable (a revert restores it); results are mixed in the threads, some players still crash"
+          - "Steam's file check puts the original back"
+        sources:
+          - { type: steam-thread, url: "https://steamcommunity.com/app/50130/discussions/0/3880470997339108924/" }
+          - { type: steam-thread, url: "https://steamcommunity.com/app/50130/discussions/0/3115908865098451740/" }
+
+# Not taken as a step:
+# - DXVK for stuttering (PCGW cites a video only; no package yet).
+# - Depth of field remover and the ATI flicker DLL (a file host and a Steam guide download, no repo or release).
+# - "Random crashes on NVIDIA GPUs": a driver-panel setting, see the note below.
+# TODO issue: https://www.pcgamingwiki.com/wiki/Mafia_II#Stuttering,_lag_spikes_and_low_performance
+
+tips:
+  launch_options: []
+  notes:
+    - text: "On AMD GPUs the NVIDIA GPU PhysX effects can be run through ZLUDA (32-bit PhysX): set the Steam launch option to \"<ZLUDA folder>\\32\\zluda.exe\" -- %command%. The ZLUDA docs list Mafia II (Classic) as tested. Install the current PhysX System Software (link below) first. Rerun does not ship ZLUDA; Windows Smart App Control may block it."
+      source: { type: official, url: "https://zluda.readthedocs.io/latest/physx32.html" }
+    - text: "NVIDIA's official PhysX System Software page (download)."
+      source: { type: official, url: "https://www.nvidia.com/en-us/drivers/physx/physx-9-19-0218-driver/" }
+    - text: "On NVIDIA GPUs, a Steam guide reports crashes cured by setting the PhysX processor to CPU in the NVIDIA Control Panel and turning off APEX PhysX in the game (system setting, not a Rerun step)."
+      source: { type: steam-guide, url: "https://steamcommunity.com/sharedfiles/filedetails/?id=2939021224" }
+    - text: "Above about 100 FPS the game may get stuck in slow motion in police chases; capping the frame rate is the reported workaround."
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Mafia_II#Game_stuck_in_slow_motion_while_being_pursued_by_the_police" }
+
+links:
+  pcgw: "Mafia_II"
