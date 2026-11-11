@@ -12,8 +12,8 @@ rerun_/
 │  ├─ rerun-helper/    Binary `rerun-helper.exe` – the elevated helper (ADR 0023): only Rerun's own firewall rules; P4-2c: validation chain; P4-2d: the batch in `exec`; P4-5b: writes through COM
 │  ├─ rerun-cpu/       cdylib `rerun-cpu.asi` – inproc CPU fix, x86 + x64
 │  ├─ rerun-workbench/ Curator tool, not shipped: build and sign the index (P4-3), Topo drafts from PCGamingWiki (P4-14)
-│  └─ rerun-app/       Planned (phase 5, ADR 0027, proposed): binary `rerun-app.exe` – the app over `rerun_core::flow`; framework in ADR 0026
-├─ app/                Tauri 2 + Svelte 5 + TypeScript (Vite); `app/src-tauri` joins the Cargo workspace only in Phase 5; removed once ADR 0026 is decided (ADR 0027)
+│  └─ rerun-app/       Planned (phase 5, ADR 0027, proposed): binary `rerun-app.exe` – the app over `rerun_core::flow`; Slint (ADR 0026); created in P5-3
+├─ app/                The Tauri skeleton of ADR 0001 (superseded for the GUI by ADR 0026); removed in P5-3 when `rerun-app` is created (ADR 0027)
 ├─ topos/              Game recipes (YAML)
 ├─ packages/           Upstream tools (YAML)
 ├─ data/               Reference data (YAML): GPU architecture table `gpu-arch.yaml`
@@ -114,12 +114,11 @@ revert: journal ─► observe each op (never overwrite a foreign state) ─► 
 - Configuration from `rerun-cpu.ini` next to it. Builds for x86 and x64.
 - Cargo produces `rerun_cpu.dll`; the build step copies it to `dist/<arch>/rerun-cpu.asi` (ADR 0006). Static CRT, `panic = "abort"`.
 
-## Frontend (app/)
+## Frontend (rerun-app, planned)
 
-- Tauri 2, Svelte 5, TypeScript, Vite. No UI library.
-- Commands: `scan`, `game_detail`, `plan`, `apply(plan_hash)`, `revert(txn_id)`, `forget(txn_id)`, `status`, `system_profile`.
-- The frontend holds no system state. It displays plans, the core executes.
-- Proposed replacement (ADR 0027): a Rust-native `rerun-app` over `rerun_core::flow` with one worker thread owning the system, framework-free view models, a typed en/de catalogue and theme tokens; the framework is ADR 0026.
+- A Rust-native app over `rerun_core::flow` (ADR 0027, proposed): one worker thread owning the system, framework-free view models, a typed en/de catalogue, theme tokens and settings. The frontend holds no system state. It displays plans, the core executes.
+- Framework: Slint =1.18.1 under its GPL-3.0 option (ADR 0026), `.slint` files compiled by `slint-build`; only `rerun-app::ui` names it. The distributed `rerun-app.exe` is effectively GPL-3.0-only; the sources and the other binaries stay GPL-3.0-or-later.
+- Frameless window with Rerun's own title bar; the snap-layout window subclass is `rerun-app::ui::chrome`, the only `unsafe` of `rerun-app`. Renderer (software always, or femtovg with the software fallback) decided in P5-3.
 
 ## Network
 

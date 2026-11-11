@@ -1,6 +1,6 @@
 # ADR 0027 · App architecture and the core–UI boundary
 
-**Status:** Proposed · 2026-11-11 · extends ADR 0003, ADR 0016, ADR 0019, ADR 0020, ADR 0023, ADR 0024 · phase 5, steps P5-1 to P5-6 and P5-10 · the UI framework is ADR 0026 (pending a comparison of GPUI and Slint); this ADR names none
+**Status:** Proposed · 2026-11-11 · extends ADR 0003, ADR 0016, ADR 0019, ADR 0020, ADR 0023, ADR 0024 · phase 5, steps P5-1 to P5-6 and P5-10 · the UI framework is ADR 0026 (Slint); this ADR names none
 
 ## Context
 Phase 5 adds a Rust-native Windows app (`docs/07-ui.md`, layout C) that shows the library, a game, the applied fixes, the history, the system and the settings against the real core, and leads every change through preview → apply → revert (with a preview). Plan P5 found:
@@ -10,7 +10,7 @@ Phase 5 adds a Rust-native Windows app (`docs/07-ui.md`, layout C) that shows th
 - **The UAC dialog needs an owner window.** `WinElevation::run_helper` takes `GetConsoleWindow()` as the owner (`sys/win/elevation.rs`); from a GUI the dialog would have none and can open behind the window.
 - **Core errors are English `Display` texts only** (the accepted localisation leftover of ADR 0016); a German UI needs typed refusals.
 - **One fix, several issues.** A Topo may list the same variant under two issues (EaglePatch for Assassin's Creed: `controller/eaglepatch` and `online-services/eaglepatch`, identical steps). The engine already plans a package picked twice once (test `tk_twice_once_and_requires_in_the_plan`), and `elevate::derive` refuses a doubled executable (fail closed); the UI must not offer the fix twice.
-- **No framework is chosen yet** (ADR 0026). Everything above the framework must be decidable and testable without it.
+- **The framework is ADR 0026** (Slint since 2026-11-11). Everything above the framework stays decidable and testable without it, so that a later switch replaces only the `ui` layer.
 
 ## Decision
 
@@ -21,7 +21,7 @@ crates/
   rerun-cli/    a renderer over flow: messages, Out, confirm, the exit mapping and the flags stay here
   rerun-app/    planned, binary rerun-app.exe: worker, vm, text, theme, settings, ui
   rerun-launch/ rerun-helper/ rerun-cpu/ rerun-proto/ rerun-workbench/   unchanged
-app/            the Tauri skeleton, removed once ADR 0026 is decided
+app/            the Tauri skeleton, removed in P5-3 (ADR 0026 decided)
 ```
 - Dependencies: `rerun-app → rerun-core` (and `rerun-proto`), never back. Only `rerun-app::ui` names the framework (source rule test). `rerun-helper` never names `flow` (its source rule grows by one name, also as a whole word after `rerun_core`).
 - `flow` is a **module of `rerun-core`**, not a crate: it has two users today, and a crate boundary would add nothing but a second public API to keep stable.
@@ -177,7 +177,7 @@ pub struct Settings { pub format: u32, pub lang: Option<Lang>, pub theme: ThemeI
 - **Proof types as a rule-5 guarantee (sealed tokens):** impossible without the core seeing the screen; claiming it would overstate the protection. **`trybuild`** for the compile-fail checks: a new dependency for what `compile_fail` doctests do.
 - **`Guarded` per session:** stale forbidden roots and a stale `AppDir` handle after a CLI run created or removed Rerun's folder.
 - **An async runtime or a thread pool:** the core is synchronous and the journal admits one writer; one worker thread gives the same responsiveness without a dependency and without two operations racing.
-- **View models in the framework's types:** untestable without a window and tied to the framework ADR 0026 has not chosen.
+- **View models in the framework's types:** untestable without a window and tied to the framework of ADR 0026.
 - **Fluent for i18n:** a dependency and run-time lookups; a missing German string shows only at run time. Two languages with typed parameters fit a `match`.
 - **Store the plan when the preview is built:** every look at a fix would create Rerun's folder and leave plan files (against S6).
 - **One fix across issues by identical steps (no rule),** or **a `fixes:` section in the format:** the first lets two copies drift unnoticed, the second changes schema, loader, engine, workbench, helper derivation and every Topo (user decision U2 a against both).

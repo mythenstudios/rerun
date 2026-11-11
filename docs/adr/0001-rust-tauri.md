@@ -1,5 +1,7 @@
 # ADR 0001 · Rust core + Tauri GUI + separate CLI
 
+**Superseded for the GUI by ADR 0026 (2026-11-11: Slint instead of Tauri 2 and Svelte 5); the Rust workspace and the CLI stand.**
+
 **Status:** accepted · 2026-11-04
 
 ## Context
