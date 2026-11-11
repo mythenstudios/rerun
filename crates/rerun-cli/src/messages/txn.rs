@@ -904,30 +904,16 @@ pub enum TxnMsg<'a> {
     },
 }
 
-/// What is wrong with the Steam app of a step file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SteamWhy {
-    /// Steam was not found.
-    NoSteam,
-    /// No library lists it.
-    NotListed,
-    /// More than one library lists it.
-    Twice,
-    /// Steam is updating it.
-    Updating,
-    /// Not installed.
-    NotInstalled,
-}
+pub use rerun_core::flow::SteamWhy;
 
-impl fmt::Display for SteamWhy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::NoSteam => "cannot be looked up: Steam was not found",
-            Self::NotListed => "is in no Steam library",
-            Self::Twice => "is listed by more than one Steam library; nothing is guessed",
-            Self::Updating => "is being updated by Steam; try again when Steam has finished",
-            Self::NotInstalled => "is not installed",
-        })
+/// What is wrong with the Steam app of a plan source, as text.
+fn steam_why(why: SteamWhy) -> &'static str {
+    match why {
+        SteamWhy::NoSteam => "cannot be looked up: Steam was not found",
+        SteamWhy::NotListed => "is in no Steam library",
+        SteamWhy::Twice => "is listed by more than one Steam library; nothing is guessed",
+        SteamWhy::Updating => "is being updated by Steam; try again when Steam has finished",
+        SteamWhy::NotInstalled => "is not installed",
     }
 }
 
@@ -1335,7 +1321,9 @@ impl fmt::Display for TxnMsg<'_> {
             Self::GameFolder { error } => {
                 write!(f, "rerun: cannot open the game folder: {error}")
             }
-            Self::SteamApp { app_id, why } => write!(f, "rerun: Steam app {app_id} {why}"),
+            Self::SteamApp { app_id, why } => {
+                write!(f, "rerun: Steam app {app_id} {}", steam_why(*why))
+            }
             Self::StoreFailed { error } => write!(f, "rerun: cannot store the plan: {error}"),
             Self::IdentityHint { txn } => write!(
                 f,

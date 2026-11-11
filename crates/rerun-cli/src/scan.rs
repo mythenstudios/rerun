@@ -5,22 +5,25 @@
 //! `SteamLibrary::open_game`, scanned with `scan_game`, printed as soon as it is done, and its
 //! `GameDir` dropped before the next app. Apps Steam is updating or that are not installed are
 //! listed and never opened (`open_read` shares read only and would block Steam's update).
-//! Every issue is one line with its location and kind, never file content. Rendering is pure.
+//! Every issue is one line with its location and kind, never file content. The scan and its
+//! counts are `rerun_core::flow::library` (ADR 0027); rendering is pure.
 
-use std::collections::BTreeSet;
 use std::io::Write;
+use std::ops::ControlFlow;
 use std::path::Path;
 
-use rerun_core::detect::exe::{
-    Candidate, ExeLimits, GameExes, HashOutcome, Main, Options, Role, scan_game,
-};
-use rerun_core::detect::steam::{self, AppState, SteamApp, SteamScan};
+use rerun_core::detect::exe::{Candidate, ExeLimits, GameExes, HashOutcome, Main, Role};
+use rerun_core::detect::steam::{self, SteamApp, SteamScan};
 use rerun_core::escape::{self, Shown};
+#[cfg(test)]
+use rerun_core::flow::tally;
+use rerun_core::flow::{self, LibraryEvent, RowScan, failed_games};
 use rerun_core::path::RootPath;
 use rerun_core::policy::root::{ForbiddenRoots, RootError};
 use rerun_core::sys::System;
 
 use crate::cli::Exit;
+use crate::host::gate;
 use crate::messages::{HashText, Message, NoneReason, ScanCounts};
 use crate::out::{Out, OutError, failed};
 
@@ -39,17 +42,11 @@ pub fn scan<W: Write, E: Write>(
         // A warning only; the scan goes on if stderr is gone.
         let _ = err.line(&Message::HashesWarning);
     }
-    let fr = match ForbiddenRoots::resolve(sys, install_dir) {
+    let fr = match flow::forbidden_roots(sys, &Ok(install_dir.to_path_buf())) {
         Ok(fr) => fr,
-        Err(e) => {
-            let _ = err.line(&Message::ForbiddenRoots {
-                error: escape::text(&e.to_string()),
-            });
-            return Exit::Fatal;
-        }
+        Err(g) => return gate(err, g),
     };
-    let steam = steam::scan(sys, &fr);
-    match report(&steam, &fr, app_ids, hashes, out).and_then(|()| out.flush()) {
+    match report(sys, &fr, app_ids, hashes, out).and_then(|()| out.flush()) {
         Ok(()) => Exit::Report,
         Err(e) => failed(err, e),
     }
@@ -57,87 +54,37 @@ pub fn scan<W: Write, E: Write>(
 
 /// Streams the report: Steam, then per library its apps, each game written when it is done.
 fn report<W: Write>(
-    steam: &SteamScan<'_>,
+    sys: &dyn System,
     fr: &ForbiddenRoots,
     app_ids: &[u32],
     hashes: bool,
     out: &mut Out<W>,
 ) -> Result<(), OutError> {
-    let mut counts = ScanCounts {
-        libraries: steam.libraries.len(),
-        issues: steam.issues.len(),
-        ..ScanCounts::default()
+    let mut on = |ev: LibraryEvent<'_>| {
+        let lines = match ev {
+            LibraryEvent::Steam(steam) => out.lines(&render_steam(steam)),
+            LibraryEvent::Library { index, lib } => out
+                .line(&Message::Blank)
+                .and_then(|()| out.lines(&render_library(index, lib.path(), lib.label()))),
+            LibraryEvent::Row { app, scan } => match scan {
+                RowScan::NotOpened => out.lines(&render_app(app)),
+                RowScan::Unopened(e) => out.lines(&render_unopened(app, e)),
+                RowScan::Scanned(exes) => out.lines(&render_game(app, exes)),
+            },
+        };
+        match lines {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(e) => ControlFlow::Break(e),
+        }
     };
-    out.lines(&render_steam(steam))?;
-    let wanted = |id: u32| app_ids.is_empty() || app_ids.contains(&id);
-    for (index, lib) in steam.libraries.iter().enumerate() {
+    let facts = flow::library(sys, fr, app_ids, hashes, &mut on)?;
+    if !facts.missing.is_empty() {
         out.line(&Message::Blank)?;
-        out.lines(&render_library(index, lib.path(), lib.label()))?;
-        for app in lib.apps().iter().filter(|a| wanted(a.app_id)) {
-            counts.apps += 1;
-            match app.state() {
-                AppState::Installed => {
-                    counts.installed += 1;
-                    match lib.open_game(fr, app.app_id) {
-                        Err(e) => {
-                            counts.none += 1;
-                            counts.issues += 1;
-                            out.lines(&render_unopened(app, &e))?;
-                        }
-                        Ok(game) => {
-                            let options = Options {
-                                name_hint: Some(app.install_dir.clone()),
-                                hashes,
-                                limits: ExeLimits::DEFAULT,
-                            };
-                            let exes = scan_game(&game, &options);
-                            // The game folder is closed before anything is printed and before
-                            // the next app is opened.
-                            drop(game);
-                            tally(&mut counts, &exes);
-                            out.lines(&render_game(app, &exes))?;
-                        }
-                    }
-                }
-                AppState::UpdatePending => {
-                    counts.pending += 1;
-                    out.lines(&render_app(app))?;
-                }
-                AppState::NotInstalled => {
-                    counts.not_installed += 1;
-                    out.lines(&render_app(app))?;
-                }
-            }
+        for app_id in &facts.missing {
+            out.line(&Message::AppNotFound { app_id: *app_id })?;
         }
     }
-    let held: BTreeSet<u32> = steam
-        .libraries
-        .iter()
-        .flat_map(|l| l.apps().iter().map(|a| a.app_id))
-        .collect();
-    let mut missing: Vec<u32> = Vec::new();
-    for id in app_ids {
-        if !held.contains(id) && !missing.contains(id) {
-            missing.push(*id);
-        }
-    }
-    if !missing.is_empty() {
-        out.line(&Message::Blank)?;
-        for app_id in missing {
-            out.line(&Message::AppNotFound { app_id })?;
-        }
-    }
-    out.lines(&render_summary(counts))
-}
-
-/// The counts of one scanned game.
-fn tally(counts: &mut ScanCounts, exes: &GameExes) {
-    match &exes.main {
-        Main::One(_) => counts.one += 1,
-        Main::Tied(_) => counts.tied += 1,
-        Main::None => counts.none += 1,
-    }
-    counts.issues += exes.issues.len() + failed_games(exes).count();
+    out.lines(&render_summary(facts.counts))
 }
 
 /// Where Steam was found and every issue of the Steam scan.
@@ -204,14 +151,6 @@ pub fn render_unopened<'a>(app: &'a SteamApp, e: &RootError) -> Vec<Message<'a>>
             error: escape::text(&e.to_string()).into_owned(),
         },
     ]
-}
-
-/// The game candidates that failed to open or parse, whatever became the main executable
-/// (failed candidates rank last, so another one may have won).
-fn failed_games(exes: &GameExes) -> impl Iterator<Item = &Candidate> {
-    exes.candidates
-        .iter()
-        .filter(|c| c.role == Role::Game && c.facts.is_err())
 }
 
 /// Facts (and hashes) of one executable.

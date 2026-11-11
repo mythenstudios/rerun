@@ -3,7 +3,8 @@
 //! (`crates/rerun-core/src/elevate`, without its `tests.rs` files) never name `WinSystem` or
 //! `WinGpu` (the helper builds its own system without GPU, P4-2c), DXGI, the system profile
 //! (`hw::`), the journal, `exec`, `pkg`, the network (`WinHttp`, `http::`, ADR 0025), the Steam
-//! detection or `topo::when`. Comment lines are not code and are skipped; the scan has teeth.
+//! detection, `topo::when` or `flow` (ADR 0027). Comment lines are not code and are skipped;
+//! the scan has teeth.
 
 #![allow(
     clippy::disallowed_methods,
@@ -29,6 +30,7 @@ const FORBIDDEN: &[&str] = &[
     "http::",
     "detect::steam",
     "topo::when",
+    "flow::",
 ];
 
 /// The forbidden names in one source text: `(line number, name)`. Lines that are comments
@@ -99,6 +101,7 @@ fn the_rule_has_teeth() {
         ("crate::exec::standard_user(sys)?;", "exec::"),
         ("let s = detect::steam::scan(sys, fr);", "detect::steam"),
         ("topo::when::eval(&w)", "topo::when"),
+        ("let g = rerun_core::flow::guard(env)?;", "flow::"),
         ("load_system32(\"dxgi.dll\")", "dxgi"),
         (
             "let x = 1; // fine so far, but WinGpu here is a comment",

@@ -15,10 +15,11 @@ use std::path::Path;
 use rerun_core::catalog::store::{self, Imported, StoreError};
 use rerun_core::catalog::{Catalog, MAX_INDEX_BYTES, SIG_BYTES, trusted_keys};
 use rerun_core::escape;
+use rerun_core::flow::{self, IndexState};
 use rerun_core::policy::root::{AppDir, Create, read_input};
 
 use crate::cli::Exit;
-use crate::host::{Host, after_change, shown, standard_user};
+use crate::host::{Host, after_change, gate, shown, standard_user};
 use crate::messages::{IndexMsg, Message, TxnMsg};
 use crate::out::Out;
 
@@ -144,18 +145,14 @@ fn run_import<W: Write, E: Write>(
 
 /// `rerun index show` (module docs).
 pub fn show<W: Write, E: Write>(host: &Host<'_>, out: &mut Out<W>, err: &mut Out<E>) -> Exit {
-    let app = match AppDir::open(host.sys, Create::Never) {
-        Ok(Some(a)) => a,
-        Ok(None) => return print(out, err, &[Message::Index(IndexMsg::NoneYet)]),
-        Err(e) => {
-            let _ = err.line(&Message::Txn(TxnMsg::AppDir { error: shown(&e) }));
-            return Exit::Fatal;
-        }
+    let app = match flow::open_app(host.sys) {
+        Ok(app) => app,
+        Err(g) => return gate(err, g),
     };
-    match store::current(&app, &trusted_keys()) {
-        Ok(None) => print(out, err, &[Message::Index(IndexMsg::NoneYet)]),
-        Ok(Some(c)) => print(out, err, &facts(&c)),
-        Err(e) => note(err, IndexMsg::Refused { error: shown(&e) }, Exit::Refused),
+    match flow::index_state(app.as_ref()) {
+        IndexState::None => print(out, err, &[Message::Index(IndexMsg::NoneYet)]),
+        IndexState::Current(c) => print(out, err, &facts(&c)),
+        IndexState::Refused(e) => note(err, IndexMsg::Refused { error: shown(&e) }, Exit::Refused),
     }
 }
 

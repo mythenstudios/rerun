@@ -19,6 +19,8 @@
 //! - [`topo`]: the Topo engine (P4-4): match, `when`, variants, anti-cheat rule, plan.
 //! - [`elevate`]: the elevated helper's side (ADR 0023): its exit code and `serve`.
 //! - [`pkg`]: packages: the download into the cache (ADR 0025).
+//! - [`flow`]: the typed flows the CLI and the app share (ADR 0027): guards, index state,
+//!   library, game, status; no text, never asks.
 //!
 //! See `docs/01-architecture.md`, ADR 0004, ADR 0007 and ADR 0011.
 
@@ -27,6 +29,7 @@ pub mod detect;
 pub mod elevate;
 pub mod escape;
 pub mod exec;
+pub mod flow;
 mod fold;
 pub mod hw;
 pub mod journal;

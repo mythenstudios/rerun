@@ -12,26 +12,28 @@
 //! nothing is stored, nothing created. With `--pick`: the engine's plan, then the same preview
 //! and storage as a step file (`plan::show_and_store`), with the plan's origin and the
 //! warnings before the preview. `appinfo.vdf` is never read (L9).
+//!
+//! The guards, the lookup and the report come from `rerun_core::flow` (`guard`, `game`,
+//! `with_topo`, ADR 0027); this module renders them and runs the planners on a pick.
 
 use std::io::Write;
 
+use rerun_core::catalog::Topo;
 use rerun_core::catalog::model::{GpuRequirement, Kind, Status, VariantStatus};
-use rerun_core::catalog::{store, trusted_keys};
 use rerun_core::escape;
-use rerun_core::hw::{self, GpuArchTable};
+use rerun_core::flow::{self, Found, GameRefusal, Lookup, OwnedReport};
+use rerun_core::path::RootPath;
 use rerun_core::plan::{Pick, PlanBytes, Preview};
 use rerun_core::policy::registry::RegPolicy;
-use rerun_core::policy::root::{AppDir, Create, Shadow, UserDataDir, preview_with_shadows};
-use rerun_core::prim::{GameRef, MethodSpec, PlanCtx};
-use rerun_core::topo::{
-    self, AntiCheatState, ExeState, Facts, GameFacts, Report, Selection, Warning,
-};
+use rerun_core::policy::root::{Shadow, UserDataDir, preview_with_shadows};
+use rerun_core::prim::{MethodSpec, PlanCtx};
+use rerun_core::topo::{self, AntiCheatState, ExeState, GameFacts, Warning};
 
 use crate::cli::Exit;
-use crate::host::{Host, fail, forbidden, shown, standard_user};
+use crate::host::{Host, fail, gate, shown};
 use crate::messages::{IndexMsg, Message, TopoMsg, TxnMsg};
 use crate::out::Out;
-use crate::plan::{Stored, show_and_store, with_game};
+use crate::plan::{Stored, game_open, show_and_store};
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -88,8 +90,8 @@ fn list<T: std::fmt::Display>(v: &[T]) -> String {
 }
 
 /// The report's lines.
-fn report_lines(r: &Report<'_>, g: &GameFacts) -> Vec<Message<'static>> {
-    let t = r.topo;
+fn report_lines(r: &OwnedReport, g: &GameFacts) -> Vec<Message<'static>> {
+    let t = &r.topo;
     let mut m = vec![Message::Topo(TopoMsg::Heading {
         id: t.id.to_string(),
         rev: t.rev,
@@ -227,14 +229,116 @@ fn warning_text(w: &Warning) -> String {
     }
 }
 
-/// What happened in the game folder.
+/// A Topo heading.
+fn heading(t: &Topo) -> Message<'static> {
+    Message::Topo(TopoMsg::Heading {
+        id: t.id.to_string(),
+        rev: t.rev,
+        status: status(t.status),
+        title: escape::text(&t.title).into_owned(),
+    })
+}
+
+/// The retired Topos of the app, listed before anything else.
+fn retired_lines(retired: &[Topo]) -> Vec<Message<'static>> {
+    retired
+        .iter()
+        .map(|t| {
+            Message::Topo(TopoMsg::Retired {
+                id: t.id.to_string(),
+                rev: t.rev,
+                title: escape::text(&t.title).into_owned(),
+            })
+        })
+        .collect()
+}
+
+/// The lines of the retired Topos and what one Topo gave; a lookup that found no single Topo
+/// is written to stdout here and ends with `exit`.
+fn one<R, W: Write, E: Write>(
+    lookup: Lookup<R>,
+    app_id: u32,
+    exit: Exit,
+    out: &mut Out<W>,
+    err: &mut Out<E>,
+) -> Result<(Vec<Message<'static>>, R), Exit> {
+    let (retired, found) = match lookup {
+        Lookup::NoIndex => {
+            let _ = out.line(&Message::Topo(TopoMsg::NoIndex));
+            return Err(exit);
+        }
+        Lookup::NoTopo { seq } => {
+            let _ = out.line(&Message::Topo(TopoMsg::NoTopo { app_id, seq }));
+            return Err(exit);
+        }
+        Lookup::Read { retired, found } => (retired, found),
+    };
+    let mut lead = retired_lines(&retired);
+    match found {
+        Found::One(r) => return Ok((lead, r)),
+        Found::NoMatch(live) => {
+            for (t, g) in &live {
+                lead.push(heading(t));
+                lead.extend(exe_lines(g));
+            }
+            lead.push(Message::Topo(TopoMsg::NoMatch));
+        }
+        Found::Several(ids) => lead.push(Message::Topo(TopoMsg::Several {
+            ids: ids.join(", "),
+        })),
+    }
+    Err(print(out, err, &lead, exit))
+}
+
+/// `lines` on stdout, then `exit`; a write error other than a closed pipe is fatal.
+fn print<W: Write, E: Write>(
+    out: &mut Out<W>,
+    err: &mut Out<E>,
+    lines: &[Message<'_>],
+    exit: Exit,
+) -> Exit {
+    out.lines(lines)
+        .and_then(|()| out.flush())
+        .map_or_else(|e| crate::out::failed(err, e), |()| exit)
+}
+
+/// A lookup that stopped, on stderr: exit 3.
+fn refusal<W: Write, E: Write>(out: &mut Out<W>, err: &mut Out<E>, r: GameRefusal) -> Exit {
+    match r {
+        GameRefusal::Index(e) => {
+            let _ = err.line(&Message::Index(IndexMsg::Refused { error: shown(&e) }));
+            Exit::Refused
+        }
+        GameRefusal::Game(e) => game_open(err, e),
+        GameRefusal::Engine(e) => failed(out, err, &[], &e.to_string()),
+    }
+}
+
+/// The engine or a planner refused: `lines` on stdout, the reason on stderr, exit 3.
+fn failed<W: Write, E: Write>(
+    out: &mut Out<W>,
+    err: &mut Out<E>,
+    lines: &[Message<'_>],
+    why: &str,
+) -> Exit {
+    let _ = out.lines(lines).and_then(|()| out.flush());
+    fail(
+        err,
+        TxnMsg::PlanFailed {
+            error: escape::text(why).into_owned(),
+        },
+        Exit::Refused,
+    )
+}
+
+/// What the engine made of the picks.
 enum Outcome {
-    Report(Vec<Message<'static>>, Exit),
     Planned {
         before: Vec<Message<'static>>,
         bytes: PlanBytes,
         view: Box<Preview>,
         shadows: Vec<Shadow>,
+        app_path: Option<RootPath>,
     },
     Failed(Vec<Message<'static>>, String),
 }
@@ -261,114 +365,28 @@ fn run<W: Write, E: Write>(
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
-    let sys = host.sys;
-    standard_user(sys, err)?;
-    let fr = forbidden(host, err)?;
-    let refused = if picks.is_empty() {
-        Exit::Report
-    } else {
-        Exit::Refused
-    };
-    let app = AppDir::open(sys, Create::Never)
-        .map_err(|e| fail(err, TxnMsg::AppDir { error: shown(&e) }, Exit::Fatal))?;
-    let Some(dir) = app.as_ref() else {
-        let _ = out.line(&Message::Topo(TopoMsg::NoIndex));
-        return Ok(refused);
-    };
-    let catalog = match store::current(dir, &trusted_keys()) {
-        Ok(Some(c)) => c,
-        Ok(None) => {
-            let _ = out.line(&Message::Topo(TopoMsg::NoIndex));
-            return Ok(refused);
-        }
-        Err(e) => {
-            let _ = err.line(&Message::Index(IndexMsg::Refused { error: shown(&e) }));
-            return Err(Exit::Refused);
-        }
-    };
-    let topos = topo::topos_for(&catalog, app_id);
-    if topos.is_empty() {
-        let _ = out.line(&Message::Topo(TopoMsg::NoTopo {
-            app_id,
-            seq: catalog.seq(),
-        }));
-        return Ok(refused);
+    let g = flow::guard(host.env()).map_err(|x| gate(err, x))?;
+    if picks.is_empty() {
+        // The report: nothing is stored, nothing created.
+        let v = flow::game(&g, app_id).map_err(|r| refusal(out, err, r))?;
+        let (mut m, mv) = match one(v.lookup, app_id, Exit::Report, out, err) {
+            Ok(x) => x,
+            Err(exit) => return Ok(exit),
+        };
+        m.extend(report_lines(&mv.report, &mv.read));
+        m.push(Message::Blank);
+        m.push(Message::Topo(TopoMsg::PickHint));
+        return Ok(print(out, err, &m, Exit::Report));
     }
-    let app_path = AppDir::path_of(sys).ok();
-    let table = GpuArchTable::builtin().ok();
-    let profile = hw::read(sys, table);
-    let index = *catalog.sha256();
-    let outcome = with_game(sys, &fr, &GameRef::Steam(app_id), err, |game, steam_app| {
-        // P4-10 (R5): an executable a live laa_patch changed still counts as its build.
-        let patched = rerun_core::exec::patched_now(dir, game.id());
-        let read: Vec<(&rerun_core::catalog::Topo, GameFacts)> = topos
-            .iter()
-            .map(|t| (*t, topo::read_game_with(game, t, &patched)))
-            .collect();
-        // Review follow-up 4: retired Topos are listed, never chosen.
-        let (retired, selection) = topo::select(read);
-        let mut lead: Vec<Message<'static>> = retired
-            .iter()
-            .map(|t| {
-                Message::Topo(TopoMsg::Retired {
-                    id: t.id.to_string(),
-                    rev: t.rev,
-                    title: escape::text(&t.title).into_owned(),
-                })
-            })
-            .collect();
-        let (t, g) = match selection {
-            Selection::One(t, g) => (t, g),
-            Selection::NoMatch(live) => {
-                for (t, g) in &live {
-                    lead.push(Message::Topo(TopoMsg::Heading {
-                        id: t.id.to_string(),
-                        rev: t.rev,
-                        status: status(t.status),
-                        title: escape::text(&t.title).into_owned(),
-                    }));
-                    lead.extend(exe_lines(g));
-                }
-                lead.push(Message::Topo(TopoMsg::NoMatch));
-                return Outcome::Report(lead, refused);
-            }
-            Selection::Several(several) => {
-                let ids: Vec<String> = several.iter().map(|t| t.id.to_string()).collect();
-                lead.push(Message::Topo(TopoMsg::Several {
-                    ids: ids.join(", "),
-                }));
-                return Outcome::Report(lead, refused);
-            }
-        };
-        let g = &g;
-        let facts = Facts {
-            profile: &profile,
-            table,
-            game: g,
-            packages: catalog.packages(),
-        };
-        if picks.is_empty() {
-            return match topo::report(t, &facts) {
-                Ok(r) => {
-                    let mut m = lead;
-                    m.extend(report_lines(&r, g));
-                    m.push(Message::Blank);
-                    m.push(Message::Topo(TopoMsg::PickHint));
-                    Outcome::Report(m, Exit::Report)
-                }
-                Err(e) => Outcome::Failed(Vec::new(), e.to_string()),
-            };
-        }
-        let heading = vec![Message::Topo(TopoMsg::Heading {
-            id: t.id.to_string(),
-            rev: t.rev,
-            status: status(t.status),
-            title: escape::text(&t.title).into_owned(),
-        })];
+    let sys = host.sys;
+    let lookup = flow::with_topo(&g, app_id, |m| {
+        let t = m.topo;
+        let heading = vec![heading(t)];
+        let facts = m.facts();
         // P4-12: the game's folder below Documents only if a picked step sets a file there.
         let user_data = match &t.user_data {
-            Some(u) if topo::needs_user_data(t, picks, &profile) => {
-                match UserDataDir::open(sys, &fr, u.base(), u.sub()) {
+            Some(u) if topo::needs_user_data(t, picks, m.profile) => {
+                match UserDataDir::open(sys, &g.fr, u.base(), u.sub()) {
                     Ok(d) => Some(d),
                     Err(e) => return Outcome::Failed(heading, e.to_string()),
                 }
@@ -376,14 +394,15 @@ fn run<W: Write, E: Write>(
             _ => None,
         };
         let ctx = PlanCtx {
-            game,
-            app: app.as_ref(),
-            steam_app,
+            game: m.game,
+            app: g.app.as_ref(),
+            steam_app: m.steam_app,
             main_exe: None,
             reg: RegPolicy.reader(sys),
-            app_path: app_path.as_ref(),
+            app_path: m.app_path,
             user_data: user_data.as_ref(),
         };
+        let index = *m.catalog.sha256();
         let tp = match topo::plan(&index, t, &facts, picks, &ctx) {
             Ok(tp) => tp,
             Err(e) => return Outcome::Failed(heading, e.to_string()),
@@ -394,8 +413,7 @@ fn run<W: Write, E: Write>(
         });
         match encoded {
             Ok((bytes, view, shadows)) => {
-                let mut before = lead;
-                before.extend(heading);
+                let mut before = heading;
                 before.push(Message::Topo(TopoMsg::Source {
                     id: t.id.to_string(),
                     rev: t.rev,
@@ -412,45 +430,44 @@ fn run<W: Write, E: Write>(
                     bytes,
                     view: Box::new(view),
                     shadows,
+                    app_path: m.app_path.cloned(),
                 }
             }
             Err(e) => Outcome::Failed(heading, e.to_string()),
         }
-    })?;
+    })
+    .map_err(|r| refusal(out, err, r))?;
+    let (lead, outcome) = match one(lookup, app_id, Exit::Refused, out, err) {
+        Ok(x) => x,
+        Err(exit) => return Ok(exit),
+    };
     match outcome {
-        Outcome::Report(lines, exit) => Ok(out
-            .lines(&lines)
-            .and_then(|()| out.flush())
-            .map_or_else(|e| crate::out::failed(err, e), |()| exit)),
-        Outcome::Failed(lines, why) => {
-            let _ = out.lines(&lines).and_then(|()| out.flush());
-            Err(fail(
-                err,
-                TxnMsg::PlanFailed {
-                    error: escape::text(&why).into_owned(),
-                },
-                Exit::Refused,
-            ))
-        }
+        // The lines of the retired Topos are not shown with a refusal.
+        Outcome::Failed(lines, why) => Err(failed(out, err, &lines, &why)),
         Outcome::Planned {
             before,
             bytes,
             view,
             shadows,
-        } => show_and_store(
-            host,
-            Stored {
-                app,
-                app_path,
-                bytes,
-                view: *view,
-                shadows,
-            },
-            &before,
-            dry_run,
-            out,
-            err,
-        ),
+            app_path,
+        } => {
+            let mut all = lead;
+            all.extend(before);
+            show_and_store(
+                host,
+                Stored {
+                    app: g.app,
+                    app_path,
+                    bytes,
+                    view: *view,
+                    shadows,
+                },
+                &all,
+                dry_run,
+                out,
+                err,
+            )
+        }
     }
 }
 

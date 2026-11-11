@@ -8,7 +8,8 @@ use std::path::PathBuf;
 
 use rerun_core::escape::{self, Shown};
 use rerun_core::exec::{self, ApplyError, ExecError};
-use rerun_core::policy::root::{AppDir, Create, ForbiddenRoots};
+use rerun_core::flow::{self, Env, Gate};
+use rerun_core::policy::root::{AppDir, ForbiddenRoots};
 use rerun_core::sys::{Http, System};
 
 use crate::cli::Exit;
@@ -44,24 +45,44 @@ pub fn fail<E: Write>(err: &mut Out<E>, m: TxnMsg<'_>, exit: Exit) -> Exit {
     exit
 }
 
+impl Host<'_> {
+    /// What a `flow` job runs against.
+    pub fn env(&self) -> Env<'_> {
+        Env {
+            sys: self.sys,
+            http: self.http,
+            install: &self.install,
+        }
+    }
+}
+
+/// A guard that stopped the job, on stderr, and its exit code: elevated 3 (user decision E3),
+/// anything else 1.
+pub fn gate<E: Write>(err: &mut Out<E>, g: Gate) -> Exit {
+    match g {
+        Gate::Elevated(r) => fail(err, TxnMsg::Error { error: shown(&r) }, Exit::Refused),
+        Gate::InstallUnknown(e) => {
+            let _ = err.line(&Message::CurrentExe {
+                error: escape::text(&e).into_owned(),
+            });
+            Exit::Fatal
+        }
+        Gate::Forbidden(e) => {
+            let _ = err.line(&Message::ForbiddenRoots { error: shown(&e) });
+            Exit::Fatal
+        }
+        Gate::AppDir(e) => fail(err, TxnMsg::AppDir { error: shown(&e) }, Exit::Fatal),
+    }
+}
+
 /// User decision E3: elevated (or undeterminable), only `system`, `scan` and `status` run.
 pub fn standard_user<E: Write>(sys: &dyn System, err: &mut Out<E>) -> Result<(), Exit> {
-    exec::standard_user(sys)
-        .map_err(|r| fail(err, TxnMsg::Error { error: shown(&r) }, Exit::Refused))
+    exec::standard_user(sys).map_err(|r| gate(err, Gate::Elevated(r)))
 }
 
 /// The forbidden roots from Rerun's install folder; unknown or unresolvable is fatal (exit 1).
 pub fn forbidden<E: Write>(host: &Host<'_>, err: &mut Out<E>) -> Result<ForbiddenRoots, Exit> {
-    let dir = host.install.as_ref().map_err(|e| {
-        let _ = err.line(&Message::CurrentExe {
-            error: escape::text(e).into_owned(),
-        });
-        Exit::Fatal
-    })?;
-    ForbiddenRoots::resolve(host.sys, dir).map_err(|e| {
-        let _ = err.line(&Message::ForbiddenRoots { error: shown(&e) });
-        Exit::Fatal
-    })
+    flow::forbidden_roots(host.sys, &host.install).map_err(|g| gate(err, g))
 }
 
 /// Rerun's folder, never created: missing is "nothing there" (exit 3), not openable fatal.
@@ -69,10 +90,10 @@ pub fn existing_app<'s, E: Write>(
     sys: &'s dyn System,
     err: &mut Out<E>,
 ) -> Result<AppDir<'s>, Exit> {
-    match AppDir::open(sys, Create::Never) {
+    match flow::open_app(sys) {
         Ok(Some(a)) => Ok(a),
         Ok(None) => Err(fail(err, TxnMsg::NoAppDir, Exit::Refused)),
-        Err(e) => Err(fail(err, TxnMsg::AppDir { error: shown(&e) }, Exit::Fatal)),
+        Err(g) => Err(gate(err, g)),
     }
 }
 

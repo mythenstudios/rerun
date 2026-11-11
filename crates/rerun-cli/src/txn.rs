@@ -34,31 +34,26 @@ use rerun_core::exec::{
     Verified,
 };
 use rerun_core::journal::{Closing, InstanceTag, JournalError, Observed, TxnId};
-use rerun_core::plan::Preview;
-use rerun_core::policy::root::{AppDir, Create, RootError};
+use rerun_core::policy::root::{AppDir, RootError};
 use rerun_core::sys::System;
 
 use crate::cli::Exit;
 use crate::confirm::Answer;
 use crate::host::{
-    Host, after_change, before_change, confirm, existing_app, exit_for_exec, fail, forbidden, note,
-    shown, standard_user,
+    Host, after_change, before_change, confirm, existing_app, exit_for_exec, fail, forbidden, gate,
+    note, shown, standard_user,
 };
 use crate::messages::{LaunchMsg, Message, OpText, ProfileMsg, StepText, TxnMsg, TxnText, Utc};
 use crate::out::{Out, failed as failed_out};
-use crate::preview::{Fate, op_at, profile_id_of, profile_of, roots, x12_lines};
+use crate::preview::{Fate, op_at, profile_id_of, roots, x12_lines};
 use rerun_core::exec::ProfilesMoved;
 use rerun_core::exec::launch_result::{ProfileId, SkipReason};
+use rerun_core::flow::{self, Holder, head, profile_op};
 use rerun_core::plan::RootKind;
 use rerun_core::prim::launch_method::ProfileMethod as Method;
 
 fn m(t: TxnMsg<'_>) -> Message<'_> {
     Message::Txn(t)
-}
-
-/// The preview of a transaction's head, if it could be built.
-fn head(st: &TxnStatus) -> Option<&Preview> {
-    st.preview.as_ref().and_then(|p| p.as_ref().ok())
 }
 
 fn op_text(s: OpState) -> OpText {
@@ -380,72 +375,6 @@ pub fn launch_lines<'a>(
     out
 }
 
-/// A transaction whose launch profile op is not reverted (A6, A7): it holds the profile.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Holder {
-    /// The profile.
-    pub id: ProfileId,
-    /// The transaction.
-    pub txn: TxnId,
-    /// It is forgotten (it cannot be reverted any more).
-    pub forgotten: bool,
-    /// The start, if it is a launcher (not the game) of a `direct` profile.
-    pub launcher: Option<rerun_core::escape::Shown<'static>>,
-    /// The target, if the profile is `watch` (P3-4c).
-    pub watch: Option<rerun_core::escape::Shown<'static>>,
-}
-
-/// The op index of the launch profile op of `p`, and whether it replaces a profile.
-fn profile_op(p: &Preview) -> Option<(u16, bool)> {
-    p.ops
-        .iter()
-        .find(|o| o.profile.is_some())
-        .map(|o| (u16::try_from(o.index).unwrap_or(u16::MAX), o.replaces))
-}
-
-/// Per profile ID the newest transaction whose profile op is not reverted, forgotten included
-/// (review S2; a head the status did not build is read on its own).
-fn holders(app: &AppDir<'_>, s: &exec::Status) -> Vec<Holder> {
-    let mut out: Vec<Holder> = Vec::new();
-    for st in &s.txns {
-        let read;
-        let p = match head(st) {
-            Some(p) => p,
-            None if st.is_forgotten() => {
-                read = exec::txn_status(app, &st.id).ok();
-                match read.as_ref().and_then(head) {
-                    Some(p) => p,
-                    None => continue,
-                }
-            }
-            None => continue,
-        };
-        let (Some((k, _)), Some(id), Some(prof)) = (profile_op(p), profile_id_of(p), profile_of(p))
-        else {
-            continue;
-        };
-        // Only an applied profile op holds a profile (an interrupted one may have no file).
-        let applied = st
-            .ops
-            .iter()
-            .any(|o| o.op == k && o.state == OpState::Applied);
-        if !applied {
-            continue;
-        }
-        let h = Holder {
-            id,
-            txn: st.id,
-            forgotten: st.is_forgotten(),
-            launcher: prof.launcher.then(|| prof.start.clone()),
-            watch: (prof.decoded.method == Method::Watch).then(|| prof.target.clone()),
-        };
-        // The listing is in order: a later transaction replaces an earlier one.
-        out.retain(|x| x.id != id);
-        out.push(h);
-    }
-    out
-}
-
 /// `rerun status` (module docs). Runs elevated too (it only reads the journal and the launch
 /// results).
 pub fn status<W: Write, E: Write>(
@@ -454,7 +383,7 @@ pub fn status<W: Write, E: Write>(
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Exit {
-    let app = match AppDir::open(sys, Create::Never) {
+    let app = match flow::open_app(sys) {
         Ok(Some(a)) => a,
         Ok(None) => {
             return match out.line(&m(TxnMsg::NoTransactions)) {
@@ -462,10 +391,10 @@ pub fn status<W: Write, E: Write>(
                 Err(e) => failed_out(err, e),
             };
         }
-        Err(e) => return fail(err, TxnMsg::AppDir { error: shown(&e) }, Exit::Fatal),
+        Err(g) => return gate(err, g),
     };
-    let s = match exec::status(&app) {
-        Ok(s) => s,
+    let v = match flow::status(sys, &app) {
+        Ok(v) => v,
         Err(e) => {
             return fail(
                 err,
@@ -474,13 +403,10 @@ pub fn status<W: Write, E: Write>(
             );
         }
     };
-    let launch = exec::launch_results(&app);
-    let mut lines = render_status(&s, all);
-    let holders = holders(&app, &s);
-    lines.extend(launch_lines(&launch, &holders));
+    let mut lines = render_status(&v.status, all);
+    lines.extend(launch_lines(&v.launch, &v.holders));
     // P4-2d (ADR 0023 §6, A4 N6): Rerun rules no transaction of this account owns.
-    let orphans = exec::firewall_orphans(sys, &app);
-    lines.extend(orphan_lines(&orphans));
+    lines.extend(orphan_lines(&v.orphans));
     match out.lines(&lines).and_then(|()| out.flush()) {
         Ok(()) => Exit::Report,
         Err(e) => failed_out(err, e),

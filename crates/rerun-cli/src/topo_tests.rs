@@ -27,7 +27,7 @@ use crate::tests::{INSTALL, RERUN, expect};
 const INDEX: &str = r"D:\Work\index.json";
 const SIG: &str = r"D:\Work\index.json.sig";
 
-fn sha256_of(sys: &FakeSystem, rel: &str) -> String {
+pub(crate) fn sha256_of(sys: &FakeSystem, rel: &str) -> String {
     let fr = ForbiddenRoots::resolve(sys, Path::new(INSTALL)).unwrap();
     let g = GameDir::open_manual(sys, &fr, Path::new(G)).unwrap();
     let f = inspect_exe(
@@ -57,7 +57,7 @@ fn index(game_sha256: &str) -> String {
 }
 
 /// `lm_sys` with the index for its `game.exe` imported.
-fn sys() -> FakeSystem {
+pub(crate) fn sys() -> FakeSystem {
     let sys = lm_sys(false, &steps(8));
     let ix = index(&sha256_of(&sys, "game.exe"));
     sys.fake_fs()

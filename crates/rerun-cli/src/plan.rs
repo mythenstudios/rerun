@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::Path;
 
 use rerun_core::detect::exe::anti_cheat;
-use rerun_core::detect::steam::{self, AppState};
+use rerun_core::flow::{self, GameOpen};
 use rerun_core::path::RootPath;
 use rerun_core::plan::{self, PlanBytes, Preview};
 use rerun_core::policy::registry::RegPolicy;
@@ -27,7 +27,7 @@ use rerun_core::topo::{self, StepKind};
 
 use crate::cli::Exit;
 use crate::host::{Host, after_change, before_change, fail, forbidden, shown, standard_user};
-use crate::messages::{Message, SteamWhy, TopoMsg, TxnMsg};
+use crate::messages::{Message, TopoMsg, TxnMsg};
 use crate::out::Out;
 use crate::preview;
 
@@ -216,7 +216,8 @@ pub(crate) fn show_and_store<W: Write, E: Write>(
         .map_or_else(|e| after_change(err, e, Exit::Report), |()| Exit::Report))
 }
 
-/// Opens the game folder a step file names and runs `f` on it; refusals end with exit 3.
+/// Opens the game folder a plan source names and runs `f` on it (`flow::with_game`); refusals
+/// end with exit 3.
 pub(crate) fn with_game<R, E: Write>(
     sys: &dyn System,
     fr: &ForbiddenRoots,
@@ -224,42 +225,14 @@ pub(crate) fn with_game<R, E: Write>(
     err: &mut Out<E>,
     f: impl FnOnce(&GameDir<'_>, Option<u32>) -> R,
 ) -> Result<R, Exit> {
-    let refused = |err: &mut Out<E>, m| fail(err, m, Exit::Refused);
-    match game {
-        GameRef::Folder(p) => {
-            let g = GameDir::open_manual(sys, fr, p.path())
-                .map_err(|e| refused(err, TxnMsg::GameFolder { error: shown(&e) }))?;
-            Ok(f(&g, None))
-        }
-        GameRef::Steam(app_id) => {
-            let app_id = *app_id;
-            let why = |err: &mut Out<E>, why| refused(err, TxnMsg::SteamApp { app_id, why });
-            let s = steam::scan(sys, fr);
-            if s.root.is_none() {
-                return Err(why(err, SteamWhy::NoSteam));
-            }
-            // Every entry counts: a library may list an app twice (ADR 0012), nothing is
-            // guessed.
-            let mut found = s.libraries.iter().flat_map(|lib| {
-                lib.apps()
-                    .iter()
-                    .filter(move |a| a.app_id == app_id)
-                    .map(move |a| (lib, a.state()))
-            });
-            let (lib, state) = match (found.next(), found.next()) {
-                (None, _) => return Err(why(err, SteamWhy::NotListed)),
-                (Some(_), Some(_)) => return Err(why(err, SteamWhy::Twice)),
-                (Some(x), None) => x,
-            };
-            match state {
-                AppState::Installed => {}
-                AppState::UpdatePending => return Err(why(err, SteamWhy::Updating)),
-                AppState::NotInstalled => return Err(why(err, SteamWhy::NotInstalled)),
-            }
-            let g = lib
-                .open_game(fr, app_id)
-                .map_err(|e| refused(err, TxnMsg::GameFolder { error: shown(&e) }))?;
-            Ok(f(&g, Some(app_id)))
-        }
-    }
+    flow::with_game(sys, fr, game, f).map_err(|e| game_open(err, e))
+}
+
+/// A game folder that did not open, on stderr: exit 3.
+pub(crate) fn game_open<E: Write>(err: &mut Out<E>, e: GameOpen) -> Exit {
+    let m = match e {
+        GameOpen::Steam { app_id, why } => TxnMsg::SteamApp { app_id, why },
+        GameOpen::Folder(e) => TxnMsg::GameFolder { error: shown(&e) },
+    };
+    fail(err, m, Exit::Refused)
 }

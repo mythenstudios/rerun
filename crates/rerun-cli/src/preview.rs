@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use rerun_core::escape::{self, Shown};
 use rerun_core::exec::launch_result::ProfileId;
-use rerun_core::plan::{Preview, PreviewOp, ProfilePreview, ProfileShown, RootKind};
+use rerun_core::plan::{Preview, PreviewOp, ProfilePreview, RootKind};
 use rerun_core::policy::root::{Shadow, file_present};
 use rerun_core::prim::launch_method::{ProfileMethod as Method, RuleMode};
 use rerun_core::prim::{MachineView, MachineWhy, SHIM, on_this_machine, steam_option_text};
@@ -279,22 +279,7 @@ pub fn shadow_lines(s: &[Shadow]) -> Vec<Message<'_>> {
         .collect()
 }
 
-/// The launch profile a preview writes, decoded (a stored plan: `Rules::Current` decodes it).
-pub fn profile_of(p: &Preview) -> Option<&ProfileShown> {
-    p.ops.iter().find_map(|o| match &o.profile {
-        Some(ProfilePreview::Decoded(s)) => Some(&**s),
-        _ => None,
-    })
-}
-
-/// The profile ID of the launch profile op of `p` (from its file name; also for a profile that
-/// does not decode).
-pub fn profile_id_of(p: &Preview) -> Option<ProfileId> {
-    p.ops.iter().find_map(|o| {
-        o.profile.as_ref()?;
-        ProfileId::from_hex(o.path.as_str().strip_suffix(".profile")?)
-    })
-}
+pub use rerun_core::flow::{profile_id_of, profile_of};
 
 /// The launch option for a front end: shown, or why not.
 #[derive(Debug, Clone, PartialEq, Eq)]

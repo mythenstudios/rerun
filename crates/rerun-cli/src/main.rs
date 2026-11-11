@@ -205,6 +205,8 @@ fn install_dir() -> Result<PathBuf, String> {
 }
 
 #[cfg(test)]
+mod flow_tests;
+#[cfg(test)]
 mod index_tests;
 #[cfg(test)]
 mod lm_tests;

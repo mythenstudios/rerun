@@ -32,7 +32,7 @@ pub use package::{FetchedHow, PackageMsg, UnpackedHow};
 pub(crate) use profile::size as size_text;
 pub use profile::{ProfileMsg, ranges};
 pub use topo::TopoMsg;
-pub use txn::{At, OpRef, OpText, SteamWhy, StepText, TxnMsg, TxnText};
+pub use txn::{At, OpRef, OpText, StepText, TxnMsg, TxnText};
 
 /// The text of [`Message::TestKeyBuild`] (ADR 0024 amendment P4-13); `tests/support/mod.rs`
 /// and `scripts/dev-topo-roundtrip.ps1` hold copies, bound by tests.
@@ -129,28 +129,8 @@ pub enum NoneReason {
     },
 }
 
-/// The counts at the end of `rerun scan`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ScanCounts {
-    /// Libraries.
-    pub libraries: usize,
-    /// Apps listed.
-    pub apps: usize,
-    /// Of these installed (scanned).
-    pub installed: usize,
-    /// Update pending (not opened).
-    pub pending: usize,
-    /// Not installed (not opened).
-    pub not_installed: usize,
-    /// Games with one main executable.
-    pub one: usize,
-    /// Games with a tie.
-    pub tied: usize,
-    /// Games without a main executable (or whose folder did not open).
-    pub none: usize,
-    /// Issue lines.
-    pub issues: usize,
-}
+/// The counts at the end of `rerun scan` (`flow::library`).
+pub use rerun_core::flow::LibraryCounts as ScanCounts;
 
 /// One line of output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -628,23 +608,22 @@ impl fmt::Display for MachineText {
     }
 }
 
-impl fmt::Display for ScanCounts {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Summary: {}, {} ({} installed, {} update pending, {} not installed); main \
-             executable: {} found, {}, {} without; {}",
-            Count(self.libraries, "library", "libraries"),
-            Count(self.apps, "app", "apps"),
-            self.installed,
-            self.pending,
-            self.not_installed,
-            self.one,
-            Count(self.tied, "tie", "ties"),
-            self.none,
-            Count(self.issues, "issue", "issues"),
-        )
-    }
+/// The summary line of `rerun scan`.
+fn summary(c: &ScanCounts, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+        f,
+        "Summary: {}, {} ({} installed, {} update pending, {} not installed); main \
+         executable: {} found, {}, {} without; {}",
+        Count(c.libraries, "library", "libraries"),
+        Count(c.apps, "app", "apps"),
+        c.installed,
+        c.pending,
+        c.not_installed,
+        c.one,
+        Count(c.tied, "tie", "ties"),
+        c.none,
+        Count(c.issues, "issue", "issues"),
+    )
 }
 
 impl fmt::Display for Message<'_> {
@@ -855,7 +834,7 @@ impl fmt::Display for Message<'_> {
                 write!(f, "    anti-cheat: cannot check {path} (counted as found)")
             }
             Self::AppNotFound { app_id } => write!(f, "app {app_id}: not found in any library"),
-            Self::Summary(counts) => write!(f, "{counts}"),
+            Self::Summary(counts) => summary(counts, f),
             Self::Hints => {
                 f.write_str("Roles and APIs are hints from names and imports, not verdicts.")
             }
