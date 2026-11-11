@@ -31,7 +31,6 @@
 //!   `max_threads`, `mode: hard`, no `exclude_first`); `max_threads` 1 to 1024; a rule with
 //!   `exclude_first` is written as profile format 2, every other as format 1 (ADR 0022
 //!   amendment P4-13); `report_cores` refused (`inproc`,
-
 //!   phase 6); `method: auto` refused (the Topo engine chooses, phase 4). Neither `cpu` nor
 //!   `priority` is refused (F9), and so is a second `launch_method` step.
 //! - **`watch_timeout_s`** of every profile is [`WATCH_TIMEOUT_S`] (120, the format's largest

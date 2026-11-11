@@ -61,7 +61,7 @@ The FFI lives in one module per binary: `rerun-core::sys::win::cpu` now (size qu
 | Hybrid without SMT (Arrow Lake, Lunar Lake, Panther Lake) | several `efficiency_class`, one thread per `core` | `smt: off` is a no-op, not an error |
 | Compact cores (Zen 5c, later Zen 6c) | own `llc` group with a smaller size; efficiency class still to be verified | `single_l3` → the cluster with more threads (Zen 5c); `prefer_l3: largest` → full-size cores |
 | Intel with several compute tiles (Nova Lake-S, unreleased) | several `llc` groups on one Intel package | treated exactly like dual-CCD Ryzen: `single_l3` keeps a game on one tile |
-| Community fix "remove CPU 0 access" (old games that stutter with load on CPU 0) | logical processor 0 of group 0, the processor Task Manager calls "CPU 0" | `exclude_first: thread` → every candidate except CPU 0; `exclude_first: core` → also its SMT sibling (step 4b). The fix is the guides' instruction, not their mask: `fffe` written as a 16-bit mask means CPUs 1–15 only and would drop every processor above 15 on a larger machine |
+| Community fix for stutter with Vsync (PCGW, Assassin's Creed II, "Stuttering and/or screen tearing with Vsync on or off": "removing the first core of your CPU availability" in Task Manager, or Process Lasso to "remove CPU 0 access") | logical processor 0 of group 0, the processor Task Manager calls "CPU 0" | `exclude_first: thread` → every candidate except CPU 0, which is what the masks quoted there do (`e`, `fe` on 4 cores / 8 threads, which keeps CPU 1, `3e`, `ffe`, `fffe`); `exclude_first: core` → also its SMT sibling (step 4b), for Topos whose source names a whole core (PCGW names none for AC II). The fix is the instruction, not a mask: `fffe` is "all but CPU 0" only on a 16-thread machine; read literally on a larger one it means CPUs 1–15 only |
 
 ## Selection algorithm (order)
 
@@ -80,7 +80,6 @@ The FFI lives in one module per binary: `rerun-core::sys::win::cpu` now (size qu
 On the 5950X (cores are pairs `2n`, `2n+1`): `exclude_first: thread` → `0xFFFFFFFE` (31 of 32), with `smt: off` `0x55555556` (16, CPU 1 for core 0); `exclude_first: core` → `0xFFFFFFFC` (30), with `smt: off` `0x55555554` (15); `thread` with `single_l3, max_threads: 8` → `0x5556` (8 cores × 1 thread).
 
 The result is one group, a mask within it, the CPU Set IDs of the same processors and "`threads` of `of`" (`of` = all logical processors of the machine). Golden snapshot of every fixture × a rule table × both bitnesses: `tests/fixtures/cpu/select.golden`; properties (subset of the group, one group, no LLC below the top level, x86 below index 32, one LLC with `single_l3`/`prefer_l3`, `max_threads` a prefix, never CPU 0 with `exclude_first` nor its core with `core`, and with `smt` on and no `max_threads` exactly the selection without `exclude_first` minus what it excludes) on every fixture and on random topologies.
-
 
 ## Coverage by CPU family (as of 2026-11-05)
 

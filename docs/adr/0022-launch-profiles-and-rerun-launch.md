@@ -270,7 +270,7 @@ The search and its check end at most one check (5 s) and one poll (500 ms) after
 
 ## Amendment P4-13 (2026-11-11): `exclude_first` and profile format 2
 
-Plan P4-13 with the user decisions (E1 changed to a choice per Topo variant, E2 the name, E3 a) and the conditions of the senior-dev plan review. Reason: the community fix for stutter in Assassin's Creed II and later Ubisoft titles of that era is, in its sources' words, "remove CPU 0 access" in Task Manager's affinity dialog.
+Plan P4-13 with the user decisions (E1 changed to a choice per Topo variant, E2 the name, E3 a) and the conditions of the senior-dev plan review. Reason: PCGW, Assassin's Creed II, section "Stuttering and/or screen tearing with Vsync on or off" (condition: Vsync, quad core and above): "Removing the first core of your CPU availability manually using the Task Manager affinity or using the utility Process Lasso to automatically remove CPU 0 access from the AC2 executable solves this." The page names both phrasings, "the first core" and "CPU 0"; the masks it quotes (`e`, `fe` on 4 cores / 8 threads, which keeps CPU 1, `3e`, `ffe`, `fffe`) all drop CPU 0 alone, so it supports `thread`. `core` has no source on PCGW for AC II; it exists for Topos whose source names a whole core.
 
 ### The fix as its source states it
 - The rule states the instruction, not a mask: guides write `fffe`, which as the 16-bit mask of a 16-thread machine means "every CPU except CPU 0", but taken literally on a machine with more than 16 logical processors means CPUs 1–15 only. Rerun never copies such a mask; it removes CPU 0 from whatever the rule selects on the machine at hand.

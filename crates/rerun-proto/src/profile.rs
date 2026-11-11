@@ -212,7 +212,17 @@ impl fmt::Display for ProfileError {
             K::EmptyLine => write!(f, "empty line"),
             K::BadHeader => write!(f, "not a launch profile"),
             K::UnsupportedFormat(n) => {
-                write!(f, "format {n}, this version reads formats 1 and 2")
+                write!(f, "format {n}, this version reads formats ")?;
+                let last = PROFILE_FORMATS.len().saturating_sub(1);
+                for (i, v) in PROFILE_FORMATS.iter().enumerate() {
+                    let sep = match i {
+                        0 => "",
+                        _ if i == last => " and ",
+                        _ => ", ",
+                    };
+                    write!(f, "{sep}{v}")?;
+                }
+                Ok(())
             }
             K::MissingEquals => write!(f, "no '='"),
             K::UnknownKey => write!(f, "unknown key"),

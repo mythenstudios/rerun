@@ -459,6 +459,10 @@ fn cr_nul_controls_empty_lines_and_non_utf8_are_refused() {
 
 #[test]
 fn only_formats_1_and_2_are_read() {
+    assert_eq!(
+        at(1, ProfileErrorKind::UnsupportedFormat(3)).to_string(),
+        "launch profile line 1: format 3, this version reads formats 1 and 2"
+    );
     for (header, kind) in [
         ("rerun-profile 3", ProfileErrorKind::UnsupportedFormat(3)),
         ("rerun-profile 0", ProfileErrorKind::UnsupportedFormat(0)),

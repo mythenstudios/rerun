@@ -483,3 +483,72 @@ fn a_process_narrowed_within_the_job_is_narrowed() {
         })
     );
 }
+
+/// Amendment P4-13: a format-2 profile (`exclude_first`) reaches the job as a mask without
+/// bit 0; a selection that `exclude_first` empties starts the game unchanged and the result file
+/// says `selection_empty`.
+#[test]
+fn exclude_first_from_a_format_2_profile() {
+    use rerun_proto::cpu::rule::{ExcludeFirst, SelectError, SelectStep};
+    use rerun_proto::cpu::{Llc, LogicalCpu};
+    // `thread`, `max_threads: 8`, `single_l3`, `smt: false` on the 5950X shape: CPU 1 stands
+    // in for core 0.
+    let mut r = rule(Mode::Hard);
+    r.exclude_first = Some(ExcludeFirst::Thread);
+    let p = profile(Some(r), None);
+    let bytes = encode(&p).unwrap();
+    assert!(bytes.starts_with(b"rerun-profile 2\n"));
+    let os = fake(&p);
+    let _ = run(&os);
+    let want = GroupAffinity {
+        group: 0,
+        mask: 0x5556,
+    };
+    assert!(
+        os.calls().contains(&Call::LimitJob(1, want)),
+        "{:?}",
+        os.calls()
+    );
+    assert!(matches!(written_one(&os).outcome, Outcome::Applied { .. }));
+    // One processor, CPU 0: nothing left after step 4b.
+    let mut os = fake(&p);
+    os.topology = Ok(CpuTopology {
+        cpus: vec![LogicalCpu {
+            cpu_set_id: 0x100,
+            group: 0,
+            index: 0,
+            core: 0,
+            llc: 0,
+            efficiency_class: 0,
+        }],
+        llcs: vec![Llc {
+            level: 3,
+            size: 32 << 20,
+        }],
+    });
+    let report = run(&os);
+    assert!(
+        matches!(
+            &report,
+            Report::Ran {
+                rule: Rule::Skipped(Skip::Select(SelectError::Empty {
+                    after: SelectStep::ExcludeFirst
+                })),
+                start: Start::Created,
+                exit: 42,
+                ..
+            }
+        ),
+        "{report:?}"
+    );
+    assert!(
+        !os.calls().iter().any(|c| matches!(c, Call::LimitJob(..))),
+        "{:?}",
+        os.calls()
+    );
+    let Outcome::Skipped { reason, start, .. } = written_one(&os).outcome else {
+        panic!("not skipped");
+    };
+    assert_eq!(reason, SkipReason::SelectionEmpty);
+    assert_eq!(start, result::Start::Created);
+}

@@ -32,7 +32,6 @@ What is checked (rule applied, once, after waiting up to 5 s on the running game
 
 - `ok` – "Affinity active · 8 of 32 threads · verified" (soft: the CPU Sets of the started process only)
 - `narrowed` – hard limit: the job still holds the selection and the game limited itself to fewer of its threads (e.g. CPU 0); within the rule, not an error. Under `exclude_first` (docs/02) CPU 0 is outside the job's affinity: an old engine that pins itself to CPU 0 (`SetProcessAffinityMask(1)`, `SetThreadAffinityMask(1)`) gets an error from Windows instead, as it would with the same fix set in Task Manager; how a game copes with that is a property of the game, so a Topo variant with `exclude_first` stays `unverified` until it was played
-
 - `reset` (`cpu`, `priority` or both) – changed after the start: the job holds something else, or the game's mask is empty or outside the job's (no culprit is named: the shim cannot tell who did it)
 - `exited_early` – the started process ended within 5 s, before the check (it crashed, or it is a launcher stub that hands over to the real game as another process)
 - `failed:<code>` – the check itself could not read the process

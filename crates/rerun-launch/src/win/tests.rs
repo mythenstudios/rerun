@@ -12,7 +12,9 @@ use std::borrow::Borrow;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use rerun_proto::cpu::rule::{Bitness, CpuRule, ExcludeFirst, Mode, Prefer, Selection, select};
+use rerun_proto::cpu::rule::{
+    Bitness, CpuRule, ExcludeFirst, Mode, Prefer, SelectError, SelectStep, Selection, select,
+};
 use rerun_proto::profile::Priority;
 
 use super::launch;
@@ -160,6 +162,18 @@ fn exclude_first(e: ExcludeFirst, max_threads: Option<u16>) -> CpuRule {
     }
 }
 
+/// The selection of `rule` on this machine, `None` only when `exclude_first` empties it (a
+/// one-processor machine); any other error fails the test.
+fn selected(topology: &rerun_proto::cpu::CpuTopology, rule: &CpuRule) -> Option<Selection> {
+    match select(topology, rule, Bitness::X64) {
+        Ok(sel) => Some(sel),
+        Err(SelectError::Empty {
+            after: SelectStep::ExcludeFirst,
+        }) => None,
+        Err(e) => panic!("{e}"),
+    }
+}
+
 /// The full mask of the processors of `group` on this machine.
 fn group_mask(topology: &rerun_proto::cpu::CpuTopology, group: u16) -> u64 {
     topology
@@ -174,11 +188,7 @@ fn group_mask(topology: &rerun_proto::cpu::CpuTopology, group: u16) -> u64 {
 #[test]
 fn exclude_first_thread_max_1_is_cpu_1_in_a_job() {
     let topology = WinOs.topology().unwrap();
-    let Ok(sel) = select(
-        &topology,
-        &exclude_first(ExcludeFirst::Thread, Some(1)),
-        Bitness::X64,
-    ) else {
+    let Some(sel) = selected(&topology, &exclude_first(ExcludeFirst::Thread, Some(1))) else {
         return; // a one-processor machine: nothing to put in a job
     };
     if sel.group == 0 {
@@ -191,12 +201,8 @@ fn exclude_first_thread_max_1_is_cpu_1_in_a_job() {
 #[test]
 fn exclude_first_thread_alone_in_a_job() {
     let topology = WinOs.topology().unwrap();
-    let Ok(sel) = select(
-        &topology,
-        &exclude_first(ExcludeFirst::Thread, None),
-        Bitness::X64,
-    ) else {
-        return;
+    let Some(sel) = selected(&topology, &exclude_first(ExcludeFirst::Thread, None)) else {
+        return; // a one-processor machine: nothing to put in a job
     };
     let full = group_mask(&topology, sel.group);
     if sel.group == 0 {
@@ -212,12 +218,8 @@ fn exclude_first_thread_alone_in_a_job() {
 #[test]
 fn exclude_first_core_alone_in_a_job() {
     let topology = WinOs.topology().unwrap();
-    let Ok(sel) = select(
-        &topology,
-        &exclude_first(ExcludeFirst::Core, None),
-        Bitness::X64,
-    ) else {
-        return;
+    let Some(sel) = selected(&topology, &exclude_first(ExcludeFirst::Core, None)) else {
+        return; // a one-processor machine: nothing to put in a job
     };
     let full = group_mask(&topology, sel.group);
     let cpu0 = topology.cpus.iter().find(|c| (c.group, c.index) == (0, 0));
