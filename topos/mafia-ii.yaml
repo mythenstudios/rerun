@@ -4,7 +4,7 @@
 format: 1
 id: mafia-ii
 title: "Mafia II (Classic)"
-status: active
+status: draft
 rev: 1
 tested_on: [x64]
 
@@ -35,6 +35,10 @@ issues:
 # (sections: .text .textnc BINK .rdata .data .tls BINKCONS BINKDATA .version .rsrc; no .bind), so the planner
 # does not refuse it. The same flag was set by NTCore on the dev PC and the game was allowed to run (HANDOFF).
 # Still unverified; if a run shows the wrapper rejects the patched file, drop the variant.
+# DRAFT until the match question is decided (lead, 2026-11-11): another NTCore-patched mafia2.exe from the same
+# Steam account differed from this original in about 576,000 bytes (the "VLV" header block and most of .rdata;
+# .text identical), so Steam probably delivers per-user or per-delivery executables (suspected Steam CEG). A hash
+# match would then hold for one user only. Open for the architect: how a Topo matches such a game.
 # Not taken as a step:
 # - DXVK for stuttering (PCGW cites a video only; no package yet).
 # - Depth of field remover and the ATI flicker DLL (a file host and a Steam guide download, no repo or release).
