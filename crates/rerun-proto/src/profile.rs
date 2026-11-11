@@ -1,4 +1,5 @@
-//! Launch profile, format 1 (ADR 0022): what `rerun-launch` reads at a game start.
+//! Launch profile, formats 1 and 2 (ADR 0022, amendment P4-13): what `rerun-launch` reads at a
+//! game start.
 //!
 //! One grammar for the writer (`rerun-core`, from a plan) and the reader (`rerun-launch`,
 //! without serde, ADR 0006). The file is UTF-8 text of at most [`MAX_PROFILE_BYTES`], one
@@ -21,6 +22,17 @@
 //! cpu.max_threads=8                   none | 1..=4096
 //! ```
 //!
+//! Format 2 is format 1 with `cpu=rule` required and one more line after `cpu.max_threads`:
+//!
+//! ```text
+//! cpu.exclude_first=thread            thread | core
+//! ```
+//!
+//! Every format carries every key it knows, always. The format is chosen by content: the
+//! writer emits format 2 exactly when the rule has `exclude_first`, format 1 otherwise (so a
+//! profile without it stays byte-identical to what earlier builds wrote). The reader takes
+//! both.
+//!
 //! The reader is strict: no other key, no repeated key, no other order, no empty line, no CR,
 //! no control character, no leading zero, nothing after the last key. A profile decodes to
 //! exactly one [`LaunchProfile`] and encodes back to the same bytes. Errors name the line
@@ -29,10 +41,13 @@
 use std::fmt;
 
 use crate::cpu::MAX_LOGICAL_CPUS;
-use crate::cpu::rule::{Bitness, CpuRule, Mode, Prefer, PreferL3};
+use crate::cpu::rule::{Bitness, CpuRule, ExcludeFirst, Mode, Prefer, PreferL3};
 
-/// The format this module reads and writes.
-pub const PROFILE_FORMAT: u32 = 1;
+/// The newest format this module reads and writes.
+pub const PROFILE_FORMAT: u32 = 2;
+
+/// Every format the reader accepts (1: ADR 0022 D1; 2: amendment P4-13).
+pub const PROFILE_FORMATS: [u32; 2] = [1, PROFILE_FORMAT];
 
 /// Largest profile file in bytes.
 pub const MAX_PROFILE_BYTES: usize = 8 * 1024;
@@ -140,7 +155,7 @@ pub enum ProfileErrorKind {
     EmptyLine,
     /// The first line is not `rerun-profile <n>`.
     BadHeader,
-    /// `rerun-profile <n>` with `n` other than [`PROFILE_FORMAT`].
+    /// `rerun-profile <n>` with `n` not in [`PROFILE_FORMATS`] (1 and 2).
     UnsupportedFormat(u32),
     /// A line without `=`.
     MissingEquals,
@@ -197,7 +212,7 @@ impl fmt::Display for ProfileError {
             K::EmptyLine => write!(f, "empty line"),
             K::BadHeader => write!(f, "not a launch profile"),
             K::UnsupportedFormat(n) => {
-                write!(f, "format {n}, this version reads {PROFILE_FORMAT}")
+                write!(f, "format {n}, this version reads formats 1 and 2")
             }
             K::MissingEquals => write!(f, "no '='"),
             K::UnknownKey => write!(f, "unknown key"),
@@ -214,7 +229,8 @@ impl fmt::Display for ProfileError {
 
 impl std::error::Error for ProfileError {}
 
-const KEYS: &[&str] = &[
+/// The keys of format 1, in order.
+const KEYS_1: &[&str] = &[
     "method",
     "start",
     "target",
@@ -230,11 +246,38 @@ const KEYS: &[&str] = &[
     "cpu.max_threads",
 ];
 
+/// The keys of format 2, in order: format 1 plus `cpu.exclude_first`.
+const KEYS_2: &[&str] = &[
+    "method",
+    "start",
+    "target",
+    "bitness",
+    "priority",
+    "watch_timeout_s",
+    "cpu",
+    "cpu.prefer",
+    "cpu.single_l3",
+    "cpu.prefer_l3",
+    "cpu.smt",
+    "cpu.mode",
+    "cpu.max_threads",
+    "cpu.exclude_first",
+];
+
+/// The format [`encode`] writes for `p`: 2 exactly when the rule has `exclude_first`, else 1.
+pub(crate) fn format_of(p: &LaunchProfile) -> u32 {
+    if p.cpu.is_some_and(|r| r.exclude_first.is_some()) {
+        2
+    } else {
+        1
+    }
+}
+
 /// Encodes `p`. The bytes are checked by [`decode`]: what the writer emits, the reader takes
 /// (an invalid path, a timeout outside `1..=120`, `max_threads` 0 or `direct` with
 /// `target != start` are errors here, never a file the shim would refuse).
 pub fn encode(p: &LaunchProfile) -> Result<Vec<u8>, ProfileError> {
-    let mut s = format!("{HEADER}{PROFILE_FORMAT}\n");
+    let mut s = format!("{HEADER}{}\n", format_of(p));
     let mut kv = |k: &str, v: &str| {
         s.push_str(k);
         s.push('=');
@@ -290,6 +333,9 @@ pub fn encode(p: &LaunchProfile) -> Result<Vec<u8>, ProfileError> {
             );
             let max = r.max_threads.map(|n| n.to_string());
             kv("cpu.max_threads", max.as_deref().unwrap_or("none"));
+            if let Some(e) = r.exclude_first {
+                kv("cpu.exclude_first", e.name());
+            }
         }
     }
     let bytes = s.into_bytes();
@@ -351,16 +397,18 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
             line: 1,
             kind: ProfileErrorKind::BadHeader,
         })?;
-    if version != u64::from(PROFILE_FORMAT) {
-        let n = u32::try_from(version).unwrap_or(u32::MAX);
+    let format = u32::try_from(version).unwrap_or(u32::MAX);
+    if !PROFILE_FORMATS.contains(&format) {
         return Err(ProfileError {
             line: 1,
-            kind: ProfileErrorKind::UnsupportedFormat(n),
+            kind: ProfileErrorKind::UnsupportedFormat(format),
         });
     }
+    let v2 = format == 2;
 
     let mut r = Reader {
         lines,
+        keys: if v2 { KEYS_2 } else { KEYS_1 },
         seen: Vec::new(),
         last_line: 1,
     };
@@ -388,8 +436,9 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
             .filter(|n| (1..=u64::from(MAX_WATCH_TIMEOUT_S)).contains(n))
             .and_then(|n| u16::try_from(n).ok())
     })?;
+    // Format 2 exists only for a rule with `exclude_first`: `cpu=none` has one form, format 1.
     let has_rule = r.value("cpu", |v| match v {
-        "none" => Some(false),
+        "none" if !v2 => Some(false),
         "rule" => Some(true),
         _ => None,
     })?;
@@ -420,6 +469,15 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
                 .and_then(|n| u16::try_from(n).ok())
                 .map(Some)
         })?;
+        let exclude_first = if v2 {
+            Some(r.value("cpu.exclude_first", |v| match v {
+                "thread" => Some(ExcludeFirst::Thread),
+                "core" => Some(ExcludeFirst::Core),
+                _ => None,
+            })?)
+        } else {
+            None
+        };
         Some(CpuRule {
             max_threads,
             prefer,
@@ -427,6 +485,7 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
             prefer_l3,
             smt,
             mode,
+            exclude_first,
         })
     } else {
         None
@@ -434,7 +493,7 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
     if let Some((n, line)) = r.lines.next() {
         let kind = match line.split_once('=').map(|(k, _)| k) {
             Some(k) if r.seen.contains(&k) => ProfileErrorKind::DuplicateKey,
-            Some(k) if KEYS.contains(&k) => ProfileErrorKind::TrailingLine,
+            Some(k) if r.keys.contains(&k) => ProfileErrorKind::TrailingLine,
             Some(_) => ProfileErrorKind::UnknownKey,
             None => ProfileErrorKind::MissingEquals,
         };
@@ -459,6 +518,8 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
 
 struct Reader<'a, I: Iterator<Item = (usize, &'a str)>> {
     lines: I,
+    /// The keys of the file's format, in order.
+    keys: &'static [&'static str],
     seen: Vec<&'a str>,
     last_line: usize,
 }
@@ -491,7 +552,7 @@ impl<'a, I: Iterator<Item = (usize, &'a str)>> Reader<'a, I> {
         if k != key {
             return Err(at(if self.seen.contains(&k) {
                 ProfileErrorKind::DuplicateKey
-            } else if KEYS.contains(&k) {
+            } else if self.keys.contains(&k) {
                 ProfileErrorKind::UnexpectedKey { expected: key }
             } else {
                 ProfileErrorKind::UnknownKey

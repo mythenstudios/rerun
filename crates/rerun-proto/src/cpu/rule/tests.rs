@@ -61,6 +61,7 @@ fn rule() -> CpuRule {
         prefer_l3: None,
         smt: true,
         mode: Mode::Hard,
+        exclude_first: None,
     }
 }
 
@@ -342,6 +343,212 @@ fn errors_name_the_step() {
     );
 }
 
+/// 7950X3D: CCD 0 with 96 MiB V-Cache, CCD 1 with 32 MiB, 8 cores x 2 threads each.
+fn r7950x3d() -> CpuTopology {
+    Builder::default()
+        .llc(0, 3, 96 * MIB, 0, 8, 2)
+        .llc(0, 3, 32 * MIB, 0, 8, 2)
+        .build()
+}
+
+/// Threadripper 7980X: 128 logical processors, two groups of 64 (8 CCDs of 8 cores x 2).
+fn threadripper_7980x() -> CpuTopology {
+    let mut b = Builder::default();
+    for group in 0..2 {
+        for _ in 0..4 {
+            b = b.llc(group, 3, 32 * MIB, 0, 8, 2);
+        }
+    }
+    b.build()
+}
+
+/// A 4-core CPU without SMT.
+fn no_smt_4c() -> CpuTopology {
+    Builder::default().llc(0, 3, 8 * MIB, 0, 4, 1).build()
+}
+
+/// A VM with one logical processor.
+fn one_lp() -> CpuTopology {
+    Builder::default().llc(0, 3, 8 * MIB, 0, 1, 1).build()
+}
+
+fn excl(e: ExcludeFirst) -> CpuRule {
+    CpuRule {
+        exclude_first: Some(e),
+        ..rule()
+    }
+}
+
+#[test]
+fn exclude_first_on_the_5950x() {
+    use ExcludeFirst::{Core, Thread};
+    let t = r5950x();
+    // (exclude, smt, single_l3, max_threads) -> (mask, threads). Core n holds 2n and 2n+1.
+    for (e, smt, single_l3, max_threads, want, threads) in [
+        // CPU 0 alone: the community fix.
+        (Thread, true, false, None, 0xFFFF_FFFE, 31),
+        // smt: false keeps the first remaining thread per core: CPU 1 stands in for core 0.
+        (Thread, false, false, None, 0x5555_5556, 16),
+        // The whole core 0.
+        (Core, true, false, None, 0xFFFF_FFFC, 30),
+        // smt: false and core: core 0 is gone entirely.
+        (Core, false, false, None, 0x5555_5554, 15),
+        // After the L3 step: single_l3 stays on CCD 0.
+        (Thread, true, true, None, 0xFFFE, 15),
+        (Core, true, true, None, 0xFFFC, 14),
+        (Thread, false, true, None, 0x5556, 8),
+        (Core, false, true, None, 0x5554, 7),
+        // max_threads fills up from what is left: 8 cores x 1 thread, CPU 1 for core 0.
+        (Thread, true, true, Some(8), 0x5556, 8),
+        (Thread, false, true, Some(8), 0x5556, 8),
+        // core: cores 1..8 give 7 first threads, then the lowest sibling (3).
+        (Core, true, true, Some(8), 0x555C, 8),
+        (Core, false, true, Some(8), 0x5554, 7),
+        (Thread, true, false, Some(1), 0x2, 1),
+        (Core, true, false, Some(1), 0x4, 1),
+    ] {
+        let r = CpuRule {
+            smt,
+            single_l3,
+            max_threads,
+            ..excl(e)
+        };
+        for b in [Bitness::X86, Bitness::X64] {
+            let s = sel(&t, &r, b);
+            assert_eq!(
+                (s.group, s.mask, s.threads, s.of),
+                (0, want, threads, 32),
+                "{r:?} {b:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn exclude_first_on_the_7950x3d_never_moves_the_llc() {
+    let t = r7950x3d();
+    for l3 in [
+        CpuRule {
+            single_l3: true,
+            ..rule()
+        },
+        CpuRule {
+            prefer_l3: Some(PreferL3::Largest),
+            ..rule()
+        },
+    ] {
+        for (e, want) in [(ExcludeFirst::Thread, 0xFFFE), (ExcludeFirst::Core, 0xFFFC)] {
+            let r = CpuRule {
+                exclude_first: Some(e),
+                ..l3
+            };
+            // 15 or 14 candidates on the V-Cache CCD still beat 16 on CCD 1: L3 comes first.
+            assert_eq!(sel(&t, &r, Bitness::X64).mask, want, "{r:?}");
+        }
+    }
+}
+
+#[test]
+fn exclude_first_on_two_groups() {
+    // Two equal groups: group 0 wins the tie, CPU 0 is in it.
+    let t = threadripper_7980x();
+    let s = sel(&t, &excl(ExcludeFirst::Thread), Bitness::X64);
+    assert_eq!((s.group, s.mask, s.threads, s.of), (0, !1u64, 63, 128));
+    let s = sel(&t, &excl(ExcludeFirst::Core), Bitness::X64);
+    assert_eq!((s.group, s.mask, s.threads), (0, !3u64, 62));
+    let s = sel(&t, &excl(ExcludeFirst::Thread), Bitness::X86);
+    assert_eq!((s.group, s.mask, s.threads), (0, 0xFFFF_FFFE, 31));
+    // Unequal groups: the larger group 1 wins, CPU 0 is not in it, step 4b is a no-op.
+    let t = Builder::default()
+        .llc(0, 3, 32 * MIB, 0, 16, 2)
+        .llc(1, 3, 32 * MIB, 0, 16, 2)
+        .llc(1, 3, 32 * MIB, 0, 16, 2)
+        .build();
+    for e in [ExcludeFirst::Thread, ExcludeFirst::Core] {
+        let s = sel(&t, &excl(e), Bitness::X64);
+        assert_eq!((s.group, s.mask, s.threads, s.of), (1, u64::MAX, 64, 96));
+    }
+}
+
+#[test]
+fn exclude_first_without_smt_is_the_same_for_thread_and_core() {
+    let t = no_smt_4c();
+    for e in [ExcludeFirst::Thread, ExcludeFirst::Core] {
+        for smt in [false, true] {
+            let r = CpuRule { smt, ..excl(e) };
+            let s = sel(&t, &r, Bitness::X64);
+            assert_eq!((s.mask, s.threads), (0xE, 3), "{r:?}");
+        }
+    }
+}
+
+#[test]
+fn exclude_first_never_falls_back_silently() {
+    // A one-processor VM: nothing is left.
+    for e in [ExcludeFirst::Thread, ExcludeFirst::Core] {
+        assert_eq!(
+            select(&one_lp(), &excl(e), Bitness::X64),
+            Err(SelectError::Empty {
+                after: SelectStep::ExcludeFirst
+            })
+        );
+    }
+    // An LLC of CPU 0 alone, chosen by the L3 step (largest cache): empty, not the other LLC.
+    let t = Builder::default()
+        .llc(0, 3, 96 * MIB, 0, 1, 1)
+        .llc(0, 3, 32 * MIB, 0, 1, 1)
+        .build();
+    let r = CpuRule {
+        prefer_l3: Some(PreferL3::Largest),
+        ..excl(ExcludeFirst::Thread)
+    };
+    assert_eq!(
+        select(&t, &r, Bitness::X64),
+        Err(SelectError::Empty {
+            after: SelectStep::ExcludeFirst
+        })
+    );
+    // core empties an LLC of exactly core 0 with SMT.
+    let t = Builder::default()
+        .llc(0, 3, 96 * MIB, 0, 1, 2)
+        .llc(0, 3, 32 * MIB, 0, 1, 2)
+        .build();
+    let r = CpuRule {
+        prefer_l3: Some(PreferL3::Largest),
+        ..excl(ExcludeFirst::Thread)
+    };
+    assert_eq!(sel(&t, &r, Bitness::X64).mask, 0x2);
+    let r = CpuRule {
+        exclude_first: Some(ExcludeFirst::Core),
+        ..r
+    };
+    assert_eq!(
+        select(&t, &r, Bitness::X64),
+        Err(SelectError::Empty {
+            after: SelectStep::ExcludeFirst
+        })
+    );
+    assert_eq!(
+        SelectError::Empty {
+            after: SelectStep::ExcludeFirst
+        }
+        .to_string(),
+        "the CPU rule selects no processor on this machine (empty after step exclude_first)"
+    );
+}
+
+#[test]
+fn exclude_first_is_a_no_op_when_cpu_0_is_not_in_the_topology() {
+    // CPU 0 filtered out (allocated / real-time): nothing else is taken away, not even its
+    // sibling for `core`.
+    let mut t = r5950x();
+    t.cpus.remove(0);
+    t.validate().unwrap();
+    for e in [ExcludeFirst::Thread, ExcludeFirst::Core] {
+        assert_eq!(sel(&t, &excl(e), Bitness::X64).mask, 0xFFFF_FFFE);
+    }
+}
+
 /// Every combination of the rule fields with the given `max_threads` values.
 fn all_rules(maxes: &[Option<u16>]) -> Vec<CpuRule> {
     let mut out = Vec::new();
@@ -351,14 +558,19 @@ fn all_rules(maxes: &[Option<u16>]) -> Vec<CpuRule> {
                 for prefer_l3 in [None, Some(PreferL3::Largest)] {
                     for smt in [false, true] {
                         for mode in [Mode::Hard, Mode::Soft] {
-                            out.push(CpuRule {
-                                max_threads,
-                                prefer,
-                                single_l3,
-                                prefer_l3,
-                                smt,
-                                mode,
-                            });
+                            for exclude_first in
+                                [None, Some(ExcludeFirst::Thread), Some(ExcludeFirst::Core)]
+                            {
+                                out.push(CpuRule {
+                                    max_threads,
+                                    prefer,
+                                    single_l3,
+                                    prefer_l3,
+                                    smt,
+                                    mode,
+                                    exclude_first,
+                                });
+                            }
                         }
                     }
                 }
@@ -431,11 +643,48 @@ fn check_properties(t: &CpuTopology, r: &CpuRule, b: Bitness) {
         .filter(|c| b == Bitness::X64 || c.index < X86_INDEX_LIMIT)
         .collect();
 
+    // What `exclude_first` takes away, if CPU 0 is in the chosen group at all.
+    let cpu0 = t
+        .cpus
+        .iter()
+        .find(|c| (c.group, c.index) == CPU0 && c.group == group);
+    let excluded = |c: &LogicalCpu| match (r.exclude_first, cpu0) {
+        (Some(ExcludeFirst::Thread), Some(_)) => (c.group, c.index) == CPU0,
+        (Some(ExcludeFirst::Core), Some(z)) => c.core == z.core,
+        _ => false,
+    };
+    // The same rule without step 4b and without the steps after it: the candidates step 4b
+    // starts from.
+    let before_4b = select(
+        t,
+        &CpuRule {
+            exclude_first: None,
+            smt: true,
+            max_threads: None,
+            ..*r
+        },
+        b,
+    );
+
     let s = match res {
         Err(SelectError::Empty { after }) => {
             match after {
                 SelectStep::Bitness => assert!(reachable.is_empty() && b == Bitness::X86),
                 SelectStep::MaxThreads => assert_eq!(r.max_threads, Some(0)),
+                SelectStep::ExcludeFirst => {
+                    // Only when every candidate after step 4 is CPU 0 or its core.
+                    assert!(r.exclude_first.is_some());
+                    let before = before_4b.unwrap();
+                    let left: Vec<&LogicalCpu> = t
+                        .cpus
+                        .iter()
+                        .filter(|c| c.group == before.group && before.mask & (1 << c.index) != 0)
+                        .collect();
+                    assert!(
+                        !left.is_empty() && left.iter().all(|c| excluded(c)),
+                        "{r:?}"
+                    );
+                }
                 other => panic!("{other:?} can never empty the candidates"),
             }
             return;
@@ -492,6 +741,18 @@ fn check_properties(t: &CpuTopology, r: &CpuRule, b: Bitness) {
                 .unwrap();
             assert_eq!(size(chosen[0]), max);
         }
+    }
+    // exclude_first: never CPU 0 (or its core); with SMT on and no max_threads exactly the
+    // selection without it, minus what it excludes.
+    assert!(chosen.iter().all(|c| !excluded(c)), "{r:?}");
+    if r.exclude_first.is_some() && r.smt && r.max_threads.is_none() {
+        let before = before_4b.unwrap();
+        let gone = t
+            .cpus
+            .iter()
+            .filter(|c| c.group == before.group && excluded(c))
+            .fold(0u64, |m, c| m | (1 << c.index));
+        assert_eq!(s.mask, before.mask & !gone, "{r:?}");
     }
     // SMT off: one thread per core.
     let cores: BTreeSet<u32> = chosen.iter().map(|c| c.core).collect();
@@ -551,7 +812,14 @@ fn random_topologies_keep_every_property() {
 #[test]
 fn the_named_shapes_keep_every_property() {
     let rules = all_rules(&[None, Some(0), Some(1), Some(8), Some(64)]);
-    for t in [r5950x(), lunar_lake()] {
+    for t in [
+        r5950x(),
+        lunar_lake(),
+        r7950x3d(),
+        threadripper_7980x(),
+        no_smt_4c(),
+        one_lp(),
+    ] {
         for r in &rules {
             for b in [Bitness::X86, Bitness::X64] {
                 check_properties(&t, r, b);

@@ -206,6 +206,7 @@ fn step(s: SelectStep) -> &'static str {
         SelectStep::Bitness => "the 32-bit limit (processors 0 to 31)",
         SelectStep::Performance => "prefer: performance",
         SelectStep::L3 => "single_l3 / prefer_l3",
+        SelectStep::ExcludeFirst => "exclude_first",
         SelectStep::Smt => "smt: false",
         SelectStep::MaxThreads => "max_threads",
     }

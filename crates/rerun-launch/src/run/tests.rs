@@ -55,6 +55,7 @@ pub(super) fn rule(mode: Mode) -> CpuRule {
         prefer_l3: None,
         smt: false,
         mode,
+        exclude_first: None,
     }
 }
 

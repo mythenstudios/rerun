@@ -91,7 +91,7 @@ revert: journal ─► observe each op (never overwrite a foreign state) ─► 
 
 ## rerun-launch
 
-- Reads the launch profile named by `--profile <id>` from `%LOCALAPPDATA%\Rerun\profiles\<id>.profile` (format 1, written on apply; ADR 0022).
+- Reads the launch profile named by `--profile <id>` from `%LOCALAPPDATA%\Rerun\profiles\<id>.profile` (format 1, or 2 for a rule with `exclude_first`; written on apply; ADR 0022 and its amendment P4-13).
 - Knows no Topos, no network and no registry; the launch profile it reads is a file.
 - Checks the rule about 5 s after the start and writes the outcome of the last start to `%LOCALAPPDATA%\Rerun\launch\<id>.result` (format 1, `rerun_proto::launch`; never when elevated; its only file write, one wrapper module; ADR 0022 amendment P3-2).
 - `watch` (ADR 0022 amendment P3-4): starts Steam's command unchanged, then looks for a new process of the profile's `target` (Toolhelp32 snapshot as a name pre-filter; image path, creation time and token read through a handle opened with query rights; `win::process`), sets its priority class and then a new job with the selection (or its default CPU Sets) from outside (`win::launch`), reads the join back, checks about 5 s later; never ends a found process.

@@ -12,7 +12,7 @@ use std::borrow::Borrow;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use rerun_proto::cpu::rule::{Bitness, CpuRule, Mode, Prefer, select};
+use rerun_proto::cpu::rule::{Bitness, CpuRule, ExcludeFirst, Mode, Prefer, Selection, select};
 use rerun_proto::profile::Priority;
 
 use super::launch;
@@ -87,6 +87,7 @@ fn hard_limit_round_trip_on_a_child_cmd() {
         prefer_l3: None,
         smt: false,
         mode: Mode::Hard,
+        exclude_first: None,
     };
     let sel = select(&topology, &rule, Bitness::X64).unwrap();
     let ga = GroupAffinity {
@@ -114,6 +115,123 @@ fn hard_limit_round_trip_on_a_child_cmd() {
     assert_eq!(back.thread, ga);
     WinOs.resume(child.child()).unwrap();
     assert_eq!(WinOs.wait(child.take()), Ok(3));
+}
+
+/// Puts `sel` on a `cmd /c exit 3` child in a job (B-2 order), reads it back equal, then lets
+/// the child run and exit.
+fn job_round_trip(sel: &Selection) {
+    let ga = GroupAffinity {
+        group: sel.group,
+        mask: sel.mask,
+    };
+    let app = cmd_exe();
+    let mut line = vec![u16::from(b'"')];
+    line.extend_from_slice(&app);
+    line.extend(w("\" /c exit 3"));
+    let spawn = Spawn {
+        in_job: true,
+        suspended: true,
+        priority: None,
+    };
+    let child = Kid::new(WinOs.spawn(&app, &line, &spawn).unwrap());
+    if let Err(e) = WinOs.limit_job(child.child(), ga) {
+        panic!(
+            "JobObjectGroupInformationEx failed with {e}; this test process in a job: {:?}",
+            in_job()
+        );
+    }
+    let back = WinOs.read_back(child.child()).unwrap();
+    assert_eq!(back.job, [ga]);
+    assert_eq!(back.thread, ga);
+    WinOs.resume(child.child()).unwrap();
+    assert_eq!(WinOs.wait(child.take()), Ok(3));
+}
+
+/// A rule of `exclude_first` alone (every other field at its default).
+fn exclude_first(e: ExcludeFirst, max_threads: Option<u16>) -> CpuRule {
+    CpuRule {
+        max_threads,
+        prefer: Prefer::Any,
+        single_l3: false,
+        prefer_l3: None,
+        smt: true,
+        mode: Mode::Hard,
+        exclude_first: Some(e),
+    }
+}
+
+/// The full mask of the processors of `group` on this machine.
+fn group_mask(topology: &rerun_proto::cpu::CpuTopology, group: u16) -> u64 {
+    topology
+        .cpus
+        .iter()
+        .filter(|c| c.group == group)
+        .fold(0, |m, c| m | (1 << c.index))
+}
+
+/// `exclude_first: thread, max_threads: 1` (amendment P4-13): the one processor is CPU 1, which
+/// stands in for core 0; a job mask without bit 0 is set and read back equal.
+#[test]
+fn exclude_first_thread_max_1_is_cpu_1_in_a_job() {
+    let topology = WinOs.topology().unwrap();
+    let Ok(sel) = select(
+        &topology,
+        &exclude_first(ExcludeFirst::Thread, Some(1)),
+        Bitness::X64,
+    ) else {
+        return; // a one-processor machine: nothing to put in a job
+    };
+    if sel.group == 0 {
+        assert_eq!(sel.mask, 0x2);
+    }
+    job_round_trip(&sel);
+}
+
+/// `exclude_first: thread` alone on the real topology: the whole group without CPU 0.
+#[test]
+fn exclude_first_thread_alone_in_a_job() {
+    let topology = WinOs.topology().unwrap();
+    let Ok(sel) = select(
+        &topology,
+        &exclude_first(ExcludeFirst::Thread, None),
+        Bitness::X64,
+    ) else {
+        return;
+    };
+    let full = group_mask(&topology, sel.group);
+    if sel.group == 0 {
+        assert_eq!(sel.mask, full & !1);
+    } else {
+        assert_eq!(sel.mask, full);
+    }
+    job_round_trip(&sel);
+}
+
+/// `exclude_first: core` alone on the real topology: the whole group without the core of
+/// CPU 0 (CPU 0 and its SMT sibling).
+#[test]
+fn exclude_first_core_alone_in_a_job() {
+    let topology = WinOs.topology().unwrap();
+    let Ok(sel) = select(
+        &topology,
+        &exclude_first(ExcludeFirst::Core, None),
+        Bitness::X64,
+    ) else {
+        return;
+    };
+    let full = group_mask(&topology, sel.group);
+    let cpu0 = topology.cpus.iter().find(|c| (c.group, c.index) == (0, 0));
+    if let Some(cpu0) = cpu0.filter(|c| c.group == sel.group) {
+        let core0 = cpu0.core;
+        let gone = topology
+            .cpus
+            .iter()
+            .filter(|c| c.core == core0)
+            .fold(0u64, |m, c| m | (1 << c.index));
+        assert_eq!(gone & 1, 1);
+        assert_eq!(sel.mask, full & !gone);
+    }
+    job_round_trip(&sel);
 }
 
 #[test]
@@ -144,6 +262,7 @@ fn read_back_without_the_limit_differs() {
         prefer_l3: None,
         smt: false,
         mode: Mode::Hard,
+        exclude_first: None,
     };
     let sel = select(&topology, &rule, Bitness::X64).unwrap();
     if sel.of < 2 {
@@ -267,6 +386,7 @@ fn one_processor() -> GroupAffinity {
         prefer_l3: None,
         smt: false,
         mode: Mode::Hard,
+        exclude_first: None,
     };
     let sel = select(&topology, &rule, Bitness::X64).unwrap();
     GroupAffinity {

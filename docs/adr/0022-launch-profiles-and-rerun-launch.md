@@ -1,6 +1,6 @@
 # ADR 0022 · Launch profiles and rerun-launch
 
-**Status:** accepted · 2026-11-08, amended the same day by the review of P3-1a (M1, M2, B-2, B-3), by P3-1b (the shim as built; B-2 without the group affinity attribute) and by P3-2 (post-launch check, result file); amended by P3-3 (2026-11-08, the `launch_method` planner) and P3-4 (2026-11-09, the `watch` method) · extends ADR 0006, ADR 0008, ADR 0010 · phase 3, steps P3-1 (P3-1a: `rerun-proto`; P3-1b: the shim), P3-2, P3-3 and P3-4
+**Status:** accepted · 2026-11-08, amended the same day by the review of P3-1a (M1, M2, B-2, B-3), by P3-1b (the shim as built; B-2 without the group affinity attribute) and by P3-2 (post-launch check, result file); amended by P3-3 (2026-11-08, the `launch_method` planner), P3-4 (2026-11-09, the `watch` method) and P4-13 (2026-11-11, `exclude_first` and profile format 2) · extends ADR 0006, ADR 0008, ADR 0010 · phase 3, steps P3-1 (P3-1a: `rerun-proto`; P3-1b: the shim), P3-2, P3-3 and P3-4
 
 ## Context
 Phase 3 starts a Steam game through `rerun-launch.exe` with a CPU rule (`docs/04-launch-methods.md`, `docs/08-roadmap.md`). The shim depends on `windows-sys` and `rerun-proto` only (ADR 0006): everything it shares with `rerun-core` (the rule selection, the profile format) must live in `rerun-proto`, without serde. The selection has to run in the shim at every start, because CPU Set IDs are runtime values (ADR 0010). `docs/03-cpu-topology.md` left four points open: LP E-cores were "never for games" without a step that removes them, the group of step 1 was "group 0 (or the largest)", step 5 said "truncate to 32" for a 32-bit game, and the SMT example of the plan (4 cores × 2 threads) contradicted step 6 ("cores before SMT siblings"). For the shim itself the plan review (P3 plan, conditions B1–B4, B13; decisions D1–D3, D5) asked for decisions before P3-1b, among them two Win32 questions: how a hard mask reaches a group other than 0 (B4), and whether a 32-bit game is limited by a count or by indices (B6).
@@ -8,7 +8,7 @@ Phase 3 starts a Steam game through `rerun-launch.exe` with a CPU rule (`docs/04
 ## Decision
 
 ### Shared code in `rerun-proto` (P3-1a)
-- `cpu::rule`: `CpuRule { max_threads, prefer, single_l3, prefer_l3, smt, mode }`, `Bitness`, `select(&CpuTopology, &CpuRule, Bitness) -> Result<Selection, SelectError>`. `Selection { group, mask, cpu_set_ids, threads, of }`; `SelectError::Empty { after: SelectStep }` names the step that emptied the candidates, `Invalid` carries a `TopologyError` (`select` validates first). Pure, no dependency, no `unsafe`.
+- `cpu::rule`: `CpuRule { max_threads, prefer, single_l3, prefer_l3, smt, mode }` (`exclude_first` since amendment P4-13), `Bitness`, `select(&CpuTopology, &CpuRule, Bitness) -> Result<Selection, SelectError>`. `Selection { group, mask, cpu_set_ids, threads, of }`; `SelectError::Empty { after: SelectStep }` names the step that emptied the candidates, `Invalid` carries a `TopologyError` (`select` validates first). Pure, no dependency, no `unsafe`.
 - `profile`: `LaunchProfile`, `ProfileId`, `encode`/`decode` (format 1, below). No serde: the shim reads it as is (ADR 0006).
 
 ### Selection (docs/03, "Selection algorithm")
@@ -16,9 +16,11 @@ Phase 3 starts a Steam game through `rerun-launch.exe` with a CPU rule (`docs/04
 2. **32-bit:** an x86 game keeps indices `< 32` only (B6, below). Before the class and L3 steps, so the L3 choice sees only what the game can address.
 3. `prefer: performance` → highest efficiency class.
 4. `prefer_l3: largest` → largest size, then most candidates, then lowest `llc`; `single_l3` → most candidates, then largest size, then lowest `llc` (candidates = threads left before the SMT step; user decision: on Zen 5 + Zen 5c `single_l3` picks the cluster with more threads, full-size cores need `prefer_l3: largest`). Exactly one LLC with either flag; without them all LLCs stay.
-5. `smt: false` → first thread of each core.
+
+   **4b.** `exclude_first: thread | core` → without CPU 0 (logical processor 0 of group 0), or without every thread of its core; a no-op when CPU 0 is not in the chosen group (amendment P4-13).
+5. `smt: false` → first remaining thread of each core (after step 4b: with `thread` CPU 1 stands in for core 0).
 6. `max_threads: N` → first `N` of "first threads of all cores, then second threads …", by index (B5: the 5950X with `max_threads: 8, single_l3` is 8 cores × 1 thread on CCD 0, with or without SMT).
-7. Empty → `Empty { after }`; only step 2 and `max_threads: 0` can empty a non-empty set.
+7. Empty → `Empty { after }`; only step 2, step 4b (amendment P4-13) and `max_threads: 0` can empty a non-empty set.
 
 `mode` (hard/soft) does not influence the selection.
 
@@ -35,6 +37,9 @@ A WOW64 process holds affinity as pointer-sized values: `DWORD_PTR` in `SetProce
 - The setters (`SetInformationJobObject`, `UpdateProcThreadAttribute`, `SetProcessDefaultCpuSets`, `SetPriorityClass`) are banned in `clippy.toml` (ADR 0010) except in one wrapper module of `rerun-launch` (`#[allow(…, reason)]`); P3-1b amends ADR 0010 with its name. Handles (job, process, thread, attribute list) are RAII; the shim keeps the job handle open while it waits (B3).
 
 ### D1 · Profile format 1
+
+*Format 2 (amendment P4-13) adds one key; the reader takes both formats, and "every key always present" holds per format.*
+
 - UTF-8 text, at most 8 KiB (`MAX_PROFILE_BYTES`), header `rerun-profile 1`, then `key=value` lines in a fixed order, each ending in LF: `method` (`direct`/`watch`), `start`, `target`, `bitness` (`x86`/`x64`), `priority` (`none`/`normal`/`above_normal`/`high`), `watch_timeout_s` (1–120), `cpu` (`none`/`rule`), and with `rule` the six lines `cpu.prefer`, `cpu.single_l3`, `cpu.prefer_l3`, `cpu.smt`, `cpu.mode`, `cpu.max_threads` (`none`/1–4096). Every key always present (explicit `none`), so the encoding is canonical: a file decodes to one profile and encodes back to the same bytes.
 - Refused: more than 8 KiB (before parsing), not UTF-8, no final LF, CR, any control character, an empty line, another header or format, an unknown, repeated, misplaced or trailing key, a value outside its set, a number with a sign or leading zero, `direct` with `target != start`. Errors carry the line and the key, never content.
 - `start` and `target` are canonical absolute drive paths: `X:\` and components, none empty, `.` or `..`, none starting with a space or ending in a space or a dot, none a reserved device name (`CON`, `NUL`, `COM1`, `nul.txt`, …), none of `< > : " / | ? *`, no Unicode format or separator character (Cf, Zl, Zp: bidirectional controls, zero-width characters, U+FEFF, U+2028/U+2029), at most 2,048 UTF-16 units; never `\\?\`, UNC or relative. `bitness` is `x86` if a process of the chain the rule reaches is i386 (`IMAGE_FILE_MACHINE_I386`), read when planning: the planner reads `start` and the game's main executable (amendment P3-3, review condition A8). A .NET "AnyCPU" image is i386 on disk and may run as x64; it counts as x86, conservatively: the cost is only on a processor group of more than 32 logical processors (B6).
@@ -262,3 +267,27 @@ The search and its check end at most one check (5 s) and one poll (500 ms) after
 - **`watch_timeout_s`** is 120 for both methods (`prim::launch_method::WATCH_TIMEOUT_S`, renamed from `DIRECT_WATCH_TIMEOUT_S`); no step field. Equal rules give equal bytes; switching `direct` and `watch` replaces the same profile (`ReplaceFile`, the same ID, the pasted launch option stays valid).
 - **Profile ID** unchanged (E1 a of P3-3).
 - **Preview:** `ProfileShown::launcher` only for `direct` (a `watch` profile has no launcher hint and `rerun status` no "the check covered the launcher" line: the check covers the game), `ProfileShown::stub` for `watch` with `start` = target, and a `watch` plan says `PROFILE_WATCH_NOTE` instead of `PROFILE_NOTE` (the search, its lifetime of at most about 125 s plus the program Steam started, the time window, the path Windows reports with junctions and `subst` drives resolved). Texts: ADR 0016 amendment P3-4.
+
+## Amendment P4-13 (2026-11-11): `exclude_first` and profile format 2
+
+Plan P4-13 with the user decisions (E1 changed to a choice per Topo variant, E2 the name, E3 a) and the conditions of the senior-dev plan review. Reason: the community fix for stutter in Assassin's Creed II and later Ubisoft titles of that era is, in its sources' words, "remove CPU 0 access" in Task Manager's affinity dialog.
+
+### The fix as its source states it
+- The rule states the instruction, not a mask: guides write `fffe`, which as the 16-bit mask of a 16-thread machine means "every CPU except CPU 0", but taken literally on a machine with more than 16 logical processors means CPUs 1–15 only. Rerun never copies such a mask; it removes CPU 0 from whatever the rule selects on the machine at hand.
+- **CPU 0** is logical processor 0 of group 0, the processor Task Manager calls "CPU 0": a fixed identity on every machine, the one named exception to "never concrete thread numbers" (docs/02). Why the fix helps (interrupt and DPC load on CPU 0 is a common explanation) is not Rerun's claim; the Topo carries the source.
+- `CpuRule.exclude_first: Option<ExcludeFirst>`, `ExcludeFirst::{Thread, Core}` (Topo: `exclude_first: thread | core`, absent = nothing excluded). `thread`: CPU 0 alone, its SMT sibling stays (the community fix). `core`: every thread of the physical core that holds CPU 0 (without SMT the same as `thread`). A Topo offers the variant its source names; both may exist as variants of one issue.
+
+### Selection step 4b
+- After step 4 (L3), before steps 5 (SMT) and 6 (`max_threads`). After L3, so excluding CPU 0 never moves the LLC choice: before it, `single_l3` on the 7950X3D would jump from the V-Cache CCD (15 candidates) to the frequency CCD (16), against AMD's driver (docs/03, "never fight them"), and on the 5950X from CCD 0 to CCD 1. Before SMT and `max_threads`, so `smt: false` keeps the first *remaining* thread of each core (with `thread` CPU 1 stands in for core 0; with `core` core 0 is gone) and `max_threads: N` still gives N threads from what is left.
+- A no-op when CPU 0 is not in the group of step 1 (unequal groups, the larger is not group 0; the group is never changed because of CPU 0) or not in the topology.
+- Empty after step 4b → `SelectError::Empty { after: SelectStep::ExcludeFirst }` (name `exclude_first`), never a silent fallback; only when everything left after step 4 is CPU 0 or its core (a one-processor VM, an LLC of CPU 0 alone). D3 applies: the shim starts the game unchanged and records the outcome.
+- `mode: soft` is allowed (the selection never depends on the mode) but is only a preference that Windows may ignore; docs/02 recommends `mode: hard` for this fix, which is a hard affinity in its sources. A game that pins itself to CPU 0 fails to do so inside the job (docs/04, pitfalls).
+
+### Profile format 2
+- Format 2 is format 1 with `cpu=rule` required and one more key after `cpu.max_threads`: `cpu.exclude_first` (`thread`/`core`). `cpu=none` in format 2 is `BadValue { key: "cpu" }`; the key in a format-1 file is `UnknownKey`.
+- **The format is chosen by content.** The writer emits format 2 exactly when the rule has `exclude_first` (`profile::format_of`, `pub(crate)`: an implementation detail of `encode`, not an API), format 1 otherwise, so every existing profile, test golden and script keeps its bytes and no re-plan replaces a profile for nothing. The reader takes formats 1 and 2 (`PROFILE_FORMATS`); `UnsupportedFormat(n)` says "this version reads formats 1 and 2".
+- **What this does to D1.** D1's "every key always present" now holds *per format*: each format carries every key it knows, always; a key is never optional within a format. A profile still has exactly one byte form (its content fixes its format), so "a file decodes to one profile and encodes back to the same bytes" stays true. What D1 did not foresee is a second format chosen by content rather than by version alone; this is accepted once, to keep format-1 bytes stable.
+- **The next profile extension does not repeat this.** It becomes one new format with every key always present (format 3 written for every profile, the reader keeping older formats as long as a revert can restore them), not a third content-chosen format.
+- Mixed builds (an old shim reading format 2) refuse it as `UnsupportedFormat(2)` → `profile_invalid`, and the game starts unchanged (D3); CLI and shim come from one build, so this does not occur in a release.
+- The result file (`rerun_proto::launch`, format 1) is unchanged: it does not encode a `SelectStep`.
+- The Topo and index stay `format: 1`: the field is additive and optional and serializes only when set, so every existing Topo, plan and index bundle keeps its bytes (the reasoning of ADR 0024, no index was ever published). After the first release an additive Topo field would break older clients on the whole index; that is a point for audit A6.

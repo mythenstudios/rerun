@@ -15,6 +15,7 @@ fn rule() -> CpuRule {
         prefer_l3: None,
         smt: false,
         mode: Mode::Hard,
+        exclude_first: None,
     }
 }
 
@@ -45,6 +46,51 @@ cpu.smt=false
 cpu.mode=hard
 cpu.max_threads=8
 ";
+
+/// Assassin's Creed II through Ubisoft Connect, with the community fix "no CPU 0".
+fn watch_v2() -> LaunchProfile {
+    LaunchProfile {
+        method: Method::Watch,
+        start: r"C:\Games\ACII\AssassinsCreedII.exe".into(),
+        target: r"C:\Games\ACII\AssassinsCreedIIGame.exe".into(),
+        bitness: Bitness::X86,
+        priority: None,
+        watch_timeout_s: 120,
+        cpu: Some(CpuRule {
+            max_threads: None,
+            prefer: Prefer::Any,
+            single_l3: false,
+            prefer_l3: None,
+            smt: true,
+            mode: Mode::Hard,
+            exclude_first: Some(ExcludeFirst::Thread),
+        }),
+    }
+}
+
+const GOLDEN_2: &str = "rerun-profile 2
+method=watch
+start=C:\\Games\\ACII\\AssassinsCreedII.exe
+target=C:\\Games\\ACII\\AssassinsCreedIIGame.exe
+bitness=x86
+priority=none
+watch_timeout_s=120
+cpu=rule
+cpu.prefer=any
+cpu.single_l3=false
+cpu.prefer_l3=none
+cpu.smt=true
+cpu.mode=hard
+cpu.max_threads=none
+cpu.exclude_first=thread
+";
+
+/// `GOLDEN_2` with line `n` (1-based) replaced.
+fn with_line_2(n: usize, new: &str) -> String {
+    let mut lines: Vec<&str> = GOLDEN_2.lines().collect();
+    lines[n - 1] = new;
+    lines.join("\n") + "\n"
+}
 
 fn err(bytes: &[u8]) -> ProfileError {
     decode(bytes).unwrap_err()
@@ -86,14 +132,21 @@ fn every_combination_round_trips() {
                                 for prefer_l3 in [None, Some(PreferL3::Largest)] {
                                     for smt in [false, true] {
                                         for mode in [Mode::Hard, Mode::Soft] {
-                                            cpus.push(Some(CpuRule {
-                                                max_threads,
-                                                prefer,
-                                                single_l3,
-                                                prefer_l3,
-                                                smt,
-                                                mode,
-                                            }));
+                                            for exclude_first in [
+                                                None,
+                                                Some(ExcludeFirst::Thread),
+                                                Some(ExcludeFirst::Core),
+                                            ] {
+                                                cpus.push(Some(CpuRule {
+                                                    max_threads,
+                                                    prefer,
+                                                    single_l3,
+                                                    prefer_l3,
+                                                    smt,
+                                                    mode,
+                                                    exclude_first,
+                                                }));
+                                            }
                                         }
                                     }
                                 }
@@ -117,13 +170,138 @@ fn every_combination_round_trips() {
                         let bytes = encode(&p).unwrap();
                         assert!(bytes.len() <= MAX_PROFILE_BYTES);
                         assert_eq!(decode(&bytes).unwrap(), p);
+                        let header = format!("rerun-profile {}\n", format_of(&p));
+                        assert!(bytes.starts_with(header.as_bytes()));
                         n += 1;
                     }
                 }
             }
         }
     }
-    assert_eq!(n, 2 * 2 * 4 * 3 * (1 + 3 * 2 * 2 * 2 * 2 * 2));
+    assert_eq!(n, 2 * 2 * 4 * 3 * (1 + 3 * 2 * 2 * 2 * 2 * 2 * 3));
+}
+
+#[test]
+fn format_2_golden_bytes() {
+    assert_eq!(format_of(&watch_v2()), 2);
+    assert_eq!(encode(&watch_v2()).unwrap(), GOLDEN_2.as_bytes());
+    assert_eq!(decode(GOLDEN_2.as_bytes()).unwrap(), watch_v2());
+    let core = GOLDEN_2.replace("=thread\n", "=core\n");
+    let p = decode(core.as_bytes()).unwrap();
+    assert_eq!(p.cpu.unwrap().exclude_first, Some(ExcludeFirst::Core));
+    assert_eq!(encode(&p).unwrap(), core.as_bytes());
+}
+
+#[test]
+fn a_profile_without_exclude_first_stays_format_1() {
+    // The format is chosen by content: every profile without the field keeps format 1 bytes.
+    assert_eq!(format_of(&direct()), 1);
+    let none = LaunchProfile {
+        cpu: None,
+        ..direct()
+    };
+    assert_eq!(format_of(&none), 1);
+    let mut p = watch_v2();
+    if let Some(r) = p.cpu.as_mut() {
+        r.exclude_first = None;
+    }
+    assert_eq!(format_of(&p), 1);
+    let text = String::from_utf8(encode(&p).unwrap()).unwrap();
+    assert!(text.starts_with("rerun-profile 1\n"), "{text}");
+    assert!(text.ends_with("cpu.max_threads=none\n"), "{text}");
+    assert!(!text.contains("exclude_first"));
+}
+
+#[test]
+fn format_2_refusals() {
+    // Format 2 never carries `cpu=none`: a profile without a rule has one form, format 1.
+    let text = "rerun-profile 2\nmethod=direct\nstart=C:\\g.exe\ntarget=C:\\g.exe\nbitness=x64\n\
+                priority=none\nwatch_timeout_s=120\ncpu=none\n";
+    assert_eq!(
+        err(text.as_bytes()),
+        at(8, ProfileErrorKind::BadValue { key: "cpu" })
+    );
+    let text = GOLDEN_2.replacen("cpu=rule", "cpu=none", 1);
+    assert_eq!(
+        err(text.as_bytes()),
+        at(8, ProfileErrorKind::BadValue { key: "cpu" })
+    );
+    // The line is required, with one of its two values.
+    let cut: String = GOLDEN_2
+        .lines()
+        .take(14)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_eq!(
+        err(cut.as_bytes()),
+        at(
+            15,
+            ProfileErrorKind::Truncated {
+                expected: "cpu.exclude_first"
+            }
+        )
+    );
+    for v in ["false", "true", "none", "Thread", "thread ", "0", ""] {
+        assert_eq!(
+            err(with_line_2(15, &format!("cpu.exclude_first={v}")).as_bytes()),
+            at(
+                15,
+                ProfileErrorKind::BadValue {
+                    key: "cpu.exclude_first"
+                }
+            ),
+            "{v:?}"
+        );
+    }
+    // At the wrong place: before cpu.max_threads.
+    let mut lines: Vec<&str> = GOLDEN_2.lines().collect();
+    lines.swap(13, 14);
+    let swapped = lines.join("\n") + "\n";
+    assert_eq!(
+        err(swapped.as_bytes()),
+        at(
+            14,
+            ProfileErrorKind::UnexpectedKey {
+                expected: "cpu.max_threads"
+            }
+        )
+    );
+    // Repeated, or anything after it.
+    for (extra, kind) in [
+        ("cpu.exclude_first=core", ProfileErrorKind::DuplicateKey),
+        ("cpu.smt=true", ProfileErrorKind::DuplicateKey),
+        ("cpu.extra=1", ProfileErrorKind::UnknownKey),
+    ] {
+        let text = format!("{GOLDEN_2}{extra}\n");
+        assert_eq!(err(text.as_bytes()), at(16, kind), "{extra}");
+    }
+}
+
+#[test]
+fn format_1_does_not_know_exclude_first() {
+    // A format-1 file with the format-2 line: the key is unknown to format 1.
+    for v in ["thread", "core"] {
+        let text = format!("{GOLDEN}cpu.exclude_first={v}\n");
+        assert_eq!(
+            err(text.as_bytes()),
+            at(15, ProfileErrorKind::UnknownKey),
+            "{v}"
+        );
+    }
+    // A format-2 body under a format-1 header.
+    let text = GOLDEN_2.replacen("rerun-profile 2", "rerun-profile 1", 1);
+    assert_eq!(err(text.as_bytes()), at(15, ProfileErrorKind::UnknownKey));
+    // A format-1 body under a format-2 header: the format-2 line is missing.
+    let text = GOLDEN.replacen("rerun-profile 1", "rerun-profile 2", 1);
+    assert_eq!(
+        err(text.as_bytes()),
+        at(
+            15,
+            ProfileErrorKind::Truncated {
+                expected: "cpu.exclude_first"
+            }
+        )
+    );
 }
 
 #[test]
@@ -149,7 +327,7 @@ fn every_truncation_is_refused() {
     let lines: Vec<&str> = GOLDEN.lines().collect();
     for keep in 1..lines.len() {
         let cut = lines[..keep].join("\n") + "\n";
-        let expected = KEYS[keep - 1];
+        let expected = KEYS_1[keep - 1];
         assert_eq!(
             err(cut.as_bytes()),
             at(keep + 1, ProfileErrorKind::Truncated { expected }),
@@ -280,10 +458,11 @@ fn cr_nul_controls_empty_lines_and_non_utf8_are_refused() {
 }
 
 #[test]
-fn only_format_1_is_read() {
+fn only_formats_1_and_2_are_read() {
     for (header, kind) in [
-        ("rerun-profile 2", ProfileErrorKind::UnsupportedFormat(2)),
+        ("rerun-profile 3", ProfileErrorKind::UnsupportedFormat(3)),
         ("rerun-profile 0", ProfileErrorKind::UnsupportedFormat(0)),
+        ("rerun-profile 02", ProfileErrorKind::BadHeader),
         (
             "rerun-profile 999999999",
             ProfileErrorKind::UnsupportedFormat(999_999_999),
@@ -525,8 +704,17 @@ impl Rng {
 
 #[test]
 fn mutated_profiles_never_panic_and_never_decode_to_something_else() {
-    let mut rng = Rng(0xDEAD_BEEF_CAFE_F00D);
-    let golden = GOLDEN.as_bytes();
+    // Seeds: a format-1 and a format-2 profile.
+    for (seed, golden) in [
+        (0xDEAD_BEEF_CAFE_F00D, GOLDEN.as_bytes()),
+        (0x0BAD_C0DE_F00D_2222, GOLDEN_2.as_bytes()),
+    ] {
+        mutate(seed, golden);
+    }
+}
+
+fn mutate(seed: u64, golden: &[u8]) {
+    let mut rng = Rng(seed);
     let mut accepted = 0;
     for _ in 0..20_000 {
         let mut b = golden.to_vec();

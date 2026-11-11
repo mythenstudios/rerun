@@ -40,6 +40,7 @@ pub(crate) fn profile_bytes(start: &str, max: u16) -> Vec<u8> {
             prefer_l3: None,
             smt: true,
             mode: Mode::Hard,
+            exclude_first: None,
         }),
     })
     .unwrap()

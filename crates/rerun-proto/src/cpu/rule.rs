@@ -13,7 +13,13 @@
 //! 4. **L3:** `prefer_l3: largest` keeps the LLC with the largest size, then the most
 //!    candidates, then the lowest number; `single_l3` alone keeps the LLC with the most
 //!    candidates, then the largest size, then the lowest number. Either way exactly one LLC.
-//! 5. **SMT:** `smt: false` keeps the first thread of each core.
+//!
+//!    **4b. Exclude first:** `exclude_first: thread` drops logical processor 0 of group 0
+//!    (Task Manager's "CPU 0"); `exclude_first: core` drops every thread of the physical core
+//!    that holds it. A no-op when that processor is not in the chosen group (or not in the
+//!    topology). After the L3 step, so it never moves the LLC choice.
+//! 5. **SMT:** `smt: false` keeps the first remaining thread of each core (with
+//!    `exclude_first: thread`, CPU 1 stands in for core 0).
 //! 6. **Max threads:** the first `N` in the order "first threads of all cores, then second
 //!    threads, …", each by `index` (cores before SMT siblings).
 //!
@@ -62,6 +68,30 @@ pub enum Bitness {
     X64,
 }
 
+/// The logical processor that Task Manager calls "CPU 0": group 0, index 0. A fixed identity
+/// on every machine, unlike the meaning of any other thread number.
+pub const CPU0: (u16, u8) = (0, 0);
+
+/// What `exclude_first` keeps the game off (ADR 0022, amendment P4-13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExcludeFirst {
+    /// Only [`CPU0`] (logical processor 0 of group 0); its SMT sibling stays.
+    Thread,
+    /// Every thread of the physical core that holds [`CPU0`] (without SMT the same as
+    /// [`ExcludeFirst::Thread`]).
+    Core,
+}
+
+impl ExcludeFirst {
+    /// Stable name, as in Topos and launch profiles.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Thread => "thread",
+            Self::Core => "core",
+        }
+    }
+}
+
 /// A CPU rule as a Topo states it (`docs/02-topo-format.md`, `cpu` step).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CpuRule {
@@ -77,6 +107,8 @@ pub struct CpuRule {
     pub smt: bool,
     /// Hard or soft.
     pub mode: Mode,
+    /// Keep the game off CPU 0 or its whole core; `None` excludes nothing.
+    pub exclude_first: Option<ExcludeFirst>,
 }
 
 /// The logical processors a rule selected, all in one group.
@@ -105,6 +137,8 @@ pub enum SelectStep {
     Performance,
     /// Step 4: `single_l3` / `prefer_l3`.
     L3,
+    /// Step 4b: `exclude_first`.
+    ExcludeFirst,
     /// Step 5: `smt: false`.
     Smt,
     /// Step 6: `max_threads`.
@@ -119,6 +153,7 @@ impl SelectStep {
             Self::Bitness => "bitness",
             Self::Performance => "performance",
             Self::L3 => "l3",
+            Self::ExcludeFirst => "exclude_first",
             Self::Smt => "smt",
             Self::MaxThreads => "max_threads",
         }
@@ -222,7 +257,22 @@ pub fn select(
         nonempty(&cand, SelectStep::L3)?;
     }
 
-    // Step 5: the first thread of each core (`cand` is sorted by index within the group).
+    // Step 4b: off CPU 0 (or its core), only if CPU 0 is in the chosen group at all.
+    if let Some(exclude) = rule.exclude_first {
+        let cpu0 = topology
+            .cpus
+            .iter()
+            .find(|c| (c.group, c.index) == CPU0 && c.group == group);
+        if let Some(cpu0) = cpu0 {
+            match exclude {
+                ExcludeFirst::Thread => cand.retain(|c| (c.group, c.index) != CPU0),
+                ExcludeFirst::Core => cand.retain(|c| c.core != cpu0.core),
+            }
+            nonempty(&cand, SelectStep::ExcludeFirst)?;
+        }
+    }
+
+    // Step 5: the first remaining thread of each core (`cand` is sorted by index within the group).
     if !rule.smt {
         let mut seen = std::collections::BTreeSet::new();
         cand.retain(|c| seen.insert(c.core));

@@ -217,6 +217,7 @@ impl CpuRuleSpec {
                 Some(ModeSpec::Soft) => Mode::Soft,
                 Some(ModeSpec::Hard) | None => Mode::Hard,
             },
+            exclude_first: None,
         })
     }
 }

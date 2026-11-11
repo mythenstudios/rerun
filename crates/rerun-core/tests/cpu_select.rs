@@ -22,7 +22,8 @@ use std::path::{Path, PathBuf};
 
 use rerun_proto::cpu::CpuTopology;
 use rerun_proto::cpu::rule::{
-    Bitness, CpuRule, Mode, Prefer, PreferL3, SelectError, X86_INDEX_LIMIT, select,
+    Bitness, CPU0, CpuRule, ExcludeFirst, Mode, Prefer, PreferL3, SelectError, X86_INDEX_LIMIT,
+    select,
 };
 
 fn dir() -> PathBuf {
@@ -55,6 +56,7 @@ fn base() -> CpuRule {
         prefer_l3: None,
         smt: true,
         mode: Mode::Hard,
+        exclude_first: None,
     }
 }
 
@@ -115,6 +117,62 @@ fn rules() -> Vec<(&'static str, CpuRule)> {
             "max4",
             CpuRule {
                 max_threads: Some(4),
+                ..b
+            },
+        ),
+        (
+            "excl_thread",
+            CpuRule {
+                exclude_first: Some(ExcludeFirst::Thread),
+                ..b
+            },
+        ),
+        (
+            "excl_core",
+            CpuRule {
+                exclude_first: Some(ExcludeFirst::Core),
+                ..b
+            },
+        ),
+        (
+            "excl_thread_smt_off",
+            CpuRule {
+                exclude_first: Some(ExcludeFirst::Thread),
+                smt: false,
+                ..b
+            },
+        ),
+        (
+            "excl_core_smt_off",
+            CpuRule {
+                exclude_first: Some(ExcludeFirst::Core),
+                smt: false,
+                ..b
+            },
+        ),
+        (
+            "excl_thread_single_l3",
+            CpuRule {
+                exclude_first: Some(ExcludeFirst::Thread),
+                single_l3: true,
+                ..b
+            },
+        ),
+        (
+            "excl_thread_max8_single_l3",
+            CpuRule {
+                exclude_first: Some(ExcludeFirst::Thread),
+                max_threads: Some(8),
+                single_l3: true,
+                ..b
+            },
+        ),
+        (
+            "excl_core_max8_single_l3",
+            CpuRule {
+                exclude_first: Some(ExcludeFirst::Core),
+                max_threads: Some(8),
+                single_l3: true,
                 ..b
             },
         ),
@@ -222,6 +280,64 @@ fn the_documented_cases() {
         ("threadripper-7980x", "all", Bitness::X86, 0, 0xFFFF_FFFF),
         ("threadripper-7980x", "single_l3", Bitness::X86, 0, 0xFFFF),
         ("i5-6600", "smt_off", Bitness::X86, 0, 0xF),
+        // exclude_first (amendment P4-13): CPU 0 alone, or its whole core; CPU 1 stands in for
+        // core 0 with `smt: false` and `thread`; after the L3 step, before max_threads.
+        ("ryzen9-5950x", "excl_thread", Bitness::X64, 0, 0xFFFF_FFFE),
+        ("ryzen9-5950x", "excl_thread", Bitness::X86, 0, 0xFFFF_FFFE),
+        ("ryzen9-5950x", "excl_core", Bitness::X64, 0, 0xFFFF_FFFC),
+        (
+            "ryzen9-5950x",
+            "excl_thread_smt_off",
+            Bitness::X64,
+            0,
+            0x5555_5556,
+        ),
+        (
+            "ryzen9-5950x",
+            "excl_core_smt_off",
+            Bitness::X64,
+            0,
+            0x5555_5554,
+        ),
+        (
+            "ryzen9-5950x",
+            "excl_thread_single_l3",
+            Bitness::X64,
+            0,
+            0xFFFE,
+        ),
+        (
+            "ryzen9-5950x",
+            "excl_thread_max8_single_l3",
+            Bitness::X64,
+            0,
+            0x5556,
+        ),
+        (
+            "ryzen9-5950x",
+            "excl_core_max8_single_l3",
+            Bitness::X64,
+            0,
+            0x555C,
+        ),
+        // The V-Cache CCD stays chosen with 15 candidates against 16.
+        (
+            "ryzen9-7950x3d",
+            "excl_thread_single_l3",
+            Bitness::X64,
+            0,
+            0xFFFE,
+        ),
+        ("threadripper-7980x", "excl_thread", Bitness::X64, 0, !1u64),
+        ("threadripper-7980x", "excl_core", Bitness::X64, 0, !3u64),
+        (
+            "threadripper-7980x",
+            "excl_thread",
+            Bitness::X86,
+            0,
+            0xFFFF_FFFE,
+        ),
+        ("i5-6600", "excl_core", Bitness::X64, 0, 0xE),
     ] {
         let s = select(&topology(fixture), &rule(r), b).unwrap();
         assert_eq!((s.group, s.mask), (group, mask), "{fixture} {r} {b:?}");
@@ -267,6 +383,17 @@ fn every_fixture_keeps_the_properties() {
                 if !r.smt {
                     let cores: BTreeSet<u32> = chosen.iter().map(|c| c.core).collect();
                     assert_eq!(cores.len(), chosen.len(), "{name} {rname}");
+                }
+                // exclude_first: never CPU 0, and with `core` never a thread of its core.
+                let cpu0 = t.cpus.iter().find(|c| (c.group, c.index) == CPU0);
+                if let (Some(e), Some(z)) = (r.exclude_first, cpu0) {
+                    assert!(
+                        chosen.iter().all(|c| (c.group, c.index) != CPU0),
+                        "{name} {rname}"
+                    );
+                    if e == ExcludeFirst::Core {
+                        assert!(chosen.iter().all(|c| c.core != z.core), "{name} {rname}");
+                    }
                 }
             }
         }
