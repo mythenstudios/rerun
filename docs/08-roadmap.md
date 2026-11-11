@@ -65,7 +65,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - Later: the round-trip script's 20-minute wait after an early game crash; the workbench draft for a game with no single API; the anti-cheat release (locked, see above); the VirtualStore case for admin-only roots (phase 6); EaglePatchAC2 for Assassin's Creed II (same repository, Sergeanur/EaglePatch) as a package and a variant (user idea, phase 5 or later)
 
 ## Phase 5 – App
-- The app `rerun-app` (Slint, ADR 0026; over `rerun_core::flow`, ADR 0027; layout C, `docs/07-ui.md`): Library, game page, Applied, History, System, Settings, first launch. P5-3 built, its [DEV] check open (docs/09, "App (rerun-app)"): the read-only skeleton (window with snap layouts, library with search and grouping, game page with problems and fixes grouped by variant ID, system page, the blocking page when elevated; software renderer always)
+- The app `rerun-app` (Slint, ADR 0026; over `rerun_core::flow`, ADR 0027; layout C, `docs/07-ui.md`): Library, game page, Applied, History, System, Settings, first launch. P5-3 done 2026-11-12, [DEV] check passed (docs/09, "App (rerun-app)"): the read-only skeleton (window with snap layouts, library with search and grouping, game page with problems and fixes grouped by variant ID, system page, the blocking page when elevated; software renderer always)
 - Primitive `launch_option` (writes the Steam launch option, Steam closed; moved from phase 3)
 - i18n en/de
 - Code signing, portable build
