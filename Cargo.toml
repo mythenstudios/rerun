@@ -1,8 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# The Tauri app joins the workspace in phase 5 (see docs/01-architecture.md).
-exclude = ["app"]
 
 [workspace.package]
 version = "0.1.0"

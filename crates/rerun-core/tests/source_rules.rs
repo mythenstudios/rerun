@@ -3,7 +3,7 @@
 //! Every Win32 import comes from `windows-sys`, whose bans in `clippy.toml` fence it. A
 //! hand-written `extern "…" { … }` block, a `#[link(…)]` attribute or a `raw-dylib` import
 //! would bypass those bans (and could import `dxgi.dll` statically), so every `.rs` file of the
-//! workspace (`crates/`, `tests/`, later `app/src-tauri/`) is scanned for them. Function pointer
+//! workspace (`crates/`, `tests/`) is scanned for them. Function pointer
 //! types (`unsafe extern "system" fn(…)`) and exported functions (`extern "system" fn f()`) are
 //! fine: they import nothing. Exceptions go into [`ALLOWED`] with a reviewed reason; there are
 //! none today.
@@ -22,7 +22,7 @@ const ALLOWED: &[&str] = &[];
 const SELF: &str = "crates/rerun-core/tests/source_rules.rs";
 
 /// Source roots below the workspace root.
-const ROOTS: &[&str] = &["crates", "tests", "app/src-tauri"];
+const ROOTS: &[&str] = &["crates", "tests"];
 
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
