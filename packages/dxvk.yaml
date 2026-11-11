@@ -1,17 +1,17 @@
-# DRAFT - determine version and hash yourself when curating.
-# The release is a .tar.gz with x32/ and x64/ folders; extraction comes in phase 4.
-# files are still missing: derive the folder x API -> slot mapping from the release when curating.
+# DXVK 2.7.1 by doitsujin, pinned to the version tag v2.7.1 (the last 2.x release; 3.x would be another package).
+# The release is a .tar.gz with x32/ and x64/ folders; only the DLLs named below are unpacked.
+# d3d8.dll (D3D8-to-D3D9 layer) is part of the release since 2.4; D3D8 games also need d3d9.dll.
 format: 1
 id: dxvk
 name: DXVK
-status: draft
+status: active
 tier: established
 source:
   repo: "https://github.com/doitsujin/dxvk"
-  release: "TODO"
-version: "TODO"
-sha256: "TODO"
-license: "Zlib"            # TODO: confirm in the repo
+  release: "https://github.com/doitsujin/dxvk/releases/download/v2.7.1/dxvk-2.7.1.tar.gz"
+version: "2.7.1"
+sha256: "D85CE7C79F57ECD765AAA1B9E7007CB875E6FDE9F6D331DF799BCE73D513CE87"
+license: "Zlib"            # LICENSE file in the repository (checked 2026-11-11)
 arch: [x86, x64]
 apis: [d3d8, d3d9, d3d10, d3d11]
 slots_by_api:
@@ -20,3 +20,20 @@ slots_by_api:
   d3d10: [d3d10core.dll, d3d11.dll, dxgi.dll]
   d3d11: [d3d11.dll, dxgi.dll]
 requires_gpu: [vulkan]
+files:
+  - { from: "dxvk-2.7.1/x32/d3d8.dll",      to: "d3d8.dll",      sha256: "901D4F234CAD5B9C6C9F0323ABA123BFA8C096DCF6F7BFBE24D3EC3C3798D348", arch: [x86], api: [d3d8] }
+  - { from: "dxvk-2.7.1/x64/d3d8.dll",      to: "d3d8.dll",      sha256: "253DCDA5BD9791B36DBDBC99881F518C6B867A78C19448E664782A4FA306C2A5", arch: [x64], api: [d3d8] }
+  - { from: "dxvk-2.7.1/x32/d3d9.dll",      to: "d3d9.dll",      sha256: "00ECD422B3B12E9D3B309785F3F19431405389D80EB4A37018EBC63E2D87D900", arch: [x86], api: [d3d8] }
+  - { from: "dxvk-2.7.1/x64/d3d9.dll",      to: "d3d9.dll",      sha256: "2740233A94774FA64A1E07C6EAF94F67027A3C7594FF3B48F7A1C9801777E5A9", arch: [x64], api: [d3d8] }
+  - { from: "dxvk-2.7.1/x32/d3d9.dll",      to: "d3d9.dll",      sha256: "00ECD422B3B12E9D3B309785F3F19431405389D80EB4A37018EBC63E2D87D900", arch: [x86], api: [d3d9] }
+  - { from: "dxvk-2.7.1/x64/d3d9.dll",      to: "d3d9.dll",      sha256: "2740233A94774FA64A1E07C6EAF94F67027A3C7594FF3B48F7A1C9801777E5A9", arch: [x64], api: [d3d9] }
+  - { from: "dxvk-2.7.1/x32/d3d10core.dll", to: "d3d10core.dll", sha256: "9F305720D5BE52A8329CEBB34F3C2E26CA3DECACE0D57B1D618531673D11E9BC", arch: [x86], api: [d3d10] }
+  - { from: "dxvk-2.7.1/x64/d3d10core.dll", to: "d3d10core.dll", sha256: "3BF5FEC5115649DFB6FED1613A4C3F9487C2F2AAF74C2786D9F9D7D21A2F1482", arch: [x64], api: [d3d10] }
+  - { from: "dxvk-2.7.1/x32/d3d11.dll",     to: "d3d11.dll",     sha256: "7406E13D2694244499783D2E9FB1BE285B6324890A348137FE5B5042C64B5913", arch: [x86], api: [d3d10] }
+  - { from: "dxvk-2.7.1/x64/d3d11.dll",     to: "d3d11.dll",     sha256: "523DA2CD765DD51D99FE1644B24F9EE7EE6247E4C98953BCC449CE84CD303405", arch: [x64], api: [d3d10] }
+  - { from: "dxvk-2.7.1/x32/dxgi.dll",      to: "dxgi.dll",      sha256: "53DEFC65DD2E53D05924A960C0891E15692CA8780ED0509A1A7EFDA71F4D631E", arch: [x86], api: [d3d10] }
+  - { from: "dxvk-2.7.1/x64/dxgi.dll",      to: "dxgi.dll",      sha256: "EC02EB37620FF52361CB45376A4611FC4210D96E71D0363F1CC9807F151C01BE", arch: [x64], api: [d3d10] }
+  - { from: "dxvk-2.7.1/x32/d3d11.dll",     to: "d3d11.dll",     sha256: "7406E13D2694244499783D2E9FB1BE285B6324890A348137FE5B5042C64B5913", arch: [x86], api: [d3d11] }
+  - { from: "dxvk-2.7.1/x64/d3d11.dll",     to: "d3d11.dll",     sha256: "523DA2CD765DD51D99FE1644B24F9EE7EE6247E4C98953BCC449CE84CD303405", arch: [x64], api: [d3d11] }
+  - { from: "dxvk-2.7.1/x32/dxgi.dll",      to: "dxgi.dll",      sha256: "53DEFC65DD2E53D05924A960C0891E15692CA8780ED0509A1A7EFDA71F4D631E", arch: [x86], api: [d3d11] }
+  - { from: "dxvk-2.7.1/x64/dxgi.dll",      to: "dxgi.dll",      sha256: "EC02EB37620FF52361CB45376A4611FC4210D96E71D0363F1CC9807F151C01BE", arch: [x64], api: [d3d11] }
