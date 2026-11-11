@@ -466,6 +466,10 @@ fn the_dev_topo_script_parses_rerun_s_lines() {
             .to_owned(),
         r"$script:ReOrphans = '^Rerun firewall rules'".to_owned(),
         r"$script:ReImported = '^index [0-9]+ imported'".to_owned(),
+        r"$script:ReRegistryOp = '^op [0-9]+: (create key|set value|add tokens|set gpu preference): '"
+            .to_owned(),
+        r"$script:ReRoot = '^root (?<index>[0-9]+): (?<path>.+)$'".to_owned(),
+        r"$script:ReSteamRoot = '^  Steam app (?<app>[0-9]+), library: '".to_owned(),
     ] {
         assert!(script.contains(&line), "the script lacks `{line}`");
     }
@@ -532,6 +536,13 @@ fn the_dev_topo_script_parses_rerun_s_lines() {
     );
     let hash = line_after(&p.stdout, "apply with: rerun apply ");
     assert!(hex(&hash, 64), "{hash}");
+    // The game's Steam root: a root line, then its Steam line with the app ID.
+    assert!(
+        p.stdout
+            .contains(&format!("\nroot 0: {G}\n  Steam app 220, library: ")),
+        "{}",
+        p.stdout
+    );
     assert_eq!(line_after(&p.stdout, "  main executable: "), "game.exe");
     let profile = line_after(&p.stdout, "     launch profile ");
     assert!(hex(&profile[..32], 32), "{profile}");
@@ -591,6 +602,34 @@ fn the_dev_topo_script_parses_rerun_s_lines() {
         "{}",
         s.stdout
     );
+
+    // The registry ops the script refuses: their action words in the core's preview, and the
+    // op line of a registry op (no root, so `<action>: <key>`).
+    let core_preview = include_str!("../../rerun-core/src/plan/preview.rs");
+    for (op, action) in [
+        ("CreateKey", "create key"),
+        ("SetValue", "set value"),
+        ("TokenList", "add tokens"),
+    ] {
+        let arm = format!("Op::{op} {{ .. }} => (\"{action}\", None, None),");
+        assert!(
+            core_preview.contains(&arm),
+            "the core preview lacks `{arm}`"
+        );
+    }
+    assert!(core_preview.contains("Op::GpuPref { .. } => (GPU_PREF_ACTION, None, None),"));
+    assert_eq!(rerun_core::plan::GPU_PREF_ACTION, "set gpu preference");
+    let reg = Message::Txn(crate::messages::TxnMsg::Op {
+        index: 3,
+        op: crate::messages::OpRef {
+            action: "set value",
+            at: crate::messages::At::Reg {
+                key: escape::text(r"HKCU\Software\Invented"),
+            },
+        },
+    })
+    .to_string();
+    assert_eq!(reg, r"op 3: set value: HKCU\Software\Invented");
 
     // The firewall lines (rendered: the fake world of these tests has no firewall plan).
     let rule = Message::Helper(HelperMsg::Rule {

@@ -40,10 +40,13 @@
 #    For a firewall case it installs the test-key helper to Program Files\Rerun first and
 #    removes it again in any case (4 administrator prompts, each named in the window title).
 #    The launch option goes to the clipboard; you paste it in Steam and remove it again (the one
-#    Enter of the run confirms that). Writes .claude\p4-13\results\<case>-<time>.txt.
+#    Enter of the run confirms that). Only the hash -Prepare stored for that case is accepted,
+#    and a plan with a registry op is refused (the snapshots do not cover the registry yet).
+#    The test-key helper stays installed while the game runs. Writes .claude\p4-13\results\<case>-<time>.txt.
 #  -RevertOnly: rerun revert <txn> (with -WithHelper: helper installed before, removed after).
 #  -Cleanup: deletes %LOCALAPPDATA%\RerunTest\p4-13 and <AppDir>\index-test (only when no
-#    transaction is open and no launch profile exists). The journal and the plans stay.
+#    transaction is open, no launch profile exists, the staged rerun.exe is there and no helper
+#    is installed; otherwise it deletes nothing). The journal and the plans stay.
 #
 # It never deletes a firewall rule or a journal entry past Rerun, never changes Steam's settings,
 # never runs elevated itself; the instruction is always in the window title; no yes/no question.
@@ -81,6 +84,9 @@ $script:ReNoTransactions = '^no transactions$'
 $script:ReStatusCounts = '^[0-9]+ transactions?: (?<open>[0-9]+) not closed, [0-9]+ closed, [0-9]+ forgotten'
 $script:ReOrphans = '^Rerun firewall rules'
 $script:ReImported = '^index [0-9]+ imported'
+$script:ReRegistryOp = '^op [0-9]+: (create key|set value|add tokens|set gpu preference): '
+$script:ReRoot = '^root (?<index>[0-9]+): (?<path>.+)$'
+$script:ReSteamRoot = '^  Steam app (?<app>[0-9]+), library: '
 $ExitReport = 0
 $ExitFatal = 1
 $ExitUsage = 2
@@ -367,6 +373,26 @@ function Get-RerunStatus {
     return @{ Open = $open; Orphans = [bool]$orphans; Text = $r.Out }
 }
 
+# A plan this script can judge: no registry op (the snapshots do not cover the registry yet, so
+# a revert there could not be proven; registry_set, compat_layer and gpu_preference are refused
+# until they are), and exactly one Steam root, which is the case's app and game folder.
+function Assert-PlanFits($c, [string]$preview) {
+    if (Find-Line $preview $script:ReRegistryOp) {
+        Fail "$($c.Name): the plan changes the registry (registry_set, compat_layer or gpu_preference); this script's snapshots do not cover the registry yet, so it cannot prove the revert: refused"
+    }
+    $lines = @(Lines $preview)
+    $games = @()
+    for ($i = 1; $i -lt $lines.Count; $i++) {
+        $s = [regex]::Match($lines[$i], $script:ReSteamRoot)
+        $r = [regex]::Match($lines[$i - 1], $script:ReRoot)
+        if ($s.Success -and $r.Success) { $games += , @($s.Groups['app'].Value, $r.Groups['path'].Value) }
+    }
+    $folder = $c.GameFolder.TrimEnd('\')
+    if ($games.Count -ne 1 -or $games[0][0] -ne "$($c.AppId)" -or -not [string]::Equals($games[0][1], $folder, [StringComparison]::OrdinalIgnoreCase)) {
+        Fail "$($c.Name): the plan's Steam root is not app $($c.AppId) at $folder (roots: $(@($games | ForEach-Object { "app $($_[0]) at $($_[1])" }) -join '; '))"
+    }
+}
+
 function Get-ExePath($c, [string]$preview) {
     $rel = $c.Exe
     if (-not $rel) {
@@ -466,6 +492,8 @@ function Invoke-Prepare {
         Rerun   = Sha256-File $script:StagedRerun
         Launch  = Sha256-File $script:StagedLaunch
         Helper  = $null
+        # Case name -> the SHA-256 of the plan -Prepare stored for it (-Case refuses another).
+        Plans   = [ordered]@{}
     }
     if ((Sha256-File $builtRerun) -ne $stage.Rerun -or (Sha256-File $builtLaunch) -ne $stage.Launch) { Fail 'a staged copy differs from its build' }
     if ($helperBuild) {
@@ -493,6 +521,10 @@ function Invoke-Prepare {
     $r = Invoke-Exe $workbench @('index', 'build', '--seq', "$seq", '--issued', $issued, '--root', $repo, $index)
     Show-Output $r
     if ($r.Code -ne 0) { Fail "rerun-workbench index build failed ($($r.Code))" }
+    # sign-test never writes over a signature: the one of an earlier -Prepare goes first.
+    $sig = "$index.sig"
+    Assert-Plain $sig
+    if (Test-Path -LiteralPath $sig) { Remove-Item -LiteralPath $sig -Force }
     $r = Invoke-Exe $workbench @('index', 'sign-test', $index)
     Show-Output $r
     if ($r.Code -ne 0) { Fail "rerun-workbench index sign-test failed ($($r.Code))" }
@@ -518,6 +550,8 @@ function Invoke-Prepare {
         $hash = $hm.Groups['hash'].Value
         $file = Join-Path $script:AppDir "plans\$hash.json"
         if ((Sha256-File $file) -ne $hash) { Fail "$($c.Name): SHA-256 of $file is not $hash" }
+        Assert-PlanFits $c $r.Out
+        $stage.Plans[$c.Name] = $hash
         $fw = [bool](Find-Line $r.Out $script:ReFirewallRule)
         if ($fw -ne $c.Helper) { Fail "$($c.Name): the plan $(if ($fw) { 'adds' } else { 'adds no' }) firewall rules, the case says Helper = $($c.Helper)" }
         $om = Find-Line $r.Out $script:ReOption
@@ -527,6 +561,7 @@ function Invoke-Prepare {
         $details.Add("---- $($c.Name): $(Split-Path $c.GameFolder -Leaf) (buildid $($m.BuildId)) ----")
         foreach ($l in (Lines $r.Out)) { $details.Add($l) }
     }
+    [IO.File]::WriteAllText($script:StageFile, ($stage | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
     $table.Add('')
     $table.Add('Release each case in the chat with "apply" and its hash; a case runs with:')
     $table.Add('  scripts\dev-topo-roundtrip.ps1 -Case <name> -PlanSha256 <hash>')
@@ -560,7 +595,9 @@ function Invoke-Case {
         $c = $c[0]
         $stage = Read-Stage
         Assert-Stage $stage $c.Helper
-        $planFile = Join-Path $script:AppDir "plans\$PlanSha256.json"
+        $stored = if ($stage.Plans) { $stage.Plans.$Case } else { $null }
+        if ($stored -ne $PlanSha256) { Fail "plan $PlanSha256 is not the one -Prepare stored for case $Case ($(if ($stored) { $stored } else { 'none' })): nothing changed" }
+        $planFile =Join-Path $script:AppDir "plans\$PlanSha256.json"
         foreach ($p in @($script:AppDir, (Join-Path $script:AppDir 'plans'), $planFile)) { Assert-Plain $p }
         if (-not (Test-Path -LiteralPath $planFile -PathType Leaf)) { Fail "plan $PlanSha256 is not stored: run -Prepare" }
         if ((Sha256-File $planFile) -ne $PlanSha256) { Fail "the SHA-256 of $planFile is not ${PlanSha256}: nothing changed" }
@@ -577,6 +614,7 @@ function Invoke-Case {
         $dry = Invoke-Rerun @('apply', $PlanSha256, '--dry-run')
         $preview = $dry.Out
         if ($dry.Code -ne $ExitReport -and -not ($c.Helper -and $dry.Code -eq $ExitRefused)) { Show-Output $dry; Fail "rerun apply --dry-run exited with $($dry.Code)" }
+        Assert-PlanFits $c $preview
         if ([bool](Find-Line $preview $script:ReFirewallRule) -ne $c.Helper) { Fail "the plan and the case disagree about firewall rules (Helper = $($c.Helper))" }
         $exePath = Get-ExePath $c $preview
         if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) { Fail "the game's executable is not there: $exePath" }
@@ -614,6 +652,8 @@ function Invoke-Case {
         if ($a.Code -eq $ExitRolledBack) { $st.Verdict = 'FAIL'; Fail 'the apply failed and was rolled back (exit 4)' }
         if ($a.Code -ne $ExitReport -or -not $st.Txn) { $st.Verdict = 'FAIL'; Fail "the apply exited with $($a.Code)$(if (-not $st.Txn) { ' without a transaction' })" }
         Row 'info' 'transaction' $st.Txn
+        # Every FAIL row of the round trip makes the verdict FAIL (the launch check stays apart).
+        $fail = $false
 
         # ---------- B.6 S1 ----------
         Title 'SNAPSHOT S1 (after the apply)'
@@ -622,29 +662,47 @@ function Invoke-Case {
         foreach ($k in @('Game', 'UserData', 'Firewall', 'Profiles')) { if ($s0.ContainsKey($k)) { $d01[$k] = Diff-Map $s0[$k] $s1[$k] } }
         $total = 0
         foreach ($k in $d01.Keys) { $total += $d01[$k].Count }
+        if ($total -eq 0) { $fail = $true }
         Row $(if ($total -gt 0) { 'PASS' } else { 'FAIL' }) 'apply changed' ("game {0}, user data {1}, firewall {2}, profiles {3}" -f $d01.Game.Count, $(if ($d01.UserData) { $d01.UserData.Count } else { 0 }), $d01.Firewall.Count, $d01.Profiles.Count)
         $om = Find-Line $a.Out $script:ReOption
         if ($om) {
             $st.Option = $om.Groups['option'].Value
             $okInstall = $om.Groups['install'].Value -eq $script:Stage
+            if (-not $okInstall) { $fail = $true }
             Row $(if ($okInstall) { 'PASS' } else { 'FAIL' }) 'launch option' "install folder $($om.Groups['install'].Value)"
             $profileName = "$($om.Groups['id'].Value).profile"
-            Row $(if ($s1.Profiles.ContainsKey($profileName)) { 'PASS' } else { 'FAIL' }) 'profile written' $profileName
+            $okProfile = $s1.Profiles.ContainsKey($profileName)
+            if (-not $okProfile) { $fail = $true }
+            Row $(if ($okProfile) { 'PASS' } else { 'FAIL' }) 'profile written' $profileName
         }
         if ($c.Helper) {
             $mine = @($s1.Firewall.Keys | Where-Object { $_ -match ('^Rerun - [a-z0-9-]+ - ' + [regex]::Escape($st.Txn) + '-[0-9]{3}\|') })
             $programOk = $true
             foreach ($k in $mine) { if (-not ($s1.Firewall[$k].Split('|')[3]).StartsWith($c.GameFolder, [StringComparison]::OrdinalIgnoreCase)) { $programOk = $false } }
-            Row $(if ($mine.Count -gt 0 -and $programOk) { 'PASS' } else { 'FAIL' }) 'firewall rules' "$($mine.Count) of transaction $($st.Txn), programs in the game folder: $programOk"
+            $okRules = $mine.Count -gt 0 -and $programOk
+            if (-not $okRules) { $fail = $true }
+            Row $(if ($okRules) { 'PASS' } else { 'FAIL' }) 'firewall rules' "$($mine.Count) of transaction $($st.Txn), programs in the game folder: $programOk"
         }
 
         # ---------- B.7/8 the game ----------
         $s1b = $s1
-        if ($c.Game -eq 'steam') {
-            if ($c.Upc) {
-                Title 'START Ubisoft Connect and sign in (waiting for it)'
-                while (-not (Get-Process -Name 'upc', 'UbisoftConnect' -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }
+        $upcOk = $true
+        if ($c.Game -eq 'steam' -and $c.Upc) {
+            Title 'START Ubisoft Connect and sign in (waiting for it, at most 10 minutes)'
+            $upcDeadline = (Get-Date).AddMinutes(10)
+            while (-not (Get-Process -Name 'upc', 'UbisoftConnect' -ErrorAction SilentlyContinue)) {
+                if ((Get-Date) -gt $upcDeadline) { $upcOk = $false; break }
+                Start-Sleep -Seconds 2
             }
+            if (-not $upcOk) {
+                $fail = $true
+                # The launch option was never handed out: nothing to remove in Steam.
+                $st.OptionRemoved = $true
+                Row 'FAIL' 'ubisoft connect' 'did not start within 10 minutes: the game was not started, the plan is reverted'
+                Title 'FAILED: Ubisoft Connect did not start within 10 minutes - reverting'
+            }
+        }
+        if ($c.Game -eq 'steam' -and $upcOk) {
             $resultFile = $null
             $resultBefore = [datetime]::MinValue
             if ($st.Option) {
@@ -732,7 +790,6 @@ function Invoke-Case {
         # ---------- B.10 S2 and the verdict ----------
         Title 'SNAPSHOT S2 (after the revert)'
         $s2 = Get-Snapshot $c $userData
-        $fail = $false
         foreach ($k in @('Game', 'UserData')) {
             if (-not $s0.ContainsKey($k)) { continue }
             $label = if ($k -eq 'Game') { '<game>' } else { '<userdata>' }
@@ -875,21 +932,25 @@ function Invoke-Cleanup {
             "deletes $indexTest (the test-key index state)",
             "keeps $script:AppDir\journal and \plans (Rerun's state) and $script:Local"
         )
-        if (Test-Path -LiteralPath $script:StagedRerun) {
-            $status = Get-RerunStatus
-            if ($status.Open -ne 0) { Fail "$($status.Open) transaction(s) not closed: revert them first (-RevertOnly <txn>)" }
-            if ($status.Orphans) { Fail 'rerun status lists Rerun firewall rules no transaction owns: look at them first' }
-        }
+        # Fail closed: every check before the first deletion. Without the staged test-key rerun.exe
+        # nothing can tell whether a transaction still needs index-test, so nothing is deleted.
+        if (-not (Test-Path -LiteralPath $script:StagedRerun -PathType Leaf)) { Fail "no staged rerun.exe ($script:StagedRerun): rerun status cannot be asked, nothing deleted (run -Prepare first, or clean up by hand)" }
+        Assert-Stage (Read-Stage) $false
+        $status = Get-RerunStatus
+        if ($status.Open -ne 0) { Fail "$($status.Open) transaction(s) not closed: revert them first (-RevertOnly <txn>); nothing deleted" }
+        if ($status.Orphans) { Fail 'rerun status lists Rerun firewall rules no transaction owns: look at them first; nothing deleted' }
         $profiles = Join-Path $script:AppDir 'profiles'
-        if ((Test-Path -LiteralPath $profiles) -and @(Get-ChildItem -LiteralPath $profiles -Force -Filter '*.profile').Count -gt 0) { Fail "a launch profile exists in ${profiles}: revert its transaction first" }
+        if ((Test-Path -LiteralPath $profiles) -and @(Get-ChildItem -LiteralPath $profiles -Force -Filter '*.profile').Count -gt 0) { Fail "a launch profile exists in ${profiles}: revert its transaction first; nothing deleted" }
+        # The staged helper is what -RevertOnly -WithHelper installs and removes: keep it while a
+        # helper is installed.
         $helper = Get-HelperPaths
-        if (Test-Path -LiteralPath $helper.Dir) { $lines.Add("FAIL  $($helper.Dir) exists: run -RevertOnly <txn> -WithHelper (it removes the helper), or delete it in an administrator PowerShell") }
+        if (Test-Path -LiteralPath $helper.Dir) { Fail "$($helper.Dir) exists: run -RevertOnly <txn> -WithHelper (it removes the helper) or delete it in an administrator PowerShell; nothing deleted" }
         Remove-Exactly $script:StagedHelperDir '^rerun-helper\.exe$'
         Remove-Exactly $script:Stage '^rerun(-launch)?\.exe$'
         if ((Test-Path -LiteralPath $script:StageParent) -and @(Get-ChildItem -LiteralPath $script:StageParent -Force).Count -eq 0) { [IO.Directory]::Delete($script:StageParent, $false) }
         Remove-Exactly $indexTest '^([0-9a-f]{64}\.(json|sig)|current\.json|lock)$'
         $lines.Add("PASS  $script:Stage and $indexTest are gone")
-        if (-not ($lines | Where-Object { $_.StartsWith('FAIL') })) { $verdict = 'PASS' }
+        $verdict = 'PASS'
         $lines.Add('Remove every launch option with RerunTest\p4-13\rerun-launch.exe in Steam: the game would not start through it any more.')
     } catch {
         $lines.Add("stopped: $($_.Exception.Message)")

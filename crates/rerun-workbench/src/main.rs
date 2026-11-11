@@ -214,24 +214,49 @@ fn sign(bundle: &Path, key: &Path) -> Result<(), String> {
         keys::parse_key(&fs::read_to_string(key).map_err(|e| format!("{}: {e}", key.display()))?)?;
     let bytes = fs::read(bundle).map_err(|e| format!("{}: {e}", bundle.display()))?;
     let s = keys::sign(&bytes, &kp)?;
-    write_sig(bundle, &s)
+    write_sig(bundle, &s, false)
 }
 
 /// `index sign-test`: like [`sign`] with the published test key instead of a key file (the
-/// same release rules, so a draft or a `TODO` is refused), verified back under that key.
+/// same release rules, so a draft or a `TODO` is refused), verified back under that key. Never
+/// writes over an existing `<bundle>.sig` or through a link there (`create_new`).
 #[cfg(feature = "test-key")]
 fn sign_test(bundle: &Path) -> Result<(), String> {
     let bytes = fs::read(bundle).map_err(|e| format!("{}: {e}", bundle.display()))?;
     let s = keys::sign_test(&bytes)?;
-    write_sig(bundle, &s)
+    write_sig(bundle, &s, true)
 }
 
-/// Writes `<bundle>.sig` and the line naming what was signed.
-fn write_sig(bundle: &Path, s: &keys::Signed) -> Result<(), String> {
+/// Writes `<bundle>.sig` and the line naming what was signed. `new_only`: the file must not
+/// exist, not even as a link (`symlink_metadata` first for a clear refusal, then `create_new`,
+/// which also refuses whatever appears in between).
+fn write_sig(bundle: &Path, s: &keys::Signed, new_only: bool) -> Result<(), String> {
     let mut out = bundle.as_os_str().to_owned();
     out.push(".sig");
     let out = PathBuf::from(out);
-    fs::write(&out, s.sig).map_err(|e| format!("{}: {e}", out.display()))?;
+    if new_only {
+        if let Ok(m) = fs::symlink_metadata(&out) {
+            let what = if m.file_type().is_symlink() {
+                "is a link"
+            } else {
+                "exists"
+            };
+            return Err(format!(
+                "{} {what}: sign-test never writes over a signature (remove it first)",
+                out.display()
+            ));
+        }
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&out)
+            .map_err(|e| format!("{}: {e}", out.display()))?;
+        f.write_all(&s.sig)
+            .and_then(|()| f.sync_all())
+            .map_err(|e| format!("{}: {e}", out.display()))?;
+    } else {
+        fs::write(&out, s.sig).map_err(|e| format!("{}: {e}", out.display()))?;
+    }
     println!(
         "{}: seq {}, sha256 {}, key {}",
         out.display(),
@@ -405,5 +430,37 @@ mod cli_tests {
         assert!(r.is_err());
         // `index sign` still needs its key file.
         assert!(Cli::try_parse_from(["rerun-workbench", "index", "sign", "index.json"]).is_err());
+    }
+
+    /// `index sign-test` writes `<bundle>.sig` only as a new file: a second run is refused and
+    /// leaves the first signature as it was (security review of P4-13).
+    #[cfg(feature = "test-key")]
+    #[test]
+    fn sign_test_never_writes_over_a_signature() {
+        let dir = std::env::temp_dir().join(format!(
+            "rerun-workbench-sign-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let bundle = dir.join("index.json");
+        let bytes =
+            br#"{"format":1,"seq":3,"issued":"2026-11-11T00:00:00Z","topos":[],"packages":[]}"#;
+        std::fs::write(&bundle, bytes).unwrap();
+        let sig = dir.join("index.json.sig");
+        super::sign_test(&bundle).unwrap();
+        let first = std::fs::read(&sig).unwrap();
+        assert_eq!(
+            first,
+            rerun_core::catalog::key::test_key::sign(bytes).to_vec()
+        );
+        std::fs::write(&sig, b"other").unwrap();
+        let e = super::sign_test(&bundle).unwrap_err();
+        assert!(e.contains("exists"), "{e}");
+        assert_eq!(std::fs::read(&sig).unwrap(), b"other");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
