@@ -19,7 +19,8 @@
 //!   the quirks of old toolchains.
 //! - [`Pe::image_fields`] (P4-10): the file offsets of `Characteristics` and `CheckSum`, the
 //!   stored checksum, the certificate table and the section names; [`checksum`] computes the
-//!   image checksum as `CheckSumMappedFile` does.
+//!   image checksum as `CheckSumMappedFile` does. P4-13: whether the DOS stub carries a Valve
+//!   header (`"VLV\0"` at `0x40`, inside the header region already read).
 //! - [`Pe::info`]: all of it at once ([`PeInfo`]); a broken version resource does not hide
 //!   the headers and imports, a broken import table fails the file.
 //! - Errors ([`PeError`]) carry a kind and a file offset, never file content.
@@ -240,6 +241,7 @@ impl<R: Read + Seek> Pe<R> {
                 .filter(|d| d.rva != 0 && d.size != 0)
                 .map(|d| (d.rva, d.size)),
             section_names: l.section_names(),
+            valve_stub: l.vlv,
         }
     }
 
@@ -265,4 +267,9 @@ pub struct ImageFields {
     pub certificates: Option<(u32, u32)>,
     /// `IMAGE_SECTION_HEADER::Name` of every section, in table order, as stored.
     pub section_names: Vec<[u8; layout::SECTION_NAME_SIZE]>,
+    /// The DOS stub carries a Valve header: `"VLV\0"` at offset `0x40`, before the NT headers
+    /// (P4-13). Seen on Steam builds that differ per delivery (suspected Steam CEG: an
+    /// executable built and signed for one user), so a patched copy has a hash no one else has.
+    /// A hint for a warning, never authorization.
+    pub valve_stub: bool,
 }

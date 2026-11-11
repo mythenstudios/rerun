@@ -27,7 +27,10 @@
 //! `editbin` and every tool that rewrites an image do through `CheckSumMappedFile`, so a game or
 //! launcher that compares it with `MapFileAndCheckSum` finds it as before; a 0 stays 0). The old
 //! R/H/S are kept. An Authenticode signature (a certificate table) becomes invalid: the engine
-//! warns ([`inspect`]); what Smart App Control does with such a file is an open user decision.
+//! warns ([`inspect`]). Smart App Control decides per file whether the patched executable may
+//! run; the engine warns while it is not off and plans the step anyway (ADR 0020 amendment
+//! P4-13, which replaced the refusal of P4-10), more strongly for an executable with a Valve
+//! header ([`LaaFacts::valve_stub`]). The revert restores the original file bit for bit.
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -83,6 +86,9 @@ pub struct LaaFacts {
     /// It carries a certificate table (an Authenticode signature), which the patch makes
     /// invalid.
     pub signed: bool,
+    /// Its DOS stub carries a Valve header (`ImageFields::valve_stub`, P4-13): likely built per
+    /// user by Steam, so a patched copy has a hash Smart App Control has never seen.
+    pub valve_stub: bool,
 }
 
 fn refuse(exe: &RelPath, why: impl std::fmt::Display) -> PlanError {
@@ -170,6 +176,7 @@ pub fn inspect(game: &GameDir<'_>, exe: &RelPath) -> Result<LaaFacts, PlanError>
     let (_, f, _) = headers(game, exe)?;
     Ok(LaaFacts {
         signed: f.certificates.is_some(),
+        valve_stub: f.valve_stub,
     })
 }
 

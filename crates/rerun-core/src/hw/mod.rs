@@ -88,7 +88,8 @@ pub struct SystemProfile {
     pub cpu: Result<CpuTopology, ProfileError>,
     /// Windows build.
     pub os: Result<OsBuild, ProfileError>,
-    /// Smart App Control (P4-10): `laa_patch` is refused while it enforces.
+    /// Smart App Control (P4-10): `laa_patch` is planned with a warning while it is not off
+    /// (P4-13).
     pub sac: SacState,
     /// Whether an architecture table was given: without one `gpu.arch` and `gpu.integrated` are `Unavailable`.
     has_table: bool,

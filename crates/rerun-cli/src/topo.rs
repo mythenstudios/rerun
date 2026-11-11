@@ -189,13 +189,24 @@ fn warning_text(w: &Warning) -> String {
             }
         ),
         Warning::SmartAppControl { state } => format!(
-            "warning: Smart App Control is {}; if Windows turns it on, it blocks the patched \
-             executable and the game does not start until the revert (or Steam's \"Verify \
-             integrity of game files\") restores it",
+            "warning: Smart App Control {}decides per file whether the patched executable may \
+             run. If the game then does not start (error 0x11c7 / 4551, \"An Application \
+             Control policy has blocked this file\"), undo it with rerun revert <txn>, which \
+             restores the original file bit for bit",
             match state {
-                rerun_core::hw::SacState::Evaluation => "in evaluation mode",
-                _ => "in a state Rerun cannot read",
+                rerun_core::hw::SacState::Enforce => "is on and ",
+                rerun_core::hw::SacState::Evaluation => {
+                    "is in evaluation mode; once Windows turns it on, it "
+                }
+                _ => "is in a state Rerun cannot read; if it is on, it ",
             }
+        ),
+        Warning::SteamPerUserExe { exe } => format!(
+            "warning: {} carries a Valve header: Steam likely built it for your account, so a \
+             patched copy is a file no one else has. Smart App Control does not know it and is \
+             likely to block it sooner or later, even if the game starts now; rerun revert \
+             <txn> then restores the original file bit for bit",
+            rerun_core::escape::path(exe.as_str())
         ),
         Warning::GpuPreferenceSet { exe, by } => match by {
             Some(t) => format!(
@@ -440,5 +451,44 @@ fn run<W: Write, E: Write>(
             out,
             err,
         ),
+    }
+}
+
+#[cfg(test)]
+mod warning_tests {
+    use rerun_core::hw::SacState;
+    use rerun_core::path::RelPath;
+    use rerun_core::topo::Warning;
+
+    use super::warning_text;
+
+    /// P4-13: every Smart App Control warning names the block and the way back; the Valve
+    /// header warning names the executable and the way back.
+    #[test]
+    fn smart_app_control_warnings_name_the_way_back() {
+        let back = "rerun revert <txn>, which restores the original file bit for bit";
+        for (state, lead) in [
+            (
+                SacState::Enforce,
+                "Smart App Control is on and decides per file",
+            ),
+            (
+                SacState::Evaluation,
+                "is in evaluation mode; once Windows turns it on",
+            ),
+            (SacState::Unknown, "a state Rerun cannot read; if it is on"),
+        ] {
+            let t = warning_text(&Warning::SmartAppControl { state });
+            assert!(t.starts_with("warning: "), "{t}");
+            assert!(t.contains(lead), "{t}");
+            assert!(t.contains("0x11c7 / 4551"), "{t}");
+            assert!(t.contains(back), "{t}");
+        }
+        let t = warning_text(&Warning::SteamPerUserExe {
+            exe: RelPath::parse(r"pc\mafia2.exe").unwrap(),
+        });
+        assert!(t.contains(r"pc\mafia2.exe carries a Valve header"), "{t}");
+        assert!(t.contains("likely to block it sooner or later"), "{t}");
+        assert!(t.contains("restores the original file bit for bit"), "{t}");
     }
 }

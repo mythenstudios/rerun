@@ -129,7 +129,9 @@ pub const PATCH_NOTE: &str = "patched files: only the bytes shown change; the wh
 is now is kept in Rerun's journal, and a revert restores exactly it. If Steam (\"Verify integrity \
 of game files\") or the game's own repair puts the original back first, the revert finds it as it \
 was and changes nothing; any other content (an update) is left as it is and the transaction \
-stays open until forget. A patch makes a digital signature of the file invalid";
+stays open until forget. A patch makes a digital signature of the file invalid. The way back is \
+one command: rerun revert <txn> (the transaction the apply names) restores the original file bit \
+for bit";
 
 /// One changed byte of a patch, as the preview prints it: `byte at 0x<offset>: 0x<old> ->
 /// 0x<new>`.

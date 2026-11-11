@@ -14,6 +14,8 @@
 //! - LA6 the loader: draft only until reviewed, a `match.exes` entry in exactly its spelling with
 //!   a `sha256`.
 //! - LA7 one executable once: two picks that patch it plan it once.
+//! - LA9 Smart App Control warns, never refuses (P4-13); a Valve header warns more strongly.
+//! - [DEV] `dev_mafia2_laa_patch_matches_ntcore`: the real Mafia II original gives NTCore's bytes.
 
 use std::path::Path;
 
@@ -561,16 +563,15 @@ fn la8_a_live_patch_still_matches_its_build() {
 
 // ---------- LA9 ----------
 
-/// LA9 (user decision of 2026-11-10 after the [DEV] measurement): while Smart App Control
-/// enforces, `laa_patch` is refused (the plan and the report); in evaluation mode, or when its
-/// state cannot be read, it is planned with a warning; off (or absent) changes nothing.
+/// LA9 (user decision of 2026-11-11, P4-13, which reverses the refusal of 2026-11-10): while
+/// Smart App Control enforces, is in evaluation mode, or its state cannot be read, `laa_patch` is
+/// planned with one warning naming the state; off (or absent) changes nothing. The report
+/// refuses nothing. An executable with a Valve header in its DOS stub adds the stronger warning,
+/// only while Smart App Control is not off.
 #[test]
-fn la9_smart_app_control_refuses_or_warns() {
+fn la9_smart_app_control_warns() {
     use crate::hw::SacState;
     use crate::sys::registry::{Hive, RegKey, RegValue, RegView};
-    let exe = game_exe(true);
-    let sys = sys_with(&exe);
-    let t = topo(&exe);
     let profile_with = |v: Option<RegValue>| {
         let key = RegKey::new(
             Hive::LocalMachine,
@@ -583,7 +584,9 @@ fn la9_smart_app_control_refuses_or_warns() {
         }
         hw::read(&b.build().unwrap(), Some(GpuArchTable::builtin().unwrap()))
     };
-    let run = |p: &SystemProfile| {
+    let run = |exe: &[u8], p: &SystemProfile| {
+        let sys = sys_with(exe);
+        let t = topo(exe);
         let fr = fr(&sys);
         let store = StoreDir::open(&sys, &fr, Path::new(STEAM_LIB)).unwrap();
         let g = store.game(&fr, "G").unwrap();
@@ -605,8 +608,8 @@ fn la9_smart_app_control_refuses_or_warns() {
             packages: &[],
         };
         let report = super::report(&t, &facts).unwrap();
-        let refused = report.issues[0].variants[0].refused;
-        let planned = plan(
+        assert_eq!(report.issues[0].variants[0].refused, None);
+        let tp = plan(
             &INDEX,
             &t,
             &facts,
@@ -615,36 +618,96 @@ fn la9_smart_app_control_refuses_or_warns() {
                 variant: "laa".to_owned(),
             }],
             &ctx,
-        );
-        (refused, planned.map(|tp| tp.warnings))
+        )
+        .unwrap();
+        patch_of(&tp);
+        tp.warnings
     };
-    // Enforcing: refused in the report and the plan.
-    let p = profile_with(Some(RegValue::Dword(1)));
-    assert_eq!(p.sac, SacState::Enforce);
-    let (refused, planned) = run(&p);
-    assert_eq!(refused, Some(Refusal::SmartAppControl));
-    match planned {
-        Err(EngineError::Refused {
-            why: Refusal::SmartAppControl,
-            ..
-        }) => {}
-        r => panic!("{r:?}"),
-    }
-    // Evaluation, an unreadable or undocumented state: planned with the warning.
+    let plain = game_exe(true);
+    // A Valve header in the DOS stub (the builder's NT headers start at 0x80).
+    let mut valve = plain.clone();
+    valve[0x40..0x44].copy_from_slice(b"VLV\0");
+    let game = || crate::path::RelPath::parse("Game.exe").unwrap();
     for (v, state) in [
+        (RegValue::Dword(1), SacState::Enforce),
         (RegValue::Dword(2), SacState::Evaluation),
         (RegValue::Dword(7), SacState::Unknown),
     ] {
-        let (refused, planned) = run(&profile_with(Some(v)));
-        assert_eq!(refused, None);
-        assert_eq!(planned.unwrap(), [Warning::SmartAppControl { state }]);
+        let p = profile_with(Some(v));
+        assert_eq!(p.sac, state);
+        assert_eq!(run(&plain, &p), [Warning::SmartAppControl { state }]);
+        assert_eq!(
+            run(&valve, &p),
+            [
+                Warning::SmartAppControl { state },
+                Warning::SteamPerUserExe { exe: game() }
+            ]
+        );
     }
-    // Off, or absent: nothing.
+    // Off, or absent: nothing, a Valve header neither.
     for v in [Some(RegValue::Dword(0)), None] {
-        let (refused, planned) = run(&profile_with(v));
-        assert_eq!(refused, None);
-        assert!(planned.unwrap().is_empty());
+        let p = profile_with(v);
+        assert!(run(&plain, &p).is_empty());
+        assert!(run(&valve, &p).is_empty());
     }
+}
+
+/// [DEV] (P4-13): Rerun's `laa_patch` of the original Mafia II Classic executable
+/// (`RERUN_DEV_MAFIA2_ORIG`, the `mafia2.exe.Backup` NTCore's 4GB Patch leaves) gives exactly
+/// NTCore's output, SHA-256 `0895CE1B…`: the flag at `0x15e` and the true image checksum at
+/// `0x1a0`, 4 bytes. The file is only read (into the fake system); nothing is written anywhere.
+#[test]
+#[ignore = "[DEV] reads a game executable of the developer machine; set RERUN_DEV_MAFIA2_ORIG"]
+fn dev_mafia2_laa_patch_matches_ntcore() {
+    const NTCORE: &str = "0895CE1B54151F03C4B0F6E286D10F5F84884B6671EA9B8494D655414572D4E3";
+    const ORIGINAL_PREFIX: &str = "C7B719906AA01059";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "[DEV] test: the developer names the original executable"
+    )]
+    let path = std::env::var("RERUN_DEV_MAFIA2_ORIG")
+        .expect("set RERUN_DEV_MAFIA2_ORIG to the path of mafia2.exe.Backup");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "[DEV] test: reads the original once, read only, into the fake system"
+    )]
+    let exe = std::fs::read(&path).unwrap();
+    assert!(
+        hex(&sha(&exe)).starts_with(ORIGINAL_PREFIX),
+        "not the measured original: {}",
+        hex(&sha(&exe))
+    );
+    let sys = sys_with(&exe);
+    let t = topo(&exe);
+    let tp = plan_on(&sys, &t).unwrap();
+    let (edits, planned) = patch_of(&tp);
+    let mut out = exe;
+    for e in &edits {
+        let at = usize::try_from(e.offset).unwrap();
+        assert_eq!(out[at], e.old);
+        out[at] = e.new;
+    }
+    println!("RERUN_DEV_MAFIA2_EDITS: {edits:?}");
+    println!("RERUN_DEV_MAFIA2_SHA256: {}", hex(&sha(&out)));
+    assert_eq!(sha(&out), planned);
+    assert_eq!(hex(&sha(&out)), NTCORE);
+    assert_eq!(
+        edits.iter().map(|e| e.offset).collect::<Vec<_>>(),
+        [0x15e, 0x1a0, 0x1a1, 0x1a2]
+    );
+    // The Valve header and Valve's signature are seen; Smart App Control is off here
+    // (`profile()` reads an empty fake registry), so only the signature warns.
+    let fields = Pe::parse(std::io::Cursor::new(&out[..]), &Limits::DEFAULT)
+        .unwrap()
+        .image_fields();
+    assert!(fields.valve_stub);
+    assert!(fields.certificates.is_some());
+    assert_eq!(
+        tp.warnings,
+        [Warning::SignedExe {
+            exe: crate::path::RelPath::parse("Game.exe").unwrap()
+        }]
+    );
 }
 
 // ---------- LA10, LA11 (P4-10 review follow-ups) ----------

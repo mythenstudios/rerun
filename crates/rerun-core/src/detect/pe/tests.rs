@@ -702,3 +702,33 @@ fn image_fields_name_the_offsets_and_names() {
         None
     );
 }
+
+/// P4-13: a Valve header (`"VLV"` and a NUL at `0x40`) in the DOS stub is reported; anything
+/// else there, or the NT headers starting before its end, is none.
+#[test]
+fn image_fields_report_a_valve_stub_only_in_the_dos_stub() {
+    let with = |e_lfanew: u32, stub: &[u8]| {
+        let mut b = Builder::x86();
+        b.e_lfanew = e_lfanew;
+        let mut bytes = b.build().bytes;
+        let end = l::DOS_HEADER_SIZE + stub.len();
+        if end <= usize::try_from(e_lfanew).unwrap() {
+            bytes[l::DOS_HEADER_SIZE..end].copy_from_slice(stub);
+        }
+        parse(&bytes).unwrap().image_fields().valve_stub
+    };
+    assert!(with(0x80, b"VLV\0"));
+    // Exactly as long as the stub.
+    assert!(with(0x44, b"VLV\0"));
+    assert!(!with(0x80, b"VLV "));
+    assert!(!with(0x80, b"vlv\0"));
+    assert!(!with(0x80, b"\0\0\0\0"));
+    // The NT headers start at 0x40: their signature is there, no stub.
+    assert!(!with(0x40, b"VLV\0"));
+    // A stub one byte too short: the PE signature at 0x43 overlaps it.
+    let mut b = Builder::x86();
+    b.e_lfanew = 0x43;
+    let mut bytes = b.build().bytes;
+    bytes[0x40..0x43].copy_from_slice(b"VLV");
+    assert!(!parse(&bytes).unwrap().image_fields().valve_stub);
+}

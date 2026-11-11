@@ -489,8 +489,6 @@ pub enum Refusal {
     AntiCheat(StepKind),
     /// A `cpu` step, but the Topo's launch cannot carry it.
     Launch(LaunchProblem),
-    /// A `laa_patch` step while Smart App Control enforces (P4-10).
-    SmartAppControl,
 }
 
 impl fmt::Display for Refusal {
@@ -502,10 +500,6 @@ impl fmt::Display for Refusal {
                 k.as_str()
             ),
             Self::Launch(p) => write!(f, "refused: {p}"),
-            Self::SmartAppControl => f.write_str(
-                "refused: Smart App Control is on and blocks a patched executable; the game \
-                 would not start until the revert (laa_patch)",
-            ),
         }
     }
 }
@@ -567,7 +561,6 @@ fn assess(
     v: &Variant,
     launch: &Result<LaunchPlan, LaunchProblem>,
     ac: &AntiCheatState,
-    sac: SacState,
 ) -> (Option<Refusal>, Vec<StepKind>) {
     let mut refused = None;
     let mut warned = Vec::new();
@@ -580,11 +573,8 @@ fn assess(
         };
         let why = match (r, k, s) {
             (AcRule::Refuse, ..) => Some(Refusal::AntiCheat(k)),
-            // P4-10: measured on the developer machine, Smart App Control blocks a patched
-            // executable while it enforces; the game would not start until the revert.
-            (_, _, TopoStep::LaaPatch(_)) if sac == SacState::Enforce => {
-                Some(Refusal::SmartAppControl)
-            }
+            // P4-13: Smart App Control no longer refuses `laa_patch`; the plan warns
+            // (`Warning::SmartAppControl`).
             (_, _, TopoStep::Cpu(_)) => launch.as_ref().err().map(|p| Refusal::Launch(*p)),
             _ => None,
         };
@@ -729,7 +719,7 @@ pub fn report<'t>(topo: &'t Topo, facts: &Facts<'_>) -> Result<Report<'t>, Engin
                 .variants
                 .iter()
                 .map(|variant| {
-                    let (refused, warned) = assess(variant, &launch, &ac, facts.profile.sac);
+                    let (refused, warned) = assess(variant, &launch, &ac);
                     VariantReport {
                         variant,
                         refused,
@@ -781,11 +771,19 @@ pub enum Warning {
         /// The issue.
         issue: String,
     },
-    /// `laa_patch` while Smart App Control is in evaluation or its state cannot be read (P4-10):
-    /// if Windows turns it on, it blocks the patched executable until the revert.
+    /// `laa_patch` while Smart App Control is not off (P4-13, which replaced the refusal of
+    /// P4-10): it decides per file whether the patched executable may run; if it blocks it, the
+    /// revert restores the original file bit for bit. Once per plan.
     SmartAppControl {
-        /// The state read (`Evaluation` or `Unknown`).
+        /// The state read (`Enforce`, `Evaluation` or `Unknown`).
         state: SacState,
+    },
+    /// `laa_patch` of an executable whose DOS stub carries a Valve header while Smart App
+    /// Control is not off (P4-13): Steam likely built it for this user, so the patched copy is
+    /// unknown to Smart App Control and likely to be blocked sooner or later.
+    SteamPerUserExe {
+        /// The executable.
+        exe: RelPath,
     },
     /// `laa_patch` of an executable with an Authenticode signature (P4-10): the patch makes the
     /// signature invalid.
@@ -899,7 +897,7 @@ pub fn plan(
             }),
             Tri::Yes => {}
         }
-        let (refused, warned) = assess(variant, &launch, &ac, facts.profile.sac);
+        let (refused, warned) = assess(variant, &launch, &ac);
         if let Some(why) = refused {
             return Err(EngineError::Refused {
                 issue: p.issue.clone(),
@@ -949,8 +947,9 @@ pub fn plan(
                 TopoStep::GpuPreference(g) => steps.push(Step::GpuPreference(g.clone())),
                 TopoStep::LaaPatch(l) => {
                     let spec = laa_step(topo, facts, l)?;
+                    // P4-13: warned, never refused (the user's decision of 2026-11-11).
                     let sac = facts.profile.sac;
-                    if matches!(sac, SacState::Evaluation | SacState::Unknown)
+                    if sac != SacState::Off
                         && !warnings
                             .iter()
                             .any(|w| matches!(w, Warning::SmartAppControl { .. }))
@@ -964,10 +963,17 @@ pub fn plan(
                     {
                         // The planner checks everything again; a refusal here is its refusal
                         // there.
-                        if prim::laa_patch::inspect(ctx.game, &spec.exe).is_ok_and(|f| f.signed) {
-                            warnings.push(Warning::SignedExe {
-                                exe: spec.exe.clone(),
-                            });
+                        if let Ok(f) = prim::laa_patch::inspect(ctx.game, &spec.exe) {
+                            if f.valve_stub && sac != SacState::Off {
+                                warnings.push(Warning::SteamPerUserExe {
+                                    exe: spec.exe.clone(),
+                                });
+                            }
+                            if f.signed {
+                                warnings.push(Warning::SignedExe {
+                                    exe: spec.exe.clone(),
+                                });
+                            }
                         }
                         steps.push(Step::LaaPatch(spec));
                     }

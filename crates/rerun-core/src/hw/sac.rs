@@ -1,11 +1,11 @@
 //! The state of Smart App Control (P4-10, `laa_patch`; user decision of 2026-11-10 after the
-//! [DEV] measurement): `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`
+//! [DEV] measurement, a warning instead of a refusal since P4-13): `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`
 //! `VerifiedAndReputablePolicyState` in the native view, read through the read-only
 //! [`Registry::get`] (ADR 0009). Microsoft documents the values 0 (off), 1 (on, enforcing) and 2
 //! (evaluation) ("Test App Signatures with Smart App Control"). The value is absent where Smart
 //! App Control does not exist (Windows 10, early Windows 11): off, also when the key is missing.
 //! Any other value or type, or another failed read, is [`SacState::Unknown`]. Display and a
-//! planning rule only, never authorisation.
+//! planning warning only, never authorisation.
 
 use crate::sys::registry::{Hive, RegKey, RegValue, RegView, Registry};
 

@@ -189,7 +189,7 @@ pub struct ArchEntry {
 User decision D8 of the phase 2 plan: the `gpu_preference` primitive and with it the per-game adapter, `gpu.hybrid` and `gpu.integrated` move from phase 2 to phase 4. "Phase 2" in "Adapters" above now reads "phase 4"; until then the conditions adapter stays `primary()`. The registry slot is reserved (ADR 0018), `docs/03b-gpu-display.md` is updated.
 
 ## Amendment P4-10 (2026-11-10): Smart App Control
-`SystemProfile::sac` (`hw::sac`): `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy` `VerifiedAndReputablePolicyState` (native view, `Registry::get`, read only): 0, absent or the key missing → off, 1 → enforcing, 2 → evaluation, anything else or a failed read → unknown. It is no `when` key; the Topo engine uses it for `laa_patch` only (ADR 0020 amendment P4-10).
+`SystemProfile::sac` (`hw::sac`): `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy` `VerifiedAndReputablePolicyState` (native view, `Registry::get`, read only): 0, absent or the key missing → off, 1 → enforcing, 2 → evaluation, anything else or a failed read → unknown. It is no `when` key; the Topo engine uses it for `laa_patch` only (ADR 0020 amendment P4-10; since amendment P4-13 for a warning, never a refusal).
 
 ## Amendment P4-11 (2026-11-10): `gpu.hybrid`, `gpu.integrated` and GPU conditions on every adapter
 User decisions E-G1 c and E-G2 d of the P4-11 plan. They replace "The conditions adapter is `primary()`" under "Adapters" and the `primary()` rows of "Facts"; the rejection of `EnumAdapterByGpuPreference` under "Alternatives" stands (no new FFI).

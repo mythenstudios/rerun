@@ -34,7 +34,8 @@ pub const FIREWALL_RULE_REVIEWED: bool = true;
 
 /// Whether a Topo outside a draft may hold a `laa_patch` step (P4-10). `true` since the step was
 /// reviewed, the Smart App Control behaviour decided (user decision A of 2026-11-10: refused while
-/// it enforces) and the [SB] case passed (CI run 42788275603, reverted bit for bit), the agreed
+/// it enforces; since P4-13, user decision of 2026-11-11: planned with a warning) and the [SB]
+/// case passed (CI run 42788275603, reverted bit for bit), the agreed
 /// condition. Setting it back to `false` makes the step draft only again (the signed index then
 /// holds none).
 pub const LAA_PATCH_REVIEWED: bool = true;

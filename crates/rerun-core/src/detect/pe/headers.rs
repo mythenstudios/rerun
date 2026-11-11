@@ -59,7 +59,14 @@ pub(super) struct Layout {
     pub opt: u64,
     /// `CheckSum` of the optional header.
     pub checksum: u32,
+    /// [`VLV_SIGNATURE`] at [`VLV_AT`], in the DOS stub (before the NT headers).
+    pub vlv: bool,
 }
+
+/// Where a Valve header starts: right after the 64-byte DOS header, in the DOS stub (P4-13).
+pub(super) const VLV_AT: usize = l::DOS_HEADER_SIZE;
+/// Its signature (P4-13): `"VLV"` and a NUL.
+pub(super) const VLV_SIGNATURE: &[u8; 4] = b"VLV\0";
 
 /// Outcome of `need`: the header buffer does not reach `end`.
 fn short(eof: bool, at: usize) -> PeError {
@@ -95,6 +102,12 @@ pub(super) fn parse(buf: &[u8], eof: bool, limits: &Limits) -> Result<Layout, Pe
             });
         }
     }
+
+    // P4-13: a Valve header in the DOS stub, only where the stub reaches past it (the NT
+    // headers start at `e`); the slice is bounded by `buf`, a short file has none.
+    let vlv = VLV_AT
+        .checked_add(VLV_SIGNATURE.len())
+        .is_some_and(|end| end <= e && buf.get(VLV_AT..end) == Some(VLV_SIGNATURE.as_slice()));
 
     let coff = e + 4;
     let need = |end: usize, at: usize| {
@@ -239,6 +252,7 @@ pub(super) fn parse(buf: &[u8], eof: bool, limits: &Limits) -> Result<Layout, Pe
         coff: off(coff),
         opt: off(opt),
         checksum,
+        vlv,
     })
 }
 
