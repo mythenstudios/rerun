@@ -1,0 +1,63 @@
+# DRAFT (P4-13): the game's executable is not hashed. On the dev PC the Binaries folder holds a replaced
+# BmLauncher.exe (next to BmLauncher_BackUP.exe) for the ZLUDA setup, and the draft tool names no single API
+# for BmStartApp.exe, so no pristine hash exists here. Hash it from an unmodified Steam copy.
+# The config folder (Documents\Square Enix\Batman Arkham Asylum GOTY) was seen on the dev PC; PhysXLevel
+# sits in BmEngine.ini [Engine.Engine] there.
+format: 1
+id: batman-arkham-asylum
+title: "Batman: Arkham Asylum GOTY"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 35140
+  exes:
+    - { path: "TODO", sha256: "TODO", api: d3d9 }
+
+user_data:
+  documents: "Square Enix\\Batman Arkham Asylum GOTY"
+
+issues:
+  - id: crash-leaving-morgue
+    title: "Crash when leaving the Morgue"
+    when: {}
+    variants:
+      - id: physx-off
+        status: unverified     # PCGW lists it without a source ("citation needed")
+        kind: fix
+        steps:
+          - ini_set:
+              file: "BmGame\\Config\\BmEngine.ini"
+              root: user_data
+              values:
+                - { section: "Engine.Engine", key: PhysXLevel, value: "0" }
+        tradeoffs: ["Turns off PhysX effects; changing settings in the game launcher rewrites this file"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Batman:_Arkham_Asylum#Game_crashes_when_leaving_the_Morgue" }
+  - id: scarecrow-framerate
+    title: "Extreme frame rate drop in the second Scarecrow level"
+    when: {}
+    variants:
+      - id: physx-low
+        status: unverified     # PCGW lists it without a source ("citation needed")
+        kind: fix
+        steps:
+          - ini_set:
+              file: "BmGame\\Config\\BmEngine.ini"
+              root: user_data
+              values:
+                - { section: "Engine.Engine", key: PhysXLevel, value: "1" }
+        tradeoffs: ["Lowers PhysX effects; changing settings in the game launcher rewrites this file"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Batman:_Arkham_Asylum#Extreme_framerate_drop_in_second_Scarecrow_level" }
+
+# Not taken:
+# - -nostartupmovies: PCGW advises against it in this game (breaks cutscene and combat audio).
+# - ZLUDA: the ZLUDA docs do not list this game as tested, so no tip is made.
+# - Advanced Launcher (repo of neatodev) replaces the game's launcher; needs a package.
+#   https://neatodev.github.io/AsylumLauncher
+# TODO launch: not needed for these ini steps.
+
+links:
+  pcgw: "Batman:_Arkham_Asylum"
