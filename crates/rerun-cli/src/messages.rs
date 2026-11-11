@@ -34,6 +34,11 @@ pub use profile::{ProfileMsg, ranges};
 pub use topo::TopoMsg;
 pub use txn::{At, OpRef, OpText, SteamWhy, StepText, TxnMsg, TxnText};
 
+/// The text of [`Message::TestKeyBuild`] (ADR 0024 amendment P4-13); `tests/support/mod.rs`
+/// and `scripts/dev-topo-roundtrip.ps1` hold copies, bound by tests.
+#[cfg(any(test, feature = "test-key"))]
+pub const TEST_KEY_BANNER: &str = "rerun: TEST-KEY BUILD - trusts the published index test key; index state in index-test; never for real use";
+
 /// A section heading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Heading {
@@ -424,6 +429,10 @@ pub enum Message<'a> {
     /// Not on Windows.
     #[cfg(not(windows))]
     WindowsOnly,
+    /// The first stderr line of a test-key `rerun.exe` (ADR 0024 amendment P4-13); written by
+    /// `main` only.
+    #[cfg(feature = "test-key")]
+    TestKeyBuild,
     /// A line of the phase 2 commands.
     Txn(TxnMsg<'a>),
     /// A line of the launch results in `rerun status` (P3-2).
@@ -872,6 +881,8 @@ impl fmt::Display for Message<'_> {
             }
             #[cfg(not(windows))]
             Self::WindowsOnly => f.write_str("rerun: runs on Windows only"),
+            #[cfg(feature = "test-key")]
+            Self::TestKeyBuild => f.write_str(TEST_KEY_BANNER),
             Self::Txn(m) => write!(f, "{m}"),
             Self::Launch(m) => write!(f, "{m}"),
             Self::Profile(m) => write!(f, "{m}"),

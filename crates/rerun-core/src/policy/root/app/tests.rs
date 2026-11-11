@@ -185,6 +185,29 @@ fn a1_sub_folders_are_opened_and_created_one_level() {
     );
 }
 
+/// ADR 0024 amendment P4-13: a test-key build keeps its index state in `index-test`, a release
+/// build in `index`; nothing else moves. The pure function is checked both ways (CI tests with
+/// `--all-features`), the folder this build creates against its own feature.
+#[test]
+fn a1_the_index_folder_is_index_test_only_in_a_test_key_build() {
+    use super::{INDEX_FOLDER, index_folder};
+    assert_eq!(index_folder(false), "index");
+    assert_eq!(index_folder(true), "index-test");
+    let want = if cfg!(feature = "test-key") {
+        "index-test"
+    } else {
+        "index"
+    };
+    assert_eq!(INDEX_FOLDER, want);
+    let sys = base().build().unwrap();
+    let app = AppDir::open(&sys, Create::IfMissing).unwrap().unwrap();
+    assert!(app.sub(AppSub::Index).unwrap().is_none());
+    app.sub_write(AppSub::Index, Create::IfMissing)
+        .unwrap()
+        .unwrap();
+    assert_eq!(names(&sys, &format!(r"{LAD}\Rerun")), [want]);
+}
+
 // ---------- A2: reparse points at Rerun and below ----------
 
 #[test]

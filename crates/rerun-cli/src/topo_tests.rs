@@ -384,3 +384,55 @@ fn c_te9_a_topo_with_a_user_data_folder() {
         r.stdout
     );
 }
+
+/// ADR 0024 amendment P4-13: with the published test key trusted (these tests always are), the
+/// index state lives in `<AppDir>\index-test` and never in `index`; a Topo plan is applied and
+/// reverted from there (`store::by_hash`), and the banner of a test-key `rerun.exe` comes from
+/// `main` only, never from the commands these tests run in-process.
+#[test]
+fn c_te10_test_key_index_state_is_index_test() {
+    let sys = sys();
+    let p = expect(
+        &sys,
+        &["plan", "220", "--pick", "cores/limit"],
+        Answer::No,
+        Exit::Report,
+    );
+    let a = expect(
+        &sys,
+        &["apply", &crate::tests::hash_of(&p), "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
+    let v = expect(
+        &sys,
+        &["revert", &crate::tests::txn_of(&a), "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
+    let s = expect(&sys, &["status"], Answer::No, Exit::Report);
+    assert!(
+        s.stdout
+            .starts_with("1 transaction: 0 not closed, 1 closed, 0 forgotten"),
+        "{}",
+        s.stdout
+    );
+    #[expect(clippy::disallowed_methods, reason = "test: look at the fake's folder")]
+    let d = rerun_core::sys::Fs::open_dir(sys.fake_fs(), Path::new(RERUN)).unwrap();
+    let names: Vec<String> = d
+        .read_dir(None)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "index-test"),
+        "{}",
+        names.join(", ")
+    );
+    assert!(!names.iter().any(|n| n == "index"), "{}", names.join(", "));
+    for r in [&p, &a, &v, &s] {
+        assert!(!r.stderr.contains("TEST-KEY"), "{}", r.stderr);
+        assert!(!r.stdout.contains("TEST-KEY"), "{}", r.stdout);
+    }
+}

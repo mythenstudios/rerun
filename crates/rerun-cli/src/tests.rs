@@ -2017,3 +2017,17 @@ fn c_u2_documents_only_when_a_step_needs_it() {
         r.stderr
     );
 }
+
+/// The banner of a test-key `rerun.exe` (ADR 0024 amendment P4-13) and its copy in the tests that
+/// run the built binary agree; with the feature, the message renders exactly that text.
+#[test]
+fn the_banner_copies_agree() {
+    let banner = crate::messages::TEST_KEY_BANNER;
+    let support = include_str!("../tests/support/mod.rs");
+    assert!(
+        support.contains(&format!("pub const BANNER: &str = \"{banner}\";")),
+        "tests/support/mod.rs lacks the banner"
+    );
+    #[cfg(feature = "test-key")]
+    assert_eq!(Message::TestKeyBuild.to_string(), banner);
+}

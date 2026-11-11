@@ -17,8 +17,9 @@
 //!    `<canonical LocalAppData>\Rerun` on the same volume (else [`RootError::Escaped`]).
 //!
 //! Below it, [`AppDir::sub`] and [`AppDir::sub_write`] open `journal`, `plans`,
-//! `packages`, `index` (ADR 0024), `elevate` (ADR 0023) and `cache` (ADR 0025), and `launch`
-//! read side only, the same way, one directory at a time;
+//! `packages`, `index` (ADR 0024; `index-test` in a build with the feature `test-key`,
+//! [`index_folder`]), `elevate` (ADR 0023) and `cache` (ADR 0025), and `launch` read side only,
+//! the same way, one directory at a time;
 //! [`AppDir::profiles`] opens `profiles` as a [`ProfilesDir`], the root of a plan's launch
 //! profile ops (P3-3), and checks that its final path is exactly `<AppDir>\profiles`.
 //!
@@ -58,7 +59,8 @@ pub(crate) enum AppSub {
     /// `launch`: the result files of `rerun-launch` (ADR 0022 amendment P3-2); read only
     /// here, the shim writes them.
     Launch,
-    /// `index`: the accepted signed indexes and the pointer to the current one (ADR 0024).
+    /// `index`: the accepted signed indexes and the pointer to the current one (ADR 0024);
+    /// `index-test` in a build that trusts the published test key ([`index_folder`]).
     Index,
     /// `elevate`: the request files of the elevated helper (ADR 0023 §4, P4-2d), written
     /// under the journal lock and never read back by the CLI.
@@ -73,6 +75,19 @@ pub(crate) enum AppSub {
 /// only `exec` may call that (`clippy.toml`; review F1 of P3-3a).
 const PROFILES: &str = "profiles";
 
+/// The index folder below [`AppDir`]: `index`, or `index-test` in a build that trusts the
+/// published test key (feature `test-key`), so a test-key index never raises the floor of the
+/// real `index\current.json` and a release build never reads an index the test key signed
+/// (ADR 0024 amendment P4-13, user decision E-A). Every other folder stays the same: `rerun-launch`
+/// reads the profiles of a test-key `rerun.exe` from the real `profiles`. The helper is given the
+/// folder by identity (ADR 0023 §4), never by this name.
+pub(crate) const fn index_folder(test_key: bool) -> &'static str {
+    if test_key { "index-test" } else { "index" }
+}
+
+/// [`index_folder`] of this build.
+pub(crate) const INDEX_FOLDER: &str = index_folder(cfg!(feature = "test-key"));
+
 impl AppSub {
     fn rel(self) -> RelPath {
         let name = match self {
@@ -80,7 +95,7 @@ impl AppSub {
             Self::Plans => "plans",
             Self::Packages => "packages",
             Self::Launch => "launch",
-            Self::Index => "index",
+            Self::Index => INDEX_FOLDER,
             Self::Elevate => "elevate",
             Self::Cache => "cache",
         };

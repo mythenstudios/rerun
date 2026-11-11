@@ -8,6 +8,8 @@
     reason = "test code: a failure should abort the test"
 )]
 
+mod support;
+
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 
@@ -20,7 +22,7 @@ fn rerun_system_on_this_machine() {
         .output()
         .unwrap();
     let stdout = String::from_utf8(out.stdout).unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
+    let stderr = support::without_banner(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
     assert!(stderr.is_empty(), "{stderr}");
     let headings: Vec<&str> = stdout

@@ -46,7 +46,12 @@ use crate::wire::hex32;
 pub(crate) const PF: &str = r"C:\Program Files";
 pub(crate) const HDIR: &str = r"C:\Program Files\Rerun";
 pub(crate) const HEXE: &str = r"C:\Program Files\Rerun\rerun-helper.exe";
-pub(crate) const INDEX: &str = r"C:\Users\Player\AppData\Local\Rerun\index";
+/// `index`, or `index-test` with the feature `test-key` (ADR 0024 amendment P4-13).
+pub(crate) const INDEX: &str = if cfg!(feature = "test-key") {
+    r"C:\Users\Player\AppData\Local\Rerun\index-test"
+} else {
+    r"C:\Users\Player\AppData\Local\Rerun\index"
+};
 pub(crate) const ELEVATE: &str = r"C:\Users\Player\AppData\Local\Rerun\elevate";
 /// The game's executable: a minimal x86 PE (the engine and `check_plan` parse it).
 pub(crate) fn game_exe() -> Vec<u8> {

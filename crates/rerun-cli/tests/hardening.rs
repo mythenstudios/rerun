@@ -16,6 +16,8 @@ use std::process::Command;
 #[path = "../../../tests/support/hardening.rs"]
 mod hardening;
 
+mod support;
+
 #[path = "../../../tests/support/test_key.rs"]
 mod test_key;
 
@@ -63,7 +65,8 @@ fn rerun_exe_runs_with_the_restricted_search_path() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    // A test-key build (`--all-features`) writes its banner first, any other build none.
+    let stderr = support::without_banner(&out.stderr);
     assert!(!stderr.contains("DLL search path"), "{stderr}");
 }
 
@@ -89,5 +92,48 @@ fn only_the_test_build_trusts_the_test_key() {
     assert!(
         !holds_test_key(&image),
         "the release rerun.exe holds the index test key"
+    );
+}
+
+/// Whether `image` holds `text` as ASCII or as UTF-16LE.
+fn holds_text(image: &[u8], text: &str) -> bool {
+    let ascii = text.as_bytes();
+    let wide: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let found = |needle: &[u8]| image.windows(needle.len()).any(|w| w == needle);
+    found(ascii) || found(&wide)
+}
+
+/// ADR 0024 amendment P4-13: the index state of a build that trusts the test key is
+/// `<AppDir>\index-test`. The test-profile binary trusts it (rerun-core/test-key through the
+/// dev-dependency), so it names that folder and the check bites; the release binary must name
+/// neither the folder nor the banner of a test-key build (`RERUN_RELEASE_CLI_EXE`, as above).
+#[test]
+fn only_the_test_build_names_the_test_index_folder() {
+    let image = std::fs::read(env!("CARGO_BIN_EXE_rerun")).unwrap();
+    assert!(
+        holds_text(&image, "index-test"),
+        "the test build should name index-test: the check would not bite"
+    );
+    assert_eq!(
+        holds_text(&image, "TEST-KEY BUILD"),
+        cfg!(feature = "test-key"),
+        "the banner is in a build with the feature test-key, and only there"
+    );
+    let Some(exe) = std::env::var_os("RERUN_RELEASE_CLI_EXE") else {
+        assert!(
+            !hardening::on_github_hosted_runner(),
+            "RERUN_RELEASE_CLI_EXE is not set on a GitHub-hosted runner (ci.yml)"
+        );
+        eprintln!("RERUN_RELEASE_CLI_EXE not set: release binary not checked");
+        return;
+    };
+    let image = std::fs::read(&exe).unwrap();
+    assert!(
+        !holds_text(&image, "index-test"),
+        "the release rerun.exe names the test-key index folder"
+    );
+    assert!(
+        !holds_text(&image, "TEST-KEY"),
+        "the release rerun.exe holds the test-key banner"
     );
 }

@@ -13,6 +13,14 @@ publish.workspace = true
 name = "rerun"
 path = "src/main.rs"
 
+[features]
+# The [DEV] test-key `rerun.exe` of the topo round trip (ADR 0024 amendment P4-13): trusts the
+# published index test key and keeps its index state in `<AppDir>\index-test`. Never default,
+# never shipped: `compile_error!` without debug assertions (here and in rerun-core), a banner on
+# stderr before every command, and CI checks that `-e normal,build` of rerun-cli with the default
+# features does not enable rerun-core/test-key.
+test-key = ["rerun-core/test-key"]
+
 [dependencies]
 rerun-core.workspace = true
 clap.workspace = true

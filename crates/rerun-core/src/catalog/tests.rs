@@ -15,7 +15,12 @@ use crate::policy::root::{AppDir, Create};
 use crate::sys::fake::FakeSystem;
 
 const LAD: &str = r"C:\Users\Player\AppData\Local";
-const INDEX_DIR: &str = r"C:\Users\Player\AppData\Local\Rerun\index";
+/// `index`, or `index-test` with the feature `test-key` (ADR 0024 amendment P4-13).
+const INDEX_DIR: &str = if cfg!(feature = "test-key") {
+    r"C:\Users\Player\AppData\Local\Rerun\index-test"
+} else {
+    r"C:\Users\Player\AppData\Local\Rerun\index"
+};
 
 fn id(s: &str) -> Id {
     Id::parse(s).unwrap()

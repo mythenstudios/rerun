@@ -10,6 +10,18 @@
 //!
 //! No console control handler: Ctrl+C during an apply or a revert ends the process like a
 //! crash, which the journal is built for; `rerun revert <txn>` finishes it (docs/04).
+//!
+//! The feature `test-key` (ADR 0024 amendment P4-13) makes the [DEV] test-key `rerun.exe`: it
+//! trusts the published index test key and keeps its index state in `<AppDir>\index-test`. Its
+//! `main` writes [`Message::TestKeyBuild`] to stderr before anything else a command writes;
+//! `run` never does, so the in-process tests see the same output with and without the feature.
+
+// The published index test key never reaches an optimised `rerun.exe` (ADR 0024).
+#[cfg(all(feature = "test-key", not(debug_assertions)))]
+compile_error!(
+    "the feature test-key (the published index test key) is for the [DEV] test-key rerun.exe \
+     only, never with debug assertions off (a release build); ADR 0024 amendment P4-13"
+);
 
 mod apply;
 mod cli;
@@ -51,6 +63,12 @@ fn main() -> ExitCode {
             error: escape::text(&e.to_string()),
         });
         return Exit::Fatal.into();
+    }
+    // The first line on stderr of every command of a test-key build, help and usage errors
+    // included (ADR 0024 amendment P4-13); a closed stderr changes nothing.
+    #[cfg(feature = "test-key")]
+    {
+        let _ = Out::new(io::stderr().lock()).line(&Message::TestKeyBuild);
     }
     let cli = match parse() {
         Ok(cli) => cli,

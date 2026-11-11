@@ -47,8 +47,8 @@ mod vstore;
 use std::fmt;
 use std::path::Path;
 
-pub(crate) use app::AppSub;
 pub use app::{AppDir, Create, ProfilesDir};
+pub(crate) use app::{AppSub, INDEX_FOLDER};
 pub use forbidden::{Forbidden, ForbiddenRoots, Protected};
 #[cfg(test)]
 pub(crate) use helper::check_test_key;

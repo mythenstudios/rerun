@@ -157,7 +157,7 @@ fn dev_helper_firewall_round_trip() {
     );
     let isha: [u8; 32] = Sha256::digest(index.as_bytes()).into();
     let hex = crate::wire::hex32::to_string(&isha);
-    let idir = lad.join(r"Rerun\index");
+    let idir = lad.join("Rerun").join(crate::policy::root::INDEX_FOLDER);
     std::fs::create_dir_all(&idir).unwrap();
     std::fs::write(idir.join(format!("{hex}.json")), index.as_bytes()).unwrap();
     std::fs::write(

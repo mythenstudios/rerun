@@ -1,4 +1,5 @@
-//! The accepted indexes under `<AppDir>\index` (ADR 0024):
+//! The accepted indexes under `<AppDir>\index` (ADR 0024; `<AppDir>\index-test` in a build with
+//! the feature `test-key`, ADR 0024 amendment P4-13):
 //!
 //! - `<sha256>.json` and `<sha256>.sig`: the bytes and the signature of every index accepted,
 //!   named by the SHA-256 of the bytes (64 lower-case hex digits). Kept: a transaction applied
@@ -24,7 +25,7 @@ use sha2::{Digest, Sha256};
 use super::{Catalog, IndexError, MAX_INDEX_BYTES, PublicKey, SIG_BYTES, key, verify};
 use crate::journal::InstanceTag;
 use crate::path::RelPath;
-use crate::policy::root::{AppDir, AppSub, Create, RootError};
+use crate::policy::root::{AppDir, AppSub, Create, INDEX_FOLDER, RootError};
 use crate::sys::fs::{Attrs, NewFile, TmpName};
 use crate::sys::{DirWrite, SysError, SysErrorKind};
 use crate::wire::hex32;
@@ -210,7 +211,7 @@ fn floor(
     dir: &dyn crate::sys::Dir,
     keys: &[PublicKey],
 ) -> Result<Option<Current>, StoreError> {
-    let at = || format!(r"{}\index\{CURRENT}", app.path());
+    let at = || format!(r"{}\{INDEX_FOLDER}\{CURRENT}", app.path());
     let c = match read_current(dir) {
         Ok(c) => c,
         Err(StoreError::Damaged(why)) => {

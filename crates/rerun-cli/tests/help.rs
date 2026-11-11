@@ -7,6 +7,8 @@
     reason = "test code: a failure should abort the test"
 )]
 
+mod support;
+
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Output};
 
@@ -106,7 +108,7 @@ fn usage_errors_exit_2_without_a_report() {
         let out = rerun(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
         assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
-        let stderr = String::from_utf8(out.stderr).unwrap();
+        let stderr = support::without_banner(&out.stderr);
         assert!(
             !stderr.contains('\u{1b}') && !stderr.contains('\u{202e}') && !stderr.contains('\u{7}'),
             "{args:?}: {stderr}"

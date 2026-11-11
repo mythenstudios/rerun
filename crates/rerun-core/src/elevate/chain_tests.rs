@@ -52,7 +52,12 @@ const HDIR: &str = r"C:\Program Files\Rerun";
 const HEXE: &str = r"C:\Program Files\Rerun\rerun-helper.exe";
 const APPDIR: &str = r"C:\Users\Player\AppData\Local\Rerun";
 const ELEVATE: &str = r"C:\Users\Player\AppData\Local\Rerun\elevate";
-const INDEX: &str = r"C:\Users\Player\AppData\Local\Rerun\index";
+/// `index`, or `index-test` with the feature `test-key` (ADR 0024 amendment P4-13).
+const INDEX: &str = if cfg!(feature = "test-key") {
+    r"C:\Users\Player\AppData\Local\Rerun\index-test"
+} else {
+    r"C:\Users\Player\AppData\Local\Rerun\index"
+};
 const GAME: &str = r"D:\Games\G";
 const EXE: &str = r"D:\Games\G\bin\game.exe";
 const GAME_BYTES: &[u8] = b"MZ invented game";
