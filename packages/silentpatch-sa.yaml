@@ -1,0 +1,22 @@
+# SilentPatch for GTA San Andreas by CookiePLMonster, build 34.1, pinned to the release tag 1.1-BUILD34.1-SA.
+# The release carries several zips (III, VC, SA, DDraw); only SilentPatchSA.zip is used. It is an ASI plugin and needs
+# an ASI loader. Chosen as the second, independent plugin of the "two plugins share the loader" case (P4-13b, E-F).
+# Per the bundled ReadMe, supported on the 1.0, Steam and Rockstar Games Launcher executables (some fixes 1.0 only);
+# the author lists no exe hashes, so supports_exe_sha1 stays empty.
+format: 1
+id: silentpatch-sa
+name: SilentPatch (GTA San Andreas)
+status: active
+tier: established
+source:
+  repo: "https://github.com/CookiePLMonster/SilentPatch"
+  release: "https://github.com/CookiePLMonster/SilentPatch/releases/download/1.1-BUILD34.1-SA/SilentPatchSA.zip"
+version: "1.1-BUILD34.1-SA"
+sha256: "0837BBDC0548A4A952F924ADEFD2BB6EACC866407F153844FE1F56995668C42C"
+license: "MIT"             # LICENSE file in the repository (checked 2026-11-11)
+arch: [x86]
+requires: [ultimate-asi-loader]
+slots: []
+files:
+  - { from: "SilentPatchSA.asi", to: "scripts/SilentPatchSA.asi", sha256: "908E1D12E36BA809A8CE584BE0BD29239349968259A5DE593F9B0CC71DBB352B" }
+  - { from: "SilentPatchSA.ini", to: "scripts/SilentPatchSA.ini", sha256: "3A2288600762070F14434E30BB8F6C0FFF25CE59962A630F629EA2B83D7E1FF4", config: true }
