@@ -153,8 +153,13 @@ fn the_repository_builds_reproducibly_and_releases_no_draft() {
             x.id
         );
     }
-    // Today every file of the repository is a draft.
-    assert_eq!(a.excluded.len(), t.len() + p.len(), "{:?}", a.excluded);
+    // Every file is either released (never a draft, above) or left out as a draft.
+    assert_eq!(
+        a.index.topos.len() + a.index.packages.len() + a.excluded.len(),
+        t.len() + p.len(),
+        "{:?}",
+        a.excluded
+    );
 }
 
 #[test]
