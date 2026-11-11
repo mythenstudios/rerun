@@ -14,9 +14,10 @@ match:
 
 # Launch observed on the dev PC (P4-13 S1, 2026-11-11): steam.exe starts AssassinsCreed_Game.exe (a D3D detector, no
 # Ubisoft Connect), which runs Detection\Detection.exe and then starts AssassinsCreed_Dx10.exe without a choice dialog.
-# Both fixes below were reproduced by hand on the dev PC (5950X, 32 logical processors, RX 9070 XT, Windows 11
+# Both problems below were reproduced by hand on the dev PC (5950X, 32 logical processors, RX 9070 XT, Windows 11
 # 26300, game unmodified) through rerun-launch (scripts/dev-launch-profile.ps1, profile direct on
-# AssassinsCreed_Game.exe); Rerun apply is not done yet, so both stay unverified. Detection.exe crashes in
+# AssassinsCreed_Game.exe); the fixes were then applied by Rerun and reverted in S1 and S2 (status per variant
+# below, docs/09). Detection.exe crashes in
 # systemtests_rd.tst on every start, also inside an 8-thread job; the game starts anyway, so that is not an issue.
 # fallback inproc stays: report_cores (phase 6) is the alternative if a job limit ever fails to reach Dx10.exe.
 launch:

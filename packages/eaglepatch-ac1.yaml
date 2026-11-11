@@ -4,9 +4,10 @@
 # game folder, EaglePatchAC1.asi + .ini into scripts/), nothing modified or
 # rehosted. If the author objects, the package is removed.
 # Everything else below is real: URL, hashes (computed ourselves), INI keys (from the INI shipped in the zip).
-# The README names loader v4.68; this package set pins ultimate-asi-loader 10.0.2 (no source says 4.68 is required; untested with AC1).
-# Accepted deviation from the README: loader 10.0.2 instead of 4.68, to be checked on [DEV] before the eaglepatch
-# variant can become verified.
+# The README names loader v4.68; this package set pins ultimate-asi-loader 10.0.2 (no source says 4.68 is required).
+# Accepted deviation from the README (docs/05: a dependency in a version we verified): loader 10.0.2 instead of 4.68,
+# verified on [DEV] in S2 on 2026-11-11: loader 10.0.2 with EaglePatchAC1 1.1 ran in AC1 (Steam, the Dx10 exe),
+# Smart App Control on and loading the DLLs (no CodeIntegrity event); topos/assassins-creed-dc.yaml, docs/09.
 # Tradeoffs for the Topo: removes DInput controller support (DisableXInputPatch=1 re-enables it); the in-game
 # controls layout has no effect (KeyboardLayout in the INI instead); removes telemetry.
 format: 1

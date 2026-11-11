@@ -67,7 +67,7 @@ Every variant links directly to its source: the specific Steam guide, the thread
 1. Original source found and documented.
 2. License permits use (Rerun hosts nothing, only links). A package without a license file is allowed only if all of these hold:
    - the author publishes the file openly as a release, and the package points at that original release URL (pinned version + SHA256);
-   - Rerun installs it unmodified and exactly as the author's own README/install instructions say, and rehosts nothing (the user's machine fetches it on the user's request);
+   - Rerun installs the plugin's files unchanged, at the place the author's own README/install instructions name; a dependency the instructions name (e.g. a loader) may come in another version than the one named there, but only in a version we verified with that plugin; Rerun rehosts nothing (the user's machine fetches it on the user's request);
    - the package states `license: "LicenseRef-NoLicense-UpstreamRelease"` (the schema accepts any SPDX-style word, so `LicenseRef-…` values pass) and a comment/`notes` names the author's install instructions (README section);
    - if the author objects, the package is removed.
 
