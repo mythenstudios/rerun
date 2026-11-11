@@ -1,5 +1,4 @@
-# DRAFT (P4-13): hashes are from an unmodified, never-started Steam copy. Per-user files and
-# registry keys the game writes on its first start do not exist on the dev machine yet.
+# DRAFT (P4-13): hashes are from an unmodified Steam copy, launch observed on its first start (S1).
 # testapp.exe in the folder is a helper, not the game, and is left out.
 format: 1
 id: tomb-raider-legend
@@ -17,7 +16,7 @@ match:
 launch:
   chain: [steam]
   method: direct
-  start: "TODO"                # Steam's launch entry not observed yet (likely trl.exe); never guessed
+  start: "trl.exe"             # observed on the dev PC (P4-13 S1, 2026-11-11): steam.exe starts trl.exe directly
 
 issues:
   - id: audio-crackle
