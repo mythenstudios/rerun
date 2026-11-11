@@ -1,21 +1,22 @@
-# DRAFT - determine version and hashes yourself when curating.
-# Separate builds per architecture -> assets instead of source.release + sha256.
+# Ultimate ASI Loader by ThirteenAG, pinned to the version tag v10.0.2 (never the rolling Win32-latest/x64-latest tags).
+# Separate builds per architecture -> assets instead of source.release + sha256. Each zip holds only dinput8.dll.
 # Shared by several ASI plugins: reference counting via `requires` of the other packages.
+# Not yet tested with any game (the EaglePatch README names the much older v4.68).
 format: 1
 id: ultimate-asi-loader
 name: Ultimate ASI Loader
-status: draft
+status: active
 tier: established
 source:
   repo: "https://github.com/ThirteenAG/Ultimate-ASI-Loader"
-version: "TODO"
+version: "10.0.2"
 assets:
-  - { arch: x86, url: "TODO", sha256: "TODO" }
-  - { arch: x64, url: "TODO", sha256: "TODO" }
-license: "TODO"
+  - { arch: x86, url: "https://github.com/ThirteenAG/Ultimate-ASI-Loader/releases/download/v10.0.2/Ultimate-ASI-Loader.zip", sha256: "A8F76A891F9BEEEF3B02BABF1062C128B00E0285FA17C227A45EC4F81F45116F" }
+  - { arch: x64, url: "https://github.com/ThirteenAG/Ultimate-ASI-Loader/releases/download/v10.0.2/Ultimate-ASI-Loader_x64.zip", sha256: "A99E188E1F40D7AAC9DB9C0339990332152D372E0359FAA06A52FA339E8B218F" }
+license: "MIT"             # LICENSE file in the repository (checked 2026-11-11)
 arch: [x86, x64]
 slots: [dinput8.dll]       # default proxy; other names possible depending on the game
 # Each asset is its own build: the same name with another hash per architecture (ADR 0025).
 files:
-  - { from: "dinput8.dll", to: "dinput8.dll", sha256: "TODO", arch: [x86] }
-  - { from: "dinput8.dll", to: "dinput8.dll", sha256: "TODO", arch: [x64] }
+  - { from: "dinput8.dll", to: "dinput8.dll", sha256: "63B465DBC1BF9C5AB4E33C3CCAD099D9EDB702F2C51587AC8D4F196497396437", arch: [x86] }
+  - { from: "dinput8.dll", to: "dinput8.dll", sha256: "FA2B9BD317BB597906BC2C4CC2008C1444E50BFDC367E648D18F36F015812E27", arch: [x64] }
