@@ -1,0 +1,39 @@
+# DRAFT (P4-13): not installed on the dev PC, so no executable path or hash (never invented).
+# The Steam copy of the 2002 game is a Direct3D 8 title; DXVK handles d3d8 from 2.4 on, but no DXVK package is
+# released yet (packages/dxvk.yaml is a draft), so the variant stays a draft too.
+format: 1
+id: mafia
+title: "Mafia"
+status: draft
+rev: 1
+tested_on: [x64]
+
+match:
+  steam_appid: 40990
+  exes:
+    - { path: "TODO", sha256: "TODO", api: d3d8 }
+
+issues:
+  - id: flickering-shadows
+    title: "Flickering shadows and blood stains"
+    when: {}
+    variants:
+      - id: dxvk
+        status: unverified     # PCGW "citation needed" (one user check); a further GOG forum post names a Direct3D 8 to 9 layer, not DXVK
+        kind: fix
+        steps:
+          - package: dxvk
+        tradeoffs: ["Needs a Vulkan-capable GPU"]
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Mafia#Flickering_shadows%2Fblood_stains" }
+
+# Not taken:
+# - Mafia Fusion Fix (repo of ThirteenAG, PCGW's main answer for flicker, registry and fullscreen): needs
+#   Ultimate ASI Loader and its own release; no package yet.
+#   https://thirteenag.github.io/wfp#mafia
+# - d3d8to9 (repo of crosire) and dgVoodoo 2: possible alternatives, no package yet.
+# - The official 1.2 patch lives on a PCGW file host: not an allowed source.
+# - Game.exe and the Setup launcher: path of the main executable not read from a local copy.
+
+links:
+  pcgw: "Mafia"
