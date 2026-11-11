@@ -1,5 +1,4 @@
-# DRAFT (P4-13): hashes are from an unmodified, never-started Steam copy. Per-user files and
-# registry keys the game writes on its first start do not exist on the dev machine yet.
+# DRAFT (P4-13): hashes are from an unmodified Steam copy, launch observed on its first start (S1).
 format: 1
 id: tomb-raider-underworld
 title: "Tomb Raider: Underworld"
@@ -17,7 +16,7 @@ match:
 launch:
   chain: [steam]
   method: direct
-  start: "TODO"                # Steam's launch entry not observed yet (likely tru.exe); never guessed
+  start: "tru.exe"             # observed on the dev PC (P4-13 S1, 2026-11-11): steam.exe starts tru.exe directly
 
 issues:
   - id: crash-many-threads
@@ -26,7 +25,7 @@ issues:
       cpu.threads: { gt: 31 }
     variants:
       - id: limit-threads
-        status: unverified     # one Steam thread plus PCGW; to reproduce on the 32-thread dev PC
+        status: unverified     # one Steam thread plus PCGW; crash reproduced without Rerun on the 32-thread dev PC (S1: tru.exe ends after 4.3 s); the variant is not tested yet
         kind: fix
         steps:
           - cpu: { max_threads: 31, mode: hard }
