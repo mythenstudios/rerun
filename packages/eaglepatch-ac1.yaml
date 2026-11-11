@@ -1,4 +1,9 @@
-# DRAFT - add version, hash, license and INI keys when curating.
+# EaglePatchAC1 1.1 by Sergeanur (release v1.1, 2025-12-02). STAYS DRAFT: the repository has no license file and GitHub
+# reports none, so the license is unknown (docs/05 "Review on inclusion" 2; plan P4-13 E-D: ask the author for a license).
+# Everything else below is real: URL, hashes (computed ourselves), INI keys (from the INI shipped in the zip).
+# The README names loader v4.68; this package set pins ultimate-asi-loader 10.0.2 (untested with AC1).
+# Tradeoffs for the Topo: removes DInput controller support (DisableXInputPatch=1 re-enables it); the in-game
+# controls layout has no effect (KeyboardLayout in the INI instead); removes telemetry.
 format: 1
 id: eaglepatch-ac1
 name: EaglePatchAC1
@@ -6,9 +11,9 @@ status: draft
 tier: established
 source:
   repo: "https://github.com/Sergeanur/EaglePatch"
-  release: "TODO"
-version: "TODO"
-sha256: "TODO"
+  release: "https://github.com/Sergeanur/EaglePatch/releases/download/v1.1/EaglePatchAC1.zip"
+version: "1.1"
+sha256: "6DC496AC6B298B92FB70C3F90A34E323F77AC88E6EA97544F84E52435038AEEA"
 license: "TODO"
 arch: [x86]
 requires: [ultimate-asi-loader]
@@ -17,11 +22,10 @@ supports_exe_sha1:
   - "A9EA476E70F076709CCA59A802E26EC894432120"   # AssassinsCreed_Dx9.exe (GOG/Steam)
   - "601475FD5EFA02BBAE80D1C06DFA25A0A1E7FD2F"   # AssassinsCreed_Dx10.exe (GOG/Steam)
 files:
-  - { from: "EaglePatchAC1.asi", to: "scripts/EaglePatchAC1.asi", sha256: "TODO" }
-  - { from: "EaglePatchAC1.ini", to: "scripts/EaglePatchAC1.ini", sha256: "TODO", config: true }
+  - { from: "EaglePatchAC1.asi", to: "scripts/EaglePatchAC1.asi", sha256: "1C58D3540D2C562D8DA0AE12FEAB0564E84F5BE4AD8D6DE70D84990B2D033E48" }
+  - { from: "EaglePatchAC1.ini", to: "scripts/EaglePatchAC1.ini", sha256: "DC4D4C2E275D3AE9DBA16907098E9D969939E5FF294CE23FCFE6B501FC72FFA0", config: true }
 options:
-  ps3_controls:    { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: false }
-  skip_intros:     { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: false }
-  keyboard_layout: { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: "TODO" }
-  shadows_4096:    { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: true, kind: enhancement }
-  draw_distance:   { ini: { file: "scripts/EaglePatchAC1.ini", section: "TODO", key: "TODO" }, default: true, kind: enhancement }
+  ps3_controls:            { ini: { file: "scripts/EaglePatchAC1.ini", section: "EaglePatchAC1", key: "PS3Controls" }, default: 0 }
+  skip_intros:             { ini: { file: "scripts/EaglePatchAC1.ini", section: "EaglePatchAC1", key: "SkipIntroVideos" }, default: 0 }
+  keyboard_layout:         { ini: { file: "scripts/EaglePatchAC1.ini", section: "EaglePatchAC1", key: "KeyboardLayout" }, default: 0 }
+  directinput_controllers: { ini: { file: "scripts/EaglePatchAC1.ini", section: "EaglePatchAC1", key: "DisableXInputPatch" }, default: 0 }
