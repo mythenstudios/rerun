@@ -3,7 +3,9 @@
 # License: no license file; the General Readme (section 1, "Redistribution rights") allows shipping individual
 # unmodified files with a game or mod, requires the original, unmodified .zip for any standalone redistribution, and
 # forbids bundling dgVoodoo inside launchers or frameworks for general use across applications. Rerun hosts nothing and
-# downloads the original zip from the author's release, but the last point is open for the maintainer.
+# downloads the original zip from the author's release. Maintainer decision 2026-11-11 (docs/05 "Review on inclusion" 2):
+# Rerun bundles nothing, so the bundling clause does not apply; the user's machine fetches the author's original zip.
+# If the author objects, the package is removed.
 # The author re-uploaded the 2.87.6 zip on 2026-10-26 under the same tag: a pinned hash fails closed if that happens again.
 # Only the x86 DirectX wrappers and the text config are unpacked, never dgVoodooCpl.exe (the control panel). The x64
 # build has D3D9 only and is not used (this package is for 32-bit games). Slot mapping follows the archive layout:

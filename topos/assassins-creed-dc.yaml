@@ -26,11 +26,25 @@ launch:
   fallback: inproc
 
 issues:
-  # Issue "controller" (modern controllers not detected, no hotplug) waits until P4-13b (decision L-1):
-  # - steam-input (steam_input: enable): no source yet, and a variant needs one.
-  # - eaglepatch (reported, package eaglepatch-ac1, needs ultimate-asi-loader): both packages are still drafts.
-  #   tradeoffs: old DInput controllers no longer supported; in-game control layout has no effect (configure in the INI)
-  #   source: https://github.com/Sergeanur/EaglePatch
+  # steam-input variant (steam_input: enable) waits: no source yet, and a variant needs one.
+  - id: controller
+    title: "Modern controllers are not detected and there is no hotplug"
+    when: {}
+    variants:
+      - id: eaglepatch
+        status: unverified      # single source (the author's README), not tested by us
+        kind: fix
+        # Loader: ultimate-asi-loader stays at 10.0.2; the README names v4.68 but no source says the patch needs it.
+        # Untested idea, NOT a claim: the README lists "Removed telemetry", which might also bear on the Ubisoft
+        # intro crash (issue online-services); check this when the variant is tested.
+        steps:
+          - { package: ultimate-asi-loader }
+          - { package: eaglepatch-ac1 }
+        tradeoffs:
+          - "Removes DInput controller support (the INI key DisableXInputPatch=1 re-enables it)"
+          - "The in-game controls layout has no effect; set KeyboardLayout in the INI instead"
+        sources:
+          - { type: repo, url: "https://github.com/Sergeanur/EaglePatch" }
 
   - id: crash-many-threads
     title: "Game crashes about 2 s after start on a PC with more than 8 logical processors"
