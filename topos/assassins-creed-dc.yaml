@@ -82,7 +82,12 @@ issues:
 
 tips:
   launch_options: []
-  notes: []
+  notes:
+    # Manual workarounds for experienced users; Rerun does not apply them (system-wide or a changed exe).
+    - text: "Manual, not done by Rerun: the game can be stopped from contacting the shut-down Ubisoft server by overwriting the host name gconnect.ubi.com in AssassinsCreed_Dx9.exe or AssassinsCreed_Dx10.exe with zero bytes in a hex editor. Keep a copy of the original exe: a changed exe no longer matches EaglePatch's supported builds or this Topo, and Smart App Control may block it. Steam's 'Verify integrity of game files' restores the original."
+      source: { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed#Game_regularly_freezes_for_a_few_seconds" }
+    # TODO note: hosts entries for gconnect.ubi.com and uts.ubi.com (system-wide, admin) are reported in the GOG forum
+    # (https://www.gog.com/forum/assassins_creed_directors_cut/ac_hangs); the source types have no forum type yet.
 
 links:
   pcgw: "Assassin's_Creed"
