@@ -55,8 +55,6 @@ pub enum Job {
 pub enum Event {
     /// A guard stopped the job; nothing was read.
     Blocked(BlockedVm),
-    /// The library scan started: Steam found or not.
-    Steam(SteamVm),
     /// One game of the library.
     Row(RowVm),
     /// The library scan is done.
@@ -173,7 +171,9 @@ pub fn run(env: Env<'_>, job: &Job, lang: Lang, emit: &mut dyn FnMut(Event)) {
             let page = match g.app() {
                 None => vm::applied(None, lang),
                 Some(app) => {
-                    let s = flow::status(g.env().sys, app);
+                    // The journal only (review of P5-3): the orphaned firewall rules are read
+                    // when the applied page shows them (P5-6).
+                    let s = rerun_core::exec::status(app);
                     vm::applied(Some(s.as_ref()), lang)
                 }
             };
@@ -220,7 +220,6 @@ fn library(g: &Guarded<'_>, lang: Lang, emit: &mut dyn FnMut(Event)) {
             LibraryEvent::Steam(s) => {
                 steam_vm = vm::steam(s);
                 problems.extend(steam_vm.problems.iter().cloned());
-                emit(Event::Steam(steam_vm.clone()));
             }
             LibraryEvent::Library { .. } => {}
             LibraryEvent::Row { app, scan } => {

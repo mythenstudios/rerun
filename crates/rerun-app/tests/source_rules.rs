@@ -9,7 +9,12 @@
 //!   `flow::forbidden_roots`/`flow::open_app` (the CLI's elevated read commands, E3) nor
 //!   `ForbiddenRoots::resolve`/`AppDir::open`;
 //! - no colour literal in a `.slint` file (every colour comes from the global `Theme`), no
-//!   Slint translation (`@tr`).
+//!   Slint translation (`@tr`);
+//! - no URL or markup path (security review S2 of P5-3): Slint links `open-url`, `Platform`,
+//!   `StyledText` and `@markdown`, and none of them is named in a `.slint` file; `StyledText` is
+//!   not named in Rust either;
+//! - the three window buttons stay the last elements of the title bar, minimise, maximise,
+//!   close (`ui::chrome` hit-tests the second from the right).
 
 #![allow(
     clippy::disallowed_methods,
@@ -108,6 +113,9 @@ fn violations(src: &str, place: Place) -> Vec<String> {
         if has_debug_format(c) {
             hit("Debug format");
         }
+        if has_word(c, "StyledText") {
+            hit("StyledText");
+        }
     }
     bad
 }
@@ -131,6 +139,11 @@ fn slint_violations(src: &str) -> Vec<String> {
         }
         if c.contains("@tr(") {
             bad.push(format!("{}: Slint translation: {}", n + 1, line.trim()));
+        }
+        for p in ["open-url", "Platform.", "StyledText", "@markdown"] {
+            if c.contains(p) {
+                bad.push(format!("{}: {p}: {}", n + 1, line.trim()));
+            }
         }
     }
     bad
@@ -192,6 +205,53 @@ fn the_product_sources_keep_the_rules() {
     assert!(bad.is_empty(), "{bad:#?}");
 }
 
+/// The labels of the window buttons in the order they appear in `src`.
+fn caption_order(src: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let mut in_button = false;
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with("CaptionButton {") {
+            in_button = true;
+        } else if in_button {
+            for (label, name) in [
+                ("label: Str.minimize;", "minimize"),
+                (
+                    "label: root.maximized ? Str.restore : Str.maximize;",
+                    "maximize",
+                ),
+                ("label: Str.close;", "close"),
+            ] {
+                if t == label {
+                    out.push(name);
+                    in_button = false;
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_caption_buttons_keep_their_order() {
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/app.slint"))
+        .unwrap();
+    assert_eq!(caption_order(&src), ["minimize", "maximize", "close"]);
+    // Nothing follows the close button in the title bar but its closing braces and the
+    // hairline below the bar.
+    let after = &src[src.find("label: Str.close;").unwrap()..];
+    let next = after.find("Hairline {").unwrap();
+    let elements: Vec<&str> = after[..next]
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.ends_with('{') && *l != "activated => {")
+        .collect();
+    assert!(elements.is_empty(), "{elements:?}");
+    // Teeth: a swapped order is found.
+    let swapped = "CaptionButton {\nlabel: Str.close;\n}\nCaptionButton {\nlabel: Str.minimize;\n}";
+    assert_eq!(caption_order(swapped), ["close", "minimize"]);
+}
+
 #[test]
 fn the_rules_have_teeth() {
     let other = |s: &str| !violations(s, Place::Other).is_empty();
@@ -210,9 +270,11 @@ fn the_rules_have_teeth() {
         "    let g = flow::guard_read(env);",
         r#"    format!("{x:?}")"#,
         "    dbg!(x);",
+        "    let t = slint::StyledText::default();",
     ] {
         assert!(other(bad), "{bad}");
     }
+    assert!(!violations("    StyledText::from(x)", Place::Ui).is_empty());
     // The same in ui: Slint is fine there, the rest is not; chrome may hold unsafe.
     assert!(violations("use slint::Model;", Place::Ui).is_empty());
     assert!(!violations("    unsafe { f() };", Place::Ui).is_empty());
@@ -234,6 +296,10 @@ fn the_rules_have_teeth() {
         "    color: #fff;",
         "    color: rgb(1, 2, 3);",
         "    text: @tr(\"Library\");",
+        "        Platform.open-url(url);",
+        "    open-url(\"https://example.com\");",
+        "    in property <StyledText> body;",
+        "    text: @markdown(\"**x**\");",
     ] {
         assert!(!slint_violations(bad).is_empty(), "{bad}");
     }

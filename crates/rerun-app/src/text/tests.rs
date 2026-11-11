@@ -4,8 +4,8 @@
 
 use super::{Lang, Msg, Sym, t};
 
-/// Every message once (count messages with 1 and with 3, where the plural differs).
-/// [`exhaustive`] fails to compile when a variant is added and not listed there.
+/// Every message once (count messages with 1 and with 3, where the plural differs); checked
+/// against [`ordinal`] by [`every_ordinal_is_listed`].
 fn every() -> Vec<Msg> {
     use Msg::*;
     vec![
@@ -229,191 +229,194 @@ fn every() -> Vec<Msg> {
     ]
 }
 
-/// Compile-time completeness: a new variant must be added here and to [`every`].
-#[allow(dead_code, reason = "only compiled, never called")]
-fn exhaustive(m: Msg) {
+/// The number of messages: one more than the highest [`ordinal`].
+const COUNT: usize = 180;
+
+/// A message's position in the enum. The `match` is exhaustive: a new variant does not compile
+/// without an ordinal here, and [`every_ordinal_is_listed`] fails until [`every`] lists it.
+fn ordinal(m: Msg) -> usize {
     use Msg::*;
     match m {
-        AppName
-        | ByMythen
-        | Minimize
-        | Maximize
-        | Restore
-        | Close
-        | NavLabel
-        | NavLibrary
-        | NavApplied
-        | NavHistory
-        | NavSystem
-        | NavSettings
-        | StatusNoBackground
-        | StatusIndex { .. }
-        | StatusIndexNone
-        | StatusIndexRefused
-        | StatusSignatureChecked
-        | StatusSignatureNone
-        | StatusReading
-        | TestKeyBuild
-        | ElevatedTitle
-        | ElevatedBody
-        | ElevatedHow
-        | GuardTitle
-        | GuardBody
-        | Detail
-        | FirstRunTitle
-        | FirstRun1Lead
-        | FirstRun1
-        | FirstRun2Lead
-        | FirstRun2
-        | FirstRun3Lead
-        | FirstRun3
-        | FirstRunDismiss
-        | LibraryTitle
-        | LibraryReading
-        | LibrarySummary { .. }
-        | SearchLabel
-        | SearchPlaceholder
-        | GroupByStatus
-        | ViewLabel
-        | ViewList
-        | GroupTopo
-        | GroupNoTopo
-        | GroupNotReady
-        | GroupAll
-        | NoSearchMatch
-        | Rescan
-        | GameListLabel { .. }
-        | BadgeTopo
-        | BadgeNoTopo
-        | BadgeNoIndex
-        | BadgeUpdating
-        | BadgeNotInstalled
-        | BadgeNotRead
-        | RowNoMainExe
-        | RowSeveralExes
-        | RowUpdating
-        | RowNotInstalled
-        | RowNotOpened
-        | RowApiUnknown
-        | NoSteamTitle
-        | NoSteamBody
-        | NoGamesTitle
-        | NoGamesBody
-        | ScanProblemsTitle { .. }
-        | ScanProblemsBody
-        | ShowProblems
-        | HideProblems
-        | IndexNoneTitle
-        | IndexNoneBody
-        | IndexNoKeysTitle
-        | IndexNoKeysBody
-        | IndexRefusedTitle
-        | IndexRefusedBody
-        | BackToLibrary
-        | GameEyebrow
-        | GameReading
-        | UnnamedGame { .. }
-        | HeroNoIndex
-        | HeroNoTopo
-        | HeroNoMatch
-        | HeroNoMatchSub
-        | HeroRetired
-        | HeroSeveral
-        | HeroAffects { .. }
-        | HeroMayOccur { .. }
-        | HeroNothingHere
-        | HeroNoFixHere
-        | HeroReadOnly
-        | HeroUpdating
-        | HeroNotInstalled
-        | HeroNoSteam
-        | HeroNotListed
-        | HeroTwice
-        | HeroFolder
-        | HeroIndexRefused
-        | HeroEngine
-        | FactsLabel
-        | FactSteamApp
-        | FactProgram
-        | FactGraphics
-        | FactTopo
-        | TopoRevision { .. }
-        | TopoActive
-        | TopoNeedsRetest
-        | TopoRetired
-        | TopoDraft
-        | NoteAntiCheat
-        | NoteAntiCheatUnreadable
-        | NoteAntiCheatReleased
-        | NoteSeveralGpus
-        | NoteNeedsRetest
-        | ProblemsTitle
-        | WhenYes
-        | WhenUnknown
-        | WhenNo
-        | ProblemFixes
-        | ProblemNoFix
-        | FixesTitle
-        | FixesIntro
-        | KindFix
-        | KindEnhancement
-        | StatusVerified
-        | StatusReported
-        | StatusUnverified
-        | FixSolves
-        | FixOffered
-        | FixNotOffered
-        | FixRefusedAntiCheat
-        | FixRefusedLaunch
-        | FixWarned
-        | FixesReadOnly
-        | AppliedTitle
-        | AppliedIntro
-        | AppliedEmpty
-        | AppliedEmptySub
-        | AppliedSome { .. }
-        | AppliedSomeSub
-        | AppliedUnreadable
-        | HistoryTitle
-        | HistoryIntro
-        | HistoryLater
-        | SystemTitle
-        | SystemIntro
-        | SystemReading
-        | SysGraphics
-        | SysProcessor
-        | SysWindows
-        | SysSac
-        | SysSteam
-        | SysVram { .. }
-        | SysIntegrated
-        | SysNoAdapter
-        | SysUnreadable
-        | SysCpu { .. }
-        | SysBuild { .. }
-        | SysBuildUbr { .. }
-        | SacOff
-        | SacOn
-        | SacEvaluation
-        | SacUnknown
-        | SteamFound { .. }
-        | SteamNotFound
-        | SettingsTitle
-        | SettingsIntro
-        | SettingsSafety
-        | SetPreview
-        | SetPreviewDesc
-        | SetSources
-        | SetSourcesDesc
-        | AlwaysOn
-        | SettingsLook
-        | SetTheme
-        | ThemeMythen
-        | SetLanguage
-        | LanguageName
-        | SettingsAbout
-        | AboutVersion
-        | AboutLicence => {}
+        AppName => 0,
+        ByMythen => 1,
+        Minimize => 2,
+        Maximize => 3,
+        Restore => 4,
+        Close => 5,
+        NavLabel => 6,
+        NavLibrary => 7,
+        NavApplied => 8,
+        NavHistory => 9,
+        NavSystem => 10,
+        NavSettings => 11,
+        StatusNoBackground => 12,
+        StatusIndex { .. } => 13,
+        StatusIndexNone => 14,
+        StatusIndexRefused => 15,
+        StatusSignatureChecked => 16,
+        StatusSignatureNone => 17,
+        StatusReading => 18,
+        TestKeyBuild => 19,
+        ElevatedTitle => 20,
+        ElevatedBody => 21,
+        ElevatedHow => 22,
+        GuardTitle => 23,
+        GuardBody => 24,
+        Detail => 25,
+        FirstRunTitle => 26,
+        FirstRun1Lead => 27,
+        FirstRun1 => 28,
+        FirstRun2Lead => 29,
+        FirstRun2 => 30,
+        FirstRun3Lead => 31,
+        FirstRun3 => 32,
+        FirstRunDismiss => 33,
+        LibraryTitle => 34,
+        LibraryReading => 35,
+        LibrarySummary { .. } => 36,
+        SearchLabel => 37,
+        SearchPlaceholder => 38,
+        GroupByStatus => 39,
+        ViewLabel => 40,
+        ViewList => 41,
+        GroupTopo => 42,
+        GroupNoTopo => 43,
+        GroupNotReady => 44,
+        GroupAll => 45,
+        NoSearchMatch => 46,
+        Rescan => 47,
+        GameListLabel { .. } => 48,
+        BadgeTopo => 49,
+        BadgeNoTopo => 50,
+        BadgeNoIndex => 51,
+        BadgeUpdating => 52,
+        BadgeNotInstalled => 53,
+        BadgeNotRead => 54,
+        RowNoMainExe => 55,
+        RowSeveralExes => 56,
+        RowUpdating => 57,
+        RowNotInstalled => 58,
+        RowNotOpened => 59,
+        RowApiUnknown => 60,
+        NoSteamTitle => 61,
+        NoSteamBody => 62,
+        NoGamesTitle => 63,
+        NoGamesBody => 64,
+        ScanProblemsTitle { .. } => 65,
+        ScanProblemsBody => 66,
+        ShowProblems => 67,
+        HideProblems => 68,
+        IndexNoneTitle => 69,
+        IndexNoneBody => 70,
+        IndexNoKeysTitle => 71,
+        IndexNoKeysBody => 72,
+        IndexRefusedTitle => 73,
+        IndexRefusedBody => 74,
+        BackToLibrary => 75,
+        GameEyebrow => 76,
+        GameReading => 77,
+        UnnamedGame { .. } => 78,
+        HeroNoIndex => 79,
+        HeroNoTopo => 80,
+        HeroNoMatch => 81,
+        HeroNoMatchSub => 82,
+        HeroRetired => 83,
+        HeroSeveral => 84,
+        HeroAffects { .. } => 85,
+        HeroMayOccur { .. } => 86,
+        HeroNothingHere => 87,
+        HeroNoFixHere => 88,
+        HeroReadOnly => 89,
+        HeroUpdating => 90,
+        HeroNotInstalled => 91,
+        HeroNoSteam => 92,
+        HeroNotListed => 93,
+        HeroTwice => 94,
+        HeroFolder => 95,
+        HeroIndexRefused => 96,
+        HeroEngine => 97,
+        FactsLabel => 98,
+        FactSteamApp => 99,
+        FactProgram => 100,
+        FactGraphics => 101,
+        FactTopo => 102,
+        TopoRevision { .. } => 103,
+        TopoActive => 104,
+        TopoNeedsRetest => 105,
+        TopoRetired => 106,
+        TopoDraft => 107,
+        NoteAntiCheat => 108,
+        NoteAntiCheatUnreadable => 109,
+        NoteAntiCheatReleased => 110,
+        NoteSeveralGpus => 111,
+        NoteNeedsRetest => 112,
+        ProblemsTitle => 113,
+        WhenYes => 114,
+        WhenUnknown => 115,
+        WhenNo => 116,
+        ProblemFixes => 117,
+        ProblemNoFix => 118,
+        FixesTitle => 119,
+        FixesIntro => 120,
+        KindFix => 121,
+        KindEnhancement => 122,
+        StatusVerified => 123,
+        StatusReported => 124,
+        StatusUnverified => 125,
+        FixSolves => 126,
+        FixOffered => 127,
+        FixNotOffered => 128,
+        FixRefusedAntiCheat => 129,
+        FixRefusedLaunch => 130,
+        FixWarned => 131,
+        FixesReadOnly => 132,
+        AppliedTitle => 133,
+        AppliedIntro => 134,
+        AppliedEmpty => 135,
+        AppliedEmptySub => 136,
+        AppliedSome { .. } => 137,
+        AppliedSomeSub => 138,
+        AppliedUnreadable => 139,
+        HistoryTitle => 140,
+        HistoryIntro => 141,
+        HistoryLater => 142,
+        SystemTitle => 143,
+        SystemIntro => 144,
+        SystemReading => 145,
+        SysGraphics => 146,
+        SysProcessor => 147,
+        SysWindows => 148,
+        SysSac => 149,
+        SysSteam => 150,
+        SysVram { .. } => 151,
+        SysIntegrated => 152,
+        SysNoAdapter => 153,
+        SysUnreadable => 154,
+        SysCpu { .. } => 155,
+        SysBuild { .. } => 156,
+        SysBuildUbr { .. } => 157,
+        SacOff => 158,
+        SacOn => 159,
+        SacEvaluation => 160,
+        SacUnknown => 161,
+        SteamFound { .. } => 162,
+        SteamNotFound => 163,
+        SettingsTitle => 164,
+        SettingsIntro => 165,
+        SettingsSafety => 166,
+        SetPreview => 167,
+        SetPreviewDesc => 168,
+        SetSources => 169,
+        SetSourcesDesc => 170,
+        AlwaysOn => 171,
+        SettingsLook => 172,
+        SetTheme => 173,
+        ThemeMythen => 174,
+        SetLanguage => 175,
+        LanguageName => 176,
+        SettingsAbout => 177,
+        AboutVersion => 178,
+        AboutLicence => 179,
     }
 }
 
@@ -438,6 +441,18 @@ fn numbers(s: &str) -> Vec<String> {
 /// Whether `s` has `word` as a whole word.
 fn has_word(s: &str, word: &str) -> bool {
     s.split(|c: char| !c.is_alphabetic()).any(|w| w == word)
+}
+
+#[test]
+fn every_ordinal_is_listed() {
+    let mut seen = [false; COUNT];
+    for m in every() {
+        seen[ordinal(m)] = true;
+    }
+    let missing: Vec<usize> = (0..COUNT).filter(|i| !seen[*i]).collect();
+    assert!(missing.is_empty(), "ordinals not in every(): {missing:?}");
+    // COUNT is right: the last variant has the highest ordinal.
+    assert_eq!(ordinal(Msg::AboutLicence), COUNT - 1);
 }
 
 #[test]

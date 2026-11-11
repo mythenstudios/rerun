@@ -3,7 +3,8 @@
 //! dynamic CRT imported statically, no delay-load import, the Windows subsystem and an
 //! `asInvoker` manifest (never `requireAdministrator`, `highestAvailable` or
 //! `uiAccess='true'`) with per-monitor DPI awareness V2; the release binary holds neither the
-//! index test key nor the test-key build's index folder or banner.
+//! index test key nor the test-key build's index folder (`index-test`). The status bar's
+//! test-key line is a catalogue message in every build, shown only with the feature.
 //!
 //! The release binary is the one CI builds (`cargo build -p rerun-app --release`, without
 //! dev-dependencies): its path comes from `RERUN_RELEASE_APP_EXE`; unset, the check is skipped

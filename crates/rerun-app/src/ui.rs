@@ -43,7 +43,7 @@ use crate::theme::{self, Rgb, ThemeId, Tokens};
 use crate::vm::{self, AppliedVm, DetailVm, GameVm, Notice, RowVm, Value};
 use crate::worker::{Event, Job, Wake, Worker, World};
 
-use chrome::Chrome;
+use chrome::{Chrome, Geometry, WindowState};
 
 /// The UI thread's state.
 struct State {
@@ -85,6 +85,35 @@ fn shown(v: &Shown<'_>) -> SharedString {
     s(v.as_str())
 }
 
+/// The app's language: Windows' display language if it is German, else English.
+pub fn lang() -> Lang {
+    Lang::from_langid(chrome::ui_language())
+}
+
+/// Says in a plain message box, before any Slint object exists, why Rerun does not start
+/// (security review S1 of P5-3: Slint reads font settings from the environment as soon as a
+/// window is created). `elevated`: the process runs as administrator (or that is unknown);
+/// otherwise the system layer could not be created.
+pub fn refuse_start(lang: Lang, elevated: bool) {
+    let (title, text) = if elevated {
+        (
+            t(lang, Msg::ElevatedTitle),
+            format!(
+                "{} {}",
+                t(lang, Msg::ElevatedBody),
+                t(lang, Msg::ElevatedHow)
+            ),
+        )
+    } else {
+        (
+            t(lang, Msg::GuardTitle),
+            t(lang, Msg::GuardBody).into_owned(),
+        )
+    };
+    let caption = format!("{} \u{2013} {title}", t(lang, Msg::AppName));
+    chrome::message_box(&caption, &text);
+}
+
 /// Runs the window until it is closed. `make` builds the worker's world on its thread.
 pub fn run<F>(make: F) -> ExitCode
 where
@@ -99,7 +128,7 @@ where
     {
         return ExitCode::FAILURE;
     }
-    let lang = Lang::from_langid(chrome::ui_language());
+    let lang = lang();
     let Ok(ui) = AppWindow::new() else {
         return ExitCode::FAILURE;
     };
@@ -138,7 +167,11 @@ where
 /// turn of the event loop); a few tries, then the window stays without snap layouts.
 fn install_chrome(ui: &AppWindow, tokens: &Tokens, tries: u32) {
     let weak = ui.as_weak();
-    let (title_h, caption_w) = (tokens.title_h, tokens.caption_w);
+    let geometry = Geometry {
+        title_h: tokens.title_h,
+        caption_w: tokens.caption_w,
+        resize_border: tokens.resize_border,
+    };
     let tokens = tokens.clone();
     slint::Timer::single_shot(
         Duration::from_millis(if tries == 0 { 0 } else { 50 }),
@@ -158,7 +191,18 @@ fn install_chrome(ui: &AppWindow, tokens: &Tokens, tries: u32) {
                     }
                 }
             });
-            if !chrome::install(ui.window(), title_h, caption_w, on) && tries < 20 {
+            let w = ui.as_weak();
+            let state = Box::new(move || match w.upgrade() {
+                Some(ui) => WindowState {
+                    scale: ui.window().scale_factor(),
+                    maximized: ui.window().is_maximized(),
+                },
+                None => WindowState {
+                    scale: 1.0,
+                    maximized: false,
+                },
+            });
+            if !chrome::install(ui.window(), geometry, state, on) && tries < 20 {
                 install_chrome(&ui, &tokens, tries + 1);
             }
         },
@@ -204,6 +248,7 @@ fn set_theme(ui: &AppWindow, k: &Tokens) {
     g.set_row_h(k.row_h);
     g.set_title_h(k.title_h);
     g.set_caption_w(k.caption_w);
+    g.set_resize_border(k.resize_border);
     g.set_nav_w(k.nav_w);
     g.set_font_sans(s(k.font_sans));
     g.set_font_display(s(k.font_display));
@@ -395,7 +440,6 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 ui.set_blocked(true);
                 ui.set_blocked_notice(notice(&b.notice));
             }
-            Event::Steam(_) => {}
             Event::Row(r) => {
                 st.rows.push(r);
                 rows_changed = true;

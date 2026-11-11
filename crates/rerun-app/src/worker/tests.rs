@@ -365,7 +365,7 @@ fn aw1_an_anti_cheat_folder_refuses_the_shared_fix_once() {
 fn aw2_the_library_streams_rows_then_the_summary() {
     let sys = indexed("Invented AC");
     let ev = events(&sys, &Job::Library, Lang::En);
-    assert!(matches!(ev.first(), Some(Event::Steam(s)) if s.found));
+    assert!(matches!(ev.first(), Some(Event::Row(_))), "{ev:?}");
     assert!(matches!(ev.last(), Some(Event::LibraryDone(_))));
     let rows = rows_of(&ev);
     let got: Vec<(u32, &str, Group, &str)> = rows
@@ -486,6 +486,127 @@ fn aw4_no_steam_and_no_index() {
     let g = game_of(&sys, 240, Lang::En);
     assert_eq!(g.hero.line, "No Steam library lists this game any more.");
     assert_eq!(g.hero.sym, Sym::NotHere);
+}
+
+#[test]
+fn aw4_no_games_scan_problems_and_refused_indexes() {
+    // Steam with one library that lists only a game that is not installed: no games.
+    let sys = bare()
+        .value(
+            RootSource::CurrentUser.key(),
+            RootSource::CurrentUser.value_name(),
+            RegValue::String(STEAM.to_owned()),
+        )
+        .file(
+            format!(r"{STEAM}\steamapps\libraryfolders.vdf"),
+            lib_vdf().into_bytes(),
+        )
+        .file(
+            format!(r"{LIB}\steamapps\appmanifest_250.acf"),
+            acf(250, "Gone", 0, "Gone").into_bytes(),
+        )
+        .build()
+        .unwrap();
+    sys.fake_fs().sync_all();
+    let ev = events(&sys, &Job::Library, Lang::En);
+    let Some(Event::LibraryDone(done)) = ev.last() else {
+        panic!("{ev:?}")
+    };
+    let titles: Vec<&str> = done.notices.iter().map(|n| n.title.as_str()).collect();
+    assert_eq!(titles, ["Rerun has no Topo list yet.", "No games found."]);
+
+    // Scan problems: the count names all, at most MAX_PROBLEMS details are listed.
+    let steam = vm::SteamVm {
+        found: true,
+        problems: Vec::new(),
+    };
+    let problems: Vec<vm::DetailVm> = (0..60)
+        .map(|i| vm::DetailVm {
+            who: Some(escape::text(&format!("Game {i}")).into_owned()),
+            what: escape::text("game folder: denied").into_owned(),
+        })
+        .collect();
+    let facts = rerun_core::flow::LibraryFacts {
+        counts: rerun_core::flow::LibraryCounts {
+            libraries: 1,
+            apps: 60,
+            installed: 60,
+            ..Default::default()
+        },
+        missing: Vec::new(),
+    };
+    let index = vm::index(&rerun_core::flow::IndexState::None, Lang::En);
+    let done = vm::library_done(&facts, &steam, &problems, index, Lang::En);
+    let scan = done.notices.last().unwrap();
+    assert_eq!(scan.title, "60 problems while reading.");
+    assert_eq!(scan.details.len(), vm::MAX_PROBLEMS);
+    assert_eq!(
+        scan.details[0].who.as_ref().map(|w| w.as_str()),
+        Some("Game 0")
+    );
+
+    // A refused index: NoKeys has its own notice and no detail; any other refusal names it.
+    use rerun_core::catalog::IndexError;
+    use rerun_core::catalog::store::StoreError;
+    let no_keys = vm::index(
+        &rerun_core::flow::IndexState::Refused(StoreError::Index(IndexError::NoKeys)),
+        Lang::En,
+    );
+    assert_eq!(no_keys.status, "Topo index refused");
+    let n = no_keys.notice.unwrap();
+    assert_eq!(n.title, "This build of Rerun trusts no index key yet.");
+    assert!(n.details.is_empty());
+    let damaged = vm::index(
+        &rerun_core::flow::IndexState::Refused(StoreError::Damaged("pointer".to_owned())),
+        Lang::De,
+    );
+    let n = damaged.notice.unwrap();
+    assert_eq!(n.title, "Der gespeicherte Topo-Index wird abgelehnt.");
+    assert_eq!(
+        n.details[0].what.as_str(),
+        "the stored index is damaged: pointer"
+    );
+    assert_eq!(damaged.signature, "Keine Signatur zu prüfen");
+}
+
+#[test]
+fn aw4_a_game_folder_that_cannot_be_opened() {
+    // Steam lists app 220 in `G`, but the folder is not there.
+    let sys = indexed("Invented AC");
+    let gone = bare()
+        .value(
+            RootSource::CurrentUser.key(),
+            RootSource::CurrentUser.value_name(),
+            RegValue::String(STEAM.to_owned()),
+        )
+        .file(
+            format!(r"{STEAM}\steamapps\libraryfolders.vdf"),
+            lib_vdf().into_bytes(),
+        )
+        .file(
+            format!(r"{LIB}\steamapps\appmanifest_220.acf"),
+            acf(220, "Invented AC", 4, "G").into_bytes(),
+        )
+        .dir(format!(r"{LIB}\steamapps\common"))
+        .build()
+        .unwrap();
+    // The same index as `indexed`, imported into the world without the game folder.
+    let ix = index(&sha256_of(&sys, "game.exe"));
+    let app = AppDir::open(&gone, Create::IfMissing).unwrap().unwrap();
+    catalog::store::import(
+        &app,
+        ix.as_bytes(),
+        &test_key::sign(ix.as_bytes()),
+        &catalog::trusted_keys(),
+    )
+    .unwrap();
+    drop(app);
+    gone.fake_fs().sync_all();
+    let g = game_of(&gone, 220, Lang::En);
+    assert_eq!(g.hero.line, "Rerun cannot open the game folder.");
+    assert_eq!(g.hero.sym, Sym::Attention);
+    assert!(g.detail.is_some(), "{g:?}");
+    assert!(g.problems.is_empty() && g.fixes.is_empty());
 }
 
 #[test]
@@ -630,6 +751,13 @@ fn aw8_the_worker_runs_jobs_in_order_and_wakes_for_each_event() {
         matches!(&ev[1], Event::Game(g) if g.fixes.len() == 2),
         "{ev:?}"
     );
+    // The wake follows the send: wait for it rather than race it (review of P5-3).
+    for _ in 0..2000 {
+        if woken.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     assert_eq!(woken.load(Ordering::SeqCst), 2);
     drop(worker);
 

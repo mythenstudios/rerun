@@ -36,6 +36,23 @@ fn main() -> ExitCode {
     if restrict_dll_search().is_err() {
         return ExitCode::FAILURE;
     }
+    // Rule 6, before any window (security review S1 of P5-3): Slint reads font settings from
+    // the environment when it creates the window, so an elevated or undeterminable process
+    // stops here with a plain message box and never creates one. The worker's guard checks
+    // again for every job.
+    let lang = ui::lang();
+    match WinSystem::new() {
+        Err(_) => {
+            ui::refuse_start(lang, false);
+            return ExitCode::FAILURE;
+        }
+        Ok(sys) => {
+            if rerun_core::exec::standard_user(&sys).is_err() {
+                ui::refuse_start(lang, true);
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     ui::run(|| {
         let sys = WinSystem::new().map_err(|e| vm::shown_error(&e))?;
         Ok(worker::World {

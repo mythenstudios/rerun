@@ -99,6 +99,8 @@ pub struct Tokens {
     pub title_h: f32,
     /// Width of a window button.
     pub caption_w: f32,
+    /// The resize border at the window's edges.
+    pub resize_border: f32,
     /// Width of the navigation.
     pub nav_w: f32,
     /// The text font.
@@ -138,6 +140,7 @@ pub fn tokens(t: ThemeId) -> Tokens {
             row_h: 64.0,
             title_h: 40.0,
             caption_w: 46.0,
+            resize_border: 6.0,
             nav_w: 264.0,
             font_sans: "Segoe UI Variable Text",
             font_display: "Segoe UI Variable Display",

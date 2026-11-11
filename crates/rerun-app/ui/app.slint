@@ -129,7 +129,10 @@ export global Theme {
     in property <length> fs-hero;
     in property <length> row-h;
     in property <length> title-h;
+    // `caption-w`, `title-h` and `resize-border` are also the hit-test geometry of the
+    // snap-layout subclass (`ui::chrome`): change them here and the hit area follows.
     in property <length> caption-w;
+    in property <length> resize-border;
     in property <length> nav-w;
     in property <string> font-sans;
     in property <string> font-display;
@@ -567,7 +570,10 @@ component RowItem inherits Pressable {
     ring-inset: Theme.hair;
     min-height: Theme.row-h;
     accessible-role: list-item;
-    accessible-label: root.item.name + ", " + root.item.detail + ", " + root.item.badge.word;
+    // Untrusted text (the Steam name) is never joined with other text: the name is the label,
+    // Rerun's own words are the description.
+    accessible-label: root.item.name;
+    accessible-description: root.item.detail + ", " + root.item.badge.word;
     accessible-item-index: root.index;
     accessible-item-count: root.count;
     accessible-action-default => {
@@ -997,7 +1003,8 @@ component GamePage inherits VerticalLayout {
             for f in root.game.facts: VerticalLayout {
                 spacing: Theme.hair * 2;
                 accessible-role: AccessibleRole.text;
-                accessible-label: f.label + ": " + f.value;
+                accessible-label: f.label;
+                accessible-value: f.value;
                 Text {
                     text: f.label;
                     color: Theme.muted;
@@ -1029,7 +1036,8 @@ component GamePage inherits VerticalLayout {
             VerticalLayout {
                 for p[i] in root.game.problems: Rectangle {
                     accessible-role: list-item;
-                    accessible-label: p.title + ", " + p.when.word;
+                    accessible-label: p.title;
+                    accessible-description: p.when.word;
                     accessible-item-index: i;
                     accessible-item-count: root.game.problems.length;
                     if i > 0: Hairline {
@@ -1108,7 +1116,8 @@ component GamePage inherits VerticalLayout {
 
         for fx in root.game.fixes: Card {
             accessible-role: groupbox;
-            accessible-label: fx.id + ", " + fx.kind + ", " + fx.state.word;
+            accessible-label: fx.id;
+            accessible-description: fx.kind + ", " + fx.state.word;
             VerticalLayout {
                 padding: Theme.s5;
                 spacing: Theme.s3;
@@ -1168,7 +1177,8 @@ component GamePage inherits VerticalLayout {
                 for s in fx.solves: HorizontalLayout {
                     spacing: Theme.s3;
                     accessible-role: AccessibleRole.text;
-                    accessible-label: s.issue + ", " + s.when.word + ", " + s.status.word;
+                    accessible-label: s.issue;
+                    accessible-description: s.when.word + ", " + s.status.word;
                     Text {
                         horizontal-stretch: 1;
                         text: s.issue;
@@ -1416,7 +1426,7 @@ component BlockedPage inherits Rectangle {
 
 export component AppWindow inherits Window {
     no-frame: true;
-    resize-border-width: Theme.s1 + Theme.hair * 2;
+    resize-border-width: Theme.resize-border;
     preferred-width: 1200px;
     preferred-height: 800px;
     min-width: 860px;
@@ -1518,6 +1528,9 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                     }
 
+                    // The three window buttons stay the last elements of the title bar, in this
+                    // order: `ui::chrome` hit-tests the second from the right as the maximise
+                    // button (source rule `the_caption_buttons_keep_their_order`).
                     CaptionButton {
                         glyph: "\u{E921}";
                         label: Str.minimize;

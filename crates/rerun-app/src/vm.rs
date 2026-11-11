@@ -14,7 +14,7 @@ use rerun_core::detect::steam::{AppState, SteamApp, SteamScan};
 use rerun_core::escape::{self, Shown};
 use rerun_core::flow::{
     Fix, Found, GameOpen, GameRefusal, GameView, IndexState, LibraryFacts, Lookup, MatchView,
-    RowScan, StatusView, SteamWhy, failed_games,
+    RowScan, SteamWhy, failed_games,
 };
 use rerun_core::hw::{GpuArch, SacState, SystemProfile};
 use rerun_core::journal::JournalError;
@@ -884,7 +884,10 @@ pub struct AppliedVm {
 }
 
 /// The applied page from the status; `None`: Rerun's folder does not exist.
-pub fn applied(status: Option<Result<&StatusView, &JournalError>>, lang: Lang) -> AppliedVm {
+pub fn applied(
+    status: Option<Result<&rerun_core::exec::Status, &JournalError>>,
+    lang: Lang,
+) -> AppliedVm {
     let empty = || AppliedVm {
         open: 0,
         title: t(lang, Msg::AppliedEmpty).into_owned(),
@@ -900,7 +903,7 @@ pub fn applied(status: Option<Result<&StatusView, &JournalError>>, lang: Lang) -
             detail: Some(shown_error(e)),
         },
         Some(Ok(v)) => {
-            let open = v.status.txns.iter().filter(|s| !s.is_settled()).count();
+            let open = v.txns.iter().filter(|s| !s.is_settled()).count();
             if open == 0 {
                 empty()
             } else {
