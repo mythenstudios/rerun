@@ -14,13 +14,11 @@ match:
 
 # Launch observed on the dev PC (P4-13 S1, 2026-11-11): steam.exe starts AssassinsCreed_Game.exe (a D3D detector, no
 # Ubisoft Connect), which runs Detection\Detection.exe and then starts AssassinsCreed_Dx10.exe without a choice dialog.
-# TODO issue: on the dev PC (5950X, 32 logical processors, RX 9070 XT, Windows 11 26300) Detection.exe crashes in
-# systemtests_rd.tst (0xc0000005) and AssassinsCreed_Dx10.exe then crashes at offset 0x00010c74, every start; started
-# directly (Dx9 or Dx10, also with affinity FF) the same happens. Sourced candidates: more than 8 processors
-# (https://steamcommunity.com/app/15100/discussions/0/3369279631097585577, fix msconfig "Number of processors", OS-wide)
-# and PCGW "Game does not start with 32 cores". An affinity mask does not change the processor count the detector
-# reads, so a cpu step is not expected to help; a reported core count (rerun-cpu report_cores, method inproc,
-# phase 6) would. Cause not confirmed yet.
+# Both fixes below were reproduced by hand on the dev PC (5950X, 32 logical processors, RX 9070 XT, Windows 11
+# 26300, game unmodified) through rerun-launch (scripts/dev-launch-profile.ps1, profile direct on
+# AssassinsCreed_Game.exe); Rerun apply is not done yet, so both stay unverified. Detection.exe crashes in
+# systemtests_rd.tst on every start, also inside an 8-thread job; the game starts anyway, so that is not an issue.
+# fallback inproc stays: report_cores (phase 6) is the alternative if a job limit ever fails to reach Dx10.exe.
 launch:
   chain: [steam]
   method: auto
@@ -46,10 +44,39 @@ issues:
         sources:
           - { type: repo, url: "https://github.com/Sergeanur/EaglePatch" }
 
+  - id: crash-many-threads
+    title: "Game crashes about 2 s after start on a PC with more than 8 logical processors"
+    when:
+      cpu.threads: { gt: 8 }
+    variants:
+      - id: limit-8-threads
+        status: unverified      # reproduced by hand on the dev PC through rerun-launch; Rerun apply not done yet
+        kind: fix
+        # Exactly the rule the dev PC test wrote (the script's fixed profile: prefer performance, one L3,
+        # no SMT, hard, 8 threads). The sources only name "8 processors"; the other fields are not sourced.
+        steps: [{ cpu: { max_threads: 8, prefer: performance, single_l3: true, smt: false, mode: hard } }]
+        tradeoffs:
+          - "The game uses at most 8 logical processors (one CCD, no SMT thread pairs); it is a 2008 title, so this costs little"
+        sources:
+          - { type: steam-thread, url: "https://steamcommunity.com/app/15100/discussions/0/3369279631097585577/" }
+          - { type: steam-thread, url: "https://steamcommunity.com/app/15100/discussions/0/5299051083531295561/" }
+          - { type: steam-guide, url: "https://steamcommunity.com/sharedfiles/filedetails/?id=3276044556" }
+
   - id: online-services
-    title: "Shut-down online services delay startup"
+    title: "Game crashes at the Ubisoft logo intro (shut-down online services)"
     when: {}
-    variants: []               # TODO: research whether a firewall rule demonstrably helps here
+    variants:
+      - id: block-network
+        status: unverified      # reproduced by hand on the dev PC (offline: menu reached); Rerun apply not done yet
+        kind: fix
+        steps:
+          - { firewall_rule: { exe: "AssassinsCreed_Dx10.exe", direction: out } }
+          - { firewall_rule: { exe: "AssassinsCreed_Dx9.exe",  direction: out } }
+        tradeoffs:
+          - "The game has no network access at all; its online features are shut down anyway"
+        sources:
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Assassin's_Creed#Crashes_to_desktop_at_Ubisoft_logo_intro" }
+          - { type: steam-thread, url: "https://steamcommunity.com/app/15100/discussions/0/540738052667940429/" }
 
 tips:
   launch_options: []
