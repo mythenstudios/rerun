@@ -35,8 +35,8 @@ issues:
         status: unverified      # single source (the author's README), not tested by us
         kind: fix
         # Loader: ultimate-asi-loader stays at 10.0.2; the README names v4.68 but no source says the patch needs it.
-        # Untested idea, NOT a claim: the README lists "Removed telemetry", which might also bear on the Ubisoft
-        # intro crash (issue online-services); check this when the variant is tested.
+        # The same steps fix the Ubisoft intro crash (variant online-services/eaglepatch, verified 2026-11-11);
+        # pick only one of the two variants. The controller part itself is not tested by us.
         steps:
           - { package: ultimate-asi-loader }
           - { package: eaglepatch-ac1 }
@@ -68,8 +68,21 @@ issues:
     title: "Game crashes at the Ubisoft logo intro (shut-down online services)"
     when: {}
     variants:
+      - id: eaglepatch
+        status: verified        # 2026-11-11, Ryzen 9 5950X (32 LP) / RX 9070 XT / Windows 11 26300, Smart App Control on: online, with only limit-8-threads the game crashed at the intro (0x80000003); with ultimate-asi-loader 10.0.2 + eaglepatch-ac1 1.1 applied (and limit-8-threads) it passed the intro and ran in game for minutes; Smart App Control loaded the DLLs (no CodeIntegrity event); revert bit-identical (docs/09)
+        kind: fix
+        # EaglePatch's README lists "Removed telemetry"; PCGW names it for the requests to the shut-down server.
+        steps:
+          - { package: ultimate-asi-loader }
+          - { package: eaglepatch-ac1 }
+        tradeoffs:
+          - "Removes DInput controller support (the INI key DisableXInputPatch=1 re-enables it)"
+          - "The in-game controls layout has no effect; set KeyboardLayout in the INI instead"
+        sources:
+          - { type: repo, url: "https://github.com/Sergeanur/EaglePatch" }
+          - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed#Game_regularly_freezes_for_a_few_seconds" }
       - id: block-network
-        status: unverified      # the problem is reproduced on the dev PC (offline: menu reached), but these rules did NOT help there: 2026-11-11, with both rules applied and active (and 8 threads) the game still crashed at the intro (0x80000003) while online; the rules were added and removed bit-identically (docs/09). A blocked connection is not the same as no network for the game; EaglePatch (P4-13b) removes the server request instead
+        status: unverified      # the problem is reproduced on the dev PC (offline: menu reached), but these rules did NOT help there: 2026-11-11, with both rules applied and active (and 8 threads) the game still crashed at the intro (0x80000003) while online; the rules were added and removed bit-identically (docs/09). A blocked connection is not the same as no network for the game; use the eaglepatch variant above
         kind: fix
         steps:
           - { firewall_rule: { exe: "AssassinsCreed_Dx10.exe", direction: out } }
