@@ -37,6 +37,11 @@ impl Trip {
         &self.0
     }
 
+    /// A trip that is the given flag (a worker's own cancel flag).
+    pub fn of(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
+    }
+
     /// The flag as a shared handle, for code that keeps its cancel flag in an `Arc`.
     pub fn shared(&self) -> Arc<AtomicBool> {
         self.0.clone()
@@ -75,6 +80,8 @@ pub struct FakeReply {
     pub chunk: Option<usize>,
     /// The flag is set once this many body bytes were delivered.
     pub trip: Option<(usize, Trip)>,
+    /// Every read waits this long first (a slow server, for a test that cancels from outside).
+    pub pause: Option<std::time::Duration>,
 }
 
 impl FakeReply {
@@ -89,6 +96,7 @@ impl FakeReply {
             fail: None,
             chunk: None,
             trip: None,
+            pause: None,
         }
     }
 
@@ -103,6 +111,7 @@ impl FakeReply {
             fail: None,
             chunk: None,
             trip: None,
+            pause: None,
         }
     }
 
@@ -118,6 +127,13 @@ impl FakeReply {
     #[must_use]
     pub fn chunked(mut self, bytes: usize) -> Self {
         self.chunk = Some(bytes);
+        self
+    }
+
+    /// Every read waits `pause` first.
+    #[must_use]
+    pub fn paced(mut self, pause: std::time::Duration) -> Self {
+        self.pause = Some(pause);
         self
     }
 
@@ -177,10 +193,14 @@ struct Body {
     cut_after: Option<usize>,
     chunk: Option<usize>,
     trip: Option<(usize, Trip)>,
+    pause: Option<std::time::Duration>,
 }
 
 impl Read for Body {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(p) = self.pause {
+            std::thread::sleep(p);
+        }
         let end = self.cut_after.unwrap_or(usize::MAX).min(self.data.len());
         if self.at >= end && self.cut_after.is_some_and(|c| c < self.data.len()) {
             return Err(io::Error::from_raw_os_error(CONNECTION_ERROR as i32));
@@ -236,6 +256,7 @@ impl Http for FakeHttp {
                 cut_after: reply.cut_after,
                 chunk: reply.chunk,
                 trip: reply.trip,
+                pause: reply.pause,
             }),
         })
     }
