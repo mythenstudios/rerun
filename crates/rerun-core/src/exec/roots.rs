@@ -748,8 +748,8 @@ fn unused(roots: &Roots<'_>, root: usize, p: &RelPath) -> Result<(), Refusal> {
 }
 
 /// D4: the game is closed: no existing file target of the ops `ops`, no executable of a
-/// compatibility layer (P2-11) or of a graphics preference (P4-11) and no main executable of an
-/// open root is in use.
+/// compatibility layer (P2-11) or of a graphics preference (P4-11) and no main or other matched
+/// executable of an open root is in use.
 pub(super) fn game_closed(plan: &Plan, roots: &Roots<'_>, ops: &[u16]) -> Result<(), Refusal> {
     for k in ops {
         let Some(op) = plan.ops.get(usize::from(*k)) else {
@@ -782,8 +782,11 @@ pub(super) fn game_closed(plan: &Plan, roots: &Roots<'_>, ops: &[u16]) -> Result
     if helper_only {
         return Ok(());
     }
+    // ADR 0020 amendment "Other executables": every executable of the game that matched, not
+    // only the first (a launcher may start another one). A recorded head without the list (an
+    // earlier version's) asks its main executable only.
     for (i, r) in plan.roots.iter().enumerate() {
-        if let Some(m) = &r.main_exe {
+        for m in r.main_exe.iter().chain(r.other_exes.iter().flatten()) {
             unused(roots, i, m)?;
         }
     }

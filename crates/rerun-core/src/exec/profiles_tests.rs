@@ -134,6 +134,7 @@ fn with_profile(env: &Env, mut p: Plan, bytes: Vec<u8>) -> Plan {
         origin: PlanOrigin::AppDir,
         main_exe: None,
         main_sha256: None,
+        other_exes: None,
     });
     let content = inline(bytes);
     let op = match try_read_abs(&env.sys, &abs) {

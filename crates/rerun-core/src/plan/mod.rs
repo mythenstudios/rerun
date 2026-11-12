@@ -254,7 +254,21 @@ pub struct PlanRoot {
         with = "crate::wire::hex32_opt"
     )]
     pub main_sha256: Option<[u8; 32]>,
+    /// The other executables of the game that matched the Topo besides `main_exe` (relative to
+    /// the root, in the Topo's order; ADR 0020 amendment "Other executables"): D4 asks them
+    /// too, since a launcher may start any of them. Only with `main_exe`, never `main_exe`
+    /// again, each once; omitted on the wire when absent, `[]` when the game has one. A plan
+    /// with a `source` needs it on every game root under [`Rules::Current`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::wire::some"
+    )]
+    pub other_exes: Option<Vec<RelPath>>,
 }
+
+/// The most entries of [`PlanRoot::other_exes`].
+pub const MAX_OTHER_EXES: usize = 16;
 
 /// Kind of a plan root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1665,6 +1679,40 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
             return Err(invalid(
                 None,
                 "a plan from a Topo without the hash of the game's main executable (made by an \
+                 earlier version of Rerun); plan again",
+            ));
+        }
+        // ADR 0020 amendment "Other executables": the other matched executables, the same way.
+        if let Some(others) = &r.other_exes {
+            let main = match (&r.main_exe, r.kind) {
+                (Some(m), RootKind::Game) => m,
+                _ => {
+                    return Err(invalid(
+                        None,
+                        "other executables on a root without a main executable",
+                    ));
+                }
+            };
+            if others.len() > MAX_OTHER_EXES {
+                return Err(invalid(None, "more other executables than allowed"));
+            }
+            for (i, o) in others.iter().enumerate() {
+                if o == main || others[..i].contains(o) {
+                    return Err(invalid(
+                        None,
+                        "an executable of a root is listed twice (main and other executables)",
+                    ));
+                }
+            }
+        }
+        if rules == Rules::Current
+            && plan.source.is_some()
+            && r.kind == RootKind::Game
+            && r.other_exes.is_none()
+        {
+            return Err(invalid(
+                None,
+                "a plan from a Topo without the other executables of the game (made by an \
                  earlier version of Rerun); plan again",
             ));
         }

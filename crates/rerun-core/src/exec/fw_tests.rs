@@ -184,6 +184,8 @@ pub(crate) fn plan(sys: &FakeSystem, index: [u8; 32], k: Kind) -> PlanHash {
     }));
     // P5-2a: the engine records the matched build.
     p.roots[0].main_sha256 = Some(Sha256::digest(game_exe()).into());
+    // The other matched build (ADR 0020 amendment "Other executables").
+    p.roots[0].other_exes = Some(vec![rel("tool.exe")]);
     p.source = Some(PlanSource {
         index,
         topo: "invented-game".to_owned(),
@@ -881,6 +883,7 @@ fn f5_rules_are_last_need_a_source_and_are_rechecked_at_begin() {
             origin: crate::plan::PlanOrigin::AppDir,
             main_exe: None,
             main_sha256: None,
+            other_exes: None,
         });
         if let Op::FirewallRule { root, .. } = &mut q.ops[2] {
             *root = RootIx(1);

@@ -52,6 +52,7 @@ fn sample() -> Plan {
                 origin: PlanOrigin::Manual,
                 main_exe: Some(r("game.exe")),
                 main_sha256: None,
+                other_exes: None,
             },
             PlanRoot {
                 kind: RootKind::Game,
@@ -65,6 +66,7 @@ fn sample() -> Plan {
                 },
                 main_exe: None,
                 main_sha256: None,
+                other_exes: None,
             },
         ],
         ops: vec![
@@ -556,6 +558,7 @@ fn p8_patch_form_rules_and_preview() {
         origin: PlanOrigin::AppDir,
         main_exe: None,
         main_sha256: None,
+        other_exes: None,
     };
     let bytes = serde_json::to_vec(&profiles).unwrap();
     for e in [

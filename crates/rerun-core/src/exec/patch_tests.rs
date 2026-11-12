@@ -71,6 +71,7 @@ fn patch_plan(env: &Env, edits: Vec<ByteEdit>, result: [u8; 32]) -> PlanHash {
             origin: PlanOrigin::Manual,
             main_exe: Some(rel("game.exe")),
             main_sha256: None,
+            other_exes: None,
         }],
         ops: vec![Op::ReplaceFile {
             root: RootIx(0),
@@ -265,6 +266,7 @@ fn pt6_a_held_file_is_not_patched() {
             origin: PlanOrigin::Manual,
             main_exe: Some(rel("game.exe")),
             main_sha256: None,
+            other_exes: None,
         }],
         ops: vec![Op::ReplaceFile {
             root: RootIx(0),

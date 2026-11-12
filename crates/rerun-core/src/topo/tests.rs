@@ -917,16 +917,21 @@ fn tb_the_plan_has_the_bytes_of_the_same_step_file() {
     let matched = p.plan.roots[0].main_sha256;
     assert_eq!(matched, Some(Sha256::digest(pe(false)).into()));
     assert!(p.plan.roots[1..].iter().all(|r| r.main_sha256.is_none()));
+    // ADR 0020 amendment "Other executables": one executable, an empty list.
+    assert_eq!(p.plan.roots[0].other_exes, Some(Vec::new()));
     let mut bare = p.plan.clone();
     let source = bare.source.take().unwrap();
     bare.roots[0].main_sha256 = None;
+    bare.roots[0].other_exes = None;
     assert_eq!(
         bare.encode().unwrap().bytes(),
         from_file.encode().unwrap().bytes()
     );
-    // The source adds exactly one field at the end (the hash one after `main_exe`).
+    // The source adds exactly one field at the end (the hash and the other executables after
+    // `main_exe`).
     let mut hashed = from_file.clone();
     hashed.roots[0].main_sha256 = matched;
+    hashed.roots[0].other_exes = Some(Vec::new());
     let with = String::from_utf8(p.plan.encode().unwrap().bytes().to_vec()).unwrap();
     let without = String::from_utf8(serde_json::to_vec(&hashed).unwrap()).unwrap();
     let tail = format!(",\"source\":{}}}", serde_json::to_string(&source).unwrap());
@@ -2039,4 +2044,166 @@ fn tg2_the_hash_in_the_plan_form() {
         r#""main_exe":"game.exe","main_sha256":null"#,
     );
     assert!(crate::plan::decode_recorded(s.as_bytes()).is_err());
+}
+
+// ---------- TX: every matched executable (ADR 0020 amendment "Other executables") ----------
+
+/// The game of [`game_sys`] with a second build, `alt.exe` (x64, another content), and a Topo
+/// that matches both: `game.exe` first (d3d9), `alt.exe` second (`alt_api`).
+fn two_exes(alt_api: &str) -> (FakeSystem, Topo) {
+    let sys = game_sys();
+    let mut alt = pe(false);
+    alt.extend_from_slice(b"the other build");
+    put(&sys, "alt.exe", &alt);
+    let mut v = topo_value();
+    v["match"]["exes"] = serde_json::json!([
+        {"path":"game.exe","sha256":sha256(&pe(false)),"api":"d3d9"},
+        {"path":"alt.exe","sha256":sha256(&alt),"api":alt_api}
+    ]);
+    (sys, topo_of(v))
+}
+
+/// TX1: the plan records the other matched executable, and D4 asks it: `alt.exe` running (not
+/// the first match) refuses the apply and the revert with the executable named, nothing written;
+/// closed, both pass and the revert is exact. A game with one executable records `[]`.
+#[test]
+fn tx1_a_running_second_executable_refuses_apply_and_revert() {
+    let (sys, t) = two_exes("d3d9");
+    let env = Env::new(sys);
+    let sys = &env.sys;
+    let tp = plan_on(sys, &t, &["display/layer"]).unwrap();
+    assert_eq!(
+        tp.plan.roots[0].other_exes,
+        Some(vec![RelPath::parse("alt.exe").unwrap()])
+    );
+    let a = app(sys);
+    let h = crate::plan::store(&a, &tp.plan.encode().unwrap()).unwrap();
+    drop(a);
+    let before = snap_at(sys, STEAM_GAME);
+    let alt = format!(r"{STEAM_GAME}\alt.exe");
+    let busy = |r: &crate::exec::Refusal| {
+        matches!(r, crate::exec::Refusal::Busy(s) if s.as_str().ends_with(r"G\alt.exe"))
+            && r.to_string()
+                .ends_with("is in use; close the game and try again later")
+    };
+    let held = sys.fake_fs().map_image_as(4244, Path::new(&alt)).unwrap();
+    match env.apply(&h) {
+        Err(crate::exec::ApplyError::Refused(r)) => assert!(busy(&r), "{r:?}"),
+        other => panic!("expected Busy, got {other:?}"),
+    }
+    assert!(env.states().is_empty(), "no transaction");
+    assert!(before == snap_at(sys, STEAM_GAME), "nothing written");
+    drop(held);
+    let txn = env.applied(&h);
+    let held = sys.fake_fs().map_image_as(4245, Path::new(&alt)).unwrap();
+    match env.revert(&txn) {
+        Err(crate::exec::ExecError::Refused(r)) => assert!(busy(&r), "{r:?}"),
+        other => panic!("expected Busy, got {other:?}"),
+    }
+    assert_eq!(env.state(&txn), Some(crate::journal::TxnState::Applied));
+    drop(held);
+    assert_eq!(env.revert(&txn).unwrap().closed, Some(Closing::Reverted));
+    assert!(before == snap_at(sys, STEAM_GAME), "exact revert");
+    // One executable: an empty list, nothing else changes.
+    let one = plan_on(&game_sys(), &game_topo(DIRECT), &["display/layer"]).unwrap();
+    assert_eq!(one.plan.roots[0].other_exes, Some(Vec::new()));
+}
+
+/// TX2: the list in the plan's form: a Topo plan without it (an earlier version's) is refused by
+/// `encode` and the current decode ("…plan again"), a recorded head without it decodes (its
+/// revert asks the main executable only); on a root without a main executable, with the main
+/// executable again or an entry twice it is refused by both; `null` is not the absent field.
+#[test]
+fn tx2_the_other_executables_in_the_plan_form() {
+    let (sys, t) = two_exes("d3d9");
+    let p = plan_on(&sys, &t, &["cores/limit"]).unwrap().plan;
+    let bytes = |p: &crate::plan::Plan| serde_json::to_vec(p).unwrap();
+    let why = |r: Result<crate::plan::Plan, crate::plan::PlanError>| match r {
+        Err(crate::plan::PlanError::Invalid { why, .. }) => why,
+        other => panic!("expected Invalid, got {other:?}"),
+    };
+    let mut old = p.clone();
+    old.roots[0].other_exes = None;
+    let w = why(crate::plan::decode(&bytes(&old)));
+    assert!(w.contains("without the other executables"), "{w}");
+    assert!(w.ends_with("plan again"), "{w}");
+    assert!(old.encode().is_err());
+    assert_eq!(crate::plan::decode_recorded(&bytes(&old)).unwrap(), old);
+    let r = |s: &str| RelPath::parse(s).unwrap();
+    let mut on_profiles = p.clone();
+    on_profiles.roots[1].other_exes = Some(vec![r("alt.exe")]);
+    let mut main_again = p.clone();
+    main_again.roots[0].other_exes = Some(vec![r("alt.exe"), r("GAME.exe")]);
+    let mut twice = p.clone();
+    twice.roots[0].other_exes = Some(vec![r("alt.exe"), r("ALT.EXE")]);
+    for (bad, want) in [
+        (on_profiles, "without a main executable"),
+        (main_again, "listed twice"),
+        (twice, "listed twice"),
+    ] {
+        let b = bytes(&bad);
+        assert!(why(crate::plan::decode(&b)).contains(want), "{want}");
+        assert!(
+            why(crate::plan::decode_recorded(&b)).contains(want),
+            "{want}"
+        );
+    }
+    let s = String::from_utf8(bytes(&old)).unwrap().replace(
+        r#""main_exe":"game.exe""#,
+        r#""main_exe":"game.exe","other_exes":null"#,
+    );
+    assert!(crate::plan::decode_recorded(s.as_bytes()).is_err());
+}
+
+/// TX3: a package whose files depend on the graphics API is refused for a game whose matched
+/// executables have different APIs (typed, with the reason), never planned for the first match;
+/// one that does not depend on it still plans; the same APIs plan the API's files as before.
+#[test]
+fn tx3_an_api_dependent_package_waits_for_the_running_executable() {
+    let archive = wrapper_zip();
+    let pkg = wrapper(&archive);
+    let (sys, t) = two_exes("d3d11");
+    cache(&sys, &archive);
+    extract(&sys, &app(&sys), &pkg).unwrap();
+    let e = plan_pkgs(&sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap_err();
+    assert!(
+        matches!(&e, EngineError::PackageApiOpen { id } if id == "invented-wrapper"),
+        "{e:?}"
+    );
+    assert_eq!(
+        e.to_string(),
+        "package invented-wrapper: its DLLs depend on the graphics API, and this game's \
+         executables use more than one; Rerun does not know yet which of them the game runs, so \
+         it does not install the package"
+    );
+    // `apis` alone counts too.
+    let mut by_list = pkg.clone();
+    by_list.files.iter_mut().for_each(|f| f.api = None);
+    by_list.files.truncate(1);
+    by_list.apis = Some(vec![Api::D3d9, Api::D3d11]);
+    let e = plan_pkgs(&sys, &t, std::slice::from_ref(&by_list), &["wrapper/pkg"]).unwrap_err();
+    assert!(matches!(e, EngineError::PackageApiOpen { .. }), "{e:?}");
+    // Not API-dependent: planned (the config file only).
+    let mut plain = pkg.clone();
+    plain.files.retain(|f| f.api.is_none());
+    let tp = plan_pkgs(&sys, &t, std::slice::from_ref(&plain), &["wrapper/pkg"]).unwrap();
+    assert_eq!(
+        installs(&tp),
+        [(
+            "invented-wrapper".to_owned(),
+            vec!["wrapper.ini".to_owned()]
+        )]
+    );
+    // Two executables of one API: planned for it, as for one executable.
+    let (sys, t) = two_exes("d3d9");
+    cache(&sys, &archive);
+    extract(&sys, &app(&sys), &pkg).unwrap();
+    let tp = plan_pkgs(&sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap();
+    assert_eq!(
+        installs(&tp),
+        [(
+            "invented-wrapper".to_owned(),
+            vec![r"x64\d3d9.dll".to_owned(), "wrapper.ini".to_owned()]
+        )]
+    );
 }

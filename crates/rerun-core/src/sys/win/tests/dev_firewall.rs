@@ -192,6 +192,7 @@ fn dev_helper_firewall_round_trip() {
     });
     // P5-2a: the engine records the matched build.
     p.roots[0].main_sha256 = Some(Sha256::digest(&exe).into());
+    p.roots[0].other_exes = Some(Vec::new());
     p.source = Some(PlanSource {
         index: isha,
         topo: "dev-firewall".to_owned(),

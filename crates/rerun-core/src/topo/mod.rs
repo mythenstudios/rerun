@@ -145,6 +145,33 @@ impl GameFacts {
     fn main(&self) -> Option<&ExeCheck> {
         self.exes.iter().find(|e| e.state == ExeState::Match)
     }
+
+    /// Every executable that matched, in the Topo's order (the first is [`Self::main_exe`]).
+    pub fn matched_exes(&self) -> impl Iterator<Item = &ExeCheck> {
+        self.exes.iter().filter(|e| e.state == ExeState::Match)
+    }
+
+    /// The executables that matched besides [`Self::main_exe`], each path once, in the Topo's
+    /// order: a plan records them, and D4 asks them too (ADR 0020 amendment "Other
+    /// executables").
+    pub fn other_exes(&self) -> Vec<RelPath> {
+        let mut v: Vec<RelPath> = Vec::new();
+        let main = self.main_exe();
+        for e in self.matched_exes() {
+            if Some(&e.path) != main && !v.contains(&e.path) {
+                v.push(e.path.clone());
+            }
+        }
+        v
+    }
+
+    /// The matched executables do not all have one graphics API (`api` of their entries): which
+    /// one the game runs is not known, so a package whose files depend on the API cannot be
+    /// planned for it (ADR 0020 amendment "Other executables").
+    pub fn apis_differ(&self) -> bool {
+        let mut apis = self.matched_exes().map(|e| e.api);
+        apis.next().is_some_and(|first| apis.any(|a| a != first))
+    }
 }
 
 /// Reads what the engine needs of the game folder (module docs).
@@ -689,6 +716,18 @@ pub enum EngineError {
         /// Why.
         why: String,
     },
+    /// A package whose files depend on the graphics API, for a game whose matched executables
+    /// have different APIs (ADR 0020 amendment "Other executables"): which one runs is not known
+    /// yet.
+    #[error(
+        "package {id}: its DLLs depend on the graphics API, and this game's executables use \
+         more than one; Rerun does not know yet which of them the game runs, so it does not \
+         install the package"
+    )]
+    PackageApiOpen {
+        /// The package ID.
+        id: String,
+    },
     /// A picked step sets a file in the Topo's user data folder (P4-12), but the folder the
     /// caller opened is not that folder (or none): the caller opens it with
     /// [`needs_user_data`] and the Topo's `user_data`.
@@ -1066,9 +1105,13 @@ pub fn plan(
     let Some(main_sha256) = facts.game.main_sha256().copied() else {
         return Err(EngineError::NoMatch(topo.id.to_string()));
     };
+    // The other matched executables (ADR 0020 amendment "Other executables"): D4 asks every
+    // executable the launcher may start, not only the first match.
+    let others = facts.game.other_exes();
     for r in &mut plan.roots {
         if r.kind == crate::plan::RootKind::Game {
             r.main_sha256 = Some(main_sha256);
+            r.other_exes = Some(others.clone());
         }
     }
     // N2 (P4-11): a preference that is set already plans no op; the user is told, and by which
@@ -1165,6 +1208,12 @@ fn package_step<'p>(
         .iter()
         .find(|p| p.id.as_str() == id)
         .ok_or_else(|| refused("not in the signed index".to_owned()))?;
+    // The API decides which DLLs (slots) a package installs; with matched executables of
+    // different APIs the running one is not known yet (the game options of ADR 0032 will pick
+    // it): refused rather than guessed from the first match.
+    if depends_on_api(p) && facts.game.apis_differ() {
+        return Err(EngineError::PackageApiOpen { id: id.to_owned() });
+    }
     let api = facts
         .game
         .main_api()
@@ -1187,6 +1236,12 @@ fn package_step<'p>(
     let spec = prim::package::file_install(p, &build)
         .map_err(|e: PackageRefusal| refused(e.to_string()))?;
     Ok((p, spec))
+}
+
+/// The files `p` installs depend on the game's graphics API (`apis`, `slots_by_api`, or a file
+/// with `api`).
+fn depends_on_api(p: &Package) -> bool {
+    p.apis.is_some() || p.slots_by_api.is_some() || p.files.iter().any(|f| f.api.is_some())
 }
 
 /// Slot conflicts inside one plan (P4-8): no two packages of the plan put a DLL (a slot, bound

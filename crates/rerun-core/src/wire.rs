@@ -82,6 +82,14 @@ pub(crate) mod hex32_opt {
     }
 }
 
+/// An optional field that is absent on the wire when `None` (with `default` and
+/// `skip_serializing_if`) and never `null` when present (one form; `deserialize_with`).
+pub(crate) fn some<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
+}
+
 /// An optional 128-bit file ID: `null` or exactly 32 lower-case hex digits.
 pub(crate) mod hex128_opt {
     use serde::de::Error as _;

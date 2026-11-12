@@ -37,6 +37,7 @@ fn game_root() -> PlanRoot {
         origin: PlanOrigin::Manual,
         main_exe: Some(r("game.exe")),
         main_sha256: None,
+        other_exes: None,
     }
 }
 
@@ -51,6 +52,7 @@ pub(crate) fn ud_root(path: &str, sub: &str, n: u128) -> PlanRoot {
         },
         main_exe: None,
         main_sha256: None,
+        other_exes: None,
     }
 }
 
