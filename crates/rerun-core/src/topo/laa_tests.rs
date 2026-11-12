@@ -766,3 +766,41 @@ fn la11_a_patch_and_a_rule_of_one_exe_in_one_plan() {
         "plan and apply the firewall rule on its own first, then laa_patch in a second plan",
     );
 }
+
+// ---------- LA12 ----------
+
+/// LA12 (P5-2a review): plan A patches the executable, plan B (another fix of the same game) is
+/// made before A is applied. After A, B names the build before the patch: refused as
+/// `GameChanged`, with the text that names another fix as a cause; nothing of B is applied.
+#[test]
+fn la12_a_plan_made_before_another_apply_on_the_exe_is_refused() {
+    let exe = game_exe(true);
+    let env = Env::new(sys_with(&exe));
+    let sys = &env.sys;
+    let mut v = serde_json::to_value(topo(&exe)).unwrap();
+    v["issues"].as_array_mut().unwrap().push(serde_json::json!({
+        "id": "display", "title": "Display", "variants": [{
+            "id": "layer", "status": "unverified", "kind": "fix",
+            "steps": [{"compat_layer": {"exe": "Game.exe", "layers": ["ZZ_FLAG_A"]}}]
+        }]
+    }));
+    let t: Topo = serde_json::from_value(v).unwrap();
+    let a = store_plan(&env, &plan_picks(sys, &t, &["memory/laa"]).unwrap());
+    let b = store_plan(&env, &plan_picks(sys, &t, &["display/layer"]).unwrap());
+    let txn = env.applied(&a);
+    let r = match env.apply(&b) {
+        Err(crate::exec::ApplyError::Refused(r)) => r,
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+    assert!(matches!(r, crate::exec::Refusal::GameChanged(_)), "{r:?}");
+    let text = r.to_string();
+    assert!(
+        text.ends_with(
+            "changed since the plan (a game update, or another fix changed it); plan again"
+        ),
+        "{text}"
+    );
+    let states = env.states();
+    assert_eq!(states.len(), 1, "only A: {states:?}");
+    assert_eq!(states[0].0, txn);
+}

@@ -379,7 +379,7 @@ fn run<W: Write, E: Write>(
                 rev: t.rev,
                 index: hex(&picked.index),
             }));
-            before.extend(p.warnings.iter().map(|w| {
+            before.extend(p.warnings().iter().map(|w| {
                 Message::Topo(TopoMsg::Warning {
                     text: warning_text(w),
                 })

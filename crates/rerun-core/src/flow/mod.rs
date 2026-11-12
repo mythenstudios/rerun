@@ -35,9 +35,10 @@ mod library;
 mod status;
 mod write;
 
+pub(crate) use game::with_topo;
 pub use game::{
     Fix, Found, GameRefusal, GameView, IssueView, Lookup, MatchView, Matched, OwnedReport, Solved,
-    VariantView, fixes, game, with_topo,
+    VariantView, fixes, game,
 };
 pub use library::{LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_games, library};
 pub use status::{Holder, StatusView, head, profile_id_of, profile_of, profile_op, status};
@@ -92,11 +93,6 @@ impl<'a> Guarded<'a> {
     /// Rerun's folder, opened if it exists (never created by a guard, review S6 of P2-13).
     pub fn app(&self) -> Option<&AppDir<'a>> {
         self.app.as_ref()
-    }
-
-    /// Rerun's folder, for the step that stores (it may create it then).
-    pub fn into_app(self) -> Option<AppDir<'a>> {
-        self.app
     }
 }
 
@@ -188,7 +184,7 @@ pub enum GameOpen {
 
 /// Opens the game folder `game` names and runs `f` on it (with the Steam app ID for a Steam
 /// game). A Steam app must be listed by exactly one library and installed; nothing is guessed.
-pub fn with_game<R>(
+pub(crate) fn with_game<R>(
     sys: &dyn System,
     fr: &ForbiddenRoots,
     game: &GameRef,

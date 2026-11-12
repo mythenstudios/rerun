@@ -328,10 +328,11 @@ pub enum Refusal {
     #[error("the main executable {0} is missing or not a file; plan again")]
     MainExe(Shown<'static>),
     /// The main executable has another content than the Topo engine matched when the plan was
-    /// made (P5-2a, ADR 0020 amendment P5-2a): the game changed since, e.g. a Steam update.
+    /// made (P5-2a, ADR 0020 amendment P5-2a): a game update, or another fix (an earlier
+    /// `laa_patch`, or the revert of one) changed it since.
     #[error(
-        "the game changed since the plan: {0} is not the build the plan was made for (a game \
-         update?); plan again"
+        "the main executable {0} changed since the plan (a game update, or another fix changed \
+         it); plan again"
     )]
     GameChanged(Shown<'static>),
     /// A key or value of op `op` cannot be checked: a symbolic-link or volatile key on the way,
@@ -1653,9 +1654,10 @@ fn preflight<'g>(
     let roots = roots::Roots::all(cx, plan, &Bindings::head(plan), stores, run)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
     roots::main_exe_present(plan, &roots)?;
-    // P5-2a: the build the plan was made for.
-    roots::main_exe_same(plan, &roots)?;
     roots::game_closed(plan, &roots, &all)?;
+    // P5-2a: the build the plan was made for (after D4: a running game is refused without
+    // hashing up to 2 GiB).
+    roots::main_exe_same(plan, &roots)?;
     roots::old_state(cx, plan, &roots)?;
     reg::old_state(&RegPolicy.writer(cx.sys), plan)?;
     // A4 S7: the firewall rules are still what the signed Topo authorises here.

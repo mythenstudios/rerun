@@ -65,14 +65,14 @@ fn run<W: Write, E: Write>(
     })?;
     let ops = p.ops();
     let mut lines = vec![Message::Txn(TxnMsg::PlanHead { hash: *hash, ops })];
-    lines.extend(preview::render(&p.preview));
-    lines.extend(preview::shadow_lines(&p.shadows));
+    lines.extend(preview::render(p.preview()));
+    lines.extend(preview::shadow_lines(p.shadows()));
     // P4-2d: the administrator prompt the firewall rules bring (ADR 0023 §10).
-    lines.extend(preview::prompt_lines(sys, &p.preview));
+    lines.extend(preview::prompt_lines(sys, p.preview()));
     // P3-3d: the launch profile's selection here, hints and the launch option.
-    let lv = preview::launch_view(sys, &install, &p.preview);
+    let lv = preview::launch_view(sys, &install, p.preview());
     if let Some(lv) = &lv {
-        lines.extend(preview::launch_lines(&p.preview, lv));
+        lines.extend(preview::launch_lines(p.preview(), lv));
     }
     lines.push(Message::Blank);
     out.lines(&lines)

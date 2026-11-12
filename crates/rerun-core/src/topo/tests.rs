@@ -1967,8 +1967,11 @@ fn tg1_a_game_updated_since_the_plan_is_refused() {
             assert!(exe.as_str().ends_with(r"G\game.exe"), "{}", exe.as_str());
             let text = crate::exec::Refusal::GameChanged(exe).to_string();
             assert!(
-                text.starts_with("the game changed since the plan: ")
-                    && text.ends_with("; plan again"),
+                text.starts_with("the main executable ")
+                    && text.ends_with(
+                        "G\\game.exe changed since the plan (a game update, or another fix \
+                         changed it); plan again"
+                    ),
                 "{text}"
             );
         }

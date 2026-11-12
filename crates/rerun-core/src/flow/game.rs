@@ -98,9 +98,8 @@ pub enum GameRefusal {
 }
 
 /// Looks up the Topo of `app_id` (module docs) and runs `f` on it if exactly one matches.
-/// Public until P5-2a (the CLI's `--pick` plans inside it), then `pub(crate)` behind
-/// `flow::plan`.
-pub fn with_topo<R>(
+/// Crate-internal behind [`super::game`] and `flow::plan` (P5-2a).
+pub(crate) fn with_topo<R>(
     g: &Guarded<'_>,
     app_id: u32,
     f: impl FnOnce(Matched<'_>) -> R,
@@ -234,6 +233,8 @@ pub struct Solved {
     pub status: VariantStatus,
     /// Where it comes from, for this issue.
     pub sources: Vec<Source>,
+    /// Its side effects as this issue's copy names them (rule 5: shown before the apply).
+    pub tradeoffs: Vec<String>,
 }
 
 /// One fix = one variant ID of the Topo, with every issue that names it (plan P5 §3, option B).
@@ -266,6 +267,7 @@ pub fn fixes(r: &OwnedReport) -> Vec<Fix> {
                 when: i.when,
                 status: v.variant.status,
                 sources: v.variant.sources.clone(),
+                tradeoffs: v.variant.tradeoffs.clone(),
             };
             match out.iter_mut().find(|f| f.variant == id) {
                 Some(f) => {

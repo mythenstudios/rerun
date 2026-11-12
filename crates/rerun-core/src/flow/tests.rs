@@ -5,7 +5,7 @@
 //!   unknown install folder stops before the forbidden roots; unresolvable forbidden roots stop
 //!   before a Rerun folder that cannot be opened (control: that folder alone is
 //!   `Gate::AppDir`); a passed guard never creates Rerun's folder.
-//! - FF1 to FF3 the fixes of a report: one fix per variant ID with one `Solved` per issue that
+//! - FF1 to FF4 the fixes of a report: one fix per variant ID with one `Solved` per issue that
 //!   names it (`when` per issue), the refusal per variant kept apart from `when`, the copies
 //!   of one fix (identical by the loader, P5-4) speak once.
 //! - FL1 the library without Steam: the Steam event, no library, the requested app IDs missing
@@ -211,6 +211,38 @@ fn ff3_the_copies_of_one_fix_speak_once() {
     assert_eq!(f[0].warned, warned, "once, not per copy");
     let when: Vec<Tri> = f[0].solves.iter().map(|s| s.when).collect();
     assert_eq!(when, [Tri::Yes, Tri::Unknown], "when stays per issue");
+}
+
+/// FF4 (P5-2a review, rule 5): each `Solved` carries the tradeoffs its issue's copy names, so
+/// a fix with two copies shows both issues' side effects before the apply.
+#[test]
+fn ff4_each_solved_carries_its_tradeoffs() {
+    let mut r = report([Tri::Yes, Tri::Yes], &[]);
+    r.issues[0].variants[0].variant.tradeoffs = vec!["the menu font is smaller".to_owned()];
+    r.issues[1].variants[0].variant.tradeoffs = vec![
+        "online play is off".to_owned(),
+        "achievements are off".to_owned(),
+    ];
+    let f = fixes(&r);
+    let patch = &f[0];
+    assert_eq!(patch.variant, "patch");
+    let t: Vec<(&str, Vec<&str>)> = patch
+        .solves
+        .iter()
+        .map(|s| {
+            (
+                s.issue.as_str(),
+                s.tradeoffs.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        t,
+        [
+            ("controller", vec!["the menu font is smaller"]),
+            ("online", vec!["online play is off", "achievements are off"]),
+        ]
+    );
 }
 
 #[test]

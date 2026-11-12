@@ -96,21 +96,21 @@ pub(crate) fn show_and_store<W: Write, E: Write>(
     if !before.is_empty() {
         out.lines(before).map_err(|e| before_change(err, e))?;
     }
-    if p.preview.ops.is_empty() {
+    if p.preview().ops.is_empty() {
         let _ = out.line(&Message::Txn(TxnMsg::NothingToDo));
         return Ok(Exit::Report);
     }
     let hash = p.hash();
     let ops = p.ops();
     // P3-3d: the launch profile's selection here, hints and the launch option (not stored).
-    let lv = preview::launch_view(sys, &host.install, &p.preview);
-    let mut lines = preview::render(&p.preview);
+    let lv = preview::launch_view(sys, &host.install, p.preview());
+    let mut lines = preview::render(p.preview());
     // P3-7: a VirtualStore copy of a managed file (looked up with the preview above).
-    lines.extend(preview::shadow_lines(&p.shadows));
+    lines.extend(preview::shadow_lines(p.shadows()));
     // P4-2d (ADR 0023 §2): the helper's pre-check as a warning, and the prompt to expect.
-    lines.extend(preview::helper_lines(sys, &p.preview));
+    lines.extend(preview::helper_lines(sys, p.preview()));
     if let Some(lv) = &lv {
-        lines.extend(preview::launch_lines(&p.preview, lv));
+        lines.extend(preview::launch_lines(p.preview(), lv));
     }
     out.lines(&lines)
         .and_then(|()| out.line(&Message::Blank))

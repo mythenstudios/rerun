@@ -838,11 +838,12 @@ fn c_te14_a_game_updated_since_the_plan_is_refused() {
         let line = r
             .stderr
             .lines()
-            .find(|l| l.contains("the game changed since the plan: "))
+            .find(|l| l.contains("changed since the plan"))
             .unwrap_or_else(|| panic!("{}", r.stderr));
         assert!(
             line.ends_with(&format!(
-                r"{exe} is not the build the plan was made for (a game update?); plan again"
+                "the main executable {exe} changed since the plan (a game update, or another fix \
+                 changed it); plan again"
             )),
             "{line}"
         );
@@ -855,6 +856,65 @@ fn c_te14_a_game_updated_since_the_plan_is_refused() {
         Answer::No,
         Exit::Report,
     );
+}
+
+/// C-TE15 (P5-2a review): a Topo plan stored by an earlier version (no `main_sha256`) is
+/// refused at `rerun apply` with exit 3 and the "plan again" line, never applied unchecked.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test: read and plant a stored plan in the fake"
+)]
+fn c_te15_an_old_stored_topo_plan_is_refused() {
+    use sha2::{Digest, Sha256};
+    let sys = sys();
+    let p = expect(
+        &sys,
+        &["plan", "220", "--pick", "display/layer"],
+        Answer::No,
+        Exit::Report,
+    );
+    let hash = crate::tests::hash_of(&p);
+    let plans = format!(r"{RERUN}\plans");
+    let stored = {
+        use rerun_core::sys::Fs as _;
+        let d = sys.fake_fs().open_dir(Path::new(&plans)).unwrap();
+        d.read(&RelPath::parse(&format!("{hash}.json")).unwrap())
+            .unwrap()
+    };
+    let text = String::from_utf8(stored).unwrap();
+    const FIELD: &str = r#","main_sha256":""#;
+    let at = text.find(FIELD).unwrap();
+    let old = format!("{}{}", &text[..at], &text[at + FIELD.len() + 64 + 1..]);
+    assert!(
+        !old.contains("main_sha256") && old.contains(r#""source":"#),
+        "{old}"
+    );
+    let old_hash: String = Sha256::digest(old.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    sys.fake_fs()
+        .put_file(
+            Path::new(&format!(r"{plans}\{old_hash}.json")),
+            old.as_bytes(),
+        )
+        .unwrap();
+    sys.fake_fs().sync_all();
+    for args in [
+        vec!["apply", old_hash.as_str(), "--dry-run"],
+        vec!["apply", old_hash.as_str(), "--yes"],
+    ] {
+        let r = expect(&sys, &args, Answer::No, Exit::Refused);
+        assert!(
+            r.stderr.lines().any(|l| l
+                .contains("a plan from a Topo without the hash of the game's main executable")
+                && l.ends_with("plan again")),
+            "{}",
+            r.stderr
+        );
+        assert!(!r.stdout.contains("applied as"), "{}", r.stdout);
+    }
 }
 
 /// Imports `ix`, signed with the test key.

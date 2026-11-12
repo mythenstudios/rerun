@@ -37,12 +37,12 @@ pub struct Planned {
     bytes: PlanBytes,
     /// The path of Rerun's folder the planners were given (`None`: unknown, or a stored plan).
     app_path: Option<RootPath>,
-    /// The preview of the bytes.
-    pub preview: Preview,
+    /// The preview of the bytes (private: a caller cannot swap it for another plan's).
+    preview: Preview,
     /// VirtualStore copies of managed files (P3-7), looked up from the same decode.
-    pub shadows: Vec<Shadow>,
+    shadows: Vec<Shadow>,
     /// The engine's warnings (a Topo plan; empty otherwise).
-    pub warnings: Vec<Warning>,
+    warnings: Vec<Warning>,
 }
 
 impl Planned {
@@ -54,6 +54,21 @@ impl Planned {
     /// The number of ops.
     pub fn ops(&self) -> usize {
         self.preview.ops.len()
+    }
+
+    /// The preview, decoded from exactly the bytes.
+    pub fn preview(&self) -> &Preview {
+        &self.preview
+    }
+
+    /// VirtualStore copies of managed files (P3-7), looked up from the same decode.
+    pub fn shadows(&self) -> &[Shadow] {
+        &self.shadows
+    }
+
+    /// The engine's warnings (a Topo plan; empty otherwise).
+    pub fn warnings(&self) -> &[Warning] {
+        &self.warnings
     }
 
     fn of(
@@ -333,7 +348,7 @@ pub fn check(g: &Guarded<'_>, p: &Previewed) -> Result<usize, Refusal> {
 ///
 /// ```no_run
 /// # fn f(mut g: rerun_core::flow::Guarded<'_>, planned: rerun_core::flow::Planned) {
-/// // … the caller renders `planned.preview` …
+/// // … the caller renders `planned.preview()` …
 /// let p = rerun_core::flow::shown(planned);
 /// if rerun_core::flow::store(&mut g, &p).is_ok() && rerun_core::flow::check(&g, &p).is_ok() {
 ///     let _ = rerun_core::flow::apply(&g, p);

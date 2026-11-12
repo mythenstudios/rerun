@@ -2,8 +2,8 @@
 //! `schema/topo.schema.json` and `schema/package.schema.json` (parity test against the same
 //! fixtures, ADR 0005) plus a few loader rules the schema cannot express (unique issue and
 //! variant IDs, one variant ID names one fix across issues (P5-4), the registry vendor deny
-//! list, unique value names, the qword range, download provenance). The rules in force now of the planners (token allowlist, INI value rule, the
-//! game folder itself) stay the planners'.
+//! list, unique value names, the qword range, download provenance). The rules in force now of
+//! the planners (token allowlist, INI value rule, the game folder itself) stay the planners'.
 //!
 //! [`Rules::Source`] is a file of `topos/` or `packages/`: `TODO` only in a draft.
 //! [`Rules::Release`] is an entry of the signed index: no draft, no `TODO` anywhere.
