@@ -591,6 +591,8 @@ component GamePage inherits VerticalLayout {
     callback apply(string);
     callback card-undo(int);
     callback card-forget(int);
+    // The details of the set-aside Topos are shown.
+    in-out property <bool> aside-open: false;
     spacing: Theme.s4;
     HorizontalLayout {
         alignment: start;
@@ -692,6 +694,22 @@ component GamePage inherits VerticalLayout {
                 wrap: word-wrap;
                 accessible-role: none;
             }
+        }
+    }
+    // Why a Topo of this game is set aside (ADR 0024 amendment "Forward compatibility" §10).
+    if root.game.aside.length > 0: HorizontalLayout {
+        alignment: start;
+        Button {
+            text: root.aside-open ? Str.hide-details : Str.show-details;
+            activated => {
+                root.aside-open = !root.aside-open;
+            }
+        }
+    }
+    if root.game.aside.length > 0 && root.aside-open: VerticalLayout {
+        spacing: Theme.s1;
+        for d in root.game.aside: DetailLine {
+            d: d;
         }
     }
     VerticalLayout {

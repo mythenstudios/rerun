@@ -132,5 +132,5 @@ fn f_g3_the_lookup_before_the_game() {
     let v = game(&lm_sys(false, &steps(8)), 220);
     assert!(matches!(v.lookup, Lookup::NoIndex));
     let v = game(&sys(), 221);
-    assert!(matches!(v.lookup, Lookup::NoTopo { seq: 1 }));
+    assert!(matches!(v.lookup, Lookup::NoTopo { seq: 1, ref aside } if aside.is_empty()));
 }

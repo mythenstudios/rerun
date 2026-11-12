@@ -38,6 +38,17 @@ pub enum IndexMsg<'a> {
         /// The date.
         issued: Shown<'a>,
     },
+    /// Entries of the index this build sets aside that a newer Rerun can use (ADR 0024
+    /// amendment "Forward compatibility" §10).
+    AsideNewer {
+        /// `topo x`, `package y`.
+        entries: Vec<Shown<'a>>,
+    },
+    /// Entries of the index this version of Rerun cannot use for another reason.
+    AsideUnusable {
+        /// `topo z (reason)`.
+        entries: Vec<Shown<'a>>,
+    },
     /// No index was imported yet.
     NoneYet,
     /// A file of the command could not be read.
@@ -52,6 +63,25 @@ pub enum IndexMsg<'a> {
         /// Why.
         error: Shown<'a>,
     },
+}
+
+/// `1 entry` with `one`, `2 entries` with `many`.
+fn count(n: usize, one: &'static str, many: &'static str) -> (String, &'static str) {
+    if n == 1 {
+        ("1 entry".to_owned(), one)
+    } else {
+        (format!("{n} entries"), many)
+    }
+}
+
+fn list(f: &mut fmt::Formatter<'_>, entries: &[Shown<'_>]) -> fmt::Result {
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "{e}")?;
+    }
+    Ok(())
 }
 
 impl fmt::Display for IndexMsg<'_> {
@@ -77,6 +107,16 @@ impl fmt::Display for IndexMsg<'_> {
                 "index {seq}: {topos} topos, {packages} packages, key {key}, sha256 {sha256}"
             ),
             Self::Issued { issued } => write!(f, "  issued: {issued}"),
+            Self::AsideNewer { entries } => {
+                let (n, verb) = count(entries.len(), "needs", "need");
+                write!(f, "  {n} {verb} a newer version of Rerun: ")?;
+                list(f, entries)
+            }
+            Self::AsideUnusable { entries } => {
+                let (n, _) = count(entries.len(), "", "");
+                write!(f, "  {n} cannot be used by this version of Rerun: ")?;
+                list(f, entries)
+            }
             Self::NoneYet => f.write_str(
                 "no signed index has been imported yet (rerun index import <index.json> <index.json.sig>)",
             ),

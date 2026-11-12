@@ -391,6 +391,8 @@ fn set_strings(ui: &AppWindow, lang: Lang) {
     g.set_rescan(x(Msg::Rescan));
     g.set_show_problems(x(Msg::ShowProblems));
     g.set_hide_problems(x(Msg::HideProblems));
+    g.set_show_details(x(Msg::ShowDetails));
+    g.set_hide_details(x(Msg::HideDetails));
     g.set_detail(x(Msg::Detail));
     g.set_back(x(Msg::BackToLibrary));
     g.set_eyebrow(x(Msg::GameEyebrow));
@@ -830,6 +832,7 @@ fn game(g: &GameVm, sel: &Selection) -> GameData {
                 .collect(),
         ),
         applied: model(g.applied.iter().map(card).collect()),
+        aside: model(g.aside.iter().map(detail).collect()),
     }
 }
 

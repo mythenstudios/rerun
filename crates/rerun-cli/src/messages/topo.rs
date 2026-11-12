@@ -18,6 +18,23 @@ pub enum TopoMsg<'a> {
         /// The index.
         seq: u64,
     },
+    /// The index has Topos for this app, but this build sets every one aside.
+    NoUsableTopo {
+        /// The app.
+        app_id: u32,
+        /// The index.
+        seq: u64,
+    },
+    /// A Topo of the app this build sets aside (ADR 0024 amendment "Forward compatibility"
+    /// §10): never planned.
+    Aside {
+        /// Its ID.
+        id: Shown<'a>,
+        /// A newer Rerun can use it.
+        newer: bool,
+        /// Why this version cannot use it (`None` when `newer`).
+        why: Option<Shown<'a>>,
+    },
     /// The Topo's heading.
     Heading {
         /// Its ID.
@@ -130,6 +147,27 @@ impl fmt::Display for TopoMsg<'_> {
             ),
             Self::NoTopo { app_id, seq } => {
                 write!(f, "app {app_id}: index {seq} has no Topo for this game")
+            }
+            Self::NoUsableTopo { app_id, seq } => write!(
+                f,
+                "app {app_id}: index {seq} has no Topo for this game that this version of Rerun can use: nothing is offered"
+            ),
+            Self::Aside { id, newer: true, .. } => {
+                write!(f, "Topo {id} for this game needs a newer version of Rerun")
+            }
+            Self::Aside {
+                id,
+                newer: false,
+                why,
+            } => {
+                write!(
+                    f,
+                    "Topo {id} for this game cannot be used by this version of Rerun"
+                )?;
+                match why {
+                    Some(w) => write!(f, " ({w})"),
+                    None => Ok(()),
+                }
             }
             Self::Heading {
                 id,

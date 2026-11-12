@@ -8,6 +8,10 @@
 //! markers, the system profile (`hw::read` with the built-in architecture table, the table
 //! the Topo is checked against). Exactly one Topo must match.
 //!
+//! A Topo of the app this build sets aside (ADR 0024 amendment "Forward compatibility") is
+//! named with its reason and never planned; an app whose only Topos are set aside offers
+//! nothing, and a `--pick` for it is refused (exit 3).
+//!
 //! Without `--pick`: the report (issues, `when` here, variants and what the engine says);
 //! nothing is stored, nothing created. With `--pick`: the engine's plan, then the same preview
 //! and storage as a step file (`plan::show_and_store`), with the plan's origin and the
@@ -18,8 +22,8 @@
 
 use std::io::Write;
 
-use rerun_core::catalog::Topo;
 use rerun_core::catalog::model::{GpuRequirement, Kind, Status, VariantStatus};
+use rerun_core::catalog::{Aside, Topo};
 use rerun_core::escape;
 use rerun_core::flow::{self, Found, GameRefusal, Lookup, OwnedReport};
 use rerun_core::plan::Pick;
@@ -250,6 +254,21 @@ fn retired_lines(retired: &[Topo]) -> Vec<Message<'static>> {
         .collect()
 }
 
+/// The set-aside Topos of the app (ADR 0024 amendment "Forward compatibility" §10): ID and
+/// reason escaped, they come from the signed entry.
+fn aside_lines(aside: &[Aside]) -> Vec<Message<'static>> {
+    aside
+        .iter()
+        .map(|a| {
+            Message::Topo(TopoMsg::Aside {
+                id: escape::text(a.id.as_str()).into_owned(),
+                newer: a.why.needs_newer(),
+                why: crate::index::aside_why(a),
+            })
+        })
+        .collect()
+}
+
 /// The lines of the retired Topos and what one Topo gave; a lookup that found no single Topo
 /// is written to stdout here and ends with `exit`.
 fn one<R, W: Write, E: Write>(
@@ -259,18 +278,29 @@ fn one<R, W: Write, E: Write>(
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Result<(Vec<Message<'static>>, R), Exit> {
-    let (retired, found) = match lookup {
+    let (retired, aside, found) = match lookup {
         Lookup::NoIndex => {
             let _ = out.line(&Message::Topo(TopoMsg::NoIndex));
             return Err(exit);
         }
-        Lookup::NoTopo { seq } => {
+        Lookup::NoTopo { seq, aside } if aside.is_empty() => {
             let _ = out.line(&Message::Topo(TopoMsg::NoTopo { app_id, seq }));
             return Err(exit);
         }
-        Lookup::Read { retired, found } => (retired, found),
+        // Only set-aside Topos: named with why; a `--pick` is refused (exit 3).
+        Lookup::NoTopo { seq, aside } => {
+            let mut lines = vec![Message::Topo(TopoMsg::NoUsableTopo { app_id, seq })];
+            lines.extend(aside_lines(&aside));
+            return Err(print(out, err, &lines, exit));
+        }
+        Lookup::Read {
+            retired,
+            aside,
+            found,
+        } => (retired, aside, found),
     };
     let mut lead = retired_lines(&retired);
+    lead.extend(aside_lines(&aside));
     match found {
         Found::One(r) => return Ok((lead, r)),
         Found::NoMatch(live) => {

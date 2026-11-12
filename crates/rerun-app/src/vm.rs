@@ -8,7 +8,7 @@
 
 use rerun_core::catalog::model::{Api, Kind, Status, VariantStatus};
 use rerun_core::catalog::store::StoreError;
-use rerun_core::catalog::{IndexError, Topo};
+use rerun_core::catalog::{Aside, IndexError, Topo};
 use rerun_core::detect::exe::{ApiVerdict, GraphicsApi, Main};
 use rerun_core::detect::steam::{AppState, SteamApp, SteamScan};
 use rerun_core::escape::{self, Shown};
@@ -188,6 +188,12 @@ pub enum TopoKnown {
     Yes,
     /// It names none.
     No,
+    /// It names no usable Topo, but one or more this version sets aside (ADR 0024 amendment
+    /// "Forward compatibility" §10).
+    Aside {
+        /// One of them needs a newer Rerun (else this version does not support them).
+        newer: bool,
+    },
 }
 
 /// One game of the library.
@@ -293,6 +299,7 @@ pub fn row(app: &SteamApp, scan: &RowScan, topo: TopoKnown, lang: Lang) -> RowVm
                 Group::NoTopo,
                 Badge::new(Sym::None, lang, Msg::BadgeNoIndex, false),
             ),
+            TopoKnown::Aside { newer } => (Group::NoTopo, aside_badge(newer, lang)),
         }
     };
     RowVm {
@@ -303,6 +310,25 @@ pub fn row(app: &SteamApp, scan: &RowScan, topo: TopoKnown, lang: Lang) -> RowVm
         group,
         badge,
         key,
+    }
+}
+
+/// The status of an app whose only Topos are set aside: a newer Rerun can use one, or this
+/// version supports none.
+fn aside_badge(newer: bool, lang: Lang) -> Badge {
+    if newer {
+        Badge::new(Sym::Attention, lang, Msg::BadgeNeedsNewer, false)
+    } else {
+        Badge::new(Sym::NotHere, lang, Msg::BadgeUnsupported, true)
+    }
+}
+
+/// One set-aside Topo for the details: its ID and the reason, both from the signed entry and
+/// escaped, each in its own element.
+pub fn aside_detail(a: &Aside) -> DetailVm {
+    DetailVm {
+        who: Some(escape::text(a.id.as_str()).into_owned()),
+        what: shown_error(&a.why),
     }
 }
 
@@ -391,7 +417,14 @@ pub struct IndexVm {
 pub fn index(state: &IndexState, lang: Lang) -> IndexVm {
     match state {
         IndexState::Current(c) => IndexVm {
-            status: t(lang, Msg::StatusIndex { seq: c.seq() }).into_owned(),
+            status: match c.aside().len() {
+                0 => t(lang, Msg::StatusIndex { seq: c.seq() }).into_owned(),
+                count => format!(
+                    "{} \u{00B7} {}",
+                    t(lang, Msg::StatusIndex { seq: c.seq() }),
+                    t(lang, Msg::StatusAside { count })
+                ),
+            },
             signature: t(lang, Msg::StatusSignatureChecked).into_owned(),
             notice: None,
         },
@@ -624,6 +657,8 @@ pub struct GameVm {
     pub fixes: Vec<FixVm>,
     /// What is applied to this game now, one card per transaction (P5-5a).
     pub applied: Vec<TxnCardVm>,
+    /// The game's Topos this version sets aside, with why (behind a details expander).
+    pub aside: Vec<DetailVm>,
 }
 
 fn hero(sym: Sym, lang: Lang, m: Msg) -> HeroVm {
@@ -667,6 +702,7 @@ fn base(app_id: u32, title: Shown<'static>, hero: HeroVm, lang: Lang) -> GameVm 
         problems: Vec::new(),
         fixes: Vec::new(),
         applied: Vec::new(),
+        aside: Vec::new(),
     }
 }
 
@@ -711,26 +747,69 @@ pub fn game(
 ) -> GameVm {
     let title = title_of(view.app_id, name, lang);
     let none = |m| base(view.app_id, title.clone(), hero(Sym::None, lang, m), lang);
+    // Only set-aside Topos (ADR 0024 amendment "Forward compatibility" §10): the row's status as
+    // the hero, why behind the details.
+    let only_aside = |aside: &[Aside]| {
+        let newer = aside.iter().any(|a| a.why.needs_newer());
+        let b = aside_badge(newer, lang);
+        let sub = if newer {
+            Msg::HeroNeedsNewerSub
+        } else {
+            Msg::HeroUnsupportedSub
+        };
+        let h = HeroVm {
+            sym: b.sym,
+            line: b.word,
+            sub: Some(t(lang, sub).into_owned()),
+        };
+        let mut g = base(view.app_id, title.clone(), h, lang);
+        g.aside = aside.iter().map(aside_detail).collect();
+        g
+    };
     match &view.lookup {
         Lookup::NoIndex => none(Msg::HeroNoIndex),
+        Lookup::NoTopo { aside, .. } if !aside.is_empty() => only_aside(aside),
         Lookup::NoTopo { .. } => none(Msg::HeroNoTopo),
-        Lookup::Read { retired, found } => match found {
-            Found::NoMatch(live) if live.is_empty() && !retired.is_empty() => {
-                none(Msg::HeroRetired)
+        Lookup::Read {
+            found: Found::NoMatch(live),
+            aside,
+            ..
+        } if live.is_empty() && !aside.is_empty() => only_aside(aside),
+        Lookup::Read {
+            retired,
+            aside,
+            found,
+        } => {
+            let mut g = match found {
+                Found::NoMatch(live) if live.is_empty() && !retired.is_empty() => {
+                    none(Msg::HeroRetired)
+                }
+                Found::NoMatch(_) => {
+                    let mut h = hero(Sym::Unknown, lang, Msg::HeroNoMatch);
+                    h.sub = Some(t(lang, Msg::HeroNoMatchSub).into_owned());
+                    base(view.app_id, title.clone(), h, lang)
+                }
+                Found::Several(_) => base(
+                    view.app_id,
+                    title.clone(),
+                    hero(Sym::Attention, lang, Msg::HeroSeveral),
+                    lang,
+                ),
+                Found::One(m) => matched(view.app_id, title.clone(), m, helper, lang),
+            };
+            // A usable Topo next to a set-aside one: a hint (the set-aside one may be the one
+            // for this build) and why.
+            if !aside.is_empty() {
+                let m = if aside.iter().any(|a| a.why.needs_newer()) {
+                    Msg::NoteAsideNewer
+                } else {
+                    Msg::NoteAsideUnsupported
+                };
+                g.notes.push(t(lang, m).into_owned());
+                g.aside = aside.iter().map(aside_detail).collect();
             }
-            Found::NoMatch(_) => {
-                let mut h = hero(Sym::Unknown, lang, Msg::HeroNoMatch);
-                h.sub = Some(t(lang, Msg::HeroNoMatchSub).into_owned());
-                base(view.app_id, title, h, lang)
-            }
-            Found::Several(_) => base(
-                view.app_id,
-                title,
-                hero(Sym::Attention, lang, Msg::HeroSeveral),
-                lang,
-            ),
-            Found::One(m) => matched(view.app_id, title, m, helper, lang),
-        },
+            g
+        }
     }
 }
 

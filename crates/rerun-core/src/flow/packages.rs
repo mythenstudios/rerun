@@ -21,8 +21,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::catalog::Catalog;
 use crate::catalog::model::{Arch, Package, Tier};
+use crate::catalog::{Catalog, EntryKind};
 use crate::pkg::download::{self, Reading};
 use crate::pkg::extract::{self, ExtractError, Unpacked};
 use crate::policy::root::AppDir;
@@ -111,7 +111,18 @@ pub fn need(catalog: &Catalog, app: Option<&AppDir<'_>>, id: &str) -> PackageNee
             repo: None,
             page: None,
             downloads: Vec::new(),
-            state: NeedState::Unobtainable("the package is not in the signed index".to_owned()),
+            // A set-aside package is never fetched (ADR 0024 amendment "Forward compatibility"
+            // §10): the same answer as `rerun package fetch`.
+            state: NeedState::Unobtainable(match catalog.aside_entry(EntryKind::Package, id) {
+                Some(a) if a.why.needs_newer() => {
+                    "the package needs a newer version of Rerun".to_owned()
+                }
+                Some(a) => format!(
+                    "the package cannot be used by this version of Rerun ({})",
+                    a.why
+                ),
+                None => "the package is not in the signed index".to_owned(),
+            }),
         },
     }
 }

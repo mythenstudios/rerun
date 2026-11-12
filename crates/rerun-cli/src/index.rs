@@ -8,13 +8,17 @@
 //! one with the same number is refused, and Rerun's folder is created only for an index that
 //! passed. `show`: reads the current index back like an import (signature, form) and prints its
 //! facts; it creates nothing.
+//!
+//! Both end with up to two lines on the entries this build sets aside (ADR 0024 amendment
+//! "Forward compatibility" §10): the ones a newer Rerun can use, and the ones this version
+//! cannot use, each with its reason. The exit code does not change.
 
 use std::io::Write;
 use std::path::Path;
 
 use rerun_core::catalog::store::{self, Imported, StoreError};
-use rerun_core::catalog::{Catalog, MAX_INDEX_BYTES, SIG_BYTES, trusted_keys};
-use rerun_core::escape;
+use rerun_core::catalog::{Aside, Catalog, MAX_INDEX_BYTES, SIG_BYTES, trusted_keys};
+use rerun_core::escape::{self, Shown};
 use rerun_core::flow::{self, IndexState};
 use rerun_core::policy::root::{AppDir, Create, read_input};
 
@@ -32,8 +36,26 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn facts(c: &Catalog) -> [Message<'static>; 2] {
-    [
+/// Why this version cannot use `a`, escaped (a rule's text comes from the signed entry);
+/// `None` when a newer Rerun can.
+pub(crate) fn aside_why(a: &Aside) -> Option<Shown<'static>> {
+    (!a.why.needs_newer()).then(|| escape::text(&a.why.to_string()).into_owned())
+}
+
+/// `topo x`, or `topo z (reason)` when a newer Rerun would not help; escaped as a whole.
+pub(crate) fn aside_shown(a: &Aside) -> Shown<'static> {
+    let s = match aside_why(a) {
+        None => format!("{} {}", a.kind, a.id),
+        Some(why) => format!("{} {} ({why})", a.kind, a.id),
+    };
+    escape::text(&s).into_owned()
+}
+
+/// The facts, then the set-aside lines (module docs).
+fn facts(c: &Catalog) -> Vec<Message<'static>> {
+    let (newer, other): (Vec<&Aside>, Vec<&Aside>) =
+        c.aside().iter().partition(|a| a.why.needs_newer());
+    let mut lines = vec![
         Message::Index(IndexMsg::Facts {
             seq: c.seq(),
             topos: c.topos().len(),
@@ -44,7 +66,18 @@ fn facts(c: &Catalog) -> [Message<'static>; 2] {
         Message::Index(IndexMsg::Issued {
             issued: escape::text(c.issued()).into_owned(),
         }),
-    ]
+    ];
+    if !newer.is_empty() {
+        lines.push(Message::Index(IndexMsg::AsideNewer {
+            entries: newer.into_iter().map(aside_shown).collect(),
+        }));
+    }
+    if !other.is_empty() {
+        lines.push(Message::Index(IndexMsg::AsideUnusable {
+            entries: other.into_iter().map(aside_shown).collect(),
+        }));
+    }
+    lines
 }
 
 fn read<E: Write>(

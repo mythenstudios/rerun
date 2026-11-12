@@ -968,3 +968,68 @@ fn vh3_the_helper_outcomes_name_the_transaction_state() {
         assert_eq!(r.notice.details.len(), 3, "cause, rollback, transaction");
     }
 }
+
+/// VX1 (FX11, ADR 0024 amendment "Forward compatibility" §10): a game whose only Topo is set
+/// aside shows the row's status as the hero, in both languages; the reason from the signed
+/// entry reaches the details escaped, in its own element, never inside a sentence.
+#[test]
+fn vx1_a_set_aside_topo_is_named_and_its_reason_escaped() {
+    use rerun_core::catalog::model::Id;
+    use rerun_core::catalog::{Aside, AsideWhy, EntryKind, RuleError};
+    use rerun_core::flow::{GameView, Lookup};
+
+    use crate::text::Sym;
+
+    let aside = |why| Aside {
+        kind: EntryKind::Topo,
+        id: Id::parse("future-game").unwrap(),
+        format: 1,
+        steam_appid: Some(250),
+        why,
+    };
+    let hostile = aside(AsideWhy::Refused(RuleError {
+        at: "issues[0]".to_owned(),
+        what: "fine\u{202e}exe.txt".to_owned(),
+    }));
+    let newer = aside(AsideWhy::Newer { format: 2 });
+    let view = |a: Vec<Aside>| GameView {
+        app_id: 250,
+        lookup: Lookup::NoTopo { seq: 1, aside: a },
+    };
+    let name = escape::text("Future Game").into_owned();
+    for lang in Lang::ALL {
+        let g = super::game(&view(vec![newer.clone()]), Some(&name), None, lang);
+        assert_eq!(g.hero.sym, Sym::Attention);
+        assert_eq!(g.hero.line, t(lang, Msg::BadgeNeedsNewer));
+        assert_eq!(
+            g.hero.sub.as_deref(),
+            Some(&*t(lang, Msg::HeroNeedsNewerSub))
+        );
+
+        let g = super::game(&view(vec![hostile.clone()]), Some(&name), None, lang);
+        assert_eq!(g.hero.sym, Sym::NotHere);
+        assert_eq!(g.hero.line, t(lang, Msg::BadgeUnsupported));
+        assert_eq!(
+            g.hero.sub.as_deref(),
+            Some(&*t(lang, Msg::HeroUnsupportedSub))
+        );
+        assert!(g.fixes.is_empty() && g.problems.is_empty());
+        let d = &g.aside[0];
+        assert_eq!(d.who.as_ref().unwrap().as_str(), "future-game");
+        assert_eq!(
+            d.what.as_str(),
+            r#""breaks a rule of this build: issues[0]: fine\u{202e}exe.txt""#
+        );
+        assert!(!d.what.as_str().contains('\u{202e}'));
+        // Never in Rerun's own sentences.
+        assert!(!g.hero.line.contains("fine") && !g.hero.sub.unwrap().contains("fine"));
+    }
+    // With both, the newer one decides: a newer Rerun can use the game's Topo.
+    let g = super::game(&view(vec![hostile, newer]), Some(&name), None, Lang::De);
+    assert_eq!(g.hero.line, "Braucht eine neuere Rerun-Version");
+    assert_eq!(g.aside.len(), 2);
+    // No set-aside Topo: the page of a game without one.
+    let g = super::game(&view(Vec::new()), Some(&name), None, Lang::En);
+    assert_eq!(g.hero.line, t(Lang::En, Msg::HeroNoTopo));
+    assert!(g.aside.is_empty());
+}

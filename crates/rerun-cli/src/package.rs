@@ -10,6 +10,9 @@
 //! file). The first failure ends the command; what was fetched or unpacked before it stays (each
 //! cache entry only under its pinned hash, each file only with its own).
 //!
+//! A package the current index holds but this build sets aside (ADR 0024 amendment "Forward
+//! compatibility") is refused like an unknown one, with its reason (exit 3).
+//!
 //! Exit codes (ADR 0025): 0 when every download is in the cache, and also when a download fails
 //! after this run stored an archive, removed a damaged entry or unpacked a file (the lines of
 //! what was done, then the failure); otherwise 1 for a passing or environment failure (`FetchError::transient`: the
@@ -19,7 +22,7 @@
 use std::io::Write;
 
 use rerun_core::catalog::store;
-use rerun_core::catalog::{Package, model::Arch, trusted_keys};
+use rerun_core::catalog::{EntryKind, Package, model::Arch, trusted_keys};
 use rerun_core::escape;
 use rerun_core::pkg::download::{self, FetchError, How};
 use rerun_core::pkg::extract::{self, ExtractError};
@@ -70,6 +73,18 @@ fn package<'c, E: Write>(
     err: &mut Out<E>,
 ) -> Result<&'c Package, Exit> {
     let id = escape::text(spec.id.as_str()).into_owned();
+    // A set-aside package is never fetched (ADR 0024 amendment "Forward compatibility" §10).
+    if let Some(a) = c.aside_entry(EntryKind::Package, spec.id.as_str()) {
+        return Err(note(
+            err,
+            PackageMsg::Aside {
+                id,
+                newer: a.why.needs_newer(),
+                why: crate::index::aside_why(a),
+            },
+            Exit::Refused,
+        ));
+    }
     let p = c
         .package(spec.id.as_str())
         .ok_or_else(|| note(err, PackageMsg::Unknown { id: id.clone() }, Exit::Refused))?;

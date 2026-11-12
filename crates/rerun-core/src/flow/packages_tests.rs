@@ -487,3 +487,29 @@ fn fp6_a_cancel_during_the_second_asset_keeps_the_first_complete() {
     assert_eq!(listed(&sys, AppSub::Cache), Some(want));
     assert_eq!(need_of(&sys, &http).state, NeedState::Unpacked);
 }
+
+/// FX11: a package the index holds but this build sets aside is never offered for download,
+/// with the same words as `rerun package fetch`; an unknown one keeps its own.
+#[test]
+fn fx11_a_set_aside_package_is_unobtainable() {
+    let b = br#"{"format":1,"seq":1,"issued":"2026-11-12T12:00:00Z","topos":[],"packages":[{"format":2,"id":"future-pack"},{"format":1,"id":"odd-pack","future":1}]}"#;
+    let sig = test_key::sign(b);
+    let v = catalog::verify(b, &sig, &[test_key::public()]).unwrap();
+    let c = catalog::Catalog::from_verified(&v).unwrap();
+    let state = |id: &str| need(&c, None, id).state;
+    assert_eq!(
+        state("future-pack"),
+        NeedState::Unobtainable("the package needs a newer version of Rerun".to_owned())
+    );
+    let NeedState::Unobtainable(why) = state("odd-pack") else {
+        panic!("odd-pack is offered");
+    };
+    assert!(
+        why.starts_with("the package cannot be used by this version of Rerun (not readable"),
+        "{why}"
+    );
+    assert_eq!(
+        state("other-pack"),
+        NeedState::Unobtainable("the package is not in the signed index".to_owned())
+    );
+}

@@ -1183,7 +1183,8 @@ fn refresh_page(
     emit(Event::Game(page));
 }
 
-/// Whether the index names a Topo (not retired) for `app_id`.
+/// Whether the index names a Topo (not retired) for `app_id`, or only Topos this version sets
+/// aside (ADR 0024 amendment "Forward compatibility" §10).
 fn topo_known(catalog: Option<&Catalog>, app_id: u32) -> TopoKnown {
     match catalog {
         None => TopoKnown::NoIndex,
@@ -1191,7 +1192,16 @@ fn topo_known(catalog: Option<&Catalog>, app_id: u32) -> TopoKnown {
             let live = topo::topos_for(c, app_id)
                 .iter()
                 .any(|t| t.status != Status::Retired);
-            if live { TopoKnown::Yes } else { TopoKnown::No }
+            let mut aside = c.aside_for(app_id).peekable();
+            if live {
+                TopoKnown::Yes
+            } else if aside.peek().is_some() {
+                TopoKnown::Aside {
+                    newer: aside.any(|a| a.why.needs_newer()),
+                }
+            } else {
+                TopoKnown::No
+            }
         }
     }
 }

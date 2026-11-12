@@ -71,6 +71,16 @@ pub enum PackageMsg<'a> {
         /// The ID asked for.
         id: Shown<'a>,
     },
+    /// The current index holds the package, but this build sets it aside (ADR 0024 amendment
+    /// "Forward compatibility" §10).
+    Aside {
+        /// The ID.
+        id: Shown<'a>,
+        /// A newer Rerun can use it.
+        newer: bool,
+        /// Why this version cannot use it (`None` when `newer`).
+        why: Option<Shown<'a>>,
+    },
     /// The current index has the package at another version (one package is one version).
     OtherVersion {
         /// The ID.
@@ -141,6 +151,24 @@ impl fmt::Display for PackageMsg<'_> {
             ),
             Self::Unknown { id } => {
                 write!(f, "rerun: the current index has no package {id}")
+            }
+            Self::Aside { id, newer: true, .. } => write!(
+                f,
+                "rerun: package {id} needs a newer version of Rerun: nothing fetched"
+            ),
+            Self::Aside {
+                id,
+                newer: false,
+                why,
+            } => {
+                write!(
+                    f,
+                    "rerun: package {id} cannot be used by this version of Rerun"
+                )?;
+                if let Some(w) = why {
+                    write!(f, " ({w})")?;
+                }
+                f.write_str(": nothing fetched")
             }
             Self::OtherVersion { id, version } => write!(
                 f,

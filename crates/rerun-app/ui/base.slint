@@ -187,6 +187,8 @@ export struct GameData {
     problems: [ProblemData],
     fixes: [FixData],
     applied: [CardData],
+    // The game's Topos this version sets aside: ID and why, behind a details expander.
+    aside: [DetailData],
 }
 
 export struct AppliedData {
@@ -276,6 +278,8 @@ export global Str {
     in property <string> rescan;
     in property <string> show-problems;
     in property <string> hide-problems;
+    in property <string> show-details;
+    in property <string> hide-details;
     in property <string> detail;
     in property <string> back;
     in property <string> eyebrow;

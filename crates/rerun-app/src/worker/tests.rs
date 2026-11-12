@@ -18,6 +18,10 @@
 //!   is read each visit.
 //! - AW10 a library scan lets a waiting job run between two games, and a second scan restarts it.
 //! - AW11 the game page at once from the library row, before the worker has read the folder.
+//! - AW-FX set-aside Topos (ADR 0024 amendment "Forward compatibility" §10, FX11): the library
+//!   row and the game page of a game whose only Topo needs a newer Rerun, and of one whose only
+//!   Topo this version does not support; a usable Topo next to a set-aside one; the count in the
+//!   status bar; English and German.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1044,6 +1048,138 @@ fn aw11_the_game_page_is_there_before_the_folder_is_read() {
     let unlisted = vm::game_loading(999, None, None, Lang::De);
     assert!(unlisted.title.as_str().contains("999"));
     assert_eq!(unlisted.hero.line, "Rerun liest den Spielordner ein.");
+}
+
+/// AW-FX: [`indexed`]'s world with app 250 ("Future Game") and 260 ("Odd Game") installed, and
+/// an index in which the only Topo of 250 is of entry format 2, the only Topo of 260 has a key
+/// this version does not know, and 220 has a usable Topo and a format-2 one.
+fn aside_world() -> FakeSystem {
+    let sys = steam_world("Invented AC");
+    for (app, name, dir) in [(250, "Future Game", "F"), (260, "Odd Game", "O")] {
+        sys.fake_fs()
+            .put_file(
+                Path::new(&format!(r"{LIB}\steamapps\appmanifest_{app}.acf")),
+                acf(app, name, 4, dir).as_bytes(),
+            )
+            .unwrap();
+        sys.fake_fs()
+            .put_file(
+                Path::new(&format!(r"{LIB}\steamapps\common\{dir}\game.exe")),
+                &x86(),
+            )
+            .unwrap();
+    }
+    let sha = sha256_of(&sys, "game.exe");
+    let step = r#"{"compat_layer":{"exe":"game.exe","layers":["HIGHDPIAWARE"]}}"#;
+    let ix = format!(
+        r#"{{"format":1,"seq":7,"issued":"2026-11-12T12:00:00Z","topos":[
+{{"format":2,"id":"future-game","match":{{"steam_appid":250}},"future":true}},
+{{"format":1,"id":"invented-ac","title":"Invented AC","status":"active","rev":3,
+"match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d9"}}]}},
+"issues":[{{"id":"display","title":"Display","variants":[{{"id":"layer","status":"verified","kind":"fix","steps":[{step}]}}]}}]}},
+{{"format":2,"id":"invented-ac-next","match":{{"steam_appid":220}}}},
+{{"format":1,"id":"odd-game","match":{{"steam_appid":260}},"future":1}}
+],"packages":[]}}"#
+    );
+    let app = AppDir::open(&sys, Create::IfMissing).unwrap().unwrap();
+    catalog::store::import(
+        &app,
+        ix.as_bytes(),
+        &test_key::sign(ix.as_bytes()),
+        &catalog::trusted_keys(),
+    )
+    .unwrap();
+    drop(app);
+    sys.fake_fs().sync_all();
+    sys
+}
+
+#[test]
+fn aw_fx_set_aside_topos_on_the_row_and_the_game_page() {
+    let sys = aside_world();
+    for (lang, newer, unsupported, status, note) in [
+        (
+            Lang::En,
+            "Needs a newer version of Rerun",
+            "Not supported by this version of Rerun",
+            "Topo index 7 \u{b7} 3 entries not usable",
+            "Another Topo for this game needs a newer version of Rerun.",
+        ),
+        (
+            Lang::De,
+            "Braucht eine neuere Rerun-Version",
+            "Von dieser Rerun-Version nicht unterstützt",
+            "Topo-Index 7 \u{b7} 3 Einträge nicht nutzbar",
+            "Ein weiterer Topo für dieses Spiel braucht eine neuere Rerun-Version.",
+        ),
+    ] {
+        let ev = events(&sys, &Job::Library, lang);
+        let rows = rows_of(&ev);
+        let row = |app: u32| *rows.iter().find(|r| r.app_id == app).unwrap();
+        // The row: symbol and word, listed with the games Rerun offers nothing for.
+        assert_eq!(row(250).group, Group::NoTopo);
+        assert_eq!(
+            (row(250).badge.sym, row(250).badge.word.as_str()),
+            (Sym::Attention, newer)
+        );
+        assert_eq!(row(260).group, Group::NoTopo);
+        assert_eq!(
+            (row(260).badge.sym, row(260).badge.word.as_str()),
+            (Sym::NotHere, unsupported)
+        );
+        assert_eq!(row(220).group, Group::Topo);
+        let Some(Event::LibraryDone(done)) = ev.last() else {
+            panic!("{ev:?}")
+        };
+        assert_eq!(done.index.status, status);
+
+        // The game page: the row's status as the hero, nothing offered, why behind the details.
+        let g = game_of(&sys, 250, lang);
+        assert_eq!((g.hero.sym, g.hero.line.as_str()), (Sym::Attention, newer));
+        assert_eq!(
+            g.hero.sub.as_deref(),
+            Some(&*crate::text::t(lang, crate::text::Msg::HeroNeedsNewerSub))
+        );
+        assert!(g.problems.is_empty() && g.fixes.is_empty());
+        assert_eq!(g.aside.len(), 1);
+        assert_eq!(g.aside[0].who.as_ref().unwrap().as_str(), "future-game");
+        assert!(
+            g.aside[0]
+                .what
+                .as_str()
+                .starts_with("entry format 2 needs a newer version"),
+            "{:?}",
+            g.aside[0].what
+        );
+        let g = game_of(&sys, 260, lang);
+        assert_eq!(
+            (g.hero.sym, g.hero.line.as_str()),
+            (Sym::NotHere, unsupported)
+        );
+        assert_eq!(
+            g.hero.sub.as_deref(),
+            Some(&*crate::text::t(lang, crate::text::Msg::HeroUnsupportedSub))
+        );
+        assert!(g.fixes.is_empty());
+        assert!(
+            g.aside[0]
+                .what
+                .as_str()
+                .starts_with("not readable by this build"),
+            "{:?}",
+            g.aside[0].what
+        );
+
+        // A usable Topo next to a set-aside one: the Topo's page with a hint and why.
+        let g = game_of(&sys, 220, lang);
+        assert_eq!(g.fixes.len(), 1);
+        assert!(g.notes.iter().any(|n| n == note), "{:?}", g.notes);
+        assert_eq!(g.aside.len(), 1);
+        assert_eq!(
+            g.aside[0].who.as_ref().unwrap().as_str(),
+            "invented-ac-next"
+        );
+    }
 }
 
 mod download;

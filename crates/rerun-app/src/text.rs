@@ -1105,6 +1105,29 @@ pub enum Msg {
     FixHelperUnavailable,
     /// An undo that needs the helper; it cannot be used for another reason.
     UndoHelperUnavailable,
+
+    // ---- set-aside Topos (ADR 0024 amendment "Forward compatibility" §10)
+    /// The library row and the hero: the only Topos of the game need a newer Rerun.
+    BadgeNeedsNewer,
+    /// The library row and the hero: this version cannot use the game's Topos.
+    BadgeUnsupported,
+    /// The hero's second line for [`Msg::BadgeNeedsNewer`].
+    HeroNeedsNewerSub,
+    /// The hero's second line for [`Msg::BadgeUnsupported`].
+    HeroUnsupportedSub,
+    /// A note next to a usable Topo: another one needs a newer Rerun.
+    NoteAsideNewer,
+    /// A note next to a usable Topo: this version cannot use another one.
+    NoteAsideUnsupported,
+    /// Shows the reasons.
+    ShowDetails,
+    /// Hides them.
+    HideDetails,
+    /// The status bar: entries of the index this version does not use.
+    StatusAside {
+        /// How many.
+        count: usize,
+    },
 }
 
 /// The text of `m` in `lang`.
@@ -1674,6 +1697,17 @@ fn en(m: Msg) -> Cow<'static, str> {
         UndoNoElevation => "Undoing this needs administrator rights, and Windows does not grant them to this account (or User Account Control is off).",
         FixHelperUnavailable => "This fix needs Rerun's administrator helper, which cannot be used here right now. It cannot be applied.",
         UndoHelperUnavailable => "Undoing this needs Rerun's administrator helper, which cannot be used here right now; until then the change stays.",
+        BadgeNeedsNewer => "Needs a newer version of Rerun",
+        BadgeUnsupported => "Not supported by this version of Rerun",
+        HeroNeedsNewerSub => "A newer version of Rerun can read the Topo for this game. Until then Rerun offers nothing and changes nothing.",
+        HeroUnsupportedSub => "This version of Rerun cannot use the Topo for this game. Rerun offers nothing and changes nothing.",
+        NoteAsideNewer => "Another Topo for this game needs a newer version of Rerun.",
+        NoteAsideUnsupported => "Another Topo for this game is not supported by this version of Rerun.",
+        ShowDetails => "Show details",
+        HideDetails => "Hide details",
+        StatusAside { count: n } => {
+            return format!("{} not usable", count(n, "entry", "entries")).into();
+        }
     };
     Cow::Borrowed(s)
 }
@@ -2240,6 +2274,17 @@ fn de(m: Msg) -> Cow<'static, str> {
         UndoNoElevation => "Das Rückgängigmachen braucht Administratorrechte, und Windows gibt sie diesem Konto nicht (oder die Benutzerkontensteuerung ist aus).",
         FixHelperUnavailable => "Dieser Fix braucht den Administrator-Helfer von Rerun, der hier gerade nicht nutzbar ist. Er kann nicht angewendet werden.",
         UndoHelperUnavailable => "Das Rückgängigmachen braucht den Administrator-Helfer von Rerun, der hier gerade nicht nutzbar ist; bis dahin bleibt die Änderung.",
+        BadgeNeedsNewer => "Braucht eine neuere Rerun-Version",
+        BadgeUnsupported => "Von dieser Rerun-Version nicht unterstützt",
+        HeroNeedsNewerSub => "Eine neuere Rerun-Version kann den Topo für dieses Spiel lesen. Bis dahin bietet Rerun nichts an und ändert nichts.",
+        HeroUnsupportedSub => "Diese Rerun-Version kann den Topo für dieses Spiel nicht verwenden. Rerun bietet nichts an und ändert nichts.",
+        NoteAsideNewer => "Ein weiterer Topo für dieses Spiel braucht eine neuere Rerun-Version.",
+        NoteAsideUnsupported => "Ein weiterer Topo für dieses Spiel wird von dieser Rerun-Version nicht unterstützt.",
+        ShowDetails => "Details zeigen",
+        HideDetails => "Details ausblenden",
+        StatusAside { count: n } => {
+            return format!("{} nicht nutzbar", count(n, "Eintrag", "Einträge")).into();
+        }
     };
     Cow::Borrowed(s)
 }

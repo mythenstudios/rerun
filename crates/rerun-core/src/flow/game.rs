@@ -16,7 +16,7 @@
 
 use crate::catalog::model::{Issue, Kind, Source, TopoStep, Variant, VariantStatus};
 use crate::catalog::store::StoreError;
-use crate::catalog::{Catalog, Topo};
+use crate::catalog::{Aside, Catalog, Topo};
 use crate::exec::PatchedExe;
 use crate::hw::{self, GpuArchTable, SystemProfile};
 use crate::path::{RelPath, RootPath};
@@ -36,15 +36,20 @@ use super::{GameOpen, Guarded, IndexState, PackageNeed, index_state, with_game};
 pub enum Lookup<R> {
     /// No signed index (or no Rerun folder).
     NoIndex,
-    /// The index names no Topo for the app.
+    /// The index names no known Topo for the app.
     NoTopo {
         /// The index's `seq`.
         seq: u64,
+        /// The app's Topos this build sets aside (ADR 0024 amendment "Forward compatibility"
+        /// §10): display only.
+        aside: Vec<Aside>,
     },
-    /// The game folder was read for every Topo of the app.
+    /// The game folder was read for every known Topo of the app.
     Read {
         /// Retired Topos of the app: listed, never chosen.
         retired: Vec<Topo>,
+        /// The app's Topos this build sets aside: display only.
+        aside: Vec<Aside>,
         /// Among the others.
         found: Found<R>,
     },
@@ -230,8 +235,12 @@ pub(crate) fn with_topo<R>(
         IndexState::Current(c) => c,
     };
     let topos = topo::topos_for(&catalog, app_id);
+    let aside: Vec<Aside> = catalog.aside_for(app_id).cloned().collect();
     if topos.is_empty() {
-        return Ok(Lookup::NoTopo { seq: catalog.seq() });
+        return Ok(Lookup::NoTopo {
+            seq: catalog.seq(),
+            aside,
+        });
     }
     let app_path = AppDir::path_of(sys).ok();
     let table = GpuArchTable::builtin().ok();
@@ -271,7 +280,11 @@ pub(crate) fn with_topo<R>(
                 app_path: app_path.as_ref(),
             })),
         };
-        Lookup::Read { retired, found }
+        Lookup::Read {
+            retired,
+            aside,
+            found,
+        }
     })
     .map_err(GameRefusal::Game)
 }
@@ -479,9 +492,14 @@ pub fn game_cached(
     })?;
     let lookup = match lookup {
         Lookup::NoIndex => Lookup::NoIndex,
-        Lookup::NoTopo { seq } => Lookup::NoTopo { seq },
-        Lookup::Read { retired, found } => Lookup::Read {
+        Lookup::NoTopo { seq, aside } => Lookup::NoTopo { seq, aside },
+        Lookup::Read {
             retired,
+            aside,
+            found,
+        } => Lookup::Read {
+            retired,
+            aside,
             found: match found {
                 Found::NoMatch(v) => Found::NoMatch(v),
                 Found::Several(v) => Found::Several(v),
