@@ -5,7 +5,8 @@
 //! which also takes the system font fallback), in a `ci` build on the developer machine, with
 //! or without the fonts within 12 ms of each other. The bound is generous (the user's report of
 //! 1.6 s to the first window was never in this part): it catches a font registration or a
-//! fallback that starts to scan the system fonts or to shape everything again.
+//! fallback that starts to scan the system fonts or to shape everything again. The dialogs of
+//! the download (P5-5b) and the wait for the UAC dialog (P5-5c) are drawn too.
 
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -16,12 +17,14 @@ use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferTyp
 use slint::platform::{Platform, WindowAdapter};
 
 use super::download::download_data;
+use super::write::uac_data;
 use super::{
     AppWindow, BadgeData, RowData, SectionData, ThemeId, model, set_strings, set_theme, theme,
 };
 use crate::text::Lang;
-use crate::vm::{PackageState, consent, failed, progress};
+use crate::vm::{PackageState, consent, failed, progress, uac_wait};
 use rerun_core::catalog::model::Tier;
+use rerun_core::elevate::{PromptKind, PromptState};
 use rerun_core::flow::{DownloadNeed, FetchError, NeedState, PackageNeed};
 
 struct Headless(Rc<MinimalSoftwareWindow>);
@@ -158,7 +161,28 @@ fn the_window_draws_its_first_frames_fast() {
     assert!(draw(), "the failure dialog is drawn");
     let d = ui.get_dialog();
     assert!(d.no_confirm && !d.cancel_disabled, "no retry for NoIndex");
-    assert_ne!(picture(), progress_pic, "failure looks other than progress");
+    let failed_pic = picture();
+    assert_ne!(
+        failed_pic, progress_pic,
+        "failure looks other than progress"
+    );
+    // The wait for the UAC dialog (P5-5c): the same dialog without any button.
+    let state = PromptState {
+        kind: PromptKind::Credentials,
+        secure_desktop: Some(false),
+        signed_only: false,
+    };
+    ui.set_dialog(uac_data(&uac_wait(&state, Lang::De)));
+    assert!(draw(), "the wait for Windows is drawn");
+    let d = ui.get_dialog();
+    assert!(d.kind == 3 && d.no_confirm && d.no_cancel);
+    assert_eq!(d.title, "Warte auf Windows-Bestätigung (UAC) ...");
+    assert_eq!(
+        d.notes.row_count(),
+        3,
+        "credentials, not secure, the taskbar"
+    );
+    assert_ne!(picture(), failed_pic, "the wait looks other than a failure");
     ui.set_dialog_open(false);
     eprintln!(
         "headless start: window created {created:?}, first frame {first:?}, with 60 rows {with_rows:?}"

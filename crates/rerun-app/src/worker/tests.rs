@@ -739,7 +739,7 @@ fn wait_for(worker: &Worker, n: usize) -> Vec<Event> {
 #[test]
 fn aw8_the_worker_runs_jobs_in_order_and_wakes_for_each_event() {
     let woken = Arc::new(AtomicUsize::new(0));
-    let make = || {
+    let make = |_| {
         Ok(World {
             sys: Box::new(indexed("Invented AC")),
             http: Box::new(FakeHttp::default()),
@@ -747,6 +747,7 @@ fn aw8_the_worker_runs_jobs_in_order_and_wakes_for_each_event() {
         })
     };
     let worker = Worker::start(Lang::En, make, Box::new(Count(woken.clone()))).unwrap();
+    worker.set_owner(None);
     worker.send(Job::Status);
     worker.send(Job::Game {
         app_id: 220,
@@ -769,8 +770,9 @@ fn aw8_the_worker_runs_jobs_in_order_and_wakes_for_each_event() {
     drop(worker);
 
     // A system layer that cannot be created: every job is answered with the blocking page.
-    let make = || Err(escape::text("no system").into_owned());
+    let make = |_| Err(escape::text("no system").into_owned());
     let worker = Worker::start(Lang::En, make, Box::new(Count(woken))).unwrap();
+    worker.set_owner(None);
     worker.send(Job::Library);
     match wait_for(&worker, 1).as_slice() {
         [Event::Blocked(b)] => {
@@ -911,6 +913,7 @@ fn kinds(ev: &[Event]) -> Vec<&'static str> {
             Event::Result(_) => "result",
             Event::Download(_) => "download",
             Event::DownloadEnded(_) => "download-ended",
+            Event::WaitingForUac(_) => "uac",
         })
         .collect()
 }
@@ -993,7 +996,7 @@ fn aw10_a_click_during_a_scan_on_the_worker_thread_is_answered_before_the_summar
     // The world is built only once every job is queued, so the jobs wait while the scan runs.
     let sent = Arc::new(std::sync::Barrier::new(2));
     let gate = sent.clone();
-    let make = move || {
+    let make = move |_| {
         gate.wait();
         Ok(World {
             sys: Box::new(indexed("Invented AC")),
@@ -1003,6 +1006,7 @@ fn aw10_a_click_during_a_scan_on_the_worker_thread_is_answered_before_the_summar
     };
     let woken = Arc::new(AtomicUsize::new(0));
     let worker = Worker::start(Lang::En, make, Box::new(Count(woken))).unwrap();
+    worker.set_owner(None);
     worker.send(Job::Library);
     worker.send(game_job());
     worker.send(Job::Status);
@@ -1046,4 +1050,5 @@ fn aw11_the_game_page_is_there_before_the_folder_is_read() {
 }
 
 mod download;
+mod helper;
 mod write;

@@ -6,7 +6,8 @@ import { DialogData, Str, Theme, Modal } from "base.slint";
 import { OpItem, WarnLine } from "ops.slint";
 
 // The undo, forget and download dialogs: what the operation meets (or what would be downloaded),
-// before the click. Esc closes. While it
+// before the click; and the wait for the UAC dialog (P5-5c, no button: the window waits for
+// Windows). Esc closes (the window ignores it while it waits for Windows). While it
 // is open `Modal.open` is set and only its controls can take the focus (a focus trap); the title
 // takes the focus when it opens.
 export component DialogView inherits Rectangle {
@@ -127,7 +128,7 @@ export component DialogView inherits Rectangle {
                         HorizontalLayout {
                             spacing: Theme.s3;
                             alignment: end;
-                            Button {
+                            if !root.d.no-cancel: Button {
                                 in-dialog: true;
                                 text: root.d.cancel-label != "" ? root.d.cancel-label : Str.btn-cancel;
                                 enabled: !root.d.cancel-disabled;

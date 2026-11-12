@@ -44,7 +44,7 @@ fn fix(packages: &[&str], needs_helper: bool, refused: bool) -> Fix {
 }
 
 fn offer(f: &Fix, lang: Lang) -> (Offer, Option<String>) {
-    let v = super::fix(f, &|id| escape::text(id).into_owned(), lang);
+    let v = super::fix(f, &|id| escape::text(id).into_owned(), None, lang);
     (v.offer, v.note)
 }
 
@@ -356,6 +356,26 @@ fn vw5_every_refusal_has_its_message_and_keeps_or_refreshes_the_page() {
         (Refusal::MainExe(shown("g")), Msg::RefStaleTitle, true),
         (Refusal::Changed { txn: txn() }, Msg::RefStaleTitle, true),
         (Refusal::NeedsHelper, Msg::RefAdminTitle, false),
+        // The helper (P5-5c): each before any prompt, the page kept.
+        (
+            Refusal::HelperUnsafe(Box::new(rerun_core::policy::root::RootError::Sys(
+                rerun_core::sys::SysError::new(rerun_core::sys::SysErrorKind::NotFound, "h"),
+            ))),
+            Msg::RefHelperTitle,
+            false,
+        ),
+        (
+            Refusal::NoElevation(rerun_core::elevate::PromptKind::Denied),
+            Msg::RefNoElevationTitle,
+            false,
+        ),
+        (
+            Refusal::Helper(rerun_core::exec::HelperFailure::Busy(
+                rerun_core::sys::SysError::new(rerun_core::sys::SysErrorKind::Busy, "b"),
+            )),
+            Msg::RefHelperBusyTitle,
+            false,
+        ),
         (
             Refusal::Forgotten { txn: txn() },
             Msg::RefNothingTitle,
@@ -768,5 +788,156 @@ fn vd6_the_failed_package_says_failed() {
         };
         assert_eq!(word(0), label(lang, Msg::DlStDone));
         assert_eq!(word(1), label(lang, Msg::DlStFailed));
+    }
+}
+
+// ---------- the elevated helper (P5-5c) ----------
+
+use rerun_core::elevate::{PromptKind, PromptState};
+use rerun_core::exec::{ExecError, HelperFailure};
+
+use super::{HelperState, admin_lines, uac_wait};
+
+fn prompt(kind: PromptKind, secure_desktop: Option<bool>, signed_only: bool) -> PromptState {
+    PromptState {
+        kind,
+        secure_desktop,
+        signed_only,
+    }
+}
+
+fn offer_with(f: &Fix, h: Option<&HelperState>, lang: Lang) -> (Offer, Option<String>) {
+    let v = super::fix(f, &|id| escape::text(id).into_owned(), h, lang);
+    (v.offer, v.note)
+}
+
+/// VH1: a fix that needs the helper is selectable only with a ready helper, and then says that
+/// Windows asks; otherwise it is locked with the reason. A package still asks for its download.
+#[test]
+fn vh1_the_helper_state_decides_the_offer() {
+    let ready = HelperState::Ready(prompt(PromptKind::Consent, Some(true), false));
+    for lang in Lang::ALL {
+        let f = fix(&[], true, false);
+        let note = |m| Some(t(lang, m).into_owned());
+        assert_eq!(
+            offer_with(&f, Some(&ready), lang),
+            (Offer::Selectable, note(Msg::FixHelperAsks))
+        );
+        assert_eq!(
+            offer_with(&f, Some(&HelperState::Missing), lang),
+            (Offer::NeedsHelper, note(Msg::FixNeedsHelper))
+        );
+        assert_eq!(
+            offer_with(&f, Some(&HelperState::NoElevation), lang),
+            (Offer::NeedsHelper, note(Msg::FixNoElevation))
+        );
+        assert_eq!(offer_with(&f, None, lang).0, Offer::NeedsHelper);
+        let f = fix(&["fix-pack"], true, false);
+        assert_eq!(offer_with(&f, Some(&ready), lang).0, Offer::NeedsDownload);
+        // A fix without the helper does not care.
+        let f = fix(&[], false, false);
+        assert_eq!(
+            offer_with(&f, Some(&HelperState::Missing), lang),
+            (Offer::Selectable, None)
+        );
+    }
+}
+
+/// VH2: what the preview and the wait say for each prompt state (ADR 0023 §10).
+#[test]
+fn vh2_the_prompt_state_in_words() {
+    for lang in Lang::ALL {
+        let m = |x| t(lang, x).into_owned();
+        let (a, n) = admin_lines(&prompt(PromptKind::Consent, Some(true), false), lang);
+        assert_eq!(
+            (a, n),
+            (m(Msg::PreviewAdminYes), vec![m(Msg::AdminConsent)])
+        );
+        let (a, n) = admin_lines(&prompt(PromptKind::Credentials, Some(false), true), lang);
+        assert_eq!(a, m(Msg::PreviewAdminYes));
+        assert_eq!(
+            n,
+            [
+                m(Msg::AdminCredentials),
+                m(Msg::AdminNotSecure),
+                m(Msg::AdminSignedOnly)
+            ]
+        );
+        for kind in [PromptKind::NoPrompt, PromptKind::Unknown] {
+            let (a, n) = admin_lines(&prompt(kind, None, false), lang);
+            assert_eq!(a, m(Msg::PreviewAdminNoDialog));
+            assert!(n.is_empty());
+        }
+        let w = uac_wait(&prompt(PromptKind::Consent, Some(true), false), lang);
+        assert_eq!(w.title, m(Msg::UacWaitTitle));
+        assert_eq!(w.notes, [m(Msg::UacWaitHidden)]);
+    }
+}
+
+/// VH3: the outcome of an apply that met the helper names the transaction's state: closed after
+/// a declined prompt or a helper that did not finish, open with its own words otherwise.
+#[test]
+fn vh3_the_helper_outcomes_name_the_transaction_state() {
+    let busy = || SysError::new(SysErrorKind::Busy, "x");
+    let rolled = |cause: ExecError| ApplyError::RolledBack {
+        txn: txn(),
+        cause: Box::new(cause),
+        cleanup: Vec::new(),
+    };
+    for lang in Lang::ALL {
+        let m = |x| t(lang, x).into_owned();
+        let has_txn = |r: &super::ResultVm| {
+            r.notice
+                .details
+                .iter()
+                .any(|d| d.what.as_str() == txn().to_string())
+        };
+        let r = apply_result(
+            Err(rolled(ExecError::Helper(HelperFailure::Declined))),
+            lang,
+        );
+        assert_eq!(
+            (r.tone, &r.notice.title),
+            (Tone::Calm, &m(Msg::ResDeclinedTitle))
+        );
+        assert!(has_txn(&r) && r.refresh);
+        let r = apply_result(
+            Err(rolled(ExecError::Helper(HelperFailure::Start(busy())))),
+            lang,
+        );
+        assert_eq!(r.notice.title, m(Msg::ResHelperNotDoneTitle));
+        let r = apply_result(
+            Err(ApplyError::HelperOpen {
+                txn: txn(),
+                cause: Box::new(ExecError::Helper(HelperFailure::Unknown)),
+            }),
+            lang,
+        );
+        assert_eq!(r.tone, Tone::Attention);
+        assert_eq!(
+            (&r.notice.title, &r.notice.body),
+            (&m(Msg::ResOpenTitle), &m(Msg::ResHelperOpenBody))
+        );
+        assert!(has_txn(&r));
+        let r = apply_result(
+            Err(ApplyError::CleanupPending {
+                txn: txn(),
+                cause: Box::new(ExecError::Sys(busy())),
+                cleanup: Vec::new(),
+            }),
+            lang,
+        );
+        assert_eq!(r.notice.body, m(Msg::ResCleanupOpenBody));
+        assert!(has_txn(&r));
+        let r = apply_result(
+            Err(ApplyError::LeftOpen {
+                txn: txn(),
+                cause: Box::new(ExecError::Sys(busy())),
+                rollback: Box::new(ExecError::Sys(busy())),
+            }),
+            lang,
+        );
+        assert_eq!(r.notice.body, m(Msg::ResOpenBody));
+        assert_eq!(r.notice.details.len(), 3, "cause, rollback, transaction");
     }
 }

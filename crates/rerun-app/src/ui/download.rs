@@ -43,6 +43,7 @@ pub(super) fn download_data(d: &DownloadVm) -> DialogData {
         no_confirm: d.confirm.is_none(),
         cancel_label: s(&d.cancel),
         cancel_disabled: d.cancelling,
+        no_cancel: false,
     }
 }
 

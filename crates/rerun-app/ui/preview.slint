@@ -108,6 +108,13 @@ export component PreviewPanel inherits VerticalLayout {
             text: root.p.admin;
         }
 
+        for n in root.p.admin-notes: Text {
+            text: n;
+            color: Theme.text;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+
         Muted {
             text: root.p.undo;
         }

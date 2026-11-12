@@ -563,7 +563,8 @@ pub struct FixVm {
     pub key: String,
     /// Whether and why the app can apply it (P5-5a).
     pub offer: Offer,
-    /// Why it cannot be applied here yet (needs the helper or a download).
+    /// Why it cannot be applied here yet (needs the helper or a download), or that Windows asks
+    /// when it is applied (the helper is ready, P5-5c).
     pub note: Option<String>,
     /// Preselected: verified for a problem that affects this PC.
     pub preselect: bool,
@@ -579,6 +580,9 @@ pub struct FixVm {
     pub(crate) issues: Vec<(String, Tri)>,
     /// A solved problem is verified and affects this PC.
     pub(crate) solves_verified_here: bool,
+    /// A step needs the elevated helper: never preselected (an administrator change is the
+    /// user's choice, P5-5c).
+    pub(crate) needs_helper: bool,
 }
 
 /// Whether the app can apply a fix on this page (P5-5a).
@@ -588,7 +592,8 @@ pub enum Offer {
     Selectable,
     /// The core refuses it here (anti-cheat, the launch): shown with the reason.
     Refused,
-    /// A step needs Rerun's elevated helper: P5-5c.
+    /// A step needs Rerun's elevated helper, and it cannot run here: not installed safely, or
+    /// Windows grants no elevation (P5-5c). With the helper ready the fix is `Selectable`.
     NeedsHelper,
     /// A step needs a package download first (P5-5b): ticking the fix asks for consent to the
     /// download, then the fix is selectable like any other.
@@ -696,8 +701,14 @@ pub fn game_loading(
     base(app_id, title, hero, lang)
 }
 
-/// The game page of a lookup.
-pub fn game(view: &GameView, name: Option<&Shown<'static>>, lang: Lang) -> GameVm {
+/// The game page of a lookup. `helper`: whether a run that needs the elevated helper could start
+/// it now (`flow::helper`), read by the worker only when a fix needs it; `None` locks such fixes.
+pub fn game(
+    view: &GameView,
+    name: Option<&Shown<'static>>,
+    helper: Option<&HelperState>,
+    lang: Lang,
+) -> GameVm {
     let title = title_of(view.app_id, name, lang);
     let none = |m| base(view.app_id, title.clone(), hero(Sym::None, lang, m), lang);
     match &view.lookup {
@@ -718,7 +729,7 @@ pub fn game(view: &GameView, name: Option<&Shown<'static>>, lang: Lang) -> GameV
                 hero(Sym::Attention, lang, Msg::HeroSeveral),
                 lang,
             ),
-            Found::One(m) => matched(view.app_id, title, m, lang),
+            Found::One(m) => matched(view.app_id, title, m, helper, lang),
         },
     }
 }
@@ -775,7 +786,13 @@ fn graphics_of(topo: &Topo, m: &MatchView) -> Option<&'static str> {
         .map(|e| topo_api_name(e.api))
 }
 
-fn matched(app_id: u32, title: Shown<'static>, m: &MatchView, lang: Lang) -> GameVm {
+fn matched(
+    app_id: u32,
+    title: Shown<'static>,
+    m: &MatchView,
+    helper: Option<&HelperState>,
+    lang: Lang,
+) -> GameVm {
     let r = &m.report;
     let topo = &r.topo;
     let issue_title = |id: &str| -> Shown<'static> {
@@ -808,7 +825,11 @@ fn matched(app_id: u32, title: Shown<'static>, m: &MatchView, lang: Lang) -> Gam
             quiet: i.when == Tri::No,
         })
         .collect();
-    let mut fixes: Vec<FixVm> = m.fixes.iter().map(|f| fix(f, &issue_title, lang)).collect();
+    let mut fixes: Vec<FixVm> = m
+        .fixes
+        .iter()
+        .map(|f| fix(f, &issue_title, helper, lang))
+        .collect();
     write::link(&mut fixes);
     for f in &mut fixes {
         if f.preselect {
@@ -905,7 +926,12 @@ fn matched(app_id: u32, title: Shown<'static>, m: &MatchView, lang: Lang) -> Gam
     g
 }
 
-fn fix(f: &Fix, issue_title: &dyn Fn(&str) -> Shown<'static>, lang: Lang) -> FixVm {
+fn fix(
+    f: &Fix,
+    issue_title: &dyn Fn(&str) -> Shown<'static>,
+    helper: Option<&HelperState>,
+    lang: Lang,
+) -> FixVm {
     let (refused, refused_detail) = match &f.refused {
         None => (None, None),
         Some(Refusal::AntiCheat(_)) => (Some(t(lang, Msg::FixRefusedAntiCheat).into_owned()), None),
@@ -919,9 +945,12 @@ fn fix(f: &Fix, issue_title: &dyn Fn(&str) -> Shown<'static>, lang: Lang) -> Fix
     } else {
         Badge::new(Sym::Open, lang, Msg::FixOffered, false)
     };
+    // A fix that needs the helper is offered only when the helper could run now; then it is
+    // like any other (a package still asks for its download first).
+    let helper_ready = matches!(helper, Some(HelperState::Ready(_)));
     let offer = if refused.is_some() {
         Offer::Refused
-    } else if f.needs_helper {
+    } else if f.needs_helper && !helper_ready {
         Offer::NeedsHelper
     } else if f
         .packages
@@ -935,15 +964,26 @@ fn fix(f: &Fix, issue_title: &dyn Fn(&str) -> Shown<'static>, lang: Lang) -> Fix
         Offer::Selectable
     };
     let note = match offer {
-        Offer::NeedsHelper => Some(t(lang, Msg::FixNeedsHelper).into_owned()),
+        Offer::NeedsHelper => Some(
+            t(
+                lang,
+                match helper {
+                    Some(HelperState::NoElevation) => Msg::FixNoElevation,
+                    _ => Msg::FixNeedsHelper,
+                },
+            )
+            .into_owned(),
+        ),
         Offer::NeedsDownload => Some(t(lang, Msg::FixNeedsDownload).into_owned()),
         Offer::NoPackage => Some(t(lang, Msg::FixNoPackage).into_owned()),
+        Offer::Selectable if f.needs_helper => Some(t(lang, Msg::FixHelperAsks).into_owned()),
         Offer::Selectable | Offer::Refused => None,
     };
     FixVm {
         key: f.variant.clone(),
         offer,
         note,
+        needs_helper: f.needs_helper,
         preselect: false,
         preselect_note: None,
         conflicts: Vec::new(),

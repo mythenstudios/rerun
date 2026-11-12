@@ -2,7 +2,9 @@
 //! sources (`src/`, without the test modules: `tests.rs` and the files below a `tests/` folder) and `ui/*.slint`; comments do not count:
 //! - only `ui` (`src/ui.rs`, `src/ui/`) names Slint; `worker`, `vm`, `text` and `theme` stay
 //!   framework-free;
-//! - `unsafe`, `windows_sys` and `raw_window_handle` only in `src/ui/chrome.rs`;
+//! - `unsafe`, `windows_sys`, `raw_window_handle` and a window handle type (`HWND`) only in
+//!   `src/ui/chrome.rs`; the handle leaves it as a plain number, the owner of the UAC dialog
+//!   (P5-5c), which the core turns back into a handle in `sys::win` only;
 //! - raw text reaches the window only escaped: no `as_raw_str`, no `Debug` format spec, no
 //!   `dbg!` (as in `rerun-cli`, ADR 0016);
 //! - a `Guarded` comes only from `flow::guard`: `rerun-app` names neither
@@ -87,7 +89,7 @@ fn violations(src: &str, place: Place) -> Vec<String> {
             hit("Slint outside ui");
         }
         if place != Place::Chrome {
-            for w in ["unsafe", "windows_sys", "raw_window_handle"] {
+            for w in ["unsafe", "windows_sys", "raw_window_handle", "HWND"] {
                 if has_word(c, w) {
                     hit(&format!("{w} outside ui::chrome"));
                 }
@@ -264,6 +266,7 @@ fn the_rules_have_teeth() {
         "    let x = unsafe { f() };",
         "use windows_sys::Win32::Foundation::HWND;",
         "use raw_window_handle::HasWindowHandle;",
+        "    let owner = h as HWND;",
         "    let s = app.name.as_raw_str();",
         "use rerun_core::flow::{forbidden_roots, guard};",
         "    let app = flow::open_app(sys)?;",

@@ -41,6 +41,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use rerun_core::escape::Shown;
+use rerun_core::sys::PromptOwner;
 use slint::{CloseRequestResponse, Color, ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::text::{Lang, Msg, t};
@@ -90,6 +91,9 @@ struct State {
     /// The window was asked to close during a download: it cancels it and closes by itself when
     /// the worker reports the end.
     close_after_download: bool,
+    /// The window shows "waiting for Windows (UAC)": no button, Esc ignored, closed by the
+    /// result (P5-5c).
+    uac: bool,
 }
 
 /// Wakes the event loop from the worker thread (ADR 0026: `invoke_from_event_loop`).
@@ -157,10 +161,11 @@ pub fn refuse_start(lang: Lang, elevated: bool) {
     chrome::message_box(&caption, &text);
 }
 
-/// Runs the window until it is closed. `make` builds the worker's world on its thread.
+/// Runs the window until it is closed. `make` builds the worker's world on its thread, with the
+/// window as the owner of the UAC dialog once its native handle exists (P5-5c).
 pub fn run<F>(make: F) -> ExitCode
 where
-    F: FnOnce() -> Result<World, Shown<'static>> + Send + 'static,
+    F: FnOnce(Option<PromptOwner>) -> Result<World, Shown<'static>> + Send + 'static,
 {
     // The software renderer always (module docs).
     if slint::BackendSelector::new()
@@ -206,6 +211,7 @@ where
         opener: -1,
         download: None,
         close_after_download: false,
+        uac: false,
     }));
     callbacks(&ui, &state);
 
@@ -218,10 +224,33 @@ where
     slint::invoke_from_event_loop(|| crate::trace::log(|| "ui: event loop, first turn".to_owned()))
         .ok();
     install_chrome(&ui, &tokens, 0);
+    hand_owner(&ui, &state, 0);
     if slint::run_event_loop().is_err() {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Hands the worker the window's handle as the owner of the UAC dialog once the native window
+/// exists (it appears with the first turn of the event loop); after a few tries the worker gets
+/// none and the dialog has no owner (it may open behind the window). The worker builds its system
+/// after this, so the library scan starts a turn later (P5-5c).
+fn hand_owner(ui: &AppWindow, state: &Rc<RefCell<State>>, tries: u32) {
+    let weak = ui.as_weak();
+    let state = state.clone();
+    slint::Timer::single_shot(
+        Duration::from_millis(if tries == 0 { 0 } else { 50 }),
+        move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            match chrome::owner_of(ui.window()).and_then(PromptOwner::from_raw) {
+                Some(owner) => state.borrow().worker.set_owner(Some(owner)),
+                None if tries < 20 => hand_owner(&ui, &state, tries + 1),
+                None => state.borrow().worker.set_owner(None),
+            }
+        },
+    );
 }
 
 /// Installs the snap-layout subclass once the native window exists (it appears with the first
@@ -540,6 +569,9 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     while let Some(e) = st.worker.poll() {
         match e {
             Event::Blocked(b) => {
+                if st.uac {
+                    close_dialog(ui, &mut st);
+                }
                 ui.set_blocked(true);
                 ui.set_blocked_notice(notice(&b.notice));
             }
@@ -612,7 +644,10 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                     ui.set_preview(preview_refused(&result));
                 }
             }
+            Event::WaitingForUac(u) => write::uac_wait(ui, &mut st, &u),
             Event::Dialog(d) => {
+                // Replaces the wait for Windows too (an undo whose state changed meanwhile).
+                st.uac = false;
                 st.dialog = Some((d.kind, d.txn, d.nonce));
                 ui.set_dialog(dialog_data(&d));
                 ui.set_dialog_open(true);
@@ -628,7 +663,7 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 }
             }
             Event::Result(r) => {
-                if st.dialog.is_some() {
+                if st.dialog.is_some() || st.uac {
                     close_dialog(ui, &mut st);
                 }
                 ui.global::<Modal>().set_working(false);

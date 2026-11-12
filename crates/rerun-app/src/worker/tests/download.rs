@@ -617,7 +617,7 @@ fn ad4_a_package_that_is_in_place_is_selectable_and_asks_nothing() {
 /// stops it at the next read, and the end is reported.
 #[test]
 fn ad5_the_worker_counts_a_download_and_a_cancel_ends_it() {
-    let make = || {
+    let make = |_| {
         let archive = archive();
         let sys = steam_world("Invented P");
         import(&sys, &pkg_index(&archive, &sha256_of(&sys, "game.exe"), 1));
@@ -633,6 +633,7 @@ fn ad5_the_worker_counts_a_download_and_a_cancel_ends_it() {
     };
     let woken = Arc::new(AtomicUsize::new(0));
     let worker = Worker::start(Lang::En, make, Box::new(Count(woken))).unwrap();
+    worker.set_owner(None);
     assert!(!worker.downloading());
     worker.send(Job::Game {
         app_id: 220,

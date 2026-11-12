@@ -498,11 +498,36 @@ fn every() -> Vec<Msg> {
             read: 1_300_000,
             total: None,
         },
+        FixHelperAsks,
+        FixNoElevation,
+        PreviewAdminNoDialog,
+        AdminConsent,
+        AdminCredentials,
+        AdminNotSecure,
+        AdminSignedOnly,
+        UacWaitTitle,
+        UacWaitBody,
+        UacWaitHidden,
+        ResDeclinedTitle,
+        ResDeclinedBody,
+        ResHelperNotDoneTitle,
+        ResHelperNotDoneBody,
+        ResHelperOpenBody,
+        ResCleanupOpenBody,
+        ResUndoDeclinedTitle,
+        ResUndoDeclinedBody,
+        RefNoElevationTitle,
+        RefNoElevationBody,
+        RefHelperBusyTitle,
+        RefHelperBusyBody,
+        RefUnavailableTitle,
+        RefUnavailableBody,
+        UndoNoElevation,
     ]
 }
 
 /// The number of messages: one more than the highest [`ordinal`].
-const COUNT: usize = 430;
+const COUNT: usize = 455;
 
 /// A message's position in the enum. The `match` is exhaustive: a new variant does not compile
 /// without an ordinal here, and [`every_ordinal_is_listed`] fails until [`every`] lists it.
@@ -940,6 +965,31 @@ fn ordinal(m: Msg) -> usize {
         DlSize { .. } => 427,
         DlStFailed => 428,
         DlLblVia => 429,
+        FixHelperAsks => 430,
+        FixNoElevation => 431,
+        PreviewAdminNoDialog => 432,
+        AdminConsent => 433,
+        AdminCredentials => 434,
+        AdminNotSecure => 435,
+        AdminSignedOnly => 436,
+        UacWaitTitle => 437,
+        UacWaitBody => 438,
+        UacWaitHidden => 439,
+        ResDeclinedTitle => 440,
+        ResDeclinedBody => 441,
+        ResHelperNotDoneTitle => 442,
+        ResHelperNotDoneBody => 443,
+        ResHelperOpenBody => 444,
+        ResCleanupOpenBody => 445,
+        ResUndoDeclinedTitle => 446,
+        ResUndoDeclinedBody => 447,
+        RefNoElevationTitle => 448,
+        RefNoElevationBody => 449,
+        RefHelperBusyTitle => 450,
+        RefHelperBusyBody => 451,
+        RefUnavailableTitle => 452,
+        RefUnavailableBody => 453,
+        UndoNoElevation => 454,
     }
 }
 
@@ -975,7 +1025,7 @@ fn every_ordinal_is_listed() {
     let missing: Vec<usize> = (0..COUNT).filter(|i| !seen[*i]).collect();
     assert!(missing.is_empty(), "ordinals not in every(): {missing:?}");
     // COUNT is right: the last variant has the highest ordinal.
-    assert_eq!(ordinal(Msg::DlLblVia), COUNT - 1);
+    assert_eq!(ordinal(Msg::UndoNoElevation), COUNT - 1);
 }
 
 #[test]

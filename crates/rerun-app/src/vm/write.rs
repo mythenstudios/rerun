@@ -7,14 +7,21 @@
 //! Rule 5: [`preview_vm`] shows every file, registry value, INI key, launch profile and
 //! firewall rule of the plan, what undo does with each, the warnings and the launch option the
 //! user pastes; [`revert_vm`] and [`forget_vm`] show what the operation meets before the click.
+//!
+//! The elevated helper (P5-5c, ADR 0023 amendment P5-5c): [`HelperState`] says whether a run
+//! that needs it could start it now; the preview and the undo dialog name the UAC prompt Windows
+//! will show ([`admin_lines`]), [`uac_wait`] is the modal while the worker waits for it, and the
+//! results name the transaction's state after a declined prompt or an unconfirmed helper.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use rerun_core::catalog::model::{SourceType, VariantStatus};
-use rerun_core::elevate::PromptState;
+use rerun_core::elevate::{PromptKind, PromptState};
 use rerun_core::escape::{self, Shown};
-use rerun_core::exec::{self, ApplyError, ExecError, Outcome, Refusal, TxnLine, TxnStatus};
+use rerun_core::exec::{
+    self, ApplyError, ExecError, HelperFailure, Outcome, Refusal, TxnLine, TxnStatus,
+};
 use rerun_core::flow::{
     self, ActError, ForgetPreview, LaunchOption, LaunchView, OptionText, PlanRefusal, Planned,
     ProfileFate, RevertAsk, RevertEnd, RevertGate, RevertOutcome, RevertPreview, RevertWould,
@@ -161,8 +168,89 @@ pub(super) fn link(fixes: &mut [FixVm]) {
         fixes[i].exclusive = c.iter().map(|j| fixes[*j].id.clone()).collect();
         fixes[i].conflicts = c;
     }
+    // A fix that needs the elevated helper is never preselected: an administrator change is the
+    // user's own choice (P5-5c).
     for f in fixes.iter_mut() {
-        f.preselect = f.offer == Offer::Selectable && f.solves_verified_here;
+        f.preselect = f.offer == Offer::Selectable && f.solves_verified_here && !f.needs_helper;
+    }
+}
+
+// ---------- the elevated helper (P5-5c) ----------
+
+/// Whether a run that needs the elevated helper could start it now (`flow::helper`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperState {
+    /// It is installed safely and Windows allows an elevation: the prompt the user will meet.
+    Ready(PromptState),
+    /// Not installed, not admin-only, or a test-key helper for a release build.
+    Missing,
+    /// Windows grants no elevation (`Denied`, `UacOff`; or this process is elevated).
+    NoElevation,
+}
+
+/// The [`HelperState`] of `flow::helper`'s answer.
+pub fn helper_state(r: &Result<PromptState, Refusal>) -> HelperState {
+    match r {
+        Ok(s) => HelperState::Ready(*s),
+        Err(Refusal::NoElevation(_) | Refusal::Elevated) => HelperState::NoElevation,
+        Err(_) => HelperState::Missing,
+    }
+}
+
+/// What the preview says about administrator rights for a prompt state, and the notes under it:
+/// which dialog Windows shows, whether it is on the secure desktop, whether only signed programs
+/// are elevated (ADR 0023 §10).
+pub fn admin_lines(s: &PromptState, lang: Lang) -> (String, Vec<String>) {
+    let mut notes = Vec::new();
+    let admin = if s.has_dialog() {
+        notes.push(tx(
+            lang,
+            if s.kind == PromptKind::Credentials {
+                Msg::AdminCredentials
+            } else {
+                Msg::AdminConsent
+            },
+        ));
+        if s.secure_desktop == Some(false) {
+            notes.push(tx(lang, Msg::AdminNotSecure));
+        }
+        tx(lang, Msg::PreviewAdminYes)
+    } else {
+        // `NoPrompt`, and `Unknown` ("unreadable = no dialog", ADR 0023 §10).
+        tx(lang, Msg::PreviewAdminNoDialog)
+    };
+    if s.signed_only {
+        notes.push(tx(lang, Msg::AdminSignedOnly));
+    }
+    (admin, notes)
+}
+
+/// The modal while the worker waits for the UAC dialog (it cannot be dismissed: the window waits
+/// for Windows, and the helper's run decides what happened).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UacVm {
+    /// "Waiting for Windows (UAC) ...".
+    pub title: String,
+    /// What to do.
+    pub body: String,
+    /// The dialog's kind and where it appears.
+    pub notes: Vec<String>,
+}
+
+/// The wait for the dialog of `s` (only shown when Windows shows one).
+pub fn uac_wait(s: &PromptState, lang: Lang) -> UacVm {
+    let mut notes = Vec::new();
+    if s.kind == PromptKind::Credentials {
+        notes.push(tx(lang, Msg::AdminCredentials));
+    }
+    if s.secure_desktop == Some(false) {
+        notes.push(tx(lang, Msg::AdminNotSecure));
+    }
+    notes.push(tx(lang, Msg::UacWaitHidden));
+    UacVm {
+        title: tx(lang, Msg::UacWaitTitle),
+        body: tx(lang, Msg::UacWaitBody),
+        notes,
     }
 }
 
@@ -577,8 +665,10 @@ pub struct PreviewVm {
     pub notes: Vec<String>,
     /// The launch option, if the plan writes a launch profile.
     pub launch: Option<LaunchVm>,
-    /// "Administrator rights: not needed".
+    /// "Administrator rights: not needed", or that Windows asks (P5-5c).
     pub admin: String,
+    /// What Windows asks when the helper starts: the dialog, where it appears.
+    pub admin_notes: Vec<String>,
     /// What undo does with the plan as a whole.
     pub undo: String,
     /// There is something to apply.
@@ -588,9 +678,25 @@ pub struct PreviewVm {
 }
 
 /// The preview of `p` (the plan's own decode of its bytes) with the launch view of this PC.
-pub fn preview_vm(p: &Planned, launch: Option<&LaunchView>, lang: Lang) -> PreviewVm {
+/// `prompt`: the UAC prompt state when the plan has firewall rules and the helper is ready
+/// (`flow::helper`); a plan with rules and no prompt state cannot be applied.
+pub fn preview_vm(
+    p: &Planned,
+    launch: Option<&LaunchView>,
+    prompt: Option<&PromptState>,
+    lang: Lang,
+) -> PreviewVm {
     let pv = p.preview();
     let n = pv.ops.len();
+    let helper = pv.firewall.is_some();
+    let (admin, admin_notes) = match (helper, prompt) {
+        (false, _) => (tx(lang, Msg::PreviewAdminNo), Vec::new()),
+        (true, Some(s)) => admin_lines(s, lang),
+        (true, None) => (
+            tx(lang, Msg::PreviewAdminYes),
+            vec![tx(lang, Msg::FixNeedsHelper)],
+        ),
+    };
     PreviewVm {
         hash: p.hash().to_string(),
         summary: tx(lang, Msg::PreviewChanges { n }),
@@ -603,21 +709,15 @@ pub fn preview_vm(p: &Planned, launch: Option<&LaunchView>, lang: Lang) -> Previ
         warnings: warnings_of(p, lang),
         notes: notes_of(pv, lang),
         launch: launch.map(|v| launch_vm(v, lang)),
-        admin: tx(
-            lang,
-            if pv.firewall.is_some() {
-                Msg::PreviewAdminYes
-            } else {
-                Msg::PreviewAdminNo
-            },
-        ),
+        admin,
+        admin_notes,
         undo: tx(
             lang,
             Msg::PreviewUndo {
                 profile: flow::profile_of(pv).is_some(),
             },
         ),
-        can_apply: n > 0 && pv.firewall.is_none(),
+        can_apply: n > 0 && (!helper || prompt.is_some()),
         nothing: (n == 0).then(|| tx(lang, Msg::ResNothingBody)),
     }
 }
@@ -694,10 +794,23 @@ pub fn refusal(r: &Refusal, lang: Lang) -> ResultVm {
         | Refusal::MainExe(_)
         | Refusal::Changed { .. } => calm(Tone::Calm, RefStaleTitle, RefStaleBody, true),
         Refusal::NeedsHelper => calm(Tone::Attention, RefAdminTitle, RefAdminBody, false),
-        Refusal::HelperUnsafe(_)
-        | Refusal::NoElevation(_)
-        | Refusal::HelperPlan(_)
-        | Refusal::Helper(_) => calm(Tone::Attention, RefHelperTitle, RefHelperBody, false),
+        // The helper (P5-5c), each before any prompt: not installed safely, no elevation here,
+        // a helper of an earlier run still busy. Rules that no longer match the signed Topo
+        // mean the game changed: the page is read again.
+        Refusal::HelperUnsafe(_) => calm(Tone::Attention, RefHelperTitle, RefHelperBody, false),
+        Refusal::NoElevation(_) => calm(
+            Tone::Attention,
+            RefNoElevationTitle,
+            RefNoElevationBody,
+            false,
+        ),
+        Refusal::Helper(HelperFailure::Busy(_)) => calm(
+            Tone::Attention,
+            RefHelperBusyTitle,
+            RefHelperBusyBody,
+            false,
+        ),
+        Refusal::HelperPlan(_) => calm(Tone::Calm, RefStaleTitle, RefStaleBody, true),
         Refusal::Forgotten { .. } => calm(Tone::Calm, RefNothingTitle, RefNothingBody, true),
         _ => calm(
             Tone::Attention,
@@ -788,13 +901,14 @@ pub fn stale(lang: Lang) -> ResultVm {
     )
 }
 
-/// A pick the app cannot apply here (the helper, a download): nothing is planned.
+/// A pick the app cannot apply here (a download not agreed to, a helper that cannot run, a
+/// refused fix): nothing is planned.
 pub fn not_available(lang: Lang) -> ResultVm {
     result(
         Tone::Calm,
         lang,
-        Msg::RefHelperTitle,
-        Msg::RefHelperBody,
+        Msg::RefUnavailableTitle,
+        Msg::RefUnavailableBody,
         false,
     )
 }
@@ -863,36 +977,35 @@ pub fn apply_result(r: Result<Outcome, ApplyError>, lang: Lang) -> ResultVm {
             escape::text(&t.to_string()).into_owned(),
         ),
         Err(ApplyError::Refused(r)) => refusal(&r, lang),
+        // Closed, nothing different now: a declined UAC prompt (P5-5c), a helper that refused
+        // or did not start, or any other failure the rollback undid.
         Err(ApplyError::RolledBack { txn, cause, .. }) => {
+            let (title, body) = match &*cause {
+                ExecError::Helper(HelperFailure::Declined) => {
+                    (Msg::ResDeclinedTitle, Msg::ResDeclinedBody)
+                }
+                ExecError::Helper(_) => (Msg::ResHelperNotDoneTitle, Msg::ResHelperNotDoneBody),
+                _ => (Msg::ResRolledBackTitle, Msg::ResRolledBackBody),
+            };
             let mut r = with_detail(
-                result(
-                    Tone::Calm,
-                    lang,
-                    Msg::ResRolledBackTitle,
-                    Msg::ResRolledBackBody,
-                    true,
-                ),
+                result(Tone::Calm, lang, title, body, true),
                 shown_error(&*cause),
             );
-            r.notice
-                .details
-                .push(DetailVm::of(escape::text(&txn.to_string()).into_owned()));
+            r.notice.details.push(txn_detail(&txn));
             r
         }
-        Err(
-            ApplyError::CleanupPending { cause, .. }
-            | ApplyError::HelperOpen { cause, .. }
-            | ApplyError::LeftOpen { cause, .. },
-        ) => with_detail(
-            result(
-                Tone::Attention,
-                lang,
-                Msg::ResOpenTitle,
-                Msg::ResOpenBody,
-                true,
-            ),
-            shown_error(&*cause),
-        ),
+        // Open: each state in its own words (ADR 0023 §9), with the transaction to look for.
+        Err(ApplyError::CleanupPending { txn, cause, .. }) => {
+            open_result(Msg::ResCleanupOpenBody, &txn, &[&*cause], lang)
+        }
+        Err(ApplyError::HelperOpen { txn, cause }) => {
+            open_result(Msg::ResHelperOpenBody, &txn, &[&*cause], lang)
+        }
+        Err(ApplyError::LeftOpen {
+            txn,
+            cause,
+            rollback,
+        }) => open_result(Msg::ResOpenBody, &txn, &[&*cause, &*rollback], lang),
         Err(e) => with_detail(
             result(
                 Tone::Attention,
@@ -904,6 +1017,20 @@ pub fn apply_result(r: Result<Outcome, ApplyError>, lang: Lang) -> ResultVm {
             shown_error(&e),
         ),
     }
+}
+
+fn txn_detail(t: &TxnId) -> DetailVm {
+    DetailVm::of(escape::text(&t.to_string()).into_owned())
+}
+
+/// An apply that left its transaction open: the state's words, the causes, the transaction.
+fn open_result(body: Msg, txn: &TxnId, causes: &[&ExecError], lang: Lang) -> ResultVm {
+    let mut r = result(Tone::Attention, lang, Msg::ResOpenTitle, body, true);
+    for c in causes {
+        r.notice.details.push(DetailVm::of(shown_error(*c)));
+    }
+    r.notice.details.push(txn_detail(txn));
+    r
 }
 
 fn exec_error(e: &ExecError, lang: Lang) -> ResultVm {
@@ -957,8 +1084,37 @@ pub fn act_error(e: &ActError, lang: Lang) -> ResultVm {
     }
 }
 
-/// How an undo ended.
+/// How an undo ended. An undo that stopped at the helper (a declined UAC prompt, a helper that
+/// did not finish) says so; nothing below it was undone (ADR 0023 §9: the batch first).
 pub fn revert_result(o: &RevertOutcome, lang: Lang) -> ResultVm {
+    let helper_halt = o
+        .report
+        .halted
+        .as_ref()
+        .filter(|h| matches!(*h.why, Refusal::Helper(_)));
+    if let Some(h) = helper_halt {
+        let declined = matches!(*h.why, Refusal::Helper(HelperFailure::Declined));
+        let r = if declined {
+            result(
+                Tone::Calm,
+                lang,
+                Msg::ResUndoDeclinedTitle,
+                Msg::ResUndoDeclinedBody,
+                true,
+            )
+        } else {
+            result(
+                Tone::Attention,
+                lang,
+                Msg::ResHaltedTitle,
+                Msg::ResHaltedBody,
+                true,
+            )
+        };
+        let mut r = with_detail(r, shown_error(&*h.why));
+        r.notice.details.push(txn_detail(&o.report.txn));
+        return r;
+    }
     let (tone, a, b) = match o.end {
         RevertEnd::Closed => (Tone::Done, Msg::ResRevertedTitle, Msg::ResRevertedBody),
         RevertEnd::Halted => (Tone::Attention, Msg::ResHaltedTitle, Msg::ResHaltedBody),
@@ -1278,12 +1434,15 @@ fn fate_launch(l: &LaunchOption, install: &Result<PathBuf, String>, lang: Lang) 
 }
 
 /// The undo dialog for a revert preview. `changed`: the state differs from the preview shown
-/// before (the dialog opens again with a calm note).
+/// before (the dialog opens again with a calm note). `helper`: whether the helper could run now,
+/// read by the worker only when the undo needs it (`p.prompt`); without a ready helper such an
+/// undo cannot be confirmed and says why.
 pub fn revert_vm(
     p: &RevertPreview,
     install: &Result<PathBuf, String>,
     changed: bool,
     nonce: u64,
+    helper: Option<&HelperState>,
     lang: Lang,
 ) -> DialogVm {
     let mut notes = vec![tx(lang, Msg::UndoCloseGame)];
@@ -1304,7 +1463,14 @@ pub fn revert_vm(
         notes.push(tx(lang, Msg::UndoHalt { op: h.op }));
         details.push(DetailVm::of(shown_error(&*h.why)));
     }
-    let blocked = prompt_block(p.prompt.as_ref(), lang);
+    let blocked = prompt_block(p.prompt.as_ref(), helper, lang);
+    if p.prompt.is_some()
+        && let Some(HelperState::Ready(s)) = helper
+    {
+        let (admin, more) = admin_lines(s, lang);
+        notes.push(admin);
+        notes.extend(more);
+    }
     DialogVm {
         kind: DialogKind::Undo,
         nonce,
@@ -1325,9 +1491,19 @@ pub fn revert_vm(
     }
 }
 
-fn prompt_block(p: Option<&PromptState>, lang: Lang) -> Option<String> {
-    // An undo that needs the administrator prompt is not available in the app yet (P5-5c).
-    p.map(|_| tx(lang, Msg::UndoPrompt))
+/// Why an undo that needs the administrator prompt cannot be confirmed (`None`: it can, or it
+/// needs no prompt).
+fn prompt_block(
+    p: Option<&PromptState>,
+    helper: Option<&HelperState>,
+    lang: Lang,
+) -> Option<String> {
+    p?;
+    match helper {
+        Some(HelperState::Ready(_)) => None,
+        Some(HelperState::NoElevation) => Some(tx(lang, Msg::UndoNoElevation)),
+        Some(HelperState::Missing) | None => Some(tx(lang, Msg::UndoPrompt)),
+    }
 }
 
 /// The forget dialog for a forget preview.

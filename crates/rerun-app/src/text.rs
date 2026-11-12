@@ -510,7 +510,7 @@ pub enum Msg {
 
     /// The select control of a fix.
     FixSelect,
-    /// A fix that needs the elevated helper.
+    /// A fix that needs the elevated helper, which is not installed safely.
     FixNeedsHelper,
     /// A fix that needs a package download.
     FixNeedsDownload,
@@ -814,7 +814,7 @@ pub enum Msg {
     },
     /// An empty record.
     UndoEmpty,
-    /// Needs the helper.
+    /// An undo that needs the helper, which is not installed safely.
     UndoPrompt,
     /// Heading.
     UndoAfter,
@@ -854,7 +854,7 @@ pub enum Msg {
     ResRolledBackBody,
     /// A result.
     ResOpenTitle,
-    /// A result.
+    /// A result: the rollback did not finish (LeftOpen).
     ResOpenBody,
     /// A result.
     ResRevertedTitle,
@@ -948,7 +948,7 @@ pub enum Msg {
     RefNoPreviewTitle,
     /// A refusal.
     RefNoPreviewBody,
-    /// The plan needs administrator rights.
+    /// The plan needs the helper; Windows shows its dialog.
     PreviewAdminYes,
 
     // ---- package download (P5-5b)
@@ -1049,6 +1049,58 @@ pub enum Msg {
         /// The announced length.
         total: Option<u64>,
     },
+
+    // ---- the helper from the app (P5-5c)
+    /// A fix that needs the helper, which is ready (P5-5c).
+    FixHelperAsks,
+    /// A fix that needs the helper; Windows grants no elevation.
+    FixNoElevation,
+    /// The plan needs the helper; Windows shows no dialog.
+    PreviewAdminNoDialog,
+    /// The UAC dialog: consent.
+    AdminConsent,
+    /// The UAC dialog: credentials.
+    AdminCredentials,
+    /// The UAC dialog is not on the secure desktop.
+    AdminNotSecure,
+    /// Windows elevates signed images only.
+    AdminSignedOnly,
+    /// Waiting for the UAC dialog.
+    UacWaitTitle,
+    /// Waiting for the UAC dialog.
+    UacWaitBody,
+    /// Waiting for the UAC dialog.
+    UacWaitHidden,
+    /// A result: UAC declined during an apply.
+    ResDeclinedTitle,
+    /// A result: UAC declined during an apply.
+    ResDeclinedBody,
+    /// A result: the helper refused or did not run; rolled back.
+    ResHelperNotDoneTitle,
+    /// A result: the helper refused or did not run; rolled back.
+    ResHelperNotDoneBody,
+    /// A result: the helper batch stays open (HelperOpen).
+    ResHelperOpenBody,
+    /// A result: rolled back, a replaced file still in use (CleanupPending).
+    ResCleanupOpenBody,
+    /// A result: UAC declined during an undo.
+    ResUndoDeclinedTitle,
+    /// A result: UAC declined during an undo.
+    ResUndoDeclinedBody,
+    /// A refusal: Windows grants no elevation.
+    RefNoElevationTitle,
+    /// A refusal: Windows grants no elevation.
+    RefNoElevationBody,
+    /// A refusal: a helper may still run.
+    RefHelperBusyTitle,
+    /// A refusal: a helper may still run.
+    RefHelperBusyBody,
+    /// A pick the app cannot apply here.
+    RefUnavailableTitle,
+    /// A pick the app cannot apply here.
+    RefUnavailableBody,
+    /// An undo that needs the helper; Windows grants no elevation.
+    UndoNoElevation,
 }
 
 /// The text of `m` in `lang`.
@@ -1342,7 +1394,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         }
 
         FixSelect => "Select this fix",
-        FixNeedsHelper => "This fix needs Rerun's administrator helper. The app cannot apply it yet; that comes with a later version.",
+        FixNeedsHelper => "This fix needs Rerun's administrator helper, and it is not installed safely on this PC (in Program Files, folder Rerun, for administrators only). The installed version of Rerun brings it.",
         FixNeedsDownload => "This fix needs a package download first. Ticking it shows what would be downloaded; nothing is downloaded unless you agree.",
         FixTradeoffs => "Side effects",
         FixNoTradeoffs => "No side effects listed",
@@ -1477,7 +1529,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         UndoHalt { op } => return format!("Undo would stop at change {op} and leave the rest as it is. The reason is below.").into(),
         UndoCleanup { n, in_use } => { let copies = if n == 1 { "1 copy".to_owned() } else { format!("{n} copies") }; let is = if in_use == 1 { "1 is".to_owned() } else { format!("{in_use} are") }; return format!("Undo also deletes {copies} Rerun made; {is} in use now and deleted once free.").into() }
         UndoEmpty => "This record changed nothing. Undo only closes it.",
-        UndoPrompt => "Part of this change needs administrator rights. The app cannot undo it yet; that comes with a later version.",
+        UndoPrompt => "Undoing this needs Rerun's administrator helper, and it is not installed safely on this PC. The installed version of Rerun brings it; until then the change stays.",
         UndoAfter => "After the undo",
         LaunchFateGone => "Remove this launch option of the game in Steam by hand. Rerun does not change Steam's settings:",
         LaunchUntilRemoved => "Until you remove it, Steam starts the game through rerun-launch, which finds no profile and starts the game unchanged.",
@@ -1534,8 +1586,8 @@ fn en(m: Msg) -> Cow<'static, str> {
         RefStaleBody => "This is not a problem. Rerun updated the page; look at the fixes and the preview again. Nothing was changed.",
         RefAdminTitle => "This needs administrator rights",
         RefAdminBody => "The folder needs administrator rights. The app cannot do that yet. Nothing was changed.",
-        RefHelperTitle => "Not available yet",
-        RefHelperBody => "Changes that need administrator rights come with a later version of the app. Nothing was changed.",
+        RefHelperTitle => "The administrator helper is not installed safely",
+        RefHelperBody => "This needs Rerun's helper in Program Files, folder Rerun, installed for administrators only. The installed version of Rerun brings it. Nothing was changed, and Windows did not ask.",
         RefNothingTitle => "Nothing to undo",
         RefNothingBody => "This change is closed already, or Rerun has no record of it.",
         RefUnexpectedTitle => "Rerun could not do this",
@@ -1544,7 +1596,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         RefPlanBody => "Nothing was changed. The reason is below.",
         RefNoPreviewTitle => "The preview is no longer current",
         RefNoPreviewBody => "Select the fixes again and apply once the preview shows. Nothing was changed.",
-        PreviewAdminYes => "Administrator rights: needed. The app cannot apply this yet.",
+        PreviewAdminYes => "Administrator: yes – Windows asks you in a moment (UAC)",
         FixNoPackage => "This fix needs a package that Rerun does not download itself (a community build you fetch from its own page). The app cannot apply it; the command line shows the details.",
         DlConsentTitle => "These files will be downloaded",
         DlConsentIntro => "This fix needs the package below. Rerun downloads it only if you agree, only from the source named here (which may hand it over to the storage hosts listed), and keeps it only if it has the SHA-256 shown. Nothing in your game is changed by this step; the usual preview comes next.",
@@ -1591,6 +1643,31 @@ fn en(m: Msg) -> Cow<'static, str> {
         DlStFailed => "Failed",
         DlLblVia => "May be handed over to",
         DlSize { read, total } => return match total { Some(t) => format!("{} of {}", bytes(read, false), bytes(t, false)), None => format!("{} so far (the source did not announce a size)", bytes(read, false)) }.into(),
+        FixHelperAsks => "Needs administrator rights: when you apply it, Windows asks you to confirm (UAC).",
+        FixNoElevation => "This fix needs administrator rights, and Windows does not grant them to this account (or User Account Control is off). It cannot be applied here.",
+        PreviewAdminNoDialog => "Administrator: yes – Windows does not ask on this PC, so your click on Apply is the only confirmation",
+        AdminConsent => "Windows shows its consent dialog: confirm it with Yes. Rerun waits until you have answered.",
+        AdminCredentials => "Windows asks for the password of an administrator account. Rerun waits until you have answered.",
+        AdminNotSecure => "The dialog appears on your normal desktop, not on the secure desktop, because that is switched off on this PC: other programs could reach it.",
+        AdminSignedOnly => "This PC lets only signed programs run as administrator. The helper of this version may not start; then Rerun keeps nothing of the change.",
+        UacWaitTitle => "Waiting for Windows (UAC) ...",
+        UacWaitBody => "Confirm the User Account Control dialog. Rerun waits until you answer it; this window stays open until then.",
+        UacWaitHidden => "If you do not see the dialog, look for a flashing shield in the taskbar.",
+        ResDeclinedTitle => "Not applied: administrator approval declined",
+        ResDeclinedBody => "You declined the Windows dialog. Rerun took back everything it had changed before it; nothing is different now, and the change is closed.",
+        ResHelperNotDoneTitle => "Not applied: the administrator helper did not finish",
+        ResHelperNotDoneBody => "Rerun took back everything it had changed; nothing is different now, and the change is closed. The reason is below.",
+        ResHelperOpenBody => "Rerun could not confirm what the administrator helper did, so the change stays open. Nothing more was changed. Undo it under Applied; Windows asks once more if a firewall rule is there.",
+        ResCleanupOpenBody => "Rerun took the change back, but a file it replaced is still in use, so the change stays open until Undo under Applied removes it.",
+        ResUndoDeclinedTitle => "Not undone: administrator approval declined",
+        ResUndoDeclinedBody => "You declined the Windows dialog. Nothing was undone; the change stays as it was under Applied. Undo asks Windows again.",
+        RefNoElevationTitle => "Windows does not grant administrator rights here",
+        RefNoElevationBody => "This account cannot get administrator rights (or User Account Control is off), so Rerun cannot start its helper. Nothing was changed.",
+        RefHelperBusyTitle => "Rerun's administrator helper is still busy",
+        RefHelperBusyBody => "A helper from an earlier run may still be working, or another program holds its lock. Wait a moment, then try again. Nothing was changed.",
+        RefUnavailableTitle => "Not available here",
+        RefUnavailableBody => "This fix cannot be applied from the app right now. Nothing was changed.",
+        UndoNoElevation => "Undoing this needs administrator rights, and Windows does not grant them to this account (or User Account Control is off).",
     };
     Cow::Borrowed(s)
 }
@@ -1881,7 +1958,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         }
 
         FixSelect => "Diesen Fix auswählen",
-        FixNeedsHelper => "Dieser Fix braucht den Administrator-Helfer von Rerun. Die App kann ihn noch nicht anwenden; das kommt mit einer späteren Version.",
+        FixNeedsHelper => "Dieser Fix braucht den Administrator-Helfer von Rerun, und der ist auf diesem PC nicht sicher installiert (unter Programme im Ordner Rerun, nur für Administratoren). Die installierte Version von Rerun bringt ihn mit.",
         FixNeedsDownload => "Dieser Fix braucht zuerst einen Paket-Download. Beim Anhaken siehst du, was heruntergeladen würde; ohne deine Zustimmung wird nichts heruntergeladen.",
         FixTradeoffs => "Nebenwirkungen",
         FixNoTradeoffs => "Keine Nebenwirkungen angegeben",
@@ -2016,7 +2093,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         UndoHalt { op } => return format!("Rückgängig würde bei Änderung {op} anhalten und den Rest lassen, wie er ist. Der Grund steht unten.").into(),
         UndoCleanup { n, in_use } => { let copies = if n == 1 { "1 Kopie".to_owned() } else { format!("{n} Kopien") }; let is = if in_use == 1 { "1 ist".to_owned() } else { format!("{in_use} sind") }; return format!("Rückgängig löscht auch {copies}, die Rerun gemacht hat; {is} gerade in Gebrauch und wird gelöscht, sobald frei.").into() }
         UndoEmpty => "Dieser Eintrag hat nichts geändert. Rückgängig schliesst ihn nur ab.",
-        UndoPrompt => "Ein Teil dieser Änderung braucht Administratorrechte. Die App kann ihn noch nicht rückgängig machen; das kommt mit einer späteren Version.",
+        UndoPrompt => "Das Rückgängigmachen braucht den Administrator-Helfer von Rerun, und der ist auf diesem PC nicht sicher installiert. Die installierte Version von Rerun bringt ihn mit; bis dahin bleibt die Änderung.",
         UndoAfter => "Nach dem Rückgängigmachen",
         LaunchFateGone => "Entferne diese Startoption des Spiels in Steam von Hand. Rerun ändert die Einstellungen von Steam nicht:",
         LaunchUntilRemoved => "Bis du sie entfernst, startet Steam das Spiel über rerun-launch, das kein Profil findet und das Spiel unverändert startet.",
@@ -2073,8 +2150,8 @@ fn de(m: Msg) -> Cow<'static, str> {
         RefStaleBody => "Das ist kein Problem. Rerun hat die Seite aktualisiert; sieh dir die Fixes und die Vorschau nochmals an. Es wurde nichts geändert.",
         RefAdminTitle => "Das braucht Administratorrechte",
         RefAdminBody => "Der Ordner braucht Administratorrechte. Die App kann das noch nicht. Es wurde nichts geändert.",
-        RefHelperTitle => "Noch nicht verfügbar",
-        RefHelperBody => "Änderungen, die Administratorrechte brauchen, kommen mit einer späteren Version der App. Es wurde nichts geändert.",
+        RefHelperTitle => "Der Administrator-Helfer ist nicht sicher installiert",
+        RefHelperBody => "Das braucht den Helfer von Rerun unter Programme im Ordner Rerun, nur für Administratoren installiert. Die installierte Version von Rerun bringt ihn mit. Es wurde nichts geändert, und Windows hat nicht gefragt.",
         RefNothingTitle => "Nichts rückgängig zu machen",
         RefNothingBody => "Diese Änderung ist schon abgeschlossen, oder Rerun hat keinen Eintrag dazu.",
         RefUnexpectedTitle => "Rerun konnte das nicht ausführen",
@@ -2083,7 +2160,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         RefPlanBody => "Es wurde nichts geändert. Der Grund steht unten.",
         RefNoPreviewTitle => "Die Vorschau ist nicht mehr aktuell",
         RefNoPreviewBody => "Wähle die Fixes nochmals und wende an, sobald die Vorschau da ist. Es wurde nichts geändert.",
-        PreviewAdminYes => "Administratorrechte: nötig. Die App kann das noch nicht anwenden.",
+        PreviewAdminYes => "Administrator: ja – Windows fragt dich gleich (UAC)",
         FixNoPackage => "Dieser Fix braucht ein Paket, das Rerun nicht selbst herunterlädt (ein Community-Build, den du von seiner eigenen Seite holst). Die App kann ihn nicht anwenden; die Kommandozeile zeigt die Einzelheiten.",
         DlConsentTitle => "Diese Dateien werden heruntergeladen",
         DlConsentIntro => "Dieser Fix braucht das Paket unten. Rerun lädt es nur herunter, wenn du zustimmst, nur von der hier genannten Quelle (die an die aufgeführten Speicher-Server weiterleiten darf), und behält es nur, wenn es den angezeigten SHA-256 hat. Dieser Schritt ändert nichts an deinem Spiel; danach kommt die gewohnte Vorschau.",
@@ -2130,6 +2207,31 @@ fn de(m: Msg) -> Cow<'static, str> {
         DlStFailed => "Fehlgeschlagen",
         DlLblVia => "Darf weiterleiten an",
         DlSize { read, total } => return match total { Some(t) => format!("{} von {}", bytes(read, true), bytes(t, true)), None => format!("{} bisher (die Quelle hat keine Grösse genannt)", bytes(read, true)) }.into(),
+        FixHelperAsks => "Braucht Administratorrechte: Beim Anwenden fragt dich Windows nach einer Bestätigung (UAC).",
+        FixNoElevation => "Dieser Fix braucht Administratorrechte, und Windows gibt sie diesem Konto nicht (oder die Benutzerkontensteuerung ist aus). Er kann hier nicht angewendet werden.",
+        PreviewAdminNoDialog => "Administrator: ja – Windows fragt auf diesem PC nicht nach, dein Klick auf Anwenden ist also die einzige Bestätigung",
+        AdminConsent => "Windows zeigt seinen Bestätigungsdialog: Bestätige ihn mit Ja. Rerun wartet, bis du geantwortet hast.",
+        AdminCredentials => "Windows fragt nach dem Passwort eines Administratorkontos. Rerun wartet, bis du geantwortet hast.",
+        AdminNotSecure => "Der Dialog erscheint auf deinem normalen Desktop und nicht auf dem sicheren, weil dieser auf diesem PC ausgeschaltet ist: Andere Programme könnten ihn erreichen.",
+        AdminSignedOnly => "Dieser PC lässt nur signierte Programme als Administrator laufen. Der Helfer dieser Version startet dann vielleicht nicht; dann behält Rerun nichts von der Änderung.",
+        UacWaitTitle => "Warte auf Windows-Bestätigung (UAC) ...",
+        UacWaitBody => "Bestätige die Abfrage der Benutzerkontensteuerung. Rerun wartet, bis du sie beantwortest; dieses Fenster bleibt so lange offen.",
+        UacWaitHidden => "Siehst du den Dialog nicht, schau in der Taskleiste nach einem blinkenden Schild.",
+        ResDeclinedTitle => "Nicht angewendet: Administrator-Bestätigung abgelehnt",
+        ResDeclinedBody => "Du hast den Windows-Dialog abgelehnt. Rerun hat alles zurückgenommen, was es davor geändert hatte; jetzt ist nichts anders, und die Änderung ist abgeschlossen.",
+        ResHelperNotDoneTitle => "Nicht angewendet: Der Administrator-Helfer hat nicht abgeschlossen",
+        ResHelperNotDoneBody => "Rerun hat alles zurückgenommen, was es geändert hatte; jetzt ist nichts anders, und die Änderung ist abgeschlossen. Der Grund steht unten.",
+        ResHelperOpenBody => "Rerun konnte nicht bestätigen, was der Administrator-Helfer getan hat, darum bleibt die Änderung offen. Es wurde nichts weiter geändert. Mach sie unter Angewendet rückgängig; Windows fragt nochmals, wenn eine Firewall-Regel da ist.",
+        ResCleanupOpenBody => "Rerun hat die Änderung zurückgenommen, aber eine ersetzte Datei ist noch in Gebrauch, darum bleibt die Änderung offen, bis Rückgängig unter Angewendet sie entfernt.",
+        ResUndoDeclinedTitle => "Nicht rückgängig gemacht: Administrator-Bestätigung abgelehnt",
+        ResUndoDeclinedBody => "Du hast den Windows-Dialog abgelehnt. Es wurde nichts rückgängig gemacht; die Änderung bleibt unter Angewendet, wie sie war. Rückgängig fragt Windows nochmals.",
+        RefNoElevationTitle => "Windows gibt hier keine Administratorrechte",
+        RefNoElevationBody => "Dieses Konto bekommt keine Administratorrechte (oder die Benutzerkontensteuerung ist aus), darum kann Rerun seinen Helfer nicht starten. Es wurde nichts geändert.",
+        RefHelperBusyTitle => "Der Administrator-Helfer von Rerun ist noch beschäftigt",
+        RefHelperBusyBody => "Ein Helfer eines früheren Laufs arbeitet vielleicht noch, oder ein anderes Programm hält seine Sperre. Warte einen Moment und versuche es dann nochmals. Es wurde nichts geändert.",
+        RefUnavailableTitle => "Hier nicht verfügbar",
+        RefUnavailableBody => "Dieser Fix kann gerade nicht aus der App angewendet werden. Es wurde nichts geändert.",
+        UndoNoElevation => "Das Rückgängigmachen braucht Administratorrechte, und Windows gibt sie diesem Konto nicht (oder die Benutzerkontensteuerung ist aus).",
     };
     Cow::Borrowed(s)
 }

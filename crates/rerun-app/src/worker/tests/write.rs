@@ -923,7 +923,7 @@ impl Wake for Hold {
 #[test]
 fn aw14_the_window_cannot_close_while_a_write_is_queued_or_runs() {
     let (release, gate) = mpsc::channel::<()>();
-    let make = || {
+    let make = |_| {
         Ok(World {
             sys: Box::new(write_world()),
             http: Box::new(FakeHttp::default()),
@@ -938,6 +938,7 @@ fn aw14_the_window_cannot_close_while_a_write_is_queued_or_runs() {
         }),
     )
     .unwrap();
+    worker.set_owner(None);
     assert!(!worker.busy_writing());
     // The first job's wake holds the thread; a read job is no write.
     worker.send(Job::Status);
@@ -1066,7 +1067,7 @@ fn aw15_a_fix_that_needs_the_helper_is_never_planned_whatever_is_sent() {
     let [Event::PreviewRefused { result, .. }] = ev.as_slice() else {
         panic!("{ev:?}");
     };
-    assert_eq!(result.notice.title, "Not available yet");
+    assert_eq!(result.notice.title, "Not available here");
     // Nothing shown, so nothing to apply; nothing stored or written.
     let ev = rig.run(Job::Apply {
         hash: "0".repeat(64),
@@ -1110,7 +1111,7 @@ impl Wake for HoldAfter {
 #[test]
 fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
     let (release, gate) = mpsc::channel::<()>();
-    let make = || {
+    let make = |_| {
         Ok(World {
             sys: Box::new(write_world()),
             http: Box::new(FakeHttp::default()),
@@ -1127,6 +1128,7 @@ fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
         }),
     )
     .unwrap();
+    worker.set_owner(None);
     worker.send(Job::Game {
         app_id: 220,
         name: None,
@@ -1170,7 +1172,7 @@ fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
 // ---------- AW16 re-check follow-ups ----------
 
 #[test]
-fn aw16_a_plan_with_a_firewall_rule_is_not_applicable() {
+fn aw16_a_plan_with_a_firewall_rule_needs_a_ready_helper() {
     let mut rig = Rig::new(Lang::En);
     let page = rig.page();
     let picks = Selection::preselected(&page).picks(&page);
@@ -1192,16 +1194,21 @@ fn aw16_a_plan_with_a_firewall_rule_is_not_applicable() {
     };
     let planned = picked.planned.unwrap_or_else(|e| panic!("{e}"));
     let pv = planned.preview().clone();
-    assert!(crate::worker::applicable(&pv));
-    // ... and the same preview with a firewall rule is not. A package file is fine since P5-5b
+    assert!(matches!(crate::worker::helper_prompt(&g, &pv), Ok(None)));
+    // ... and the same preview with a firewall rule needs the helper, which this world does not
+    // have (P5-5c: refused before any prompt; AH1 has one). A package file is fine since P5-5b
     // (AD1 applies and undoes one).
     let mut fw = pv.clone();
     fw.firewall = Some("firewall rules");
-    assert!(!crate::worker::applicable(&fw));
+    assert!(matches!(
+        crate::worker::helper_prompt(&g, &fw),
+        Err(rerun_core::exec::Refusal::HelperUnsafe(_))
+    ));
     let mut pkg = pv.clone();
     let op = pkg.ops.iter_mut().find(|o| o.profile.is_none()).unwrap();
     op.source = Some(escape::text("pack 1.0: d3d9.dll").into_owned());
-    assert!(crate::worker::applicable(&pkg));
+    assert!(matches!(crate::worker::helper_prompt(&g, &pkg), Ok(None)));
+    assert!(rig.sys.fake_elevation().calls().is_empty(), "no prompt");
 }
 
 #[test]
@@ -1212,8 +1219,22 @@ fn aw16_an_undo_that_needs_the_prompt_keeps_no_token() {
         secure_desktop: Some(true),
         signed_only: false,
     };
-    assert!(!crate::worker::token_kept(Some(&state)));
-    assert!(crate::worker::token_kept(None));
+    use crate::vm::HelperState;
+    assert!(!crate::worker::token_kept(Some(&state), None));
+    assert!(!crate::worker::token_kept(
+        Some(&state),
+        Some(&HelperState::Missing)
+    ));
+    assert!(!crate::worker::token_kept(
+        Some(&state),
+        Some(&HelperState::NoElevation)
+    ));
+    // P5-5c: with the helper ready the undo can be confirmed (AH3).
+    assert!(crate::worker::token_kept(
+        Some(&state),
+        Some(&HelperState::Ready(state))
+    ));
+    assert!(crate::worker::token_kept(None, None));
     // Without a kept token a confirm with any nonce writes nothing and shows the preview: the
     // same path as a stale confirm (AW15).
     let mut rig = Rig::new(Lang::En);

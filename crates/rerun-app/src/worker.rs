@@ -27,6 +27,15 @@
 //! library scan, which takes seconds, lets the jobs that wait run between two games (a click on
 //! a game or a page never waits for the scan); a second library job during a scan restarts it.
 //!
+//! The elevated helper (P5-5c, ADR 0023 amendment P5-5c): a fix or an undo that needs it is
+//! offered only when `flow::helper` says it could run now (installed safely, Windows allows an
+//! elevation), and the preview names the UAC prompt. The system is built with the window as the
+//! owner of the UAC dialog ([`Worker::set_owner`]: the thread builds the world only once the
+//! window handed its handle over, or said it has none). Before the core call that may start the
+//! helper, the worker sends [`Event::WaitingForUac`] (only when Windows shows a dialog); the
+//! thread then blocks in `run_helper` until the user answers, and the result follows. The window
+//! cannot close meanwhile (a write job runs).
+//!
 //! Rule 1: the thread lives as long as the window. Dropping the [`Worker`] closes the job
 //! channel; the thread ends after the job it runs. A write job counts as running from `send` to its
 //! end ([`Worker::busy_writing`]): the window does not close meanwhile.
@@ -37,10 +46,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 
 use rerun_core::catalog::Catalog;
 use rerun_core::catalog::model::Status;
 use rerun_core::detect::steam;
+use rerun_core::elevate::PromptState;
 use rerun_core::escape::Shown;
 use rerun_core::exec;
 use rerun_core::flow::{
@@ -50,13 +61,14 @@ use rerun_core::flow::{
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::journal::TxnId;
 use rerun_core::plan::Pick;
-use rerun_core::sys::{Http, System};
+use rerun_core::sys::{Http, PromptOwner, System};
 use rerun_core::topo;
 
 use crate::text::{Lang, Msg, t};
 use crate::vm::{
-    self, AppliedVm, BlockedVm, DetailVm, DialogVm, DownloadVm, GameVm, LibraryVm, Names, Notice,
-    Offer, PackageState, PreviewVm, ResultVm, RowVm, SteamVm, SystemVm, TopoKnown,
+    self, AppliedVm, BlockedVm, DetailVm, DialogVm, DownloadVm, GameVm, HelperState, LibraryVm,
+    Names, Notice, Offer, PackageState, PreviewVm, ResultVm, RowVm, SteamVm, SystemVm, TopoKnown,
+    UacVm,
 };
 
 /// A job for the worker.
@@ -232,6 +244,10 @@ pub enum Event {
     Download(Box<DownloadVm>),
     /// A [`Job::Download`] has ended (always the last event of it, after the fresh page).
     DownloadEnded(DownloadOutcome),
+    /// The next core call may start the elevated helper and Windows shows its UAC dialog: the
+    /// worker blocks until the user answers it. Always followed by [`Event::Result`] (or, for an
+    /// undo whose state changed meanwhile, [`Event::Dialog`]).
+    WaitingForUac(Box<UacVm>),
 }
 
 /// How the framework learns that an event is waiting (ADR 0027).
@@ -251,9 +267,16 @@ pub struct World {
     pub install: Result<PathBuf, String>,
 }
 
+/// How long the thread waits for the window's handle before it builds the system without an
+/// owner (the UAC dialog then has none and may open behind the window). The window hands it over
+/// within its first turns of the event loop.
+const OWNER_WAIT: Duration = Duration::from_secs(5);
+
 /// The worker thread's handle.
 pub struct Worker {
     jobs: Sender<Job>,
+    /// The owner of the UAC dialog, handed over once (the thread builds its world after it).
+    owner: Sender<Option<PromptOwner>>,
     events: Receiver<Event>,
     /// Write jobs queued or running: the window does not close while it is above zero.
     writes: Arc<AtomicUsize>,
@@ -265,12 +288,15 @@ pub struct Worker {
 
 impl Worker {
     /// Starts the thread. `make` builds the world on it (a `WinSystem` is created and used on
-    /// one thread only); if it fails, every job is answered with [`Event::Blocked`].
+    /// one thread only) with the owner of the UAC dialog the window hands over
+    /// ([`Self::set_owner`]; `None` after [`OWNER_WAIT`] without one); if it fails, every job is
+    /// answered with [`Event::Blocked`]. Jobs sent before wait for it.
     pub fn start<F>(lang: Lang, make: F, wake: Box<dyn Wake>) -> std::io::Result<Self>
     where
-        F: FnOnce() -> Result<World, Shown<'static>> + Send + 'static,
+        F: FnOnce(Option<PromptOwner>) -> Result<World, Shown<'static>> + Send + 'static,
     {
         let (jobs, job_rx) = mpsc::channel::<Job>();
+        let (owner, owner_rx) = mpsc::channel::<Option<PromptOwner>>();
         let (event_tx, events) = mpsc::channel::<Event>();
         let writes = Arc::new(AtomicUsize::new(0));
         let downloads = Arc::new(AtomicUsize::new(0));
@@ -281,7 +307,8 @@ impl Worker {
         std::thread::Builder::new()
             .name("rerun-worker".to_owned())
             .spawn(move || {
-                let world = make();
+                let owner = owner_rx.recv_timeout(OWNER_WAIT).ok().flatten();
+                let world = make(owner);
                 let mut emit = |e: Event| {
                     // The window is gone when the receiver is: nothing left to tell.
                     if event_tx.send(e).is_ok() {
@@ -325,11 +352,19 @@ impl Worker {
             })?;
         Ok(Self {
             jobs,
+            owner,
             events,
             writes,
             downloads,
             cancel,
         })
+    }
+
+    /// Hands the thread the window that owns the UAC dialog (or `None`: the window has no native
+    /// handle). Only the first call counts; the thread builds its world after it.
+    pub fn set_owner(&self, owner: Option<PromptOwner>) {
+        // An error means the thread has ended (or already took one): nothing to do.
+        let _ = self.owner.send(owner);
     }
 
     /// Queues a job (ignored once the thread has ended). A write job counts as running from
@@ -419,12 +454,14 @@ pub struct Session {
 /// time (a new preview replaces the old).
 #[derive(Debug, Default)]
 struct Pending {
-    /// A plan whose preview was handed to the window, not yet reported rendered.
-    plan: Option<(u32, Planned)>,
+    /// A plan whose preview was handed to the window, not yet reported rendered, with the UAC
+    /// prompt its preview named (a plan with firewall rules).
+    plan: Option<(u32, Planned, Option<PromptState>)>,
     /// A plan whose preview the window rendered: "Apply" may use it.
-    shown: Option<(u32, Previewed)>,
-    /// An undo preview, with the game its transaction is about.
-    revert: Option<(RevertShown, Option<u32>, u64)>,
+    shown: Option<(u32, Previewed, Option<PromptState>)>,
+    /// An undo preview, with the game its transaction is about, its nonce and the UAC prompt
+    /// the dialog named (an undo that removes a firewall rule).
+    revert: Option<(RevertShown, Option<u32>, u64, Option<PromptState>)>,
     /// A forget preview, with the game its transaction is about.
     forget: Option<(ForgetShown, Option<u32>, u64)>,
     /// The list the consent (or failure) dialog showed: a download is made only for it.
@@ -564,10 +601,10 @@ fn run_job(
                 .pending
                 .plan
                 .as_ref()
-                .is_some_and(|(_, p)| p.hash().to_string() == *hash)
-                && let Some((app, p)) = session.pending.plan.take()
+                .is_some_and(|(_, p, _)| p.hash().to_string() == *hash)
+                && let Some((app, p, prompt)) = session.pending.plan.take()
             {
-                session.pending.shown = Some((app, flow::shown(p)));
+                session.pending.shown = Some((app, flow::shown(p), prompt));
                 emit(Event::PreviewReady { hash: hash.clone() });
             }
         }
@@ -604,7 +641,11 @@ fn game_page_view(
     session: &mut Session,
 ) -> (GameVm, Option<GameView>) {
     let (mut page, view) = match flow::game_cached(g, app_id, Some(&mut session.games)) {
-        Ok(v) => (vm::game(&v, name, lang), Some(v)),
+        Ok(v) => {
+            // The helper is asked only when a fix needs it (a few reads in Program Files).
+            let helper = needs_helper(&v).then(|| vm::helper_state(&flow::helper(g)));
+            (vm::game(&v, name, helper.as_ref(), lang), Some(v))
+        }
         Err(e) => (vm::game_refused(app_id, name, &e, lang), None),
     };
     if let Some(Ok(s)) = g.app().map(exec::status) {
@@ -615,6 +656,17 @@ fn game_page_view(
     }
     session.pages.insert(app_id, fix_key(&page));
     (page, view)
+}
+
+/// Whether a fix of the view needs the elevated helper.
+fn needs_helper(v: &GameView) -> bool {
+    match &v.lookup {
+        Lookup::Read {
+            found: Found::One(m),
+            ..
+        } => m.fixes.iter().any(|f| f.needs_helper),
+        _ => false,
+    }
 }
 
 /// What decides whether a page the window holds is still the page of the files: the fixes and
@@ -691,8 +743,8 @@ fn plan(
         return;
     }
     let refused = |result| Event::PreviewRefused { app_id, result };
-    // Only fixes the app can apply here (not the helper, not a download): the lock holds in
-    // the worker too, whatever a caller sends.
+    // Only fixes the app can apply here (not a download the user has not agreed to, not the
+    // helper when it cannot run): the lock holds in the worker too, whatever a caller sends.
     if !picks.iter().all(|p| {
         page.fixes
             .iter()
@@ -708,12 +760,20 @@ fn plan(
             ..
         }) => match picked.planned {
             Err(e) => emit(refused(vm::plan_refusal(&e, lang))),
-            Ok(planned) if !applicable(planned.preview()) => emit(refused(vm::not_available(lang))),
             Ok(planned) => {
+                // A plan with firewall rules needs the helper now, and its preview names the
+                // prompt Windows will show (ADR 0023 §10).
+                let prompt = match helper_prompt(g, planned.preview()) {
+                    Ok(p) => p,
+                    Err(r) => {
+                        emit(refused(vm::refusal(&r, lang)));
+                        return;
+                    }
+                };
                 let env = g.env();
                 let launch = flow::launch_view(env.sys, env.install, planned.preview());
-                let vm = vm::preview_vm(&planned, launch.as_ref(), lang);
-                session.pending.plan = Some((app_id, planned));
+                let vm = vm::preview_vm(&planned, launch.as_ref(), prompt.as_ref(), lang);
+                session.pending.plan = Some((app_id, planned, prompt));
                 emit(Event::Preview {
                     app_id,
                     vm: Box::new(vm),
@@ -728,18 +788,33 @@ fn plan(
     }
 }
 
-/// Whether an undo preview keeps its token: not when it needs the administrator prompt
-/// (P5-5c), so no confirm can reach `flow::revert`.
-pub(crate) fn token_kept(prompt: Option<&rerun_core::elevate::PromptState>) -> bool {
-    prompt.is_none()
+/// Whether an undo preview keeps its token: an undo that needs the administrator prompt only
+/// when the helper could run now (P5-5c); otherwise no confirm can reach `flow::revert`.
+pub(crate) fn token_kept(prompt: Option<&PromptState>, helper: Option<&HelperState>) -> bool {
+    prompt.is_none() || matches!(helper, Some(HelperState::Ready(_)))
 }
 
-/// Whether the app can apply a plan in this slice: no firewall rule (the elevated helper,
-/// P5-5c). Package files are fine since P5-5b: the planner reads them from Rerun's packages folder
-/// and hashes them against the Topo's pinned values, so they are there only after a download the
-/// user agreed to (or `rerun package fetch`).
-pub(crate) fn applicable(pv: &rerun_core::plan::Preview) -> bool {
-    pv.firewall.is_none()
+/// The UAC prompt a plan's apply would meet: `None` for a plan without firewall rules (no
+/// helper), else the state of `flow::helper`, or the refusal the apply would meet before any
+/// prompt (the helper not installed safely, Windows granting no elevation). Package files need
+/// nothing here since P5-5b: the planner reads them from Rerun's packages folder and hashes them
+/// against the Topo's pinned values.
+pub(crate) fn helper_prompt(
+    g: &Guarded<'_>,
+    pv: &rerun_core::plan::Preview,
+) -> Result<Option<PromptState>, rerun_core::exec::Refusal> {
+    if pv.firewall.is_none() {
+        return Ok(None);
+    }
+    flow::helper(g).map(Some)
+}
+
+/// Tells the window that the next core call may start the helper and Windows shows its dialog:
+/// the modal "waiting for Windows" until the result (P5-5c).
+fn waiting_for_uac(prompt: Option<&PromptState>, lang: Lang, emit: &mut dyn FnMut(Event)) {
+    if let Some(s) = prompt.filter(|s| s.has_dialog()) {
+        emit(Event::WaitingForUac(Box::new(vm::uac_wait(s, lang))));
+    }
 }
 
 /// Applies the plan the window rendered: store, check, apply. Nothing is applied that was not
@@ -758,8 +833,8 @@ fn apply(
         .pending
         .shown
         .as_ref()
-        .is_some_and(|(_, p)| p.hash().to_string() == hash);
-    let Some((app_id, p)) = wanted.then(|| session.pending.shown.take()).flatten() else {
+        .is_some_and(|(_, p, _)| p.hash().to_string() == hash);
+    let Some((app_id, p, prompt)) = wanted.then(|| session.pending.shown.take()).flatten() else {
         emit(Event::Result(vm::no_preview(lang)));
         return;
     };
@@ -779,13 +854,18 @@ fn apply(
             if !r.refresh {
                 // A refusal that may pass later (the game runs, another Rerun holds the lock):
                 // the same preview stays, "Apply" can be tried again.
-                session.pending.shown = Some((app_id, p));
+                session.pending.shown = Some((app_id, p, prompt));
                 again = true;
             }
             r
         }
         Ok(0) => vm::apply_result(Ok(exec::Outcome::Nothing), lang),
-        Ok(_) => vm::apply_result(flow::apply(g, p), lang),
+        Ok(_) => {
+            // Every check passed: the helper starts at the end of this apply (its batch is the
+            // plan's last ops), and the thread blocks until the user answers Windows.
+            waiting_for_uac(prompt.as_ref(), lang, emit);
+            vm::apply_result(flow::apply(g, p), lang)
+        }
     };
     let refresh_page = result.refresh;
     emit(Event::Result(result));
@@ -813,11 +893,20 @@ fn revert_preview(
             let app = vm::app_of(&p.status);
             session.nonce += 1;
             let nonce = session.nonce;
-            let dialog = vm::revert_vm(&p, g.env().install, changed, nonce, lang);
-            // An undo that needs the administrator prompt is not available in the app yet
-            // (P5-5c): no token is kept, so no confirm can reach `flow::revert`.
-            if token_kept(p.prompt.as_ref()) {
-                session.pending.revert = Some((shown, app, nonce));
+            // An undo that removes a firewall rule needs the helper: asked now, so a dialog that
+            // can be confirmed never ends in a refusal the user could have been told about.
+            let helper = p
+                .prompt
+                .is_some()
+                .then(|| vm::helper_state(&flow::helper(g)));
+            let dialog = vm::revert_vm(&p, g.env().install, changed, nonce, helper.as_ref(), lang);
+            // Without a ready helper no token is kept, so no confirm can reach `flow::revert`.
+            if token_kept(p.prompt.as_ref(), helper.as_ref()) {
+                let prompt = match helper {
+                    Some(HelperState::Ready(s)) => Some(s),
+                    _ => None,
+                };
+                session.pending.revert = Some((shown, app, nonce, prompt));
             }
             emit(Event::Dialog(Box::new(dialog)));
         }
@@ -840,11 +929,13 @@ fn revert(
         .pending
         .revert
         .as_ref()
-        .is_some_and(|(s, _, n)| s.txn() == *txn && *n == nonce);
-    let Some((shown, app, _)) = ok.then(|| session.pending.revert.take()).flatten() else {
+        .is_some_and(|(s, _, n, _)| s.txn() == *txn && *n == nonce);
+    let Some((shown, app, _, prompt)) = ok.then(|| session.pending.revert.take()).flatten() else {
         revert_preview(g, txn, true, lang, session, emit);
         return;
     };
+    // The helper's batch is reverted first (LIFO), so the dialog of Windows comes right away.
+    waiting_for_uac(prompt.as_ref(), lang, emit);
     match flow::revert(g, shown) {
         Ok(o) => {
             let mut r = vm::revert_result(&o, lang);

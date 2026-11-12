@@ -9,6 +9,11 @@
 //! - The Windows display language picks the app's language (ADR 0027).
 //! - An elevated start is told with a plain message box before any Slint object exists (`main`,
 //!   security review S1 of P5-3).
+//! - The owner of the UAC dialog (P5-5c, ADR 0023 amendment P5-5c): [`owner_of`] reads the
+//!   window's handle value for the worker, which builds its system with it
+//!   (`WinSystem::with_prompt_owner`), so the dialog of a helper start appears in front of this
+//!   window. The value leaves this module as a plain number; no other module of `rerun-app`
+//!   names a window handle type.
 //!
 //! The caption geometry is coupled to `ui/app.slint`: the three `CaptionButton`s are the last
 //! elements of the title bar, each `Theme.caption-w` wide, the maximise button the second from
@@ -76,7 +81,7 @@ pub fn hit_max_button(g: Geometry, state: WindowState, right: f64, x: f64, y: f6
 }
 
 #[cfg(windows)]
-pub use win::{install, message_box, ui_language};
+pub use win::{install, message_box, owner_of, ui_language};
 
 #[cfg(all(windows, feature = "test-key"))]
 pub use win::process_age_ms;
@@ -101,6 +106,12 @@ pub fn install(
 #[cfg(not(windows))]
 /// No message box outside Windows.
 pub fn message_box(_title: &str, _text: &str) {}
+
+#[cfg(not(windows))]
+/// No window handle outside Windows.
+pub fn owner_of(_window: &slint::Window) -> Option<isize> {
+    None
+}
 
 #[cfg(windows)]
 mod win {
@@ -202,6 +213,18 @@ mod win {
         let raw = handle.window_handle().ok()?.as_raw();
         match raw {
             RawWindowHandle::Win32(w) => Some(w.hwnd.get() as HWND),
+            _ => None,
+        }
+    }
+
+    /// The raw handle value of `window`'s native window, once it exists: the owner of the UAC
+    /// dialog of a helper start (module docs). A number, not a pointer: the system layer passes
+    /// it to Windows unchanged, and Windows checks it.
+    pub fn owner_of(window: &slint::Window) -> Option<isize> {
+        let handle = window.window_handle();
+        let raw = handle.window_handle().ok()?.as_raw();
+        match raw {
+            RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
             _ => None,
         }
     }

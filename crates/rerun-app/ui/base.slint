@@ -84,6 +84,8 @@ export struct PreviewData {
     has-launch: bool,
     launch: LaunchData,
     admin: string,
+    // What Windows asks when the helper starts (P5-5c): the dialog, where it appears.
+    admin-notes: [string],
     undo: string,
     can-apply: bool,
     nothing: string,
@@ -102,7 +104,7 @@ export struct CardData {
     can-forget: bool,
 }
 
-// kind: 0 undo, 1 forget, 2 download.
+// kind: 0 undo, 1 forget, 2 download, 3 waiting for the UAC dialog (no button at all).
 export struct DialogData {
     kind: int,
     title: string,
@@ -124,6 +126,8 @@ export struct DialogData {
     no-confirm: bool,
     cancel-label: string,
     cancel-disabled: bool,
+    // No cancel button either: the wait for the UAC dialog cannot be dismissed (P5-5c).
+    no-cancel: bool,
 }
 
 // tone: 0 done, 1 calm, 2 attention.

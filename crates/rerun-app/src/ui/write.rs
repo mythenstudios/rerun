@@ -88,6 +88,7 @@ pub(super) fn preview_data(p: &PreviewVm, ready: bool) -> PreviewData {
         has_launch: p.launch.is_some(),
         launch: p.launch.as_ref().map(launch).unwrap_or_default(),
         admin: s(&p.admin),
+        admin_notes: model(p.admin_notes.iter().map(s).collect()),
         undo: s(&p.undo),
         can_apply: p.can_apply,
         nothing: p.nothing.as_deref().map(s).unwrap_or_default(),
@@ -138,7 +139,39 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
         no_confirm: false,
         cancel_label: SharedString::new(),
         cancel_disabled: false,
+        no_cancel: false,
     }
+}
+
+/// The wait for the UAC dialog in the window's one dialog: no button at all (P5-5c).
+pub(super) fn uac_data(u: &vm::UacVm) -> DialogData {
+    DialogData {
+        kind: 3,
+        title: s(&u.title),
+        intro: s(&u.body),
+        notes: model(u.notes.iter().map(s).collect()),
+        no_confirm: true,
+        no_cancel: true,
+        cancel_disabled: true,
+        ..DialogData::default()
+    }
+}
+
+/// The worker waits for the UAC dialog: the window shows it as a modal that cannot be dismissed
+/// (Esc and the buttons do nothing; closing the window is refused, a write runs), replacing an
+/// undo dialog whose confirm started it. The result closes it.
+pub(super) fn uac_wait(ui: &AppWindow, st: &mut State, u: &vm::UacVm) {
+    // Opened by "Apply" (no dialog open): the focus goes to the result's banner afterwards, not
+    // to the opener of an earlier dialog.
+    if st.dialog.is_none() {
+        st.opener = -1;
+    }
+    st.uac = true;
+    ui.set_dialog(uac_data(u));
+    ui.set_dialog_open(true);
+    let m = ui.global::<Modal>();
+    m.set_open(true);
+    m.set_working(true);
 }
 
 fn banner(r: &ResultVm) -> BannerData {
@@ -202,6 +235,7 @@ pub(super) fn close_dialog(ui: &AppWindow, st: &mut State) {
     // The opener of the dialog takes the focus back.
     m.set_return_to(st.opener);
     st.dialog = None;
+    st.uac = false;
 }
 
 /// How long a close waits for a cancelled download to stop before the window closes anyway.
@@ -306,6 +340,10 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             return;
         };
         let mut st = st.borrow_mut();
+        // The wait for Windows has no confirm.
+        if st.uac {
+            return;
+        }
         // The download dialogs share the window's dialog; their confirm is the download's.
         if st.download.is_some() {
             download::confirm(&ui, &mut st);
@@ -331,6 +369,10 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     ui.on_dialog_cancel(move || {
         if let Some(ui) = weak.upgrade() {
             let mut st = st.borrow_mut();
+            // The wait for Windows cannot be dismissed: the result closes it.
+            if st.uac {
+                return;
+            }
             if st.download.is_some() {
                 download::dismiss(&ui, &mut st);
             } else {

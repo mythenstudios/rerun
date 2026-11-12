@@ -286,3 +286,40 @@ fn digested_types_derive_debug() {
     );
     assert!(manual_debug("#[derive(Debug)]\n// impl Debug for X").is_empty());
 }
+
+/// The lines of `src` (comments skipped) that name a window handle type (`HWND` as a word).
+fn window_handles(src: &str) -> usize {
+    src.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .map(|l| l.split("//").next().unwrap_or(l))
+        .filter(|code| {
+            code.match_indices("HWND").any(|(i, _)| {
+                let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+                !code[..i].chars().next_back().is_some_and(ident)
+                    && !code[i + 4..].chars().next().is_some_and(ident)
+            })
+        })
+        .count()
+}
+
+/// ADR 0023 amendment P5-5c: the owner of the UAC dialog crosses the core as an opaque
+/// `PromptOwner` value; only `sys::win` turns it into a window handle. (In `rerun-app` the
+/// handle stays in `ui::chrome`, its own source rule.)
+#[test]
+fn a_window_handle_type_only_in_sys_win() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let win = src.join("sys").join("win");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    assert!(files.len() > 50, "{}", files.len());
+    let bad: Vec<String> = files
+        .iter()
+        .filter(|f| !f.starts_with(&win))
+        .filter(|f| window_handles(&std::fs::read_to_string(f).unwrap_or_default()) > 0)
+        .map(|f| f.display().to_string())
+        .collect();
+    assert!(bad.is_empty(), "{bad:#?}");
+    // The rule bites, and skips comments and longer names.
+    assert_eq!(window_handles("let h: HWND = x;"), 1);
+    assert_eq!(window_handles("// HWND\nlet h = HWNDS;"), 0);
+}
