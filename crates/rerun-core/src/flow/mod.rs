@@ -25,6 +25,10 @@
 //! it; [`revert`], [`rebind`] and [`forget`] take only the token, observe again under the journal
 //! lock and write nothing when it differs ([`ActError::Changed`]).
 //!
+//! Packages (P5-5b, `flow/packages.rs`): [`need`] says what a fix's package is (the list a user
+//! consents to) and whether it is unpacked; [`fetch`] downloads, verifies and unpacks it with
+//! progress and cancellation, only for the list that was shown.
+//!
 //! A [`Guarded`] is built per job, never kept for a session: Rerun's folder can appear or vanish
 //! between two jobs.
 
@@ -39,6 +43,7 @@ use crate::sys::{Http, System};
 mod game;
 mod launch;
 mod library;
+mod packages;
 mod revert;
 mod status;
 mod write;
@@ -50,6 +55,9 @@ pub use game::{
 };
 pub use launch::{LaunchView, OptionText, launch_view, option_text};
 pub use library::{LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_games, library};
+pub use packages::{
+    DownloadNeed, FetchError, FetchKind, Fetched, NeedState, PackageNeed, Progress, fetch, need,
+};
 pub use revert::{
     ActError, CleanupAsk, ForgetPreview, ForgetShown, LaunchOption, ProfileFate, RebindShown,
     RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome, RevertPreview, RevertShown,

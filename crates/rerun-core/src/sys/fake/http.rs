@@ -4,11 +4,14 @@
 //! forgot to script a host can never pass by accident. Every request is recorded in order
 //! ([`FakeHttp::requests`]): a test shows which hosts were asked, and that a refused redirect
 //! was never requested. A reply can end its body early with a transport error
-//! ([`FakeReply::cut_after`]), the abort in the middle of a download.
+//! ([`FakeReply::cut_after`]), the abort in the middle of a download. A body can be delivered in
+//! small chunks ([`FakeReply::chunked`]) and set a shared flag once some bytes have been read
+//! ([`FakeReply::trip_after`]), so a test can cancel a download exactly in the middle of its body.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::sys::http::check_request;
 use crate::sys::{Http, Response, SysError, SysErrorKind, SysResult};
@@ -17,6 +20,41 @@ use crate::sys::{Http, Response, SysError, SysErrorKind, SysResult};
 pub const CANNOT_CONNECT: u32 = 12029;
 /// `ERROR_WINHTTP_CONNECTION_ERROR`: what a reset in the middle of a body reports.
 pub const CONNECTION_ERROR: u32 = 12030;
+
+/// A flag a test shares with a body ([`FakeReply::trip_after`]): the body sets it, the test hands
+/// it to the code under test as its cancel flag.
+#[derive(Debug, Clone, Default)]
+pub struct Trip(Arc<AtomicBool>);
+
+impl Trip {
+    /// A flag that is not set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The flag.
+    pub fn flag(&self) -> &AtomicBool {
+        &self.0
+    }
+
+    /// The flag as a shared handle, for code that keeps its cancel flag in an `Arc`.
+    pub fn shared(&self) -> Arc<AtomicBool> {
+        self.0.clone()
+    }
+
+    /// Sets it, as a user's cancel does.
+    pub fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl PartialEq for Trip {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Trip {}
 
 /// One scripted reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +71,10 @@ pub struct FakeReply {
     pub cut_after: Option<usize>,
     /// The request itself fails with this Win32 code (nothing else of the reply counts).
     pub fail: Option<u32>,
+    /// A read returns at most this many bytes.
+    pub chunk: Option<usize>,
+    /// The flag is set once this many body bytes were delivered.
+    pub trip: Option<(usize, Trip)>,
 }
 
 impl FakeReply {
@@ -45,6 +87,8 @@ impl FakeReply {
             body: body.to_vec(),
             cut_after: None,
             fail: None,
+            chunk: None,
+            trip: None,
         }
     }
 
@@ -57,6 +101,8 @@ impl FakeReply {
             body: Vec::new(),
             cut_after: None,
             fail: None,
+            chunk: None,
+            trip: None,
         }
     }
 
@@ -66,6 +112,20 @@ impl FakeReply {
             status,
             ..Self::ok(b"")
         }
+    }
+
+    /// The body is delivered in reads of at most `bytes`.
+    #[must_use]
+    pub fn chunked(mut self, bytes: usize) -> Self {
+        self.chunk = Some(bytes);
+        self
+    }
+
+    /// `trip` is set once `bytes` body bytes were delivered (a cancel in the middle of a body).
+    #[must_use]
+    pub fn trip_after(mut self, bytes: usize, trip: &Trip) -> Self {
+        self.trip = Some((bytes, trip.clone()));
+        self
     }
 
     /// The request fails with `code` (a WinHTTP code).
@@ -115,6 +175,8 @@ struct Body {
     data: Vec<u8>,
     at: usize,
     cut_after: Option<usize>,
+    chunk: Option<usize>,
+    trip: Option<(usize, Trip)>,
 }
 
 impl Read for Body {
@@ -124,9 +186,17 @@ impl Read for Body {
             return Err(io::Error::from_raw_os_error(CONNECTION_ERROR as i32));
         }
         let rest = self.data.get(self.at..end).unwrap_or_default();
-        let n = rest.len().min(buf.len());
+        let n = rest
+            .len()
+            .min(buf.len())
+            .min(self.chunk.unwrap_or(usize::MAX));
         buf[..n].copy_from_slice(&rest[..n]);
         self.at += n;
+        if let Some((after, t)) = &self.trip
+            && self.at >= *after
+        {
+            t.set();
+        }
         Ok(n)
     }
 }
@@ -164,6 +234,8 @@ impl Http for FakeHttp {
                 data: reply.body,
                 at: 0,
                 cut_after: reply.cut_after,
+                chunk: reply.chunk,
+                trip: reply.trip,
             }),
         })
     }

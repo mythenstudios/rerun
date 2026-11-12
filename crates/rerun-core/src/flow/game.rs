@@ -29,7 +29,7 @@ use crate::topo::{
     Refusal, Report, Selection, StepKind,
 };
 
-use super::{GameOpen, Guarded, IndexState, index_state, with_game};
+use super::{GameOpen, Guarded, IndexState, PackageNeed, index_state, with_game};
 
 /// What a Topo lookup for one app found.
 #[derive(Debug)]
@@ -374,9 +374,9 @@ pub struct Fix {
     pub refused: Option<Refusal>,
     /// Step kinds the anti-cheat rule warns about (per variant, as `refused`).
     pub warned: Vec<StepKind>,
-    /// The packages its steps name (P5-5a): a front end that cannot download yet does not offer
-    /// the fix. Per variant, as `refused`.
-    pub packages: Vec<String>,
+    /// The packages its steps name, each with what a consent shows and whether it is unpacked
+    /// (P5-5a, P5-5b). Per variant, as `refused`.
+    pub packages: Vec<PackageNeed>,
     /// A step needs Rerun's elevated helper (a firewall rule): per variant.
     pub needs_helper: bool,
 }
@@ -384,7 +384,9 @@ pub struct Fix {
 /// The fixes of a report, grouped by variant ID in the order of first appearance. The loader
 /// makes every copy of an ID identical in `kind` and `steps` (P5-4, `catalog::check`), so the
 /// first copy speaks for the fix and later copies add only the issue they solve.
-pub fn fixes(r: &OwnedReport) -> Vec<Fix> {
+///
+/// `need` says what a package is (`flow::need` over the current index).
+pub fn fixes(r: &OwnedReport, need: &dyn Fn(&str) -> PackageNeed) -> Vec<Fix> {
     let mut out: Vec<Fix> = Vec::new();
     for i in &r.issues {
         for v in &i.variants {
@@ -415,7 +417,7 @@ pub fn fixes(r: &OwnedReport) -> Vec<Fix> {
                         .steps
                         .iter()
                         .filter_map(|s| match s {
-                            TopoStep::Package(p) => Some(p.to_string()),
+                            TopoStep::Package(p) => Some(need(p.as_str())),
                             _ => None,
                         })
                         .collect(),
@@ -466,7 +468,8 @@ pub fn game_cached(
     let lookup = with_topo(g, app_id, cache, |m| {
         topo::report(m.topo, &m.facts()).map(|r| {
             let report = OwnedReport::from(r);
-            let fixes = fixes(&report);
+            let app = g.app();
+            let fixes = fixes(&report, &|id| super::need(m.catalog, app, id));
             Box::new(MatchView {
                 report,
                 read: m.read.clone(),

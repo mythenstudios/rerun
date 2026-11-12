@@ -2,10 +2,10 @@
 //! it; the typed refusals come out calm, in both languages, with what to do and the core's
 //! text only as an escaped detail.
 
-use rerun_core::catalog::model::{Kind, VariantStatus};
+use rerun_core::catalog::model::{Kind, Tier, VariantStatus};
 use rerun_core::escape;
 use rerun_core::exec::{ApplyError, Outcome, Refusal};
-use rerun_core::flow::{Fix, Solved};
+use rerun_core::flow::{Fix, NeedState, PackageNeed, Solved};
 use rerun_core::journal::TxnId;
 use rerun_core::topo::{StepKind, Tri};
 
@@ -25,7 +25,19 @@ fn fix(packages: &[&str], needs_helper: bool, refused: bool) -> Fix {
         }],
         refused: refused.then_some(rerun_core::topo::Refusal::AntiCheat(StepKind::Package)),
         warned: Vec::new(),
-        packages: packages.iter().map(|s| (*s).to_owned()).collect(),
+        packages: packages
+            .iter()
+            .map(|id| PackageNeed {
+                id: (*id).to_owned(),
+                name: (*id).to_owned(),
+                version: "1.0".to_owned(),
+                license: "MIT".to_owned(),
+                tier: Tier::Established,
+                repo: None,
+                downloads: Vec::new(),
+                state: NeedState::Missing,
+            })
+            .collect(),
         needs_helper,
     }
 }

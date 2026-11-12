@@ -3,19 +3,20 @@
 //! on the bytes read, and nothing is left behind by a failure.
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
 use super::download::{
-    Download, FetchError, Fetched, How, Limits, MAX_DOWNLOAD_BYTES, MAX_DOWNLOAD_TIME, cache_name,
-    downloads, fetch, fetch_noting, fetch_with,
+    Download, FetchError, Fetched, How, Limits, MAX_DOWNLOAD_BYTES, MAX_DOWNLOAD_TIME,
+    PROGRESS_STEP, Reading, cache_name, downloads, fetch, fetch_noting, fetch_watched, fetch_with,
 };
 use crate::catalog::model::{Arch, ArchList, Asset, Hex, Id, Package, PackageSource, Status, Tier};
 use crate::path::RelPath;
 use crate::policy::root::{AppDir, AppSub, Create};
 use crate::policy::url::{HttpsUrl, UrlError};
-use crate::sys::fake::{FakeHttp, FakeReply, FakeSystem, Fault, Prim};
+use crate::sys::fake::{FakeHttp, FakeReply, FakeSystem, Fault, Prim, Trip};
 use crate::sys::{SysErrorKind, System};
 
 const LAD: &str = r"C:\Users\Player\AppData\Local";
@@ -553,4 +554,169 @@ fn failures_are_refusals_or_transient() {
     ] {
         assert_eq!(e.transient(), transient, "{e:?}");
     }
+}
+
+// ---------- progress and cancellation (P5-5b) ----------
+
+/// A body of `n` bytes that is not an archive (the tests here never extract).
+fn big(n: usize) -> Vec<u8> {
+    (0..n).map(|i| u8::try_from(i % 251).unwrap()).collect()
+}
+
+/// PW1: the body reports its progress with the announced length, at the first read, every
+/// [`PROGRESS_STEP`] bytes and at the end; the numbers only grow and end at the length.
+#[test]
+fn pw1_the_body_reports_its_progress_and_its_announced_length() {
+    let body = big(300 * 1024);
+    let sys = sys();
+    let http = github(FakeReply::ok(&body).chunked(16 * 1024));
+    let mut seen: Vec<Reading> = Vec::new();
+    let cancel = AtomicBool::new(false);
+    let got = fetch_watched(
+        &sys,
+        &http,
+        &app(&sys),
+        &download(&body),
+        &mut false,
+        &mut |r| seen.push(r),
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(got.len, body.len() as u64);
+    assert!(seen.len() > 3, "{seen:?}");
+    assert!(
+        seen.iter().all(|r| r.announced == Some(body.len() as u64)),
+        "{seen:?}"
+    );
+    assert!(seen.windows(2).all(|w| w[0].read <= w[1].read), "{seen:?}");
+    // Not a report per 16 KiB read: one per step.
+    assert!(
+        seen.windows(2)
+            .all(|w| w[1].read - w[0].read >= PROGRESS_STEP || w[1].read == body.len() as u64),
+        "{seen:?}"
+    );
+    assert_eq!(seen.last().map(|r| r.read), Some(body.len() as u64));
+    // A cache hit makes no request and reports nothing.
+    seen.clear();
+    http.clear_requests();
+    fetch_watched(
+        &sys,
+        &http,
+        &app(&sys),
+        &download(&body),
+        &mut false,
+        &mut |r| seen.push(r),
+        &cancel,
+    )
+    .unwrap();
+    assert!(seen.is_empty() && http.requests().is_empty());
+}
+
+/// PW2: a cancel in the middle of the body ends the download at its next read and leaves
+/// nothing in the cache, no archive and no temp file; the next fetch downloads it whole.
+#[test]
+fn pw2_a_cancel_in_the_middle_keeps_nothing() {
+    let body = big(300 * 1024);
+    let sys = sys();
+    let trip = Trip::new();
+    let http = github(
+        FakeReply::ok(&body)
+            .chunked(16 * 1024)
+            .trip_after(100 * 1024, &trip),
+    );
+    let mut read_at_cancel = 0;
+    let mut changed = false;
+    let e = fetch_watched(
+        &sys,
+        &http,
+        &app(&sys),
+        &download(&body),
+        &mut changed,
+        &mut |r| read_at_cancel = r.read,
+        trip.flag(),
+    )
+    .unwrap_err();
+    assert_eq!(e, FetchError::Cancelled);
+    assert!(!e.transient());
+    // It stopped in the middle, not at the end.
+    assert!(read_at_cancel >= 64 * 1024 && read_at_cancel < body.len() as u64);
+    assert!(!changed, "a cancelled download changed nothing");
+    assert_eq!(cached(&sys), Vec::<String>::new());
+    // The same fetch again, not cancelled: whole and under its hash.
+    let again = AtomicBool::new(false);
+    http.reply(STORE, FakeReply::ok(&body));
+    fetch_watched(
+        &sys,
+        &http,
+        &app(&sys),
+        &download(&body),
+        &mut false,
+        &mut |_| {},
+        &again,
+    )
+    .unwrap();
+    assert_eq!(cached(&sys), [cache_name(&sha(&body))]);
+}
+
+/// PW3: a cancel that is set before the fetch starts touches nothing, not even the cache
+/// folder, and asks no host.
+#[test]
+fn pw3_a_cancel_before_a_request_asks_nobody() {
+    let sys = sys();
+    let a = app(&sys);
+    let http = github(FakeReply::ok(BODY));
+    let set = AtomicBool::new(true);
+    let e = fetch_watched(
+        &sys,
+        &http,
+        &a,
+        &download(BODY),
+        &mut false,
+        &mut |_| {},
+        &set,
+    )
+    .unwrap_err();
+    assert_eq!(e, FetchError::Cancelled);
+    assert!(http.requests().is_empty());
+    assert!(a.sub(AppSub::Cache).unwrap().is_none());
+}
+
+/// PW4: every failure a front end tells apart keeps nothing and is typed: a wrong hash, a
+/// redirect to a foreign host, an unreachable host, a cut connection.
+#[test]
+fn pw4_failures_are_typed_and_keep_nothing() {
+    let sys = sys();
+    let never = AtomicBool::new(false);
+    let run = |http: &FakeHttp| {
+        fetch_watched(
+            &sys,
+            http,
+            &app(&sys),
+            &download(BODY),
+            &mut false,
+            &mut |_| {},
+            &never,
+        )
+        .unwrap_err()
+    };
+    let e = run(&github(FakeReply::ok(b"PK another archive")));
+    assert!(matches!(e, FetchError::Mismatch { .. }), "{e:?}");
+    let foreign = FakeHttp::default();
+    foreign.reply(
+        ASSET,
+        FakeReply::redirect(302, "https://evil.example/fix-pack.zip"),
+    );
+    let e = run(&foreign);
+    assert!(matches!(e, FetchError::Url(_)), "{e:?}");
+    assert_eq!(foreign.requests(), [ASSET]);
+    let e = run(&FakeHttp::default());
+    assert!(
+        matches!(e, FetchError::Network(_)) && e.transient(),
+        "{e:?}"
+    );
+    let mut cut = FakeReply::ok(BODY);
+    cut.cut_after = Some(5);
+    let e = run(&github(cut));
+    assert!(matches!(e, FetchError::Network(_)), "{e:?}");
+    assert_eq!(cached(&sys), Vec::<String>::new());
 }

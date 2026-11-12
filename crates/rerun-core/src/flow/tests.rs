@@ -163,9 +163,23 @@ fn report(when: [Tri; 2], per: &[(usize, usize, Option<Refusal>, Vec<StepKind>)]
     }
 }
 
+/// A need without an index: only the ID is real.
+fn stub(id: &str) -> super::PackageNeed {
+    super::PackageNeed {
+        id: id.to_owned(),
+        name: id.to_owned(),
+        version: "1.0".to_owned(),
+        license: "MIT".to_owned(),
+        tier: crate::catalog::model::Tier::Established,
+        repo: None,
+        downloads: Vec::new(),
+        state: super::NeedState::Missing,
+    }
+}
+
 #[test]
 fn ff1_one_fix_per_variant_id() {
-    let f = fixes(&report([Tri::Yes, Tri::No], &[]));
+    let f = fixes(&report([Tri::Yes, Tri::No], &[]), &stub);
     let ids: Vec<&str> = f.iter().map(|f| f.variant.as_str()).collect();
     assert_eq!(ids, ["patch", "limit"]);
     let patch = &f[0];
@@ -186,10 +200,13 @@ fn ff1_one_fix_per_variant_id() {
 #[test]
 fn ff2_the_refusal_per_variant_is_kept_apart_from_when() {
     let ac = Some(Refusal::AntiCheat(StepKind::CompatLayer));
-    let f = fixes(&report(
-        [Tri::Yes, Tri::Yes],
-        &[(0, 0, ac, Vec::new()), (1, 0, ac, Vec::new())],
-    ));
+    let f = fixes(
+        &report(
+            [Tri::Yes, Tri::Yes],
+            &[(0, 0, ac, Vec::new()), (1, 0, ac, Vec::new())],
+        ),
+        &stub,
+    );
     assert_eq!(f[0].refused, ac);
     assert!(f[0].solves.iter().all(|s| s.when == Tri::Yes));
     // The other variant of the second issue is not refused.
@@ -203,10 +220,13 @@ fn ff3_the_copies_of_one_fix_speak_once() {
     crate::catalog::check::topo(&topo(), crate::catalog::check::Rules::Release).unwrap();
     let ac = Some(Refusal::AntiCheat(StepKind::CompatLayer));
     let warned = vec![StepKind::IniSet, StepKind::RegistrySet];
-    let f = fixes(&report(
-        [Tri::Yes, Tri::Unknown],
-        &[(0, 0, ac, warned.clone()), (1, 0, ac, warned.clone())],
-    ));
+    let f = fixes(
+        &report(
+            [Tri::Yes, Tri::Unknown],
+            &[(0, 0, ac, warned.clone()), (1, 0, ac, warned.clone())],
+        ),
+        &stub,
+    );
     assert_eq!(f[0].refused, ac);
     assert_eq!(f[0].warned, warned, "once, not per copy");
     let when: Vec<Tri> = f[0].solves.iter().map(|s| s.when).collect();
@@ -223,7 +243,7 @@ fn ff4_each_solved_carries_its_tradeoffs() {
         "online play is off".to_owned(),
         "achievements are off".to_owned(),
     ];
-    let f = fixes(&r);
+    let f = fixes(&r, &stub);
     let patch = &f[0];
     assert_eq!(patch.variant, "patch");
     let t: Vec<(&str, Vec<&str>)> = patch
@@ -331,8 +351,9 @@ fn ff5_a_fix_names_its_packages_and_the_helper() {
         r#"[{"package":"fix-pack"},{"firewall_rule":{"exe":"game.exe","direction":"out"}}]"#,
     )
     .unwrap();
-    let f = fixes(&r);
+    let f = fixes(&r, &stub);
     assert!(f[0].packages.is_empty() && !f[0].needs_helper);
-    assert_eq!(f[1].packages, ["fix-pack"]);
+    let ids: Vec<&str> = f[1].packages.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids, ["fix-pack"]);
     assert!(f[1].needs_helper);
 }

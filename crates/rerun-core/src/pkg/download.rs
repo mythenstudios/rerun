@@ -25,10 +25,17 @@
 //!    file, so nothing is ever kept under the name unless it is exactly the pinned content. On
 //!    success the temp file is renamed (without replace) to `<sha256>` and the folder flushed.
 //!
+//! **Progress and cancellation** (P5-5b, [`fetch_watched`]): the body reports how many bytes were
+//! read and the announced `Content-Length` (every [`PROGRESS_STEP`] bytes), and a flag is checked
+//! before every request and every read. A cancel stops at the next read (a blocked read ends at
+//! WinHTTP's 30 s receive timeout at the latest) and takes the same road as any other failure of
+//! the body: the temp file is deleted, so a cancelled download keeps nothing under any name.
+//!
 //! A cached file is still untrusted: whoever uses it (extraction, P4-7) hashes it again on its
 //! own handle.
 
 use std::io::{self, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::catalog::model::{Arch, Package, Sha256, Tier};
@@ -165,6 +172,9 @@ pub enum FetchError {
         /// The limit.
         limit: u64,
     },
+    /// The caller cancelled; nothing was kept of the download that was running.
+    #[error("the download was cancelled; nothing was kept")]
+    Cancelled,
     /// The download took longer than [`MAX_DOWNLOAD_TIME`].
     #[error("https://{host}: the download took longer than {secs} s")]
     TimedOut {
@@ -297,6 +307,18 @@ pub fn downloads(p: &Package) -> Result<Vec<Download>, FetchError> {
     }
 }
 
+/// A progress report is made every this many bytes (and at the first and the last read).
+pub const PROGRESS_STEP: u64 = 64 * 1024;
+
+/// How far the body of a download has come (P5-5b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reading {
+    /// Bytes read so far.
+    pub read: u64,
+    /// The announced `Content-Length` (advisory), if the server sent one.
+    pub announced: Option<u64>,
+}
+
 /// The body of the last response, counted against `Content-Length` and the limit; remembers why
 /// it failed, so a failure inside `create_new` is reported as what it was.
 struct Tap<'a> {
@@ -307,6 +329,10 @@ struct Tap<'a> {
     limits: Limits,
     started: Instant,
     failed: Option<FetchError>,
+    cancel: Option<&'a AtomicBool>,
+    on_read: &'a mut dyn FnMut(Reading),
+    /// Bytes read at the last report (`None`: none yet).
+    reported: Option<u64>,
 }
 
 impl Tap<'_> {
@@ -318,6 +344,9 @@ impl Tap<'_> {
 
 impl Read for Tap<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if cancelled(self.cancel) {
+            return Err(self.stop(FetchError::Cancelled));
+        }
         if let Some(why) = self.limits.past(self.started, &self.host) {
             return Err(self.stop(why));
         }
@@ -342,8 +371,22 @@ impl Read for Tap<'_> {
         {
             return Err(self.stop(FetchError::Length { host, expected }));
         }
+        if self
+            .reported
+            .is_none_or(|r| n == 0 || self.read.saturating_sub(r) >= PROGRESS_STEP)
+        {
+            self.reported = Some(self.read);
+            (self.on_read)(Reading {
+                read: self.read,
+                announced: self.expected,
+            });
+        }
         Ok(n)
     }
+}
+
+fn cancelled(flag: Option<&AtomicBool>) -> bool {
+    flag.is_some_and(|f| f.load(Ordering::SeqCst))
 }
 
 /// The bounds of one download.
@@ -448,6 +491,30 @@ pub fn fetch_noting(
     fetch_with(sys, http, app, d, Limits::PRODUCT, changed)
 }
 
+/// [`fetch_noting`] that reports the progress of the body and stops when `cancel` is set (P5-5b,
+/// module docs). A cancel before anything started touches nothing; a cancel during the body
+/// leaves no archive and no temp file ([`FetchError::Cancelled`]).
+pub fn fetch_watched(
+    sys: &dyn System,
+    http: &dyn Http,
+    app: &AppDir<'_>,
+    d: &Download,
+    changed: &mut bool,
+    on_read: &mut dyn FnMut(Reading),
+    cancel: &AtomicBool,
+) -> Result<Fetched, FetchError> {
+    fetch_watching(
+        sys,
+        http,
+        app,
+        d,
+        Limits::PRODUCT,
+        changed,
+        on_read,
+        Some(cancel),
+    )
+}
+
 /// [`fetch`] with other limits (tests: a small byte limit, a zero deadline).
 pub(crate) fn fetch_with(
     sys: &dyn System,
@@ -457,6 +524,28 @@ pub(crate) fn fetch_with(
     limits: Limits,
     changed: &mut bool,
 ) -> Result<Fetched, FetchError> {
+    fetch_watching(sys, http, app, d, limits, changed, &mut |_| {}, None)
+}
+
+/// [`fetch_with`] that reports progress and listens to `cancel`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one body for the public fetches and the tests; each argument is one thing"
+)]
+pub(crate) fn fetch_watching(
+    sys: &dyn System,
+    http: &dyn Http,
+    app: &AppDir<'_>,
+    d: &Download,
+    limits: Limits,
+    changed: &mut bool,
+    on_read: &mut dyn FnMut(Reading),
+    cancel: Option<&AtomicBool>,
+) -> Result<Fetched, FetchError> {
+    // Before anything is opened or created.
+    if cancelled(cancel) {
+        return Err(FetchError::Cancelled);
+    }
     crate::exec::standard_user(sys).map_err(|_| FetchError::Elevated)?;
     let dir = app
         .sub_write(AppSub::Cache, Create::IfMissing)?
@@ -480,6 +569,9 @@ pub(crate) fn fetch_with(
     let resp = loop {
         if let Some(why) = limits.past(started, url.host()) {
             return Err(why);
+        }
+        if cancelled(cancel) {
+            return Err(FetchError::Cancelled);
         }
         let resp = http
             .get(url.host(), url.path())
@@ -523,6 +615,9 @@ pub(crate) fn fetch_with(
         limits,
         started,
         failed: None,
+        cancel,
+        on_read,
+        reported: None,
     };
     let new = NewFile {
         tmp: TmpName::new(InstanceTag::new().get(), 0),

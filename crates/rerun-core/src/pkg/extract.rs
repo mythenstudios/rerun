@@ -37,6 +37,7 @@ use crate::catalog::model::{Arch, Package};
 use crate::journal::InstanceTag;
 use crate::path::RelPath;
 use crate::policy::root::{AppDir, AppSub, Create, RootError};
+use crate::prim::file_install::{hash_file, package_rel};
 use crate::sys::fs::{Attrs, EntryKind, NewFile, TmpName};
 use crate::sys::{DirWrite, SysError, SysErrorKind, System};
 
@@ -404,6 +405,35 @@ pub fn extract_noting(
     done: &mut Vec<Unpacked>,
 ) -> Result<(), ExtractError> {
     extract_with(sys, app, p, &Limits::DEFAULT, done)
+}
+
+/// Whether every file of `p` is in its version folder with its pinned SHA-256 (hashed on a read
+/// only handle): the package needs no download. Read only: nothing is created, and `false` for
+/// every doubt (no folder, a missing or other file, a layout that does not resolve), because the
+/// answer only decides whether the app offers to fetch it; the planner and `exec` hash every
+/// source again (P5-5b).
+pub fn is_unpacked(app: Option<&AppDir<'_>>, p: &Package) -> bool {
+    let Some(app) = app else {
+        return false;
+    };
+    let Ok(placed) = layout(p) else {
+        return false;
+    };
+    if placed.is_empty() {
+        return true;
+    }
+    let Ok(Some(packages)) = app.sub(AppSub::Packages) else {
+        return false;
+    };
+    let Ok(rel) = package_rel(p.id.as_str(), &p.version) else {
+        return false;
+    };
+    let Ok(dir) = packages.open_dir(&rel) else {
+        return false;
+    };
+    placed
+        .iter()
+        .all(|x| matches!(hash_file(&*dir, &x.dest), Ok((h, _)) if h == x.sha256))
 }
 
 /// [`extract_noting`] with other archive limits (tests).
