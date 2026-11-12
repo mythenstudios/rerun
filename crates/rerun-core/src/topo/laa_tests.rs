@@ -561,6 +561,57 @@ fn la8_a_live_patch_still_matches_its_build() {
     assert!(facts_now().2.is_empty());
 }
 
+/// LA8b (P5-3b review): the session cache of `flow::GameCache` keys on the live patches and on
+/// the index. The same file read with another `patched` list, or for another index, is read
+/// again; a live patch that appears and disappears changes what the cache serves.
+#[test]
+fn la8b_the_session_cache_keys_on_the_patches_and_the_index() {
+    use super::ExeState;
+    use crate::flow::GameCache;
+    let exe = game_exe(true);
+    let env = Env::new(sys_with(&exe));
+    let sys = &env.sys;
+    let t = topo(&exe);
+    let fr = fr(sys);
+    let store = StoreDir::open(sys, &fr, Path::new(STEAM_LIB)).unwrap();
+    let g = store.game(&fr, "G").unwrap();
+    let a = app(sys);
+    let idx = [1u8; 32];
+    let mut cache = GameCache::default();
+    let counts = |c: &GameCache| (c.reads(), c.hits());
+
+    // The same file, the same keys: read once, then served.
+    let plain = cache.facts(&g, APP, idx, &t, &[]);
+    assert_eq!(plain.exes[0].state, ExeState::Match);
+    let _ = cache.facts(&g, APP, idx, &t, &[]);
+    assert_eq!(counts(&cache), (1, 1));
+
+    // Another index (a re-import with the same seq has another SHA-256): read again.
+    let _ = cache.facts(&g, APP, [2u8; 32], &t, &[]);
+    assert_eq!(counts(&cache), (2, 1));
+
+    // A live patch appears: the same unpatched file, another list of patches: read again.
+    let txn = env.applied(&store_plan(&env, &plan_on(sys, &t).unwrap()));
+    let patched = crate::exec::patched_now(&a, g.id());
+    assert_eq!(patched.len(), 1);
+    let derived = cache.facts(&g, APP, [2u8; 32], &t, &patched);
+    assert_eq!(derived.exes[0].state, ExeState::Match);
+    assert_eq!(derived.exes[0].patched_by, Some(txn));
+    assert_eq!(counts(&cache), (3, 1));
+    let again = cache.facts(&g, APP, [2u8; 32], &t, &patched);
+    assert_eq!(again, derived);
+    assert_eq!(counts(&cache), (3, 2));
+
+    // It disappears (reverted): another list again, and nothing is derived any more.
+    assert_eq!(env.revert(&txn).unwrap().closed, Some(Closing::Reverted));
+    let none = crate::exec::patched_now(&a, g.id());
+    assert!(none.is_empty());
+    let back = cache.facts(&g, APP, [2u8; 32], &t, &none);
+    assert_eq!(back.exes[0].patched_by, None);
+    assert_eq!(back.exes[0].state, ExeState::Match);
+    assert_eq!(counts(&cache), (4, 2));
+}
+
 // ---------- LA9 ----------
 
 /// LA9 (user decision of 2026-11-11, P4-13, which reverses the refusal of 2026-11-10): while

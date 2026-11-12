@@ -12,7 +12,8 @@
 
 #![windows_subsystem = "windows"]
 
-// The published index test key never reaches an optimised `rerun-app.exe` (ADR 0024).
+// The published index test key never reaches the shipped `rerun-app.exe`: never in the `release`
+// profile, which has debug assertions off; `dev`, `ci` and `dev-release` keep them (ADR 0024).
 #[cfg(all(feature = "test-key", not(debug_assertions)))]
 compile_error!(
     "the feature test-key (the published index test key) is for the [DEV] test-key app only, \

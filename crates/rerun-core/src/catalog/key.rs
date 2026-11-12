@@ -108,8 +108,8 @@ pub fn revert_keys() -> Vec<PublicKey> {
     keys
 }
 
-// The published test key never reaches an optimised build: `--release` turns debug assertions
-// off, the test profiles (`dev`, `ci`) keep them (ADR 0024).
+// The published test key never reaches the shipped build: the `release` profile has debug
+// assertions off, the test profiles (`dev`, `ci`, `dev-release`) keep them (ADR 0024).
 #[cfg(all(feature = "test-key", not(debug_assertions)))]
 compile_error!(
     "the feature test-key (the published index test key) is for test builds only, never with \

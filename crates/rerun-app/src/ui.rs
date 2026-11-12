@@ -386,7 +386,7 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 
     let weak = ui.as_weak();
     let st = state.clone();
-    ui.on_open_game(move |app_id, _name| {
+    ui.on_open_game(move |app_id| {
         let Some(ui) = weak.upgrade() else {
             return;
         };

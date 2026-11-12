@@ -109,17 +109,17 @@ pub enum GameRefusal {
 struct CacheEntry {
     app_id: u32,
     topo: String,
-    /// The index the Topo comes from.
-    seq: u64,
+    /// The index the Topo comes from (its SHA-256: a re-import with the same `seq` differs).
+    index: [u8; 32],
     game: RootId,
     patched: Vec<PatchedExe>,
-    /// Identity of every `match.exes` file when it was read (`None`: not described).
+    /// Identity of every `match.exes` file when it was read (`None`: the file does not exist).
     files: Vec<Option<Metadata>>,
     exes: Vec<ExeCheck>,
 }
 
 /// Session cache of what was read from the executables of a game folder (P5-3b, ADR 0027
-/// amendment): per app and Topo the [`ExeCheck`]s, valid while the index, the game folder, the
+/// amendment): per app and Topo the [`ExeCheck`]s, valid while the index (its SHA-256), the game folder, the
 /// live patches and every executable's identity (length, file ID, attributes, link count; the
 /// layer reports no timestamps) are the same. Held in memory by the caller for the session,
 /// never written anywhere; [`Self::clear`] on a rescan. It only spares the display a re-hash:
@@ -149,11 +149,11 @@ impl GameCache {
         self.reads
     }
 
-    fn facts(
+    pub(crate) fn facts(
         &mut self,
         game: &GameDir<'_>,
         app_id: u32,
-        seq: u64,
+        index: [u8; 32],
         topo: &Topo,
         patched: &[PatchedExe],
     ) -> GameFacts {
@@ -175,7 +175,7 @@ impl GameCache {
             .position(|c| c.app_id == app_id && c.topo == topo.id.as_str());
         if let Some(i) = at {
             let c = &self.entries[i];
-            if c.seq == seq && c.game == id && c.files == files && c.patched == patched {
+            if c.index == index && c.game == id && c.files == files && c.patched == patched {
                 self.hits += 1;
                 return GameFacts {
                     exes: c.exes.clone(),
@@ -188,7 +188,7 @@ impl GameCache {
         let entry = CacheEntry {
             app_id,
             topo: topo.id.to_string(),
-            seq,
+            index,
             game: id,
             patched: patched.to_vec(),
             files,
@@ -238,7 +238,7 @@ pub(crate) fn with_topo<R>(
             .iter()
             .map(|t| {
                 let facts = match cache.as_deref_mut() {
-                    Some(c) => c.facts(game, app_id, catalog.seq(), t, &patched),
+                    Some(c) => c.facts(game, app_id, *catalog.sha256(), t, &patched),
                     None => topo::read_game_with(game, t, &patched),
                 };
                 (*t, facts)

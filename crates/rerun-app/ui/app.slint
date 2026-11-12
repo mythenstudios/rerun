@@ -793,7 +793,7 @@ component LibraryPage inherits VerticalLayout {
     in-out property <bool> first-run;
     callback query-edited(string);
     callback group-toggled(bool);
-    callback open-game(int, string);
+    callback open-game(int);
     callback rescan();
     spacing: Theme.s4;
     PageTitle {
@@ -868,7 +868,7 @@ component LibraryPage inherits VerticalLayout {
                         index: i;
                         count: s.rows.length;
                         activated => {
-                            root.open-game(r.app-id, r.name);
+                            root.open-game(r.app-id);
                         }
                     }
                 }
@@ -1483,7 +1483,7 @@ export component AppWindow inherits Window {
     in property <[SysLineData]> system-lines;
 
     callback navigate(int);
-    callback open-game(int, string);
+    callback open-game(int);
     callback query-edited(string);
     callback group-toggled(bool);
     callback rescan();
@@ -1662,8 +1662,8 @@ export component AppWindow inherits Window {
                                     group-toggled(v) => {
                                         root.group-toggled(v);
                                     }
-                                    open-game(id, name) => {
-                                        root.open-game(id, name);
+                                    open-game(id) => {
+                                        root.open-game(id);
                                     }
                                     rescan => {
                                         root.rescan();

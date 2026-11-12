@@ -14,8 +14,8 @@
 //! - AW7 the system page from the fake profile.
 //! - AW8 the worker thread: jobs in order, every event woken, a failed system is blocked.
 //! - AW9 the session (P5-3b): reopening a game reads no executable again, a changed executable
-//!   and a rescan do; the applied and system pages come from the session until a rescan or a
-//!   journal change.
+//!   and a rescan do; the system page comes from the session until a rescan, the applied page
+//!   is read each visit.
 //! - AW10 a library scan lets a waiting job run between two games, and a second scan restarts it.
 //! - AW11 the game page at once from the library row, before the worker has read the folder.
 
@@ -857,34 +857,25 @@ fn aw9_a_rescan_forgets_the_session() {
     assert_eq!((session.games.reads(), session.games.hits()), (1, 1));
     events_in(&sys, &mut session, &Job::Status);
     events_in(&sys, &mut session, &Job::System);
-    assert!(session.applied.is_some() && session.system.is_some());
+    assert!(session.system.is_some());
 
     events_in(&sys, &mut session, &Job::Library);
-    assert!(session.applied.is_none() && session.system.is_none());
+    assert!(session.system.is_none());
     let _ = the_game(events_in(&sys, &mut session, &game_job()));
     // Read again after the scan (the counters are not reset, the entries are).
     assert_eq!((session.games.reads(), session.games.hits()), (2, 1));
 }
 
 #[test]
-fn aw9_the_applied_and_system_pages_come_from_the_session() {
+fn aw9_the_system_page_comes_from_the_session_and_the_applied_page_never_does() {
     let sys = indexed("Invented AC");
     let mut session = Session::default();
     let applied = |ev: &[Event]| match ev {
         [Event::Applied(a)] => a.clone(),
         other => panic!("{other:?}"),
     };
+    // Nothing of the applied page is kept: another process may apply or revert meanwhile.
     let first = applied(&events_in(&sys, &mut session, &Job::Status));
-    // Planted in the session: the next visit answers with it, it does not read again.
-    let mut planted = first.clone();
-    planted.sub = "from the session".to_owned();
-    session.applied = Some(planted.clone());
-    assert_eq!(
-        applied(&events_in(&sys, &mut session, &Job::Status)),
-        planted
-    );
-    // The hook for the write jobs: a changed journal is read again.
-    session.journal_changed();
     assert_eq!(applied(&events_in(&sys, &mut session, &Job::Status)), first);
 
     let system = |ev: &[Event]| match ev {
@@ -991,7 +982,11 @@ fn aw10_a_second_scan_restarts_the_first() {
 
 #[test]
 fn aw10_a_click_during_a_scan_on_the_worker_thread_is_answered_before_the_summary() {
-    let make = || {
+    // The world is built only once every job is queued, so the jobs wait while the scan runs.
+    let sent = Arc::new(std::sync::Barrier::new(2));
+    let gate = sent.clone();
+    let make = move || {
+        gate.wait();
         Ok(World {
             sys: Box::new(indexed("Invented AC")),
             http: Box::new(FakeHttp::default()),
@@ -1003,6 +998,7 @@ fn aw10_a_click_during_a_scan_on_the_worker_thread_is_answered_before_the_summar
     worker.send(Job::Library);
     worker.send(game_job());
     worker.send(Job::Status);
+    sent.wait();
     let ev = wait_for(&worker, 6);
     let k = kinds(&ev);
     let at = |name: &str| k.iter().position(|x| *x == name).unwrap();

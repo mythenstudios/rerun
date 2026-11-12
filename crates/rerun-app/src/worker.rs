@@ -9,7 +9,7 @@
 //!
 //! Session (P5-3b): the worker keeps, in memory and for the session only, what it already
 //! read ([`Session`]): per game the executables' hashes (`flow::GameCache`, valid while the
-//! files keep their identity), the applied page and the system page. A library scan (the
+//! files keep their identity) and the system page; the applied page is read each visit. A library scan (the
 //! rescan) clears all of it. Nothing of it is ever written.
 //!
 //! Order (ADR 0027 amendment P5-3b): jobs run one at a time in the order sent, except that a
@@ -184,8 +184,7 @@ fn no_system(detail: Shown<'static>, lang: Lang) -> BlockedVm {
 #[derive(Debug, Default)]
 pub struct Session {
     /// The executables read per game.
-    pub games: GameCache,
-    applied: Option<AppliedVm>,
+    pub(crate) games: GameCache,
     system: Option<SystemVm>,
 }
 
@@ -193,15 +192,7 @@ impl Session {
     /// A rescan: forget everything read so far.
     fn rescan(&mut self) {
         self.games.clear();
-        self.applied = None;
         self.system = None;
-    }
-
-    /// The journal changed (the hook for P5-6: an apply, a revert or a forget calls this): the
-    /// applied page is read again at its next visit.
-    #[cfg(test)]
-    pub fn journal_changed(&mut self) {
-        self.applied = None;
     }
 }
 
@@ -243,7 +234,9 @@ pub fn run_in(
             emit(Event::Game(page));
         }
         Job::Status => {
-            let page = session.applied.take().unwrap_or_else(|| match g.app() {
+            // Never kept: another process may apply or revert while the window is open (the
+            // window only skips setting an unchanged page).
+            let page = match g.app() {
                 None => vm::applied(None, lang),
                 Some(app) => {
                     // The journal only (review of P5-3): the orphaned firewall rules are read
@@ -251,8 +244,7 @@ pub fn run_in(
                     let s = rerun_core::exec::status(app);
                     vm::applied(Some(s.as_ref()), lang)
                 }
-            });
-            session.applied = Some(page.clone());
+            };
             emit(Event::Applied(page));
         }
         Job::System => {
