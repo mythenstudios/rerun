@@ -1,7 +1,9 @@
 //! `rerun apply <hash> [--dry-run] [--yes]` (P2-13): shows the stored plan again from exactly
 //! the bytes that are applied, runs every check of the apply without writing (`exec::check`),
 //! asks (user decision E1 a), then applies (`exec::apply` loads the same bytes by hash and runs
-//! every check again under the lock).
+//! every check again under the lock). The loading, the checks and the apply are
+//! `rerun_core::flow`'s (`load_stored`, `shown`, `check`, `apply`; ADR 0027 amendment P5-2a);
+//! this module renders, asks and maps the exit codes.
 //!
 //! Nothing is asked for a plan that is refused anyway. `--dry-run` stops after the checks: no
 //! journal folder, no lock file, no record (user decision E2 a). Exit codes: 0 applied or
@@ -10,15 +12,13 @@
 
 use std::io::Write;
 
-use rerun_core::exec::{self, ApplyError, ExecCtx, ExecError, Outcome};
-use rerun_core::journal::InstanceTag;
-use rerun_core::plan::{self, PlanHash};
-use rerun_core::policy::root::preview_with_shadows;
+use rerun_core::exec::{ApplyError, ExecError, Outcome};
+use rerun_core::flow::{self, Env, LoadRefusal};
+use rerun_core::plan::PlanHash;
 
 use crate::cli::Exit;
 use crate::host::{
-    Host, after_change, before_change, confirm, existing_app, exit_for_apply, fail, forbidden,
-    note, shown, standard_user,
+    Host, after_change, before_change, confirm, exit_for_apply, fail, gate, note, shown,
 };
 use crate::messages::{Message, ProfileMsg, TxnMsg};
 use crate::out::Out;
@@ -48,37 +48,38 @@ fn run<W: Write, E: Write>(
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
     let sys = host.sys;
-    standard_user(sys, err)?;
-    let fr = forbidden(host, err)?;
-    let app = existing_app(sys, err)?;
+    // The guards borrow a copy of the install folder: the question needs the host mutably.
+    let install = host.install.clone();
+    let env = Env {
+        sys,
+        http: host.http,
+        install: &install,
+    };
+    let g = flow::guard(env).map_err(|x| gate(err, x))?;
     let refused = |err: &mut Out<E>, e: &dyn std::fmt::Display| {
         fail(err, TxnMsg::Error { error: shown(&e) }, Exit::Refused)
     };
-    let bytes = plan::load(&app, hash).map_err(|e| refused(err, &e))?;
-    // P3-7: the VirtualStore lookup (read only) from the same decode as the preview.
-    let (view, shadows) = preview_with_shadows(sys, &bytes).map_err(|e| refused(err, &e))?;
-    let ops = view.ops.len();
+    let p = flow::load_stored(&g, hash).map_err(|e| match e {
+        LoadRefusal::NoAppDir => fail(err, TxnMsg::NoAppDir, Exit::Refused),
+        LoadRefusal::Plan(e) => refused(err, &e),
+    })?;
+    let ops = p.ops();
     let mut lines = vec![Message::Txn(TxnMsg::PlanHead { hash: *hash, ops })];
-    lines.extend(preview::render(&view));
-    lines.extend(preview::shadow_lines(&shadows));
+    lines.extend(preview::render(&p.preview));
+    lines.extend(preview::shadow_lines(&p.shadows));
     // P4-2d: the administrator prompt the firewall rules bring (ADR 0023 §10).
-    lines.extend(preview::prompt_lines(sys, &view));
+    lines.extend(preview::prompt_lines(sys, &p.preview));
     // P3-3d: the launch profile's selection here, hints and the launch option.
-    let lv = preview::launch_view(sys, &host.install, &view);
+    let lv = preview::launch_view(sys, &install, &p.preview);
     if let Some(lv) = &lv {
-        lines.extend(preview::launch_lines(&view, lv));
+        lines.extend(preview::launch_lines(&p.preview, lv));
     }
     lines.push(Message::Blank);
     out.lines(&lines)
         .and_then(|()| out.flush())
         .map_err(|e| before_change(err, e))?;
-    let cx = ExecCtx {
-        sys,
-        fr: &fr,
-        app: &app,
-        tag: InstanceTag::new(),
-    };
-    match exec::check(&cx, hash) {
+    let p = flow::shown(p);
+    match flow::check(&g, &p) {
         Err(r) => return Err(refused(err, &r)),
         Ok(0) => {
             let _ = out.line(&Message::Txn(TxnMsg::NothingToDo));
@@ -92,7 +93,7 @@ fn run<W: Write, E: Write>(
             .map_or_else(|e| before_change(err, e), |()| Exit::Report));
     }
     confirm(host, yes, TxnMsg::AskApply { ops }, err)?;
-    match exec::apply(&cx, hash) {
+    match flow::apply(&g, p) {
         Ok(Outcome::Nothing) => {
             let _ = out.line(&Message::Txn(TxnMsg::NothingToDo));
             Ok(Exit::Report)

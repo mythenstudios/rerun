@@ -13,8 +13,8 @@
 //! and storage as a step file (`plan::show_and_store`), with the plan's origin and the
 //! warnings before the preview. `appinfo.vdf` is never read (L9).
 //!
-//! The guards, the lookup and the report come from `rerun_core::flow` (`guard`, `game`,
-//! `with_topo`, ADR 0027); this module renders them and runs the planners on a pick.
+//! The guards, the lookup, the report and the plan come from `rerun_core::flow` (`guard`,
+//! `game`, `plan`, ADR 0027 and its amendment P5-2a); this module renders them.
 
 use std::io::Write;
 
@@ -22,18 +22,15 @@ use rerun_core::catalog::Topo;
 use rerun_core::catalog::model::{GpuRequirement, Kind, Status, VariantStatus};
 use rerun_core::escape;
 use rerun_core::flow::{self, Found, GameRefusal, Lookup, OwnedReport};
-use rerun_core::path::RootPath;
-use rerun_core::plan::{Pick, PlanBytes, Preview};
-use rerun_core::policy::registry::RegPolicy;
-use rerun_core::policy::root::{Shadow, UserDataDir, preview_with_shadows};
-use rerun_core::prim::{MethodSpec, PlanCtx};
-use rerun_core::topo::{self, AntiCheatState, ExeState, GameFacts, Warning};
+use rerun_core::plan::Pick;
+use rerun_core::prim::MethodSpec;
+use rerun_core::topo::{AntiCheatState, ExeState, GameFacts, Warning};
 
 use crate::cli::Exit;
 use crate::host::{Host, fail, gate, shown};
 use crate::messages::{IndexMsg, Message, TopoMsg, TxnMsg};
 use crate::out::Out;
-use crate::plan::{Stored, game_open, show_and_store};
+use crate::plan::{game_open, show_and_store};
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -331,18 +328,6 @@ fn failed<W: Write, E: Write>(
     )
 }
 
-/// What the engine made of the picks.
-enum Outcome {
-    Planned {
-        before: Vec<Message<'static>>,
-        bytes: PlanBytes,
-        view: Box<Preview>,
-        shadows: Vec<Shadow>,
-        app_path: Option<RootPath>,
-    },
-    Failed(Vec<Message<'static>>, String),
-}
-
 /// `rerun plan <app-id>` (module docs).
 pub fn plan<W: Write, E: Write>(
     host: &Host<'_>,
@@ -378,95 +363,31 @@ fn run<W: Write, E: Write>(
         m.push(Message::Topo(TopoMsg::PickHint));
         return Ok(print(out, err, &m, Exit::Report));
     }
-    let sys = host.sys;
-    let lookup = flow::with_topo(&g, app_id, |m| {
-        let t = m.topo;
-        let heading = vec![heading(t)];
-        let facts = m.facts();
-        // P4-12: the game's folder below Documents only if a picked step sets a file there.
-        let user_data = match &t.user_data {
-            Some(u) if topo::needs_user_data(t, picks, m.profile) => {
-                match UserDataDir::open(sys, g.fr(), u.base(), u.sub()) {
-                    Ok(d) => Some(d),
-                    Err(e) => return Outcome::Failed(heading, e.to_string()),
-                }
-            }
-            _ => None,
-        };
-        let ctx = PlanCtx {
-            game: m.game,
-            app: g.app(),
-            steam_app: m.steam_app,
-            main_exe: None,
-            reg: RegPolicy.reader(sys),
-            app_path: m.app_path,
-            user_data: user_data.as_ref(),
-        };
-        let index = *m.catalog.sha256();
-        let tp = match topo::plan(&index, t, &facts, picks, &ctx) {
-            Ok(tp) => tp,
-            Err(e) => return Outcome::Failed(heading, e.to_string()),
-        };
-        let encoded = tp.plan.encode().and_then(|b| {
-            let (v, sh) = preview_with_shadows(sys, &b)?;
-            Ok((b, v, sh))
-        });
-        match encoded {
-            Ok((bytes, view, shadows)) => {
-                let mut before = heading;
-                before.push(Message::Topo(TopoMsg::Source {
-                    id: t.id.to_string(),
-                    rev: t.rev,
-                    index: hex(&index),
-                }));
-                before.extend(tp.warnings.iter().map(|w| {
-                    Message::Topo(TopoMsg::Warning {
-                        text: warning_text(w),
-                    })
-                }));
-                before.push(Message::Blank);
-                Outcome::Planned {
-                    before,
-                    bytes,
-                    view: Box::new(view),
-                    shadows,
-                    app_path: m.app_path.cloned(),
-                }
-            }
-            Err(e) => Outcome::Failed(heading, e.to_string()),
-        }
-    })
-    .map_err(|r| refusal(out, err, r))?;
-    let (lead, outcome) = match one(lookup, app_id, Exit::Refused, out, err) {
+    let lookup = flow::plan(&g, app_id, picks).map_err(|r| refusal(out, err, r))?;
+    let (lead, picked) = match one(lookup, app_id, Exit::Refused, out, err) {
         Ok(x) => x,
         Err(exit) => return Ok(exit),
     };
-    match outcome {
+    let t = &picked.topo;
+    let mut before = vec![heading(t)];
+    match picked.planned {
         // The lines of the retired Topos are not shown with a refusal.
-        Outcome::Failed(lines, why) => Err(failed(out, err, &lines, &why)),
-        Outcome::Planned {
-            before,
-            bytes,
-            view,
-            shadows,
-            app_path,
-        } => {
+        Err(e) => Err(failed(out, err, &before, &e.to_string())),
+        Ok(p) => {
+            before.push(Message::Topo(TopoMsg::Source {
+                id: t.id.to_string(),
+                rev: t.rev,
+                index: hex(&picked.index),
+            }));
+            before.extend(p.warnings.iter().map(|w| {
+                Message::Topo(TopoMsg::Warning {
+                    text: warning_text(w),
+                })
+            }));
+            before.push(Message::Blank);
             let mut all = lead;
             all.extend(before);
-            show_and_store(
-                host,
-                Stored {
-                    app: g.into_app(),
-                    app_path,
-                    bytes,
-                    view: *view,
-                    shadows,
-                },
-                &all,
-                dry_run,
-                out,
-                err,
-            )
+            show_and_store(host, g, p, &all, dry_run, out, err)
         }
     }
 }

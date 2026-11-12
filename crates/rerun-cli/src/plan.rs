@@ -2,31 +2,26 @@
 //! game folder it names, shows the preview of exactly the bytes it stores, and stores them as
 //! `<AppDir>\plans\<hash>.json` for `rerun apply <hash>`. No lock (planning only reads).
 //!
-//! Order: the elevated guard (user decision E3), the forbidden roots, the step file
-//! (`read_input`, 1 MiB, `StepFile::parse`), Rerun's folder without creating it (review S6),
-//! the game folder (`steam`: exactly one installed app in the libraries; `folder`: opened like
-//! a manually added folder), the game's folder below the user's `Documents` only if a step names
-//! it (P4-12, `user_data`), the planner, `encode`, the preview of the encoded bytes. A plan
-//! without ops is not stored. The preview is written and flushed before anything is stored:
-//! a preview that did not arrive stores nothing (exit 3). `--dry-run` creates nothing at all.
+//! Order: the guards (`flow::guard`: elevation (user decision E3), the forbidden roots, Rerun's
+//! folder without creating it, review S6), the step file (`read_input`, 1 MiB,
+//! `StepFile::parse`), then `flow::plan_steps`: the game folder (`steam`: exactly one installed
+//! app in the libraries; `folder`: opened like a manually added folder), the game's folder below
+//! the user's `Documents` only if a step names it (P4-12, `user_data`), the planner, `encode`,
+//! the preview of the encoded bytes. A plan without ops is not stored. The preview is written and
+//! flushed before anything is stored: a preview that did not arrive stores nothing (exit 3).
+//! `--dry-run` creates nothing at all. Planning and storing are `rerun_core::flow`'s (ADR 0027
+//! amendment P5-2a); this module renders and maps the refusals.
 
 use std::io::Write;
 use std::path::Path;
 
-use rerun_core::detect::exe::anti_cheat;
-use rerun_core::flow::{self, GameOpen};
-use rerun_core::path::RootPath;
-use rerun_core::plan::{self, PlanBytes, Preview};
-use rerun_core::policy::registry::RegPolicy;
-use rerun_core::policy::root::{
-    AppDir, Create, ForbiddenRoots, GameDir, Shadow, UserDataDir, preview_with_shadows, read_input,
-};
-use rerun_core::prim::{self, GameRef, MAX_STEP_FILE, PlanCtx, StepFile};
-use rerun_core::sys::System;
-use rerun_core::topo::{self, StepKind};
+use rerun_core::flow::{self, GameOpen, Guarded, Planned, StepsRefusal, StoreRefusal};
+use rerun_core::policy::root::read_input;
+use rerun_core::prim::{MAX_STEP_FILE, StepFile};
+use rerun_core::topo::StepKind;
 
 use crate::cli::Exit;
-use crate::host::{Host, after_change, before_change, fail, forbidden, shown, standard_user};
+use crate::host::{Host, after_change, before_change, fail, gate, shown};
 use crate::messages::{Message, TopoMsg, TxnMsg};
 use crate::out::Out;
 use crate::preview;
@@ -52,63 +47,18 @@ fn run<W: Write, E: Write>(
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
     let sys = host.sys;
-    standard_user(sys, err)?;
-    let fr = forbidden(host, err)?;
+    let g = flow::guard(host.env()).map_err(|x| gate(err, x))?;
     let file = std::path::absolute(steps)
         .map_err(|e| fail(err, TxnMsg::StepFile { error: shown(&e) }, Exit::Refused))?;
     let bytes = read_input(sys, &file, MAX_STEP_FILE)
         .map_err(|e| fail(err, TxnMsg::StepFile { error: shown(&e) }, Exit::Refused))?;
     let sf = StepFile::parse(&bytes)
         .map_err(|e| fail(err, TxnMsg::StepFile { error: shown(&e) }, Exit::Refused))?;
-    let app = AppDir::open(sys, Create::Never)
-        .map_err(|e| fail(err, TxnMsg::AppDir { error: shown(&e) }, Exit::Fatal))?;
-    // P3-3c: the path of Rerun's folder without creating it (a launch profile names its
-    // profiles root by path); unknown only fails a `launch_method` step.
-    let app_path = AppDir::path_of(sys).ok();
-    let (bytes, view, shadows, warned) = with_game(sys, &fr, &sf.game, err, |game, steam_app| {
-        // User decision E4 holds for every plan source (P4-4 review follow-up 1): a step file
-        // has no Topo, so nothing is released as dead.
-        let scan = anti_cheat::find(game, &topo::step_file_dirs(&sf.steps, &sf.main_exe));
-        let warned = topo::anti_cheat_steps(&sf.steps, &scan)
-            .map_err(|r| plan::PlanError::Step(r.to_string()))?;
-        // P4-12: the user data folder only if a step needs it (nothing below Documents is
-        // touched otherwise); without `user_data` such a step is the planner's refusal.
-        let user_data = match &sf.user_data {
-            Some(u) if prim::needs_user_data(&sf.steps) => {
-                Some(UserDataDir::open(sys, &fr, u.base(), u.sub())?)
-            }
-            _ => None,
-        };
-        let ctx = PlanCtx {
-            game,
-            app: app.as_ref(),
-            steam_app,
-            main_exe: Some(&sf.main_exe),
-            reg: RegPolicy.reader(sys),
-            app_path: app_path.as_ref(),
-            user_data: user_data.as_ref(),
-        };
-        let p = prim::plan(&sf.steps, &ctx)?;
-        let b = p.encode()?;
-        // P3-7: the VirtualStore lookup (read only) from the same decode as the preview.
-        let (v, sh) = preview_with_shadows(sys, &b)?;
-        Ok::<_, plan::PlanError>((b, v, sh, warned))
-    })?
-    .map_err(|e| fail(err, TxnMsg::PlanFailed { error: shown(&e) }, Exit::Refused))?;
-    show_and_store(
-        host,
-        Stored {
-            app,
-            app_path,
-            bytes,
-            view,
-            shadows,
-        },
-        &warned_lines(&warned),
-        dry_run,
-        out,
-        err,
-    )
+    let (planned, warned) = flow::plan_steps(&g, &sf).map_err(|e| match e {
+        StepsRefusal::Game(e) => game_open(err, e),
+        StepsRefusal::Plan(e) => fail(err, TxnMsg::PlanFailed { error: shown(&e) }, Exit::Refused),
+    })?;
+    show_and_store(host, g, planned, &warned_lines(&warned), dry_run, out, err)
 }
 
 /// The anti-cheat warnings of a step file, before its preview.
@@ -130,56 +80,37 @@ fn warned_lines(warned: &[StepKind]) -> Vec<Message<'static>> {
     m
 }
 
-/// A plan as encoded, with its preview and Rerun's folder as found while planning.
-pub(crate) struct Stored<'s> {
-    /// Rerun's folder, if it existed (planning never creates it).
-    pub app: Option<AppDir<'s>>,
-    /// Its path, if known.
-    pub app_path: Option<RootPath>,
-    /// The encoded plan.
-    pub bytes: PlanBytes,
-    /// The preview of exactly these bytes.
-    pub view: Preview,
-    /// VirtualStore copies of managed files.
-    pub shadows: Vec<Shadow>,
-}
-
-/// Prints `before`, then the preview of `s`, then (without `--dry-run`) stores the plan
-/// (module docs). Shared by the step file and the Topo engine.
+/// Prints `before`, then the preview of `p`, then (without `--dry-run`) stores the plan
+/// through `flow::shown` and `flow::store` (module docs). Shared by the step file and the Topo
+/// engine.
 pub(crate) fn show_and_store<W: Write, E: Write>(
     host: &Host<'_>,
-    s: Stored<'_>,
+    mut g: Guarded<'_>,
+    p: Planned,
     before: &[Message<'_>],
     dry_run: bool,
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
     let sys = host.sys;
-    let Stored {
-        app,
-        app_path,
-        bytes,
-        view,
-        shadows,
-    } = s;
     if !before.is_empty() {
         out.lines(before).map_err(|e| before_change(err, e))?;
     }
-    if view.ops.is_empty() {
+    if p.preview.ops.is_empty() {
         let _ = out.line(&Message::Txn(TxnMsg::NothingToDo));
         return Ok(Exit::Report);
     }
-    let hash = bytes.hash();
-    let ops = view.ops.len();
+    let hash = p.hash();
+    let ops = p.ops();
     // P3-3d: the launch profile's selection here, hints and the launch option (not stored).
-    let lv = preview::launch_view(sys, &host.install, &view);
-    let mut lines = preview::render(&view);
+    let lv = preview::launch_view(sys, &host.install, &p.preview);
+    let mut lines = preview::render(&p.preview);
     // P3-7: a VirtualStore copy of a managed file (looked up with the preview above).
-    lines.extend(preview::shadow_lines(&shadows));
+    lines.extend(preview::shadow_lines(&p.shadows));
     // P4-2d (ADR 0023 §2): the helper's pre-check as a warning, and the prompt to expect.
-    lines.extend(preview::helper_lines(sys, &view));
+    lines.extend(preview::helper_lines(sys, &p.preview));
     if let Some(lv) = &lv {
-        lines.extend(preview::launch_lines(&view, lv));
+        lines.extend(preview::launch_lines(&p.preview, lv));
     }
     out.lines(&lines)
         .and_then(|()| out.line(&Message::Blank))
@@ -190,22 +121,16 @@ pub(crate) fn show_and_store<W: Write, E: Write>(
             .line(&Message::Txn(TxnMsg::PlanDryRun { hash, ops }))
             .map_or_else(|e| before_change(err, e), |()| Exit::Report));
     }
-    // Review S6: Rerun's folder is created only now, right before the plan is stored.
-    let app = match app {
-        Some(a) => a,
-        None => match AppDir::open(sys, Create::IfMissing) {
-            Ok(Some(a)) => a,
-            Ok(None) => return Err(fail(err, TxnMsg::NoAppDir, Exit::Fatal)),
-            Err(e) => return Err(fail(err, TxnMsg::AppDir { error: shown(&e) }, Exit::Fatal)),
-        },
-    };
-    // Plan §9 (review of P3-3c): a launch profile names Rerun's folder by the path planned
-    // with; one that is another now (LocalAppData moved meanwhile) is not stored.
-    if app_path.as_ref().is_some_and(|p| p != app.path()) {
-        return Err(fail(err, TxnMsg::AppDirMoved, Exit::Refused));
-    }
-    plan::store(&app, &bytes)
-        .map_err(|e| fail(err, TxnMsg::StoreFailed { error: shown(&e) }, Exit::Refused))?;
+    let p = flow::shown(p);
+    flow::store(&mut g, &p).map_err(|e| match e {
+        StoreRefusal::Empty => fail(err, TxnMsg::NothingToDo, Exit::Report),
+        StoreRefusal::NoAppDir => fail(err, TxnMsg::NoAppDir, Exit::Fatal),
+        StoreRefusal::AppDir(e) => fail(err, TxnMsg::AppDir { error: shown(&e) }, Exit::Fatal),
+        StoreRefusal::AppDirMoved => fail(err, TxnMsg::AppDirMoved, Exit::Refused),
+        StoreRefusal::Store(e) => {
+            fail(err, TxnMsg::StoreFailed { error: shown(&e) }, Exit::Refused)
+        }
+    })?;
     let done = [
         Message::Txn(TxnMsg::PlanStored { hash, ops }),
         Message::Txn(TxnMsg::ApplyWith { hash }),
@@ -214,18 +139,6 @@ pub(crate) fn show_and_store<W: Write, E: Write>(
         .lines(&done)
         .and_then(|()| out.flush())
         .map_or_else(|e| after_change(err, e, Exit::Report), |()| Exit::Report))
-}
-
-/// Opens the game folder a plan source names and runs `f` on it (`flow::with_game`); refusals
-/// end with exit 3.
-pub(crate) fn with_game<R, E: Write>(
-    sys: &dyn System,
-    fr: &ForbiddenRoots,
-    game: &GameRef,
-    err: &mut Out<E>,
-    f: impl FnOnce(&GameDir<'_>, Option<u32>) -> R,
-) -> Result<R, Exit> {
-    flow::with_game(sys, fr, game, f).map_err(|e| game_open(err, e))
 }
 
 /// A game folder that did not open, on stderr: exit 3.

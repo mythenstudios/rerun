@@ -10,9 +10,14 @@
 //! - [`index_state`]: the current signed index, none, or why it is refused;
 //! - [`library`]: the Steam libraries and every listed app, streamed row by row;
 //! - [`game`]: one app's Topo, the engine's report and its fixes grouped by variant ID
-//!   ([`Fix`]); [`with_topo`] is the same lookup for a caller that plans;
+//!   ([`Fix`]); [`with_topo`] is the same lookup with a closure (behind [`plan`] since P5-2a);
 //! - [`status`]: the journal, the launch results, the profile holders and the orphaned firewall
 //!   rules.
+//!
+//! Write side (P5-2a, [`write`]): [`plan`] (a Topo and the picked variants) and [`plan_steps`]
+//! (a step file) read only and give a [`Planned`]; the caller shows its preview and calls
+//! [`shown`]; [`store`] creates Rerun's folder only then; [`load_stored`] reads a stored plan
+//! back; [`check`] and [`apply`] run `exec` on the stored bytes of the [`Previewed`].
 //!
 //! A [`Guarded`] is built per job, never kept for a session: Rerun's folder can appear or vanish
 //! between two jobs.
@@ -28,6 +33,7 @@ use crate::sys::{Http, System};
 mod game;
 mod library;
 mod status;
+mod write;
 
 pub use game::{
     Fix, Found, GameRefusal, GameView, IssueView, Lookup, MatchView, Matched, OwnedReport, Solved,
@@ -35,6 +41,10 @@ pub use game::{
 };
 pub use library::{LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_games, library};
 pub use status::{Holder, StatusView, head, profile_id_of, profile_of, profile_op, status};
+pub use write::{
+    LoadRefusal, Picked, PlanRefusal, Planned, Previewed, StepsRefusal, StoreRefusal, apply, check,
+    load_stored, plan, plan_steps, shown, store,
+};
 
 /// What a job runs against.
 #[derive(Clone, Copy)]
