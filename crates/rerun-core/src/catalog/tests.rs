@@ -851,3 +851,40 @@ fn one_variant_id_names_one_fix_across_issues() {
         );
     }
 }
+
+/// P5-5c review: a variant that installs a package whose files depend on the graphics API (or
+/// one it requires) is refused for a Topo whose executables name more than one API, until the
+/// game options of ADR 0032 name the one the game runs; one API, or a package without API files,
+/// passes.
+#[test]
+fn an_api_dependent_package_needs_one_api_in_the_topo() {
+    let mut i = index(4);
+    let mut dx10 = i.topos[0].matches.exes[0].clone();
+    dx10.path = rel("game_dx10.exe");
+    dx10.sha256 = Some(Hex::new([0x12; 32]));
+    dx10.api = Api::D3d10;
+    i.topos[0].matches.exes.push(dx10);
+    super::check_index(&i).unwrap();
+    for by in ["file", "apis", "required"] {
+        let mut j = i.clone();
+        match by {
+            "file" => j.packages[0].files[0].api = Some(vec![Api::D3d9]),
+            "apis" => j.packages[0].apis = Some(vec![Api::D3d9]),
+            _ => {
+                let mut wrapper = package("api-wrapper");
+                wrapper.files[0].api = Some(vec![Api::D3d9]);
+                j.packages[0].requires = vec![id("api-wrapper")];
+                j.packages.insert(0, wrapper);
+            }
+        }
+        let e = super::check_index(&j).unwrap_err().to_string();
+        assert!(
+            e.contains("variant fix-pack installs package")
+                && e.contains("depend on the graphics API"),
+            "{by}: {e}"
+        );
+        // The same Topo with one API passes.
+        j.topos[0].matches.exes.truncate(1);
+        super::check_index(&j).unwrap_or_else(|e| panic!("{by}: {e}"));
+    }
+}

@@ -633,7 +633,6 @@ fn ad5_the_worker_counts_a_download_and_a_cancel_ends_it() {
     };
     let woken = Arc::new(AtomicUsize::new(0));
     let worker = Worker::start(Lang::En, make, Box::new(Count(woken))).unwrap();
-    worker.set_owner(None);
     assert!(!worker.downloading());
     worker.send(Job::Game {
         app_id: 220,

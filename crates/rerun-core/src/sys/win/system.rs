@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use super::{WinElevation, WinFirewall, WinFs, WinGpu, WinKnownFolders, WinRegistry, WinTopology};
 use crate::sys::{
-    Elevation, Firewall, Fs, Gpu, KnownFolders, PromptOwner, Registry, RegistryWrite, SysResult,
-    System, Topology,
+    Elevation, Firewall, Fs, Gpu, KnownFolders, PromptOwner, PromptOwnerSlot, Registry,
+    RegistryWrite, SysResult, System, Topology,
 };
 
 /// The real file system, registry, known folders (on that registry), CPU topology and graphics
@@ -49,6 +49,15 @@ impl WinSystem {
     #[must_use]
     pub fn with_prompt_owner(mut self, owner: PromptOwner) -> Self {
         self.elevation = WinElevation::owned_by(owner);
+        self
+    }
+
+    /// As [`Self::with_prompt_owner`], with the owner arriving later through `slot` (the app
+    /// builds the system before its window exists; review of P5-5c). A start before the slot is
+    /// set has the console window as the owner (none in a GUI process).
+    #[must_use]
+    pub fn with_prompt_owner_slot(mut self, slot: PromptOwnerSlot) -> Self {
+        self.elevation = WinElevation::with_slot(slot);
         self
     }
 }

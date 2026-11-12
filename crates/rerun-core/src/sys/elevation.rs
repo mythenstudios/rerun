@@ -13,9 +13,10 @@
 //! refuses everything (the helper's own system, §11, and test systems that never elevate).
 //!
 //! The owner of the UAC dialog (ADR 0023 amendment P5-5c) is a [`PromptOwner`]: an opaque window
-//! handle value the caller hands to the system layer when it builds it
-//! (`sys::win::WinSystem::with_prompt_owner`; the app passes its window, the CLI none, so its
-//! console window stays the owner). Only `sys::win` turns it back into a window handle.
+//! handle value the caller hands to the system layer (`sys::win::WinSystem::with_prompt_owner`,
+//! or later through a [`PromptOwnerSlot`] it built the system with: the app's window exists only
+//! after its worker built the system; the CLI passes none, so its console window stays the
+//! owner). Only `sys::win` turns it back into a window handle.
 
 use super::{SysError, SysErrorKind, SysResult};
 use crate::path::RootPath;
@@ -41,6 +42,38 @@ impl PromptOwner {
     /// The raw window handle value.
     pub const fn raw(self) -> isize {
         self.0
+    }
+}
+
+/// Where the owner of the UAC dialog arrives once it is known (ADR 0023 amendment P5-5c,
+/// review of P5-5c): written once, read at every helper start, shared between the caller and the
+/// system layer it built with it. A start before it is set has no owner of the caller's (the
+/// console window, null in a GUI process: the dialog may then open behind the window); an owner
+/// that comes later is used from the next start on, never lost.
+#[derive(Debug, Clone, Default)]
+pub struct PromptOwnerSlot(std::sync::Arc<std::sync::OnceLock<PromptOwner>>);
+
+impl PromptOwnerSlot {
+    /// An empty slot.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A slot that holds `owner` already.
+    pub fn with(owner: PromptOwner) -> Self {
+        let s = Self::new();
+        s.set(owner);
+        s
+    }
+
+    /// Sets the owner; `false` if one was set already (the first one stays).
+    pub fn set(&self, owner: PromptOwner) -> bool {
+        self.0.set(owner).is_ok()
+    }
+
+    /// The owner, if it is known.
+    pub fn get(&self) -> Option<PromptOwner> {
+        self.0.get().copied()
     }
 }
 
@@ -222,6 +255,21 @@ mod tests {
     fn elevation_is_an_object_safe_send_sync_trait() {
         fn assert_send_sync<T: ?Sized + Send + Sync>() {}
         assert_send_sync::<dyn Elevation>();
+    }
+
+    #[test]
+    fn a_prompt_owner_slot_is_shared_and_written_once() {
+        use super::PromptOwnerSlot;
+        let a = PromptOwner::from_raw(10).unwrap();
+        let b = PromptOwner::from_raw(20).unwrap();
+        let slot = PromptOwnerSlot::new();
+        let system_side = slot.clone();
+        assert_eq!(system_side.get(), None);
+        assert!(slot.set(a));
+        assert_eq!(system_side.get(), Some(a), "a late owner reaches the clone");
+        assert!(!slot.set(b));
+        assert_eq!(system_side.get(), Some(a), "the first one stays");
+        assert_eq!(PromptOwnerSlot::with(b).get(), Some(b));
     }
 
     #[test]

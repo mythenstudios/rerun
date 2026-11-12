@@ -831,6 +831,10 @@ fn vh1_the_helper_state_decides_the_offer() {
             offer_with(&f, Some(&HelperState::NoElevation), lang),
             (Offer::NeedsHelper, note(Msg::FixNoElevation))
         );
+        assert_eq!(
+            offer_with(&f, Some(&HelperState::Unavailable), lang),
+            (Offer::NeedsHelper, note(Msg::FixHelperUnavailable))
+        );
         assert_eq!(offer_with(&f, None, lang).0, Offer::NeedsHelper);
         let f = fix(&["fix-pack"], true, false);
         assert_eq!(offer_with(&f, Some(&ready), lang).0, Offer::NeedsDownload);
@@ -841,6 +845,29 @@ fn vh1_the_helper_state_decides_the_offer() {
             (Offer::Selectable, None)
         );
     }
+}
+
+/// VH1b (review of P5-5c): each refusal of `flow::helper` maps to its own state; one the core
+/// may add later is `Unavailable`, never "not installed".
+#[test]
+fn vh1b_every_helper_refusal_has_its_own_state() {
+    use super::helper_state;
+    let unsafe_ = Refusal::HelperUnsafe(Box::new(rerun_core::policy::root::RootError::Sys(
+        SysError::new(SysErrorKind::NotFound, "h"),
+    )));
+    assert_eq!(helper_state(&Err(unsafe_)), HelperState::Missing);
+    assert_eq!(
+        helper_state(&Err(Refusal::NoElevation(PromptKind::UacOff))),
+        HelperState::NoElevation
+    );
+    assert_eq!(
+        helper_state(&Err(Refusal::Elevated)),
+        HelperState::NoElevation
+    );
+    assert_eq!(
+        helper_state(&Err(Refusal::JournalBusy)),
+        HelperState::Unavailable
+    );
 }
 
 /// VH2: what the preview and the wait say for each prompt state (ADR 0023 §10).

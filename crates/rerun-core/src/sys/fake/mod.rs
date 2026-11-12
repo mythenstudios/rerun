@@ -140,6 +140,14 @@ impl FakeSystem {
         self
     }
 
+    /// The owner arrives later through `slot` (the fake of
+    /// `sys::win::WinSystem::with_prompt_owner_slot`): each run records what it holds then.
+    #[must_use]
+    pub fn with_prompt_owner_slot(self, slot: super::PromptOwnerSlot) -> Self {
+        self.elevation.set_prompt_owner_slot(slot);
+        self
+    }
+
     /// Changes of `d` that a power loss could drop (logged, not durable).
     pub fn pending(&self, d: Domain) -> usize {
         match d {

@@ -10,7 +10,8 @@ use std::sync::{Mutex, PoisonError};
 
 use crate::path::RootPath;
 use crate::sys::elevation::{
-    Elevation, HelperLock, HelperPresence, HelperRun, PromptOwner, TokenKind, parameters,
+    Elevation, HelperLock, HelperPresence, HelperRun, PromptOwner, PromptOwnerSlot, TokenKind,
+    parameters,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
@@ -38,7 +39,7 @@ pub struct FakeElevation {
     running: Mutex<SysResult<Vec<String>>>,
     unaskable: Mutex<bool>,
     lock: Mutex<SysResult<HelperLock>>,
-    owner: Mutex<Option<PromptOwner>>,
+    owner: Mutex<PromptOwnerSlot>,
 }
 
 impl Default for FakeElevation {
@@ -50,7 +51,7 @@ impl Default for FakeElevation {
             running: Mutex::new(Ok(Vec::new())),
             unaskable: Mutex::new(false),
             lock: Mutex::new(Ok(HelperLock::Free)),
-            owner: Mutex::new(None),
+            owner: Mutex::new(PromptOwnerSlot::new()),
         }
     }
 }
@@ -92,7 +93,17 @@ impl FakeElevation {
 
     /// The owner of the UAC dialog of every run from now on.
     pub fn set_prompt_owner(&self, owner: Option<PromptOwner>) {
-        *self.owner.lock().unwrap_or_else(PoisonError::into_inner) = owner;
+        let slot = PromptOwnerSlot::new();
+        if let Some(o) = owner {
+            slot.set(o);
+        }
+        self.set_prompt_owner_slot(slot);
+    }
+
+    /// The owner of the UAC dialog is whatever `slot` holds when a run starts (the fake of
+    /// `WinSystem::with_prompt_owner_slot`).
+    pub fn set_prompt_owner_slot(&self, slot: PromptOwnerSlot) {
+        *self.owner.lock().unwrap_or_else(PoisonError::into_inner) = slot;
     }
 
     /// The helper's instance lock from now on.
@@ -111,7 +122,11 @@ impl Elevation for FakeElevation {
 
     fn run_helper(&self, image: &RootPath, args: &[&str]) -> SysResult<HelperRun> {
         let parameters = parameters(args)?;
-        let owner = *self.owner.lock().unwrap_or_else(PoisonError::into_inner);
+        let owner = self
+            .owner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get();
         self.calls
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

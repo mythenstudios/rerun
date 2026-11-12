@@ -872,6 +872,22 @@ pub struct Package {
 }
 
 impl Package {
+    /// Its files depend on the graphics API (`apis`, `slots_by_api`, or a file with `api`): which
+    /// DLLs it installs follows the executable the game runs (ADR 0020 amendment "Other
+    /// executables").
+    pub fn depends_on_api(&self) -> bool {
+        self.apis.is_some()
+            || self.slots_by_api.is_some()
+            || self.files.iter().any(|f| f.api.is_some())
+    }
+
+    /// It installs a file that is not a config file: a DLL is built for one architecture, so
+    /// what it installs follows the executable the game runs (ADR 0020 amendment "Other
+    /// executables").
+    pub fn depends_on_arch(&self) -> bool {
+        self.files.iter().any(|f| !f.config)
+    }
+
     /// The downloads a file comes from (ADR 0025 part 2, the one placement rule of the loader,
     /// the extraction and the planner): `[None]` for a package with one download; with
     /// `assets`, the file's `arch`, or every asset's architecture when it has none (whether an

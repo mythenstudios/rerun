@@ -18,8 +18,10 @@
 //!   an undo that needs it cannot be confirmed and keeps no token; Windows is never asked.
 //! - AH6 the nonce and the second click: a second Apply and a stale undo confirm never start the
 //!   helper a second time.
-//! - AH7 the window's handle reaches the helper start: `Worker::set_owner` → the world built
-//!   with it → the fake records it with the run (the `WinSystem::with_prompt_owner` path).
+//! - AH7 the window's handle reaches the helper start: the world is built at once with a
+//!   `PromptOwnerSlot`, `Worker::set_owner` fills it later (a late owner is not lost, the first
+//!   one stays), the fake records it with the run (the `WinSystem::with_prompt_owner_slot`
+//!   path); never handed over, the run has none.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -36,7 +38,8 @@ use rerun_core::sys::registry::{Hive, RegKey, RegView};
 use rerun_core::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
 use rerun_core::sys::{
     Elevation, Firewall, FwRule, Gpu, HelperLock, HelperPresence, HelperProc, HelperRun,
-    KnownFolders, PromptOwner, Registry, RegistryWrite, SysResult, System, TokenKind, Topology,
+    KnownFolders, PromptOwner, PromptOwnerSlot, Registry, RegistryWrite, SysResult, System,
+    TokenKind, Topology,
 };
 
 use super::*;
@@ -711,16 +714,13 @@ fn wait_until<T>(worker: &Worker, mut pick: impl FnMut(&Event) -> Option<T>) -> 
     panic!("the event never came");
 }
 
-#[test]
-fn ah7_the_window_s_handle_reaches_the_helper_start() {
-    let owner = PromptOwner::from_raw(0x0003_0e52).unwrap();
+/// Runs one apply of `block` whose UAC prompt is declined, through the worker thread, and
+/// returns what the fake recorded for the run. `owner` is handed over after the world was built
+/// (`Some`) or never (`None`).
+fn apply_through_the_worker(owner: Option<PromptOwner>) -> Vec<rerun_core::sys::fake::RunCall> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let make = move |o: Option<PromptOwner>| {
-        let world = helper_world(true, CONSENT);
-        let world = match o {
-            Some(o) => world.with_prompt_owner(o),
-            None => world,
-        };
+    let make = move |slot: PromptOwnerSlot| {
+        let world = helper_world(true, CONSENT).with_prompt_owner_slot(slot);
         world.fake_elevation().push_run(Ok(HelperRun::Declined));
         let world = std::sync::Arc::new(world);
         tx.send(world.clone()).unwrap();
@@ -732,14 +732,20 @@ fn ah7_the_window_s_handle_reaches_the_helper_start() {
     };
     let woken = std::sync::Arc::new(AtomicUsize::new(0));
     let worker = Worker::start(Lang::En, make, Box::new(Count(woken))).unwrap();
-    // A job sent before the handle waits for it: the world is built with the owner.
+    // The world does not wait for the window: it is built and answers before any owner.
+    let world = rx.recv().unwrap();
     worker.send(Job::Game {
         app_id: 220,
         name: None,
     });
-    worker.set_owner(Some(owner));
-    let world = rx.recv().unwrap();
     wait_until(&worker, |e| matches!(e, Event::Game(_)).then_some(()));
+    // The window's handle arrives late (after the world was built): it is not lost.
+    if let Some(o) = owner {
+        assert!(worker.set_owner(Some(o)));
+        let other = PromptOwner::from_raw(0x0004_0001).unwrap();
+        assert!(!worker.set_owner(Some(other)), "the first owner stays");
+    }
+    assert!(!worker.set_owner(None));
     worker.send(Job::Plan {
         app_id: 220,
         picks: vec![pick("net", "block")],
@@ -759,11 +765,23 @@ fn ah7_the_window_s_handle_reaches_the_helper_start() {
         _ => None,
     });
     assert_eq!(title, t(Lang::En, Msg::ResDeclinedTitle));
-    let calls = world.fake_elevation().calls();
+    world.fake_elevation().calls()
+}
+
+#[test]
+fn ah7_the_window_s_handle_reaches_the_helper_start() {
+    // Handed over after the world was built: the run has it.
+    let owner = PromptOwner::from_raw(0x0003_0e52).unwrap();
+    let calls = apply_through_the_worker(Some(owner));
     assert_eq!(calls.len(), 1);
     assert_eq!(
         calls[0].owner,
         Some(owner),
         "the dialog belongs to the window"
     );
+    // Never handed over (the window had no native handle): the run goes on without one, as
+    // the CLI's would (its console window, none in a GUI process).
+    let calls = apply_through_the_worker(None);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].owner, None);
 }

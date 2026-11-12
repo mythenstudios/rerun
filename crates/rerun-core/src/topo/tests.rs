@@ -2207,3 +2207,48 @@ fn tx3_an_api_dependent_package_waits_for_the_running_executable() {
         )]
     );
 }
+
+/// TX4 (P5-5c review): the architecture as the API: a package with DLLs is refused for a game
+/// whose matched executables have different architectures (typed, with the reason), never
+/// planned for the first match; a package of config files only still plans.
+#[test]
+fn tx4_a_package_with_dlls_waits_when_the_executables_differ_in_arch() {
+    let archive = wrapper_zip();
+    let mut pkg = wrapper(&archive);
+    pkg.files.iter_mut().for_each(|f| f.api = None);
+    pkg.files
+        .retain(|f| f.config || f.from.as_str() != "x64/d3d11.dll");
+    let sys = game_sys();
+    let mut alt = pe(true);
+    alt.extend_from_slice(b"the 32-bit build");
+    put(&sys, "alt.exe", &alt);
+    let mut v = topo_value();
+    v["match"]["exes"] = serde_json::json!([
+        {"path":"game.exe","sha256":sha256(&pe(false)),"api":"d3d9"},
+        {"path":"alt.exe","sha256":sha256(&alt),"api":"d3d9"}
+    ]);
+    let t = topo_of(v);
+    assert!(facts_of(&sys, &t).arches_differ());
+    cache(&sys, &archive);
+    extract(&sys, &app(&sys), &pkg).unwrap();
+    let e = plan_pkgs(&sys, &t, std::slice::from_ref(&pkg), &["wrapper/pkg"]).unwrap_err();
+    assert!(
+        matches!(&e, EngineError::PackageArchOpen { id } if id == "invented-wrapper"),
+        "{e:?}"
+    );
+    assert!(e.to_string().contains("built for one architecture"), "{e}");
+    // Config files only: planned.
+    let mut plain = pkg.clone();
+    plain.files.retain(|f| f.config);
+    let tp = plan_pkgs(&sys, &t, std::slice::from_ref(&plain), &["wrapper/pkg"]).unwrap();
+    assert_eq!(
+        installs(&tp),
+        [(
+            "invented-wrapper".to_owned(),
+            vec!["wrapper.ini".to_owned()]
+        )]
+    );
+    // One architecture (TX3's world): planned as before.
+    let (sys, t) = two_exes("d3d9");
+    assert!(!facts_of(&sys, &t).arches_differ());
+}

@@ -408,6 +408,20 @@ fn the_fake_elevation_runs_as_scripted_and_records_the_command_line() {
     let run = sys.elevation().run_helper(&image, &[]);
     assert_eq!(run.unwrap(), HelperRun::Declined);
     assert_eq!(sys.fake_elevation().calls()[0].owner, Some(owner));
+    // Review of P5-5c: an owner that arrives through the slot after the system was built is
+    // read at the start, never lost.
+    let slot = crate::sys::PromptOwnerSlot::new();
+    let sys = FakeSystem::new().with_prompt_owner_slot(slot.clone());
+    sys.fake_elevation().push_run(Ok(HelperRun::Declined));
+    sys.fake_elevation().push_run(Ok(HelperRun::Declined));
+    #[expect(clippy::disallowed_methods, reason = "test: the fake's own behaviour")]
+    let runs = [sys.elevation().run_helper(&image, &[]), {
+        slot.set(owner);
+        sys.elevation().run_helper(&image, &[])
+    }];
+    assert!(runs.iter().all(Result::is_ok));
+    let calls = sys.fake_elevation().calls();
+    assert_eq!((calls[0].owner, calls[1].owner), (None, Some(owner)));
 }
 
 /// Tripwire (security review N1): `HELPER_MIN_SEQ` is 1 only while no release key and no shipped

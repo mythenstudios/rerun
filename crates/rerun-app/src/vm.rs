@@ -969,6 +969,7 @@ fn fix(
                 lang,
                 match helper {
                     Some(HelperState::NoElevation) => Msg::FixNoElevation,
+                    Some(HelperState::Unavailable) => Msg::FixHelperUnavailable,
                     _ => Msg::FixNeedsHelper,
                 },
             )

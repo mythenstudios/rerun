@@ -258,6 +258,43 @@ fn a_variant_id_with_other_steps_or_kind_under_another_issue_fails_the_build() {
     }
 }
 
+/// P5-5c review: until the game options of ADR 0032, a variant that installs a package whose
+/// files depend on the graphics API is not released for a Topo whose executables name more than
+/// one API (the planner would refuse it, and the app would offer its download for nothing).
+#[test]
+fn an_api_dependent_package_on_a_topo_of_two_apis_fails_the_build() {
+    let two = TOPO.replacen(
+        "api: d3d9 }",
+        "api: d3d9 }
+    - { path: \"bin/game_dx10.exe\", sha256: \"2222222222222222222222222222222222222222222222222222222222222222\", api: d3d10 }",
+        1,
+    );
+    let by_api = PACKAGE.replacen(
+        "sha256: \"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\" }",
+        "sha256: \"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\", api: [d3d9] }",
+        1,
+    );
+    assert_ne!(by_api, PACKAGE);
+    let go = |topo: &str, pkg: &str| {
+        build(
+            &[f("a-game.yaml", topo)],
+            &[f("fix-pack.yaml", pkg)],
+            1,
+            ISSUED,
+        )
+    };
+    let e = go(&two, &by_api).unwrap_err();
+    assert!(
+        e.contains(
+            "variant fix-pack installs package fix-pack, whose files depend on the graphics API"
+        ),
+        "{e}"
+    );
+    // One API, or a package that does not depend on it: built as before.
+    go(TOPO, &by_api).unwrap();
+    go(&two, PACKAGE).unwrap();
+}
+
 #[test]
 fn issued_and_seq_are_checked() {
     assert!(build(&[], &[], 0, ISSUED).is_err());

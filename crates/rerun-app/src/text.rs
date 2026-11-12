@@ -1101,6 +1101,10 @@ pub enum Msg {
     RefUnavailableBody,
     /// An undo that needs the helper; Windows grants no elevation.
     UndoNoElevation,
+    /// A fix that needs the helper; it cannot be used for another reason.
+    FixHelperUnavailable,
+    /// An undo that needs the helper; it cannot be used for another reason.
+    UndoHelperUnavailable,
 }
 
 /// The text of `m` in `lang`.
@@ -1668,6 +1672,8 @@ fn en(m: Msg) -> Cow<'static, str> {
         RefUnavailableTitle => "Not available here",
         RefUnavailableBody => "This fix cannot be applied from the app right now. Nothing was changed.",
         UndoNoElevation => "Undoing this needs administrator rights, and Windows does not grant them to this account (or User Account Control is off).",
+        FixHelperUnavailable => "This fix needs Rerun's administrator helper, which cannot be used here right now. It cannot be applied.",
+        UndoHelperUnavailable => "Undoing this needs Rerun's administrator helper, which cannot be used here right now; until then the change stays.",
     };
     Cow::Borrowed(s)
 }
@@ -2232,6 +2238,8 @@ fn de(m: Msg) -> Cow<'static, str> {
         RefUnavailableTitle => "Hier nicht verfügbar",
         RefUnavailableBody => "Dieser Fix kann gerade nicht aus der App angewendet werden. Es wurde nichts geändert.",
         UndoNoElevation => "Das Rückgängigmachen braucht Administratorrechte, und Windows gibt sie diesem Konto nicht (oder die Benutzerkontensteuerung ist aus).",
+        FixHelperUnavailable => "Dieser Fix braucht den Administrator-Helfer von Rerun, der hier gerade nicht nutzbar ist. Er kann nicht angewendet werden.",
+        UndoHelperUnavailable => "Das Rückgängigmachen braucht den Administrator-Helfer von Rerun, der hier gerade nicht nutzbar ist; bis dahin bleibt die Änderung.",
     };
     Cow::Borrowed(s)
 }

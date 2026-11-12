@@ -182,18 +182,24 @@ pub(super) fn link(fixes: &mut [FixVm]) {
 pub enum HelperState {
     /// It is installed safely and Windows allows an elevation: the prompt the user will meet.
     Ready(PromptState),
-    /// Not installed, not admin-only, or a test-key helper for a release build.
+    /// Not installed, not admin-only, or a test-key helper for a release build
+    /// (`Refusal::HelperUnsafe`).
     Missing,
     /// Windows grants no elevation (`Denied`, `UacOff`; or this process is elevated).
     NoElevation,
+    /// Another refusal (one a later core may add): the helper cannot be used now, for a reason
+    /// that is neither of the above; never read as "not installed" (review of P5-5c).
+    Unavailable,
 }
 
 /// The [`HelperState`] of `flow::helper`'s answer.
 pub fn helper_state(r: &Result<PromptState, Refusal>) -> HelperState {
     match r {
         Ok(s) => HelperState::Ready(*s),
+        Err(Refusal::HelperUnsafe(_)) => HelperState::Missing,
         Err(Refusal::NoElevation(_) | Refusal::Elevated) => HelperState::NoElevation,
-        Err(_) => HelperState::Missing,
+        // `Refusal` is non-exhaustive: anything else is its own state, with its own words.
+        Err(_) => HelperState::Unavailable,
     }
 }
 
@@ -1502,6 +1508,7 @@ fn prompt_block(
     match helper {
         Some(HelperState::Ready(_)) => None,
         Some(HelperState::NoElevation) => Some(tx(lang, Msg::UndoNoElevation)),
+        Some(HelperState::Unavailable) => Some(tx(lang, Msg::UndoHelperUnavailable)),
         Some(HelperState::Missing) | None => Some(tx(lang, Msg::UndoPrompt)),
     }
 }

@@ -938,7 +938,6 @@ fn aw14_the_window_cannot_close_while_a_write_is_queued_or_runs() {
         }),
     )
     .unwrap();
-    worker.set_owner(None);
     assert!(!worker.busy_writing());
     // The first job's wake holds the thread; a read job is no write.
     worker.send(Job::Status);
@@ -1128,7 +1127,6 @@ fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
         }),
     )
     .unwrap();
-    worker.set_owner(None);
     worker.send(Job::Game {
         app_id: 220,
         name: None,

@@ -63,14 +63,12 @@ fn main() -> ExitCode {
             }
         }
     }
-    // The worker builds its system once the window handed over its handle: the UAC dialog of a
-    // helper start belongs to the window (P5-5c), not to a console the app does not have.
+    // The window fills the slot with its handle once it exists: the UAC dialog of a helper start
+    // belongs to the window (P5-5c), not to a console the app does not have.
     ui::run(|owner| {
-        let sys = WinSystem::new().map_err(|e| vm::shown_error(&e))?;
-        let sys = match owner {
-            Some(o) => sys.with_prompt_owner(o),
-            None => sys,
-        };
+        let sys = WinSystem::new()
+            .map_err(|e| vm::shown_error(&e))?
+            .with_prompt_owner_slot(owner);
         Ok(worker::World {
             sys: Box::new(sys),
             http: Box::new(WinHttp::new()),

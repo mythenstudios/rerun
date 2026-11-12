@@ -343,6 +343,36 @@ pub fn check_index(index: &Index) -> Result<(Lookup, Lookup), IndexError> {
             }
         }
     }
+    // P5-5c review: until the game options of ADR 0032 name the executable the game runs, a
+    // variant that installs a package whose files depend on the graphics API (or one it
+    // requires) is refused for a Topo whose executables name more than one API. The engine would
+    // refuse its plan (`EngineError::PackageApiOpen`, which stays its guard), and the app would
+    // offer a download for a fix it cannot apply.
+    for t in &index.topos {
+        let mut apis = t.matches.exes.iter().map(|e| e.api);
+        let first = apis.next();
+        if !first.is_some_and(|f| apis.any(|a| a != f)) {
+            continue;
+        }
+        for v in t.issues.iter().flat_map(|i| &i.variants) {
+            for s in &v.steps {
+                let model::TopoStep::Package(id) = s else {
+                    continue;
+                };
+                if let Some(p) = with_requires(index, &packages, id)
+                    .into_iter()
+                    .find(|p| p.depends_on_api())
+                {
+                    return Err(rule(format!(
+                        "topo {}: variant {} installs package {}, whose files depend on the \
+                         graphics API, but its match.exes name more than one api (the game \
+                         options of ADR 0032 are not there yet)",
+                        t.id, v.id, p.id
+                    )));
+                }
+            }
+        }
+    }
     for p in &index.packages {
         if let Some(id) = p
             .requires
@@ -362,6 +392,24 @@ pub fn check_index(index: &Index) -> Result<(Lookup, Lookup), IndexError> {
         .map(|(i, t)| (t.id.as_str().to_owned(), i))
         .collect();
     Ok((topos, packages))
+}
+
+/// The package `id` and every package it requires, transitively (each once; the ones not in the
+/// index are another rule's).
+fn with_requires<'i>(index: &'i Index, packages: &Lookup, id: &model::Id) -> Vec<&'i Package> {
+    let mut out: Vec<&Package> = Vec::new();
+    let mut todo = vec![id];
+    while let Some(next) = todo.pop() {
+        let Some(p) = packages.get(next.as_str()).map(|i| &index.packages[*i]) else {
+            continue;
+        };
+        if out.iter().any(|q| q.id == p.id) {
+            continue;
+        }
+        out.push(p);
+        todo.extend(p.requires.iter());
+    }
+    out
 }
 
 #[cfg(test)]

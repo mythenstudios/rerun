@@ -70,8 +70,8 @@ use super::status::kind_of_win32;
 use super::token;
 use crate::path::RootPath;
 use crate::sys::elevation::{
-    Elevation, HelperLock, HelperPresence, HelperProc, HelperRun, PromptOwner, TokenKind,
-    parameters,
+    Elevation, HelperLock, HelperPresence, HelperProc, HelperRun, PromptOwner, PromptOwnerSlot,
+    TokenKind, parameters,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
@@ -85,17 +85,23 @@ const MAX_IMAGE: u32 = 32_768;
 /// The class key of every start (A4 S2).
 pub(super) const EXEFILE_CLASS: &str = r"SOFTWARE\Classes\exefile";
 
-/// The real [`Elevation`]: the UAC dialog belongs to `owner`, or to the console window without
-/// one (module docs).
-#[derive(Debug, Clone, Copy, Default)]
+/// The real [`Elevation`]: the UAC dialog belongs to the owner in its slot when a start reads
+/// it, or to the console window while there is none (module docs).
+#[derive(Debug, Clone, Default)]
 pub struct WinElevation {
-    owner: Option<PromptOwner>,
+    owner: PromptOwnerSlot,
 }
 
 impl WinElevation {
     /// The dialog of every start belongs to `owner` (the app's window).
-    pub const fn owned_by(owner: PromptOwner) -> Self {
-        Self { owner: Some(owner) }
+    pub fn owned_by(owner: PromptOwner) -> Self {
+        Self::with_slot(PromptOwnerSlot::with(owner))
+    }
+
+    /// The dialog of every start belongs to the owner `slot` holds when the start reads it (the
+    /// caller sets it once its window exists).
+    pub fn with_slot(slot: PromptOwnerSlot) -> Self {
+        Self { owner: slot }
     }
 }
 
@@ -307,7 +313,8 @@ impl Elevation for WinElevation {
             .parent()
             .ok_or_else(|| SysError::new(SysErrorKind::InvalidPath, &shown))?;
         let class = exefile_class().map_err(|c| sys_err(r"HKLM\SOFTWARE\Classes\exefile", c))?;
-        let process = match start("runas", image.path(), &params, dir, &class, self.owner) {
+        let owner = self.owner.get();
+        let process = match start("runas", image.path(), &params, dir, &class, owner) {
             Ok(p) => p,
             Err(NoProcess::Failed(ERROR_CANCELLED)) => return Ok(HelperRun::Declined),
             // No process was created: an error (the caller's `HelperFailure::Start`).

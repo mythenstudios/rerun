@@ -383,6 +383,10 @@ pub fn fetch(
     })
 }
 
+// The fetch reads the index through `catalog::trusted_keys()`, which holds the published test
+// key only with the feature `test-key`: without it every index is refused (`NoKeys`), so the
+// tests run with it (`cargo test -p rerun-core --features fake,test-key`, and the workspace run).
 #[cfg(test)]
+#[cfg(feature = "test-key")]
 #[path = "packages_tests.rs"]
 mod tests;

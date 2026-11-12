@@ -41,7 +41,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use rerun_core::escape::Shown;
-use rerun_core::sys::PromptOwner;
+use rerun_core::sys::{PromptOwner, PromptOwnerSlot};
 use slint::{CloseRequestResponse, Color, ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::text::{Lang, Msg, t};
@@ -162,10 +162,11 @@ pub fn refuse_start(lang: Lang, elevated: bool) {
 }
 
 /// Runs the window until it is closed. `make` builds the worker's world on its thread, with the
-/// window as the owner of the UAC dialog once its native handle exists (P5-5c).
+/// slot the window fills with its handle once its native window exists: the owner of the UAC
+/// dialog (P5-5c).
 pub fn run<F>(make: F) -> ExitCode
 where
-    F: FnOnce(Option<PromptOwner>) -> Result<World, Shown<'static>> + Send + 'static,
+    F: FnOnce(PromptOwnerSlot) -> Result<World, Shown<'static>> + Send + 'static,
 {
     // The software renderer always (module docs).
     if slint::BackendSelector::new()
@@ -232,9 +233,9 @@ where
 }
 
 /// Hands the worker the window's handle as the owner of the UAC dialog once the native window
-/// exists (it appears with the first turn of the event loop); after a few tries the worker gets
-/// none and the dialog has no owner (it may open behind the window). The worker builds its system
-/// after this, so the library scan starts a turn later (P5-5c).
+/// exists (it appears with the first turn of the event loop). The system reads it at every
+/// helper start; after a few tries without a handle the dialog has no owner of the app's (it may
+/// open behind the window) (P5-5c).
 fn hand_owner(ui: &AppWindow, state: &Rc<RefCell<State>>, tries: u32) {
     let weak = ui.as_weak();
     let state = state.clone();
@@ -245,9 +246,11 @@ fn hand_owner(ui: &AppWindow, state: &Rc<RefCell<State>>, tries: u32) {
                 return;
             };
             match chrome::owner_of(ui.window()).and_then(PromptOwner::from_raw) {
-                Some(owner) => state.borrow().worker.set_owner(Some(owner)),
+                Some(owner) => {
+                    state.borrow().worker.set_owner(Some(owner));
+                }
                 None if tries < 20 => hand_owner(&ui, &state, tries + 1),
-                None => state.borrow().worker.set_owner(None),
+                None => {}
             }
         },
     );

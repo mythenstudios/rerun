@@ -29,9 +29,11 @@
 //!
 //! The elevated helper (P5-5c, ADR 0023 amendment P5-5c): a fix or an undo that needs it is
 //! offered only when `flow::helper` says it could run now (installed safely, Windows allows an
-//! elevation), and the preview names the UAC prompt. The system is built with the window as the
-//! owner of the UAC dialog ([`Worker::set_owner`]: the thread builds the world only once the
-//! window handed its handle over, or said it has none). Before the core call that may start the
+//! elevation), and the preview names the UAC prompt. The system is built at once with a
+//! [`PromptOwnerSlot`] the window fills with its handle when its native window exists
+//! ([`Worker::set_owner`]); every helper start reads it then, so a late owner is never lost (a
+//! start before it would have no owner; the window exists long before any click). Before the
+//! core call that may start the
 //! helper, the worker sends [`Event::WaitingForUac`] (only when Windows shows a dialog); the
 //! thread then blocks in `run_helper` until the user answers, and the result follows. The window
 //! cannot close meanwhile (a write job runs).
@@ -46,7 +48,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
 
 use rerun_core::catalog::Catalog;
 use rerun_core::catalog::model::Status;
@@ -61,7 +62,7 @@ use rerun_core::flow::{
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::journal::TxnId;
 use rerun_core::plan::Pick;
-use rerun_core::sys::{Http, PromptOwner, System};
+use rerun_core::sys::{Http, PromptOwner, PromptOwnerSlot, System};
 use rerun_core::topo;
 
 use crate::text::{Lang, Msg, t};
@@ -267,16 +268,11 @@ pub struct World {
     pub install: Result<PathBuf, String>,
 }
 
-/// How long the thread waits for the window's handle before it builds the system without an
-/// owner (the UAC dialog then has none and may open behind the window). The window hands it over
-/// within its first turns of the event loop.
-const OWNER_WAIT: Duration = Duration::from_secs(5);
-
 /// The worker thread's handle.
 pub struct Worker {
     jobs: Sender<Job>,
-    /// The owner of the UAC dialog, handed over once (the thread builds its world after it).
-    owner: Sender<Option<PromptOwner>>,
+    /// The owner of the UAC dialog: the system reads it at every helper start.
+    owner: PromptOwnerSlot,
     events: Receiver<Event>,
     /// Write jobs queued or running: the window does not close while it is above zero.
     writes: Arc<AtomicUsize>,
@@ -288,15 +284,15 @@ pub struct Worker {
 
 impl Worker {
     /// Starts the thread. `make` builds the world on it (a `WinSystem` is created and used on
-    /// one thread only) with the owner of the UAC dialog the window hands over
-    /// ([`Self::set_owner`]; `None` after [`OWNER_WAIT`] without one); if it fails, every job is
-    /// answered with [`Event::Blocked`]. Jobs sent before wait for it.
+    /// one thread only) with the slot of the UAC dialog's owner, which the window fills later
+    /// ([`Self::set_owner`]); if it fails, every job is answered with [`Event::Blocked`].
     pub fn start<F>(lang: Lang, make: F, wake: Box<dyn Wake>) -> std::io::Result<Self>
     where
-        F: FnOnce(Option<PromptOwner>) -> Result<World, Shown<'static>> + Send + 'static,
+        F: FnOnce(PromptOwnerSlot) -> Result<World, Shown<'static>> + Send + 'static,
     {
         let (jobs, job_rx) = mpsc::channel::<Job>();
-        let (owner, owner_rx) = mpsc::channel::<Option<PromptOwner>>();
+        let owner = PromptOwnerSlot::new();
+        let thread_owner = owner.clone();
         let (event_tx, events) = mpsc::channel::<Event>();
         let writes = Arc::new(AtomicUsize::new(0));
         let downloads = Arc::new(AtomicUsize::new(0));
@@ -307,8 +303,7 @@ impl Worker {
         std::thread::Builder::new()
             .name("rerun-worker".to_owned())
             .spawn(move || {
-                let owner = owner_rx.recv_timeout(OWNER_WAIT).ok().flatten();
-                let world = make(owner);
+                let world = make(thread_owner);
                 let mut emit = |e: Event| {
                     // The window is gone when the receiver is: nothing left to tell.
                     if event_tx.send(e).is_ok() {
@@ -360,11 +355,11 @@ impl Worker {
         })
     }
 
-    /// Hands the thread the window that owns the UAC dialog (or `None`: the window has no native
-    /// handle). Only the first call counts; the thread builds its world after it.
-    pub fn set_owner(&self, owner: Option<PromptOwner>) {
-        // An error means the thread has ended (or already took one): nothing to do.
-        let _ = self.owner.send(owner);
+    /// Hands the system the window that owns the UAC dialog; it is used from the next helper
+    /// start on. Only the first owner counts (`false` for a later one); `None` (the window has no
+    /// native handle) leaves the dialog without an owner of the app's.
+    pub fn set_owner(&self, owner: Option<PromptOwner>) -> bool {
+        owner.is_some_and(|o| self.owner.set(o))
     }
 
     /// Queues a job (ignored once the thread has ended). A write job counts as running from

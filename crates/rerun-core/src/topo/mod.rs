@@ -172,6 +172,16 @@ impl GameFacts {
         let mut apis = self.matched_exes().map(|e| e.api);
         apis.next().is_some_and(|first| apis.any(|a| a != first))
     }
+
+    /// The matched executables do not all have one architecture (as parsed; one that could not
+    /// be parsed counts as different): a package's DLLs follow the architecture of the
+    /// executable the game runs, which is not known (ADR 0020 amendment "Other executables").
+    pub fn arches_differ(&self) -> bool {
+        let mut arches = self.matched_exes().map(|e| e.arch);
+        arches
+            .next()
+            .is_some_and(|first| arches.any(|a| a != first))
+    }
 }
 
 /// Reads what the engine needs of the game folder (module docs).
@@ -728,6 +738,17 @@ pub enum EngineError {
         /// The package ID.
         id: String,
     },
+    /// A package that installs DLLs, for a game whose matched executables have different
+    /// architectures (ADR 0020 amendment "Other executables"): which one runs is not known yet.
+    #[error(
+        "package {id}: its DLLs are built for one architecture, and this game's executables use \
+         more than one; Rerun does not know yet which of them the game runs, so it does not \
+         install the package"
+    )]
+    PackageArchOpen {
+        /// The package ID.
+        id: String,
+    },
     /// A picked step sets a file in the Topo's user data folder (P4-12), but the folder the
     /// caller opened is not that folder (or none): the caller opens it with
     /// [`needs_user_data`] and the Topo's `user_data`.
@@ -1211,8 +1232,12 @@ fn package_step<'p>(
     // The API decides which DLLs (slots) a package installs; with matched executables of
     // different APIs the running one is not known yet (the game options of ADR 0032 will pick
     // it): refused rather than guessed from the first match.
-    if depends_on_api(p) && facts.game.apis_differ() {
+    if p.depends_on_api() && facts.game.apis_differ() {
         return Err(EngineError::PackageApiOpen { id: id.to_owned() });
+    }
+    // The same for the architecture: the DLLs of one architecture are wrong for the other.
+    if p.depends_on_arch() && facts.game.arches_differ() {
+        return Err(EngineError::PackageArchOpen { id: id.to_owned() });
     }
     let api = facts
         .game
@@ -1236,12 +1261,6 @@ fn package_step<'p>(
     let spec = prim::package::file_install(p, &build)
         .map_err(|e: PackageRefusal| refused(e.to_string()))?;
     Ok((p, spec))
-}
-
-/// The files `p` installs depend on the game's graphics API (`apis`, `slots_by_api`, or a file
-/// with `api`).
-fn depends_on_api(p: &Package) -> bool {
-    p.apis.is_some() || p.slots_by_api.is_some() || p.files.iter().any(|f| f.api.is_some())
 }
 
 /// Slot conflicts inside one plan (P4-8): no two packages of the plan put a DLL (a slot, bound

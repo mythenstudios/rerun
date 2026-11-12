@@ -52,7 +52,7 @@ pub mod win;
 
 pub use elevation::{
     Elevation, HelperLock, HelperPresence, HelperProc, HelperRun, NoElevation, PromptOwner,
-    TokenKind,
+    PromptOwnerSlot, TokenKind,
 };
 pub use error::{SysError, SysErrorKind, SysResult, shown_target};
 pub use firewall::{Firewall, FirewallWrite, FwRest, FwRule, FwRule3, FwSelection};
