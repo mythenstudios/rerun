@@ -51,8 +51,8 @@ pub use library::{LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_gam
 pub use revert::{
     ActError, CleanupAsk, ForgetPreview, ForgetShown, LaunchOption, ProfileFate, RebindShown,
     RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome, RevertPreview, RevertShown,
-    RevertWould, fate_after, fate_before, fate_forget, forget, forget_preview, holding, rebind,
-    rebind_preview, revert, revert_end, revert_preview,
+    RevertWould, forget, forget_preview, holding, left_foreign, rebind, rebind_preview, revert,
+    revert_preview,
 };
 pub use status::{Holder, StatusView, head, profile_id_of, profile_of, profile_op, status};
 pub use write::{

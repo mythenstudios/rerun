@@ -2031,3 +2031,80 @@ fn the_banner_copies_agree() {
     #[cfg(feature = "test-key")]
     assert_eq!(Message::TestKeyBuild.to_string(), banner);
 }
+
+// ---------- C13: changed between the preview and the answer (P5-2b) ----------
+
+/// A console that lets another program change the fake while the question waits, then says yes.
+struct Meddling<'a> {
+    sys: &'a FakeSystem,
+    change: fn(&FakeSystem),
+    asked: Vec<String>,
+}
+
+impl Confirm for Meddling<'_> {
+    fn ask(&mut self, q: &Message<'_>) -> Answer {
+        self.asked.push(q.to_string());
+        (self.change)(self.sys);
+        Answer::Yes
+    }
+}
+
+/// `rerun <args>` with a [`Meddling`] console: exit, stdout, stderr.
+fn meddled(sys: &FakeSystem, args: &[&str], change: fn(&FakeSystem)) -> (Exit, String, String) {
+    let cli = Cli::try_parse_from(std::iter::once("rerun").chain(args.iter().copied()))
+        .unwrap_or_else(|e| panic!("{args:?}: {e}"));
+    let mut c = Meddling {
+        sys,
+        change,
+        asked: Vec::new(),
+    };
+    let http = FakeHttp::default();
+    let mut host = Host {
+        sys,
+        http: &http,
+        install: Ok(INSTALL.into()),
+        confirm: &mut c,
+    };
+    let (mut out, mut err) = (Out::new(Vec::new()), Out::new(Vec::new()));
+    let exit = run(&mut host, cli.command, &mut out, &mut err);
+    assert_eq!(c.asked.len(), 1, "asked once");
+    (
+        exit,
+        String::from_utf8(out.into_inner()).unwrap(),
+        String::from_utf8(err.into_inner()).unwrap(),
+    )
+}
+
+/// The file the revert would remove is deleted by someone else while `revert` and `forget` ask:
+/// exit 3 with the line of `Refusal::Changed`, Rerun's folder unchanged; run again, they go
+/// through.
+#[test]
+fn c13_a_change_while_the_question_waits_is_refused_with_nothing_written() {
+    fn delete_new(sys: &FakeSystem) {
+        sys.fake_fs()
+            .remove_abs(Path::new(&game("new.dll")))
+            .unwrap();
+        sys.sync_all();
+    }
+    for cmd in ["revert", "forget"] {
+        let sys = build(with_package(), &file_steps());
+        let txn = applied(&sys);
+        let journal = snap_dirs(&sys, &[RERUN]);
+        let (exit, _, stderr) = meddled(&sys, &[cmd, &txn], delete_new);
+        assert_eq!(exit, Exit::Refused, "{cmd}: {stderr}");
+        assert!(
+            stderr.ends_with(&format!(
+                "transaction {txn} changed since its preview; nothing was done; look at it again \
+                 before you go on\n"
+            )),
+            "{cmd}: {stderr}"
+        );
+        same(&journal, &snap_dirs(&sys, &[RERUN]));
+        let again = expect(&sys, &[cmd, &txn, "--yes"], Answer::No, Exit::Report);
+        assert!(again.stderr.is_empty(), "{cmd}: {}", again.stderr);
+        assert!(
+            journal != snap_dirs(&sys, &[RERUN]),
+            "{cmd}: the second run writes"
+        );
+    }
+}

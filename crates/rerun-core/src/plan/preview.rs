@@ -363,6 +363,9 @@ impl fmt::Display for RegShown {
 }
 
 /// The preview of a whole plan.
+///
+/// `Debug` is compared by `flow::revert` (its digest of a preview, ADR 0027 amendment P5-2b):
+/// derive only, never a manual impl (a source rule of `rerun-core`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preview {
     /// The roots.

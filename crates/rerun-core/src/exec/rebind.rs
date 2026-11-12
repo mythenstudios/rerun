@@ -574,6 +574,10 @@ pub(crate) fn revert_rebound_seen(
         }
         drop(w);
         drop(lock);
+        // `Look::Early` alone suffices here (P5-2b): a preview of a transaction bound already is
+        // `rebind_check`'s `AlreadyBound`, so a front end reaches this branch only if a rebind
+        // record was written after its preview, and that record changed `TxnStatus::rebinds`,
+        // which the comparison right after the lock (above, and again in `revert_seen`) covers.
         return super::revert_seen(cx, t, same);
     }
     let ops = w.ops().clone();

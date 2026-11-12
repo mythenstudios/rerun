@@ -203,3 +203,86 @@ fn certificate_validation_is_never_switched_off() {
     );
     assert!(tls_off("// WINHTTP_OPTION_SECURITY_FLAGS in a comment").is_empty());
 }
+
+/// The source folders and files of the types whose `Debug` form `flow::revert` hashes to compare
+/// a preview with what is observed under the lock (ADR 0027 amendment P5-2b): the journal view,
+/// the observation, the head's preview and the values in them.
+const DIGESTED: &[&str] = &[
+    "crates/rerun-core/src/exec",
+    "crates/rerun-core/src/plan",
+    "crates/rerun-core/src/journal",
+    "crates/rerun-core/src/escape.rs",
+    "crates/rerun-core/src/escape",
+    "crates/rerun-core/src/path.rs",
+];
+
+/// Hand-written `Debug` impls there of types that are never part of a digest (a context and a
+/// lock guard).
+const DEBUG_ALLOWED: &[&str] = &["ExecCtx", "LockHold"];
+
+/// The types with a hand-written `Debug` impl in `src` (comments aside).
+fn manual_debug(src: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in src.lines() {
+        let code = line.split("//").next().unwrap_or_default();
+        let s: String = code.split_whitespace().collect::<Vec<_>>().join(" ");
+        let Some(at) = s.find("Debug for ") else {
+            continue;
+        };
+        if !s.trim_start().starts_with("impl") {
+            continue;
+        }
+        let ty: String = s[at + "Debug for ".len()..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        found.push(ty);
+    }
+    found
+}
+
+/// The digest of a preview is taken over the derived `Debug` form, which holds every field; a
+/// hand-written impl could leave a field out and let a change pass as "the same" (P5-2b).
+#[test]
+fn digested_types_derive_debug() {
+    let root = workspace();
+    let mut files = Vec::new();
+    for d in DIGESTED {
+        let p = root.join(d);
+        if p.is_file() {
+            files.push(p);
+        } else {
+            rust_files(&p, &mut files);
+        }
+    }
+    assert!(files.len() > 10, "found only {} .rs files", files.len());
+    let mut bad = Vec::new();
+    for f in files {
+        let src = std::fs::read_to_string(&f).unwrap();
+        for ty in manual_debug(&src) {
+            if !DEBUG_ALLOWED.contains(&ty.as_str()) {
+                bad.push(format!("{}: {ty}", f.display()));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "flow::revert compares the Debug form of these types: derive Debug, never a manual impl:\n{}",
+        bad.join("\n")
+    );
+    // The scanner has teeth.
+    assert_eq!(
+        manual_debug("impl fmt::Debug for TxnStatus {"),
+        ["TxnStatus"]
+    );
+    assert_eq!(
+        manual_debug("impl std::fmt::Debug for Verified {"),
+        ["Verified"]
+    );
+    assert_eq!(manual_debug("impl Debug for Halt {"), ["Halt"]);
+    assert_eq!(
+        manual_debug("impl<'a>  fmt::Debug  for Preview<'a> {"),
+        ["Preview"]
+    );
+    assert!(manual_debug("#[derive(Debug)]\n// impl Debug for X").is_empty());
+}

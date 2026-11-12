@@ -13,6 +13,8 @@
 //!   `Changed`, the journal unchanged; unchanged, it forgets.
 //! - FR6 the gates: not found, no Rerun folder, forgotten, closed, damaged, refused (LIFO), an
 //!   empty transaction with a head (no question).
+//! - FX1 the launch profile's fate (X12) before a revert, after it and before a forget (moved
+//!   from the CLI, review of P5-2b).
 //!
 //! The `compile_fail` doctests of `flow::revert` and `flow::RevertShown` check that `revert`
 //! takes no transaction ID and that a `RevertShown` comes only from `revert_preview`.
@@ -321,4 +323,224 @@ fn fr6_the_gates() {
         crate::exec::tests::try_read_abs(&env.sys, &game("d3d9.dll")).as_deref(),
         Some(crate::exec::tests::OLD)
     );
+}
+
+// ---------- FX1: the launch profile's fate (X12, review M1/B1; moved from the CLI) ----------
+
+mod x12 {
+    use std::collections::BTreeMap;
+
+    use crate::escape;
+    use crate::exec::{
+        Halt, OpReport, OpState, OpStatus, Refusal, RevertReport, TxnLine, TxnStatus, Verified,
+    };
+    use crate::journal::{Observed, TxnId};
+    use crate::plan::{NOT_RESTORED, Preview, PreviewOp, PreviewRoot, ProfilePreview, RootKind};
+
+    use super::super::{LaunchOption, ProfileFate as F, fate_after, fate_before, fate_forget};
+
+    fn txn() -> TxnId {
+        "00000004-00000000000000ab".parse().unwrap()
+    }
+
+    fn file_op(index: usize, action: &'static str, path: &str) -> PreviewOp {
+        PreviewOp {
+            index,
+            action,
+            root: Some(0),
+            path: escape::path(path).into_owned(),
+            name: None,
+            old_value: None,
+            new_value: None,
+            tokens: None,
+            machine: Vec::new(),
+            type_change: false,
+            source: None,
+            content: None,
+            attrs: None,
+            old: None,
+            config: false,
+            ini: Vec::new(),
+            profile: None,
+            replaces: false,
+            firewall: None,
+            held: false,
+            patch: Vec::new(),
+        }
+    }
+
+    fn root(index: usize, kind: RootKind, path: &str) -> PreviewRoot {
+        PreviewRoot {
+            index,
+            kind,
+            path: escape::path(path).into_owned(),
+            steam: None,
+            main_exe: None,
+        }
+    }
+
+    /// A head with a game file op 1 and, with `profile`, a launch profile op 0 (`Some(true)`: it
+    /// replaced a profile).
+    fn head(profile: Option<bool>) -> Preview {
+        let mut ops = vec![
+            file_op(0, "create file", "a.dll"),
+            file_op(1, "create file", "new.dll"),
+        ];
+        let mut roots = vec![root(0, RootKind::Game, r"D:\Games\G")];
+        if let Some(replace) = profile {
+            let prof = &mut ops[0];
+            prof.action = if replace {
+                "replace file"
+            } else {
+                "create file"
+            };
+            prof.path = escape::path("323ad79fbc93ca3e73b0b152a5d44616.profile").into_owned();
+            prof.root = Some(1);
+            prof.replaces = replace;
+            // The ID comes from the file name.
+            prof.profile = Some(ProfilePreview::Unreadable("x".to_owned()));
+            roots.push(root(
+                1,
+                RootKind::Profiles,
+                r"C:\Users\Player\AppData\Local\Rerun\profiles",
+            ));
+        }
+        Preview {
+            roots,
+            ops,
+            not_restored: NOT_RESTORED,
+            registry: None,
+            layers: None,
+            ini: None,
+            profiles: None,
+            firewall: None,
+            held: None,
+            patched: None,
+            gpu_pref: None,
+            user_data: None,
+        }
+    }
+
+    fn st(state: TxnLine, profile: Option<bool>, ops: &[(u16, OpState)]) -> TxnStatus {
+        TxnStatus {
+            id: txn(),
+            state,
+            forgotten: false,
+            folder: escape::path(r"C:\x").into_owned(),
+            preview: Some(Ok(head(profile))),
+            ops: ops
+                .iter()
+                .map(|(op, state)| OpStatus {
+                    op: *op,
+                    state: *state,
+                    backup: None,
+                    cleanup: Vec::new(),
+                })
+                .collect(),
+            rebinds: Vec::new(),
+            shares: Vec::new(),
+            shares_error: None,
+        }
+    }
+
+    fn halt(h: Option<(u16, u16)>) -> Option<Halt> {
+        h.map(|(op, root)| Halt {
+            op,
+            root,
+            why: Box::new(Refusal::NeedsHelper),
+        })
+    }
+
+    fn verified(ops: Vec<(u16, Observed)>, halted: Option<(u16, u16)>) -> Verified {
+        Verified {
+            ops,
+            halted: halt(halted),
+            details: BTreeMap::new(),
+            cleanup: Vec::new(),
+            profiles_moved: None,
+            virtual_store: Vec::new(),
+        }
+    }
+
+    fn report(ops: Vec<(u16, Observed)>, halted: Option<(u16, u16)>) -> RevertReport {
+        RevertReport {
+            txn: txn(),
+            closed: None,
+            ops: ops
+                .into_iter()
+                .map(|(op, observed)| OpReport {
+                    op,
+                    observed,
+                    left: Vec::new(),
+                    backup: None,
+                    detail: None,
+                })
+                .collect(),
+            halted: halt(halted),
+            cleanup: Vec::new(),
+            profiles_moved: None,
+        }
+    }
+
+    fn fate(lo: Option<LaunchOption>) -> F {
+        lo.map(|l| l.fate).expect("a launch profile")
+    }
+
+    /// FX1 (moved from the CLI's X12 test, review of P5-2b): which fate a revert's preview, its
+    /// report and a forget give.
+    #[test]
+    fn fx1_the_fate_follows_what_becomes_of_the_profile() {
+        let a = OpState::Applied;
+        let applied = |replace| st(TxnLine::Applied, Some(replace), &[(1, a), (0, a)]);
+        // A created profile reverted: gone; a replaced one: the previous profile is back.
+        let both = vec![(0, Observed::After), (1, Observed::After)];
+        let v = verified(both.clone(), None);
+        assert_eq!(fate(fate_before(&applied(false), &v)), F::Gone);
+        assert_eq!(fate(fate_before(&applied(true), &v)), F::PreviousBack);
+        let r = report(both, None);
+        assert_eq!(fate(fate_after(&applied(false), &r)), F::Gone);
+        assert_eq!(fate(fate_after(&applied(true), &r)), F::PreviousBack);
+        // The game folder gone: a halt at the game op before the profile is reached: it stays.
+        let v = verified(Vec::new(), Some((1, 0)));
+        assert_eq!(fate(fate_before(&applied(false), &v)), F::Stays);
+        let r = report(Vec::new(), Some((1, 0)));
+        assert_eq!(fate(fate_after(&applied(false), &r)), F::Stays);
+        // `profiles` gone: a halt at the profile op itself: no profile.
+        let r = report(vec![(1, Observed::After)], Some((0, 1)));
+        assert_eq!(fate(fate_after(&applied(false), &r)), F::Gone);
+        // Changed by someone else: left, it keeps applying.
+        let r = report(vec![(1, Observed::After), (0, Observed::Foreign)], None);
+        assert_eq!(fate(fate_after(&applied(false), &r)), F::Stays);
+        // Forget: as it is now. Applied: it stays.
+        let now = verified(vec![(0, Observed::After), (1, Observed::After)], None);
+        assert_eq!(fate(fate_forget(&applied(false), Some(&now))), F::Stays);
+        assert_eq!(fate(fate_forget(&applied(false), None)), F::Stays);
+        // Forget with only the cleanup pending: the profile op was reverted already.
+        let rv = OpState::Reverted(Observed::After);
+        let cleanup = |replace| st(TxnLine::CleanupPending, Some(replace), &[(1, rv), (0, rv)]);
+        assert_eq!(fate(fate_forget(&cleanup(false), Some(&now))), F::Gone);
+        assert_eq!(
+            fate(fate_forget(&cleanup(true), Some(&now))),
+            F::PreviousBack
+        );
+        // Review L-a: `profiles` missing, forget: `verify` halts at the profile op itself.
+        let v = verified(vec![(1, Observed::After)], Some((0, 1)));
+        assert_eq!(fate(fate_forget(&applied(false), Some(&v))), F::Gone);
+        // Review L-a: an earlier revert left the profile foreign; whether it is still there is
+        // not known.
+        let left = st(
+            TxnLine::Applied,
+            Some(false),
+            &[(1, a), (0, OpState::Reverted(Observed::Foreign))],
+        );
+        let v = verified(vec![(0, Observed::Foreign), (1, Observed::After)], None);
+        assert_eq!(fate(fate_before(&left, &v)), F::Left);
+        let r = report(vec![(1, Observed::After)], None);
+        assert_eq!(fate(fate_after(&left, &r)), F::Left);
+        assert_eq!(fate(fate_forget(&left, Some(&v))), F::Left);
+        // A head without a profile: nothing.
+        let plain = st(TxnLine::Applied, None, &[]);
+        assert!(fate_forget(&plain, None).is_none());
+        assert!(fate_before(&plain, &now).is_none());
+    }
 }

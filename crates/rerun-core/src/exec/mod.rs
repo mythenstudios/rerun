@@ -754,6 +754,9 @@ pub struct IniKey {
 /// later revert goes on from there once the folder itself is back or the update finished. A
 /// reinstall makes a new folder with a new identity: `IdentityMismatch`, refused until a
 /// rebind (D5).
+///
+/// `Debug` is compared by `flow::revert` (its digest of a preview, ADR 0027 amendment P5-2b):
+/// derive only, never a manual impl (a source rule of `rerun-core`).
 #[derive(Debug)]
 pub struct Halt {
     /// Op index.
@@ -785,6 +788,9 @@ pub struct RevertReport {
 }
 
 /// What [`verify`] observed.
+///
+/// `Debug` is compared by `flow::revert` (its digest of a preview, ADR 0027 amendment P5-2b):
+/// derive only, never a manual impl (a source rule of `rerun-core`).
 #[derive(Debug)]
 pub struct Verified {
     /// The intended ops by index (ascending): observed now, or `Foreign` as recorded for an

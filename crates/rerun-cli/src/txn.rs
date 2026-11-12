@@ -36,7 +36,7 @@ use rerun_core::escape;
 use rerun_core::exec::launch_result::Outcome;
 use rerun_core::exec::{
     self, Backup, Detail, ExecError, Halt, LaunchResults, OldSeen, OpState, OpStatus, PendingOld,
-    RebindPreview, RebindRefusal, Refusal, RerunStep, RevertReport, TxnLine, TxnStatus, Verified,
+    RebindRefusal, Refusal, RerunStep, RevertReport, TxnLine, TxnStatus, Verified,
 };
 use rerun_core::journal::{Closing, JournalError, Observed, TxnId};
 use rerun_core::policy::root::RootError;
@@ -54,7 +54,7 @@ use rerun_core::exec::ProfilesMoved;
 use rerun_core::exec::launch_result::SkipReason;
 use rerun_core::flow::{
     self, ActError, Env, Holder, LaunchOption, RebindShown, RebindView, RevertAsk, RevertEnd,
-    RevertGate, RevertWould, head,
+    RevertGate, RevertWould, head, left_foreign,
 };
 use rerun_core::plan::RootKind;
 use rerun_core::prim::launch_method::ProfileMethod as Method;
@@ -174,12 +174,6 @@ fn head_lines(st: &TxnStatus) -> Vec<Message<'_>> {
 fn blocked(st: &TxnStatus) -> bool {
     matches!(st.state, TxnLine::Damaged(_) | TxnLine::Unreadable(_))
         || matches!(st.preview, Some(Err(_)))
-}
-
-fn left_foreign(st: &TxnStatus) -> bool {
-    st.ops
-        .iter()
-        .any(|o| o.state == OpState::Reverted(Observed::Foreign))
 }
 
 /// The `status` report of `s` (pure).
@@ -526,35 +520,6 @@ fn profiles_halt<'a>(st: &TxnStatus, h: &Halt) -> Option<Message<'a>> {
         .then_some(Message::Profile(ProfileMsg::ProfilesHalt))
 }
 
-/// X12 before a revert (review M1/B1): what the revert `verify` describes will leave.
-fn x12_before(
-    install: &Result<std::path::PathBuf, String>,
-    st: &TxnStatus,
-    v: &Verified,
-) -> Vec<Message<'static>> {
-    x12(install, flow::fate_before(st, v), true)
-}
-
-/// X12 after a revert: what its report says became of the profile.
-#[cfg(test)]
-fn x12_after(
-    install: &Result<std::path::PathBuf, String>,
-    st: &TxnStatus,
-    rep: &RevertReport,
-) -> Vec<Message<'static>> {
-    x12(install, flow::fate_after(st, rep), false)
-}
-
-/// X12 before `forget`: the profile as it is now (forget changes nothing).
-#[cfg(test)]
-fn x12_forget(
-    install: &Result<std::path::PathBuf, String>,
-    st: &TxnStatus,
-    v: Option<&Verified>,
-) -> Vec<Message<'static>> {
-    x12(install, flow::fate_forget(st, v), false)
-}
-
 /// The X12 lines of a launch profile's fate (`after_revert`: said before a revert).
 fn x12(
     install: &Result<std::path::PathBuf, String>,
@@ -873,9 +838,9 @@ fn halt_hint<'a>(st: &TxnStatus, h: &Halt) -> Option<Message<'a>> {
 /// there, and the two notes.
 fn rebind_lines_of<'a>(
     install: &Result<std::path::PathBuf, String>,
-    st: &'a TxnStatus,
-    p: &'a RebindPreview,
+    view: &'a RebindView,
 ) -> Vec<Message<'a>> {
+    let (st, p) = (&view.status, &view.rebind);
     let path = |r: &rerun_core::path::RootPath| escape::path(&r.to_string()).into_owned();
     let mut out = vec![m(TxnMsg::Txn {
         txn: st.id,
@@ -923,7 +888,7 @@ fn rebind_lines_of<'a>(
     out.push(m(TxnMsg::RebindScopeNote));
     out.push(m(TxnMsg::RebindPermanentNote));
     // X12 in the rebind preview too (review of P3-3d): what the revert there leaves.
-    out.extend(x12_before(install, st, &p.verified));
+    out.extend(x12(install, view.launch_option, true));
     out.push(Message::Blank);
     out
 }
@@ -941,7 +906,7 @@ fn rebind_run<W: Write, E: Write>(
 ) -> Result<Exit, Exit> {
     let (st, p) = (&view.status, &view.rebind);
     let txn = st.id;
-    out.lines(&rebind_lines_of(&host.install, st, p))
+    out.lines(&rebind_lines_of(&host.install, view))
         .and_then(|()| out.flush())
         .map_err(|e| before_change(err, e))?;
     if dry_run {

@@ -139,9 +139,10 @@ struct Seen {
 /// The transaction and digests of the revert preview shown (module docs). Only
 /// [`revert_preview`] builds one:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0451
 /// # fn f(t: rerun_core::journal::TxnId) {
-/// let s = rerun_core::flow::RevertShown { txn: t, seen: todo!() };
+/// // Every field named: only their privacy refuses it.
+/// let s = rerun_core::flow::RevertShown { txn: t, seen: todo!(), profile: todo!() };
 /// # }
 /// ```
 #[derive(Debug)]
@@ -258,7 +259,9 @@ pub enum ActError {
     /// What is observed under the lock differs from the preview: nothing written, show it
     /// again.
     Changed,
-    /// `exec`'s error (a refusal: nothing written).
+    /// `exec`'s error (a refusal: nothing written). A rebind's
+    /// `Exec(Refused(Rebind(`[`exec::RebindRefusal::Changed`]`)))` (the folder or a created folder
+    /// is another one than the preview showed) also means "show the preview again".
     Exec(ExecError),
 }
 
@@ -273,8 +276,23 @@ impl From<ExecError> for ActError {
 
 // ---------- The digests ----------
 
+/// The `Debug` form of a value streamed into SHA-256 (no string of the whole form is built).
+struct Hashing(Sha256);
+
+impl std::fmt::Write for Hashing {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.update(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// The digest of `v`'s `Debug` form. The types in it derive `Debug` (never a manual impl, a
+/// source rule of `rerun-core`), so it holds every field.
 fn sha(v: &impl std::fmt::Debug) -> [u8; 32] {
-    Sha256::digest(format!("{v:?}").as_bytes()).into()
+    let mut h = Hashing(Sha256::new());
+    // Writing into the hasher cannot fail; a `Debug` impl that fails would only hash less.
+    let _ = std::fmt::Write::write_fmt(&mut h, format_args!("{v:?}"));
+    h.0.finalize().into()
 }
 
 fn seen_of(st: &TxnStatus, v: Option<Result<&Verified, &ExecError>>) -> Seen {
@@ -401,7 +419,7 @@ fn profile_seen(st: &TxnStatus) -> Option<ProfileSeen> {
 }
 
 /// X12 before a revert (review M1/B1): what the revert `verify` describes will leave.
-pub fn fate_before(st: &TxnStatus, v: &Verified) -> Option<LaunchOption> {
+pub(crate) fn fate_before(st: &TxnStatus, v: &Verified) -> Option<LaunchOption> {
     let (k, replace, id) = profile_of_head(st)?;
     let fate = if left_earlier(st, k) {
         ProfileFate::Left
@@ -418,7 +436,8 @@ pub fn fate_before(st: &TxnStatus, v: &Verified) -> Option<LaunchOption> {
 
 /// X12 after a revert of `st` (as the preview showed it): what its report says became of the
 /// profile.
-pub fn fate_after(st: &TxnStatus, rep: &RevertReport) -> Option<LaunchOption> {
+#[cfg(test)]
+pub(crate) fn fate_after(st: &TxnStatus, rep: &RevertReport) -> Option<LaunchOption> {
     fate_after_seen(profile_seen(st), rep)
 }
 
@@ -437,7 +456,7 @@ fn fate_after_seen(p: Option<ProfileSeen>, rep: &RevertReport) -> Option<LaunchO
 }
 
 /// X12 before `forget`: the profile as it is now (forget changes nothing).
-pub fn fate_forget(st: &TxnStatus, v: Option<&Verified>) -> Option<LaunchOption> {
+pub(crate) fn fate_forget(st: &TxnStatus, v: Option<&Verified>) -> Option<LaunchOption> {
     let (k, replace, id) = profile_of_head(st)?;
     let halted_here = v.and_then(|v| v.halted.as_ref()).is_some_and(|h| h.op == k);
     let fate = if left_earlier(st, k) {
@@ -458,6 +477,14 @@ pub fn fate_forget(st: &TxnStatus, v: Option<&Verified>) -> Option<LaunchOption>
 
 // ---------- Revert ----------
 
+/// An earlier revert left an op of `st` as found (changed by someone else): only forget closes
+/// it.
+pub fn left_foreign(st: &TxnStatus) -> bool {
+    st.ops
+        .iter()
+        .any(|o| o.state == OpState::Reverted(Observed::Foreign))
+}
+
 /// The `.old` files of `items` that keep the transaction open: (in use, kept).
 pub fn holding(items: &[PendingOld]) -> (usize, usize) {
     let n = |s: OldSeen| items.iter().filter(|p| p.seen == s).count();
@@ -466,7 +493,7 @@ pub fn holding(items: &[PendingOld]) -> (usize, usize) {
 
 /// How the revert of `rep` ended: closed; halted, foreign, or a file of Rerun's still left
 /// (P2-15): open.
-pub fn revert_end(rep: &RevertReport) -> RevertEnd {
+pub(crate) fn revert_end(rep: &RevertReport) -> RevertEnd {
     let (in_use, kept) = holding(&rep.cleanup);
     if rep.closed.is_some() {
         RevertEnd::Closed
@@ -557,7 +584,7 @@ pub fn revert_preview(
 /// the lock with the preview `s` was made from: on any difference [`ActError::Changed`], nothing
 /// written. Takes the token, never a transaction ID:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// # fn f(g: &rerun_core::flow::Guarded<'_>, t: rerun_core::journal::TxnId) {
 /// let _ = rerun_core::flow::revert(g, t);
 /// # }
@@ -645,11 +672,8 @@ pub fn rebind(g: &Guarded<'_>, s: RebindShown) -> Result<RevertOutcome, ActError
 /// how.
 fn revert_would(st: &TxnStatus, v: Option<&Verified>) -> Option<RevertWould> {
     let v = v?;
-    let left_foreign = st
-        .ops
-        .iter()
-        .any(|o| o.state == OpState::Reverted(Observed::Foreign));
-    if v.halted.is_some() || v.ops.iter().any(|(_, o)| *o == Observed::Foreign) || left_foreign {
+    if v.halted.is_some() || v.ops.iter().any(|(_, o)| *o == Observed::Foreign) || left_foreign(st)
+    {
         return None;
     }
     Some(match holding(&v.cleanup) {

@@ -30,6 +30,9 @@ pub struct Status {
 }
 
 /// One transaction.
+///
+/// `Debug` is compared by `flow::revert` (its digest of a preview, ADR 0027 amendment P5-2b):
+/// derive only, never a manual impl (a source rule of `rerun-core`).
 #[derive(Debug)]
 pub struct TxnStatus {
     /// The transaction.
