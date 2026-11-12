@@ -1284,13 +1284,13 @@ fn f8_a_rule_first_then_the_patch() {
     });
 }
 
-// ---------- Forward compatibility (ADR 0024 amendment, FC8 and FC9) ----------
+// ---------- Forward compatibility (ADR 0024 amendment, FX8 and FX9) ----------
 
-/// FC8, the CLI's side: a stored plan whose Topo this build sets aside in the index the plan
+/// FX8, the CLI's side: a stored plan whose Topo this build sets aside in the index the plan
 /// names (here a rule tightened in this build: every floor reported as format 2) stops at the
 /// recheck before `begin`, with nothing changed and no prompt.
 #[test]
-fn fc8_a_set_aside_topo_stops_at_the_recheck() {
+fn fx8_a_set_aside_topo_stops_at_the_recheck() {
     use crate::catalog::check::{Floor, TEST_FLOOR};
     seams(|| {
         let fw = Fw::new();
@@ -1317,11 +1317,11 @@ fn fc8_a_set_aside_topo_stops_at_the_recheck() {
     });
 }
 
-/// FC9: a revert reads no index. A Topo applied, then an index imported in which it is of entry
+/// FX9: a revert reads no index. A Topo applied, then an index imported in which it is of entry
 /// format 2 (set aside by this build): `status` lists the transaction, and the revert restores
 /// the game folder and the firewall scope exactly.
 #[test]
-fn fc9_a_revert_does_not_need_its_topo_known() {
+fn fx9_a_revert_does_not_need_its_topo_known() {
     seams(|| {
         let fw = Fw::new();
         let before = fw.snap();

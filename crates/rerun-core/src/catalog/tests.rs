@@ -314,7 +314,7 @@ fn a_release_index_holds_no_draft_and_no_todo() {
         aside(&i),
         vec![
             "topo a-game: names package fix-pack, which this build cannot use",
-            "package fix-pack: breaks a rule of this build: : a released entry has no TODO",
+            "package fix-pack: breaks a rule of this build: a released entry has no TODO",
         ]
     );
 
@@ -333,7 +333,7 @@ fn the_bundle_is_sorted_complete_and_numbered() {
     i.topos.insert(0, topo("z-game", "fix-pack"));
     assert!(rule(&i).contains("sorted"));
 
-    // A duplicate across a known and a set-aside entry is refused too (FC5).
+    // A duplicate across a known and a set-aside entry is refused too (FX5).
     let mut i = index(1);
     let mut draft = topo("a-game", "fix-pack");
     draft.status = Status::Draft;
@@ -951,5 +951,28 @@ fn an_api_dependent_package_needs_one_api_in_the_topo() {
     }
 }
 
-/// Forward compatibility (ADR 0024 amendment): FC1 to FC7 and the frozen bundle.
-mod fc;
+/// A rule of the whole entry (an empty `at`) shows the rule alone, never ": :"; the envelope's
+/// format error names the format this build reads.
+#[test]
+fn rule_and_format_errors_read_cleanly() {
+    let whole = super::RuleError {
+        at: String::new(),
+        what: "status: draft".to_owned(),
+    };
+    assert_eq!(whole.to_string(), "status: draft");
+    let at = super::RuleError {
+        at: "issues[0]".to_owned(),
+        what: "not empty".to_owned(),
+    };
+    assert_eq!(at.to_string(), "issues[0]: not empty");
+    assert_eq!(
+        IndexError::Format(2).to_string(),
+        format!(
+            "this index needs a newer version of Rerun (index format 2; this build reads format {})",
+            super::INDEX_FORMAT
+        )
+    );
+}
+
+/// Forward compatibility (ADR 0024 amendment): FX1 to FX7 and the frozen bundle.
+mod fx;

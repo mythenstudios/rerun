@@ -295,11 +295,13 @@ fn an_api_dependent_package_on_a_topo_of_two_apis_fails_the_build() {
     go(&two, PACKAGE).unwrap();
 }
 
-/// FC10 (ADR 0024 amendment "Forward compatibility" §5, §6): a source below its floor or above
-/// this workbench's entry format is not built, and nothing the client would set aside is built
-/// (here two released Topos claiming one build: the client would refuse both).
+/// FX10 (ADR 0024 amendment "Forward compatibility" §5, §6): a source of format 0 or above this
+/// workbench's entry format is not built, and nothing the client would set aside is built (here
+/// two released Topos claiming one build: the client would refuse both). A source below its
+/// floor goes through the same `Rules::Source` check; every floor is 1 today, so that case is
+/// core's FX3 with its test-only floor override.
 #[test]
-fn the_format_is_checked_and_nothing_set_aside_is_built() {
+fn format_0_or_above_entry_format_and_set_aside_entries_are_not_built() {
     let below = TOPO.replacen("format: 1", "format: 0", 1);
     let e = build(
         &[f("a-game.yaml", &below)],

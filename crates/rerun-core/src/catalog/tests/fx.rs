@@ -1,6 +1,6 @@
 //! Forward compatibility of the signed index (ADR 0024 amendment "Forward compatibility"):
-//! FC1 to FC7 of the core, against the fake. FC1's planning is `topo::tests`, FC8 and FC9 the
-//! helper chain and `exec`, FC10 the workbench and the parity tests.
+//! FX1 to FX7 of the core, against the fake. FX1's planning is `topo::tests`, FX8 and FX9 the
+//! helper chain and `exec`, FX10 the workbench and the parity tests.
 
 use serde_json::{Value, json};
 
@@ -53,12 +53,12 @@ fn with_topo(t: Value) -> Value {
     v
 }
 
-// ---------- FC1 / FC2: newer and unreadable ----------
+// ---------- FX1 / FX2: newer and unreadable ----------
 
-/// FC1: a Topo of entry format 2 with an unknown field and an unknown step kind is set aside as
-/// newer with its app; the rest loads (planning: `topo::tests::fc1_*`).
+/// FX1: a Topo of entry format 2 with an unknown field and an unknown step kind is set aside as
+/// newer with its app; the rest loads (planning: `topo::tests::fx1_*`).
 #[test]
-fn fc1_a_future_topo_is_set_aside_and_the_rest_loads() {
+fn fx1_a_future_topo_is_set_aside_and_the_rest_loads() {
     let mut t = other_topo();
     t["format"] = json!(2);
     t["new_field"] = json!({ "anything": [1, 2] });
@@ -85,10 +85,10 @@ fn fc1_a_future_topo_is_set_aside_and_the_rest_loads() {
     assert!(a[0].why.needs_newer());
 }
 
-/// FC2: in format 1 an unknown step kind, an unknown field and an unknown enum value are each
+/// FX2: in format 1 an unknown step kind, an unknown field and an unknown enum value are each
 /// unreadable (not "needs newer"), by position; the same content in format 2 is newer.
 #[test]
-fn fc2_unknown_content_of_a_known_format_is_unreadable() {
+fn fx2_unknown_content_of_a_known_format_is_unreadable() {
     let cases: Vec<(&str, Change)> = vec![
         ("unknown step kind", |t| {
             t["issues"][0]["variants"][0]["steps"] = json!([{ "teleport": {} }]);
@@ -129,12 +129,12 @@ fn fc2_unknown_content_of_a_known_format_is_unreadable() {
     }
 }
 
-// ---------- FC3: refused by a rule of this build ----------
+// ---------- FX3: refused by a rule of this build ----------
 
-/// FC3: a known entry that breaks a release rule is refused, the rest loads; both Topos of an
+/// FX3: a known entry that breaks a release rule is refused, the rest loads; both Topos of an
 /// overlapping pair are refused; a floor above the entry's format is refused.
 #[test]
-fn fc3_a_broken_rule_refuses_the_entry_only() {
+fn fx3_a_broken_rule_refuses_the_entry_only() {
     // A draft.
     let mut t = other_topo();
     t["status"] = json!("draft");
@@ -191,10 +191,10 @@ fn fc3_a_broken_rule_refuses_the_entry_only() {
     );
 }
 
-/// FC3: an entry whose content needs a higher format than it says is refused, naming the
+/// FX3: an entry whose content needs a higher format than it says is refused, naming the
 /// feature (a test-only floor: every floor is 1 until the first format bump).
 #[test]
-fn fc3_a_floor_above_the_format_is_refused() {
+fn fx3_a_floor_above_the_format_is_refused() {
     TEST_FLOOR.with(|f| {
         f.set(Some(Floor {
             format: 2,
@@ -293,10 +293,10 @@ const FULL_PACKAGE: &str = r#"{
             "c": { "ini": { "file": "a.ini", "section": "S", "key": "M" }, "default": "x" } }
     }"#;
 
-/// FC3: the floor functions walk every type of the model (a Topo and a package that use every
+/// FX3: the floor functions walk every type of the model (a Topo and a package that use every
 /// step kind, every optional part and every enum value): all format 1 until the first release.
 #[test]
-fn fc3_the_floors_are_format_1() {
+fn fx3_the_floors_are_format_1() {
     let t: Topo = serde_json::from_str(FULL_TOPO).unwrap();
     assert_eq!(topo_floor(&t), Floor::BASE);
     for (status, method) in [
@@ -319,7 +319,7 @@ fn fc3_the_floors_are_format_1() {
     assert_eq!(ENTRY_FORMAT, 1, "format 1 until the first release (A6)");
 }
 
-// ---------- FC4: packages ----------
+// ---------- FX4: packages ----------
 
 /// A package entry of format 2 the client cannot read (an unknown key, no other content).
 fn future_package(name: &str) -> Value {
@@ -330,10 +330,10 @@ fn needs(t: &mut Value, pkg: &str) {
     t["issues"][0]["variants"][0]["steps"] = json!([{ "package": pkg }]);
 }
 
-/// FC4: a Topo on a newer package, transitively through `requires`, on an unreadable package;
+/// FX4: a Topo on a newer package, transitively through `requires`, on an unreadable package;
 /// a `requires` cycle with a set-aside member; a package entry with a `match` key.
 #[test]
-fn fc4_packages_set_aside_what_needs_them() {
+fn fx4_packages_set_aside_what_needs_them() {
     // A Topo on a format-2 package: needs newer.
     let mut v = base();
     v["packages"]
@@ -442,10 +442,10 @@ fn fc4_packages_set_aside_what_needs_them() {
     assert!(c.aside_for(440).all(|a| a.kind == EntryKind::Topo));
 }
 
-/// FC4b: overlap is computed last over the Topos still known. A known Topo that overlaps a
+/// FX4b: overlap is computed last over the Topos still known. A known Topo that overlaps a
 /// newer, an unreadable or a package-set-aside Topo stays known; two known ones are refused.
 #[test]
-fn fc4b_overlap_counts_only_known_topos() {
+fn fx4b_overlap_counts_only_known_topos() {
     let twin = || {
         let mut t = serde_json::to_value(topo("b-game", "fix-pack")).unwrap();
         t["issues"][0]["variants"][0]["steps"] = json!([{ "steam_input": "enable" }]);
@@ -485,7 +485,7 @@ fn fc4b_overlap_counts_only_known_topos() {
     assert_eq!(c.aside().len(), 2);
 }
 
-// ---------- FC5: the envelope stays strict ----------
+// ---------- FX5: the envelope stays strict ----------
 
 fn refused(v: &Value) -> IndexError {
     read(v).unwrap_err()
@@ -495,11 +495,11 @@ fn head_refused(v: &Value) -> bool {
     matches!(refused(v), IndexError::Head { .. })
 }
 
-/// FC5: envelope format 2 with an unknown key is "needs newer"; an unknown key in format 1, an
+/// FX5: envelope format 2 with an unknown key is "needs newer"; an unknown key in format 1, an
 /// entry that is not an object, a broken head, `steam_appid: 0`, unsorted or duplicate IDs over
 /// known and set-aside entries refuse the whole index.
 #[test]
-fn fc5_the_envelope_and_the_heads_refuse_the_whole_index() {
+fn fx5_the_envelope_and_the_heads_refuse_the_whole_index() {
     let mut v = base();
     v["format"] = json!(2);
     v["extra"] = json!(1);
@@ -605,12 +605,12 @@ fn fc5_the_envelope_and_the_heads_refuse_the_whole_index() {
     assert!(matches!(refused(&v), IndexError::Rule(r) if r.contains("packages")));
 }
 
-// ---------- FC6: the signature covers every byte ----------
+// ---------- FX6: the signature covers every byte ----------
 
-/// FC6: a byte changed inside a set-aside entry breaks the signature; a revoked key is refused
+/// FX6: a byte changed inside a set-aside entry breaks the signature; a revoked key is refused
 /// on every path, also for an index with set-aside entries.
 #[test]
-fn fc6_the_signature_covers_the_set_aside_entries() {
+fn fx6_the_signature_covers_the_set_aside_entries() {
     let mut t = other_topo();
     t["format"] = json!(2);
     t["shiny"] = json!("abc");
@@ -651,7 +651,7 @@ fn fc6_the_signature_covers_the_set_aside_entries() {
     );
 }
 
-// ---------- FC7: the store ----------
+// ---------- FX7: the store ----------
 
 fn signed_value(v: &Value) -> (Vec<u8>, Vec<u8>) {
     let t = text(v).into_bytes();
@@ -659,11 +659,11 @@ fn signed_value(v: &Value) -> (Vec<u8>, Vec<u8>) {
     (t, s)
 }
 
-/// FC7: an index with set-aside entries is imported and raises the floor; rollback and the
+/// FX7: an index with set-aside entries is imported and raises the floor; rollback and the
 /// same-`seq` rule are unchanged; `current` and `by_hash` give the same set-aside list; a stored
 /// index whose entries this build does not read loads with them set aside (the downgrade).
 #[test]
-fn fc7_the_store_treats_an_index_with_set_aside_entries_like_any_other() {
+fn fx7_the_store_treats_an_index_with_set_aside_entries_like_any_other() {
     let sys = sys();
     let mut t = other_topo();
     t["format"] = json!(2);
@@ -705,11 +705,11 @@ fn fc7_the_store_treats_an_index_with_set_aside_entries_like_any_other() {
     ));
 }
 
-/// FC7, the downgrade: a newer build accepted an index whose entries this build does not read
+/// FX7, the downgrade: a newer build accepted an index whose entries this build does not read
 /// (here: format-2 entries stored as `current.json` names them); this build reads it with those
 /// entries set aside instead of calling it damaged, and imports a newer one on top.
 #[test]
-fn fc7_a_stored_index_with_newer_entries_is_not_damaged() {
+fn fx7_a_stored_index_with_newer_entries_is_not_damaged() {
     let sys = sys();
     let mut v = base();
     v["seq"] = json!(7);
@@ -782,10 +782,10 @@ fn check_bundle_is_the_clients_classification() {
 }
 
 /// The frozen format-1 bundle (`tests/fixtures/index/format-1.json`, signed with the test key;
-/// frozen at A6): every later build loads it with nothing set aside (FC10, backward
+/// frozen at A6): every later build loads it with nothing set aside (FX10, backward
 /// compatibility).
 #[test]
-fn fc10_the_frozen_format_1_bundle_loads_with_nothing_set_aside() {
+fn fx10_the_frozen_format_1_bundle_loads_with_nothing_set_aside() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/index");
     #[expect(
         clippy::disallowed_methods,

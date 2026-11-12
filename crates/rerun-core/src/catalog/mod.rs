@@ -73,7 +73,7 @@ pub enum IndexError {
     },
     /// Another envelope `format`.
     #[error(
-        "this index needs a newer version of Rerun (index format {0}; this build reads format 1)"
+        "this index needs a newer version of Rerun (index format {0}; this build reads format {INDEX_FORMAT})"
     )]
     Format(u32),
     /// An entry whose frozen head (`format`, `id`, a Topo's `match.steam_appid`) does not parse:

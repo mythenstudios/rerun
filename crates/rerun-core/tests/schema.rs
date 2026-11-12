@@ -923,8 +923,10 @@ fn json_files(rel: &str) -> Vec<PathBuf> {
 }
 
 /// The index schema describes the frozen heads: it accepts an index whose entries are of a
-/// newer entry format (the typed side, `catalog_parity.rs`, sets them aside), the frozen
-/// format-1 bundle, and refuses a head the client refuses as a whole.
+/// newer entry format (the typed side, `catalog_parity.rs`, sets them aside) and the frozen
+/// format-1 bundle. It refuses a head the client refuses as a whole (`steam_appid: 0`, a
+/// malformed `id`, no `format`), and also `format: 0`, which the client reads as a head and sets
+/// aside as `Refused` (`1 <= format`): there the schema is stricter than the client.
 #[test]
 fn index_fixtures_validate_against_the_index_schema() {
     let v = validator(&load_json("schema/index.schema.json"));

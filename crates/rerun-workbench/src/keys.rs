@@ -233,7 +233,7 @@ mod tests {
         assert!(sign(draft, &kp).is_err(), "seq 0");
     }
 
-    /// FC10 (ADR 0024 amendment "Forward compatibility" §6): `index sign` refuses a bundle with
+    /// FX10 (ADR 0024 amendment "Forward compatibility" §6): `index sign` refuses a bundle with
     /// any entry the client would set aside, whatever the reason.
     #[test]
     fn a_bundle_with_set_aside_entries_is_not_signed() {
@@ -290,7 +290,7 @@ mod tests {
             .replace("Invented Game", "TODO");
         assert!(super::sign_test(todo.as_bytes()).is_err());
         assert!(super::sign_test(b"{}").is_err());
-        // An entry the client would set aside (FC10): a newer entry format.
+        // An entry the client would set aside (FX10): a newer entry format.
         let newer = String::from_utf8(bundle).unwrap().replacen(
             r#""topos":[{"format":1"#,
             r#""topos":[{"format":2"#,

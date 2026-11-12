@@ -1406,7 +1406,7 @@ fn r_two_builds_of_one_path_anchor_either() {
     });
 }
 
-// ---------- Forward compatibility (ADR 0024 amendment, FC8) ----------
+// ---------- Forward compatibility (ADR 0024 amendment, FX8) ----------
 
 /// Signs an index of raw `topos` and `packages` and stores it under `INDEX` by hash.
 fn put_raw_index(sys: &FakeSystem, topos: &[String], packages: &[&str]) -> [u8; 32] {
@@ -1428,11 +1428,11 @@ fn put_raw_index(sys: &FakeSystem, topos: &[String], packages: &[&str]) -> [u8; 
     sha
 }
 
-/// FC8, the helper's side: it acts only on a known Topo. A request naming a Topo this build
+/// FX8, the helper's side: it acts only on a known Topo. A request naming a Topo this build
 /// sets aside (a newer entry format, or a package set aside under it) is `Reason::Topo` with
 /// nothing written; a known Topo in an index that also holds a future entry is done.
 #[test]
-fn fc8_the_helper_acts_only_on_a_known_topo() {
+fn fx8_the_helper_acts_only_on_a_known_topo() {
     let game = topo_json("invented-game", 3, "active", &game_sha());
     let future_pack = r#"{"format":2,"id":"future-pack","shiny":true}"#;
     let with_pack = game.replacen(

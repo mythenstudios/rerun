@@ -1007,11 +1007,11 @@ fn tc_from_a_signed_index() {
     assert_eq!(&p.plan.source.unwrap().index, c.sha256());
 }
 
-/// FC1 (ADR 0024 amendment "Forward compatibility"): next to a Topo of entry format 2 with an
+/// FX1 (ADR 0024 amendment "Forward compatibility"): next to a Topo of entry format 2 with an
 /// unknown field and an unknown step kind for the same game, the known Topo loads and is
 /// planned; the future one is set aside as newer, with its app from the head, and never found.
 #[test]
-fn fc1_a_known_topo_is_planned_next_to_a_future_one() {
+fn fx1_a_known_topo_is_planned_next_to_a_future_one() {
     use crate::catalog::{AsideWhy, EntryKind};
     let sys = game_sys();
     let mut t = game_topo(DIRECT);

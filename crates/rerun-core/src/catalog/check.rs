@@ -78,7 +78,7 @@ fn format_rule(format: u32, floor: Floor) -> R {
 #[cfg(test)]
 thread_local! {
     /// A floor every entry reports instead of its own (tests only: every floor is 1 until the
-    /// first format bump, FC3).
+    /// first format bump, FX3).
     pub(crate) static TEST_FLOOR: std::cell::Cell<Option<Floor>> = const { std::cell::Cell::new(None) };
 }
 
@@ -103,14 +103,24 @@ pub enum Rules {
     Release,
 }
 
-/// A broken rule: where (a field path) and what.
+/// A broken rule: where (a field path) and what. An empty `at` (a rule of the whole entry) shows
+/// the rule alone.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{at}: {what}")]
 pub struct RuleError {
     /// The field, e.g. `issues[0].variants[1].steps[0]`.
     pub at: String,
     /// The rule.
     pub what: String,
+}
+
+impl std::fmt::Display for RuleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.at.is_empty() {
+            f.write_str(&self.what)
+        } else {
+            write!(f, "{}: {}", self.at, self.what)
+        }
+    }
 }
 
 type R = Result<(), RuleError>;
