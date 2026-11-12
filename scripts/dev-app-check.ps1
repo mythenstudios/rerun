@@ -5,8 +5,11 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev-app-check.ps1
 #
 # What it writes, and removes again (the list is also printed first):
-#  - builds into target\ (rerun-cli, rerun-workbench, rerun-app, all with the feature test-key),
-#    with the Smart-App-Control-safe source replacement .dev\sac-build\sac.toml. If a build stops
+#  - builds into target\dev-release\ (rerun-cli, rerun-workbench, rerun-app, all with the feature
+#    test-key) with the profile dev-release: release optimisation, so the speed you see is the
+#    shipped app's; debug assertions stay on because the test key demands them (ADR 0024), which
+#    is why this is not the shipped release profile (that one cannot contain the test key).
+#    Built with the Smart-App-Control-safe source replacement .dev\sac-build\sac.toml. If a build stops
 #    with os error 4551 (Smart App Control) the script stops; it never tries to get around it.
 #  - a fresh folder below %TEMP% with the index built from this repository and signed with the
 #    test key (deleted at the end).
@@ -20,8 +23,9 @@
 # It starts the test-key rerun-app.exe, shows the checklist in the window title one step after
 # the other while the app runs, and waits until you close the app. It asks nothing. What it
 # measures itself (time to the first window, working set after 5 s, DLLs loaded from outside
-# System32 and WinSxS) and the checklist for you to report are in the summary, which is also
-# copied to the clipboard. The cleanup runs in any case and reports PASS or FAIL.
+# System32 and WinSxS, and the timing lines the test-key app writes to standard error: the
+# jobs of the worker and the time from a click on a game to its page) and the checklist for
+# you to report are in the summary, which is also copied to the clipboard. The cleanup runs in any case and reports PASS or FAIL.
 
 [CmdletBinding()]
 param(
@@ -37,9 +41,9 @@ $lad = [Environment]::GetFolderPath('LocalApplicationData')
 $appDir = Join-Path $lad 'Rerun'
 $indexTest = Join-Path $appDir 'index-test'
 $sacToml = Join-Path $repo '.dev\sac-build\sac.toml'
-$cli = Join-Path $repo 'target\debug\rerun.exe'
-$workbench = Join-Path $repo 'target\debug\rerun-workbench.exe'
-$appExe = Join-Path $repo 'target\debug\rerun-app.exe'
+$cli = Join-Path $repo 'target\dev-release\rerun.exe'
+$workbench = Join-Path $repo 'target\dev-release\rerun-workbench.exe'
+$appExe = Join-Path $repo 'target\dev-release\rerun-app.exe'
 
 function Sha256-File([string]$path) {
     $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite, Delete')
@@ -94,7 +98,7 @@ function Invoke-Build {
     try {
         $ErrorActionPreference = 'Continue'
         $lines = New-Object System.Collections.Generic.List[string]
-        & cargo build -p rerun-cli -p rerun-workbench -p rerun-app --features test-key --config $sacToml 2>&1 | ForEach-Object {
+        & cargo build --profile dev-release -p rerun-cli -p rerun-workbench -p rerun-app --features test-key --config $sacToml 2>&1 | ForEach-Object {
             $l = "$_"
             $lines.Add($l)
             Write-Host $l
@@ -127,6 +131,7 @@ $workingSet = $null
 $foreign = @{}
 $exitCode = $null
 $seq = $null
+$traceText = ''
 
 try {
     Title 'CHECKING the machine (nothing is changed yet)'
@@ -149,7 +154,7 @@ try {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('rerun-app-check-' + [Guid]::NewGuid().ToString('N'))
     Write-Host ''
     Write-Host 'What this run writes, and removes again:' -ForegroundColor Yellow
-    Write-Host "  - builds into $repo\target (test-key rerun-cli, rerun-workbench, rerun-app; Smart-App-Control source replacement)"
+    Write-Host "  - builds into $repo\target (release-speed test-key rerun-cli, rerun-workbench, rerun-app; Smart-App-Control source replacement)"
     Write-Host "  - the test index (built from this repository, signed with the test key) in $tmp (deleted at the end)"
     Write-Host "  - $indexTest : Rerun's index state of a test-key build, by rerun index import (deleted at the end; the real index folder is never touched)"
     Write-Host '  - nothing else: no registry, no firewall, no Steam, no game folder, no profile, no journal'
@@ -184,6 +189,7 @@ try {
         "B: open Assassin's Creed: Director's Cut: all 3 issues of its Topo listed; EaglePatch once under Fixes, with both issues it solves",
         'C: hover the maximise button (snap flyout); double-click it; press it and drag away (no toggle)',
         'D: keyboard only: Tab through navigation, search field (reached?), switch, rows; Enter opens a game',
+        'E: speed: open a game at once after the start (while the list still fills), go back, open it again; switch Library, Applied, System, Library a few times: does anything wait?',
         'CLOSE the app when done (the script then cleans up)'
     )
     foreach ($s in $steps) { Write-Host "  $s" }
@@ -194,15 +200,18 @@ try {
     $psi.FileName = $appExe
     $psi.UseShellExecute = $false
     $psi.WorkingDirectory = $repo
+    # The test-key app writes timing lines to standard error; they are read after it ends.
+    $psi.RedirectStandardError = $true
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $appProc = [Diagnostics.Process]::Start($psi)
+    $traceTask = $appProc.StandardError.ReadToEndAsync()
     while ($sw.Elapsed.TotalSeconds -lt 30 -and -not $appProc.HasExited) {
         $appProc.Refresh()
         if ($appProc.MainWindowHandle -ne [IntPtr]::Zero) { $firstWindowMs = [int]$sw.Elapsed.TotalMilliseconds; break }
         Start-Sleep -Milliseconds 20
     }
     if ($null -eq $firstWindowMs) { Fail 'the app showed no window within 30 s (or exited at once)' }
-    Write-Host "first visible window after $firstWindowMs ms (debug build; the 1 s target is for release)"
+    Write-Host "first visible window after $firstWindowMs ms (release-speed build, target under 1 s)"
 
     $lastSample = [datetime]::MinValue
     $workDone = $false
@@ -235,6 +244,7 @@ try {
     }
     $appProc.WaitForExit()
     $exitCode = $appProc.ExitCode
+    $traceText = $traceTask.Result
     $verdict = 'PASS'
 }
 catch {
@@ -269,10 +279,21 @@ finally {
 # ---------- the summary ----------
 $ws = if ($null -ne $workingSet) { ('{0:N1} MB' -f ($workingSet / 1MB)) } else { 'not measured' }
 $fw = if ($null -ne $firstWindowMs) { "$firstWindowMs ms" } else { 'not measured' }
-$summary.Add("Rerun DEV app check (index seq $seq, debug test-key build)")
+$summary.Add("Rerun DEV app check (index seq $seq, release-speed test-key build)")
 if ($errorText) { $summary.Add("STOPPED: $errorText") }
 $summary.Add("run: $verdict (app exit code $exitCode)")
-$summary.Add("measured: first visible window $fw (debug build), working set after 5 s $ws")
+$summary.Add("measured: first visible window $fw (release-speed build), working set after 5 s $ws")
+# The timing lines of the app: how long each job of the worker took, and click to page.
+$traceLines = @($traceText -split "`r?`n" | Where-Object { $_ -match '^\[\s*[0-9.]+ ms\]' })
+$clicks = @{}
+foreach ($l in $traceLines) {
+    if ($l -match '^\[\s*([0-9.]+) ms\] ui: game ([0-9]+) clicked') { $clicks[$matches[2]] = [double]$matches[1] }
+    elseif ($l -match '^\[\s*([0-9.]+) ms\] ui: game ([0-9]+) shown' -and $clicks.ContainsKey($matches[2])) {
+        $summary.Add(('measured: game {0}: click to page {1:N0} ms' -f $matches[2], ([double]$matches[1] - $clicks[$matches[2]])))
+        $clicks.Remove($matches[2])
+    }
+}
+foreach ($l in ($traceLines | Where-Object { $_ -match 'worker: ' } | Select-Object -First 40)) { $summary.Add("trace: $l") }
 $foreignList = @($foreign.Keys | Sort-Object)
 if ($null -ne $firstWindowMs) {
     if ($foreignList.Count -eq 0) { $summary.Add('measured: DLLs from outside System32/WinSxS/SysWOW64: none -> PASS') }
@@ -285,6 +306,7 @@ $summary.Add("  A status bar: index seq $seq and 'Test key build'")
 $summary.Add("  B Assassin's Creed: Director's Cut: 3 issues listed; EaglePatch once under Fixes with both issues")
 $summary.Add('  C maximise button: snap flyout on hover; double-click toggles; press and drag away does not toggle')
 $summary.Add('  D keyboard only: navigation, search field reached, switch, rows, Enter opens a game')
+$summary.Add('  E speed: a game opened at once after the start, back, opened again; Library, Applied, System, Library a few times: did anything wait? (and where)')
 Set-Clipboard -Value ($summary -join "`r`n")
 Write-Host ''
 $summary | ForEach-Object { Write-Host $_ }
