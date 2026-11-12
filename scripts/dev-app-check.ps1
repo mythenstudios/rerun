@@ -37,10 +37,25 @@
 # (<AppDir>\plans, \journal, \profiles). It removes exactly those top-level folders at the end if
 # they did not exist before, the game folder is identical again, and `rerun status` lists no open
 # transaction; otherwise it leaves them and says so. Apply fixes to the named game only.
+# Optional download test (P5-5b): -Game <folder> -Download. A fix whose package is not in Rerun's
+# packages folder is ticked in the app, the consent dialog lists what would be downloaded, and
+# "Download" fetches it from its source (GitHub) as the real app does: the script downloads
+# nothing itself. Meant for Assassin's Creed: Director's Cut and EaglePatch from an EMPTY package
+# cache, then apply and undo as in steps F to H. The script lists <AppDir>\cache and
+# <AppDir>\packages before (every entry: name, kind, length; it refuses a link anywhere in them)
+# and after the app is closed, and REPORTS what the app added: each archive in the cache (its name
+# must equal its SHA-256, which the script computes again), each unpacked file. What was there
+# before is never touched. What the app added is removed again, exactly those entries and then the
+# folders that did not exist before, only if the game folder is identical again and `rerun status`
+# lists no open transaction, so the test can be repeated from an empty cache; with -KeepDownloads
+# it is kept and the summary says so. Entries that existed before and changed are never
+# modified: the run FAILs and says which.
 [CmdletBinding()]
 param(
     [ValidateRange(5, 120)][int]$StepSeconds = 45,
-    [string]$Game = ''
+    [string]$Game = '',
+    [switch]$Download,
+    [switch]$KeepDownloads
 )
 
 $ErrorActionPreference = 'Stop'
@@ -120,6 +135,22 @@ function Compare-GameSnapshot($a, $b) {
     return $d
 }
 
+# <AppDir>\cache and <AppDir>\packages as a table: relative path -> "file|length", "dir" or
+# "link" (never followed). Used before and after the app ran, to report and to remove exactly
+# what the app added (-Download).
+function Get-TreeList([string]$root) {
+    $t = @{}
+    if (-not (Test-Path -LiteralPath $root)) { return $t }
+    $prefix = $root.TrimEnd('\') + '\'
+    foreach ($i in Get-ChildItem -LiteralPath $root -Recurse -Force) {
+        $rel = $i.FullName.Substring($prefix.Length)
+        if ($i.Attributes -band [IO.FileAttributes]::ReparsePoint) { $t[$rel] = 'link' }
+        elseif ($i.PSIsContainer) { $t[$rel] = 'dir' }
+        else { $t[$rel] = "file|$($i.Length)" }
+    }
+    return $t
+}
+
 function Quote-Arg([string]$a) {
     if ($a -match '^[A-Za-z0-9_.:/\\=-]+$') { return $a }
     if ($a.Contains('"') -or $a.EndsWith('\')) { Fail "refusing an argument: $a" }
@@ -191,6 +222,11 @@ $seq = $null
 $traceText = ''
 $gameBefore = $null        # the named game folder before the app ran (apply test)
 $applyCheck = 'not run'
+$cacheDir = Join-Path $appDir 'cache'
+$packagesDir = Join-Path $appDir 'packages'
+$dlBefore = $null          # cache and packages before the app ran (download test)
+$downloadCheck = 'not run'
+$downloadReport = New-Object System.Collections.Generic.List[string]
 
 try {
     Title 'CHECKING the machine (nothing is changed yet)'
@@ -209,6 +245,8 @@ try {
         $indexExisted = $true
     }
     $listBefore = Get-AppDirList
+    if ($Download -and -not $Game) { Fail '-Download needs -Game (the game whose fix is downloaded and applied)' }
+    if ($KeepDownloads -and -not $Download) { Fail '-KeepDownloads only goes with -Download' }
     if ($Game) {
         $Game = [IO.Path]::GetFullPath($Game).TrimEnd('\')
         if (-not (Test-Path -LiteralPath $Game -PathType Container)) { Fail "-Game: not a folder: $Game" }
@@ -218,6 +256,19 @@ try {
             if ($listBefore -contains "$p|True") { Write-Host "note: $appDir\$p exists already; it stays, whatever the test writes there" -ForegroundColor Yellow }
         }
     }
+    if ($Download) {
+        foreach ($p in @($cacheDir, $packagesDir)) {
+            if (Is-Link $p) { Fail "refusing: $p is a reparse point" }
+        }
+        $dlBefore = @{ Cache = (Get-TreeList $cacheDir); Packages = (Get-TreeList $packagesDir); CacheExisted = (Test-Path -LiteralPath $cacheDir); PackagesExisted = (Test-Path -LiteralPath $packagesDir) }
+        foreach ($k in @('Cache', 'Packages')) {
+            foreach ($e in $dlBefore[$k].Keys) {
+                if ($dlBefore[$k][$e] -eq 'link') { Fail "refusing: $k holds a reparse point ($e); remove it by hand first" }
+            }
+        }
+        $held = @($dlBefore.Cache.Keys | Where-Object { $_ -ne 'lock' }).Count + @($dlBefore.Packages.Keys | Where-Object { $_ -ne '.lock' }).Count
+        if ($held -gt 0) { Write-Host "note: $cacheDir and $packagesDir hold $held entries already; they stay, and a package that is there is not downloaded again (the test is then not from an empty cache)" -ForegroundColor Yellow }
+    }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('rerun-app-check-' + [Guid]::NewGuid().ToString('N'))
     Write-Host ''
@@ -225,6 +276,11 @@ try {
     Write-Host "  - builds into $repo\target (release-speed test-key rerun-cli, rerun-workbench, rerun-app; Smart-App-Control source replacement)"
     Write-Host "  - the test index (built from this repository, signed with the test key) in $tmp (deleted at the end)"
     Write-Host "  - $indexTest : Rerun's index state of a test-key build, by rerun index import (deleted at the end; the real index folder is never touched)"
+    if ($Download) {
+        Write-Host "  - DOWNLOAD TEST: when you press Download in the app it fetches ONE package from its source on the internet (GitHub) into $cacheDir and unpacks it into $packagesDir" -ForegroundColor Yellow
+        if ($KeepDownloads) { Write-Host '    -KeepDownloads: what the app added there is KEPT (and listed in the summary)' }
+        else { Write-Host '    what the app added there is listed in the summary and removed again (exactly those entries; what was there before is never touched)' }
+    }
     if ($Game) {
         Write-Host "  - APPLY TEST: the app can apply fixes to ONE game, $Game (you apply and undo them in the app; the script compares the folder afterwards)" -ForegroundColor Yellow
         Write-Host "    and writes Rerun's records of that transaction in $appDir (plans, journal, profiles: removed again at the end if they were not there and the transaction is closed)"
@@ -279,6 +335,10 @@ try {
         $steps += "F: APPLY TEST, only this game: $Game. Open it. The preselected fixes are ticked (verified, affect this PC); a fix that needs a download or the helper says so and cannot be ticked. Read the preview: every file, value, the launch profile, the warnings. Press Copy launch option and paste it into Notepad (it is only text). Press Apply once.",
         'G: the game page and Applied now show ONE card with everything in it; Esc and Tab in the next dialog work; press UNDO on the card (NOT ''Close without undoing'', which is forget and leaves the change in place), read what it restores, press Undo this change. The card is gone.',
         'H: Apply is greyed out until the preview is shown; select a fix, deselect it: the preview follows. Do not apply anything else.'
+    }
+    if ($Download) {
+        $steps += 'I: DOWNLOAD TEST, same game. A fix that needs a package (EaglePatch) says it needs a download first and is not ticked. Tick it: the dialog "These files will be downloaded" lists name, version, source, release URL, host, SHA-256, licence and that the file is checked after. Press Cancel: nothing is downloaded and the fix stays unticked.'
+        $steps += 'J: tick it again and press Download: the progress shows the size while it runs; when done the fix is ticked and the preview lists the package files. Apply once, then UNDO on the card (not ''Close without undoing'') as in G. Optional: tick another time while offline (network cable or Wi-Fi off): the dialog says Rerun cannot reach the source and offers Try again.'
     }
     $steps += 'CLOSE the app when done (the script then compares the game folder and cleans up)'
     foreach ($s in $steps) { Write-Host "  $s" }
@@ -382,6 +442,78 @@ finally {
             }
         } catch { $applyCheck = "FAIL: apply check error: $($_.Exception.Message)" }
     }
+    # The download test: report what the app added to the cache and the packages folder, then
+    # remove exactly that (unless -KeepDownloads), but only when the game folder is identical
+    # again and `rerun status` lists no open transaction. Nothing that was there before is
+    # touched; an entry that was there and changed is never modified.
+    if ($dlBefore) {
+        try {
+            $added = @{ Cache = New-Object System.Collections.Generic.List[string]; Packages = New-Object System.Collections.Generic.List[string] }
+            $changed = New-Object System.Collections.Generic.List[string]
+            $hasLink = $false
+            $roots = @{ Cache = $cacheDir; Packages = $packagesDir }
+            foreach ($k in @('Cache', 'Packages')) {
+                if ((Test-Path -LiteralPath $roots[$k]) -and (Is-Link $roots[$k])) { $hasLink = $true; $downloadReport.Add("$k folder is a reparse point: left alone"); continue }
+                $now = Get-TreeList $roots[$k]
+                foreach ($e in $now.Keys) {
+                    if ($now[$e] -eq 'link') { $hasLink = $true; $downloadReport.Add("$k\$e is a link: left alone") }
+                    if (-not $dlBefore[$k].ContainsKey($e)) { $added[$k].Add($e) }
+                    elseif ($dlBefore[$k][$e] -ne $now[$e]) { $changed.Add("$k\$e") }
+                }
+                foreach ($e in $dlBefore[$k].Keys) { if (-not $now.ContainsKey($e)) { $changed.Add("$k\$e (gone)") } }
+            }
+            # What was downloaded: every archive in the cache must be named by its own SHA-256.
+            $bad = 0
+            foreach ($e in ($added.Cache | Sort-Object)) {
+                $f = Join-Path $cacheDir $e
+                if ((Get-Item -LiteralPath $f -Force) -is [IO.DirectoryInfo]) { continue }
+                if ($e -eq 'lock') { continue }
+                $len = (Get-Item -LiteralPath $f -Force).Length
+                $h = Sha256-File $f
+                if ($h -eq $e) { $downloadReport.Add("downloaded: cache\$e  $len bytes  SHA-256 equals its name: ok") }
+                else { $bad++; $downloadReport.Add("downloaded: cache\$e  $len bytes  SHA-256 is ${h}: NOT its name") }
+            }
+            foreach ($e in ($added.Packages | Sort-Object)) {
+                if ($e -ne '.lock') {
+                    $item = Get-Item -LiteralPath (Join-Path $packagesDir $e) -Force
+                    if ($item -isnot [IO.DirectoryInfo]) { $downloadReport.Add("unpacked: packages\$e  $($item.Length) bytes") }
+                }
+            }
+            if ($added.Cache.Count -eq 0 -and $added.Packages.Count -eq 0) { $downloadReport.Add('the app added nothing to the cache or the packages folder (nothing was downloaded, or it was there already)') }
+            $verdictDl = 'PASS'
+            if ($bad -gt 0) { $verdictDl = 'FAIL: an archive is not named by its SHA-256' }
+            if ($changed.Count -gt 0) { $verdictDl = 'FAIL: entries that were there before changed (left alone): ' + (($changed | Select-Object -First 10) -join '; ') }
+            if ($hasLink) { $verdictDl = 'FAIL: a link was found (left alone)' }
+            if ($KeepDownloads) {
+                $downloadCheck = "$verdictDl (kept as asked: -KeepDownloads)"
+            } elseif ($verdictDl -ne 'PASS') {
+                $downloadCheck = "$verdictDl; nothing was removed"
+            } elseif ($applyCheck -ne 'PASS') {
+                $downloadCheck = "$verdictDl; kept because the game folder check did not pass"
+            } else {
+                $r = Invoke-Exe $cli @('status')
+                $after = if ($r.Code -eq 0) { Status-Counts $r.Out } else { $null }
+                if ($null -eq $after -or $after.NotClosed -gt 0 -or $after.Forgotten -gt 0 -or $r.Out -match '(?m)^transaction [0-9]{8}-[0-9a-f]{16}') {
+                    $downloadCheck = "$verdictDl; kept because rerun status lists a transaction that is not closed or was forgotten"
+                } else {
+                    # Files first, then folders (deepest first), exactly the entries that were added.
+                    foreach ($k in @('Cache', 'Packages')) {
+                        $files = @($added[$k] | Where-Object { -not ((Get-Item -LiteralPath (Join-Path $roots[$k] $_) -Force) -is [IO.DirectoryInfo]) })
+                        $dirs = @($added[$k] | Where-Object { (Get-Item -LiteralPath (Join-Path $roots[$k] $_) -Force) -is [IO.DirectoryInfo] } | Sort-Object { $_.Length } -Descending)
+                        foreach ($e in $files) { Remove-Item -LiteralPath (Join-Path $roots[$k] $e) -Force }
+                        foreach ($e in $dirs) {
+                            $d = Join-Path $roots[$k] $e
+                            if (@(Get-ChildItem -LiteralPath $d -Force).Count -eq 0) { Remove-Item -LiteralPath $d -Force }
+                            else { $downloadReport.Add("kept: $k\$e is not empty (something else wrote there)") }
+                        }
+                        $existed = if ($k -eq 'Cache') { $dlBefore.CacheExisted } else { $dlBefore.PackagesExisted }
+                        if (-not $existed -and (Test-Path -LiteralPath $roots[$k]) -and @(Get-ChildItem -LiteralPath $roots[$k] -Force).Count -eq 0) { Remove-Item -LiteralPath $roots[$k] -Force }
+                    }
+                    $downloadCheck = "$verdictDl; what the app added was removed again"
+                }
+            }
+        } catch { $downloadCheck = "FAIL: download check error: $($_.Exception.Message)" }
+    }
     $problems = New-Object System.Collections.Generic.List[string]
     try {
         if ($touched) {
@@ -396,7 +528,14 @@ finally {
             if ($indexExisted) {
                 if (-not $now -or @(Get-ChildItem -LiteralPath $indexTest -Force).Count -ne 0) { $problems.Add('index-test is not the empty folder it was') }
             } elseif ($now) { $problems.Add('index-test is still there') }
-            if ((Compare-Object $listBefore (Get-AppDirList))) { $problems.Add("the top level of $appDir differs from before") }
+            $a = $listBefore
+            $b = Get-AppDirList
+            if ($Download -and $KeepDownloads) {
+                # Kept on purpose: cache and packages may be new.
+                $a = @($a | Where-Object { $_ -notlike 'cache|*' -and $_ -notlike 'packages|*' })
+                $b = @($b | Where-Object { $_ -notlike 'cache|*' -and $_ -notlike 'packages|*' })
+            }
+            if ((Compare-Object $a $b)) { $problems.Add("the top level of $appDir differs from before") }
         }
     } catch { $problems.Add("cleanup error: $($_.Exception.Message)") }
     if ($touched -or $tmp) {
@@ -434,6 +573,10 @@ if ($null -ne $firstWindowMs) {
 }
 $summary.Add("cleanup (index-test, temp folder): $cleanup")
 if ($Game) { $summary.Add("apply test ($Game, the folder compared with its snapshot; Rerun's records removed): $applyCheck; files not hashed (unreadable): $script:notHashed") }
+if ($Download) {
+    foreach ($l in $downloadReport) { $summary.Add("download test: $l") }
+    $summary.Add("download test (cache and packages of <AppDir>, listed before and after): $downloadCheck")
+}
 $summary.Add('')
 $summary.Add('By eye, report in the chat (ok / not ok, and what you saw):')
 $summary.Add("  A status bar: index seq $seq and 'Test key build'")
@@ -446,10 +589,14 @@ if ($Game) {
     $summary.Add('  G one card on the game page and under Applied; Esc and Tab in the undo dialog; what Undo said it would restore')
     $summary.Add('  H Apply greyed out until the preview showed; selecting and deselecting a fix updated the preview')
 }
+if ($Download) {
+    $summary.Add('  I the fix that needs a package is not ticked and says so; the consent dialog lists name, version, source, release URL, host, SHA-256, licence, and that it is checked after; Cancel downloaded nothing')
+    $summary.Add('  J Download: progress with sizes, then the fix is ticked and the preview lists the package files; Apply once, Undo on the card; (optional) offline: "cannot reach the source" and Try again')
+}
 Set-Clipboard -Value ($summary -join "`r`n")
 Write-Host ''
 $summary | ForEach-Object { Write-Host $_ }
 Write-Host ''
 Write-Host 'Summary is in the clipboard.'
-$final = if ($verdict -eq 'PASS' -and $cleanup -notlike 'FAIL*' -and $applyCheck -notlike 'FAIL*') { 'DONE: the summary is in the clipboard, report it' } else { 'FAILED: the summary is in the clipboard, report it' }
+$final = if ($verdict -eq 'PASS' -and $cleanup -notlike 'FAIL*' -and $applyCheck -notlike 'FAIL*' -and $downloadCheck -notlike 'FAIL*') { 'DONE: the summary is in the clipboard, report it' } else { 'FAILED: the summary is in the clipboard, report it' }
 Title $final
