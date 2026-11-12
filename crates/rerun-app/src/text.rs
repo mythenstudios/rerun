@@ -507,6 +507,442 @@ pub enum Msg {
     AboutVersion,
     /// The licence line.
     AboutLicence,
+
+    /// The select control of a fix.
+    FixSelect,
+    /// A fix that needs the elevated helper.
+    FixNeedsHelper,
+    /// A fix that needs a package download.
+    FixNeedsDownload,
+    /// Label of a fix's side effects.
+    FixTradeoffs,
+    /// No side effect is listed.
+    FixNoTradeoffs,
+    /// Label of a fix's sources.
+    FixSources,
+    /// The fix cannot be combined with these.
+    FixExclusive,
+    /// Why a fix is preselected.
+    FixPreselected,
+    /// A source type.
+    SourceRepo,
+    /// A source type.
+    SourceSteamGuide,
+    /// A source type.
+    SourceSteamThread,
+    /// A source type.
+    SourcePcgw,
+    /// A source type.
+    SourceOfficial,
+    /// Heading of the preview.
+    PreviewTitle,
+    /// No fix is selected.
+    PreviewNone,
+    /// The preview is being made.
+    PreviewPlanning,
+    /// Under the heading of a preview.
+    PreviewIntro,
+    /// The number of changes of a plan.
+    PreviewChanges {
+        /// A number.
+        n: usize,
+    },
+    /// Label.
+    PreviewGameFolder,
+    /// Label of the plan hash.
+    PreviewChecksum,
+    /// The plan needs no administrator rights.
+    PreviewAdminNo,
+    /// What undo does with a plan.
+    PreviewUndo,
+    /// Before an apply.
+    PreviewCloseGame,
+    /// While a write runs.
+    PreviewApplying,
+    /// A button.
+    BtnApply,
+    /// A button.
+    BtnCancel,
+    /// A button.
+    BtnDismiss,
+    /// A button.
+    BtnUndo,
+    /// A button.
+    BtnForget,
+    /// An action.
+    ActCreateFolder,
+    /// An action.
+    ActCreateFile,
+    /// An action.
+    ActReplaceFile,
+    /// An action.
+    ActPatchFile,
+    /// An action.
+    ActCreateKey,
+    /// An action.
+    ActSetValue,
+    /// An action.
+    ActAddTokens,
+    /// An action.
+    ActGpuPref,
+    /// An action.
+    ActEditIni,
+    /// An action.
+    ActFirewall,
+    /// An action.
+    ActHold,
+    /// An action.
+    ActOther,
+    /// A label.
+    LblFrom,
+    /// A label.
+    LblNew,
+    /// A label.
+    LblOld,
+    /// A label.
+    LblValue,
+    /// A label.
+    LblValueNow,
+    /// A label.
+    LblValueNew,
+    /// A label.
+    LblAdds,
+    /// A label.
+    LblIniKey,
+    /// A label.
+    LblProfile,
+    /// A label.
+    LblCpuRule,
+    /// A label.
+    LblPriority,
+    /// A label.
+    LblStart,
+    /// A label.
+    LblTarget,
+    /// A label.
+    LblPatch,
+    /// A label.
+    LblUndo,
+    /// A kept shared file.
+    HeldLine,
+    /// An old INI value.
+    IniMissing,
+    /// An old INI value.
+    IniNewSection,
+    /// A size.
+    Bytes {
+        /// A number.
+        n: u64,
+    },
+    /// One patched byte.
+    PatchByte {
+        /// A number.
+        offset: u64,
+        /// A number.
+        old: u8,
+        /// A number.
+        new: u8,
+    },
+    /// What undo does.
+    UndoRemoves,
+    /// What undo does.
+    UndoRestoresFile,
+    /// What undo does.
+    UndoRestoresValue,
+    /// What undo does.
+    UndoRemovesTokens,
+    /// What undo does.
+    UndoSetsKeys,
+    /// What undo does.
+    UndoKeepsShared,
+    /// What undo does.
+    UndoRemovesRule,
+    /// A note.
+    NoteNotRestored,
+    /// A note.
+    NoteRegistry,
+    /// A note.
+    NoteLayers,
+    /// A note.
+    NoteIni,
+    /// A note.
+    NoteProfile,
+    /// A note.
+    NoteProfileWatch,
+    /// A note.
+    NoteFirewall,
+    /// A note.
+    NoteHold,
+    /// A note.
+    NotePatch,
+    /// A note.
+    NoteGpuPref,
+    /// A note.
+    NoteUserData,
+    /// The word of a warning.
+    WarningWord,
+    /// A warning.
+    WarnSacOn,
+    /// A warning.
+    WarnSacEvaluation,
+    /// A warning.
+    WarnSacUnknown,
+    /// A warning.
+    WarnSteamPerUser,
+    /// A warning.
+    WarnSignedExe,
+    /// A warning.
+    WarnWhenUnknown,
+    /// A warning.
+    WarnNeedsRetest,
+    /// A warning.
+    WarnAntiCheat,
+    /// A warning.
+    WarnGpuSet,
+    /// A warning.
+    WarnRequiresGpu,
+    /// A warning.
+    WarnSteamInput,
+    /// A warning.
+    WarnVsCopy,
+    /// A warning.
+    WarnVsLink,
+    /// A warning.
+    WarnVsUnchecked,
+    /// Heading.
+    LaunchHeading,
+    /// The CPU limit on this PC.
+    LaunchCpu {
+        /// A number.
+        threads: u16,
+        /// A number.
+        of: u16,
+    },
+    /// No CPU rule.
+    LaunchCpuNone,
+    /// The selection is unknown.
+    LaunchCpuUnknown,
+    /// The launch option.
+    LaunchOptionIntro,
+    /// The launch option.
+    LaunchOptionCombine,
+    /// The launch option.
+    LaunchOptionByHand,
+    /// The launch option.
+    LaunchShimStays,
+    /// A launch problem.
+    LaunchShimMissing,
+    /// A launch problem.
+    LaunchShimUnchecked,
+    /// A launch problem.
+    LaunchInstallUnknown,
+    /// A launch problem.
+    LaunchNotShowable,
+    /// A button.
+    LaunchCopy,
+    /// After the copy.
+    LaunchCopied,
+    /// What a card's undo takes back.
+    CardNote {
+        /// A number.
+        n: usize,
+    },
+    /// A label.
+    CardGame,
+    /// A label.
+    CardTxn,
+    /// A state.
+    StateApplied,
+    /// A state.
+    StateInterrupted,
+    /// A state.
+    StateCleanup,
+    /// A state.
+    StateDamaged,
+    /// A state.
+    StateUnreadable,
+    /// A state.
+    StateForeign,
+    /// A card's problem.
+    ProblemInterrupted,
+    /// A card's problem.
+    ProblemCleanup,
+    /// A card's problem.
+    ProblemDamaged,
+    /// A card's problem.
+    ProblemUnreadable,
+    /// A card's problem.
+    ProblemForeign,
+    /// Heading on a game page.
+    AppliedHere,
+    /// A card without steps.
+    CardNoOps,
+    /// The undo dialog.
+    UndoTitle,
+    /// The undo dialog.
+    UndoIntro,
+    /// The undo dialog.
+    UndoCloseGame,
+    /// What undo meets.
+    FateBefore,
+    /// What undo meets.
+    FateAfter,
+    /// What undo meets.
+    FateDrifted,
+    /// What undo meets.
+    FateForeign,
+    /// What undo meets.
+    FateKept,
+    /// What undo meets.
+    FateNotReached,
+    /// Where undo would stop.
+    UndoHalt {
+        /// A number.
+        op: u16,
+    },
+    /// Copies undo deletes.
+    UndoCleanup {
+        /// A number.
+        n: usize,
+        /// A number.
+        in_use: usize,
+    },
+    /// An empty record.
+    UndoEmpty,
+    /// Needs the helper.
+    UndoPrompt,
+    /// Heading.
+    UndoAfter,
+    /// The launch option after an undo.
+    LaunchFateGone,
+    /// The launch option after an undo.
+    LaunchUntilRemoved,
+    /// The launch option after an undo.
+    LaunchFatePrev,
+    /// The launch option after an undo.
+    LaunchFateStays,
+    /// The launch option after an undo.
+    LaunchFateLeft,
+    /// After a changed preview.
+    ChangedNote,
+    /// The confirm button.
+    UndoBtn,
+    /// The forget dialog.
+    ForgetTitle,
+    /// The forget dialog.
+    ForgetIntro,
+    /// The forget dialog.
+    ForgetWould,
+    /// The forget dialog.
+    ForgetNow,
+    /// A result.
+    ResAppliedTitle,
+    /// A result.
+    ResAppliedBody,
+    /// A result.
+    ResNothingTitle,
+    /// A result.
+    ResNothingBody,
+    /// A result.
+    ResRolledBackTitle,
+    /// A result.
+    ResRolledBackBody,
+    /// A result.
+    ResOpenTitle,
+    /// A result.
+    ResOpenBody,
+    /// A result.
+    ResRevertedTitle,
+    /// A result.
+    ResRevertedBody,
+    /// A result.
+    ResHaltedTitle,
+    /// A result.
+    ResHaltedBody,
+    /// A result.
+    ResInUseTitle,
+    /// A result.
+    ResInUseBody,
+    /// A result.
+    ResKeptTitle,
+    /// A result.
+    ResKeptBody,
+    /// A result.
+    ResForeignTitle,
+    /// A result.
+    ResForeignBody,
+    /// A result.
+    ResForgottenTitle,
+    /// A result.
+    ResForgottenBody,
+    /// A result.
+    ResChangedTitle,
+    /// A result.
+    ResUnconfirmedTitle,
+    /// A result.
+    ResUnconfirmedBody,
+    /// While a write runs.
+    ResWorking,
+    /// The window cannot close.
+    ResClosingTitle,
+    /// The window cannot close.
+    ResClosingBody,
+    /// A refusal.
+    RefBusyTitle,
+    /// A refusal.
+    RefBusyBody,
+    /// A refusal.
+    RefJournalBusyTitle,
+    /// A refusal.
+    RefJournalBusyBody,
+    /// A refusal.
+    RefBlockedTitle,
+    /// A refusal.
+    RefBlockedBody,
+    /// A refusal.
+    RefOrderTitle,
+    /// A refusal.
+    RefOrderBody,
+    /// A refusal.
+    RefSlotTitle,
+    /// A refusal.
+    RefSlotBody,
+    /// A refusal.
+    RefCleanupTitle,
+    /// A refusal.
+    RefCleanupBody,
+    /// A refusal.
+    RefSteamTitle,
+    /// A refusal.
+    RefSteamBody,
+    /// A refusal.
+    RefStaleTitle,
+    /// A refusal.
+    RefStaleBody,
+    /// A refusal.
+    RefAdminTitle,
+    /// A refusal.
+    RefAdminBody,
+    /// A refusal.
+    RefHelperTitle,
+    /// A refusal.
+    RefHelperBody,
+    /// A refusal.
+    RefNothingTitle,
+    /// A refusal.
+    RefNothingBody,
+    /// A refusal.
+    RefUnexpectedTitle,
+    /// A refusal.
+    RefUnexpectedBody,
+    /// A refusal.
+    RefPlanTitle,
+    /// A refusal.
+    RefPlanBody,
+    /// A refusal.
+    RefNoPreviewTitle,
+    /// A refusal.
+    RefNoPreviewBody,
 }
 
 /// The text of `m` in `lang`.
@@ -664,7 +1100,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         }
         HeroNothingHere => "No known problem affects this PC.",
         HeroNoFixHere => "Rerun cannot offer a fix on this PC.",
-        HeroReadOnly => "Choosing and applying fixes comes with the next version of the app.",
+        HeroReadOnly => "Select the fixes you want to see exactly what they change.",
         HeroUpdating => "Steam is updating this game. Open it again when the update is done.",
         HeroNotInstalled => "This game is listed by Steam but not installed.",
         HeroNoSteam => "Steam was not found, so Rerun cannot read this game.",
@@ -713,7 +1149,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         FixRefusedAntiCheat => "Not offered: an anti-cheat system was found.",
         FixRefusedLaunch => "Not offered: the way this game starts cannot carry this fix.",
         FixWarned => "The anti-cheat rule allows this fix with a warning.",
-        FixesReadOnly => "Fixes cannot be chosen yet in this version.",
+        FixesReadOnly => "Rerun shows the preview first and changes nothing until you apply.",
         AppliedTitle => "Applied",
         AppliedIntro => "Everything Rerun has changed on your games.",
         AppliedEmpty => "Nothing applied",
@@ -722,7 +1158,7 @@ fn en(m: Msg) -> Cow<'static, str> {
             return format!("{} in the journal", count(n, "open change", "open changes")).into();
         }
         AppliedSomeSub => {
-            "The list with undo comes with the next version of the app. The command line shows it: rerun status."
+            "Each card is one change Rerun applied. Undo takes the whole card back, after showing you what it restores."
         }
         AppliedUnreadable => "The journal could not be read.",
         HistoryTitle => "History",
@@ -783,6 +1219,210 @@ fn en(m: Msg) -> Cow<'static, str> {
         AboutLicence => {
             "Free software under the GNU General Public License, version 3. No warranty."
         }
+
+        FixSelect => "Select this fix",
+        FixNeedsHelper => "This fix needs Rerun's administrator helper. The app cannot apply it yet; that comes with a later version.",
+        FixNeedsDownload => "This fix needs a package download. The app cannot download yet; that comes with a later version.",
+        FixTradeoffs => "Side effects",
+        FixNoTradeoffs => "No side effects listed",
+        FixSources => "Sources",
+        FixExclusive => "Cannot be combined with",
+        FixPreselected => "Preselected: tested by us, and the problem affects this PC",
+        SourceRepo => "Repository",
+        SourceSteamGuide => "Steam guide",
+        SourceSteamThread => "Steam discussion",
+        SourcePcgw => "PCGamingWiki",
+        SourceOfficial => "Official page",
+        PreviewTitle => "Preview",
+        PreviewNone => "Select a fix to see exactly what Rerun would change.",
+        PreviewPlanning => "Preparing the preview ...",
+        PreviewIntro => "Nothing has been changed yet. This is everything Rerun would do.",
+        PreviewChanges { n } => return (if n == 1 { "1 change".to_owned() } else { format!("{n} changes") }).into(),
+        PreviewGameFolder => "Game folder",
+        PreviewChecksum => "Plan checksum",
+        PreviewAdminNo => "Administrator rights: not needed",
+        PreviewUndo => "Undo takes this whole plan back together, the launch profile included. Before it restores anything, Rerun shows what it will do.",
+        PreviewCloseGame => "Close the game before you apply.",
+        PreviewApplying => "Applying. Rerun finishes this before the window closes.",
+        BtnApply => "Apply",
+        BtnCancel => "Cancel",
+        BtnDismiss => "Dismiss",
+        BtnUndo => "Undo",
+        BtnForget => "Close without undoing",
+        ActCreateFolder => "Create folder",
+        ActCreateFile => "Create file",
+        ActReplaceFile => "Replace file",
+        ActPatchFile => "Patch file",
+        ActCreateKey => "Create registry key",
+        ActSetValue => "Set registry value",
+        ActAddTokens => "Add compatibility layers",
+        ActGpuPref => "Set graphics preference",
+        ActEditIni => "Edit INI file",
+        ActFirewall => "Add firewall rule",
+        ActHold => "Keep shared file",
+        ActOther => "Other change",
+        LblFrom => "From",
+        LblNew => "New file",
+        LblOld => "Current file",
+        LblValue => "Value",
+        LblValueNow => "Now",
+        LblValueNew => "Set to",
+        LblAdds => "Adds",
+        LblIniKey => "Key",
+        LblProfile => "Launch profile",
+        LblCpuRule => "Limit",
+        LblPriority => "Priority",
+        LblStart => "Starts",
+        LblTarget => "Looks for",
+        LblPatch => "Changed byte",
+        LblUndo => "On undo",
+        HeldLine => "The file is there already with exactly this content. Rerun keeps it as it is.",
+        IniMissing => "missing",
+        IniNewSection => "missing (new section)",
+        Bytes { n } => return (if n == 1 { "1 byte".to_owned() } else { format!("{n} bytes") }).into(),
+        PatchByte { offset, old, new } => return (format!("0x{offset:x}: 0x{old:02x} -> 0x{new:02x}")).into(),
+        UndoRemoves => "Undo removes it",
+        UndoRestoresFile => "Undo restores the file as it was",
+        UndoRestoresValue => "Undo restores the previous value",
+        UndoRemovesTokens => "Undo removes only the layers Rerun added",
+        UndoSetsKeys => "Undo sets back only the keys Rerun changed",
+        UndoKeepsShared => "Undo keeps the shared file until the last change that needs it is undone",
+        UndoRemovesRule => "Undo removes the rule",
+        NoteNotRestored => "Undo restores existence, content, length and the read-only, hidden and system flags. It does not restore timestamps, permissions or file IDs.",
+        NoteRegistry => "Registry: if the game fills a key or changes a value later, undo leaves it as it is, and the change can only be closed without undoing.",
+        NoteLayers => "Compatibility layers apply only when Windows starts the game by exactly the path shown. Undo removes only the layers Rerun added.",
+        NoteIni => "INI files: if the game rewrote the file, undo sets back only the keys that still hold Rerun's value. Keys you or the game changed stay.",
+        NoteProfile => "Launch profile: it applies only when Steam starts the game through the launch option shown below. While Steam runs as administrator, no rule applies.",
+        NoteProfileWatch => "Launch profile (watch): after Steam starts the game, Rerun looks for the game process for up to 120 seconds. The rule reaches the game shortly after it started.",
+        NoteFirewall => "Firewall rules are added with administrator rights, with one Windows prompt, and removed again on undo.",
+        NoteHold => "Shared files: a file that is there already with exactly this content is kept. This change relies on it.",
+        NotePatch => "Patched files: only the bytes shown change. A patch makes a digital signature of the file invalid. Undo restores the original file bit for bit.",
+        NoteGpuPref => "Graphics preference: only the preference of this program changes, to High performance. It takes effect at the next start.",
+        NoteUserData => "Your Documents folder: the game's folder there lies outside the game folder. A cloud save may write the file again.",
+        WarningWord => "Warning",
+        WarnSacOn => "Smart App Control is on. It may block the patched file. Undo restores the original.",
+        WarnSacEvaluation => "Smart App Control is in evaluation mode. It blocks nothing now, but Windows may turn it on later and then block the patched file. Undo restores the original.",
+        WarnSacUnknown => "Rerun cannot read the state of Smart App Control. It may block the patched file. Undo restores the original.",
+        WarnSteamPerUser => "Steam built this program for your account. Smart App Control does not know the patched copy and is likely to block it.",
+        WarnSignedExe => "The program has a digital signature. The patch makes it invalid.",
+        WarnWhenUnknown => "Rerun cannot tell whether a problem you picked affects your PC.",
+        WarnNeedsRetest => "This Topo is due to be tested again.",
+        WarnAntiCheat => "An anti-cheat rule allows this fix only with a warning.",
+        WarnGpuSet => "The graphics preference is High performance already. There is nothing to change here.",
+        WarnRequiresGpu => "A package needs a Vulkan driver for the game's graphics card. Rerun does not check that.",
+        WarnSteamInput => "A hint: enable Steam Input for the game in Steam. Rerun changes nothing there.",
+        WarnVsCopy => "A copy of a file Rerun changes is in the VirtualStore. The game probably reads that copy, not the file Rerun changes.",
+        WarnVsLink => "A link in the VirtualStore was not followed, so Rerun could not look behind it.",
+        WarnVsUnchecked => "Rerun could not look for copies in the VirtualStore.",
+        LaunchHeading => "Steam launch option",
+        LaunchCpu { threads, of } => return format!("The game is limited to {threads} of {of} threads on this PC.").into(),
+        LaunchCpuNone => "This profile sets no CPU limit.",
+        LaunchCpuUnknown => "Rerun cannot tell which threads the limit would pick on this PC.",
+        LaunchOptionIntro => "Rerun does not change Steam's settings. Paste this into the game's launch options in Steam (Properties, General):",
+        LaunchOptionCombine => "Launch options the game has already go after %command%. An option that already contains %command% cannot be combined.",
+        LaunchOptionByHand => "After an undo, remove the option by hand.",
+        LaunchShimStays => "Moving or deleting rerun-launch.exe breaks the start through Steam until the option is removed.",
+        LaunchShimMissing => "rerun-launch.exe is not in Rerun's install folder. The option would not start the game.",
+        LaunchShimUnchecked => "Rerun could not check whether rerun-launch.exe is in its install folder.",
+        LaunchInstallUnknown => "Rerun's install folder is unknown, so no launch option can be shown.",
+        LaunchNotShowable => "The path of Rerun's install folder holds characters that cannot be shown as they are. Move Rerun to another path.",
+        LaunchCopy => "Copy launch option",
+        LaunchCopied => "Copied",
+        CardNote { n } => return (if n == 1 { "This card holds 1 change. Undo takes it back, the launch profile included.".to_owned() } else { format!("This card holds {n} changes. Undo takes them all back together, the launch profile included. To change one of them later, undo the card and apply again.") }).into(),
+        CardGame => "Game",
+        CardTxn => "Transaction",
+        StateApplied => "Applied",
+        StateInterrupted => "Interrupted",
+        StateCleanup => "Cleanup pending",
+        StateDamaged => "Damaged",
+        StateUnreadable => "Unreadable",
+        StateForeign => "Needs you",
+        ProblemInterrupted => "This was interrupted before it finished. Undo finishes the job.",
+        ProblemCleanup => "Everything is undone, but a file Rerun left is still in use. Undo once more deletes it when it is free.",
+        ProblemDamaged => "The record is damaged. Rerun cannot undo it; only closing it helps.",
+        ProblemUnreadable => "The record cannot be read. Rerun cannot undo it; only closing it helps.",
+        ProblemForeign => "Someone else changed a file Rerun changed. Rerun leaves it as it is; closing the card without undoing is the way out.",
+        AppliedHere => "Applied to this game",
+        CardNoOps => "The record lists no changes.",
+        UndoTitle => "Undo this change?",
+        UndoIntro => "Nothing has been changed yet. Undo would do this, newest change first:",
+        UndoCloseGame => "The game must be closed. Rerun refuses to undo while it runs.",
+        FateBefore => "Already as before, nothing to do",
+        FateAfter => "Will be set back",
+        FateDrifted => "Rerun's part is set back; later changes by you or the game stay",
+        FateForeign => "Someone else changed it. Rerun leaves it as it is",
+        FateKept => "Stays for another change that relies on it",
+        FateNotReached => "Not reached: undo stops earlier",
+        UndoHalt { op } => return format!("Undo would stop at change {op} and leave the rest as it is. The reason is below.").into(),
+        UndoCleanup { n, in_use } => return (format!("Undo also deletes {n} copies Rerun made; {in_use} are in use now and are deleted once they are free.")).into(),
+        UndoEmpty => "This record changed nothing. Undo only closes it.",
+        UndoPrompt => "Part of this change needs administrator rights. The app cannot undo it yet; that comes with a later version.",
+        UndoAfter => "After the undo",
+        LaunchFateGone => "Remove this launch option of the game in Steam by hand. Rerun does not change Steam's settings:",
+        LaunchUntilRemoved => "Until you remove it, Steam starts the game through rerun-launch, which finds no profile and starts the game unchanged.",
+        LaunchFatePrev => "The launch profile from before this change is back and keeps applying through the launch option. Leave the option set.",
+        LaunchFateStays => "The launch profile stays and keeps applying through the launch option until you remove it. To stop it, remove this launch option by hand:",
+        LaunchFateLeft => "An earlier undo left the launch profile as found, because someone else changed it. If it is still there, it keeps applying until you remove the launch option by hand:",
+        ChangedNote => "The preview was updated. Something changed since you looked; please look at it again.",
+        UndoBtn => "Undo this change",
+        ForgetTitle => "Close this change without undoing it?",
+        ForgetIntro => "Rerun forgets the record. Nothing on disk changes, and Rerun can no longer undo this change. Use this only when undoing is not possible.",
+        ForgetWould => "An undo would finish this cleanly. Think about undoing instead.",
+        ForgetNow => "This is on disk now, which Rerun leaves as it is:",
+        ResAppliedTitle => "Applied",
+        ResAppliedBody => "The change is listed under Applied. Undo takes it back together.",
+        ResNothingTitle => "Nothing to change",
+        ResNothingBody => "The game already has these settings.",
+        ResRolledBackTitle => "Rerun took the change back",
+        ResRolledBackBody => "Something went wrong while applying. Rerun restored everything it had changed. Nothing is different now.",
+        ResOpenTitle => "The change is only partly done",
+        ResOpenBody => "Open Applied: it shows what is left and what you can do. Nothing more was changed.",
+        ResRevertedTitle => "Undone",
+        ResRevertedBody => "Everything this change touched is as before.",
+        ResHaltedTitle => "Undo stopped",
+        ResHaltedBody => "Rerun stopped before the end and left the rest as it is. The card under Applied says what is left.",
+        ResInUseTitle => "Undone, one file is still in use",
+        ResInUseBody => "A copy Rerun made is still in use. Close the program that uses it and undo again to delete it.",
+        ResKeptTitle => "Undone, a copy is kept",
+        ResKeptBody => "Rerun kept a copy next to a file that changed. Undo again once it is safe to delete it.",
+        ResForeignTitle => "Part of it was changed by someone else",
+        ResForeignBody => "Rerun left those parts as they are and did not close the change. Closing it without undoing is the way out.",
+        ResForgottenTitle => "Closed",
+        ResForgottenBody => "Rerun forgot this change. It changed nothing on disk and can no longer undo it.",
+        ResChangedTitle => "Look again",
+        ResUnconfirmedTitle => "Rerun cannot confirm the result",
+        ResUnconfirmedBody => "Look at Applied to see where things stand.",
+        ResWorking => "Working ...",
+        ResClosingTitle => "Rerun finishes the running operation first",
+        ResClosingBody => "Close the window once it has finished. This keeps your files in a known state.",
+        RefBusyTitle => "A file of the game is in use",
+        RefBusyBody => "Close the game, then try again. Nothing was changed.",
+        RefJournalBusyTitle => "Another Rerun operation is running",
+        RefJournalBusyBody => "Wait until it has finished, then try again. Nothing was changed.",
+        RefBlockedTitle => "An earlier change is damaged",
+        RefBlockedBody => "Close it first under Applied. Nothing was changed.",
+        RefOrderTitle => "Another change comes first",
+        RefOrderBody => "A change of Rerun that touches the same files must be undone first (the transaction is named below). Open Applied. Nothing was changed.",
+        RefSlotTitle => "Another fix already uses that file",
+        RefSlotBody => "Two packages cannot share a DLL. Undo the other change first, or keep it instead. Nothing was changed.",
+        RefCleanupTitle => "A file Rerun left is still there",
+        RefCleanupBody => "Undo that change once more under Applied; it deletes the file once it is free. Nothing was changed.",
+        RefSteamTitle => "Steam is busy with this game",
+        RefSteamBody => "Wait until Steam has finished, then try again. Nothing was changed.",
+        RefStaleTitle => "The game changed since the preview",
+        RefStaleBody => "This is not a problem. Rerun updated the page; look at the fixes and the preview again. Nothing was changed.",
+        RefAdminTitle => "This needs administrator rights",
+        RefAdminBody => "The folder needs administrator rights. The app cannot do that yet. Nothing was changed.",
+        RefHelperTitle => "Not available yet",
+        RefHelperBody => "Changes that need administrator rights come with a later version of the app. Nothing was changed.",
+        RefNothingTitle => "Nothing to undo",
+        RefNothingBody => "This change is closed already, or Rerun has no record of it.",
+        RefUnexpectedTitle => "Rerun could not do this",
+        RefUnexpectedBody => "The reason is below. Look at Applied if you are unsure what state things are in.",
+        RefPlanTitle => "Rerun cannot plan this selection",
+        RefPlanBody => "Nothing was changed. The reason is below.",
+        RefNoPreviewTitle => "The preview is no longer current",
+        RefNoPreviewBody => "Select the fixes again and apply once the preview shows. Nothing was changed.",
     };
     Cow::Borrowed(s)
 }
@@ -936,7 +1576,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         }
         HeroNothingHere => "Kein bekanntes Problem betrifft diesen PC.",
         HeroNoFixHere => "Rerun kann auf diesem PC keinen Fix anbieten.",
-        HeroReadOnly => "Fixes auswählen und anwenden kommt mit der nächsten Version der App.",
+        HeroReadOnly => "Wähle die Fixes, von denen du genau sehen willst, was sie ändern.",
         HeroUpdating => {
             "Steam aktualisiert dieses Spiel. Öffne es wieder, wenn das Update fertig ist."
         }
@@ -993,7 +1633,7 @@ fn de(m: Msg) -> Cow<'static, str> {
             "Nicht angeboten: So, wie dieses Spiel startet, lässt sich dieser Fix nicht anwenden."
         }
         FixWarned => "Die Anti-Cheat-Regel erlaubt diesen Fix mit einem Hinweis.",
-        FixesReadOnly => "In dieser Version lassen sich Fixes noch nicht auswählen.",
+        FixesReadOnly => "Rerun zeigt zuerst die Vorschau und ändert nichts, bis du anwendest.",
         AppliedTitle => "Angewendet",
         AppliedIntro => "Alles, was Rerun an deinen Spielen geändert hat.",
         AppliedEmpty => "Nichts angewendet",
@@ -1006,7 +1646,7 @@ fn de(m: Msg) -> Cow<'static, str> {
             .into();
         }
         AppliedSomeSub => {
-            "Die Liste mit Rückgängig kommt mit der nächsten Version der App. Die Kommandozeile zeigt sie: rerun status."
+            "Jede Karte ist eine Änderung, die Rerun angewendet hat. Rückgängig nimmt die ganze Karte zurück, nachdem es dir gezeigt hat, was es wiederherstellt."
         }
         AppliedUnreadable => "Das Journal liess sich nicht lesen.",
         HistoryTitle => "Verlauf",
@@ -1071,6 +1711,210 @@ fn de(m: Msg) -> Cow<'static, str> {
         AboutLicence => {
             "Freie Software unter der GNU General Public License, Version 3. Ohne Gewährleistung."
         }
+
+        FixSelect => "Diesen Fix auswählen",
+        FixNeedsHelper => "Dieser Fix braucht den Administrator-Helfer von Rerun. Die App kann ihn noch nicht anwenden; das kommt mit einer späteren Version.",
+        FixNeedsDownload => "Dieser Fix braucht einen Paket-Download. Die App kann noch nichts herunterladen; das kommt mit einer späteren Version.",
+        FixTradeoffs => "Nebenwirkungen",
+        FixNoTradeoffs => "Keine Nebenwirkungen angegeben",
+        FixSources => "Quellen",
+        FixExclusive => "Lässt sich nicht kombinieren mit",
+        FixPreselected => "Vorausgewählt: von uns getestet, und das Problem betrifft diesen PC",
+        SourceRepo => "Repository",
+        SourceSteamGuide => "Steam-Guide",
+        SourceSteamThread => "Steam-Diskussion",
+        SourcePcgw => "PCGamingWiki",
+        SourceOfficial => "Offizielle Seite",
+        PreviewTitle => "Vorschau",
+        PreviewNone => "Wähle einen Fix, um genau zu sehen, was Rerun ändern würde.",
+        PreviewPlanning => "Die Vorschau wird erstellt ...",
+        PreviewIntro => "Noch wurde nichts geändert. Das ist alles, was Rerun tun würde.",
+        PreviewChanges { n } => return (if n == 1 { "1 Änderung".to_owned() } else { format!("{n} Änderungen") }).into(),
+        PreviewGameFolder => "Spielordner",
+        PreviewChecksum => "Prüfsumme des Plans",
+        PreviewAdminNo => "Administratorrechte: nicht nötig",
+        PreviewUndo => "Rückgängig nimmt diesen ganzen Plan gemeinsam zurück, das Startprofil eingeschlossen. Bevor Rerun etwas wiederherstellt, zeigt es dir, was es tun wird.",
+        PreviewCloseGame => "Schliesse das Spiel, bevor du anwendest.",
+        PreviewApplying => "Wird angewendet. Rerun beendet das, bevor sich das Fenster schliesst.",
+        BtnApply => "Anwenden",
+        BtnCancel => "Abbrechen",
+        BtnDismiss => "Ausblenden",
+        BtnUndo => "Rückgängig",
+        BtnForget => "Abschliessen ohne Rückgängig",
+        ActCreateFolder => "Ordner anlegen",
+        ActCreateFile => "Datei anlegen",
+        ActReplaceFile => "Datei ersetzen",
+        ActPatchFile => "Datei patchen",
+        ActCreateKey => "Registry-Schlüssel anlegen",
+        ActSetValue => "Registry-Wert setzen",
+        ActAddTokens => "Kompatibilitätsebenen hinzufügen",
+        ActGpuPref => "Grafikeinstellung setzen",
+        ActEditIni => "INI-Datei bearbeiten",
+        ActFirewall => "Firewall-Regel hinzufügen",
+        ActHold => "Gemeinsame Datei behalten",
+        ActOther => "Andere Änderung",
+        LblFrom => "Aus",
+        LblNew => "Neue Datei",
+        LblOld => "Aktuelle Datei",
+        LblValue => "Wert",
+        LblValueNow => "Jetzt",
+        LblValueNew => "Wird gesetzt auf",
+        LblAdds => "Fügt hinzu",
+        LblIniKey => "Schlüssel",
+        LblProfile => "Startprofil",
+        LblCpuRule => "Begrenzung",
+        LblPriority => "Priorität",
+        LblStart => "Startet",
+        LblTarget => "Sucht nach",
+        LblPatch => "Geändertes Byte",
+        LblUndo => "Beim Rückgängigmachen",
+        HeldLine => "Die Datei ist schon mit genau diesem Inhalt da. Rerun lässt sie, wie sie ist.",
+        IniMissing => "fehlt",
+        IniNewSection => "fehlt (neuer Abschnitt)",
+        Bytes { n } => return (if n == 1 { "1 Byte".to_owned() } else { format!("{n} Bytes") }).into(),
+        PatchByte { offset, old, new } => return (format!("0x{offset:x}: 0x{old:02x} -> 0x{new:02x}")).into(),
+        UndoRemoves => "Rückgängig entfernt es",
+        UndoRestoresFile => "Rückgängig stellt die Datei wieder her, wie sie war",
+        UndoRestoresValue => "Rückgängig stellt den früheren Wert wieder her",
+        UndoRemovesTokens => "Rückgängig entfernt nur die Ebenen, die Rerun hinzugefügt hat",
+        UndoSetsKeys => "Rückgängig setzt nur die Schlüssel zurück, die Rerun geändert hat",
+        UndoKeepsShared => "Rückgängig behält die gemeinsame Datei, bis die letzte Änderung, die sie braucht, zurückgenommen ist",
+        UndoRemovesRule => "Rückgängig entfernt die Regel",
+        NoteNotRestored => "Rückgängig stellt Vorhandensein, Inhalt, Länge sowie die Attribute Schreibgeschützt, Versteckt und System wieder her, nicht aber Zeitstempel, Berechtigungen oder Datei-IDs.",
+        NoteRegistry => "Registry: Wenn das Spiel später einen Schlüssel füllt oder einen Wert ändert, lässt Rückgängig ihn, wie er ist, und die Änderung lässt sich nur noch ohne Rückgängig abschliessen.",
+        NoteLayers => "Kompatibilitätsebenen gelten nur, wenn Windows das Spiel genau über den gezeigten Pfad startet. Rückgängig entfernt nur die Ebenen, die Rerun hinzugefügt hat.",
+        NoteIni => "INI-Dateien: Hat das Spiel die Datei neu geschrieben, setzt Rückgängig nur die Schlüssel zurück, die noch Reruns Wert haben. Schlüssel, die du oder das Spiel geändert haben, bleiben.",
+        NoteProfile => "Startprofil: Es gilt nur, wenn Steam das Spiel über die unten gezeigte Startoption startet. Solange Steam als Administrator läuft, gilt keine Regel.",
+        NoteProfileWatch => "Startprofil (Beobachten): Nachdem Steam das Spiel gestartet hat, sucht Rerun bis zu 120 Sekunden nach dem Spielprozess. Die Regel erreicht das Spiel kurz nach dem Start.",
+        NoteFirewall => "Firewall-Regeln werden mit Administratorrechten und einer Windows-Abfrage hinzugefügt und beim Rückgängigmachen wieder entfernt.",
+        NoteHold => "Gemeinsame Dateien: Eine Datei, die schon mit genau diesem Inhalt da ist, bleibt. Diese Änderung verlässt sich darauf.",
+        NotePatch => "Gepatchte Dateien: Nur die gezeigten Bytes ändern sich. Ein Patch macht eine digitale Signatur der Datei ungültig. Rückgängig stellt die Originaldatei Bit für Bit wieder her.",
+        NoteGpuPref => "Grafikeinstellung: Nur die Einstellung dieses Programms ändert sich, auf Hohe Leistung. Die Einstellung gilt ab dem nächsten Start.",
+        NoteUserData => "Dein Dokumente-Ordner: Der Ordner des Spiels dort liegt ausserhalb des Spielordners. Ein Cloud-Spielstand kann die Datei erneut schreiben.",
+        WarningWord => "Warnung",
+        WarnSacOn => "Die intelligente App-Kontrolle ist an. Die App-Kontrolle kann die gepatchte Datei blockieren. Rückgängig stellt das Original wieder her.",
+        WarnSacEvaluation => "Die intelligente App-Kontrolle ist im Testmodus. Die App-Kontrolle blockiert jetzt nichts, aber Windows kann sie später einschalten und dann die gepatchte Datei blockieren. Rückgängig stellt das Original wieder her.",
+        WarnSacUnknown => "Rerun kann den Zustand der intelligenten App-Kontrolle nicht lesen. Die App-Kontrolle kann die gepatchte Datei blockieren. Rückgängig stellt das Original wieder her.",
+        WarnSteamPerUser => "Steam hat dieses Programm für dein Konto gebaut. Die intelligente App-Kontrolle kennt die gepatchte Kopie nicht und blockiert sie wahrscheinlich.",
+        WarnSignedExe => "Das Programm hat eine digitale Signatur. Der Patch macht sie ungültig.",
+        WarnWhenUnknown => "Rerun kann nicht sagen, ob ein gewähltes Problem deinen PC betrifft.",
+        WarnNeedsRetest => "Dieses Topo soll nochmals getestet werden.",
+        WarnAntiCheat => "Eine Anti-Cheat-Regel erlaubt diesen Fix nur mit einem Hinweis.",
+        WarnGpuSet => "Die Grafikeinstellung ist schon Hohe Leistung. Hier gibt es nichts zu ändern.",
+        WarnRequiresGpu => "Ein Paket braucht einen Vulkan-Treiber für die Grafikkarte des Spiels. Rerun prüft das nicht.",
+        WarnSteamInput => "Ein Hinweis: Aktiviere Steam Input für das Spiel in Steam. Rerun ändert dort nichts.",
+        WarnVsCopy => "Eine Kopie einer Datei, die Rerun ändert, liegt im VirtualStore. Das Spiel liest wahrscheinlich diese Kopie und nicht die Datei, die Rerun ändert.",
+        WarnVsLink => "Ein Link im VirtualStore wurde nicht verfolgt, darum konnte Rerun nicht dahinter nachsehen.",
+        WarnVsUnchecked => "Rerun konnte nicht nach Kopien im VirtualStore suchen.",
+        LaunchHeading => "Steam-Startoption",
+        LaunchCpu { threads, of } => return format!("Das Spiel wird auf {threads} von {of} Threads dieses PCs beschränkt.").into(),
+        LaunchCpuNone => "Dieses Profil setzt keine CPU-Begrenzung.",
+        LaunchCpuUnknown => "Rerun kann nicht sagen, welche Threads die Begrenzung auf diesem PC wählen würde.",
+        LaunchOptionIntro => "Rerun ändert die Einstellungen von Steam nicht. Füge dies in Steam bei den Startoptionen des Spiels ein (Eigenschaften, Allgemein):",
+        LaunchOptionCombine => "Startoptionen, die das Spiel schon hat, kommen hinter %command%. Eine Option, die schon %command% enthält, lässt sich nicht kombinieren.",
+        LaunchOptionByHand => "Nach dem Rückgängigmachen entfernst du die Option von Hand.",
+        LaunchShimStays => "Wird rerun-launch.exe verschoben oder gelöscht, startet das Spiel über Steam nicht mehr, bis die Option entfernt ist.",
+        LaunchShimMissing => "rerun-launch.exe liegt nicht im Installationsordner von Rerun. Die Option würde das Spiel nicht starten.",
+        LaunchShimUnchecked => "Rerun konnte nicht prüfen, ob rerun-launch.exe in seinem Installationsordner liegt.",
+        LaunchInstallUnknown => "Der Installationsordner von Rerun ist unbekannt, darum lässt sich keine Startoption zeigen.",
+        LaunchNotShowable => "Der Pfad zum Installationsordner von Rerun enthält Zeichen, die sich nicht unverändert zeigen lassen. Verschiebe Rerun an einen anderen Pfad.",
+        LaunchCopy => "Startoption kopieren",
+        LaunchCopied => "Kopiert",
+        CardNote { n } => return (if n == 1 { "Diese Karte enthält 1 Änderung. Rückgängig nimmt sie zurück, das Startprofil eingeschlossen.".to_owned() } else { format!("Diese Karte enthält {n} Änderungen. Rückgängig nimmt sie alle gemeinsam zurück, das Startprofil eingeschlossen. Um eine davon später zu ändern, mache die Karte rückgängig und wende neu an.") }).into(),
+        CardGame => "Spiel",
+        CardTxn => "Vorgang",
+        StateApplied => "Angewendet",
+        StateInterrupted => "Unterbrochen",
+        StateCleanup => "Aufräumen ausstehend",
+        StateDamaged => "Beschädigt",
+        StateUnreadable => "Nicht lesbar",
+        StateForeign => "Braucht dich",
+        ProblemInterrupted => "Das wurde unterbrochen, bevor es fertig war. Rückgängig bringt es zu Ende.",
+        ProblemCleanup => "Alles ist rückgängig gemacht, aber eine Datei, die Rerun hinterlassen hat, ist noch in Gebrauch. Nochmals Rückgängig löscht sie, sobald sie frei ist.",
+        ProblemDamaged => "Der Eintrag ist beschädigt. Rerun kann ihn nicht rückgängig machen; nur Abschliessen hilft.",
+        ProblemUnreadable => "Der Eintrag lässt sich nicht lesen. Rerun kann ihn nicht rückgängig machen; nur Abschliessen hilft.",
+        ProblemForeign => "Jemand anderes hat eine Datei geändert, die Rerun geändert hat. Rerun lässt sie, wie sie ist; der Ausweg ist, die Karte ohne Rückgängig abzuschliessen.",
+        AppliedHere => "Auf dieses Spiel angewendet",
+        CardNoOps => "Der Eintrag listet keine Änderungen.",
+        UndoTitle => "Diese Änderung rückgängig machen?",
+        UndoIntro => "Noch wurde nichts geändert. Rückgängig würde Folgendes tun, die neueste Änderung zuerst:",
+        UndoCloseGame => "Das Spiel muss geschlossen sein. Rerun macht nichts rückgängig, solange es läuft.",
+        FateBefore => "Schon wie vorher, nichts zu tun",
+        FateAfter => "Wird zurückgesetzt",
+        FateDrifted => "Rerun setzt seinen Teil zurück; spätere Änderungen von dir oder dem Spiel bleiben",
+        FateForeign => "Jemand anderes hat es geändert. Rerun lässt es, wie es ist",
+        FateKept => "Bleibt für eine andere Änderung, die sich darauf verlässt",
+        FateNotReached => "Nicht erreicht: Rückgängig hält vorher an",
+        UndoHalt { op } => return format!("Rückgängig würde bei Änderung {op} anhalten und den Rest lassen, wie er ist. Der Grund steht unten.").into(),
+        UndoCleanup { n, in_use } => return (format!("Rückgängig löscht auch {n} Kopien, die Rerun gemacht hat; {in_use} sind gerade in Gebrauch und werden gelöscht, sobald sie frei sind.")).into(),
+        UndoEmpty => "Dieser Eintrag hat nichts geändert. Rückgängig schliesst ihn nur ab.",
+        UndoPrompt => "Ein Teil dieser Änderung braucht Administratorrechte. Die App kann ihn noch nicht rückgängig machen; das kommt mit einer späteren Version.",
+        UndoAfter => "Nach dem Rückgängigmachen",
+        LaunchFateGone => "Entferne diese Startoption des Spiels in Steam von Hand. Rerun ändert die Einstellungen von Steam nicht:",
+        LaunchUntilRemoved => "Bis du sie entfernst, startet Steam das Spiel über rerun-launch, das kein Profil findet und das Spiel unverändert startet.",
+        LaunchFatePrev => "Das Startprofil von vor dieser Änderung ist zurück und gilt weiter über die Startoption. Lass die Option gesetzt.",
+        LaunchFateStays => "Das Startprofil bleibt und gilt weiter über die Startoption, bis du sie entfernst. Um es zu stoppen, entferne diese Startoption von Hand:",
+        LaunchFateLeft => "Ein früheres Rückgängigmachen hat das Startprofil so gelassen, wie es war, weil jemand anderes es geändert hat. Falls es noch da ist, gilt es weiter, bis du die Startoption von Hand entfernst:",
+        ChangedNote => "Die Vorschau wurde aktualisiert. Seit deinem Blick hat sich etwas geändert; bitte sieh sie dir nochmals an.",
+        UndoBtn => "Diese Änderung rückgängig machen",
+        ForgetTitle => "Diese Änderung abschliessen, ohne sie rückgängig zu machen?",
+        ForgetIntro => "Rerun vergisst den Eintrag. Auf der Festplatte ändert sich nichts, und Rerun kann diese Änderung nicht mehr rückgängig machen. Nutze das nur, wenn Rückgängig nicht möglich ist.",
+        ForgetWould => "Rückgängig würde das sauber abschliessen. Überlege dir, stattdessen rückgängig zu machen.",
+        ForgetNow => "Das liegt jetzt auf der Festplatte, und Rerun lässt es so:",
+        ResAppliedTitle => "Angewendet",
+        ResAppliedBody => "Die Änderung steht unter Angewendet. Rückgängig nimmt sie gemeinsam zurück.",
+        ResNothingTitle => "Nichts zu ändern",
+        ResNothingBody => "Das Spiel hat diese Einstellungen schon.",
+        ResRolledBackTitle => "Rerun hat die Änderung zurückgenommen",
+        ResRolledBackBody => "Beim Anwenden ging etwas schief. Rerun hat alles wiederhergestellt, was es geändert hatte. Jetzt ist nichts anders.",
+        ResOpenTitle => "Die Änderung ist nur teilweise erledigt",
+        ResOpenBody => "Öffne Angewendet: Dort steht, was übrig ist und was du tun kannst. Es wurde nichts weiter geändert.",
+        ResRevertedTitle => "Rückgängig gemacht",
+        ResRevertedBody => "Alles, was diese Änderung berührt hat, ist wie vorher.",
+        ResHaltedTitle => "Rückgängig hat angehalten",
+        ResHaltedBody => "Rerun hat vor dem Ende angehalten und den Rest gelassen, wie er ist. Die Karte unter Angewendet sagt, was übrig ist.",
+        ResInUseTitle => "Rückgängig gemacht, eine Datei ist noch in Gebrauch",
+        ResInUseBody => "Eine Kopie, die Rerun gemacht hat, ist noch in Gebrauch. Schliesse das Programm, das sie nutzt, und mache nochmals rückgängig, um sie zu löschen.",
+        ResKeptTitle => "Rückgängig gemacht, eine Kopie bleibt",
+        ResKeptBody => "Rerun hat neben einer geänderten Datei eine Kopie behalten. Mache nochmals rückgängig, sobald sie sich gefahrlos löschen lässt.",
+        ResForeignTitle => "Ein Teil wurde von jemand anderem geändert",
+        ResForeignBody => "Rerun hat diese Teile gelassen, wie sie sind, und die Änderung nicht abgeschlossen. Der Ausweg ist, sie ohne Rückgängig abzuschliessen.",
+        ResForgottenTitle => "Abgeschlossen",
+        ResForgottenBody => "Rerun hat diese Änderung vergessen. Auf der Festplatte hat es nichts geändert und kann sie nicht mehr rückgängig machen.",
+        ResChangedTitle => "Bitte nochmals ansehen",
+        ResUnconfirmedTitle => "Rerun kann das Ergebnis nicht bestätigen",
+        ResUnconfirmedBody => "Sieh unter Angewendet nach, wie es steht.",
+        ResWorking => "Wird ausgeführt ...",
+        ResClosingTitle => "Rerun beendet zuerst den laufenden Vorgang",
+        ResClosingBody => "Schliesse das Fenster, sobald er fertig ist. So bleiben deine Dateien in einem bekannten Zustand.",
+        RefBusyTitle => "Eine Datei des Spiels ist in Gebrauch",
+        RefBusyBody => "Schliesse das Spiel und versuche es nochmals. Es wurde nichts geändert.",
+        RefJournalBusyTitle => "Ein anderer Rerun-Vorgang läuft",
+        RefJournalBusyBody => "Warte, bis er fertig ist, und versuche es dann nochmals. Es wurde nichts geändert.",
+        RefBlockedTitle => "Eine frühere Änderung ist beschädigt",
+        RefBlockedBody => "Schliesse sie zuerst unter Angewendet ab. Es wurde nichts geändert.",
+        RefOrderTitle => "Eine andere Änderung kommt zuerst",
+        RefOrderBody => "Eine Änderung von Rerun, die dieselben Dateien berührt, muss zuerst rückgängig gemacht werden (der Vorgang steht unten). Öffne Angewendet. Es wurde nichts geändert.",
+        RefSlotTitle => "Ein anderer Fix nutzt diese Datei schon",
+        RefSlotBody => "Zwei Pakete können sich keine DLL teilen. Mache die andere Änderung zuerst rückgängig oder behalte sie. Es wurde nichts geändert.",
+        RefCleanupTitle => "Eine Datei, die Rerun hinterlassen hat, ist noch da",
+        RefCleanupBody => "Mache diese Änderung unter Angewendet nochmals rückgängig; dabei wird die Datei gelöscht, sobald sie frei ist. Es wurde nichts geändert.",
+        RefSteamTitle => "Steam ist mit diesem Spiel beschäftigt",
+        RefSteamBody => "Warte, bis Steam fertig ist, und versuche es dann nochmals. Es wurde nichts geändert.",
+        RefStaleTitle => "Das Spiel hat sich seit der Vorschau geändert",
+        RefStaleBody => "Das ist kein Problem. Rerun hat die Seite aktualisiert; sieh dir die Fixes und die Vorschau nochmals an. Es wurde nichts geändert.",
+        RefAdminTitle => "Das braucht Administratorrechte",
+        RefAdminBody => "Der Ordner braucht Administratorrechte. Die App kann das noch nicht. Es wurde nichts geändert.",
+        RefHelperTitle => "Noch nicht verfügbar",
+        RefHelperBody => "Änderungen, die Administratorrechte brauchen, kommen mit einer späteren Version der App. Es wurde nichts geändert.",
+        RefNothingTitle => "Nichts rückgängig zu machen",
+        RefNothingBody => "Diese Änderung ist schon abgeschlossen, oder Rerun hat keinen Eintrag dazu.",
+        RefUnexpectedTitle => "Rerun konnte das nicht ausführen",
+        RefUnexpectedBody => "Der Grund steht unten. Sieh unter Angewendet nach, wenn du unsicher bist, in welchem Zustand die Dinge sind.",
+        RefPlanTitle => "Rerun kann diese Auswahl nicht planen",
+        RefPlanBody => "Es wurde nichts geändert. Der Grund steht unten.",
+        RefNoPreviewTitle => "Die Vorschau ist nicht mehr aktuell",
+        RefNoPreviewBody => "Wähle die Fixes nochmals und wende an, sobald die Vorschau da ist. Es wurde nichts geändert.",
     };
     Cow::Borrowed(s)
 }

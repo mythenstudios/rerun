@@ -1,5 +1,5 @@
 //! Source rules of `rerun-app` (ADR 0026, ADR 0027 and its amendment P5-1), over the product
-//! sources (`src/`, without the `tests.rs` files) and `ui/*.slint`; comments do not count:
+//! sources (`src/`, without the test modules: `tests.rs` and the files below a `tests/` folder) and `ui/*.slint`; comments do not count:
 //! - only `ui` (`src/ui.rs`, `src/ui/`) names Slint; `worker`, `vm`, `text` and `theme` stay
 //!   framework-free;
 //! - `unsafe`, `windows_sys` and `raw_window_handle` only in `src/ui/chrome.rs`;
@@ -153,7 +153,10 @@ fn sources(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
         if p.is_dir() {
-            sources(&p, ext, out);
+            // A `tests/` folder below `src` holds test modules, like `tests.rs`.
+            if p.file_name().is_some_and(|n| n != "tests") {
+                sources(&p, ext, out);
+            }
         } else if p.extension().is_some_and(|x| x == ext)
             && p.file_name().is_some_and(|n| n != "tests.rs")
         {

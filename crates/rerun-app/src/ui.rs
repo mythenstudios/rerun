@@ -26,8 +26,9 @@ mod generated {
 }
 
 use generated::{
-    AppWindow, AppliedData, BadgeData, DetailData, FactData, FixData, GameData, NoticeData,
-    ProblemData, Reveal, RowData, SectionData, SolvedData, Str, SysLineData, Theme,
+    AppWindow, AppliedData, BadgeData, BannerData, CardData, DetailData, DialogData, FactData,
+    FixData, GameData, LaunchData, LineData, Modal, NoticeData, OpData, PreviewData, ProblemData,
+    Reveal, RowData, SectionData, SolvedData, Str, SysLineData, Theme, WarnData,
 };
 
 use std::cell::RefCell;
@@ -36,12 +37,16 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use rerun_core::escape::Shown;
-use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{CloseRequestResponse, Color, ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::text::{Lang, Msg, t};
 use crate::theme::{self, Rgb, ThemeId, Tokens};
-use crate::vm::{self, AppliedVm, DetailVm, GameVm, Notice, RowVm, SystemVm, Value};
+use crate::vm::{
+    self, AppliedVm, DetailVm, DialogKind, DialogVm, GameVm, LaunchVm, Notice, OpVm, PreviewVm,
+    ResultVm, RowVm, Selection, SystemVm, Tone, TxnCardVm, Value, WarnVm,
+};
 use crate::worker::{Event, Job, Wake, Worker, World};
+use rerun_core::journal::TxnId;
 
 use chrome::{Chrome, Geometry, WindowState};
 
@@ -57,6 +62,19 @@ struct State {
     /// a visit that the worker answers from its session does not rebuild its models.
     applied: Option<AppliedVm>,
     system: Option<SystemVm>,
+    /// The game page as handed to the window (the selection works on it).
+    page: Option<GameVm>,
+    /// The fixes the user selected on `page`.
+    selection: Selection,
+    /// The plan hash of the preview the window shows.
+    preview_hash: Option<String>,
+    /// The cards of the page that shows them (the game page or the applied page).
+    game_cards: Vec<TxnCardVm>,
+    applied_cards: Vec<TxnCardVm>,
+    /// The open undo or forget dialog.
+    dialog: Option<(DialogKind, TxnId)>,
+    /// The card button that opened it (2 * index, +1 for forget): the focus returns there.
+    opener: i32,
 }
 
 /// Wakes the event loop from the worker thread (ADR 0026: `invoke_from_event_loop`).
@@ -156,6 +174,13 @@ where
         game: None,
         applied: None,
         system: None,
+        page: None,
+        selection: Selection::default(),
+        preview_hash: None,
+        game_cards: Vec::new(),
+        applied_cards: Vec::new(),
+        dialog: None,
+        opener: -1,
     }));
     callbacks(&ui, &state);
 
@@ -345,6 +370,29 @@ fn set_strings(ui: &AppWindow, lang: Lang) {
         env!("CARGO_PKG_VERSION")
     )));
     g.set_about_licence(x(Msg::AboutLicence));
+    g.set_fix_select(x(Msg::FixSelect));
+    g.set_fix_tradeoffs(x(Msg::FixTradeoffs));
+    g.set_fix_no_tradeoffs(x(Msg::FixNoTradeoffs));
+    g.set_fix_sources(x(Msg::FixSources));
+    g.set_fix_exclusive(x(Msg::FixExclusive));
+    g.set_preview_title(x(Msg::PreviewTitle));
+    g.set_preview_none(x(Msg::PreviewNone));
+    g.set_preview_planning(x(Msg::PreviewPlanning));
+    g.set_preview_intro(x(Msg::PreviewIntro));
+    g.set_preview_folder(x(Msg::PreviewGameFolder));
+    g.set_preview_checksum(x(Msg::PreviewChecksum));
+    g.set_preview_close_game(x(Msg::PreviewCloseGame));
+    g.set_preview_applying(x(Msg::PreviewApplying));
+    g.set_btn_apply(x(Msg::BtnApply));
+    g.set_btn_cancel(x(Msg::BtnCancel));
+    g.set_btn_dismiss(x(Msg::BtnDismiss));
+    g.set_btn_undo(x(Msg::BtnUndo));
+    g.set_btn_forget(x(Msg::BtnForget));
+    g.set_lbl_undo(x(Msg::LblUndo));
+    g.set_applied_here(x(Msg::AppliedHere));
+    g.set_card_game(x(Msg::CardGame));
+    g.set_card_txn(x(Msg::CardTxn));
+    g.set_working(x(Msg::ResWorking));
 }
 
 fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
@@ -406,7 +454,12 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         let row = st.rows.iter().find(|r| r.app_id == app_id);
         let loading = vm::game_loading(app_id, name.as_ref(), row, st.lang);
         st.game = Some(app_id);
-        ui.set_game(game(&loading));
+        st.page = None;
+        st.selection = Selection::default();
+        st.preview_hash = None;
+        st.game_cards.clear();
+        ui.set_preview(preview_none(0));
+        ui.set_game(game(&loading, &Selection::default()));
         ui.set_game_loading(true);
         ui.set_game_open(true);
         st.worker.send(Job::Game { app_id, name });
@@ -444,6 +497,8 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         st.worker.send(Job::Library);
         st.worker.send(Job::Status);
     });
+
+    write_callbacks(ui, state);
 }
 
 /// Takes every waiting event of the worker.
@@ -476,14 +531,80 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             }
             Event::Game(g) => {
                 if st.game == Some(g.app_id) {
-                    ui.set_game(game(&g));
+                    // The first page of this visit: the preselection. Later pages (after a write
+                    // or a refresh) keep what is still selectable.
+                    let first = st.page.is_none();
+                    if first {
+                        st.selection = Selection::preselected(&g);
+                    } else {
+                        st.selection.keep(&g);
+                    }
+                    let app_id = g.app_id;
+                    st.game_cards = g.applied.clone();
+                    ui.set_game(game(&g, &st.selection));
                     ui.set_game_loading(false);
-                    crate::trace::log(|| format!("ui: game {} shown", g.app_id));
+                    st.page = Some(g);
+                    // The preview of the selection, live (nothing is changed by looking).
+                    plan_selection(ui, &mut st);
+                    crate::trace::log(|| format!("ui: game {app_id} shown"));
                 }
+            }
+            Event::Preview { app_id, vm } => {
+                if st.game == Some(app_id) {
+                    st.preview_hash = Some(vm.hash.clone());
+                    ui.set_preview(preview_data(&vm, false));
+                    // Handed to the window: only now may the worker take the plan as shown
+                    // (`flow::shown`); it answers with `PreviewReady`, which enables "Apply".
+                    st.worker.send(Job::PreviewShown {
+                        hash: vm.hash.clone(),
+                    });
+                }
+            }
+            Event::PreviewReady { hash } => {
+                if st.preview_hash.as_deref() == Some(hash.as_str()) {
+                    let mut p = ui.get_preview();
+                    p.ready = true;
+                    ui.set_preview(p);
+                }
+            }
+            Event::PreviewNone { app_id } => {
+                if st.game == Some(app_id) {
+                    st.preview_hash = None;
+                    ui.set_preview(preview_none(0));
+                }
+            }
+            Event::PreviewRefused { app_id, result } => {
+                if st.game == Some(app_id) {
+                    st.preview_hash = None;
+                    ui.set_preview(preview_refused(&result));
+                }
+            }
+            Event::Dialog(d) => {
+                st.dialog = Some((d.kind, d.txn));
+                ui.set_dialog(dialog_data(&d));
+                ui.set_dialog_open(true);
+                let m = ui.global::<Modal>();
+                m.set_working(false);
+                m.set_open(true);
+            }
+            Event::Result(r) => {
+                if st.dialog.is_some() {
+                    close_dialog(ui, &mut st);
+                }
+                ui.global::<Modal>().set_working(false);
+                if r.refresh {
+                    // Written, or the game changed: the page is read again and the selection
+                    // starts over.
+                    st.selection = Selection::default();
+                    st.preview_hash = None;
+                    ui.set_preview(preview_none(0));
+                }
+                show_result(ui, &r);
             }
             Event::Applied(a) => {
                 if st.applied.as_ref() != Some(&a) {
                     ui.set_applied(applied(&a));
+                    st.applied_cards = a.cards.clone();
                     ui.set_nav_applied_count(if a.open > 0 {
                         s(a.open.to_string())
                     } else {
@@ -567,7 +688,7 @@ fn notice(n: &Notice) -> NoticeData {
     }
 }
 
-fn game(g: &GameVm) -> GameData {
+fn game(g: &GameVm, sel: &Selection) -> GameData {
     GameData {
         app_id: i32::try_from(g.app_id).unwrap_or(i32::MAX),
         title: shown(&g.title),
@@ -610,6 +731,11 @@ fn game(g: &GameVm) -> GameData {
                     refused: f.refused.as_deref().map(s).unwrap_or_default(),
                     refused_detail: f.refused_detail.as_ref().map(shown).unwrap_or_default(),
                     warned: f.warned.as_deref().map(s).unwrap_or_default(),
+                    selectable: f.offer == vm::Offer::Selectable,
+                    selected: sel.contains(&f.key),
+                    note: f.note.as_deref().map(s).unwrap_or_default(),
+                    preselect_note: f.preselect_note.as_deref().map(s).unwrap_or_default(),
+                    exclusive: model(f.exclusive.iter().map(shown).collect()),
                     solves: model(
                         f.solves
                             .iter()
@@ -617,12 +743,15 @@ fn game(g: &GameVm) -> GameData {
                                 issue: shown(&x.issue),
                                 when: badge(&x.when),
                                 status: badge(&x.status),
+                                tradeoffs: model(x.tradeoffs.iter().map(shown).collect()),
+                                sources: model(x.sources.iter().map(shown).collect()),
                             })
                             .collect(),
                     ),
                 })
                 .collect(),
         ),
+        applied: model(g.applied.iter().map(card).collect()),
     }
 }
 
@@ -636,5 +765,336 @@ fn applied(a: &AppliedVm) -> AppliedData {
         title: s(&a.title),
         sub: s(&a.sub),
         detail: a.detail.as_ref().map(shown).unwrap_or_default(),
+        cards: model(a.cards.iter().map(card).collect()),
     }
+}
+
+// ---------- selecting, previewing, applying, undoing (P5-5a) ----------
+
+fn value_str(v: &Value) -> SharedString {
+    s(v.as_str())
+}
+
+fn line(l: &vm::LineVm) -> LineData {
+    LineData {
+        label: s(&l.label),
+        values: model(l.values.iter().map(value_str).collect()),
+        mono: l.mono,
+    }
+}
+
+fn op(o: &OpVm) -> OpData {
+    let (fate_sym, fate_word) = match &o.fate {
+        Some((b, word)) => (s(b.sym.glyph()), s(word)),
+        None => (SharedString::new(), SharedString::new()),
+    };
+    OpData {
+        index: i32::try_from(o.index).unwrap_or(i32::MAX),
+        action: s(&o.action),
+        target: shown(&o.target),
+        lines: model(o.lines.iter().map(line).collect()),
+        undo: o.undo.as_deref().map(s).unwrap_or_default(),
+        fate_sym,
+        fate_word,
+    }
+}
+
+fn warn(w: &WarnVm) -> WarnData {
+    WarnData {
+        sym: s(w.badge.sym.glyph()),
+        word: s(&w.badge.word),
+        text: s(&w.text),
+        detail: w.detail.as_ref().map(shown).unwrap_or_default(),
+    }
+}
+
+fn launch(l: &LaunchVm) -> LaunchData {
+    LaunchData {
+        heading: s(&l.heading),
+        lines: model(l.lines.iter().map(s).collect()),
+        intro: s(&l.intro),
+        option: l.option.as_ref().map(shown).unwrap_or_default(),
+        notes: model(l.notes.iter().map(s).collect()),
+        problems: model(l.problems.iter().map(warn).collect()),
+        copy: s(&l.copy),
+        copied: s(&l.copied),
+    }
+}
+
+/// The preview panel without a preview: `state` 0 nothing selected, 1 being made.
+fn preview_none(state: i32) -> PreviewData {
+    PreviewData {
+        state,
+        ..PreviewData::default()
+    }
+}
+
+/// The preview panel with a refusal (state 3).
+fn preview_refused(r: &ResultVm) -> PreviewData {
+    PreviewData {
+        state: 3,
+        refused: notice(&r.notice),
+        ..PreviewData::default()
+    }
+}
+
+/// The preview of a plan, drawn; `ready` only once the worker confirmed it was handed over
+/// (module docs: "Apply" waits for it).
+fn preview_data(p: &PreviewVm, ready: bool) -> PreviewData {
+    PreviewData {
+        state: 2,
+        hash: s(&p.hash),
+        summary: s(&p.summary),
+        folder: p.folder.as_ref().map(shown).unwrap_or_default(),
+        ops: model(p.ops.iter().map(op).collect()),
+        warnings: model(p.warnings.iter().map(warn).collect()),
+        notes: model(p.notes.iter().map(s).collect()),
+        has_launch: p.launch.is_some(),
+        launch: p.launch.as_ref().map(launch).unwrap_or_default(),
+        admin: s(&p.admin),
+        undo: s(&p.undo),
+        can_apply: p.can_apply,
+        nothing: p.nothing.as_deref().map(s).unwrap_or_default(),
+        ready,
+        ..PreviewData::default()
+    }
+}
+
+fn card(c: &TxnCardVm) -> CardData {
+    CardData {
+        id: s(&c.id),
+        game: c.game.as_ref().map(value_str).unwrap_or_default(),
+        state: badge(&c.state),
+        problem: c.problem.as_deref().map(s).unwrap_or_default(),
+        ops: model(c.ops.iter().map(op).collect()),
+        note: s(&c.note),
+        can_undo: c.can_undo,
+        can_forget: c.can_forget,
+    }
+}
+
+fn dialog_data(d: &DialogVm) -> DialogData {
+    let (heading, lines, option, problems) = match &d.launch {
+        Some(l) => (
+            l.heading.as_str(),
+            l.lines.iter().map(s).collect(),
+            l.option.as_ref().map(shown).unwrap_or_default(),
+            l.problems.iter().map(warn).collect(),
+        ),
+        None => ("", Vec::new(), SharedString::new(), Vec::new()),
+    };
+    DialogData {
+        kind: i32::from(d.kind == DialogKind::Forget),
+        title: s(&d.title),
+        intro: s(&d.intro),
+        changed: d.changed.as_deref().map(s).unwrap_or_default(),
+        ops: model(d.ops.iter().map(op).collect()),
+        notes: model(d.notes.iter().map(s).collect()),
+        details: model(d.details.iter().map(detail).collect()),
+        has_launch: d.launch.is_some(),
+        launch_heading: s(heading),
+        launch_lines: model(lines),
+        launch_option: option,
+        launch_problems: model(problems),
+        confirm: s(&d.confirm),
+        can_confirm: d.can_confirm,
+        blocked: d.blocked.as_deref().map(s).unwrap_or_default(),
+    }
+}
+
+fn banner(r: &ResultVm) -> BannerData {
+    use crate::text::Sym;
+    BannerData {
+        tone: match r.tone {
+            Tone::Done => 0,
+            Tone::Calm => 1,
+            Tone::Attention => 2,
+        },
+        sym: s(match r.tone {
+            Tone::Done => Sym::Applied.glyph(),
+            Tone::Calm => Sym::None.glyph(),
+            Tone::Attention => Sym::Attention.glyph(),
+        }),
+        title: s(&r.notice.title),
+        body: s(&r.notice.body),
+        details: model(r.notice.details.iter().map(detail).collect()),
+    }
+}
+
+/// Marks the selected fixes on the page the window holds (the rows are updated in place, so the
+/// focused control stays).
+fn show_selection(ui: &AppWindow, st: &State) {
+    let Some(page) = &st.page else {
+        return;
+    };
+    let rows = ui.get_game().fixes;
+    for (i, on) in st.selection.flags(page).into_iter().enumerate() {
+        if let Some(mut row) = rows.row_data(i)
+            && row.selected != on
+        {
+            row.selected = on;
+            rows.set_row_data(i, row);
+        }
+    }
+}
+
+/// Asks the worker for the preview of the selection (or clears it when nothing is selected).
+fn plan_selection(ui: &AppWindow, st: &mut State) {
+    let (Some(app_id), Some(page)) = (st.game, st.page.as_ref()) else {
+        return;
+    };
+    let picks = st.selection.picks(page);
+    st.preview_hash = None;
+    ui.set_preview(preview_none(i32::from(!picks.is_empty())));
+    st.worker.send(Job::Plan { app_id, picks });
+}
+
+/// Shows an outcome calmly above the page.
+fn show_result(ui: &AppWindow, r: &ResultVm) {
+    ui.set_banner(banner(r));
+    ui.set_banner_shown(true);
+}
+
+fn close_dialog(ui: &AppWindow, st: &mut State) {
+    ui.set_dialog_open(false);
+    let m = ui.global::<Modal>();
+    m.set_open(false);
+    m.set_working(false);
+    // The opener of the dialog takes the focus back.
+    m.set_return_to(st.opener);
+    st.dialog = None;
+}
+
+/// The window's close: refused while a write runs (rule 1: the journal covers a crash, but a
+/// close in the middle of an apply is not something to offer).
+fn close_window(ui: &AppWindow, st: &State) -> CloseRequestResponse {
+    if st.worker.busy_writing() {
+        show_result(ui, &vm::closing_blocked(st.lang));
+        return CloseRequestResponse::KeepWindowShown;
+    }
+    CloseRequestResponse::HideWindow
+}
+
+fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    // A fix is ticked: the selection rules are `vm::Selection`'s, the window only asks.
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_fix_toggled(move |i| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut st = st.borrow_mut();
+        let (Some(page), Ok(i)) = (st.page.clone(), usize::try_from(i)) else {
+            return;
+        };
+        st.selection.toggle(&page, i);
+        show_selection(&ui, &st);
+        plan_selection(&ui, &mut st);
+    });
+
+    // "Apply" carries the plan hash of the preview it belongs to; the worker applies only the
+    // plan it shows under that hash, and the core checks the hash again.
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_apply(move |hash| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let st = st.borrow();
+        ui.global::<Modal>().set_working(true);
+        let mut p = ui.get_preview();
+        p.ready = false;
+        ui.set_preview(p);
+        st.worker.send(Job::Apply {
+            hash: hash.to_string(),
+        });
+    });
+
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_card_undo(move |i| card_action(&weak, &st, i, false));
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_card_forget(move |i| card_action(&weak, &st, i, true));
+
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_dialog_confirm(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let st = st.borrow();
+        let Some((kind, txn)) = st.dialog else {
+            return;
+        };
+        ui.global::<Modal>().set_working(true);
+        st.worker.send(match kind {
+            DialogKind::Undo => Job::Revert { txn },
+            DialogKind::Forget => Job::Forget { txn },
+        });
+    });
+
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_dialog_cancel(move || {
+        if let Some(ui) = weak.upgrade() {
+            close_dialog(&ui, &mut st.borrow_mut());
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_banner_dismiss(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_banner_shown(false);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_request_close(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if matches!(
+            close_window(&ui, &st.borrow()),
+            CloseRequestResponse::HideWindow
+        ) {
+            let _ = ui.hide();
+        }
+    });
+
+    // Alt+F4 and the system menu take the same way.
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.window()
+        .on_close_requested(move || match weak.upgrade() {
+            Some(ui) => close_window(&ui, &st.borrow()),
+            None => CloseRequestResponse::HideWindow,
+        });
+}
+
+/// A card's "Undo" or "Close without undoing": the preview first (rule 5).
+fn card_action(weak: &slint::Weak<AppWindow>, st: &Rc<RefCell<State>>, i: i32, forget: bool) {
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    let mut st = st.borrow_mut();
+    let Ok(i) = usize::try_from(i) else {
+        return;
+    };
+    let cards = if ui.get_page() == 1 {
+        &st.applied_cards
+    } else {
+        &st.game_cards
+    };
+    let Some(txn) = cards.get(i).map(|c| c.txn) else {
+        return;
+    };
+    st.opener = i32::try_from(i * 2 + usize::from(forget)).unwrap_or(-1);
+    ui.global::<Modal>().set_return_to(-1);
+    st.worker.send(if forget {
+        Job::ForgetPreview { txn }
+    } else {
+        Job::RevertPreview { txn }
+    });
 }

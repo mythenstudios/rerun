@@ -20,6 +20,9 @@ use rerun_core::hw::{GpuArch, SacState, SystemProfile};
 use rerun_core::journal::JournalError;
 use rerun_core::topo::{AntiCheatState, Refusal, Tri};
 
+mod write;
+pub use write::*;
+
 use crate::text::{Lang, Msg, Sym, t};
 
 /// The most problem details the library lists.
@@ -531,6 +534,10 @@ pub struct SolvedVm {
     pub when: Badge,
     /// The evidence for this issue.
     pub status: Badge,
+    /// The side effects this issue's copy of the fix names (Topo text, escaped).
+    pub tradeoffs: Vec<Shown<'static>>,
+    /// Where the fix comes from for this issue: type and link (escaped).
+    pub sources: Vec<Shown<'static>>,
 }
 
 /// One fix (one variant ID, ADR 0027 U2 a).
@@ -550,6 +557,39 @@ pub struct FixVm {
     pub warned: Option<String>,
     /// Every issue it solves.
     pub solves: Vec<SolvedVm>,
+    /// The variant ID as the Topo spells it (the pick; never drawn as text of its own).
+    pub key: String,
+    /// Whether and why the app can apply it (P5-5a).
+    pub offer: Offer,
+    /// Why it cannot be applied here yet (needs the helper or a download).
+    pub note: Option<String>,
+    /// Preselected: verified for a problem that affects this PC.
+    pub preselect: bool,
+    /// Why it is preselected.
+    pub preselect_note: Option<String>,
+    /// The fixes it cannot be combined with (indices into the page's fixes).
+    pub conflicts: Vec<usize>,
+    /// The same fixes' IDs (escaped), drawn under the label.
+    pub exclusive: Vec<Shown<'static>>,
+    /// The problem the pick names it for.
+    pub pick_issue: String,
+    /// Every problem it solves with its `when`, for the attribution.
+    pub(crate) issues: Vec<(String, Tri)>,
+    /// A solved problem is verified and affects this PC.
+    pub(crate) solves_verified_here: bool,
+}
+
+/// Whether the app can apply a fix on this page (P5-5a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offer {
+    /// It can be selected and applied.
+    Selectable,
+    /// The core refuses it here (anti-cheat, the launch): shown with the reason.
+    Refused,
+    /// A step needs Rerun's elevated helper: P5-5c.
+    NeedsHelper,
+    /// A step needs a package download: P5-5b.
+    NeedsDownload,
 }
 
 /// The game page.
@@ -571,6 +611,8 @@ pub struct GameVm {
     pub problems: Vec<ProblemVm>,
     /// The fixes, in the Topo's order of first appearance.
     pub fixes: Vec<FixVm>,
+    /// What is applied to this game now, one card per transaction (P5-5a).
+    pub applied: Vec<TxnCardVm>,
 }
 
 fn hero(sym: Sym, lang: Lang, m: Msg) -> HeroVm {
@@ -613,6 +655,7 @@ fn base(app_id: u32, title: Shown<'static>, hero: HeroVm, lang: Lang) -> GameVm 
         detail: None,
         problems: Vec::new(),
         fixes: Vec::new(),
+        applied: Vec::new(),
     }
 }
 
@@ -759,7 +802,13 @@ fn matched(app_id: u32, title: Shown<'static>, m: &MatchView, lang: Lang) -> Gam
             quiet: i.when == Tri::No,
         })
         .collect();
-    let fixes: Vec<FixVm> = m.fixes.iter().map(|f| fix(f, &issue_title, lang)).collect();
+    let mut fixes: Vec<FixVm> = m.fixes.iter().map(|f| fix(f, &issue_title, lang)).collect();
+    write::link(&mut fixes);
+    for f in &mut fixes {
+        if f.preselect {
+            f.preselect_note = Some(t(lang, Msg::FixPreselected).into_owned());
+        }
+    }
 
     let with_fix = |w: Tri| {
         r.issues
@@ -864,7 +913,34 @@ fn fix(f: &Fix, issue_title: &dyn Fn(&str) -> Shown<'static>, lang: Lang) -> Fix
     } else {
         Badge::new(Sym::Open, lang, Msg::FixOffered, false)
     };
+    let offer = if refused.is_some() {
+        Offer::Refused
+    } else if f.needs_helper {
+        Offer::NeedsHelper
+    } else if !f.packages.is_empty() {
+        Offer::NeedsDownload
+    } else {
+        Offer::Selectable
+    };
+    let note = match offer {
+        Offer::NeedsHelper => Some(t(lang, Msg::FixNeedsHelper).into_owned()),
+        Offer::NeedsDownload => Some(t(lang, Msg::FixNeedsDownload).into_owned()),
+        Offer::Selectable | Offer::Refused => None,
+    };
     FixVm {
+        key: f.variant.clone(),
+        offer,
+        note,
+        preselect: false,
+        preselect_note: None,
+        conflicts: Vec::new(),
+        exclusive: Vec::new(),
+        pick_issue: String::new(),
+        issues: f.solves.iter().map(|s| (s.issue.clone(), s.when)).collect(),
+        solves_verified_here: f
+            .solves
+            .iter()
+            .any(|s| write::verified_here(s.when, s.status)),
         id: escape::text(&f.variant).into_owned(),
         kind: t(
             lang,
@@ -886,6 +962,16 @@ fn fix(f: &Fix, issue_title: &dyn Fn(&str) -> Shown<'static>, lang: Lang) -> Fix
                 issue: issue_title(&s.issue),
                 when: when_badge(s.when, lang),
                 status: status_badge(s.status, lang),
+                tradeoffs: s
+                    .tradeoffs
+                    .iter()
+                    .map(|x| escape::text(x).into_owned())
+                    .collect(),
+                sources: s
+                    .sources
+                    .iter()
+                    .map(|x| write::source_text(x.kind, &x.url, lang))
+                    .collect(),
             })
             .collect(),
     }
@@ -904,11 +990,14 @@ pub struct AppliedVm {
     pub sub: String,
     /// The core's text if the journal could not be read (escaped).
     pub detail: Option<Shown<'static>>,
+    /// One card per open transaction (P5-5a, user decision U1).
+    pub cards: Vec<TxnCardVm>,
 }
 
 /// The applied page from the status; `None`: Rerun's folder does not exist.
 pub fn applied(
     status: Option<Result<&rerun_core::exec::Status, &JournalError>>,
+    names: &Names,
     lang: Lang,
 ) -> AppliedVm {
     let empty = || AppliedVm {
@@ -916,6 +1005,7 @@ pub fn applied(
         title: t(lang, Msg::AppliedEmpty).into_owned(),
         sub: t(lang, Msg::AppliedEmptySub).into_owned(),
         detail: None,
+        cards: Vec::new(),
     };
     match status {
         None => empty(),
@@ -924,6 +1014,7 @@ pub fn applied(
             title: t(lang, Msg::AppliedUnreadable).into_owned(),
             sub: String::new(),
             detail: Some(shown_error(e)),
+            cards: Vec::new(),
         },
         Some(Ok(v)) => {
             let open = v.txns.iter().filter(|s| !s.is_settled()).count();
@@ -935,6 +1026,7 @@ pub fn applied(
                     title: t(lang, Msg::AppliedSome { count: open }).into_owned(),
                     sub: t(lang, Msg::AppliedSomeSub).into_owned(),
                     detail: None,
+                    cards: cards(v, names, lang),
                 }
             }
         }
@@ -1031,3 +1123,6 @@ pub fn system(p: &SystemProfile, steam: Option<usize>, lang: Lang) -> SystemVm {
         ],
     }
 }
+
+#[cfg(test)]
+mod tests;

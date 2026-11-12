@@ -20,23 +20,32 @@
 //! channel; the thread ends after the job it runs (read-only, so the process may also end
 //! while it runs).
 
+use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use rerun_core::catalog::Catalog;
 use rerun_core::catalog::model::Status;
 use rerun_core::detect::steam;
 use rerun_core::escape::Shown;
-use rerun_core::flow::{self, Env, GameCache, Guarded, IndexState, LibraryEvent};
+use rerun_core::exec;
+use rerun_core::flow::{
+    self, ActError, Env, ForgetShown, Found, GameCache, Guarded, IndexState, LibraryEvent, Lookup,
+    Planned, Previewed, RevertShown,
+};
 use rerun_core::hw::{self, GpuArchTable};
+use rerun_core::journal::TxnId;
+use rerun_core::plan::Pick;
 use rerun_core::sys::{Http, System};
 use rerun_core::topo;
 
 use crate::text::{Lang, Msg, t};
 use crate::vm::{
-    self, AppliedVm, BlockedVm, DetailVm, GameVm, LibraryVm, Notice, RowVm, SteamVm, SystemVm,
-    TopoKnown,
+    self, AppliedVm, BlockedVm, DetailVm, DialogVm, GameVm, LibraryVm, Names, Notice, Offer,
+    PreviewVm, ResultVm, RowVm, SteamVm, SystemVm, TopoKnown,
 };
 
 /// A job for the worker.
@@ -55,6 +64,46 @@ pub enum Job {
     Status,
     /// The system profile.
     System,
+    /// Plans the picked fixes of a game (reads only, stores nothing). No picks: clears the
+    /// preview.
+    Plan {
+        /// The Steam app.
+        app_id: u32,
+        /// The fixes' picks, one per selected fix.
+        picks: Vec<Pick>,
+    },
+    /// The window rendered the preview with this plan hash: only now may it be applied
+    /// (`flow::shown`, ADR 0027 rule 5).
+    PreviewShown {
+        /// The plan hash (hex).
+        hash: String,
+    },
+    /// Applies the shown plan with this hash: store, check, apply. The core checks the hash
+    /// again.
+    Apply {
+        /// The plan hash (hex) the Apply button carries.
+        hash: String,
+    },
+    /// The preview of the undo of a transaction.
+    RevertPreview {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// Undoes the transaction whose preview was shown.
+    Revert {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// The preview of closing a transaction without undoing it.
+    ForgetPreview {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// Closes the transaction whose preview was shown.
+    Forget {
+        /// The transaction.
+        txn: TxnId,
+    },
 }
 
 impl Job {
@@ -65,7 +114,23 @@ impl Job {
             Self::Game { app_id, .. } => format!("game {app_id}"),
             Self::Status => "status".to_owned(),
             Self::System => "system".to_owned(),
+            Self::Plan { app_id, .. } => format!("plan {app_id}"),
+            Self::PreviewShown { .. } => "preview shown".to_owned(),
+            Self::Apply { .. } => "apply".to_owned(),
+            Self::RevertPreview { .. } => "undo preview".to_owned(),
+            Self::Revert { .. } => "undo".to_owned(),
+            Self::ForgetPreview { .. } => "forget preview".to_owned(),
+            Self::Forget { .. } => "forget".to_owned(),
         }
+    }
+
+    /// The job may change the system: the window cannot close while it is queued or runs
+    /// (rule 1, ADR 0027).
+    pub fn writes(&self) -> bool {
+        matches!(
+            self,
+            Self::Apply { .. } | Self::Revert { .. } | Self::Forget { .. }
+        )
     }
 }
 
@@ -86,6 +151,34 @@ pub enum Event {
     Applied(AppliedVm),
     /// The system page.
     System(SystemVm),
+    /// The preview of the picked fixes (rule 5).
+    Preview {
+        /// The game it is for.
+        app_id: u32,
+        /// The preview.
+        vm: Box<PreviewVm>,
+    },
+    /// Nothing is picked: the preview is cleared.
+    PreviewNone {
+        /// The game.
+        app_id: u32,
+    },
+    /// No preview could be made.
+    PreviewRefused {
+        /// The game.
+        app_id: u32,
+        /// Why.
+        result: ResultVm,
+    },
+    /// The preview with this plan hash is shown: Apply may be offered.
+    PreviewReady {
+        /// The plan hash (hex).
+        hash: String,
+    },
+    /// An undo or forget dialog.
+    Dialog(Box<DialogVm>),
+    /// What a job that may have written (or was refused) came to.
+    Result(ResultVm),
 }
 
 /// How the framework learns that an event is waiting (ADR 0027).
@@ -109,6 +202,8 @@ pub struct World {
 pub struct Worker {
     jobs: Sender<Job>,
     events: Receiver<Event>,
+    /// Write jobs queued or running: the window does not close while it is above zero.
+    writes: Arc<AtomicUsize>,
 }
 
 impl Worker {
@@ -120,6 +215,8 @@ impl Worker {
     {
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (event_tx, events) = mpsc::channel::<Event>();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let thread_writes = writes.clone();
         std::thread::Builder::new()
             .name("rerun-worker".to_owned())
             .spawn(move || {
@@ -130,7 +227,10 @@ impl Worker {
                         wake.wake();
                     }
                 };
-                let mut session = Session::default();
+                let mut session = Session {
+                    writes: thread_writes,
+                    ..Session::default()
+                };
                 // A library job that stopped a running scan: it runs next.
                 let mut next: Option<Job> = None;
                 while let Some(job) = next.take().or_else(|| job_rx.recv().ok()) {
@@ -154,12 +254,28 @@ impl Worker {
                     }
                 }
             })?;
-        Ok(Self { jobs, events })
+        Ok(Self {
+            jobs,
+            events,
+            writes,
+        })
     }
 
-    /// Queues a job (ignored once the thread has ended).
+    /// Queues a job (ignored once the thread has ended). A write job counts as running from
+    /// here on, so the window cannot close between the click and the worker picking it up.
     pub fn send(&self, job: Job) {
-        let _ = self.jobs.send(job);
+        let writes = job.writes();
+        if writes {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+        }
+        if self.jobs.send(job).is_err() && writes {
+            self.writes.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A write job is queued or running (rule 1: closing the window is refused meanwhile).
+    pub fn busy_writing(&self) -> bool {
+        self.writes.load(Ordering::SeqCst) > 0
     }
 
     /// The next waiting event.
@@ -186,6 +302,31 @@ pub struct Session {
     /// The executables read per game.
     pub(crate) games: GameCache,
     system: Option<SystemVm>,
+    /// The names of the games the library listed (escaped), for the applied cards.
+    names: Names,
+    /// The fixes of the page last handed to the window, per game: a plan that finds the game
+    /// read differently now hands the window the fresh page instead of a preview (ADR 0027
+    /// amendment P5-5a).
+    pages: HashMap<u32, Vec<(String, Offer)>>,
+    /// What the window was shown and may confirm (module docs).
+    pending: Pending,
+    /// Write jobs queued or running (shared with [`Worker::busy_writing`]).
+    writes: Arc<AtomicUsize>,
+}
+
+/// The proof tokens of the flows the window may confirm: the bytes whose preview was handed
+/// over, and the observation an undo or forget preview showed. Memory only; one of each at a
+/// time (a new preview replaces the old).
+#[derive(Debug, Default)]
+struct Pending {
+    /// A plan whose preview was handed to the window, not yet reported rendered.
+    plan: Option<(u32, Planned)>,
+    /// A plan whose preview the window rendered: "Apply" may use it.
+    shown: Option<(u32, Previewed)>,
+    /// An undo preview, with the game its transaction is about.
+    revert: Option<(RevertShown, Option<u32>)>,
+    /// A forget preview, with the game its transaction is about.
+    forget: Option<(ForgetShown, Option<u32>)>,
 }
 
 impl Session {
@@ -193,6 +334,7 @@ impl Session {
     fn rescan(&mut self) {
         self.games.clear();
         self.system = None;
+        self.pages.clear();
     }
 }
 
@@ -216,7 +358,34 @@ pub fn run_in(
     emit: &mut dyn FnMut(Event),
 ) -> Option<Job> {
     let began = std::time::Instant::now();
-    let g = match flow::guard(env) {
+    let preempted = run_job(env, job, lang, session, waiting, emit);
+    if job.writes() {
+        // The write is over (done, refused or never started): the window may close.
+        let _ = session
+            .writes
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                Some(n.saturating_sub(1))
+            });
+    }
+    crate::trace::log(|| {
+        format!(
+            "worker: {} took {:.1} ms (jobs run in between included)",
+            job.name(),
+            began.elapsed().as_secs_f64() * 1000.0
+        )
+    });
+    preempted
+}
+
+fn run_job(
+    env: Env<'_>,
+    job: &Job,
+    lang: Lang,
+    session: &mut Session,
+    waiting: &mut dyn FnMut() -> Option<Job>,
+    emit: &mut dyn FnMut(Event),
+) -> Option<Job> {
+    let mut g = match flow::guard(env) {
         Ok(g) => g,
         Err(gate) => {
             emit(Event::Blocked(vm::blocked(&gate, lang)));
@@ -227,25 +396,16 @@ pub fn run_in(
     match job {
         Job::Library => preempted = library(&g, lang, session, waiting, emit),
         Job::Game { app_id, name } => {
-            let page = match flow::game_cached(&g, *app_id, Some(&mut session.games)) {
-                Ok(v) => vm::game(&v, name.as_ref(), lang),
-                Err(e) => vm::game_refused(*app_id, name.as_ref(), &e, lang),
-            };
+            if let Some(n) = name {
+                session.names.insert(*app_id, n.clone());
+            }
+            let page = game_page(&g, *app_id, name.as_ref(), lang, session);
             emit(Event::Game(page));
         }
         Job::Status => {
             // Never kept: another process may apply or revert while the window is open (the
             // window only skips setting an unchanged page).
-            let page = match g.app() {
-                None => vm::applied(None, lang),
-                Some(app) => {
-                    // The journal only (review of P5-3): the orphaned firewall rules are read
-                    // when the applied page shows them (P5-6).
-                    let s = rerun_core::exec::status(app);
-                    vm::applied(Some(s.as_ref()), lang)
-                }
-            };
-            emit(Event::Applied(page));
+            emit(Event::Applied(applied_page(&g, lang, session)));
         }
         Job::System => {
             let page = session.system.take().unwrap_or_else(|| {
@@ -258,15 +418,313 @@ pub fn run_in(
             session.system = Some(page.clone());
             emit(Event::System(page));
         }
+        Job::Plan { app_id, picks } => plan(&g, *app_id, picks, lang, session, emit),
+        Job::PreviewShown { hash } => {
+            // The window handed the preview over to be drawn: only now is the plan the
+            // user's to apply (rule 5, `flow::shown`).
+            // Only the plan the window drew: a report for an older preview leaves the newer
+            // plan where it is.
+            if session
+                .pending
+                .plan
+                .as_ref()
+                .is_some_and(|(_, p)| p.hash().to_string() == *hash)
+                && let Some((app, p)) = session.pending.plan.take()
+            {
+                session.pending.shown = Some((app, flow::shown(p)));
+                emit(Event::PreviewReady { hash: hash.clone() });
+            }
+        }
+        Job::Apply { hash } => apply(&mut g, hash, lang, session, emit),
+        Job::RevertPreview { txn } => revert_preview(&g, txn, false, lang, session, emit),
+        Job::Revert { txn } => revert(&g, txn, lang, session, emit),
+        Job::ForgetPreview { txn } => forget_preview(&g, txn, false, lang, session, emit),
+        Job::Forget { txn } => forget(&g, txn, lang, session, emit),
     }
-    crate::trace::log(|| {
-        format!(
-            "worker: {} took {:.1} ms (jobs run in between included)",
-            job.name(),
-            began.elapsed().as_secs_f64() * 1000.0
-        )
-    });
     preempted
+}
+
+/// A game's page: the lookup, and the transactions applied to it.
+fn game_page(
+    g: &Guarded<'_>,
+    app_id: u32,
+    name: Option<&Shown<'static>>,
+    lang: Lang,
+    session: &mut Session,
+) -> GameVm {
+    let mut page = match flow::game_cached(g, app_id, Some(&mut session.games)) {
+        Ok(v) => vm::game(&v, name, lang),
+        Err(e) => vm::game_refused(app_id, name, &e, lang),
+    };
+    if let Some(Ok(s)) = g.app().map(exec::status) {
+        page.applied = vm::cards(&s, &session.names, lang)
+            .into_iter()
+            .filter(|c| c.app_id == Some(app_id))
+            .collect();
+    }
+    session.pages.insert(app_id, fix_key(&page));
+    page
+}
+
+/// What decides whether a page the window holds is still the page of the files: the fixes and
+/// whether each can be applied.
+fn fix_key(page: &GameVm) -> Vec<(String, Offer)> {
+    page.fixes
+        .iter()
+        .map(|f| (f.key.clone(), f.offer))
+        .collect()
+}
+
+/// The applied page from the journal (never kept).
+fn applied_page(g: &Guarded<'_>, lang: Lang, session: &Session) -> AppliedVm {
+    match g.app() {
+        None => vm::applied(None, &session.names, lang),
+        Some(app) => {
+            // The journal only (review of P5-3): the orphaned firewall rules are read when the
+            // applied page shows them (P5-6).
+            let s = exec::status(app);
+            vm::applied(Some(s.as_ref()), &session.names, lang)
+        }
+    }
+}
+
+/// After a write: the applied page, and the game page of the app it was about (its cached
+/// executables dropped: the files may have changed).
+fn refresh(
+    g: &Guarded<'_>,
+    app_id: Option<u32>,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    emit(Event::Applied(applied_page(g, lang, session)));
+    if let Some(app) = app_id {
+        session.games.forget(app);
+        let name = session.names.get(&app).cloned();
+        let page = game_page(g, app, name.as_ref(), lang, session);
+        emit(Event::Game(page));
+    }
+}
+
+/// The preview of the picked fixes. Reads only and stores nothing (S6: looking at fixes never
+/// creates Rerun's folder).
+///
+/// The executables are read again first (the session's entry of the game is dropped): `flow::plan`
+/// reads them fresh anyway, and a display from the cache must not lead to a plan the page
+/// does not show (ADR 0027 amendment P5-5a). If the fresh page offers other fixes than the page
+/// the window holds, the window gets the fresh page and a calm note instead of a preview.
+fn plan(
+    g: &Guarded<'_>,
+    app_id: u32,
+    picks: &[Pick],
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    session.pending.plan = None;
+    session.pending.shown = None;
+    if picks.is_empty() {
+        emit(Event::PreviewNone { app_id });
+        return;
+    }
+    let before = session.pages.get(&app_id).cloned();
+    session.games.forget(app_id);
+    let name = session.names.get(&app_id).cloned();
+    let page = game_page(g, app_id, name.as_ref(), lang, session);
+    if before.as_ref().is_some_and(|b| *b != fix_key(&page)) {
+        emit(Event::Game(page));
+        emit(Event::PreviewRefused {
+            app_id,
+            result: vm::stale(lang),
+        });
+        return;
+    }
+    let refused = |result| Event::PreviewRefused { app_id, result };
+    match flow::plan(g, app_id, picks) {
+        Err(e) => emit(refused(vm::game_refusal(&e, lang))),
+        Ok(Lookup::Read {
+            found: Found::One(picked),
+            ..
+        }) => match picked.planned {
+            Err(e) => emit(refused(vm::plan_refusal(&e, lang))),
+            Ok(planned) => {
+                let env = g.env();
+                let launch = flow::launch_view(env.sys, env.install, planned.preview());
+                let vm = vm::preview_vm(&planned, launch.as_ref(), lang);
+                session.pending.plan = Some((app_id, planned));
+                emit(Event::Preview {
+                    app_id,
+                    vm: Box::new(vm),
+                });
+            }
+        },
+        // The game reads differently now (another build, no Topo): the page is the answer.
+        Ok(_) => {
+            emit(Event::Game(page));
+            emit(refused(vm::stale(lang)));
+        }
+    }
+}
+
+/// Applies the plan the window rendered: store, check, apply. Nothing is applied that was not
+/// shown (the preview of exactly those bytes) and whose hash the click does not carry; the core
+/// checks everything again under the journal lock.
+fn apply(
+    g: &mut Guarded<'_>,
+    hash: &str,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    // Only a plan whose preview was shown, under exactly the hash the click carries; another
+    // hash leaves the shown plan where it is.
+    let wanted = session
+        .pending
+        .shown
+        .as_ref()
+        .is_some_and(|(_, p)| p.hash().to_string() == hash);
+    let Some((app_id, p)) = wanted.then(|| session.pending.shown.take()).flatten() else {
+        emit(Event::Result(vm::no_preview(lang)));
+        return;
+    };
+    if let Err(e) = flow::store(g, &p) {
+        let r = vm::store_refusal(&e, lang);
+        let refresh_page = r.refresh;
+        emit(Event::Result(r));
+        if refresh_page {
+            refresh(g, Some(app_id), lang, session, emit);
+        }
+        return;
+    }
+    let mut again = false;
+    let result = match flow::check(g, &p) {
+        Err(r) => {
+            let r = vm::refusal(&r, lang);
+            if !r.refresh {
+                // A refusal that may pass later (the game runs, another Rerun holds the lock):
+                // the same preview stays, "Apply" can be tried again.
+                session.pending.shown = Some((app_id, p));
+                again = true;
+            }
+            r
+        }
+        Ok(0) => vm::apply_result(Ok(exec::Outcome::Nothing), lang),
+        Ok(_) => vm::apply_result(flow::apply(g, p), lang),
+    };
+    let refresh_page = result.refresh;
+    emit(Event::Result(result));
+    if again {
+        emit(Event::PreviewReady {
+            hash: hash.to_owned(),
+        });
+    }
+    if refresh_page {
+        refresh(g, Some(app_id), lang, session, emit);
+    }
+}
+
+fn revert_preview(
+    g: &Guarded<'_>,
+    txn: &TxnId,
+    changed: bool,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    session.pending.revert = None;
+    match flow::revert_preview(g, txn) {
+        Ok((p, shown)) => {
+            let app = vm::app_of(&p.status);
+            let dialog = vm::revert_vm(&p, g.env().install, changed, lang);
+            session.pending.revert = Some((shown, app));
+            emit(Event::Dialog(Box::new(dialog)));
+        }
+        Err(gate) => emit(Event::Result(vm::gate(&gate, lang))),
+    }
+}
+
+fn revert(
+    g: &Guarded<'_>,
+    txn: &TxnId,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    let Some((shown, app)) = session
+        .pending
+        .revert
+        .take()
+        .filter(|(s, _)| s.txn() == *txn)
+    else {
+        // No preview of this transaction was shown: show it first.
+        revert_preview(g, txn, false, lang, session, emit);
+        return;
+    };
+    match flow::revert(g, shown) {
+        Ok(o) => {
+            let mut r = vm::revert_result(&o, lang);
+            if let Some(l) = o.launch_option {
+                vm::add_launch_option(&mut r, &l, g.env().install, lang);
+            }
+            emit(Event::Result(r));
+            refresh(g, app, lang, session, emit);
+        }
+        // What is there now differs from the preview: nothing was written; show it again.
+        Err(ActError::Changed) => revert_preview(g, txn, true, lang, session, emit),
+        Err(e) => {
+            emit(Event::Result(vm::act_error(&e, lang)));
+            refresh(g, app, lang, session, emit);
+        }
+    }
+}
+
+fn forget_preview(
+    g: &Guarded<'_>,
+    txn: &TxnId,
+    changed: bool,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    session.pending.forget = None;
+    match flow::forget_preview(g, txn) {
+        Ok((p, shown)) => {
+            let app = vm::app_of(&p.status);
+            let dialog = vm::forget_vm(&p, g.env().install, changed, lang);
+            session.pending.forget = Some((shown, app));
+            emit(Event::Dialog(Box::new(dialog)));
+        }
+        Err(gate) => emit(Event::Result(vm::gate(&gate, lang))),
+    }
+}
+
+fn forget(
+    g: &Guarded<'_>,
+    txn: &TxnId,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    let Some((shown, app)) = session
+        .pending
+        .forget
+        .take()
+        .filter(|(s, _)| s.txn() == *txn)
+    else {
+        forget_preview(g, txn, false, lang, session, emit);
+        return;
+    };
+    match flow::forget(g, shown) {
+        Ok(()) => {
+            emit(Event::Result(vm::forget_result(lang)));
+            refresh(g, app, lang, session, emit);
+        }
+        Err(ActError::Changed) => forget_preview(g, txn, true, lang, session, emit),
+        Err(e) => {
+            emit(Event::Result(vm::act_error(&e, lang)));
+            refresh(g, app, lang, session, emit);
+        }
+    }
 }
 
 /// Whether the index names a Topo (not retired) for `app_id`.
@@ -314,6 +772,9 @@ fn library(
             }
             LibraryEvent::Library { .. } => {}
             LibraryEvent::Row { app, scan } => {
+                session
+                    .names
+                    .insert(app.app_id, app.name.escaped().into_owned());
                 problems.extend(vm::row_problems(app, scan));
                 let known = topo_known(catalog, app.app_id);
                 emit(Event::Row(vm::row(app, scan, known, lang)));

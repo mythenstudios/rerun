@@ -47,6 +47,101 @@ export struct NoticeData {
     details: [DetailData],
 }
 
+// One labelled line of an op; every value is drawn in its own element.
+export struct LineData {
+    label: string,
+    values: [string],
+    mono: bool,
+}
+
+// One op of a plan or of a transaction, with what undo does with it (and, in an undo dialog,
+// what it would meet now).
+export struct OpData {
+    index: int,
+    action: string,
+    target: string,
+    lines: [LineData],
+    undo: string,
+    fate-sym: string,
+    fate-word: string,
+}
+
+export struct WarnData {
+    sym: string,
+    word: string,
+    text: string,
+    detail: string,
+}
+
+export struct LaunchData {
+    heading: string,
+    lines: [string],
+    intro: string,
+    option: string,
+    notes: [string],
+    problems: [WarnData],
+    copy: string,
+    copied: string,
+}
+
+// state: 0 nothing selected, 1 planning, 2 shown, 3 refused.
+export struct PreviewData {
+    state: int,
+    hash: string,
+    summary: string,
+    folder: string,
+    ops: [OpData],
+    warnings: [WarnData],
+    notes: [string],
+    has-launch: bool,
+    launch: LaunchData,
+    admin: string,
+    undo: string,
+    can-apply: bool,
+    nothing: string,
+    ready: bool,
+    refused: NoticeData,
+}
+
+export struct CardData {
+    id: string,
+    game: string,
+    state: BadgeData,
+    problem: string,
+    ops: [OpData],
+    note: string,
+    can-undo: bool,
+    can-forget: bool,
+}
+
+// kind: 0 undo, 1 forget.
+export struct DialogData {
+    kind: int,
+    title: string,
+    intro: string,
+    changed: string,
+    ops: [OpData],
+    notes: [string],
+    details: [DetailData],
+    has-launch: bool,
+    launch-heading: string,
+    launch-lines: [string],
+    launch-option: string,
+    launch-problems: [WarnData],
+    confirm: string,
+    can-confirm: bool,
+    blocked: string,
+}
+
+// tone: 0 done, 1 calm, 2 attention.
+export struct BannerData {
+    tone: int,
+    sym: string,
+    title: string,
+    body: string,
+    details: [DetailData],
+}
+
 export struct FactData {
     label: string,
     value: string,
@@ -64,6 +159,8 @@ export struct SolvedData {
     issue: string,
     when: BadgeData,
     status: BadgeData,
+    tradeoffs: [string],
+    sources: [string],
 }
 
 export struct FixData {
@@ -74,6 +171,11 @@ export struct FixData {
     refused-detail: string,
     warned: string,
     solves: [SolvedData],
+    selectable: bool,
+    selected: bool,
+    note: string,
+    preselect-note: string,
+    exclusive: [string],
 }
 
 export struct GameData {
@@ -87,6 +189,7 @@ export struct GameData {
     detail: string,
     problems: [ProblemData],
     fixes: [FixData],
+    applied: [CardData],
 }
 
 export struct AppliedData {
@@ -94,6 +197,7 @@ export struct AppliedData {
     title: string,
     sub: string,
     detail: string,
+    cards: [CardData],
 }
 
 export struct SysLineData {
@@ -211,12 +315,46 @@ export global Str {
     in property <string> settings-about;
     in property <string> about-version;
     in property <string> about-licence;
+    // Selecting, previewing, applying and undoing (P5-5a).
+    in property <string> fix-select;
+    in property <string> fix-tradeoffs;
+    in property <string> fix-no-tradeoffs;
+    in property <string> fix-sources;
+    in property <string> fix-exclusive;
+    in property <string> preview-title;
+    in property <string> preview-none;
+    in property <string> preview-planning;
+    in property <string> preview-intro;
+    in property <string> preview-folder;
+    in property <string> preview-checksum;
+    in property <string> preview-close-game;
+    in property <string> preview-applying;
+    in property <string> btn-apply;
+    in property <string> btn-cancel;
+    in property <string> btn-dismiss;
+    in property <string> btn-undo;
+    in property <string> btn-forget;
+    in property <string> lbl-undo;
+    in property <string> applied-here;
+    in property <string> card-game;
+    in property <string> card-txn;
+    in property <string> working;
 }
 
 // Keeps the focused element visible: every focusable element asks for it, `ui` hands it to
 // `AppWindow.reveal`, which scrolls the page.
 export global Reveal {
     callback request(length, length);
+}
+
+// A dialog is open: everything outside it cannot take the focus (a focus trap; Tab cycles in
+// the dialog). `return-to` is the card button that takes the focus back when the dialog closes
+// (`ui` sets it then): 2 * card index for "Undo", 2 * card index + 1 for "Close without undoing".
+export global Modal {
+    in-out property <bool> open;
+    in-out property <int> return-to: -1;
+    // A write is running: the apply and undo buttons wait.
+    in-out property <bool> working;
 }
 
 // ---------------------------------------------------------------- building blocks
@@ -228,7 +366,17 @@ component Pressable inherits FocusScope {
     out property <bool> kb-focus;
     out property <bool> hovered: ta.has-hover;
     out property <bool> pressed: ta.pressed;
+    // Set on the controls of a dialog: while one is open only they can take the focus.
+    in property <bool> in-dialog: false;
+    // Takes the focus when it turns true (the opener of a closed dialog gets it back).
+    in property <bool> take-focus: false;
     callback activated();
+    enabled: !Modal.open || root.in-dialog;
+    changed take-focus => {
+        if (root.take-focus) {
+            root.focus();
+        }
+    }
     focus-gained(reason) => {
         root.kb-focus = reason == FocusReason.tab-navigation;
         Reveal.request(self.absolute-position.y, self.height);
@@ -244,6 +392,7 @@ component Pressable inherits FocusScope {
         reject
     }
     ta := TouchArea {
+        enabled: root.enabled;
         mouse-cursor: pointer;
         clicked => {
             root.activated();
@@ -323,6 +472,7 @@ component Badge inherits Rectangle {
 component Button inherits Pressable {
     in property <string> text;
     in property <bool> primary;
+    // A disabled button (a dialog is open, a write runs, nothing to apply) is drawn quiet.
     accessible-role: button;
     accessible-label: root.text;
     accessible-action-default => {
@@ -332,7 +482,7 @@ component Button inherits Pressable {
     min-height: Theme.s6 + Theme.s1 + Theme.hair * 2;
     Rectangle {
         border-radius: Theme.radius-m;
-        background: root.primary ? (root.hovered ? Theme.text : Theme.strong) : (root.hovered ? Theme.raised4 : Theme.raised3);
+        background: !root.enabled ? Theme.raised2 : root.primary ? (root.hovered ? Theme.text : Theme.strong) : (root.hovered ? Theme.raised4 : Theme.raised3);
     }
 
     HorizontalLayout {
@@ -340,7 +490,7 @@ component Button inherits Pressable {
         padding-right: Theme.s4;
         Text {
             text: root.text;
-            color: root.primary ? Theme.on-strong : Theme.strong;
+            color: !root.enabled ? Theme.faint : root.primary ? Theme.on-strong : Theme.strong;
             font-size: Theme.fs-m;
             font-weight: root.primary ? 600 : 500;
             vertical-alignment: center;
@@ -458,6 +608,7 @@ component CaptionButton inherits Pressable {
     in property <bool> nc-hover;
     width: Theme.caption-w;
     radius: 0px;
+    in-dialog: true;
     focus-on-tab-navigation: false;
     accessible-role: button;
     accessible-label: root.label;
@@ -888,10 +1039,683 @@ component LibraryPage inherits VerticalLayout {
     }
 }
 
+// A checkbox: a square with a tick, the state in the tick and in the screen reader's checked
+// state. The page sets `checked` (the selection lives in `ui`); a click only asks.
+component Check inherits Pressable {
+    in property <bool> checked;
+    in property <string> text;
+    // The name a screen reader reads (the visible text may be shorter).
+    in property <string> a11y;
+    ring-inset: -3px;
+    accessible-role: checkbox;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-label: root.a11y != "" ? root.a11y : root.text;
+    accessible-action-default => {
+        root.activated();
+    }
+    HorizontalLayout {
+        spacing: Theme.s3;
+        padding: Theme.s2;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Theme.s5;
+                height: Theme.s5;
+                border-width: Theme.hair * 2;
+                border-color: Theme.strong;
+                background: root.checked ? Theme.strong : transparent;
+                Text {
+                    text: root.checked ? "\u{2713}" : "";
+                    color: Theme.on-strong;
+                    font-family: Theme.font-symbol;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+// A warning: glyph and word, the sentence, and what it is about in its own element.
+component WarnLine inherits Rectangle {
+    in property <WarnData> w;
+    background: Theme.raised2;
+    border-radius: Theme.radius-s;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.w.word + ": " + root.w.text;
+    accessible-description: root.w.detail;
+    Rectangle {
+        x: 0;
+        width: Theme.hair * 2;
+        background: Theme.line-strong;
+    }
+
+    HorizontalLayout {
+        padding: Theme.s3;
+        padding-left: Theme.s4;
+        spacing: Theme.s3;
+        Text {
+            text: root.w.sym;
+            color: Theme.muted;
+            font-family: Theme.font-symbol;
+            font-size: Theme.fs-m;
+            accessible-role: none;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.s1;
+            Text {
+                text: root.w.word + ": " + root.w.text;
+                color: Theme.text;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+
+            if root.w.detail != "": Text {
+                text: root.w.detail;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+        }
+    }
+}
+
+// One op: what it does, where, every detail, and what undo does with it.
+component OpItem inherits Rectangle {
+    in property <OpData> op;
+    background: Theme.raised2;
+    border-radius: Theme.radius-s;
+    accessible-role: groupbox;
+    accessible-label: root.op.action;
+    accessible-description: root.op.target;
+    VerticalLayout {
+        padding: Theme.s3;
+        padding-left: Theme.s4;
+        padding-right: Theme.s4;
+        spacing: Theme.s1;
+        HorizontalLayout {
+            spacing: Theme.s3;
+            Text {
+                text: root.op.action;
+                color: Theme.strong;
+                font-size: Theme.fs-m;
+                font-weight: 600;
+                vertical-alignment: top;
+                accessible-role: none;
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: root.op.target;
+                color: Theme.text;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s + Theme.hair;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+        }
+
+        for l in root.op.lines: HorizontalLayout {
+            spacing: Theme.s3;
+            accessible-role: AccessibleRole.text;
+            accessible-label: l.label;
+            Text {
+                width: Theme.s8 * 2;
+                text: l.label;
+                color: Theme.muted;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                for v in l.values: Text {
+                    text: v;
+                    color: Theme.text;
+                    font-family: l.mono ? Theme.font-mono : Theme.font-sans;
+                    font-size: l.mono ? Theme.fs-s : Theme.fs-m;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+            }
+        }
+
+        if root.op.fate-word != "": HorizontalLayout {
+            spacing: Theme.s2;
+            accessible-role: AccessibleRole.text;
+            accessible-label: root.op.fate-word;
+            Text {
+                text: root.op.fate-sym;
+                color: Theme.muted;
+                font-family: Theme.font-symbol;
+                font-size: Theme.fs-s;
+                accessible-role: none;
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: root.op.fate-word;
+                color: Theme.strong;
+                font-size: Theme.fs-s;
+                font-weight: 500;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+        }
+        if root.op.undo != "": Text {
+            text: Str.lbl-undo + ": " + root.op.undo;
+            color: Theme.muted;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// The Steam launch option the user pastes: read-only text that can be selected and copied.
+component LaunchBox inherits Rectangle {
+    in property <LaunchData> l;
+    in-out property <bool> copied;
+    background: Theme.raised2;
+    border-radius: Theme.radius-s;
+    accessible-role: groupbox;
+    accessible-label: root.l.heading;
+    VerticalLayout {
+        padding: Theme.s4;
+        spacing: Theme.s2;
+        Text {
+            text: root.l.heading;
+            color: Theme.strong;
+            font-size: Theme.fs-m;
+            font-weight: 600;
+        }
+
+        for line in root.l.lines: Muted {
+            text: line;
+        }
+        if root.l.option != "": VerticalLayout {
+            spacing: Theme.s2;
+            Muted {
+                text: root.l.intro;
+            }
+
+            HorizontalLayout {
+                spacing: Theme.s3;
+                option-field := LineEdit {
+                    horizontal-stretch: 1;
+                    read-only: true;
+                    text: root.l.option;
+                    font-size: Theme.fs-s + Theme.hair;
+                    accessible-label: root.l.heading;
+                }
+
+                Button {
+                    text: root.copied ? root.l.copied : root.l.copy;
+                    activated => {
+                        option-field.select-all();
+                        option-field.copy();
+                        root.copied = true;
+                    }
+                }
+            }
+        }
+        for p in root.l.problems: WarnLine {
+            w: p;
+        }
+        for n in root.l.notes: Text {
+            text: n;
+            color: Theme.muted;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// The preview of the picked fixes (rule 5): every change before any change.
+component PreviewPanel inherits VerticalLayout {
+    in property <PreviewData> p;
+    callback apply(string);
+    spacing: Theme.s3;
+    GroupHeading {
+        text: Str.preview-title;
+    }
+
+    if root.p.state == 0: Muted {
+        text: Str.preview-none;
+    }
+    if root.p.state == 1: Muted {
+        text: Str.preview-planning;
+    }
+    if root.p.state == 3: NoticeCard {
+        n: root.p.refused;
+    }
+    if root.p.state == 2: VerticalLayout {
+        spacing: Theme.s3;
+        Muted {
+            text: Str.preview-intro;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s6;
+            alignment: start;
+            VerticalLayout {
+                spacing: Theme.hair * 2;
+                accessible-role: AccessibleRole.text;
+                accessible-label: root.p.summary;
+                Text {
+                    text: root.p.summary;
+                    color: Theme.strong;
+                    font-size: Theme.fs-m;
+                    font-weight: 600;
+                    accessible-role: none;
+                }
+            }
+
+            if root.p.folder != "": VerticalLayout {
+                spacing: Theme.hair * 2;
+                accessible-role: AccessibleRole.text;
+                accessible-label: Str.preview-folder;
+                accessible-value: root.p.folder;
+                Text {
+                    text: Str.preview-folder;
+                    color: Theme.muted;
+                    font-size: Theme.fs-s;
+                    accessible-role: none;
+                }
+
+                Text {
+                    text: root.p.folder;
+                    color: Theme.text;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-s + Theme.hair;
+                    accessible-role: none;
+                }
+            }
+            VerticalLayout {
+                spacing: Theme.hair * 2;
+                accessible-role: AccessibleRole.text;
+                accessible-label: Str.preview-checksum;
+                accessible-value: root.p.hash;
+                Text {
+                    text: Str.preview-checksum;
+                    color: Theme.muted;
+                    font-size: Theme.fs-s;
+                    accessible-role: none;
+                }
+
+                Text {
+                    text: root.p.hash;
+                    color: Theme.text;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-xs;
+                    accessible-role: none;
+                }
+            }
+        }
+
+        if root.p.nothing != "": Muted {
+            text: root.p.nothing;
+        }
+        for op in root.p.ops: OpItem {
+            op: op;
+        }
+        for w in root.p.warnings: WarnLine {
+            w: w;
+        }
+        if root.p.has-launch: LaunchBox {
+            l: root.p.launch;
+        }
+        for n in root.p.notes: Text {
+            text: n;
+            color: Theme.muted;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+        Muted {
+            text: root.p.admin;
+        }
+
+        Muted {
+            text: root.p.undo;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s4;
+            alignment: start;
+            Button {
+                primary: true;
+                text: Str.btn-apply;
+                enabled: root.p.can-apply && root.p.ready && !Modal.working && !Modal.open;
+                activated => {
+                    root.apply(root.p.hash);
+                }
+            }
+
+            Text {
+                text: Modal.working ? Str.preview-applying : Str.preview-close-game;
+                color: Theme.muted;
+                font-size: Theme.fs-m;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// One transaction: everything in it, and what undo takes back together (user decision U1).
+component CardView inherits Card {
+    in property <CardData> c;
+    in property <int> index;
+    callback undo();
+    callback forget();
+    accessible-role: groupbox;
+    accessible-label: root.c.game != "" ? root.c.game : root.c.id;
+    accessible-description: root.c.state.word;
+    VerticalLayout {
+        padding: Theme.s5;
+        spacing: Theme.s3;
+        HorizontalLayout {
+            spacing: Theme.s3;
+            if root.c.game != "": Text {
+                horizontal-stretch: 1;
+                text: root.c.game;
+                color: Theme.strong;
+                font-size: Theme.fs-l;
+                font-weight: 600;
+                wrap: word-wrap;
+                vertical-alignment: center;
+            }
+            if root.c.game == "": Rectangle {
+                horizontal-stretch: 1;
+            }
+            Badge {
+                data: root.c.state;
+                accessible-role: none;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s2;
+            Text {
+                text: Str.card-txn;
+                color: Theme.muted;
+                font-size: Theme.fs-s;
+            }
+
+            Text {
+                text: root.c.id;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+            }
+        }
+
+        if root.c.problem != "": Text {
+            text: root.c.problem;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        for op in root.c.ops: OpItem {
+            op: op;
+        }
+        Muted {
+            text: root.c.note;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s3;
+            alignment: start;
+            if root.c.can-undo: Button {
+                text: Str.btn-undo;
+                accessible-label: Str.btn-undo + ": " + (root.c.game != "" ? root.c.game : root.c.id);
+                take-focus: Modal.return-to == root.index * 2;
+                enabled: !Modal.open && !Modal.working;
+                activated => {
+                    root.undo();
+                }
+            }
+            if root.c.can-forget: Button {
+                text: Str.btn-forget;
+                accessible-label: Str.btn-forget + ": " + (root.c.game != "" ? root.c.game : root.c.id);
+                take-focus: Modal.return-to == root.index * 2 + 1;
+                enabled: !Modal.open && !Modal.working;
+                activated => {
+                    root.forget();
+                }
+            }
+        }
+    }
+}
+
+// The outcome of an apply, an undo or a refusal: calm, with what to do. It takes the focus
+// when it appears, so a screen reader reads it.
+component BannerView inherits Rectangle {
+    in property <BannerData> b;
+    callback dismiss();
+    background: Theme.raised;
+    border-radius: Theme.radius-m;
+    accessible-role: groupbox;
+    accessible-label: root.b.title;
+    Rectangle {
+        x: 0;
+        width: Theme.hair * 2;
+        background: Theme.strong;
+    }
+
+    VerticalLayout {
+        padding: Theme.s5;
+        padding-left: Theme.s5 + Theme.hair * 2;
+        spacing: Theme.s2;
+        HorizontalLayout {
+            spacing: Theme.s3;
+            Text {
+                text: root.b.sym;
+                color: Theme.muted;
+                font-family: Theme.font-symbol;
+                font-size: Theme.fs-l;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+
+            PageTitle {
+                horizontal-stretch: 1;
+                text: root.b.title;
+                size: Theme.fs-l;
+                family: Theme.font-sans;
+            }
+        }
+
+        Muted {
+            text: root.b.body;
+        }
+
+        for d in root.b.details: DetailLine {
+            d: d;
+        }
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                in-dialog: true;
+                text: Str.btn-dismiss;
+                activated => {
+                    root.dismiss();
+                }
+            }
+        }
+    }
+}
+
+// The undo and forget dialogs: what the operation meets, before the click. Esc closes. While it
+// is open `Modal.open` is set and only its controls can take the focus (a focus trap); the title
+// takes the focus when it opens.
+component DialogView inherits Rectangle {
+    in property <DialogData> d;
+    callback confirm();
+    callback cancel();
+    background: Theme.bg.with-alpha(0.85);
+    // Keeps the mouse from reaching the page behind.
+    TouchArea { }
+
+    FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            reject
+        }
+        VerticalLayout {
+            alignment: center;
+            padding: Theme.s6;
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: min(root.width - Theme.s8, Theme.s8 * 14);
+                    height: root.height - Theme.s8 * 2;
+                    background: Theme.raised;
+                    border-radius: Theme.radius-m;
+                    border-width: Theme.hair;
+                    border-color: Theme.line-strong;
+                    accessible-role: groupbox;
+                    accessible-label: root.d.title;
+                    VerticalLayout {
+                        padding: Theme.s6;
+                        spacing: Theme.s4;
+                        PageTitle {
+                            text: root.d.title;
+                            size: Theme.fs-l;
+                            family: Theme.font-sans;
+                        }
+
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                spacing: Theme.s3;
+                                if root.d.changed != "": Rectangle {
+                                    background: Theme.raised2;
+                                    border-radius: Theme.radius-s;
+                                    accessible-role: AccessibleRole.text;
+                                    accessible-label: root.d.changed;
+                                    VerticalLayout {
+                                        padding: Theme.s3;
+                                        Text {
+                                            text: root.d.changed;
+                                            color: Theme.strong;
+                                            font-size: Theme.fs-m;
+                                            wrap: word-wrap;
+                                            accessible-role: none;
+                                        }
+                                    }
+                                }
+                                Muted {
+                                    text: root.d.intro;
+                                }
+
+                                for op in root.d.ops: OpItem {
+                                    op: op;
+                                }
+                                for n in root.d.notes: Text {
+                                    text: n;
+                                    color: Theme.text;
+                                    font-size: Theme.fs-m;
+                                    wrap: word-wrap;
+                                }
+                                for x in root.d.details: DetailLine {
+                                    d: x;
+                                }
+                                if root.d.has-launch: Rectangle {
+                                    background: Theme.raised2;
+                                    border-radius: Theme.radius-s;
+                                    accessible-role: groupbox;
+                                    accessible-label: root.d.launch-heading;
+                                    VerticalLayout {
+                                        padding: Theme.s4;
+                                        spacing: Theme.s2;
+                                        Text {
+                                            text: root.d.launch-heading;
+                                            color: Theme.strong;
+                                            font-size: Theme.fs-m;
+                                            font-weight: 600;
+                                        }
+
+                                        for line in root.d.launch-lines: Muted {
+                                            text: line;
+                                        }
+                                        if root.d.launch-option != "": Text {
+                                            text: root.d.launch-option;
+                                            color: Theme.text;
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.fs-s + Theme.hair;
+                                            wrap: word-wrap;
+                                        }
+                                        for p in root.d.launch-problems: WarnLine {
+                                            w: p;
+                                        }
+                                    }
+                                }
+                                if root.d.blocked != "": Text {
+                                    text: root.d.blocked;
+                                    color: Theme.strong;
+                                    font-size: Theme.fs-m;
+                                    font-weight: 600;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: Theme.s3;
+                            alignment: end;
+                            Button {
+                                in-dialog: true;
+                                text: Str.btn-cancel;
+                                activated => {
+                                    root.cancel();
+                                }
+                            }
+
+                            Button {
+                                in-dialog: true;
+                                primary: true;
+                                text: root.d.confirm;
+                                enabled: root.d.can-confirm && !Modal.working;
+                                activated => {
+                                    root.confirm();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 component GamePage inherits VerticalLayout {
     in property <bool> loading;
     in property <GameData> game;
+    in property <PreviewData> preview;
     callback back();
+    callback fix-toggled(int);
+    callback apply(string);
+    callback card-undo(int);
+    callback card-forget(int);
     spacing: Theme.s4;
     HorizontalLayout {
         alignment: start;
@@ -1130,7 +1954,7 @@ component GamePage inherits VerticalLayout {
             text: Str.fixes-read-only;
         }
 
-        for fx in root.game.fixes: Card {
+        for fx[fi] in root.game.fixes: Card {
             accessible-role: groupbox;
             accessible-label: fx.id;
             accessible-description: fx.kind + ", " + fx.state.word;
@@ -1164,6 +1988,42 @@ component GamePage inherits VerticalLayout {
                     }
                 }
 
+                if fx.selectable: Check {
+                    text: Str.fix-select;
+                    a11y: Str.fix-select + ": " + fx.id;
+                    checked: fx.selected;
+                    activated => {
+                        root.fix-toggled(fi);
+                    }
+                }
+                if fx.note != "": Text {
+                    text: fx.note;
+                    color: Theme.text;
+                    font-size: Theme.fs-m;
+                    wrap: word-wrap;
+                }
+                if fx.preselect-note != "": Text {
+                    text: fx.preselect-note;
+                    color: Theme.muted;
+                    font-size: Theme.fs-s;
+                    wrap: word-wrap;
+                }
+                if fx.exclusive.length > 0: HorizontalLayout {
+                    spacing: Theme.s2;
+                    alignment: start;
+                    Text {
+                        text: Str.fix-exclusive;
+                        color: Theme.muted;
+                        font-size: Theme.fs-s;
+                    }
+
+                    for e in fx.exclusive: Text {
+                        text: e;
+                        color: Theme.text;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.fs-s;
+                    }
+                }
                 if fx.refused != "": Text {
                     text: fx.refused;
                     color: Theme.text;
@@ -1190,31 +2050,89 @@ component GamePage inherits VerticalLayout {
                     accessible-role: none;
                 }
 
-                for s in fx.solves: HorizontalLayout {
-                    spacing: Theme.s3;
-                    accessible-role: AccessibleRole.text;
-                    accessible-label: s.issue;
-                    accessible-description: s.when.word + ", " + s.status.word;
-                    Text {
-                        horizontal-stretch: 1;
-                        text: s.issue;
+                for s in fx.solves: VerticalLayout {
+                    spacing: Theme.s1;
+                    HorizontalLayout {
+                        spacing: Theme.s3;
+                        accessible-role: AccessibleRole.text;
+                        accessible-label: s.issue;
+                        accessible-description: s.when.word + ", " + s.status.word;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: s.issue;
+                            color: Theme.text;
+                            font-size: Theme.fs-m;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                            accessible-role: none;
+                        }
+
+                        Badge {
+                            data: s.when;
+                            accessible-role: none;
+                        }
+
+                        Badge {
+                            data: s.status;
+                            accessible-role: none;
+                        }
+                    }
+
+                    if s.tradeoffs.length == 0: Text {
+                        text: Str.fix-no-tradeoffs;
+                        color: Theme.muted;
+                        font-size: Theme.fs-s;
+                    }
+                    if s.tradeoffs.length > 0: Text {
+                        text: Str.fix-tradeoffs;
+                        color: Theme.muted;
+                        font-size: Theme.fs-s;
+                    }
+                    for tx in s.tradeoffs: Text {
+                        text: tx;
                         color: Theme.text;
-                        font-size: Theme.fs-m;
+                        font-size: Theme.fs-s + Theme.hair;
                         wrap: word-wrap;
-                        vertical-alignment: center;
-                        accessible-role: none;
                     }
-
-                    Badge {
-                        data: s.when;
-                        accessible-role: none;
+                    if s.sources.length > 0: Text {
+                        text: Str.fix-sources;
+                        color: Theme.muted;
+                        font-size: Theme.fs-s;
                     }
-
-                    Badge {
-                        data: s.status;
-                        accessible-role: none;
+                    for src in s.sources: Text {
+                        text: src;
+                        color: Theme.text;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.fs-s;
+                        wrap: word-wrap;
                     }
                 }
+            }
+        }
+    }
+
+    // The preview is mandatory before any apply (rule 5).
+    if !root.loading && root.game.fixes.length > 0: PreviewPanel {
+        p: root.preview;
+        apply(h) => {
+            root.apply(h);
+        }
+    }
+    if !root.loading && root.game.applied.length > 0: VerticalLayout {
+        spacing: Theme.s3;
+        padding-top: Theme.s5;
+        GroupHeading {
+            text: Str.applied-here;
+        }
+
+        for c[ci] in root.game.applied: CardView {
+            c: c;
+            index: ci;
+            undo => {
+                root.card-undo(ci);
+            }
+            forget => {
+                root.card-forget(ci);
             }
         }
     }
@@ -1222,6 +2140,8 @@ component GamePage inherits VerticalLayout {
 
 component AppliedPage inherits VerticalLayout {
     in property <AppliedData> applied;
+    callback card-undo(int);
+    callback card-forget(int);
     spacing: Theme.s4;
     PageTitle {
         text: Str.applied-title;
@@ -1273,6 +2193,17 @@ component AppliedPage inherits VerticalLayout {
                     wrap: word-wrap;
                 }
             }
+        }
+    }
+
+    for c[ci] in root.applied.cards: CardView {
+        c: c;
+        index: ci;
+        undo => {
+            root.card-undo(ci);
+        }
+        forget => {
+            root.card-forget(ci);
         }
     }
 }
@@ -1481,7 +2412,21 @@ export component AppWindow inherits Window {
     in property <AppliedData> applied;
     in property <bool> system-loading: true;
     in property <[SysLineData]> system-lines;
+    // Selecting, previewing, applying, undoing (P5-5a).
+    in property <PreviewData> preview;
+    in property <bool> banner-shown;
+    in property <BannerData> banner;
+    in property <bool> dialog-open;
+    in property <DialogData> dialog;
 
+    callback fix-toggled(int);
+    callback apply(string);
+    callback card-undo(int);
+    callback card-forget(int);
+    callback dialog-confirm();
+    callback dialog-cancel();
+    callback banner-dismiss();
+    callback request-close();
     callback navigate(int);
     callback open-game(int);
     callback query-edited(string);
@@ -1568,7 +2513,7 @@ export component AppWindow inherits Window {
                         label: Str.close;
                         danger: true;
                         activated => {
-                            root.close();
+                            root.request-close();
                         }
                     }
                 }
@@ -1646,6 +2591,13 @@ export component AppWindow inherits Window {
                                 max-width: Theme.s8 * 16;
                                 horizontal-stretch: 1;
                                 alignment: start;
+                                spacing: Theme.s4;
+                                if root.banner-shown: BannerView {
+                                    b: root.banner;
+                                    dismiss => {
+                                        root.banner-dismiss();
+                                    }
+                                }
                                 if root.page == 0 && !root.game-open: LibraryPage {
                                     reading: root.library-reading;
                                     summary: root.library-summary;
@@ -1672,12 +2624,31 @@ export component AppWindow inherits Window {
                                 if root.page == 0 && root.game-open: GamePage {
                                     loading: root.game-loading;
                                     game: root.game;
+                                    preview: root.preview;
                                     back => {
                                         root.navigate(0);
+                                    }
+                                    fix-toggled(i) => {
+                                        root.fix-toggled(i);
+                                    }
+                                    apply(h) => {
+                                        root.apply(h);
+                                    }
+                                    card-undo(i) => {
+                                        root.card-undo(i);
+                                    }
+                                    card-forget(i) => {
+                                        root.card-forget(i);
                                     }
                                 }
                                 if root.page == 1: AppliedPage {
                                     applied: root.applied;
+                                    card-undo(i) => {
+                                        root.card-undo(i);
+                                    }
+                                    card-forget(i) => {
+                                        root.card-forget(i);
+                                    }
                                 }
                                 if root.page == 2: HistoryPage { }
                                 if root.page == 3: SystemPage {
@@ -1696,6 +2667,17 @@ export component AppWindow inherits Window {
                 height: 100%;
                 n: root.blocked-notice;
             }
+            if root.dialog-open && !root.blocked: DialogView {
+                width: 100%;
+                height: 100%;
+                d: root.dialog;
+                confirm => {
+                    root.dialog-confirm();
+                }
+                cancel => {
+                    root.dialog-cancel();
+                }
+            }
         }
 
         Hairline {
@@ -1710,7 +2692,7 @@ export component AppWindow inherits Window {
                 padding-left: Theme.s4 + Theme.hair * 2;
                 padding-right: Theme.s4 + Theme.hair * 2;
                 spacing: Theme.s4;
-                for part in [Str.no-background, root.status-index, root.status-signature, root.status-build]: Text {
+                for part in [Str.no-background, root.status-index, root.status-signature, root.status-build, Modal.working ? Str.working : ""]: Text {
                     visible: part != "";
                     text: part;
                     font-family: Theme.font-mono;

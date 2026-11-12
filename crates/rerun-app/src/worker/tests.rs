@@ -903,6 +903,12 @@ fn kinds(ev: &[Event]) -> Vec<&'static str> {
             Event::Game(_) => "game",
             Event::Applied(_) => "applied",
             Event::System(_) => "system",
+            Event::Preview { .. } => "preview",
+            Event::PreviewNone { .. } => "preview-none",
+            Event::PreviewRefused { .. } => "preview-refused",
+            Event::PreviewReady { .. } => "preview-ready",
+            Event::Dialog(_) => "dialog",
+            Event::Result(_) => "result",
         })
         .collect()
 }
@@ -1036,3 +1042,5 @@ fn aw11_the_game_page_is_there_before_the_folder_is_read() {
     assert!(unlisted.title.as_str().contains("999"));
     assert_eq!(unlisted.hero.line, "Rerun liest den Spielordner ein.");
 }
+
+mod write;
