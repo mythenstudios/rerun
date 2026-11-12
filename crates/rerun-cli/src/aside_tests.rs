@@ -4,8 +4,8 @@
 //!   one for the ones this version cannot use (with the reason); the exit code unchanged.
 //! - C-FX2 `plan <app-id>` for an app with a usable and a set-aside Topo: the set-aside one
 //!   named, the usable one reported and planned.
-//! - C-FX3 `plan <app-id>` for an app whose only Topos are set aside: named with the reason,
-//!   nothing offered; `--pick` refused (exit 3).
+//! - C-FX3 `plan <app-id>` for an app whose only Topos are set aside (or retired and set
+//!   aside): named with the reason, nothing offered; `--pick` refused (exit 3).
 //! - C-FX4 `package fetch` of a set-aside package: refused (exit 3), nothing fetched.
 //! - C-FX5 a hostile reason is escaped on every line that shows it.
 
@@ -173,6 +173,56 @@ fn c_fx3_only_set_aside_topos_offer_nothing_and_a_pick_is_refused() {
         );
         assert!(r.stdout.contains(none), "{}", r.stdout);
         assert!(r.stdout.contains(line), "{line}\n{}", r.stdout);
+    }
+}
+
+/// C-FX3, review follow-up: an installed game whose Topos are one retired and one set aside
+/// offers nothing with the same line as one with only set-aside Topos, never the "no executable
+/// matches" line; `--pick` is refused (exit 3).
+#[test]
+fn c_fx3_only_retired_and_set_aside_topos_offer_nothing() {
+    let sys = lm_sys(false, &steps(8));
+    let sha = sha256_of(&sys, "game.exe");
+    let ix = format!(
+        r#"{{"format":1,"seq":2,"issued":"2026-11-12T12:00:00Z","topos":[
+{{"format":2,"id":"invented-game-next","match":{{"steam_appid":220}}}},
+{{"format":1,"id":"invented-game-old","title":"Invented Game (old)","status":"retired","rev":1,"match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d9"}}]}},"issues":[]}}
+],"packages":[]}}"#
+    );
+    sys.fake_fs()
+        .put_file(Path::new(INDEX), ix.as_bytes())
+        .unwrap();
+    sys.fake_fs()
+        .put_file(Path::new(SIG), &test_key::sign(ix.as_bytes()))
+        .unwrap();
+    sys.fake_fs().sync_all();
+    expect(
+        &sys,
+        &["index", "import", INDEX, SIG],
+        Answer::No,
+        Exit::Report,
+    );
+    let none = "app 220: the index has no Topo for this game that this version of Rerun can use: nothing is offered\n";
+    for (args, exit) in [
+        (&["plan", "220"][..], Exit::Report),
+        (
+            &["plan", "220", "--pick", "display/layer"][..],
+            Exit::Refused,
+        ),
+    ] {
+        let r = expect(&sys, args, Answer::No, exit);
+        for line in [
+            "Topo invented-game-old rev 1 is retired and offers nothing: Invented Game (old)\n",
+            "Topo invented-game-next for this game needs a newer version of Rerun\n",
+            none,
+        ] {
+            assert!(r.stdout.contains(line), "{line}\n{}", r.stdout);
+        }
+        assert!(
+            !r.stdout.contains("matches the Topo's hashes"),
+            "{}",
+            r.stdout
+        );
     }
 }
 

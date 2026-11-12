@@ -22,8 +22,8 @@ pub enum TopoMsg<'a> {
     NoUsableTopo {
         /// The app.
         app_id: u32,
-        /// The index.
-        seq: u64,
+        /// The index, when the lookup names it (not after the game folder was read).
+        seq: Option<u64>,
     },
     /// A Topo of the app this build sets aside (ADR 0024 amendment "Forward compatibility"
     /// §10): never planned.
@@ -148,10 +148,15 @@ impl fmt::Display for TopoMsg<'_> {
             Self::NoTopo { app_id, seq } => {
                 write!(f, "app {app_id}: index {seq} has no Topo for this game")
             }
-            Self::NoUsableTopo { app_id, seq } => write!(
-                f,
-                "app {app_id}: index {seq} has no Topo for this game that this version of Rerun can use: nothing is offered"
-            ),
+            Self::NoUsableTopo { app_id, seq } => {
+                match seq {
+                    Some(seq) => write!(f, "app {app_id}: index {seq} has ")?,
+                    None => write!(f, "app {app_id}: the index has ")?,
+                }
+                f.write_str(
+                    "no Topo for this game that this version of Rerun can use: nothing is offered",
+                )
+            }
             Self::Aside { id, newer: true, .. } => {
                 write!(f, "Topo {id} for this game needs a newer version of Rerun")
             }

@@ -1051,7 +1051,7 @@ fn aw11_the_game_page_is_there_before_the_folder_is_read() {
 }
 
 /// AW-FX: [`indexed`]'s world with app 250 ("Future Game") and 260 ("Odd Game") installed, and
-/// an index in which the only Topo of 250 is of entry format 2, the only Topo of 260 has a key
+/// an index in which the Topos of 250 are one of entry format 2 and one retired, the only Topo of 260 has a key
 /// this version does not know, and 220 has a usable Topo and a format-2 one.
 fn aside_world() -> FakeSystem {
     let sys = steam_world("Invented AC");
@@ -1074,6 +1074,8 @@ fn aside_world() -> FakeSystem {
     let ix = format!(
         r#"{{"format":1,"seq":7,"issued":"2026-11-12T12:00:00Z","topos":[
 {{"format":2,"id":"future-game","match":{{"steam_appid":250}},"future":true}},
+{{"format":1,"id":"future-game-old","title":"Future Game (old)","status":"retired","rev":1,
+"match":{{"steam_appid":250,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d9"}}]}},"issues":[]}},
 {{"format":1,"id":"invented-ac","title":"Invented AC","status":"active","rev":3,
 "match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d9"}}]}},
 "issues":[{{"id":"display","title":"Display","variants":[{{"id":"layer","status":"verified","kind":"fix","steps":[{step}]}}]}}]}},

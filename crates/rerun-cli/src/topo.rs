@@ -289,7 +289,10 @@ fn one<R, W: Write, E: Write>(
         }
         // Only set-aside Topos: named with why; a `--pick` is refused (exit 3).
         Lookup::NoTopo { seq, aside } => {
-            let mut lines = vec![Message::Topo(TopoMsg::NoUsableTopo { app_id, seq })];
+            let mut lines = vec![Message::Topo(TopoMsg::NoUsableTopo {
+                app_id,
+                seq: Some(seq),
+            })];
             lines.extend(aside_lines(&aside));
             return Err(print(out, err, &lines, exit));
         }
@@ -303,6 +306,10 @@ fn one<R, W: Write, E: Write>(
     lead.extend(aside_lines(&aside));
     match found {
         Found::One(r) => return Ok((lead, r)),
+        // Only retired and set-aside Topos: nothing to match, as for only set-aside ones.
+        Found::NoMatch(live) if live.is_empty() && !aside.is_empty() => {
+            lead.push(Message::Topo(TopoMsg::NoUsableTopo { app_id, seq: None }));
+        }
         Found::NoMatch(live) => {
             for (t, g) in &live {
                 lead.push(heading(t));

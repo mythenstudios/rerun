@@ -976,7 +976,7 @@ fn vh3_the_helper_outcomes_name_the_transaction_state() {
 fn vx1_a_set_aside_topo_is_named_and_its_reason_escaped() {
     use rerun_core::catalog::model::Id;
     use rerun_core::catalog::{Aside, AsideWhy, EntryKind, RuleError};
-    use rerun_core::flow::{GameView, Lookup};
+    use rerun_core::flow::{Found, GameView, Lookup};
 
     use crate::text::Sym;
 
@@ -1025,11 +1025,51 @@ fn vx1_a_set_aside_topo_is_named_and_its_reason_escaped() {
         assert!(!g.hero.line.contains("fine") && !g.hero.sub.unwrap().contains("fine"));
     }
     // With both, the newer one decides: a newer Rerun can use the game's Topo.
-    let g = super::game(&view(vec![hostile, newer]), Some(&name), None, Lang::De);
+    let g = super::game(
+        &view(vec![hostile.clone(), newer.clone()]),
+        Some(&name),
+        None,
+        Lang::De,
+    );
     assert_eq!(g.hero.line, "Braucht eine neuere Rerun-Version");
     assert_eq!(g.aside.len(), 2);
     // No set-aside Topo: the page of a game without one.
     let g = super::game(&view(Vec::new()), Some(&name), None, Lang::En);
     assert_eq!(g.hero.line, t(Lang::En, Msg::HeroNoTopo));
     assert!(g.aside.is_empty());
+
+    // The game folder was read, but no Topo is left to match: the same hero.
+    let read = |a: Vec<Aside>, found| GameView {
+        app_id: 250,
+        lookup: Lookup::Read {
+            retired: Vec::new(),
+            aside: a,
+            found,
+        },
+    };
+    for lang in Lang::ALL {
+        let g = super::game(
+            &read(vec![hostile.clone()], Found::NoMatch(Vec::new())),
+            Some(&name),
+            None,
+            lang,
+        );
+        assert_eq!(g.hero.line, t(lang, Msg::BadgeUnsupported));
+        assert_eq!(g.aside.len(), 1);
+        // Next to a Topo the folder was matched against: its page, a note by the reason.
+        let several = || Found::Several(vec!["a-game".to_owned(), "b-game".to_owned()]);
+        for (a, note) in [
+            (vec![hostile.clone()], Msg::NoteAsideUnsupported),
+            (vec![newer.clone()], Msg::NoteAsideNewer),
+            (vec![hostile.clone(), newer.clone()], Msg::NoteAsideNewer),
+        ] {
+            let n = a.len();
+            let g = super::game(&read(a, several()), Some(&name), None, lang);
+            assert_eq!(g.hero.line, t(lang, Msg::HeroSeveral));
+            assert_eq!(g.notes, [t(lang, note).into_owned()]);
+            assert_eq!(g.aside.len(), n);
+        }
+        let g = super::game(&read(Vec::new(), several()), Some(&name), None, lang);
+        assert!(g.notes.is_empty() && g.aside.is_empty());
+    }
 }

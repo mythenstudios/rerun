@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::catalog::model::{Arch, Package, Tier};
 use crate::catalog::{Catalog, EntryKind};
+use crate::escape;
 use crate::pkg::download::{self, Reading};
 use crate::pkg::extract::{self, ExtractError, Unpacked};
 use crate::policy::root::AppDir;
@@ -50,7 +51,9 @@ pub enum NeedState {
     /// A download and unpacking is needed and possible.
     Missing,
     /// Rerun cannot download it (a community package, a draft value, a URL outside the rules, not
-    /// in the index); the text is the core's reason, English, untrusted-free but not localised.
+    /// in the index, set aside by this build); the text is the core's reason in English, not
+    /// localised, and display text already escaped (`escape::text`): it may name parts of the
+    /// signed entry.
     Unobtainable(String),
 }
 
@@ -119,7 +122,7 @@ pub fn need(catalog: &Catalog, app: Option<&AppDir<'_>>, id: &str) -> PackageNee
                 }
                 Some(a) => format!(
                     "the package cannot be used by this version of Rerun ({})",
-                    a.why
+                    escape::text(&a.why.to_string())
                 ),
                 None => "the package is not in the signed index".to_owned(),
             }),
@@ -129,7 +132,10 @@ pub fn need(catalog: &Catalog, app: Option<&AppDir<'_>>, id: &str) -> PackageNee
 
 fn need_of(p: &Package, app: Option<&AppDir<'_>>) -> PackageNeed {
     let (downloads, state) = match download::downloads(p) {
-        Err(e) => (Vec::new(), NeedState::Unobtainable(e.to_string())),
+        Err(e) => (
+            Vec::new(),
+            NeedState::Unobtainable(escape::text(&e.to_string()).to_string()),
+        ),
         Ok(ds) => {
             let downloads = ds
                 .iter()
