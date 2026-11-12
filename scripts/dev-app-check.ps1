@@ -27,9 +27,20 @@
 # jobs of the worker and the time from a click on a game to its page) and the checklist for
 # you to report are in the summary, which is also copied to the clipboard. The cleanup runs in any case and reports PASS or FAIL.
 
+# Optional apply test (P5-5a): -Game <folder of ONE Steam game you name>. The test-key app then
+# runs with a real index, so it CAN apply a fix to that game. You apply the preselected fixes
+# of that game in the app, look at the preview, and undo them again (steps F to H of the
+# checklist). The script snapshots the game folder first (every file: length, read-only/hidden/
+# system flags and, up to 64 MB, SHA-256; timestamps are not compared, an undo does not
+# restore them) and compares it when the app is closed: PASS only if it is bit-identical for
+# what is hashed. What else it writes in this mode: Rerun's own records of the transaction
+# (<AppDir>\plans, \journal, \profiles). It removes exactly those top-level folders at the end if
+# they did not exist before, the game folder is identical again, and `rerun status` lists no open
+# transaction; otherwise it leaves them and says so. Apply fixes to the named game only.
 [CmdletBinding()]
 param(
-    [ValidateRange(5, 120)][int]$StepSeconds = 45
+    [ValidateRange(5, 120)][int]$StepSeconds = 45,
+    [string]$Game = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,6 +72,33 @@ function Is-Link([string]$path) {
 function Get-AppDirList {
     if (-not (Test-Path -LiteralPath $appDir)) { return @('<missing>') }
     return @(Get-ChildItem -LiteralPath $appDir -Force | Sort-Object Name | ForEach-Object { "$($_.Name)|$($_.PSIsContainer)" })
+}
+
+# The game folder as a table: relative path -> "length|flags|sha256" (SHA-256 up to 64 MB, larger
+# files by length and flags), and every folder. Timestamps are not part of it (ADR 0017).
+function Get-GameSnapshot([string]$root) {
+    $t = @{}
+    $prefix = $root.TrimEnd('\') + '\'
+    foreach ($f in Get-ChildItem -LiteralPath $root -Recurse -Force -File) {
+        $rel = $f.FullName.Substring($prefix.Length).ToLowerInvariant()
+        $flags = [int]($f.Attributes -band 7)
+        $sha = if ($f.Length -le 64MB) { Sha256-File $f.FullName } else { 'large' }
+        $t["file:$rel"] = "$($f.Length)|$flags|$sha"
+    }
+    foreach ($d in Get-ChildItem -LiteralPath $root -Recurse -Force -Directory) {
+        $t['dir:' + $d.FullName.Substring($prefix.Length).ToLowerInvariant()] = 'dir'
+    }
+    return $t
+}
+
+function Compare-GameSnapshot($a, $b) {
+    $d = New-Object System.Collections.Generic.List[string]
+    foreach ($k in $a.Keys) {
+        if (-not $b.ContainsKey($k)) { $d.Add("gone: $k") }
+        elseif ($a[$k] -ne $b[$k]) { $d.Add("changed: $k") }
+    }
+    foreach ($k in $b.Keys) { if (-not $a.ContainsKey($k)) { $d.Add("new: $k") } }
+    return $d
 }
 
 function Quote-Arg([string]$a) {
@@ -132,6 +170,8 @@ $foreign = @{}
 $exitCode = $null
 $seq = $null
 $traceText = ''
+$gameBefore = $null        # the named game folder before the app ran (apply test)
+$applyCheck = 'not run'
 
 try {
     Title 'CHECKING the machine (nothing is changed yet)'
@@ -150,6 +190,15 @@ try {
         $indexExisted = $true
     }
     $listBefore = Get-AppDirList
+    if ($Game) {
+        $Game = [IO.Path]::GetFullPath($Game).TrimEnd('\')
+        if (-not (Test-Path -LiteralPath $Game -PathType Container)) { Fail "-Game: not a folder: $Game" }
+        if (Is-Link $Game) { Fail "-Game: refusing a reparse point: $Game" }
+        if ($Game -notmatch '\\steamapps\\common\\[^\\]+$') { Fail "-Game: not the folder of one Steam game (...\steamapps\common\<game>): $Game" }
+        foreach ($p in @('plans', 'journal', 'profiles')) {
+            if ($listBefore -contains "$p|True") { Write-Host "note: $appDir\$p exists already; it stays, whatever the test writes there" -ForegroundColor Yellow }
+        }
+    }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('rerun-app-check-' + [Guid]::NewGuid().ToString('N'))
     Write-Host ''
@@ -157,7 +206,13 @@ try {
     Write-Host "  - builds into $repo\target (release-speed test-key rerun-cli, rerun-workbench, rerun-app; Smart-App-Control source replacement)"
     Write-Host "  - the test index (built from this repository, signed with the test key) in $tmp (deleted at the end)"
     Write-Host "  - $indexTest : Rerun's index state of a test-key build, by rerun index import (deleted at the end; the real index folder is never touched)"
-    Write-Host '  - nothing else: no registry, no firewall, no Steam, no game folder, no profile, no journal'
+    if ($Game) {
+        Write-Host "  - APPLY TEST: the app can apply fixes to ONE game, $Game (you apply and undo them in the app; the script compares the folder afterwards)" -ForegroundColor Yellow
+        Write-Host "    and writes Rerun's records of that transaction in $appDir (plans, journal, profiles: removed again at the end if they were not there and the transaction is closed)"
+        Write-Host '  - nothing else: no firewall, no Steam settings, no other game'
+    } else {
+        Write-Host '  - nothing else: no registry, no firewall, no Steam, no game folder, no profile, no journal'
+    }
     Write-Host ''
 
     Invoke-Build
@@ -189,11 +244,22 @@ try {
         "B: open Assassin's Creed: Director's Cut: all 3 issues of its Topo listed; EaglePatch once under Fixes, with both issues it solves",
         'C: hover the maximise button (snap flyout); double-click it; press it and drag away (no toggle)',
         'D: keyboard only: Tab through navigation, search field (reached?), switch, rows; Enter opens a game',
-        'E: speed: open a game at once after the start (while the list still fills), go back, open it again; switch Library, Applied, System, Library a few times: does anything wait?',
-        'CLOSE the app when done (the script then cleans up)'
+        'E: speed: open a game at once after the start (while the list still fills), go back, open it again; switch Library, Applied, System, Library a few times: does anything wait?'
     )
+    if ($Game) {
+        $steps += "F: APPLY TEST, only this game: $Game. Open it. The preselected fixes are ticked (verified, affect this PC); a fix that needs a download or the helper says so and cannot be ticked. Read the preview: every file, value, the launch profile, the warnings. Press Copy launch option and paste it into Notepad (it is only text). Press Apply once.",
+        'G: the game page and Applied now show ONE card with everything in it; Esc and Tab in the next dialog work; press Undo on the card, read what it restores, press Undo this change. The card is gone.',
+        'H: Apply is greyed out until the preview is shown; select a fix, deselect it: the preview follows. Do not apply anything else.'
+    }
+    $steps += 'CLOSE the app when done (the script then compares the game folder and cleans up)'
     foreach ($s in $steps) { Write-Host "  $s" }
     Write-Host ''
+
+    if ($Game) {
+        Title 'READING the game folder (hashing files up to 64 MB)'
+        $gameBefore = Get-GameSnapshot $Game
+        Write-Host "self-check: $($gameBefore.Count) entries of $Game recorded"
+    }
 
     Title 'STARTING the app'
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -254,6 +320,36 @@ catch {
 finally {
     $Host.UI.RawUI.WindowTitle = "$script:HelperTitle - CLEANING UP"
     if ($appProc -and -not $appProc.HasExited) { try { $appProc.Kill(); $appProc.WaitForExit() } catch { } }
+    # The apply test: the named game folder against its snapshot, then Rerun's records of the
+    # test (only folders that were not there before, only if the game folder is identical again
+    # and `rerun status` lists no transaction), before the index cleanup compares the top level.
+    if ($gameBefore) {
+        try {
+            $diff = @(Compare-GameSnapshot $gameBefore (Get-GameSnapshot $Game))
+            $applyCheck = if ($diff.Count -eq 0) { 'PASS' } else { 'FAIL: the game folder differs: ' + (($diff | Select-Object -First 20) -join '; ') }
+            $newDirs = @('plans', 'journal', 'profiles') | Where-Object {
+                (Test-Path -LiteralPath (Join-Path $appDir $_) -PathType Container) -and ($listBefore -notcontains "$_|True")
+            }
+            if ($newDirs.Count -gt 0) {
+                $kept = ''
+                if ($applyCheck -ne 'PASS') { $kept = 'the game folder differs' }
+                else {
+                    $r = Invoke-Exe $cli @('status')
+                    if ($r.Code -ne 0) { $kept = "rerun status failed ($($r.Code))" }
+                    elseif ($r.Out -match '[0-9]{8}-[0-9a-f]{16}') { $kept = 'rerun status lists a transaction' }
+                }
+                if ($kept) {
+                    $applyCheck += " (Rerun's records kept in ${appDir}: $($newDirs -join ', '); $kept; undo the transaction with rerun revert, then remove them by hand)"
+                    if ($applyCheck -notlike 'FAIL*') { $applyCheck = 'FAIL: ' + $applyCheck }
+                } else {
+                    foreach ($d in $newDirs) {
+                        $p = Join-Path $appDir $d
+                        if (Is-Link $p) { $applyCheck = "FAIL: $p is a reparse point: left alone" } else { Remove-Item -LiteralPath $p -Recurse -Force }
+                    }
+                }
+            }
+        } catch { $applyCheck = "FAIL: apply check error: $($_.Exception.Message)" }
+    }
     $problems = New-Object System.Collections.Generic.List[string]
     try {
         if ($touched) {
@@ -300,6 +396,7 @@ if ($null -ne $firstWindowMs) {
     else { $summary.Add('measured: DLLs from outside System32/WinSxS/SysWOW64 -> FAIL'); foreach ($f in $foreignList) { $summary.Add("  $f") } }
 }
 $summary.Add("cleanup (index-test, temp folder): $cleanup")
+if ($Game) { $summary.Add("apply test ($Game, the folder compared with its snapshot; Rerun's records removed): $applyCheck") }
 $summary.Add('')
 $summary.Add('By eye, report in the chat (ok / not ok, and what you saw):')
 $summary.Add("  A status bar: index seq $seq and 'Test key build'")
@@ -307,10 +404,15 @@ $summary.Add("  B Assassin's Creed: Director's Cut: 3 issues listed; EaglePatch 
 $summary.Add('  C maximise button: snap flyout on hover; double-click toggles; press and drag away does not toggle')
 $summary.Add('  D keyboard only: navigation, search field reached, switch, rows, Enter opens a game')
 $summary.Add('  E speed: a game opened at once after the start, back, opened again; Library, Applied, System, Library a few times: did anything wait? (and where)')
+if ($Game) {
+    $summary.Add('  F the preselection (verified, affects this PC), the preview (every file, value, launch profile, warnings), Copy launch option pasted into Notepad, Apply once')
+    $summary.Add('  G one card on the game page and under Applied; Esc and Tab in the undo dialog; what Undo said it would restore')
+    $summary.Add('  H Apply greyed out until the preview showed; selecting and deselecting a fix updated the preview')
+}
 Set-Clipboard -Value ($summary -join "`r`n")
 Write-Host ''
 $summary | ForEach-Object { Write-Host $_ }
 Write-Host ''
 Write-Host 'Summary is in the clipboard.'
-$final = if ($verdict -eq 'PASS' -and $cleanup -notlike 'FAIL*') { 'DONE: the summary is in the clipboard, report it' } else { 'FAILED: the summary is in the clipboard, report it' }
+$final = if ($verdict -eq 'PASS' -and $cleanup -notlike 'FAIL*' -and $applyCheck -notlike 'FAIL*') { 'DONE: the summary is in the clipboard, report it' } else { 'FAILED: the summary is in the clipboard, report it' }
 Title $final
