@@ -1170,7 +1170,7 @@ fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
 // ---------- AW16 re-check follow-ups ----------
 
 #[test]
-fn aw16_a_plan_with_a_firewall_rule_or_package_content_is_not_applicable() {
+fn aw16_a_plan_with_a_firewall_rule_is_not_applicable() {
     let mut rig = Rig::new(Lang::En);
     let page = rig.page();
     let picks = Selection::preselected(&page).picks(&page);
@@ -1193,14 +1193,15 @@ fn aw16_a_plan_with_a_firewall_rule_or_package_content_is_not_applicable() {
     let planned = picked.planned.unwrap_or_else(|e| panic!("{e}"));
     let pv = planned.preview().clone();
     assert!(crate::worker::applicable(&pv));
-    // ... and the same preview with a firewall rule, or with a package file, is not.
+    // ... and the same preview with a firewall rule is not. A package file is fine since P5-5b
+    // (AD1 applies and undoes one).
     let mut fw = pv.clone();
     fw.firewall = Some("firewall rules");
     assert!(!crate::worker::applicable(&fw));
     let mut pkg = pv.clone();
     let op = pkg.ops.iter_mut().find(|o| o.profile.is_none()).unwrap();
     op.source = Some(escape::text("pack 1.0: d3d9.dll").into_owned());
-    assert!(!crate::worker::applicable(&pkg));
+    assert!(crate::worker::applicable(&pkg));
 }
 
 #[test]

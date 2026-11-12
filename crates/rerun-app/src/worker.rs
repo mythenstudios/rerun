@@ -5,6 +5,14 @@
 //! ([`Job::Plan`], [`Job::RevertPreview`], [`Job::ForgetPreview`]); write jobs (P5-5a): [`Job::Apply`],
 //! [`Job::Revert`] and [`Job::Forget`], which write only through `flow` with a token the window
 //! was shown.
+//! Package downloads (P5-5b): [`Job::DownloadAsk`] answers the consent dialog (what would be
+//! downloaded, read only) and keeps the list it showed under a nonce; [`Job::Download`] downloads
+//! only for the list whose nonce the click carries, through `flow::fetch` (which checks the index
+//! against that list again), reports progress, and ends in [`Event::DownloadEnded`]. A cancel is
+//! a flag ([`Worker::cancel_download`]) the fetch checks before every request and read: it takes
+//! effect at the next read, up to WinHTTP's 30 s receive timeout, and a cancelled or failed body
+//! leaves nothing in the cache.
+//!
 //! Every job builds its own `Guarded` through `flow::guard` (elevation first, then the
 //! forbidden roots, then Rerun's folder opened if it exists, never created): an elevated process
 //! reads nothing, and the window shows the blocking page (rule 6). Reading and previewing
@@ -27,7 +35,7 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use rerun_core::catalog::Catalog;
@@ -36,8 +44,8 @@ use rerun_core::detect::steam;
 use rerun_core::escape::Shown;
 use rerun_core::exec;
 use rerun_core::flow::{
-    self, ActError, Env, ForgetShown, Found, GameCache, Guarded, IndexState, LibraryEvent, Lookup,
-    Planned, Previewed, RevertShown,
+    self, ActError, Env, FetchError, ForgetShown, Found, GameCache, GameView, Guarded, IndexState,
+    LibraryEvent, Lookup, NeedState, PackageNeed, Planned, Previewed, Progress, RevertShown,
 };
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::journal::TxnId;
@@ -47,8 +55,8 @@ use rerun_core::topo;
 
 use crate::text::{Lang, Msg, t};
 use crate::vm::{
-    self, AppliedVm, BlockedVm, DetailVm, DialogVm, GameVm, LibraryVm, Names, Notice, Offer,
-    PreviewVm, ResultVm, RowVm, SteamVm, SystemVm, TopoKnown,
+    self, AppliedVm, BlockedVm, DetailVm, DialogVm, DownloadVm, GameVm, LibraryVm, Names, Notice,
+    Offer, PackageState, PreviewVm, ResultVm, RowVm, SteamVm, SystemVm, TopoKnown,
 };
 
 /// A job for the worker.
@@ -112,6 +120,19 @@ pub enum Job {
         /// The nonce of the shown preview.
         nonce: u64,
     },
+    /// What a fix would download: answers the consent dialog. Reads only.
+    DownloadAsk {
+        /// The Steam app.
+        app_id: u32,
+        /// The fix (its variant ID).
+        variant: String,
+    },
+    /// Downloads, verifies and unpacks the packages of the consent dialog whose nonce this is
+    /// (also "Try again" of the failure dialog). Nothing is downloaded for another nonce.
+    Download {
+        /// The nonce of the dialog the user confirmed (`DownloadVm::nonce`).
+        nonce: u64,
+    },
 }
 
 impl Job {
@@ -129,6 +150,8 @@ impl Job {
             Self::Revert { .. } => "undo".to_owned(),
             Self::ForgetPreview { .. } => "forget preview".to_owned(),
             Self::Forget { .. } => "forget".to_owned(),
+            Self::DownloadAsk { app_id, .. } => format!("download ask {app_id}"),
+            Self::Download { .. } => "download".to_owned(),
         }
     }
 
@@ -140,6 +163,24 @@ impl Job {
             Self::Apply { .. } | Self::Revert { .. } | Self::Forget { .. }
         )
     }
+
+    /// The job downloads: the window cancels it and waits for it before it closes (rule 1).
+    pub fn downloads(&self) -> bool {
+        matches!(self, Self::Download { .. })
+    }
+}
+
+/// How a [`Job::Download`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadOutcome {
+    /// Every package is in place; the fix can be selected.
+    Done,
+    /// The user cancelled; nothing of the running download was kept.
+    Cancelled,
+    /// It failed; the failure dialog was sent.
+    Failed,
+    /// The click carried no list that was shown: nothing was downloaded.
+    Refused,
 }
 
 /// What the worker hands back.
@@ -187,6 +228,10 @@ pub enum Event {
     Dialog(Box<DialogVm>),
     /// What a job that may have written (or was refused) came to.
     Result(ResultVm),
+    /// The consent, progress or failure dialog of a package download (P5-5b).
+    Download(Box<DownloadVm>),
+    /// A [`Job::Download`] has ended (always the last event of it).
+    DownloadEnded(DownloadOutcome),
 }
 
 /// How the framework learns that an event is waiting (ADR 0027).
@@ -212,6 +257,10 @@ pub struct Worker {
     events: Receiver<Event>,
     /// Write jobs queued or running: the window does not close while it is above zero.
     writes: Arc<AtomicUsize>,
+    /// Downloads queued or running: the window cancels them and waits before it closes.
+    downloads: Arc<AtomicUsize>,
+    /// The cancel flag of the download (shared with the session).
+    cancel: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -224,7 +273,11 @@ impl Worker {
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (event_tx, events) = mpsc::channel::<Event>();
         let writes = Arc::new(AtomicUsize::new(0));
+        let downloads = Arc::new(AtomicUsize::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
         let thread_writes = writes.clone();
+        let thread_downloads = downloads.clone();
+        let thread_cancel = cancel.clone();
         std::thread::Builder::new()
             .name("rerun-worker".to_owned())
             .spawn(move || {
@@ -237,6 +290,8 @@ impl Worker {
                 };
                 let mut session = Session {
                     writes: thread_writes,
+                    downloads: thread_downloads,
+                    cancel: thread_cancel,
                     ..Session::default()
                 };
                 // A library job that stopped a running scan: it runs next.
@@ -259,7 +314,7 @@ impl Worker {
                             );
                         }
                         Err(detail) => {
-                            let _guard = WriteGuard::new(&session.writes, &job);
+                            let _guard = WriteGuard::new(&session, &job);
                             emit(Event::Blocked(no_system(detail.clone(), lang)));
                         }
                     }
@@ -269,6 +324,8 @@ impl Worker {
             jobs,
             events,
             writes,
+            downloads,
+            cancel,
         })
     }
 
@@ -276,12 +333,35 @@ impl Worker {
     /// here on, so the window cannot close between the click and the worker picking it up.
     pub fn send(&self, job: Job) {
         let writes = job.writes();
+        let downloads = job.downloads();
         if writes {
             self.writes.fetch_add(1, Ordering::SeqCst);
         }
-        if self.jobs.send(job).is_err() && writes {
-            self.writes.fetch_sub(1, Ordering::SeqCst);
+        if downloads {
+            // A new download starts uncancelled; a cancel after this call reaches it.
+            self.cancel.store(false, Ordering::SeqCst);
+            self.downloads.fetch_add(1, Ordering::SeqCst);
         }
+        if self.jobs.send(job).is_err() {
+            if writes {
+                self.writes.fetch_sub(1, Ordering::SeqCst);
+            }
+            if downloads {
+                self.downloads.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// A download is queued or running (rule 1: the window cancels it and closes when it has
+    /// stopped).
+    pub fn downloading(&self) -> bool {
+        self.downloads.load(Ordering::SeqCst) > 0
+    }
+
+    /// Asks the running download to stop. Takes effect at the next read (up to WinHTTP's 30 s
+    /// receive timeout); the worker answers with [`Event::DownloadEnded`].
+    pub fn cancel_download(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
     }
 
     /// A write job is queued or running (rule 1: closing the window is refused meanwhile).
@@ -325,6 +405,10 @@ pub struct Session {
     nonce: u64,
     /// Write jobs queued or running (shared with [`Worker::busy_writing`]).
     writes: Arc<AtomicUsize>,
+    /// Downloads queued or running (shared with [`Worker::downloading`]).
+    downloads: Arc<AtomicUsize>,
+    /// The download's cancel flag (shared with [`Worker::cancel_download`]).
+    pub(crate) cancel: Arc<AtomicBool>,
 }
 
 /// The proof tokens of the flows the window may confirm: the bytes whose preview was handed
@@ -340,6 +424,18 @@ struct Pending {
     revert: Option<(RevertShown, Option<u32>, u64)>,
     /// A forget preview, with the game its transaction is about.
     forget: Option<(ForgetShown, Option<u32>, u64)>,
+    /// The list the consent (or failure) dialog showed: a download is made only for it.
+    consent: Option<Consent>,
+}
+
+/// What a download dialog showed, kept under its nonce (the consent is bound to this list).
+#[derive(Debug)]
+struct Consent {
+    nonce: u64,
+    app_id: u32,
+    variant: String,
+    /// The packages the fix still needs (not unpacked yet), as shown.
+    needs: Vec<PackageNeed>,
 }
 
 impl Session {
@@ -366,8 +462,15 @@ pub fn run(env: Env<'_>, job: &Job, lang: Lang, emit: &mut dyn FnMut(Event)) {
 struct WriteGuard(Option<Arc<AtomicUsize>>);
 
 impl WriteGuard {
-    fn new(writes: &Arc<AtomicUsize>, job: &Job) -> Self {
-        Self(job.writes().then(|| writes.clone()))
+    /// Counts `job` in the counter of its kind (writes or downloads), if it has one.
+    fn new(session: &Session, job: &Job) -> Self {
+        Self(if job.writes() {
+            Some(session.writes.clone())
+        } else if job.downloads() {
+            Some(session.downloads.clone())
+        } else {
+            None
+        })
     }
 }
 
@@ -391,7 +494,7 @@ pub fn run_in(
 ) -> Option<Job> {
     let began = std::time::Instant::now();
     // Dropped at the end of the job, also on a panic: the window may close then.
-    let _guard = WriteGuard::new(&session.writes, job);
+    let _guard = WriteGuard::new(session, job);
     let preempted = run_job(env, job, lang, session, waiting, emit);
     crate::trace::log(|| {
         format!(
@@ -466,6 +569,10 @@ fn run_job(
         Job::Revert { txn, nonce } => revert(&g, txn, *nonce, lang, session, emit),
         Job::ForgetPreview { txn } => forget_preview(&g, txn, false, lang, session, emit),
         Job::Forget { txn, nonce } => forget(&g, txn, *nonce, lang, session, emit),
+        Job::DownloadAsk { app_id, variant } => {
+            download_ask(&g, *app_id, variant, lang, session, emit);
+        }
+        Job::Download { nonce } => download(&g, *nonce, lang, session, emit),
     }
     preempted
 }
@@ -478,9 +585,20 @@ fn game_page(
     lang: Lang,
     session: &mut Session,
 ) -> GameVm {
-    let mut page = match flow::game_cached(g, app_id, Some(&mut session.games)) {
-        Ok(v) => vm::game(&v, name, lang),
-        Err(e) => vm::game_refused(app_id, name, &e, lang),
+    game_page_view(g, app_id, name, lang, session).0
+}
+
+/// [`game_page`], with the flow's view it was made from (`None` when the lookup was refused).
+fn game_page_view(
+    g: &Guarded<'_>,
+    app_id: u32,
+    name: Option<&Shown<'static>>,
+    lang: Lang,
+    session: &mut Session,
+) -> (GameVm, Option<GameView>) {
+    let (mut page, view) = match flow::game_cached(g, app_id, Some(&mut session.games)) {
+        Ok(v) => (vm::game(&v, name, lang), Some(v)),
+        Err(e) => (vm::game_refused(app_id, name, &e, lang), None),
     };
     if let Some(Ok(s)) = g.app().map(exec::status) {
         page.applied = vm::cards(&s, &session.names, lang)
@@ -489,7 +607,7 @@ fn game_page(
             .collect();
     }
     session.pages.insert(app_id, fix_key(&page));
-    page
+    (page, view)
 }
 
 /// What decides whether a page the window holds is still the page of the files: the fixes and
@@ -610,13 +728,11 @@ pub(crate) fn token_kept(prompt: Option<&rerun_core::elevate::PromptState>) -> b
 }
 
 /// Whether the app can apply a plan in this slice: no firewall rule (the elevated helper,
-/// P5-5c) and no package file (a download, P5-5b).
+/// P5-5c). Package files are fine since P5-5b: the planner reads them from Rerun's packages folder
+/// and hashes them against the Topo's pinned values, so they are there only after a download the
+/// user agreed to (or `rerun package fetch`).
 pub(crate) fn applicable(pv: &rerun_core::plan::Preview) -> bool {
     pv.firewall.is_none()
-        && pv
-            .ops
-            .iter()
-            .all(|o| o.profile.is_some() || o.source.is_none())
 }
 
 /// Applies the plan the window rendered: store, check, apply. Nothing is applied that was not
@@ -790,6 +906,183 @@ fn forget(
             refresh(g, app, lang, session, emit);
         }
     }
+}
+
+/// The fix `variant` of a game view.
+fn fix_of<'v>(view: &'v GameView, variant: &str) -> Option<&'v flow::Fix> {
+    match &view.lookup {
+        Lookup::Read {
+            found: Found::One(m),
+            ..
+        } => m.fixes.iter().find(|f| f.variant == variant),
+        _ => None,
+    }
+}
+
+/// The consent dialog for a fix that needs packages: what would be downloaded, read only
+/// (nothing is requested, nothing is created). The game is read again first, as a plan does: a
+/// window that holds a page the files no longer match gets the fresh page instead.
+fn download_ask(
+    g: &Guarded<'_>,
+    app_id: u32,
+    variant: &str,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    session.pending.consent = None;
+    let before = session.pages.get(&app_id).cloned();
+    session.games.forget(app_id);
+    let name = session.names.get(&app_id).cloned();
+    let (page, view) = game_page_view(g, app_id, name.as_ref(), lang, session);
+    if before.as_ref().is_none_or(|b| *b != fix_key(&page)) {
+        emit(Event::Result(vm::stale(lang)));
+        emit(Event::Game(page));
+        return;
+    }
+    // Only a fix the page offers with a download: nothing else is asked for.
+    let offered = page
+        .fixes
+        .iter()
+        .any(|f| f.key == variant && f.offer == Offer::NeedsDownload);
+    let needs: Vec<PackageNeed> = view
+        .as_ref()
+        .and_then(|v| fix_of(v, variant))
+        .map(|f| {
+            f.packages
+                .iter()
+                .filter(|p| p.state == NeedState::Missing)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if !offered || needs.is_empty() {
+        emit(Event::Result(vm::not_available(lang)));
+        return;
+    }
+    session.nonce += 1;
+    let nonce = session.nonce;
+    let dialog = vm::consent(app_id, variant, &needs, nonce, lang);
+    session.pending.consent = Some(Consent {
+        nonce,
+        app_id,
+        variant: variant.to_owned(),
+        needs,
+    });
+    emit(Event::Download(Box::new(dialog)));
+}
+
+/// How often progress reaches the window (every report in tests, so they see each state).
+const PROGRESS_EVERY: std::time::Duration = if cfg!(test) {
+    std::time::Duration::ZERO
+} else {
+    std::time::Duration::from_millis(100)
+};
+
+/// Downloads the packages of the dialog the user confirmed (`nonce`), one after the other, through
+/// `flow::fetch` with the session's cancel flag. Only a list that was shown is downloaded: a
+/// confirm that matches none writes nothing and asks nobody. The core checks the index against
+/// the shown list again for every package.
+fn download(
+    g: &Guarded<'_>,
+    nonce: u64,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    let shown = session
+        .pending
+        .consent
+        .as_ref()
+        .is_some_and(|c| c.nonce == nonce);
+    let Some(c) = shown.then(|| session.pending.consent.take()).flatten() else {
+        emit(Event::Result(vm::no_consent(lang)));
+        emit(Event::DownloadEnded(DownloadOutcome::Refused));
+        return;
+    };
+    let cancel = session.cancel.clone();
+    let mut states = vec![PackageState::Waiting; c.needs.len()];
+    let progress = |states: &[PackageState]| {
+        Event::Download(Box::new(vm::progress(
+            c.app_id,
+            &c.variant,
+            &c.needs,
+            states,
+            nonce,
+            cancel.load(Ordering::SeqCst),
+            lang,
+        )))
+    };
+    emit(progress(&states));
+    let mut last = std::time::Instant::now();
+    for i in 0..c.needs.len() {
+        let result = {
+            let mut on = |p: Progress| {
+                states[i] = match p {
+                    Progress::Download {
+                        read, announced, ..
+                    } => PackageState::Reading { read, announced },
+                    Progress::Cached { .. } => PackageState::Cached,
+                    Progress::Unpacking => PackageState::Unpacking,
+                };
+                // Throttled: the core reports every 64 KiB, the window needs a few a second.
+                if last.elapsed() >= PROGRESS_EVERY || matches!(p, Progress::Unpacking) {
+                    last = std::time::Instant::now();
+                    emit(progress(&states));
+                }
+            };
+            flow::fetch(g, &c.needs[i], &mut on, &cancel)
+        };
+        match result {
+            Ok(_) => {
+                states[i] = PackageState::Done;
+                emit(progress(&states));
+            }
+            Err(FetchError::Cancelled) => {
+                // What finished before stays unpacked; the page shows where things stand.
+                emit(Event::Result(vm::cancelled(lang)));
+                emit(Event::DownloadEnded(DownloadOutcome::Cancelled));
+                refresh_page(g, c.app_id, lang, session, emit);
+                return;
+            }
+            Err(e) => {
+                for s in &mut states[i + 1..] {
+                    *s = PackageState::NotStarted;
+                }
+                session.nonce += 1;
+                let again = session.nonce;
+                emit(Event::Download(Box::new(vm::failed(
+                    c.app_id, &c.variant, &c.needs, &states, &e, again, lang,
+                ))));
+                let (app_id, retry) = (c.app_id, e.kind() != flow::FetchKind::Changed);
+                session.pending.consent = Some(Consent { nonce: again, ..c });
+                emit(Event::DownloadEnded(DownloadOutcome::Failed));
+                if !retry {
+                    // The index changed: the page may offer other fixes now.
+                    refresh_page(g, app_id, lang, session, emit);
+                }
+                return;
+            }
+        }
+    }
+    // Every package is in place: the window selects the fix when it takes the fresh page.
+    session.games.forget(c.app_id);
+    emit(Event::DownloadEnded(DownloadOutcome::Done));
+    refresh_page(g, c.app_id, lang, session, emit);
+}
+
+/// The game page again (its cached executables dropped), after the packages changed.
+fn refresh_page(
+    g: &Guarded<'_>,
+    app_id: u32,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    session.games.forget(app_id);
+    let name = session.names.get(&app_id).cloned();
+    let page = game_page(g, app_id, name.as_ref(), lang, session);
+    emit(Event::Game(page));
 }
 
 /// Whether the index names a Topo (not retired) for `app_id`.

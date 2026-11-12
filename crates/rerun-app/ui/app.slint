@@ -869,6 +869,7 @@ component GamePage inherits VerticalLayout {
                     text: Str.fix-select;
                     a11y: Str.fix-select + ": " + fx.id;
                     checked: fx.selected;
+                    take-focus: Modal.return-to == -2 - fi;
                     activated => {
                         root.fix-toggled(fi);
                     }

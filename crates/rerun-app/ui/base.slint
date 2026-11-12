@@ -119,6 +119,11 @@ export struct DialogData {
     confirm: string,
     can-confirm: bool,
     blocked: string,
+    // A dialog without a confirm button (a download that runs), and its cancel button's label and
+    // state (a cancel that is not confirmed yet waits).
+    no-confirm: bool,
+    cancel-label: string,
+    cancel-disabled: bool,
 }
 
 // tone: 0 done, 1 calm, 2 attention.

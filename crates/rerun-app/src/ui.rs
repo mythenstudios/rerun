@@ -6,6 +6,7 @@
 //! no GPU, no OpenGL driver in the process.
 
 mod chrome;
+mod download;
 #[cfg(test)]
 mod tests;
 mod write;
@@ -52,6 +53,7 @@ use crate::worker::{Event, Job, Wake, Worker, World};
 use rerun_core::journal::TxnId;
 
 use chrome::{Chrome, Geometry, WindowState};
+use download::{DownloadState, download_ended, download_event};
 use write::{
     card, close_dialog, dialog_data, plan_selection, preview_data, preview_none, preview_refused,
     show_result, write_callbacks,
@@ -80,8 +82,16 @@ struct State {
     applied_cards: Vec<TxnCardVm>,
     /// The open undo or forget dialog.
     dialog: Option<(DialogKind, TxnId, u64)>,
-    /// The card button that opened it (2 * index, +1 for forget): the focus returns there.
+    /// The card button that opened it (2 * index, +1 for forget), or the checkbox of a fix
+    /// (-2 - index): the focus returns there.
     opener: i32,
+    /// The open download dialog (consent, progress or failure), if any.
+    download: Option<DownloadState>,
+    /// A fix whose download finished: selected when the fresh page arrives.
+    select_after: Option<String>,
+    /// The window was asked to close during a download: it cancels it and closes by itself when
+    /// the worker reports the end.
+    close_after_download: bool,
 }
 
 /// Wakes the event loop from the worker thread (ADR 0026: `invoke_from_event_loop`).
@@ -196,6 +206,9 @@ where
         applied_cards: Vec::new(),
         dialog: None,
         opener: -1,
+        download: None,
+        select_after: None,
+        close_after_download: false,
     }));
     callbacks(&ui, &state);
 
@@ -560,6 +573,17 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                     } else {
                         st.selection.keep(&g);
                     }
+                    // A download just finished: the fix is selectable now and the user asked
+                    // for it.
+                    if let Some(key) = st.select_after.take()
+                        && let Some(i) = g
+                            .fixes
+                            .iter()
+                            .position(|f| f.key == key && f.offer == vm::Offer::Selectable)
+                        && !st.selection.contains(&key)
+                    {
+                        st.selection.toggle(&g, i);
+                    }
                     let app_id = g.app_id;
                     st.game_cards = g.applied.clone();
                     ui.set_game(game(&g, &st.selection));
@@ -607,6 +631,13 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 let m = ui.global::<Modal>();
                 m.set_working(false);
                 m.set_open(true);
+            }
+            Event::Download(d) => download_event(ui, &mut st, &d),
+            Event::DownloadEnded(outcome) => {
+                if download_ended(ui, &mut st, outcome) {
+                    // The window was asked to close while the download ran: it has stopped.
+                    let _ = ui.hide();
+                }
             }
             Event::Result(r) => {
                 if st.dialog.is_some() {
@@ -752,7 +783,7 @@ fn game(g: &GameVm, sel: &Selection) -> GameData {
                     refused: f.refused.as_deref().map(s).unwrap_or_default(),
                     refused_detail: f.refused_detail.as_ref().map(shown).unwrap_or_default(),
                     warned: f.warned.as_deref().map(s).unwrap_or_default(),
-                    selectable: f.offer == vm::Offer::Selectable,
+                    selectable: matches!(f.offer, vm::Offer::Selectable | vm::Offer::NeedsDownload),
                     selected: sel.contains(&f.key),
                     note: f.note.as_deref().map(s).unwrap_or_default(),
                     preselect_note: f.preselect_note.as_deref().map(s).unwrap_or_default(),

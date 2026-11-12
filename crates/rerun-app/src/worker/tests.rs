@@ -909,6 +909,8 @@ fn kinds(ev: &[Event]) -> Vec<&'static str> {
             Event::PreviewReady { .. } => "preview-ready",
             Event::Dialog(_) => "dialog",
             Event::Result(_) => "result",
+            Event::Download(_) => "download",
+            Event::DownloadEnded(_) => "download-ended",
         })
         .collect()
 }
@@ -1043,4 +1045,5 @@ fn aw11_the_game_page_is_there_before_the_folder_is_read() {
     assert_eq!(unlisted.hero.line, "Rerun liest den Spielordner ein.");
 }
 
+mod download;
 mod write;

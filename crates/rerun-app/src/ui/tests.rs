@@ -14,10 +14,14 @@ use slint::ComponentHandle as _;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
 use slint::platform::{Platform, WindowAdapter};
 
+use super::download::download_data;
 use super::{
     AppWindow, BadgeData, RowData, SectionData, ThemeId, model, set_strings, set_theme, theme,
 };
 use crate::text::Lang;
+use crate::vm::{PackageState, consent, failed, progress};
+use rerun_core::catalog::model::Tier;
+use rerun_core::flow::{DownloadNeed, FetchError, NeedState, PackageNeed};
 
 struct Headless(Rc<MinimalSoftwareWindow>);
 
@@ -85,6 +89,52 @@ fn the_window_draws_its_first_frames_fast() {
     }]));
     assert!(draw(), "the page with rows is drawn");
     let with_rows = start.elapsed();
+    // The download dialogs (P5-5b) draw in the one dialog: consent, progress (no confirm button,
+    // a cancel that waits), failure.
+    let need = PackageNeed {
+        id: "fix-pack".to_owned(),
+        name: "Fix pack".to_owned(),
+        version: "1.0".to_owned(),
+        license: "MIT".to_owned(),
+        tier: Tier::Established,
+        repo: Some("https://github.com/owner/fix-pack".to_owned()),
+        downloads: vec![DownloadNeed {
+            arch: None,
+            url: "https://github.com/owner/fix-pack/releases/download/v1.0/fix-pack.zip".to_owned(),
+            host: "github.com".to_owned(),
+            sha256: "ab".repeat(32),
+        }],
+        state: NeedState::Missing,
+    };
+    let needs = [need];
+    ui.set_dialog(download_data(&consent(1, "fix-pack", &needs, 1, Lang::De)));
+    ui.set_dialog_open(true);
+    assert!(draw(), "the consent dialog is drawn");
+    let reading = [PackageState::Reading {
+        read: 1_300_000,
+        announced: Some(3_250_000),
+    }];
+    ui.set_dialog(download_data(&progress(
+        1,
+        "fix-pack",
+        &needs,
+        &reading,
+        1,
+        true,
+        Lang::En,
+    )));
+    assert!(draw(), "the progress dialog is drawn");
+    ui.set_dialog(download_data(&failed(
+        1,
+        "fix-pack",
+        &needs,
+        &reading,
+        &FetchError::NoIndex,
+        2,
+        Lang::En,
+    )));
+    assert!(draw(), "the failure dialog is drawn");
+    ui.set_dialog_open(false);
     eprintln!(
         "headless start: window created {created:?}, first frame {first:?}, with 60 rows {with_rows:?}"
     );

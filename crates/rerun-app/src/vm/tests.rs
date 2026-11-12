@@ -64,6 +64,51 @@ fn vw1_only_a_fix_without_a_download_and_without_the_helper_is_selectable() {
     assert_eq!((o, note), (Offer::Refused, None));
 }
 
+/// VD0 (P5-5b): a fix that needs a package is offered with a consent, never selectable before
+/// it; one whose packages are in place is selectable; one with a package Rerun cannot download
+/// is not offered at all.
+#[test]
+fn vd0_the_packages_decide_whether_a_fix_asks_first() {
+    let with = |states: &[NeedState]| {
+        let mut f = fix(&[], false, false);
+        f.packages = states
+            .iter()
+            .enumerate()
+            .map(|(i, s)| PackageNeed {
+                id: format!("p{i}"),
+                name: format!("P{i}"),
+                version: "1.0".to_owned(),
+                license: "MIT".to_owned(),
+                tier: Tier::Established,
+                repo: None,
+                downloads: Vec::new(),
+                state: s.clone(),
+            })
+            .collect();
+        f
+    };
+    let missing = NeedState::Missing;
+    let there = NeedState::Unpacked;
+    let never = NeedState::Unobtainable("a community package".to_owned());
+    for lang in Lang::ALL {
+        assert_eq!(
+            offer(&with(std::slice::from_ref(&there)), lang).0,
+            Offer::Selectable
+        );
+        assert_eq!(
+            offer(&with(&[there.clone(), missing.clone()]), lang).0,
+            Offer::NeedsDownload
+        );
+        let (o, note) = offer(&with(&[missing.clone(), never.clone()]), lang);
+        assert_eq!(o, Offer::NoPackage);
+        assert_eq!(note.as_deref(), Some(&*t(lang, Msg::FixNoPackage)));
+    }
+    // A package that needs a download and a helper: the helper's lock wins (P5-5c).
+    let mut f = with(&[missing]);
+    f.needs_helper = true;
+    assert_eq!(offer(&f, Lang::En).0, Offer::NeedsHelper);
+}
+
 fn txn() -> TxnId {
     "00000007-00000000000000ab".parse().unwrap()
 }
@@ -323,4 +368,374 @@ fn vw5_every_refusal_has_its_message_and_keeps_or_refreshes_the_page() {
             assert!(!v.notice.body.is_empty() && !v.notice.details.is_empty());
         }
     }
+}
+
+// ---------- the download dialogs (P5-5b) ----------
+
+use rerun_core::catalog::model::Arch;
+use rerun_core::flow::{DownloadNeed, FetchError, FetchKind};
+use rerun_core::pkg::download::FetchError as Dl;
+use rerun_core::sys::{SysError, SysErrorKind};
+
+use super::{
+    DownloadStage, PackageState, Value, cancelled, closing, consent, failed, no_consent, progress,
+};
+
+fn dl(arch: Option<Arch>, url: &str, host: &str, sha: &str) -> DownloadNeed {
+    DownloadNeed {
+        arch,
+        url: url.to_owned(),
+        host: host.to_owned(),
+        sha256: sha.to_owned(),
+    }
+}
+
+/// Two packages: one with an asset per architecture (two URLs on one host), one whose name
+/// carries a bidi override.
+fn needs() -> Vec<PackageNeed> {
+    vec![
+        PackageNeed {
+            id: "loader".to_owned(),
+            name: "Ultimate ASI Loader".to_owned(),
+            version: "9.8".to_owned(),
+            license: "MIT".to_owned(),
+            tier: Tier::Established,
+            repo: Some("https://github.com/ThirteenAG/Ultimate-ASI-Loader".to_owned()),
+            downloads: vec![
+                dl(
+                    Some(Arch::X86),
+                    "https://github.com/o/r/releases/download/v9.8/x86.zip",
+                    "github.com",
+                    &"a".repeat(64),
+                ),
+                dl(
+                    Some(Arch::X64),
+                    "https://github.com/o/r/releases/download/v9.8/x64.zip",
+                    "github.com",
+                    &"b".repeat(64),
+                ),
+            ],
+            state: NeedState::Missing,
+        },
+        PackageNeed {
+            id: "evil".to_owned(),
+            name: "Pack\u{202e}gnp".to_owned(),
+            version: "1".to_owned(),
+            license: "MIT".to_owned(),
+            tier: Tier::Official,
+            repo: None,
+            downloads: vec![dl(
+                None,
+                "https://github.com/o/p/releases/download/v1/p.zip",
+                "github.com",
+                &"c".repeat(64),
+            )],
+            state: NeedState::Missing,
+        },
+    ]
+}
+
+fn label(lang: Lang, m: Msg) -> String {
+    t(lang, m).into_owned()
+}
+
+/// VD1: the consent lists, per package, everything the index says (name and version, source,
+/// every release URL, the host once, every SHA-256, the licence), that the size comes while it
+/// downloads, and that the file is checked after; untrusted text stays escaped and `Shown`.
+#[test]
+fn vd1_the_consent_lists_what_the_index_says() {
+    for lang in Lang::ALL {
+        let d = consent(220, "fix-pack", &needs(), 7, lang);
+        assert_eq!(d.stage, DownloadStage::Consent);
+        assert_eq!(
+            (d.nonce, d.app_id, d.variant.as_str()),
+            (7, 220, "fix-pack")
+        );
+        assert_eq!(d.title, label(lang, Msg::DlConsentTitle));
+        assert_eq!(d.confirm.as_deref(), Some(label(lang, Msg::DlBtn).as_str()));
+        assert_eq!(d.cancel, label(lang, Msg::BtnCancel));
+        assert!(!d.cancelling);
+        assert_eq!(d.notes, [label(lang, Msg::DlChecked)]);
+        assert_eq!(d.packages.len(), 2);
+        let p = &d.packages[0];
+        assert_eq!(p.target.as_str(), "Ultimate ASI Loader 9.8");
+        let lines: Vec<(String, Vec<String>)> = p
+            .lines
+            .iter()
+            .map(|l| {
+                (
+                    l.label.clone(),
+                    l.values.iter().map(|v| v.as_str().to_owned()).collect(),
+                )
+            })
+            .collect();
+        let one = |m: Msg, v: &str| (label(lang, m), vec![v.to_owned()]);
+        assert_eq!(
+            lines,
+            [
+                one(
+                    Msg::DlLblSource,
+                    "https://github.com/ThirteenAG/Ultimate-ASI-Loader"
+                ),
+                (
+                    label(lang, Msg::DlLblRelease),
+                    vec![
+                        "x86: https://github.com/o/r/releases/download/v9.8/x86.zip".to_owned(),
+                        "x64: https://github.com/o/r/releases/download/v9.8/x64.zip".to_owned()
+                    ]
+                ),
+                one(Msg::DlLblHost, "github.com"),
+                (
+                    label(lang, Msg::DlLblSha),
+                    vec![
+                        format!("x86: {}", "a".repeat(64)),
+                        format!("x64: {}", "b".repeat(64))
+                    ]
+                ),
+                one(Msg::DlLblLicence, "MIT"),
+                one(Msg::DlLblSize, &label(lang, Msg::DlSizeLater)),
+            ]
+        );
+        // Everything the index wrote is `Shown` (escaped); only Rerun's own sentence is `Text`.
+        for l in &p.lines {
+            for v in &l.values {
+                let own = matches!(v, Value::Text(_));
+                assert_eq!(own, l.label == label(lang, Msg::DlLblSize), "{}", l.label);
+            }
+        }
+        // A bidi override in a name is escaped, not drawn.
+        assert!(!d.packages[1].target.as_str().contains('\u{202e}'));
+        assert!(d.packages[1].target.as_str().contains("Pack"));
+        // The other package has no source line.
+        assert!(
+            d.packages[1]
+                .lines
+                .iter()
+                .all(|l| l.label != label(lang, Msg::DlLblSource))
+        );
+    }
+    // The two languages are different texts (a copied English line would pass the compiler).
+    let en = consent(1, "x", &needs(), 1, Lang::En);
+    let de = consent(1, "x", &needs(), 1, Lang::De);
+    assert_ne!(en.title, de.title);
+    assert_ne!(en.intro, de.intro);
+    assert_eq!(de.confirm.as_deref(), Some("Herunterladen"));
+    assert_eq!(de.cancel, "Abbrechen");
+}
+
+/// VD2: the progress dialog shows each package's state and, while a body is read, how far (of
+/// how much when the server announced it); it has no confirm, and a cancel that is not confirmed
+/// yet says so and waits.
+#[test]
+fn vd2_progress_shows_every_state() {
+    let status = |d: &super::DownloadVm, i: usize, lang: Lang| -> (String, Option<String>) {
+        let find = |m: Msg| {
+            d.packages[i]
+                .lines
+                .iter()
+                .find(|l| l.label == label(lang, m))
+                .map(|l| l.values[0].as_str().to_owned())
+        };
+        (find(Msg::DlLblStatus).unwrap(), find(Msg::DlLblSize))
+    };
+    for lang in Lang::ALL {
+        let states = [
+            PackageState::Reading {
+                read: 1_300_000,
+                announced: Some(3_250_000),
+            },
+            PackageState::Waiting,
+        ];
+        let d = progress(220, "f", &needs(), &states, 9, false, lang);
+        assert_eq!(d.stage, DownloadStage::Progress);
+        assert!(d.confirm.is_none());
+        assert_eq!(d.cancel, label(lang, Msg::DlBtnCancel));
+        assert!(!d.cancelling);
+        assert_eq!(d.title, label(lang, Msg::DlProgressTitle));
+        let (word, size) = status(&d, 0, lang);
+        assert_eq!(word, label(lang, Msg::DlStDownloading));
+        let want = if lang == Lang::En {
+            "1.2 MB of 3.1 MB"
+        } else {
+            "1,2 MB von 3,1 MB"
+        };
+        assert_eq!(size.as_deref(), Some(want));
+        assert_eq!(status(&d, 1, lang), (label(lang, Msg::DlStWaiting), None));
+        // No announced length: how far, and that none was announced.
+        let d = progress(
+            220,
+            "f",
+            &needs(),
+            &[PackageState::Reading {
+                read: 2048,
+                announced: None,
+            }],
+            9,
+            false,
+            lang,
+        );
+        let size = status(&d, 0, lang).1.unwrap();
+        assert!(size.starts_with("2 KB"), "{size}");
+        // The other states, by their words.
+        for (s, m) in [
+            (PackageState::Cached, Msg::DlStCached),
+            (PackageState::Unpacking, Msg::DlStUnpacking),
+            (PackageState::Done, Msg::DlStDone),
+            (PackageState::NotStarted, Msg::DlStNotStarted),
+        ] {
+            let d = progress(220, "f", &needs(), &[s], 9, false, lang);
+            assert_eq!(status(&d, 0, lang), (label(lang, m), None));
+        }
+        // A cancel that is asked for and not confirmed yet.
+        let d = progress(220, "f", &needs(), &states, 9, true, lang);
+        assert!(d.cancelling);
+        assert_eq!(d.cancel, label(lang, Msg::DlCancelling));
+    }
+}
+
+/// VD3: a failure is the same list with the words for what went wrong, the core's text as an
+/// escaped detail, and "Try again" unless trying again cannot help.
+#[test]
+fn vd3_a_failure_names_what_went_wrong() {
+    let net = |code| {
+        FetchError::Download(Dl::Network(
+            SysError::new(SysErrorKind::Other, "https://github.com").with_win32(code),
+        ))
+    };
+    let site = |f: fn(String) -> Dl| FetchError::Download(f("github.com".to_owned()));
+    let cases: Vec<(FetchError, FetchKind, Msg, bool)> = vec![
+        (net(12029), FetchKind::Offline, Msg::DlErrOffline, true),
+        (net(12007), FetchKind::Offline, Msg::DlErrOffline, true),
+        (net(12002), FetchKind::TimedOut, Msg::DlErrTimedOut, true),
+        (
+            net(12030),
+            FetchKind::Interrupted,
+            Msg::DlErrInterrupted,
+            true,
+        ),
+        (
+            site(|host| Dl::TimedOut { host, secs: 600 }),
+            FetchKind::TimedOut,
+            Msg::DlErrTimedOut,
+            true,
+        ),
+        (
+            site(|host| Dl::Status { host, status: 404 }),
+            FetchKind::Status,
+            Msg::DlErrStatus,
+            true,
+        ),
+        (
+            FetchError::Download(Dl::Mismatch {
+                expected: "AB".to_owned(),
+            }),
+            FetchKind::WrongHash,
+            Msg::DlErrHash,
+            true,
+        ),
+        (
+            site(|host| Dl::TooLarge { host, limit: 64 }),
+            FetchKind::TooLarge,
+            Msg::DlErrTooLarge,
+            true,
+        ),
+        (
+            site(|host| Dl::TooManyRedirects { host }),
+            FetchKind::RedirectRefused,
+            Msg::DlErrRedirect,
+            true,
+        ),
+        (
+            FetchError::Unpack(rerun_core::pkg::extract::ExtractError::Layout {
+                id: "p".to_owned(),
+                why: "x".to_owned(),
+            }),
+            FetchKind::ExtractionRefused,
+            Msg::DlErrExtract,
+            true,
+        ),
+        (
+            FetchError::NoIndex,
+            FetchKind::Changed,
+            Msg::DlErrChanged,
+            false,
+        ),
+        (
+            FetchError::Changed { id: "p".to_owned() },
+            FetchKind::Changed,
+            Msg::DlErrChanged,
+            false,
+        ),
+        (
+            FetchError::Unobtainable {
+                id: "p".to_owned(),
+                why: "x".to_owned(),
+            },
+            FetchKind::Unobtainable,
+            Msg::DlErrUnobtainable,
+            false,
+        ),
+    ];
+    for lang in Lang::ALL {
+        for (e, kind, msg, retry) in &cases {
+            assert_eq!(e.kind(), *kind, "{e:?}");
+            let d = failed(220, "f", &needs(), &[PackageState::NotStarted], e, 11, lang);
+            assert_eq!(d.stage, DownloadStage::Failed, "{e:?}");
+            assert_eq!(d.nonce, 11);
+            assert_eq!(d.title, label(lang, Msg::DlFailedTitle));
+            assert_eq!(d.intro, label(lang, *msg), "{e:?}");
+            assert_eq!(d.confirm.is_some(), *retry, "{e:?}");
+            if *retry {
+                assert_eq!(
+                    d.confirm.as_deref(),
+                    Some(label(lang, Msg::DlBtnRetry).as_str())
+                );
+            }
+            // The core's English text is the escaped detail; the list is still shown.
+            assert_eq!(d.details.len(), 1);
+            assert!(!d.details[0].what.as_str().is_empty());
+            assert_eq!(d.packages.len(), 2);
+            assert!(!d.cancelling);
+        }
+    }
+    // A failure text with a control character in it is escaped, never drawn raw.
+    let e = FetchError::Unobtainable {
+        id: "p".to_owned(),
+        why: "evil\u{202e}x".to_owned(),
+    };
+    let d = failed(220, "f", &needs(), &[], &e, 1, Lang::En);
+    assert!(!d.details[0].what.as_str().contains('\u{202e}'));
+}
+
+/// VD4: the notices around a download: a cancel keeps nothing, the window says it waits for the
+/// download to stop, and a confirm of a list that was not shown downloaded nothing.
+#[test]
+fn vd4_the_notices_say_what_happened() {
+    for lang in Lang::ALL {
+        let c = cancelled(lang);
+        assert_eq!(c.tone, Tone::Calm);
+        assert_eq!(c.notice.title, label(lang, Msg::DlCancelledTitle));
+        assert_eq!(c.notice.body, label(lang, Msg::DlCancelledBody));
+        assert!(!c.refresh);
+        let w = closing(lang);
+        assert_eq!(w.tone, Tone::Attention);
+        assert_eq!(w.notice.title, label(lang, Msg::DlClosingTitle));
+        // The wait is named: up to 30 seconds.
+        assert!(w.notice.body.contains("30"), "{}", w.notice.body);
+        let n = no_consent(lang);
+        assert_eq!(n.tone, Tone::Calm);
+        assert_eq!(n.notice.title, label(lang, Msg::DlNoConsentTitle));
+    }
+}
+
+/// VD5: closing the window: a write is finished first; a download is cancelled and the window
+/// closes when it has stopped; with neither it closes.
+#[test]
+fn vd5_closing_waits_for_a_write_and_cancels_a_download() {
+    use super::{Closing, closing_policy};
+    assert_eq!(closing_policy(false, false), Closing::Close);
+    assert_eq!(closing_policy(true, false), Closing::FinishWrite);
+    assert_eq!(closing_policy(false, true), Closing::CancelDownload);
+    // Both: the write comes first (it cannot be cancelled).
+    assert_eq!(closing_policy(true, true), Closing::FinishWrite);
 }

@@ -950,6 +950,101 @@ pub enum Msg {
     RefNoPreviewBody,
     /// The plan needs administrator rights.
     PreviewAdminYes,
+
+    // ---- package download (P5-5b)
+    /// A fix that needs a package Rerun does not download.
+    FixNoPackage,
+    /// The question before a download.
+    DlConsentTitle,
+    /// Under the question.
+    DlConsentIntro,
+    /// The progress dialog.
+    DlProgressTitle,
+    /// Under the progress title.
+    DlProgressIntro,
+    /// The dialog after a failure.
+    DlFailedTitle,
+    /// The word before a package's name.
+    DlPackage,
+    /// A label.
+    DlLblSource,
+    /// A label.
+    DlLblRelease,
+    /// A label.
+    DlLblHost,
+    /// A label.
+    DlLblSha,
+    /// A label.
+    DlLblLicence,
+    /// A label.
+    DlLblSize,
+    /// A label.
+    DlLblStatus,
+    /// The size before the download starts.
+    DlSizeLater,
+    /// What happens after the download.
+    DlChecked,
+    /// The consent button.
+    DlBtn,
+    /// The button after a failure.
+    DlBtnRetry,
+    /// The cancel button while downloading.
+    DlBtnCancel,
+    /// While a cancel is not confirmed yet.
+    DlCancelling,
+    /// A package's state.
+    DlStWaiting,
+    /// A package's state.
+    DlStDownloading,
+    /// A package's state.
+    DlStCached,
+    /// A package's state.
+    DlStUnpacking,
+    /// A package's state.
+    DlStDone,
+    /// A package's state after a failure.
+    DlStNotStarted,
+    /// A failure.
+    DlErrOffline,
+    /// A failure.
+    DlErrTimedOut,
+    /// A failure.
+    DlErrInterrupted,
+    /// A failure.
+    DlErrRedirect,
+    /// A failure.
+    DlErrStatus,
+    /// A failure.
+    DlErrHash,
+    /// A failure.
+    DlErrTooLarge,
+    /// A failure.
+    DlErrExtract,
+    /// A failure.
+    DlErrChanged,
+    /// A failure.
+    DlErrUnobtainable,
+    /// A failure.
+    DlErrOther,
+    /// The banner after a cancel.
+    DlCancelledTitle,
+    /// The banner after a cancel.
+    DlCancelledBody,
+    /// The window cannot close yet.
+    DlClosingTitle,
+    /// The window cannot close yet.
+    DlClosingBody,
+    /// A confirm that matches no shown list.
+    DlNoConsentTitle,
+    /// A confirm that matches no shown list.
+    DlNoConsentBody,
+    /// The size line while downloading.
+    DlSize {
+        /// Bytes read.
+        read: u64,
+        /// The announced length.
+        total: Option<u64>,
+    },
 }
 
 /// The text of `m` in `lang`.
@@ -957,6 +1052,21 @@ pub fn t(lang: Lang, m: Msg) -> Cow<'static, str> {
     match lang {
         Lang::En => en(m),
         Lang::De => de(m),
+    }
+}
+
+/// A size for people: bytes, KB, or MB with one decimal (a comma in German).
+fn bytes(n: u64, de: bool) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if n < KB {
+        format!("{n} B")
+    } else if n < MB {
+        format!("{} KB", (n + KB / 2) / KB)
+    } else {
+        let tenths = (n.saturating_mul(10).saturating_add(MB / 2)) / MB;
+        let sep = if de { ',' } else { '.' };
+        format!("{}{sep}{} MB", tenths / 10, tenths % 10)
     }
 }
 
@@ -1229,7 +1339,7 @@ fn en(m: Msg) -> Cow<'static, str> {
 
         FixSelect => "Select this fix",
         FixNeedsHelper => "This fix needs Rerun's administrator helper. The app cannot apply it yet; that comes with a later version.",
-        FixNeedsDownload => "This fix needs a package download. The app cannot download yet; that comes with a later version.",
+        FixNeedsDownload => "This fix needs a package download first. Ticking it shows what would be downloaded; nothing is downloaded unless you agree.",
         FixTradeoffs => "Side effects",
         FixNoTradeoffs => "No side effects listed",
         FixSources => "Sources",
@@ -1431,6 +1541,50 @@ fn en(m: Msg) -> Cow<'static, str> {
         RefNoPreviewTitle => "The preview is no longer current",
         RefNoPreviewBody => "Select the fixes again and apply once the preview shows. Nothing was changed.",
         PreviewAdminYes => "Administrator rights: needed. The app cannot apply this yet.",
+        FixNoPackage => "This fix needs a package that Rerun does not download itself (a community build you fetch from its own page). The app cannot apply it; the command line shows the details.",
+        DlConsentTitle => "These files will be downloaded",
+        DlConsentIntro => "This fix needs the package below. Rerun downloads it only if you agree, only from the source named here, and keeps it only if it has the SHA-256 shown. Nothing in your game is changed by this step; the usual preview comes next.",
+        DlProgressTitle => "Downloading",
+        DlProgressIntro => "Nothing in your game is changed. If you cancel, Rerun keeps nothing of the download that is running.",
+        DlFailedTitle => "The download did not finish",
+        DlPackage => "Package",
+        DlLblSource => "Source",
+        DlLblRelease => "Release",
+        DlLblHost => "Host",
+        DlLblSha => "SHA-256",
+        DlLblLicence => "Licence",
+        DlLblSize => "Size",
+        DlLblStatus => "Status",
+        DlSizeLater => "Shown while it downloads (the index lists no size)",
+        DlChecked => "Checked after the download: Rerun keeps the file only if it has this SHA-256",
+        DlBtn => "Download",
+        DlBtnRetry => "Try again",
+        DlBtnCancel => "Cancel download",
+        DlCancelling => "Cancelling ...",
+        DlStWaiting => "Waiting",
+        DlStDownloading => "Downloading",
+        DlStCached => "Already downloaded; checking it again",
+        DlStUnpacking => "Unpacking the files it names",
+        DlStDone => "Done",
+        DlStNotStarted => "Not downloaded",
+        DlErrOffline => "Rerun cannot reach the source. Check your internet connection and try again.",
+        DlErrTimedOut => "The source took too long to answer. Try again later.",
+        DlErrInterrupted => "The connection broke before the file was complete. Rerun kept nothing of it.",
+        DlErrRedirect => "The source sent Rerun to a place that is not allowed. Rerun did not follow it and kept nothing.",
+        DlErrStatus => "The source answered with an error. Rerun kept nothing.",
+        DlErrHash => "The file is not the one the index names: its SHA-256 differs. Rerun deleted it.",
+        DlErrTooLarge => "The file is larger than Rerun allows. Rerun deleted it.",
+        DlErrExtract => "The package could not be unpacked safely, so Rerun refused it. Nothing in your game was changed.",
+        DlErrChanged => "The package list changed since you looked at it. Close this and look at the fix again.",
+        DlErrUnobtainable => "Rerun cannot download this package.",
+        DlErrOther => "The download failed. The reason is below. Nothing in your game was changed.",
+        DlCancelledTitle => "Download cancelled",
+        DlCancelledBody => "Rerun kept nothing of the download that was running. Nothing in your game was changed.",
+        DlClosingTitle => "Rerun cancels the download first",
+        DlClosingBody => "The window closes by itself as soon as the download has stopped. This can take up to 30 seconds.",
+        DlNoConsentTitle => "That was not the download you were shown",
+        DlNoConsentBody => "Open the fix again and read what would be downloaded. Nothing was downloaded.",
+        DlSize { read, total } => return match total { Some(t) => format!("{} of {}", bytes(read, false), bytes(t, false)), None => format!("{} so far (the source did not announce a size)", bytes(read, false)) }.into(),
     };
     Cow::Borrowed(s)
 }
@@ -1722,7 +1876,7 @@ fn de(m: Msg) -> Cow<'static, str> {
 
         FixSelect => "Diesen Fix auswählen",
         FixNeedsHelper => "Dieser Fix braucht den Administrator-Helfer von Rerun. Die App kann ihn noch nicht anwenden; das kommt mit einer späteren Version.",
-        FixNeedsDownload => "Dieser Fix braucht einen Paket-Download. Die App kann noch nichts herunterladen; das kommt mit einer späteren Version.",
+        FixNeedsDownload => "Dieser Fix braucht zuerst einen Paket-Download. Beim Anhaken siehst du, was heruntergeladen würde; ohne deine Zustimmung wird nichts heruntergeladen.",
         FixTradeoffs => "Nebenwirkungen",
         FixNoTradeoffs => "Keine Nebenwirkungen angegeben",
         FixSources => "Quellen",
@@ -1924,6 +2078,50 @@ fn de(m: Msg) -> Cow<'static, str> {
         RefNoPreviewTitle => "Die Vorschau ist nicht mehr aktuell",
         RefNoPreviewBody => "Wähle die Fixes nochmals und wende an, sobald die Vorschau da ist. Es wurde nichts geändert.",
         PreviewAdminYes => "Administratorrechte: nötig. Die App kann das noch nicht anwenden.",
+        FixNoPackage => "Dieser Fix braucht ein Paket, das Rerun nicht selbst herunterlädt (ein Community-Build, den du von seiner eigenen Seite holst). Die App kann ihn nicht anwenden; die Kommandozeile zeigt die Einzelheiten.",
+        DlConsentTitle => "Diese Dateien werden heruntergeladen",
+        DlConsentIntro => "Dieser Fix braucht das Paket unten. Rerun lädt es nur herunter, wenn du zustimmst, nur von der hier genannten Quelle, und behält es nur, wenn es den angezeigten SHA-256 hat. Dieser Schritt ändert nichts an deinem Spiel; danach kommt die gewohnte Vorschau.",
+        DlProgressTitle => "Wird heruntergeladen",
+        DlProgressIntro => "An deinem Spiel wird nichts geändert. Wenn du abbrichst, behält Rerun nichts vom laufenden Download.",
+        DlFailedTitle => "Der Download ist nicht abgeschlossen",
+        DlPackage => "Paket",
+        DlLblSource => "Quelle",
+        DlLblRelease => "Release",
+        DlLblHost => "Server",
+        DlLblSha => "SHA-256",
+        DlLblLicence => "Lizenz",
+        DlLblSize => "Grösse",
+        DlLblStatus => "Stand",
+        DlSizeLater => "Wird beim Herunterladen angezeigt (der Index nennt keine Grösse)",
+        DlChecked => "Wird nach dem Herunterladen geprüft: Rerun behält die Datei nur, wenn sie diesen SHA-256 hat",
+        DlBtn => "Herunterladen",
+        DlBtnRetry => "Erneut versuchen",
+        DlBtnCancel => "Download abbrechen",
+        DlCancelling => "Wird abgebrochen ...",
+        DlStWaiting => "Wartet",
+        DlStDownloading => "Wird heruntergeladen",
+        DlStCached => "Schon heruntergeladen; wird nochmals geprüft",
+        DlStUnpacking => "Die genannten Dateien werden entpackt",
+        DlStDone => "Fertig",
+        DlStNotStarted => "Nicht heruntergeladen",
+        DlErrOffline => "Rerun erreicht die Quelle nicht. Prüfe deine Internetverbindung und versuche es nochmals.",
+        DlErrTimedOut => "Die Quelle hat zu lange nicht geantwortet. Versuche es später nochmals.",
+        DlErrInterrupted => "Die Verbindung brach ab, bevor die Datei vollständig war. Rerun hat nichts davon behalten.",
+        DlErrRedirect => "Die Quelle hat Rerun an einen nicht erlaubten Ort verwiesen. Rerun ist nicht gefolgt und hat nichts behalten.",
+        DlErrStatus => "Die Quelle hat mit einem Fehler geantwortet. Rerun hat nichts behalten.",
+        DlErrHash => "Die Datei ist nicht die, die der Index nennt: ihr SHA-256 weicht ab. Rerun hat sie gelöscht.",
+        DlErrTooLarge => "Die Datei ist grösser, als Rerun erlaubt. Rerun hat sie gelöscht.",
+        DlErrExtract => "Das Paket liess sich nicht sicher entpacken, darum hat Rerun es abgelehnt. An deinem Spiel wurde nichts geändert.",
+        DlErrChanged => "Die Paketliste hat sich geändert, seit du sie angesehen hast. Schliesse das und sieh dir den Fix nochmals an.",
+        DlErrUnobtainable => "Rerun kann dieses Paket nicht herunterladen.",
+        DlErrOther => "Der Download ist fehlgeschlagen. Der Grund steht unten. An deinem Spiel wurde nichts geändert.",
+        DlCancelledTitle => "Download abgebrochen",
+        DlCancelledBody => "Rerun hat nichts vom laufenden Download behalten. An deinem Spiel wurde nichts geändert.",
+        DlClosingTitle => "Rerun bricht zuerst den Download ab",
+        DlClosingBody => "Das Fenster schliesst von selbst, sobald der Download gestoppt ist. Das kann bis zu 30 Sekunden dauern.",
+        DlNoConsentTitle => "Das war nicht der Download, den du gesehen hast",
+        DlNoConsentBody => "Öffne den Fix nochmals und lies, was heruntergeladen würde. Es wurde nichts heruntergeladen.",
+        DlSize { read, total } => return match total { Some(t) => format!("{} von {}", bytes(read, true), bytes(t, true)), None => format!("{} bisher (die Quelle hat keine Grösse genannt)", bytes(read, true)) }.into(),
     };
     Cow::Borrowed(s)
 }

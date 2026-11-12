@@ -1,11 +1,12 @@
-// The undo and forget dialogs.
+// The undo, forget and download dialogs.
 
 import { ScrollView } from "std-widgets.slint";
 import { Button, DetailLine, Muted, PageTitle } from "base.slint";
 import { DialogData, Str, Theme, Modal } from "base.slint";
 import { OpItem, WarnLine } from "ops.slint";
 
-// The undo and forget dialogs: what the operation meets, before the click. Esc closes. While it
+// The undo, forget and download dialogs: what the operation meets (or what would be downloaded),
+// before the click. Esc closes. While it
 // is open `Modal.open` is set and only its controls can take the focus (a focus trap); the title
 // takes the focus when it opens.
 export component DialogView inherits Rectangle {
@@ -128,13 +129,14 @@ export component DialogView inherits Rectangle {
                             alignment: end;
                             Button {
                                 in-dialog: true;
-                                text: Str.btn-cancel;
+                                text: root.d.cancel-label != "" ? root.d.cancel-label : Str.btn-cancel;
+                                enabled: !root.d.cancel-disabled;
                                 activated => {
                                     root.cancel();
                                 }
                             }
 
-                            Button {
+                            if !root.d.no-confirm: Button {
                                 in-dialog: true;
                                 primary: true;
                                 text: root.d.confirm;

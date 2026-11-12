@@ -14,13 +14,15 @@ use rerun_core::detect::steam::{AppState, SteamApp, SteamScan};
 use rerun_core::escape::{self, Shown};
 use rerun_core::flow::{
     Fix, Found, GameOpen, GameRefusal, GameView, IndexState, LibraryFacts, Lookup, MatchView,
-    RowScan, SteamWhy, failed_games,
+    NeedState, RowScan, SteamWhy, failed_games,
 };
 use rerun_core::hw::{GpuArch, SacState, SystemProfile};
 use rerun_core::journal::JournalError;
 use rerun_core::topo::{AntiCheatState, Refusal, Tri};
 
+mod download;
 mod write;
+pub use download::*;
 pub use write::*;
 
 use crate::text::{Lang, Msg, Sym, t};
@@ -588,8 +590,12 @@ pub enum Offer {
     Refused,
     /// A step needs Rerun's elevated helper: P5-5c.
     NeedsHelper,
-    /// A step needs a package download: P5-5b.
+    /// A step needs a package download first (P5-5b): ticking the fix asks for consent to the
+    /// download, then the fix is selectable like any other.
     NeedsDownload,
+    /// A step needs a package Rerun does not download (a community build, a draft value): it
+    /// cannot be applied from the app.
+    NoPackage,
 }
 
 /// The game page.
@@ -917,7 +923,13 @@ fn fix(f: &Fix, issue_title: &dyn Fn(&str) -> Shown<'static>, lang: Lang) -> Fix
         Offer::Refused
     } else if f.needs_helper {
         Offer::NeedsHelper
-    } else if !f.packages.is_empty() {
+    } else if f
+        .packages
+        .iter()
+        .any(|p| matches!(p.state, NeedState::Unobtainable(_)))
+    {
+        Offer::NoPackage
+    } else if f.packages.iter().any(|p| p.state == NeedState::Missing) {
         Offer::NeedsDownload
     } else {
         Offer::Selectable
@@ -925,6 +937,7 @@ fn fix(f: &Fix, issue_title: &dyn Fn(&str) -> Shown<'static>, lang: Lang) -> Fix
     let note = match offer {
         Offer::NeedsHelper => Some(t(lang, Msg::FixNeedsHelper).into_owned()),
         Offer::NeedsDownload => Some(t(lang, Msg::FixNeedsDownload).into_owned()),
+        Offer::NoPackage => Some(t(lang, Msg::FixNoPackage).into_owned()),
         Offer::Selectable | Offer::Refused => None,
     };
     FixVm {

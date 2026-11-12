@@ -19,7 +19,7 @@ fn line(l: &vm::LineVm) -> LineData {
     }
 }
 
-fn op(o: &OpVm) -> OpData {
+pub(super) fn op(o: &OpVm) -> OpData {
     let (fate_sym, fate_word) = match &o.fate {
         Some((b, word)) => (s(b.sym.glyph()), s(word)),
         None => (SharedString::new(), SharedString::new()),
@@ -135,6 +135,9 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
         confirm: s(&d.confirm),
         can_confirm: d.can_confirm,
         blocked: d.blocked.as_deref().map(s).unwrap_or_default(),
+        no_confirm: false,
+        cancel_label: SharedString::new(),
+        cancel_disabled: false,
     }
 }
 
@@ -202,13 +205,24 @@ pub(super) fn close_dialog(ui: &AppWindow, st: &mut State) {
 }
 
 /// The window's close: refused while a write runs (rule 1: the journal covers a crash, but a
-/// close in the middle of an apply is not something to offer).
-fn close_window(ui: &AppWindow, st: &State) -> CloseRequestResponse {
-    if st.worker.busy_writing() {
-        show_result(ui, &vm::closing_blocked(st.lang));
-        return CloseRequestResponse::KeepWindowShown;
+/// close in the middle of an apply is not something to offer). A download is different: it is
+/// cancelled, and the window closes by itself when the worker reports that it has stopped
+/// (up to WinHTTP's 30 s receive timeout), so nothing outlives the window and the cache keeps
+/// nothing of it (P5-5b).
+fn close_window(ui: &AppWindow, st: &mut State) -> CloseRequestResponse {
+    match vm::closing_policy(st.worker.busy_writing(), st.worker.downloading()) {
+        vm::Closing::Close => CloseRequestResponse::HideWindow,
+        vm::Closing::FinishWrite => {
+            show_result(ui, &vm::closing_blocked(st.lang));
+            CloseRequestResponse::KeepWindowShown
+        }
+        vm::Closing::CancelDownload => {
+            st.close_after_download = true;
+            download::cancel(ui, st);
+            show_result(ui, &vm::closing(st.lang));
+            CloseRequestResponse::KeepWindowShown
+        }
     }
-    CloseRequestResponse::HideWindow
 }
 
 pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
@@ -223,6 +237,16 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         let (Some(page), Ok(i)) = (st.page.clone(), usize::try_from(i)) else {
             return;
         };
+        // A fix that needs a download: the consent dialog first (nothing is selected, nothing
+        // is downloaded until the user agrees there).
+        if page
+            .fixes
+            .get(i)
+            .is_some_and(|f| f.offer == vm::Offer::NeedsDownload)
+        {
+            download::ask(&ui, &mut st, &page, i);
+            return;
+        }
         st.selection.toggle(&page, i);
         show_selection(&ui, &st);
         plan_selection(&ui, &mut st);
@@ -265,7 +289,12 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        let st = st.borrow();
+        let mut st = st.borrow_mut();
+        // The download dialogs share the window's dialog; their confirm is the download's.
+        if st.download.is_some() {
+            download::confirm(&ui, &mut st);
+            return;
+        }
         let Some((kind, txn, nonce)) = st.dialog else {
             return;
         };
@@ -285,7 +314,12 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     let st = state.clone();
     ui.on_dialog_cancel(move || {
         if let Some(ui) = weak.upgrade() {
-            close_dialog(&ui, &mut st.borrow_mut());
+            let mut st = st.borrow_mut();
+            if st.download.is_some() {
+                download::dismiss(&ui, &mut st);
+            } else {
+                close_dialog(&ui, &mut st);
+            }
         }
     });
 
@@ -303,7 +337,7 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             return;
         };
         if matches!(
-            close_window(&ui, &st.borrow()),
+            close_window(&ui, &mut st.borrow_mut()),
             CloseRequestResponse::HideWindow
         ) {
             let _ = ui.hide();
@@ -315,7 +349,7 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     let st = state.clone();
     ui.window()
         .on_close_requested(move || match weak.upgrade() {
-            Some(ui) => close_window(&ui, &st.borrow()),
+            Some(ui) => close_window(&ui, &mut st.borrow_mut()),
             None => CloseRequestResponse::HideWindow,
         });
 }
