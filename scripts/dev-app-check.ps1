@@ -56,6 +56,13 @@ $cli = Join-Path $repo 'target\dev-release\rerun.exe'
 $workbench = Join-Path $repo 'target\dev-release\rerun-workbench.exe'
 $appExe = Join-Path $repo 'target\dev-release\rerun-app.exe'
 
+# The summary line of `rerun status`: "<n> transactions: <a> not closed, <b> closed, <c> forgotten".
+function Status-Counts([string]$out) {
+    $m = [regex]::Match($out, '(\d+) not closed, (\d+) closed, (\d+) forgotten')
+    if (-not $m.Success) { return $null }
+    [pscustomobject]@{ NotClosed = [int]$m.Groups[1].Value; Closed = [int]$m.Groups[2].Value; Forgotten = [int]$m.Groups[3].Value }
+}
+
 function Sha256-File([string]$path) {
     $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite, Delete')
     try {
@@ -231,9 +238,13 @@ try {
 
     # The app lists every transaction of this account on its Applied page and can undo them: with
     # one already there the test would show (and could touch) the real ones, so it stops here.
-    $r = Invoke-Exe $cli @('status', '--all')
+    # Closed (reverted) transactions are history and stay; only one that is not closed, forgotten
+    # or listed by plain `rerun status` (it needs attention) stops the test.
+    $r = Invoke-Exe $cli @('status')
     if ($r.Code -ne 0) { Fail "rerun status failed ($($r.Code))" }
-    if ($r.Out -match '[0-9]{8}-[0-9a-f]{16}') { Fail 'Rerun already holds a transaction (open, forgotten or cleanup pending); the app would show it. Nothing was changed. See rerun status --all' }
+    $counts = Status-Counts $r.Out
+    if ($null -eq $counts) { Fail 'rerun status printed no transaction summary; nothing was changed' }
+    if ($counts.NotClosed -gt 0 -or $counts.Forgotten -gt 0 -or $r.Out -match '(?m)^transaction [0-9]{8}-[0-9a-f]{16}') { Fail "Rerun holds a transaction that is not closed or was forgotten ($($counts.NotClosed) not closed, $($counts.Forgotten) forgotten); the app would show it. Nothing was changed. See rerun status" }
 
     # ---------- the test index ----------
     Title 'BUILDING the test index and importing it into index-test'
@@ -353,14 +364,11 @@ finally {
                 if ($applyCheck -ne 'PASS') { $kept = 'the game folder differs' }
                 else {
                     $r = Invoke-Exe $cli @('status')
+                    $after = if ($r.Code -eq 0) { Status-Counts $r.Out } else { $null }
                     if ($r.Code -ne 0) { $kept = "rerun status failed ($($r.Code))" }
-                    elseif ($r.Out -match '[0-9]{8}-[0-9a-f]{16}') { $kept = 'rerun status lists a transaction' }
-                    else {
-                        # "Close without undoing" (forget) leaves the changes on disk: the records stay.
-                        $all = Invoke-Exe $cli @('status', '--all')
-                        if ($all.Code -ne 0) { $kept = "rerun status --all failed ($($all.Code))" }
-                        elseif ($all.Out -match '(?i)forgotten') { $kept = 'a transaction was closed without undoing (forgotten)' }
-                    }
+                    elseif ($null -eq $after) { $kept = 'rerun status printed no transaction summary' }
+                    elseif ($after.NotClosed -gt 0 -or $r.Out -match '(?m)^transaction [0-9]{8}-[0-9a-f]{16}') { $kept = 'rerun status lists a transaction that is not closed' }
+                    elseif ($after.Forgotten -gt 0) { $kept = 'a transaction was closed without undoing (forgotten): its changes stay on disk' }
                 }
                 if ($kept) {
                     $applyCheck += " (Rerun's records kept in ${appDir}: $($newDirs -join ', '); $kept; undo the transaction with rerun revert, then remove them by hand)"
