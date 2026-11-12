@@ -31,7 +31,7 @@
 # runs with a real index, so it CAN apply a fix to that game. You apply the preselected fixes
 # of that game in the app, look at the preview, and undo them again (steps F to H of the
 # checklist). The script snapshots the game folder first (every file: length, read-only/hidden/
-# system flags and, up to 64 MB, SHA-256; timestamps are not compared, an undo does not
+# system flags and SHA-256 (streamed, any size); timestamps are not compared, an undo does not
 # restore them) and compares it when the app is closed: PASS only if it is bit-identical for
 # what is hashed. What else it writes in this mode: Rerun's own records of the transaction
 # (<AppDir>\plans, \journal, \profiles). It removes exactly those top-level folders at the end if
@@ -74,15 +74,27 @@ function Get-AppDirList {
     return @(Get-ChildItem -LiteralPath $appDir -Force | Sort-Object Name | ForEach-Object { "$($_.Name)|$($_.PSIsContainer)" })
 }
 
-# The game folder as a table: relative path -> "length|flags|sha256" (SHA-256 up to 64 MB, larger
-# files by length and flags), and every folder. Timestamps are not part of it (ADR 0017).
+# Whether a folder holds no reparse point anywhere below it (a recursive delete must never
+# follow a junction or symlink): walked item by item, links are not followed.
+function Test-NoLinks([string]$path) {
+    foreach ($c in Get-ChildItem -LiteralPath $path -Force) {
+        if ($c.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+        if ($c.PSIsContainer -and -not (Test-NoLinks $c.FullName)) { return $false }
+    }
+    return $true
+}
+
+# The game folder as a table: relative path -> "length|flags|sha256" (SHA-256 of every file,
+# streamed; "unreadable" if a file cannot be read, counted in $script:notHashed), and every folder. Timestamps are not part of it (ADR 0017).
 function Get-GameSnapshot([string]$root) {
     $t = @{}
+    $script:notHashed = 0
     $prefix = $root.TrimEnd('\') + '\'
     foreach ($f in Get-ChildItem -LiteralPath $root -Recurse -Force -File) {
         $rel = $f.FullName.Substring($prefix.Length).ToLowerInvariant()
         $flags = [int]($f.Attributes -band 7)
-        $sha = if ($f.Length -le 64MB) { Sha256-File $f.FullName } else { 'large' }
+        # Every file, streamed, whatever its size; one that cannot be read is counted.
+        try { $sha = Sha256-File $f.FullName } catch { $sha = 'unreadable'; $script:notHashed++ }
         $t["file:$rel"] = "$($f.Length)|$flags|$sha"
     }
     foreach ($d in Get-ChildItem -LiteralPath $root -Recurse -Force -Directory) {
@@ -217,6 +229,12 @@ try {
 
     Invoke-Build
 
+    # The app lists every transaction of this account on its Applied page and can undo them: with
+    # one already there the test would show (and could touch) the real ones, so it stops here.
+    $r = Invoke-Exe $cli @('status', '--all')
+    if ($r.Code -gt 3) { Fail "rerun status failed ($($r.Code))" }
+    if ($r.Out -match '[0-9]{8}-[0-9a-f]{16}') { Fail 'Rerun already holds a transaction (open, forgotten or cleanup pending); the app would show it. Nothing was changed. See rerun status --all' }
+
     # ---------- the test index ----------
     Title 'BUILDING the test index and importing it into index-test'
     New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -256,7 +274,7 @@ try {
     Write-Host ''
 
     if ($Game) {
-        Title 'READING the game folder (hashing files up to 64 MB)'
+        Title 'READING the game folder (hashing every file; big games take a while)'
         $gameBefore = Get-GameSnapshot $Game
         Write-Host "self-check: $($gameBefore.Count) entries of $Game recorded"
     }
@@ -344,7 +362,7 @@ finally {
                 } else {
                     foreach ($d in $newDirs) {
                         $p = Join-Path $appDir $d
-                        if (Is-Link $p) { $applyCheck = "FAIL: $p is a reparse point: left alone" } else { Remove-Item -LiteralPath $p -Recurse -Force }
+                        if ((Is-Link $p) -or -not (Test-NoLinks $p)) { $applyCheck = "FAIL: $p holds a reparse point: left alone" } else { Remove-Item -LiteralPath $p -Recurse -Force }
                     }
                 }
             }
@@ -396,7 +414,7 @@ if ($null -ne $firstWindowMs) {
     else { $summary.Add('measured: DLLs from outside System32/WinSxS/SysWOW64 -> FAIL'); foreach ($f in $foreignList) { $summary.Add("  $f") } }
 }
 $summary.Add("cleanup (index-test, temp folder): $cleanup")
-if ($Game) { $summary.Add("apply test ($Game, the folder compared with its snapshot; Rerun's records removed): $applyCheck") }
+if ($Game) { $summary.Add("apply test ($Game, the folder compared with its snapshot; Rerun's records removed): $applyCheck; files not hashed (unreadable): $script:notHashed") }
 $summary.Add('')
 $summary.Add('By eye, report in the chat (ok / not ok, and what you saw):')
 $summary.Add("  A status bar: index seq $seq and 'Test key build'")
