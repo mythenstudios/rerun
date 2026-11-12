@@ -37,6 +37,7 @@ use crate::prim::GameRef;
 use crate::sys::{Http, System};
 
 mod game;
+mod launch;
 mod library;
 mod revert;
 mod status;
@@ -47,6 +48,7 @@ pub use game::{
     Fix, Found, GameCache, GameRefusal, GameView, IssueView, Lookup, MatchView, Matched,
     OwnedReport, Solved, VariantView, fixes, game, game_cached,
 };
+pub use launch::{LaunchView, OptionText, launch_view, option_text};
 pub use library::{LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_games, library};
 pub use revert::{
     ActError, CleanupAsk, ForgetPreview, ForgetShown, LaunchOption, ProfileFate, RebindShown,

@@ -321,3 +321,18 @@ fn fs1_the_status_of_an_empty_folder() {
     assert!(v.holders.is_empty());
     assert!(matches!(v.launch, Ok(None)));
 }
+
+/// FF5 (P5-5a): a fix says which packages its steps name and whether a step needs the helper,
+/// so a front end that cannot download or elevate yet does not offer it.
+#[test]
+fn ff5_a_fix_names_its_packages_and_the_helper() {
+    let mut r = report([Tri::Yes, Tri::Yes], &[]);
+    r.issues[1].variants[1].variant.steps = serde_json::from_str(
+        r#"[{"package":"fix-pack"},{"firewall_rule":{"exe":"game.exe","direction":"out"}}]"#,
+    )
+    .unwrap();
+    let f = fixes(&r);
+    assert!(f[0].packages.is_empty() && !f[0].needs_helper);
+    assert_eq!(f[1].packages, ["fix-pack"]);
+    assert!(f[1].needs_helper);
+}

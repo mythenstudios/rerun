@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use rerun_core::escape::{self, Shown};
 use rerun_core::exec::launch_result::ProfileId;
 use rerun_core::plan::{Preview, PreviewOp, ProfilePreview, RootKind};
-use rerun_core::policy::root::{Shadow, file_present};
+use rerun_core::policy::root::Shadow;
+use rerun_core::prim::MachineWhy;
 use rerun_core::prim::launch_method::{ProfileMethod as Method, RuleMode};
-use rerun_core::prim::{MachineView, MachineWhy, SHIM, on_this_machine, steam_option_text};
 use rerun_core::sys::System;
 
 use rerun_core::elevate::{PromptKind, PromptState};
@@ -281,24 +281,7 @@ pub fn shadow_lines(s: &[Shadow]) -> Vec<Message<'_>> {
 
 pub use rerun_core::flow::profile_of;
 
-/// The launch option for a front end: shown, or why not.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OptionText {
-    /// The option, as it is.
-    Shown(Shown<'static>),
-    /// Rerun's install folder is unknown.
-    InstallUnknown,
-    /// The install folder's path cannot be shown as it is.
-    NotShowable,
-}
-
-/// The launch option of profile `id` with Rerun's install folder `install`.
-pub fn option_text(install: &Result<PathBuf, String>, id: ProfileId) -> OptionText {
-    match install {
-        Err(_) => OptionText::InstallUnknown,
-        Ok(dir) => steam_option_text(dir, id).map_or(OptionText::NotShowable, OptionText::Shown),
-    }
-}
+pub use rerun_core::flow::{LaunchView, OptionText, launch_view, option_text};
 
 /// The line of an option that cannot be shown.
 fn option_missing(o: &OptionText) -> Option<Message<'static>> {
@@ -307,49 +290,6 @@ fn option_missing(o: &OptionText) -> Option<Message<'static>> {
         OptionText::InstallUnknown => Some(Message::Profile(ProfileMsg::InstallUnknown)),
         OptionText::NotShowable => Some(Message::Profile(ProfileMsg::OptionNotShowable)),
     }
-}
-
-/// What the preview of a launch profile shows beyond the plan (P3-3d): the selection on this
-/// computer now, the launch option and whether the shim is there.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaunchView {
-    /// The rule on this computer.
-    pub machine: MachineView,
-    /// The launch option.
-    pub option: OptionText,
-    /// `rerun-launch.exe` in the install folder: its path and whether it is a plain file, or
-    /// why that could not be checked (`None`: the install folder is unknown).
-    pub shim: Option<(Shown<'static>, Result<bool, Shown<'static>>)>,
-}
-
-impl LaunchView {
-    /// The option can be pasted and the shim is there (review L3: only then "paste it now").
-    pub fn ready(&self) -> bool {
-        matches!(self.option, OptionText::Shown(_)) && matches!(self.shim, Some((_, Ok(true))))
-    }
-}
-
-/// The [`LaunchView`] of `p`, if it writes a launch profile.
-pub fn launch_view(
-    sys: &dyn System,
-    install: &Result<PathBuf, String>,
-    p: &Preview,
-) -> Option<LaunchView> {
-    let s = profile_of(p)?;
-    let id = ProfileId::from_hex(&s.id)?;
-    let machine = on_this_machine(sys.topology().read(), &s.decoded);
-    let shim = install.as_ref().ok().map(|dir| {
-        (
-            escape::path(&dir.join(SHIM).display().to_string()).into_owned(),
-            // The error names a path (ADR 0016: `escape::path`).
-            file_present(sys, dir, SHIM).map_err(|e| escape::path(&e.to_string()).into_owned()),
-        )
-    });
-    Some(LaunchView {
-        machine,
-        option: option_text(install, id),
-        shim,
-    })
 }
 
 /// The lines of a [`LaunchView`] (plan `P3-3` §5): the selection, the hints, the launch option.

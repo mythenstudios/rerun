@@ -14,7 +14,7 @@
 //! files keep their identity, in memory for the session only (P5-3b). Planning and applying
 //! never use it: they read the files fresh.
 
-use crate::catalog::model::{Issue, Kind, Source, Variant, VariantStatus};
+use crate::catalog::model::{Issue, Kind, Source, TopoStep, Variant, VariantStatus};
 use crate::catalog::store::StoreError;
 use crate::catalog::{Catalog, Topo};
 use crate::exec::PatchedExe;
@@ -136,6 +136,12 @@ impl GameCache {
     /// Forgets everything (a rescan).
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Forgets what was read for one app (P5-5a): a front end drops it before it plans, so the
+    /// page it shows next comes from the files as they are now (ADR 0027 amendment P5-5a).
+    pub fn forget(&mut self, app_id: u32) {
+        self.entries.retain(|c| c.app_id != app_id);
     }
 
     /// How often the executables were served from the cache.
@@ -368,6 +374,11 @@ pub struct Fix {
     pub refused: Option<Refusal>,
     /// Step kinds the anti-cheat rule warns about (per variant, as `refused`).
     pub warned: Vec<StepKind>,
+    /// The packages its steps name (P5-5a): a front end that cannot download yet does not offer
+    /// the fix. Per variant, as `refused`.
+    pub packages: Vec<String>,
+    /// A step needs Rerun's elevated helper (a firewall rule): per variant.
+    pub needs_helper: bool,
 }
 
 /// The fixes of a report, grouped by variant ID in the order of first appearance. The loader
@@ -399,6 +410,20 @@ pub fn fixes(r: &OwnedReport) -> Vec<Fix> {
                     solves: vec![solved],
                     refused: v.refused,
                     warned: v.warned.clone(),
+                    packages: v
+                        .variant
+                        .steps
+                        .iter()
+                        .filter_map(|s| match s {
+                            TopoStep::Package(p) => Some(p.to_string()),
+                            _ => None,
+                        })
+                        .collect(),
+                    needs_helper: v
+                        .variant
+                        .steps
+                        .iter()
+                        .any(|s| matches!(s, TopoStep::FirewallRule(_))),
                 }),
             }
         }
