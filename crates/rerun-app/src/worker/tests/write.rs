@@ -1166,3 +1166,64 @@ fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
     }
     panic!("the write never ended");
 }
+
+// ---------- AW16 re-check follow-ups ----------
+
+#[test]
+fn aw16_a_plan_with_a_firewall_rule_or_package_content_is_not_applicable() {
+    let mut rig = Rig::new(Lang::En);
+    let page = rig.page();
+    let picks = Selection::preselected(&page).picks(&page);
+    // A real preview of a plan the app may apply ...
+    let http = FakeHttp::default();
+    let install = install();
+    let env = Env {
+        sys: &rig.sys,
+        http: &http,
+        install: &install,
+    };
+    let g = rerun_core::flow::guard(env).unwrap();
+    let Ok(rerun_core::flow::Lookup::Read {
+        found: rerun_core::flow::Found::One(picked),
+        ..
+    }) = rerun_core::flow::plan(&g, 220, &picks)
+    else {
+        panic!("no plan");
+    };
+    let planned = picked.planned.unwrap_or_else(|e| panic!("{e}"));
+    let pv = planned.preview().clone();
+    assert!(crate::worker::applicable(&pv));
+    // ... and the same preview with a firewall rule, or with a package file, is not.
+    let mut fw = pv.clone();
+    fw.firewall = Some("firewall rules");
+    assert!(!crate::worker::applicable(&fw));
+    let mut pkg = pv.clone();
+    let op = pkg.ops.iter_mut().find(|o| o.profile.is_none()).unwrap();
+    op.source = Some(escape::text("pack 1.0: d3d9.dll").into_owned());
+    assert!(!crate::worker::applicable(&pkg));
+}
+
+#[test]
+fn aw16_an_undo_that_needs_the_prompt_keeps_no_token() {
+    use rerun_core::elevate::{PromptKind, PromptState};
+    let state = PromptState {
+        kind: PromptKind::Consent,
+        secure_desktop: Some(true),
+        signed_only: false,
+    };
+    assert!(!crate::worker::token_kept(Some(&state)));
+    assert!(crate::worker::token_kept(None));
+    // Without a kept token a confirm with any nonce writes nothing and shows the preview: the
+    // same path as a stale confirm (AW15).
+    let mut rig = Rig::new(Lang::En);
+    let pv = rig.preview();
+    let ev = rig.run(Job::Apply { hash: pv.hash });
+    let txn = applied_of(&ev).cards[0].txn;
+    let ev = rig.run(Job::RevertPreview { txn });
+    let nonce = dialog_of(&ev).nonce;
+    rig.session.pending.revert = None;
+    let state = rig.snap();
+    let ev = rig.run(Job::Revert { txn, nonce });
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert!(rig.snap() == state, "nothing was written");
+}

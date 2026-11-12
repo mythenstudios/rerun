@@ -583,7 +583,7 @@ fn plan(
             ..
         }) => match picked.planned {
             Err(e) => emit(refused(vm::plan_refusal(&e, lang))),
-            Ok(planned) if !applicable(&planned) => emit(refused(vm::not_available(lang))),
+            Ok(planned) if !applicable(planned.preview()) => emit(refused(vm::not_available(lang))),
             Ok(planned) => {
                 let env = g.env();
                 let launch = flow::launch_view(env.sys, env.install, planned.preview());
@@ -603,10 +603,15 @@ fn plan(
     }
 }
 
+/// Whether an undo preview keeps its token: not when it needs the administrator prompt
+/// (P5-5c), so no confirm can reach `flow::revert`.
+pub(crate) fn token_kept(prompt: Option<&rerun_core::elevate::PromptState>) -> bool {
+    prompt.is_none()
+}
+
 /// Whether the app can apply a plan in this slice: no firewall rule (the elevated helper,
 /// P5-5c) and no package file (a download, P5-5b).
-fn applicable(p: &Planned) -> bool {
-    let pv = p.preview();
+pub(crate) fn applicable(pv: &rerun_core::plan::Preview) -> bool {
     pv.firewall.is_none()
         && pv
             .ops
@@ -688,7 +693,7 @@ fn revert_preview(
             let dialog = vm::revert_vm(&p, g.env().install, changed, nonce, lang);
             // An undo that needs the administrator prompt is not available in the app yet
             // (P5-5c): no token is kept, so no confirm can reach `flow::revert`.
-            if p.prompt.is_none() {
+            if token_kept(p.prompt.as_ref()) {
                 session.pending.revert = Some((shown, app, nonce));
             }
             emit(Event::Dialog(Box::new(dialog)));
