@@ -266,7 +266,7 @@ try {
     )
     if ($Game) {
         $steps += "F: APPLY TEST, only this game: $Game. Open it. The preselected fixes are ticked (verified, affect this PC); a fix that needs a download or the helper says so and cannot be ticked. Read the preview: every file, value, the launch profile, the warnings. Press Copy launch option and paste it into Notepad (it is only text). Press Apply once.",
-        'G: the game page and Applied now show ONE card with everything in it; Esc and Tab in the next dialog work; press UNDO on the card (NOT 'Close without undoing', which is forget and leaves the change in place), read what it restores, press Undo this change. The card is gone.',
+        'G: the game page and Applied now show ONE card with everything in it; Esc and Tab in the next dialog work; press UNDO on the card (NOT ''Close without undoing'', which is forget and leaves the change in place), read what it restores, press Undo this change. The card is gone.',
         'H: Apply is greyed out until the preview is shown; select a fix, deselect it: the preview follows. Do not apply anything else.'
     }
     $steps += 'CLOSE the app when done (the script then compares the game folder and cleans up)'
