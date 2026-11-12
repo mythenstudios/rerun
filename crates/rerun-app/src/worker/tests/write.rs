@@ -16,6 +16,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc;
 
+use rerun_core::journal::TxnId;
 use rerun_core::plan::Pick;
 use rerun_core::sys::System;
 use rerun_core::sys::fake::Prim;
@@ -79,6 +80,8 @@ struct Rig {
     sys: FakeSystem,
     session: Session,
     lang: Lang,
+    /// The nonce of the last dialog the worker showed (what a confirm click carries).
+    nonce: u64,
 }
 
 impl Rig {
@@ -87,6 +90,7 @@ impl Rig {
             sys: write_world(),
             session: Session::default(),
             lang,
+            nonce: 0,
         }
     }
 
@@ -109,7 +113,22 @@ impl Rig {
                 out.push(e);
             },
         );
+        if let Some(Event::Dialog(d)) = out.iter().rev().find(|e| matches!(e, Event::Dialog(_))) {
+            self.nonce = d.nonce;
+        }
         out
+    }
+
+    /// The click on "Undo this change" of the dialog last shown.
+    fn revert(&mut self, txn: TxnId) -> Vec<Event> {
+        let nonce = self.nonce;
+        self.run(Job::Revert { txn, nonce })
+    }
+
+    /// The click on "Close without undoing" of the dialog last shown.
+    fn forget(&mut self, txn: TxnId) -> Vec<Event> {
+        let nonce = self.nonce;
+        self.run(Job::Forget { txn, nonce })
     }
 
     fn page(&mut self) -> GameVm {
@@ -631,7 +650,7 @@ fn aw13_apply_then_undo_through_the_worker_is_bit_identical() {
     // Nothing changed by looking.
     assert!(rig.snap() != before);
 
-    let ev = rig.run(Job::Revert { txn });
+    let ev = rig.revert(txn);
     let r = result_of(&ev);
     assert_eq!((r.tone, r.notice.title.as_str()), (Tone::Done, "Undone"));
     assert!(
@@ -727,7 +746,7 @@ fn aw13_a_state_changed_since_the_undo_preview_shows_the_preview_again() {
         )
         .unwrap();
     let state = rig.snap();
-    let ev = rig.run(Job::Revert { txn });
+    let ev = rig.revert(txn);
     // Calm: the dialog again with a note; no result, no error, nothing written.
     assert_eq!(ev.len(), 1, "{ev:?}");
     let d = dialog_of(&ev);
@@ -747,7 +766,7 @@ fn aw13_a_state_changed_since_the_undo_preview_shows_the_preview_again() {
         dialog_ops(d)
     );
     // Confirmed on the new preview: Rerun's key goes back, the game's key stays.
-    let ev = rig.run(Job::Revert { txn });
+    let ev = rig.revert(txn);
     assert_eq!(result_of(&ev).notice.title, "Undone", "{ev:?}");
     assert_eq!(
         rig.read(&format!(r"{G}\game.ini")),
@@ -787,7 +806,7 @@ fn aw13_a_foreign_change_offers_closing_without_undoing() {
         "{:?}",
         dialog_ops(d)
     );
-    let ev = rig.run(Job::Revert { txn });
+    let ev = rig.revert(txn);
     let r = result_of(&ev);
     assert_eq!(r.notice.title, "Part of it was changed by someone else");
     assert_eq!(r.tone, Tone::Attention);
@@ -810,7 +829,7 @@ fn aw13_a_foreign_change_offers_closing_without_undoing() {
     assert_eq!(d.title, "Close this change without undoing it?");
     assert_eq!(d.confirm, "Close without undoing");
     assert!(d.notes.iter().any(|n| n.starts_with("This is on disk now")));
-    let ev = rig.run(Job::Forget { txn });
+    let ev = rig.forget(txn);
     assert_eq!(result_of(&ev).notice.title, "Closed");
     assert_eq!(applied_of(&ev).open, 0);
 }
@@ -823,11 +842,11 @@ fn aw13_an_undo_without_its_preview_shows_the_preview_first() {
     let txn = applied_of(&ev).cards[0].txn;
     let before = rig.snap();
     // A click that names a transaction nobody previewed: the dialog, not the undo.
-    let ev = rig.run(Job::Revert { txn });
+    let ev = rig.revert(txn);
     assert_eq!(ev.len(), 1);
     assert_eq!(dialog_of(&ev).kind, DialogKind::Undo);
     assert!(rig.snap() == before);
-    let ev = rig.run(Job::Forget { txn });
+    let ev = rig.forget(txn);
     assert_eq!(dialog_of(&ev).kind, DialogKind::Forget);
     assert!(rig.snap() == before);
 }
@@ -874,13 +893,9 @@ fn aw14_a_game_that_reads_differently_hands_the_page_back_instead_of_a_preview()
     );
     // The fresh page: no Topo matches this build.
     assert!(game_in(&ev).fixes.is_empty());
-    let Some(Event::PreviewRefused {
-        app_id: 220,
-        result,
-    }) = ev.last()
-    else {
-        panic!("{ev:?}");
-    };
+    // The note comes first (the window clears its selection), then the page; no preview.
+    let result = result_of(&ev);
+    assert!(matches!(ev.first(), Some(Event::Result(_))));
     assert_eq!(
         (result.tone, result.notice.title.as_str()),
         (Tone::Calm, "The game changed since the preview")
@@ -942,6 +957,7 @@ fn aw14_the_window_cannot_close_while_a_write_is_queued_or_runs() {
     assert!(worker.busy_writing());
     worker.send(Job::Revert {
         txn: "00000001-0000000000000001".parse().unwrap(),
+        nonce: 0,
     });
     assert!(worker.busy_writing());
     // Let every job run (one release per event of each).
@@ -963,4 +979,190 @@ fn aw14_the_window_cannot_close_while_a_write_is_queued_or_runs() {
         seen.iter().any(|e| matches!(e, Event::Result(_))),
         "the writes ran (and were refused: no preview, no such transaction): {seen:?}"
     );
+}
+
+// ---------- AW15 a confirm is bound to the dialog that was shown (review H1) ----------
+
+fn rewrite_ini(rig: &Rig) {
+    rig.sys
+        .fake_fs()
+        .put_file(
+            Path::new(&format!(r"{G}\game.ini")),
+            b"[Display]\r\nWidth=1920\r\nHeight=1080\r\n",
+        )
+        .unwrap();
+}
+
+#[test]
+fn aw15_a_second_undo_confirm_never_takes_a_preview_the_user_did_not_see() {
+    let mut rig = Rig::new(Lang::En);
+    let pv = rig.preview();
+    let ev = rig.run(Job::Apply { hash: pv.hash });
+    let txn = applied_of(&ev).cards[0].txn;
+    let ev = rig.run(Job::RevertPreview { txn });
+    let first = dialog_of(&ev).nonce;
+    rewrite_ini(&rig);
+    let state = rig.snap();
+    // The first confirm finds the state changed: the dialog comes again, nothing is written.
+    let c1 = rig.run(Job::Revert { txn, nonce: first });
+    assert_eq!(c1.len(), 1, "{c1:?}");
+    let second = dialog_of(&c1).nonce;
+    assert_ne!(second, first);
+    assert!(dialog_of(&c1).changed.is_some());
+    // A second click queued behind it still carries the first dialog's nonce: it writes
+    // nothing and shows the preview again, with yet another nonce.
+    let c2 = rig.run(Job::Revert { txn, nonce: first });
+    assert_eq!(c2.len(), 1, "no result, only the dialog: {c2:?}");
+    let third = dialog_of(&c2).nonce;
+    assert!(third != first && third != second);
+    assert!(rig.snap() == state, "nothing was written");
+    // Only the confirm of the dialog on screen goes through.
+    let ev = rig.run(Job::Revert { txn, nonce: third });
+    assert_eq!(result_of(&ev).notice.title, "Undone", "{ev:?}");
+}
+
+#[test]
+fn aw15_a_second_forget_confirm_never_takes_a_preview_the_user_did_not_see() {
+    let mut rig = Rig::new(Lang::En);
+    let pv = rig.preview();
+    let ev = rig.run(Job::Apply { hash: pv.hash });
+    let txn = applied_of(&ev).cards[0].txn;
+    let ev = rig.run(Job::ForgetPreview { txn });
+    let first = dialog_of(&ev).nonce;
+    rewrite_ini(&rig);
+    let state = rig.snap();
+    let c1 = rig.run(Job::Forget { txn, nonce: first });
+    assert_eq!(c1.len(), 1, "{c1:?}");
+    assert!(dialog_of(&c1).changed.is_some());
+    let c2 = rig.run(Job::Forget { txn, nonce: first });
+    assert_eq!(c2.len(), 1, "{c2:?}");
+    assert_ne!(dialog_of(&c2).nonce, dialog_of(&c1).nonce);
+    assert!(rig.snap() == state);
+    let open = rig.run(Job::Status);
+    assert_eq!(
+        applied_of(&open).open,
+        1,
+        "still open: nothing was forgotten"
+    );
+    let nonce = dialog_of(&c2).nonce;
+    let ev = rig.run(Job::Forget { txn, nonce });
+    assert_eq!(result_of(&ev).notice.title, "Closed", "{ev:?}");
+}
+
+#[test]
+fn aw15_a_fix_that_needs_the_helper_is_never_planned_whatever_is_sent() {
+    let mut rig = Rig::new(Lang::En);
+    rig.page();
+    let app = rig.snap_app();
+    let game = rig.snap();
+    let ev = rig.run(Job::Plan {
+        app_id: 220,
+        picks: vec![pick("net", "block")],
+    });
+    assert!(
+        !ev.iter().any(|e| matches!(e, Event::Preview { .. })),
+        "{ev:?}"
+    );
+    let [Event::PreviewRefused { result, .. }] = ev.as_slice() else {
+        panic!("{ev:?}");
+    };
+    assert_eq!(result.notice.title, "Not available yet");
+    // Nothing shown, so nothing to apply; nothing stored or written.
+    let ev = rig.run(Job::Apply {
+        hash: "0".repeat(64),
+    });
+    assert_eq!(
+        result_of(&ev).notice.title,
+        "The preview is no longer current"
+    );
+    assert!(rig.snap_app() == app && rig.snap() == game);
+}
+
+#[test]
+fn aw15_after_a_rescan_the_first_plan_hands_the_page_back() {
+    let mut rig = Rig::new(Lang::En);
+    let page = rig.page();
+    let picks = Selection::preselected(&page).picks(&page);
+    rig.session.pages.clear();
+    let ev = rig.run(Job::Plan { app_id: 220, picks });
+    assert!(matches!(ev.first(), Some(Event::Result(_))), "{ev:?}");
+    assert!(matches!(ev.last(), Some(Event::Game(_))), "{ev:?}");
+    assert!(!ev.iter().any(|e| matches!(e, Event::Preview { .. })));
+}
+
+/// Lets the first `free` wakes pass and blocks the next one (the worker is then inside the job
+/// that emitted it).
+struct HoldAfter {
+    free: std::sync::atomic::AtomicUsize,
+    gate: Mutex<mpsc::Receiver<()>>,
+}
+
+impl Wake for HoldAfter {
+    fn wake(&self) {
+        if self.free.load(Ordering::SeqCst) > 0 {
+            self.free.fetch_sub(1, Ordering::SeqCst);
+        } else {
+            let _ = self.gate.lock().unwrap().recv();
+        }
+    }
+}
+
+#[test]
+fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
+    let (release, gate) = mpsc::channel::<()>();
+    let make = || {
+        Ok(World {
+            sys: Box::new(write_world()),
+            http: Box::new(FakeHttp::default()),
+            install: install(),
+        })
+    };
+    // Game, Plan and PreviewShown pass; the wake of the Apply's result blocks, inside the job.
+    let worker = Worker::start(
+        Lang::En,
+        make,
+        Box::new(HoldAfter {
+            free: std::sync::atomic::AtomicUsize::new(3),
+            gate: Mutex::new(gate),
+        }),
+    )
+    .unwrap();
+    worker.send(Job::Game {
+        app_id: 220,
+        name: None,
+    });
+    let ev = wait_for(&worker, 1);
+    let page = game_in(&ev).clone();
+    worker.send(Job::Plan {
+        app_id: 220,
+        picks: Selection::preselected(&page).picks(&page),
+    });
+    let hash = match &wait_for(&worker, 1)[0] {
+        Event::Preview { vm, .. } => vm.hash.clone(),
+        other => panic!("{other:?}"),
+    };
+    worker.send(Job::PreviewShown { hash: hash.clone() });
+    wait_for(&worker, 1);
+    assert!(!worker.busy_writing());
+    worker.send(Job::Apply { hash });
+    // The result is emitted from inside the running job; its wake holds the thread.
+    let ev = wait_for(&worker, 1);
+    assert!(
+        matches!(&ev[0], Event::Result(r) if r.tone == Tone::Done),
+        "{ev:?}"
+    );
+    assert!(
+        worker.busy_writing(),
+        "the apply has not ended: closing is refused"
+    );
+    for _ in 0..3 {
+        let _ = release.send(());
+    }
+    for _ in 0..2000 {
+        if !worker.busy_writing() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("the write never ended");
 }

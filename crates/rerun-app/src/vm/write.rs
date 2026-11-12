@@ -414,51 +414,54 @@ fn warn(lang: Lang, m: Msg, detail: Option<Shown<'static>>) -> WarnVm {
 }
 
 fn warnings_of(p: &Planned, lang: Lang) -> Vec<WarnVm> {
-    let mut out = Vec::new();
-    for w in p.warnings() {
-        let id = |s: &str| Some(escape::text(s).into_owned());
-        let path = |s: &str| Some(escape::path(s).into_owned());
-        out.push(match w {
-            Warning::NeedsRetest => warn(lang, Msg::WarnNeedsRetest, None),
-            Warning::WhenUnknown { issue } => warn(lang, Msg::WarnWhenUnknown, id(issue)),
-            Warning::AntiCheat { variant, .. } => warn(lang, Msg::WarnAntiCheat, id(variant)),
-            Warning::SteamInput { issue } => warn(lang, Msg::WarnSteamInput, id(issue)),
-            Warning::SmartAppControl { state } => {
-                let m = match state {
-                    SacState::Off => continue,
-                    SacState::Enforce => Msg::WarnSacOn,
-                    SacState::Evaluation => Msg::WarnSacEvaluation,
-                    SacState::Unknown => Msg::WarnSacUnknown,
-                };
-                warn(lang, m, None)
-            }
-            Warning::SteamPerUserExe { exe } => {
-                warn(lang, Msg::WarnSteamPerUser, path(exe.as_str()))
-            }
-            Warning::SignedExe { exe } => warn(lang, Msg::WarnSignedExe, path(exe.as_str())),
-            Warning::GpuPreferenceSet { exe, .. } => {
-                warn(lang, Msg::WarnGpuSet, path(exe.as_str()))
-            }
-            Warning::RequiresGpu { package, .. } => warn(lang, Msg::WarnRequiresGpu, id(package)),
-        });
-    }
-    for s in p.shadows() {
-        out.push(match s {
-            Shadow::Copy { copy, .. } => warn(lang, Msg::WarnVsCopy, Some(copy.clone())),
-            Shadow::Link { at, .. } => warn(lang, Msg::WarnVsLink, Some(at.clone())),
-            Shadow::Unchecked { why, at, .. } => warn(
-                lang,
-                Msg::WarnVsUnchecked,
-                Some(at.clone().unwrap_or_else(|| why.clone())),
-            ),
-        });
-    }
-    out
+    p.warnings()
+        .iter()
+        .filter_map(|w| warning_vm(w, lang))
+        .chain(p.shadows().iter().map(|s| shadow_vm(s, lang)))
+        .collect()
 }
 
+/// An engine warning as a message; `None` for one that says nothing (Smart App Control off).
+pub fn warning_vm(w: &Warning, lang: Lang) -> Option<WarnVm> {
+    let id = |s: &str| Some(escape::text(s).into_owned());
+    let path = |s: &str| Some(escape::path(s).into_owned());
+    Some(match w {
+        Warning::NeedsRetest => warn(lang, Msg::WarnNeedsRetest, None),
+        Warning::WhenUnknown { issue } => warn(lang, Msg::WarnWhenUnknown, id(issue)),
+        Warning::AntiCheat { variant, .. } => warn(lang, Msg::WarnAntiCheat, id(variant)),
+        Warning::SteamInput { issue } => warn(lang, Msg::WarnSteamInput, id(issue)),
+        Warning::SmartAppControl { state } => {
+            let m = match state {
+                SacState::Off => return None,
+                SacState::Enforce => Msg::WarnSacOn,
+                SacState::Evaluation => Msg::WarnSacEvaluation,
+                SacState::Unknown => Msg::WarnSacUnknown,
+            };
+            warn(lang, m, None)
+        }
+        Warning::SteamPerUserExe { exe } => warn(lang, Msg::WarnSteamPerUser, path(exe.as_str())),
+        Warning::SignedExe { exe } => warn(lang, Msg::WarnSignedExe, path(exe.as_str())),
+        Warning::GpuPreferenceSet { exe, .. } => warn(lang, Msg::WarnGpuSet, path(exe.as_str())),
+        Warning::RequiresGpu { package, .. } => warn(lang, Msg::WarnRequiresGpu, id(package)),
+    })
+}
+
+/// A VirtualStore finding as a message.
+pub fn shadow_vm(s: &Shadow, lang: Lang) -> WarnVm {
+    match s {
+        Shadow::Copy { copy, .. } => warn(lang, Msg::WarnVsCopy, Some(copy.clone())),
+        Shadow::Link { at, .. } => warn(lang, Msg::WarnVsLink, Some(at.clone())),
+        Shadow::Unchecked { why, at, .. } => warn(
+            lang,
+            Msg::WarnVsUnchecked,
+            Some(at.clone().unwrap_or_else(|| why.clone())),
+        ),
+    }
+}
 /// The notes a preview says once (the core's constants, as flags, in the app's words).
 fn notes_of(p: &plan::Preview, lang: Lang) -> Vec<String> {
     let mut out = vec![tx(lang, Msg::NoteNotRestored)];
+
     let mut add = |on: bool, m: Msg| {
         if on {
             out.push(tx(lang, m));
@@ -600,8 +603,20 @@ pub fn preview_vm(p: &Planned, launch: Option<&LaunchView>, lang: Lang) -> Previ
         warnings: warnings_of(p, lang),
         notes: notes_of(pv, lang),
         launch: launch.map(|v| launch_vm(v, lang)),
-        admin: tx(lang, Msg::PreviewAdminNo),
-        undo: tx(lang, Msg::PreviewUndo),
+        admin: tx(
+            lang,
+            if pv.firewall.is_some() {
+                Msg::PreviewAdminYes
+            } else {
+                Msg::PreviewAdminNo
+            },
+        ),
+        undo: tx(
+            lang,
+            Msg::PreviewUndo {
+                profile: flow::profile_of(pv).is_some(),
+            },
+        ),
         can_apply: n > 0 && pv.firewall.is_none(),
         nothing: (n == 0).then(|| tx(lang, Msg::ResNothingBody)),
     }
@@ -670,7 +685,7 @@ pub fn refusal(r: &Refusal, lang: Lang) -> ResultVm {
             calm(Tone::Attention, RefCleanupTitle, RefCleanupBody, false)
         }
         Refusal::Steam { .. } | Refusal::SteamGone { .. } | Refusal::SteamManifest { .. } => {
-            calm(Tone::Calm, RefSteamTitle, RefSteamBody, true)
+            calm(Tone::Calm, RefSteamTitle, RefSteamBody, false)
         }
         // The game or the state changed since the preview (ADR 0020 amendment P5-2a): not an
         // error, the page is read again.
@@ -770,6 +785,17 @@ pub fn stale(lang: Lang) -> ResultVm {
         Msg::RefStaleTitle,
         Msg::RefStaleBody,
         true,
+    )
+}
+
+/// A pick the app cannot apply here (the helper, a download): nothing is planned.
+pub fn not_available(lang: Lang) -> ResultVm {
+    result(
+        Tone::Calm,
+        lang,
+        Msg::RefHelperTitle,
+        Msg::RefHelperBody,
+        false,
     )
 }
 
@@ -1024,6 +1050,11 @@ fn head_ops(st: &TxnStatus, lang: Lang) -> Vec<OpVm> {
         .unwrap_or_default()
 }
 
+/// Whether a transaction's head writes a launch profile.
+fn st_has_profile(st: &TxnStatus) -> bool {
+    flow::head(st).is_some_and(|p| flow::profile_of(p).is_some())
+}
+
 /// The Steam app a transaction's head names.
 pub fn app_of(st: &TxnStatus) -> Option<u32> {
     flow::head(st)?
@@ -1088,7 +1119,13 @@ pub fn card(st: &TxnStatus, names: &Names, lang: Lang) -> Option<TxnCardVm> {
         note: if ops.is_empty() {
             tx(lang, Msg::CardNoOps)
         } else {
-            tx(lang, Msg::CardNote { n: ops.len() })
+            tx(
+                lang,
+                Msg::CardNote {
+                    n: ops.len(),
+                    profile: st_has_profile(st),
+                },
+            )
         },
         ops,
         can_undo,
@@ -1134,6 +1171,9 @@ pub struct LaunchFateVm {
 pub struct DialogVm {
     /// Which.
     pub kind: DialogKind,
+    /// Identifies this dialog: a confirm carries it, the worker writes only for the dialog it
+    /// last showed.
+    pub nonce: u64,
     /// The transaction.
     pub txn: TxnId,
     /// The question.
@@ -1243,6 +1283,7 @@ pub fn revert_vm(
     p: &RevertPreview,
     install: &Result<PathBuf, String>,
     changed: bool,
+    nonce: u64,
     lang: Lang,
 ) -> DialogVm {
     let mut notes = vec![tx(lang, Msg::UndoCloseGame)];
@@ -1266,6 +1307,7 @@ pub fn revert_vm(
     let blocked = prompt_block(p.prompt.as_ref(), lang);
     DialogVm {
         kind: DialogKind::Undo,
+        nonce,
         txn: p.status.id,
         title: tx(lang, Msg::UndoTitle),
         intro: tx(lang, Msg::UndoIntro),
@@ -1293,6 +1335,7 @@ pub fn forget_vm(
     p: &ForgetPreview,
     install: &Result<PathBuf, String>,
     changed: bool,
+    nonce: u64,
     lang: Lang,
 ) -> DialogVm {
     let mut notes = Vec::new();
@@ -1317,6 +1360,7 @@ pub fn forget_vm(
     };
     DialogVm {
         kind: DialogKind::Forget,
+        nonce,
         txn: p.status.id,
         title: tx(lang, Msg::ForgetTitle),
         intro: tx(lang, Msg::ForgetIntro),

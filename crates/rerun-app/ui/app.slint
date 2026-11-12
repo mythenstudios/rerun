@@ -385,7 +385,7 @@ component Pressable inherits FocusScope {
         root.kb-focus = false;
     }
     key-pressed(e) => {
-        if (e.text == Key.Return || e.text == " ") {
+        if (root.enabled && (e.text == Key.Return || e.text == " ")) {
             root.activated();
             return accept;
         }
@@ -476,7 +476,9 @@ component Button inherits Pressable {
     accessible-role: button;
     accessible-label: root.text;
     accessible-action-default => {
-        root.activated();
+        if (root.enabled) {
+            root.activated();
+        }
     }
     ring-inset: -3px;
     min-height: Theme.s6 + Theme.s1 + Theme.hair * 2;
@@ -510,7 +512,9 @@ component Toggle inherits Pressable {
     accessible-checked: root.checked;
     accessible-label: root.text;
     accessible-action-default => {
-        root.activated();
+        if (root.enabled) {
+            root.activated();
+        }
     }
     activated => {
         root.checked = !root.checked;
@@ -557,7 +561,9 @@ component NavItem inherits Pressable {
     accessible-item-selectable: true;
     accessible-item-selected: root.active;
     accessible-action-default => {
-        root.activated();
+        if (root.enabled) {
+            root.activated();
+        }
     }
     Rectangle {
         border-radius: Theme.radius-m;
@@ -613,7 +619,9 @@ component CaptionButton inherits Pressable {
     accessible-role: button;
     accessible-label: root.label;
     accessible-action-default => {
-        root.activated();
+        if (root.enabled) {
+            root.activated();
+        }
     }
     Rectangle {
         background: (root.hovered || root.nc-hover) ? (root.danger ? Theme.danger : Theme.raised3) : transparent;
@@ -737,7 +745,9 @@ component RowItem inherits Pressable {
     accessible-item-index: root.index;
     accessible-item-count: root.count;
     accessible-action-default => {
-        root.activated();
+        if (root.enabled) {
+            root.activated();
+        }
     }
     Rectangle {
         background: root.hovered ? Theme.raised2 : transparent;
@@ -1052,7 +1062,9 @@ component Check inherits Pressable {
     accessible-checked: root.checked;
     accessible-label: root.a11y != "" ? root.a11y : root.text;
     accessible-action-default => {
-        root.activated();
+        if (root.enabled) {
+            root.activated();
+        }
     }
     HorizontalLayout {
         spacing: Theme.s3;
@@ -1723,7 +1735,9 @@ component GamePage inherits VerticalLayout {
             accessible-role: button;
             accessible-label: Str.back;
             accessible-action-default => {
-                self.activated();
+                if (self.enabled) {
+                    self.activated();
+                }
             }
             ring-inset: -3px;
             activated => {

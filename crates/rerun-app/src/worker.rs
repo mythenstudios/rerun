@@ -1,11 +1,14 @@
 //! The worker (ADR 0027): one thread for the session owns the system, runs one job at a time
 //! and hands view models back as events. The UI thread never touches the system.
 //!
-//! P5-3 is read-only: [`Job::Library`], [`Job::Game`], [`Job::Status`] and [`Job::System`].
+//! Read jobs: [`Job::Library`], [`Job::Game`], [`Job::Status`], [`Job::System`] and the preview jobs
+//! ([`Job::Plan`], [`Job::RevertPreview`], [`Job::ForgetPreview`]); write jobs (P5-5a): [`Job::Apply`],
+//! [`Job::Revert`] and [`Job::Forget`], which write only through `flow` with a token the window
+//! was shown.
 //! Every job builds its own `Guarded` through `flow::guard` (elevation first, then the
 //! forbidden roots, then Rerun's folder opened if it exists, never created): an elevated process
-//! reads nothing, and the window shows the blocking page (rule 6). Nothing is written, no
-//! folder created, nothing cached on disk.
+//! reads nothing, and the window shows the blocking page (rule 6). Reading and previewing
+//! write nothing and create no folder; nothing is cached on disk.
 //!
 //! Session (P5-3b): the worker keeps, in memory and for the session only, what it already
 //! read ([`Session`]): per game the executables' hashes (`flow::GameCache`, valid while the
@@ -17,8 +20,8 @@
 //! a game or a page never waits for the scan); a second library job during a scan restarts it.
 //!
 //! Rule 1: the thread lives as long as the window. Dropping the [`Worker`] closes the job
-//! channel; the thread ends after the job it runs (read-only, so the process may also end
-//! while it runs).
+//! channel; the thread ends after the job it runs. A write job counts as running from `send` to its
+//! end ([`Worker::busy_writing`]): the window does not close meanwhile.
 
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -89,20 +92,25 @@ pub enum Job {
         /// The transaction.
         txn: TxnId,
     },
-    /// Undoes the transaction whose preview was shown.
+    /// Undoes the transaction whose preview was shown: only if `nonce` is the one of the
+    /// dialog the user confirmed (a confirm of an older dialog writes nothing).
     Revert {
         /// The transaction.
         txn: TxnId,
+        /// The nonce of the shown preview (`DialogVm::nonce`).
+        nonce: u64,
     },
     /// The preview of closing a transaction without undoing it.
     ForgetPreview {
         /// The transaction.
         txn: TxnId,
     },
-    /// Closes the transaction whose preview was shown.
+    /// Closes the transaction whose preview was shown (nonce as for [`Job::Revert`]).
     Forget {
         /// The transaction.
         txn: TxnId,
+        /// The nonce of the shown preview.
+        nonce: u64,
     },
 }
 
@@ -250,7 +258,10 @@ impl Worker {
                                 &mut emit,
                             );
                         }
-                        Err(detail) => emit(Event::Blocked(no_system(detail.clone(), lang))),
+                        Err(detail) => {
+                            let _guard = WriteGuard::new(&session.writes, &job);
+                            emit(Event::Blocked(no_system(detail.clone(), lang)));
+                        }
                     }
                 }
             })?;
@@ -310,6 +321,8 @@ pub struct Session {
     pages: HashMap<u32, Vec<(String, Offer)>>,
     /// What the window was shown and may confirm (module docs).
     pending: Pending,
+    /// The last dialog nonce handed out (a confirm must carry the one of the shown dialog).
+    nonce: u64,
     /// Write jobs queued or running (shared with [`Worker::busy_writing`]).
     writes: Arc<AtomicUsize>,
 }
@@ -324,9 +337,9 @@ struct Pending {
     /// A plan whose preview the window rendered: "Apply" may use it.
     shown: Option<(u32, Previewed)>,
     /// An undo preview, with the game its transaction is about.
-    revert: Option<(RevertShown, Option<u32>)>,
+    revert: Option<(RevertShown, Option<u32>, u64)>,
     /// A forget preview, with the game its transaction is about.
-    forget: Option<(ForgetShown, Option<u32>)>,
+    forget: Option<(ForgetShown, Option<u32>, u64)>,
 }
 
 impl Session {
@@ -349,6 +362,25 @@ pub fn run(env: Env<'_>, job: &Job, lang: Lang, emit: &mut dyn FnMut(Event)) {
 /// [`run`] in `session`. `waiting` hands out the next job that is already queued, without
 /// waiting for one: a library scan runs those between two games; if it hands out another
 /// library job, the scan stops and that job is returned to be run next.
+/// Counts a write job as finished when dropped (done, refused, never started, or a panic).
+struct WriteGuard(Option<Arc<AtomicUsize>>);
+
+impl WriteGuard {
+    fn new(writes: &Arc<AtomicUsize>, job: &Job) -> Self {
+        Self(job.writes().then(|| writes.clone()))
+    }
+}
+
+impl Drop for WriteGuard {
+    fn drop(&mut self) {
+        if let Some(w) = &self.0 {
+            let _ = w.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                Some(n.saturating_sub(1))
+            });
+        }
+    }
+}
+
 pub fn run_in(
     env: Env<'_>,
     job: &Job,
@@ -358,15 +390,9 @@ pub fn run_in(
     emit: &mut dyn FnMut(Event),
 ) -> Option<Job> {
     let began = std::time::Instant::now();
+    // Dropped at the end of the job, also on a panic: the window may close then.
+    let _guard = WriteGuard::new(&session.writes, job);
     let preempted = run_job(env, job, lang, session, waiting, emit);
-    if job.writes() {
-        // The write is over (done, refused or never started): the window may close.
-        let _ = session
-            .writes
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                Some(n.saturating_sub(1))
-            });
-    }
     crate::trace::log(|| {
         format!(
             "worker: {} took {:.1} ms (jobs run in between included)",
@@ -437,9 +463,9 @@ fn run_job(
         }
         Job::Apply { hash } => apply(&mut g, hash, lang, session, emit),
         Job::RevertPreview { txn } => revert_preview(&g, txn, false, lang, session, emit),
-        Job::Revert { txn } => revert(&g, txn, lang, session, emit),
+        Job::Revert { txn, nonce } => revert(&g, txn, *nonce, lang, session, emit),
         Job::ForgetPreview { txn } => forget_preview(&g, txn, false, lang, session, emit),
-        Job::Forget { txn } => forget(&g, txn, lang, session, emit),
+        Job::Forget { txn, nonce } => forget(&g, txn, *nonce, lang, session, emit),
     }
     preempted
 }
@@ -531,15 +557,25 @@ fn plan(
     session.games.forget(app_id);
     let name = session.names.get(&app_id).cloned();
     let page = game_page(g, app_id, name.as_ref(), lang, session);
-    if before.as_ref().is_some_and(|b| *b != fix_key(&page)) {
+    // No page before (a rescan cleared them) counts as a difference: the window may hold a
+    // page the session cannot vouch for. The note comes first, then the page, so the window
+    // clears its selection before it takes the fresh page.
+    if before.as_ref().is_none_or(|b| *b != fix_key(&page)) {
+        emit(Event::Result(vm::stale(lang)));
         emit(Event::Game(page));
-        emit(Event::PreviewRefused {
-            app_id,
-            result: vm::stale(lang),
-        });
         return;
     }
     let refused = |result| Event::PreviewRefused { app_id, result };
+    // Only fixes the app can apply here (not the helper, not a download): the lock holds in
+    // the worker too, whatever a caller sends.
+    if !picks.iter().all(|p| {
+        page.fixes
+            .iter()
+            .any(|f| f.key == p.variant && f.offer == Offer::Selectable)
+    }) {
+        emit(refused(vm::not_available(lang)));
+        return;
+    }
     match flow::plan(g, app_id, picks) {
         Err(e) => emit(refused(vm::game_refusal(&e, lang))),
         Ok(Lookup::Read {
@@ -547,6 +583,7 @@ fn plan(
             ..
         }) => match picked.planned {
             Err(e) => emit(refused(vm::plan_refusal(&e, lang))),
+            Ok(planned) if !applicable(&planned) => emit(refused(vm::not_available(lang))),
             Ok(planned) => {
                 let env = g.env();
                 let launch = flow::launch_view(env.sys, env.install, planned.preview());
@@ -560,10 +597,21 @@ fn plan(
         },
         // The game reads differently now (another build, no Topo): the page is the answer.
         Ok(_) => {
+            emit(Event::Result(vm::stale(lang)));
             emit(Event::Game(page));
-            emit(refused(vm::stale(lang)));
         }
     }
+}
+
+/// Whether the app can apply a plan in this slice: no firewall rule (the elevated helper,
+/// P5-5c) and no package file (a download, P5-5b).
+fn applicable(p: &Planned) -> bool {
+    let pv = p.preview();
+    pv.firewall.is_none()
+        && pv
+            .ops
+            .iter()
+            .all(|o| o.profile.is_some() || o.source.is_none())
 }
 
 /// Applies the plan the window rendered: store, check, apply. Nothing is applied that was not
@@ -635,29 +683,38 @@ fn revert_preview(
     match flow::revert_preview(g, txn) {
         Ok((p, shown)) => {
             let app = vm::app_of(&p.status);
-            let dialog = vm::revert_vm(&p, g.env().install, changed, lang);
-            session.pending.revert = Some((shown, app));
+            session.nonce += 1;
+            let nonce = session.nonce;
+            let dialog = vm::revert_vm(&p, g.env().install, changed, nonce, lang);
+            // An undo that needs the administrator prompt is not available in the app yet
+            // (P5-5c): no token is kept, so no confirm can reach `flow::revert`.
+            if p.prompt.is_none() {
+                session.pending.revert = Some((shown, app, nonce));
+            }
             emit(Event::Dialog(Box::new(dialog)));
         }
         Err(gate) => emit(Event::Result(vm::gate(&gate, lang))),
     }
 }
 
+/// Undoes the transaction of the dialog the user confirmed (`nonce`). A confirm of any other
+/// dialog (an older one, or a second click queued behind a preview that was refreshed) writes
+/// nothing: the current preview is shown again and the user confirms that one.
 fn revert(
     g: &Guarded<'_>,
     txn: &TxnId,
+    nonce: u64,
     lang: Lang,
     session: &mut Session,
     emit: &mut dyn FnMut(Event),
 ) {
-    let Some((shown, app)) = session
+    let ok = session
         .pending
         .revert
-        .take()
-        .filter(|(s, _)| s.txn() == *txn)
-    else {
-        // No preview of this transaction was shown: show it first.
-        revert_preview(g, txn, false, lang, session, emit);
+        .as_ref()
+        .is_some_and(|(s, _, n)| s.txn() == *txn && *n == nonce);
+    let Some((shown, app, _)) = ok.then(|| session.pending.revert.take()).flatten() else {
+        revert_preview(g, txn, true, lang, session, emit);
         return;
     };
     match flow::revert(g, shown) {
@@ -690,8 +747,10 @@ fn forget_preview(
     match flow::forget_preview(g, txn) {
         Ok((p, shown)) => {
             let app = vm::app_of(&p.status);
-            let dialog = vm::forget_vm(&p, g.env().install, changed, lang);
-            session.pending.forget = Some((shown, app));
+            session.nonce += 1;
+            let nonce = session.nonce;
+            let dialog = vm::forget_vm(&p, g.env().install, changed, nonce, lang);
+            session.pending.forget = Some((shown, app, nonce));
             emit(Event::Dialog(Box::new(dialog)));
         }
         Err(gate) => emit(Event::Result(vm::gate(&gate, lang))),
@@ -701,17 +760,18 @@ fn forget_preview(
 fn forget(
     g: &Guarded<'_>,
     txn: &TxnId,
+    nonce: u64,
     lang: Lang,
     session: &mut Session,
     emit: &mut dyn FnMut(Event),
 ) {
-    let Some((shown, app)) = session
+    let ok = session
         .pending
         .forget
-        .take()
-        .filter(|(s, _)| s.txn() == *txn)
-    else {
-        forget_preview(g, txn, false, lang, session, emit);
+        .as_ref()
+        .is_some_and(|(s, _, n)| s.txn() == *txn && *n == nonce);
+    let Some((shown, app, _)) = ok.then(|| session.pending.forget.take()).flatten() else {
+        forget_preview(g, txn, true, lang, session, emit);
         return;
     };
     match flow::forget(g, shown) {

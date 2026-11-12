@@ -119,3 +119,196 @@ fn vw3_an_apply_that_did_nothing_or_was_rolled_back_says_so() {
     );
     assert_eq!(r.notice.title, "Another change comes first");
 }
+
+// ---------- table-driven: every warning, shadow and refusal says something calm ----------
+
+use rerun_core::detect::steam::AppState;
+use rerun_core::exec::SteamGone;
+use rerun_core::hw::SacState;
+use rerun_core::path::RelPath;
+use rerun_core::policy::root::Shadow;
+use rerun_core::topo::Warning;
+
+fn rel(s: &str) -> RelPath {
+    RelPath::parse(s).unwrap()
+}
+
+#[test]
+fn vw4_every_warning_and_shadow_has_words_in_both_languages() {
+    use rerun_core::catalog::model::GpuRequirement;
+    let sac = |state| Warning::SmartAppControl { state };
+    let w: Vec<(Warning, Msg, bool)> = vec![
+        (Warning::NeedsRetest, Msg::WarnNeedsRetest, false),
+        (
+            Warning::WhenUnknown { issue: "i".into() },
+            Msg::WarnWhenUnknown,
+            true,
+        ),
+        (
+            Warning::AntiCheat {
+                issue: "i".into(),
+                variant: "v".into(),
+                step: StepKind::Package,
+            },
+            Msg::WarnAntiCheat,
+            true,
+        ),
+        (
+            Warning::SteamInput { issue: "i".into() },
+            Msg::WarnSteamInput,
+            true,
+        ),
+        (sac(SacState::Enforce), Msg::WarnSacOn, false),
+        (sac(SacState::Evaluation), Msg::WarnSacEvaluation, false),
+        (sac(SacState::Unknown), Msg::WarnSacUnknown, false),
+        (
+            Warning::SteamPerUserExe {
+                exe: rel("game.exe"),
+            },
+            Msg::WarnSteamPerUser,
+            true,
+        ),
+        (
+            Warning::SignedExe {
+                exe: rel("game.exe"),
+            },
+            Msg::WarnSignedExe,
+            true,
+        ),
+        (
+            Warning::GpuPreferenceSet {
+                exe: rel("game.exe"),
+                by: None,
+            },
+            Msg::WarnGpuSet,
+            true,
+        ),
+        (
+            Warning::RequiresGpu {
+                package: "p".into(),
+                needs: GpuRequirement::Vulkan,
+            },
+            Msg::WarnRequiresGpu,
+            true,
+        ),
+    ];
+    for lang in Lang::ALL {
+        for (warning, msg, detail) in &w {
+            let v = super::warning_vm(warning, lang).expect("says something");
+            assert_eq!(v.text, t(lang, *msg).as_ref(), "{warning:?}");
+            assert_eq!(v.detail.is_some(), *detail, "{warning:?}");
+            assert_eq!(v.badge.word, t(lang, Msg::WarningWord));
+        }
+        assert!(super::warning_vm(&sac(SacState::Off), lang).is_none());
+        let at = escape::path(r"C:\x").into_owned();
+        let shadows = [
+            (
+                Shadow::Copy {
+                    root: 0,
+                    file: rel("a.ini"),
+                    copy: at.clone(),
+                },
+                Msg::WarnVsCopy,
+            ),
+            (
+                Shadow::Link {
+                    root: 0,
+                    at: at.clone(),
+                },
+                Msg::WarnVsLink,
+            ),
+            (
+                Shadow::Unchecked {
+                    root: 0,
+                    why: escape::text("no").into_owned(),
+                    at: None,
+                },
+                Msg::WarnVsUnchecked,
+            ),
+        ];
+        for (s, m) in &shadows {
+            let v = super::shadow_vm(s, lang);
+            assert_eq!(v.text, t(lang, *m).as_ref());
+            assert!(v.detail.is_some());
+        }
+    }
+}
+
+#[test]
+fn vw5_every_refusal_has_its_message_and_keeps_or_refreshes_the_page() {
+    let shown = |s: &str| escape::text(s).into_owned();
+    // (refusal, title, the page is read again)
+    let table: Vec<(Refusal, Msg, bool)> = vec![
+        (Refusal::Busy(shown("g")), Msg::RefBusyTitle, false),
+        (Refusal::Unchecked(shown("g")), Msg::RefBusyTitle, false),
+        (Refusal::JournalBusy, Msg::RefJournalBusyTitle, false),
+        (Refusal::Blocked { txn: txn() }, Msg::RefBlockedTitle, false),
+        (
+            Refusal::Interrupted { txn: txn() },
+            Msg::RefOrderTitle,
+            false,
+        ),
+        (Refusal::Later { txn: txn() }, Msg::RefOrderTitle, false),
+        (Refusal::Held { txn: txn() }, Msg::RefOrderTitle, false),
+        (
+            Refusal::HeldChange { txn: txn() },
+            Msg::RefOrderTitle,
+            false,
+        ),
+        (
+            Refusal::SlotTaken {
+                txn: txn(),
+                op: 1,
+                path: shown("d.dll"),
+                package: shown("p"),
+            },
+            Msg::RefSlotTitle,
+            false,
+        ),
+        (
+            Refusal::CleanupPending { txn: txn() },
+            Msg::RefCleanupTitle,
+            false,
+        ),
+        // Steam busy keeps the page and the selection: try again when Steam has finished.
+        (
+            Refusal::Steam {
+                app_id: 1,
+                state: AppState::UpdatePending,
+            },
+            Msg::RefSteamTitle,
+            false,
+        ),
+        (
+            Refusal::SteamGone {
+                app_id: 1,
+                gone: SteamGone::NoManifest,
+            },
+            Msg::RefSteamTitle,
+            false,
+        ),
+        (
+            Refusal::SteamManifest { app_id: 1 },
+            Msg::RefSteamTitle,
+            false,
+        ),
+        (Refusal::GameChanged(shown("g")), Msg::RefStaleTitle, true),
+        (Refusal::Mismatch { op: 1 }, Msg::RefStaleTitle, true),
+        (Refusal::MainExe(shown("g")), Msg::RefStaleTitle, true),
+        (Refusal::Changed { txn: txn() }, Msg::RefStaleTitle, true),
+        (Refusal::NeedsHelper, Msg::RefAdminTitle, false),
+        (
+            Refusal::Forgotten { txn: txn() },
+            Msg::RefNothingTitle,
+            true,
+        ),
+    ];
+    for lang in Lang::ALL {
+        for (r, title, refresh) in &table {
+            let v = refusal(r, lang);
+            assert_eq!(v.notice.title, t(lang, *title), "{r}");
+            assert_eq!(v.refresh, *refresh, "{r}");
+            assert!(!v.notice.body.is_empty() && !v.notice.details.is_empty());
+        }
+    }
+}

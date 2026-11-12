@@ -554,7 +554,10 @@ pub enum Msg {
     /// The plan needs no administrator rights.
     PreviewAdminNo,
     /// What undo does with a plan.
-    PreviewUndo,
+    PreviewUndo {
+        /// The plan writes a launch profile.
+        profile: bool,
+    },
     /// Before an apply.
     PreviewCloseGame,
     /// While a write runs.
@@ -746,6 +749,8 @@ pub enum Msg {
     CardNote {
         /// A number.
         n: usize,
+        /// The transaction writes a launch profile.
+        profile: bool,
     },
     /// A label.
     CardGame,
@@ -943,6 +948,8 @@ pub enum Msg {
     RefNoPreviewTitle,
     /// A refusal.
     RefNoPreviewBody,
+    /// The plan needs administrator rights.
+    PreviewAdminYes,
 }
 
 /// The text of `m` in `lang`.
@@ -1241,7 +1248,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         PreviewGameFolder => "Game folder",
         PreviewChecksum => "Plan checksum",
         PreviewAdminNo => "Administrator rights: not needed",
-        PreviewUndo => "Undo takes this whole plan back together, the launch profile included. Before it restores anything, Rerun shows what it will do.",
+        PreviewUndo { profile } => return format!("Undo takes this whole plan back together{}. Before it restores anything, Rerun shows what it will do.", if profile { ", the launch profile included" } else { "" }).into(),
         PreviewCloseGame => "Close the game before you apply.",
         PreviewApplying => "Applying. Rerun finishes this before the window closes.",
         BtnApply => "Apply",
@@ -1328,7 +1335,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         LaunchNotShowable => "The path of Rerun's install folder holds characters that cannot be shown as they are. Move Rerun to another path.",
         LaunchCopy => "Copy launch option",
         LaunchCopied => "Copied",
-        CardNote { n } => return (if n == 1 { "This card holds 1 change. Undo takes it back, the launch profile included.".to_owned() } else { format!("This card holds {n} changes. Undo takes them all back together, the launch profile included. To change one of them later, undo the card and apply again.") }).into(),
+        CardNote { n, profile } => { let inc = if profile { ", the launch profile included" } else { "" }; return (if n == 1 { format!("This card holds 1 change. Undo takes it back{inc}. To change it later, undo the card and apply again.") } else { format!("This card holds {n} changes. Undo takes them all back together{inc}. To change one of them later, undo the card and apply again.") }).into() }
         CardGame => "Game",
         CardTxn => "Transaction",
         StateApplied => "Applied",
@@ -1354,7 +1361,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         FateKept => "Stays for another change that relies on it",
         FateNotReached => "Not reached: undo stops earlier",
         UndoHalt { op } => return format!("Undo would stop at change {op} and leave the rest as it is. The reason is below.").into(),
-        UndoCleanup { n, in_use } => return (format!("Undo also deletes {n} copies Rerun made; {in_use} are in use now and are deleted once they are free.")).into(),
+        UndoCleanup { n, in_use } => { let copies = if n == 1 { "1 copy".to_owned() } else { format!("{n} copies") }; let is = if in_use == 1 { "1 is".to_owned() } else { format!("{in_use} are") }; return format!("Undo also deletes {copies} Rerun made; {is} in use now and deleted once free.").into() }
         UndoEmpty => "This record changed nothing. Undo only closes it.",
         UndoPrompt => "Part of this change needs administrator rights. The app cannot undo it yet; that comes with a later version.",
         UndoAfter => "After the undo",
@@ -1423,6 +1430,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         RefPlanBody => "Nothing was changed. The reason is below.",
         RefNoPreviewTitle => "The preview is no longer current",
         RefNoPreviewBody => "Select the fixes again and apply once the preview shows. Nothing was changed.",
+        PreviewAdminYes => "Administrator rights: needed. The app cannot apply this yet.",
     };
     Cow::Borrowed(s)
 }
@@ -1733,7 +1741,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         PreviewGameFolder => "Spielordner",
         PreviewChecksum => "Prüfsumme des Plans",
         PreviewAdminNo => "Administratorrechte: nicht nötig",
-        PreviewUndo => "Rückgängig nimmt diesen ganzen Plan gemeinsam zurück, das Startprofil eingeschlossen. Bevor Rerun etwas wiederherstellt, zeigt es dir, was es tun wird.",
+        PreviewUndo { profile } => return format!("Rückgängig nimmt diesen ganzen Plan gemeinsam zurück{}. Bevor Rerun etwas wiederherstellt, zeigt es dir, was es tun wird.", if profile { ", das Startprofil eingeschlossen" } else { "" }).into(),
         PreviewCloseGame => "Schliesse das Spiel, bevor du anwendest.",
         PreviewApplying => "Wird angewendet. Rerun beendet das, bevor sich das Fenster schliesst.",
         BtnApply => "Anwenden",
@@ -1820,7 +1828,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         LaunchNotShowable => "Der Pfad zum Installationsordner von Rerun enthält Zeichen, die sich nicht unverändert zeigen lassen. Verschiebe Rerun an einen anderen Pfad.",
         LaunchCopy => "Startoption kopieren",
         LaunchCopied => "Kopiert",
-        CardNote { n } => return (if n == 1 { "Diese Karte enthält 1 Änderung. Rückgängig nimmt sie zurück, das Startprofil eingeschlossen.".to_owned() } else { format!("Diese Karte enthält {n} Änderungen. Rückgängig nimmt sie alle gemeinsam zurück, das Startprofil eingeschlossen. Um eine davon später zu ändern, mache die Karte rückgängig und wende neu an.") }).into(),
+        CardNote { n, profile } => { let inc = if profile { ", das Startprofil eingeschlossen" } else { "" }; return (if n == 1 { format!("Diese Karte enthält 1 Änderung. Rückgängig nimmt sie zurück{inc}. Um sie später zu ändern, mache die Karte rückgängig und wende neu an.") } else { format!("Diese Karte enthält {n} Änderungen. Rückgängig nimmt sie alle gemeinsam zurück{inc}. Um eine davon später zu ändern, mache die Karte rückgängig und wende neu an.") }).into() }
         CardGame => "Spiel",
         CardTxn => "Vorgang",
         StateApplied => "Angewendet",
@@ -1846,7 +1854,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         FateKept => "Bleibt für eine andere Änderung, die sich darauf verlässt",
         FateNotReached => "Nicht erreicht: Rückgängig hält vorher an",
         UndoHalt { op } => return format!("Rückgängig würde bei Änderung {op} anhalten und den Rest lassen, wie er ist. Der Grund steht unten.").into(),
-        UndoCleanup { n, in_use } => return (format!("Rückgängig löscht auch {n} Kopien, die Rerun gemacht hat; {in_use} sind gerade in Gebrauch und werden gelöscht, sobald sie frei sind.")).into(),
+        UndoCleanup { n, in_use } => { let copies = if n == 1 { "1 Kopie".to_owned() } else { format!("{n} Kopien") }; let is = if in_use == 1 { "1 ist".to_owned() } else { format!("{in_use} sind") }; return format!("Rückgängig löscht auch {copies}, die Rerun gemacht hat; {is} gerade in Gebrauch und wird gelöscht, sobald frei.").into() }
         UndoEmpty => "Dieser Eintrag hat nichts geändert. Rückgängig schliesst ihn nur ab.",
         UndoPrompt => "Ein Teil dieser Änderung braucht Administratorrechte. Die App kann ihn noch nicht rückgängig machen; das kommt mit einer späteren Version.",
         UndoAfter => "Nach dem Rückgängigmachen",
@@ -1915,6 +1923,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         RefPlanBody => "Es wurde nichts geändert. Der Grund steht unten.",
         RefNoPreviewTitle => "Die Vorschau ist nicht mehr aktuell",
         RefNoPreviewBody => "Wähle die Fixes nochmals und wende an, sobald die Vorschau da ist. Es wurde nichts geändert.",
+        PreviewAdminYes => "Administratorrechte: nötig. Die App kann das noch nicht anwenden.",
     };
     Cow::Borrowed(s)
 }

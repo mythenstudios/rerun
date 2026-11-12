@@ -72,7 +72,7 @@ struct State {
     game_cards: Vec<TxnCardVm>,
     applied_cards: Vec<TxnCardVm>,
     /// The open undo or forget dialog.
-    dialog: Option<(DialogKind, TxnId)>,
+    dialog: Option<(DialogKind, TxnId, u64)>,
     /// The card button that opened it (2 * index, +1 for forget): the focus returns there.
     opener: i32,
 }
@@ -419,7 +419,10 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         };
         ui.set_page(page);
         ui.set_game_open(false);
-        let st = st.borrow();
+        // No game page is open: a late preview or page for it is ignored, nothing is planned.
+        let mut st = st.borrow_mut();
+        st.game = None;
+        st.page = None;
         match page {
             1 => st.worker.send(Job::Status),
             3 => {
@@ -580,7 +583,7 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 }
             }
             Event::Dialog(d) => {
-                st.dialog = Some((d.kind, d.txn));
+                st.dialog = Some((d.kind, d.txn, d.nonce));
                 ui.set_dialog(dialog_data(&d));
                 ui.set_dialog_open(true);
                 let m = ui.global::<Modal>();
@@ -1001,8 +1004,14 @@ fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             return;
         };
         let st = st.borrow();
+        // One apply at a time, and only for a preview the worker confirmed: a key repeat or an
+        // accessibility action on a disabled button sends nothing.
+        let p = ui.get_preview();
+        if ui.global::<Modal>().get_working() || !p.ready || !p.can_apply || p.hash != hash {
+            return;
+        }
         ui.global::<Modal>().set_working(true);
-        let mut p = ui.get_preview();
+        let mut p = p;
         p.ready = false;
         ui.set_preview(p);
         st.worker.send(Job::Apply {
@@ -1024,13 +1033,18 @@ fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             return;
         };
         let st = st.borrow();
-        let Some((kind, txn)) = st.dialog else {
+        let Some((kind, txn, nonce)) = st.dialog else {
             return;
         };
+        // Nothing while a write is in flight, nothing for a dialog that cannot be confirmed; the
+        // worker also refuses a confirm that does not carry the shown dialog's nonce.
+        if ui.global::<Modal>().get_working() || !ui.get_dialog().can_confirm {
+            return;
+        }
         ui.global::<Modal>().set_working(true);
         st.worker.send(match kind {
-            DialogKind::Undo => Job::Revert { txn },
-            DialogKind::Forget => Job::Forget { txn },
+            DialogKind::Undo => Job::Revert { txn, nonce },
+            DialogKind::Forget => Job::Forget { txn, nonce },
         });
     });
 
