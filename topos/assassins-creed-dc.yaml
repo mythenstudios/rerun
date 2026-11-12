@@ -3,14 +3,15 @@ format: 1
 id: assassins-creed-dc
 title: "Assassin's Creed: Director's Cut Edition"
 status: active
-rev: 1
+rev: 2
 tested_on: [x64]
 
 match:
   steam_appid: 15100          # confirmed by the dev scan (app 15100 installed in that folder)
   exes:
-    - { path: "AssassinsCreed_Dx9.exe",  sha1: "A9EA476E70F076709CCA59A802E26EC894432120", sha256: "2FA8D50C60398CC249C6D908DE46B15F48E445DD0C605B5956E94FA2F445A713", api: d3d9 }
+    # Dx10 first: the first matched entry is the plan's main executable, and the launch starts Dx10.exe (below).
     - { path: "AssassinsCreed_Dx10.exe", sha1: "601475FD5EFA02BBAE80D1C06DFA25A0A1E7FD2F", sha256: "576A04841C37BE5A819974ABD59EA3ECD818F0BC36ACAB71C62EE0313DCA0129", api: d3d10 }
+    - { path: "AssassinsCreed_Dx9.exe",  sha1: "A9EA476E70F076709CCA59A802E26EC894432120", sha256: "2FA8D50C60398CC249C6D908DE46B15F48E445DD0C605B5956E94FA2F445A713", api: d3d9 }
 
 # Launch observed on the dev PC (P4-13 S1, 2026-11-11): steam.exe starts AssassinsCreed_Game.exe (a D3D detector, no
 # Ubisoft Connect), which runs Detection\Detection.exe and then starts AssassinsCreed_Dx10.exe without a choice dialog.
