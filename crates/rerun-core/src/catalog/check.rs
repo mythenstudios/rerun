@@ -1,14 +1,14 @@
 //! The form rules of the typed Topo and package that their types do not carry: the rules of
 //! `schema/topo.schema.json` and `schema/package.schema.json` (parity test against the same
 //! fixtures, ADR 0005) plus a few loader rules the schema cannot express (unique issue and
-//! variant IDs, the registry vendor deny list, unique value names, the qword range, download
-//! provenance). The rules in force now of the planners (token allowlist, INI value rule, the
+//! variant IDs, one variant ID names one fix across issues (P5-4), the registry vendor deny
+//! list, unique value names, the qword range, download provenance). The rules in force now of the planners (token allowlist, INI value rule, the
 //! game folder itself) stay the planners'.
 //!
 //! [`Rules::Source`] is a file of `topos/` or `packages/`: `TODO` only in a draft.
 //! [`Rules::Release`] is an entry of the signed index: no draft, no `TODO` anywhere.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::model::{
     ArchList, Compare, FirewallRuleSpec, Id, LaaPatchStep, Launch, Method, Package, PackageOption,
@@ -318,6 +318,7 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
             }
         }
     }
+    one_fix_per_id(t)?;
     if let Some(tips) = &t.tips {
         for (i, o) in tips.launch_options.iter().enumerate() {
             let b = o.as_bytes();
@@ -352,6 +353,40 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
         )?;
     }
     status_rule(t, t.status, rules)
+}
+
+/// P5-4: one variant ID names one fix across the Topo's issues. Every copy of an ID has the
+/// same `kind` and the same `steps` (in the same order), what the engine plans and how the fix
+/// is shown; the evidence (`status`, `sources`) and the `tradeoffs` stay per issue. No
+/// counter-rule: two IDs may hold the same steps. The error names the later copy's differing
+/// field and the issue of the first copy; the callers name the Topo.
+fn one_fix_per_id(t: &Topo) -> R {
+    let mut first: BTreeMap<&Id, (usize, usize)> = BTreeMap::new();
+    for (i, issue) in t.issues.iter().enumerate() {
+        for (j, v) in issue.variants.iter().enumerate() {
+            let Some(&(fi, fj)) = first.get(&v.id) else {
+                first.insert(&v.id, (i, j));
+                continue;
+            };
+            let f = &t.issues[fi].variants[fj];
+            let field = if f.kind != v.kind {
+                "kind"
+            } else if f.steps != v.steps {
+                "steps"
+            } else {
+                continue;
+            };
+            return Err(err(
+                &format!("issues[{i}].variants[{j}].{field}"),
+                format!(
+                    "variant {} differs in {field} from its copy under issue {} \
+                     (issues[{fi}].variants[{fj}]): one variant ID names one fix",
+                    v.id, t.issues[fi].id
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn launch(l: &Launch) -> R {

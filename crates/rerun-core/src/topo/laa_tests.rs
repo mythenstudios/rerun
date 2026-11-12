@@ -755,12 +755,14 @@ fn la11_a_patch_and_a_rule_of_one_exe_in_one_plan() {
     let sys = sys_with(&exe);
     let mut v: serde_json::Value =
         serde_json::to_value(topo_with(&exe, "Game.exe", false)).unwrap();
+    // Another variant ID: one ID names one fix across issues (P5-4).
+    v["issues"][1]["variants"][0]["id"] = serde_json::json!("block");
     v["issues"][1]["variants"][0]["steps"] =
         serde_json::json!([{"firewall_rule": {"exe": "Game.exe", "direction": "out"}}]);
     let t: Topo = serde_json::from_value(v).unwrap();
     check::topo(&t, Rules::Source).unwrap();
     refused(
-        plan_picks(&sys, &t, &["memory/laa", "again/laa"]),
+        plan_picks(&sys, &t, &["memory/laa", "again/block"]),
         "plan and apply the firewall rule on its own first, then laa_patch in a second plan",
     );
 }

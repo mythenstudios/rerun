@@ -216,6 +216,48 @@ fn drafts_are_left_out_and_nothing_released_needs_one() {
     );
 }
 
+/// P5-4: one variant ID names one fix across issues. A copy under a second issue with the
+/// same steps and kind builds (its evidence may differ); a copy with other steps or another kind
+/// fails the build, naming the file (= the Topo), the variant and the field.
+#[test]
+fn a_variant_id_with_other_steps_or_kind_under_another_issue_fails_the_build() {
+    let copy = |status: &str, kind: &str, steps: &str| {
+        format!(
+            r#"  - id: crash
+    title: "Crash"
+    variants:
+      - id: fix-pack
+        status: {status}
+        kind: {kind}
+        steps: {steps}
+"#
+        )
+    };
+    let same = r#"[{ package: fix-pack }, { ini_set: { file: "game.ini", values: [{ section: Display, key: Width, value: "1920" }] } }]"#;
+    let build_with = |extra: String| {
+        build(
+            &[f("a-game.yaml", &format!("{TOPO}{extra}"))],
+            &[f("fix-pack.yaml", PACKAGE)],
+            1,
+            ISSUED,
+        )
+    };
+    let b = build_with(copy("verified", "fix", same)).unwrap();
+    assert_eq!(b.index.topos[0].issues.len(), 2);
+    for (extra, field) in [
+        (copy("reported", "fix", "[{ package: fix-pack }]"), "steps"),
+        (copy("reported", "enhancement", same), "kind"),
+    ] {
+        let e = build_with(extra).unwrap_err();
+        assert!(
+            e.starts_with(&format!(
+                "a-game.yaml: issues[1].variants[0].{field}: variant fix-pack differs in {field}"
+            )),
+            "{e}"
+        );
+    }
+}
+
 #[test]
 fn issued_and_seq_are_checked() {
     assert!(build(&[], &[], 0, ISSUED).is_err());

@@ -6,7 +6,8 @@
 //!   before a Rerun folder that cannot be opened (control: that folder alone is
 //!   `Gate::AppDir`); a passed guard never creates Rerun's folder.
 //! - FF1 to FF3 the fixes of a report: one fix per variant ID with one `Solved` per issue that
-//!   names it (`when` per issue), the refusal per variant kept, warned kinds merged once.
+//!   names it (`when` per issue), the refusal per variant kept apart from `when`, the copies
+//!   of one fix (identical by the loader, P5-4) speak once.
 //! - FL1 the library without Steam: the Steam event, no library, the requested app IDs missing
 //!   once each in the order asked; a `Break` stops the stream and is returned.
 //! - FL2 (moved from `rerun-cli`) the counts: a failed game candidate is an issue whatever
@@ -195,21 +196,21 @@ fn ff2_the_refusal_per_variant_is_kept_apart_from_when() {
     assert_eq!(f[1].refused, None);
 }
 
+/// The loader makes every copy of an ID the same fix (P5-4), and the engine assesses a variant
+/// by its steps only: the copies carry the same refusal and warnings, which the fix holds once.
 #[test]
-fn ff3_a_drift_between_copies_refuses_and_merges_warnings() {
+fn ff3_the_copies_of_one_fix_speak_once() {
+    crate::catalog::check::topo(&topo(), crate::catalog::check::Rules::Release).unwrap();
     let ac = Some(Refusal::AntiCheat(StepKind::CompatLayer));
+    let warned = vec![StepKind::IniSet, StepKind::RegistrySet];
     let f = fixes(&report(
         [Tri::Yes, Tri::Unknown],
-        &[
-            (0, 0, None, vec![StepKind::IniSet]),
-            (1, 0, ac, vec![StepKind::IniSet, StepKind::RegistrySet]),
-        ],
+        &[(0, 0, ac, warned.clone()), (1, 0, ac, warned.clone())],
     ));
-    assert_eq!(
-        f[0].refused, ac,
-        "fail closed: the first refusal of any copy"
-    );
-    assert_eq!(f[0].warned, [StepKind::IniSet, StepKind::RegistrySet]);
+    assert_eq!(f[0].refused, ac);
+    assert_eq!(f[0].warned, warned, "once, not per copy");
+    let when: Vec<Tri> = f[0].solves.iter().map(|s| s.when).collect();
+    assert_eq!(when, [Tri::Yes, Tri::Unknown], "when stays per issue");
 }
 
 #[test]

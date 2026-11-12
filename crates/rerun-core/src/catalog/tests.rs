@@ -794,3 +794,60 @@ fn supports_exe_sha1_covers_the_topos_builds() {
     i.packages[0].supports_exe_sha1.push(Hex::new([0x22; 20]));
     super::check_index(&i).unwrap();
 }
+
+/// P5-4: one variant ID names one fix across the issues of a Topo. Copies with the same `kind`
+/// and `steps` load (their `status`, `sources` and `tradeoffs` may differ); a copy with other
+/// steps or another kind is refused at load and in the index, naming the Topo, the variant
+/// and the field. No counter-rule: two IDs may hold the same steps.
+#[test]
+fn one_variant_id_names_one_fix_across_issues() {
+    use super::check::{self, Rules};
+    use super::model::{Source, SourceType};
+
+    let mut i = index(5);
+    let first = i.topos[0].issues[0].clone();
+    let mut copy = first.clone();
+    copy.id = id("crash");
+    copy.title = "Crash".into();
+    copy.variants[0].status = VariantStatus::Verified;
+    copy.variants[0].tradeoffs = vec!["Slower start".into()];
+    copy.variants[0].sources = vec![Source {
+        kind: SourceType::Repo,
+        url: "https://github.com/owner/fix-pack".into(),
+    }];
+    // Another ID with the same steps: no counter-rule.
+    let mut twin = copy.variants[0].clone();
+    twin.id = id("same-steps");
+    copy.variants.push(twin);
+    i.topos[0].issues.push(copy);
+    for rules in [Rules::Source, Rules::Release] {
+        assert_eq!(check::topo(&i.topos[0], rules), Ok(()), "{rules:?}");
+    }
+    super::check_index(&i).unwrap();
+
+    let mut steps = i.clone();
+    steps.topos[0].issues[1].variants[0]
+        .steps
+        .push(TopoStep::Package(id("fix-pack")));
+    let mut kind = i.clone();
+    kind.topos[0].issues[1].variants[0].kind = Kind::Enhancement;
+    for (bad, field) in [(&steps, "steps"), (&kind, "kind")] {
+        for rules in [Rules::Source, Rules::Release] {
+            let e = check::topo(&bad.topos[0], rules).unwrap_err();
+            assert_eq!(e.at, format!("issues[1].variants[0].{field}"), "{rules:?}");
+            assert_eq!(
+                e.what,
+                format!(
+                    "variant fix-pack differs in {field} from its copy under issue stutter \
+                     (issues[0].variants[0]): one variant ID names one fix"
+                )
+            );
+        }
+        let e = super::check_index(bad).unwrap_err().to_string();
+        assert!(
+            e.contains("topo a-game: issues[1].variants[0].")
+                && e.contains("variant fix-pack differs in"),
+            "{e}"
+        );
+    }
+}

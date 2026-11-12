@@ -241,19 +241,21 @@ pub struct Solved {
 pub struct Fix {
     /// The variant ID.
     pub variant: String,
-    /// `fix` or `enhancement` (of the first issue that names it).
+    /// `fix` or `enhancement` (the same in every copy, P5-4).
     pub kind: Kind,
     /// Every issue that names the ID, in the Topo's order.
     pub solves: Vec<Solved>,
-    /// Why the variant cannot be planned here (anti-cheat, the launch); the first refusal
-    /// among its issues, so a drift between two copies refuses (fail closed).
+    /// Why the variant cannot be planned here (anti-cheat, the launch). Per variant: the engine
+    /// assesses a variant by its steps only, and every copy has the same steps (P5-4). A refusal
+    /// of one issue (`when`) is [`Solved::when`].
     pub refused: Option<Refusal>,
-    /// Step kinds the anti-cheat rule warns about, over every copy.
+    /// Step kinds the anti-cheat rule warns about (per variant, as `refused`).
     pub warned: Vec<StepKind>,
 }
 
-/// The fixes of a report, grouped by variant ID in the order of first appearance. Until the
-/// loader requires identical steps for one ID (P5-4), copies are grouped by their ID alone.
+/// The fixes of a report, grouped by variant ID in the order of first appearance. The loader
+/// makes every copy of an ID identical in `kind` and `steps` (P5-4, `catalog::check`), so the
+/// first copy speaks for the fix and later copies add only the issue they solve.
 pub fn fixes(r: &OwnedReport) -> Vec<Fix> {
     let mut out: Vec<Fix> = Vec::new();
     for i in &r.issues {
@@ -267,15 +269,11 @@ pub fn fixes(r: &OwnedReport) -> Vec<Fix> {
             };
             match out.iter_mut().find(|f| f.variant == id) {
                 Some(f) => {
+                    debug_assert!(
+                        f.kind == v.variant.kind && f.refused == v.refused && f.warned == v.warned,
+                        "the loader makes every copy of {id} the same fix (P5-4)"
+                    );
                     f.solves.push(solved);
-                    if f.refused.is_none() {
-                        f.refused = v.refused;
-                    }
-                    for k in &v.warned {
-                        if !f.warned.contains(k) {
-                            f.warned.push(*k);
-                        }
-                    }
                 }
                 None => out.push(Fix {
                     variant: id,
