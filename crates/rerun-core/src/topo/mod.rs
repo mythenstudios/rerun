@@ -162,8 +162,21 @@ pub fn read_game_with(
     topo: &Topo,
     patched: &[crate::exec::PatchedExe],
 ) -> GameFacts {
-    let exes = topo
-        .matches
+    GameFacts {
+        exes: read_exes_with(game, topo, patched),
+        anti_cheat: read_anti_cheat(game, topo),
+    }
+}
+
+/// The executable half of [`read_game_with`]: every `match.exes` entry opened, parsed and
+/// hashed. The expensive half; a session cache may keep it while the files do not change
+/// (`flow::GameCache`, P5-3b).
+pub fn read_exes_with(
+    game: &GameDir<'_>,
+    topo: &Topo,
+    patched: &[crate::exec::PatchedExe],
+) -> Vec<ExeCheck> {
+    topo.matches
         .exes
         .iter()
         .map(|e| {
@@ -179,11 +192,12 @@ pub fn read_game_with(
                 sha256,
             }
         })
-        .collect();
-    GameFacts {
-        exes,
-        anti_cheat: anti_cheat::find(game, &anti_cheat_dirs(topo)),
-    }
+        .collect()
+}
+
+/// The anti-cheat half of [`read_game_with`]: a few directory listings, always read fresh.
+pub fn read_anti_cheat(game: &GameDir<'_>, topo: &Topo) -> AntiCheatScan {
+    anti_cheat::find(game, &anti_cheat_dirs(topo))
 }
 
 /// The folders the anti-cheat markers are looked for in besides the game folder: those of the

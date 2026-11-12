@@ -8,18 +8,25 @@
 //! on their parsed handles (an executable a live `laa_patch` changed still counts as its build,
 //! P4-10) and the anti-cheat markers. Retired Topos are listed, never chosen; exactly one of the
 //! others must match. `appinfo.vdf` is never read (L9). Nothing is stored, nothing created.
+//!
+//! A long-lived caller (the app's worker) may pass a [`GameCache`] to [`game_cached`]: it keeps
+//! what was read from a game's executables (the hashes, the expensive part) for as long as the
+//! files keep their identity, in memory for the session only (P5-3b). Planning and applying
+//! never use it: they read the files fresh.
 
 use crate::catalog::model::{Issue, Kind, Source, Variant, VariantStatus};
 use crate::catalog::store::StoreError;
 use crate::catalog::{Catalog, Topo};
+use crate::exec::PatchedExe;
 use crate::hw::{self, GpuArchTable, SystemProfile};
 use crate::path::{RelPath, RootPath};
-use crate::policy::root::{AppDir, GameDir};
+use crate::policy::root::{AppDir, GameDir, RootId};
 use crate::prim::GameRef;
+use crate::sys::fs::Metadata;
 use crate::topo::when::Tri;
 use crate::topo::{
-    self, AntiCheatState, EngineError, Facts, GameFacts, LaunchPlan, LaunchProblem, Refusal,
-    Report, Selection, StepKind,
+    self, AntiCheatState, EngineError, ExeCheck, Facts, GameFacts, LaunchPlan, LaunchProblem,
+    Refusal, Report, Selection, StepKind,
 };
 
 use super::{GameOpen, Guarded, IndexState, index_state, with_game};
@@ -97,11 +104,113 @@ pub enum GameRefusal {
     Engine(EngineError),
 }
 
+/// What a [`GameCache`] holds for one Topo of one game.
+#[derive(Debug)]
+struct CacheEntry {
+    app_id: u32,
+    topo: String,
+    /// The index the Topo comes from.
+    seq: u64,
+    game: RootId,
+    patched: Vec<PatchedExe>,
+    /// Identity of every `match.exes` file when it was read (`None`: not described).
+    files: Vec<Option<Metadata>>,
+    exes: Vec<ExeCheck>,
+}
+
+/// Session cache of what was read from the executables of a game folder (P5-3b, ADR 0027
+/// amendment): per app and Topo the [`ExeCheck`]s, valid while the index, the game folder, the
+/// live patches and every executable's identity (length, file ID, attributes, link count; the
+/// layer reports no timestamps) are the same. Held in memory by the caller for the session,
+/// never written anywhere; [`Self::clear`] on a rescan. It only spares the display a re-hash:
+/// a file changed in place without a change of length and file ID shows as before until the
+/// next rescan, and planning and applying read the files fresh (`flow::plan` takes no cache).
+#[derive(Debug, Default)]
+pub struct GameCache {
+    entries: Vec<CacheEntry>,
+    hits: u32,
+    reads: u32,
+}
+
+impl GameCache {
+    /// Forgets everything (a rescan).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// How often the executables were served from the cache.
+    pub fn hits(&self) -> u32 {
+        self.hits
+    }
+
+    /// How often the executables were read from the game folder (a first look, or a changed
+    /// identity).
+    pub fn reads(&self) -> u32 {
+        self.reads
+    }
+
+    fn facts(
+        &mut self,
+        game: &GameDir<'_>,
+        app_id: u32,
+        seq: u64,
+        topo: &Topo,
+        patched: &[PatchedExe],
+    ) -> GameFacts {
+        let files: Option<Vec<Option<Metadata>>> = topo
+            .matches
+            .exes
+            .iter()
+            .map(|e| game.dir().metadata(&e.path).ok())
+            .collect();
+        // Not describable: read fresh and keep nothing.
+        let Some(files) = files else {
+            self.reads += 1;
+            return topo::read_game_with(game, topo, patched);
+        };
+        let id = game.id();
+        let at = self
+            .entries
+            .iter()
+            .position(|c| c.app_id == app_id && c.topo == topo.id.as_str());
+        if let Some(i) = at {
+            let c = &self.entries[i];
+            if c.seq == seq && c.game == id && c.files == files && c.patched == patched {
+                self.hits += 1;
+                return GameFacts {
+                    exes: c.exes.clone(),
+                    anti_cheat: topo::read_anti_cheat(game, topo),
+                };
+            }
+        }
+        self.reads += 1;
+        let exes = topo::read_exes_with(game, topo, patched);
+        let entry = CacheEntry {
+            app_id,
+            topo: topo.id.to_string(),
+            seq,
+            game: id,
+            patched: patched.to_vec(),
+            files,
+            exes: exes.clone(),
+        };
+        match at {
+            Some(i) => self.entries[i] = entry,
+            None => self.entries.push(entry),
+        }
+        GameFacts {
+            exes,
+            anti_cheat: topo::read_anti_cheat(game, topo),
+        }
+    }
+}
+
 /// Looks up the Topo of `app_id` (module docs) and runs `f` on it if exactly one matches.
 /// Crate-internal behind [`super::game`] and `flow::plan` (P5-2a).
 pub(crate) fn with_topo<R>(
     g: &Guarded<'_>,
     app_id: u32,
+    cache: Option<&mut GameCache>,
     f: impl FnOnce(Matched<'_>) -> R,
 ) -> Result<Lookup<R>, GameRefusal> {
     let sys = g.env().sys;
@@ -124,9 +233,16 @@ pub(crate) fn with_topo<R>(
     with_game(sys, g.fr(), &GameRef::Steam(app_id), |game, steam_app| {
         // P4-10 (R5): an executable a live laa_patch changed still counts as its build.
         let patched = crate::exec::patched_now(dir, game.id());
+        let mut cache = cache;
         let read: Vec<(&Topo, GameFacts)> = topos
             .iter()
-            .map(|t| (*t, topo::read_game_with(game, t, &patched)))
+            .map(|t| {
+                let facts = match cache.as_deref_mut() {
+                    Some(c) => c.facts(game, app_id, catalog.seq(), t, &patched),
+                    None => topo::read_game_with(game, t, &patched),
+                };
+                (*t, facts)
+            })
             .collect();
         // Review follow-up 4: retired Topos are listed, never chosen.
         let (retired, selection) = topo::select(read);
@@ -312,7 +428,17 @@ pub struct GameView {
 
 /// The game `app_id` (module docs).
 pub fn game(g: &Guarded<'_>, app_id: u32) -> Result<GameView, GameRefusal> {
-    let lookup = with_topo(g, app_id, |m| {
+    game_cached(g, app_id, None)
+}
+
+/// [`game`], with the executables served from `cache` while their files keep their identity
+/// (and put into it otherwise).
+pub fn game_cached(
+    g: &Guarded<'_>,
+    app_id: u32,
+    cache: Option<&mut GameCache>,
+) -> Result<GameView, GameRefusal> {
+    let lookup = with_topo(g, app_id, cache, |m| {
         topo::report(m.topo, &m.facts()).map(|r| {
             let report = OwnedReport::from(r);
             let fixes = fixes(&report);

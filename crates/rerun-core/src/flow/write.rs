@@ -164,7 +164,7 @@ pub struct Picked {
 /// creates nothing.
 pub fn plan(g: &Guarded<'_>, app_id: u32, picks: &[Pick]) -> Result<Lookup<Picked>, GameRefusal> {
     let sys = g.env().sys;
-    with_topo(g, app_id, |m| {
+    with_topo(g, app_id, None, |m| {
         let t = m.topo;
         let index = *m.catalog.sha256();
         let planned = (|| {

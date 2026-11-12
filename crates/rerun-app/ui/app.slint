@@ -891,7 +891,6 @@ component LibraryPage inherits VerticalLayout {
 component GamePage inherits VerticalLayout {
     in property <bool> loading;
     in property <GameData> game;
-    in property <string> loading-title;
     callback back();
     spacing: Theme.s4;
     HorizontalLayout {
@@ -927,14 +926,11 @@ component GamePage inherits VerticalLayout {
     }
 
     PageTitle {
-        text: root.loading ? root.loading-title : root.game.title;
+        text: root.game.title;
         size: Theme.fs-hero;
     }
 
-    if root.loading: Muted {
-        text: Str.game-reading;
-    }
-    if !root.loading: HorizontalLayout {
+    HorizontalLayout {
         spacing: Theme.s3;
         accessible-role: AccessibleRole.text;
         accessible-label: root.game.hero-line;
@@ -967,7 +963,7 @@ component GamePage inherits VerticalLayout {
             }
         }
     }
-    if !root.loading && root.game.detail != "": Text {
+    if root.game.detail != "": Text {
         text: root.game.detail;
         color: Theme.muted;
         font-family: Theme.font-mono;
@@ -997,7 +993,7 @@ component GamePage inherits VerticalLayout {
             }
         }
     }
-    if !root.loading: VerticalLayout {
+    VerticalLayout {
         padding-top: Theme.s4;
         spacing: Theme.s4;
         Hairline {
@@ -1032,6 +1028,17 @@ component GamePage inherits VerticalLayout {
         }
     }
 
+    // The reading text holds the place of the problems and the fixes until they arrive.
+    if root.loading: VerticalLayout {
+        padding-top: Theme.s5;
+        min-height: Theme.s8 * 3;
+        accessible-role: AccessibleRole.text;
+        accessible-label: Str.game-reading;
+        Muted {
+            text: Str.game-reading;
+            accessible-role: none;
+        }
+    }
     if !root.loading && root.game.problems.length > 0: VerticalLayout {
         spacing: Theme.s3;
         padding-top: Theme.s5;
@@ -1469,7 +1476,6 @@ export component AppWindow inherits Window {
     in-out property <bool> first-run: true;
     // Game page.
     in property <bool> game-loading;
-    in property <string> game-loading-title;
     in property <GameData> game;
     // Applied and system.
     in property <AppliedData> applied;
@@ -1665,7 +1671,6 @@ export component AppWindow inherits Window {
                                 }
                                 if root.page == 0 && root.game-open: GamePage {
                                     loading: root.game-loading;
-                                    loading-title: root.game-loading-title;
                                     game: root.game;
                                     back => {
                                         root.navigate(0);

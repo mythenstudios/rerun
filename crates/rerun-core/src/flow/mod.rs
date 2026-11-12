@@ -37,8 +37,8 @@ mod write;
 
 pub(crate) use game::with_topo;
 pub use game::{
-    Fix, Found, GameRefusal, GameView, IssueView, Lookup, MatchView, Matched, OwnedReport, Solved,
-    VariantView, fixes, game,
+    Fix, Found, GameCache, GameRefusal, GameView, IssueView, Lookup, MatchView, Matched,
+    OwnedReport, Solved, VariantView, fixes, game, game_cached,
 };
 pub use library::{LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_games, library};
 pub use status::{Holder, StatusView, head, profile_id_of, profile_of, profile_op, status};

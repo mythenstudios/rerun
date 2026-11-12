@@ -21,6 +21,7 @@ compile_error!(
 
 mod text;
 mod theme;
+mod trace;
 mod ui;
 mod vm;
 mod worker;
@@ -36,6 +37,7 @@ fn main() -> ExitCode {
     if restrict_dll_search().is_err() {
         return ExitCode::FAILURE;
     }
+    trace::start();
     // Rule 6, before any window (security review S1 of P5-3): Slint reads font settings from
     // the environment when it creates the window, so an elevated or undeterminable process
     // stops here with a plain message box and never creates one. The worker's guard checks

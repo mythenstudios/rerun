@@ -13,6 +13,11 @@
 //! - AW6 untrusted text: a Steam name with a bidi control reaches the view model escaped.
 //! - AW7 the system page from the fake profile.
 //! - AW8 the worker thread: jobs in order, every event woken, a failed system is blocked.
+//! - AW9 the session (P5-3b): reopening a game reads no executable again, a changed executable
+//!   and a rescan do; the applied and system pages come from the session until a rescan or a
+//!   journal change.
+//! - AW10 a library scan lets a waiting job run between two games, and a second scan restarts it.
+//! - AW11 the game page at once from the library row, before the worker has read the folder.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,7 +34,7 @@ use rerun_core::policy::root::{AppDir, Create, ForbiddenRoots, GameDir};
 use rerun_core::sys::fake::{FakeHttp, FakeSystem, FakeSystemBuilder};
 use rerun_core::sys::registry::RegValue;
 
-use super::{Event, Job, Wake, Worker, World, run};
+use super::{Event, Job, Session, Wake, Worker, World, run, run_in};
 use crate::text::{Lang, Sym};
 use crate::vm::{self, GameVm, Group, RowVm, Value};
 
@@ -365,7 +370,9 @@ fn aw1_an_anti_cheat_folder_refuses_the_shared_fix_once() {
 fn aw2_the_library_streams_rows_then_the_summary() {
     let sys = indexed("Invented AC");
     let ev = events(&sys, &Job::Library, Lang::En);
-    assert!(matches!(ev.first(), Some(Event::Row(_))), "{ev:?}");
+    // The scan announces itself (the rows of an earlier scan are void), then streams.
+    assert_eq!(ev.first(), Some(&Event::LibraryStarted));
+    assert!(matches!(ev.get(1), Some(Event::Row(_))), "{ev:?}");
     assert!(matches!(ev.last(), Some(Event::LibraryDone(_))));
     let rows = rows_of(&ev);
     let got: Vec<(u32, &str, Group, &str)> = rows
@@ -772,4 +779,264 @@ fn aw8_the_worker_runs_jobs_in_order_and_wakes_for_each_event() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// Runs `job` in `session` (jobs that wait: none) and returns every event.
+fn events_in(sys: &FakeSystem, session: &mut Session, job: &Job) -> Vec<Event> {
+    let http = FakeHttp::default();
+    let install = install();
+    let env = Env {
+        sys,
+        http: &http,
+        install: &install,
+    };
+    let mut out = Vec::new();
+    let _ = run_in(env, job, Lang::En, session, &mut || None, &mut |e| {
+        out.push(e);
+    });
+    out
+}
+
+fn game_job() -> Job {
+    Job::Game {
+        app_id: 220,
+        name: Some(escape::text("Invented AC").into_owned()),
+    }
+}
+
+fn the_game(ev: Vec<Event>) -> GameVm {
+    match ev.as_slice() {
+        [Event::Game(g)] => g.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn aw9_reopening_a_game_reads_no_executable_again() {
+    let sys = indexed("Invented AC");
+    let mut session = Session::default();
+    let served = |sys: &FakeSystem| sys.fake_fs().bytes_served();
+
+    let before = served(&sys);
+    let first = the_game(events_in(&sys, &mut session, &game_job()));
+    let first_cost = served(&sys) - before;
+    assert_eq!((session.games.reads(), session.games.hits()), (1, 0));
+
+    let before = served(&sys);
+    let second = the_game(events_in(&sys, &mut session, &game_job()));
+    let second_cost = served(&sys) - before;
+    assert_eq!((session.games.reads(), session.games.hits()), (1, 1));
+    assert_eq!(first, second);
+    // The executable (1 KiB here) was parsed and hashed the first time, not the second.
+    assert!(
+        first_cost >= second_cost + 1024,
+        "first {first_cost}, second {second_cost}"
+    );
+
+    // Another build of the executable (another length): read again, and it no longer matches.
+    let exe = PathBuf::from(format!(r"{G}\game.exe"));
+    let mut longer = x86();
+    longer.extend_from_slice(b"another build");
+    sys.fake_fs().put_file(&exe, &longer).unwrap();
+    let changed = the_game(events_in(&sys, &mut session, &game_job()));
+    assert_eq!((session.games.reads(), session.games.hits()), (2, 1));
+    assert_ne!(changed, first);
+    assert!(changed.fixes.is_empty(), "{changed:?}");
+
+    // The same file again: served again.
+    let _ = the_game(events_in(&sys, &mut session, &game_job()));
+    assert_eq!((session.games.reads(), session.games.hits()), (2, 2));
+}
+
+#[test]
+fn aw9_a_rescan_forgets_the_session() {
+    let sys = indexed("Invented AC");
+    let mut session = Session::default();
+    let _ = the_game(events_in(&sys, &mut session, &game_job()));
+    let _ = the_game(events_in(&sys, &mut session, &game_job()));
+    assert_eq!((session.games.reads(), session.games.hits()), (1, 1));
+    events_in(&sys, &mut session, &Job::Status);
+    events_in(&sys, &mut session, &Job::System);
+    assert!(session.applied.is_some() && session.system.is_some());
+
+    events_in(&sys, &mut session, &Job::Library);
+    assert!(session.applied.is_none() && session.system.is_none());
+    let _ = the_game(events_in(&sys, &mut session, &game_job()));
+    // Read again after the scan (the counters are not reset, the entries are).
+    assert_eq!((session.games.reads(), session.games.hits()), (2, 1));
+}
+
+#[test]
+fn aw9_the_applied_and_system_pages_come_from_the_session() {
+    let sys = indexed("Invented AC");
+    let mut session = Session::default();
+    let applied = |ev: &[Event]| match ev {
+        [Event::Applied(a)] => a.clone(),
+        other => panic!("{other:?}"),
+    };
+    let first = applied(&events_in(&sys, &mut session, &Job::Status));
+    // Planted in the session: the next visit answers with it, it does not read again.
+    let mut planted = first.clone();
+    planted.sub = "from the session".to_owned();
+    session.applied = Some(planted.clone());
+    assert_eq!(
+        applied(&events_in(&sys, &mut session, &Job::Status)),
+        planted
+    );
+    // The hook for the write jobs: a changed journal is read again.
+    session.journal_changed();
+    assert_eq!(applied(&events_in(&sys, &mut session, &Job::Status)), first);
+
+    let system = |ev: &[Event]| match ev {
+        [Event::System(s)] => s.clone(),
+        other => panic!("{other:?}"),
+    };
+    let read = system(&events_in(&sys, &mut session, &Job::System));
+    let mut planted = read.clone();
+    planted.lines.clear();
+    session.system = Some(planted.clone());
+    assert_eq!(
+        system(&events_in(&sys, &mut session, &Job::System)),
+        planted
+    );
+}
+
+/// The kind of each event, for the order of a scan.
+fn kinds(ev: &[Event]) -> Vec<&'static str> {
+    ev.iter()
+        .map(|e| match e {
+            Event::Blocked(_) => "blocked",
+            Event::LibraryStarted => "started",
+            Event::Row(_) => "row",
+            Event::LibraryDone(_) => "done",
+            Event::Game(_) => "game",
+            Event::Applied(_) => "applied",
+            Event::System(_) => "system",
+        })
+        .collect()
+}
+
+#[test]
+fn aw10_a_scan_lets_a_waiting_job_run_between_two_games() {
+    let sys = indexed("Invented AC");
+    let http = FakeHttp::default();
+    let install = install();
+    let env = Env {
+        sys: &sys,
+        http: &http,
+        install: &install,
+    };
+    let mut session = Session::default();
+    let mut queue = vec![Job::Status, game_job()];
+    let mut out = Vec::new();
+    // The jobs are queued before the scan starts: they run after its first game.
+    let next = run_in(
+        env,
+        &Job::Library,
+        Lang::En,
+        &mut session,
+        &mut || (!queue.is_empty()).then(|| queue.remove(0)),
+        &mut |e| out.push(e),
+    );
+    assert!(next.is_none());
+    assert_eq!(
+        kinds(&out),
+        ["started", "row", "applied", "game", "row", "done"]
+    );
+    // The page of the game that was asked for is whole, though the scan was not done.
+    assert!(
+        matches!(&out[3], Event::Game(g) if g.fixes.len() == 2),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn aw10_a_second_scan_restarts_the_first() {
+    let sys = indexed("Invented AC");
+    let http = FakeHttp::default();
+    let install = install();
+    let env = Env {
+        sys: &sys,
+        http: &http,
+        install: &install,
+    };
+    let mut session = Session::default();
+    let mut queue = vec![Job::Library];
+    let mut out = Vec::new();
+    let next = run_in(
+        env,
+        &Job::Library,
+        Lang::En,
+        &mut session,
+        &mut || (!queue.is_empty()).then(|| queue.remove(0)),
+        &mut |e| out.push(e),
+    );
+    // Stopped after the first game, no summary; the newer scan is handed back to run next.
+    assert_eq!(kinds(&out), ["started", "row"]);
+    assert_eq!(next, Some(Job::Library));
+    let again = run_in(
+        env,
+        &Job::Library,
+        Lang::En,
+        &mut session,
+        &mut || None,
+        &mut |e| out.push(e),
+    );
+    assert!(again.is_none());
+    assert_eq!(
+        kinds(&out),
+        ["started", "row", "started", "row", "row", "done"]
+    );
+}
+
+#[test]
+fn aw10_a_click_during_a_scan_on_the_worker_thread_is_answered_before_the_summary() {
+    let make = || {
+        Ok(World {
+            sys: Box::new(indexed("Invented AC")),
+            http: Box::new(FakeHttp::default()),
+            install: install(),
+        })
+    };
+    let woken = Arc::new(AtomicUsize::new(0));
+    let worker = Worker::start(Lang::En, make, Box::new(Count(woken))).unwrap();
+    worker.send(Job::Library);
+    worker.send(game_job());
+    worker.send(Job::Status);
+    let ev = wait_for(&worker, 6);
+    let k = kinds(&ev);
+    let at = |name: &str| k.iter().position(|x| *x == name).unwrap();
+    assert!(at("game") < at("done"), "{k:?}");
+    assert!(at("applied") < at("done"), "{k:?}");
+}
+
+#[test]
+fn aw11_the_game_page_is_there_before_the_folder_is_read() {
+    let sys = indexed("Invented AC");
+    let ev = events(&sys, &Job::Library, Lang::En);
+    let rows = rows_of(&ev);
+    let row = rows.iter().find(|r| r.app_id == 220).unwrap();
+
+    let name = Some(row.name.clone());
+    let loading = vm::game_loading(220, name.as_ref(), Some(row), Lang::En);
+    assert_eq!(loading.title.as_str(), "Invented AC");
+    // The hero is the row's status, glyph and word; its second line the row's.
+    assert_eq!(loading.hero.sym, row.badge.sym);
+    assert_eq!(loading.hero.line, row.badge.word);
+    assert_eq!(loading.hero.sub.as_deref(), Some(row.detail.as_str()));
+    // No problems or fixes yet (the page shows its reading text), the Steam app is known.
+    assert!(loading.problems.is_empty() && loading.fixes.is_empty());
+    assert_eq!(loading.facts.len(), 1);
+    assert_eq!(loading.facts[0].value, Value::Text("220".to_owned()));
+
+    // The whole page is for the same app, title and facts the loading page showed.
+    let whole = game_of(&sys, 220, Lang::En);
+    assert_eq!(whole.app_id, loading.app_id);
+    assert_eq!(whole.title, loading.title);
+    assert_eq!(whole.facts[0], loading.facts[0]);
+
+    // A game the library does not list: a neutral hero and the app number as the title.
+    let unlisted = vm::game_loading(999, None, None, Lang::De);
+    assert!(unlisted.title.as_str().contains("999"));
+    assert_eq!(unlisted.hero.line, "Rerun liest den Spielordner ein.");
 }

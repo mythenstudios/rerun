@@ -1,6 +1,5 @@
 //! The worker (ADR 0027): one thread for the session owns the system, runs one job at a time
-//! in the order sent and hands view models back as events. The UI thread never touches the
-//! system.
+//! and hands view models back as events. The UI thread never touches the system.
 //!
 //! P5-3 is read-only: [`Job::Library`], [`Job::Game`], [`Job::Status`] and [`Job::System`].
 //! Every job builds its own `Guarded` through `flow::guard` (elevation first, then the
@@ -8,11 +7,19 @@
 //! reads nothing, and the window shows the blocking page (rule 6). Nothing is written, no
 //! folder created, nothing cached on disk.
 //!
+//! Session (P5-3b): the worker keeps, in memory and for the session only, what it already
+//! read ([`Session`]): per game the executables' hashes (`flow::GameCache`, valid while the
+//! files keep their identity), the applied page and the system page. A library scan (the
+//! rescan) clears all of it. Nothing of it is ever written.
+//!
+//! Order (ADR 0027 amendment P5-3b): jobs run one at a time in the order sent, except that a
+//! library scan, which takes seconds, lets the jobs that wait run between two games (a click on
+//! a game or a page never waits for the scan); a second library job during a scan restarts it.
+//!
 //! Rule 1: the thread lives as long as the window. Dropping the [`Worker`] closes the job
 //! channel; the thread ends after the job it runs (read-only, so the process may also end
 //! while it runs).
 
-use std::convert::Infallible;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -21,7 +28,7 @@ use rerun_core::catalog::Catalog;
 use rerun_core::catalog::model::Status;
 use rerun_core::detect::steam;
 use rerun_core::escape::Shown;
-use rerun_core::flow::{self, Env, Guarded, IndexState, LibraryEvent};
+use rerun_core::flow::{self, Env, GameCache, Guarded, IndexState, LibraryEvent};
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::sys::{Http, System};
 use rerun_core::topo;
@@ -50,11 +57,25 @@ pub enum Job {
     System,
 }
 
+impl Job {
+    /// The job's name for the timing trace.
+    fn name(&self) -> String {
+        match self {
+            Self::Library => "library".to_owned(),
+            Self::Game { app_id, .. } => format!("game {app_id}"),
+            Self::Status => "status".to_owned(),
+            Self::System => "system".to_owned(),
+        }
+    }
+}
+
 /// What the worker hands back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// A guard stopped the job; nothing was read.
     Blocked(BlockedVm),
+    /// A library scan begins: the rows of an earlier scan are void.
+    LibraryStarted,
     /// One game of the library.
     Row(RowVm),
     /// The library scan is done.
@@ -109,7 +130,10 @@ impl Worker {
                         wake.wake();
                     }
                 };
-                while let Ok(job) = job_rx.recv() {
+                let mut session = Session::default();
+                // A library job that stopped a running scan: it runs next.
+                let mut next: Option<Job> = None;
+                while let Some(job) = next.take().or_else(|| job_rx.recv().ok()) {
                     match &world {
                         Ok(w) => {
                             let env = Env {
@@ -117,7 +141,14 @@ impl Worker {
                                 http: &*w.http,
                                 install: &w.install,
                             };
-                            run(env, &job, lang, &mut emit);
+                            next = run_in(
+                                env,
+                                &job,
+                                lang,
+                                &mut session,
+                                &mut || job_rx.try_recv().ok(),
+                                &mut emit,
+                            );
                         }
                         Err(detail) => emit(Event::Blocked(no_system(detail.clone(), lang))),
                     }
@@ -149,26 +180,70 @@ fn no_system(detail: Shown<'static>, lang: Lang) -> BlockedVm {
     }
 }
 
-/// Runs one job against `env`: the guards first, then the job; every outcome goes to `emit`.
+/// What the worker has read in this session (module docs). Memory only.
+#[derive(Debug, Default)]
+pub struct Session {
+    /// The executables read per game.
+    pub games: GameCache,
+    applied: Option<AppliedVm>,
+    system: Option<SystemVm>,
+}
+
+impl Session {
+    /// A rescan: forget everything read so far.
+    fn rescan(&mut self) {
+        self.games.clear();
+        self.applied = None;
+        self.system = None;
+    }
+
+    /// The journal changed (the hook for P5-6: an apply, a revert or a forget calls this): the
+    /// applied page is read again at its next visit.
+    #[cfg(test)]
+    pub fn journal_changed(&mut self) {
+        self.applied = None;
+    }
+}
+
+/// Runs one job against `env` with a fresh [`Session`]: the guards first, then the job; every
+/// outcome goes to `emit`.
+#[cfg(test)]
 pub fn run(env: Env<'_>, job: &Job, lang: Lang, emit: &mut dyn FnMut(Event)) {
+    let mut session = Session::default();
+    let _ = run_in(env, job, lang, &mut session, &mut || None, emit);
+}
+
+/// [`run`] in `session`. `waiting` hands out the next job that is already queued, without
+/// waiting for one: a library scan runs those between two games; if it hands out another
+/// library job, the scan stops and that job is returned to be run next.
+pub fn run_in(
+    env: Env<'_>,
+    job: &Job,
+    lang: Lang,
+    session: &mut Session,
+    waiting: &mut dyn FnMut() -> Option<Job>,
+    emit: &mut dyn FnMut(Event),
+) -> Option<Job> {
+    let began = std::time::Instant::now();
     let g = match flow::guard(env) {
         Ok(g) => g,
         Err(gate) => {
             emit(Event::Blocked(vm::blocked(&gate, lang)));
-            return;
+            return None;
         }
     };
+    let mut preempted = None;
     match job {
-        Job::Library => library(&g, lang, emit),
+        Job::Library => preempted = library(&g, lang, session, waiting, emit),
         Job::Game { app_id, name } => {
-            let page = match flow::game(&g, *app_id) {
+            let page = match flow::game_cached(&g, *app_id, Some(&mut session.games)) {
                 Ok(v) => vm::game(&v, name.as_ref(), lang),
                 Err(e) => vm::game_refused(*app_id, name.as_ref(), &e, lang),
             };
             emit(Event::Game(page));
         }
         Job::Status => {
-            let page = match g.app() {
+            let page = session.applied.take().unwrap_or_else(|| match g.app() {
                 None => vm::applied(None, lang),
                 Some(app) => {
                     // The journal only (review of P5-3): the orphaned firewall rules are read
@@ -176,17 +251,30 @@ pub fn run(env: Env<'_>, job: &Job, lang: Lang, emit: &mut dyn FnMut(Event)) {
                     let s = rerun_core::exec::status(app);
                     vm::applied(Some(s.as_ref()), lang)
                 }
-            };
+            });
+            session.applied = Some(page.clone());
             emit(Event::Applied(page));
         }
         Job::System => {
-            let sys = g.env().sys;
-            let profile = hw::read(sys, GpuArchTable::builtin().ok());
-            let s = steam::scan(sys, g.fr());
-            let libraries = s.root.is_some().then_some(s.libraries.len());
-            emit(Event::System(vm::system(&profile, libraries, lang)));
+            let page = session.system.take().unwrap_or_else(|| {
+                let sys = g.env().sys;
+                let profile = hw::read(sys, GpuArchTable::builtin().ok());
+                let s = steam::scan(sys, g.fr());
+                let libraries = s.root.is_some().then_some(s.libraries.len());
+                vm::system(&profile, libraries, lang)
+            });
+            session.system = Some(page.clone());
+            emit(Event::System(page));
         }
     }
+    crate::trace::log(|| {
+        format!(
+            "worker: {} took {:.1} ms (jobs run in between included)",
+            job.name(),
+            began.elapsed().as_secs_f64() * 1000.0
+        )
+    });
+    preempted
 }
 
 /// Whether the index names a Topo (not retired) for `app_id`.
@@ -203,8 +291,17 @@ fn topo_known(catalog: Option<&Catalog>, app_id: u32) -> TopoKnown {
 }
 
 /// The library: the index, then the scan streamed row by row (without hashes: matching a
-/// Topo is the game page's job), then the summary.
-fn library(g: &Guarded<'_>, lang: Lang, emit: &mut dyn FnMut(Event)) {
+/// Topo is the game page's job), then the summary. Between two games the jobs that wait run
+/// (module docs). Returns the library job that stopped the scan, if one did.
+fn library(
+    g: &Guarded<'_>,
+    lang: Lang,
+    session: &mut Session,
+    waiting: &mut dyn FnMut() -> Option<Job>,
+    emit: &mut dyn FnMut(Event),
+) -> Option<Job> {
+    session.rescan();
+    emit(Event::LibraryStarted);
     let state = flow::index_state(g.app());
     let catalog = match &state {
         IndexState::Current(c) => Some(&**c),
@@ -215,7 +312,9 @@ fn library(g: &Guarded<'_>, lang: Lang, emit: &mut dyn FnMut(Event)) {
         problems: Vec::new(),
     };
     let mut problems: Vec<DetailVm> = Vec::new();
-    let scanned = flow::library::<Infallible>(g.env().sys, g.fr(), &[], false, &mut |ev| {
+    let mut preempted: Option<Job> = None;
+    let env = g.env();
+    let scanned = flow::library::<()>(env.sys, g.fr(), &[], false, &mut |ev| {
         match ev {
             LibraryEvent::Steam(s) => {
                 steam_vm = vm::steam(s);
@@ -226,18 +325,27 @@ fn library(g: &Guarded<'_>, lang: Lang, emit: &mut dyn FnMut(Event)) {
                 problems.extend(vm::row_problems(app, scan));
                 let known = topo_known(catalog, app.app_id);
                 emit(Event::Row(vm::row(app, scan, known, lang)));
+                // The game folder is closed: a click that waits goes first.
+                while let Some(next) = waiting() {
+                    if next == Job::Library {
+                        preempted = Some(next);
+                        return ControlFlow::Break(());
+                    }
+                    let _ = run_in(env, &next, lang, session, &mut || None, emit);
+                }
             }
         }
         ControlFlow::Continue(())
     });
-    let facts = match scanned {
-        Ok(f) => f,
-        Err(never) => match never {},
+    let Ok(facts) = scanned else {
+        // Stopped by a newer scan: no summary of this one.
+        return preempted;
     };
     let index = vm::index(&state, lang);
     emit(Event::LibraryDone(vm::library_done(
         &facts, &steam_vm, &problems, index, lang,
     )));
+    None
 }
 
 #[cfg(test)]

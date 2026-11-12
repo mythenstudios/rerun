@@ -624,6 +624,29 @@ pub fn title_of(app_id: u32, name: Option<&Shown<'static>>, lang: Lang) -> Shown
     }
 }
 
+/// The game page while the worker still reads the game folder (P5-3b): what the library row
+/// already says, at once. The title, the row's status as the hero line (its glyph and word) and
+/// the row's second line under it; the fact of the Steam app. No problems, no fixes: the
+/// page shows its reading text there until [`game`] replaces this one. Without the row (the
+/// library has not listed the game) the hero says that the folder is being read.
+pub fn game_loading(
+    app_id: u32,
+    name: Option<&Shown<'static>>,
+    row: Option<&RowVm>,
+    lang: Lang,
+) -> GameVm {
+    let title = title_of(app_id, name.or(row.map(|r| &r.name)), lang);
+    let hero = match row {
+        Some(r) => HeroVm {
+            sym: r.badge.sym,
+            line: r.badge.word.clone(),
+            sub: Some(r.detail.clone()),
+        },
+        None => hero(Sym::None, lang, Msg::GameReading),
+    };
+    base(app_id, title, hero, lang)
+}
+
 /// The game page of a lookup.
 pub fn game(view: &GameView, name: Option<&Shown<'static>>, lang: Lang) -> GameVm {
     let title = title_of(view.app_id, name, lang);

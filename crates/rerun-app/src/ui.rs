@@ -40,7 +40,7 @@ use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::text::{Lang, Msg, t};
 use crate::theme::{self, Rgb, ThemeId, Tokens};
-use crate::vm::{self, AppliedVm, DetailVm, GameVm, Notice, RowVm, Value};
+use crate::vm::{self, AppliedVm, DetailVm, GameVm, Notice, RowVm, SystemVm, Value};
 use crate::worker::{Event, Job, Wake, Worker, World};
 
 use chrome::{Chrome, Geometry, WindowState};
@@ -53,6 +53,10 @@ struct State {
     rows: Vec<RowVm>,
     /// The game page last asked for.
     game: Option<u32>,
+    /// The pages as last handed to the window: an unchanged page is not set again (P5-3b), so
+    /// a visit that the worker answers from its session does not rebuild its models.
+    applied: Option<AppliedVm>,
+    system: Option<SystemVm>,
 }
 
 /// Wakes the event loop from the worker thread (ADR 0026: `invoke_from_event_loop`).
@@ -150,9 +154,12 @@ where
         lang,
         rows: Vec::new(),
         game: None,
+        applied: None,
+        system: None,
     }));
     callbacks(&ui, &state);
 
+    crate::trace::log(|| "ui: window built, showing".to_owned());
     if ui.show().is_err() {
         return ExitCode::FAILURE;
     }
@@ -368,7 +375,9 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         match page {
             1 => st.worker.send(Job::Status),
             3 => {
-                ui.set_system_loading(true);
+                // The reading text only while there is nothing to show yet; a page seen before
+                // stays on screen and is replaced only if the answer differs.
+                ui.set_system_loading(st.system.is_none());
                 st.worker.send(Job::System);
             }
             _ => {}
@@ -377,7 +386,7 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 
     let weak = ui.as_weak();
     let st = state.clone();
-    ui.on_open_game(move |app_id, label| {
+    ui.on_open_game(move |app_id, _name| {
         let Some(ui) = weak.upgrade() else {
             return;
         };
@@ -391,9 +400,14 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             .iter()
             .find(|r| r.app_id == app_id)
             .map(|r| r.name.clone());
+        crate::trace::log(|| format!("ui: game {app_id} clicked"));
+        // At once, from the library row: the title and the row's status; the worker fills in
+        // the problems and fixes (P5-3b).
+        let row = st.rows.iter().find(|r| r.app_id == app_id);
+        let loading = vm::game_loading(app_id, name.as_ref(), row, st.lang);
         st.game = Some(app_id);
+        ui.set_game(game(&loading));
         ui.set_game_loading(true);
-        ui.set_game_loading_title(label);
         ui.set_game_open(true);
         st.worker.send(Job::Game { app_id, name });
     });
@@ -425,6 +439,8 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         ui.set_library_reading(true);
         ui.set_library_notices(model(Vec::new()));
         show_rows(&ui, &st);
+        // The worker forgets what it read for the session with the scan. The pages the window
+        // holds stay (no flash) and are replaced at the next visit if the answer differs.
         st.worker.send(Job::Library);
         st.worker.send(Job::Status);
     });
@@ -439,6 +455,12 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             Event::Blocked(b) => {
                 ui.set_blocked(true);
                 ui.set_blocked_notice(notice(&b.notice));
+            }
+            Event::LibraryStarted => {
+                st.rows.clear();
+                ui.set_library_reading(true);
+                ui.set_library_notices(model(Vec::new()));
+                rows_changed = true;
             }
             Event::Row(r) => {
                 st.rows.push(r);
@@ -456,17 +478,25 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 if st.game == Some(g.app_id) {
                     ui.set_game(game(&g));
                     ui.set_game_loading(false);
+                    crate::trace::log(|| format!("ui: game {} shown", g.app_id));
                 }
             }
             Event::Applied(a) => {
-                ui.set_applied(applied(&a));
-                ui.set_nav_applied_count(if a.open > 0 {
-                    s(a.open.to_string())
-                } else {
-                    SharedString::new()
-                });
+                if st.applied.as_ref() != Some(&a) {
+                    ui.set_applied(applied(&a));
+                    ui.set_nav_applied_count(if a.open > 0 {
+                        s(a.open.to_string())
+                    } else {
+                        SharedString::new()
+                    });
+                    st.applied = Some(a);
+                }
             }
             Event::System(sys) => {
+                ui.set_system_loading(false);
+                if st.system.as_ref() == Some(&sys) {
+                    continue;
+                }
                 ui.set_system_lines(model(
                     sys.lines
                         .iter()
@@ -476,7 +506,7 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                         })
                         .collect(),
                 ));
-                ui.set_system_loading(false);
+                st.system = Some(sys);
             }
         }
     }

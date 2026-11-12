@@ -83,6 +83,16 @@ opt-level = "s"
 [profile.release.package.rerun-cpu]
 opt-level = "s"
 
+# The [DEV] test-key app at release speed (scripts/dev-app-check.ps1, P5-3b): the release
+# optimisation with debug assertions on, which is what the test key's `compile_error!` asks for
+# (ADR 0024). Never a shipped profile: the shipped `release` keeps debug assertions off, so it
+# cannot contain the test key. Thin LTO and 16 codegen units keep the build a few minutes.
+[profile.dev-release]
+inherits = "release"
+debug-assertions = true
+lto = "thin"
+codegen-units = 16
+
 # CI test profile (docs/09-testing.md): the dev profile with optimisation, so the heavy crash
 # matrices run several times faster. Debug assertions and overflow checks stay on (inherited).
 [profile.ci]
