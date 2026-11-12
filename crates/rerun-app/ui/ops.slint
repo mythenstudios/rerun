@@ -1,0 +1,207 @@
+// The parts of a plan or of a transaction that the preview panel, the transaction card and the
+// dialogs share: a warning, one op, the Steam launch option.
+
+import { LineEdit } from "std-widgets.slint";
+import { Button, Muted } from "base.slint";
+import { WarnData, OpData, LaunchData, Theme, Str } from "base.slint";
+
+// A warning: glyph and word, the sentence, and what it is about in its own element.
+export component WarnLine inherits Rectangle {
+    in property <WarnData> w;
+    background: Theme.raised2;
+    border-radius: Theme.radius-s;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.w.word + ": " + root.w.text;
+    accessible-description: root.w.detail;
+    Rectangle {
+        x: 0;
+        width: Theme.hair * 2;
+        background: Theme.line-strong;
+    }
+
+    HorizontalLayout {
+        padding: Theme.s3;
+        padding-left: Theme.s4;
+        spacing: Theme.s3;
+        Text {
+            text: root.w.sym;
+            color: Theme.muted;
+            font-family: Theme.font-symbol;
+            font-size: Theme.fs-m;
+            accessible-role: none;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.s1;
+            Text {
+                text: root.w.word + ": " + root.w.text;
+                color: Theme.text;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+
+            if root.w.detail != "": Text {
+                text: root.w.detail;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+        }
+    }
+}
+
+// One op: what it does, where, every detail, and what undo does with it.
+export component OpItem inherits Rectangle {
+    in property <OpData> op;
+    background: Theme.raised2;
+    border-radius: Theme.radius-s;
+    accessible-role: groupbox;
+    accessible-label: root.op.action;
+    accessible-description: root.op.target;
+    VerticalLayout {
+        padding: Theme.s3;
+        padding-left: Theme.s4;
+        padding-right: Theme.s4;
+        spacing: Theme.s1;
+        HorizontalLayout {
+            spacing: Theme.s3;
+            Text {
+                text: root.op.action;
+                color: Theme.strong;
+                font-size: Theme.fs-m;
+                font-weight: 600;
+                vertical-alignment: top;
+                accessible-role: none;
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: root.op.target;
+                color: Theme.text;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s + Theme.hair;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+        }
+
+        for l in root.op.lines: HorizontalLayout {
+            spacing: Theme.s3;
+            accessible-role: AccessibleRole.text;
+            accessible-label: l.label;
+            Text {
+                width: Theme.s8 * 2;
+                text: l.label;
+                color: Theme.muted;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                for v in l.values: Text {
+                    text: v;
+                    color: Theme.text;
+                    font-family: l.mono ? Theme.font-mono : Theme.font-sans;
+                    font-size: l.mono ? Theme.fs-s : Theme.fs-m;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+            }
+        }
+
+        if root.op.fate-word != "": HorizontalLayout {
+            spacing: Theme.s2;
+            accessible-role: AccessibleRole.text;
+            accessible-label: root.op.fate-word;
+            Text {
+                text: root.op.fate-sym;
+                color: Theme.muted;
+                font-family: Theme.font-symbol;
+                font-size: Theme.fs-s;
+                accessible-role: none;
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: root.op.fate-word;
+                color: Theme.strong;
+                font-size: Theme.fs-s;
+                font-weight: 500;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+        }
+        if root.op.undo != "": Text {
+            text: Str.lbl-undo + ": " + root.op.undo;
+            color: Theme.muted;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// The Steam launch option the user pastes: read-only text that can be selected and copied.
+export component LaunchBox inherits Rectangle {
+    in property <LaunchData> l;
+    in-out property <bool> copied;
+    background: Theme.raised2;
+    border-radius: Theme.radius-s;
+    accessible-role: groupbox;
+    accessible-label: root.l.heading;
+    VerticalLayout {
+        padding: Theme.s4;
+        spacing: Theme.s2;
+        Text {
+            text: root.l.heading;
+            color: Theme.strong;
+            font-size: Theme.fs-m;
+            font-weight: 600;
+        }
+
+        for line in root.l.lines: Muted {
+            text: line;
+        }
+        if root.l.option != "": VerticalLayout {
+            spacing: Theme.s2;
+            Muted {
+                text: root.l.intro;
+            }
+
+            HorizontalLayout {
+                spacing: Theme.s3;
+                option-field := LineEdit {
+                    horizontal-stretch: 1;
+                    read-only: true;
+                    text: root.l.option;
+                    font-size: Theme.fs-s + Theme.hair;
+                    accessible-label: root.l.heading;
+                }
+
+                Button {
+                    text: root.copied ? root.l.copied : root.l.copy;
+                    activated => {
+                        option-field.select-all();
+                        option-field.copy();
+                        root.copied = true;
+                    }
+                }
+            }
+        }
+        for p in root.l.problems: WarnLine {
+            w: p;
+        }
+        for n in root.l.notes: Text {
+            text: n;
+            color: Theme.muted;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+    }
+}
+

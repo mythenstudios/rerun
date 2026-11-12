@@ -1,0 +1,153 @@
+// The undo and forget dialogs.
+
+import { ScrollView } from "std-widgets.slint";
+import { Button, DetailLine, Muted, PageTitle } from "base.slint";
+import { DialogData, Str, Theme, Modal } from "base.slint";
+import { OpItem, WarnLine } from "ops.slint";
+
+// The undo and forget dialogs: what the operation meets, before the click. Esc closes. While it
+// is open `Modal.open` is set and only its controls can take the focus (a focus trap); the title
+// takes the focus when it opens.
+export component DialogView inherits Rectangle {
+    in property <DialogData> d;
+    callback confirm();
+    callback cancel();
+    background: Theme.bg.with-alpha(0.85);
+    // Keeps the mouse from reaching the page behind.
+    TouchArea { }
+
+    FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            reject
+        }
+        VerticalLayout {
+            alignment: center;
+            padding: Theme.s6;
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: min(root.width - Theme.s8, Theme.s8 * 14);
+                    height: root.height - Theme.s8 * 2;
+                    background: Theme.raised;
+                    border-radius: Theme.radius-m;
+                    border-width: Theme.hair;
+                    border-color: Theme.line-strong;
+                    accessible-role: groupbox;
+                    accessible-label: root.d.title;
+                    VerticalLayout {
+                        padding: Theme.s6;
+                        spacing: Theme.s4;
+                        PageTitle {
+                            text: root.d.title;
+                            size: Theme.fs-l;
+                            family: Theme.font-sans;
+                        }
+
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                spacing: Theme.s3;
+                                if root.d.changed != "": Rectangle {
+                                    background: Theme.raised2;
+                                    border-radius: Theme.radius-s;
+                                    accessible-role: AccessibleRole.text;
+                                    accessible-label: root.d.changed;
+                                    VerticalLayout {
+                                        padding: Theme.s3;
+                                        Text {
+                                            text: root.d.changed;
+                                            color: Theme.strong;
+                                            font-size: Theme.fs-m;
+                                            wrap: word-wrap;
+                                            accessible-role: none;
+                                        }
+                                    }
+                                }
+                                Muted {
+                                    text: root.d.intro;
+                                }
+
+                                for op in root.d.ops: OpItem {
+                                    op: op;
+                                }
+                                for n in root.d.notes: Text {
+                                    text: n;
+                                    color: Theme.text;
+                                    font-size: Theme.fs-m;
+                                    wrap: word-wrap;
+                                }
+                                for x in root.d.details: DetailLine {
+                                    d: x;
+                                }
+                                if root.d.has-launch: Rectangle {
+                                    background: Theme.raised2;
+                                    border-radius: Theme.radius-s;
+                                    accessible-role: groupbox;
+                                    accessible-label: root.d.launch-heading;
+                                    VerticalLayout {
+                                        padding: Theme.s4;
+                                        spacing: Theme.s2;
+                                        Text {
+                                            text: root.d.launch-heading;
+                                            color: Theme.strong;
+                                            font-size: Theme.fs-m;
+                                            font-weight: 600;
+                                        }
+
+                                        for line in root.d.launch-lines: Muted {
+                                            text: line;
+                                        }
+                                        if root.d.launch-option != "": Text {
+                                            text: root.d.launch-option;
+                                            color: Theme.text;
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.fs-s + Theme.hair;
+                                            wrap: word-wrap;
+                                        }
+                                        for p in root.d.launch-problems: WarnLine {
+                                            w: p;
+                                        }
+                                    }
+                                }
+                                if root.d.blocked != "": Text {
+                                    text: root.d.blocked;
+                                    color: Theme.strong;
+                                    font-size: Theme.fs-m;
+                                    font-weight: 600;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: Theme.s3;
+                            alignment: end;
+                            Button {
+                                in-dialog: true;
+                                text: Str.btn-cancel;
+                                activated => {
+                                    root.cancel();
+                                }
+                            }
+
+                            Button {
+                                in-dialog: true;
+                                primary: true;
+                                text: root.d.confirm;
+                                enabled: root.d.can-confirm && !Modal.working;
+                                activated => {
+                                    root.confirm();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

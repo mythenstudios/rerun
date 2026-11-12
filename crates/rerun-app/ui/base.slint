@@ -1,0 +1,589 @@
+// The shared base of the window (docs/07-ui.md): the data the view models hand over, the globals
+// `Theme`, `Str`, `Reveal` and `Modal`, and the small components every page builds on. Only
+// `rerun-app::ui` and `build.rs` know these files (ADR 0026); `app.slint` re-exports what `ui`
+// uses.
+
+// ---------------------------------------------------------------- data from the view models
+
+export struct BadgeData {
+    sym: string,
+    word: string,
+    quiet: bool,
+}
+
+export struct RowData {
+    app-id: int,
+    name: string,
+    detail: string,
+    exe: string,
+    badge: BadgeData,
+}
+
+export struct SectionData {
+    title: string,
+    rows: [RowData],
+}
+
+export struct DetailData {
+    who: string,
+    what: string,
+}
+
+export struct NoticeData {
+    title: string,
+    body: string,
+    details: [DetailData],
+}
+
+// One labelled line of an op; every value is drawn in its own element.
+export struct LineData {
+    label: string,
+    values: [string],
+    mono: bool,
+}
+
+// One op of a plan or of a transaction, with what undo does with it (and, in an undo dialog,
+// what it would meet now).
+export struct OpData {
+    index: int,
+    action: string,
+    target: string,
+    lines: [LineData],
+    undo: string,
+    fate-sym: string,
+    fate-word: string,
+}
+
+export struct WarnData {
+    sym: string,
+    word: string,
+    text: string,
+    detail: string,
+}
+
+export struct LaunchData {
+    heading: string,
+    lines: [string],
+    intro: string,
+    option: string,
+    notes: [string],
+    problems: [WarnData],
+    copy: string,
+    copied: string,
+}
+
+// state: 0 nothing selected, 1 planning, 2 shown, 3 refused.
+export struct PreviewData {
+    state: int,
+    hash: string,
+    summary: string,
+    folder: string,
+    ops: [OpData],
+    warnings: [WarnData],
+    notes: [string],
+    has-launch: bool,
+    launch: LaunchData,
+    admin: string,
+    undo: string,
+    can-apply: bool,
+    nothing: string,
+    ready: bool,
+    refused: NoticeData,
+}
+
+export struct CardData {
+    id: string,
+    game: string,
+    state: BadgeData,
+    problem: string,
+    ops: [OpData],
+    note: string,
+    can-undo: bool,
+    can-forget: bool,
+}
+
+// kind: 0 undo, 1 forget.
+export struct DialogData {
+    kind: int,
+    title: string,
+    intro: string,
+    changed: string,
+    ops: [OpData],
+    notes: [string],
+    details: [DetailData],
+    has-launch: bool,
+    launch-heading: string,
+    launch-lines: [string],
+    launch-option: string,
+    launch-problems: [WarnData],
+    confirm: string,
+    can-confirm: bool,
+    blocked: string,
+}
+
+// tone: 0 done, 1 calm, 2 attention.
+export struct BannerData {
+    tone: int,
+    sym: string,
+    title: string,
+    body: string,
+    details: [DetailData],
+}
+
+export struct FactData {
+    label: string,
+    value: string,
+    mono: bool,
+}
+
+export struct ProblemData {
+    title: string,
+    when: BadgeData,
+    fixes: [string],
+    quiet: bool,
+}
+
+export struct SolvedData {
+    issue: string,
+    when: BadgeData,
+    status: BadgeData,
+    tradeoffs: [string],
+    sources: [string],
+}
+
+export struct FixData {
+    id: string,
+    kind: string,
+    state: BadgeData,
+    refused: string,
+    refused-detail: string,
+    warned: string,
+    solves: [SolvedData],
+    selectable: bool,
+    selected: bool,
+    note: string,
+    preselect-note: string,
+    exclusive: [string],
+}
+
+export struct GameData {
+    app-id: int,
+    title: string,
+    hero-sym: string,
+    hero-line: string,
+    hero-sub: string,
+    facts: [FactData],
+    notes: [string],
+    detail: string,
+    problems: [ProblemData],
+    fixes: [FixData],
+    applied: [CardData],
+}
+
+export struct AppliedData {
+    sym: string,
+    title: string,
+    sub: string,
+    detail: string,
+    cards: [CardData],
+}
+
+export struct SysLineData {
+    label: string,
+    values: [string],
+}
+
+// ---------------------------------------------------------------- tokens and strings
+
+export global Theme {
+    in property <color> bg;
+    in property <color> raised;
+    in property <color> raised2;
+    in property <color> raised3;
+    in property <color> raised4;
+    in property <color> line-soft;
+    in property <color> line;
+    in property <color> line-strong;
+    in property <color> text;
+    in property <color> strong;
+    in property <color> muted;
+    in property <color> faint;
+    in property <color> on-strong;
+    in property <color> danger;
+    in property <length> hair;
+    in property <length> radius-s;
+    in property <length> radius-m;
+    in property <length> s1;
+    in property <length> s2;
+    in property <length> s3;
+    in property <length> s4;
+    in property <length> s5;
+    in property <length> s6;
+    in property <length> s7;
+    in property <length> s8;
+    in property <length> fs-xs;
+    in property <length> fs-s;
+    in property <length> fs-m;
+    in property <length> fs-l;
+    in property <length> fs-group;
+    in property <length> fs-page;
+    in property <length> fs-hero;
+    in property <length> row-h;
+    in property <length> title-h;
+    // `caption-w`, `title-h` and `resize-border` are also the hit-test geometry of the
+    // snap-layout subclass (`ui::chrome`): change them here and the hit area follows.
+    in property <length> caption-w;
+    in property <length> resize-border;
+    in property <length> nav-w;
+    in property <string> font-sans;
+    in property <string> font-display;
+    in property <string> font-mono;
+    in property <string> font-symbol;
+    in property <string> font-icons;
+}
+
+export global Str {
+    in property <string> app-name;
+    in property <string> by;
+    in property <string> minimize;
+    in property <string> maximize;
+    in property <string> restore;
+    in property <string> close;
+    in property <string> nav-label;
+    in property <[string]> nav;
+    in property <string> no-background;
+    in property <string> first-run-title;
+    in property <[string]> first-run-leads;
+    in property <[string]> first-run-texts;
+    in property <string> first-run-dismiss;
+    in property <string> library-title;
+    in property <string> library-reading;
+    in property <string> search-label;
+    in property <string> search-placeholder;
+    in property <string> group-by-status;
+    in property <string> view-label;
+    in property <string> view-list;
+    in property <string> no-search-match;
+    in property <string> rescan;
+    in property <string> show-problems;
+    in property <string> hide-problems;
+    in property <string> detail;
+    in property <string> back;
+    in property <string> eyebrow;
+    in property <string> game-reading;
+    in property <string> facts-label;
+    in property <string> problems-title;
+    in property <string> problem-fixes;
+    in property <string> problem-no-fix;
+    in property <string> fixes-title;
+    in property <string> fixes-intro;
+    in property <string> fixes-read-only;
+    in property <string> fix-solves;
+    in property <string> applied-title;
+    in property <string> applied-intro;
+    in property <string> history-title;
+    in property <string> history-intro;
+    in property <string> history-later;
+    in property <string> system-title;
+    in property <string> system-intro;
+    in property <string> system-reading;
+    in property <string> settings-title;
+    in property <string> settings-intro;
+    in property <string> settings-safety;
+    in property <string> set-preview;
+    in property <string> set-preview-desc;
+    in property <string> set-sources;
+    in property <string> set-sources-desc;
+    in property <string> always-on;
+    in property <string> settings-look;
+    in property <string> set-theme;
+    in property <string> theme-name;
+    in property <string> set-language;
+    in property <string> language-name;
+    in property <string> settings-about;
+    in property <string> about-version;
+    in property <string> about-licence;
+    // Selecting, previewing, applying and undoing (P5-5a).
+    in property <string> fix-select;
+    in property <string> fix-tradeoffs;
+    in property <string> fix-no-tradeoffs;
+    in property <string> fix-sources;
+    in property <string> fix-exclusive;
+    in property <string> preview-title;
+    in property <string> preview-none;
+    in property <string> preview-planning;
+    in property <string> preview-intro;
+    in property <string> preview-folder;
+    in property <string> preview-checksum;
+    in property <string> preview-close-game;
+    in property <string> preview-applying;
+    in property <string> btn-apply;
+    in property <string> btn-cancel;
+    in property <string> btn-dismiss;
+    in property <string> btn-undo;
+    in property <string> btn-forget;
+    in property <string> lbl-undo;
+    in property <string> applied-here;
+    in property <string> card-game;
+    in property <string> card-txn;
+    in property <string> working;
+}
+
+// Keeps the focused element visible: every focusable element asks for it, `ui` hands it to
+// `AppWindow.reveal`, which scrolls the page.
+export global Reveal {
+    callback request(length, length);
+}
+
+// A dialog is open: everything outside it cannot take the focus (a focus trap; Tab cycles in
+// the dialog). `return-to` is the card button that takes the focus back when the dialog closes
+// (`ui` sets it then): 2 * card index for "Undo", 2 * card index + 1 for "Close without undoing".
+export global Modal {
+    in-out property <bool> open;
+    in-out property <int> return-to: -1;
+    // A write is running: the apply and undo buttons wait.
+    in-out property <bool> working;
+}
+
+// ---------------------------------------------------------------- building blocks
+
+// Focusable and keyboard-clickable (Enter, Space), with a focus ring after keyboard focus only.
+export component Pressable inherits FocusScope {
+    in property <length> radius: Theme.radius-m;
+    in property <length> ring-inset: 0px;
+    out property <bool> kb-focus;
+    out property <bool> hovered: ta.has-hover;
+    out property <bool> pressed: ta.pressed;
+    // Set on the controls of a dialog: while one is open only they can take the focus.
+    in property <bool> in-dialog: false;
+    // Takes the focus when it turns true (the opener of a closed dialog gets it back).
+    in property <bool> take-focus: false;
+    callback activated();
+    enabled: !Modal.open || root.in-dialog;
+    changed take-focus => {
+        if (root.take-focus) {
+            root.focus();
+        }
+    }
+    focus-gained(reason) => {
+        root.kb-focus = reason == FocusReason.tab-navigation;
+        Reveal.request(self.absolute-position.y, self.height);
+    }
+    focus-lost(reason) => {
+        root.kb-focus = false;
+    }
+    key-pressed(e) => {
+        if (root.enabled && (e.text == Key.Return || e.text == " ")) {
+            root.activated();
+            return accept;
+        }
+        reject
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.activated();
+        }
+    }
+
+    @children
+    Rectangle {
+        x: root.ring-inset;
+        y: root.ring-inset;
+        width: root.width - 2 * root.ring-inset;
+        height: root.height - 2 * root.ring-inset;
+        border-width: root.kb-focus ? 2 * Theme.hair : 0px;
+        border-color: Theme.strong;
+        border-radius: root.radius;
+    }
+}
+
+// A page or section title that takes the focus when its page opens, so a screen reader reads
+// the page's name (Slint has no heading role, ADR 0026).
+export component PageTitle inherits FocusScope {
+    in property <string> text;
+    in property <length> size: Theme.fs-page;
+    in property <string> family: Theme.font-display;
+    focus-on-tab-navigation: false;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    init => {
+        self.focus();
+    }
+    Text {
+        width: 100%;
+        text: root.text;
+        font-family: root.family;
+        font-size: root.size;
+        font-weight: 800;
+        color: Theme.strong;
+        wrap: word-wrap;
+        accessible-role: none;
+    }
+}
+
+export component Badge inherits Rectangle {
+    in property <BadgeData> data;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.data.word;
+    background: root.data.quiet ? Theme.raised2 : Theme.line-soft;
+    border-width: root.data.quiet ? Theme.hair : 0px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.radius-s;
+    HorizontalLayout {
+        padding-left: Theme.s2;
+        padding-right: Theme.s2;
+        padding-top: Theme.hair * 2;
+        padding-bottom: Theme.hair * 2;
+        spacing: Theme.s1 + Theme.hair * 2;
+        Text {
+            text: root.data.sym;
+            color: Theme.muted;
+            font-size: Theme.fs-s;
+            font-family: Theme.font-symbol;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+
+        Text {
+            text: root.data.word;
+            color: Theme.strong;
+            font-size: Theme.fs-s;
+            font-weight: 500;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+export component Button inherits Pressable {
+    in property <string> text;
+    in property <bool> primary;
+    // A disabled button (a dialog is open, a write runs, nothing to apply) is drawn quiet.
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.activated();
+        }
+    }
+    ring-inset: -3px;
+    min-height: Theme.s6 + Theme.s1 + Theme.hair * 2;
+    Rectangle {
+        border-radius: Theme.radius-m;
+        background: !root.enabled ? Theme.raised2 : root.primary ? (root.hovered ? Theme.text : Theme.strong) : (root.hovered ? Theme.raised4 : Theme.raised3);
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.s4;
+        padding-right: Theme.s4;
+        Text {
+            text: root.text;
+            color: !root.enabled ? Theme.faint : root.primary ? Theme.on-strong : Theme.strong;
+            font-size: Theme.fs-m;
+            font-weight: root.primary ? 600 : 500;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+export component Hairline inherits Rectangle {
+    background: Theme.line-soft;
+}
+
+export component Muted inherits Text {
+    color: Theme.muted;
+    font-size: Theme.fs-m;
+    wrap: word-wrap;
+}
+
+export component GroupHeading inherits Text {
+    color: Theme.strong;
+    font-size: Theme.fs-group;
+    font-weight: 600;
+    wrap: word-wrap;
+}
+
+// One detail: what it is about and the core's text, each in its own element.
+export component DetailLine inherits HorizontalLayout {
+    in property <DetailData> d;
+    spacing: Theme.s2;
+    if root.d.who != "": Text {
+        text: root.d.who;
+        color: Theme.text;
+        font-size: Theme.fs-s;
+        font-weight: 600;
+        vertical-alignment: top;
+    }
+    Text {
+        horizontal-stretch: 1;
+        text: root.d.what;
+        color: Theme.muted;
+        font-size: Theme.fs-s;
+        font-family: Theme.font-mono;
+        wrap: word-wrap;
+    }
+}
+
+export component NoticeCard inherits Rectangle {
+    in property <NoticeData> n;
+    in-out property <bool> open;
+    background: Theme.raised;
+    border-radius: Theme.radius-m;
+    accessible-role: groupbox;
+    accessible-label: root.n.title;
+    // The strong left rule of a callout.
+    Rectangle {
+        x: 0;
+        width: Theme.hair * 2;
+        background: Theme.strong;
+    }
+
+    VerticalLayout {
+        padding: Theme.s5;
+        padding-left: Theme.s5 + Theme.hair * 2;
+        spacing: Theme.s2;
+        Text {
+            text: root.n.title;
+            color: Theme.strong;
+            font-size: Theme.fs-l;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+
+        Muted {
+            text: root.n.body;
+        }
+
+        if root.n.details.length > 0 && root.n.details.length <= 1: VerticalLayout {
+            spacing: Theme.s1;
+            for d in root.n.details: DetailLine {
+                d: d;
+            }
+        }
+        if root.n.details.length > 1: HorizontalLayout {
+            alignment: start;
+            Button {
+                text: root.open ? Str.hide-problems : Str.show-problems;
+                activated => {
+                    root.open = !root.open;
+                }
+            }
+        }
+        if root.n.details.length > 1 && root.open: VerticalLayout {
+            spacing: Theme.s1;
+            for d in root.n.details: DetailLine {
+                d: d;
+            }
+        }
+    }
+}
+
+export component Card inherits Rectangle {
+    background: Theme.raised;
+    border-radius: Theme.radius-m;
+}
+

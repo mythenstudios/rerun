@@ -1,0 +1,137 @@
+// The preview panel of the picked fixes (rule 5, docs/07-ui.md).
+
+import { Button, GroupHeading, Muted, NoticeCard } from "base.slint";
+import { PreviewData, Str, Theme, Modal } from "base.slint";
+import { OpItem, WarnLine, LaunchBox } from "ops.slint";
+
+// The preview of the picked fixes (rule 5): every change before any change.
+export component PreviewPanel inherits VerticalLayout {
+    in property <PreviewData> p;
+    callback apply(string);
+    spacing: Theme.s3;
+    GroupHeading {
+        text: Str.preview-title;
+    }
+
+    if root.p.state == 0: Muted {
+        text: Str.preview-none;
+    }
+    if root.p.state == 1: Muted {
+        text: Str.preview-planning;
+    }
+    if root.p.state == 3: NoticeCard {
+        n: root.p.refused;
+    }
+    if root.p.state == 2: VerticalLayout {
+        spacing: Theme.s3;
+        Muted {
+            text: Str.preview-intro;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s6;
+            alignment: start;
+            VerticalLayout {
+                spacing: Theme.hair * 2;
+                accessible-role: AccessibleRole.text;
+                accessible-label: root.p.summary;
+                Text {
+                    text: root.p.summary;
+                    color: Theme.strong;
+                    font-size: Theme.fs-m;
+                    font-weight: 600;
+                    accessible-role: none;
+                }
+            }
+
+            if root.p.folder != "": VerticalLayout {
+                spacing: Theme.hair * 2;
+                accessible-role: AccessibleRole.text;
+                accessible-label: Str.preview-folder;
+                accessible-value: root.p.folder;
+                Text {
+                    text: Str.preview-folder;
+                    color: Theme.muted;
+                    font-size: Theme.fs-s;
+                    accessible-role: none;
+                }
+
+                Text {
+                    text: root.p.folder;
+                    color: Theme.text;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-s + Theme.hair;
+                    accessible-role: none;
+                }
+            }
+            VerticalLayout {
+                spacing: Theme.hair * 2;
+                accessible-role: AccessibleRole.text;
+                accessible-label: Str.preview-checksum;
+                accessible-value: root.p.hash;
+                Text {
+                    text: Str.preview-checksum;
+                    color: Theme.muted;
+                    font-size: Theme.fs-s;
+                    accessible-role: none;
+                }
+
+                Text {
+                    text: root.p.hash;
+                    color: Theme.text;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-xs;
+                    accessible-role: none;
+                }
+            }
+        }
+
+        if root.p.nothing != "": Muted {
+            text: root.p.nothing;
+        }
+        for op in root.p.ops: OpItem {
+            op: op;
+        }
+        for w in root.p.warnings: WarnLine {
+            w: w;
+        }
+        if root.p.has-launch: LaunchBox {
+            l: root.p.launch;
+        }
+        for n in root.p.notes: Text {
+            text: n;
+            color: Theme.muted;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+        Muted {
+            text: root.p.admin;
+        }
+
+        Muted {
+            text: root.p.undo;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s4;
+            alignment: start;
+            Button {
+                primary: true;
+                text: Str.btn-apply;
+                enabled: root.p.can-apply && root.p.ready && !Modal.working && !Modal.open;
+                activated => {
+                    root.apply(root.p.hash);
+                }
+            }
+
+            Text {
+                text: Modal.working ? Str.preview-applying : Str.preview-close-game;
+                color: Theme.muted;
+                font-size: Theme.fs-m;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+

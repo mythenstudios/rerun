@@ -1,0 +1,92 @@
+// The transaction card: one transaction and what undo takes back together.
+
+import { Badge, Button, Card, Muted } from "base.slint";
+import { CardData, Str, Theme, Modal } from "base.slint";
+import { OpItem } from "ops.slint";
+
+// One transaction: everything in it, and what undo takes back together (user decision U1).
+export component CardView inherits Card {
+    in property <CardData> c;
+    in property <int> index;
+    callback undo();
+    callback forget();
+    accessible-role: groupbox;
+    accessible-label: root.c.game != "" ? root.c.game : root.c.id;
+    accessible-description: root.c.state.word;
+    VerticalLayout {
+        padding: Theme.s5;
+        spacing: Theme.s3;
+        HorizontalLayout {
+            spacing: Theme.s3;
+            if root.c.game != "": Text {
+                horizontal-stretch: 1;
+                text: root.c.game;
+                color: Theme.strong;
+                font-size: Theme.fs-l;
+                font-weight: 600;
+                wrap: word-wrap;
+                vertical-alignment: center;
+            }
+            if root.c.game == "": Rectangle {
+                horizontal-stretch: 1;
+            }
+            Badge {
+                data: root.c.state;
+                accessible-role: none;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s2;
+            Text {
+                text: Str.card-txn;
+                color: Theme.muted;
+                font-size: Theme.fs-s;
+            }
+
+            Text {
+                text: root.c.id;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+            }
+        }
+
+        if root.c.problem != "": Text {
+            text: root.c.problem;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        for op in root.c.ops: OpItem {
+            op: op;
+        }
+        Muted {
+            text: root.c.note;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s3;
+            alignment: start;
+            if root.c.can-undo: Button {
+                text: Str.btn-undo;
+                accessible-label: Str.btn-undo + ": " + (root.c.game != "" ? root.c.game : root.c.id);
+                take-focus: Modal.return-to == root.index * 2;
+                enabled: !Modal.open && !Modal.working;
+                activated => {
+                    root.undo();
+                }
+            }
+            if root.c.can-forget: Button {
+                text: Str.btn-forget;
+                accessible-label: Str.btn-forget + ": " + (root.c.game != "" ? root.c.game : root.c.id);
+                take-focus: Modal.return-to == root.index * 2 + 1;
+                enabled: !Modal.open && !Modal.working;
+                activated => {
+                    root.forget();
+                }
+            }
+        }
+    }
+}
+
