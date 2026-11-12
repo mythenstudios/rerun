@@ -1038,6 +1038,10 @@ pub enum Msg {
     DlNoConsentTitle,
     /// A confirm that matches no shown list.
     DlNoConsentBody,
+    /// A package's state after a failure.
+    DlStFailed,
+    /// A label: the hosts a download may be handed over to.
+    DlLblVia,
     /// The size line while downloading.
     DlSize {
         /// Bytes read.
@@ -1543,7 +1547,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         PreviewAdminYes => "Administrator rights: needed. The app cannot apply this yet.",
         FixNoPackage => "This fix needs a package that Rerun does not download itself (a community build you fetch from its own page). The app cannot apply it; the command line shows the details.",
         DlConsentTitle => "These files will be downloaded",
-        DlConsentIntro => "This fix needs the package below. Rerun downloads it only if you agree, only from the source named here, and keeps it only if it has the SHA-256 shown. Nothing in your game is changed by this step; the usual preview comes next.",
+        DlConsentIntro => "This fix needs the package below. Rerun downloads it only if you agree, only from the source named here (which may hand it over to the storage hosts listed), and keeps it only if it has the SHA-256 shown. Nothing in your game is changed by this step; the usual preview comes next.",
         DlProgressTitle => "Downloading",
         DlProgressIntro => "Nothing in your game is changed. If you cancel, Rerun keeps nothing of the download that is running.",
         DlFailedTitle => "The download did not finish",
@@ -1581,9 +1585,11 @@ fn en(m: Msg) -> Cow<'static, str> {
         DlCancelledTitle => "Download cancelled",
         DlCancelledBody => "Rerun kept nothing of the download that was running. Nothing in your game was changed.",
         DlClosingTitle => "Rerun cancels the download first",
-        DlClosingBody => "The window closes by itself as soon as the download has stopped. This can take up to 30 seconds.",
+        DlClosingBody => "The window closes by itself as soon as the download has stopped, usually within seconds. If the connection hangs it closes after 15 seconds anyway; a leftover temporary file is removed by the next download.",
         DlNoConsentTitle => "That was not the download you were shown",
         DlNoConsentBody => "Open the fix again and read what would be downloaded. Nothing was downloaded.",
+        DlStFailed => "Failed",
+        DlLblVia => "May be handed over to",
         DlSize { read, total } => return match total { Some(t) => format!("{} of {}", bytes(read, false), bytes(t, false)), None => format!("{} so far (the source did not announce a size)", bytes(read, false)) }.into(),
     };
     Cow::Borrowed(s)
@@ -2080,7 +2086,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         PreviewAdminYes => "Administratorrechte: nötig. Die App kann das noch nicht anwenden.",
         FixNoPackage => "Dieser Fix braucht ein Paket, das Rerun nicht selbst herunterlädt (ein Community-Build, den du von seiner eigenen Seite holst). Die App kann ihn nicht anwenden; die Kommandozeile zeigt die Einzelheiten.",
         DlConsentTitle => "Diese Dateien werden heruntergeladen",
-        DlConsentIntro => "Dieser Fix braucht das Paket unten. Rerun lädt es nur herunter, wenn du zustimmst, nur von der hier genannten Quelle, und behält es nur, wenn es den angezeigten SHA-256 hat. Dieser Schritt ändert nichts an deinem Spiel; danach kommt die gewohnte Vorschau.",
+        DlConsentIntro => "Dieser Fix braucht das Paket unten. Rerun lädt es nur herunter, wenn du zustimmst, nur von der hier genannten Quelle (die an die aufgeführten Speicher-Server weiterleiten darf), und behält es nur, wenn es den angezeigten SHA-256 hat. Dieser Schritt ändert nichts an deinem Spiel; danach kommt die gewohnte Vorschau.",
         DlProgressTitle => "Wird heruntergeladen",
         DlProgressIntro => "An deinem Spiel wird nichts geändert. Wenn du abbrichst, behält Rerun nichts vom laufenden Download.",
         DlFailedTitle => "Der Download ist nicht abgeschlossen",
@@ -2118,9 +2124,11 @@ fn de(m: Msg) -> Cow<'static, str> {
         DlCancelledTitle => "Download abgebrochen",
         DlCancelledBody => "Rerun hat nichts vom laufenden Download behalten. An deinem Spiel wurde nichts geändert.",
         DlClosingTitle => "Rerun bricht zuerst den Download ab",
-        DlClosingBody => "Das Fenster schliesst von selbst, sobald der Download gestoppt ist. Das kann bis zu 30 Sekunden dauern.",
+        DlClosingBody => "Das Fenster schliesst von selbst, sobald der Download gestoppt ist, meist innert Sekunden. Hängt die Verbindung, schliesst es nach 15 Sekunden trotzdem; eine übrig gebliebene temporäre Datei entfernt der nächste Download.",
         DlNoConsentTitle => "Das war nicht der Download, den du gesehen hast",
         DlNoConsentBody => "Öffne den Fix nochmals und lies, was heruntergeladen würde. Es wurde nichts heruntergeladen.",
+        DlStFailed => "Fehlgeschlagen",
+        DlLblVia => "Darf weiterleiten an",
         DlSize { read, total } => return match total { Some(t) => format!("{} von {}", bytes(read, true), bytes(t, true)), None => format!("{} bisher (die Quelle hat keine Grösse genannt)", bytes(read, true)) }.into(),
     };
     Cow::Borrowed(s)

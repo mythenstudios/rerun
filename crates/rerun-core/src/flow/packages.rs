@@ -69,6 +69,8 @@ pub struct PackageNeed {
     pub tier: Tier,
     /// The forge repository it comes from.
     pub repo: Option<String>,
+    /// The original page (shown as the source when there is no repository).
+    pub page: Option<String>,
     /// Its downloads (empty when [`NeedState::Unobtainable`]).
     pub downloads: Vec<DownloadNeed>,
     /// Where it stands.
@@ -85,6 +87,7 @@ impl PackageNeed {
             && self.license == o.license
             && self.tier == o.tier
             && self.repo == o.repo
+            && self.page == o.page
             && self.downloads == o.downloads
     }
 
@@ -106,6 +109,7 @@ pub fn need(catalog: &Catalog, app: Option<&AppDir<'_>>, id: &str) -> PackageNee
             license: String::new(),
             tier: Tier::Community,
             repo: None,
+            page: None,
             downloads: Vec::new(),
             state: NeedState::Unobtainable("the package is not in the signed index".to_owned()),
         },
@@ -140,6 +144,7 @@ fn need_of(p: &Package, app: Option<&AppDir<'_>>) -> PackageNeed {
         license: p.license.clone(),
         tier: p.tier,
         repo: p.source.repo.clone(),
+        page: p.source.page.clone(),
         downloads,
         state,
     }
@@ -263,6 +268,8 @@ impl FetchError {
             Self::Cancelled => FetchKind::Cancelled,
             Self::NoIndex | Self::Changed { .. } => FetchKind::Changed,
             Self::Unobtainable { .. } => FetchKind::Unobtainable,
+            // A passing I/O failure of the unpacking is not a refusal of the archive.
+            Self::Unpack(e) if e.transient() => FetchKind::Other,
             Self::Unpack(_) => FetchKind::ExtractionRefused,
             Self::Download(d) => match d {
                 D::Network(e) => match e.win32 {
@@ -294,6 +301,16 @@ impl FetchError {
             }
         }
     }
+}
+
+/// The hosts a download of the package's host may be handed over to (ADR 0025, the fixed
+/// redirect list): where the bytes may come from besides the URL's own host.
+pub fn redirect_hosts(host: &str) -> Vec<&'static str> {
+    crate::policy::url::REDIRECTS
+        .iter()
+        .filter(|(from, _)| *from == host)
+        .flat_map(|(_, to)| to.iter().copied())
+        .collect()
 }
 
 /// Downloads, verifies and unpacks the package `need` (module docs): every download into the

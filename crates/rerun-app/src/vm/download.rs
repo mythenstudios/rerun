@@ -11,7 +11,7 @@
 
 use rerun_core::catalog::model::Arch;
 use rerun_core::escape;
-use rerun_core::flow::{DownloadNeed, FetchError, FetchKind, PackageNeed};
+use rerun_core::flow::{self, DownloadNeed, FetchError, FetchKind, PackageNeed};
 
 use super::{DetailVm, LineVm, Notice, OpVm, ResultVm, Tone, Value, shown_error};
 use crate::text::{Lang, Msg, t};
@@ -51,6 +51,8 @@ pub enum PackageState {
     Done,
     /// Not downloaded (a failure came first).
     NotStarted,
+    /// This package's download or unpacking failed.
+    Failed,
 }
 
 /// The consent, progress or failure dialog.
@@ -119,6 +121,7 @@ fn state_word(s: PackageState) -> Msg {
         PackageState::Unpacking => Msg::DlStUnpacking,
         PackageState::Done => Msg::DlStDone,
         PackageState::NotStarted => Msg::DlStNotStarted,
+        PackageState::Failed => Msg::DlStFailed,
     }
 }
 
@@ -126,10 +129,11 @@ fn state_word(s: PackageState) -> Msg {
 /// `state`: `None` in the consent dialog.
 fn package_op(index: usize, n: &PackageNeed, state: Option<PackageState>, lang: Lang) -> OpVm {
     let mut lines = Vec::new();
-    if let Some(repo) = &n.repo {
+    // The repository, else the original page.
+    if let Some(src) = n.repo.as_ref().or(n.page.as_ref()) {
         lines.push(line(
             tx(lang, Msg::DlLblSource),
-            vec![Value::Shown(escape::text(repo).into_owned())],
+            vec![Value::Shown(escape::text(src).into_owned())],
         ));
     }
     lines.push(line(
@@ -149,6 +153,23 @@ fn package_op(index: usize, n: &PackageNeed, state: Option<PackageState>, lang: 
             .map(|h| Value::Shown(escape::text(h).into_owned()))
             .collect(),
     ));
+    // Where the bytes may come from besides the host: the fixed redirect list (ADR 0025).
+    let mut via: Vec<&str> = Vec::new();
+    for h in &hosts {
+        for v in flow::redirect_hosts(h) {
+            if !via.contains(&v) {
+                via.push(v);
+            }
+        }
+    }
+    if !via.is_empty() {
+        lines.push(line(
+            tx(lang, Msg::DlLblVia),
+            via.iter()
+                .map(|h| Value::Shown(escape::text(h).into_owned()))
+                .collect(),
+        ));
+    }
     lines.push(line(
         tx(lang, Msg::DlLblSha),
         n.downloads
@@ -275,12 +296,6 @@ fn failure_msg(kind: FetchKind) -> Msg {
     }
 }
 
-/// Whether "Try again" can help: not when the list no longer matches the index or the package
-/// cannot be downloaded at all.
-fn retryable(kind: FetchKind) -> bool {
-    !matches!(kind, FetchKind::Changed | FetchKind::Unobtainable)
-}
-
 /// The failure dialog: the same list, what went wrong, and "Try again" (a new confirm of the
 /// list that is shown).
 pub fn failed(
@@ -303,7 +318,8 @@ pub fn failed(
         packages: packages(needs, Some(states), lang),
         notes: Vec::new(),
         details: vec![DetailVm::of(shown_error(e))],
-        confirm: retryable(kind).then(|| tx(lang, Msg::DlBtnRetry)),
+        // Only a passing failure can be tried again (`FetchError::transient`).
+        confirm: e.transient().then(|| tx(lang, Msg::DlBtnRetry)),
         cancel: tx(lang, Msg::BtnDismiss),
         cancelling: false,
     }

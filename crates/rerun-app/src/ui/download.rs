@@ -126,6 +126,13 @@ pub(super) fn cancel(ui: &AppWindow, st: &mut State) {
     }
 }
 
+/// Whether a download is running as far as the window knows (its progress dialog is open).
+pub(super) fn running(st: &State) -> bool {
+    st.download
+        .as_ref()
+        .is_some_and(|d| d.stage == DownloadStage::Progress)
+}
+
 /// Closes the dialog; the opener takes the focus back.
 fn close(ui: &AppWindow, st: &mut State) {
     ui.set_dialog_open(false);
@@ -140,22 +147,28 @@ fn close(ui: &AppWindow, st: &mut State) {
 pub(super) fn download_ended(ui: &AppWindow, st: &mut State, outcome: DownloadOutcome) -> bool {
     match outcome {
         DownloadOutcome::Done => {
-            // The fix is selected when the fresh page arrives.
-            st.select_after = st.download.as_ref().map(|d| d.variant.clone());
+            // The fresh page came before this: the fix is selectable now and the user asked for
+            // it, so it is ticked and the usual preview follows.
+            let variant = st.download.as_ref().map(|d| d.variant.clone());
             close(ui, st);
+            if let (Some(key), Some(page)) = (variant, st.page.clone())
+                && let Some(i) = page
+                    .fixes
+                    .iter()
+                    .position(|f| f.key == key && f.offer == crate::vm::Offer::Selectable)
+                && !st.selection.contains(&key)
+            {
+                st.selection.toggle(&page, i);
+                super::write::show_selection(ui, st);
+                plan_selection(ui, st);
+            }
         }
         DownloadOutcome::Cancelled => close(ui, st),
         // The failure dialog was sent before this and stays.
         DownloadOutcome::Failed => {}
-        DownloadOutcome::Refused => {
-            if st
-                .download
-                .as_ref()
-                .is_some_and(|d| d.stage != DownloadStage::Progress)
-            {
-                close(ui, st);
-            }
-        }
+        // A confirm that matched no shown list, or a job that stopped before it began: nothing
+        // runs, so no dialog stays.
+        DownloadOutcome::Refused => close(ui, st),
     }
     std::mem::take(&mut st.close_after_download)
 }

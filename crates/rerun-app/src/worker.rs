@@ -230,7 +230,7 @@ pub enum Event {
     Result(ResultVm),
     /// The consent, progress or failure dialog of a package download (P5-5b).
     Download(Box<DownloadVm>),
-    /// A [`Job::Download`] has ended (always the last event of it).
+    /// A [`Job::Download`] has ended (always the last event of it, after the fresh page).
     DownloadEnded(DownloadOutcome),
 }
 
@@ -316,6 +316,9 @@ impl Worker {
                         Err(detail) => {
                             let _guard = WriteGuard::new(&session, &job);
                             emit(Event::Blocked(no_system(detail.clone(), lang)));
+                            if job.downloads() {
+                                emit(Event::DownloadEnded(DownloadOutcome::Refused));
+                            }
                         }
                     }
                 }
@@ -518,6 +521,10 @@ fn run_job(
         Ok(g) => g,
         Err(gate) => {
             emit(Event::Blocked(vm::blocked(&gate, lang)));
+            // A download's dialog must not outlive a stopped job.
+            if job.downloads() {
+                emit(Event::DownloadEnded(DownloadOutcome::Refused));
+            }
             return None;
         }
     };
@@ -1041,11 +1048,12 @@ fn download(
             Err(FetchError::Cancelled) => {
                 // What finished before stays unpacked; the page shows where things stand.
                 emit(Event::Result(vm::cancelled(lang)));
-                emit(Event::DownloadEnded(DownloadOutcome::Cancelled));
                 refresh_page(g, c.app_id, lang, session, emit);
+                emit(Event::DownloadEnded(DownloadOutcome::Cancelled));
                 return;
             }
             Err(e) => {
+                states[i] = PackageState::Failed;
                 for s in &mut states[i + 1..] {
                     *s = PackageState::NotStarted;
                 }
@@ -1054,21 +1062,25 @@ fn download(
                 emit(Event::Download(Box::new(vm::failed(
                     c.app_id, &c.variant, &c.needs, &states, &e, again, lang,
                 ))));
-                let (app_id, retry) = (c.app_id, e.kind() != flow::FetchKind::Changed);
-                session.pending.consent = Some(Consent { nonce: again, ..c });
-                emit(Event::DownloadEnded(DownloadOutcome::Failed));
-                if !retry {
+                let app_id = c.app_id;
+                // The list is kept for "Try again" only when trying again can help (the
+                // dialog offers it only then).
+                if e.transient() {
+                    session.pending.consent = Some(Consent { nonce: again, ..c });
+                }
+                if e.kind() == flow::FetchKind::Changed {
                     // The index changed: the page may offer other fixes now.
                     refresh_page(g, app_id, lang, session, emit);
                 }
+                emit(Event::DownloadEnded(DownloadOutcome::Failed));
                 return;
             }
         }
     }
     // Every package is in place: the window selects the fix when it takes the fresh page.
     session.games.forget(c.app_id);
-    emit(Event::DownloadEnded(DownloadOutcome::Done));
     refresh_page(g, c.app_id, lang, session, emit);
+    emit(Event::DownloadEnded(DownloadOutcome::Done));
 }
 
 /// The game page again (its cached executables dropped), after the packages changed.

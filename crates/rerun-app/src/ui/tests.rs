@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use slint::ComponentHandle as _;
+use slint::Model as _;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
 use slint::platform::{Platform, WindowAdapter};
 
@@ -72,11 +73,11 @@ fn the_window_draws_its_first_frames_fast() {
     set_strings(&ui, Lang::En);
     window.set_size(slint::PhysicalSize::new(WIDTH, HEIGHT));
     ui.show().unwrap();
-    let mut buf = vec![Rgb565Pixel(0); (WIDTH * HEIGHT) as usize];
-    let mut draw = || {
+    let buf = std::cell::RefCell::new(vec![Rgb565Pixel(0); (WIDTH * HEIGHT) as usize]);
+    let draw = || {
         let mut drawn = false;
         window.draw_if_needed(|r| {
-            r.render(&mut buf, WIDTH as usize);
+            r.render(&mut buf.borrow_mut(), WIDTH as usize);
             drawn = true;
         });
         drawn
@@ -98,6 +99,7 @@ fn the_window_draws_its_first_frames_fast() {
         license: "MIT".to_owned(),
         tier: Tier::Established,
         repo: Some("https://github.com/owner/fix-pack".to_owned()),
+        page: None,
         downloads: vec![DownloadNeed {
             arch: None,
             url: "https://github.com/owner/fix-pack/releases/download/v1.0/fix-pack.zip".to_owned(),
@@ -107,9 +109,22 @@ fn the_window_draws_its_first_frames_fast() {
         state: NeedState::Missing,
     };
     let needs = [need];
+    // What the window drew, as one number: a binding that is wrong draws another picture.
+    let picture = || {
+        buf.borrow().iter().fold(0u64, |a, p| {
+            a.wrapping_mul(1_000_003).wrapping_add(u64::from(p.0))
+        })
+    };
+    let closed = picture();
     ui.set_dialog(download_data(&consent(1, "fix-pack", &needs, 1, Lang::De)));
     ui.set_dialog_open(true);
     assert!(draw(), "the consent dialog is drawn");
+    let d = ui.get_dialog();
+    assert_eq!(d.kind, 2);
+    assert!(!d.no_confirm && d.can_confirm && d.confirm == "Herunterladen");
+    assert_eq!(d.ops.row_count(), 1);
+    let consent_pic = picture();
+    assert_ne!(consent_pic, closed, "the open dialog changes the picture");
     let reading = [PackageState::Reading {
         read: 1_300_000,
         announced: Some(3_250_000),
@@ -124,6 +139,13 @@ fn the_window_draws_its_first_frames_fast() {
         Lang::En,
     )));
     assert!(draw(), "the progress dialog is drawn");
+    let d = ui.get_dialog();
+    assert!(d.no_confirm && d.cancel_disabled && d.cancel_label == "Cancelling ...");
+    let progress_pic = picture();
+    assert_ne!(
+        progress_pic, consent_pic,
+        "progress looks other than consent"
+    );
     ui.set_dialog(download_data(&failed(
         1,
         "fix-pack",
@@ -134,6 +156,9 @@ fn the_window_draws_its_first_frames_fast() {
         Lang::En,
     )));
     assert!(draw(), "the failure dialog is drawn");
+    let d = ui.get_dialog();
+    assert!(d.no_confirm && !d.cancel_disabled, "no retry for NoIndex");
+    assert_ne!(picture(), progress_pic, "failure looks other than progress");
     ui.set_dialog_open(false);
     eprintln!(
         "headless start: window created {created:?}, first frame {first:?}, with 60 rows {with_rows:?}"

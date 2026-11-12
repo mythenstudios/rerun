@@ -411,9 +411,79 @@ fn fp5_every_failure_is_typed_and_keeps_nothing() {
     assert_eq!(e.kind(), FetchKind::ExtractionRefused, "{e:?}");
     assert!(matches!(seen.last(), Some(Progress::Unpacking)));
     assert_eq!(need_of(&sys, &http).state, NeedState::Missing);
+    // The archive had its pinned hash: it stays in the cache (a refusal of its content is not a
+    // failed download); nothing was unpacked.
+    assert_eq!(listed(&sys, AppSub::Cache), Some(vec![lower(&bad)]));
     let files = listed(&sys, AppSub::Packages).unwrap_or_default();
     assert!(
         files.iter().all(|f| f != "fix-pack") || files.is_empty(),
         "{files:?}"
     );
+}
+
+/// FP6: a package with one download per architecture. A cancel during the second body keeps
+/// the first archive (complete, under its pinned hash) and nothing of the second; the retry takes
+/// the first as a cache hit and finishes.
+#[test]
+fn fp6_a_cancel_during_the_second_asset_keeps_the_first_complete() {
+    const ASSET64: &str =
+        "https://github.com/owner/fix-pack/releases/download/v1.0/fix-pack-x64.zip";
+    const STORE64: &str =
+        "https://release-assets.githubusercontent.com/github-production-release-asset/1/3?sp=r";
+    let a86 = zip(&[
+        ZipEntry::file("bin/fix.dll", DLL),
+        ZipEntry::file("fix.ini", INI),
+    ]);
+    let a64 = zip(&[
+        ZipEntry::file("bin/fix.dll", DLL),
+        ZipEntry::file("fix.ini", INI),
+        ZipEntry::file("README.txt", &noise(300 * 1024)),
+    ]);
+    let pkg = format!(
+        r#"{{"format":1,"id":"fix-pack","name":"Fix pack","status":"active","tier":"established","source":{{"repo":"https://github.com/owner/fix-pack","page":"https://github.com/owner/fix-pack"}},"version":"1.0","assets":[{{"arch":"x86","url":"{ASSET}","sha256":"{x}"}},{{"arch":"x64","url":"{ASSET64}","sha256":"{y}"}}],"license":"MIT","arch":["x86","x64"],"slots":["fix.dll"],"files":[{{"from":"bin/fix.dll","to":"fix.dll","sha256":"{d}"}},{{"from":"fix.ini","to":"fix.ini","sha256":"{i}","config":true}}]}}"#,
+        x = upper(&a86),
+        y = upper(&a64),
+        d = upper(DLL),
+        i = upper(INI),
+    );
+    let sys = world(&pkg);
+    let trip = Trip::new();
+    let http = FakeHttp::default();
+    http.reply(ASSET, FakeReply::redirect(302, STORE));
+    http.reply(STORE, FakeReply::ok(&a86));
+    http.reply(ASSET64, FakeReply::redirect(302, STORE64));
+    http.reply(
+        STORE64,
+        FakeReply::ok(&a64)
+            .chunked(16 * 1024)
+            .trip_after(100 * 1024, &trip),
+    );
+    let n = need_of(&sys, &http);
+    assert_eq!(n.downloads.len(), 2);
+    let (r, seen) = run(&sys, &http, &n, trip.flag());
+    assert_eq!(r.unwrap_err(), FetchError::Cancelled);
+    assert!(seen.iter().any(|p| matches!(
+        p,
+        Progress::Download {
+            index: 1,
+            of: 2,
+            ..
+        }
+    )));
+    assert_eq!(listed(&sys, AppSub::Cache), Some(vec![lower(&a86)]));
+    assert_eq!(listed(&sys, AppSub::Packages), None);
+    // Retry: the first is a hit, the second is downloaded whole.
+    http.reply(STORE64, FakeReply::ok(&a64));
+    http.clear_requests();
+    let (r, seen) = run(&sys, &http, &n, &AtomicBool::new(false));
+    r.unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        seen.iter()
+            .any(|p| matches!(p, Progress::Cached { index: 0, of: 2 }))
+    );
+    assert_eq!(http.requests(), [ASSET64, STORE64]);
+    let mut want = vec![lower(&a86), lower(&a64)];
+    want.sort();
+    assert_eq!(listed(&sys, AppSub::Cache), Some(want));
+    assert_eq!(need_of(&sys, &http).state, NeedState::Unpacked);
 }

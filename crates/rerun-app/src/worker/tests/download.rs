@@ -298,10 +298,11 @@ fn ad1_nothing_is_downloaded_without_the_consent_of_the_list_shown() {
         assert_eq!(ended(&ev), Some(DownloadOutcome::Done), "{ev:?}");
         assert_eq!(r.http.requests(), [ASSET, STORE]);
         // The fresh page follows the end: the fix is selectable now.
-        let page = match ev.last() {
-            Some(Event::Game(g)) => g.clone(),
-            other => panic!("{other:?}"),
-        };
+        let page = game_in(&ev).clone();
+        assert_eq!(
+            ev.last(),
+            Some(&Event::DownloadEnded(DownloadOutcome::Done))
+        );
         assert_eq!(page.fixes[0].offer, Offer::Selectable);
         let want = r.archive.len();
         assert_eq!(
@@ -432,7 +433,7 @@ fn ad2_progress_names_every_state_in_order() {
     assert!(kinds.contains(&1) && kinds.contains(&2), "{kinds:?}");
     // The last event of the job is the end, then the fresh page.
     let tail: Vec<&str> = kinds_of(&ev);
-    assert_eq!(&tail[tail.len() - 2..], ["download-ended", "game"]);
+    assert_eq!(&tail[tail.len() - 2..], ["game", "download-ended"]);
 }
 
 fn kinds_of(ev: &[Event]) -> Vec<&'static str> {
@@ -465,10 +466,11 @@ fn ad3_a_cancel_in_the_middle_leaves_nothing_and_a_second_try_works() {
         .expect("a notice");
     assert_eq!(banner.notice.title, t(Lang::En, Msg::DlCancelledTitle));
     assert_eq!(banner.tone, crate::vm::Tone::Calm);
-    let page = match ev.last() {
-        Some(Event::Game(g)) => g,
-        other => panic!("{other:?}"),
-    };
+    let page = game_in(&ev);
+    assert_eq!(
+        ev.last(),
+        Some(&Event::DownloadEnded(DownloadOutcome::Cancelled))
+    );
     assert_eq!(page.fixes[0].offer, Offer::NeedsDownload);
     // Nothing in the cache (no archive, no temp file), nothing unpacked, the game untouched.
     assert_eq!(r.listed("cache"), Some(Vec::new()));
@@ -511,21 +513,21 @@ fn ad4_a_failure_is_a_dialog_with_try_again_and_keeps_nothing() {
         assert_eq!(f.stage, DownloadStage::Failed);
         assert_eq!(f.title, t(lang, Msg::DlFailedTitle));
         assert_eq!(f.intro, t(lang, Msg::DlErrHash));
-        assert_eq!(f.confirm.as_deref(), Some(&*t(lang, Msg::DlBtnRetry)));
+        // A wrong hash does not pass: no "Try again" and no consent kept.
+        assert_eq!(f.confirm, None);
         // The same list is still shown, and the core's text is the detail.
         assert_eq!(f.packages.len(), 1);
         assert!(!f.details.is_empty());
         assert_eq!(r.listed("cache"), Some(Vec::new()), "{lang:?}");
         assert_eq!(r.listed("packages"), None);
-        // "Try again" is a confirm of the failure dialog's list: with the right archive now it
-        // works.
         let good = r.archive.clone();
         r.http.reply(STORE, FakeReply::ok(&good));
         let ev = r.run(Job::Download { nonce: f.nonce });
-        assert_eq!(ended(&ev), Some(DownloadOutcome::Done), "{ev:?}");
-        // The old dialog's nonce no longer downloads.
-        let ev = r.run(Job::Download { nonce: f.nonce });
-        assert_eq!(ended(&ev), Some(DownloadOutcome::Refused));
+        assert_eq!(
+            ended(&ev),
+            Some(DownloadOutcome::Refused),
+            "no list is kept"
+        );
 
         // A redirect to a foreign host is never followed.
         let mut r = DRig::new(lang, FakeReply::ok);
@@ -584,7 +586,10 @@ fn ad4_a_package_changed_since_the_consent_is_refused_before_any_request() {
     assert!(r.http.requests().is_empty(), "nothing was asked for");
     assert_eq!(r.listed("cache"), None);
     // The page is read again: it offers the fix with its new list.
-    assert!(matches!(ev.last(), Some(Event::Game(_))), "{ev:?}");
+    assert!(
+        matches!(ev.iter().rev().nth(1), Some(Event::Game(_))),
+        "{ev:?}"
+    );
 }
 
 #[test]
@@ -683,4 +688,96 @@ fn ad5_the_worker_counts_a_download_and_a_cancel_ends_it() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     panic!("the download never stopped counting");
+}
+
+fn game_in(ev: &[Event]) -> &GameVm {
+    ev.iter()
+        .find_map(|e| match e {
+            Event::Game(g) => Some(g),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no game page in {ev:?}"))
+}
+
+/// A second package for AD6.
+const DLL2: &[u8] = b"the second dll";
+
+/// A fix with two packages: `fix-pack` and `fix-two`.
+fn two_index(a1: &[u8], a2: &[u8], game_sha: &str) -> String {
+    let one = pkg_index(a1, game_sha, 1);
+    let steps_old = r#""steps":[{"package":"fix-pack"}]"#;
+    let steps_new = r#""steps":[{"package":"fix-pack"},{"package":"fix-two"}]"#;
+    let two = format!(
+        r#",{{"format":1,"id":"fix-two","name":"Fix two","status":"active","tier":"established","source":{{"repo":"https://github.com/owner/fix-two","release":"https://github.com/owner/fix-two/releases/download/v1.0/fix-two.zip"}},"version":"1.0","sha256":"{a}","license":"MIT","arch":["x86"],"slots":["two.dll"],"files":[{{"from":"two.dll","to":"two.dll","sha256":"{d}"}}]}}]}}"#,
+        a = upper(a2),
+        d = upper(DLL2),
+    );
+    let mut s = one.replace(steps_old, steps_new);
+    assert!(s.ends_with("}]}"), "{s}");
+    s.truncate(s.len() - 2);
+    s.push_str(&two);
+    s
+}
+
+const ASSET2: &str = "https://github.com/owner/fix-two/releases/download/v1.0/fix-two.zip";
+const STORE2: &str =
+    "https://release-assets.githubusercontent.com/github-production-release-asset/1/9?sp=r";
+
+/// AD6: a fix with two packages: both are listed, the progress follows the first (done) and the
+/// second; a connection that breaks in the second is a failure dialog that marks it failed and
+/// the first done, offers "Try again" (a passing failure), and the retry takes the first from the
+/// cache and finishes; the fix is selectable then.
+#[test]
+fn ad6_a_fix_with_two_packages_fails_on_the_second_and_retries() {
+    let a1 = archive();
+    let a2 = zip(&[ZipEntry::file("two.dll", DLL2)]);
+    let sys = steam_world("Invented P");
+    import(&sys, &two_index(&a1, &a2, &sha256_of(&sys, "game.exe")));
+    let http = github(FakeReply::ok(&a1));
+    let mut cut = FakeReply::ok(&a2);
+    cut.cut_after = Some(10);
+    http.reply(ASSET2, FakeReply::redirect(302, STORE2));
+    http.reply(STORE2, cut);
+    let mut r = DRig {
+        sys,
+        http,
+        session: Session::default(),
+        lang: Lang::En,
+        archive: a1,
+    };
+    r.page();
+    let d = r.ask();
+    assert_eq!(d.packages.len(), 2);
+    assert_eq!(d.packages[1].target.as_str(), "Fix two 1.0");
+    let ev = r.run(Job::Download { nonce: d.nonce });
+    assert_eq!(ended(&ev), Some(DownloadOutcome::Failed), "{ev:?}");
+    let status = |d: &DownloadVm, i: usize| {
+        d.packages[i]
+            .lines
+            .iter()
+            .find(|l| l.label == t(Lang::En, Msg::DlLblStatus))
+            .map(|l| l.values[0].as_str().to_owned())
+            .unwrap()
+    };
+    // Progress saw the first done while the second was waiting.
+    assert!(dialogs(&ev).iter().any(|d| {
+        d.stage == DownloadStage::Progress
+            && status(d, 0) == t(Lang::En, Msg::DlStDone)
+            && status(d, 1) == t(Lang::En, Msg::DlStWaiting)
+    }));
+    let f = *dialogs(&ev).last().unwrap();
+    assert_eq!(f.stage, DownloadStage::Failed);
+    assert_eq!(status(f, 0), t(Lang::En, Msg::DlStDone));
+    assert_eq!(status(f, 1), t(Lang::En, Msg::DlStFailed));
+    assert_eq!(f.intro, t(Lang::En, Msg::DlErrInterrupted));
+    assert!(f.confirm.is_some(), "a cut connection can be tried again");
+    // The first package is in place, the second left nothing.
+    assert_eq!(r.listed("packages"), Some(vec!["fix-pack".to_owned()]));
+    // Retry with a working connection: the first is a cache hit.
+    r.http.reply(STORE2, FakeReply::ok(&a2));
+    r.http.clear_requests();
+    let ev = r.run(Job::Download { nonce: f.nonce });
+    assert_eq!(ended(&ev), Some(DownloadOutcome::Done), "{ev:?}");
+    assert_eq!(r.http.requests(), [ASSET2, STORE2], "the first is cached");
+    assert_eq!(game_in(&ev).fixes[0].offer, Offer::Selectable);
 }

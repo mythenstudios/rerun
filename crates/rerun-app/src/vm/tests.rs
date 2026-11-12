@@ -34,6 +34,7 @@ fn fix(packages: &[&str], needs_helper: bool, refused: bool) -> Fix {
                 license: "MIT".to_owned(),
                 tier: Tier::Established,
                 repo: None,
+                page: None,
                 downloads: Vec::new(),
                 state: NeedState::Missing,
             })
@@ -81,6 +82,7 @@ fn vd0_the_packages_decide_whether_a_fix_asks_first() {
                 license: "MIT".to_owned(),
                 tier: Tier::Established,
                 repo: None,
+                page: None,
                 downloads: Vec::new(),
                 state: s.clone(),
             })
@@ -401,6 +403,7 @@ fn needs() -> Vec<PackageNeed> {
             license: "MIT".to_owned(),
             tier: Tier::Established,
             repo: Some("https://github.com/ThirteenAG/Ultimate-ASI-Loader".to_owned()),
+            page: None,
             downloads: vec![
                 dl(
                     Some(Arch::X86),
@@ -424,6 +427,7 @@ fn needs() -> Vec<PackageNeed> {
             license: "MIT".to_owned(),
             tier: Tier::Official,
             repo: None,
+            page: Some("https://example.org/pack".to_owned()),
             downloads: vec![dl(
                 None,
                 "https://github.com/o/p/releases/download/v1/p.zip",
@@ -486,6 +490,13 @@ fn vd1_the_consent_lists_what_the_index_says() {
                 ),
                 one(Msg::DlLblHost, "github.com"),
                 (
+                    label(lang, Msg::DlLblVia),
+                    vec![
+                        "objects.githubusercontent.com".to_owned(),
+                        "release-assets.githubusercontent.com".to_owned()
+                    ]
+                ),
+                (
                     label(lang, Msg::DlLblSha),
                     vec![
                         format!("x86: {}", "a".repeat(64)),
@@ -506,13 +517,13 @@ fn vd1_the_consent_lists_what_the_index_says() {
         // A bidi override in a name is escaped, not drawn.
         assert!(!d.packages[1].target.as_str().contains('\u{202e}'));
         assert!(d.packages[1].target.as_str().contains("Pack"));
-        // The other package has no source line.
-        assert!(
-            d.packages[1]
-                .lines
-                .iter()
-                .all(|l| l.label != label(lang, Msg::DlLblSource))
-        );
+        // The other package has no repository: its page is the source.
+        let src = d.packages[1]
+            .lines
+            .iter()
+            .find(|l| l.label == label(lang, Msg::DlLblSource))
+            .expect("a source line");
+        assert_eq!(src.values[0].as_str(), "https://example.org/pack");
     }
     // The two languages are different texts (a copied English line would pass the compiler).
     let en = consent(1, "x", &needs(), 1, Lang::En);
@@ -623,7 +634,7 @@ fn vd3_a_failure_names_what_went_wrong() {
             site(|host| Dl::Status { host, status: 404 }),
             FetchKind::Status,
             Msg::DlErrStatus,
-            true,
+            false,
         ),
         (
             FetchError::Download(Dl::Mismatch {
@@ -631,19 +642,19 @@ fn vd3_a_failure_names_what_went_wrong() {
             }),
             FetchKind::WrongHash,
             Msg::DlErrHash,
-            true,
+            false,
         ),
         (
             site(|host| Dl::TooLarge { host, limit: 64 }),
             FetchKind::TooLarge,
             Msg::DlErrTooLarge,
-            true,
+            false,
         ),
         (
             site(|host| Dl::TooManyRedirects { host }),
             FetchKind::RedirectRefused,
             Msg::DlErrRedirect,
-            true,
+            false,
         ),
         (
             FetchError::Unpack(rerun_core::pkg::extract::ExtractError::Layout {
@@ -652,7 +663,7 @@ fn vd3_a_failure_names_what_went_wrong() {
             }),
             FetchKind::ExtractionRefused,
             Msg::DlErrExtract,
-            true,
+            false,
         ),
         (
             FetchError::NoIndex,
@@ -720,8 +731,8 @@ fn vd4_the_notices_say_what_happened() {
         let w = closing(lang);
         assert_eq!(w.tone, Tone::Attention);
         assert_eq!(w.notice.title, label(lang, Msg::DlClosingTitle));
-        // The wait is named: up to 30 seconds.
-        assert!(w.notice.body.contains("30"), "{}", w.notice.body);
+        // The grace period is named.
+        assert!(w.notice.body.contains("15"), "{}", w.notice.body);
         let n = no_consent(lang);
         assert_eq!(n.tone, Tone::Calm);
         assert_eq!(n.notice.title, label(lang, Msg::DlNoConsentTitle));
@@ -738,4 +749,24 @@ fn vd5_closing_waits_for_a_write_and_cancels_a_download() {
     assert_eq!(closing_policy(false, true), Closing::CancelDownload);
     // Both: the write comes first (it cannot be cancelled).
     assert_eq!(closing_policy(true, true), Closing::FinishWrite);
+}
+
+/// VD6: a package that failed says so, the ones behind it were not started.
+#[test]
+fn vd6_the_failed_package_says_failed() {
+    for lang in Lang::ALL {
+        let states = [PackageState::Done, PackageState::Failed];
+        let e = FetchError::NoIndex;
+        let d = failed(220, "f", &needs(), &states, &e, 3, lang);
+        let word = |i: usize| {
+            d.packages[i]
+                .lines
+                .iter()
+                .find(|l| l.label == label(lang, Msg::DlLblStatus))
+                .map(|l| l.values[0].as_str().to_owned())
+                .unwrap()
+        };
+        assert_eq!(word(0), label(lang, Msg::DlStDone));
+        assert_eq!(word(1), label(lang, Msg::DlStFailed));
+    }
 }

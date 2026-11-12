@@ -57,6 +57,7 @@ pub use launch::{LaunchView, OptionText, launch_view, option_text};
 pub use library::{LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_games, library};
 pub use packages::{
     DownloadNeed, FetchError, FetchKind, Fetched, NeedState, PackageNeed, Progress, fetch, need,
+    redirect_hosts,
 };
 pub use revert::{
     ActError, CleanupAsk, ForgetPreview, ForgetShown, LaunchOption, ProfileFate, RebindShown,

@@ -87,8 +87,6 @@ struct State {
     opener: i32,
     /// The open download dialog (consent, progress or failure), if any.
     download: Option<DownloadState>,
-    /// A fix whose download finished: selected when the fresh page arrives.
-    select_after: Option<String>,
     /// The window was asked to close during a download: it cancels it and closes by itself when
     /// the worker reports the end.
     close_after_download: bool,
@@ -207,7 +205,6 @@ where
         dialog: None,
         opener: -1,
         download: None,
-        select_after: None,
         close_after_download: false,
     }));
     callbacks(&ui, &state);
@@ -217,6 +214,7 @@ where
         return ExitCode::FAILURE;
     }
     crate::trace::log(|| "ui: shown, entering the event loop".to_owned());
+    #[cfg(feature = "test-key")]
     slint::invoke_from_event_loop(|| crate::trace::log(|| "ui: event loop, first turn".to_owned()))
         .ok();
     install_chrome(&ui, &tokens, 0);
@@ -573,17 +571,7 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                     } else {
                         st.selection.keep(&g);
                     }
-                    // A download just finished: the fix is selectable now and the user asked
-                    // for it.
-                    if let Some(key) = st.select_after.take()
-                        && let Some(i) = g
-                            .fixes
-                            .iter()
-                            .position(|f| f.key == key && f.offer == vm::Offer::Selectable)
-                        && !st.selection.contains(&key)
-                    {
-                        st.selection.toggle(&g, i);
-                    }
+
                     let app_id = g.app_id;
                     st.game_cards = g.applied.clone();
                     ui.set_game(game(&g, &st.selection));

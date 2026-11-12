@@ -162,7 +162,7 @@ fn banner(r: &ResultVm) -> BannerData {
 
 /// Marks the selected fixes on the page the window holds (the rows are updated in place, so the
 /// focused control stays).
-fn show_selection(ui: &AppWindow, st: &State) {
+pub(super) fn show_selection(ui: &AppWindow, st: &State) {
     let Some(page) = &st.page else {
         return;
     };
@@ -204,13 +204,19 @@ pub(super) fn close_dialog(ui: &AppWindow, st: &mut State) {
     st.dialog = None;
 }
 
+/// How long a close waits for a cancelled download to stop before the window closes anyway.
+const CLOSE_GRACE: Duration = Duration::from_secs(15);
+
 /// The window's close: refused while a write runs (rule 1: the journal covers a crash, but a
 /// close in the middle of an apply is not something to offer). A download is different: it is
 /// cancelled, and the window closes by itself when the worker reports that it has stopped
 /// (up to WinHTTP's 30 s receive timeout), so nothing outlives the window and the cache keeps
 /// nothing of it (P5-5b).
 fn close_window(ui: &AppWindow, st: &mut State) -> CloseRequestResponse {
-    match vm::closing_policy(st.worker.busy_writing(), st.worker.downloading()) {
+    // A download that the window no longer shows (its end is on the way) does not hold the
+    // window: it would wait for an event that already came.
+    let downloading = st.worker.downloading() && download::running(st);
+    match vm::closing_policy(st.worker.busy_writing(), downloading) {
         vm::Closing::Close => CloseRequestResponse::HideWindow,
         vm::Closing::FinishWrite => {
             show_result(ui, &vm::closing_blocked(st.lang));
@@ -220,6 +226,16 @@ fn close_window(ui: &AppWindow, st: &mut State) -> CloseRequestResponse {
             st.close_after_download = true;
             download::cancel(ui, st);
             show_result(ui, &vm::closing(st.lang));
+            // A cancel takes effect at the next read; a request that hangs (WinHTTP's phases
+            // are 30 s each) must not keep the window forever: after the grace period it
+            // closes anyway (rule 1: the process ends). A leftover temporary file is removed by
+            // the next fetch (`sweep`).
+            let weak = ui.as_weak();
+            slint::Timer::single_shot(CLOSE_GRACE, move || {
+                if let Some(ui) = weak.upgrade() {
+                    let _ = ui.hide();
+                }
+            });
             CloseRequestResponse::KeepWindowShown
         }
     }

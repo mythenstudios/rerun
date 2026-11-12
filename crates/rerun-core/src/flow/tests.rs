@@ -172,6 +172,7 @@ fn stub(id: &str) -> super::PackageNeed {
         license: "MIT".to_owned(),
         tier: crate::catalog::model::Tier::Established,
         repo: None,
+        page: None,
         downloads: Vec::new(),
         state: super::NeedState::Missing,
     }
