@@ -39,6 +39,13 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     trace::start();
+    #[cfg(feature = "test-key")]
+    trace::log(|| match ui::process_age_ms() {
+        Some(ms) => {
+            format!("main: entered {ms:.1} ms after the process was created (loader, scan)")
+        }
+        None => "main: entered".to_owned(),
+    });
     // Rule 6, before any window (security review S1 of P5-3): Slint reads font settings from
     // the environment when it creates the window, so an elevated or undeterminable process
     // stops here with a plain message box and never creates one. The worker's guard checks

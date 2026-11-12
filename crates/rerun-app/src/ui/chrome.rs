@@ -78,6 +78,9 @@ pub fn hit_max_button(g: Geometry, state: WindowState, right: f64, x: f64, y: f6
 #[cfg(windows)]
 pub use win::{install, message_box, ui_language};
 
+#[cfg(all(windows, feature = "test-key"))]
+pub use win::process_age_ms;
+
 #[cfg(not(windows))]
 /// The Windows display language; English elsewhere.
 pub fn ui_language() -> u16 {
@@ -145,6 +148,36 @@ mod win {
     pub fn ui_language() -> u16 {
         // SAFETY: no arguments, no pointers; returns a value.
         unsafe { GetUserDefaultUILanguage() }
+    }
+
+    /// Milliseconds since the operating system created this process (the [DEV] test-key app's
+    /// timing trace only): what passed before `main` ran (loader, antivirus scan, Smart App
+    /// Control check of a fresh binary).
+    #[cfg(feature = "test-key")]
+    pub fn process_age_ms() -> Option<f64> {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+        let zero = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+        // SAFETY: no arguments; returns the pseudo handle of this process (never closed).
+        let this = unsafe { GetCurrentProcess() };
+        // SAFETY: `this` is the pseudo handle; the four pointers are valid, writable
+        // FILETIMEs for the call.
+        let ok =
+            unsafe { GetProcessTimes(this, &mut created, &mut exited, &mut kernel, &mut user) };
+        if ok == 0 {
+            return None;
+        }
+        let mut now = zero;
+        // SAFETY: one valid, writable FILETIME for the call.
+        unsafe { GetSystemTimePreciseAsFileTime(&mut now) };
+        let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+        // FILETIME counts 100 ns.
+        Some(ticks(now).saturating_sub(ticks(created)) as f64 / 10_000.0)
     }
 
     /// A modal message box without an owner (no window exists yet); `title` and `text` are

@@ -6,6 +6,8 @@
 //! no GPU, no OpenGL driver in the process.
 
 mod chrome;
+#[cfg(test)]
+mod tests;
 
 /// The code `slint-build` generates from `ui/app.slint` (not written by hand, so the
 /// workspace's style lints do not apply to it).
@@ -112,6 +114,12 @@ pub fn lang() -> Lang {
     Lang::from_langid(chrome::ui_language())
 }
 
+/// Milliseconds since Windows created the process (the [DEV] test-key app's trace only).
+#[cfg(all(windows, feature = "test-key"))]
+pub fn process_age_ms() -> Option<f64> {
+    chrome::process_age_ms()
+}
+
 /// Says in a plain message box, before any Slint object exists, why Rerun does not start
 /// (security review S1 of P5-3: Slint reads font settings from the environment as soon as a
 /// window is created). `elevated`: the process runs as administrator (or that is unknown);
@@ -150,10 +158,12 @@ where
     {
         return ExitCode::FAILURE;
     }
+    crate::trace::log(|| "ui: backend selected".to_owned());
     let lang = lang();
     let Ok(ui) = AppWindow::new() else {
         return ExitCode::FAILURE;
     };
+    crate::trace::log(|| "ui: window object created (fonts registered)".to_owned());
     let tokens = theme::tokens(ThemeId::default());
     set_theme(&ui, &tokens);
     set_strings(&ui, lang);
@@ -188,6 +198,9 @@ where
     if ui.show().is_err() {
         return ExitCode::FAILURE;
     }
+    crate::trace::log(|| "ui: shown, entering the event loop".to_owned());
+    slint::invoke_from_event_loop(|| crate::trace::log(|| "ui: event loop, first turn".to_owned()))
+        .ok();
     install_chrome(&ui, &tokens, 0);
     if slint::run_event_loop().is_err() {
         return ExitCode::FAILURE;

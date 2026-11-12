@@ -411,8 +411,13 @@ $summary.Add("Rerun DEV app check (index seq $seq, release-speed test-key build)
 if ($errorText) { $summary.Add("STOPPED: $errorText") }
 $summary.Add("run: $verdict (app exit code $exitCode)")
 $summary.Add("measured: first visible window $fw (release-speed build), working set after 5 s $ws")
-# The timing lines of the app: how long each job of the worker took, and click to page.
 $traceLines = @($traceText -split "`r?`n" | Where-Object { $_ -match '^\[\s*[0-9.]+ ms\]' })
+# Where the start time goes (P5-5 preparation): the process age at main (what passed before main:
+# loader, antivirus or Smart App Control scan of a freshly built exe) and the phases in main.
+$exeKb = [int]((Get-Item $appExe).Length / 1KB)
+$summary.Add("measured: start phases of the app ($exeKb KB exe; first launch after a build is often slower: run the check twice and compare):")
+foreach ($l in ($traceLines | Where-Object { $_ -match '(main|ui): (entered|backend|window object|shown|event loop|window built)' } | Select-Object -First 12)) { $summary.Add("  $l") }
+# The timing lines of the app: how long each job of the worker took, and click to page.
 $clicks = @{}
 foreach ($l in $traceLines) {
     if ($l -match '^\[\s*([0-9.]+) ms\] ui: game ([0-9]+) clicked') { $clicks[$matches[2]] = [double]$matches[1] }
