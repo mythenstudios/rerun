@@ -104,7 +104,7 @@ pub mod launch_result {
         Start,
     };
 }
-pub use helper::{HelperFailure, reason_words};
+pub use helper::{HelperFailure, helper_ready, reason_words};
 pub(crate) use rebind::revert_rebound_seen;
 pub use rebind::{
     CreatedDir, RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,

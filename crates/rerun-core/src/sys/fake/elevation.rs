@@ -1,5 +1,7 @@
 //! Fake elevation (ADR 0023 §12, §14): a token kind as set, scripted helper runs in order, and
-//! whether a helper process runs (A4 S8). The two-process tests of `elevate` put a transport of
+//! whether a helper process runs (A4 S8). The owner of the UAC dialog
+//! (`FakeSystem::with_prompt_owner`, the fake of `WinSystem::with_prompt_owner`, P5-5c) is
+//! recorded with every run. The two-process tests of `elevate` put a transport of
 //! their own in front of `elevate::serve` instead (`elevate::chain_tests`), so `sys` never calls
 //! up into `elevate`.
 
@@ -8,17 +10,20 @@ use std::sync::{Mutex, PoisonError};
 
 use crate::path::RootPath;
 use crate::sys::elevation::{
-    Elevation, HelperLock, HelperPresence, HelperRun, TokenKind, parameters,
+    Elevation, HelperLock, HelperPresence, HelperRun, PromptOwner, TokenKind, parameters,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
-/// A recorded [`Elevation::run_helper`] call: the image and the command line.
+/// A recorded [`Elevation::run_helper`] call: the image, the command line and the dialog's
+/// owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunCall {
     /// The image as given.
     pub image: RootPath,
     /// The `lpParameters` the real one would pass.
     pub parameters: String,
+    /// The window the UAC dialog would belong to (`None`: the console window, as for the CLI).
+    pub owner: Option<PromptOwner>,
 }
 
 /// [`Elevation`] of a fake process. The token kind defaults to [`TokenKind::Filtered`] (an
@@ -33,6 +38,7 @@ pub struct FakeElevation {
     running: Mutex<SysResult<Vec<String>>>,
     unaskable: Mutex<bool>,
     lock: Mutex<SysResult<HelperLock>>,
+    owner: Mutex<Option<PromptOwner>>,
 }
 
 impl Default for FakeElevation {
@@ -44,6 +50,7 @@ impl Default for FakeElevation {
             running: Mutex::new(Ok(Vec::new())),
             unaskable: Mutex::new(false),
             lock: Mutex::new(Ok(HelperLock::Free)),
+            owner: Mutex::new(None),
         }
     }
 }
@@ -83,6 +90,11 @@ impl FakeElevation {
             .unwrap_or_else(PoisonError::into_inner) = on;
     }
 
+    /// The owner of the UAC dialog of every run from now on.
+    pub fn set_prompt_owner(&self, owner: Option<PromptOwner>) {
+        *self.owner.lock().unwrap_or_else(PoisonError::into_inner) = owner;
+    }
+
     /// The helper's instance lock from now on.
     pub fn set_helper_lock(&self, lock: SysResult<HelperLock>) {
         *self.lock.lock().unwrap_or_else(PoisonError::into_inner) = lock;
@@ -99,12 +111,14 @@ impl Elevation for FakeElevation {
 
     fn run_helper(&self, image: &RootPath, args: &[&str]) -> SysResult<HelperRun> {
         let parameters = parameters(args)?;
+        let owner = *self.owner.lock().unwrap_or_else(PoisonError::into_inner);
         self.calls
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(RunCall {
                 image: image.clone(),
                 parameters,
+                owner,
             });
         self.runs
             .lock()

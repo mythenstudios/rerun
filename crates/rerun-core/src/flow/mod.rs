@@ -17,7 +17,9 @@
 //! Write side (P5-2a, [`write`]): [`plan`] (a Topo and the picked variants) and [`plan_steps`]
 //! (a step file) read only and give a [`Planned`]; the caller shows its preview and calls
 //! [`shown`]; [`store`] creates Rerun's folder only then; [`load_stored`] reads a stored plan
-//! back; [`check`] and [`apply`] run `exec` on the stored bytes of the [`Previewed`].
+//! back; [`check`] and [`apply`] run `exec` on the stored bytes of the [`Previewed`]; [`helper`]
+//! says before the click whether a run that needs the elevated helper could start it, with the
+//! UAC prompt state (P5-5c).
 //!
 //! Revert, rebind and forget (P5-2b, `flow/revert.rs`): [`revert_preview`],
 //! [`rebind_preview`] and [`forget_preview`] run every check read only and give what the caller
@@ -68,7 +70,7 @@ pub use revert::{
 pub use status::{Holder, StatusView, head, profile_id_of, profile_of, profile_op, status};
 pub use write::{
     LoadRefusal, Picked, PlanRefusal, Planned, Previewed, StepsRefusal, StoreRefusal, apply, check,
-    load_stored, plan, plan_steps, shown, store,
+    helper, load_stored, plan, plan_steps, shown, store,
 };
 
 /// What a job runs against.

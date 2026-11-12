@@ -493,7 +493,8 @@ fn sb_test_key_helper_removes_a_rule() {
             name,
         };
         let sha: [u8; 32] = Sha256::digest(&file).into();
-        let judged = client::start(&WinElevation, &image, &at, &sha, req.op_count()).unwrap();
+        let judged =
+            client::start(&WinElevation::default(), &image, &at, &sha, req.op_count()).unwrap();
         note(&format!("MEASURED helper run {n}: {judged:?}"));
         judged
     };

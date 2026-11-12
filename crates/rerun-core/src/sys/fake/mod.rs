@@ -131,6 +131,15 @@ impl FakeSystem {
         self.firewall.power_loss();
     }
 
+    /// The UAC dialog of every helper run belongs to `owner` (the fake of
+    /// `sys::win::WinSystem::with_prompt_owner`, ADR 0023 amendment P5-5c): recorded in
+    /// [`RunCall::owner`].
+    #[must_use]
+    pub fn with_prompt_owner(self, owner: super::PromptOwner) -> Self {
+        self.elevation.set_prompt_owner(Some(owner));
+        self
+    }
+
     /// Changes of `d` that a power loss could drop (logged, not durable).
     pub fn pending(&self, d: Domain) -> usize {
         match d {

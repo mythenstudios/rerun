@@ -10,6 +10,9 @@
 //!   `store` they find no plan and write nothing; after it the game folder holds the new files;
 //!   `load_stored` gives the same bytes and preview back.
 //! - FW4 a plan without ops is never stored.
+//! - FW5 `helper` (P5-5c): no helper installed, or one that is not admin-only, is
+//!   `HelperUnsafe`; an installed admin-only helper gives the prompt state; Windows denying
+//!   standard users elevation is `NoElevation`. Read only: no prompt, nothing written.
 //!
 //! The `compile_fail` doctests of `flow::apply` and `flow::Previewed` check that `apply` takes
 //! no plan hash and that a `Previewed` comes only from `shown`.
@@ -262,4 +265,57 @@ fn fw4_a_plan_without_ops_is_never_stored() {
         assert!(matches!(plan_steps(&g, &t1()), Err(StepsRefusal::Game(_))));
     });
     assert!(!AppDir::open(&gone, Create::Never).unwrap().is_some());
+}
+
+#[test]
+fn fw5_the_helper_state_before_the_click() {
+    use crate::elevate::PromptKind;
+    use crate::elevate::prompt::POLICY_KEY;
+    use crate::sys::TokenKind;
+    use crate::sys::fake::{FakeSd, FakeSystemBuilder};
+    use crate::sys::registry::{Hive, RegKey, RegValue, RegView};
+    const PF: &str = r"C:\Program Files";
+    const HDIR: &str = r"C:\Program Files\Rerun";
+    const HEXE: &str = r"C:\Program Files\Rerun\rerun-helper.exe";
+    let policy = RegKey::new(Hive::LocalMachine, RegView::Native, POLICY_KEY);
+    let dword =
+        |b: FakeSystemBuilder, n: &str, v: u32| b.value(policy.clone(), n, RegValue::Dword(v));
+    // Not installed: refused before any prompt.
+    let sys = world();
+    with_guard(&sys, |g| {
+        let r = super::helper(&g);
+        assert!(matches!(r, Err(Refusal::HelperUnsafe(_))), "{r:?}");
+    });
+    // Installed, but not admin-only: the same refusal.
+    let b = base().file(HEXE, b"MZ helper".to_vec());
+    let b = dword(dword(b, "EnableLUA", 1), "ConsentPromptBehaviorAdmin", 5);
+    let sys = finish(dword(b, "ConsentPromptBehaviorUser", 0));
+    with_guard(&sys, |g| {
+        assert!(matches!(super::helper(&g), Err(Refusal::HelperUnsafe(_))));
+    });
+    // Admin-only: the prompt state of this machine and token.
+    for p in [PF, HDIR, HEXE] {
+        sys.fake_fs()
+            .set_sd(Path::new(p), FakeSd::admin_only())
+            .unwrap();
+    }
+    sys.fake_fs().sync_all();
+    sys.fake_fs().record_calls(true);
+    with_guard(&sys, |g| {
+        let s = super::helper(&g).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(s.kind, PromptKind::Consent);
+        assert!(s.has_dialog());
+    });
+    // A standard user whom Windows denies elevation: refused before any prompt.
+    sys.fake_elevation().set_token_kind(Ok(TokenKind::Standard));
+    with_guard(&sys, |g| {
+        assert!(matches!(
+            super::helper(&g),
+            Err(Refusal::NoElevation(PromptKind::Denied))
+        ));
+    });
+    let calls = sys.fake_fs().take_calls();
+    assert!(!calls.is_empty(), "the record bites");
+    assert!(!calls.iter().any(writes), "nothing written: {calls:?}");
+    assert!(sys.fake_elevation().calls().is_empty(), "no prompt");
 }

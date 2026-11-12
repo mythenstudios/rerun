@@ -269,16 +269,36 @@ pub(super) fn ready(sys: &dyn System, plan: &Plan) -> Result<Option<Ready>, Refu
 }
 
 fn ready_now(sys: &dyn System) -> Result<Ready, Refusal> {
+    helper_ready_with(sys).map(|(image, _)| Ready { image })
+}
+
+/// Whether a run that needs the helper could start it now, checked as `apply` and `revert` check
+/// it before the lock (module docs: the pre-check of the installed helper, then whether Windows
+/// allows an elevation at all), with the UAC prompt state the user will meet. Read only; no
+/// prompt. A front end shows the state before the click and locks what would be refused anyway
+/// (ADR 0023 amendment P5-5c); `exec` checks again in every run.
+///
+/// # Errors
+/// [`Refusal::HelperUnsafe`] (not installed, or not admin-only, or a test-key helper for a
+/// release build), [`Refusal::NoElevation`] (`Denied`, `UacOff`) or [`Refusal::Elevated`].
+pub fn helper_ready(sys: &dyn System) -> Result<crate::elevate::PromptState, Refusal> {
+    helper_ready_with(sys).map(|(_, state)| state)
+}
+
+fn helper_ready_with(
+    sys: &dyn System,
+) -> Result<(HelperImage, crate::elevate::PromptState), Refusal> {
     // N5 (P4-2c security review): a test-key helper is refused unless this is a test-key CLI.
     let image = crate::policy::root::helper_for_this_build(sys)
         .map_err(|e| Refusal::HelperUnsafe(Box::new(e)))?;
-    match crate::elevate::prompt::read(sys).kind {
+    let state = crate::elevate::prompt::read(sys);
+    match state.kind {
         k @ (PromptKind::Denied | PromptKind::UacOff) => Err(Refusal::NoElevation(k)),
         PromptKind::Elevated => Err(Refusal::Elevated),
         PromptKind::Consent
         | PromptKind::Credentials
         | PromptKind::NoPrompt
-        | PromptKind::Unknown => Ok(Ready { image }),
+        | PromptKind::Unknown => Ok((image, state)),
     }
 }
 

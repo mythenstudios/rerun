@@ -398,6 +398,16 @@ fn the_fake_elevation_runs_as_scripted_and_records_the_command_line() {
     assert_eq!(calls.len(), 3);
     assert_eq!(calls[0].parameters, "--a b");
     assert_eq!(calls[0].image, image);
+    // Without an owner the dialog would belong to the console window (the CLI).
+    assert!(calls.iter().all(|c| c.owner.is_none()));
+    // P5-5c: the owner the system was built with reaches every run.
+    let owner = crate::sys::PromptOwner::from_raw(0x0002_04d6).unwrap();
+    let sys = FakeSystem::new().with_prompt_owner(owner);
+    sys.fake_elevation().push_run(Ok(HelperRun::Declined));
+    #[expect(clippy::disallowed_methods, reason = "test: the fake's own behaviour")]
+    let run = sys.elevation().run_helper(&image, &[]);
+    assert_eq!(run.unwrap(), HelperRun::Declined);
+    assert_eq!(sys.fake_elevation().calls()[0].owner, Some(owner));
 }
 
 /// Tripwire (security review N1): `HELPER_MIN_SEQ` is 1 only while no release key and no shipped

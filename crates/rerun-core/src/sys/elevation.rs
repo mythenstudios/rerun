@@ -11,9 +11,38 @@
 //! The real one is `sys::win::WinElevation` (`ShellExecuteExW`, verb `runas`, the `HKLM`
 //! `exefile` class key), the fake one `sys::fake::FakeElevation` (scripted). [`NoElevation`]
 //! refuses everything (the helper's own system, §11, and test systems that never elevate).
+//!
+//! The owner of the UAC dialog (ADR 0023 amendment P5-5c) is a [`PromptOwner`]: an opaque window
+//! handle value the caller hands to the system layer when it builds it
+//! (`sys::win::WinSystem::with_prompt_owner`; the app passes its window, the CLI none, so its
+//! console window stays the owner). Only `sys::win` turns it back into a window handle.
 
 use super::{SysError, SysErrorKind, SysResult};
 use crate::path::RootPath;
+
+/// The window that owns the UAC dialog of a helper start (ADR 0023 amendment P5-5c): the raw
+/// value of a top-level window handle (`HWND`), opaque everywhere but in `sys::win`, which
+/// passes it as `SHELLEXECUTEINFOW::hwnd`. Never null (`from_raw(0)` is `None`).
+///
+/// A window handle is an index into the window manager's table, not a pointer: Windows checks
+/// it on every use, so a stale value (the window closed meanwhile) can at worst name no window
+/// or, after reuse, another one; the dialog is then not placed in front of Rerun's window. It is
+/// never read as memory. The app keeps its window open while a helper runs (closing is refused
+/// during a write), so the value names that window for the whole start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptOwner(isize);
+
+impl PromptOwner {
+    /// The owner from a raw window handle value; `None` for 0 (no window).
+    pub const fn from_raw(raw: isize) -> Option<Self> {
+        if raw == 0 { None } else { Some(Self(raw)) }
+    }
+
+    /// The raw window handle value.
+    pub const fn raw(self) -> isize {
+        self.0
+    }
+}
 
 /// What the process token is (`TokenElevation`, `TokenElevationType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,7 +214,7 @@ impl Elevation for NoElevation {
 
 #[cfg(test)]
 mod tests {
-    use super::{Elevation, NoElevation, is_plain_arg, parameters};
+    use super::{Elevation, NoElevation, PromptOwner, is_plain_arg, parameters};
     use crate::path::RootPath;
     use crate::sys::SysErrorKind;
 
@@ -193,6 +222,14 @@ mod tests {
     fn elevation_is_an_object_safe_send_sync_trait() {
         fn assert_send_sync<T: ?Sized + Send + Sync>() {}
         assert_send_sync::<dyn Elevation>();
+    }
+
+    #[test]
+    fn a_prompt_owner_is_never_null() {
+        assert_eq!(PromptOwner::from_raw(0), None);
+        let o = PromptOwner::from_raw(0x0001_0a2c).unwrap();
+        assert_eq!(o.raw(), 0x0001_0a2c);
+        assert_eq!(PromptOwner::from_raw(-2).map(PromptOwner::raw), Some(-2));
     }
 
     #[test]

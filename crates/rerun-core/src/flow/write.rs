@@ -366,6 +366,18 @@ pub fn apply(g: &Guarded<'_>, p: Previewed) -> Result<Outcome, ApplyError> {
     exec::apply(&cx, &p.hash())
 }
 
+/// Whether a plan or revert that needs the elevated helper could start it now, and the UAC
+/// prompt state the user meets ([`exec::helper_ready`]: the pre-check of the installed helper,
+/// then whether Windows allows an elevation). Read only; never a prompt. The app locks a fix or
+/// an undo that would be refused anyway and shows the prompt state in the preview (ADR 0023
+/// amendment P5-5c); `exec` checks again in the run.
+///
+/// # Errors
+/// The refusal the run would meet before any prompt (`HelperUnsafe`, `NoElevation`, `Elevated`).
+pub fn helper(g: &Guarded<'_>) -> Result<crate::elevate::PromptState, Refusal> {
+    exec::helper_ready(g.env().sys)
+}
+
 #[cfg(test)]
 #[path = "write_tests.rs"]
 mod tests;

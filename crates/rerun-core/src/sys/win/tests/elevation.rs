@@ -13,6 +13,7 @@
 //!   exited, and the native image equals the NT name `sd_facts` reads for the file (the
 //!   comparison of `elevate::judge`). The Win32 form fails after exit (31).
 //! - The token kind, the prompt state of this machine and `helper_image`, read only.
+//! - An owner value that names no window does not stop a start (P5-5c).
 //!
 //! `#[ignore]`: the [SB] probe (`sb_runas_redirection_and_the_class_key`, writes the real
 //! `HKCU`, CI runner only behind `sandbox_guard`) and the [DEV] dialog test
@@ -71,7 +72,7 @@ fn the_class_key_decides_the_verb_command() {
     let hostname = sys32.join("hostname.exe");
     let nt = nt_name_of(&sys32, "hostname.exe");
     for (class, expected) in [("scrfile", 1), ("exefile", 0)] {
-        let p = start("open", &hostname, "", &sys32, &hklm_class(class)).unwrap();
+        let p = start("open", &hostname, "", &sys32, &hklm_class(class), None).unwrap();
         assert_eq!(wait(p.as_handle()), Ok(expected), "{class}");
         assert_eq!(
             fold(&image_of(p.as_handle()).unwrap()),
@@ -86,6 +87,7 @@ fn the_class_key_decides_the_verb_command() {
         "",
         &sys32,
         &exefile_class().unwrap(),
+        None,
     );
     note(&format!(
         "S2: an unknown verb with the HKLM exefile key: {:?}",
@@ -97,12 +99,44 @@ fn the_class_key_decides_the_verb_command() {
     );
 }
 
+/// ADR 0023 amendment P5-5c: the owner is a window handle value Windows checks, never memory.
+/// A value that names no window (the app's window closed, or a stale value) does not stop the
+/// start: the process runs and exits as without an owner. No window and no prompt are involved
+/// (`open`, `hostname.exe`).
+#[test]
+fn an_owner_that_is_no_window_still_starts() {
+    use crate::sys::PromptOwner;
+    let sys32 = system32();
+    let hostname = sys32.join("hostname.exe");
+    // A value no window of this test owns (whether it names some other window or none, the
+    // start must go through).
+    let owner = PromptOwner::from_raw(0x7fff_0001).unwrap();
+    let p = start(
+        "open",
+        &hostname,
+        "",
+        &sys32,
+        &exefile_class().unwrap(),
+        Some(owner),
+    )
+    .unwrap();
+    assert_eq!(wait(p.as_handle()), Ok(0));
+}
+
 #[test]
 fn image_and_token_are_readable_on_the_handle_also_after_exit() {
     let sys32 = system32();
     let cmd = sys32.join("cmd.exe");
     let nt = nt_name_of(&sys32, "cmd.exe");
-    let p = start("open", &cmd, "/c exit 5", &sys32, &exefile_class().unwrap()).unwrap();
+    let p = start(
+        "open",
+        &cmd,
+        "/c exit 5",
+        &sys32,
+        &exefile_class().unwrap(),
+        None,
+    )
+    .unwrap();
     let before = facts(p.as_handle());
     assert_eq!(wait(p.as_handle()), Ok(5));
     let after = facts(p.as_handle());
@@ -115,7 +149,7 @@ fn image_and_token_are_readable_on_the_handle_also_after_exit() {
 
 #[test]
 fn token_kind_matches_this_process() {
-    let kind = WinElevation.token_kind().unwrap();
+    let kind = WinElevation::default().token_kind().unwrap();
     if is_elevated() {
         assert_eq!(kind, TokenKind::Elevated);
     } else {
@@ -177,7 +211,7 @@ fn sb_runas_redirection_and_the_class_key() {
             .unwrap(),
     );
     let run = |class: &OwnedKey| {
-        let p = start("runas", &hostname, "", &sys32, class).unwrap();
+        let p = start("runas", &hostname, "", &sys32, class, None).unwrap();
         let f = facts(p.as_handle());
         (f, wait(p.as_handle()))
     };
@@ -291,7 +325,7 @@ fn own_image_and_the_process_check() {
         Ok(HelperPresence::None)
     );
     assert_eq!(
-        WinElevation.helper_running(&own).unwrap(),
+        WinElevation::default().helper_running(&own).unwrap(),
         HelperPresence::Running,
         "through the Elevation trait"
     );
@@ -473,7 +507,7 @@ fn dev_helper_chain_with_the_test_key() {
         name,
     };
     let file_sha: [u8; 32] = Sha256::digest(&file).into();
-    let judged = client::start(&WinElevation, &image, &at, &file_sha, 1).unwrap();
+    let judged = client::start(&WinElevation::default(), &image, &at, &file_sha, 1).unwrap();
     println!("RERUN_DEV_CHAIN_RUN: {judged:?}");
     let topo = Judged::Exit(HelperExit::refused(Reason::Topo));
     if judged == Judged::Exit(HelperExit::refused(Reason::Index)) {

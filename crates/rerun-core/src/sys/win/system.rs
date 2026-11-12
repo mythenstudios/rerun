@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use super::{WinElevation, WinFirewall, WinFs, WinGpu, WinKnownFolders, WinRegistry, WinTopology};
 use crate::sys::{
-    Elevation, Firewall, Fs, Gpu, KnownFolders, Registry, RegistryWrite, SysResult, System,
-    Topology,
+    Elevation, Firewall, Fs, Gpu, KnownFolders, PromptOwner, Registry, RegistryWrite, SysResult,
+    System, Topology,
 };
 
 /// The real file system, registry, known folders (on that registry), CPU topology and graphics
@@ -39,8 +39,17 @@ impl WinSystem {
             topology: WinTopology::new(),
             gpu: WinGpu::new(),
             firewall: WinFirewall,
-            elevation: WinElevation,
+            elevation: WinElevation::default(),
         })
+    }
+
+    /// The UAC dialog of a helper start belongs to `owner` (ADR 0023 amendment P5-5c): the app
+    /// passes its window, so the dialog appears in front of it. Without this the owner is the
+    /// console window, as for the CLI.
+    #[must_use]
+    pub fn with_prompt_owner(mut self, owner: PromptOwner) -> Self {
+        self.elevation = WinElevation::owned_by(owner);
+        self
     }
 }
 

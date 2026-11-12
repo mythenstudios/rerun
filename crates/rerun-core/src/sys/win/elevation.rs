@@ -13,7 +13,7 @@
 //!    `ShellExecuteExW` asks (the CLI's named `CoInitializeEx` exception, ADR 0008, A4 N3).
 //! 3. `ShellExecuteExW`, verb `runas`, `lpFile` = the pre-checked image, `lpDirectory` = its
 //!    folder (N3), `SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI |
-//!    SEE_MASK_CLASSKEY`, the console window as the owner. `ERROR_CANCELLED` (1223) is
+//!    SEE_MASK_CLASSKEY`, the owner window of the UAC dialog (below). `ERROR_CANCELLED` (1223) is
 //!    [`HelperRun::Declined`].
 //! 4. On `hProcess`, right after the start and before the wait: `QueryFullProcessImageNameW`
 //!    in the native form (`\Device\…`; the Win32 form fails once the process has exited, and a
@@ -23,6 +23,21 @@
 //! 5. Wait without a timeout (the prompt waits for the user), then `GetExitCodeProcess`.
 //!
 //! Every handle is owned (`OwnedHandle`, `OwnedKey`) and closed on every path.
+//!
+//! **The owner (ADR 0023 amendment P5-5c).** `SHELLEXECUTEINFOW::hwnd` is the window the consent
+//! dialog belongs to: Windows (the AppInfo service and `consent.exe`) shows the dialog in front
+//! of it, or, when the owner is not the foreground window, only flashes a taskbar button. The
+//! CLI has none of its own and passes its console window (`GetConsoleWindow`, null without a
+//! console); the app builds its system with [`PromptOwner`] = its own top-level window
+//! (`WinSystem::with_prompt_owner`), so the dialog appears in front of the app instead of behind
+//! it. The call runs on the app's worker thread while the window belongs to the UI thread. That
+//! is allowed: the owner of a shell call may belong to another thread of the process; what the
+//! shell would do with it is post or send window messages (with `SEE_MASK_FLAG_NO_UI` it shows
+//! no message box of its own), and the UI thread keeps pumping messages while the worker waits
+//! here, so nothing waits on the worker. `SEE_MASK_NOASYNC` keeps the call synchronous on a
+//! thread without a message loop. The value is a window handle, not a pointer: Windows checks
+//! it, and a stale one only loses the placement (measured: an owner that is no window still
+//! starts the process, `an_owner_that_is_no_window_still_starts`).
 
 #![allow(
     unsafe_code,
@@ -36,7 +51,7 @@ use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle,
 use std::path::Path;
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{HANDLE, HWND, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
 };
@@ -55,7 +70,8 @@ use super::status::kind_of_win32;
 use super::token;
 use crate::path::RootPath;
 use crate::sys::elevation::{
-    Elevation, HelperLock, HelperPresence, HelperProc, HelperRun, TokenKind, parameters,
+    Elevation, HelperLock, HelperPresence, HelperProc, HelperRun, PromptOwner, TokenKind,
+    parameters,
 };
 use crate::sys::{SysError, SysErrorKind, SysResult};
 
@@ -69,9 +85,19 @@ const MAX_IMAGE: u32 = 32_768;
 /// The class key of every start (A4 S2).
 pub(super) const EXEFILE_CLASS: &str = r"SOFTWARE\Classes\exefile";
 
-/// The real [`Elevation`].
+/// The real [`Elevation`]: the UAC dialog belongs to `owner`, or to the console window without
+/// one (module docs).
 #[derive(Debug, Clone, Copy, Default)]
-pub struct WinElevation;
+pub struct WinElevation {
+    owner: Option<PromptOwner>,
+}
+
+impl WinElevation {
+    /// The dialog of every start belongs to `owner` (the app's window).
+    pub const fn owned_by(owner: PromptOwner) -> Self {
+        Self { owner: Some(owner) }
+    }
+}
 
 /// The last Win32 error of this thread (read right after a failed call).
 fn last_error() -> u32 {
@@ -134,9 +160,21 @@ pub(super) enum NoProcess {
     NoHandle,
 }
 
+/// The window handle of the dialog's owner: `owner`, or the console window (null without a
+/// console) when there is none.
+fn owner_window(owner: Option<PromptOwner>) -> HWND {
+    match owner {
+        // A handle value, never dereferenced (module docs): no provenance is involved.
+        Some(o) => ptr::without_provenance_mut(o.raw().cast_unsigned()),
+        // SAFETY: GetConsoleWindow takes no arguments; a null result (no console) is allowed as
+        // the owner.
+        None => unsafe { GetConsoleWindow() },
+    }
+}
+
 /// One `ShellExecuteExW` with `SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC |
 /// SEE_MASK_FLAG_NO_UI | SEE_MASK_CLASSKEY` and `hkeyClass` = `class`: `verb` on `file` with
-/// `params` in `dir`, owner the console window, `SW_HIDE`. The started process's handle, or why
+/// `params` in `dir`, owner `owner` or the console window ([`owner_window`]), `SW_HIDE`. The started process's handle, or why
 /// there is none ([`NoProcess`]): the call failed (no process was created), or it succeeded
 /// without a handle (a process may exist, so its result is unknown; P4-2d review follow-up).
 /// Product code passes `runas` only ([`WinElevation::run_helper`]); tests pass other verbs to
@@ -147,14 +185,13 @@ pub(super) fn start(
     params: &str,
     dir: &Path,
     class: &OwnedKey,
+    owner: Option<PromptOwner>,
 ) -> Result<OwnedHandle, NoProcess> {
     let verb = wide(OsStr::new(verb));
     let file = wide(file.as_os_str());
     let params = wide(OsStr::new(params));
     let dir = wide(dir.as_os_str());
-    // SAFETY: GetConsoleWindow takes no arguments; a null result (no console) is allowed as the
-    // owner.
-    let owner = unsafe { GetConsoleWindow() };
+    let owner = owner_window(owner);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: u32::try_from(size_of::<SHELLEXECUTEINFOW>()).unwrap_or(0),
         fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_CLASSKEY,
@@ -176,7 +213,8 @@ pub(super) fn start(
     // SAFETY: `info` is a SHELLEXECUTEINFOW with a matching `cbSize`; `lpVerb`, `lpFile`,
     // `lpParameters` and `lpDirectory` point to NUL-terminated buffers owned by this function
     // and alive for the call; `hkeyClass` is the open key `class` borrows for the call;
-    // `hwnd` is the console window or null.
+    // `hwnd` is a window handle value (the caller's window, the console window, or null), which
+    // Windows validates and never reads as memory (module docs).
     let ok = unsafe { ShellExecuteExW(&mut info) };
     let code = if ok == 0 { last_error() } else { 0 };
     drop(com);
@@ -269,7 +307,7 @@ impl Elevation for WinElevation {
             .parent()
             .ok_or_else(|| SysError::new(SysErrorKind::InvalidPath, &shown))?;
         let class = exefile_class().map_err(|c| sys_err(r"HKLM\SOFTWARE\Classes\exefile", c))?;
-        let process = match start("runas", image.path(), &params, dir, &class) {
+        let process = match start("runas", image.path(), &params, dir, &class, self.owner) {
             Ok(p) => p,
             Err(NoProcess::Failed(ERROR_CANCELLED)) => return Ok(HelperRun::Declined),
             // No process was created: an error (the caller's `HelperFailure::Start`).
