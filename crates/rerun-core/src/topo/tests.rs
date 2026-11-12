@@ -913,15 +913,22 @@ fn tb_the_plan_has_the_bytes_of_the_same_step_file() {
         from_file.ops.len() >= 3,
         "a profile, an INI and a layer op at least"
     );
+    // P5-2a: the engine records the SHA-256 of the matched main executable on the game root.
+    let matched = p.plan.roots[0].main_sha256;
+    assert_eq!(matched, Some(Sha256::digest(pe(false)).into()));
+    assert!(p.plan.roots[1..].iter().all(|r| r.main_sha256.is_none()));
     let mut bare = p.plan.clone();
     let source = bare.source.take().unwrap();
+    bare.roots[0].main_sha256 = None;
     assert_eq!(
         bare.encode().unwrap().bytes(),
         from_file.encode().unwrap().bytes()
     );
-    // The source adds exactly one field at the end.
+    // The source adds exactly one field at the end (the hash one after `main_exe`).
+    let mut hashed = from_file.clone();
+    hashed.roots[0].main_sha256 = matched;
     let with = String::from_utf8(p.plan.encode().unwrap().bytes().to_vec()).unwrap();
-    let without = String::from_utf8(from_file.encode().unwrap().bytes().to_vec()).unwrap();
+    let without = String::from_utf8(serde_json::to_vec(&hashed).unwrap()).unwrap();
     let tail = format!(",\"source\":{}}}", serde_json::to_string(&source).unwrap());
     assert_eq!(with, format!("{}{tail}", &without[..without.len() - 1]));
     // And it survives the strict decode, which checks its form.
@@ -1929,4 +1936,104 @@ fn ts3_supported_builds_and_gpu_requirements() {
             needs: crate::catalog::model::GpuRequirement::Vulkan,
         }]
     );
+}
+
+// ---------- TG the matched build (P5-2a) ----------
+
+/// TG1 (P5-2a, finding 12 of plan P5): a game updated between the plan and the apply (another
+/// `game.exe`, as a Steam update leaves it) is refused by `check` and by the apply under the
+/// lock, with the executable named; nothing is written, no transaction. The original build
+/// back, the same stored plan applies.
+#[test]
+fn tg1_a_game_updated_since_the_plan_is_refused() {
+    let env = Env::new(game_sys());
+    let sys = &env.sys;
+    let t = game_topo(DIRECT);
+    let tp = plan_on(sys, &t, &["settings/ini", "display/layer"]).unwrap();
+    assert_eq!(
+        tp.plan.roots[0].main_sha256,
+        Some(Sha256::digest(pe(false)).into())
+    );
+    let a = app(sys);
+    let h = crate::plan::store(&a, &tp.plan.encode().unwrap()).unwrap();
+    drop(a);
+    // The update: the same size class, another content.
+    let mut updated = pe(false);
+    updated.extend_from_slice(b"patch 1.01");
+    put(sys, "game.exe", &updated);
+    let before = snap_at(sys, STEAM_GAME);
+    let changed = |r: crate::exec::Refusal| match r {
+        crate::exec::Refusal::GameChanged(exe) => {
+            assert!(exe.as_str().ends_with(r"G\game.exe"), "{}", exe.as_str());
+            let text = crate::exec::Refusal::GameChanged(exe).to_string();
+            assert!(
+                text.starts_with("the game changed since the plan: ")
+                    && text.ends_with("; plan again"),
+                "{text}"
+            );
+        }
+        other => panic!("expected GameChanged, got {other:?}"),
+    };
+    changed(env.check(&h).unwrap_err());
+    match env.apply(&h) {
+        Err(crate::exec::ApplyError::Refused(r)) => changed(r),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(env.states().is_empty(), "no transaction");
+    let after = snap_at(sys, STEAM_GAME);
+    assert!(
+        before == after,
+        "nothing written: {:#?}",
+        before.diff(&after)
+    );
+    // The build the plan was made for: the same plan applies.
+    put(sys, "game.exe", &pe(false));
+    assert!(env.check(&h).is_ok());
+    let txn = env.applied(&h);
+    assert_eq!(env.state(&txn), Some(crate::journal::TxnState::Applied));
+}
+
+/// TG2 (P5-2a): the hash of the main executable in the plan's form: only on a game root with a
+/// main executable (both rule sets); a plan with a `source` needs it on every game root to be
+/// encoded or applied (an earlier version's stored plan is refused, never applied unchecked),
+/// while a recorded head without it still decodes for its revert.
+#[test]
+fn tg2_the_hash_in_the_plan_form() {
+    let sys = game_sys();
+    let p = plan_on(&sys, &game_topo(DIRECT), &["cores/limit"])
+        .unwrap()
+        .plan;
+    assert_eq!(p.roots[1].kind, crate::plan::RootKind::Profiles);
+    let bytes = |p: &crate::plan::Plan| serde_json::to_vec(p).unwrap();
+    let why = |r: Result<crate::plan::Plan, crate::plan::PlanError>| match r {
+        Err(crate::plan::PlanError::Invalid { why, .. }) => why,
+        other => panic!("expected Invalid, got {other:?}"),
+    };
+    // Without it (a plan stored by an earlier version).
+    let mut old = p.clone();
+    old.roots[0].main_sha256 = None;
+    let w = why(crate::plan::decode(&bytes(&old)));
+    assert!(
+        w.contains("without the hash of the game's main executable"),
+        "{w}"
+    );
+    assert!(w.ends_with("plan again"), "{w}");
+    assert!(old.encode().is_err());
+    assert_eq!(crate::plan::decode_recorded(&bytes(&old)).unwrap(), old);
+    // On the profiles root, or a game root without a main executable: refused by both.
+    let mut on_profiles = p.clone();
+    on_profiles.roots[1].main_sha256 = Some([7; 32]);
+    let mut no_main = p.clone();
+    no_main.roots[0].main_exe = None;
+    for bad in [on_profiles, no_main] {
+        let b = bytes(&bad);
+        assert!(why(crate::plan::decode(&b)).contains("root without one"));
+        assert!(why(crate::plan::decode_recorded(&b)).contains("root without one"));
+    }
+    // `null` is not the absent field (one form).
+    let s = String::from_utf8(bytes(&old)).unwrap().replace(
+        r#""main_exe":"game.exe""#,
+        r#""main_exe":"game.exe","main_sha256":null"#,
+    );
+    assert!(crate::plan::decode_recorded(s.as_bytes()).is_err());
 }

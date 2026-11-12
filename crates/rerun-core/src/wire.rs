@@ -61,6 +61,27 @@ pub(crate) mod hex32 {
     }
 }
 
+/// An optional SHA-256: absent on the wire when `None` (with `skip_serializing_if`), else 64
+/// lower-case hex digits.
+pub(crate) mod hex32_opt {
+    use super::{Deserializer, Serializer};
+
+    /// Serialises `Some(v)` as 64 lower-case hex digits (`None` is skipped by the field).
+    pub(crate) fn serialize<S: Serializer>(v: &Option<[u8; 32]>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) => super::hex32::serialize(v, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    /// Parses exactly 64 lower-case hex digits (a present field is never `null`).
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<[u8; 32]>, D::Error> {
+        super::hex32::deserialize(d).map(Some)
+    }
+}
+
 /// An optional 128-bit file ID: `null` or exactly 32 lower-case hex digits.
 pub(crate) mod hex128_opt {
     use serde::de::Error as _;

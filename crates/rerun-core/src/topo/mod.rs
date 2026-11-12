@@ -96,6 +96,10 @@ pub struct ExeCheck {
     /// The file matched as the build a live transaction patched with `laa_patch` (P4-10, R5): the
     /// transaction. `None` for a file that matched by its own hashes.
     pub patched_by: Option<crate::journal::TxnId>,
+    /// Its own SHA-256 as hashed on the handle it was parsed on, when it matched (`None`
+    /// otherwise; P5-2a): for a file a live transaction patched, the patched file's. A plan
+    /// records it for the main executable, and an apply refuses another content.
+    pub sha256: Option<[u8; 32]>,
 }
 
 /// What the engine read from the game folder for one Topo.
@@ -128,6 +132,11 @@ impl GameFacts {
         self.main().and_then(|e| e.api)
     }
 
+    /// The SHA-256 of [`Self::main_exe`] as read (P5-2a).
+    pub fn main_sha256(&self) -> Option<&[u8; 32]> {
+        self.main().and_then(|e| e.sha256.as_ref())
+    }
+
     /// The SHA-1 of [`Self::main_exe`].
     pub fn main_sha1(&self) -> Option<&Sha1> {
         self.main().and_then(|e| e.sha1.as_ref())
@@ -158,7 +167,7 @@ pub fn read_game_with(
         .exes
         .iter()
         .map(|e| {
-            let (state, arch, sha1, patched_by) = check_exe(game, e, patched);
+            let (state, arch, sha1, patched_by, sha256) = check_exe(game, e, patched);
             let api = (state == ExeState::Match).then_some(e.api);
             ExeCheck {
                 path: e.path.clone(),
@@ -167,6 +176,7 @@ pub fn read_game_with(
                 api,
                 sha1,
                 patched_by,
+                sha256,
             }
         })
         .collect();
@@ -197,16 +207,17 @@ pub fn anti_cheat_dirs(topo: &Topo) -> Vec<RelPath> {
     dirs
 }
 
-fn check_exe(
-    game: &GameDir<'_>,
-    e: &Exe,
-    patched: &[crate::exec::PatchedExe],
-) -> (
+/// What [`check_exe`] found: the state, and for a match the architecture, the SHA-1, the live
+/// patch it counts through and the file's own SHA-256 (the fields of [`ExeCheck`]).
+type Checked = (
     ExeState,
     Option<Arch>,
     Option<Sha1>,
     Option<crate::journal::TxnId>,
-) {
+    Option<[u8; 32]>,
+);
+
+fn check_exe(game: &GameDir<'_>, e: &Exe, patched: &[crate::exec::PatchedExe]) -> Checked {
     let r = inspect_exe(
         game,
         &e.path,
@@ -223,6 +234,7 @@ fn check_exe(
     };
     let mut matched_sha1 = None;
     let mut patched_by = None;
+    let mut own_sha256 = None;
     let state = match r {
         Err(ExeError::Pe(PeReadError::Open { source, .. }))
             if source.kind == SysErrorKind::NotFound =>
@@ -232,6 +244,7 @@ fn check_exe(
         Err(err) => ExeState::Unreadable(err.to_string()),
         Ok(f) => match f.hashes {
             HashOutcome::Done(h) => {
+                own_sha256 = crate::wire::hex32::from_str(&h.sha256.to_ascii_lowercase());
                 // Every hash given must agree (a `TODO` never does); the loader requires one.
                 let sha256 = e.sha256.as_ref().map(|x| x.to_string() == h.sha256);
                 let sha1 = e.sha1.as_ref().map(|x| x.to_string() == h.sha1);
@@ -261,7 +274,8 @@ fn check_exe(
         },
     };
     let arch = if state == ExeState::Match { arch } else { None };
-    (state, arch, matched_sha1, patched_by)
+    let own_sha256 = own_sha256.filter(|_| state == ExeState::Match);
+    (state, arch, matched_sha1, patched_by, own_sha256)
 }
 
 // ---------- Anti-cheat and launch ----------
@@ -1033,6 +1047,16 @@ pub fn plan(
         ..*ctx
     };
     let mut plan = prim::plan(&steps, &ctx)?;
+    // P5-2a (finding 12 of plan P5): the matched build, so an apply refuses a game Steam updated
+    // since the plan. The engine plans one game root, with the executable that matched.
+    let Some(main_sha256) = facts.game.main_sha256().copied() else {
+        return Err(EngineError::NoMatch(topo.id.to_string()));
+    };
+    for r in &mut plan.roots {
+        if r.kind == crate::plan::RootKind::Game {
+            r.main_sha256 = Some(main_sha256);
+        }
+    }
     // N2 (P4-11): a preference that is set already plans no op; the user is told, and by which
     // open transaction if Rerun's.
     for a in prim::gpu_preference::already_set(&steps, &plan, &ctx) {

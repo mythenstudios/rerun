@@ -327,6 +327,13 @@ pub enum Refusal {
     /// the game-closed check would ask nothing about it.
     #[error("the main executable {0} is missing or not a file; plan again")]
     MainExe(Shown<'static>),
+    /// The main executable has another content than the Topo engine matched when the plan was
+    /// made (P5-2a, ADR 0020 amendment P5-2a): the game changed since, e.g. a Steam update.
+    #[error(
+        "the game changed since the plan: {0} is not the build the plan was made for (a game \
+         update?); plan again"
+    )]
+    GameChanged(Shown<'static>),
     /// A key or value of op `op` cannot be checked: a symbolic-link or volatile key on the way,
     /// a key deleted while it was opened, a value too large to read.
     #[error("op {op}: the registry cannot be checked: {source}")]
@@ -1646,6 +1653,8 @@ fn preflight<'g>(
     let roots = roots::Roots::all(cx, plan, &Bindings::head(plan), stores, run)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
     roots::main_exe_present(plan, &roots)?;
+    // P5-2a: the build the plan was made for.
+    roots::main_exe_same(plan, &roots)?;
     roots::game_closed(plan, &roots, &all)?;
     roots::old_state(cx, plan, &roots)?;
     reg::old_state(&RegPolicy.writer(cx.sys), plan)?;

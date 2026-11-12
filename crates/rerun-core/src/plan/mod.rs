@@ -244,6 +244,16 @@ pub struct PlanRoot {
     /// The game's main executable (relative to the root), asked by `users()` before apply
     /// and revert (user decision D4).
     pub main_exe: Option<RelPath>,
+    /// The SHA-256 of the main executable as the Topo engine matched it (P5-2a, ADR 0020
+    /// amendment P5-2a): an apply refuses when the file has another content now (a Steam update
+    /// since the plan). Only with `main_exe`; omitted on the wire when absent. A plan with a
+    /// `source` needs it on every game root under [`Rules::Current`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::hex32_opt"
+    )]
+    pub main_sha256: Option<[u8; 32]>,
 }
 
 /// Kind of a plan root.
@@ -1636,6 +1646,28 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
             None,
             "registry and INI ops need the main executable of every game root",
         ));
+    }
+    // P5-2a: the hash of the main executable only with one; a plan from a Topo needs it on
+    // every game root when it is made or applied (a plan stored by an earlier version is
+    // refused, never applied unchecked); a recorded head keeps decoding without it (E4).
+    for r in &plan.roots {
+        if r.main_sha256.is_some() && (r.kind != RootKind::Game || r.main_exe.is_none()) {
+            return Err(invalid(
+                None,
+                "the hash of a main executable on a root without one",
+            ));
+        }
+        if rules == Rules::Current
+            && plan.source.is_some()
+            && r.kind == RootKind::Game
+            && r.main_sha256.is_none()
+        {
+            return Err(invalid(
+                None,
+                "a plan from a Topo without the hash of the game's main executable (made by an \
+                 earlier version of Rerun); plan again",
+            ));
+        }
     }
     // P4-10: a patch only on a game root, before the profile fence (which refuses any
     // non-inline content on the profiles root with its own words).

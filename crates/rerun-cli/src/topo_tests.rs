@@ -799,6 +799,64 @@ fn c_te13_the_golden_plan_with_a_package() {
     );
 }
 
+/// C-TE14 (P5-2a, finding 12 of plan P5): a game updated between `rerun plan` and `rerun
+/// apply` (another `game.exe`): `apply` with and without `--dry-run` is refused (exit 3) with the
+/// reason on stderr, nothing applied; with the build the plan was made for it passes again.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test: read and replace a fixture file of the fake"
+)]
+fn c_te14_a_game_updated_since_the_plan_is_refused() {
+    let sys = sys();
+    let p = expect(
+        &sys,
+        &["plan", "220", "--pick", "display/layer"],
+        Answer::No,
+        Exit::Report,
+    );
+    let hash = crate::tests::hash_of(&p);
+    let exe = format!(r"{G}\game.exe");
+    let original = {
+        use rerun_core::sys::Fs as _;
+        let d = sys.fake_fs().open_dir(Path::new(G)).unwrap();
+        d.read(&RelPath::parse("game.exe").unwrap()).unwrap()
+    };
+    let replace = |b: &[u8]| {
+        sys.fake_fs().remove_abs(Path::new(&exe)).unwrap();
+        sys.fake_fs().put_file(Path::new(&exe), b).unwrap();
+        sys.fake_fs().sync_all();
+    };
+    let mut updated = original.clone();
+    updated.extend_from_slice(b"patch 1.01");
+    replace(&updated);
+    for args in [
+        vec!["apply", hash.as_str(), "--dry-run"],
+        vec!["apply", hash.as_str(), "--yes"],
+    ] {
+        let r = expect(&sys, &args, Answer::No, Exit::Refused);
+        let line = r
+            .stderr
+            .lines()
+            .find(|l| l.contains("the game changed since the plan: "))
+            .unwrap_or_else(|| panic!("{}", r.stderr));
+        assert!(
+            line.ends_with(&format!(
+                r"{exe} is not the build the plan was made for (a game update?); plan again"
+            )),
+            "{line}"
+        );
+        assert!(!r.stdout.contains("applied as"), "{}", r.stdout);
+    }
+    replace(&original);
+    expect(
+        &sys,
+        &["apply", hash.as_str(), "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+}
+
 /// Imports `ix`, signed with the test key.
 fn import(sys: &FakeSystem, ix: &[u8]) {
     sys.fake_fs().put_file(Path::new(INDEX), ix).unwrap();

@@ -317,6 +317,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
         id: ctx.game.id(),
         origin,
         main_exe: ctx.main_exe.cloned(),
+        main_sha256: None,
     }];
     let mut ops = b.ops;
     // P3-3 (F3): the profile is op 0 on root 1, so a revert reaches it last.
@@ -327,6 +328,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
             id: PROFILES_ROOT_ID,
             origin: PlanOrigin::AppDir,
             main_exe: None,
+            main_sha256: None,
         });
         ops.insert(0, op);
     }
@@ -354,6 +356,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
                 sub: u.sub().clone(),
             },
             main_exe: None,
+            main_sha256: None,
         });
     }
     let plan = Plan {

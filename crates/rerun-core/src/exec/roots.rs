@@ -390,6 +390,45 @@ pub(super) fn main_exe_at(plan: &Plan, roots: &Roots<'_>, i: usize) -> Result<()
     }
 }
 
+/// P5-2a (ADR 0020 amendment P5-2a), for an apply after [`main_exe_present`]: the main
+/// executable of every root that records its SHA-256 still has that content (read through the
+/// root's handle, at most 2 GiB); another one is [`Refusal::GameChanged`] (a Steam update since
+/// the plan). A revert does not ask this.
+pub(super) fn main_exe_same(plan: &Plan, roots: &Roots<'_>) -> Result<(), Refusal> {
+    for (i, r) in plan.roots.iter().enumerate() {
+        let (Some(m), Some(want), Some(g)) = (&r.main_exe, &r.main_sha256, roots.opened(i)) else {
+            continue;
+        };
+        let now = sha256_of(g.dir(), m)?;
+        if now.as_ref() != Some(want) {
+            return Err(Refusal::GameChanged(roots.shown(i, m)));
+        }
+    }
+    Ok(())
+}
+
+/// The SHA-256 of file `p` below `dir`, `None` above [`crate::plan::MAX_FILE_LEN`].
+fn sha256_of(dir: &dyn Dir, p: &RelPath) -> crate::sys::SysResult<Option<[u8; 32]>> {
+    use sha2::Digest as _;
+    use std::io::Read as _;
+    let limit = crate::plan::MAX_FILE_LEN;
+    let mut r = dir.open_read(p)?.take(limit.saturating_add(1));
+    let mut h = sha2::Sha256::new();
+    let mut len = 0u64;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(crate::sys::SysError::io(&e, p.as_str())),
+        };
+        h.update(buf.get(..n).unwrap_or_default());
+        len = len.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+    }
+    Ok((len <= limit).then(|| h.finalize().into()))
+}
+
 /// How the folder a binding names opens now (P2-14, user decision E-R1), opened and dropped.
 #[derive(Debug)]
 pub(super) enum Probe {

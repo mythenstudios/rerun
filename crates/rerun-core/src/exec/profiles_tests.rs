@@ -133,6 +133,7 @@ fn with_profile(env: &Env, mut p: Plan, bytes: Vec<u8>) -> Plan {
         id: PROFILES_ROOT_ID,
         origin: PlanOrigin::AppDir,
         main_exe: None,
+        main_sha256: None,
     });
     let content = inline(bytes);
     let op = match try_read_abs(&env.sys, &abs) {

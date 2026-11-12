@@ -190,6 +190,8 @@ fn dev_helper_firewall_round_trip() {
         program: main.clone(),
         direction: Direction::Out,
     });
+    // P5-2a: the engine records the matched build.
+    p.roots[0].main_sha256 = Some(Sha256::digest(&exe).into());
     p.source = Some(PlanSource {
         index: isha,
         topo: "dev-firewall".to_owned(),

@@ -71,6 +71,7 @@ fn game_root() -> PlanRoot {
             installdir: r("G"),
         },
         main_exe: Some(r("game.exe")),
+        main_sha256: None,
     }
 }
 
@@ -81,6 +82,7 @@ fn profiles_root() -> PlanRoot {
         id: PROFILES_ROOT_ID,
         origin: PlanOrigin::AppDir,
         main_exe: None,
+        main_sha256: None,
     }
 }
 
