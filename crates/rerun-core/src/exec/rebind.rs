@@ -31,9 +31,9 @@ use std::collections::BTreeMap;
 use super::bind::{Binding, Bindings, Proof, file_ops};
 use super::roots::{self, Probe};
 use super::{
-    ExecCtx, ExecError, Refusal, RevertReport, Seen, Touched, Verified, knob_rewrite_head,
-    load_resumable, op_ix, refused_early, revert_listed, revert_plan, revert_run, stack,
-    standard_user, verify_seen,
+    ExecCtx, ExecError, Look, Refusal, RevertReport, Same, Seen, Touched, Verified,
+    knob_rewrite_head, load_resumable, op_ix, refused_early, revert_listed, revert_plan,
+    revert_run, stack, standard_user, verify_seen,
 };
 use crate::escape::{self, Shown};
 use crate::journal::{
@@ -539,9 +539,24 @@ pub fn revert_rebound(
     t: &TxnId,
     to: &RebindTo,
 ) -> Result<RevertReport, ExecError> {
+    revert_rebound_seen(cx, t, to, &|_| true)
+}
+
+/// [`revert_rebound`] with the preview compared under the lock (`same`): right after the lock
+/// ([`Look::Early`]) and, once every check passed, what the ops observe with the new binding
+/// ([`Look::Rebound`]), both before the record (ADR 0027 amendment P5-2b).
+pub(crate) fn revert_rebound_seen(
+    cx: &ExecCtx<'_>,
+    t: &TxnId,
+    to: &RebindTo,
+    same: Same<'_>,
+) -> Result<RevertReport, ExecError> {
     standard_user(cx.sys)?;
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
+    if !same(Look::Early) {
+        return Err(Refusal::Changed { txn: *t }.into());
+    }
     let listing = j.list().map_err(Refusal::from)?;
     revert_listed(&listing, t)?;
     let mut w = lock.resume(t).map_err(Refusal::from)?;
@@ -559,7 +574,7 @@ pub fn revert_rebound(
         }
         drop(w);
         drop(lock);
-        return super::revert(cx, t);
+        return super::revert_seen(cx, t, same);
     }
     let ops = w.ops().clone();
     // Condition a: the Steam scan again, under the lock; rule 5: the binding written is the
@@ -572,6 +587,9 @@ pub fn revert_rebound(
     let mut c = checked(cx, &plan, &b, &tg, &j, &listing, t, &ops, &stores)?;
     if c.dirs != to.dirs {
         return Err(Refusal::from(RebindRefusal::Changed).into());
+    }
+    if !same(Look::Rebound(&c.verified)) {
+        return Err(Refusal::Changed { txn: *t }.into());
     }
     let old = tg.from.id;
     let n = w.rebinds().len();

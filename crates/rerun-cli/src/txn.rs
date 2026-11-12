@@ -22,6 +22,12 @@
 //!   pending"; `revert --dry-run` lists what the revert deletes (Rerun's copy, by its known
 //!   SHA-256) and what stays; the revert asks before it deletes, reports each file, and exits 5
 //!   while one is still in use (or kept next to a file that changed).
+//!
+//! Since P5-2b (ADR 0027 amendment P5-2b) the gates, the checks before the preview, the X12
+//! fates, the question and how a revert ended are `rerun_core::flow`'s (`revert_preview`/`revert`,
+//! `rebind_preview`/`rebind`, `forget_preview`/`forget`); the operation compares what it observes
+//! under the lock with the preview and refuses with nothing written when it changed (exit 3). This
+//! module renders, asks and maps the exit codes.
 
 use std::io::Write;
 
@@ -29,26 +35,27 @@ use rerun_core::detect::steam::AppState;
 use rerun_core::escape;
 use rerun_core::exec::launch_result::Outcome;
 use rerun_core::exec::{
-    self, Backup, Detail, ExecCtx, ExecError, Halt, LaunchResults, OldSeen, OpState, OpStatus,
-    PendingOld, RebindPreview, RebindRefusal, Refusal, RerunStep, RevertReport, TxnLine, TxnStatus,
-    Verified,
+    self, Backup, Detail, ExecError, Halt, LaunchResults, OldSeen, OpState, OpStatus, PendingOld,
+    RebindPreview, RebindRefusal, Refusal, RerunStep, RevertReport, TxnLine, TxnStatus, Verified,
 };
-use rerun_core::journal::{Closing, InstanceTag, JournalError, Observed, TxnId};
-use rerun_core::policy::root::{AppDir, RootError};
+use rerun_core::journal::{Closing, JournalError, Observed, TxnId};
+use rerun_core::policy::root::RootError;
 use rerun_core::sys::System;
 
 use crate::cli::Exit;
 use crate::confirm::Answer;
 use crate::host::{
-    Host, after_change, before_change, confirm, existing_app, exit_for_exec, fail, forbidden, gate,
-    note, shown, standard_user,
+    Host, after_change, before_change, confirm, exit_for_exec, fail, gate, note, shown,
 };
 use crate::messages::{LaunchMsg, Message, OpText, ProfileMsg, StepText, TxnMsg, TxnText, Utc};
 use crate::out::{Out, failed as failed_out};
-use crate::preview::{Fate, op_at, profile_id_of, roots, x12_lines};
+use crate::preview::{op_at, roots, x12_lines};
 use rerun_core::exec::ProfilesMoved;
-use rerun_core::exec::launch_result::{ProfileId, SkipReason};
-use rerun_core::flow::{self, Holder, head, profile_op};
+use rerun_core::exec::launch_result::SkipReason;
+use rerun_core::flow::{
+    self, ActError, Env, Holder, LaunchOption, RebindShown, RebindView, RevertAsk, RevertEnd,
+    RevertGate, RevertWould, head,
+};
 use rerun_core::plan::RootKind;
 use rerun_core::prim::launch_method::ProfileMethod as Method;
 
@@ -152,11 +159,7 @@ pub(crate) fn cleanup_lines(items: &[PendingOld]) -> Vec<Message<'_>> {
         .collect()
 }
 
-/// The `.old` files of `items` that keep the transaction open, by what keeps it.
-pub(crate) fn holding(items: &[PendingOld]) -> (usize, usize) {
-    let n = |s: OldSeen| items.iter().filter(|p| p.seen == s).count();
-    (n(OldSeen::InUse), n(OldSeen::Kept))
-}
+pub(crate) use rerun_core::flow::holding;
 
 /// The roots of the transaction's head, or why it cannot be shown.
 fn head_lines(st: &TxnStatus) -> Vec<Message<'_>> {
@@ -443,19 +446,6 @@ pub(crate) fn orphan_lines(
     }
 }
 
-/// The transaction `txn` from the journal; not found is a refusal (exit 3), an unreadable
-/// journal fatal.
-fn load<E: Write>(app: &AppDir<'_>, txn: &TxnId, err: &mut Out<E>) -> Result<TxnStatus, Exit> {
-    exec::txn_status(app, txn).map_err(|e| match e {
-        JournalError::NotFound(_) => fail(err, TxnMsg::Error { error: shown(&e) }, Exit::Refused),
-        e => fail(
-            err,
-            TxnMsg::JournalUnreadable { error: shown(&e) },
-            Exit::Fatal,
-        ),
-    })
-}
-
 /// A refusal on stderr, with the hint for a root that is another folder now (user decision
 /// E5 a: no rebind yet).
 fn refusal<E: Write>(r: &Refusal, txn: TxnId, err: &mut Out<E>) -> Exit {
@@ -536,113 +526,43 @@ fn profiles_halt<'a>(st: &TxnStatus, h: &Halt) -> Option<Message<'a>> {
         .then_some(Message::Profile(ProfileMsg::ProfilesHalt))
 }
 
-/// What a revert's observation of the profile op means for the profile (X12).
-fn fate_of(replace: bool, o: Observed) -> Fate {
-    match o {
-        Observed::Before | Observed::After if replace => Fate::PreviousBack,
-        Observed::Before | Observed::After => Fate::Gone,
-        Observed::Drifted | Observed::Foreign | Observed::Kept => Fate::Stays,
-    }
-}
-
-/// The op `k` was left as found by an earlier revert (`verify` shows it as recorded when its
-/// folder cannot be read, review L-a).
-fn left_earlier(st: &TxnStatus, k: u16) -> bool {
-    st.ops
-        .iter()
-        .any(|o| o.op == k && o.state == OpState::Reverted(Observed::Foreign))
-}
-
-/// The fate of the profile op `k` from the journal (an earlier run reverted it), else `None`.
-fn recorded_fate(st: &TxnStatus, k: u16, replace: bool) -> Option<Fate> {
-    st.ops
-        .iter()
-        .find(|o| o.op == k)
-        .and_then(|o| match o.state {
-            OpState::Reverted(obs) => Some(fate_of(replace, obs)),
-            _ => None,
-        })
-}
-
-/// A revert's halt: at the profile op (its folder is missing: no profile) or before it.
-fn halted_fate(h: &Halt, k: u16) -> Fate {
-    if h.op == k { Fate::Gone } else { Fate::Stays }
-}
-
-/// The profile op of the head and its ID.
-fn profile_of_head(st: &TxnStatus) -> Option<(u16, bool, ProfileId)> {
-    let p = head(st)?;
-    let (k, replace) = profile_op(p)?;
-    Some((k, replace, profile_id_of(p)?))
-}
-
 /// X12 before a revert (review M1/B1): what the revert `verify` describes will leave.
 fn x12_before(
     install: &Result<std::path::PathBuf, String>,
     st: &TxnStatus,
     v: &Verified,
 ) -> Vec<Message<'static>> {
-    let Some((k, replace, id)) = profile_of_head(st) else {
-        return Vec::new();
-    };
-    let fate = if left_earlier(st, k) {
-        Fate::Left
-    } else if let Some((_, o)) = v.ops.iter().find(|(x, _)| *x == k) {
-        // A halt is newest first: the profile op is observed only if it is reached.
-        fate_of(replace, *o)
-    } else if let Some(h) = &v.halted {
-        halted_fate(h, k)
-    } else {
-        recorded_fate(st, k, replace).unwrap_or(Fate::Stays)
-    };
-    x12_lines(install, id, fate, true)
+    x12(install, flow::fate_before(st, v), true)
 }
 
 /// X12 after a revert: what its report says became of the profile.
+#[cfg(test)]
 fn x12_after(
     install: &Result<std::path::PathBuf, String>,
     st: &TxnStatus,
     rep: &RevertReport,
 ) -> Vec<Message<'static>> {
-    let Some((k, replace, id)) = profile_of_head(st) else {
-        return Vec::new();
-    };
-    let fate = if let Some(o) = rep.ops.iter().find(|o| o.op == k) {
-        fate_of(replace, o.observed)
-    } else if left_earlier(st, k) {
-        Fate::Left
-    } else if let Some(h) = &rep.halted {
-        halted_fate(h, k)
-    } else {
-        recorded_fate(st, k, replace).unwrap_or(Fate::Stays)
-    };
-    x12_lines(install, id, fate, false)
+    x12(install, flow::fate_after(st, rep), false)
 }
 
 /// X12 before `forget`: the profile as it is now (forget changes nothing).
+#[cfg(test)]
 fn x12_forget(
     install: &Result<std::path::PathBuf, String>,
     st: &TxnStatus,
     v: Option<&Verified>,
 ) -> Vec<Message<'static>> {
-    let Some((k, replace, id)) = profile_of_head(st) else {
-        return Vec::new();
-    };
-    let halted_here = v.and_then(|v| v.halted.as_ref()).is_some_and(|h| h.op == k);
-    let fate = if left_earlier(st, k) {
-        Fate::Left
-    } else {
-        recorded_fate(st, k, replace).unwrap_or_else(|| {
-            match v.and_then(|v| v.ops.iter().find(|(x, _)| *x == k)) {
-                Some((_, Observed::Before)) if replace => Fate::PreviousBack,
-                Some((_, Observed::Before)) => Fate::Gone,
-                // `profiles` missing: `verify` halts at the profile op itself (review L-a).
-                None if halted_here => Fate::Gone,
-                _ => Fate::Stays,
-            }
-        })
-    };
-    x12_lines(install, id, fate, false)
+    x12(install, flow::fate_forget(st, v), false)
+}
+
+/// The X12 lines of a launch profile's fate (`after_revert`: said before a revert).
+fn x12(
+    install: &Result<std::path::PathBuf, String>,
+    lo: Option<LaunchOption>,
+    after_revert: bool,
+) -> Vec<Message<'static>> {
+    lo.map(|lo| x12_lines(install, lo.id, lo.fate, after_revert))
+        .unwrap_or_default()
 }
 
 /// The keys of an INI op and the `.old` before a step of Rerun (P2-12 open point: shown
@@ -764,6 +684,52 @@ pub fn revert<W: Write, E: Write>(
     }
 }
 
+/// A gate of `flow` before a revert, a rebind or a forget, on stdout or stderr, and its exit
+/// code: closed or empty 0, not found, forgotten, damaged or refused 3, an unreadable journal 1.
+fn revert_gate<W: Write, E: Write>(
+    g: RevertGate,
+    txn: TxnId,
+    out: &mut Out<W>,
+    err: &mut Out<E>,
+) -> Exit {
+    match g {
+        RevertGate::NoAppDir => fail(err, TxnMsg::NoAppDir, Exit::Refused),
+        RevertGate::NotFound(e) => fail(err, TxnMsg::Error { error: shown(&e) }, Exit::Refused),
+        RevertGate::Journal(e) => fail(
+            err,
+            TxnMsg::JournalUnreadable { error: shown(&e) },
+            Exit::Fatal,
+        ),
+        RevertGate::Forgotten => refusal(&Refusal::Forgotten { txn }, txn, err),
+        RevertGate::Closed(how) => {
+            let _ = out.line(&m(TxnMsg::AlreadyClosed { txn, how }));
+            Exit::Report
+        }
+        RevertGate::Empty => {
+            let _ = out.line(&m(TxnMsg::NothingToRevert { txn }));
+            Exit::Report
+        }
+        RevertGate::Blocked => refusal(&Refusal::Blocked { txn }, txn, err),
+        RevertGate::Refused(r) => refusal(&r, txn, err),
+        RevertGate::Failed(e) => fail(err, TxnMsg::Error { error: shown(&e) }, Exit::Refused),
+    }
+}
+
+/// A failed revert (also one after a rebind's record) on stderr, and its exit code; `after` is
+/// the note for an error after the run's first record.
+fn failed_revert<E: Write>(e: ActError, txn: TxnId, after: TxnMsg<'_>, err: &mut Out<E>) -> Exit {
+    match e {
+        // P5-2b: the transaction or what is on disk changed since the preview; nothing written.
+        ActError::Changed => refusal(&Refusal::Changed { txn }, txn, err),
+        ActError::Exec(ExecError::Refused(r)) => refusal(&r, txn, err),
+        ActError::Exec(e) => {
+            note(err, TxnMsg::Error { error: shown(&e) });
+            note(err, after);
+            exit_for_exec(&e)
+        }
+    }
+}
+
 fn run_revert<W: Write, E: Write>(
     host: &mut Host<'_>,
     txn: TxnId,
@@ -773,83 +739,46 @@ fn run_revert<W: Write, E: Write>(
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
-    let sys = host.sys;
-    standard_user(sys, err)?;
-    let fr = forbidden(host, err)?;
-    let app = existing_app(sys, err)?;
-    let st = load(&app, &txn, err)?;
-    if st.is_forgotten() {
-        return Err(refusal(&Refusal::Forgotten { txn }, txn, err));
-    }
-    match st.state {
-        TxnLine::Closed(how) => {
-            let _ = out.line(&m(TxnMsg::AlreadyClosed { txn, how }));
-            return Ok(Exit::Report);
-        }
-        // Review nit: an empty transaction without a readable head changed nothing.
-        TxnLine::Empty if head(&st).is_none() => {
-            let _ = out.line(&m(TxnMsg::NothingToRevert { txn }));
-            return Ok(Exit::Report);
-        }
-        // Only forget closes these; one text with the core (`Refusal::Blocked`).
-        TxnLine::Damaged(_) | TxnLine::Unreadable(_) => {
-            return Err(refusal(&Refusal::Blocked { txn }, txn, err));
-        }
-        _ => {}
-    }
-    let cx = ExecCtx {
-        sys,
-        fr: &fr,
-        app: &app,
-        tag: InstanceTag::new(),
+    // The guards borrow a copy of the install folder: the question needs the host mutably.
+    let install = host.install.clone();
+    let env = Env {
+        sys: host.sys,
+        http: host.http,
+        install: &install,
     };
+    let g = flow::guard(env).map_err(|x| gate(err, x))?;
     if rebind {
-        match exec::rebind_check(&cx, &txn) {
-            Ok(p) => return rebind_run(host, &cx, &st, &p, dry_run, out, err),
+        match flow::rebind_preview(&g, &txn) {
+            Ok((v, s)) => return rebind_run(host, &g, &v, s, dry_run, out, err),
             // Bound already: the revert goes on there as it is (a binding is permanent).
-            Err(Refusal::Rebind(RebindRefusal::AlreadyBound { path, .. })) => {
+            Err(RevertGate::Refused(Refusal::Rebind(RebindRefusal::AlreadyBound {
+                path, ..
+            }))) => {
                 out.line(&m(TxnMsg::AlreadyBound { path }))
                     .map_err(|e| before_change(err, e))?;
             }
-            Err(r) => return Err(refusal(&r, txn, err)),
+            Err(x) => return Err(revert_gate(x, txn, out, err)),
         }
     }
-    // Senior-dev S-a: every check of the revert first, so neither the preview nor the question
-    // offers a revert that is refused anyway.
-    if let Err(r) = exec::revert_check(&cx, &txn) {
-        return Err(refusal(&r, txn, err));
-    }
-    let v = match exec::verify(&cx, &txn) {
-        Ok(v) => v,
-        Err(ExecError::Refused(r)) => return Err(refusal(&r, txn, err)),
-        Err(e) => return Err(fail(err, TxnMsg::Error { error: shown(&e) }, Exit::Refused)),
-    };
-    let empty = st.state == TxnLine::Empty;
+    // Senior-dev S-a: every check of the revert runs before the preview (in `flow`), so neither
+    // the preview nor the question offers a revert that is refused anyway.
+    let (pv, s) = flow::revert_preview(&g, &txn).map_err(|x| revert_gate(x, txn, out, err))?;
+    let (st, v) = (&pv.status, &pv.verified);
     let mut lines = vec![m(TxnMsg::Txn {
         txn,
-        state: txn_text(&st),
+        state: txn_text(st),
     })];
-    lines.extend(head_lines(&st));
-    if empty {
+    lines.extend(head_lines(st));
+    if pv.empty {
         lines.push(m(TxnMsg::EmptyCloses { txn }));
     } else {
-        lines.extend(now_lines(&st, &v));
+        lines.extend(now_lines(st, v));
     }
     // X12 (B7, C-LM3): the launch option Rerun does not change, said before the question.
-    if !empty {
-        lines.extend(x12_before(&host.install, &st, &v));
-    }
+    lines.extend(x12(&install, pv.launch_option, true));
     // P4-2d: a firewall rule still there brings the administrator prompt (ADR 0023 §10).
-    if let Some(Ok(p)) = &st.preview {
-        let rule_there = v.ops.iter().any(|(k, o)| {
-            *o == Observed::After
-                && p.ops
-                    .get(usize::from(*k))
-                    .is_some_and(|x| x.firewall.is_some())
-        });
-        if rule_there {
-            lines.extend(crate::preview::prompt_lines(host.sys, p));
-        }
+    if let Some(p) = &pv.prompt {
+        lines.extend(crate::preview::prompt_lines_of(p));
     }
     lines.push(Message::Blank);
     out.lines(&lines)
@@ -860,45 +789,30 @@ fn run_revert<W: Write, E: Write>(
             .line(&m(TxnMsg::DryRunDone))
             .map_or_else(|e| before_change(err, e), |()| Exit::Report));
     }
-    // An empty transaction changed nothing: closing it is nothing to ask about.
-    // P2-15: a revert that only cleans up asks before it deletes (nothing to delete: no
-    // question). A copy `verify` sees in use may still be deleted (a process holding it with
-    // delete sharing, review S1): it counts too.
-    let ours = v.cleanup.iter().filter(|p| p.seen == OldSeen::Ours).count();
-    let in_use = v
-        .cleanup
-        .iter()
-        .filter(|p| p.seen == OldSeen::InUse)
-        .count();
-    if st.state == TxnLine::CleanupPending {
-        if ours + in_use > 0 {
+    // An empty transaction changed nothing: closing it is nothing to ask about. P2-15: a revert
+    // that only cleans up asks before it deletes (nothing to delete: no question).
+    match pv.ask {
+        RevertAsk::Nothing => {}
+        RevertAsk::Cleanup(c) => {
             let q = TxnMsg::AskCleanup {
-                n: ours + in_use,
-                in_use,
+                n: c.n,
+                in_use: c.in_use,
             };
             confirm(host, yes, q, err)?;
         }
-    } else if !empty {
-        confirm(host, yes, TxnMsg::AskRevert { ops: v.ops.len() }, err)?;
+        RevertAsk::Revert { ops } => confirm(host, yes, TxnMsg::AskRevert { ops }, err)?,
     }
-    let rep = match exec::revert(&cx, &txn) {
-        Ok(rep) => rep,
-        Err(ExecError::Refused(r)) => return Err(refusal(&r, txn, err)),
-        Err(e @ ExecError::Unconfirmed(_)) => {
-            note(err, TxnMsg::Error { error: shown(&e) });
-            note(err, TxnMsg::MayHaveClosed { txn });
-            return Err(exit_for_exec(&e));
+    let o = match flow::revert(&g, s) {
+        Ok(o) => o,
+        Err(e @ ActError::Exec(ExecError::Unconfirmed(_))) => {
+            return Err(failed_revert(e, txn, TxnMsg::MayHaveClosed { txn }, err));
         }
-        Err(e) => {
-            note(err, TxnMsg::Error { error: shown(&e) });
-            note(err, TxnMsg::RevertFailed { txn });
-            return Err(exit_for_exec(&e));
-        }
+        Err(e) => return Err(failed_revert(e, txn, TxnMsg::RevertFailed { txn }, err)),
     };
-    let (exit, last) = closing_line(&rep);
-    let mut lines = report_lines(&st, &rep, &v);
+    let (exit, last) = closing_line(txn, o.end);
+    let mut lines = report_lines(st, &o.report, v);
     lines.push(m(last));
-    lines.extend(x12_after(&host.install, &st, &rep));
+    lines.extend(x12(&install, o.launch_option, false));
     Ok(out
         .lines(&lines)
         .and_then(|()| out.flush())
@@ -907,19 +821,13 @@ fn run_revert<W: Write, E: Write>(
 
 /// The last line of a revert's report and its exit code: closed 0; halted, foreign, or a file of
 /// Rerun's still left (P2-15) 5.
-fn closing_line(rep: &RevertReport) -> (Exit, TxnMsg<'static>) {
-    let txn = rep.txn;
-    let (in_use, kept) = holding(&rep.cleanup);
-    if rep.closed.is_some() {
-        (Exit::Report, TxnMsg::Reverted { txn })
-    } else if rep.halted.is_some() {
-        (Exit::Open, TxnMsg::StaysOpenHalted { txn })
-    } else if in_use > 0 {
-        (Exit::Open, TxnMsg::StaysOpenInUse { txn, n: in_use })
-    } else if kept > 0 {
-        (Exit::Open, TxnMsg::StaysOpenKept { txn })
-    } else {
-        (Exit::Open, TxnMsg::StaysOpenForeign { txn })
+fn closing_line(txn: TxnId, end: RevertEnd) -> (Exit, TxnMsg<'static>) {
+    match end {
+        RevertEnd::Closed => (Exit::Report, TxnMsg::Reverted { txn }),
+        RevertEnd::Halted => (Exit::Open, TxnMsg::StaysOpenHalted { txn }),
+        RevertEnd::InUse(n) => (Exit::Open, TxnMsg::StaysOpenInUse { txn, n }),
+        RevertEnd::Kept => (Exit::Open, TxnMsg::StaysOpenKept { txn }),
+        RevertEnd::Foreign => (Exit::Open, TxnMsg::StaysOpenForeign { txn }),
     }
 }
 
@@ -1024,13 +932,14 @@ fn rebind_lines_of<'a>(
 /// only, user decision E-R5), the rebind and the revert, the report.
 fn rebind_run<W: Write, E: Write>(
     host: &mut Host<'_>,
-    cx: &ExecCtx<'_>,
-    st: &TxnStatus,
-    p: &RebindPreview,
+    g: &flow::Guarded<'_>,
+    view: &RebindView,
+    s: RebindShown,
     dry_run: bool,
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
+    let (st, p) = (&view.status, &view.rebind);
     let txn = st.id;
     out.lines(&rebind_lines_of(&host.install, st, p))
         .and_then(|()| out.flush())
@@ -1049,31 +958,27 @@ fn rebind_run<W: Write, E: Write>(
         Answer::No => return Err(fail(err, TxnMsg::NothingDone, Exit::Refused)),
         Answer::NoConsole => return Err(fail(err, TxnMsg::RebindNeedsConsole, Exit::Usage)),
     }
-    let rep = match exec::revert_rebound(cx, &txn, &p.to) {
-        Ok(rep) => rep,
-        Err(ExecError::Refused(r)) => return Err(refusal(&r, txn, err)),
+    let o = match flow::rebind(g, s) {
+        Ok(o) => o,
         // The record may not be on disk, and the journal could not be read again.
-        Err(e @ ExecError::RebindUnconfirmed(_)) => {
-            note(err, TxnMsg::Error { error: shown(&e) });
-            note(err, TxnMsg::MayBeBound { txn });
-            return Err(exit_for_exec(&e));
+        Err(e @ ActError::Exec(ExecError::RebindUnconfirmed(_))) => {
+            return Err(failed_revert(e, txn, TxnMsg::MayBeBound { txn }, err));
         }
         // Every other error comes after the record (review N3): bound now.
-        Err(e @ ExecError::Unconfirmed(_)) => {
-            note(err, TxnMsg::Error { error: shown(&e) });
-            note(err, TxnMsg::BoundMayHaveClosed { txn });
-            return Err(exit_for_exec(&e));
+        Err(e @ ActError::Exec(ExecError::Unconfirmed(_))) => {
+            return Err(failed_revert(
+                e,
+                txn,
+                TxnMsg::BoundMayHaveClosed { txn },
+                err,
+            ));
         }
-        Err(e) => {
-            note(err, TxnMsg::Error { error: shown(&e) });
-            note(err, TxnMsg::BoundNow { txn });
-            return Err(exit_for_exec(&e));
-        }
+        Err(e) => return Err(failed_revert(e, txn, TxnMsg::BoundNow { txn }, err)),
     };
-    let (exit, last) = closing_line(&rep);
-    let mut lines = report_lines(st, &rep, &p.verified);
+    let (exit, last) = closing_line(txn, o.end);
+    let mut lines = report_lines(st, &o.report, &p.verified);
     lines.push(m(last));
-    lines.extend(x12_after(&host.install, st, &rep));
+    lines.extend(x12(&host.install, o.launch_option, false));
     Ok(out
         .lines(&lines)
         .and_then(|()| out.flush())
@@ -1100,45 +1005,45 @@ fn run_forget<W: Write, E: Write>(
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
-    let sys = host.sys;
-    standard_user(sys, err)?;
-    let fr = forbidden(host, err)?;
-    let app = existing_app(sys, err)?;
-    let st = load(&app, &txn, err)?;
-    if st.is_forgotten() {
-        let _ = out.line(&m(TxnMsg::AlreadyForgotten { txn }));
-        return Ok(Exit::Report);
-    }
-    if let TxnLine::Closed(how) = st.state {
-        return Err(fail(
-            err,
-            TxnMsg::NothingToForget { txn, how },
-            Exit::Refused,
-        ));
-    }
+    let install = host.install.clone();
+    let env = Env {
+        sys: host.sys,
+        http: host.http,
+        install: &install,
+    };
+    let g = flow::guard(env).map_err(|x| gate(err, x))?;
+    let (pv, s) = match flow::forget_preview(&g, &txn) {
+        Ok(x) => x,
+        Err(RevertGate::Forgotten) => {
+            let _ = out.line(&m(TxnMsg::AlreadyForgotten { txn }));
+            return Ok(Exit::Report);
+        }
+        Err(RevertGate::Closed(how)) => {
+            return Err(fail(
+                err,
+                TxnMsg::NothingToForget { txn, how },
+                Exit::Refused,
+            ));
+        }
+        Err(x) => return Err(revert_gate(x, txn, out, err)),
+    };
+    let st = &pv.status;
     let mut lines = vec![m(TxnMsg::Txn {
         txn,
-        state: txn_text(&st),
+        state: txn_text(st),
     })];
-    lines.extend(head_lines(&st));
+    lines.extend(head_lines(st));
     for o in &st.ops {
-        lines.extend(op_lines(&st, o, true));
+        lines.extend(op_lines(st, o, true));
     }
     // What is on disk now, if the head can be read (`verify` writes nothing).
-    let cx = ExecCtx {
-        sys,
-        fr: &fr,
-        app: &app,
-        tag: InstanceTag::new(),
-    };
-    let verified = head(&st).map(|_| exec::verify(&cx, &txn));
-    match &verified {
-        Some(Ok(v)) => lines.extend(now_lines(&st, v)),
+    match &pv.verified {
+        Some(Ok(v)) => lines.extend(now_lines(st, v)),
         Some(Err(e)) => lines.push(m(TxnMsg::CannotObserve { error: shown(e) })),
         None => {}
     }
     // P4-8b (S3, default 2): what forget means for the files it shares.
-    lines.extend(share_lines(&st, true));
+    lines.extend(share_lines(st, true));
     lines.push(m(TxnMsg::ForgetChangesNothing));
     // P2-15 (senior-dev S3): with only the cleanup pending, no change of Rerun's stays.
     lines.push(m(if st.state == TxnLine::CleanupPending {
@@ -1148,24 +1053,16 @@ fn run_forget<W: Write, E: Write>(
     }));
     lines.push(m(TxnMsg::ForgetKeeps));
     // C-LM4 (A3, X12): what forget leaves of the profile, as it is now.
-    lines.extend(x12_forget(
-        &host.install,
-        &st,
-        verified.as_ref().and_then(|r| r.as_ref().ok()),
-    ));
+    lines.extend(x12(&install, pv.launch_option, false));
     if st.state == TxnLine::Applied && st.ops.iter().all(|o| o.state == OpState::Applied) {
         lines.push(m(TxnMsg::AllStay { ops: st.ops.len() }));
     }
     // Review S7: nothing is foreign and nothing halts: a revert finishes it cleanly.
-    if let Some(Ok(v)) = &verified
-        && v.halted.is_none()
-        && v.ops.iter().all(|(_, o)| *o != Observed::Foreign)
-        && !left_foreign(&st)
-    {
-        lines.push(m(match holding(&v.cleanup) {
-            (0, 0) => TxnMsg::RevertIsClean { txn },
-            (0, _) => TxnMsg::FinishKept { txn },
-            _ => TxnMsg::FinishCleanup { txn },
+    if let Some(w) = pv.revert_would {
+        lines.push(m(match w {
+            RevertWould::BeClean => TxnMsg::RevertIsClean { txn },
+            RevertWould::KeepCopy => TxnMsg::FinishKept { txn },
+            RevertWould::CleanUp => TxnMsg::FinishCleanup { txn },
         }));
     }
     lines.push(Message::Blank);
@@ -1173,12 +1070,13 @@ fn run_forget<W: Write, E: Write>(
         .and_then(|()| out.flush())
         .map_err(|e| before_change(err, e))?;
     confirm(host, yes, TxnMsg::AskForget { txn }, err)?;
-    match exec::forget(&cx, &txn) {
+    match flow::forget(&g, s) {
         Ok(()) => {}
-        // Nothing written.
-        Err(ExecError::Refused(r)) => return Err(refusal(&r, txn, err)),
+        // Nothing written (P5-2b: changed since the preview, or refused).
+        Err(ActError::Changed) => return Err(refusal(&Refusal::Changed { txn }, txn, err)),
+        Err(ActError::Exec(ExecError::Refused(r))) => return Err(refusal(&r, txn, err)),
         // The record or marker may be on disk (security review N1).
-        Err(e) => {
+        Err(ActError::Exec(e)) => {
             note(err, TxnMsg::Error { error: shown(&e) });
             note(err, TxnMsg::MayHaveClosed { txn });
             return Err(Exit::Open);

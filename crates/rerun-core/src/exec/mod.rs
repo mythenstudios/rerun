@@ -105,6 +105,7 @@ pub mod launch_result {
     };
 }
 pub use helper::{HelperFailure, reason_words};
+pub(crate) use rebind::revert_rebound_seen;
 pub use rebind::{
     CreatedDir, RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,
 };
@@ -291,6 +292,16 @@ pub enum Refusal {
     /// The transaction was forgotten: there is nothing to revert.
     #[error("transaction {txn} was forgotten; there is nothing to revert")]
     Forgotten {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// What a revert, rebind or forget observes under the lock differs from what its preview
+    /// showed (ADR 0027 amendment P5-2b): nothing was written; show the preview again.
+    #[error(
+        "transaction {txn} changed since its preview; nothing was done; look at it again before \
+         you go on"
+    )]
+    Changed {
         /// The transaction.
         txn: TxnId,
     },
@@ -2381,9 +2392,35 @@ fn closing_failed(j: &Journal<'_>, t: &TxnId, e: JournalError) -> ExecError {
 /// changed); a `Closed` that may be on disk is [`ExecError::Unconfirmed`]; any other error
 /// came after a record of this run.
 pub fn revert(cx: &ExecCtx<'_>, t: &TxnId) -> Result<RevertReport, ExecError> {
+    revert_seen(cx, t, &|_| true)
+}
+
+/// What a front end's preview is compared with under the lock (ADR 0027 amendment P5-2b): right
+/// after the lock is taken, and for a rebind also the observation with the new binding before
+/// its record.
+pub(crate) enum Look<'a> {
+    /// The lock is held; nothing read yet.
+    Early,
+    /// A rebind's checks under the lock passed: what its ops observe with the new binding.
+    Rebound(&'a Verified),
+}
+
+/// Whether what is seen under the lock is what the preview showed (`false`:
+/// [`Refusal::Changed`], nothing written).
+pub(crate) type Same<'a> = &'a dyn Fn(Look<'_>) -> bool;
+
+/// [`revert`] with the preview compared under the lock first (`same`, [`Look::Early`]).
+pub(crate) fn revert_seen(
+    cx: &ExecCtx<'_>,
+    t: &TxnId,
+    same: Same<'_>,
+) -> Result<RevertReport, ExecError> {
     standard_user(cx.sys)?;
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
+    if !same(Look::Early) {
+        return Err(Refusal::Changed { txn: *t }.into());
+    }
     let listing = j.list().map_err(Refusal::from)?;
     revert_listed(&listing, t)?;
     let w = lock.resume(t).map_err(Refusal::from)?;
@@ -2512,6 +2549,16 @@ fn revert_run<W: Reverting>(
 pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     let j = Journal::new(cx.app, cx.tag);
     let _hold = j.hold().map_err(Refusal::from)?;
+    verify_in(cx, &j, t)
+}
+
+/// [`verify`] without holding the lock file: for a caller that holds the lock already (the
+/// comparison with a preview under the lock, ADR 0027 amendment P5-2b).
+pub(crate) fn verify_in(
+    cx: &ExecCtx<'_>,
+    j: &Journal<'_>,
+    t: &TxnId,
+) -> Result<Verified, ExecError> {
     let v = j.load(t, crate::journal::VerifyBackups::Length)?;
     let blocked = || ExecError::Refused(Refusal::Blocked { txn: *t });
     if !v.head_usable() {
@@ -2531,7 +2578,7 @@ pub fn verify(cx: &ExecCtx<'_>, t: &TxnId) -> Result<Verified, ExecError> {
     let mut touched = Touched::new(cx.sys, &roots).of(*t);
     // P4-8b (rule 5): what the revert would hand over and inherit now (a refusal of the revert
     // shows the plain observation; `revert_check` names it).
-    touched.shares = verify_shares(&j, t, &plan, &b, &v);
+    touched.shares = verify_shares(j, t, &plan, &b, &v);
     let mut out = verify_ops(&plan, &mut touched, &roots, &v.ops)?;
     // P2-15 (rule 5): what the cleanup pass of a revert would find now, unless it halts first.
     if out.halted.is_none() {
@@ -2596,9 +2643,18 @@ fn verify_shares(
 /// marker is a refusal; a record or marker that reached the journal but whose flush failed is
 /// [`ExecError::Unconfirmed`] (security review N1).
 pub fn forget(cx: &ExecCtx<'_>, t: &TxnId) -> Result<(), ExecError> {
+    forget_seen(cx, t, &|_| true)
+}
+
+/// [`forget`] with the preview compared under the lock first (`same`, [`Look::Early`]), before
+/// anything is written.
+pub(crate) fn forget_seen(cx: &ExecCtx<'_>, t: &TxnId, same: Same<'_>) -> Result<(), ExecError> {
     standard_user(cx.sys)?;
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
+    if !same(Look::Early) {
+        return Err(Refusal::Changed { txn: *t }.into());
+    }
     // P4-2d review follow-up (security L2): no request file stays for a late helper to find.
     helper::sweep_leftovers(cx);
     let listing = j.list().map_err(Refusal::from)?;

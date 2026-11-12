@@ -279,7 +279,7 @@ pub fn shadow_lines(s: &[Shadow]) -> Vec<Message<'_>> {
         .collect()
 }
 
-pub use rerun_core::flow::{profile_id_of, profile_of};
+pub use rerun_core::flow::profile_of;
 
 /// The launch option for a front end: shown, or why not.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -430,21 +430,9 @@ pub fn launch_lines<'a>(p: &'a Preview, v: &'a LaunchView) -> Vec<Message<'a>> {
     out
 }
 
-/// What becomes of a transaction's launch profile (X12, review M1/B1): the text depends on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fate {
-    /// No profile at the name any more (a created profile reverted, or `profiles` gone): the
-    /// shim finds none, the option should go.
-    Gone,
-    /// A replaced profile reverted: the profile from before is back and applies.
-    PreviousBack,
-    /// The profile stays and applies (not reverted, changed by someone else, a halt before it,
-    /// `forget`).
-    Stays,
-    /// An earlier run left it as found (changed by someone else); whether it is still there is
-    /// not known now (its folder may be gone: `verify` shows such an op as recorded).
-    Left,
-}
+/// What becomes of a transaction's launch profile (X12, review M1/B1): the text depends on it
+/// (decided in `flow`, P5-2b).
+pub use rerun_core::flow::ProfileFate as Fate;
 
 /// X12 (revert, `forget`): the launch option Rerun does not change, by what becomes of the
 /// profile; `after_revert`: said before a revert ("once the revert completes").
