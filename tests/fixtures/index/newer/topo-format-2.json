@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "seq": 2,
+  "issued": "2026-11-12T12:00:00Z",
+  "topos": [
+    {
+      "format": 2,
+      "id": "future-game",
+      "title": "A future game",
+      "status": "active",
+      "rev": 1,
+      "a_format_2_field": { "anything": [1, 2, 3] },
+      "match": {
+        "steam_appid": 440,
+        "exes": [{ "path": "game.exe", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "api": "d3d12" }]
+      },
+      "issues": [
+        {
+          "id": "stutter",
+          "title": "Stutter",
+          "variants": [
+            { "id": "fix", "status": "verified", "kind": "fix", "steps": [{ "teleport": { "to": "mars" } }] }
+          ]
+        }
+      ]
+    }
+  ],
+  "packages": []
+}

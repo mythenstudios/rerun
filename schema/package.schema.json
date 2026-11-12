@@ -18,6 +18,7 @@
   ],
   "properties": {
     "format": {
+      "description": "The entry format (ADR 0024 amendment \"Forward compatibility\"): the lowest version of the entry language this entry needs. Every format up to the current one is allowed; from format 2 an enum. Format 1 is frozen with the first release.",
       "const": 1
     },
     "id": {

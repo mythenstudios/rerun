@@ -295,6 +295,61 @@ fn an_api_dependent_package_on_a_topo_of_two_apis_fails_the_build() {
     go(&two, PACKAGE).unwrap();
 }
 
+/// FC10 (ADR 0024 amendment "Forward compatibility" §5, §6): a source below its floor or above
+/// this workbench's entry format is not built, and nothing the client would set aside is built
+/// (here two released Topos claiming one build: the client would refuse both).
+#[test]
+fn the_format_is_checked_and_nothing_set_aside_is_built() {
+    let below = TOPO.replacen("format: 1", "format: 0", 1);
+    let e = build(
+        &[f("a-game.yaml", &below)],
+        &[f("fix-pack.yaml", PACKAGE)],
+        1,
+        ISSUED,
+    )
+    .unwrap_err();
+    assert!(e.starts_with("a-game.yaml: format: "), "{e}");
+    let above = TOPO.replacen("format: 1", "format: 2", 1);
+    let e = build(
+        &[f("a-game.yaml", &above)],
+        &[f("fix-pack.yaml", PACKAGE)],
+        1,
+        ISSUED,
+    )
+    .unwrap_err();
+    assert!(
+        e.contains("entry format 2 is newer than this build reads (1)"),
+        "{e}"
+    );
+    let e = build(
+        &[],
+        &[f(
+            "fix-pack.yaml",
+            &PACKAGE.replacen("format: 1", "format: 2", 1),
+        )],
+        1,
+        ISSUED,
+    )
+    .unwrap_err();
+    assert!(
+        e.starts_with("fix-pack.yaml: format: entry format 2"),
+        "{e}"
+    );
+    let twin = TOPO.replacen("id: a-game", "id: b-game", 1);
+    let e = build(
+        &[f("a-game.yaml", TOPO), f("b-game.yaml", &twin)],
+        &[f("fix-pack.yaml", PACKAGE)],
+        1,
+        ISSUED,
+    )
+    .unwrap_err();
+    assert!(
+        e.starts_with("the client would set aside 2 entries of this bundle: topo a-game: ")
+            && e.contains("claims the same app and executable hash as topo b-game"),
+        "{e}"
+    );
+}
+
 #[test]
 fn issued_and_seq_are_checked() {
     assert!(build(&[], &[], 0, ISSUED).is_err());

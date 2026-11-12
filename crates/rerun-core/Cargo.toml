@@ -27,8 +27,10 @@ thiserror.workspace = true
 # Snapshot hashes and, with sha1, exe hashes (detect::exe::hash, ADR 0014).
 sha2.workspace = true
 sha1.workspace = true
-# Topology fixtures; from phase 1 also profile and topo.
-serde_json.workspace = true
+# Topology fixtures; from phase 1 also profile and topo. `raw_value` (a feature of the same
+# crate, no new code from outside): the signed index keeps each entry as its raw text and reads
+# it in two stages (ADR 0024 amendment "Forward compatibility").
+serde_json = { workspace = true, features = ["raw_value"] }
 # Journal records (ADR 0019) and later plans (ADR 0020): derive with deny_unknown_fields.
 # Already in the tree through rerun-proto and serde_json.
 serde.workspace = true

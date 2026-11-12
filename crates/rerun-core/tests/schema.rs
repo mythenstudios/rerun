@@ -908,3 +908,46 @@ fn arch_id_parity_with_schema() {
     );
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
+
+// ---------- The signed index (ADR 0024 amendment "Forward compatibility") ----------
+
+fn json_files(rel: &str) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = fs::read_dir(repo().join(rel))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    v.sort();
+    assert!(!v.is_empty(), "no *.json in {rel}");
+    v
+}
+
+/// The index schema describes the frozen heads: it accepts an index whose entries are of a
+/// newer entry format (the typed side, `catalog_parity.rs`, sets them aside), the frozen
+/// format-1 bundle, and refuses a head the client refuses as a whole.
+#[test]
+fn index_fixtures_validate_against_the_index_schema() {
+    let v = validator(&load_json("schema/index.schema.json"));
+    let mut files = json_files("tests/fixtures/index/newer");
+    files.push(repo().join("tests/fixtures/index/format-1.json"));
+    for f in &files {
+        let doc: Value = serde_json::from_str(&fs::read_to_string(f).unwrap()).unwrap();
+        let errs = errors(&v, &doc);
+        assert!(errs.is_empty(), "{}:\n{}", f.display(), errs.join("\n"));
+    }
+    let doc: Value =
+        serde_json::from_str(&fs::read_to_string(&files[files.len() - 1]).unwrap()).unwrap();
+    let broken: [fn(&mut Value); 4] = [
+        |d| d["topos"][0]["match"]["steam_appid"] = Value::from(0),
+        |d| d["topos"][0]["format"] = Value::from(0),
+        |d| d["packages"][0]["id"] = Value::from("Not An Id"),
+        |d| {
+            d["packages"][0].as_object_mut().unwrap().remove("format");
+        },
+    ];
+    for (i, b) in broken.iter().enumerate() {
+        let mut d = doc.clone();
+        b(&mut d);
+        assert!(!errors(&v, &d).is_empty(), "case {i}");
+    }
+}

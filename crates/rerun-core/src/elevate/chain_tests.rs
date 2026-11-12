@@ -1405,3 +1405,62 @@ fn r_two_builds_of_one_path_anchor_either() {
         assert_eq!(run_on(&wire, &at, &sha, 1), refused(Reason::Program));
     });
 }
+
+// ---------- Forward compatibility (ADR 0024 amendment, FC8) ----------
+
+/// Signs an index of raw `topos` and `packages` and stores it under `INDEX` by hash.
+fn put_raw_index(sys: &FakeSystem, topos: &[String], packages: &[&str]) -> [u8; 32] {
+    let index = format!(
+        r#"{{"format":1,"seq":1,"issued":"2026-11-12T12:00:00Z","topos":[{}],"packages":[{}]}}"#,
+        topos.join(","),
+        packages.join(",")
+    );
+    let sha: [u8; 32] = Sha256::digest(index.as_bytes()).into();
+    let h = hex32::to_string(&sha);
+    let fs = sys.fake_fs();
+    fs.put_file(Path::new(&format!(r"{INDEX}\{h}.json")), index.as_bytes())
+        .unwrap();
+    fs.put_file(
+        Path::new(&format!(r"{INDEX}\{h}.sig")),
+        &test_key::sign(index.as_bytes()),
+    )
+    .unwrap();
+    sha
+}
+
+/// FC8, the helper's side: it acts only on a known Topo. A request naming a Topo this build
+/// sets aside (a newer entry format, or a package set aside under it) is `Reason::Topo` with
+/// nothing written; a known Topo in an index that also holds a future entry is done.
+#[test]
+fn fc8_the_helper_acts_only_on_a_known_topo() {
+    let game = topo_json("invented-game", 3, "active", &game_sha());
+    let future_pack = r#"{"format":2,"id":"future-pack","shiny":true}"#;
+    let with_pack = game.replacen(
+        r#"{"steam_input":"enable"}"#,
+        r#"{"package":"future-pack"}"#,
+        1,
+    );
+    assert_ne!(with_pack, game);
+    let newer = game.replacen(r#""format":1"#, r#""format":2"#, 1);
+    let cases: Vec<(&str, Vec<String>, Vec<&str>)> = vec![
+        ("newer entry format", vec![newer], vec![]),
+        ("its package is newer", vec![with_pack], vec![future_pack]),
+    ];
+    for (what, topos, packages) in cases {
+        let sys = world();
+        let idx = put_raw_index(&sys, &topos, &packages);
+        let (at, sha) = write(&sys, &add_request(&sys, idx));
+        assert_eq!(
+            run_on(&Wire::new(&sys), &at, &sha, 1),
+            refused(Reason::Topo),
+            "{what}"
+        );
+        assert!(sys.fake_firewall().rules().is_empty(), "{what}");
+    }
+    // A known Topo next to a future Topo and a future package: done.
+    let sys = world();
+    let future = r#"{"format":2,"id":"zz-future","match":{"steam_appid":7},"teleport":{}}"#;
+    let idx = put_raw_index(&sys, &[game, future.to_owned()], &[future_pack]);
+    let (at, sha) = write(&sys, &add_request(&sys, idx));
+    assert_added(&sys, run_on(&Wire::new(&sys), &at, &sha, 1));
+}

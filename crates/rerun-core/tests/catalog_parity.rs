@@ -192,3 +192,29 @@ arch: [x86, x64]
     let e = check::package(&p, Rules::Source).unwrap_err().to_string();
     assert!(e.contains("not from the original source"), "{e}");
 }
+
+/// The parity category of the signed index (ADR 0024 amendment "Forward compatibility"): the
+/// fixtures of `tests/fixtures/index/newer` hold entries of a newer entry format; the typed
+/// loader sets them aside (and what needs them) as "needs newer" and keeps the index. The schema
+/// side (`tests/schema.rs`) accepts their heads.
+#[test]
+fn index_fixtures_with_newer_entries_are_set_aside() {
+    let dir = repo().join("tests/fixtures/index/newer");
+    let mut files: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty());
+    for f in files {
+        let aside = rerun_core::catalog::check_bundle(&fs::read(&f).unwrap())
+            .unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        assert!(!aside.is_empty(), "{}", f.display());
+        assert!(
+            aside.iter().all(|a| a.why.needs_newer()),
+            "{}: {aside:?}",
+            f.display()
+        );
+    }
+}

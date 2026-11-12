@@ -1,0 +1,36 @@
+{
+  "format": 1,
+  "seq": 3,
+  "issued": "2026-11-12T12:00:00Z",
+  "topos": [
+    {
+      "format": 1,
+      "id": "a-game",
+      "title": "A game",
+      "status": "active",
+      "rev": 1,
+      "match": {
+        "steam_appid": 440,
+        "exes": [{ "path": "game.exe", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "api": "d3d9" }]
+      },
+      "issues": [
+        {
+          "id": "stutter",
+          "title": "Stutter",
+          "variants": [
+            { "id": "future-pack", "status": "reported", "kind": "fix", "steps": [{ "package": "future-pack" }] }
+          ]
+        }
+      ]
+    }
+  ],
+  "packages": [
+    {
+      "format": 2,
+      "id": "future-pack",
+      "name": "A future package",
+      "status": "active",
+      "a_format_2_source": { "kind": "torrent" }
+    }
+  ]
+}

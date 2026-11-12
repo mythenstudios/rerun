@@ -1283,3 +1283,73 @@ fn f8_a_rule_first_then_the_patch() {
         }
     });
 }
+
+// ---------- Forward compatibility (ADR 0024 amendment, FC8 and FC9) ----------
+
+/// FC8, the CLI's side: a stored plan whose Topo this build sets aside in the index the plan
+/// names (here a rule tightened in this build: every floor reported as format 2) stops at the
+/// recheck before `begin`, with nothing changed and no prompt.
+#[test]
+fn fc8_a_set_aside_topo_stops_at_the_recheck() {
+    use crate::catalog::check::{Floor, TEST_FLOOR};
+    seams(|| {
+        let fw = Fw::new();
+        let before = fw.snap();
+        let h = plan(&fw.sys, fw.index, Kind::Rules);
+        TEST_FLOOR.with(|f| {
+            f.set(Some(Floor {
+                format: 2,
+                at: "issues",
+            }));
+        });
+        let (r, runs) = fw.apply(&h, Vec::new());
+        TEST_FLOOR.with(|f| f.set(None));
+        assert!(
+            matches!(r, Err(ApplyError::Refused(Refusal::Mismatch { .. }))),
+            "{r:?}"
+        );
+        assert_eq!(runs, 0);
+        assert!(fw.states().is_empty());
+        assert_eq!(fw.snap(), before);
+        // The same plan with the Topo known again is applied (the refusal was the aside).
+        let (r, _) = fw.apply(&h, Vec::new());
+        applied(&r);
+    });
+}
+
+/// FC9: a revert reads no index. A Topo applied, then an index imported in which it is of entry
+/// format 2 (set aside by this build): `status` lists the transaction, and the revert restores
+/// the game folder and the firewall scope exactly.
+#[test]
+fn fc9_a_revert_does_not_need_its_topo_known() {
+    seams(|| {
+        let fw = Fw::new();
+        let before = fw.snap();
+        let h = plan(&fw.sys, fw.index, Kind::Rules);
+        let (r, _) = fw.apply(&h, Vec::new());
+        let t = applied(&r);
+        let future = topo_json().replacen(r#""format":1"#, r#""format":2"#, 1);
+        let index = format!(
+            r#"{{"format":1,"seq":2,"issued":"2026-11-12T12:00:00Z","topos":[{future}],"packages":[]}}"#
+        );
+        let a = app(&fw.sys);
+        let imported = crate::catalog::store::import(
+            &a,
+            index.as_bytes(),
+            &test_key::sign(index.as_bytes()),
+            &[test_key::public()],
+        )
+        .unwrap();
+        let crate::catalog::store::Imported::New { catalog, .. } = imported else {
+            panic!("not a new index");
+        };
+        assert!(catalog.topo("invented-game").is_none());
+        assert_eq!(catalog.aside().len(), 1);
+        let st = super::status::status(&a).unwrap();
+        assert!(st.txns.iter().any(|s| s.id == t), "{st:?}");
+        drop(a);
+        let (r, _) = fw.revert(&t, Vec::new());
+        assert_eq!(r.unwrap().closed, Some(Closing::Reverted));
+        assert_eq!(fw.snap(), before);
+    });
+}

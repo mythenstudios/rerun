@@ -6,13 +6,15 @@
 //! the planners (token allowlist, INI value rule, the game folder itself) stay the planners'.
 //!
 //! [`Rules::Source`] is a file of `topos/` or `packages/`: `TODO` only in a draft.
-//! [`Rules::Release`] is an entry of the signed index: no draft, no `TODO` anywhere.
+//! [`Rules::Release`] is an entry of the signed index: no draft, no `TODO` anywhere. Both check
+//! the entry's `format` against its floor ([`topo_floor`], [`package_floor`]; ADR 0024 amendment
+//! "Forward compatibility" §5).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::model::{
-    ArchList, Compare, FirewallRuleSpec, Id, LaaPatchStep, Launch, Method, Package, PackageOption,
-    Source, SourceType, Status, TODO, Tier, Topo, TopoStep, When,
+    ArchList, Compare, ENTRY_FORMAT, FirewallRuleSpec, Id, LaaPatchStep, Launch, Method, Package,
+    PackageOption, Source, SourceType, Status, TODO, Tier, Topo, TopoStep, When,
 };
 use crate::fold::fold;
 use crate::policy::ini::IniName;
@@ -47,6 +49,47 @@ pub const LAA_PATCH_REVIEWED: bool = true;
 /// only again (the signed index then holds none). Topos with it stay `unverified` until a test
 /// on a hybrid machine (R1).
 pub const GPU_PREFERENCE_REVIEWED: bool = true;
+
+mod floor;
+pub use floor::{Floor, package_floor, topo_floor};
+
+/// The format rule of every entry (ADR 0024 amendment "Forward compatibility" §5), for
+/// [`Rules::Source`] and [`Rules::Release`] alike: `1 <= format <= ENTRY_FORMAT`, and the
+/// entry's content needs no more than its `format` says. A `format` above the floor is allowed
+/// (a deliberate bump hides an entry from older clients).
+fn format_rule(format: u32, floor: Floor) -> R {
+    ensure(format >= 1, "format", "at least 1")?;
+    if format > ENTRY_FORMAT {
+        return Err(err(
+            "format",
+            format!("entry format {format} is newer than this build reads ({ENTRY_FORMAT})"),
+        ));
+    }
+    if floor.format > format {
+        let f = floor.format;
+        return Err(err(
+            floor.at,
+            format!("uses {} of entry format {f}; set format: {f}", floor.at),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A floor every entry reports instead of its own (tests only: every floor is 1 until the
+    /// first format bump, FC3).
+    pub(crate) static TEST_FLOOR: std::cell::Cell<Option<Floor>> = const { std::cell::Cell::new(None) };
+}
+
+/// `floor`, or the test override.
+fn floor_of(floor: Floor) -> Floor {
+    #[cfg(test)]
+    if let Some(f) = TEST_FLOOR.with(std::cell::Cell::get) {
+        return f;
+    }
+    floor
+}
 
 /// Most executables of `match.exes` (P4-4: each is hashed when the engine reads a game).
 pub const MAX_EXES: usize = 8;
@@ -200,11 +243,7 @@ fn source(s: &Source, at: &str) -> R {
 
 /// Checks a Topo.
 pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
-    ensure(
-        t.format == super::model::FORMAT,
-        "format",
-        "format must be 1",
-    )?;
+    format_rule(t.format, floor_of(topo_floor(t)))?;
     ensure(
         chars_between(&t.title, 1, 200),
         "title",
@@ -767,11 +806,7 @@ fn url_or_todo(u: &str) -> bool {
 
 /// Checks a package.
 pub fn package(p: &Package, rules: Rules) -> Result<(), RuleError> {
-    ensure(
-        p.format == super::model::FORMAT,
-        "format",
-        "format must be 1",
-    )?;
+    format_rule(p.format, floor_of(package_floor(p)))?;
     ensure(
         chars_between(&p.name, 1, 200),
         "name",

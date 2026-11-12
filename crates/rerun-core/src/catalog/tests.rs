@@ -242,6 +242,20 @@ fn rule(i: &Index) -> String {
     }
 }
 
+/// The entries the client sets aside in `i` (ADR 0024 amendment "Forward compatibility"),
+/// shown as `<kind> <id>: <why>`; the index itself is accepted.
+fn aside(i: &Index) -> Vec<String> {
+    let b = bytes(i);
+    let c = catalog(&b, &test_key::sign(&b)).unwrap();
+    c.aside().iter().map(ToString::to_string).collect()
+}
+
+/// [`aside`] of serialised text.
+fn aside_text(text: &str) -> Vec<String> {
+    let c = catalog(text.as_bytes(), &test_key::sign(text.as_bytes())).unwrap();
+    c.aside().iter().map(ToString::to_string).collect()
+}
+
 #[test]
 fn signed_bytes_of_the_wrong_form_are_refused_by_position_only() {
     assert!(matches!(
@@ -259,31 +273,54 @@ fn signed_bytes_of_the_wrong_form_are_refused_by_position_only() {
     ));
     let format2 = text.replacen("\"format\": 1", "\"format\": 2", 1);
     assert_eq!(signed_err(format2.as_bytes()), IndexError::Format(2));
+    // Inside an entry of a known format the strict types still refuse it, by position, but the
+    // entry is set aside instead of the whole index (ADR 0024 amendment "Forward
+    // compatibility"): a path escaping the game folder, a hash in lower case.
     let escape = text.replacen("\"game.exe\"", "\"..\\\\game.exe\"", 1);
-    assert!(matches!(
-        signed_err(escape.as_bytes()),
-        IndexError::Parse { class: "data", .. }
-    ));
+    let a = aside_text(&escape);
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert!(
+        a[0].starts_with("topo a-game: not readable by this build (data at line "),
+        "{a:?}"
+    );
     let lower = text.replacen(&"AB".repeat(32), &"ab".repeat(32), 1);
-    assert!(matches!(
-        signed_err(lower.as_bytes()),
-        IndexError::Parse { class: "data", .. }
-    ));
+    let a = aside_text(&lower);
+    assert_eq!(a.len(), 2, "{a:?}");
+    assert_eq!(
+        a[0],
+        "topo a-game: names package fix-pack, which this build cannot use"
+    );
+    assert!(
+        a[1].starts_with("package fix-pack: not readable by this build (data at line "),
+        "{a:?}"
+    );
 }
 
+/// A draft or a `TODO` is never used from a signed index: since the amendment "Forward
+/// compatibility" the entry is set aside as refused (the workbench never builds one), and the
+/// rest of the index stays.
 #[test]
 fn a_release_index_holds_no_draft_and_no_todo() {
     let mut i = index(1);
     i.topos[0].status = Status::Draft;
-    assert!(rule(&i).contains("draft"), "{}", rule(&i));
+    assert_eq!(
+        aside(&i),
+        vec!["topo a-game: breaks a rule of this build: status: a draft is never released"]
+    );
 
     let mut i = index(1);
     i.packages[0].files[0].sha256 = Hex::parse("TODO").unwrap();
-    assert!(rule(&i).contains("TODO"), "{}", rule(&i));
+    assert_eq!(
+        aside(&i),
+        vec![
+            "topo a-game: names package fix-pack, which this build cannot use",
+            "package fix-pack: breaks a rule of this build: : a released entry has no TODO",
+        ]
+    );
 
     let mut i = index(1);
     i.packages[0].version = "TODO".into();
-    assert!(rule(&i).contains("TODO"));
+    assert!(aside(&i)[1].contains("TODO"));
 }
 
 #[test]
@@ -296,13 +333,34 @@ fn the_bundle_is_sorted_complete_and_numbered() {
     i.topos.insert(0, topo("z-game", "fix-pack"));
     assert!(rule(&i).contains("sorted"));
 
+    // A duplicate across a known and a set-aside entry is refused too (FC5).
+    let mut i = index(1);
+    let mut draft = topo("a-game", "fix-pack");
+    draft.status = Status::Draft;
+    i.topos.push(draft);
+    assert!(rule(&i).contains("sorted"));
+
+    // A missing package sets aside what names it (the amendment "Forward compatibility").
     let mut i = index(1);
     i.topos[0] = topo("a-game", "missing-pack");
-    assert!(rule(&i).contains("missing-pack"));
+    assert_eq!(
+        aside(&i),
+        vec![
+            "topo a-game: breaks a rule of this build: issues[0].variants[0].steps[0].package: \
+             package missing-pack is not in the index"
+        ]
+    );
 
     let mut i = index(1);
     i.packages[0].requires = vec![id("other")];
-    assert!(rule(&i).contains("requires other"));
+    assert_eq!(
+        aside(&i),
+        vec![
+            "topo a-game: names package fix-pack, which this build cannot use",
+            "package fix-pack: breaks a rule of this build: requires[0]: requires other, which is \
+             not in the index",
+        ]
+    );
 
     assert!(rule(&index(0)).contains("seq"));
 
@@ -662,10 +720,11 @@ fn firewall_rule_is_released_only_by_a_trusted_signed_index() {
     // Verified by a key the caller trusts, the index releases the step.
     let v = super::verify(&bytes, &ours, &[test_key::public()]).unwrap();
     super::Catalog::from_verified(&v).unwrap();
-    // A draft is never in a signed index, with or without the step.
+    // A draft is never used from a signed index, with or without the step (set aside).
     let mut draft = t.clone();
     draft.status = Status::Draft;
-    assert!(super::check_index(&index(&draft)).is_err());
+    let bytes = serde_json::to_vec(&index(&draft)).unwrap();
+    assert_eq!(super::check_bundle(&bytes).unwrap().len(), 1);
 }
 
 #[test]
@@ -784,15 +843,17 @@ fn slots_are_bound_to_the_files() {
 fn supports_exe_sha1_covers_the_topos_builds() {
     let mut i = index(4);
     i.topos[0].matches.exes[0].sha1 = Some(Hex::new([0x22; 20]));
-    super::check_index(&i).unwrap();
+    assert!(aside(&i).is_empty());
     i.packages[0].supports_exe_sha1 = vec![Hex::new([0x33; 20])];
-    let e = super::check_index(&i).unwrap_err().to_string();
-    assert!(
-        e.contains("package fix-pack does not list the SHA-1 of game.exe"),
-        "{e}"
+    assert_eq!(
+        aside(&i),
+        vec![
+            "topo a-game: breaks a rule of this build: match.exes[0].sha1: package fix-pack does \
+             not list the SHA-1 of game.exe in supports_exe_sha1"
+        ]
     );
     i.packages[0].supports_exe_sha1.push(Hex::new([0x22; 20]));
-    super::check_index(&i).unwrap();
+    assert!(aside(&i).is_empty());
 }
 
 /// P5-4: one variant ID names one fix across the issues of a Topo. Copies with the same `kind`
@@ -823,7 +884,7 @@ fn one_variant_id_names_one_fix_across_issues() {
     for rules in [Rules::Source, Rules::Release] {
         assert_eq!(check::topo(&i.topos[0], rules), Ok(()), "{rules:?}");
     }
-    super::check_index(&i).unwrap();
+    assert!(aside(&i).is_empty());
 
     let mut steps = i.clone();
     steps.topos[0].issues[1].variants[0]
@@ -843,9 +904,9 @@ fn one_variant_id_names_one_fix_across_issues() {
                 )
             );
         }
-        let e = super::check_index(bad).unwrap_err().to_string();
+        let e = aside(bad).join("\n");
         assert!(
-            e.contains("topo a-game: issues[1].variants[0].")
+            e.starts_with("topo a-game: breaks a rule of this build: issues[1].variants[0].")
                 && e.contains("variant fix-pack differs in"),
             "{e}"
         );
@@ -864,7 +925,7 @@ fn an_api_dependent_package_needs_one_api_in_the_topo() {
     dx10.sha256 = Some(Hex::new([0x12; 32]));
     dx10.api = Api::D3d10;
     i.topos[0].matches.exes.push(dx10);
-    super::check_index(&i).unwrap();
+    assert!(aside(&i).is_empty());
     for by in ["file", "apis", "required"] {
         let mut j = i.clone();
         match by {
@@ -877,14 +938,18 @@ fn an_api_dependent_package_needs_one_api_in_the_topo() {
                 j.packages.insert(0, wrapper);
             }
         }
-        let e = super::check_index(&j).unwrap_err().to_string();
+        let e = aside(&j).join("\n");
         assert!(
-            e.contains("variant fix-pack installs package")
+            e.starts_with("topo a-game: breaks a rule of this build: issues[0].variants[0]: ")
+                && e.contains("variant fix-pack installs package")
                 && e.contains("depend on the graphics API"),
             "{by}: {e}"
         );
         // The same Topo with one API passes.
         j.topos[0].matches.exes.truncate(1);
-        super::check_index(&j).unwrap_or_else(|e| panic!("{by}: {e}"));
+        assert!(aside(&j).is_empty(), "{by}");
     }
 }
+
+/// Forward compatibility (ADR 0024 amendment): FC1 to FC7 and the frozen bundle.
+mod fc;

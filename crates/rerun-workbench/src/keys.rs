@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use ed25519_compact::{KeyPair, Seed};
 use rerun_core::catalog::key::PublicKey;
 use rerun_core::catalog::model::Index;
-use rerun_core::catalog::{check_index, verify};
+use rerun_core::catalog::verify;
 use sha2::{Digest, Sha256};
 
 /// The private key file.
@@ -151,8 +151,8 @@ pub struct Signed {
 /// Signs `bundle` after checking it is a valid release index (nothing else is ever signed),
 /// then verifies the signature like the client.
 pub fn sign(bundle: &[u8], kp: &KeyPair) -> Result<Signed, String> {
+    crate::bundle::refuse_aside(bundle)?;
     let index: Index = serde_json::from_slice(bundle).map_err(|e| format!("not an index: {e}"))?;
-    check_index(&index).map_err(|e| e.to_string())?;
     let sig = *kp.sk.sign(bundle, None);
     let key = PublicKey::new(*kp.pk);
     verify(bundle, &sig, &[key]).map_err(|e| format!("own signature does not verify: {e}"))?;
@@ -233,6 +233,29 @@ mod tests {
         assert!(sign(draft, &kp).is_err(), "seq 0");
     }
 
+    /// FC10 (ADR 0024 amendment "Forward compatibility" §6): `index sign` refuses a bundle with
+    /// any entry the client would set aside, whatever the reason.
+    #[test]
+    fn a_bundle_with_set_aside_entries_is_not_signed() {
+        let kp = generate().unwrap();
+        for (what, entry) in [
+            (
+                "newer",
+                r#"{"format":2,"id":"future-game","match":{"steam_appid":7}}"#,
+            ),
+            ("unreadable", r#"{"format":1,"id":"broken-game"}"#),
+        ] {
+            let bundle = format!(
+                r#"{{"format":1,"seq":1,"issued":"2026-11-12T00:00:00Z","topos":[{entry}],"packages":[]}}"#
+            );
+            let e = sign(bundle.as_bytes(), &kp).unwrap_err();
+            assert!(
+                e.contains("the client would set aside 1 entry"),
+                "{what}: {e}"
+            );
+        }
+    }
+
     /// One Topo in an index, with `status`.
     #[cfg(feature = "test-key")]
     fn with_topo(status: &str) -> Vec<u8> {
@@ -267,5 +290,13 @@ mod tests {
             .replace("Invented Game", "TODO");
         assert!(super::sign_test(todo.as_bytes()).is_err());
         assert!(super::sign_test(b"{}").is_err());
+        // An entry the client would set aside (FC10): a newer entry format.
+        let newer = String::from_utf8(bundle).unwrap().replacen(
+            r#""topos":[{"format":1"#,
+            r#""topos":[{"format":2"#,
+            1,
+        );
+        let e = super::sign_test(newer.as_bytes()).unwrap_err();
+        assert!(e.contains("needs a newer version of Rerun"), "{e}");
     }
 }

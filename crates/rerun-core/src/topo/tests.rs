@@ -1007,6 +1007,63 @@ fn tc_from_a_signed_index() {
     assert_eq!(&p.plan.source.unwrap().index, c.sha256());
 }
 
+/// FC1 (ADR 0024 amendment "Forward compatibility"): next to a Topo of entry format 2 with an
+/// unknown field and an unknown step kind for the same game, the known Topo loads and is
+/// planned; the future one is set aside as newer, with its app from the head, and never found.
+#[test]
+fn fc1_a_known_topo_is_planned_next_to_a_future_one() {
+    use crate::catalog::{AsideWhy, EntryKind};
+    let sys = game_sys();
+    let mut t = game_topo(DIRECT);
+    t.issues.retain(|i| i.id.as_str() != "wrapper");
+    let future = format!(
+        r#"{{"format":2,"id":"zz-future","title":"F","status":"active","rev":1,"new_field":true,"match":{{"steam_appid":{APP},"exes":[{{"path":"game.exe","api":"d3d12","sha256":"{}"}}]}},"issues":[{{"id":"x","title":"X","variants":[{{"id":"v","status":"verified","kind":"fix","steps":[{{"teleport":{{"to":"mars"}}}}]}}]}}]}}"#,
+        "11".repeat(32)
+    );
+    let index = format!(
+        r#"{{"format":1,"seq":1,"issued":"2026-11-09T12:00:00Z","topos":[{},{future}],"packages":[]}}"#,
+        serde_json::to_string(&t).unwrap()
+    );
+    let sig = test_key::sign(index.as_bytes());
+    let v = verify(index.as_bytes(), &sig, &[test_key::public()]).unwrap();
+    let c = Catalog::from_verified(&v).unwrap();
+    assert!(c.topo("zz-future").is_none());
+    let a: Vec<_> = c.aside_for(APP).collect();
+    assert_eq!(a.len(), 1);
+    assert_eq!(
+        (a[0].kind, a[0].id.as_str(), a[0].format, a[0].steam_appid),
+        (EntryKind::Topo, "zz-future", 2, Some(APP))
+    );
+    assert_eq!(a[0].why, AsideWhy::Newer { format: 2 });
+    assert!(a[0].why.needs_newer());
+    let found = topos_for(&c, APP);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, t.id);
+    let gf = facts_of(&sys, found[0]);
+    let fr = fr(&sys);
+    let store = StoreDir::open(&sys, &fr, Path::new(STEAM_LIB)).unwrap();
+    let g = store.game(&fr, "G").unwrap();
+    let a = app(&sys);
+    let ctx = PlanCtx {
+        game: &g,
+        app: Some(&a),
+        steam_app: Some(APP),
+        main_exe: None,
+        reg: RegPolicy.reader(&sys),
+        app_path: None,
+        user_data: None,
+    };
+    let profile = full();
+    let facts = Facts {
+        profile: &profile,
+        table: Some(table()),
+        game: &gf,
+        packages: &[],
+    };
+    let p = plan(c.sha256(), found[0], &facts, &picks(&["cores/limit"]), &ctx).unwrap();
+    assert_eq!(&p.plan.source.unwrap().index, c.sha256());
+}
+
 // ---------- Review follow-ups (P4-4) ----------
 
 fn mkdir(sys: &FakeSystem, rel: &str) {
@@ -1155,7 +1212,9 @@ fn rf_select_sets_retired_topos_aside() {
     assert!(matches!(sel, Selection::NoMatch(v) if v.is_empty()));
 }
 
-/// Follow-up 4: the index refuses two live Topos with the same app and an exe hash in common.
+/// Follow-up 4: the index refuses two live Topos with the same app and an exe hash in common
+/// (since the amendment "Forward compatibility" of ADR 0024: both are set aside as refused, the
+/// rest of the index stays).
 #[test]
 fn rf_the_index_refuses_overlapping_topos() {
     let mut a = game_topo(DIRECT);
@@ -1169,14 +1228,21 @@ fn rf_the_index_refuses_overlapping_topos() {
         topos: topos.iter().map(|t| (*t).clone()).collect(),
         packages: vec![],
     };
-    let e = crate::catalog::check_index(&index(&[&a, &b])).unwrap_err();
-    assert!(e.to_string().contains("claim the same app"), "{e}");
+    let aside = |topos: &[&Topo]| {
+        let bytes = serde_json::to_vec(&index(topos)).unwrap();
+        crate::catalog::check_bundle(&bytes).unwrap()
+    };
+    let both = aside(&[&a, &b]);
+    assert_eq!(both.len(), 2, "{both:?}");
+    for x in &both {
+        assert!(x.to_string().contains("claims the same app"), "{x}");
+    }
     let mut retired = b.clone();
     retired.status = crate::catalog::model::Status::Retired;
-    crate::catalog::check_index(&index(&[&a, &retired])).unwrap();
+    assert_eq!(aside(&[&a, &retired]), vec![]);
     let mut other_app = b.clone();
     other_app.matches.steam_appid = Some(APP + 1);
-    crate::catalog::check_index(&index(&[&a, &other_app])).unwrap();
+    assert_eq!(aside(&[&a, &other_app]), vec![]);
 }
 
 /// Follow-up 1: a step file gets the same rule (nothing released, a step file has no Topo).

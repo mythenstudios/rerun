@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use rerun_core::catalog::Topo;
 use rerun_core::catalog::check::{self, Rules};
-use rerun_core::catalog::model::{Api, Exe, FORMAT, Id, Links, Match, Sha256, Status};
+use rerun_core::catalog::model::{Api, Exe, Id, Links, Match, Sha256, Status};
 use rerun_core::escape;
 use rerun_core::path::RelPath;
 use rerun_core::sys::Http;
@@ -262,7 +262,8 @@ fn intended(d: &Draft) -> Result<Topo, String> {
             .collect(),
     };
     Ok(Topo {
-        format: FORMAT,
+        // Facts and links only: format 1 (ADR 0024 amendment "Forward compatibility" §6).
+        format: 1,
         id: d.id.clone(),
         title: d.title.clone(),
         status: Status::Draft,

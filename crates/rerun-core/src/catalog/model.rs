@@ -26,8 +26,10 @@ use crate::prim::{
     UserDataSpec,
 };
 
-/// The one value of `format` (Topo, package, index).
-pub const FORMAT: u32 = 1;
+/// The highest entry `format` (Topo, package) this build reads (ADR 0024 amendment "Forward
+/// compatibility" §1). Topos and packages share the counter; the envelope's own number is
+/// [`super::INDEX_FORMAT`].
+pub const ENTRY_FORMAT: u32 = 1;
 
 /// The placeholder for an unknown value (`docs/02-topo-format.md`, "TODO").
 pub const TODO: &str = "TODO";
@@ -228,7 +230,7 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Topo {
-    /// [`FORMAT`].
+    /// The entry format: the lowest [`ENTRY_FORMAT`] a client needs to use the entry.
     pub format: u32,
     /// The ID (= file name).
     pub id: Id,
@@ -805,7 +807,7 @@ pub struct Links {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Package {
-    /// [`FORMAT`].
+    /// The entry format: the lowest [`ENTRY_FORMAT`] a client needs to use the entry.
     pub format: u32,
     /// The ID (= file name).
     pub id: Id,
@@ -1083,7 +1085,7 @@ pub enum OptionValue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Index {
-    /// [`FORMAT`].
+    /// [`super::INDEX_FORMAT`].
     pub format: u32,
     /// Monotonic sequence number, from 1; a lower one than the last accepted is a rollback.
     pub seq: u64,

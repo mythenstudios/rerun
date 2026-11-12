@@ -1,0 +1,1091 @@
+{
+  "format": 1,
+  "seq": 1,
+  "issued": "2026-11-12T12:00:00Z",
+  "topos": [
+    {
+      "format": 1,
+      "id": "alice-madness-returns",
+      "title": "Alice: Madness Returns",
+      "status": "active",
+      "rev": 1,
+      "tested_on": [
+        "x64"
+      ],
+      "match": {
+        "steam_appid": 19680,
+        "exes": [
+          {
+            "path": "Binaries\\Win32\\AliceMadnessReturns.exe",
+            "sha1": "7B67A0BC34D7C5AE6FBE895112A4D6FC6618EE43",
+            "sha256": "DBFA581B60540658C0A3E315DC521BAEC07ECFF41361DA506BB34C93D0DAA2EF",
+            "api": "d3d9"
+          }
+        ]
+      },
+      "user_data": {
+        "documents": "My Games\\Alice Madness Returns"
+      },
+      "issues": [
+        {
+          "id": "complete-collection-extras",
+          "title": "Complete Collection outfits and weapons left in the files are locked",
+          "when": {},
+          "variants": [
+            {
+              "id": "special-pc-edition",
+              "status": "unverified",
+              "kind": "enhancement",
+              "steps": [
+                {
+                  "ini_set": {
+                    "root": "user_data",
+                    "file": "AliceGame\\Config\\AliceEngine.ini",
+                    "values": [
+                      {
+                        "section": "AliceGame.AliceGameEngine",
+                        "key": "GIsSpecialPCEdition",
+                        "value": "TRUE"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "tradeoffs": [
+                "PCGW notes that the January 2022 Steam executable keeps the extra DLC weapons from working fully (the guide covers a downgrade, which Rerun does not do)"
+              ],
+              "sources": [
+                {
+                  "type": "steam-guide",
+                  "url": "https://steamcommunity.com/sharedfiles/filedetails/?id=2771334992"
+                },
+                {
+                  "type": "pcgw",
+                  "url": "https://www.pcgamingwiki.com/wiki/Alice:_Madness_Returns#Activate_Complete_Collection_extras"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "tips": {
+        "launch_options": [
+          "-nostartupmovies"
+        ],
+        "notes": [
+          {
+            "text": "On AMD GPUs the NVIDIA GPU PhysX effects can be run through ZLUDA (32-bit PhysX): set the Steam launch option to \"<ZLUDA folder>\\32\\zluda.exe\" -- %command%. The ZLUDA docs list Alice: Madness Returns as tested. Install the current PhysX System Software (link below) first. Rerun does not ship ZLUDA; Windows Smart App Control may block it.",
+            "source": {
+              "type": "official",
+              "url": "https://zluda.readthedocs.io/latest/physx32.html"
+            }
+          },
+          {
+            "text": "NVIDIA's official PhysX System Software page (download).",
+            "source": {
+              "type": "official",
+              "url": "https://www.nvidia.com/en-us/drivers/physx/physx-9-19-0218-driver/"
+            }
+          },
+          {
+            "text": "On an uncapped frame rate, reloading a save can hang on an infinite loading screen; lowering the resolution while loading is the reported workaround.",
+            "source": {
+              "type": "pcgw",
+              "url": "https://www.pcgamingwiki.com/wiki/Alice:_Madness_Returns#Infinite_loading_screens"
+            }
+          },
+          {
+            "text": "-nostartupmovies skips the intro videos.",
+            "source": {
+              "type": "pcgw",
+              "url": "https://www.pcgamingwiki.com/wiki/Alice:_Madness_Returns#Skip_intro_videos"
+            }
+          }
+        ]
+      },
+      "links": {
+        "pcgw": "Alice:_Madness_Returns"
+      }
+    },
+    {
+      "format": 1,
+      "id": "assassins-creed-dc",
+      "title": "Assassin's Creed: Director's Cut Edition",
+      "status": "active",
+      "rev": 2,
+      "tested_on": [
+        "x64"
+      ],
+      "match": {
+        "steam_appid": 15100,
+        "exes": [
+          {
+            "path": "AssassinsCreed_Dx10.exe",
+            "sha1": "601475FD5EFA02BBAE80D1C06DFA25A0A1E7FD2F",
+            "sha256": "576A04841C37BE5A819974ABD59EA3ECD818F0BC36ACAB71C62EE0313DCA0129",
+            "api": "d3d10"
+          },
+          {
+            "path": "AssassinsCreed_Dx9.exe",
+            "sha1": "A9EA476E70F076709CCA59A802E26EC894432120",
+            "sha256": "2FA8D50C60398CC249C6D908DE46B15F48E445DD0C605B5956E94FA2F445A713",
+            "api": "d3d9"
+          }
+        ]
+      },
+      "launch": {
+        "chain": [
+          "steam"
+        ],
+        "method": "auto",
+        "fallback": "inproc",
+        "start": "AssassinsCreed_Game.exe"
+      },
+      "issues": [
+        {
+          "id": "controller",
+          "title": "Modern controllers are not detected and there is no hotplug",
+          "when": {},
+          "variants": [
+            {
+              "id": "eaglepatch",
+              "status": "unverified",
+              "kind": "fix",
+              "steps": [
+                {
+                  "package": "ultimate-asi-loader"
+                },
+                {
+                  "package": "eaglepatch-ac1"
+                }
+              ],
+              "tradeoffs": [
+                "Removes DInput controller support (the INI key DisableXInputPatch=1 re-enables it)",
+                "The in-game controls layout has no effect; set KeyboardLayout in the INI instead"
+              ],
+              "sources": [
+                {
+                  "type": "repo",
+                  "url": "https://github.com/Sergeanur/EaglePatch"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "crash-many-threads",
+          "title": "Game crashes about 2 s after start on a PC with more than 8 logical processors",
+          "when": {
+            "cpu.threads": {
+              "gt": 8
+            }
+          },
+          "variants": [
+            {
+              "id": "limit-8-threads",
+              "status": "verified",
+              "kind": "fix",
+              "steps": [
+                {
+                  "cpu": {
+                    "max_threads": 8,
+                    "prefer": "performance",
+                    "single_l3": true,
+                    "smt": false,
+                    "mode": "hard"
+                  }
+                }
+              ],
+              "tradeoffs": [
+                "The game uses at most 8 logical processors (one CCD, no SMT thread pairs); it is a 2008 title, so this costs little"
+              ],
+              "sources": [
+                {
+                  "type": "steam-thread",
+                  "url": "https://steamcommunity.com/app/15100/discussions/0/3369279631097585577/"
+                },
+                {
+                  "type": "steam-thread",
+                  "url": "https://steamcommunity.com/app/15100/discussions/0/5299051083531295561/"
+                },
+                {
+                  "type": "steam-guide",
+                  "url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3276044556"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "online-services",
+          "title": "Game crashes at the Ubisoft logo intro (shut-down online services)",
+          "when": {},
+          "variants": [
+            {
+              "id": "eaglepatch",
+              "status": "verified",
+              "kind": "fix",
+              "steps": [
+                {
+                  "package": "ultimate-asi-loader"
+                },
+                {
+                  "package": "eaglepatch-ac1"
+                }
+              ],
+              "tradeoffs": [
+                "Removes DInput controller support (the INI key DisableXInputPatch=1 re-enables it)",
+                "The in-game controls layout has no effect; set KeyboardLayout in the INI instead"
+              ],
+              "sources": [
+                {
+                  "type": "repo",
+                  "url": "https://github.com/Sergeanur/EaglePatch"
+                },
+                {
+                  "type": "pcgw",
+                  "url": "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed#Game_regularly_freezes_for_a_few_seconds"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "tips": {
+        "notes": [
+          {
+            "text": "Manual, not done by Rerun: the game can be stopped from contacting the shut-down Ubisoft server by overwriting the host name gconnect.ubi.com in AssassinsCreed_Dx9.exe or AssassinsCreed_Dx10.exe with zero bytes in a hex editor. Keep a copy of the original exe: a changed exe no longer matches EaglePatch's supported builds or this Topo, and Smart App Control may block it. Steam's 'Verify integrity of game files' restores the original.",
+            "source": {
+              "type": "pcgw",
+              "url": "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed#Game_regularly_freezes_for_a_few_seconds"
+            }
+          }
+        ]
+      },
+      "links": {
+        "pcgw": "Assassin's_Creed"
+      }
+    },
+    {
+      "format": 1,
+      "id": "assassins-creed-ii",
+      "title": "Assassin's Creed II",
+      "status": "active",
+      "rev": 1,
+      "tested_on": [
+        "x64"
+      ],
+      "match": {
+        "steam_appid": 33230,
+        "exes": [
+          {
+            "path": "AssassinsCreedIIGame.exe",
+            "sha1": "FDFDD9B80641DFE9C4AB6A63BD5247A2BDD2BE26",
+            "sha256": "A4BA454B0E2A9190A42DB631574B694CC0DBDCEC750106C1B0364B70A6E4D17E",
+            "api": "d3d9"
+          }
+        ]
+      },
+      "launch": {
+        "chain": [
+          "steam",
+          "upc"
+        ],
+        "method": "watch",
+        "start": "AssassinsCreedIIGame.exe"
+      },
+      "issues": [
+        {
+          "id": "vsync-stutter",
+          "title": "Stuttering or screen tearing with Vsync on or off",
+          "when": {},
+          "variants": [
+            {
+              "id": "exclude-cpu0",
+              "status": "verified",
+              "kind": "fix",
+              "steps": [
+                {
+                  "cpu": {
+                    "mode": "hard",
+                    "exclude_first": "thread"
+                  }
+                }
+              ],
+              "sources": [
+                {
+                  "type": "pcgw",
+                  "url": "https://www.pcgamingwiki.com/wiki/Assassin's_Creed_II#Stuttering_and%2For_screen_tearing_with_Vsync_on_or_off"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "links": {
+        "pcgw": "Assassin's_Creed_II"
+      }
+    },
+    {
+      "format": 1,
+      "id": "assassins-creed-syndicate",
+      "title": "Assassin's Creed Syndicate",
+      "status": "active",
+      "rev": 1,
+      "tested_on": [
+        "x64"
+      ],
+      "match": {
+        "steam_appid": 368500,
+        "exes": [
+          {
+            "path": "ACS.exe",
+            "sha1": "6666805A1E83D06001D7265CA18D9579C22DC822",
+            "sha256": "6E25F759242252F93ACDD79C7E8BE10D5BEDEEE94CE429FF5274D942CA10C5A2",
+            "api": "d3d11"
+          }
+        ]
+      },
+      "launch": {
+        "chain": [
+          "steam",
+          "upc"
+        ],
+        "method": "watch",
+        "start": "ACS.exe"
+      },
+      "user_data": {
+        "documents": "Assassin's Creed Syndicate"
+      },
+      "issues": [
+        {
+          "id": "title-screen-freeze",
+          "title": "Freeze on the title screen after pressing a key (exclusive fullscreen above 60 Hz)",
+          "when": {},
+          "variants": [
+            {
+              "id": "refresh-rate-60",
+              "status": "unverified",
+              "kind": "fix",
+              "steps": [
+                {
+                  "ini_set": {
+                    "root": "user_data",
+                    "file": "AC.ini",
+                    "values": [
+                      {
+                        "section": "Graphics",
+                        "key": "RefreshRate",
+                        "value": "60"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "tradeoffs": [
+                "The game is limited to 60 Hz in exclusive fullscreen"
+              ],
+              "sources": [
+                {
+                  "type": "pcgw",
+                  "url": "https://www.pcgamingwiki.com/wiki/Assassin's_Creed_Syndicate#Game_Freezes_on_Main_Title_Screen"
+                },
+                {
+                  "type": "steam-thread",
+                  "url": "https://steamcommunity.com/app/368500/discussions/0/601892852260193436/"
+                }
+              ]
+            },
+            {
+              "id": "borderless",
+              "status": "unverified",
+              "kind": "fix",
+              "steps": [
+                {
+                  "ini_set": {
+                    "root": "user_data",
+                    "file": "AC.ini",
+                    "values": [
+                      {
+                        "section": "Graphics",
+                        "key": "WindowMode",
+                        "value": "1"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "tradeoffs": [
+                "Borderless fullscreen instead of exclusive fullscreen"
+              ],
+              "sources": [
+                {
+                  "type": "pcgw",
+                  "url": "https://www.pcgamingwiki.com/wiki/Assassin's_Creed_Syndicate#Game_Freezes_on_Main_Title_Screen"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "links": {
+        "pcgw": "Assassin's_Creed_Syndicate"
+      }
+    },
+    {
+      "format": 1,
+      "id": "mirrors-edge",
+      "title": "Mirror's Edge",
+      "status": "active",
+      "rev": 1,
+      "tested_on": [
+        "x64"
+      ],
+      "match": {
+        "steam_appid": 17410,
+        "exes": [
+          {
+            "path": "Binaries\\MirrorsEdge.exe",
+            "sha1": "9538DD552D8ACDC5498E7B37A59EA5C434A2FB08",
+            "sha256": "A0F653B63B299D5D3899B8B4FA6E4D47EEB390BF26B1F020710482EABFE297F0",
+            "api": "d3d9"
+          }
+        ]
+      },
+      "user_data": {
+        "documents": "EA Games\\Mirror's Edge"
+      },
+      "issues": [
+        {
+          "id": "crash-after-splash",
+          "title": "Crash right after the splash screen",
+          "when": {},
+          "variants": [
+            {
+              "id": "no-multisampling",
+              "status": "unverified",
+              "kind": "fix",
+              "steps": [
+                {
+                  "ini_set": {
+                    "root": "user_data",
+                    "file": "TdGame\\Config\\TdEngine.ini",
+                    "values": [
+                      {
+                        "section": "SystemSettings",
+                        "key": "MaxMultisamples",
+                        "value": "1"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "tradeoffs": [
+                "Turns off multisample anti-aliasing"
+              ],
+              "sources": [
+                {
+                  "type": "pcgw",
+                  "url": "https://www.pcgamingwiki.com/wiki/Mirror's_Edge#Crash_just_after_splash_screen"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "tips": {
+        "launch_options": [
+          "-nostartupmovies"
+        ],
+        "notes": [
+          {
+            "text": "On AMD GPUs the NVIDIA GPU PhysX effects can be run through ZLUDA (32-bit PhysX): set the Steam launch option to \"<ZLUDA folder>\\32\\zluda.exe\" -- %command%. The ZLUDA docs list Mirror's Edge as tested. Install the current PhysX System Software (link below) first. Rerun does not ship ZLUDA; Windows Smart App Control may block it.",
+            "source": {
+              "type": "official",
+              "url": "https://zluda.readthedocs.io/latest/physx32.html"
+            }
+          },
+          {
+            "text": "NVIDIA's official PhysX System Software page (download).",
+            "source": {
+              "type": "official",
+              "url": "https://www.nvidia.com/en-us/drivers/physx/physx-9-19-0218-driver/"
+            }
+          },
+          {
+            "text": "If the game does not start and Mandatory ASLR was turned on system-wide, a Steam thread reports that disabling it for MirrorsEdge.exe in Windows Security (Exploit protection) helped (system setting, not a Rerun step).",
+            "source": {
+              "type": "steam-thread",
+              "url": "https://steamcommunity.com/app/17410/discussions/0/3833171151458736010/"
+            }
+          },
+          {
+            "text": "-nostartupmovies skips the intro videos.",
+            "source": {
+              "type": "pcgw",
+              "url": "https://www.pcgamingwiki.com/wiki/Mirror's_Edge#Skip_intro_videos"
+            }
+          }
+        ]
+      },
+      "links": {
+        "pcgw": "Mirror's_Edge"
+      }
+    },
+    {
+      "format": 1,
+      "id": "tomb-raider-underworld",
+      "title": "Tomb Raider: Underworld",
+      "status": "active",
+      "rev": 1,
+      "tested_on": [
+        "x64"
+      ],
+      "match": {
+        "steam_appid": 8140,
+        "exes": [
+          {
+            "path": "tru.exe",
+            "sha1": "67B0C64CF58F723979C8551D43D201B1D27063F9",
+            "sha256": "D554EE8BD38985F08092C8A0D0F7192B0AC583B38D93083326901CAE0D1F8507",
+            "api": "d3d9"
+          }
+        ]
+      },
+      "launch": {
+        "chain": [
+          "steam"
+        ],
+        "method": "direct",
+        "start": "tru.exe"
+      },
+      "issues": [
+        {
+          "id": "crash-many-threads",
+          "title": "Crashes at start on CPUs with more than 31 logical processors",
+          "when": {
+            "cpu.threads": {
+              "gt": 31
+            }
+          },
+          "variants": [
+            {
+              "id": "limit-threads",
+              "status": "verified",
+              "kind": "fix",
+              "steps": [
+                {
+                  "cpu": {
+                    "max_threads": 31,
+                    "mode": "hard"
+                  }
+                }
+              ],
+              "tradeoffs": [
+                "The game may use at most 31 logical processors"
+              ],
+              "sources": [
+                {
+                  "type": "steam-thread",
+                  "url": "https://steamcommunity.com/app/8140/discussions/0/2791621786941084149/"
+                },
+                {
+                  "type": "pcgw",
+                  "url": "https://www.pcgamingwiki.com/wiki/Tomb_Raider:_Underworld#Crash_on_startup_when_CPU_has_%3E31_threads"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "tips": {
+        "notes": [
+          {
+            "text": "Audio crackling: lowering the Windows output sample rate to 96000 Hz or below is reported to help (system setting, not a Rerun step).",
+            "source": {
+              "type": "steam-thread",
+              "url": "https://steamcommunity.com/app/8140/discussions/0/537402115090619340/"
+            }
+          },
+          {
+            "text": "A repo-hosted menu hook exists that is listed as an alternative fix for the start crash (not packaged yet).",
+            "source": {
+              "type": "repo",
+              "url": "https://github.com/TheIndra55/TRLAU-menu-hook"
+            }
+          }
+        ]
+      },
+      "links": {
+        "pcgw": "Tomb_Raider:_Underworld"
+      }
+    }
+  ],
+  "packages": [
+    {
+      "format": 1,
+      "id": "dgvoodoo2",
+      "name": "dgVoodoo 2",
+      "status": "active",
+      "tier": "established",
+      "source": {
+        "repo": "https://github.com/dege-diosg/dgVoodoo2",
+        "release": "https://github.com/dege-diosg/dgVoodoo2/releases/download/2.87.6/dgVoodoo2_87_6.zip"
+      },
+      "version": "2.87.6",
+      "sha256": "9AFA493396FEEC7108F42A2D97661EEF96BBAAC5ADDF0DFB5CFBC3001CD76A0A",
+      "license": "LicenseRef-dgVoodoo2-Freeware",
+      "arch": [
+        "x86"
+      ],
+      "apis": [
+        "ddraw",
+        "d3d8",
+        "d3d9"
+      ],
+      "slots_by_api": {
+        "ddraw": [
+          "ddraw.dll",
+          "d3dimm.dll"
+        ],
+        "d3d8": [
+          "d3d8.dll"
+        ],
+        "d3d9": [
+          "d3d9.dll"
+        ]
+      },
+      "files": [
+        {
+          "from": "MS\\x86\\DDraw.dll",
+          "to": "DDraw.dll",
+          "sha256": "F68CD82BFB585C9B6676C6282B0FAC713C9567EAE624BC991C5BCFE5881C7BEF",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "ddraw"
+          ]
+        },
+        {
+          "from": "MS\\x86\\D3DImm.dll",
+          "to": "D3DImm.dll",
+          "sha256": "85AA1D15D6880DBE927458F6A045A631264BA128528010B7296EC5C3A640E0AC",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "ddraw"
+          ]
+        },
+        {
+          "from": "MS\\x86\\D3D8.dll",
+          "to": "D3D8.dll",
+          "sha256": "25A0CEEB85FCC4675C6F964442EECC14FEDD504EFFD39C931A627249AD4685E2",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "d3d8"
+          ]
+        },
+        {
+          "from": "MS\\x86\\D3D9.dll",
+          "to": "D3D9.dll",
+          "sha256": "060CB161EB7A0C608A520185F0B334DB325AD71D69016BC26060C9D5B9651F7D",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "d3d9"
+          ]
+        },
+        {
+          "from": "dgVoodoo.conf",
+          "to": "dgVoodoo.conf",
+          "sha256": "45CC0EB8E6ED4F067ACA1B2E4AC1268DFBD164BBBD06D264C53E8A60642C4DBF",
+          "config": true,
+          "arch": [
+            "x86"
+          ]
+        }
+      ]
+    },
+    {
+      "format": 1,
+      "id": "dxvk",
+      "name": "DXVK",
+      "status": "active",
+      "tier": "established",
+      "source": {
+        "repo": "https://github.com/doitsujin/dxvk",
+        "release": "https://github.com/doitsujin/dxvk/releases/download/v2.7.1/dxvk-2.7.1.tar.gz"
+      },
+      "version": "2.7.1",
+      "sha256": "D85CE7C79F57ECD765AAA1B9E7007CB875E6FDE9F6D331DF799BCE73D513CE87",
+      "license": "Zlib",
+      "arch": [
+        "x86",
+        "x64"
+      ],
+      "apis": [
+        "d3d8",
+        "d3d9",
+        "d3d10",
+        "d3d11"
+      ],
+      "slots_by_api": {
+        "d3d8": [
+          "d3d8.dll",
+          "d3d9.dll"
+        ],
+        "d3d9": [
+          "d3d9.dll"
+        ],
+        "d3d10": [
+          "d3d10core.dll",
+          "d3d11.dll",
+          "dxgi.dll"
+        ],
+        "d3d11": [
+          "d3d11.dll",
+          "dxgi.dll"
+        ]
+      },
+      "requires_gpu": [
+        "vulkan"
+      ],
+      "files": [
+        {
+          "from": "dxvk-2.7.1\\x32\\d3d8.dll",
+          "to": "d3d8.dll",
+          "sha256": "901D4F234CAD5B9C6C9F0323ABA123BFA8C096DCF6F7BFBE24D3EC3C3798D348",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "d3d8"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x64\\d3d8.dll",
+          "to": "d3d8.dll",
+          "sha256": "253DCDA5BD9791B36DBDBC99881F518C6B867A78C19448E664782A4FA306C2A5",
+          "arch": [
+            "x64"
+          ],
+          "api": [
+            "d3d8"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x32\\d3d9.dll",
+          "to": "d3d9.dll",
+          "sha256": "00ECD422B3B12E9D3B309785F3F19431405389D80EB4A37018EBC63E2D87D900",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "d3d8"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x64\\d3d9.dll",
+          "to": "d3d9.dll",
+          "sha256": "2740233A94774FA64A1E07C6EAF94F67027A3C7594FF3B48F7A1C9801777E5A9",
+          "arch": [
+            "x64"
+          ],
+          "api": [
+            "d3d8"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x32\\d3d9.dll",
+          "to": "d3d9.dll",
+          "sha256": "00ECD422B3B12E9D3B309785F3F19431405389D80EB4A37018EBC63E2D87D900",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "d3d9"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x64\\d3d9.dll",
+          "to": "d3d9.dll",
+          "sha256": "2740233A94774FA64A1E07C6EAF94F67027A3C7594FF3B48F7A1C9801777E5A9",
+          "arch": [
+            "x64"
+          ],
+          "api": [
+            "d3d9"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x32\\d3d10core.dll",
+          "to": "d3d10core.dll",
+          "sha256": "9F305720D5BE52A8329CEBB34F3C2E26CA3DECACE0D57B1D618531673D11E9BC",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "d3d10"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x64\\d3d10core.dll",
+          "to": "d3d10core.dll",
+          "sha256": "3BF5FEC5115649DFB6FED1613A4C3F9487C2F2AAF74C2786D9F9D7D21A2F1482",
+          "arch": [
+            "x64"
+          ],
+          "api": [
+            "d3d10"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x32\\d3d11.dll",
+          "to": "d3d11.dll",
+          "sha256": "7406E13D2694244499783D2E9FB1BE285B6324890A348137FE5B5042C64B5913",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "d3d10"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x64\\d3d11.dll",
+          "to": "d3d11.dll",
+          "sha256": "523DA2CD765DD51D99FE1644B24F9EE7EE6247E4C98953BCC449CE84CD303405",
+          "arch": [
+            "x64"
+          ],
+          "api": [
+            "d3d10"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x32\\dxgi.dll",
+          "to": "dxgi.dll",
+          "sha256": "53DEFC65DD2E53D05924A960C0891E15692CA8780ED0509A1A7EFDA71F4D631E",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "d3d10"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x64\\dxgi.dll",
+          "to": "dxgi.dll",
+          "sha256": "EC02EB37620FF52361CB45376A4611FC4210D96E71D0363F1CC9807F151C01BE",
+          "arch": [
+            "x64"
+          ],
+          "api": [
+            "d3d10"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x32\\d3d11.dll",
+          "to": "d3d11.dll",
+          "sha256": "7406E13D2694244499783D2E9FB1BE285B6324890A348137FE5B5042C64B5913",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "d3d11"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x64\\d3d11.dll",
+          "to": "d3d11.dll",
+          "sha256": "523DA2CD765DD51D99FE1644B24F9EE7EE6247E4C98953BCC449CE84CD303405",
+          "arch": [
+            "x64"
+          ],
+          "api": [
+            "d3d11"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x32\\dxgi.dll",
+          "to": "dxgi.dll",
+          "sha256": "53DEFC65DD2E53D05924A960C0891E15692CA8780ED0509A1A7EFDA71F4D631E",
+          "arch": [
+            "x86"
+          ],
+          "api": [
+            "d3d11"
+          ]
+        },
+        {
+          "from": "dxvk-2.7.1\\x64\\dxgi.dll",
+          "to": "dxgi.dll",
+          "sha256": "EC02EB37620FF52361CB45376A4611FC4210D96E71D0363F1CC9807F151C01BE",
+          "arch": [
+            "x64"
+          ],
+          "api": [
+            "d3d11"
+          ]
+        }
+      ]
+    },
+    {
+      "format": 1,
+      "id": "eaglepatch-ac1",
+      "name": "EaglePatchAC1",
+      "status": "active",
+      "tier": "established",
+      "source": {
+        "repo": "https://github.com/Sergeanur/EaglePatch",
+        "release": "https://github.com/Sergeanur/EaglePatch/releases/download/v1.1/EaglePatchAC1.zip"
+      },
+      "version": "1.1",
+      "sha256": "6DC496AC6B298B92FB70C3F90A34E323F77AC88E6EA97544F84E52435038AEEA",
+      "license": "LicenseRef-NoLicense-UpstreamRelease",
+      "arch": [
+        "x86"
+      ],
+      "requires": [
+        "ultimate-asi-loader"
+      ],
+      "supports_exe_sha1": [
+        "A9EA476E70F076709CCA59A802E26EC894432120",
+        "601475FD5EFA02BBAE80D1C06DFA25A0A1E7FD2F"
+      ],
+      "files": [
+        {
+          "from": "EaglePatchAC1.asi",
+          "to": "scripts\\EaglePatchAC1.asi",
+          "sha256": "1C58D3540D2C562D8DA0AE12FEAB0564E84F5BE4AD8D6DE70D84990B2D033E48"
+        },
+        {
+          "from": "EaglePatchAC1.ini",
+          "to": "scripts\\EaglePatchAC1.ini",
+          "sha256": "DC4D4C2E275D3AE9DBA16907098E9D969939E5FF294CE23FCFE6B501FC72FFA0",
+          "config": true
+        }
+      ],
+      "options": {
+        "directinput_controllers": {
+          "ini": {
+            "file": "scripts\\EaglePatchAC1.ini",
+            "section": "EaglePatchAC1",
+            "key": "DisableXInputPatch"
+          },
+          "default": 0
+        },
+        "keyboard_layout": {
+          "ini": {
+            "file": "scripts\\EaglePatchAC1.ini",
+            "section": "EaglePatchAC1",
+            "key": "KeyboardLayout"
+          },
+          "default": 0
+        },
+        "ps3_controls": {
+          "ini": {
+            "file": "scripts\\EaglePatchAC1.ini",
+            "section": "EaglePatchAC1",
+            "key": "PS3Controls"
+          },
+          "default": 0
+        },
+        "skip_intros": {
+          "ini": {
+            "file": "scripts\\EaglePatchAC1.ini",
+            "section": "EaglePatchAC1",
+            "key": "SkipIntroVideos"
+          },
+          "default": 0
+        }
+      }
+    },
+    {
+      "format": 1,
+      "id": "silentpatch-sa",
+      "name": "SilentPatch (GTA San Andreas)",
+      "status": "active",
+      "tier": "established",
+      "source": {
+        "repo": "https://github.com/CookiePLMonster/SilentPatch",
+        "release": "https://github.com/CookiePLMonster/SilentPatch/releases/download/1.1-BUILD34.1-SA/SilentPatchSA.zip"
+      },
+      "version": "1.1-BUILD34.1-SA",
+      "sha256": "0837BBDC0548A4A952F924ADEFD2BB6EACC866407F153844FE1F56995668C42C",
+      "license": "MIT",
+      "arch": [
+        "x86"
+      ],
+      "requires": [
+        "ultimate-asi-loader"
+      ],
+      "files": [
+        {
+          "from": "SilentPatchSA.asi",
+          "to": "scripts\\SilentPatchSA.asi",
+          "sha256": "908E1D12E36BA809A8CE584BE0BD29239349968259A5DE593F9B0CC71DBB352B"
+        },
+        {
+          "from": "SilentPatchSA.ini",
+          "to": "scripts\\SilentPatchSA.ini",
+          "sha256": "3A2288600762070F14434E30BB8F6C0FFF25CE59962A630F629EA2B83D7E1FF4",
+          "config": true
+        }
+      ]
+    },
+    {
+      "format": 1,
+      "id": "ultimate-asi-loader",
+      "name": "Ultimate ASI Loader",
+      "status": "active",
+      "tier": "established",
+      "source": {
+        "repo": "https://github.com/ThirteenAG/Ultimate-ASI-Loader"
+      },
+      "version": "10.0.2",
+      "assets": [
+        {
+          "arch": "x86",
+          "url": "https://github.com/ThirteenAG/Ultimate-ASI-Loader/releases/download/v10.0.2/Ultimate-ASI-Loader.zip",
+          "sha256": "A8F76A891F9BEEEF3B02BABF1062C128B00E0285FA17C227A45EC4F81F45116F"
+        },
+        {
+          "arch": "x64",
+          "url": "https://github.com/ThirteenAG/Ultimate-ASI-Loader/releases/download/v10.0.2/Ultimate-ASI-Loader_x64.zip",
+          "sha256": "A99E188E1F40D7AAC9DB9C0339990332152D372E0359FAA06A52FA339E8B218F"
+        }
+      ],
+      "license": "MIT",
+      "arch": [
+        "x86",
+        "x64"
+      ],
+      "slots": [
+        "dinput8.dll"
+      ],
+      "files": [
+        {
+          "from": "dinput8.dll",
+          "to": "dinput8.dll",
+          "sha256": "63B465DBC1BF9C5AB4E33C3CCAD099D9EDB702F2C51587AC8D4F196497396437",
+          "arch": [
+            "x86"
+          ]
+        },
+        {
+          "from": "dinput8.dll",
+          "to": "dinput8.dll",
+          "sha256": "FA2B9BD317BB597906BC2C4CC2008C1444E50BFDC367E648D18F36F015812E27",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
+  ]
+}

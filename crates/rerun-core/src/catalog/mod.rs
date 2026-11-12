@@ -5,10 +5,14 @@
 //!
 //! 1. [`verify`]: at most [`MAX_INDEX_BYTES`], a signature of exactly 64 bytes, valid for the
 //!    raw bytes under one of the trusted keys ([`key::trusted_keys`]). Nothing is parsed before.
-//! 2. [`Catalog::from_verified`]: the bytes as UTF-8 JSON into [`Index`] (`deny_unknown_fields`
-//!    at every level, `RelPath`, hashes), then the form rules ([`check`], [`Rules::Release`]:
-//!    no draft, no `TODO`), Topos and packages sorted by ID without duplicates, every package a
-//!    Topo or package names present.
+//! 2. [`Catalog::from_verified`]: the envelope strict (`format` alone first, then
+//!    `deny_unknown_fields`), each entry's frozen head lenient (IDs sorted and unique over all
+//!    heads), then each entry known or set aside ([`Aside`], ADR 0024 amendment "Forward
+//!    compatibility"): a newer entry format, a known format that does not parse into the strict
+//!    types (`deny_unknown_fields` at every level, `RelPath`, hashes), one that breaks a rule of
+//!    [`check`] with [`Rules::Release`] (no draft, no `TODO`, the floor), or the cross-entry rules
+//!    (a missing or set-aside package, two Topos claiming one build). Only known entries are
+//!    ever returned by [`Catalog::topo`] and the like.
 //! 3. [`store`]: the rollback rule against the last accepted `seq` under
 //!    `<AppDir>\index`, and the bytes kept by hash so a later revert can find the index a
 //!    transaction was applied with (P4 condition R1).
@@ -16,6 +20,7 @@
 //! A [`Catalog`] exists only from a [`Verified`], and a [`Verified`] only from [`verify`].
 
 pub mod check;
+mod entries;
 pub mod key;
 pub mod model;
 pub mod store;
@@ -25,15 +30,18 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 pub use check::{RuleError, Rules};
+pub use entries::{Aside, AsideWhy, EntryKind, check_bundle};
 pub use key::{KeyId, PublicKey, trusted_keys};
-pub use model::{FORMAT, Index, Package, Topo};
+pub use model::{ENTRY_FORMAT, Index, Package, Topo};
 
 /// Most bytes of `index.json` (8 MiB).
 pub const MAX_INDEX_BYTES: usize = 8 << 20;
 /// The length of `index.json.sig`: one raw Ed25519 signature.
 pub const SIG_BYTES: usize = 64;
-/// The format of the index.
-pub const INDEX_FORMAT: u32 = FORMAT;
+/// The format of the envelope (the index's top-level `format`): strict, never extended
+/// additively; another value refuses the whole index (ADR 0024 amendment "Forward
+/// compatibility" §1). The entries' own counter is [`ENTRY_FORMAT`].
+pub const INDEX_FORMAT: u32 = 1;
 
 /// Why an index is refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -63,10 +71,29 @@ pub enum IndexError {
         /// 1-based column.
         column: usize,
     },
-    /// Another `format`.
-    #[error("index format {0} is not supported (this build reads format 1)")]
+    /// Another envelope `format`.
+    #[error(
+        "this index needs a newer version of Rerun (index format {0}; this build reads format 1)"
+    )]
     Format(u32),
-    /// A broken rule of an entry or of the bundle.
+    /// An entry whose frozen head (`format`, `id`, a Topo's `match.steam_appid`) does not parse:
+    /// the whole index is refused (position only, never the text).
+    #[error(
+        "entry {pos} of {list} in the signed index has no valid head ({class} at line {line}, column {column} of the entry)"
+    )]
+    Head {
+        /// `topos` or `packages`.
+        list: &'static str,
+        /// 0-based position in the list.
+        pos: usize,
+        /// `syntax`, `data`, `eof`.
+        class: &'static str,
+        /// 1-based line within the entry.
+        line: usize,
+        /// 1-based column.
+        column: usize,
+    },
+    /// A broken rule of the envelope (`seq`, `issued`, IDs sorted and unique over the heads).
     #[error("the signed index breaks a rule: {0}")]
     Rule(String),
 }
@@ -137,33 +164,26 @@ pub(crate) fn verify_with<'a>(
     })
 }
 
-/// The released Topos and packages of one verified index, by ID.
+/// The known Topos and packages of one verified index, by ID, and the entries set aside (ADR
+/// 0024 amendment "Forward compatibility").
 #[derive(Debug, Clone)]
 pub struct Catalog {
     index: Index,
+    aside: Vec<Aside>,
     key: KeyId,
     sha256: [u8; 32],
     topos: BTreeMap<String, usize>,
     packages: BTreeMap<String, usize>,
 }
 
-/// The `format` field alone, read before the rest.
-#[derive(serde::Deserialize)]
-struct FormatOnly {
-    format: u32,
-}
-
-fn parse_error(e: &serde_json::Error) -> IndexError {
+/// The class of a JSON error (position only, never the text).
+pub(crate) fn parse_class(e: &serde_json::Error) -> &'static str {
     use serde_json::error::Category;
-    IndexError::Parse {
-        class: match e.classify() {
-            Category::Io => "io",
-            Category::Syntax => "syntax",
-            Category::Data => "data",
-            Category::Eof => "eof",
-        },
-        line: e.line(),
-        column: e.column(),
+    match e.classify() {
+        Category::Io => "io",
+        Category::Syntax => "syntax",
+        Category::Data => "data",
+        Category::Eof => "eof",
     }
 }
 
@@ -193,16 +213,25 @@ pub fn issued_ok(s: &str) -> bool {
 }
 
 impl Catalog {
-    /// Parses and checks verified bytes (module docs, step 2).
+    /// Parses and classifies verified bytes (module docs, step 2): the envelope strict, each
+    /// entry known or set aside.
     pub fn from_verified(v: &Verified<'_>) -> Result<Self, IndexError> {
-        let f: FormatOnly = serde_json::from_slice(v.bytes).map_err(|e| parse_error(&e))?;
-        if f.format != INDEX_FORMAT {
-            return Err(IndexError::Format(f.format));
-        }
-        let index: Index = serde_json::from_slice(v.bytes).map_err(|e| parse_error(&e))?;
-        let (topos, packages) = check_index(&index)?;
+        let entries::Classified { index, aside } = entries::classify(v.bytes)?;
+        let topos = index
+            .topos
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.id.as_str().to_owned(), i))
+            .collect();
+        let packages = index
+            .packages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id.as_str().to_owned(), i))
+            .collect();
         Ok(Self {
             index,
+            aside,
             key: v.key,
             sha256: v.sha256,
             topos,
@@ -210,7 +239,7 @@ impl Catalog {
         })
     }
 
-    /// The index.
+    /// The index with its known entries only.
     pub fn index(&self) -> &Index {
         &self.index
     }
@@ -235,181 +264,44 @@ impl Catalog {
         &self.sha256
     }
 
-    /// Every Topo, sorted by ID.
+    /// Every known Topo, sorted by ID.
     pub fn topos(&self) -> &[Topo] {
         &self.index.topos
     }
 
-    /// Every package, sorted by ID.
+    /// Every known package, sorted by ID.
     pub fn packages(&self) -> &[Package] {
         &self.index.packages
     }
 
-    /// The Topo `id`.
+    /// The known Topo `id` (never a set-aside one).
     pub fn topo(&self, id: &str) -> Option<&Topo> {
         self.topos.get(id).map(|i| &self.index.topos[*i])
     }
 
-    /// The package `id`.
+    /// The known package `id` (never a set-aside one).
     pub fn package(&self, id: &str) -> Option<&Package> {
         self.packages.get(id).map(|i| &self.index.packages[*i])
     }
-}
 
-type Lookup = BTreeMap<String, usize>;
+    /// The entries set aside, sorted by kind, then ID (display only).
+    pub fn aside(&self) -> &[Aside] {
+        &self.aside
+    }
 
-/// The bundle rules (module docs, step 2) on a parsed index. Also run by the workbench on
-/// what it builds.
-pub fn check_index(index: &Index) -> Result<(Lookup, Lookup), IndexError> {
-    let rule = |what: String| IndexError::Rule(what);
-    if index.format != INDEX_FORMAT {
-        return Err(IndexError::Format(index.format));
-    }
-    if index.seq == 0 {
-        return Err(rule("seq starts at 1".into()));
-    }
-    if !issued_ok(&index.issued) {
-        return Err(rule("issued is not YYYY-MM-DDTHH:MM:SSZ".into()));
-    }
-    let sorted = |ids: Vec<&str>, what: &str| {
-        if ids.windows(2).all(|w| w[0] < w[1]) {
-            Ok(())
-        } else {
-            Err(rule(format!(
-                "{what} are not sorted by ID without duplicates"
-            )))
-        }
-    };
-    sorted(index.topos.iter().map(|t| t.id.as_str()).collect(), "topos")?;
-    sorted(
-        index.packages.iter().map(|p| p.id.as_str()).collect(),
-        "packages",
-    )?;
-    for t in &index.topos {
-        check::topo(t, Rules::Release).map_err(|e| rule(format!("topo {}: {e}", t.id)))?;
-    }
-    for p in &index.packages {
-        check::package(p, Rules::Release).map_err(|e| rule(format!("package {}: {e}", p.id)))?;
-    }
-    // P4-4 review follow-up 4: two Topos that are not retired never claim the same build (the
-    // same app and an executable hash in common), so the engine finds at most one.
-    let live: Vec<&Topo> = index
-        .topos
-        .iter()
-        .filter(|t| t.status != model::Status::Retired)
-        .collect();
-    for (i, a) in live.iter().enumerate() {
-        if let Some(b) = live[..i].iter().find(|b| check::overlap(a, b)) {
-            return Err(rule(format!(
-                "topos {} and {} claim the same app and executable hash",
-                b.id, a.id
-            )));
-        }
-    }
-    let packages: Lookup = index
-        .packages
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.id.as_str().to_owned(), i))
-        .collect();
-    for t in &index.topos {
-        if let Some(id) = check::package_refs(t).find(|id| !packages.contains_key(id.as_str())) {
-            return Err(rule(format!(
-                "topo {}: package {id} is not in the index",
-                t.id
-            )));
-        }
-    }
-    // P4-8 (ADR 0025 open point): a package that names the builds it supports
-    // (`supports_exe_sha1`) supports every build a Topo that installs it names by SHA-1; the
-    // engine checks the matched build itself as well (an entry may name only a SHA-256).
-    for t in &index.topos {
-        for id in check::package_refs(t) {
-            let Some(p) = packages.get(id.as_str()).map(|i| &index.packages[*i]) else {
-                continue;
-            };
-            if p.supports_exe_sha1.is_empty() {
-                continue;
-            }
-            if let Some(e) = t.matches.exes.iter().find(|e| {
-                e.sha1
-                    .as_ref()
-                    .is_some_and(|h| !p.supports_exe_sha1.contains(h))
-            }) {
-                return Err(rule(format!(
-                    "topo {}: package {id} does not list the SHA-1 of {} in supports_exe_sha1",
-                    t.id, e.path
-                )));
-            }
-        }
-    }
-    // P5-5c review: until the game options of ADR 0032 name the executable the game runs, a
-    // variant that installs a package whose files depend on the graphics API (or one it
-    // requires) is refused for a Topo whose executables name more than one API. The engine would
-    // refuse its plan (`EngineError::PackageApiOpen`, which stays its guard), and the app would
-    // offer a download for a fix it cannot apply.
-    for t in &index.topos {
-        let mut apis = t.matches.exes.iter().map(|e| e.api);
-        let first = apis.next();
-        if !first.is_some_and(|f| apis.any(|a| a != f)) {
-            continue;
-        }
-        for v in t.issues.iter().flat_map(|i| &i.variants) {
-            for s in &v.steps {
-                let model::TopoStep::Package(id) = s else {
-                    continue;
-                };
-                if let Some(p) = with_requires(index, &packages, id)
-                    .into_iter()
-                    .find(|p| p.depends_on_api())
-                {
-                    return Err(rule(format!(
-                        "topo {}: variant {} installs package {}, whose files depend on the \
-                         graphics API, but its match.exes name more than one api (the game \
-                         options of ADR 0032 are not there yet)",
-                        t.id, v.id, p.id
-                    )));
-                }
-            }
-        }
-    }
-    for p in &index.packages {
-        if let Some(id) = p
-            .requires
+    /// The set-aside Topos of a Steam app (from their heads).
+    pub fn aside_for(&self, app_id: u32) -> impl Iterator<Item = &Aside> + '_ {
+        self.aside
             .iter()
-            .find(|id| !packages.contains_key(id.as_str()))
-        {
-            return Err(rule(format!(
-                "package {}: requires {id}, which is not in the index",
-                p.id
-            )));
-        }
+            .filter(move |a| a.kind == EntryKind::Topo && a.steam_appid == Some(app_id))
     }
-    let topos = index
-        .topos
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (t.id.as_str().to_owned(), i))
-        .collect();
-    Ok((topos, packages))
-}
 
-/// The package `id` and every package it requires, transitively (each once; the ones not in the
-/// index are another rule's).
-fn with_requires<'i>(index: &'i Index, packages: &Lookup, id: &model::Id) -> Vec<&'i Package> {
-    let mut out: Vec<&Package> = Vec::new();
-    let mut todo = vec![id];
-    while let Some(next) = todo.pop() {
-        let Some(p) = packages.get(next.as_str()).map(|i| &index.packages[*i]) else {
-            continue;
-        };
-        if out.iter().any(|q| q.id == p.id) {
-            continue;
-        }
-        out.push(p);
-        todo.extend(p.requires.iter());
+    /// The set-aside entry `id` of a list.
+    pub fn aside_entry(&self, kind: EntryKind, id: &str) -> Option<&Aside> {
+        self.aside
+            .iter()
+            .find(|a| a.kind == kind && a.id.as_str() == id)
     }
-    out
 }
 
 #[cfg(test)]

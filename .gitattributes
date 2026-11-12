@@ -4,3 +4,6 @@
 *.dll binary
 *.exe binary
 *.ttf binary
+# Signed index fixtures: the signature covers the exact bytes (ADR 0024).
+*.sig binary
+tests/fixtures/index/*.json -text
