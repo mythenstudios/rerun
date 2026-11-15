@@ -1276,8 +1276,9 @@ pub enum Msg {
     },
     /// A launch note: the option was still set without a profile.
     LaunchOptionStillSet,
-    /// A launch note: the change that holds the profile now.
-    LaunchHeldBy {
+    /// A launch note: the option was still set without a profile, a change holds one now (a
+    /// reapplied fix needs the option: no advice to remove it).
+    LaunchOptionStillSetHeld {
         /// The txn.
         txn: TxnId,
     },
@@ -1292,6 +1293,8 @@ pub enum Msg {
         /// The code.
         code: u32,
     },
+    /// A history entry: its plan cannot be read (the reason follows as a detail).
+    HistHeadUnreadable,
 }
 
 /// The text of `m` in `lang`.
@@ -2018,8 +2021,8 @@ fn en(m: Msg) -> Cow<'static, str> {
             .into();
         }
         LaunchOptionStillSet => "The Steam launch option for Rerun's launcher was still set at that start, but no profile was found. The game starts unchanged through it; remove the option in Steam.",
-        LaunchHeldBy { txn } => {
-            return format!("Change {txn} holds this profile now.").into();
+        LaunchOptionStillSetHeld { txn } => {
+            return format!("The Steam launch option for Rerun's launcher was still set at that start, but no profile was found, so the game started unchanged. Change {txn} holds this profile now; see it under Applied.").into();
         }
         LaunchOptionStillSetForgotten => "The Steam launch option was still set at that start. A change closed without undoing it left a profile that was missing then. Remove the launch option by hand.",
         LaunchCheckedLauncher => "Steam starts a launcher here. The check covered the launcher, not the game.",
@@ -2027,6 +2030,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         LaunchPriorityNotRestored { code } => {
             return format!("The priority class set on the game process could not be put back (Windows error {code}). It stays until the game exits.").into();
         }
+        HistHeadUnreadable => "Its plan cannot be read, so what it changed cannot be listed.",
     };
     Cow::Borrowed(s)
 }
@@ -2750,8 +2754,8 @@ fn de(m: Msg) -> Cow<'static, str> {
             .into();
         }
         LaunchOptionStillSet => "Die Steam-Startoption für den Rerun-Starter war bei diesem Start noch gesetzt, aber es gab kein Profil. Das Spiel startet damit unverändert; entferne die Option in Steam.",
-        LaunchHeldBy { txn } => {
-            return format!("Die Änderung {txn} hält dieses Profil jetzt.").into();
+        LaunchOptionStillSetHeld { txn } => {
+            return format!("Die Steam-Startoption für den Rerun-Starter war bei diesem Start noch gesetzt, aber es gab kein Profil, darum startete das Spiel unverändert. Die Änderung {txn} hält dieses Profil jetzt; sieh sie unter Angewendet an.").into();
         }
         LaunchOptionStillSetForgotten => "Die Steam-Startoption war bei diesem Start noch gesetzt. Eine ohne Rückgängig abgeschlossene Änderung hat ein Profil hinterlassen, das damals fehlte. Entferne die Startoption von Hand.",
         LaunchCheckedLauncher => "Steam startet hier einen Starter. Die Prüfung galt dem Starter, nicht dem Spiel.",
@@ -2759,6 +2763,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         LaunchPriorityNotRestored { code } => {
             return format!("Die Prioritätsklasse des Spielprozesses konnte nicht zurückgesetzt werden (Windows-Fehler {code}). Die Klasse bleibt, bis das Spiel endet.").into();
         }
+        HistHeadUnreadable => "Sein Plan kann nicht gelesen werden, darum lässt sich nicht auflisten, was es geändert hat.",
     };
     Cow::Borrowed(s)
 }

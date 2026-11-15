@@ -186,7 +186,7 @@ fn view_launch(launch: Option<LaunchResults>, holders: Vec<Holder>) -> JournalVi
     view(Vec::new(), launch, holders)
 }
 
-fn rows(entries: Vec<LaunchEntry>, holders: Vec<Holder>, lang: Lang) -> Vec<LaunchRowVm> {
+fn self_rows(entries: Vec<LaunchEntry>, holders: Vec<Holder>, lang: Lang) -> Vec<LaunchRowVm> {
     let v = view_launch(Some(LaunchResults { entries, other: 0 }), holders);
     history(Some(Ok(&v)), &Names::new(), 1_762_600_000 + 7_200, lang).launches
 }
@@ -217,6 +217,30 @@ const REASONS: [SkipReason; 24] = [
     SkipReason::SearchFailed { code: 5 },
     SkipReason::PriorityFailed { code: 5 },
 ];
+
+/// A closed entry whose plan cannot be read says why, escaped, instead of an empty entry; the
+/// exact-time formatter keeps the bound of the CLI's `Utc` (rerun-cli `txn/launch_tests.rs`).
+#[test]
+fn vv1_an_unreadable_plan_says_why_and_utc_keeps_its_bound() {
+    let mut bad = st(1, TxnLine::Closed(Closing::Reverted), false, &[]);
+    bad.preview = Some(Err(escape::text("head.json \u{202e} damaged").into_owned()));
+    let h = page(&view(vec![bad], None, Vec::new()), Lang::En);
+    let e = &h.groups[0].entries[0];
+    assert_eq!(
+        e.problem.as_deref(),
+        Some("Its plan cannot be read, so what it changed cannot be listed.")
+    );
+    let d = e.detail.as_ref().unwrap().as_str();
+    assert!(d.contains("damaged") && !d.contains('\u{202e}'), "{d}");
+    assert!(e.ops.is_empty());
+
+    assert_eq!(utc(0), "1970-01-01 00:00:00 UTC");
+    assert_eq!(utc(951_782_400), "2000-02-29 00:00:00 UTC");
+    assert_eq!(utc(4_107_542_400), "2100-03-01 00:00:00 UTC");
+    assert_eq!(utc(253_402_300_799), "9999-12-31 23:59:59 UTC");
+    assert_eq!(utc(253_402_300_800), "253402300800 s");
+    assert_eq!(utc(u64::MAX), "18446744073709551615 s");
+}
 
 #[test]
 fn vv2_every_reason_and_check_has_words() {
@@ -299,7 +323,7 @@ fn vv2_every_reason_and_check_has_words() {
                 ));
             }
         }
-        let rows = rows(entries, Vec::new(), lang);
+        let rows = self_rows(entries, Vec::new(), lang);
         let mut lines = std::collections::BTreeSet::new();
         for r in &rows {
             assert!(
@@ -398,7 +422,7 @@ fn vv2_notes_unreadable_files_and_folders() {
         hold(4, false, true, false),
         hold(5, false, false, true),
     ];
-    let rows = rows(entries, holders, Lang::En);
+    let rows = self_rows(entries, holders, Lang::En);
     let by = |i: u32| {
         rows.iter()
             .find(|r| r.game.as_str().ends_with(&profile_id(i).to_string()))
@@ -408,6 +432,28 @@ fn vv2_notes_unreadable_files_and_folders() {
     assert!(note(1).contains("remove the option in Steam"));
     assert!(!note(1).contains("holds this profile"));
     assert!(note(2).contains(&format!("Change {} holds this profile now", id(2))));
+    // A held profile is needed by a reapplied fix: no advice to remove the option.
+    assert!(!note(2).contains("remove"), "{}", note(2));
+    let de = self_rows(
+        vec![entry(
+            profile_id(2),
+            Outcome::Skipped {
+                reason: SkipReason::ProfileMissing,
+                start: Start::Created,
+                ended: None,
+                priority_restore: None,
+            },
+            None,
+        )],
+        vec![hold(2, false, false, false)],
+        Lang::De,
+    );
+    let held_de = de[0].note.clone().unwrap();
+    assert!(
+        held_de.contains(&id(2).to_string()) && !held_de.contains("entfern"),
+        "{held_de}"
+    );
+    assert!(note(1).contains("remove the option"));
     assert!(note(3).contains("closed without undoing it left a profile"));
     assert!(note(4).contains("check covered the launcher"));
     assert_eq!(

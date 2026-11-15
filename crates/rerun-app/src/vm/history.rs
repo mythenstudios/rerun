@@ -48,8 +48,10 @@ pub struct HistEntryVm {
     pub game: Option<Value>,
     /// State glyph and word.
     pub state: Badge,
-    /// What is wrong, if something is (an open entry).
+    /// What is wrong, if something is (an open entry, or a plan that cannot be read).
     pub problem: Option<String>,
+    /// Why the plan cannot be read (escaped): what the core says.
+    pub detail: Option<Shown<'static>>,
     /// Everything in it, collapsed by the window.
     pub ops: Vec<OpVm>,
     /// A forgotten entry: the folder that keeps its backups.
@@ -189,6 +191,11 @@ fn entry(
     names: &Names,
     lang: Lang,
 ) -> HistEntryVm {
+    // A plan that cannot be read lists nothing: say why instead of showing an empty entry.
+    let head_err = match &st.preview {
+        Some(Err(why)) => Some(why.clone()),
+        _ => None,
+    };
     // An open entry is its card (the same state, problem and ops as under Applied).
     if group == HistGroup::Open
         && let Some(c) = card(st, names, lang)
@@ -199,6 +206,7 @@ fn entry(
             game: c.game,
             state: c.state,
             problem: c.problem,
+            detail: head_err.clone(),
             ops: c.ops,
             backups: None,
             may_remain: Vec::new(),
@@ -229,7 +237,10 @@ fn entry(
             word: tx(lang, word),
             quiet,
         },
-        problem: None,
+        problem: head_err
+            .is_some()
+            .then(|| tx(lang, Msg::HistHeadUnreadable)),
+        detail: head_err,
         ops: head_ops(st, lang),
         backups,
         may_remain,
@@ -437,10 +448,10 @@ fn notes(l: &LaunchLine, lang: Lang) -> (Option<String>, Option<Shown<'static>>)
     let mut detail = None;
     match &l.note {
         Some(LaunchNote::OptionStillSet { held }) => {
-            parts.push(tx(lang, Msg::LaunchOptionStillSet));
-            if let Some(txn) = held {
-                parts.push(tx(lang, Msg::LaunchHeldBy { txn: *txn }));
-            }
+            parts.push(match held {
+                Some(txn) => tx(lang, Msg::LaunchOptionStillSetHeld { txn: *txn }),
+                None => tx(lang, Msg::LaunchOptionStillSet),
+            });
         }
         Some(LaunchNote::OptionStillSetForgotten) => {
             parts.push(tx(lang, Msg::LaunchOptionStillSetForgotten));

@@ -868,6 +868,7 @@ fn history_data(h: &HistoryVm, lang: Lang) -> HistoryData {
                                 game: e.game.as_ref().map(|v| s(v.as_str())).unwrap_or_default(),
                                 state: badge(&e.state),
                                 problem: e.problem.as_deref().map(s).unwrap_or_default(),
+                                detail: e.detail.as_ref().map(shown).unwrap_or_default(),
                                 ops: model(e.ops.iter().map(write::op).collect()),
                                 backups: e.backups.as_ref().map(shown).unwrap_or_default(),
                                 may_remain: model(e.may_remain.iter().map(shown).collect()),

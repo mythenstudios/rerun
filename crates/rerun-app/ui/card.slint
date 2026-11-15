@@ -146,6 +146,13 @@ export component HistEntryView inherits Card {
             font-size: Theme.fs-m;
             wrap: word-wrap;
         }
+        if root.e.detail != "": Text {
+            text: root.e.detail;
+            color: Theme.muted;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
         if root.e.note != "": Text {
             text: root.e.note;
             color: Theme.text;

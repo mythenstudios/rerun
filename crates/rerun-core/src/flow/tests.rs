@@ -393,7 +393,7 @@ fn fl3_launch_lines_type_each_note() {
         priority: None,
         check: Check::Ok,
     };
-    let ids: Vec<ProfileId> = (1..=7).map(profile_id).collect();
+    let ids: Vec<ProfileId> = (1..=9).map(profile_id).collect();
     let r = LaunchResults {
         entries: vec![
             // 1: profile missing, no holder.
@@ -414,6 +414,14 @@ fn fl3_launch_lines_type_each_note() {
             ),
             // 7: nothing wrong, even with a launcher holder: the method is unknown.
             result(ids[6], applied, None),
+            // 8: no method, a failed restore: the words of `watch` all the same.
+            result(
+                ids[7],
+                skipped(SkipReason::JobFailed { code: 5 }, Some(7)),
+                None,
+            ),
+            // 9: no method, a reason only `watch` writes.
+            result(ids[8], skipped(SkipReason::TargetNotFound, None), None),
         ],
         other: 0,
     };
@@ -430,6 +438,7 @@ fn fl3_launch_lines_type_each_note() {
         holder(2, t(3), true, false, false),
         holder(3, t(4), false, true, false),
         holder(4, t(5), false, false, true),
+        holder(5, t(6), false, false, true),
         holder(6, t(7), false, true, true),
     ];
     let lines = launch_lines(&r, &holders);
@@ -444,14 +453,17 @@ fn fl3_launch_lines_type_each_note() {
         matches!(notes[3], Some(LaunchNote::CheckedLauncher(s)) if s.as_str().contains("launcher.exe"))
     );
     assert!(matches!(notes[4], Some(LaunchNote::Watched(s)) if s.as_str().contains("game.exe")));
-    assert_eq!(
-        notes[5], None,
-        "a skipped start is neither checked nor watched"
-    );
+    // A `watch` start that was skipped still concerns the game process: the target is named.
+    assert!(matches!(notes[5], Some(LaunchNote::Watched(s)) if s.as_str().contains("game.exe")));
     assert_eq!(notes[6], None);
     // The words of `watch`: the result's own method, a reason only `watch` writes, a restore line.
     let watch: Vec<bool> = lines.iter().map(|l| l.watch).collect();
-    assert_eq!(watch, [false, false, false, false, true, true, false]);
+    assert_eq!(
+        watch,
+        [false, false, false, false, true, true, false, true, true]
+    );
+    assert_eq!(lines[7].restore_failed, Some(7));
+    assert!(notes[7].is_none() && notes[8].is_none());
     assert_eq!(lines[5].restore_failed, Some(5));
     assert_eq!(lines[0].restore_failed, None);
     // The game's line by the profile ID of its app.

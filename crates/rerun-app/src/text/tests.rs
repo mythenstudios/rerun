@@ -741,18 +741,19 @@ fn every() -> Vec<Msg> {
             ended: Ended::NotConfirmed { code: 258 },
         },
         LaunchOptionStillSet,
-        LaunchHeldBy {
+        LaunchOptionStillSetHeld {
             txn: TxnId::from_str("00000001-0123456789abcdef").unwrap(),
         },
         LaunchOptionStillSetForgotten,
         LaunchCheckedLauncher,
         LaunchWatched,
         LaunchPriorityNotRestored { code: 5 },
+        HistHeadUnreadable,
     ]
 }
 
 /// The number of messages: one more than the highest [`ordinal`].
-const COUNT: usize = 519;
+const COUNT: usize = 520;
 
 /// A message's position in the enum. The `match` is exhaustive: a new variant does not compile
 /// without an ordinal here, and [`every_ordinal_is_listed`] fails until [`every`] lists it.
@@ -1274,11 +1275,12 @@ fn ordinal(m: Msg) -> usize {
         LaunchStart { .. } => 511,
         LaunchEnded { .. } => 512,
         LaunchOptionStillSet => 513,
-        LaunchHeldBy { .. } => 514,
+        LaunchOptionStillSetHeld { .. } => 514,
         LaunchOptionStillSetForgotten => 515,
         LaunchCheckedLauncher => 516,
         LaunchWatched => 517,
         LaunchPriorityNotRestored { .. } => 518,
+        HistHeadUnreadable => 519,
     }
 }
 
@@ -1314,10 +1316,7 @@ fn every_ordinal_is_listed() {
     let missing: Vec<usize> = (0..COUNT).filter(|i| !seen[*i]).collect();
     assert!(missing.is_empty(), "ordinals not in every(): {missing:?}");
     // COUNT is right: the last variant has the highest ordinal.
-    assert_eq!(
-        ordinal(Msg::LaunchPriorityNotRestored { code: 0 }),
-        COUNT - 1
-    );
+    assert_eq!(ordinal(Msg::HistHeadUnreadable), COUNT - 1);
 }
 
 #[test]
