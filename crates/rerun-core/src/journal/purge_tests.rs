@@ -934,3 +934,104 @@ fn jp7_a_reader_between_scan_and_load_sees_it_settled_or_not_at_all() {
     ));
     fx.clear_on_step();
 }
+
+/// Review S-1: an unreadable folder is shown whatever tombstone there is (else a tombstone with
+/// any content would hide it, and with it an heir from the hand-over rule).
+#[test]
+fn an_unreadable_folder_is_never_hidden_by_a_tombstone() {
+    let (sys, a, _) = world();
+    let fx = sys.fake_fs();
+    fx.mkdir_all(Path::new(r"C:\x")).unwrap();
+    fx.swap_with_junction(Path::new(&txn_dir(&a)), r"C:\x")
+        .unwrap();
+    fx.put_file(Path::new(&tomb(&a)), b"not the head at all")
+        .unwrap();
+    let app = open_app(&sys);
+    let l = Journal::new(&app, InstanceTag::fixed(1)).list().unwrap();
+    let t = l.txns.iter().find(|t| t.id == a).expect("listed");
+    assert!(t.view.is_err(), "shown as unreadable");
+    assert_eq!(l.purging, 0);
+}
+
+/// Review S-3: a tombstone that cannot be read (a folder under its name) does not stop a revert.
+#[test]
+fn resume_reads_past_an_unreadable_tombstone() {
+    let sys = system();
+    let id = locked(&sys, |l| {
+        let g = game(&sys, r"D:\G");
+        *apply2(l, &*g).id()
+    });
+    sys.fake_fs().mkdir_all(Path::new(&tomb(&id))).unwrap();
+    locked(&sys, |l| {
+        let w = l.resume(&id).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(*w.id(), id);
+    });
+}
+
+/// Review nit 4: a tombstone on an applied transaction without a forget marker was not left by
+/// a purge (Rerun never writes one there): it hides the transaction (scenario 29) but is never
+/// resumed, nothing is deleted.
+#[test]
+fn a_tombstone_on_an_applied_transaction_is_not_resumed() {
+    let sys = system();
+    let id = locked(&sys, |l| {
+        let g = game(&sys, r"D:\G");
+        *apply2(l, &*g).id()
+    });
+    let files = ls(&sys, &txn_dir(&id));
+    assert!(files.len() > 3, "precondition: {files:?}");
+    sys.fake_fs()
+        .put_file(
+            Path::new(&tomb(&id)),
+            crate::wire::hex32::to_string(&head()).as_bytes(),
+        )
+        .unwrap();
+    assert_eq!(listed(&sys, &id), None, "hidden (scenario 29)");
+    locked(&sys, |l| l.finish_purges().unwrap());
+    let r = locked(&sys, |l| l.purge(&id, Some(&head())));
+    assert_eq!(stopped(&r), Some(PurgeStop::NotSettled));
+    assert_eq!(ls(&sys, &txn_dir(&id)), files, "nothing deleted");
+}
+
+/// Review S1: `finish_purges` is best effort per entry; an error of one orphan or one hidden
+/// transaction leaves it for the next run, the run itself succeeds.
+#[test]
+fn finish_purges_leaves_what_fails_for_the_next_run() {
+    // An orphan tombstone whose deletion fails.
+    let (sys, _, _) = world();
+    let gone = TxnId::new(77, 1).unwrap();
+    let fx = sys.fake_fs();
+    fx.put_file(Path::new(&tomb(&gone)), b"").unwrap();
+    locked(&sys, |l| {
+        fx.clear_faults();
+        fx.fail_at(
+            Prim::OpenFileDelete,
+            1,
+            crate::sys::SysErrorKind::Unsupported,
+        );
+        l.finish_purges().unwrap();
+        assert!(fx.fault_fired(), "precondition: the fault was met");
+    });
+    assert!(exists(&sys, &tomb(&gone)));
+    locked(&sys, |l| l.finish_purges().unwrap());
+    assert!(!exists(&sys, &tomb(&gone)));
+
+    // A hidden transaction (a purge stopped while a file was in use) whose next file fails.
+    let (sys, a, _) = world();
+    let fx = sys.fake_fs();
+    let bin = format!(r"{}\op-0000.bin", txn_dir(&a));
+    let held = fx
+        .hold_open_as(4242, Path::new(&bin), Access::READ, Share::RW)
+        .unwrap();
+    assert_eq!(stopped(&purge(&sys, &a)), Some(PurgeStop::InUse));
+    drop(held);
+    locked(&sys, |l| {
+        fx.clear_faults();
+        fx.fail_at(Prim::OpenFileDelete, 1, crate::sys::SysErrorKind::Other);
+        l.finish_purges().unwrap();
+        assert!(fx.fault_fired(), "precondition: the fault was met");
+    });
+    assert_eq!(listed(&sys, &a), None);
+    assert!(exists(&sys, &tomb(&a)));
+    finished(&sys, &a, false);
+}

@@ -9,8 +9,10 @@
 //!
 //! Order (S2): the checks write nothing; then the tombstone `journal\<txn>.purge` (content
 //! the lower-case hex SHA-256 of the head, empty without one; `create_new`) and a flush of
-//! `journal\`, so no deletion is ever durable without a durable tombstone (one ordered volume
-//! log); then the backups, Rerun's temp leftovers, the records newest first with the record
+//! `journal\`. The tombstone and every deletion are changes of the one volume of `journal\`,
+//! whose log is ordered, so no deletion is durable without the tombstone even without that
+//! flush (no cut of the fake's model can tell the flush is there, JP4); it is belt and braces,
+//! as `create_new` flushes everywhere else in Rerun. Then the backups, Rerun's temp leftovers, the records newest first with the record
 //! holding `Closed` last, and `head.json` last of all. A reader that misses the tombstone sees a
 //! closed, empty or damaged transaction, never an open or applied one, and every reader reads
 //! the tombstone after its `load` anyway (`read::see`). Each file goes by its file ID from the
@@ -43,10 +45,10 @@ use crate::sys::{Dir, SysErrorKind, SysResult};
 
 /// What [`JournalLock::purge`] left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Purged {
+pub(crate) struct Purged {
     /// The transaction had the highest `seq`: its empty folder and its tombstone stay as the
     /// anchor of `seq` (invisible to every reader) until a newer transaction exists.
-    pub anchor: bool,
+    pub(crate) anchor: bool,
 }
 
 /// Why a purge did not go on ([`JournalError::Purge`]).
@@ -189,6 +191,15 @@ impl JournalLock<'_> {
             Ok(None) => false,
             Err(e) => return Err(e),
         };
+        // Rerun writes a tombstone only for a settled transaction, and its order never makes a
+        // closed one read as open or applied: such a view with a tombstone was not left by a
+        // purge unless a forget marker covers it (review nit 4, defense in depth).
+        if resume
+            && matches!(view.state, TxnState::Open | TxnState::Applied)
+            && !read::marker_applies(self.dir, id, view.head_sha256.as_ref())?
+        {
+            return Err(stop(PurgeStop::NotSettled));
+        }
         if !resume {
             if view.head_sha256.as_ref() != head {
                 return Err(stop(PurgeStop::HeadChanged));
@@ -284,12 +295,13 @@ impl JournalLock<'_> {
     /// Finishes what earlier purges left (S5): every transaction folder whose tombstone applies
     /// is purged on (an anchor goes once a newer transaction exists), a tombstone for another
     /// head stays untouched, and markers and tombstones without a folder are deleted (markers
-    /// first). A transaction that cannot be finished now (in use, foreign, unreadable) is left
-    /// for a later run; only an error of `journal\` itself is returned.
+    /// first). Best effort per entry (review S1): whatever stops one transaction or one orphan
+    /// (in use, foreign, unreadable, any error of its own) leaves it for a later run; only an
+    /// error of listing or flushing `journal\` itself is returned.
     pub(crate) fn finish_purges(&self) -> Result<(), JournalError> {
         let entries = self.dir.read_dir_limited(None, self.lim.journal_entries)?;
         let named: BTreeSet<TxnId> = entries.iter().filter_map(|e| e.name.parse().ok()).collect();
-        let mut flush = false;
+        let mut touched = false;
         for pass in [
             names::marker_of as fn(&str) -> Option<TxnId>,
             names::tombstone_of,
@@ -302,30 +314,23 @@ impl JournalLock<'_> {
                 let Ok(name) = RelPath::from_segment(&e.name) else {
                     continue;
                 };
-                if removed(self.dir.remove_file(&name, e.meta.file_id))?.is_none() {
-                    flush = true;
-                }
+                // An orphan that does not go now goes next time.
+                touched |= self.dir.remove_file(&name, e.meta.file_id).is_ok();
             }
-        }
-        if flush {
-            self.dir.flush()?;
         }
         for e in entries.iter().filter(|e| plain(e)) {
             let Some(id) = names::tombstone_of(&e.name) else {
                 continue;
             };
-            if !named.contains(&id) {
-                continue;
+            if named.contains(&id) {
+                // Whatever stops this one leaves it for a later run.
+                let _later = self.purge(&id, None);
+                touched = true;
             }
-            match self.purge(&id, None) {
-                Ok(_)
-                | Err(
-                    JournalError::Purge { .. } | JournalError::NotFound(_) | JournalError::Root(_),
-                ) => {}
-                Err(JournalError::Sys(e))
-                    if matches!(e.kind, SysErrorKind::Busy | SysErrorKind::AccessDenied) => {}
-                Err(e) => return Err(e),
-            }
+        }
+        if touched {
+            // Makes what was deleted durable, and reports a `journal\` that cannot be flushed.
+            self.dir.flush()?;
         }
         Ok(())
     }

@@ -637,6 +637,12 @@ pub trait DirWrite: Dir {
     /// Hard links: a link added by another program between the check and the delete is not
     /// seen; the delete then removes only `name`, the object and its other name stay (no data
     /// reachable elsewhere is lost).
+    ///
+    /// Only for Rerun's own files in Rerun's own folders below `AppDir` (the journal), with the
+    /// file ID from a fresh listing of this same handle; never in a game folder, where a file is
+    /// deleted only by its hash through [`Self::guard`] (`docs/06-security.md`). A file with an
+    /// allowlisted data tag (WOF, dedup, a cloud placeholder) counts as a plain file; deleting a
+    /// cloud placeholder may notify its provider.
     fn remove_file(&self, name: &RelPath, expected_id: u128) -> SysResult<()>;
 
     /// Flushes this directory (the renames into it), best effort (ADR 0019).

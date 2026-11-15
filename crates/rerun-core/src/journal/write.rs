@@ -161,7 +161,8 @@ impl<'j> JournalLock<'j> {
             _ => JournalError::Sys(e),
         })?;
         let (view, m) = read::read_txn(&*dir, *id, VerifyBackups::Length, &self.lim)?;
-        if read::tombstone(self.dir, id, view.head_sha256.as_ref())? == Some(true) {
+        // As for a reader: a tombstone that cannot be read does not apply (review S-3).
+        if let Ok(Some(true)) = read::tombstone(self.dir, id, view.head_sha256.as_ref()) {
             return Err(JournalError::NotFound(*id));
         }
         let resumable = matches!(

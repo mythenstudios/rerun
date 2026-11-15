@@ -106,12 +106,12 @@ pub mod launch_result {
     };
 }
 pub use helper::{HelperFailure, helper_ready, reason_words};
+pub use purge::{Keep, PurgeReport};
 #[cfg_attr(
     not(test),
     expect(unused_imports, reason = "flow::history calls it from P5-6d-1b on")
 )]
-pub(crate) use purge::purge_seen;
-pub use purge::{Keep, PurgeReport};
+pub(crate) use purge::{PurgeMode, purge_seen};
 pub(crate) use rebind::revert_rebound_seen;
 pub use rebind::{
     CreatedDir, RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,

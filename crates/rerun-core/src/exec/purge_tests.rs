@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use super::tests::{Env, N, NEW, base, finish, same, snap_app};
-use super::{ExecError, Keep, PurgeReport, Refusal, purge_seen};
+use super::{ExecError, Keep, PurgeMode, PurgeReport, Refusal, purge_seen};
 use crate::journal::{Closing, InstanceTag, Journal, Observed, TxnId, TxnState};
 use crate::prim::FileInstallSpec;
 use crate::prim::tests::{app, entry, spec};
@@ -39,7 +39,7 @@ fn seen(env: &Env, t: &TxnId) -> (TxnId, Option<[u8; 32]>) {
 
 fn purge(env: &Env, ts: &[TxnId]) -> Result<PurgeReport, ExecError> {
     let ids: Vec<_> = ts.iter().map(|t| seen(env, t)).collect();
-    env.with(|cx| purge_seen(cx, &ids))
+    env.with(|cx| purge_seen(cx, &ids, PurgeMode::Lenient))
 }
 
 fn listed(env: &Env) -> Vec<TxnId> {
@@ -151,7 +151,7 @@ fn what_is_never_purged_is_reported_and_nothing_is_written() {
     reverted(&env, &done);
     let before = snap_app(&env.sys);
     let ids = [seen(&env, &done), (applied, Some([1; 32]))];
-    match env.with(|cx| purge_seen(cx, &ids)) {
+    match env.with(|cx| purge_seen(cx, &ids, PurgeMode::Lenient)) {
         Err(ExecError::Refused(Refusal::Changed { txn })) if txn == applied => {}
         r => panic!("{r:?}"),
     }
@@ -159,8 +159,15 @@ fn what_is_never_purged_is_reported_and_nothing_is_written() {
 
     // Purged already: gone, which counts as done.
     let ids = [seen(&env, &done)];
-    assert_eq!(env.with(|cx| purge_seen(cx, &ids)).unwrap().removed, [done]);
-    let r = env.with(|cx| purge_seen(cx, &ids)).unwrap();
+    assert_eq!(
+        env.with(|cx| purge_seen(cx, &ids, PurgeMode::Lenient))
+            .unwrap()
+            .removed,
+        [done]
+    );
+    let r = env
+        .with(|cx| purge_seen(cx, &ids, PurgeMode::Lenient))
+        .unwrap();
     assert_eq!((r.removed.len(), r.gone.as_slice()), (0, &[done][..]));
 
     // The lock held by another Rerun.
@@ -226,7 +233,9 @@ fn a_file_in_use_stops_only_its_own_purge_and_a_later_run_finishes() {
     );
     drop(held);
     // The next run (with nothing asked) finishes it.
-    let r = env.with(|cx| purge_seen(cx, &[])).unwrap();
+    let r = env
+        .with(|cx| purge_seen(cx, &[], PurgeMode::Lenient))
+        .unwrap();
     assert_eq!(r, PurgeReport::default());
     assert_eq!(
         Journal::new(&a, InstanceTag::fixed(1))
@@ -236,4 +245,99 @@ fn a_file_in_use_stops_only_its_own_purge_and_a_later_run_finishes() {
         0
     );
     assert!(!super::tests::exists_abs(&env.sys, &env.txn_dir(&x)));
+}
+
+/// Review S-1 (reproduced by the reviewer): an applied heir made unreadable and a tombstone
+/// with any content planted next to it. The heir stays listed (unreadable), so the creator
+/// stays (`HandedOver`).
+#[test]
+fn a_planted_tombstone_never_hides_an_unreadable_heir() {
+    let (env, a, b) = handed_over();
+    let fx = env.sys.fake_fs();
+    fx.mkdir_all(Path::new(r"C:\x")).unwrap();
+    fx.swap_with_junction(Path::new(&env.txn_dir(&b)), r"C:\x")
+        .unwrap();
+    fx.put_file(
+        Path::new(&format!("{}.purge", env.txn_dir(&b))),
+        b"not the head at all",
+    )
+    .unwrap();
+    assert!(listed(&env).contains(&b), "B is listed");
+    assert_eq!(env.state(&b), None, "precondition: B cannot be read");
+    let r = purge(&env, &[a]).unwrap();
+    assert_eq!(r.refused, [(a, Keep::HandedOver)]);
+    assert!(r.removed.is_empty());
+}
+
+/// Review S-2: "clear history" is exact. A transaction applied between the preview and the
+/// confirmation makes the creator `HandedOver`: `Exact` refuses with nothing written, `Lenient`
+/// (the cap) reports it and goes on.
+#[test]
+fn exact_refuses_what_is_no_longer_removable_and_lenient_reports_it() {
+    let env = Env::new(finish(base()));
+    let a = env.applied(&env.plan(&c_file()));
+    let b = env.applied(&env.plan(&h_rep()));
+    let r = env.revert(&a).unwrap();
+    assert!(
+        r.ops.iter().any(|o| o.observed == Observed::Kept),
+        "precondition"
+    );
+    reverted(&env, &b);
+    // The preview: both removable.
+    let shown = [seen(&env, &a), seen(&env, &b)];
+    // Between preview and confirmation: a new apply.
+    let c = env.applied(&env.plan(&spec(vec![entry("new.dll", "other.dll", N)])));
+    let before = snap_app(&env.sys);
+    match env.with(|cx| purge_seen(cx, &shown, PurgeMode::Exact)) {
+        Err(ExecError::Refused(Refusal::Changed { txn })) if txn == a => {}
+        r => panic!("{r:?}"),
+    }
+    same(&before, &snap_app(&env.sys));
+    let r = env
+        .with(|cx| purge_seen(cx, &shown, PurgeMode::Lenient))
+        .unwrap();
+    assert_eq!(
+        (r.removed.as_slice(), r.refused.as_slice()),
+        (&[b][..], &[(a, Keep::HandedOver)][..])
+    );
+    // Exact with what is still removable, and an ID gone already: done.
+    reverted(&env, &c);
+    let shown = [seen(&env, &a), (b, shown[1].1)];
+    let r = env
+        .with(|cx| purge_seen(cx, &shown, PurgeMode::Exact))
+        .unwrap();
+    assert_eq!(
+        (r.removed.as_slice(), r.gone.as_slice()),
+        (&[a][..], &[b][..])
+    );
+}
+
+/// Review nits: an access error of one transaction is reported and the run goes on; an ID given
+/// twice is purged and reported once.
+#[test]
+fn an_access_error_of_one_transaction_keeps_the_report() {
+    let env = Env::new(finish(base()));
+    let x = env.applied(&env.plan(&spec(vec![entry("d3d9.dll", "d3d9.dll", NEW)])));
+    reverted(&env, &x);
+    let y = env.applied(&env.plan(&spec(vec![entry("new.dll", "y.dll", N)])));
+    reverted(&env, &y);
+    let ids = [seen(&env, &x), seen(&env, &y), seen(&env, &y)];
+    let fx = env.sys.fake_fs();
+    let r = env
+        .with(|cx| {
+            fx.clear_faults();
+            fx.fail_at(
+                crate::sys::fake::Prim::OpenFileDelete,
+                1,
+                crate::sys::SysErrorKind::AccessDenied,
+            );
+            purge_seen(cx, &ids, PurgeMode::Lenient)
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(fx.fault_fired(), "precondition");
+    assert_eq!(
+        (r.removed.as_slice(), r.refused.as_slice()),
+        (&[y][..], &[(x, Keep::Foreign)][..])
+    );
+    assert!(r.gone.is_empty(), "y once: {r:?}");
 }

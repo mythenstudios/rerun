@@ -44,7 +44,9 @@ use std::sync::atomic::AtomicU64;
 
 use names::LOCK;
 pub use names::{InstanceTag, TxnId};
-pub use purge::{PurgeStop, Purged};
+pub use purge::PurgeStop;
+#[cfg(test)]
+pub(crate) use purge::Purged;
 pub use record::{
     Before, Closing, Digest, DirProof, FORMAT, INLINE_MAX, MAX_DIRS, Observed, Semantic,
 };

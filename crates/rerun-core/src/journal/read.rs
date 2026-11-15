@@ -128,13 +128,14 @@ fn see(jdir: &dyn Dir, id: &TxnId, v: VerifyBackups, lim: &Limits, app: &RootPat
     if matches!(view, Err(JournalError::NotFound(_))) {
         return Seen::Gone;
     }
-    let head = view.as_ref().ok().and_then(|v| v.head_sha256);
-    // A tombstone that cannot be read leaves the transaction as loaded (fail closed: a damaged
-    // or unreadable view blocks).
-    if let Ok(Some(true)) = tombstone(jdir, id, head.as_ref()) {
-        return Seen::Purging {
-            bare: view.as_ref().is_ok_and(|v| v.bare),
-        };
+    // Only a folder that was read can be hidden: the head (or its absence) is known then. An
+    // unreadable one is shown whatever tombstone there is (fail closed, review S-1: otherwise a
+    // tombstone with any content would hide an unreadable heir from the hand-over rule). A
+    // tombstone that cannot be read leaves the transaction as loaded too.
+    if let Ok(v) = &view
+        && let Ok(Some(true)) = tombstone(jdir, id, v.head_sha256.as_ref())
+    {
+        return Seen::Purging { bare: v.bare };
     }
     // The purge removes the folder before its tombstone: a view caught mid-purge whose
     // tombstone is gone by now belongs to a folder that is gone as well. Only a view that is

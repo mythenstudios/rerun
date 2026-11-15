@@ -21,6 +21,7 @@ use crate::journal::{
     VerifyBackups,
 };
 use crate::plan::{Op, RootKind};
+use crate::sys::SysErrorKind;
 
 use super::{ExecCtx, ExecError, Refusal, decode_head, standard_user};
 
@@ -39,7 +40,7 @@ pub enum Keep {
     /// Its folder holds something Rerun did not write there.
     Foreign,
     /// Its folder has too many entries.
-    TooLarge,
+    TooManyEntries,
     /// Forgotten (its backups are not purged without their own preview, P5-6d-2).
     Forgotten,
     /// A file of it is in use; its purge is finished by a later run.
@@ -72,7 +73,7 @@ fn keep(j: &Journal<'_>, l: &Listing, t: &Listed) -> Option<Keep> {
         });
     }
     match &v.state {
-        TxnState::Damaged(Damage::TooManyEntries) => return Some(Keep::TooLarge),
+        TxnState::Damaged(Damage::TooManyEntries) => return Some(Keep::TooManyEntries),
         TxnState::Damaged(Damage::UnknownEntry) => return Some(Keep::Foreign),
         TxnState::Open | TxnState::Applied | TxnState::Damaged(_) => {
             return Some(Keep::NotSettled);
@@ -128,13 +129,31 @@ fn holds_profile(j: &Journal<'_>, id: &TxnId) -> bool {
     })
 }
 
+/// How [`purge_seen`] treats an ID that is not removable (review S-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "flow::history uses both from P5-6d-1b on")
+)]
+pub(crate) enum PurgeMode {
+    /// "Clear history": the user confirmed exactly these IDs. If any of them is not removable
+    /// any more (a [`Keep`] applies now) or has another head, nothing is written and the
+    /// result is `Refusal::Changed`.
+    Exact,
+    /// The automatic cap: what is not removable is reported in [`PurgeReport::refused`] and the
+    /// rest goes.
+    Lenient,
+}
+
 /// Purges the transactions `ids` (each with the hash of its head as the caller saw it, `None`
-/// without one) under the journal lock, by the rules of this module; first it finishes what
-/// earlier purges left (`JournalLock::finish_purges`). Every ID is classified on one listing
-/// before anything is written: a head other than the one seen is `Refusal::Changed` and
-/// nothing is written. Kept ones are reported, not errors; an ID not listed counts as gone.
-/// A file in use stops only its own transaction ([`Keep::InUse`]: its tombstone stays, a later
-/// run finishes it).
+/// without one) under the journal lock, by the rules of this module. Every ID (each once, the
+/// first occurrence) is classified on one listing before anything is written: a head other
+/// than the one seen is `Refusal::Changed` with nothing written, in both modes; in
+/// [`PurgeMode::Exact`] so is an ID a [`Keep`] applies to. An ID not listed counts as gone
+/// (done) in both. Then it finishes what earlier purges left (`JournalLock::finish_purges`, best
+/// effort) and purges. A file in use stops only its own transaction ([`Keep::InUse`]: its
+/// tombstone stays, a later run finishes it); an access error of one transaction reports it
+/// ([`Keep::Foreign`]) and the run goes on.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "flow::history calls it from P5-6d-1b on")
@@ -142,6 +161,7 @@ fn holds_profile(j: &Journal<'_>, id: &TxnId) -> bool {
 pub(crate) fn purge_seen(
     cx: &ExecCtx<'_>,
     ids: &[(TxnId, Option<[u8; 32]>)],
+    mode: PurgeMode,
 ) -> Result<PurgeReport, ExecError> {
     standard_user(cx.sys)?;
     let j = Journal::new(cx.app, cx.tag);
@@ -149,7 +169,12 @@ pub(crate) fn purge_seen(
     let listing = j.list().map_err(Refusal::from)?;
     let mut report = PurgeReport::default();
     let mut todo = Vec::new();
+    let mut asked: Vec<TxnId> = Vec::new();
     for (id, seen) in ids {
+        if asked.contains(id) {
+            continue;
+        }
+        asked.push(*id);
         let Some(t) = listing.txns.iter().find(|t| t.id == *id) else {
             report.gone.push(*id);
             continue;
@@ -159,9 +184,10 @@ pub(crate) fn purge_seen(
         {
             return Err(Refusal::Changed { txn: *id }.into());
         }
-        match keep(&j, &listing, t) {
-            None => todo.push((*id, *seen)),
-            Some(k) => report.refused.push((*id, k)),
+        match (keep(&j, &listing, t), mode) {
+            (None, _) => todo.push((*id, *seen)),
+            (Some(_), PurgeMode::Exact) => return Err(Refusal::Changed { txn: *id }.into()),
+            (Some(k), PurgeMode::Lenient) => report.refused.push((*id, k)),
         }
     }
     lock.finish_purges()?;
@@ -170,6 +196,10 @@ pub(crate) fn purge_seen(
             Ok(_) => report.removed.push(id),
             Err(JournalError::NotFound(_)) => report.gone.push(id),
             Err(JournalError::Purge { why, .. }) => report.refused.push((id, keep_of(why))),
+            Err(JournalError::Root(_)) => report.refused.push((id, Keep::Unreadable)),
+            Err(JournalError::Sys(e)) if e.kind == SysErrorKind::AccessDenied => {
+                report.refused.push((id, Keep::Foreign));
+            }
             Err(e) => return Err(e.into()),
         }
     }
@@ -180,7 +210,7 @@ pub(crate) fn purge_seen(
 fn keep_of(why: PurgeStop) -> Keep {
     match why {
         PurgeStop::InUse => Keep::InUse,
-        PurgeStop::TooManyEntries => Keep::TooLarge,
+        PurgeStop::TooManyEntries => Keep::TooManyEntries,
         PurgeStop::NotSettled => Keep::NotSettled,
         // Under the lock the listing cannot change, so another head or a tombstone for another
         // head is something planted.
