@@ -470,3 +470,23 @@ fn fl3_launch_lines_type_each_note() {
     assert_eq!(launch_of(&lines, 5).map(|l| l.id), Some(ids[4]));
     assert!(launch_of(&lines, 99).is_none());
 }
+
+/// FH1 (P5-6c, moved from the CLI's hints): `rebind_may_help` says no for a refusal that is not a
+/// changed game folder and for a halt it cannot judge (no transaction, so no Steam root); the
+/// positive cases are the CLI goldens and the app's AB1.
+#[test]
+fn fh1_a_rebind_is_not_suggested_without_a_changed_folder() {
+    use super::{RebindCue, rebind_may_help};
+    use crate::exec::{Halt, Refusal, SteamGone};
+    let busy = Refusal::Busy(crate::escape::text("game.exe").into_owned());
+    assert!(!rebind_may_help(None, RebindCue::Refused(&busy)));
+    let halt = Halt {
+        op: 0,
+        root: 0,
+        why: Box::new(Refusal::SteamGone {
+            app_id: 220,
+            gone: SteamGone::NoManifest,
+        }),
+    };
+    assert!(!rebind_may_help(None, RebindCue::Halted(&halt)));
+}

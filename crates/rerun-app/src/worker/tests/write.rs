@@ -57,7 +57,11 @@ fn write_index(sha: &str) -> String {
 
 /// Steam with the game and its `game.ini`, the write Topo imported.
 fn write_world() -> FakeSystem {
-    let sys = steam_world("Invented W");
+    write_world_gpu(None)
+}
+
+pub(super) fn write_world_gpu(gpu: Option<rerun_core::sys::GpuAdapter>) -> FakeSystem {
+    let sys = steam_world_gpu("Invented W", gpu);
     sys.fake_fs()
         .put_file(Path::new(&format!(r"{G}\game.ini")), WRITE_INI.as_bytes())
         .unwrap();
@@ -81,10 +85,41 @@ pub(super) struct Rig {
     pub(super) session: Session,
     pub(super) lang: Lang,
     /// The nonce of the last dialog the worker showed (what a confirm click carries).
-    nonce: u64,
+    pub(super) nonce: u64,
 }
 
 impl Rig {
+    /// A world whose graphics adapter is an NVIDIA one (the Topo's `online` problem applies).
+    pub(super) fn with_nvidia(lang: Lang) -> Self {
+        let gpu = rerun_core::sys::GpuAdapter {
+            name: "NVIDIA GeForce RTX 4070".to_owned(),
+            vendor_id: 0x10DE,
+            device_id: 0x2786,
+            subsys_id: 0,
+            revision: 0xa1,
+            luid: 1,
+            dedicated_video_memory: 12 << 30,
+            shared_system_memory: 16 << 30,
+            software: false,
+            umd_version: None,
+        };
+        let sys = write_world_gpu(Some(gpu));
+        // The compatibility layer is written under this key, which Windows has.
+        sys.fake_registry()
+            .put_key_all(&rerun_core::sys::registry::RegKey::new(
+                rerun_core::sys::registry::Hive::CurrentUser,
+                rerun_core::sys::registry::RegView::Native,
+                r"Software\Microsoft\Windows NT\CurrentVersion",
+            ))
+            .unwrap();
+        Self {
+            sys,
+            session: Session::default(),
+            lang,
+            nonce: 0,
+        }
+    }
+
     pub(super) fn new(lang: Lang) -> Self {
         Self {
             sys: write_world(),
@@ -123,6 +158,12 @@ impl Rig {
     pub(super) fn revert(&mut self, txn: TxnId) -> Vec<Event> {
         let nonce = self.nonce;
         self.run(Job::Revert { txn, nonce })
+    }
+
+    /// The click on "Rebind and undo" of the dialog last shown (P5-6c).
+    pub(super) fn rebind(&mut self, txn: TxnId) -> Vec<Event> {
+        let nonce = self.nonce;
+        self.run(Job::Rebind { txn, nonce })
     }
 
     /// The click on "Close without undoing" of the dialog last shown.
@@ -217,7 +258,7 @@ pub(super) fn result_of(ev: &[Event]) -> &ResultVm {
         .unwrap_or_else(|| panic!("no result in {ev:?}"))
 }
 
-fn dialog_of(ev: &[Event]) -> &DialogVm {
+pub(super) fn dialog_of(ev: &[Event]) -> &DialogVm {
     ev.iter()
         .find_map(|e| match e {
             Event::Dialog(d) => Some(&**d),
@@ -244,7 +285,7 @@ fn game_in(ev: &[Event]) -> &GameVm {
         .unwrap_or_else(|| panic!("no game page in {ev:?}"))
 }
 
-fn pick(issue: &str, variant: &str) -> Pick {
+pub(super) fn pick(issue: &str, variant: &str) -> Pick {
     Pick {
         issue: issue.to_owned(),
         variant: variant.to_owned(),

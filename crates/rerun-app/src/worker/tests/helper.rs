@@ -669,6 +669,49 @@ fn ah6_a_second_click_never_starts_the_helper_twice() {
 
 // ---------- AH7 ----------
 
+/// AH8 (P5-6c) a change with a firewall rule cannot be rebound from the app: its undo needs the
+/// administrator prompt, which the rebind preview does not name. The dialog says so and cannot be
+/// confirmed; no token is kept, so a confirm writes nothing and never starts the helper.
+#[test]
+fn ah8_a_change_with_a_firewall_rule_is_not_rebound_from_the_app() {
+    let mut rig = Rig::new(helper_world(true, CONSENT), true, Lang::En);
+    let pv = rig.preview_of(both());
+    let ev = rig.run(Job::Apply { hash: pv.hash });
+    let txn = open_cards(&ev)[0];
+    assert_eq!(rig.rerun_rules(), 1, "precondition: the rule is there");
+    // The library moves; the game folder is gone where it was bound.
+    super::rebind::move_library(&rig.sys, &["game.exe", "game.ini"]);
+    let starts = rig.starts();
+    let ev = rig.run(Job::RevertPreview { txn });
+    assert_eq!(
+        dialog_of(&ev).secondary.as_deref(),
+        Some("Check new folder"),
+        "precondition: a rebind is offered"
+    );
+    let ev = rig.run(Job::RebindPreview { txn });
+    let d = dialog_of(&ev);
+    assert_eq!(d.kind, crate::vm::DialogKind::Rebind);
+    assert!(!d.can_confirm);
+    assert!(
+        d.blocked
+            .as_deref()
+            .is_some_and(|b| b.contains("firewall rule")),
+        "{:?}",
+        d.blocked
+    );
+    // A confirm writes nothing: the rule stays, the helper is not started, the change stays open.
+    let nonce = d.nonce;
+    let ev = rig.run(Job::Rebind { txn, nonce });
+    assert!(!ev.iter().any(|e| matches!(e, Event::Result(_))), "{ev:?}");
+    assert_eq!(rig.rerun_rules(), 1);
+    assert_eq!(rig.starts(), starts);
+    let ev = rig.run(Job::Status);
+    assert!(
+        matches!(ev.as_slice(), [Event::Applied(a)] if a.open == 1),
+        "{ev:?}"
+    );
+}
+
 /// The world shared between the worker thread and the test.
 struct Shared(std::sync::Arc<FakeSystem>);
 

@@ -44,6 +44,7 @@ pub(super) fn download_data(d: &DownloadVm) -> DialogData {
         cancel_label: s(&d.cancel),
         cancel_disabled: d.cancelling,
         no_cancel: false,
+        secondary: SharedString::new(),
     }
 }
 

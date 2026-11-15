@@ -54,11 +54,11 @@ use rerun_core::catalog::model::Status;
 use rerun_core::detect::steam;
 use rerun_core::elevate::PromptState;
 use rerun_core::escape::Shown;
-use rerun_core::exec;
+use rerun_core::exec::{self, ExecError, RebindRefusal, Refusal};
 use rerun_core::flow::{
     self, ActError, Env, FetchError, ForgetShown, Found, GameCache, GameView, Guarded, Heads,
     IndexState, LibraryEvent, Lookup, NeedState, PackageNeed, Planned, Previewed, Progress,
-    RevertShown,
+    RebindShown, RevertGate, RevertShown,
 };
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::journal::TxnId;
@@ -128,6 +128,20 @@ pub enum Job {
         /// The nonce of the shown preview (`DialogVm::nonce`).
         nonce: u64,
     },
+    /// The preview of binding a transaction to the game folder Steam lists now (P5-6c). Reads
+    /// only; offered from an undo dialog whose game folder has changed.
+    RebindPreview {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// Binds the transaction to the new folder and undoes it there: only if `nonce` is the one
+    /// of the rebind dialog the user confirmed (P5-6c, the rule of [`Job::Revert`]).
+    Rebind {
+        /// The transaction.
+        txn: TxnId,
+        /// The nonce of the shown rebind preview.
+        nonce: u64,
+    },
     /// The preview of closing a transaction without undoing it.
     ForgetPreview {
         /// The transaction.
@@ -170,6 +184,8 @@ impl Job {
             Self::Apply { .. } => "apply".to_owned(),
             Self::RevertPreview { .. } => "undo preview".to_owned(),
             Self::Revert { .. } => "undo".to_owned(),
+            Self::RebindPreview { .. } => "rebind preview".to_owned(),
+            Self::Rebind { .. } => "rebind".to_owned(),
             Self::ForgetPreview { .. } => "forget preview".to_owned(),
             Self::Forget { .. } => "forget".to_owned(),
             Self::DownloadAsk { app_id, .. } => format!("download ask {app_id}"),
@@ -182,7 +198,7 @@ impl Job {
     pub fn writes(&self) -> bool {
         matches!(
             self,
-            Self::Apply { .. } | Self::Revert { .. } | Self::Forget { .. }
+            Self::Apply { .. } | Self::Revert { .. } | Self::Rebind { .. } | Self::Forget { .. }
         )
     }
 
@@ -484,6 +500,9 @@ struct Pending {
     /// An undo preview, with the game its transaction is about, its nonce and the UAC prompt
     /// the dialog named (an undo that removes a firewall rule).
     revert: Option<(RevertShown, Option<u32>, u64, Option<PromptState>)>,
+    /// A rebind preview, with the game its transaction is about and its nonce (P5-6c; no
+    /// prompt: a change with a firewall rule keeps no token).
+    rebind: Option<(RebindShown, Option<u32>, u64)>,
     /// A forget preview, with the game its transaction is about.
     forget: Option<(ForgetShown, Option<u32>, u64)>,
     /// The list the consent (or failure) dialog showed: a download is made only for it.
@@ -638,6 +657,8 @@ fn run_job(
         Job::Apply { hash } => apply(&mut g, hash, lang, session, emit),
         Job::RevertPreview { txn } => revert_preview(&g, txn, false, lang, session, emit),
         Job::Revert { txn, nonce } => revert(&g, txn, *nonce, lang, session, emit),
+        Job::RebindPreview { txn } => rebind_preview(&g, txn, false, lang, session, emit),
+        Job::Rebind { txn, nonce } => rebind(&g, txn, *nonce, lang, session, emit),
         Job::ForgetPreview { txn } => forget_preview(&g, txn, false, lang, session, emit),
         Job::Forget { txn, nonce } => forget(&g, txn, *nonce, lang, session, emit),
         Job::DownloadAsk { app_id, variant } => {
@@ -936,6 +957,7 @@ fn revert_preview(
     emit: &mut dyn FnMut(Event),
 ) {
     session.pending.revert = None;
+    session.pending.rebind = None;
     match flow::revert_preview(g, txn) {
         Ok((p, shown)) => {
             let app = vm::app_of(&p.status);
@@ -947,7 +969,20 @@ fn revert_preview(
                 .prompt
                 .is_some()
                 .then(|| vm::helper_state(&flow::helper(g)));
-            let dialog = vm::revert_vm(&p, g.env().install, changed, nonce, helper.as_ref(), lang);
+            // A halt at a Steam folder that is gone: a rebind may help (P5-6c). Only offered; the
+            // rebind preview is the authority.
+            let rebind = p.verified.halted.as_ref().is_some_and(|h| {
+                flow::rebind_may_help(Some(&p.status), flow::RebindCue::Halted(h))
+            });
+            let dialog = vm::revert_vm(
+                &p,
+                g.env().install,
+                changed,
+                nonce,
+                helper.as_ref(),
+                rebind,
+                lang,
+            );
             // Without a ready helper no token is kept, so no confirm can reach `flow::revert`.
             if token_kept(p.prompt.as_ref(), helper.as_ref()) {
                 let prompt = match helper {
@@ -958,8 +993,41 @@ fn revert_preview(
             }
             emit(Event::Dialog(Box::new(dialog)));
         }
+        // The game folder is another folder now: nothing to undo yet, but a rebind may help.
+        Err(RevertGate::Refused(r))
+            if flow::rebind_may_help(None, flow::RebindCue::Refused(&r)) =>
+        {
+            session.nonce += 1;
+            let nonce = session.nonce;
+            let dialog = vm::revert_refused_vm(*txn, &r, nonce, changed, lang);
+            emit(Event::Dialog(Box::new(dialog)));
+        }
         Err(gate) => emit(Event::Result(vm::gate(&gate, lang))),
     }
+}
+
+/// What an undo or a rebind came to: the result with the report per change and the launch option,
+/// then the pages read again.
+fn finish_revert(
+    g: &Guarded<'_>,
+    o: flow::RevertOutcome,
+    app: Option<u32>,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    // The head names what each change was (read only; the journal is as the undo left it).
+    let ops = g
+        .app()
+        .and_then(|app| flow::transaction(app, &o.report.txn))
+        .map(|st| vm::head_ops(&st, lang))
+        .unwrap_or_default();
+    let mut r = vm::revert_result(&o, &ops, lang);
+    if let Some(l) = o.launch_option {
+        vm::add_launch_option(&mut r, &l, g.env().install, lang);
+    }
+    emit(Event::Result(r));
+    refresh(g, app, lang, session, emit);
 }
 
 /// Undoes the transaction of the dialog the user confirmed (`nonce`). A confirm of any other
@@ -985,22 +1053,76 @@ fn revert(
     // The helper's batch is reverted first (LIFO), so the dialog of Windows comes right away.
     waiting_for_uac(prompt.as_ref(), lang, emit);
     match flow::revert(g, shown) {
-        Ok(o) => {
-            // The head names what each change was (read only; the journal is as the undo left it).
-            let ops = g
-                .app()
-                .and_then(|app| flow::transaction(app, &o.report.txn))
-                .map(|st| vm::head_ops(&st, lang))
-                .unwrap_or_default();
-            let mut r = vm::revert_result(&o, &ops, lang);
-            if let Some(l) = o.launch_option {
-                vm::add_launch_option(&mut r, &l, g.env().install, lang);
-            }
-            emit(Event::Result(r));
-            refresh(g, app, lang, session, emit);
-        }
+        Ok(o) => finish_revert(g, o, app, lang, session, emit),
         // What is there now differs from the preview: nothing was written; show it again.
         Err(ActError::Changed) => revert_preview(g, txn, true, lang, session, emit),
+        Err(e) => {
+            emit(Event::Result(vm::act_error(&e, lang)));
+            refresh(g, app, lang, session, emit);
+        }
+    }
+}
+
+/// The preview of binding a transaction to the folder Steam lists now (P5-6c). Reads only. A
+/// transaction that is bound already goes straight to the undo preview; every other refusal is
+/// said in its own words.
+fn rebind_preview(
+    g: &Guarded<'_>,
+    txn: &TxnId,
+    changed: bool,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    session.pending.revert = None;
+    session.pending.rebind = None;
+    match flow::rebind_preview(g, txn) {
+        Ok((view, shown)) => {
+            let app = vm::app_of(&view.status);
+            session.nonce += 1;
+            let nonce = session.nonce;
+            let dialog = vm::rebind_vm(&view, g.env().install, changed, nonce, lang);
+            // A change with a firewall rule cannot be confirmed here: no token, so no confirm
+            // reaches the core (the dialog says why).
+            if dialog.can_confirm {
+                session.pending.rebind = Some((shown, app, nonce));
+            }
+            emit(Event::Dialog(Box::new(dialog)));
+        }
+        // Bound already: undo it as it is.
+        Err(RevertGate::Refused(Refusal::Rebind(RebindRefusal::AlreadyBound { .. }))) => {
+            revert_preview(g, txn, false, lang, session, emit);
+        }
+        Err(gate) => emit(Event::Result(vm::gate(&gate, lang))),
+    }
+}
+
+/// Binds and undoes the transaction of the rebind dialog the user confirmed (`nonce`). A confirm
+/// of any other dialog writes nothing: the current rebind preview is shown again (H1 of P5-5a).
+fn rebind(
+    g: &Guarded<'_>,
+    txn: &TxnId,
+    nonce: u64,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    let ok = session
+        .pending
+        .rebind
+        .as_ref()
+        .is_some_and(|(s, _, n)| s.txn() == *txn && *n == nonce);
+    let Some((shown, app, _)) = ok.then(|| session.pending.rebind.take()).flatten() else {
+        rebind_preview(g, txn, true, lang, session, emit);
+        return;
+    };
+    match flow::rebind(g, shown) {
+        Ok(o) => finish_revert(g, o, app, lang, session, emit),
+        // What is on disk now differs from the preview: nothing was written; show it again.
+        Err(ActError::Changed)
+        | Err(ActError::Exec(ExecError::Refused(Refusal::Rebind(RebindRefusal::Changed)))) => {
+            rebind_preview(g, txn, true, lang, session, emit);
+        }
         Err(e) => {
             emit(Event::Result(vm::act_error(&e, lang)));
             refresh(g, app, lang, session, emit);

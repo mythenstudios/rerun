@@ -772,11 +772,46 @@ fn every() -> Vec<Msg> {
         OrphansNoJournal,
         AttentionUnreadableTitle,
         AttentionUnreadableBody,
+        UndoFolderChanged,
+        UndoFolderChangedBody,
+        RebindCheckBtn,
+        RebindTitle,
+        RebindIntro,
+        RebindLblOld,
+        RebindLblLibrary,
+        RebindLblWhy,
+        RebindLblNew,
+        RebindLblNewLibrary,
+        RebindCreatedFound,
+        RebindCreatedMissing,
+        RebindRegistryNote,
+        RebindScopeNote,
+        RebindPermanentNote,
+        RebindBtn,
+        RebindFirewallBlocked,
+        RefRebindTitle,
+        RefRebindNotNeeded,
+        RefRebindManual,
+        RefRebindNotApplied,
+        RefRebindUndecided,
+        RefRebindMoreThanOne,
+        RefRebindNoCandidate,
+        RefRebindAmbiguous,
+        RefRebindLibraryUnreadable,
+        RefRebindUpdatePending,
+        RefRebindOtherInstallDir,
+        RefRebindCandidate,
+        RefRebindSharedFolder,
+        RefRebindHalts,
+        RefRebindNotWritable,
+        RefRebindForeign,
+        RefRebindRevertPending,
+        RefRebindNoRoom,
     ]
 }
 
 /// The number of messages: one more than the highest [`ordinal`].
-const COUNT: usize = 542;
+const COUNT: usize = 577;
 
 /// A message's position in the enum. The `match` is exhaustive: a new variant does not compile
 /// without an ordinal here, and [`every_ordinal_is_listed`] fails until [`every`] lists it.
@@ -1326,6 +1361,41 @@ fn ordinal(m: Msg) -> usize {
         OrphansNoJournal => 539,
         AttentionUnreadableTitle => 540,
         AttentionUnreadableBody => 541,
+        UndoFolderChanged => 542,
+        UndoFolderChangedBody => 543,
+        RebindCheckBtn => 544,
+        RebindTitle => 545,
+        RebindIntro => 546,
+        RebindLblOld => 547,
+        RebindLblLibrary => 548,
+        RebindLblWhy => 549,
+        RebindLblNew => 550,
+        RebindLblNewLibrary => 551,
+        RebindCreatedFound => 552,
+        RebindCreatedMissing => 553,
+        RebindRegistryNote => 554,
+        RebindScopeNote => 555,
+        RebindPermanentNote => 556,
+        RebindBtn => 557,
+        RebindFirewallBlocked => 558,
+        RefRebindTitle => 559,
+        RefRebindNotNeeded => 560,
+        RefRebindManual => 561,
+        RefRebindNotApplied => 562,
+        RefRebindUndecided => 563,
+        RefRebindMoreThanOne => 564,
+        RefRebindNoCandidate => 565,
+        RefRebindAmbiguous => 566,
+        RefRebindLibraryUnreadable => 567,
+        RefRebindUpdatePending => 568,
+        RefRebindOtherInstallDir => 569,
+        RefRebindCandidate => 570,
+        RefRebindSharedFolder => 571,
+        RefRebindHalts => 572,
+        RefRebindNotWritable => 573,
+        RefRebindForeign => 574,
+        RefRebindRevertPending => 575,
+        RefRebindNoRoom => 576,
     }
 }
 
@@ -1361,7 +1431,7 @@ fn every_ordinal_is_listed() {
     let missing: Vec<usize> = (0..COUNT).filter(|i| !seen[*i]).collect();
     assert!(missing.is_empty(), "ordinals not in every(): {missing:?}");
     // COUNT is right: the last variant has the highest ordinal.
-    assert_eq!(ordinal(Msg::AttentionUnreadableBody), COUNT - 1);
+    assert_eq!(ordinal(Msg::RefRebindNoRoom), COUNT - 1);
 }
 
 #[test]

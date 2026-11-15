@@ -132,7 +132,17 @@ fn bare() -> FakeSystemBuilder {
 /// Steam with app 220 in `G` (an x86 game and an x64 launcher) named `name`, and app 230 that
 /// Steam is updating.
 fn steam_world(name: &str) -> FakeSystem {
-    let sys = bare()
+    steam_world_gpu(name, None)
+}
+
+/// [`steam_world`] with a graphics adapter (a Topo condition may need one).
+fn steam_world_gpu(name: &str, gpu: Option<rerun_core::sys::GpuAdapter>) -> FakeSystem {
+    let base = bare();
+    let base = match gpu {
+        Some(g) => base.gpu(g),
+        None => base,
+    };
+    let sys = base
         .value(
             RootSource::CurrentUser.key(),
             RootSource::CurrentUser.value_name(),
@@ -1190,4 +1200,5 @@ mod download;
 mod helper;
 mod history;
 mod problems;
+mod rebind;
 mod write;

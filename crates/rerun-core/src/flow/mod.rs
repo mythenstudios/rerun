@@ -67,10 +67,10 @@ pub use packages::{
     redirect_hosts,
 };
 pub use revert::{
-    ActError, CleanupAsk, ForgetPreview, ForgetShown, LaunchOption, ProfileFate, RebindShown,
-    RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome, RevertPreview, RevertShown,
-    RevertWould, forget, forget_preview, holding, left_foreign, rebind, rebind_preview, revert,
-    revert_begun, revert_preview,
+    ActError, CleanupAsk, ForgetPreview, ForgetShown, LaunchOption, ProfileFate, RebindCue,
+    RebindShown, RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome, RevertPreview,
+    RevertShown, RevertWould, forget, forget_preview, holding, left_foreign, rebind,
+    rebind_may_help, rebind_preview, revert, revert_begun, revert_preview,
 };
 pub use status::{
     Heads, Holder, JournalView, StatusView, head, journal, orphans, profile_id_of, profile_of,

@@ -20,12 +20,12 @@ use rerun_core::catalog::model::{SourceType, VariantStatus};
 use rerun_core::elevate::{PromptKind, PromptState};
 use rerun_core::escape::{self, Shown};
 use rerun_core::exec::{
-    self, ApplyError, ExecError, HelperFailure, Outcome, Refusal, TxnLine, TxnStatus,
+    self, ApplyError, ExecError, HelperFailure, Outcome, RebindRefusal, Refusal, TxnLine, TxnStatus,
 };
 use rerun_core::flow::{
     self, ActError, ForgetPreview, LaunchOption, LaunchView, OptionText, PlanRefusal, Planned,
-    ProfileFate, RevertAsk, RevertEnd, RevertGate, RevertOutcome, RevertPreview, RevertWould,
-    StoreRefusal,
+    ProfileFate, RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome, RevertPreview,
+    RevertWould, StoreRefusal,
 };
 use rerun_core::hw::SacState;
 use rerun_core::journal::{Observed, TxnId};
@@ -817,6 +817,7 @@ pub fn refusal(r: &Refusal, lang: Lang) -> ResultVm {
             false,
         ),
         Refusal::HelperPlan(_) => calm(Tone::Calm, RefStaleTitle, RefStaleBody, true),
+        Refusal::Rebind(x) => rebind_refusal(x, lang),
         Refusal::Forgotten { .. } => calm(Tone::Calm, RefNothingTitle, RefNothingBody, true),
         _ => calm(
             Tone::Attention,
@@ -1194,6 +1195,49 @@ pub fn gate(g: &RevertGate, lang: Lang) -> ResultVm {
     }
 }
 
+/// Why a rebind is refused, in Rerun's words (P5-6c): the same heading, one sentence for each
+/// reason (`refusal` adds the core's text as the detail). The reasons that go away by themselves
+/// are calm.
+fn rebind_refusal(x: &RebindRefusal, lang: Lang) -> ResultVm {
+    use Msg::*;
+    let (tone, body) = match x {
+        RebindRefusal::NotNeeded | RebindRefusal::AlreadyBound { .. } => {
+            (Tone::Calm, RefRebindNotNeeded)
+        }
+        RebindRefusal::Manual => (Tone::Attention, RefRebindManual),
+        RebindRefusal::NotApplied => (Tone::Attention, RefRebindNotApplied),
+        RebindRefusal::Undecided(_) => (Tone::Calm, RefRebindUndecided),
+        RebindRefusal::MoreThanOne => (Tone::Attention, RefRebindMoreThanOne),
+        RebindRefusal::NoCandidate => (Tone::Attention, RefRebindNoCandidate),
+        RebindRefusal::Ambiguous(_) => (Tone::Attention, RefRebindAmbiguous),
+        RebindRefusal::LibraryUnreadable(_) => (Tone::Calm, RefRebindLibraryUnreadable),
+        RebindRefusal::UpdatePending => (Tone::Calm, RefRebindUpdatePending),
+        RebindRefusal::OtherInstallDir => (Tone::Attention, RefRebindOtherInstallDir),
+        RebindRefusal::Candidate(_) => (Tone::Attention, RefRebindCandidate),
+        RebindRefusal::SharedFolder => (Tone::Attention, RefRebindSharedFolder),
+        RebindRefusal::Halts(_) => (Tone::Attention, RefRebindHalts),
+        RebindRefusal::NotWritable => (Tone::Attention, RefRebindNotWritable),
+        RebindRefusal::Foreign { .. } => (Tone::Attention, RefRebindForeign),
+        RebindRefusal::RevertPending { .. } => (Tone::Attention, RefRebindRevertPending),
+        RebindRefusal::TooLarge | RebindRefusal::NoRoom => (Tone::Attention, RefRebindNoRoom),
+        // The folder changed since the preview: the worker shows the preview again, not this.
+        RebindRefusal::Changed => {
+            return result(Tone::Calm, lang, RefStaleTitle, RefStaleBody, true);
+        }
+        // A reason a later version adds: the generic message with the core's text.
+        _ => {
+            return result(
+                Tone::Attention,
+                lang,
+                RefUnexpectedTitle,
+                RefUnexpectedBody,
+                false,
+            );
+        }
+    };
+    result(tone, lang, RefRebindTitle, body, false)
+}
+
 // ---------- applied cards ----------
 
 /// One transaction of the journal as a card (user decision U1: the card lists everything in
@@ -1335,6 +1379,8 @@ pub enum DialogKind {
     Undo,
     /// "Close this change without undoing it?"
     Forget,
+    /// "Bind this change to the new folder?" (P5-6c)
+    Rebind,
 }
 
 /// What becomes of the launch profile and the option the user set in Steam (X12).
@@ -1380,6 +1426,9 @@ pub struct DialogVm {
     pub can_confirm: bool,
     /// Why it does not.
     pub blocked: Option<String>,
+    /// A second button next to the confirm: "Check new folder" in an undo dialog whose game folder
+    /// has changed (P5-6c). It only asks for the rebind preview; it writes nothing.
+    pub secondary: Option<String>,
 }
 
 fn fate_of(o: Option<Observed>, lang: Lang) -> (Badge, String) {
@@ -1471,6 +1520,7 @@ pub fn revert_vm(
     changed: bool,
     nonce: u64,
     helper: Option<&HelperState>,
+    rebind_may_help: bool,
     lang: Lang,
 ) -> DialogVm {
     let mut notes = vec![tx(lang, Msg::UndoCloseGame)];
@@ -1490,6 +1540,10 @@ pub fn revert_vm(
     if let Some(h) = &p.verified.halted {
         notes.push(tx(lang, Msg::UndoHalt { op: h.op }));
         details.push(DetailVm::of(shown_error(&*h.why)));
+    }
+    if rebind_may_help {
+        notes.push(tx(lang, Msg::UndoFolderChanged));
+        notes.push(tx(lang, Msg::UndoFolderChangedBody));
     }
     let blocked = prompt_block(p.prompt.as_ref(), helper, lang);
     if p.prompt.is_some()
@@ -1516,6 +1570,101 @@ pub fn revert_vm(
         confirm: tx(lang, Msg::UndoBtn),
         can_confirm: blocked.is_none(),
         blocked,
+        secondary: rebind_may_help.then(|| tx(lang, Msg::RebindCheckBtn)),
+    }
+}
+
+/// The undo dialog for an undo whose preview was refused because the game folder is another
+/// folder now (P5-6c): nothing to confirm, the folder change and the button that asks for the
+/// rebind preview. The core's refusal is the detail.
+pub fn revert_refused_vm(
+    txn: TxnId,
+    why: &Refusal,
+    nonce: u64,
+    changed: bool,
+    lang: Lang,
+) -> DialogVm {
+    DialogVm {
+        kind: DialogKind::Undo,
+        nonce,
+        txn,
+        title: tx(lang, Msg::UndoTitle),
+        intro: tx(lang, Msg::UndoFolderChanged),
+        changed: changed.then(|| tx(lang, Msg::ChangedNote)),
+        ops: Vec::new(),
+        notes: vec![tx(lang, Msg::UndoFolderChangedBody)],
+        details: vec![DetailVm::of(shown_error(why))],
+        launch: None,
+        confirm: tx(lang, Msg::UndoBtn),
+        can_confirm: false,
+        blocked: None,
+        secondary: Some(tx(lang, Msg::RebindCheckBtn)),
+    }
+}
+
+/// The rebind dialog (P5-6c, user decision E3 a: one dialog, no extra checkbox): the folder bound
+/// now and why it does not open, the folder Steam lists now, the folders the change created
+/// there, what the undo does there per change, the registry note (only with registry changes),
+/// the scope, that the new binding is permanent, and what becomes of the launch option. A change
+/// with a firewall rule cannot be rebound here: that undo needs the administrator prompt, which
+/// the rebind preview does not name (the token is not kept, so no confirm reaches the core).
+pub fn rebind_vm(
+    view: &RebindView,
+    install: &Result<PathBuf, String>,
+    changed: bool,
+    nonce: u64,
+    lang: Lang,
+) -> DialogVm {
+    let (st, p) = (&view.status, &view.rebind);
+    let path = |r: &rerun_core::path::RootPath| escape::path(&r.to_string()).into_owned();
+    let line = |m: Msg, what: Shown<'static>| DetailVm {
+        who: Some(escape::text(&tx(lang, m)).into_owned()),
+        what,
+    };
+    let mut details = vec![
+        line(Msg::RebindLblOld, path(&p.to.from.path)),
+        line(Msg::RebindLblLibrary, path(&p.to.from.store)),
+        line(Msg::RebindLblWhy, shown_error(&*p.why)),
+        line(Msg::RebindLblNew, path(&p.path)),
+        line(Msg::RebindLblNewLibrary, path(&p.to.store)),
+    ];
+    for d in &p.created {
+        let m = if d.found {
+            Msg::RebindCreatedFound
+        } else {
+            Msg::RebindCreatedMissing
+        };
+        details.push(line(m, d.path.clone()));
+    }
+    let head = flow::head(st);
+    let mut notes = vec![tx(lang, Msg::UndoCloseGame)];
+    // Only where the head has registry ops (a registry op has no root in the preview).
+    if head.is_some_and(|h| h.ops.iter().any(|o| o.root.is_none())) {
+        notes.push(tx(lang, Msg::RebindRegistryNote));
+    }
+    notes.push(tx(lang, Msg::RebindScopeNote));
+    notes.push(tx(lang, Msg::RebindPermanentNote));
+    let blocked = head
+        .is_some_and(|h| h.firewall.is_some())
+        .then(|| tx(lang, Msg::RebindFirewallBlocked));
+    DialogVm {
+        kind: DialogKind::Rebind,
+        nonce,
+        txn: st.id,
+        title: tx(lang, Msg::RebindTitle),
+        intro: tx(lang, Msg::RebindIntro),
+        changed: changed.then(|| tx(lang, Msg::ChangedNote)),
+        ops: fate_ops(st, &p.verified, lang),
+        notes,
+        details,
+        launch: view
+            .launch_option
+            .as_ref()
+            .map(|l| fate_launch(l, install, lang)),
+        confirm: tx(lang, Msg::RebindBtn),
+        can_confirm: blocked.is_none(),
+        blocked,
+        secondary: None,
     }
 }
 
@@ -1580,5 +1729,6 @@ pub fn forget_vm(
         confirm: tx(lang, Msg::BtnForget),
         can_confirm: true,
         blocked: None,
+        secondary: None,
     }
 }

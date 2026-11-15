@@ -121,7 +121,11 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
         None => ("", Vec::new(), SharedString::new(), Vec::new()),
     };
     DialogData {
-        kind: i32::from(d.kind == DialogKind::Forget),
+        kind: match d.kind {
+            DialogKind::Undo => 0,
+            DialogKind::Forget => 1,
+            DialogKind::Rebind => 4,
+        },
         title: s(&d.title),
         intro: s(&d.intro),
         changed: d.changed.as_deref().map(s).unwrap_or_default(),
@@ -140,6 +144,7 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
         cancel_label: SharedString::new(),
         cancel_disabled: false,
         no_cancel: false,
+        secondary: d.secondary.as_deref().map(s).unwrap_or_default(),
     }
 }
 
@@ -361,7 +366,25 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         st.worker.send(match kind {
             DialogKind::Undo => Job::Revert { txn, nonce },
             DialogKind::Forget => Job::Forget { txn, nonce },
+            DialogKind::Rebind => Job::Rebind { txn, nonce },
         });
+    });
+
+    // "Check new folder" of an undo dialog: only asks for the rebind preview (reads, writes
+    // nothing).
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_dialog_secondary(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let st = st.borrow();
+        if st.uac || st.download.is_some() || ui.global::<Modal>().get_working() {
+            return;
+        }
+        if let Some((DialogKind::Undo, txn, _)) = st.dialog {
+            st.worker.send(Job::RebindPreview { txn });
+        }
     });
 
     let weak = ui.as_weak();

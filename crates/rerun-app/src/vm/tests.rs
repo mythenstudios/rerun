@@ -4,6 +4,7 @@
 
 mod history;
 mod problems;
+mod rebind;
 
 use rerun_core::catalog::model::{Kind, Tier, VariantStatus};
 use rerun_core::escape;

@@ -485,6 +485,54 @@ pub fn left_foreign(st: &TxnStatus) -> bool {
         .any(|o| o.state == OpState::Reverted(Observed::Foreign))
 }
 
+/// What made an undo stop, for [`rebind_may_help`].
+#[derive(Debug, Clone, Copy)]
+pub enum RebindCue<'a> {
+    /// The preview of the undo was refused.
+    Refused(&'a Refusal),
+    /// The undo would halt here.
+    Halted(&'a crate::exec::Halt),
+}
+
+/// Whether a rebind (a new binding of the game folder to the one Steam lists now, P2-14b) may
+/// help after `cue`: a refusal because the game folder is another folder now, or a halt at a
+/// Steam root that is gone or not installed (not when the app is installed in another folder of
+/// its library: no rebind binds that, E-R1). `st` is the transaction the halt is about (without
+/// it a halt cannot be judged). It decides nothing: the rebind preview is the authority.
+pub fn rebind_may_help(st: Option<&TxnStatus>, cue: RebindCue<'_>) -> bool {
+    use crate::detect::steam::AppState;
+    use crate::exec::SteamGone;
+    use crate::policy::root::RootError;
+    match cue {
+        RebindCue::Refused(r) => matches!(
+            r,
+            Refusal::Root(e) if matches!(**e, RootError::IdentityMismatch { .. })
+        ),
+        RebindCue::Halted(h) => {
+            let steam = st
+                .and_then(head)
+                .and_then(|p| p.roots.get(usize::from(h.root)))
+                .is_some_and(|r| r.steam.is_some());
+            let gone = match &*h.why {
+                // Installed in another folder of its library: no rebind binds that (E-R1).
+                Refusal::SteamGone {
+                    gone: SteamGone::OtherFolder,
+                    ..
+                } => false,
+                Refusal::SteamGone { .. }
+                | Refusal::Steam {
+                    state: AppState::NotInstalled,
+                    ..
+                } => true,
+                Refusal::Root(e) => matches!(&**e, RootError::Sys(s)
+                    if s.kind == crate::sys::SysErrorKind::NotFound),
+                _ => false,
+            };
+            steam && gone
+        }
+    }
+}
+
 /// A revert of `st` began and did not finish (P5-6b): the transaction still counts as applied
 /// but some of its ops are not applied any more (a crash or a halt in the middle of an undo).
 /// It is also true when an op was left as found (foreign, [`left_foreign`]): both show as

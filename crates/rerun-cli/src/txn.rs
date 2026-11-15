@@ -31,7 +31,6 @@
 
 use std::io::Write;
 
-use rerun_core::detect::steam::AppState;
 use rerun_core::escape;
 use rerun_core::exec::launch_result::Outcome;
 use rerun_core::exec::{
@@ -406,9 +405,7 @@ pub(crate) fn orphan_lines(
 /// E5 a: no rebind yet).
 fn refusal<E: Write>(r: &Refusal, txn: TxnId, err: &mut Out<E>) -> Exit {
     note(err, TxnMsg::Error { error: shown(r) });
-    if let Refusal::Root(e) = r
-        && matches!(**e, RootError::IdentityMismatch { .. })
-    {
+    if flow::rebind_may_help(None, flow::RebindCue::Refused(r)) {
         note(err, TxnMsg::IdentityHint { txn });
     }
     // P2-15 (N1): no room for another `RevertIntent`; forget always fits.
@@ -774,25 +771,8 @@ fn rebind_lines(st: &TxnStatus) -> Vec<Message<'_>> {
 
 /// After a halt at a Steam root that is gone: a rebind may bind it (P2-14b).
 fn halt_hint<'a>(st: &TxnStatus, h: &Halt) -> Option<Message<'a>> {
-    let steam = head(st)
-        .and_then(|p| p.roots.get(usize::from(h.root)))
-        .is_some_and(|r| r.steam.is_some());
-    let gone = match &*h.why {
-        // Installed in another folder of its library: no rebind binds that (E-R1).
-        Refusal::SteamGone {
-            gone: exec::SteamGone::OtherFolder,
-            ..
-        } => false,
-        Refusal::SteamGone { .. }
-        | Refusal::Steam {
-            state: AppState::NotInstalled,
-            ..
-        } => true,
-        Refusal::Root(e) => matches!(&**e, RootError::Sys(s)
-            if s.kind == rerun_core::sys::SysErrorKind::NotFound),
-        _ => false,
-    };
-    (steam && gone).then(|| m(TxnMsg::HaltRebindHint { txn: st.id }))
+    flow::rebind_may_help(Some(st), flow::RebindCue::Halted(h))
+        .then(|| m(TxnMsg::HaltRebindHint { txn: st.id }))
 }
 
 /// The preview of a rebind (rule 5): the transaction, the folder bound now and why it does not
