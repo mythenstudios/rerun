@@ -97,6 +97,10 @@ pub(super) fn preview_data(p: &PreviewVm, ready: bool) -> PreviewData {
     }
 }
 
+/// `st.opener` of the dialog that "Clear history..." opens: the history page's button takes the
+/// focus back (`take-focus: Modal.return-to == -1000` in `app.slint`).
+pub(super) const CLEAR_OPENER: i32 = -1000;
+
 pub(super) fn card(c: &TxnCardVm) -> CardData {
     CardData {
         id: s(&c.id),
@@ -402,7 +406,8 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         {
             return;
         }
-        st.opener = -1;
+        // The button takes the focus back when the dialog closes (`Modal.return-to`, app.slint).
+        st.opener = CLEAR_OPENER;
         ui.global::<Modal>().set_return_to(-1);
         st.worker.send(Job::ClearPreview);
     });

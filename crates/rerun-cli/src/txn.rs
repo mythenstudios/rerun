@@ -1062,14 +1062,24 @@ fn run_history_clear<W: Write, E: Write>(
         }
     };
     let mut lines = Vec::new();
+    // Review S2: empty entries (they changed nothing) as one line, never one row each.
+    let empty = |i: &flow::ClearItem| i.line == TxnLine::Empty;
     if !p.remove.is_empty() || !p.results.is_empty() {
         lines.push(m(TxnMsg::ClearGoesHeader));
-        for i in &p.remove {
+        for i in p.remove.iter().filter(|i| !empty(i)) {
             lines.push(m(TxnMsg::ClearGoes {
                 txn: i.txn,
                 app: i.app,
-                state: line_text(&i.line),
+                state: if i.forgotten {
+                    TxnText::Closed(Closing::Forgotten)
+                } else {
+                    line_text(&i.line)
+                },
             }));
+        }
+        let n = p.remove.iter().filter(|i| empty(i)).count();
+        if n > 0 {
+            lines.push(m(TxnMsg::ClearEmpty { n }));
         }
         for id in &p.results {
             lines.push(m(TxnMsg::ClearResultGoes { profile: *id }));
@@ -1077,12 +1087,16 @@ fn run_history_clear<W: Write, E: Write>(
     }
     if !p.stays.is_empty() || !p.results_stay.is_empty() {
         lines.push(m(TxnMsg::ClearStaysHeader));
-        for (i, why) in &p.stays {
+        for (i, why) in p.stays.iter().filter(|(i, _)| !empty(i)) {
             lines.push(m(TxnMsg::ClearStays {
                 txn: i.txn,
                 app: i.app,
                 why: *why,
             }));
+        }
+        let n = p.stays.iter().filter(|(i, _)| empty(i)).count();
+        if n > 0 {
+            lines.push(m(TxnMsg::ClearEmpty { n }));
         }
         for (id, why) in &p.results_stay {
             lines.push(m(TxnMsg::ClearResultStays {
@@ -1117,16 +1131,29 @@ fn run_history_clear<W: Write, E: Write>(
         Err(ActError::Exec(ExecError::Refused(r))) => {
             return Err(fail(err, TxnMsg::Error { error: shown(&r) }, Exit::Refused));
         }
+        // Review N5: an error while removing never leaves a transaction open: exit 1.
         Err(ActError::Exec(e)) => {
             note(err, TxnMsg::Error { error: shown(&e) });
-            return Err(exit_for_exec(&e));
+            return Err(Exit::Fatal);
         }
     };
+    // `gone`: removed meanwhile, done as well (the app counts the same).
+    let mut done = vec![m(TxnMsg::Cleared {
+        entries: r.removed.len() + r.gone.len(),
+        results: r.results,
+    })];
+    // Review S3: what was refused when it was deleted stays, with its reason.
+    if !r.refused.is_empty() {
+        done.push(m(TxnMsg::ClearStaysHeader));
+        done.extend(r.refused.iter().map(|(txn, why)| {
+            m(TxnMsg::ClearKept {
+                txn: *txn,
+                why: *why,
+            })
+        }));
+    }
     Ok(out
-        .line(&m(TxnMsg::Cleared {
-            entries: r.removed.len() + r.gone.len(),
-            results: r.results,
-        }))
+        .lines(&done)
         .and_then(|()| out.flush())
         .map_or_else(|e| after_change(err, e, Exit::Report), |()| Exit::Report))
 }

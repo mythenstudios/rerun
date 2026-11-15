@@ -57,24 +57,25 @@ pub type Tidy = Result<Tidied, TidyNote>;
 
 /// The entries the cap removes now, oldest first: of the transactions "undone" or "rolled back"
 /// (not forgotten), the newest [`HISTORY_KEEP`] stay whatever their rules say (they count); older
-/// ones that may be purged now, and empty ones, are picked, at most [`TIDY_PER_RUN`].
-fn tidy_picks(classes: &[exec::PurgeClass]) -> Vec<(TxnId, Option<[u8; 32]>)> {
+/// ones that may be purged now, and empty ones, are picked, at most [`TIDY_PER_RUN`]. Each pick
+/// says whether it is an entry the history shows (undone or rolled back; an empty one is not).
+fn tidy_picks(classes: &[exec::PurgeClass]) -> Vec<(TxnId, Option<[u8; 32]>, bool)> {
     let mut undone = 0;
     let mut picks = Vec::new();
     for c in classes.iter().rev() {
         if c.forgotten {
             continue;
         }
-        let pick = match &c.state {
+        let (pick, shown) = match &c.state {
             Some(TxnState::Closed(Closing::Reverted | Closing::RolledBack)) => {
                 undone += 1;
-                undone > HISTORY_KEEP
+                (undone > HISTORY_KEEP, true)
             }
-            Some(TxnState::Empty) => true,
-            _ => false,
+            Some(TxnState::Empty) => (true, false),
+            _ => (false, false),
         };
         if pick && c.keep.is_none() {
-            picks.push((c.id, c.head));
+            picks.push((c.id, c.head, shown));
         }
     }
     picks.reverse();
@@ -82,8 +83,11 @@ fn tidy_picks(classes: &[exec::PurgeClass]) -> Vec<(TxnId, Option<[u8; 32]>)> {
     picks
 }
 
-/// The cap after a successful write (module docs). Another Rerun holding the lock: nothing,
-/// silently (the next write tries again).
+/// The cap after a successful write (module docs). Nothing to pick: it returns before the lock is
+/// taken. Another Rerun holding the lock: nothing, silently (the next write tries again); a
+/// change between the listing and the lock is a [`TidyNote`] (a front end only logs it).
+/// [`Tidied::removed`] counts the entries the history shows (undone or rolled back); empty ones
+/// go silently (review S2).
 pub(crate) fn tidy(g: &Guarded<'_>) -> Tidy {
     let Some(app) = g.app() else {
         return Ok(Tidied::default());
@@ -93,13 +97,15 @@ pub(crate) fn tidy(g: &Guarded<'_>) -> Tidy {
     if picks.is_empty() {
         return Ok(Tidied::default());
     }
-    match exec::purge_seen(&ctx(g, app), &picks, PurgeMode::Lenient) {
+    let ids: Vec<(TxnId, Option<[u8; 32]>)> = picks.iter().map(|(t, h, _)| (*t, *h)).collect();
+    match exec::purge_seen(&ctx(g, app), &ids, PurgeMode::Lenient) {
         Ok(r) => Ok(Tidied {
-            removed: r.removed.len(),
+            removed: picks
+                .iter()
+                .filter(|(t, _, shown)| *shown && r.removed.contains(t))
+                .count(),
         }),
-        Err(ExecError::Refused(Refusal::JournalBusy | Refusal::Changed { .. })) => {
-            Ok(Tidied::default())
-        }
+        Err(ExecError::Refused(Refusal::JournalBusy)) => Ok(Tidied::default()),
         Err(e) => Err(TidyNote::Exec(e)),
     }
 }
@@ -122,6 +128,8 @@ pub struct ClearItem {
     pub app: Option<u32>,
     /// Its state.
     pub line: TxnLine,
+    /// A forget marker or record closed it (`TxnStatus::is_forgotten`).
+    pub forgotten: bool,
 }
 
 /// Why a launch result stays.
@@ -187,13 +195,19 @@ pub fn clear_preview(g: &Guarded<'_>) -> Result<(ClearPreview, ClearShown), Clea
     let app = g.app().ok_or(ClearGate::NoAppDir)?;
     let classes = exec::purge_classes(app).map_err(ClearGate::Journal)?;
     let status = exec::status_with(app, true).map_err(ClearGate::Journal)?;
+    // A transaction gone between the two listings is not shown (review N11): `clear` would
+    // count it as done anyway.
     let item = |id: &TxnId| {
-        let st = status.txns.iter().find(|s| s.id == *id);
-        ClearItem {
-            txn: *id,
-            app: st.and_then(app_of),
-            line: st.map_or(TxnLine::Empty, |s| s.state.clone()),
-        }
+        status
+            .txns
+            .iter()
+            .find(|s| s.id == *id)
+            .map(|st| ClearItem {
+                txn: *id,
+                app: app_of(st),
+                line: st.state.clone(),
+                forgotten: st.is_forgotten(),
+            })
     };
     let mut preview = ClearPreview {
         remove: Vec::new(),
@@ -206,12 +220,13 @@ pub fn clear_preview(g: &Guarded<'_>) -> Result<(ClearPreview, ClearShown), Clea
         results: Vec::new(),
     };
     for c in &classes {
+        let Some(i) = item(&c.id) else { continue };
         match c.keep {
             None => {
-                preview.remove.push(item(&c.id));
+                preview.remove.push(i);
                 shown.items.push((c.id, c.head));
             }
-            Some(k) => preview.stays.push((item(&c.id), k)),
+            Some(k) => preview.stays.push((i, k)),
         }
     }
     if let Ok(Some((results, hashes))) = exec::launch_results_hashed(app) {

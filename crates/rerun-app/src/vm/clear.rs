@@ -3,6 +3,7 @@
 //! count would not let the user see what is lost. The words are the app's, the values are
 //! `flow`'s ([`flow::clear_preview`]); nothing here reads or writes the system.
 
+use rerun_core::escape;
 use rerun_core::exec::launch_result::ProfileId;
 use rerun_core::exec::{Keep, PurgeReport, TxnLine};
 use rerun_core::flow::{ClearGate, ClearItem, ClearPreview, ResultKeep};
@@ -11,7 +12,7 @@ use rerun_core::plan::profile_id;
 
 use super::history::game_value;
 use super::write::{DialogKind, DialogVm, ListVm, ResultVm, Tone, result, with_detail};
-use super::{Names, shown_error};
+use super::{DetailVm, Names, shown_error};
 use crate::text::{Lang, Msg, t};
 
 fn tx(lang: Lang, m: Msg) -> String {
@@ -19,9 +20,9 @@ fn tx(lang: Lang, m: Msg) -> String {
 }
 
 /// The word of an entry's state, as the history says it. A forgotten entry's line is the
-/// journal's (`Applied` with a marker), so `keep` says it.
-fn state_word(line: &TxnLine, keep: Option<Keep>) -> Msg {
-    if keep == Some(Keep::Forgotten) {
+/// journal's (`Applied` with a marker), so the core's `forgotten` says it.
+fn state_word(line: &TxnLine, forgotten: bool) -> Msg {
+    if forgotten {
         return Msg::HistStateForgotten;
     }
     match line {
@@ -38,7 +39,7 @@ fn state_word(line: &TxnLine, keep: Option<Keep>) -> Msg {
 }
 
 /// Why an entry stays, in one short sentence.
-fn keep_reason(k: Keep) -> Msg {
+pub(super) fn keep_reason(k: Keep) -> Msg {
     match k {
         Keep::NotSettled => Msg::ClearKeepNotSettled,
         Keep::Unreadable => Msg::ClearKeepUnreadable,
@@ -69,12 +70,35 @@ fn item_line(i: &ClearItem, keep: Option<Keep>, names: &Names, lang: Lang) -> St
         parts.push(game_value(a, names, lang).as_str().to_owned());
     }
     parts.push(tx(lang, Msg::ClearNumber { n: i.txn.seq() }));
-    parts.push(tx(lang, state_word(&i.line, keep)));
+    parts.push(tx(lang, state_word(&i.line, i.forgotten)));
     let line = parts.join(" \u{b7} ");
     match keep {
         Some(k) => format!("{line}. {}", tx(lang, keep_reason(k))),
         None => line,
     }
+}
+
+/// The lines of a list of entries, newest first (the core lists oldest first). The entries that
+/// changed nothing are one summary line at the end, not a row each (they are no history anyone
+/// reads); an entry that stays carries its reason.
+fn entry_lines<'a>(
+    items: impl DoubleEndedIterator<Item = (&'a ClearItem, Option<Keep>)>,
+    names: &Names,
+    lang: Lang,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut empty = 0;
+    for (i, keep) in items.rev() {
+        if matches!(i.line, TxnLine::Empty) {
+            empty += 1;
+        } else {
+            lines.push(item_line(i, keep, names, lang));
+        }
+    }
+    if empty > 0 {
+        lines.push(tx(lang, Msg::ClearEmptySummary { n: empty }));
+    }
+    lines
 }
 
 /// A launch result as a line: the game of its profile, or the profile ID when no game of the
@@ -124,12 +148,7 @@ pub fn clear_vm(
     if !p.remove.is_empty() {
         lists.push(ListVm {
             heading: tx(lang, Msg::ClearEntriesHeading { n: p.remove.len() }),
-            lines: p
-                .remove
-                .iter()
-                .rev()
-                .map(|i| item_line(i, None, names, lang))
-                .collect(),
+            lines: entry_lines(p.remove.iter().map(|i| (i, None)), names, lang),
         });
     }
     if !p.results.is_empty() {
@@ -144,12 +163,7 @@ pub fn clear_vm(
     }
     let stays = p.stays.len() + p.results_stay.len();
     if stays > 0 {
-        let mut lines: Vec<String> = p
-            .stays
-            .iter()
-            .rev()
-            .map(|(i, k)| item_line(i, Some(*k), names, lang))
-            .collect();
+        let mut lines = entry_lines(p.stays.iter().map(|(i, k)| (i, Some(*k))), names, lang);
         lines.extend(
             p.results_stay
                 .iter()
@@ -209,16 +223,37 @@ pub fn clear_gate(g: &ClearGate, lang: Lang) -> ResultVm {
     }
 }
 
-/// What a clear came to: the quiet line says how many entries and launch results went.
+/// What a clear came to: how many entries and launch results went (an entry that was gone
+/// already counts as done), and under "Stays" each entry the core refused at delete time with
+/// its reason (a backup in use, something that is not Rerun's, ...). The core checked it again
+/// under the lock, so these are entries that changed since the preview.
 pub fn clear_done(r: &PurgeReport, lang: Lang) -> ResultVm {
-    result(
-        Tone::Done,
+    let mut out = result(
+        if r.refused.is_empty() {
+            Tone::Done
+        } else {
+            Tone::Calm
+        },
         lang,
         Msg::ClearDoneTitle,
         Msg::ClearDoneBody {
-            entries: r.removed.len(),
+            entries: r.removed.len() + r.gone.len(),
             results: r.results,
         },
         false,
-    )
+    );
+    if !r.refused.is_empty() {
+        let text = |s: String| escape::text(&s).into_owned();
+        out.notice.details.push(DetailVm::of(text(tx(
+            lang,
+            Msg::ClearStaysHeading { n: r.refused.len() },
+        ))));
+        for (id, keep) in &r.refused {
+            out.notice.details.push(DetailVm {
+                who: Some(text(tx(lang, Msg::ClearNumber { n: id.seq() }))),
+                what: text(tx(lang, keep_reason(*keep))),
+            });
+        }
+    }
+    out
 }

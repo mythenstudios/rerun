@@ -31,6 +31,17 @@ fn apply_and_undo(rig: &mut Rig) -> (TxnId, Vec<Event>) {
     (txn, ev)
 }
 
+/// [`apply_and_undo`] with the one cheap fix (a single ini edit): AH3 needs 101 of them. The page
+/// must have been read once (a plan is refused as stale without it).
+fn apply_and_undo_cheap(rig: &mut Rig) -> (TxnId, Vec<Event>) {
+    let pv = rig.preview_of(vec![super::write::pick("display", "ini")]);
+    let ev = rig.run(Job::Apply { hash: pv.hash });
+    let txn = applied_of(&ev).cards[0].txn;
+    rig.run(Job::RevertPreview { txn });
+    let ev = rig.revert(txn);
+    (txn, ev)
+}
+
 /// One applied change, left open: its transaction.
 fn apply_open(rig: &mut Rig) -> TxnId {
     let pv = rig.preview();
@@ -137,7 +148,7 @@ fn ah1_clear_removes_the_undone_entries_and_results_and_nothing_else() {
     );
     assert!(
         stays.contains(&format!(
-            "Invented W \u{b7} No. {} \u{b7} Closed without undo. Closed without undoing: its backups stay.",
+            "Invented W \u{b7} No. {} \u{b7} Closed without undo. Its backups stay.",
             forgotten.seq()
         )),
         "{stays:?}"
@@ -216,13 +227,14 @@ fn ah2_a_confirm_of_another_dialog_writes_nothing() {
 #[test]
 fn ah3_an_apply_that_finds_101_undone_entries_says_how_many_went() {
     let mut rig = Rig::new(Lang::En);
-    let (oldest, ev) = apply_and_undo(&mut rig);
+    rig.page();
+    let (oldest, ev) = apply_and_undo_cheap(&mut rig);
     assert!(result_of(&ev).note.is_none());
     // The oldest entry holds a file that is not Rerun's: the cap skips it, so the entries pile up
     // past the cap without anything going (a failure of the cap would look the same).
     let stray = plant_stray(&rig, oldest);
     for _ in 1..=rerun_core::flow::HISTORY_KEEP {
-        let (_, ev) = apply_and_undo(&mut rig);
+        let (_, ev) = apply_and_undo_cheap(&mut rig);
         assert!(result_of(&ev).note.is_none(), "{:?}", result_of(&ev));
     }
     let ev = rig.run(Job::History);

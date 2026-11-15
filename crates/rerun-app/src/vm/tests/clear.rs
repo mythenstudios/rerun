@@ -26,6 +26,15 @@ fn item(seq: u32, app: Option<u32>, line: TxnLine) -> ClearItem {
         txn: id(seq),
         app,
         line,
+        forgotten: false,
+    }
+}
+
+/// A change closed without undoing: the journal line is the open one, the marker says forgotten.
+fn forgotten(seq: u32, app: Option<u32>) -> ClearItem {
+    ClearItem {
+        forgotten: true,
+        ..item(seq, app, TxnLine::Applied)
     }
 }
 
@@ -42,10 +51,11 @@ fn preview() -> ClearPreview {
             item(2, Some(220), TxnLine::Closed(Closing::Reverted)),
             item(5, None, TxnLine::Closed(Closing::RolledBack)),
             item(7, Some(330), TxnLine::Empty),
+            item(13, None, TxnLine::Empty),
         ],
         stays: vec![
             item(1, Some(220), TxnLine::Applied),
-            item(3, Some(220), TxnLine::Applied),
+            forgotten(3, Some(220)),
             item(4, Some(220), TxnLine::Closed(Closing::Reverted)),
             item(
                 6,
@@ -55,8 +65,9 @@ fn preview() -> ClearPreview {
             item(8, Some(220), TxnLine::Closed(Closing::Reverted)),
             item(9, Some(220), TxnLine::Closed(Closing::Reverted)),
             item(10, Some(220), TxnLine::Closed(Closing::Reverted)),
-            item(11, Some(220), TxnLine::Closed(Closing::Reverted)),
-            item(12, Some(220), TxnLine::Closed(Closing::Reverted)),
+            forgotten(11, Some(220)),
+            forgotten(12, Some(220)),
+            item(14, None, TxnLine::Empty),
         ]
         .into_iter()
         .zip([
@@ -69,6 +80,7 @@ fn preview() -> ClearPreview {
             Keep::InUse,
             Keep::HoldsProfile,
             Keep::Forgotten,
+            Keep::Foreign,
         ])
         .collect(),
         results: vec![profile_id(220), profile_id(999)],
@@ -105,11 +117,12 @@ fn vh2_the_dialog_lists_what_goes_and_what_stays_with_its_reason() {
     // What goes: newest first, the game as the history names it (a name, "Steam app N", or
     // nothing when the head names none), the number, the state.
     assert_eq!(
-        lines(&d, "Entries removed (3)"),
+        lines(&d, "Entries removed (4)"),
         [
-            "Steam app 330 \u{b7} No. 7 \u{b7} Changed nothing",
             "No. 5 \u{b7} Rolled back",
             "Invented W \u{b7} No. 2 \u{b7} Undone",
+            // The two that changed nothing are one line, not a row each.
+            "2 empty entries (changed nothing)",
         ]
     );
     // Launch results by game, or by profile when no game has it.
@@ -121,27 +134,28 @@ fn vh2_the_dialog_lists_what_goes_and_what_stays_with_its_reason() {
         "a profile no known game has"
     );
     // What stays: every entry with its reason, then the results that stay.
-    let stays = lines(&d, "Stays (11)");
+    let stays = lines(&d, "Stays (12)");
     let want = [
-        "Invented W \u{b7} No. 12 \u{b7} Closed without undo. Closed without undoing: its backups stay.",
-        "Invented W \u{b7} No. 11 \u{b7} Undone. It still holds a launch profile.",
-        "Invented W \u{b7} No. 10 \u{b7} Undone. A file of it is in use; a later run removes it.",
+        "Invented W \u{b7} No. 12 \u{b7} Closed without undo. Its backups stay.",
+        "Invented W \u{b7} No. 11 \u{b7} Closed without undo. It still holds a launch profile.",
+        "Invented W \u{b7} No. 10 \u{b7} Undone. A backup is in use right now; a later clean-up removes the entry.",
         "Invented W \u{b7} No. 9 \u{b7} Undone. Its folder has too many files.",
         "Invented W \u{b7} No. 8 \u{b7} Undone. Its folder holds something Rerun did not write there.",
         "No. 6 \u{b7} Unreadable. Its folder cannot be read.",
-        "Invented W \u{b7} No. 4 \u{b7} Undone. It handed over a file or folder that a newer change may rely on.",
-        "Invented W \u{b7} No. 3 \u{b7} Closed without undo. Closed without undoing: its backups stay.",
+        "Invented W \u{b7} No. 4 \u{b7} Undone. It handed files over to a later change that is not finished yet.",
+        "Invented W \u{b7} No. 3 \u{b7} Closed without undo. Its backups stay.",
         "Invented W \u{b7} No. 1 \u{b7} Applied. Not finished: undo it or close it first.",
+        "1 empty entry (changed nothing)",
     ];
-    assert_eq!(&stays[..9], want.as_slice());
+    assert_eq!(&stays[..10], want.as_slice());
     // A result of a game the journal names (330, from the entry that changed nothing) goes by
     // its game; one of a profile no game has goes by the profile.
     assert_eq!(
-        stays[9],
+        stays[10],
         "Steam app 330. The Steam launch option still points at Rerun: remove it by hand first."
     );
     assert_eq!(
-        stays[10],
+        stays[11],
         format!("Profile {}. It cannot be read.", profile_id(331))
     );
     // The headings are in this order.
@@ -149,9 +163,9 @@ fn vh2_the_dialog_lists_what_goes_and_what_stays_with_its_reason() {
     assert_eq!(
         heads,
         [
-            "Entries removed (3)",
+            "Entries removed (4)",
             "Launch results removed (2)",
-            "Stays (11)"
+            "Stays (12)"
         ]
     );
 }
@@ -204,14 +218,23 @@ fn vh2_every_keep_and_result_keep_has_its_own_words_in_both_languages() {
         ["Spielordner, Registry und Firewall bleiben unverändert."]
     );
     assert_eq!(
-        lines(&d, "Entfernte Einträge (3)")[2],
-        "Invented W \u{b7} Nr. 2 \u{b7} Rückgängig gemacht"
+        lines(&d, "Entfernte Einträge (4)"),
+        [
+            "Nr. 5 \u{b7} Zurückgerollt",
+            "Invented W \u{b7} Nr. 2 \u{b7} Rückgängig gemacht",
+            "2 leere Einträge (nichts geändert)",
+        ]
     );
+    let stays = lines(&d, "Bleibt (12)");
+    assert_eq!(
+        stays[0],
+        "Invented W \u{b7} Nr. 12 \u{b7} Ohne Rückgängig abgeschlossen. Seine Sicherungen bleiben."
+    );
+    assert_eq!(stays[9], "1 leerer Eintrag (nichts geändert)");
     assert!(
-        lines(&d, "Bleibt (11)")[8]
-            .ends_with("Nicht abgeschlossen: Mache es zuerst rückgängig oder schliesse es ab."),
-        "{:?}",
-        lines(&d, "Bleibt (11)")
+        stays[8]
+            .ends_with("Nicht abgeschlossen: Mache sie zuerst rückgängig oder schliesse sie ab."),
+        "{stays:?}"
     );
 }
 
@@ -297,4 +320,50 @@ fn vt1_the_quiet_line_names_how_many_went_and_never_a_failure() {
         clear_done(&report(2, 2), Lang::De).notice.body,
         "2 Einträge und 2 Startergebnisse entfernt."
     );
+}
+
+/// VT2 an entry the core refused at delete time is listed under "Stays" with its reason, and one
+/// that was gone already counts as done with the removed ones.
+#[test]
+fn vt2_the_result_lists_what_the_core_refused_and_counts_gone_as_done() {
+    let r = PurgeReport {
+        removed: vec![id(1)],
+        gone: vec![id(2), id(3)],
+        refused: vec![(id(4), Keep::InUse), (id(5), Keep::Foreign)],
+        results: 1,
+    };
+    let en = clear_done(&r, Lang::En);
+    assert_eq!(en.notice.body, "3 entries and 1 launch result removed.");
+    let d: Vec<(Option<&str>, &str)> = en
+        .notice
+        .details
+        .iter()
+        .map(|d| (d.who.as_ref().map(|w| w.as_str()), d.what.as_str()))
+        .collect();
+    assert_eq!(
+        d,
+        [
+            (None, "Stays (2)"),
+            (
+                Some("No. 4"),
+                "A backup is in use right now; a later clean-up removes the entry."
+            ),
+            (
+                Some("No. 5"),
+                "Its folder holds something Rerun did not write there."
+            ),
+        ]
+    );
+    let de = clear_done(&r, Lang::De);
+    assert_eq!(de.notice.details[0].what.as_str(), "Bleibt (2)");
+    assert_eq!(
+        de.notice.details[1].what.as_str(),
+        "Eine Sicherung ist gerade in Gebrauch; die nächste Aufräumung entfernt den Eintrag."
+    );
+    // Nothing refused: no "Stays" detail at all.
+    let clean = PurgeReport {
+        removed: vec![id(1)],
+        ..PurgeReport::default()
+    };
+    assert!(clear_done(&clean, Lang::En).notice.details.is_empty());
 }

@@ -191,3 +191,16 @@ fn the_window_draws_its_first_frames_fast() {
     assert!(first < Duration::from_millis(750), "{first:?}");
     assert!(with_rows < Duration::from_secs(1), "{with_rows:?}");
 }
+
+/// The window and the Rust side agree on where the focus goes back to after the clear dialog
+/// (N12): the button of the history page takes it when `Modal.return-to` is `CLEAR_OPENER`, which
+/// is what `st.opener` is while that dialog is open.
+#[test]
+fn the_clear_button_takes_the_focus_back() {
+    let slint = include_str!("../../ui/app.slint");
+    let want = format!(
+        "take-focus: Modal.return-to == {};",
+        super::write::CLEAR_OPENER
+    );
+    assert_eq!(slint.matches(&want).count(), 1, "{want}");
+}

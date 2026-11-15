@@ -183,8 +183,9 @@ fn hp2_the_cap_keeps_the_newest_hundred_and_removes_at_most_five_per_run() {
         (held, open, forgotten, e)
     });
     assert_eq!(undone_count(&sys), HISTORY_KEEP + extra, "precondition");
-    // Run 1: the empty one and the four oldest removable undone ones (5 at most).
-    assert_eq!(tidied(&sys).removed, TIDY_PER_RUN);
+    // Run 1: the empty one and the four oldest removable undone ones (5 at most); the empty
+    // one is not counted (review S2: the history never shows it).
+    assert_eq!(tidied(&sys).removed, TIDY_PER_RUN - 1);
     let left = ids(&sys);
     assert!(!left.contains(&e));
     assert!(left.contains(&held) && left.contains(&open) && left.contains(&forgotten));
@@ -290,9 +291,9 @@ fn hp5_a_failing_cap_never_fails_the_apply() {
         let there = crate::exec::tests::exists_abs(&env.sys, &env.txn_dir(&e));
         (a.tidied, there, fx.fault_fired())
     };
-    // Control: the cap removes the empty one.
+    // Control: the cap removes the empty one, silently (not counted, review S2).
     let (t, still, _) = run(&|_| {});
-    assert_eq!(t.unwrap().removed, 1);
+    assert_eq!(t.unwrap().removed, 0);
     assert!(!still);
     // An error while deleting: the apply stays a success, the note says why.
     let (t, still, fired) = run(&|fx| fx.fail_at(Prim::OpenFileDelete, 1, SysErrorKind::Other));
@@ -405,4 +406,55 @@ fn hp2_a_forgotten_entry_does_not_count_towards_the_cap() {
         "100 undone that are not forgotten stay"
     );
     assert_eq!(ids(&sys).len(), HISTORY_KEEP + 1);
+}
+
+/// Review S1 (S6, "held ones count"): a held entry inside the newest 100 counts towards them, so
+/// the one removable entry older than the 100 goes.
+#[test]
+fn hp2_a_held_entry_inside_the_newest_hundred_counts() {
+    let sys = finish(base());
+    let (oldest, held, open) = journal(&sys, |l| {
+        let oldest = settled(l, Closing::Reverted, false);
+        let held = settled(l, Closing::Reverted, true);
+        for _ in 0..HISTORY_KEEP - 1 {
+            settled(l, Closing::Reverted, false);
+        }
+        // Newer than the creator, not settled: it holds what was kept.
+        (oldest, held, applied(l))
+    });
+    assert_eq!(undone_count(&sys), HISTORY_KEEP + 1, "precondition");
+    let (p, _) = with_guard(&sys, |g| clear_preview(&g)).unwrap();
+    assert!(
+        p.stays
+            .iter()
+            .any(|(i, k)| i.txn == held && *k == Keep::HandedOver),
+        "precondition: held"
+    );
+    assert_eq!(tidied(&sys).removed, 1);
+    let left = ids(&sys);
+    assert!(
+        !left.contains(&oldest),
+        "the one beyond the newest 100 goes"
+    );
+    assert!(left.contains(&held) && left.contains(&open));
+    assert_eq!(undone_count(&sys), HISTORY_KEEP);
+}
+
+/// Review security nit 3: a launch result with a second hard link is unreadable and stays.
+#[test]
+fn hp6_a_linked_launch_result_is_unreadable_and_stays() {
+    let sys = finish(base());
+    let fx = sys.fake_fs();
+    fx.put_file(Path::new(&result_at(1)), &started(1, ran(), 1_000))
+        .unwrap();
+    fx.put_hardlink(
+        Path::new(&result_at(1)),
+        Path::new(r"C:\Users\Player\elsewhere.result"),
+    )
+    .unwrap();
+    let (p, shown) = with_guard(&sys, |g| clear_preview(&g)).unwrap();
+    assert!(p.results.is_empty());
+    assert_eq!(p.results_stay, [(profile_id(1), ResultKeep::Unreadable)]);
+    assert_eq!(with_guard(&sys, |g| clear(&g, shown)).unwrap().results, 0);
+    assert!(crate::exec::tests::try_meta_abs(&sys, &result_at(1)).is_some());
 }

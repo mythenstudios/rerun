@@ -26,7 +26,7 @@ fn history_clear_lists_then_removes_exactly_what_it_listed() {
     assert_eq!(
         dry.stdout,
         format!(
-            "Removed from the history:\n  {t0}  no game  reverted\nStays:\n  {t1}  no game  not \
+            "Removed from the history:\n  {t0}  reverted\nStays:\n  {t1}  not \
              settled (open, applied or damaged)\nGame folders, the registry and the firewall stay \
              unchanged.\n\n"
         )
@@ -85,4 +85,74 @@ fn the_cap_line_is_quiet_unless_entries_went() {
         Some("3 older history entries removed (Rerun keeps the last 100 undone or rolled back)")
     );
     assert_eq!(line(Err(TidyNote::Journal(JournalError::Busy))), None);
+}
+
+/// Review S2, S3, N5: empty entries as one line; an entry refused when it is deleted (a backup
+/// in use) is listed under "Stays" after the run; an error while removing is exit 1.
+#[test]
+fn history_clear_sums_up_empty_entries_and_names_what_it_could_not_remove() {
+    use std::path::Path;
+
+    use rerun_core::sys::contract::{Access, Share};
+
+    use crate::tests::RERUN;
+
+    let sys = build(with_package(), &file_steps());
+    let t0 = applied(&sys);
+    expect(&sys, &["revert", &t0, "--yes"], Answer::No, Exit::Report);
+    for n in [7, 8] {
+        let empty = format!(r"{RERUN}\journal\0000000{n}-0000000000000001");
+        sys.fake_fs().mkdir_all(Path::new(&empty)).unwrap();
+    }
+    let dry = expect(
+        &sys,
+        &["history", "clear", "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    assert_eq!(
+        dry.stdout,
+        format!(
+            "Removed from the history:\n  {t0}  reverted\n  2 empty entries (they changed \
+             nothing)\nGame folders, the registry and the firewall stay unchanged.\n\n"
+        )
+    );
+    // A file of t0 held by a scanner: refused when it is deleted, named under "Stays".
+    let bin = format!(r"{RERUN}\journal\{t0}\head.json");
+    let held = sys
+        .fake_fs()
+        .hold_open_as(4242, Path::new(&bin), Access::READ, Share::RW)
+        .unwrap();
+    let yes = expect(
+        &sys,
+        &["history", "clear", "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
+    assert!(
+        yes.stdout.ends_with(&format!(
+            "2 history entries and 0 launch results removed\nStays:\n  {t0}: a backup is in use \
+             right now; a later clean-up removes the entry\n"
+        )),
+        "{}",
+        yes.stdout
+    );
+    drop(held);
+
+    // An error while removing: exit 1.
+    let sys = build(with_package(), &file_steps());
+    let t = applied(&sys);
+    expect(&sys, &["revert", &t, "--yes"], Answer::No, Exit::Report);
+    sys.fake_fs().clear_faults();
+    sys.fake_fs().fail_at(
+        rerun_core::sys::fake::Prim::OpenFileDelete,
+        1,
+        rerun_core::sys::SysErrorKind::Other,
+    );
+    expect(
+        &sys,
+        &["history", "clear", "--yes"],
+        Answer::No,
+        Exit::Fatal,
+    );
 }

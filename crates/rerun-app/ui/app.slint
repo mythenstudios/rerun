@@ -1221,6 +1221,8 @@ component HistoryPage inherits VerticalLayout {
         alignment: start;
         Button {
             text: root.history.clear-label;
+            take-focus: Modal.return-to == -1000;
+            enabled: !Modal.open && !Modal.working;
             activated => {
                 root.clear();
             }

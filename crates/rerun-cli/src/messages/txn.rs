@@ -77,9 +77,9 @@ pub enum TxnText<'a> {
     Unreadable(Shown<'a>),
 }
 
-/// The game of a history entry.
+/// The game of a history entry, after two spaces; nothing for a folder game (no Steam app).
 fn game(app: Option<u32>) -> String {
-    app.map_or_else(|| "no game".to_owned(), |a| format!("Steam app {a}"))
+    app.map_or_else(String::new, |a| format!("  Steam app {a}"))
 }
 
 /// Why an entry stays in the history.
@@ -92,7 +92,7 @@ fn keep_why(k: Keep) -> &'static str {
         Keep::Foreign => "its folder holds something Rerun did not write",
         Keep::TooManyEntries => "its folder has too many entries",
         Keep::Forgotten => "forgotten (its backups stay)",
-        Keep::InUse => "a file of it is in use",
+        Keep::InUse => "a backup is in use right now; a later clean-up removes the entry",
         _ => "it cannot be removed now",
     }
 }
@@ -767,6 +767,18 @@ pub enum TxnMsg<'a> {
         /// Its state.
         state: TxnText<'a>,
     },
+    /// Empty entries (they changed nothing), summed up in one line.
+    ClearEmpty {
+        /// How many.
+        n: usize,
+    },
+    /// After the run: an entry that stayed although it was listed (refused when it was deleted).
+    ClearKept {
+        /// The transaction.
+        txn: TxnId,
+        /// Why.
+        why: Keep,
+    },
     /// A launch result that goes.
     ClearResultGoes {
         /// The launch profile.
@@ -1387,15 +1399,19 @@ impl fmt::Display for TxnMsg<'_> {
                 Count(*n, "older history entry", "older history entries")
             ),
             Self::ClearGoesHeader => f.write_str("Removed from the history:"),
-            Self::ClearGoes { txn, app, state } => {
-                write!(f, "  {txn}  {}  {state}", game(*app))
-            }
+            Self::ClearGoes { txn, app, state } => write!(f, "  {txn}{}  {state}", game(*app)),
+            Self::ClearEmpty { n } => write!(
+                f,
+                "  {} (they changed nothing)",
+                Count(*n, "empty entry", "empty entries")
+            ),
+            Self::ClearKept { txn, why } => write!(f, "  {txn}: {}", keep_why(*why)),
             Self::ClearResultGoes { profile } => {
                 write!(f, "  the last start of launch profile {profile}")
             }
             Self::ClearStaysHeader => f.write_str("Stays:"),
             Self::ClearStays { txn, app, why } => {
-                write!(f, "  {txn}  {}  {}", game(*app), keep_why(*why))
+                write!(f, "  {txn}{}  {}", game(*app), keep_why(*why))
             }
             Self::ClearResultStays { profile, why } => write!(
                 f,

@@ -1503,6 +1503,11 @@ pub enum Msg {
         /// How many.
         n: usize,
     },
+    /// The clear dialog: the empty entries (they changed nothing) as one line.
+    ClearEmptySummary {
+        /// How many.
+        n: usize,
+    },
 }
 
 /// The text of `m` in `lang`.
@@ -2328,11 +2333,11 @@ fn en(m: Msg) -> Cow<'static, str> {
         ClearKeepNotSettled => "Not finished: undo it or close it first.",
         ClearKeepUnreadable => "Its folder cannot be read.",
         ClearKeepHoldsProfile => "It still holds a launch profile.",
-        ClearKeepHandedOver => "It handed over a file or folder that a newer change may rely on.",
+        ClearKeepHandedOver => "It handed files over to a later change that is not finished yet.",
         ClearKeepForeign => "Its folder holds something Rerun did not write there.",
         ClearKeepTooMany => "Its folder has too many files.",
-        ClearKeepForgotten => "Closed without undoing: its backups stay.",
-        ClearKeepInUse => "A file of it is in use; a later run removes it.",
+        ClearKeepForgotten => "Its backups stay.",
+        ClearKeepInUse => "A backup is in use right now; a later clean-up removes the entry.",
         ClearKeepOther => "Rerun keeps it for now.",
         ClearResultOptionSet => "The Steam launch option still points at Rerun: remove it by hand first.",
         ClearResultUnreadable => "It cannot be read.",
@@ -2346,6 +2351,13 @@ fn en(m: Msg) -> Cow<'static, str> {
                 count(results, "launch result", "launch results")
             )
             .into();
+        }
+        ClearEmptySummary { n } => {
+            return if n == 1 {
+                "1 empty entry (changed nothing)".into()
+            } else {
+                format!("{n} empty entries (changed nothing)").into()
+            };
         }
         TidyLine { n } => {
             return if n == 1 {
@@ -3173,14 +3185,14 @@ fn de(m: Msg) -> Cow<'static, str> {
         ClearNumber { n } => {
             return format!("Nr. {n}").into();
         }
-        ClearKeepNotSettled => "Nicht abgeschlossen: Mache es zuerst rückgängig oder schliesse es ab.",
+        ClearKeepNotSettled => "Nicht abgeschlossen: Mache sie zuerst rückgängig oder schliesse sie ab.",
         ClearKeepUnreadable => "Sein Ordner kann nicht gelesen werden.",
-        ClearKeepHoldsProfile => "Es hält noch ein Startprofil.",
-        ClearKeepHandedOver => "Es hat eine Datei oder einen Ordner übergeben, auf den sich eine neuere Änderung stützen kann.",
+        ClearKeepHoldsProfile => "Hält noch ein Startprofil.",
+        ClearKeepHandedOver => "Hat Dateien an eine spätere Änderung übergeben, die noch nicht abgeschlossen ist.",
         ClearKeepForeign => "Sein Ordner enthält etwas, das Rerun nicht dorthin geschrieben hat.",
         ClearKeepTooMany => "Sein Ordner hat zu viele Dateien.",
-        ClearKeepForgotten => "Ohne Rückgängig abgeschlossen: Seine Sicherungen bleiben.",
-        ClearKeepInUse => "Eine Datei davon ist in Gebrauch; ein späterer Lauf entfernt sie.",
+        ClearKeepForgotten => "Seine Sicherungen bleiben.",
+        ClearKeepInUse => "Eine Sicherung ist gerade in Gebrauch; die nächste Aufräumung entfernt den Eintrag.",
         ClearKeepOther => "Rerun behält es vorerst.",
         ClearResultOptionSet => "Die Steam-Startoption zeigt noch auf Rerun: Entferne sie zuerst von Hand.",
         ClearResultUnreadable => "Es kann nicht gelesen werden.",
@@ -3194,6 +3206,13 @@ fn de(m: Msg) -> Cow<'static, str> {
                 count(results, "Startergebnis", "Startergebnisse")
             )
             .into();
+        }
+        ClearEmptySummary { n } => {
+            return if n == 1 {
+                "1 leerer Eintrag (nichts geändert)".into()
+            } else {
+                format!("{n} leere Einträge (nichts geändert)").into()
+            };
         }
         TidyLine { n } => {
             return if n == 1 {

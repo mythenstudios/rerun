@@ -545,3 +545,44 @@ mod x12 {
         assert!(fate_before(&plain, &now).is_none());
     }
 }
+
+/// An empty transaction (a crash right after `begin`): the cap removes it silently.
+fn plant_empty(sys: &FakeSystem) -> TxnId {
+    let a = crate::prim::tests::app(sys);
+    let j = crate::journal::Journal::new(&a, crate::journal::InstanceTag::new());
+    let lock = j.lock().unwrap();
+    *lock.begin(b"{}").unwrap().id()
+}
+
+fn listed(sys: &FakeSystem, t: &TxnId) -> bool {
+    let a = crate::prim::tests::app(sys);
+    crate::journal::Journal::new(&a, crate::journal::InstanceTag::new())
+        .list()
+        .unwrap()
+        .txns
+        .iter()
+        .any(|l| l.id == *t)
+}
+
+/// P5-6d-1b review N7: the cap runs after a forget and after a rebind (their `tidied`); an
+/// empty entry goes silently (it is not counted, review S2).
+#[test]
+fn fr7_the_cap_runs_after_forget_and_rebind() {
+    let (env, t, _) = t1();
+    let e = plant_empty(&env.sys);
+    assert!(listed(&env.sys, &e), "precondition");
+    let (_, s) = with_guard(&env.sys, |g| forget_preview(&g, &t)).unwrap();
+    let f = with_guard(&env.sys, |g| forget(&g, s)).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(f.tidied.unwrap(), crate::flow::Tidied::default());
+    assert!(!listed(&env.sys, &e), "the cap ran after the forget");
+
+    let rb = applied(false);
+    move_lib(&rb.env.sys, crate::prim::tests::STEAM_LIB, LIB_E);
+    let e = plant_empty(&rb.env.sys);
+    let (_, s) =
+        with_guard(&rb.env.sys, |g| rebind_preview(&g, &rb.t)).unwrap_or_else(|e| panic!("{e:?}"));
+    let o = with_guard(&rb.env.sys, |g| rebind(&g, s)).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(o.end, RevertEnd::Closed);
+    assert_eq!(o.tidied.unwrap(), crate::flow::Tidied::default());
+    assert!(!listed(&rb.env.sys, &e), "the cap ran after the rebind");
+}

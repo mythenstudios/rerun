@@ -160,6 +160,11 @@ fn read(
         EntryKind::Dir => return Err(text("a folder, not a file")),
         EntryKind::Reparse => return Err(text("a link (not followed)")),
     }
+    // P5-6d-1b (security nit 3): a result with a second hard link is not the shim's own file;
+    // it is never acted on (a "clear history" would otherwise delete one name of it).
+    if !e.meta.is_single_link() {
+        return Err(text("a file with more than one link"));
+    }
     let rel = RelPath::from_segment(&e.name).map_err(|err| text(&err.to_string()))?;
     let max = u64::try_from(MAX_RESULT_BYTES).unwrap_or(u64::MAX);
     let bytes = dir.read_limited(&rel, max).map_err(|err| match err.kind {
