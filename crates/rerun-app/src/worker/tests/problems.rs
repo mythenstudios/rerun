@@ -21,63 +21,92 @@ use super::write::{RERUN, Rig, applied_of, result_of};
 use super::*;
 use crate::vm::{Tone, attention};
 
+/// One crash point: the apply of the write plan dies at the `nth` rename, the process starts
+/// again; `None` if the apply ran to its end without reaching it.
+fn crash_at(nth: usize) -> Option<Rig> {
+    let mut rig = Rig::new(Lang::En);
+    let pv = rig.preview();
+    rig.sys
+        .fake_fs()
+        .fault(Prim::Rename, nth, Fault::CrashAfter);
+    rig.run(Job::Apply { hash: pv.hash });
+    let crashed = rig.sys.fake_fs().crashed();
+    // The process dies; what was durable stays.
+    rig.sys.power_loss(&BTreeMap::new());
+    rig.sys.fake_fs().restart();
+    crashed.then_some(rig)
+}
+
+/// AR1 every crash point of an apply that leaves its transaction open: the next status shows it
+/// as interrupted with the band, the history and the undo preview write nothing, the undo is done,
+/// the game folder is bit-identical to before and Rerun's launch profile is gone, the band is
+/// gone. At least one crash point has the game folder already changed, so the test bites.
 #[test]
-fn ar1_a_crash_in_the_middle_of_an_apply_is_interrupted_then_undone() {
-    // Find a rename the apply reaches after something is written, so the crash leaves the
-    // transaction open with changes on disk.
-    let mut found = None;
-    for nth in 2..=12usize {
-        let mut rig = Rig::new(Lang::En);
-        let before = rig.snap();
-        let pv = rig.preview();
-        rig.sys
-            .fake_fs()
-            .fault(Prim::Rename, nth, Fault::CrashAfter);
-        rig.run(Job::Apply { hash: pv.hash });
-        let crashed = rig.sys.fake_fs().crashed();
-        // The process dies; what was durable stays.
-        rig.sys.power_loss(&BTreeMap::new());
-        rig.sys.fake_fs().restart();
-        if !crashed {
+fn ar1_every_crash_in_the_middle_of_an_apply_is_interrupted_then_undone() {
+    let (mut open, mut game_changed) = (0, 0);
+    // The apply makes fewer than 40 renames; a point it does not reach is skipped.
+    for nth in 1..=40usize {
+        let Some(mut rig) = crash_at(nth) else {
             continue;
-        }
+        };
+        let before = Rig::new(Lang::En).snap();
         let ev = rig.run(Job::Status);
         let a = applied_of(&ev);
-        if a.cards.iter().any(|c| c.state.word == "Interrupted") {
-            found = Some((rig, before, nth));
-            break;
+        let Some(card) = a.cards.iter().find(|c| c.state.word == "Interrupted") else {
+            continue;
+        };
+        open += 1;
+        assert_eq!(a.open, 1, "nth {nth}: {a:?}");
+        assert!(card.problem.is_some() && card.can_undo);
+        let profile = card
+            .ops
+            .iter()
+            .find(|o| o.target.as_str().ends_with(".profile"))
+            .map(|o| o.target.as_str().to_owned());
+        // The band counts it; it only says so.
+        let band = attention(a, Lang::En).expect("the band");
+        assert_eq!((band.count, band.title.as_str()), (1, "1 change needs you"));
+        let txn = card.txn;
+        if rig.snap() != before {
+            game_changed += 1;
+        }
+        // Looking at the history and the undo preview writes nothing.
+        let app_before = rig.snap_app();
+        let ev = rig.run(Job::History);
+        assert!(
+            matches!(ev.as_slice(), [Event::History(h)] if h.groups[0].kind == vm::HistGroup::Open)
+        );
+        let ev = rig.run(Job::RevertPreview { txn });
+        assert!(matches!(ev.as_slice(), [Event::Dialog(_)]));
+        assert!(
+            rig.snap_app() == app_before,
+            "nth {nth}: the preview writes nothing"
+        );
+        // The undo puts the game folder back, bit for bit, removes Rerun's profile, and the band
+        // goes.
+        let ev = rig.revert(txn);
+        let r = result_of(&ev);
+        assert_eq!(r.tone, Tone::Done, "nth {nth}: {r:?}");
+        let a = applied_of(&ev);
+        assert_eq!(a.open, 0, "nth {nth}");
+        assert!(attention(a, Lang::En).is_none());
+        let after = rig.snap();
+        assert!(after == before, "nth {nth}: {:#?}", before.diff(&after));
+        if let Some(file) = profile {
+            assert!(
+                rig.try_read(&format!(r"{RERUN}\profiles\{file}")).is_none(),
+                "nth {nth}: the launch profile is gone"
+            );
         }
     }
-    let (mut rig, before, nth) = found.expect("some rename leaves an open transaction");
-    assert!(nth >= 2);
-    let ev = rig.run(Job::Status);
-    let a = applied_of(&ev);
-    assert_eq!(a.open, 1, "{a:?}");
-    let card = &a.cards[0];
-    assert_eq!(card.state.word, "Interrupted");
-    assert!(card.problem.is_some() && card.can_undo);
-    // The band counts it; it only says so.
-    let band = attention(a, Lang::En).expect("the band");
-    assert_eq!((band.count, band.title.as_str()), (1, "1 change needs you"));
-    let txn = card.txn;
-    // Looking at the history and the undo preview writes nothing.
-    let app_before = rig.snap_app();
-    let ev = rig.run(Job::History);
     assert!(
-        matches!(ev.as_slice(), [Event::History(h)] if h.groups[0].kind == vm::HistGroup::Open)
+        open >= 4,
+        "crash points that leave the transaction open: {open}"
     );
-    let ev = rig.run(Job::RevertPreview { txn });
-    assert!(matches!(ev.as_slice(), [Event::Dialog(_)]));
-    assert!(rig.snap_app() == app_before, "the preview writes nothing");
-    // The undo puts the game folder back, bit for bit, and the band goes.
-    let ev = rig.revert(txn);
-    let r = result_of(&ev);
-    assert_eq!(r.tone, Tone::Done, "{r:?}");
-    let a = applied_of(&ev);
-    assert_eq!(a.open, 0);
-    assert!(attention(a, Lang::En).is_none());
-    let after = rig.snap();
-    assert!(after == before, "{:#?}", before.diff(&after));
+    assert!(
+        game_changed >= 1,
+        "no crash point had changed the game folder"
+    );
 }
 
 #[test]

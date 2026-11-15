@@ -74,7 +74,7 @@ pub use revert::{
 };
 pub use status::{
     Heads, Holder, JournalView, StatusView, head, journal, orphans, profile_id_of, profile_of,
-    profile_op, status,
+    profile_op, status, transaction,
 };
 pub use write::{
     LoadRefusal, Picked, PlanRefusal, Planned, Previewed, StepsRefusal, StoreRefusal, apply, check,

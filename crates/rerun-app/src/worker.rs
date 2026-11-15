@@ -719,8 +719,8 @@ fn applied_page(g: &Guarded<'_>, lang: Lang, session: &Session) -> AppliedVm {
     match g.app() {
         None => vm::applied(None, &session.names, lang),
         Some(app) => {
-            // The journal only (review of P5-3): the orphaned firewall rules are read when the
-            // applied page shows them (P5-6).
+            // The journal only (review of P5-3): the orphaned firewall rules are read by their
+            // own job when the System page opens (`Job::Orphans`, P5-6b).
             let s = exec::status(app);
             vm::applied(Some(s.as_ref()), &session.names, lang)
         }
@@ -989,7 +989,7 @@ fn revert(
             // The head names what each change was (read only; the journal is as the undo left it).
             let ops = g
                 .app()
-                .and_then(|app| exec::txn_status(app, &o.report.txn).ok())
+                .and_then(|app| flow::transaction(app, &o.report.txn))
                 .map(|st| vm::head_ops(&st, lang))
                 .unwrap_or_default();
             let mut r = vm::revert_result(&o, &ops, lang);

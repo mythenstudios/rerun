@@ -770,11 +770,13 @@ fn every() -> Vec<Msg> {
         OrphansProgram,
         OrphansUnreadable,
         OrphansNoJournal,
+        AttentionUnreadableTitle,
+        AttentionUnreadableBody,
     ]
 }
 
 /// The number of messages: one more than the highest [`ordinal`].
-const COUNT: usize = 540;
+const COUNT: usize = 542;
 
 /// A message's position in the enum. The `match` is exhaustive: a new variant does not compile
 /// without an ordinal here, and [`every_ordinal_is_listed`] fails until [`every`] lists it.
@@ -1322,6 +1324,8 @@ fn ordinal(m: Msg) -> usize {
         OrphansProgram => 537,
         OrphansUnreadable => 538,
         OrphansNoJournal => 539,
+        AttentionUnreadableTitle => 540,
+        AttentionUnreadableBody => 541,
     }
 }
 
@@ -1357,7 +1361,7 @@ fn every_ordinal_is_listed() {
     let missing: Vec<usize> = (0..COUNT).filter(|i| !seen[*i]).collect();
     assert!(missing.is_empty(), "ordinals not in every(): {missing:?}");
     // COUNT is right: the last variant has the highest ordinal.
-    assert_eq!(ordinal(Msg::OrphansNoJournal), COUNT - 1);
+    assert_eq!(ordinal(Msg::AttentionUnreadableBody), COUNT - 1);
 }
 
 #[test]

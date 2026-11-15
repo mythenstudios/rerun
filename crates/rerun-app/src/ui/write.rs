@@ -395,6 +395,7 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         if let Some(ui) = weak.upgrade() {
             let mut st = st.borrow_mut();
             if let Some(a) = st.attention.clone() {
+                st.dismissed_unreadable |= a.unreadable;
                 st.dismissed.extend(a.txns);
             }
             ui.set_attention_shown(false);

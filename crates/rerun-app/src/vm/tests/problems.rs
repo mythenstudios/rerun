@@ -190,9 +190,21 @@ fn vr1_every_journal_state_is_a_card_and_counts_for_the_band() {
     assert!(attention(&applied(None, &Names::new(), Lang::En), Lang::En).is_none());
     // The dismissal holds for the changes it was made for; a new problem shows it again.
     let b = attention(&one, Lang::En).unwrap();
-    assert!(attention_shown(&b, &[]));
-    assert!(!attention_shown(&b, &[id(2)]));
-    assert!(attention_shown(&band, &[id(2), id(3)]));
+    assert!(attention_shown(&b, &[], false));
+    assert!(!attention_shown(&b, &[id(2)], false));
+    assert!(attention_shown(&band, &[id(2), id(3)], false));
+    // A journal that cannot be read at all has its own band and its own dismissal.
+    let err = rerun_core::journal::JournalError::NotFound(id(1));
+    let bad = applied(Some(Err(&err)), &Names::new(), Lang::En);
+    let u = attention(&bad, Lang::En).expect("the band");
+    assert!(u.unreadable && u.count == 0 && u.txns.is_empty());
+    assert_eq!(u.title, "The journal cannot be read");
+    assert!(attention_shown(&u, &[id(1)], false));
+    assert!(!attention_shown(&u, &[], true));
+    assert_eq!(
+        attention(&bad, Lang::De).unwrap().title,
+        "Das Journal kann nicht gelesen werden"
+    );
     // Resolved (the card is gone): no band at all.
     let solved = applied(
         Some(Ok(&status(vec![st(

@@ -78,6 +78,8 @@ struct State {
     /// The band's current content (P5-6b) and the changes the user dismissed it for this session.
     attention: Option<AttentionVm>,
     dismissed: Vec<TxnId>,
+    /// The band for an unreadable journal was dismissed this session.
+    dismissed_unreadable: bool,
     system: Option<SystemVm>,
     /// The game page as handed to the window (the selection works on it).
     page: Option<GameVm>,
@@ -213,6 +215,7 @@ where
         orphans: None,
         attention: None,
         dismissed: Vec::new(),
+        dismissed_unreadable: false,
         system: None,
         page: None,
         selection: Selection::default(),
@@ -868,7 +871,7 @@ fn game(g: &GameVm, sel: &Selection) -> GameData {
 /// Shows, hides or updates the band (P5-6b): it shows while a counted change was not dismissed.
 fn set_attention(ui: &AppWindow, st: &mut State, att: Option<AttentionVm>) {
     match &att {
-        Some(a) if vm::attention_shown(a, &st.dismissed) => {
+        Some(a) if vm::attention_shown(a, &st.dismissed, st.dismissed_unreadable) => {
             ui.set_attention_title(s(&a.title));
             ui.set_attention_body(s(&a.body));
             ui.set_attention_view_label(s(&a.action));

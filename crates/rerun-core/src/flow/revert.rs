@@ -487,7 +487,8 @@ pub fn left_foreign(st: &TxnStatus) -> bool {
 
 /// A revert of `st` began and did not finish (P5-6b): the transaction still counts as applied
 /// but some of its ops are not applied any more (a crash or a halt in the middle of an undo).
-/// An op left as found (foreign) is [`left_foreign`]'s case; both show as "applied" in the journal.
+/// It is also true when an op was left as found (foreign, [`left_foreign`]): both show as
+/// "applied" in the journal, so a caller that tells them apart checks `left_foreign` first.
 pub fn revert_begun(st: &TxnStatus) -> bool {
     !st.is_forgotten()
         && st.state == TxnLine::Applied

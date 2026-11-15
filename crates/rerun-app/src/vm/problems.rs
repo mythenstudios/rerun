@@ -30,12 +30,24 @@ pub struct AttentionVm {
     pub action: String,
     /// The transactions it counts.
     pub txns: Vec<TxnId>,
+    /// The journal cannot be read at all (no cards to count): its own band and dismissal.
+    pub unreadable: bool,
 }
 
 /// The band for the Applied page's cards: only a card with a problem counts (interrupted,
 /// undo interrupted, cleanup pending, needs you, damaged, unreadable); an applied card alone
 /// never does. `None`: nothing needs the user.
 pub fn attention(a: &AppliedVm, lang: Lang) -> Option<AttentionVm> {
+    if a.detail.is_some() && a.cards.is_empty() {
+        return Some(AttentionVm {
+            count: 0,
+            title: tx(lang, Msg::AttentionUnreadableTitle),
+            body: tx(lang, Msg::AttentionUnreadableBody),
+            action: tx(lang, Msg::AttentionView),
+            txns: Vec::new(),
+            unreadable: true,
+        });
+    }
     let txns: Vec<TxnId> = a
         .cards
         .iter()
@@ -52,12 +64,16 @@ pub fn attention(a: &AppliedVm, lang: Lang) -> Option<AttentionVm> {
         body: tx(lang, Msg::AttentionBody),
         action: tx(lang, Msg::AttentionView),
         txns,
+        unreadable: false,
     })
 }
 
 /// Whether the band is shown given what the user dismissed this session: any counted
 /// transaction that was not dismissed shows it.
-pub fn attention_shown(a: &AttentionVm, dismissed: &[TxnId]) -> bool {
+pub fn attention_shown(a: &AttentionVm, dismissed: &[TxnId], unreadable_dismissed: bool) -> bool {
+    if a.unreadable {
+        return !unreadable_dismissed;
+    }
     a.txns.iter().any(|t| !dismissed.contains(t))
 }
 

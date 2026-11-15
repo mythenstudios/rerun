@@ -1339,6 +1339,10 @@ pub enum Msg {
     OrphansUnreadable,
     /// The system page: the journal cannot be read.
     OrphansNoJournal,
+    /// The band: the journal cannot be read at all.
+    AttentionUnreadableTitle,
+    /// The band: the journal cannot be read at all.
+    AttentionUnreadableBody,
 }
 
 /// The text of `m` in `lang`.
@@ -1748,7 +1752,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         StateUnreadable => "Unreadable",
         StateForeign => "Needs you",
         ProblemInterrupted => "This was interrupted before it finished. Undo finishes the job.",
-        ProblemCleanup => "Everything is undone, but a file Rerun left is still in use. Undo once more deletes it when it is free.",
+        ProblemCleanup => "Everything is undone, but a copy Rerun left is still there, in use or kept next to a file that changed. Undo once more deletes it when that is safe; the report of the undo names the way out.",
         ProblemDamaged => "The record is damaged. Rerun cannot undo it; only closing it helps.",
         ProblemUnreadable => "The record cannot be read. Rerun cannot undo it; only closing it helps.",
         ProblemForeign => "Someone else changed a file Rerun changed. Rerun leaves it as it is; closing the card without undoing is the way out.",
@@ -2093,10 +2097,12 @@ fn en(m: Msg) -> Cow<'static, str> {
         ResRebindUnconfirmedTitle => "Rerun cannot tell whether the new folder was recorded",
         ResRebindUnconfirmedBody => "The change may be bound to the new folder now, but the journal cannot be read again to confirm it. Look at Applied to see where things stand.",
         OrphansTitle => "Firewall rules of Rerun without a change",
-        OrphansHint => "No change of this Windows account owns these rules. They may belong to another account. Rerun never removes them without administrator rights; remove them in Windows Defender Firewall with Advanced Security.",
+        OrphansHint => "No change of this Windows account owns these rules. They may belong to another account. Rerun does not remove them; remove them in Windows Defender Firewall with Advanced Security.",
         OrphansProgram => "Program",
         OrphansUnreadable => "The firewall cannot be read now, so Rerun cannot list its rules.",
         OrphansNoJournal => "The journal cannot be read now, so the rules cannot be matched to changes.",
+        AttentionUnreadableTitle => "The journal cannot be read",
+        AttentionUnreadableBody => "Rerun cannot tell what it has changed, and changes nothing by itself. Look under Applied for the reason.",
     };
     Cow::Borrowed(s)
 }
@@ -2503,7 +2509,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         StateUnreadable => "Nicht lesbar",
         StateForeign => "Braucht dich",
         ProblemInterrupted => "Das wurde unterbrochen, bevor es fertig war. Rückgängig bringt es zu Ende.",
-        ProblemCleanup => "Alles ist rückgängig gemacht, aber eine Datei, die Rerun hinterlassen hat, ist noch in Gebrauch. Nochmals Rückgängig löscht sie, sobald sie frei ist.",
+        ProblemCleanup => "Alles ist rückgängig gemacht, aber eine Kopie, die Rerun hinterlassen hat, ist noch da, in Gebrauch oder neben einer Datei, die sich geändert hat. Nochmals Rückgängig löscht sie, sobald das sicher ist; der Bericht zum Rückgängigmachen nennt den Ausweg.",
         ProblemDamaged => "Der Eintrag ist beschädigt. Rerun kann ihn nicht rückgängig machen; nur Abschliessen hilft.",
         ProblemUnreadable => "Der Eintrag lässt sich nicht lesen. Rerun kann ihn nicht rückgängig machen; nur Abschliessen hilft.",
         ProblemForeign => "Jemand anderes hat eine Datei geändert, die Rerun geändert hat. Rerun lässt sie, wie sie ist; der Ausweg ist, die Karte ohne Rückgängig abzuschliessen.",
@@ -2848,10 +2854,12 @@ fn de(m: Msg) -> Cow<'static, str> {
         ResRebindUnconfirmedTitle => "Rerun kann nicht sagen, ob der neue Ordner festgehalten wurde",
         ResRebindUnconfirmedBody => "Die Änderung ist vielleicht jetzt an den neuen Ordner gebunden, aber das Journal lässt sich nicht nochmals lesen, um es zu bestätigen. Sieh unter Angewendet nach, wo es steht.",
         OrphansTitle => "Firewall-Regeln von Rerun ohne Änderung",
-        OrphansHint => "Keine Änderung dieses Windows-Kontos besitzt diese Regeln. Möglicherweise gehören sie zu einem anderen Konto. Rerun entfernt sie nie ohne Administratorrechte; entferne sie in der Windows Defender Firewall mit erweiterter Sicherheit.",
+        OrphansHint => "Keine Änderung dieses Windows-Kontos besitzt diese Regeln. Möglicherweise gehören sie zu einem anderen Konto. Rerun entfernt sie nicht; entferne sie in der Windows Defender Firewall mit erweiterter Sicherheit.",
         OrphansProgram => "Programm",
         OrphansUnreadable => "Die Firewall lässt sich gerade nicht lesen, darum kann Rerun ihre Regeln nicht auflisten.",
         OrphansNoJournal => "Das Journal lässt sich gerade nicht lesen, darum lassen sich die Regeln nicht den Änderungen zuordnen.",
+        AttentionUnreadableTitle => "Das Journal kann nicht gelesen werden",
+        AttentionUnreadableBody => "Rerun kann nicht sagen, was es geändert hat, und ändert von sich aus nichts. Den Grund siehst du unter Angewendet.",
     };
     Cow::Borrowed(s)
 }

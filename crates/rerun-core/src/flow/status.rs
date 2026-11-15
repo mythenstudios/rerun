@@ -134,6 +134,12 @@ pub fn journal(app: &AppDir<'_>, heads: Heads) -> Result<JournalView, JournalErr
     })
 }
 
+/// One transaction as the journal holds it, with its head (read only; `None` if it cannot be
+/// read). The app names the changes of an undo's report by it.
+pub fn transaction(app: &AppDir<'_>, txn: &TxnId) -> Option<TxnStatus> {
+    exec::txn_status(app, txn).ok()
+}
+
 /// Rerun's firewall rules no transaction of this account owns (ADR 0023 §6, A4 N6): reads the
 /// firewall (COM).
 pub fn orphans(sys: &dyn System, app: &AppDir<'_>) -> Result<Vec<OrphanRule>, OrphansError> {
