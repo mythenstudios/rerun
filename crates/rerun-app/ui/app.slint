@@ -20,10 +20,10 @@ import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
 import { CardView, HistEntryView, LaunchRowView } from "card.slint";
 import { DialogView } from "dialog.slint";
-import { BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
+import { BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
 
 // What `ui` names through the generated code.
-export { BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, SysLineData, Theme, Str, Reveal, Modal }
+export { BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, SysLineData, Theme, Str, Reveal, Modal }
 
 component Toggle inherits Pressable {
     in-out property <bool> checked;
@@ -571,6 +571,64 @@ component BannerView inherits Rectangle {
         }
         HorizontalLayout {
             alignment: start;
+            Button {
+                in-dialog: true;
+                text: Str.btn-dismiss;
+                activated => {
+                    root.dismiss();
+                }
+            }
+        }
+    }
+}
+
+// The calm band on every page when changes need the user (P5-6b): it only says so and leads to
+// Applied. It never takes the focus (the result banner does) and acts on nothing itself.
+component AttentionBand inherits Rectangle {
+    in property <string> title;
+    in property <string> body;
+    in property <string> view-label;
+    callback view();
+    callback dismiss();
+    background: Theme.raised;
+    border-radius: Theme.radius-m;
+    accessible-role: groupbox;
+    accessible-label: root.title;
+    accessible-description: root.body;
+    Rectangle {
+        x: 0;
+        width: Theme.hair * 2;
+        background: Theme.line-strong;
+    }
+
+    VerticalLayout {
+        padding: Theme.s4;
+        padding-left: Theme.s4 + Theme.hair * 2;
+        spacing: Theme.s2;
+        Text {
+            text: "!  " + root.title;
+            color: Theme.strong;
+            font-size: Theme.fs-m;
+            font-weight: 600;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+
+        Muted {
+            text: root.body;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s3;
+            alignment: start;
+            Button {
+                in-dialog: true;
+                text: root.view-label;
+                activated => {
+                    root.view();
+                }
+            }
+
             Button {
                 in-dialog: true;
                 text: Str.btn-dismiss;
@@ -1199,6 +1257,7 @@ component HistoryPage inherits VerticalLayout {
 component SystemPage inherits VerticalLayout {
     in property <bool> loading;
     in property <[SysLineData]> lines;
+    in property <OrphansData> orphans;
     spacing: Theme.s4;
     PageTitle {
         text: Str.system-title;
@@ -1238,6 +1297,56 @@ component SystemPage inherits VerticalLayout {
                             wrap: word-wrap;
                         }
                     }
+                }
+            }
+        }
+    }
+    if !root.loading && root.orphans.shown: VerticalLayout {
+        spacing: Theme.s3;
+        padding-top: Theme.s3;
+        GroupHeading {
+            text: root.orphans.title;
+        }
+
+        Muted {
+            text: root.orphans.hint;
+        }
+        if root.orphans.note != "": Text {
+            text: root.orphans.note;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        if root.orphans.detail != "": Text {
+            text: root.orphans.detail;
+            color: Theme.muted;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+        for r in root.orphans.rules: Card {
+            accessible-role: AccessibleRole.text;
+            accessible-label: r.name;
+            accessible-description: r.program;
+            VerticalLayout {
+                padding: Theme.s4;
+                spacing: Theme.hair * 2;
+                Text {
+                    text: r.name;
+                    color: Theme.strong;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-s;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+
+                Text {
+                    text: root.orphans.program-label + ": " + r.program;
+                    color: Theme.muted;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-s;
+                    wrap: word-wrap;
+                    accessible-role: none;
                 }
             }
         }
@@ -1381,6 +1490,13 @@ export component AppWindow inherits Window {
     in property <AppliedData> applied;
     in property <bool> system-loading: true;
     in property <[SysLineData]> system-lines;
+    in property <OrphansData> orphans;
+    in property <bool> attention-shown;
+    in property <string> attention-title;
+    in property <string> attention-body;
+    in property <string> attention-view-label;
+    callback attention-view();
+    callback attention-dismiss();
     // Selecting, previewing, applying, undoing (P5-5a).
     in property <PreviewData> preview;
     in property <bool> banner-shown;
@@ -1567,6 +1683,17 @@ export component AppWindow inherits Window {
                                         root.banner-dismiss();
                                     }
                                 }
+                                if root.attention-shown && !root.blocked && root.page != 1: AttentionBand {
+                                    title: root.attention-title;
+                                    body: root.attention-body;
+                                    view-label: root.attention-view-label;
+                                    view => {
+                                        root.attention-view();
+                                    }
+                                    dismiss => {
+                                        root.attention-dismiss();
+                                    }
+                                }
                                 if root.page == 0 && !root.game-open: LibraryPage {
                                     reading: root.library-reading;
                                     summary: root.library-summary;
@@ -1625,6 +1752,7 @@ export component AppWindow inherits Window {
                                 if root.page == 3: SystemPage {
                                     loading: root.system-loading;
                                     lines: root.system-lines;
+                                    orphans: root.orphans;
                                 }
                                 if root.page == 4: SettingsPage { }
                             }

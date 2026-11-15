@@ -3,6 +3,7 @@
 //! text only as an escaped detail.
 
 mod history;
+mod problems;
 
 use rerun_core::catalog::model::{Kind, Tier, VariantStatus};
 use rerun_core::escape;

@@ -32,8 +32,8 @@ mod generated {
 use generated::{
     AppWindow, AppliedData, BadgeData, BannerData, CardData, DetailData, DialogData, FactData,
     FixData, GameData, HistEntryData, HistGroupData, HistoryData, LaunchData, LaunchRowData,
-    LineData, Modal, NoticeData, OpData, PreviewData, ProblemData, Reveal, RowData, SectionData,
-    SolvedData, Str, SysLineData, Theme, WarnData,
+    LineData, Modal, NoticeData, OpData, OrphanData, OrphansData, PreviewData, ProblemData, Reveal,
+    RowData, SectionData, SolvedData, Str, SysLineData, Theme, WarnData,
 };
 
 use std::cell::RefCell;
@@ -48,8 +48,9 @@ use slint::{CloseRequestResponse, Color, ComponentHandle, Model, ModelRc, Shared
 use crate::text::{Lang, Msg, t};
 use crate::theme::{self, Rgb, ThemeId, Tokens};
 use crate::vm::{
-    self, AppliedVm, DetailVm, DialogKind, DialogVm, GameVm, HistoryVm, LaunchVm, Notice, OpVm,
-    PreviewVm, ResultVm, RowVm, Selection, SystemVm, Tone, TxnCardVm, Value, WarnVm,
+    self, AppliedVm, AttentionVm, DetailVm, DialogKind, DialogVm, GameVm, HistoryVm, LaunchVm,
+    Notice, OpVm, OrphansVm, PreviewVm, ResultVm, RowVm, Selection, SystemVm, Tone, TxnCardVm,
+    Value, WarnVm,
 };
 use crate::worker::{Event, Job, Wake, Worker, World};
 use rerun_core::journal::TxnId;
@@ -73,6 +74,10 @@ struct State {
     /// a visit that the worker answers from its session does not rebuild its models.
     applied: Option<AppliedVm>,
     history: Option<HistoryVm>,
+    orphans: Option<OrphansVm>,
+    /// The band's current content (P5-6b) and the changes the user dismissed it for this session.
+    attention: Option<AttentionVm>,
+    dismissed: Vec<TxnId>,
     system: Option<SystemVm>,
     /// The game page as handed to the window (the selection works on it).
     page: Option<GameVm>,
@@ -205,6 +210,9 @@ where
         game: None,
         applied: None,
         history: None,
+        orphans: None,
+        attention: None,
+        dismissed: Vec::new(),
         system: None,
         page: None,
         selection: Selection::default(),
@@ -497,6 +505,8 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 // stays on screen and is replaced only if the answer differs.
                 ui.set_system_loading(st.system.is_none());
                 st.worker.send(Job::System);
+                // The firewall is read only when this page opens (COM), never at start.
+                st.worker.send(Job::Orphans);
             }
             _ => {}
         }
@@ -686,6 +696,9 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 show_result(ui, &r);
             }
             Event::Applied(a) => {
+                // Re-evaluated after every read of the journal: it goes by itself when solved.
+                let att = vm::attention(&a, st.lang);
+                set_attention(ui, &mut st, att);
                 if st.applied.as_ref() != Some(&a) {
                     ui.set_applied(applied(&a));
                     st.applied_cards = a.cards.clone();
@@ -701,6 +714,12 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 if st.history.as_ref() != Some(&*h) {
                     ui.set_history(history_data(&h, st.lang));
                     st.history = Some(*h);
+                }
+            }
+            Event::Orphans(o) => {
+                if st.orphans.as_ref() != Some(&*o) {
+                    ui.set_orphans(orphans_data(&o));
+                    st.orphans = Some(*o);
                 }
             }
             Event::System(sys) => {
@@ -843,6 +862,40 @@ fn game(g: &GameVm, sel: &Selection) -> GameData {
         ),
         applied: model(g.applied.iter().map(card).collect()),
         aside: model(g.aside.iter().map(detail).collect()),
+    }
+}
+
+/// Shows, hides or updates the band (P5-6b): it shows while a counted change was not dismissed.
+fn set_attention(ui: &AppWindow, st: &mut State, att: Option<AttentionVm>) {
+    match &att {
+        Some(a) if vm::attention_shown(a, &st.dismissed) => {
+            ui.set_attention_title(s(&a.title));
+            ui.set_attention_body(s(&a.body));
+            ui.set_attention_view_label(s(&a.action));
+            ui.set_attention_shown(true);
+        }
+        _ => ui.set_attention_shown(false),
+    }
+    st.attention = att;
+}
+
+fn orphans_data(o: &OrphansVm) -> OrphansData {
+    OrphansData {
+        shown: o.shown,
+        title: s(&o.title),
+        hint: s(&o.hint),
+        program_label: s(&o.program_label),
+        rules: model(
+            o.rules
+                .iter()
+                .map(|r| OrphanData {
+                    name: shown(&r.name),
+                    program: shown(&r.program),
+                })
+                .collect(),
+        ),
+        note: o.note.as_deref().map(s).unwrap_or_default(),
+        detail: o.detail.as_ref().map(shown).unwrap_or_default(),
     }
 }
 

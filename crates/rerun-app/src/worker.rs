@@ -69,8 +69,8 @@ use rerun_core::topo;
 use crate::text::{Lang, Msg, t};
 use crate::vm::{
     self, AppliedVm, BlockedVm, DetailVm, DialogVm, DownloadVm, GameVm, HelperState, HistoryVm,
-    LibraryVm, Names, Notice, Offer, PackageState, PreviewVm, ResultVm, RowVm, SteamVm, SystemVm,
-    TopoKnown, UacVm,
+    LibraryVm, Names, Notice, Offer, OrphansVm, PackageState, PreviewVm, ResultVm, RowVm, SteamVm,
+    SystemVm, TopoKnown, UacVm,
 };
 
 /// A job for the worker.
@@ -92,6 +92,9 @@ pub enum Job {
     History,
     /// The system profile.
     System,
+    /// The Rerun firewall rules no change of this account owns (P5-6b). Reads the firewall, so
+    /// the window sends it only when the System page opens; never kept.
+    Orphans,
     /// Plans the picked fixes of a game (reads only, stores nothing). No picks: clears the
     /// preview.
     Plan {
@@ -161,6 +164,7 @@ impl Job {
             Self::Status => "status".to_owned(),
             Self::History => "history".to_owned(),
             Self::System => "system".to_owned(),
+            Self::Orphans => "orphans".to_owned(),
             Self::Plan { app_id, .. } => format!("plan {app_id}"),
             Self::PreviewShown { .. } => "preview shown".to_owned(),
             Self::Apply { .. } => "apply".to_owned(),
@@ -220,6 +224,8 @@ pub enum Event {
     History(Box<HistoryVm>),
     /// The system page.
     System(SystemVm),
+    /// The orphaned firewall rules for the system page (P5-6b).
+    Orphans(Box<OrphansVm>),
     /// The preview of the picked fixes (rule 5).
     Preview {
         /// The game it is for.
@@ -597,6 +603,10 @@ fn run_job(
             emit(Event::Applied(applied_page(&g, lang, session)));
         }
         Job::History => emit(Event::History(Box::new(history_page(&g, lang, session)))),
+        Job::Orphans => {
+            let r = g.app().map(|app| flow::orphans(g.env().sys, app));
+            emit(Event::Orphans(Box::new(vm::orphans(r.as_ref(), lang))));
+        }
         Job::System => {
             let page = session.system.take().unwrap_or_else(|| {
                 let sys = g.env().sys;
@@ -976,7 +986,13 @@ fn revert(
     waiting_for_uac(prompt.as_ref(), lang, emit);
     match flow::revert(g, shown) {
         Ok(o) => {
-            let mut r = vm::revert_result(&o, lang);
+            // The head names what each change was (read only; the journal is as the undo left it).
+            let ops = g
+                .app()
+                .and_then(|app| exec::txn_status(app, &o.report.txn).ok())
+                .map(|st| vm::head_ops(&st, lang))
+                .unwrap_or_default();
+            let mut r = vm::revert_result(&o, &ops, lang);
             if let Some(l) = o.launch_option {
                 vm::add_launch_option(&mut r, &l, g.env().install, lang);
             }

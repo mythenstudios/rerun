@@ -485,6 +485,15 @@ pub fn left_foreign(st: &TxnStatus) -> bool {
         .any(|o| o.state == OpState::Reverted(Observed::Foreign))
 }
 
+/// A revert of `st` began and did not finish (P5-6b): the transaction still counts as applied
+/// but some of its ops are not applied any more (a crash or a halt in the middle of an undo).
+/// An op left as found (foreign) is [`left_foreign`]'s case; both show as "applied" in the journal.
+pub fn revert_begun(st: &TxnStatus) -> bool {
+    !st.is_forgotten()
+        && st.state == TxnLine::Applied
+        && st.ops.iter().any(|o| o.state != OpState::Applied)
+}
+
 /// The `.old` files of `items` that keep the transaction open: (in use, kept).
 pub fn holding(items: &[PendingOld]) -> (usize, usize) {
     let n = |s: OldSeen| items.iter().filter(|p| p.seen == s).count();

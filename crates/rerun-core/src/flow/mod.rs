@@ -70,7 +70,7 @@ pub use revert::{
     ActError, CleanupAsk, ForgetPreview, ForgetShown, LaunchOption, ProfileFate, RebindShown,
     RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome, RevertPreview, RevertShown,
     RevertWould, forget, forget_preview, holding, left_foreign, rebind, rebind_preview, revert,
-    revert_preview,
+    revert_begun, revert_preview,
 };
 pub use status::{
     Heads, Holder, JournalView, StatusView, head, journal, orphans, profile_id_of, profile_of,

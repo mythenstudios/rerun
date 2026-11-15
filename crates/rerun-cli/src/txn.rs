@@ -78,9 +78,7 @@ fn txn_text(st: &TxnStatus) -> TxnText<'_> {
     match &st.state {
         TxnLine::Empty => TxnText::Empty,
         TxnLine::Open => TxnText::Open,
-        TxnLine::Applied if st.ops.iter().any(|o| o.state != OpState::Applied) => {
-            TxnText::Reverting
-        }
+        TxnLine::Applied if flow::revert_begun(st) => TxnText::Reverting,
         TxnLine::Applied => TxnText::Applied,
         TxnLine::CleanupPending => TxnText::CleanupPending,
         TxnLine::Closed(c) => TxnText::Closed(*c),

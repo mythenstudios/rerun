@@ -247,6 +247,22 @@ export struct HistoryData {
     exact-label: string,
 }
 
+export struct OrphanData {
+    name: string,
+    program: string,
+}
+
+// The firewall rules no change of this account owns (system page).
+export struct OrphansData {
+    shown: bool,
+    title: string,
+    hint: string,
+    program-label: string,
+    rules: [OrphanData],
+    note: string,
+    detail: string,
+}
+
 export struct SysLineData {
     label: string,
     values: [string],

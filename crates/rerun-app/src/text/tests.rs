@@ -749,11 +749,32 @@ fn every() -> Vec<Msg> {
         LaunchWatched,
         LaunchPriorityNotRestored { code: 5 },
         HistHeadUnreadable,
+        StateUndoInterrupted,
+        ProblemUndoInterrupted,
+        AttentionTitle { count: 1 },
+        AttentionTitle { count: 3 },
+        AttentionBody,
+        AttentionView,
+        ReportDrifted,
+        ReportForeign,
+        ReportForeignInline,
+        ReportKept,
+        ReportOldInUse,
+        ReportOldKept,
+        ReportOldForeign,
+        ReportProfilesMoved,
+        ResRebindUnconfirmedTitle,
+        ResRebindUnconfirmedBody,
+        OrphansTitle,
+        OrphansHint,
+        OrphansProgram,
+        OrphansUnreadable,
+        OrphansNoJournal,
     ]
 }
 
 /// The number of messages: one more than the highest [`ordinal`].
-const COUNT: usize = 520;
+const COUNT: usize = 540;
 
 /// A message's position in the enum. The `match` is exhaustive: a new variant does not compile
 /// without an ordinal here, and [`every_ordinal_is_listed`] fails until [`every`] lists it.
@@ -1281,6 +1302,26 @@ fn ordinal(m: Msg) -> usize {
         LaunchWatched => 517,
         LaunchPriorityNotRestored { .. } => 518,
         HistHeadUnreadable => 519,
+        StateUndoInterrupted => 520,
+        ProblemUndoInterrupted => 521,
+        AttentionTitle { .. } => 522,
+        AttentionBody => 523,
+        AttentionView => 524,
+        ReportDrifted => 525,
+        ReportForeign => 526,
+        ReportForeignInline => 527,
+        ReportKept => 528,
+        ReportOldInUse => 529,
+        ReportOldKept => 530,
+        ReportOldForeign => 531,
+        ReportProfilesMoved => 532,
+        ResRebindUnconfirmedTitle => 533,
+        ResRebindUnconfirmedBody => 534,
+        OrphansTitle => 535,
+        OrphansHint => 536,
+        OrphansProgram => 537,
+        OrphansUnreadable => 538,
+        OrphansNoJournal => 539,
     }
 }
 
@@ -1316,7 +1357,7 @@ fn every_ordinal_is_listed() {
     let missing: Vec<usize> = (0..COUNT).filter(|i| !seen[*i]).collect();
     assert!(missing.is_empty(), "ordinals not in every(): {missing:?}");
     // COUNT is right: the last variant has the highest ordinal.
-    assert_eq!(ordinal(Msg::HistHeadUnreadable), COUNT - 1);
+    assert_eq!(ordinal(Msg::OrphansNoJournal), COUNT - 1);
 }
 
 #[test]

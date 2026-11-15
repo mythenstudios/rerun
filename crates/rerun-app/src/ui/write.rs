@@ -381,6 +381,26 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         }
     });
 
+    // The band only says so and leads to Applied; it never acts (ADR 0019).
+    let weak = ui.as_weak();
+    ui.on_attention_view(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.invoke_navigate(1);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_attention_dismiss(move || {
+        if let Some(ui) = weak.upgrade() {
+            let mut st = st.borrow_mut();
+            if let Some(a) = st.attention.clone() {
+                st.dismissed.extend(a.txns);
+            }
+            ui.set_attention_shown(false);
+        }
+    });
+
     let weak = ui.as_weak();
     ui.on_banner_dismiss(move || {
         if let Some(ui) = weak.upgrade() {

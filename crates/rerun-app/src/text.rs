@@ -1295,6 +1295,50 @@ pub enum Msg {
     },
     /// A history entry: its plan cannot be read (the reason follows as a detail).
     HistHeadUnreadable,
+    // ---- problem states (P5-6b)
+    /// A card: an undo began and did not finish.
+    StateUndoInterrupted,
+    /// A card: what to do after an interrupted undo.
+    ProblemUndoInterrupted,
+    /// The band on every page: how many changes need you.
+    AttentionTitle {
+        /// The count.
+        count: usize,
+    },
+    /// The band: what Rerun does and does not do.
+    AttentionBody,
+    /// The band: the button to the Applied page.
+    AttentionView,
+    /// An undo report: only Rerun's part of a change was set back.
+    ReportDrifted,
+    /// An undo report: someone else changed it, Rerun left it as found.
+    ReportForeign,
+    /// An undo report: the old value is in the journal record.
+    ReportForeignInline,
+    /// An undo report: a later change relies on it.
+    ReportKept,
+    /// An undo report: a copy of Rerun's is in use.
+    ReportOldInUse,
+    /// An undo report: a copy of Rerun's is kept.
+    ReportOldKept,
+    /// An undo report: a file that is not Rerun's.
+    ReportOldForeign,
+    /// An undo report: the launch profiles were set back in another folder.
+    ReportProfilesMoved,
+    /// A result: a rebind that may or may not be on disk.
+    ResRebindUnconfirmedTitle,
+    /// A result: a rebind that may or may not be on disk.
+    ResRebindUnconfirmedBody,
+    /// The system page: rules without a change.
+    OrphansTitle,
+    /// The system page: what the rules are and how to remove them.
+    OrphansHint,
+    /// The system page: the label of a rule's program.
+    OrphansProgram,
+    /// The system page: the firewall cannot be read.
+    OrphansUnreadable,
+    /// The system page: the journal cannot be read.
+    OrphansNoJournal,
 }
 
 /// The text of `m` in `lang`.
@@ -2031,6 +2075,28 @@ fn en(m: Msg) -> Cow<'static, str> {
             return format!("The priority class set on the game process could not be put back (Windows error {code}). It stays until the game exits.").into();
         }
         HistHeadUnreadable => "Its plan cannot be read, so what it changed cannot be listed.",
+        StateUndoInterrupted => "Undo interrupted",
+        ProblemUndoInterrupted => "An undo of this change began and did not finish. Undo it again to finish, or close it without undoing.",
+        AttentionTitle { count } => {
+            return (if count == 1 { "1 change needs you".to_owned() } else { format!("{count} changes need you") }).into();
+        }
+        AttentionBody => "Rerun changes nothing by itself. Look at them under Applied, then decide whether to undo or close them.",
+        AttentionView => "View",
+        ReportDrifted => "Only Rerun's part was set back; what changed since stays.",
+        ReportForeign => "Someone else changed it, so Rerun left it as found. Closing the change without undoing ends it.",
+        ReportForeignInline => "Its old value is kept in the journal entry.",
+        ReportKept => "A later change relies on it, so Rerun left it to that change.",
+        ReportOldInUse => "A copy of Rerun's is still in use, so it stays until the program using it ends. Undo again then:",
+        ReportOldKept => "A copy of Rerun's is kept next to a file that changed since, as it may be the last copy of a state. Delete it by hand, or close the change without undoing:",
+        ReportOldForeign => "This is not Rerun's copy; Rerun did not touch it:",
+        ReportProfilesMoved => "The launch profiles were set back in another folder than the plan names:",
+        ResRebindUnconfirmedTitle => "Rerun cannot tell whether the new folder was recorded",
+        ResRebindUnconfirmedBody => "The change may be bound to the new folder now, but the journal cannot be read again to confirm it. Look at Applied to see where things stand.",
+        OrphansTitle => "Firewall rules of Rerun without a change",
+        OrphansHint => "No change of this Windows account owns these rules. They may belong to another account. Rerun never removes them without administrator rights; remove them in Windows Defender Firewall with Advanced Security.",
+        OrphansProgram => "Program",
+        OrphansUnreadable => "The firewall cannot be read now, so Rerun cannot list its rules.",
+        OrphansNoJournal => "The journal cannot be read now, so the rules cannot be matched to changes.",
     };
     Cow::Borrowed(s)
 }
@@ -2764,6 +2830,28 @@ fn de(m: Msg) -> Cow<'static, str> {
             return format!("Die Prioritätsklasse des Spielprozesses konnte nicht zurückgesetzt werden (Windows-Fehler {code}). Die Klasse bleibt, bis das Spiel endet.").into();
         }
         HistHeadUnreadable => "Sein Plan kann nicht gelesen werden, darum lässt sich nicht auflisten, was es geändert hat.",
+        StateUndoInterrupted => "Rückgängig unterbrochen",
+        ProblemUndoInterrupted => "Ein Rückgängigmachen dieser Änderung hat begonnen und ist nicht zu Ende gekommen. Mache sie nochmals rückgängig, um es abzuschliessen, oder schliesse sie ohne Rückgängig ab.",
+        AttentionTitle { count } => {
+            return (if count == 1 { "1 Änderung braucht dich".to_owned() } else { format!("{count} Änderungen brauchen dich") }).into();
+        }
+        AttentionBody => "Rerun ändert von sich aus nichts. Sieh sie dir unter Angewendet an und entscheide dann, ob du sie rückgängig machst oder abschliesst.",
+        AttentionView => "Ansehen",
+        ReportDrifted => "Nur der Teil von Rerun wurde zurückgesetzt; was sich seither geändert hat, bleibt.",
+        ReportForeign => "Jemand anderes hat es geändert, darum hat Rerun es so gelassen, wie es war. Das Abschliessen ohne Rückgängig beendet die Änderung.",
+        ReportForeignInline => "Sein alter Wert liegt im Journal-Eintrag.",
+        ReportKept => "Eine spätere Änderung verlässt sich darauf, darum hat Rerun es dieser überlassen.",
+        ReportOldInUse => "Eine Kopie von Rerun ist noch in Benutzung und bleibt, bis das Programm, das sie nutzt, endet. Mache es dann nochmals rückgängig:",
+        ReportOldKept => "Eine Kopie von Rerun bleibt neben einer Datei, die sich seither geändert hat, weil sie die letzte Kopie eines Zustands sein kann. Lösche sie von Hand, oder schliesse die Änderung ohne Rückgängig ab:",
+        ReportOldForeign => "Das ist keine Kopie von Rerun; Rerun hat sie nicht angefasst:",
+        ReportProfilesMoved => "Die Startprofile wurden in einem anderen Ordner zurückgesetzt, als der Plan nennt:",
+        ResRebindUnconfirmedTitle => "Rerun kann nicht sagen, ob der neue Ordner festgehalten wurde",
+        ResRebindUnconfirmedBody => "Die Änderung ist vielleicht jetzt an den neuen Ordner gebunden, aber das Journal lässt sich nicht nochmals lesen, um es zu bestätigen. Sieh unter Angewendet nach, wo es steht.",
+        OrphansTitle => "Firewall-Regeln von Rerun ohne Änderung",
+        OrphansHint => "Keine Änderung dieses Windows-Kontos besitzt diese Regeln. Möglicherweise gehören sie zu einem anderen Konto. Rerun entfernt sie nie ohne Administratorrechte; entferne sie in der Windows Defender Firewall mit erweiterter Sicherheit.",
+        OrphansProgram => "Programm",
+        OrphansUnreadable => "Die Firewall lässt sich gerade nicht lesen, darum kann Rerun ihre Regeln nicht auflisten.",
+        OrphansNoJournal => "Das Journal lässt sich gerade nicht lesen, darum lassen sich die Regeln nicht den Änderungen zuordnen.",
     };
     Cow::Borrowed(s)
 }

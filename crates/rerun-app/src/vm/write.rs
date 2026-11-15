@@ -1052,6 +1052,16 @@ fn exec_error(e: &ExecError, lang: Lang) -> ResultVm {
             ),
             shown_error(e),
         ),
+        ExecError::RebindUnconfirmed(_) => with_detail(
+            result(
+                Tone::Attention,
+                lang,
+                Msg::ResRebindUnconfirmedTitle,
+                Msg::ResRebindUnconfirmedBody,
+                true,
+            ),
+            shown_error(e),
+        ),
         ExecError::Unconfirmed(_) => with_detail(
             result(
                 Tone::Attention,
@@ -1092,7 +1102,7 @@ pub fn act_error(e: &ActError, lang: Lang) -> ResultVm {
 
 /// How an undo ended. An undo that stopped at the helper (a declined UAC prompt, a helper that
 /// did not finish) says so; nothing below it was undone (ADR 0023 §9: the batch first).
-pub fn revert_result(o: &RevertOutcome, lang: Lang) -> ResultVm {
+pub fn revert_result(o: &RevertOutcome, ops: &[OpVm], lang: Lang) -> ResultVm {
     let helper_halt = o
         .report
         .halted
@@ -1128,7 +1138,13 @@ pub fn revert_result(o: &RevertOutcome, lang: Lang) -> ResultVm {
         RevertEnd::Kept => (Tone::Attention, Msg::ResKeptTitle, Msg::ResKeptBody),
         RevertEnd::Foreign => (Tone::Attention, Msg::ResForeignTitle, Msg::ResForeignBody),
     };
-    result(tone, lang, a, b, true)
+    let mut r = result(tone, lang, a, b, true);
+    // P5-6b: per change what the undo did beyond the expected (drifted, left as found, left to a
+    // later change, copies of Rerun's that stay, profiles set back elsewhere).
+    r.notice
+        .details
+        .extend(super::problems::report_details(&o.report, ops, lang));
+    r
 }
 
 /// A forget that went through.
@@ -1206,7 +1222,7 @@ pub struct TxnCardVm {
     pub can_forget: bool,
 }
 
-pub(super) fn head_ops(st: &TxnStatus, lang: Lang) -> Vec<OpVm> {
+pub(crate) fn head_ops(st: &TxnStatus, lang: Lang) -> Vec<OpVm> {
     flow::head(st)
         .map(|p| p.ops.iter().map(|o| op_vm(o, lang)).collect())
         .unwrap_or_default()
@@ -1240,6 +1256,12 @@ pub fn card(st: &TxnStatus, names: &Names, lang: Lang) -> Option<TxnCardVm> {
         TxnLine::Applied if foreign => (
             state(Sym::Attention, Msg::StateForeign),
             Some(Msg::ProblemForeign),
+            true,
+        ),
+        // P5-6b (F3): an undo began and did not finish.
+        TxnLine::Applied if flow::revert_begun(st) => (
+            state(Sym::Attention, Msg::StateUndoInterrupted),
+            Some(Msg::ProblemUndoInterrupted),
             true,
         ),
         TxnLine::Applied => (state(Sym::Applied, Msg::StateApplied), None, true),
