@@ -74,6 +74,8 @@ struct State {
     /// a visit that the worker answers from its session does not rebuild its models.
     applied: Option<AppliedVm>,
     history: Option<HistoryVm>,
+    /// What each history group shows this session (collapse state; never written anywhere).
+    reveal: std::collections::HashMap<vm::HistGroup, vm::Reveal>,
     orphans: Option<OrphansVm>,
     /// The band's current content (P5-6b) and the changes the user dismissed it for this session.
     attention: Option<AttentionVm>,
@@ -212,6 +214,7 @@ where
         game: None,
         applied: None,
         history: None,
+        reveal: std::collections::HashMap::new(),
         orphans: None,
         attention: None,
         dismissed: Vec::new(),
@@ -715,8 +718,8 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             }
             Event::History(h) => {
                 if st.history.as_ref() != Some(&*h) {
-                    ui.set_history(history_data(&h, st.lang));
                     st.history = Some(*h);
+                    show_history(ui, &st);
                 }
             }
             Event::Orphans(o) => {
@@ -902,7 +905,47 @@ fn orphans_data(o: &OrphansVm) -> OrphansData {
     }
 }
 
-fn history_data(h: &HistoryVm, lang: Lang) -> HistoryData {
+/// What a history group shows now: the session's choice, else the start state.
+fn reveal_of(st: &State, kind: vm::HistGroup) -> vm::Reveal {
+    st.reveal
+        .get(&kind)
+        .copied()
+        .unwrap_or_else(|| vm::initial_reveal(kind))
+}
+
+/// Draws the history page under the session's collapse state.
+fn show_history(ui: &AppWindow, st: &State) {
+    if let Some(h) = &st.history {
+        ui.set_history(history_data(h, st.lang, &|k| reveal_of(st, k)));
+    }
+}
+
+/// The header button or "Show older" of the group at `index` (a position in the page's list).
+fn history_reveal(ui: &AppWindow, st: &mut State, index: i32, more: bool) {
+    let Some(kind) = usize::try_from(index)
+        .ok()
+        .and_then(|i| st.history.as_ref()?.groups.get(i))
+        .map(|g| g.kind)
+    else {
+        return;
+    };
+    let now = reveal_of(st, kind);
+    st.reveal.insert(
+        kind,
+        if more {
+            vm::revealed_more(now)
+        } else {
+            vm::toggled(now)
+        },
+    );
+    show_history(ui, st);
+}
+
+fn history_data(
+    h: &HistoryVm,
+    lang: Lang,
+    reveal: &dyn Fn(vm::HistGroup) -> vm::Reveal,
+) -> HistoryData {
     let (empty_title, empty_sub) = h
         .empty
         .as_ref()
@@ -913,25 +956,36 @@ fn history_data(h: &HistoryVm, lang: Lang) -> HistoryData {
         groups: model(
             h.groups
                 .iter()
-                .map(|g| HistGroupData {
-                    title: s(&g.title),
-                    hint: g.hint.as_deref().map(s).unwrap_or_default(),
-                    entries: model(
-                        g.entries
-                            .iter()
-                            .map(|e| HistEntryData {
-                                id: s(&e.id),
-                                game: e.game.as_ref().map(|v| s(v.as_str())).unwrap_or_default(),
-                                state: badge(&e.state),
-                                problem: e.problem.as_deref().map(s).unwrap_or_default(),
-                                detail: e.detail.as_ref().map(shown).unwrap_or_default(),
-                                ops: model(e.ops.iter().map(write::op).collect()),
-                                backups: e.backups.as_ref().map(shown).unwrap_or_default(),
-                                may_remain: model(e.may_remain.iter().map(shown).collect()),
-                                note: e.note.as_deref().map(s).unwrap_or_default(),
-                            })
-                            .collect(),
-                    ),
+                .map(|g| {
+                    let v = vm::group_view(g, reveal(g.kind), lang);
+                    HistGroupData {
+                        title: s(&v.heading),
+                        hint: v.hint.as_deref().map(s).unwrap_or_default(),
+                        collapsible: v.collapsible,
+                        expanded: v.expanded,
+                        toggle: s(&v.toggle),
+                        more: v.more.as_deref().map(s).unwrap_or_default(),
+                        entries: model(
+                            v.entries
+                                .iter()
+                                .map(|e| HistEntryData {
+                                    id: s(&e.id),
+                                    game: e
+                                        .game
+                                        .as_ref()
+                                        .map(|v| s(v.as_str()))
+                                        .unwrap_or_default(),
+                                    state: badge(&e.state),
+                                    problem: e.problem.as_deref().map(s).unwrap_or_default(),
+                                    detail: e.detail.as_ref().map(shown).unwrap_or_default(),
+                                    ops: model(e.ops.iter().map(write::op).collect()),
+                                    backups: e.backups.as_ref().map(shown).unwrap_or_default(),
+                                    may_remain: model(e.may_remain.iter().map(shown).collect()),
+                                    note: e.note.as_deref().map(s).unwrap_or_default(),
+                                })
+                                .collect(),
+                        ),
+                    }
                 })
                 .collect(),
         ),

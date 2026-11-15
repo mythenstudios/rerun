@@ -16,7 +16,9 @@ use rerun_core::plan::profile_id;
 use rerun_core::prim::launch_method::ProfileMethod;
 
 use crate::text::{Lang, Msg, Sym, t};
-use crate::vm::{HistGroup, HistoryVm, LaunchRowVm, Names, Value, ago, history, last_launch, utc};
+use crate::vm::{
+    HISTORY_PAGE, HistGroup, HistoryVm, LaunchRowVm, Names, Value, ago, history, last_launch, utc,
+};
 
 fn id(seq: u32) -> TxnId {
     format!("{seq:08}-0123456789abcdef").parse().unwrap()
@@ -103,8 +105,7 @@ fn vv1_every_state_lands_in_its_group() {
                 HistGroup::Open,
                 HistGroup::Reverted,
                 HistGroup::RolledBack,
-                HistGroup::Forgotten,
-                HistGroup::Empty
+                HistGroup::Forgotten
             ]
         );
         assert!(h.empty.is_none() && h.launch_title.is_none());
@@ -112,10 +113,7 @@ fn vv1_every_state_lands_in_its_group() {
             |g: usize| -> Vec<u32> { h.groups[g].entries.iter().map(|e| e.txn.seq()).collect() };
         // Newest first inside a group; the open group holds everything not settled.
         assert_eq!(seqs(0), [5, 4, 3, 2, 1]);
-        assert_eq!(
-            (seqs(1), seqs(2), seqs(3), seqs(4)),
-            (vec![8], vec![9], vec![7, 6], vec![10])
-        );
+        assert_eq!((seqs(1), seqs(2), seqs(3)), (vec![8], vec![9], vec![7, 6]));
         let word = |g: usize, i: usize| {
             let e = &h.groups[g].entries[i];
             (e.state.sym, e.state.word.clone())
@@ -129,7 +127,8 @@ fn vv1_every_state_lands_in_its_group() {
         assert_eq!(word(1, 0), (Sym::None, w(Msg::HistStateReverted)));
         assert_eq!(word(2, 0), (Sym::None, w(Msg::HistStateRolledBack)));
         assert_eq!(word(3, 0), (Sym::Unconfirmed, w(Msg::HistStateForgotten)));
-        assert_eq!(word(4, 0), (Sym::NotHere, w(Msg::HistStateEmpty)));
+        // The empty transaction (10) is in no group: the view leaves it out (P5-6d-0).
+        assert_eq!(h.groups.iter().map(|g| g.count).sum::<usize>(), 9);
         // A forgotten one (by a record, or by a marker) says where its backups stay.
         for e in &h.groups[3].entries {
             assert_eq!(
@@ -563,4 +562,120 @@ fn vv3_the_last_start_of_a_game_by_its_profile() {
         Value::Shown(escape::text("Invented W").into_owned())
     );
     assert!(!h.launches[0].game_is_id);
+}
+
+/// VH1 (P5-6d-0) the tidy view: the open group is first and always shown in full, the closed
+/// groups start collapsed with their numbers, expanded they show the newest page and "Show older"
+/// reveals the next one, the empty transactions are in no group, the session's reveal is plain
+/// data (nothing is stored), and German has its own words.
+#[test]
+fn vh1_closed_groups_are_collapsed_counted_and_paged() {
+    use crate::vm::{group_view, initial_reveal, revealed_more, toggled};
+    // 2 open, 45 undone, 3 rolled back, 5 forgotten, 4 empty: interleaved by number.
+    let mut txns = Vec::new();
+    for seq in 1..=59u32 {
+        let state = match seq {
+            1..=2 => TxnLine::Applied,
+            3..=47 => TxnLine::Closed(Closing::Reverted),
+            48..=50 => TxnLine::Closed(Closing::RolledBack),
+            51..=55 => TxnLine::Closed(Closing::Forgotten),
+            _ => TxnLine::Empty,
+        };
+        txns.push(st(seq, state, false, &[]));
+    }
+    let v = view(txns, None, Vec::new());
+    for lang in Lang::ALL {
+        let h = page(&v, lang);
+        // Open first, then the closed groups; the empty ones are nowhere.
+        let kinds: Vec<(HistGroup, usize)> = h.groups.iter().map(|g| (g.kind, g.count)).collect();
+        assert_eq!(
+            kinds,
+            [
+                (HistGroup::Open, 2),
+                (HistGroup::Reverted, 45),
+                (HistGroup::RolledBack, 3),
+                (HistGroup::Forgotten, 5)
+            ]
+        );
+        assert_eq!(h.groups.iter().map(|g| g.entries.len()).sum::<usize>(), 55);
+        // The numbers are in the headings.
+        assert_eq!(h.groups[1].heading, format!("{} (45)", h.groups[1].title));
+        // The open group: not collapsible, all entries, no button, its sentence.
+        let open = group_view(&h.groups[0], initial_reveal(HistGroup::Open), lang);
+        assert!(
+            open.expanded && !open.collapsible && open.toggle.is_empty() && open.more.is_none()
+        );
+        assert_eq!(open.entries.len(), 2);
+        assert!(open.hint.is_some());
+        // A closed group starts collapsed: no entries, no sentence, no older button, the "Show"
+        // button, and the number is still there.
+        let closed = group_view(&h.groups[1], initial_reveal(HistGroup::Reverted), lang);
+        assert!(!closed.expanded && closed.collapsible);
+        assert!(closed.entries.is_empty() && closed.more.is_none());
+        assert_eq!(closed.toggle, t(lang, Msg::HistShowGroup));
+        assert_eq!(closed.heading, h.groups[1].heading);
+        // Expanded: the newest page, newest first, and the button says how many are not shown.
+        let r = toggled(initial_reveal(HistGroup::Reverted));
+        assert_eq!(r, Some(HISTORY_PAGE));
+        let page1 = group_view(&h.groups[1], r, lang);
+        assert!(page1.expanded);
+        assert_eq!(page1.toggle, t(lang, Msg::HistHideGroup));
+        let seqs: Vec<u32> = page1.entries.iter().map(|e| e.txn.seq()).collect();
+        assert_eq!(seqs.len(), HISTORY_PAGE);
+        assert_eq!(seqs[0], 47, "newest first");
+        assert_eq!(seqs[HISTORY_PAGE - 1], 28, "the 20th newest of 3..=47");
+        assert_eq!(
+            page1.more,
+            Some(t(lang, Msg::HistShowOlder { n: 25 }).into_owned())
+        );
+        // Show older: the next page, then the rest, then no button.
+        let r2 = revealed_more(r);
+        let page2 = group_view(&h.groups[1], r2, lang);
+        assert_eq!(page2.entries.len(), 2 * HISTORY_PAGE);
+        assert_eq!(
+            page2.more,
+            Some(t(lang, Msg::HistShowOlder { n: 5 }).into_owned())
+        );
+        let page3 = group_view(&h.groups[1], revealed_more(r2), lang);
+        assert_eq!(page3.entries.len(), 45);
+        assert!(page3.more.is_none(), "everything is shown");
+        assert_eq!(page3.entries.last().map(|e| e.txn.seq()), Some(3));
+        // A group of a few: expanded shows all of it and no older button; hidden again.
+        let few = group_view(&h.groups[2], toggled(None), lang);
+        assert_eq!((few.entries.len(), few.more.is_none()), (3, true));
+        assert!(
+            group_view(&h.groups[2], toggled(toggled(None)), lang)
+                .entries
+                .is_empty()
+        );
+        // The open group cannot be capped by a reveal either.
+        assert_eq!(group_view(&h.groups[0], Some(1), lang).entries.len(), 1);
+    }
+    assert_eq!(
+        t(Lang::En, Msg::HistShowOlder { n: 25 }),
+        "Show older (25 not shown)"
+    );
+    assert_eq!(
+        t(Lang::De, Msg::HistShowOlder { n: 25 }),
+        "Ältere zeigen (25 nicht angezeigt)"
+    );
+}
+
+/// VH1 a journal of only empty transactions is as good as none: the page says nothing is there.
+#[test]
+fn vh1_a_journal_of_empty_transactions_shows_nothing() {
+    let v = view(
+        vec![
+            st(1, TxnLine::Empty, false, &[]),
+            st(2, TxnLine::Empty, false, &[]),
+        ],
+        None,
+        Vec::new(),
+    );
+    let h = page(&v, Lang::En);
+    assert!(h.groups.is_empty());
+    assert_eq!(
+        h.empty.as_ref().map(|e| e.0.as_str()),
+        Some("Nothing in the journal yet")
+    );
 }

@@ -404,6 +404,23 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         }
     });
 
+    // The history's groups collapse and reveal older entries: the window's own state for the
+    // session, read only.
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_history_group_toggle(move |i| {
+        if let Some(ui) = weak.upgrade() {
+            history_reveal(&ui, &mut st.borrow_mut(), i, false);
+        }
+    });
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_history_group_more(move |i| {
+        if let Some(ui) = weak.upgrade() {
+            history_reveal(&ui, &mut st.borrow_mut(), i, true);
+        }
+    });
+
     // The band only says so and leads to Applied; it never acts (ADR 0019).
     let weak = ui.as_weak();
     ui.on_attention_view(move || {

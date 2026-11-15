@@ -1153,18 +1153,12 @@ pub enum Msg {
     HistGroupForgotten,
     /// History group hint: closed without undo.
     HistGroupForgottenHint,
-    /// History group: no change.
-    HistGroupEmpty,
-    /// History group hint: no change.
-    HistGroupEmptyHint,
     /// A history entry: undone.
     HistStateReverted,
     /// A history entry: rolled back.
     HistStateRolledBack,
     /// A history entry: closed without undo.
     HistStateForgotten,
-    /// A history entry: no change.
-    HistStateEmpty,
     /// A history entry: where the backups stay.
     HistoryBackupsIn,
     /// A history entry: files that may remain next to the game files.
@@ -1423,6 +1417,16 @@ pub enum Msg {
     RebindSamePath,
     /// A rebind result: the record is written, the undo did not finish.
     RebindBoundNow,
+    // ---- the tidy history view (P5-6d-0)
+    /// A history group: the button that shows its entries.
+    HistShowGroup,
+    /// A history group: the button that hides its entries.
+    HistHideGroup,
+    /// A history group: the button that shows more entries.
+    HistShowOlder {
+        /// How many entries are not shown.
+        n: usize,
+    },
 }
 
 /// The text of `m` in `lang`.
@@ -2013,12 +2017,9 @@ fn en(m: Msg) -> Cow<'static, str> {
         HistGroupRolledBackHint => "An apply failed and Rerun put everything back.",
         HistGroupForgotten => "Closed without undoing",
         HistGroupForgottenHint => "Rerun cannot undo these any more. What they changed stays, and their backups stay where listed.",
-        HistGroupEmpty => "No change",
-        HistGroupEmptyHint => "These began and changed nothing.",
         HistStateReverted => "Undone",
         HistStateRolledBack => "Rolled back",
         HistStateForgotten => "Closed without undo",
-        HistStateEmpty => "No change",
         HistoryBackupsIn => "Backups stay in",
         HistoryMayRemain => "These files may remain next to the game's files",
         HistoryForeignEntries { n } => {
@@ -2223,6 +2224,11 @@ fn en(m: Msg) -> Cow<'static, str> {
         RebindHeadUnavailable => "The plan of this change cannot be read, so Rerun cannot tell whether it still has a firewall rule that needs the administrator prompt. Rebinding it from the app is not offered.",
         RebindSamePath => "The folder is at the same path as recorded, but it is another folder now (the game was reinstalled).",
         RebindBoundNow => "This change is bound to the new folder now. Undo it again to finish, or close it without undoing.",
+        HistShowGroup => "Show",
+        HistHideGroup => "Hide",
+        HistShowOlder { n } => {
+            return format!("Show older ({n} not shown)").into();
+        }
     };
     Cow::Borrowed(s)
 }
@@ -2810,12 +2816,9 @@ fn de(m: Msg) -> Cow<'static, str> {
         HistGroupRolledBackHint => "Ein Anwenden ist fehlgeschlagen, und Rerun hat alles zurückgesetzt.",
         HistGroupForgotten => "Abgeschlossen ohne Rückgängig",
         HistGroupForgottenHint => "Rerun kann diese nicht mehr rückgängig machen. Was sie geändert haben, bleibt, und ihre Sicherungen bleiben dort, wo sie stehen.",
-        HistGroupEmpty => "Ohne Änderung",
-        HistGroupEmptyHint => "Diese haben begonnen und nichts geändert.",
         HistStateReverted => "Rückgängig gemacht",
         HistStateRolledBack => "Zurückgerollt",
         HistStateForgotten => "Ohne Rückgängig abgeschlossen",
-        HistStateEmpty => "Ohne Änderung",
         HistoryBackupsIn => "Die Sicherungen bleiben in",
         HistoryMayRemain => "Diese Dateien können neben den Spieldateien bleiben",
         HistoryForeignEntries { n } => {
@@ -3020,6 +3023,11 @@ fn de(m: Msg) -> Cow<'static, str> {
         RebindHeadUnavailable => "Der Plan dieser Änderung kann nicht gelesen werden, darum kann Rerun nicht sagen, ob sie noch eine Firewall-Regel hat, die die Administrator-Abfrage braucht. Das Neu-Zuordnen aus der App ist nicht möglich.",
         RebindSamePath => "Der Ordner liegt am gleichen Pfad wie gespeichert, ist aber jetzt ein anderer Ordner (das Spiel wurde neu installiert).",
         RebindBoundNow => "Diese Änderung ist dem neuen Ordner jetzt zugeordnet. Mache sie nochmals rückgängig, um es abzuschliessen, oder schliesse sie ohne Rückgängig ab.",
+        HistShowGroup => "Anzeigen",
+        HistHideGroup => "Ausblenden",
+        HistShowOlder { n } => {
+            return format!("Ältere zeigen ({n} nicht angezeigt)").into();
+        }
     };
     Cow::Borrowed(s)
 }

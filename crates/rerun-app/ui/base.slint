@@ -218,6 +218,11 @@ export struct HistGroupData {
     title: string,
     hint: string,
     entries: [HistEntryData],
+    // The closed groups collapse (the open one does not); `more` is the button for older entries.
+    collapsible: bool,
+    expanded: bool,
+    toggle: string,
+    more: string,
 }
 
 // The last start of one game or profile.

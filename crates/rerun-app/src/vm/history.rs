@@ -23,7 +23,7 @@ fn tx(lang: Lang, m: Msg) -> String {
 }
 
 /// The group of a history entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HistGroup {
     /// Not closed: still under Applied.
     Open,
@@ -33,8 +33,6 @@ pub enum HistGroup {
     RolledBack,
     /// Closed without undoing it.
     Forgotten,
-    /// Began and changed nothing.
-    Empty,
 }
 
 /// One transaction in the history.
@@ -69,6 +67,10 @@ pub struct HistGroupVm {
     pub kind: HistGroup,
     /// Its heading.
     pub title: String,
+    /// The heading with the number of entries, "Undone (12)".
+    pub heading: String,
+    /// How many entries it has (all of them, shown or not).
+    pub count: usize,
     /// One sentence under it.
     pub hint: Option<String>,
     /// Its entries, newest first.
@@ -169,17 +171,19 @@ fn game_value(app_id: u32, names: &Names, lang: Lang) -> Value {
 
 // ---------- the journal ----------
 
-fn group_of(st: &rerun_core::exec::TxnStatus) -> HistGroup {
+/// The group of a transaction; `None` for one that began and changed nothing (an empty one: the
+/// view leaves it out, P5-6d-0).
+fn group_of(st: &rerun_core::exec::TxnStatus) -> Option<HistGroup> {
     if !st.is_settled() {
-        HistGroup::Open
+        Some(HistGroup::Open)
     } else if st.is_forgotten() {
-        HistGroup::Forgotten
+        Some(HistGroup::Forgotten)
     } else {
         match &st.state {
-            TxnLine::Closed(Closing::Reverted) => HistGroup::Reverted,
-            TxnLine::Closed(Closing::RolledBack) => HistGroup::RolledBack,
+            TxnLine::Closed(Closing::Reverted) => Some(HistGroup::Reverted),
+            TxnLine::Closed(Closing::RolledBack) => Some(HistGroup::RolledBack),
             // `Closed(Forgotten)` is forgotten above; the rest of the settled lines is empty.
-            _ => HistGroup::Empty,
+            _ => None,
         }
     }
 }
@@ -217,7 +221,8 @@ fn entry(
         HistGroup::Reverted => (Sym::None, Msg::HistStateReverted, false),
         HistGroup::RolledBack => (Sym::None, Msg::HistStateRolledBack, false),
         HistGroup::Forgotten => (Sym::Unconfirmed, Msg::HistStateForgotten, true),
-        HistGroup::Empty | HistGroup::Open => (Sym::NotHere, Msg::HistStateEmpty, true),
+        // An open entry is its card above; a card is always there for one.
+        HistGroup::Open => (Sym::Attention, Msg::StateUnreadable, false),
     };
     let forgotten = group == HistGroup::Forgotten;
     // Review S8 of the status: a forgotten entry always says where its backups stay.
@@ -254,13 +259,90 @@ fn group(kind: HistGroup, entries: Vec<HistEntryVm>, lang: Lang) -> HistGroupVm 
         HistGroup::Reverted => (Msg::HistGroupReverted, None),
         HistGroup::RolledBack => (Msg::HistGroupRolledBack, Some(Msg::HistGroupRolledBackHint)),
         HistGroup::Forgotten => (Msg::HistGroupForgotten, Some(Msg::HistGroupForgottenHint)),
-        HistGroup::Empty => (Msg::HistGroupEmpty, Some(Msg::HistGroupEmptyHint)),
     };
+    let title = tx(lang, title);
     HistGroupVm {
         kind,
-        title: tx(lang, title),
+        heading: format!("{title} ({})", entries.len()),
+        title,
+        count: entries.len(),
         hint: hint.map(|m| tx(lang, m)),
         entries,
+    }
+}
+
+/// How many entries of a closed group the window shows at once, and how many more "Show older"
+/// reveals.
+pub const HISTORY_PAGE: usize = 20;
+
+/// What the window shows of a group: `None` collapsed, `Some(n)` the newest `n` entries.
+pub type Reveal = Option<usize>;
+
+/// The reveal a group starts with each session: the open entries are all there (they are few and
+/// need the user), the closed groups are collapsed.
+pub fn initial_reveal(kind: HistGroup) -> Reveal {
+    (kind == HistGroup::Open).then_some(usize::MAX)
+}
+
+/// The group's header button: collapsed shows the first page, expanded hides it again.
+pub fn toggled(r: Reveal) -> Reveal {
+    match r {
+        None => Some(HISTORY_PAGE),
+        Some(_) => None,
+    }
+}
+
+/// "Show older": the next page.
+pub fn revealed_more(r: Reveal) -> Reveal {
+    Some(r.unwrap_or(0).saturating_add(HISTORY_PAGE))
+}
+
+/// A group as the window draws it under a reveal (the session's collapse state; nothing is kept
+/// on disk).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupView {
+    /// The group's heading with its number.
+    pub heading: String,
+    /// Its sentence, shown while expanded.
+    pub hint: Option<String>,
+    /// The header can collapse it (not the open group).
+    pub collapsible: bool,
+    /// The entries are shown.
+    pub expanded: bool,
+    /// The header button's word (Show, Hide); empty if the group cannot collapse.
+    pub toggle: String,
+    /// The newest entries that are shown, newest first.
+    pub entries: Vec<HistEntryVm>,
+    /// "Show older (N not shown)" while some are not shown.
+    pub more: Option<String>,
+}
+
+/// The group under `reveal`: collapsed shows none, expanded the newest `n` and the button for the
+/// older ones.
+pub fn group_view(g: &HistGroupVm, reveal: Reveal, lang: Lang) -> GroupView {
+    let collapsible = g.kind != HistGroup::Open;
+    let n = reveal.unwrap_or(0).min(g.entries.len());
+    let expanded = reveal.is_some();
+    let hidden = g.entries.len() - n;
+    GroupView {
+        heading: g.heading.clone(),
+        hint: if expanded { g.hint.clone() } else { None },
+        collapsible,
+        expanded,
+        toggle: if collapsible {
+            tx(
+                lang,
+                if expanded {
+                    Msg::HistHideGroup
+                } else {
+                    Msg::HistShowGroup
+                },
+            )
+        } else {
+            String::new()
+        },
+        entries: g.entries[..n].to_vec(),
+        more: (expanded && hidden > 0).then(|| tx(lang, Msg::HistShowOlder { n: hidden })),
     }
 }
 
@@ -317,11 +399,10 @@ pub fn history(
         HistGroup::Reverted,
         HistGroup::RolledBack,
         HistGroup::Forgotten,
-        HistGroup::Empty,
     ] {
         let entries: Vec<HistEntryVm> = order
             .iter()
-            .filter(|st| group_of(st) == kind)
+            .filter(|st| group_of(st) == Some(kind))
             .map(|st| entry(st, kind, &v.holders, names, lang))
             .collect();
         if !entries.is_empty() {

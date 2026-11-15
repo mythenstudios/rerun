@@ -1164,6 +1164,8 @@ component AppliedPage inherits VerticalLayout {
 
 component HistoryPage inherits VerticalLayout {
     in property <HistoryData> history;
+    callback group-toggle(int);
+    callback group-more(int);
     spacing: Theme.s4;
     PageTitle {
         text: Str.history-title;
@@ -1208,11 +1210,24 @@ component HistoryPage inherits VerticalLayout {
     if root.history.empty-title == "": Muted {
         text: root.history.order;
     }
-    for g in root.history.groups: VerticalLayout {
+    for g[gi] in root.history.groups: VerticalLayout {
         spacing: Theme.s3;
         padding-top: Theme.s3;
-        GroupHeading {
-            text: g.title;
+        HorizontalLayout {
+            spacing: Theme.s3;
+            GroupHeading {
+                horizontal-stretch: 1;
+                text: g.title;
+                vertical-alignment: center;
+            }
+
+            if g.collapsible: Button {
+                text: g.toggle;
+                accessible-label: g.toggle + ": " + g.title;
+                activated => {
+                    root.group-toggle(gi);
+                }
+            }
         }
 
         if g.hint != "": Muted {
@@ -1222,6 +1237,15 @@ component HistoryPage inherits VerticalLayout {
             e: e;
             backups-label: root.history.backups-label;
             may-remain-label: root.history.may-remain-label;
+        }
+        if g.more != "": HorizontalLayout {
+            alignment: start;
+            Button {
+                text: g.more;
+                activated => {
+                    root.group-more(gi);
+                }
+            }
         }
     }
     if root.history.foreign != "": Muted {
@@ -1496,6 +1520,8 @@ export component AppWindow inherits Window {
     in property <string> attention-body;
     in property <string> attention-view-label;
     callback attention-view();
+    callback history-group-toggle(int);
+    callback history-group-more(int);
     callback attention-dismiss();
     // Selecting, previewing, applying, undoing (P5-5a).
     in property <PreviewData> preview;
@@ -1749,6 +1775,12 @@ export component AppWindow inherits Window {
                                 }
                                 if root.page == 2: HistoryPage {
                                     history: root.history;
+                                    group-toggle(i) => {
+                                        root.history-group-toggle(i);
+                                    }
+                                    group-more(i) => {
+                                        root.history-group-more(i);
+                                    }
                                 }
                                 if root.page == 3: SystemPage {
                                     loading: root.system-loading;
