@@ -1474,7 +1474,11 @@ fn fate_ops(st: &TxnStatus, v: &exec::Verified, lang: Lang) -> Vec<OpVm> {
     out
 }
 
-fn fate_launch(l: &LaunchOption, install: &Result<PathBuf, String>, lang: Lang) -> LaunchFateVm {
+pub(crate) fn fate_launch(
+    l: &LaunchOption,
+    install: &Result<PathBuf, String>,
+    lang: Lang,
+) -> LaunchFateVm {
     let (m, until) = match l.fate {
         ProfileFate::Gone => (Msg::LaunchFateGone, true),
         ProfileFate::PreviousBack => (Msg::LaunchFatePrev, false),
@@ -1602,6 +1606,36 @@ pub fn revert_refused_vm(
     }
 }
 
+/// A firewall rule of the plan is still there as the change left it (`flow::revert`'s own test
+/// for the administrator prompt).
+fn rule_still_there(p: &plan::Preview, v: &exec::Verified) -> bool {
+    p.firewall.is_some()
+        && v.ops.iter().any(|(k, o)| {
+            *o == Observed::After
+                && p.ops
+                    .get(usize::from(*k))
+                    .is_some_and(|x| x.firewall.is_some())
+        })
+}
+
+/// How a rebind that failed is told: the result of [`act_error`], and, when the rebind record is
+/// written already (every error after it but a refusal and a record that may not be on disk),
+/// that the change is bound to the new folder now (the CLI's "bound now").
+pub fn rebind_failed(e: &ActError, lang: Lang) -> ResultVm {
+    let mut r = act_error(e, lang);
+    let after_record = matches!(
+        e,
+        ActError::Exec(x) if !matches!(x, ExecError::Refused(_) | ExecError::RebindUnconfirmed(_))
+    );
+    if after_record {
+        r.notice.details.insert(
+            0,
+            DetailVm::of(escape::text(&tx(lang, Msg::RebindBoundNow)).into_owned()),
+        );
+    }
+    r
+}
+
 /// The rebind dialog (P5-6c, user decision E3 a: one dialog, no extra checkbox): the folder bound
 /// now and why it does not open, the folder Steam lists now, the folders the change created
 /// there, what the undo does there per change, the registry note (only with registry changes),
@@ -1638,15 +1672,24 @@ pub fn rebind_vm(
     }
     let head = flow::head(st);
     let mut notes = vec![tx(lang, Msg::UndoCloseGame)];
+    if p.to.from.path == p.path {
+        notes.insert(0, tx(lang, Msg::RebindSamePath));
+    }
     // Only where the head has registry ops (a registry op has no root in the preview).
     if head.is_some_and(|h| h.ops.iter().any(|o| o.root.is_none())) {
         notes.push(tx(lang, Msg::RebindRegistryNote));
     }
     notes.push(tx(lang, Msg::RebindScopeNote));
     notes.push(tx(lang, Msg::RebindPermanentNote));
-    let blocked = head
-        .is_some_and(|h| h.firewall.is_some())
-        .then(|| tx(lang, Msg::RebindFirewallBlocked));
+    // A rule that is still there makes the undo need the administrator prompt, which this preview
+    // does not name: not confirmable here. Unknown is blocked too (fail closed): without a
+    // readable plan Rerun cannot tell. A rule the undo already removed (it halted at the moved
+    // folder after the helper's batch) does not block.
+    let blocked = match head {
+        None => Some(tx(lang, Msg::RebindHeadUnavailable)),
+        Some(h) => rule_still_there(h, &p.verified)
+            .then(|| tx(lang, Msg::RebindFirewallBlocked { txn: st.id })),
+    };
     DialogVm {
         kind: DialogKind::Rebind,
         nonce,

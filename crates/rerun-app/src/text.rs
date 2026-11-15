@@ -1377,7 +1377,10 @@ pub enum Msg {
     /// The rebind dialog: the confirm button.
     RebindBtn,
     /// The rebind dialog: a change with a firewall rule cannot be rebound here.
-    RebindFirewallBlocked,
+    RebindFirewallBlocked {
+        /// The transaction.
+        txn: TxnId,
+    },
     /// A refusal of a rebind: the heading.
     RefRebindTitle,
     /// A rebind refusal.
@@ -1414,6 +1417,12 @@ pub enum Msg {
     RefRebindRevertPending,
     /// A rebind refusal.
     RefRebindNoRoom,
+    /// The rebind dialog: the plan of the change cannot be read.
+    RebindHeadUnavailable,
+    /// The rebind dialog: the game folder is at the same path but is another folder.
+    RebindSamePath,
+    /// A rebind result: the record is written, the undo did not finish.
+    RebindBoundNow,
 }
 
 /// The text of `m` in `lang`.
@@ -2175,7 +2184,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         AttentionUnreadableTitle => "The journal cannot be read",
         AttentionUnreadableBody => "Rerun cannot tell what it has changed, and changes nothing by itself. Look under Applied for the reason.",
         UndoFolderChanged => "The game folder has changed",
-        UndoFolderChangedBody => "Steam may have moved or reinstalled the game. Rerun can check the folder Steam lists now; nothing changes before you confirm.",
+        UndoFolderChangedBody => "Steam may have moved or reinstalled the game. Rerun can check the folder Steam lists now; nothing changes before you confirm. A folder you chose yourself is never rebound: close the change without undoing instead.",
         RebindCheckBtn => "Check new folder",
         RebindTitle => "Bind this change to the new folder?",
         RebindIntro => "Nothing has been changed yet. Rerun would bind this change to the folder Steam lists now and undo it there, newest change first:",
@@ -2190,7 +2199,9 @@ fn en(m: Msg) -> Cow<'static, str> {
         RebindScopeNote => "Only the folder bound now is undone; a copy of the game elsewhere (a renamed old folder, a library removed from Steam while its drive was away) keeps Rerun's files.",
         RebindPermanentNote => "The new binding is permanent: every later undo of this change uses the new folder.",
         RebindBtn => "Rebind and undo",
-        RebindFirewallBlocked => "This change includes a firewall rule, which needs the Windows administrator prompt. Rebinding it from the app is not offered yet; use the command line: rerun revert with --rebind.",
+        RebindFirewallBlocked { txn } => {
+            return format!("This change includes a firewall rule, which needs the Windows administrator prompt. Rebinding it from the app is not offered yet; use the command line: rerun revert {txn} --rebind.").into();
+        }
         RefRebindTitle => "Rerun cannot bind this change to a new folder",
         RefRebindNotNeeded => "Every folder of this change opens as recorded. Undo it without a rebind.",
         RefRebindManual => "You chose this game folder yourself, so Rerun never rebinds it. Only closing the change without undoing ends it.",
@@ -2209,6 +2220,9 @@ fn en(m: Msg) -> Cow<'static, str> {
         RefRebindForeign => "A change there is not as Rerun left it. Only closing the change without undoing ends it.",
         RefRebindRevertPending => "An undo of a change in that folder has begun. Only closing the change without undoing ends it.",
         RefRebindNoRoom => "The journal of this change has no room for a rebind. Only closing it without undoing ends it.",
+        RebindHeadUnavailable => "The plan of this change cannot be read, so Rerun cannot tell whether it still has a firewall rule that needs the administrator prompt. Rebinding it from the app is not offered.",
+        RebindSamePath => "The folder is at the same path as recorded, but it is another folder now (the game was reinstalled).",
+        RebindBoundNow => "This change is bound to the new folder now. Undo it again to finish, or close it without undoing.",
     };
     Cow::Borrowed(s)
 }
@@ -2958,7 +2972,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         ReportOldForeign => "Das ist keine Kopie von Rerun; Rerun hat sie nicht angefasst:",
         ReportProfilesMoved => "Die Startprofile wurden in einem anderen Ordner zurückgesetzt, als der Plan nennt:",
         ResRebindUnconfirmedTitle => "Rerun kann nicht sagen, ob der neue Ordner festgehalten wurde",
-        ResRebindUnconfirmedBody => "Die Änderung ist vielleicht jetzt an den neuen Ordner gebunden, aber das Journal lässt sich nicht nochmals lesen, um es zu bestätigen. Sieh unter Angewendet nach, wo es steht.",
+        ResRebindUnconfirmedBody => "Die Änderung ist vielleicht jetzt dem neuen Ordner zugeordnet, aber das Journal lässt sich nicht nochmals lesen, um es zu bestätigen. Sieh unter Angewendet nach, wo es steht.",
         OrphansTitle => "Firewall-Regeln von Rerun ohne Änderung",
         OrphansHint => "Keine Änderung dieses Windows-Kontos besitzt diese Regeln. Möglicherweise gehören sie zu einem anderen Konto. Rerun entfernt sie nicht; entferne sie in der Windows Defender Firewall mit erweiterter Sicherheit.",
         OrphansProgram => "Programm",
@@ -2967,10 +2981,10 @@ fn de(m: Msg) -> Cow<'static, str> {
         AttentionUnreadableTitle => "Das Journal kann nicht gelesen werden",
         AttentionUnreadableBody => "Rerun kann nicht sagen, was es geändert hat, und ändert von sich aus nichts. Den Grund siehst du unter Angewendet.",
         UndoFolderChanged => "Der Spielordner hat sich geändert",
-        UndoFolderChangedBody => "Steam hat das Spiel vielleicht verschoben oder neu installiert. Rerun kann den Ordner prüfen, den Steam jetzt nennt; vor deiner Bestätigung ändert sich nichts.",
+        UndoFolderChangedBody => "Steam hat das Spiel vielleicht verschoben oder neu installiert. Rerun kann den Ordner prüfen, den Steam jetzt nennt; vor deiner Bestätigung ändert sich nichts. Einen Ordner, den du selbst gewählt hast, ordnet Rerun nie neu zu: schliesse die Änderung dann ohne Rückgängig ab.",
         RebindCheckBtn => "Neuen Ordner prüfen",
-        RebindTitle => "Diese Änderung an den neuen Ordner binden?",
-        RebindIntro => "Es wurde noch nichts geändert. Rerun würde diese Änderung an den Ordner binden, den Steam jetzt nennt, und sie dort rückgängig machen, neueste Änderung zuerst:",
+        RebindTitle => "Diese Änderung dem neuen Ordner zuordnen?",
+        RebindIntro => "Es wurde noch nichts geändert. Rerun würde diese Änderung dem Ordner zuordnen, den Steam jetzt nennt, und sie dort rückgängig machen, neueste Änderung zuerst:",
         RebindLblOld => "Gespeicherter Ordner",
         RebindLblLibrary => "Bibliothek",
         RebindLblWhy => "Warum er sich nicht öffnen lässt",
@@ -2979,21 +2993,23 @@ fn de(m: Msg) -> Cow<'static, str> {
         RebindCreatedFound => "Ordner, den die Änderung angelegt hat, dort gefunden; er wird nur entfernt, wenn er leer ist",
         RebindCreatedMissing => "Ordner, den die Änderung angelegt hat, dort nicht vorhanden",
         RebindRegistryNote => "Registry-Änderungen werden dort rückgängig gemacht, wo Rerun sie gemacht hat, auch ein Kompatibilitätsschicht-Wert unter dem alten Programmpfad; ein Wert unter dem neuen Programmpfad bleibt unberührt.",
-        RebindScopeNote => "Nur der jetzt gebundene Ordner wird rückgängig gemacht; eine Kopie des Spiels anderswo (ein umbenannter alter Ordner, eine aus Steam entfernte Bibliothek, deren Laufwerk fehlte) behält die Dateien von Rerun.",
+        RebindScopeNote => "Nur der jetzt zugeordnete Ordner wird rückgängig gemacht; eine Kopie des Spiels anderswo (ein umbenannter alter Ordner, eine aus Steam entfernte Bibliothek, deren Laufwerk fehlte) behält die Dateien von Rerun.",
         RebindPermanentNote => "Die neue Zuordnung ist dauerhaft: Jedes spätere Rückgängigmachen dieser Änderung nutzt den neuen Ordner.",
         RebindBtn => "Neu zuordnen und rückgängig machen",
-        RebindFirewallBlocked => "Diese Änderung enthält eine Firewall-Regel, die die Administrator-Abfrage von Windows braucht. Das Neu-Zuordnen aus der App ist noch nicht möglich; nutze die Befehlszeile: rerun revert mit --rebind.",
-        RefRebindTitle => "Rerun kann diese Änderung nicht an einen neuen Ordner binden",
+        RebindFirewallBlocked { txn } => {
+            return format!("Diese Änderung enthält eine Firewall-Regel, die die Administrator-Abfrage von Windows braucht. Das Neu-Zuordnen aus der App ist noch nicht möglich; nutze die Befehlszeile: rerun revert {txn} --rebind.").into();
+        }
+        RefRebindTitle => "Rerun kann diese Änderung keinem neuen Ordner zuordnen",
         RefRebindNotNeeded => "Jeder Ordner dieser Änderung lässt sich wie gespeichert öffnen. Mache sie ohne Neu-Zuordnung rückgängig.",
         RefRebindManual => "Diesen Spielordner hast du selbst gewählt, darum ordnet Rerun ihn nie neu zu. Nur das Abschliessen ohne Rückgängig beendet die Änderung.",
         RefRebindNotApplied => "Nur eine angewendete Änderung lässt sich neu zuordnen. Mache sie rückgängig oder schliesse sie ohne Rückgängig ab.",
         RefRebindUndecided => "Rerun kann den Ordner gerade nicht prüfen. Versuche es später nochmals.",
-        RefRebindMoreThanOne => "Mehr als ein Ordner dieser Änderung lässt sich nicht öffnen, und eine Neu-Zuordnung bindet nur einen.",
+        RefRebindMoreThanOne => "Mehr als ein Ordner dieser Änderung lässt sich nicht öffnen, und eine Neu-Zuordnung ordnet nur einen zu.",
         RefRebindNoCandidate => "Keine Steam-Bibliothek enthält das Spiel jetzt.",
         RefRebindAmbiguous => "Das Spiel liegt in mehr als einer Steam-Bibliothek. Rerun wählt nicht zwischen ihnen.",
         RefRebindLibraryUnreadable => "Eine Steam-Bibliothek oder das Manifest des Spiels lässt sich gerade nicht lesen. Eine Neu-Zuordnung braucht jede Bibliothek lesbar. Versuche es später nochmals.",
         RefRebindUpdatePending => "Steam aktualisiert das Spiel. Versuche es nochmals, wenn es fertig ist.",
-        RefRebindOtherInstallDir => "Das Spiel ist in dieser Bibliothek in einem anderen Ordner installiert. Das bindet Rerun nicht.",
+        RefRebindOtherInstallDir => "Das Spiel ist in dieser Bibliothek in einem anderen Ordner installiert. Das ordnet Rerun nicht zu.",
         RefRebindCandidate => "Der Ordner in dieser Bibliothek lässt sich nicht öffnen.",
         RefRebindSharedFolder => "Der Ordner in dieser Bibliothek ist schon ein anderer Ordner dieser Änderung.",
         RefRebindHalts => "Das Rückgängigmachen würde auch an einem anderen Ordner dieser Änderung anhalten. Mache ihn zuerst verfügbar.",
@@ -3001,6 +3017,9 @@ fn de(m: Msg) -> Cow<'static, str> {
         RefRebindForeign => "Eine Änderung dort ist nicht so, wie Rerun sie hinterlassen hat. Nur das Abschliessen ohne Rückgängig beendet die Änderung.",
         RefRebindRevertPending => "Ein Rückgängigmachen einer Änderung in diesem Ordner hat begonnen. Nur das Abschliessen ohne Rückgängig beendet die Änderung.",
         RefRebindNoRoom => "Das Journal dieser Änderung hat keinen Platz für eine Neu-Zuordnung. Nur das Abschliessen ohne Rückgängig beendet sie.",
+        RebindHeadUnavailable => "Der Plan dieser Änderung kann nicht gelesen werden, darum kann Rerun nicht sagen, ob sie noch eine Firewall-Regel hat, die die Administrator-Abfrage braucht. Das Neu-Zuordnen aus der App ist nicht möglich.",
+        RebindSamePath => "Der Ordner liegt am gleichen Pfad wie gespeichert, ist aber jetzt ein anderer Ordner (das Spiel wurde neu installiert).",
+        RebindBoundNow => "Diese Änderung ist dem neuen Ordner jetzt zugeordnet. Mache sie nochmals rückgängig, um es abzuschliessen, oder schliesse sie ohne Rückgängig ab.",
     };
     Cow::Borrowed(s)
 }

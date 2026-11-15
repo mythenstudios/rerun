@@ -405,7 +405,7 @@ pub(crate) fn orphan_lines(
 /// E5 a: no rebind yet).
 fn refusal<E: Write>(r: &Refusal, txn: TxnId, err: &mut Out<E>) -> Exit {
     note(err, TxnMsg::Error { error: shown(r) });
-    if flow::rebind_may_help(None, flow::RebindCue::Refused(r)) {
+    if flow::rebind_may_help(flow::RebindCue::Refused(r)) {
         note(err, TxnMsg::IdentityHint { txn });
     }
     // P2-15 (N1): no room for another `RevertIntent`; forget always fits.
@@ -771,7 +771,7 @@ fn rebind_lines(st: &TxnStatus) -> Vec<Message<'_>> {
 
 /// After a halt at a Steam root that is gone: a rebind may bind it (P2-14b).
 fn halt_hint<'a>(st: &TxnStatus, h: &Halt) -> Option<Message<'a>> {
-    flow::rebind_may_help(Some(st), flow::RebindCue::Halted(h))
+    flow::rebind_may_help(flow::RebindCue::Halted(st, h))
         .then(|| m(TxnMsg::HaltRebindHint { txn: st.id }))
 }
 

@@ -190,3 +190,41 @@ fn vb1_the_undo_dialog_of_a_changed_game_folder_offers_the_check_and_cannot_be_c
         assert_eq!(d.details.len(), 1);
     }
 }
+
+/// VB2 (the launch option part of the rebind dialog, shared with the undo dialog): every
+/// `ProfileFate` says its own sentence; only "the previous profile is back" shows no option; the
+/// one that goes says until when; an unknown install folder is a warning, not an option.
+#[test]
+fn vb2_every_profile_fate_has_its_sentence() {
+    use rerun_core::exec::launch_result::ProfileId;
+    use rerun_core::flow::{LaunchOption, ProfileFate};
+    use std::path::PathBuf;
+    let install: Result<PathBuf, String> = Ok(PathBuf::from(r"C:\Rerun"));
+    let unknown: Result<PathBuf, String> = Err("unknown".to_owned());
+    let fates = [
+        (ProfileFate::Gone, Msg::LaunchFateGone, true, true),
+        (ProfileFate::PreviousBack, Msg::LaunchFatePrev, false, false),
+        (ProfileFate::Stays, Msg::LaunchFateStays, false, true),
+        (ProfileFate::Left, Msg::LaunchFateLeft, false, true),
+    ];
+    for lang in Lang::ALL {
+        let mut firsts = BTreeSet::new();
+        for (fate, msg, until, option) in fates {
+            let l = LaunchOption {
+                id: ProfileId([7; 16]),
+                fate,
+            };
+            let v = crate::vm::fate_launch(&l, &install, lang);
+            assert_eq!(v.lines[0], t(lang, msg), "{fate:?}");
+            assert_eq!(v.lines.len(), 1 + usize::from(until), "{fate:?}");
+            assert_eq!(v.option.is_some(), option, "{fate:?}");
+            assert!(v.problems.is_empty());
+            firsts.insert(v.lines[0].clone());
+            // Without a known install folder there is no option, only a warning.
+            let v = crate::vm::fate_launch(&l, &unknown, lang);
+            assert!(v.option.is_none());
+            assert_eq!(v.problems.len(), 1, "{fate:?}");
+        }
+        assert_eq!(firsts.len(), fates.len(), "every fate says its own words");
+    }
+}

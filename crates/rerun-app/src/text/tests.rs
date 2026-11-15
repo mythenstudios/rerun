@@ -788,7 +788,9 @@ fn every() -> Vec<Msg> {
         RebindScopeNote,
         RebindPermanentNote,
         RebindBtn,
-        RebindFirewallBlocked,
+        RebindFirewallBlocked {
+            txn: TxnId::from_str("00000001-0123456789abcdef").unwrap(),
+        },
         RefRebindTitle,
         RefRebindNotNeeded,
         RefRebindManual,
@@ -807,11 +809,14 @@ fn every() -> Vec<Msg> {
         RefRebindForeign,
         RefRebindRevertPending,
         RefRebindNoRoom,
+        RebindHeadUnavailable,
+        RebindSamePath,
+        RebindBoundNow,
     ]
 }
 
 /// The number of messages: one more than the highest [`ordinal`].
-const COUNT: usize = 577;
+const COUNT: usize = 580;
 
 /// A message's position in the enum. The `match` is exhaustive: a new variant does not compile
 /// without an ordinal here, and [`every_ordinal_is_listed`] fails until [`every`] lists it.
@@ -1377,7 +1382,7 @@ fn ordinal(m: Msg) -> usize {
         RebindScopeNote => 555,
         RebindPermanentNote => 556,
         RebindBtn => 557,
-        RebindFirewallBlocked => 558,
+        RebindFirewallBlocked { .. } => 558,
         RefRebindTitle => 559,
         RefRebindNotNeeded => 560,
         RefRebindManual => 561,
@@ -1396,6 +1401,9 @@ fn ordinal(m: Msg) -> usize {
         RefRebindForeign => 574,
         RefRebindRevertPending => 575,
         RefRebindNoRoom => 576,
+        RebindHeadUnavailable => 577,
+        RebindSamePath => 578,
+        RebindBoundNow => 579,
     }
 }
 
@@ -1431,7 +1439,7 @@ fn every_ordinal_is_listed() {
     let missing: Vec<usize> = (0..COUNT).filter(|i| !seen[*i]).collect();
     assert!(missing.is_empty(), "ordinals not in every(): {missing:?}");
     // COUNT is right: the last variant has the highest ordinal.
-    assert_eq!(ordinal(Msg::RefRebindNoRoom), COUNT - 1);
+    assert_eq!(ordinal(Msg::RebindBoundNow), COUNT - 1);
 }
 
 #[test]

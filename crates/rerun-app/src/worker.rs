@@ -971,9 +971,11 @@ fn revert_preview(
                 .then(|| vm::helper_state(&flow::helper(g)));
             // A halt at a Steam folder that is gone: a rebind may help (P5-6c). Only offered; the
             // rebind preview is the authority.
-            let rebind = p.verified.halted.as_ref().is_some_and(|h| {
-                flow::rebind_may_help(Some(&p.status), flow::RebindCue::Halted(h))
-            });
+            let rebind = p
+                .verified
+                .halted
+                .as_ref()
+                .is_some_and(|h| flow::rebind_may_help(flow::RebindCue::Halted(&p.status, h)));
             let dialog = vm::revert_vm(
                 &p,
                 g.env().install,
@@ -994,9 +996,7 @@ fn revert_preview(
             emit(Event::Dialog(Box::new(dialog)));
         }
         // The game folder is another folder now: nothing to undo yet, but a rebind may help.
-        Err(RevertGate::Refused(r))
-            if flow::rebind_may_help(None, flow::RebindCue::Refused(&r)) =>
-        {
+        Err(RevertGate::Refused(r)) if flow::rebind_may_help(flow::RebindCue::Refused(&r)) => {
             session.nonce += 1;
             let nonce = session.nonce;
             let dialog = vm::revert_refused_vm(*txn, &r, nonce, changed, lang);
@@ -1124,7 +1124,7 @@ fn rebind(
             rebind_preview(g, txn, true, lang, session, emit);
         }
         Err(e) => {
-            emit(Event::Result(vm::act_error(&e, lang)));
+            emit(Event::Result(vm::rebind_failed(&e, lang)));
             refresh(g, app, lang, session, emit);
         }
     }

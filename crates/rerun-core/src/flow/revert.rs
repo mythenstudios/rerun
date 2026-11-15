@@ -490,16 +490,17 @@ pub fn left_foreign(st: &TxnStatus) -> bool {
 pub enum RebindCue<'a> {
     /// The preview of the undo was refused.
     Refused(&'a Refusal),
-    /// The undo would halt here.
-    Halted(&'a crate::exec::Halt),
+    /// The undo of this transaction would halt here.
+    Halted(&'a TxnStatus, &'a crate::exec::Halt),
 }
 
 /// Whether a rebind (a new binding of the game folder to the one Steam lists now, P2-14b) may
 /// help after `cue`: a refusal because the game folder is another folder now, or a halt at a
 /// Steam root that is gone or not installed (not when the app is installed in another folder of
-/// its library: no rebind binds that, E-R1). `st` is the transaction the halt is about (without
-/// it a halt cannot be judged). It decides nothing: the rebind preview is the authority.
-pub fn rebind_may_help(st: Option<&TxnStatus>, cue: RebindCue<'_>) -> bool {
+/// its library: no rebind binds that, E-R1). A halt comes with the transaction it is about (its
+/// head says whether the root is a Steam one). It decides nothing: the rebind preview is the
+/// authority.
+pub fn rebind_may_help(cue: RebindCue<'_>) -> bool {
     use crate::detect::steam::AppState;
     use crate::exec::SteamGone;
     use crate::policy::root::RootError;
@@ -508,9 +509,8 @@ pub fn rebind_may_help(st: Option<&TxnStatus>, cue: RebindCue<'_>) -> bool {
             r,
             Refusal::Root(e) if matches!(**e, RootError::IdentityMismatch { .. })
         ),
-        RebindCue::Halted(h) => {
-            let steam = st
-                .and_then(head)
+        RebindCue::Halted(st, h) => {
+            let steam = head(st)
                 .and_then(|p| p.roots.get(usize::from(h.root)))
                 .is_some_and(|r| r.steam.is_some());
             let gone = match &*h.why {

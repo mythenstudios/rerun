@@ -472,14 +472,14 @@ fn fl3_launch_lines_type_each_note() {
 }
 
 /// FH1 (P5-6c, moved from the CLI's hints): `rebind_may_help` says no for a refusal that is not a
-/// changed game folder and for a halt it cannot judge (no transaction, so no Steam root); the
+/// changed game folder and for a halt at a root whose head is not readable (not provably Steam's); the
 /// positive cases are the CLI goldens and the app's AB1.
 #[test]
 fn fh1_a_rebind_is_not_suggested_without_a_changed_folder() {
     use super::{RebindCue, rebind_may_help};
     use crate::exec::{Halt, Refusal, SteamGone};
     let busy = Refusal::Busy(crate::escape::text("game.exe").into_owned());
-    assert!(!rebind_may_help(None, RebindCue::Refused(&busy)));
+    assert!(!rebind_may_help(RebindCue::Refused(&busy)));
     let halt = Halt {
         op: 0,
         root: 0,
@@ -488,5 +488,17 @@ fn fh1_a_rebind_is_not_suggested_without_a_changed_folder() {
             gone: SteamGone::NoManifest,
         }),
     };
-    assert!(!rebind_may_help(None, RebindCue::Halted(&halt)));
+    // A halt at a root the head does not name as a Steam one (no head here): no.
+    let st = crate::exec::TxnStatus {
+        id: "00000001-0123456789abcdef".parse().unwrap(),
+        state: crate::exec::TxnLine::Applied,
+        forgotten: false,
+        folder: crate::escape::path("x").into_owned(),
+        preview: None,
+        ops: Vec::new(),
+        rebinds: Vec::new(),
+        shares: Vec::new(),
+        shares_error: None,
+    };
+    assert!(!rebind_may_help(RebindCue::Halted(&st, &halt)));
 }

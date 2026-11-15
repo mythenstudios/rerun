@@ -699,6 +699,7 @@ fn ah8_a_change_with_a_firewall_rule_is_not_rebound_from_the_app() {
         "{:?}",
         d.blocked
     );
+    assert!(rig.session.pending.rebind.is_none(), "no token kept");
     // A confirm writes nothing: the rule stays, the helper is not started, the change stays open.
     let nonce = d.nonce;
     let ev = rig.run(Job::Rebind { txn, nonce });
@@ -709,6 +710,49 @@ fn ah8_a_change_with_a_firewall_rule_is_not_rebound_from_the_app() {
     assert!(
         matches!(ev.as_slice(), [Event::Applied(a)] if a.open == 1),
         "{ev:?}"
+    );
+}
+
+/// AH9 (P5-6c) after an undo that already removed the rule (the helper's batch goes first and
+/// the undo then halts at the moved folder), nothing needs the administrator prompt any more: the
+/// rebind is confirmable and completes without a second start of the helper.
+#[test]
+fn ah9_a_rebind_after_the_rule_is_gone_is_confirmable() {
+    let mut rig = Rig::new(helper_world(true, CONSENT), true, Lang::En);
+    let pv = rig.preview_of(both());
+    let ev = rig.run(Job::Apply { hash: pv.hash });
+    let txn = open_cards(&ev)[0];
+    assert_eq!(rig.rerun_rules(), 1, "precondition: the rule is there");
+    super::rebind::move_library(&rig.sys, &["game.exe", "game.ini"]);
+    // The undo: the helper removes the rule, then it halts at the folder that is gone.
+    let ev = rig.run(Job::RevertPreview { txn });
+    assert_eq!(
+        dialog_of(&ev).secondary.as_deref(),
+        Some("Check new folder")
+    );
+    let nonce = rig.nonce;
+    let ev = rig.run(Job::Revert { txn, nonce });
+    assert_eq!(rig.rerun_rules(), 0, "precondition: the rule is gone");
+    assert_eq!(
+        open_cards(&ev),
+        [txn],
+        "precondition: the change is still open"
+    );
+    let starts = rig.starts();
+    // Now the rebind can be confirmed, and it does not start the helper again.
+    let ev = rig.run(Job::RebindPreview { txn });
+    let d = dialog_of(&ev);
+    assert_eq!(d.kind, crate::vm::DialogKind::Rebind);
+    assert!(d.can_confirm && d.blocked.is_none(), "{d:?}");
+    assert!(rig.session.pending.rebind.is_some(), "the token is kept");
+    let nonce = d.nonce;
+    let ev = rig.run(Job::Rebind { txn, nonce });
+    assert_eq!(result_of(&ev).tone, Tone::Done, "{ev:?}");
+    assert!(open_cards(&ev).is_empty());
+    assert_eq!(rig.starts(), starts);
+    assert_eq!(
+        super::rebind::read(&rig.sys, &format!(r"{}\game.ini", super::rebind::GAME_E)),
+        INI.as_bytes()
     );
 }
 
