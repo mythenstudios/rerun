@@ -29,7 +29,7 @@ use crate::vm::{
 };
 
 const WRITE_INI: &str = "[Display]\r\nWidth=800\r\n";
-const RERUN: &str = r"C:\Users\Player\AppData\Local\Rerun";
+pub(super) const RERUN: &str = r"C:\Users\Player\AppData\Local\Rerun";
 
 /// The Topo of the write tests: `limit` and `limit-4` are two answers to one problem; `ini`
 /// solves two problems with identical steps; `layer` is verified but its problem does not
@@ -76,16 +76,16 @@ fn write_world() -> FakeSystem {
 }
 
 /// A world, a session and a language: jobs run as the worker thread runs them.
-struct Rig {
-    sys: FakeSystem,
-    session: Session,
-    lang: Lang,
+pub(super) struct Rig {
+    pub(super) sys: FakeSystem,
+    pub(super) session: Session,
+    pub(super) lang: Lang,
     /// The nonce of the last dialog the worker showed (what a confirm click carries).
     nonce: u64,
 }
 
 impl Rig {
-    fn new(lang: Lang) -> Self {
+    pub(super) fn new(lang: Lang) -> Self {
         Self {
             sys: write_world(),
             session: Session::default(),
@@ -94,7 +94,7 @@ impl Rig {
         }
     }
 
-    fn run(&mut self, job: Job) -> Vec<Event> {
+    pub(super) fn run(&mut self, job: Job) -> Vec<Event> {
         let http = FakeHttp::default();
         let install = install();
         let env = Env {
@@ -120,18 +120,18 @@ impl Rig {
     }
 
     /// The click on "Undo this change" of the dialog last shown.
-    fn revert(&mut self, txn: TxnId) -> Vec<Event> {
+    pub(super) fn revert(&mut self, txn: TxnId) -> Vec<Event> {
         let nonce = self.nonce;
         self.run(Job::Revert { txn, nonce })
     }
 
     /// The click on "Close without undoing" of the dialog last shown.
-    fn forget(&mut self, txn: TxnId) -> Vec<Event> {
+    pub(super) fn forget(&mut self, txn: TxnId) -> Vec<Event> {
         let nonce = self.nonce;
         self.run(Job::Forget { txn, nonce })
     }
 
-    fn page(&mut self) -> GameVm {
+    pub(super) fn page(&mut self) -> GameVm {
         let ev = self.run(Job::Game {
             app_id: 220,
             name: Some(escape::text("Invented W").into_owned()),
@@ -143,7 +143,7 @@ impl Rig {
     }
 
     /// The game folder: what an undo must restore bit for bit.
-    fn snap(&self) -> Snapshot {
+    pub(super) fn snap(&self) -> Snapshot {
         let fr = ForbiddenRoots::resolve(&self.sys, Path::new(INSTALL)).unwrap();
         let g = GameDir::open_manual(&self.sys, &fr, Path::new(G)).unwrap();
         snapshot(
@@ -157,7 +157,7 @@ impl Rig {
     }
 
     /// Rerun's whole folder: plans, journal, index.
-    fn snap_app(&self) -> Snapshot {
+    pub(super) fn snap_app(&self) -> Snapshot {
         let app = AppDir::open(&self.sys, Create::Never).unwrap().unwrap();
         snapshot(
             System::registry(&self.sys),
@@ -170,26 +170,26 @@ impl Rig {
     }
 
     #[allow(clippy::disallowed_methods, reason = "test: read a fixture file")]
-    fn try_read(&self, abs: &str) -> Option<Vec<u8>> {
+    pub(super) fn try_read(&self, abs: &str) -> Option<Vec<u8>> {
         let p = Path::new(abs);
         let d = self.sys.fake_fs().open_dir(p.parent()?).ok()?;
         d.read(&RelPath::parse(&p.file_name()?.to_string_lossy()).ok()?)
             .ok()
     }
 
-    fn read(&self, abs: &str) -> Vec<u8> {
+    pub(super) fn read(&self, abs: &str) -> Vec<u8> {
         self.try_read(abs)
             .unwrap_or_else(|| panic!("{abs} is missing"))
     }
 
     /// Plans the preselection and hands the preview over (the window did render it).
-    fn preview(&mut self) -> PreviewVm {
+    pub(super) fn preview(&mut self) -> PreviewVm {
         let page = self.page();
         let picks = Selection::preselected(&page).picks(&page);
         self.preview_of(picks)
     }
 
-    fn preview_of(&mut self, picks: Vec<Pick>) -> PreviewVm {
+    pub(super) fn preview_of(&mut self, picks: Vec<Pick>) -> PreviewVm {
         let ev = self.run(Job::Plan { app_id: 220, picks });
         let pv = match ev.as_slice() {
             [Event::Preview { vm, .. }] => (**vm).clone(),
@@ -208,7 +208,7 @@ impl Rig {
     }
 }
 
-fn result_of(ev: &[Event]) -> &ResultVm {
+pub(super) fn result_of(ev: &[Event]) -> &ResultVm {
     ev.iter()
         .find_map(|e| match e {
             Event::Result(r) => Some(r),
@@ -226,7 +226,7 @@ fn dialog_of(ev: &[Event]) -> &DialogVm {
         .unwrap_or_else(|| panic!("no dialog in {ev:?}"))
 }
 
-fn applied_of(ev: &[Event]) -> &vm::AppliedVm {
+pub(super) fn applied_of(ev: &[Event]) -> &vm::AppliedVm {
     ev.iter()
         .find_map(|e| match e {
             Event::Applied(a) => Some(a),

@@ -199,6 +199,53 @@ export struct AppliedData {
     cards: [CardData],
 }
 
+// One transaction of the history.
+export struct HistEntryData {
+    id: string,
+    game: string,
+    state: BadgeData,
+    problem: string,
+    ops: [OpData],
+    backups: string,
+    may-remain: [string],
+    note: string,
+}
+
+export struct HistGroupData {
+    title: string,
+    hint: string,
+    entries: [HistEntryData],
+}
+
+// The last start of one game or profile.
+export struct LaunchRowData {
+    game: string,
+    game-is-id: bool,
+    when: string,
+    exact: string,
+    outcome: BadgeData,
+    line: string,
+    note: string,
+    detail: string,
+}
+
+export struct HistoryData {
+    order: string,
+    groups: [HistGroupData],
+    empty-title: string,
+    empty-sub: string,
+    detail: string,
+    foreign: string,
+    launch-title: string,
+    launch-intro: string,
+    launches: [LaunchRowData],
+    launch-note: string,
+    launch-detail: string,
+    backups-label: string,
+    may-remain-label: string,
+    exact-label: string,
+}
+
 export struct SysLineData {
     label: string,
     values: [string],
@@ -296,7 +343,6 @@ export global Str {
     in property <string> applied-intro;
     in property <string> history-title;
     in property <string> history-intro;
-    in property <string> history-later;
     in property <string> system-title;
     in property <string> system-intro;
     in property <string> system-reading;

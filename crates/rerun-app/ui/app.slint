@@ -18,12 +18,12 @@ import "../assets/fonts/ibm-plex-mono/IBMPlexMono-Medium.ttf";
 import { Pressable, PageTitle, Badge, Button, Hairline, Muted, GroupHeading, DetailLine, NoticeCard, Card } from "base.slint";
 import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
-import { CardView } from "card.slint";
+import { CardView, HistEntryView, LaunchRowView } from "card.slint";
 import { DialogView } from "dialog.slint";
-import { BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
+import { BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
 
 // What `ui` names through the generated code.
-export { BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, SysLineData, Theme, Str, Reveal, Modal }
+export { BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, SysLineData, Theme, Str, Reveal, Modal }
 
 component Toggle inherits Pressable {
     in-out property <bool> checked;
@@ -1105,6 +1105,7 @@ component AppliedPage inherits VerticalLayout {
 }
 
 component HistoryPage inherits VerticalLayout {
+    in property <HistoryData> history;
     spacing: Theme.s4;
     PageTitle {
         text: Str.history-title;
@@ -1114,12 +1115,83 @@ component HistoryPage inherits VerticalLayout {
         text: Str.history-intro;
     }
 
-    Card {
+    if root.history.empty-title != "": Card {
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.history.empty-title;
+        accessible-description: root.history.empty-sub;
         VerticalLayout {
             padding: Theme.s5;
-            Muted {
-                text: Str.history-later;
+            spacing: Theme.s1;
+            Text {
+                text: root.history.empty-title;
+                color: Theme.strong;
+                font-size: Theme.fs-l;
+                font-weight: 600;
+                wrap: word-wrap;
+                accessible-role: none;
             }
+
+            if root.history.empty-sub != "": Text {
+                text: root.history.empty-sub;
+                color: Theme.muted;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+            if root.history.detail != "": Text {
+                text: root.history.detail;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+            }
+        }
+    }
+    if root.history.empty-title == "": Muted {
+        text: root.history.order;
+    }
+    for g in root.history.groups: VerticalLayout {
+        spacing: Theme.s3;
+        padding-top: Theme.s3;
+        GroupHeading {
+            text: g.title;
+        }
+
+        if g.hint != "": Muted {
+            text: g.hint;
+        }
+        for e in g.entries: HistEntryView {
+            e: e;
+            backups-label: root.history.backups-label;
+            may-remain-label: root.history.may-remain-label;
+        }
+    }
+    if root.history.foreign != "": Muted {
+        text: root.history.foreign;
+    }
+    if root.history.launch-title != "": VerticalLayout {
+        spacing: Theme.s3;
+        padding-top: Theme.s5;
+        GroupHeading {
+            text: root.history.launch-title;
+        }
+
+        Muted {
+            text: root.history.launch-intro;
+        }
+        for r in root.history.launches: LaunchRowView {
+            r: r;
+            exact-label: root.history.exact-label;
+        }
+        if root.history.launch-note != "": Muted {
+            text: root.history.launch-note;
+        }
+        if root.history.launch-detail != "": Text {
+            text: root.history.launch-detail;
+            color: Theme.muted;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
         }
     }
 }
@@ -1291,6 +1363,7 @@ export component AppWindow inherits Window {
     in property <string> status-build;
     in property <string> nav-library-count;
     in property <string> nav-applied-count;
+    in property <HistoryData> history;
     // Library.
     in property <bool> library-reading: true;
     in property <string> library-summary;
@@ -1546,7 +1619,9 @@ export component AppWindow inherits Window {
                                         root.card-forget(i);
                                     }
                                 }
-                                if root.page == 2: HistoryPage { }
+                                if root.page == 2: HistoryPage {
+                                    history: root.history;
+                                }
                                 if root.page == 3: SystemPage {
                                     loading: root.system-loading;
                                     lines: root.system-lines;

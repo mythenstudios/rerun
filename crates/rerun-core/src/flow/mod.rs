@@ -12,7 +12,9 @@
 //! - [`game`]: one app's Topo, the engine's report and its fixes grouped by variant ID
 //!   ([`Fix`]); [`with_topo`] is the same lookup with a closure (behind [`plan`] since P5-2a);
 //! - [`status`]: the journal, the launch results, the profile holders and the orphaned firewall
-//!   rules.
+//!   rules; [`journal`] is the same without the firewall ([`Heads::All`] reads the head of closed
+//!   transactions too, P5-6a) and [`orphans`] the firewall alone; [`launch_lines`] types each last
+//!   start with its note and [`launch_of`] picks a game's.
 //!
 //! Write side (P5-2a, [`write`]): [`plan`] (a Topo and the picked variants) and [`plan_steps`]
 //! (a step file) read only and give a [`Planned`]; the caller shows its preview and calls
@@ -55,7 +57,10 @@ pub use game::{
     Fix, Found, GameCache, GameRefusal, GameView, IssueView, Lookup, MatchView, Matched,
     OwnedReport, Solved, VariantView, fixes, game, game_cached,
 };
-pub use launch::{LaunchView, OptionText, launch_view, option_text};
+pub use launch::{
+    LaunchLine, LaunchNote, LaunchView, OptionText, launch_lines, launch_of, launch_view,
+    option_text,
+};
 pub use library::{LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_games, library};
 pub use packages::{
     DownloadNeed, FetchError, FetchKind, Fetched, NeedState, PackageNeed, Progress, fetch, need,
@@ -67,7 +72,10 @@ pub use revert::{
     RevertWould, forget, forget_preview, holding, left_foreign, rebind, rebind_preview, revert,
     revert_preview,
 };
-pub use status::{Holder, StatusView, head, profile_id_of, profile_of, profile_op, status};
+pub use status::{
+    Heads, Holder, JournalView, StatusView, head, journal, orphans, profile_id_of, profile_of,
+    profile_op, status,
+};
 pub use write::{
     LoadRefusal, Picked, PlanRefusal, Planned, Previewed, StepsRefusal, StoreRefusal, apply, check,
     helper, load_stored, plan, plan_steps, shown, store,

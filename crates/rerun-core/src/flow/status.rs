@@ -100,6 +100,46 @@ pub(crate) fn holders(app: &AppDir<'_>, s: &exec::Status) -> Vec<Holder> {
     out
 }
 
+/// What the journal and the launch results show, without the firewall (P5-6a): what a front end
+/// reads on every page that lists transactions or starts.
+#[derive(Debug)]
+pub struct JournalView {
+    /// The journal.
+    pub status: exec::Status,
+    /// The last start per launch profile (`Ok(None)`: no `launch` folder).
+    pub launch: Result<Option<LaunchResults>, RootError>,
+    /// Which transaction holds each launch profile.
+    pub holders: Vec<Holder>,
+}
+
+/// How many transactions get their head read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Heads {
+    /// Only those not settled (and any that left a `.old`): `status`.
+    Open,
+    /// Every one, closed and forgotten too: the history.
+    All,
+}
+
+/// The journal and the launch results of Rerun's folder `app`, no firewall (COM) and no lock;
+/// only an unreadable journal fails it.
+pub fn journal(app: &AppDir<'_>, heads: Heads) -> Result<JournalView, JournalError> {
+    let status = exec::status_with(app, heads == Heads::All)?;
+    let launch = exec::launch_results(app);
+    let holders = holders(app, &status);
+    Ok(JournalView {
+        status,
+        launch,
+        holders,
+    })
+}
+
+/// Rerun's firewall rules no transaction of this account owns (ADR 0023 §6, A4 N6): reads the
+/// firewall (COM).
+pub fn orphans(sys: &dyn System, app: &AppDir<'_>) -> Result<Vec<OrphanRule>, OrphansError> {
+    exec::firewall_orphans(sys, app)
+}
+
 /// What `status` shows.
 #[derive(Debug)]
 pub struct StatusView {
@@ -115,14 +155,12 @@ pub struct StatusView {
 
 /// The status of Rerun's folder `app` (module docs); only an unreadable journal fails it.
 pub fn status(sys: &dyn System, app: &AppDir<'_>) -> Result<StatusView, JournalError> {
-    let status = exec::status(app)?;
-    let launch = exec::launch_results(app);
-    let holders = holders(app, &status);
-    let orphans = exec::firewall_orphans(sys, app);
+    let j = journal(app, Heads::Open)?;
+    let orphans = orphans(sys, app);
     Ok(StatusView {
-        status,
-        launch,
-        holders,
+        status: j.status,
+        launch: j.launch,
+        holders: j.holders,
         orphans,
     })
 }

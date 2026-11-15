@@ -21,8 +21,10 @@ use rerun_core::journal::JournalError;
 use rerun_core::topo::{AntiCheatState, Refusal, Tri};
 
 mod download;
+mod history;
 mod write;
 pub use download::*;
+pub use history::*;
 pub use write::*;
 
 use crate::text::{Lang, Msg, Sym, t};

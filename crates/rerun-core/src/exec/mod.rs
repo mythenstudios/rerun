@@ -112,7 +112,7 @@ pub use rebind::{
 pub use stack::PatchedExe;
 pub use status::{
     OpState, OpStatus, OrphanRule, OrphansError, RebindLine, ShareKind, ShareLine, Status, TxnLine,
-    TxnStatus, firewall_orphans, status, txn_status,
+    TxnStatus, firewall_orphans, status, status_with, txn_status,
 };
 
 use bind::Bindings;

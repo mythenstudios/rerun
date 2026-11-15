@@ -1206,7 +1206,7 @@ pub struct TxnCardVm {
     pub can_forget: bool,
 }
 
-fn head_ops(st: &TxnStatus, lang: Lang) -> Vec<OpVm> {
+pub(super) fn head_ops(st: &TxnStatus, lang: Lang) -> Vec<OpVm> {
     flow::head(st)
         .map(|p| p.ops.iter().map(|o| op_vm(o, lang)).collect())
         .unwrap_or_default()

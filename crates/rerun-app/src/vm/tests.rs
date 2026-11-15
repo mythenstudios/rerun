@@ -2,6 +2,8 @@
 //! it; the typed refusals come out calm, in both languages, with what to do and the core's
 //! text only as an escaped detail.
 
+mod history;
+
 use rerun_core::catalog::model::{Kind, Tier, VariantStatus};
 use rerun_core::escape;
 use rerun_core::exec::{ApplyError, Outcome, Refusal};

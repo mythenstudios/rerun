@@ -1,7 +1,7 @@
 //! The worker (ADR 0027): one thread for the session owns the system, runs one job at a time
 //! and hands view models back as events. The UI thread never touches the system.
 //!
-//! Read jobs: [`Job::Library`], [`Job::Game`], [`Job::Status`], [`Job::System`] and the preview jobs
+//! Read jobs: [`Job::Library`], [`Job::Game`], [`Job::Status`], [`Job::History`] (P5-6a), [`Job::System`] and the preview jobs
 //! ([`Job::Plan`], [`Job::RevertPreview`], [`Job::ForgetPreview`]); write jobs (P5-5a): [`Job::Apply`],
 //! [`Job::Revert`] and [`Job::Forget`], which write only through `flow` with a token the window
 //! was shown.
@@ -56,8 +56,9 @@ use rerun_core::elevate::PromptState;
 use rerun_core::escape::Shown;
 use rerun_core::exec;
 use rerun_core::flow::{
-    self, ActError, Env, FetchError, ForgetShown, Found, GameCache, GameView, Guarded, IndexState,
-    LibraryEvent, Lookup, NeedState, PackageNeed, Planned, Previewed, Progress, RevertShown,
+    self, ActError, Env, FetchError, ForgetShown, Found, GameCache, GameView, Guarded, Heads,
+    IndexState, LibraryEvent, Lookup, NeedState, PackageNeed, Planned, Previewed, Progress,
+    RevertShown,
 };
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::journal::TxnId;
@@ -67,9 +68,9 @@ use rerun_core::topo;
 
 use crate::text::{Lang, Msg, t};
 use crate::vm::{
-    self, AppliedVm, BlockedVm, DetailVm, DialogVm, DownloadVm, GameVm, HelperState, LibraryVm,
-    Names, Notice, Offer, PackageState, PreviewVm, ResultVm, RowVm, SteamVm, SystemVm, TopoKnown,
-    UacVm,
+    self, AppliedVm, BlockedVm, DetailVm, DialogVm, DownloadVm, GameVm, HelperState, HistoryVm,
+    LibraryVm, Names, Notice, Offer, PackageState, PreviewVm, ResultVm, RowVm, SteamVm, SystemVm,
+    TopoKnown, UacVm,
 };
 
 /// A job for the worker.
@@ -86,6 +87,9 @@ pub enum Job {
     },
     /// The journal, for the applied page.
     Status,
+    /// The journal with every transaction's head and the launch results, for the history page
+    /// (P5-6a). Reads only; never kept.
+    History,
     /// The system profile.
     System,
     /// Plans the picked fixes of a game (reads only, stores nothing). No picks: clears the
@@ -155,6 +159,7 @@ impl Job {
             Self::Library => "library".to_owned(),
             Self::Game { app_id, .. } => format!("game {app_id}"),
             Self::Status => "status".to_owned(),
+            Self::History => "history".to_owned(),
             Self::System => "system".to_owned(),
             Self::Plan { app_id, .. } => format!("plan {app_id}"),
             Self::PreviewShown { .. } => "preview shown".to_owned(),
@@ -211,6 +216,8 @@ pub enum Event {
     Game(GameVm),
     /// The applied page.
     Applied(AppliedVm),
+    /// The history page (P5-6a).
+    History(Box<HistoryVm>),
     /// The system page.
     System(SystemVm),
     /// The preview of the picked fixes (rule 5).
@@ -442,6 +449,20 @@ pub struct Session {
     downloads: Arc<AtomicUsize>,
     /// The download's cancel flag (shared with [`Worker::cancel_download`]).
     pub(crate) cancel: Arc<AtomicBool>,
+    /// The time the pages say "ago" against, seconds since 1970-01-01 UTC: `None` reads the
+    /// clock (tests set it).
+    pub(crate) now: Option<u64>,
+}
+
+impl Session {
+    /// Now, seconds since 1970-01-01 UTC (reading the clock changes nothing).
+    fn now_s(&self) -> u64 {
+        self.now.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs())
+        })
+    }
 }
 
 /// The proof tokens of the flows the window may confirm: the bytes whose preview was handed
@@ -575,6 +596,7 @@ fn run_job(
             // window only skips setting an unchanged page).
             emit(Event::Applied(applied_page(&g, lang, session)));
         }
+        Job::History => emit(Event::History(Box::new(history_page(&g, lang, session)))),
         Job::System => {
             let page = session.system.take().unwrap_or_else(|| {
                 let sys = g.env().sys;
@@ -643,11 +665,20 @@ fn game_page_view(
         }
         Err(e) => (vm::game_refused(app_id, name, &e, lang), None),
     };
-    if let Some(Ok(s)) = g.app().map(exec::status) {
-        page.applied = vm::cards(&s, &session.names, lang)
+    if let Some(Ok(j)) = g.app().map(|app| flow::journal(app, Heads::Open)) {
+        page.applied = vm::cards(&j.status, &session.names, lang)
             .into_iter()
             .filter(|c| c.app_id == Some(app_id))
             .collect();
+        // The last start of this game (P5-6a): a fact, and the notes that go with it.
+        if let Ok(Some(r)) = &j.launch
+            && let lines = flow::launch_lines(r, &j.holders)
+            && let Some(l) = flow::launch_of(&lines, app_id)
+            && let Some((fact, notes)) = vm::last_launch(l, session.now_s(), lang)
+        {
+            page.facts.push(fact);
+            page.notes.extend(notes);
+        }
     }
     session.pages.insert(app_id, fix_key(&page));
     (page, view)
@@ -682,6 +713,18 @@ fn applied_page(g: &Guarded<'_>, lang: Lang, session: &Session) -> AppliedVm {
             // applied page shows them (P5-6).
             let s = exec::status(app);
             vm::applied(Some(s.as_ref()), &session.names, lang)
+        }
+    }
+}
+
+/// The history page from the journal, every head read (P5-6a; never kept).
+fn history_page(g: &Guarded<'_>, lang: Lang, session: &Session) -> HistoryVm {
+    let now = session.now_s();
+    match g.app() {
+        None => vm::history(None, &session.names, now, lang),
+        Some(app) => {
+            let j = flow::journal(app, Heads::All);
+            vm::history(Some(j.as_ref()), &session.names, now, lang)
         }
     }
 }

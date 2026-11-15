@@ -358,3 +358,103 @@ fn ff5_a_fix_names_its_packages_and_the_helper() {
     assert_eq!(ids, ["fix-pack"]);
     assert!(f[1].needs_helper);
 }
+
+/// FL3 (P5-6a, moved from the CLI's `launch_lines`): the typed note of each last start: the
+/// option still set (no holder, a holder, a forgotten holder), the launcher a `direct` check
+/// covered, the target of a `watch` start; the words of `watch`; the failed priority restore;
+/// no note when nothing is wrong; the game's line by its profile ID.
+#[test]
+fn fl3_launch_lines_type_each_note() {
+    use super::{Holder, LaunchNote, launch_lines, launch_of};
+    use crate::escape;
+    use crate::exec::launch_result::{Check, LaunchResult, Outcome, ProfileId, SkipReason, Start};
+    use crate::exec::{LaunchEntry, LaunchResults};
+    use crate::journal::TxnId;
+    use crate::plan::profile_id;
+    use crate::prim::launch_method::ProfileMethod;
+
+    let result = |id: ProfileId, outcome, method| LaunchEntry {
+        id,
+        result: Ok(LaunchResult {
+            profile: id,
+            unix_s: 1_762_600_000,
+            outcome,
+            method,
+        }),
+    };
+    let skipped = |reason, restore| Outcome::Skipped {
+        reason,
+        start: Start::Created,
+        ended: None,
+        priority_restore: restore,
+    };
+    let applied = Outcome::Applied {
+        cpu: None,
+        priority: None,
+        check: Check::Ok,
+    };
+    let ids: Vec<ProfileId> = (1..=7).map(profile_id).collect();
+    let r = LaunchResults {
+        entries: vec![
+            // 1: profile missing, no holder.
+            result(ids[0], skipped(SkipReason::ProfileMissing, None), None),
+            // 2: profile missing, a holder.
+            result(ids[1], skipped(SkipReason::ProfileMissing, None), None),
+            // 3: profile missing, a forgotten holder.
+            result(ids[2], skipped(SkipReason::ProfileMissing, None), None),
+            // 4: direct check of a launcher.
+            result(ids[3], applied.clone(), Some(ProfileMethod::Direct)),
+            // 5: watch, applied.
+            result(ids[4], applied.clone(), Some(ProfileMethod::Watch)),
+            // 6: a watch-only reason with a failed priority restore.
+            result(
+                ids[5],
+                skipped(SkipReason::JobFailed { code: 5 }, Some(5)),
+                Some(ProfileMethod::Watch),
+            ),
+            // 7: nothing wrong, even with a launcher holder: the method is unknown.
+            result(ids[6], applied, None),
+        ],
+        other: 0,
+    };
+    let t = |n: u32| -> TxnId { format!("{n:08}-0123456789abcdef").parse().unwrap() };
+    let holder = |i: usize, txn, forgotten, launcher: bool, watch: bool| Holder {
+        id: ids[i],
+        txn,
+        forgotten,
+        launcher: launcher.then(|| escape::path(r"D:\G\launcher.exe").into_owned()),
+        watch: watch.then(|| escape::path(r"D:\G\game.exe").into_owned()),
+    };
+    let holders = [
+        holder(1, t(2), false, false, false),
+        holder(2, t(3), true, false, false),
+        holder(3, t(4), false, true, false),
+        holder(4, t(5), false, false, true),
+        holder(6, t(7), false, true, true),
+    ];
+    let lines = launch_lines(&r, &holders);
+    let notes: Vec<Option<&LaunchNote>> = lines.iter().map(|l| l.note.as_ref()).collect();
+    assert_eq!(notes[0], Some(&LaunchNote::OptionStillSet { held: None }));
+    assert_eq!(
+        notes[1],
+        Some(&LaunchNote::OptionStillSet { held: Some(t(2)) })
+    );
+    assert_eq!(notes[2], Some(&LaunchNote::OptionStillSetForgotten));
+    assert!(
+        matches!(notes[3], Some(LaunchNote::CheckedLauncher(s)) if s.as_str().contains("launcher.exe"))
+    );
+    assert!(matches!(notes[4], Some(LaunchNote::Watched(s)) if s.as_str().contains("game.exe")));
+    assert_eq!(
+        notes[5], None,
+        "a skipped start is neither checked nor watched"
+    );
+    assert_eq!(notes[6], None);
+    // The words of `watch`: the result's own method, a reason only `watch` writes, a restore line.
+    let watch: Vec<bool> = lines.iter().map(|l| l.watch).collect();
+    assert_eq!(watch, [false, false, false, false, true, true, false]);
+    assert_eq!(lines[5].restore_failed, Some(5));
+    assert_eq!(lines[0].restore_failed, None);
+    // The game's line by the profile ID of its app.
+    assert_eq!(launch_of(&lines, 5).map(|l| l.id), Some(ids[4]));
+    assert!(launch_of(&lines, 99).is_none());
+}

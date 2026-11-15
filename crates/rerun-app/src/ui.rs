@@ -31,8 +31,9 @@ mod generated {
 
 use generated::{
     AppWindow, AppliedData, BadgeData, BannerData, CardData, DetailData, DialogData, FactData,
-    FixData, GameData, LaunchData, LineData, Modal, NoticeData, OpData, PreviewData, ProblemData,
-    Reveal, RowData, SectionData, SolvedData, Str, SysLineData, Theme, WarnData,
+    FixData, GameData, HistEntryData, HistGroupData, HistoryData, LaunchData, LaunchRowData,
+    LineData, Modal, NoticeData, OpData, PreviewData, ProblemData, Reveal, RowData, SectionData,
+    SolvedData, Str, SysLineData, Theme, WarnData,
 };
 
 use std::cell::RefCell;
@@ -47,8 +48,8 @@ use slint::{CloseRequestResponse, Color, ComponentHandle, Model, ModelRc, Shared
 use crate::text::{Lang, Msg, t};
 use crate::theme::{self, Rgb, ThemeId, Tokens};
 use crate::vm::{
-    self, AppliedVm, DetailVm, DialogKind, DialogVm, GameVm, LaunchVm, Notice, OpVm, PreviewVm,
-    ResultVm, RowVm, Selection, SystemVm, Tone, TxnCardVm, Value, WarnVm,
+    self, AppliedVm, DetailVm, DialogKind, DialogVm, GameVm, HistoryVm, LaunchVm, Notice, OpVm,
+    PreviewVm, ResultVm, RowVm, Selection, SystemVm, Tone, TxnCardVm, Value, WarnVm,
 };
 use crate::worker::{Event, Job, Wake, Worker, World};
 use rerun_core::journal::TxnId;
@@ -71,6 +72,7 @@ struct State {
     /// The pages as last handed to the window: an unchanged page is not set again (P5-3b), so
     /// a visit that the worker answers from its session does not rebuild its models.
     applied: Option<AppliedVm>,
+    history: Option<HistoryVm>,
     system: Option<SystemVm>,
     /// The game page as handed to the window (the selection works on it).
     page: Option<GameVm>,
@@ -202,6 +204,7 @@ where
         rows: Vec::new(),
         game: None,
         applied: None,
+        history: None,
         system: None,
         page: None,
         selection: Selection::default(),
@@ -409,7 +412,6 @@ fn set_strings(ui: &AppWindow, lang: Lang) {
     g.set_applied_intro(x(Msg::AppliedIntro));
     g.set_history_title(x(Msg::HistoryTitle));
     g.set_history_intro(x(Msg::HistoryIntro));
-    g.set_history_later(x(Msg::HistoryLater));
     g.set_system_title(x(Msg::SystemTitle));
     g.set_system_intro(x(Msg::SystemIntro));
     g.set_system_reading(x(Msg::SystemReading));
@@ -488,6 +490,8 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         st.page = None;
         match page {
             1 => st.worker.send(Job::Status),
+            // Every visit reads the journal again (never kept, like Applied).
+            2 => st.worker.send(Job::History),
             3 => {
                 // The reading text only while there is nothing to show yet; a page seen before
                 // stays on screen and is replaced only if the answer differs.
@@ -693,6 +697,12 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                     st.applied = Some(a);
                 }
             }
+            Event::History(h) => {
+                if st.history.as_ref() != Some(&*h) {
+                    ui.set_history(history_data(&h, st.lang));
+                    st.history = Some(*h);
+                }
+            }
             Event::System(sys) => {
                 ui.set_system_loading(false);
                 if st.system.as_ref() == Some(&sys) {
@@ -833,6 +843,67 @@ fn game(g: &GameVm, sel: &Selection) -> GameData {
         ),
         applied: model(g.applied.iter().map(card).collect()),
         aside: model(g.aside.iter().map(detail).collect()),
+    }
+}
+
+fn history_data(h: &HistoryVm, lang: Lang) -> HistoryData {
+    let (empty_title, empty_sub) = h
+        .empty
+        .as_ref()
+        .map(|(a, b)| (s(a), s(b)))
+        .unwrap_or_default();
+    HistoryData {
+        order: s(&h.order),
+        groups: model(
+            h.groups
+                .iter()
+                .map(|g| HistGroupData {
+                    title: s(&g.title),
+                    hint: g.hint.as_deref().map(s).unwrap_or_default(),
+                    entries: model(
+                        g.entries
+                            .iter()
+                            .map(|e| HistEntryData {
+                                id: s(&e.id),
+                                game: e.game.as_ref().map(|v| s(v.as_str())).unwrap_or_default(),
+                                state: badge(&e.state),
+                                problem: e.problem.as_deref().map(s).unwrap_or_default(),
+                                ops: model(e.ops.iter().map(write::op).collect()),
+                                backups: e.backups.as_ref().map(shown).unwrap_or_default(),
+                                may_remain: model(e.may_remain.iter().map(shown).collect()),
+                                note: e.note.as_deref().map(s).unwrap_or_default(),
+                            })
+                            .collect(),
+                    ),
+                })
+                .collect(),
+        ),
+        empty_title,
+        empty_sub,
+        detail: h.detail.as_ref().map(shown).unwrap_or_default(),
+        foreign: h.foreign.as_deref().map(s).unwrap_or_default(),
+        launch_title: h.launch_title.as_deref().map(s).unwrap_or_default(),
+        launch_intro: s(&h.launch_intro),
+        launches: model(
+            h.launches
+                .iter()
+                .map(|r| LaunchRowData {
+                    game: s(r.game.as_str()),
+                    game_is_id: r.game_is_id,
+                    when: s(&r.when),
+                    exact: r.exact.as_deref().map(s).unwrap_or_default(),
+                    outcome: badge(&r.outcome),
+                    line: s(&r.line),
+                    note: r.note.as_deref().map(s).unwrap_or_default(),
+                    detail: r.detail.as_ref().map(shown).unwrap_or_default(),
+                })
+                .collect(),
+        ),
+        launch_note: h.launch_note.as_deref().map(s).unwrap_or_default(),
+        launch_detail: h.launch_detail.as_ref().map(shown).unwrap_or_default(),
+        backups_label: s(t(lang, Msg::HistoryBackupsIn)),
+        may_remain_label: s(t(lang, Msg::HistoryMayRemain)),
+        exact_label: s(t(lang, Msg::LaunchExact)),
     }
 }
 

@@ -171,6 +171,12 @@ pub enum OpState {
 /// the transactions that are not settled ([`TxnStatus::is_settled`]) and for any that left a
 /// `.old` (its path comes from the head).
 pub fn status(app: &AppDir<'_>) -> Result<Status, JournalError> {
+    status_with(app, false)
+}
+
+/// [`status`], with the head of every transaction when `all_heads` (P5-6a: the history shows
+/// closed and forgotten ones with their game and ops).
+pub fn status_with(app: &AppDir<'_>, all_heads: bool) -> Result<Status, JournalError> {
     let j = Journal::new(app, InstanceTag::new());
     let listing = j.list()?;
     // Review follow-up (senior N-6): the other transactions read once for every line.
@@ -178,7 +184,7 @@ pub fn status(app: &AppDir<'_>) -> Result<Status, JournalError> {
     let txns = listing
         .txns
         .iter()
-        .map(|l| one(&j, app, l, false, &others))
+        .map(|l| one(&j, app, l, all_heads, &others))
         .collect();
     Ok(Status {
         txns,

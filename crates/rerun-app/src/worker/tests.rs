@@ -906,6 +906,7 @@ fn kinds(ev: &[Event]) -> Vec<&'static str> {
             Event::LibraryDone(_) => "done",
             Event::Game(_) => "game",
             Event::Applied(_) => "applied",
+            Event::History(_) => "history",
             Event::System(_) => "system",
             Event::Preview { .. } => "preview",
             Event::PreviewNone { .. } => "preview-none",
@@ -1186,4 +1187,5 @@ fn aw_fx_set_aside_topos_on_the_row_and_the_game_page() {
 
 mod download;
 mod helper;
+mod history;
 mod write;

@@ -1,7 +1,7 @@
 // The transaction card: one transaction and what undo takes back together.
 
 import { Badge, Button, Card, Muted } from "base.slint";
-import { CardData, Str, Theme, Modal } from "base.slint";
+import { CardData, HistEntryData, LaunchRowData, Str, Theme, Modal } from "base.slint";
 import { OpItem } from "ops.slint";
 
 // One transaction: everything in it, and what undo takes back together (user decision U1).
@@ -90,3 +90,183 @@ export component CardView inherits Card {
     }
 }
 
+
+// One transaction of the history: its state, and what it changed behind a details button. No
+// buttons that change anything: undo and close are on the Applied page.
+export component HistEntryView inherits Card {
+    in property <HistEntryData> e;
+    in property <string> backups-label;
+    in property <string> may-remain-label;
+    in-out property <bool> open: false;
+    accessible-role: groupbox;
+    accessible-label: root.e.game != "" ? root.e.game : root.e.id;
+    accessible-description: root.e.state.word;
+    VerticalLayout {
+        padding: Theme.s5;
+        spacing: Theme.s3;
+        HorizontalLayout {
+            spacing: Theme.s3;
+            if root.e.game != "": Text {
+                horizontal-stretch: 1;
+                text: root.e.game;
+                color: Theme.strong;
+                font-size: Theme.fs-l;
+                font-weight: 600;
+                wrap: word-wrap;
+                vertical-alignment: center;
+            }
+            if root.e.game == "": Rectangle {
+                horizontal-stretch: 1;
+            }
+            Badge {
+                data: root.e.state;
+                accessible-role: none;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s2;
+            Text {
+                text: Str.card-txn;
+                color: Theme.muted;
+                font-size: Theme.fs-s;
+            }
+
+            Text {
+                text: root.e.id;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+            }
+        }
+
+        if root.e.problem != "": Text {
+            text: root.e.problem;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        if root.e.note != "": Text {
+            text: root.e.note;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        if root.e.backups != "": VerticalLayout {
+            spacing: Theme.hair * 2;
+            Text {
+                text: root.backups-label;
+                color: Theme.muted;
+                font-size: Theme.fs-s;
+            }
+
+            Text {
+                text: root.e.backups;
+                color: Theme.text;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+            }
+        }
+        if root.e.may-remain.length > 0: VerticalLayout {
+            spacing: Theme.hair * 2;
+            Text {
+                text: root.may-remain-label;
+                color: Theme.muted;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+            }
+
+            for p in root.e.may-remain: Text {
+                text: p;
+                color: Theme.text;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+            }
+        }
+        if root.e.ops.length > 0: HorizontalLayout {
+            alignment: start;
+            Button {
+                text: root.open ? Str.hide-details : Str.show-details;
+                accessible-label: (root.open ? Str.hide-details : Str.show-details) + ": " + (root.e.game != "" ? root.e.game : root.e.id);
+                activated => {
+                    root.open = !root.open;
+                }
+            }
+        }
+        if root.open: VerticalLayout {
+            spacing: Theme.s3;
+            for op in root.e.ops: OpItem {
+                op: op;
+            }
+        }
+    }
+}
+
+// The last start of one game: when, what came of the rule, what Rerun adds.
+export component LaunchRowView inherits Card {
+    in property <LaunchRowData> r;
+    in property <string> exact-label;
+    accessible-role: groupbox;
+    accessible-label: root.r.game;
+    accessible-description: root.r.outcome.word + (root.r.when != "" ? ", " + root.r.when : "");
+    VerticalLayout {
+        padding: Theme.s5;
+        spacing: Theme.s2;
+        HorizontalLayout {
+            spacing: Theme.s3;
+            Text {
+                horizontal-stretch: 1;
+                text: root.r.game;
+                color: Theme.strong;
+                font-size: root.r.game-is-id ? Theme.fs-s : Theme.fs-l;
+                font-family: root.r.game-is-id ? Theme.font-mono : Theme.font-sans;
+                font-weight: root.r.game-is-id ? 400 : 600;
+                wrap: word-wrap;
+                vertical-alignment: center;
+            }
+
+            Badge {
+                data: root.r.outcome;
+                accessible-role: none;
+            }
+        }
+
+        if root.r.when != "": HorizontalLayout {
+            spacing: Theme.s3;
+            Text {
+                text: root.r.when;
+                color: Theme.text;
+                font-size: Theme.fs-m;
+            }
+
+            if root.r.exact != "": Text {
+                text: root.exact-label + ": " + root.r.exact;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.r.line;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        if root.r.note != "": Text {
+            text: root.r.note;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        if root.r.detail != "": Text {
+            text: root.r.detail;
+            color: Theme.muted;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+    }
+}

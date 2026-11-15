@@ -51,13 +51,11 @@ use crate::messages::{LaunchMsg, Message, OpText, ProfileMsg, StepText, TxnMsg, 
 use crate::out::{Out, failed as failed_out};
 use crate::preview::{op_at, roots, x12_lines};
 use rerun_core::exec::ProfilesMoved;
-use rerun_core::exec::launch_result::SkipReason;
 use rerun_core::flow::{
-    self, ActError, Env, Holder, LaunchOption, RebindShown, RebindView, RevertAsk, RevertEnd,
-    RevertGate, RevertWould, head, left_foreign,
+    self, ActError, Env, Holder, LaunchNote, LaunchOption, RebindShown, RebindView, RevertAsk,
+    RevertEnd, RevertGate, RevertWould, head, left_foreign,
 };
 use rerun_core::plan::RootKind;
-use rerun_core::prim::launch_method::ProfileMethod as Method;
 
 fn m(t: TxnMsg<'_>) -> Message<'_> {
     Message::Txn(t)
@@ -277,21 +275,11 @@ pub fn launch_lines<'a>(
         }
     };
     let mut out = vec![Message::Blank, l(LaunchMsg::Heading)];
-    for e in &r.entries {
-        let missing = matches!(
-            &e.result,
-            Ok(res) if matches!(res.outcome, Outcome::Skipped { reason: SkipReason::ProfileMissing, .. })
-        );
-        let holder = holders.iter().find(|h| h.id == e.id);
-        // The method for the wording is the result file's own (`method=`, senior-dev decision 1
-        // of the review of P3-4b/c): a head may be newer than the result. Without the line the
-        // shared words stay; the head gives a path only, and only when it agrees.
-        let method = e.result.as_ref().ok().and_then(|r| r.method);
-        let watch = method == Some(Method::Watch);
-        let mut restore_failed = None;
+    for e in flow::launch_lines(r, holders) {
+        let id = e.id;
         out.push(l(match &e.result {
             Err(why) => LaunchMsg::Unreadable {
-                id: e.id,
+                id,
                 why: why.clone(),
             },
             Ok(res) => {
@@ -302,69 +290,45 @@ pub fn launch_lines<'a>(
                         priority,
                         check,
                     } => LaunchMsg::Applied {
-                        id: e.id,
+                        id,
                         at,
                         cpu: *cpu,
                         priority: *priority,
                         check: *check,
-                        watch,
+                        watch: e.watch,
                     },
                     Outcome::Skipped {
                         reason,
                         start,
                         ended,
                         priority_restore,
-                    } => {
-                        restore_failed = *priority_restore;
-                        LaunchMsg::Skipped {
-                            id: e.id,
-                            at,
-                            reason: *reason,
-                            start: *start,
-                            ended: *ended,
-                            restore: *priority_restore,
-                            // Only `watch` writes these reasons and a restore line (N1).
-                            watch: watch || reason.watch_only() || priority_restore.is_some(),
-                        }
-                    }
+                    } => LaunchMsg::Skipped {
+                        id,
+                        at,
+                        reason: *reason,
+                        start: *start,
+                        ended: *ended,
+                        restore: *priority_restore,
+                        watch: e.watch,
+                    },
                 }
             }
         }));
         // A4: the priority class could not be put back after a failed CPU step.
-        if let Some(code) = restore_failed {
+        if let Some(code) = e.restore_failed {
             out.push(l(LaunchMsg::PriorityNotRestored { code }));
         }
-        // A7: after a revert or forget the option still starts the game through the shim.
-        if missing {
-            out.push(l(match holder {
-                Some(h) if h.forgotten => LaunchMsg::OptionStillSetForgotten { id: e.id },
-                h => LaunchMsg::OptionStillSet {
-                    id: e.id,
-                    held: h.map(|h| h.txn),
-                },
-            }));
-        } else if let (
-            Some(Holder {
-                launcher: Some(start),
-                ..
-            }),
-            Ok(res),
-        ) = (holder, &e.result)
-            && method == Some(Method::Direct)
-            && matches!(res.outcome, Outcome::Applied { .. })
-        {
-            // A6: the check covered the launcher Steam starts, not the game.
-            out.push(l(LaunchMsg::CheckedLauncher {
-                start: start.clone(),
-            }));
-        } else if let Some(target) = holder.and_then(|h| h.watch.as_ref())
-            && watch
-        {
-            // P3-4c: the rule and the check concern the game process found after the start.
-            out.push(l(LaunchMsg::Watched {
-                target: target.clone(),
-            }));
-        }
+        out.extend(e.note.map(|n| {
+            l(match n {
+                // A7: after a revert or forget the option still starts the game through the shim.
+                LaunchNote::OptionStillSetForgotten => LaunchMsg::OptionStillSetForgotten { id },
+                LaunchNote::OptionStillSet { held } => LaunchMsg::OptionStillSet { id, held },
+                // A6: the check covered the launcher Steam starts, not the game.
+                LaunchNote::CheckedLauncher(start) => LaunchMsg::CheckedLauncher { start },
+                // P3-4c: the rule and the check concern the game process found after the start.
+                LaunchNote::Watched(target) => LaunchMsg::Watched { target },
+            })
+        }));
     }
     if r.other > 0 {
         out.push(l(LaunchMsg::Other { n: r.other }));

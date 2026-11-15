@@ -12,6 +12,9 @@
 
 use std::borrow::Cow;
 
+use rerun_core::exec::launch_result::{AppliedCpu, Ended, Mode, Priority, SkipReason, Start};
+use rerun_core::journal::TxnId;
+
 /// A language of the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Lang {
@@ -410,8 +413,6 @@ pub enum Msg {
     HistoryTitle,
     /// The page's intro.
     HistoryIntro,
-    /// The placeholder.
-    HistoryLater,
     /// The page title.
     SystemTitle,
     /// The page's intro.
@@ -1128,6 +1129,169 @@ pub enum Msg {
         /// How many.
         count: usize,
     },
+
+    // ---- history and launch results (P5-6a)
+    /// The history: how the entries are ordered.
+    HistoryOrder,
+    /// The history: nothing in the journal.
+    HistoryEmpty,
+    /// The history: nothing in the journal, second line.
+    HistoryEmptySub,
+    /// The history: the journal could not be read.
+    HistoryUnreadable,
+    /// History group: open changes.
+    HistGroupOpen,
+    /// History group hint: open changes.
+    HistGroupOpenHint,
+    /// History group: undone changes.
+    HistGroupReverted,
+    /// History group: rolled back.
+    HistGroupRolledBack,
+    /// History group hint: rolled back.
+    HistGroupRolledBackHint,
+    /// History group: closed without undo.
+    HistGroupForgotten,
+    /// History group hint: closed without undo.
+    HistGroupForgottenHint,
+    /// History group: no change.
+    HistGroupEmpty,
+    /// History group hint: no change.
+    HistGroupEmptyHint,
+    /// A history entry: undone.
+    HistStateReverted,
+    /// A history entry: rolled back.
+    HistStateRolledBack,
+    /// A history entry: closed without undo.
+    HistStateForgotten,
+    /// A history entry: no change.
+    HistStateEmpty,
+    /// A history entry: where the backups stay.
+    HistoryBackupsIn,
+    /// A history entry: files that may remain next to the game files.
+    HistoryMayRemain,
+    /// The history: entries in the journal folder that are not Rerun's.
+    HistoryForeignEntries {
+        /// The n.
+        n: usize,
+    },
+    /// A history entry: a forgotten change still holds a launch profile.
+    HolderForgotten,
+    /// The game page fact: the last start.
+    LaunchLast,
+    /// The history: heading of the launch results.
+    LaunchTitle,
+    /// The history: intro of the launch results.
+    LaunchIntro,
+    /// The history: the launch folder cannot be read.
+    LaunchFolderUnreadable,
+    /// The history: entries of the launch folder that are not Rerun's.
+    LaunchOther {
+        /// The n.
+        n: usize,
+    },
+    /// A launch result of a game Rerun cannot name: the label before the profile ID.
+    LaunchProfileOf,
+    /// A time: less than a minute ago.
+    AgoNow,
+    /// A time: minutes ago.
+    AgoMinutes {
+        /// The n.
+        n: u64,
+    },
+    /// A time: hours ago.
+    AgoHours {
+        /// The n.
+        n: u64,
+    },
+    /// A time: days ago.
+    AgoDays {
+        /// The n.
+        n: u64,
+    },
+    /// A launch result: the label of the exact time.
+    LaunchExact,
+    /// A launch result: the rule was applied.
+    LaunchBadgeApplied,
+    /// A launch result: the game changed the rule after the start.
+    LaunchBadgeReset,
+    /// A launch result: the process ended before the check.
+    LaunchBadgeEnded,
+    /// A launch result: the check failed.
+    LaunchBadgeFailed,
+    /// A launch result: the rule was not applied.
+    LaunchBadgeSkipped,
+    /// A launch result: the file cannot be read.
+    LaunchBadgeUnreadable,
+    /// A launch result: the file cannot be read, the sentence.
+    LaunchUnreadable,
+    /// A launch result: what the rule set.
+    LaunchSet {
+        /// The cpu.
+        cpu: Option<AppliedCpu>,
+        /// The priority.
+        priority: Option<Priority>,
+    },
+    /// A launch result: the check found everything as set.
+    LaunchCheckOk {
+        /// The soft.
+        soft: bool,
+        /// The watch.
+        watch: bool,
+    },
+    /// A launch result: the game limited itself within the rule.
+    LaunchCheckNarrowed,
+    /// A launch result: something changed after the start.
+    LaunchCheckReset {
+        /// The cpu.
+        cpu: bool,
+        /// The priority.
+        priority: bool,
+    },
+    /// A launch result: the process ended before the check.
+    LaunchCheckExitedEarly {
+        /// The watch.
+        watch: bool,
+    },
+    /// A launch result: the check itself failed.
+    LaunchCheckFailed {
+        /// The code.
+        code: u32,
+    },
+    /// A launch result: why the rule was not applied.
+    LaunchSkipWhy {
+        /// The reason.
+        reason: SkipReason,
+    },
+    /// A launch result: how Steam's command was started.
+    LaunchStart {
+        /// The start.
+        start: Start,
+        /// The watch.
+        watch: bool,
+    },
+    /// A launch result: how the paused child with the rule was ended.
+    LaunchEnded {
+        /// The ended.
+        ended: Ended,
+    },
+    /// A launch note: the option was still set without a profile.
+    LaunchOptionStillSet,
+    /// A launch note: the change that holds the profile now.
+    LaunchHeldBy {
+        /// The txn.
+        txn: TxnId,
+    },
+    /// A launch note: the option was still set, a forgotten change left the profile.
+    LaunchOptionStillSetForgotten,
+    /// A launch note: the check covered a launcher.
+    LaunchCheckedLauncher,
+    /// A launch note: method watch.
+    LaunchWatched,
+    /// A launch note: the priority class could not be put back.
+    LaunchPriorityNotRestored {
+        /// The code.
+        code: u32,
+    },
 }
 
 /// The text of `m` in `lang`.
@@ -1363,7 +1527,6 @@ fn en(m: Msg) -> Cow<'static, str> {
         AppliedUnreadable => "The journal could not be read.",
         HistoryTitle => "History",
         HistoryIntro => "The journal. Rerun writes every entry before it changes anything.",
-        HistoryLater => "The history comes with the next version of the app.",
         SystemTitle => "System",
         SystemIntro => {
             "Rerun reads these facts when you open this page. They decide which problems fit your PC."
@@ -1708,6 +1871,162 @@ fn en(m: Msg) -> Cow<'static, str> {
         StatusAside { count: n } => {
             return format!("{} not usable", count(n, "entry", "entries")).into();
         }
+        HistoryOrder => "Newest first. The journal keeps the order of the entries, not their time.",
+        HistoryEmpty => "Nothing in the journal yet",
+        HistoryEmptySub => "Rerun writes an entry before it changes anything.",
+        HistoryUnreadable => "The journal could not be read.",
+        HistGroupOpen => "Open",
+        HistGroupOpenHint => "These are still under Applied, where you can undo or close them.",
+        HistGroupReverted => "Undone",
+        HistGroupRolledBack => "Rolled back",
+        HistGroupRolledBackHint => "An apply failed and Rerun put everything back.",
+        HistGroupForgotten => "Closed without undoing",
+        HistGroupForgottenHint => "Rerun cannot undo these any more. What they changed stays, and their backups stay where listed.",
+        HistGroupEmpty => "No change",
+        HistGroupEmptyHint => "These began and changed nothing.",
+        HistStateReverted => "Undone",
+        HistStateRolledBack => "Rolled back",
+        HistStateForgotten => "Closed without undo",
+        HistStateEmpty => "No change",
+        HistoryBackupsIn => "Backups stay in",
+        HistoryMayRemain => "These files may remain next to the game's files",
+        HistoryForeignEntries { n } => {
+            return format!("{} in the journal folder not Rerun's (not read)", count(n, "other entry", "other entries")).into();
+        }
+        HolderForgotten => "It still holds the launch profile. The Steam launch option keeps working until you remove it by hand.",
+        LaunchLast => "Last start",
+        LaunchTitle => "Last start of each game",
+        LaunchIntro => "Written by Rerun's launcher each time Steam starts a game through it.",
+        LaunchFolderUnreadable => "The launch results cannot be read.",
+        LaunchOther { n } => {
+            return format!("{} in the launch folder not Rerun's (not read)", count(n, "other entry", "other entries")).into();
+        }
+        LaunchProfileOf => "Profile",
+        AgoNow => "just now",
+        AgoMinutes { n } => {
+            return (if n == 1 { "1 minute ago".to_owned() } else { format!("{n} minutes ago") }).into();
+        }
+        AgoHours { n } => {
+            return (if n == 1 { "1 hour ago".to_owned() } else { format!("{n} hours ago") }).into();
+        }
+        AgoDays { n } => {
+            return (if n == 1 { "1 day ago".to_owned() } else { format!("{n} days ago") }).into();
+        }
+        LaunchExact => "Exact time",
+        LaunchBadgeApplied => "Rule applied",
+        LaunchBadgeReset => "Changed after start",
+        LaunchBadgeEnded => "Ended early",
+        LaunchBadgeFailed => "Check failed",
+        LaunchBadgeSkipped => "Rule not applied",
+        LaunchBadgeUnreadable => "Unreadable",
+        LaunchUnreadable => "Rerun cannot read this result.",
+        LaunchSet { cpu, priority } => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(c) = cpu {
+                let kind = match c.mode {
+                    Mode::Hard => "hard limit",
+                    Mode::Soft => "soft limit, CPU Sets",
+                };
+                parts.push(format!("{} of {} threads ({kind})", c.threads, c.of));
+            }
+            if let Some(p) = priority {
+                let word = match p {
+                    Priority::Normal => "normal",
+                    Priority::AboveNormal => "above normal",
+                    Priority::High => "high",
+                };
+                parts.push(format!("priority {word}"));
+            }
+            if parts.is_empty() {
+                return "Set: no CPU rule, no priority".into();
+            }
+            return format!("Set: {}", parts.join(", ")).into();
+        }
+        LaunchCheckOk { soft, watch } => {
+            return match (soft, watch) {
+                (true, true) => "Checked about 5 seconds after the start: as set. CPU Sets of the game process only; whether threads already running follow them is unproven.",
+                (true, false) => "Checked about 5 seconds after the start: as set. CPU Sets of the started process only.",
+                (false, _) => "Checked about 5 seconds after the start: as set.",
+            }
+            .into();
+        }
+        LaunchCheckNarrowed => "The game limited itself to fewer threads within the rule. That is not an error; the rule holds.",
+        LaunchCheckReset { cpu, priority } => {
+            return match (cpu, priority) {
+                (true, true) => "The affinity and the priority changed after the start.",
+                (true, false) => "The affinity changed after the start.",
+                _ => "The priority changed after the start.",
+            }
+            .into();
+        }
+        LaunchCheckExitedEarly { watch } => {
+            return if watch {
+                "The game process ended within 5 seconds, before the check, and no other one followed in time. It crashed, or it hands over to a process of another path."
+            } else {
+                "The started process ended within 5 seconds, before the check. It crashed, or it is a launcher that starts the game as another process."
+            }
+            .into();
+        }
+        LaunchCheckFailed { code } => {
+            return format!("The check failed (Windows error {code}).").into();
+        }
+        LaunchSkipWhy { reason } => {
+            return match reason {
+                SkipReason::ProfileMissing => "The launch profile was missing.".to_owned(),
+                SkipReason::ProfileUnreadable { code } => format!("The profile could not be read (Windows error {code})."),
+                SkipReason::ProfileReparsePoint => "The profile is a link; Rerun does not follow it.".to_owned(),
+                SkipReason::ProfileNotAFile => "The profile is not a file.".to_owned(),
+                SkipReason::ProfileInvalid => "The profile is too large or cannot be decoded.".to_owned(),
+                SkipReason::MethodUnsupported => "The result was written by an older launcher that did not know method watch.".to_owned(),
+                SkipReason::PathMismatch => "Steam started another program than the profile names.".to_owned(),
+                SkipReason::TopologyUnavailable => "The processor layout could not be read.".to_owned(),
+                SkipReason::TopologyInvalid => "Windows reported a processor layout Rerun does not accept.".to_owned(),
+                SkipReason::SelectionEmpty => "The rule selects no processor on this PC.".to_owned(),
+                SkipReason::MaskTooWide => "The selection does not fit the affinity mask of this build.".to_owned(),
+                SkipReason::SpawnFailed { code } => format!("The job or the paused process could not be created (Windows error {code})."),
+                SkipReason::JobFailed { code } => format!("The processor limit of the job could not be set (Windows error {code})."),
+                SkipReason::ReadBackFailed { code } => format!("The limit could not be read back (Windows error {code})."),
+                SkipReason::Mismatch => "The limit read back differed from the selection.".to_owned(),
+                SkipReason::CpuSetsFailed { code } => format!("The CPU Sets could not be set (Windows error {code})."),
+                SkipReason::ResumeFailed { code } => format!("The paused process could not be resumed (Windows error {code})."),
+                SkipReason::ElevationRequired => "The game needs administrator rights, so it started through the Windows prompt without a rule.".to_owned(),
+                SkipReason::TargetNotFound => "No new game process appeared within 120 seconds. A launcher may be waiting for a login or an update; start the game again.".to_owned(),
+                SkipReason::JobIneffective => "The game process joined the job but kept another limit, from a job it was already in.".to_owned(),
+                SkipReason::TargetElevated => "The game process runs as administrator; Rerun leaves it alone.".to_owned(),
+                SkipReason::TargetDenied { code } => format!("A process of the game's name could not be opened (Windows error {code}): protected, another account, or running as administrator. Nothing was set."),
+                SkipReason::SearchFailed { code } => format!("No game process could be looked for (Windows error {code}). Nothing was set."),
+                SkipReason::PriorityFailed { code } => format!("The priority class of the game process could not be read or set (Windows error {code}). Nothing was set."),
+            }
+            .into();
+        }
+        LaunchStart { start, watch } => {
+            return match start {
+                Start::Created if watch => "Steam's command started unchanged.".to_owned(),
+                Start::Created => "The game started unchanged.".to_owned(),
+                Start::Shell | Start::ShellNoProcess => "The game started unchanged through the Windows prompt for administrator rights.".to_owned(),
+                Start::NotExe => "Nothing started (not an .exe).".to_owned(),
+                Start::Failed { code } => format!("Nothing started (Windows error {code})."),
+            }
+            .into();
+        }
+        LaunchEnded { ended } => {
+            return match ended {
+                Ended::Ended => "The paused process created with the rule was ended first.".to_owned(),
+                Ended::Failed { code } => format!("The paused process created with the rule could not be ended (Windows error {code})."),
+                Ended::NotConfirmed { code } => format!("The paused process created with the rule was not seen ending (Windows error {code})."),
+            }
+            .into();
+        }
+        LaunchOptionStillSet => "The Steam launch option for Rerun's launcher was still set at that start, but no profile was found. The game starts unchanged through it; remove the option in Steam.",
+        LaunchHeldBy { txn } => {
+            return format!("Change {txn} holds this profile now.").into();
+        }
+        LaunchOptionStillSetForgotten => "The Steam launch option was still set at that start. A change closed without undoing it left a profile that was missing then. Remove the launch option by hand.",
+        LaunchCheckedLauncher => "Steam starts a launcher here. The check covered the launcher, not the game.",
+        LaunchWatched => "Method watch: the rule is for the game process found after the start, not for the program Steam starts.",
+        LaunchPriorityNotRestored { code } => {
+            return format!("The priority class set on the game process could not be put back (Windows error {code}). It stays until the game exits.").into();
+        }
     };
     Cow::Borrowed(s)
 }
@@ -1936,7 +2255,6 @@ fn de(m: Msg) -> Cow<'static, str> {
         AppliedUnreadable => "Das Journal liess sich nicht lesen.",
         HistoryTitle => "Verlauf",
         HistoryIntro => "Das Journal. Rerun schreibt jeden Eintrag, bevor es etwas ändert.",
-        HistoryLater => "Der Verlauf kommt mit der nächsten Version der App.",
         SystemTitle => "System",
         SystemIntro => {
             "Diese Angaben liest Rerun, wenn du diese Seite öffnest. Danach richtet sich, welche Probleme zu deinem PC passen."
@@ -2284,6 +2602,162 @@ fn de(m: Msg) -> Cow<'static, str> {
         HideDetails => "Details ausblenden",
         StatusAside { count: n } => {
             return format!("{} nicht nutzbar", count(n, "Eintrag", "Einträge")).into();
+        }
+        HistoryOrder => "Neueste zuerst. Das Journal hält die Reihenfolge der Einträge fest, nicht ihre Zeit.",
+        HistoryEmpty => "Noch nichts im Journal",
+        HistoryEmptySub => "Rerun schreibt einen Eintrag, bevor es etwas ändert.",
+        HistoryUnreadable => "Das Journal konnte nicht gelesen werden.",
+        HistGroupOpen => "Offen",
+        HistGroupOpenHint => "Diese stehen noch unter Angewendet, wo du sie rückgängig machen oder abschliessen kannst.",
+        HistGroupReverted => "Rückgängig gemacht",
+        HistGroupRolledBack => "Zurückgerollt",
+        HistGroupRolledBackHint => "Ein Anwenden ist fehlgeschlagen, und Rerun hat alles zurückgesetzt.",
+        HistGroupForgotten => "Abgeschlossen ohne Rückgängig",
+        HistGroupForgottenHint => "Rerun kann diese nicht mehr rückgängig machen. Was sie geändert haben, bleibt, und ihre Sicherungen bleiben dort, wo sie stehen.",
+        HistGroupEmpty => "Ohne Änderung",
+        HistGroupEmptyHint => "Diese haben begonnen und nichts geändert.",
+        HistStateReverted => "Rückgängig gemacht",
+        HistStateRolledBack => "Zurückgerollt",
+        HistStateForgotten => "Ohne Rückgängig abgeschlossen",
+        HistStateEmpty => "Ohne Änderung",
+        HistoryBackupsIn => "Die Sicherungen bleiben in",
+        HistoryMayRemain => "Diese Dateien können neben den Spieldateien bleiben",
+        HistoryForeignEntries { n } => {
+            return format!("{} im Journal-Ordner, nicht von Rerun (nicht gelesen)", count(n, "anderer Eintrag", "andere Einträge")).into();
+        }
+        HolderForgotten => "Es hält noch das Startprofil. Die Steam-Startoption wirkt weiter, bis du sie von Hand entfernst.",
+        LaunchLast => "Letzter Start",
+        LaunchTitle => "Letzter Start je Spiel",
+        LaunchIntro => "Vom Rerun-Starter geschrieben, jedes Mal wenn Steam ein Spiel über ihn startet.",
+        LaunchFolderUnreadable => "Die Startergebnisse können nicht gelesen werden.",
+        LaunchOther { n } => {
+            return format!("{} im Startordner, nicht von Rerun (nicht gelesen)", count(n, "anderer Eintrag", "andere Einträge")).into();
+        }
+        LaunchProfileOf => "Profil",
+        AgoNow => "gerade eben",
+        AgoMinutes { n } => {
+            return (if n == 1 { "vor 1 Minute".to_owned() } else { format!("vor {n} Minuten") }).into();
+        }
+        AgoHours { n } => {
+            return (if n == 1 { "vor 1 Stunde".to_owned() } else { format!("vor {n} Stunden") }).into();
+        }
+        AgoDays { n } => {
+            return (if n == 1 { "vor 1 Tag".to_owned() } else { format!("vor {n} Tagen") }).into();
+        }
+        LaunchExact => "Genaue Zeit",
+        LaunchBadgeApplied => "Regel angewendet",
+        LaunchBadgeReset => "Nach dem Start geändert",
+        LaunchBadgeEnded => "Früh beendet",
+        LaunchBadgeFailed => "Prüfung fehlgeschlagen",
+        LaunchBadgeSkipped => "Regel nicht angewendet",
+        LaunchBadgeUnreadable => "Nicht lesbar",
+        LaunchUnreadable => "Rerun kann dieses Ergebnis nicht lesen.",
+        LaunchSet { cpu, priority } => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(c) = cpu {
+                let kind = match c.mode {
+                    Mode::Hard => "harte Grenze",
+                    Mode::Soft => "weiche Grenze, CPU Sets",
+                };
+                parts.push(format!("{} von {} Threads ({kind})", c.threads, c.of));
+            }
+            if let Some(p) = priority {
+                let word = match p {
+                    Priority::Normal => "normal",
+                    Priority::AboveNormal => "über normal",
+                    Priority::High => "hoch",
+                };
+                parts.push(format!("Priorität {word}"));
+            }
+            if parts.is_empty() {
+                return "Gesetzt: keine CPU-Regel, keine Priorität".into();
+            }
+            return format!("Gesetzt: {}", parts.join(", ")).into();
+        }
+        LaunchCheckOk { soft, watch } => {
+            return match (soft, watch) {
+                (true, true) => "Etwa 5 Sekunden nach dem Start geprüft: wie gesetzt. CPU Sets nur für den Spielprozess; ob schon laufende Threads ihnen folgen, ist nicht belegt.",
+                (true, false) => "Etwa 5 Sekunden nach dem Start geprüft: wie gesetzt. CPU Sets nur für den gestarteten Prozess.",
+                (false, _) => "Etwa 5 Sekunden nach dem Start geprüft: wie gesetzt.",
+            }
+            .into();
+        }
+        LaunchCheckNarrowed => "Das Spiel hat sich selbst auf weniger Threads innerhalb der Regel beschränkt. Das ist kein Fehler; die Regel gilt.",
+        LaunchCheckReset { cpu, priority } => {
+            return match (cpu, priority) {
+                (true, true) => "Die Affinität und die Priorität haben sich nach dem Start geändert.",
+                (true, false) => "Die Affinität hat sich nach dem Start geändert.",
+                _ => "Die Priorität hat sich nach dem Start geändert.",
+            }
+            .into();
+        }
+        LaunchCheckExitedEarly { watch } => {
+            return if watch {
+                "Der Spielprozess ist innerhalb von 5 Sekunden vor der Prüfung zu Ende gegangen, und es folgte keiner rechtzeitig. Er ist abgestürzt, oder er übergibt an einen Prozess mit anderem Pfad."
+            } else {
+                "Der gestartete Prozess ist innerhalb von 5 Sekunden vor der Prüfung zu Ende gegangen. Er ist abgestürzt, oder er ist ein Starter, der das Spiel als anderen Prozess startet."
+            }
+            .into();
+        }
+        LaunchCheckFailed { code } => {
+            return format!("Die Prüfung ist fehlgeschlagen (Windows-Fehler {code}).").into();
+        }
+        LaunchSkipWhy { reason } => {
+            return match reason {
+                SkipReason::ProfileMissing => "Das Startprofil fehlte.".to_owned(),
+                SkipReason::ProfileUnreadable { code } => format!("Das Profil konnte nicht gelesen werden (Windows-Fehler {code})."),
+                SkipReason::ProfileReparsePoint => "Das Profil ist ein Link; Rerun folgt ihm nicht.".to_owned(),
+                SkipReason::ProfileNotAFile => "Das Profil ist keine Datei.".to_owned(),
+                SkipReason::ProfileInvalid => "Das Profil ist zu gross oder lässt sich nicht lesen.".to_owned(),
+                SkipReason::MethodUnsupported => "Das Ergebnis stammt von einem älteren Starter, der die Methode watch nicht kannte.".to_owned(),
+                SkipReason::PathMismatch => "Steam hat ein anderes Programm gestartet, als das Profil nennt.".to_owned(),
+                SkipReason::TopologyUnavailable => "Die Prozessorstruktur konnte nicht gelesen werden.".to_owned(),
+                SkipReason::TopologyInvalid => "Windows hat eine Prozessorstruktur gemeldet, die Rerun nicht annimmt.".to_owned(),
+                SkipReason::SelectionEmpty => "Die Regel wählt auf diesem PC keinen Prozessor aus.".to_owned(),
+                SkipReason::MaskTooWide => "Die Auswahl passt nicht in die Affinitätsmaske dieses Builds.".to_owned(),
+                SkipReason::SpawnFailed { code } => format!("Der Job oder der angehaltene Prozess konnte nicht erstellt werden (Windows-Fehler {code})."),
+                SkipReason::JobFailed { code } => format!("Die Prozessorgrenze des Jobs konnte nicht gesetzt werden (Windows-Fehler {code})."),
+                SkipReason::ReadBackFailed { code } => format!("Die Grenze konnte nicht zurückgelesen werden (Windows-Fehler {code})."),
+                SkipReason::Mismatch => "Die zurückgelesene Grenze wich von der Auswahl ab.".to_owned(),
+                SkipReason::CpuSetsFailed { code } => format!("Die CPU Sets konnten nicht gesetzt werden (Windows-Fehler {code})."),
+                SkipReason::ResumeFailed { code } => format!("Der angehaltene Prozess konnte nicht fortgesetzt werden (Windows-Fehler {code})."),
+                SkipReason::ElevationRequired => "Das Spiel braucht Administratorrechte und wurde über die Windows-Abfrage ohne Regel gestartet.".to_owned(),
+                SkipReason::TargetNotFound => "Innerhalb von 120 Sekunden ist kein neuer Spielprozess erschienen. Vielleicht wartet ein Starter auf eine Anmeldung oder ein Update; starte das Spiel nochmals.".to_owned(),
+                SkipReason::JobIneffective => "Der Spielprozess ist dem Job beigetreten, behielt aber eine andere Grenze aus einem Job, in dem er schon war.".to_owned(),
+                SkipReason::TargetElevated => "Der Spielprozess läuft als Administrator; Rerun lässt ihn in Ruhe.".to_owned(),
+                SkipReason::TargetDenied { code } => format!("Ein Prozess mit dem Namen des Spiels konnte nicht geöffnet werden (Windows-Fehler {code}): geschützt, anderes Konto oder als Administrator gestartet. Es wurde nichts gesetzt."),
+                SkipReason::SearchFailed { code } => format!("Es konnte kein Spielprozess gesucht werden (Windows-Fehler {code}). Es wurde nichts gesetzt."),
+                SkipReason::PriorityFailed { code } => format!("Die Prioritätsklasse des Spielprozesses konnte nicht gelesen oder gesetzt werden (Windows-Fehler {code}). Es wurde nichts gesetzt."),
+            }
+            .into();
+        }
+        LaunchStart { start, watch } => {
+            return match start {
+                Start::Created if watch => "Der Befehl von Steam wurde unverändert gestartet.".to_owned(),
+                Start::Created => "Das Spiel wurde unverändert gestartet.".to_owned(),
+                Start::Shell | Start::ShellNoProcess => "Das Spiel wurde unverändert über die Windows-Abfrage für Administratorrechte gestartet.".to_owned(),
+                Start::NotExe => "Es wurde nichts gestartet (keine .exe).".to_owned(),
+                Start::Failed { code } => format!("Es wurde nichts gestartet (Windows-Fehler {code})."),
+            }
+            .into();
+        }
+        LaunchEnded { ended } => {
+            return match ended {
+                Ended::Ended => "Der angehaltene Prozess mit der Regel wurde zuerst beendet.".to_owned(),
+                Ended::Failed { code } => format!("Der angehaltene Prozess mit der Regel konnte nicht beendet werden (Windows-Fehler {code})."),
+                Ended::NotConfirmed { code } => format!("Es wurde nicht gesehen, dass der angehaltene Prozess mit der Regel endete (Windows-Fehler {code})."),
+            }
+            .into();
+        }
+        LaunchOptionStillSet => "Die Steam-Startoption für den Rerun-Starter war bei diesem Start noch gesetzt, aber es gab kein Profil. Das Spiel startet damit unverändert; entferne die Option in Steam.",
+        LaunchHeldBy { txn } => {
+            return format!("Die Änderung {txn} hält dieses Profil jetzt.").into();
+        }
+        LaunchOptionStillSetForgotten => "Die Steam-Startoption war bei diesem Start noch gesetzt. Eine ohne Rückgängig abgeschlossene Änderung hat ein Profil hinterlassen, das damals fehlte. Entferne die Startoption von Hand.",
+        LaunchCheckedLauncher => "Steam startet hier einen Starter. Die Prüfung galt dem Starter, nicht dem Spiel.",
+        LaunchWatched => "Methode watch: Die Regel gilt für den Spielprozess, der nach dem Start gefunden wird, nicht für das Programm, das Steam startet.",
+        LaunchPriorityNotRestored { code } => {
+            return format!("Die Prioritätsklasse des Spielprozesses konnte nicht zurückgesetzt werden (Windows-Fehler {code}). Die Klasse bleibt, bis das Spiel endet.").into();
         }
     };
     Cow::Borrowed(s)
