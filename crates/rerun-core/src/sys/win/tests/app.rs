@@ -240,3 +240,94 @@ fn journal_hold_and_lock_exclude_each_other_on_real_windows() {
     assert!(j.hold().is_ok());
     drop(root);
 }
+
+/// P5-6d-1a on real NTFS: a purge deletes Rerun's files by file ID and the folder by its file
+/// ID; a read-only record is foreign (nothing deleted); a backup another program holds without
+/// share-delete (a scanner) stops the purge with its tombstone kept, and the next run finishes
+/// it; the highest transaction stays as the anchor of `seq`.
+#[test]
+fn jp_purge_on_real_windows() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use crate::journal::purge_tests::{FULL, closed, head};
+    use crate::journal::{PurgeStop, Purged};
+
+    let Some((root, lad, _out)) = app_root("journal-purge") else {
+        return;
+    };
+    let sys = AppTestSys::new(&lad);
+    let app = AppDir::open(&sys, Create::IfMissing).unwrap().unwrap();
+    let game = root.work("game");
+    std::fs::write(game.join("a.bin"), b"old content on real Windows").unwrap();
+    let fs = WinFs::new();
+    let g = fs.open_dir_write(&game, &WriteCap::new()).unwrap();
+    let j = Journal::new(&app, InstanceTag::new());
+    let jdir = lad.join(r"Rerun\journal");
+    let lock = j.lock().unwrap();
+    let (a, b, c, d) = (
+        closed(&lock, &*g),
+        closed(&lock, &*g),
+        closed(&lock, &*g),
+        closed(&lock, &*g),
+    );
+    for t in [a, b, c, d] {
+        assert_eq!(listing(&jdir.join(t.to_string())), FULL, "precondition");
+    }
+    let stop = |r: Result<Purged, JournalError>| match r {
+        Err(JournalError::Purge { why, .. }) => Some(why),
+        _ => None,
+    };
+
+    // A read-only record: foreign, nothing written.
+    let ro = jdir.join(format!(r"{b}\0003.json"));
+    let mut p = std::fs::metadata(&ro).unwrap().permissions();
+    p.set_readonly(true);
+    std::fs::set_permissions(&ro, p.clone()).unwrap();
+    assert_eq!(
+        stop(lock.purge(&b, Some(&head()))),
+        Some(PurgeStop::Foreign)
+    );
+    assert_eq!(listing(&jdir.join(b.to_string())), FULL);
+    assert!(!jdir.join(format!("{b}.purge")).exists());
+    #[expect(
+        clippy::permissions_set_readonly_false,
+        reason = "test: undo the fixture"
+    )]
+    p.set_readonly(false);
+    std::fs::set_permissions(&ro, p).unwrap();
+
+    // Purged: files by ID, the folder by ID, the tombstone last.
+    assert_eq!(
+        lock.purge(&a, Some(&head())).unwrap(),
+        Purged { anchor: false }
+    );
+    assert!(!jdir.join(a.to_string()).exists() && !jdir.join(format!("{a}.purge")).exists());
+
+    // A scanner holds the backup without share-delete: stopped, the tombstone stays.
+    let bin = jdir.join(format!(r"{c}\op-0000.bin"));
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1) // FILE_SHARE_READ
+        .open(&bin)
+        .unwrap();
+    assert_eq!(stop(lock.purge(&c, Some(&head()))), Some(PurgeStop::InUse));
+    assert!(jdir.join(format!("{c}.purge")).exists() && bin.exists());
+    drop(held);
+
+    // The highest: the anchor stays.
+    assert_eq!(
+        lock.purge(&d, Some(&head())).unwrap(),
+        Purged { anchor: true }
+    );
+    assert!(listing(&jdir.join(d.to_string())).is_empty());
+    assert!(jdir.join(format!("{d}.purge")).exists());
+
+    // The next run finishes `c`.
+    lock.finish_purges().unwrap();
+    assert!(!jdir.join(c.to_string()).exists() && !jdir.join(format!("{c}.purge")).exists());
+    drop(lock);
+    let l = j.list().unwrap();
+    assert_eq!(l.txns.iter().map(|t| t.id).collect::<Vec<_>>(), [b]);
+    assert_eq!((l.purging, l.foreign), (0, 0));
+    drop(root);
+}

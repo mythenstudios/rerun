@@ -10,6 +10,8 @@
 //!   untrusted input: bounded reads, one written form, `Damaged` instead of guessing.
 //! - `write`: [`JournalLock`] (`journal\lock`, held by apply, revert and forget) with `begin`
 //!   (a new transaction) and `resume` (revert only, condition S4), and the writers.
+//! - `purge`: `JournalLock::purge` of a settled transaction (P5-6d): tombstone, fixed order of
+//!   deletion, the anchor of `seq`, finishing an interrupted purge.
 //!
 //! The journal is op-agnostic: records refer to ops by their index in the head; which op
 //! kinds exist and what they change is `exec`'s business (ADR 0020).
@@ -29,6 +31,7 @@
 //! records and `Applied` follow the helper.
 
 pub mod names;
+mod purge;
 mod read;
 mod record;
 mod replay;
@@ -41,6 +44,7 @@ use std::sync::atomic::AtomicU64;
 
 use names::LOCK;
 pub use names::{InstanceTag, TxnId};
+pub use purge::{PurgeStop, Purged};
 pub use record::{
     Before, Closing, Digest, DirProof, FORMAT, INLINE_MAX, MAX_DIRS, Observed, Semantic,
 };
@@ -126,6 +130,15 @@ pub enum JournalError {
         /// The marker, escaped for display.
         path: String,
     },
+    /// A purge of a transaction did not go on (P5-6d); [`PurgeStop`] says whether anything was
+    /// written.
+    #[error("transaction {id} is not purged: {why}")]
+    Purge {
+        /// The transaction.
+        id: TxnId,
+        /// Why.
+        why: PurgeStop,
+    },
     /// The record would break the grammar (a caller error); nothing was written.
     #[error("journal record refused: {0}")]
     Order(&'static str),
@@ -183,6 +196,8 @@ pub struct TxnView {
     pub(crate) log: Vec<record::Record>,
     /// The folder holds at least one record file.
     pub(crate) has_records: bool,
+    /// The folder holds no entry at all (P5-6d: the anchor of `seq` a purge leaves).
+    pub(crate) bare: bool,
 }
 
 impl TxnView {
@@ -214,9 +229,13 @@ pub struct Listed {
 pub struct Listing {
     /// The transactions.
     pub txns: Vec<Listed>,
-    /// Entries of `journal\` that are neither `lock`, nor a transaction name, nor a Rerun
-    /// temp name.
+    /// Entries of `journal\` that are neither `lock`, nor a transaction name, a forget marker,
+    /// a tombstone, nor a Rerun temp name.
     pub foreign: usize,
+    /// Purges begun and not finished (P5-6d): transactions a tombstone hides whose folder is
+    /// not empty, and tombstones without a folder. The anchor of `seq` (an empty folder with
+    /// its tombstone) is not counted.
+    pub purging: usize,
 }
 
 /// An existing `journal\lock` held read side by a check ([`Journal::hold`]); released when it
@@ -632,5 +651,7 @@ impl OpLog {
 
 #[cfg(test)]
 mod crash_tests;
+#[cfg(test)]
+pub(crate) mod purge_tests;
 #[cfg(test)]
 pub(crate) mod tests;

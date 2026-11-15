@@ -179,6 +179,20 @@ pub(crate) fn marker_of(name: &str) -> Option<TxnId> {
     name.strip_suffix(MARKER_SUFFIX)?.parse().ok()
 }
 
+/// Suffix of a tombstone `<txn>.purge` in `journal\` (P5-6d): a purge of that transaction has
+/// begun.
+const TOMBSTONE_SUFFIX: &str = ".purge";
+
+/// `<txn>.purge`.
+pub(crate) fn tombstone_name(id: &TxnId) -> RelPath {
+    segment(&format!("{id}{TOMBSTONE_SUFFIX}"))
+}
+
+/// The transaction of a tombstone name, exactly in the written form.
+pub(crate) fn tombstone_of(name: &str) -> Option<TxnId> {
+    name.strip_suffix(TOMBSTONE_SUFFIX)?.parse().ok()
+}
+
 /// A fixed name (`head.json`, `lock`) as a segment.
 pub(crate) fn fixed(name: &str) -> RelPath {
     segment(name)
@@ -254,6 +268,23 @@ mod tests {
             TxnEntry::Tmp
         );
         assert_eq!(record_name(7).as_str(), "0007.json");
+        let id = TxnId::new(3, 0xab).unwrap();
+        assert_eq!(
+            super::tombstone_name(&id).as_str(),
+            "00000003-00000000000000ab.purge"
+        );
+        assert_eq!(
+            super::tombstone_of("00000003-00000000000000ab.purge"),
+            Some(id)
+        );
+        for bad in [
+            "00000003-00000000000000ab.PURGE",
+            "00000003-00000000000000ab.purge.tmp",
+            "0000003-00000000000000ab.purge",
+            "00000003-00000000000000ab.forgotten",
+        ] {
+            assert_eq!(super::tombstone_of(bad), None, "{bad}");
+        }
         assert_eq!(backup_name(7).as_str(), "op-0007.bin");
         for bad in [
             "HEAD.JSON",

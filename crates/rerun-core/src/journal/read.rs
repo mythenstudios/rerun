@@ -28,6 +28,9 @@ pub(super) struct Scan {
     pub(super) txns: Vec<(TxnId, EntryKind)>,
     /// Plain files `<txn>.forgotten` (user decision D2): their transactions.
     pub(super) forgotten: Vec<TxnId>,
+    /// Plain files `<txn>.purge` (P5-6d): their transactions. Only orphans are counted from
+    /// here; whether a tombstone hides a transaction is read after its `load`, independently.
+    pub(super) purges: Vec<TxnId>,
     /// Entries that are none of these, nor `lock`, nor a temp name.
     pub(super) foreign: usize,
 }
@@ -39,6 +42,7 @@ pub(super) fn scan(jdir: &dyn Dir, lim: &Limits) -> Result<Scan, JournalError> {
     let mut s = Scan {
         txns: Vec::new(),
         forgotten: Vec::new(),
+        purges: Vec::new(),
         foreign: 0,
     };
     for e in entries {
@@ -49,6 +53,11 @@ pub(super) fn scan(jdir: &dyn Dir, lim: &Limits) -> Result<Scan, JournalError> {
             && !e.meta.restricted
         {
             s.forgotten.push(id);
+        } else if let Some(id) = names::tombstone_of(&e.name)
+            && e.meta.kind == EntryKind::File
+            && !e.meta.restricted
+        {
+            s.purges.push(id);
         } else if e.name != names::LOCK && TmpName::parse(&e.name).is_none() {
             s.foreign += 1;
         }
@@ -60,7 +69,7 @@ pub(super) fn scan(jdir: &dyn Dir, lim: &Limits) -> Result<Scan, JournalError> {
 /// A forget marker applies to the transaction as it is now: its content names the head
 /// hash that was forgotten (or nothing, for a transaction without a readable head), so a
 /// head swapped in afterwards is not covered.
-fn marker_applies(
+pub(super) fn marker_applies(
     jdir: &dyn Dir,
     id: &TxnId,
     head: Option<&[u8; 32]>,
@@ -72,29 +81,105 @@ fn marker_applies(
         }
         Err(e) => return Err(e.into()),
     };
-    Ok(match head {
+    Ok(head_named(&content, head))
+}
+
+/// The tombstone `<txn>.purge` (P5-6d) as it is now: `None` without one; else whether it
+/// applies to the transaction as loaded, by the rule of the forget marker: its content names
+/// the head that was purged, or there is no head (any more). A tombstone that cannot be read
+/// as a plain file of at most 64 bytes does not apply.
+pub(super) fn tombstone(
+    jdir: &dyn Dir,
+    id: &TxnId,
+    head: Option<&[u8; 32]>,
+) -> Result<Option<bool>, JournalError> {
+    let content = match jdir.read_limited(&names::tombstone_name(id), 64) {
+        Ok(c) => c,
+        Err(e) if e.kind == SysErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind == SysErrorKind::TooLarge => return Ok(Some(false)),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(Some(head_named(&content, head)))
+}
+
+/// The content of a marker or tombstone names `head` (or there is no head).
+pub(super) fn head_named(content: &[u8], head: Option<&[u8; 32]>) -> bool {
+    match head {
         Some(h) => content == crate::wire::hex32::to_string(h).as_bytes(),
         None => true,
-    })
+    }
+}
+
+/// What a reader makes of a transaction after its `load` (P5-6d, S2): the tombstone is read
+/// after every `load`, never taken from the scan. A tombstone that applies hides it; a folder
+/// gone by now hides it (the purge finished, its tombstone may be gone too); everything else
+/// is shown as loaded.
+enum Seen {
+    Shown(Result<TxnView, JournalError>),
+    /// Hidden by a tombstone; `bare`: an empty folder (the anchor of `seq`).
+    Purging {
+        bare: bool,
+    },
+    Gone,
+}
+
+fn see(jdir: &dyn Dir, id: &TxnId, v: VerifyBackups, lim: &Limits, app: &RootPath) -> Seen {
+    let view = load_raw(jdir, id, v, lim, app);
+    if matches!(view, Err(JournalError::NotFound(_))) {
+        return Seen::Gone;
+    }
+    let head = view.as_ref().ok().and_then(|v| v.head_sha256);
+    // A tombstone that cannot be read leaves the transaction as loaded (fail closed: a damaged
+    // or unreadable view blocks).
+    if let Ok(Some(true)) = tombstone(jdir, id, head.as_ref()) {
+        return Seen::Purging {
+            bare: view.as_ref().is_ok_and(|v| v.bare),
+        };
+    }
+    // The purge removes the folder before its tombstone: a view caught mid-purge whose
+    // tombstone is gone by now belongs to a folder that is gone as well. Only a view that is
+    // not settled is worth the second look.
+    let settled = view
+        .as_ref()
+        .is_ok_and(|v| matches!(v.state, TxnState::Closed(_) | TxnState::Empty));
+    if !settled && matches!(jdir.metadata(&id.rel()), Ok(None)) {
+        return Seen::Gone;
+    }
+    Seen::Shown(view)
 }
 
 /// Every transaction of `journal\`, without head bytes (only their hashes). S5: every entry
 /// with a transaction name counts for its `seq`; two with one `seq` make an open or applied
 /// one damaged, a closed one gets the anomaly, a damaged one keeps its first cause. A
-/// transaction with a forget marker that applies to it is [`Listed::forgotten`].
+/// transaction with a forget marker that applies to it is [`Listed::forgotten`]. P5-6d: a
+/// transaction a tombstone hides, or whose folder vanished after the scan, is not listed;
+/// [`Listing::purging`] counts the purges begun (hidden folders that are not bare, and
+/// tombstones without a folder), never the anchor of `seq`.
 pub(super) fn list(jdir: &dyn Dir, lim: &Limits, app: &RootPath) -> Result<Listing, JournalError> {
     let Scan {
         txns: ids,
         forgotten,
+        purges,
         foreign,
     } = scan(jdir, lim)?;
     let mut per_seq: BTreeMap<u32, usize> = BTreeMap::new();
     for (id, _) in &ids {
         *per_seq.entry(id.seq()).or_default() += 1;
     }
+    let mut purging = purges
+        .iter()
+        .filter(|p| !ids.iter().any(|(id, _)| id == *p))
+        .count();
     let mut txns = Vec::with_capacity(ids.len());
     for (id, _) in ids {
-        let mut view = load(jdir, &id, VerifyBackups::Length, lim, app);
+        let mut view = match see(jdir, &id, VerifyBackups::Length, lim, app) {
+            Seen::Shown(v) => v,
+            Seen::Purging { bare } => {
+                purging += usize::from(!bare);
+                continue;
+            }
+            Seen::Gone => continue,
+        };
         if let Ok(v) = &mut view {
             v.head = None;
             if per_seq.get(&id.seq()).copied().unwrap_or(0) > 1 {
@@ -119,7 +204,11 @@ pub(super) fn list(jdir: &dyn Dir, lim: &Limits, app: &RootPath) -> Result<Listi
             forgotten,
         });
     }
-    Ok(Listing { txns, foreign })
+    Ok(Listing {
+        txns,
+        foreign,
+        purging,
+    })
 }
 
 /// What a transaction folder holds, by name.
@@ -130,6 +219,8 @@ struct Entries {
     /// Backup op → length from the listing.
     backups: BTreeMap<u16, u64>,
     unknown: bool,
+    /// Entries listed, of any kind.
+    count: usize,
 }
 
 fn entries(dir: &dyn Dir, lim: &Limits) -> Result<Option<Entries>, JournalError> {
@@ -138,7 +229,10 @@ fn entries(dir: &dyn Dir, lim: &Limits) -> Result<Option<Entries>, JournalError>
         Err(e) if e.kind == SysErrorKind::TooLarge => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    let mut found = Entries::default();
+    let mut found = Entries {
+        count: listing.len(),
+        ..Entries::default()
+    };
     for e in listing {
         let class = names::classify(&e.name, lim.records);
         let plain = e.meta.kind == EntryKind::File && !e.meta.restricted;
@@ -158,8 +252,23 @@ fn entries(dir: &dyn Dir, lim: &Limits) -> Result<Option<Entries>, JournalError>
     Ok(Some(found))
 }
 
-/// Reads one transaction (P2-7 amendment, "States").
+/// Reads one transaction (P2-7 amendment, "States") as a reader sees it: one that a tombstone
+/// hides, or whose folder is gone, is `NotFound` (P5-6d).
 pub(super) fn load(
+    jdir: &dyn Dir,
+    id: &TxnId,
+    v: VerifyBackups,
+    lim: &Limits,
+    app: &RootPath,
+) -> Result<TxnView, JournalError> {
+    match see(jdir, id, v, lim, app) {
+        Seen::Shown(view) => view,
+        Seen::Purging { .. } | Seen::Gone => Err(JournalError::NotFound(*id)),
+    }
+}
+
+/// Reads one transaction folder, whatever tombstone there is.
+pub(super) fn load_raw(
     jdir: &dyn Dir,
     id: &TxnId,
     v: VerifyBackups,
@@ -192,6 +301,7 @@ pub(super) fn read_txn(
         rebinds: Vec::new(),
         log: Vec::new(),
         has_records: false,
+        bare: false,
     };
     let mut m = Machine::default();
     let damaged = |mut view: TxnView, m: Machine, d: Damage| {
@@ -202,6 +312,7 @@ pub(super) fn read_txn(
         return damaged(view, m, Damage::TooManyEntries);
     };
     view.has_records = !found.records.is_empty();
+    view.bare = found.count == 0;
     if found.records.is_empty() && !found.head {
         // B2: a folder without head and records changed nothing (a crash right after
         // `begin` created it); it still counts for `seq`.

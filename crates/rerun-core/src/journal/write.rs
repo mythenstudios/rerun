@@ -29,12 +29,12 @@ use crate::sys::{DirWrite, SysError, SysErrorKind};
 /// The held `journal\lock` (ADR 0019, "Lock").
 #[derive(Debug)]
 pub struct JournalLock<'j> {
-    dir: &'j dyn DirWrite,
+    pub(super) dir: &'j dyn DirWrite,
     _lock: Box<dyn FileLock + 'j>,
     tag: u64,
     tmp_n: &'j AtomicU64,
-    lim: Limits,
-    app: &'j RootPath,
+    pub(super) lim: Limits,
+    pub(super) app: &'j RootPath,
 }
 
 impl<'j> JournalLock<'j> {
@@ -57,7 +57,7 @@ impl<'j> JournalLock<'j> {
     }
 
     /// A fresh temp name of this instance.
-    fn tmp(&self) -> TmpName {
+    pub(super) fn tmp(&self) -> TmpName {
         TmpName::new(self.tag, self.tmp_n.fetch_add(1, Ordering::Relaxed))
     }
 
@@ -151,7 +151,8 @@ impl<'j> JournalLock<'j> {
     }
 
     /// Reopens transaction `id` to revert it (after a crash, or a revert of an applied one).
-    /// `Empty`, `Open` and `Applied` only; never a damaged or closed one.
+    /// `Empty`, `Open` and `Applied` only; never a damaged or closed one, and never one a
+    /// tombstone hides (P5-6d: `NotFound`, as for a reader).
     pub(crate) fn resume(&self, id: &TxnId) -> Result<RevertWriter<'_>, JournalError> {
         let rel = id.rel();
         let dir = self.dir.open_dir_write(&rel).map_err(|e| match e.kind {
@@ -160,6 +161,9 @@ impl<'j> JournalLock<'j> {
             _ => JournalError::Sys(e),
         })?;
         let (view, m) = read::read_txn(&*dir, *id, VerifyBackups::Length, &self.lim)?;
+        if read::tombstone(self.dir, id, view.head_sha256.as_ref())? == Some(true) {
+            return Err(JournalError::NotFound(*id));
+        }
         let resumable = matches!(
             view.state,
             TxnState::Empty | TxnState::Open | TxnState::Applied

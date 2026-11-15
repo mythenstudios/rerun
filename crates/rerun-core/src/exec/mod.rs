@@ -87,6 +87,7 @@ mod file;
 mod helper;
 mod ini;
 mod launch;
+mod purge;
 mod rebind;
 mod reg;
 mod roots;
@@ -105,6 +106,12 @@ pub mod launch_result {
     };
 }
 pub use helper::{HelperFailure, helper_ready, reason_words};
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "flow::history calls it from P5-6d-1b on")
+)]
+pub(crate) use purge::purge_seen;
+pub use purge::{Keep, PurgeReport};
 pub(crate) use rebind::revert_rebound_seen;
 pub use rebind::{
     CreatedDir, RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,
@@ -2741,6 +2748,8 @@ mod patch_tests;
 mod profiles_crash_tests;
 #[cfg(test)]
 mod profiles_tests;
+#[cfg(test)]
+mod purge_tests;
 #[cfg(test)]
 mod rebind_crash_tests;
 #[cfg(test)]
