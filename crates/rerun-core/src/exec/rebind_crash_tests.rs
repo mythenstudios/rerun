@@ -196,7 +196,7 @@ pub(super) fn changes_state(p: Prim) -> bool {
         | Prim::Reg(R::Create | R::SetValue | R::DeleteValue | R::Delete | R::Flush) => true,
         Prim::Reg(_) => false,
         // Read side: Support, VolumeName, OpenGuard, Lookup, OpenLock (see above),
-        // OpenDirDelete, State, Name, ReadAt, Users, ReadSide.
+        // OpenDirDelete, OpenFileDelete, State, Name, ReadAt, Users, ReadSide.
         _ => false,
     }
 }

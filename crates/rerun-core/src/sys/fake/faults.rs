@@ -39,6 +39,8 @@ pub enum Prim {
     CreateDir,
     /// `PrimDir::open_dir_delete`.
     OpenDirDelete,
+    /// `PrimDir::open_file_delete` (`remove_file`).
+    OpenFileDelete,
     /// `PrimDir::rename` (steps 6 and 7, the undo, `rename_to`, `create_new`).
     Rename,
     /// `PrimDir::flush`.
@@ -57,7 +59,7 @@ pub enum Prim {
     SetAttrs,
     /// `PrimFile::flush` (step 5).
     FlushFile,
-    /// `PrimFile::posix_delete` (step 8, `delete`, `remove_dir`, the cleanup of `<tmp>`).
+    /// `PrimFile::posix_delete` (step 8, `delete`, `remove_dir`, `remove_file`, the cleanup of `<tmp>`).
     PosixDelete,
     /// A read-side operation of a `Dir` handle or `Fs::open_dir` (`FsOp::OpenDir`): a fault
     /// unit only, its hooks are the walk steps.

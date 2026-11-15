@@ -533,6 +533,54 @@ fn win_fulfils_fs_link_write_contract() {
     );
 }
 
+/// P5-6d measurement (`docs/09-testing.md`, W26-M): deleting a freshly written 1 GiB file
+/// through `remove_file` (by file ID, nothing read) on the `target\` volume, three times, and
+/// once through `guard` + `sha256` + `delete` (by hash) for comparison. The file is written,
+/// flushed and closed right before, so a real-time scanner may still be looking at it. Prints
+/// the times; fails if a `remove_file` takes 200 ms or more (the budget of one purged journal
+/// entry). Run by hand: `cargo test -p rerun-core --profile ci --config
+/// .dev/sac-build/sac.toml measure_remove_file_of_one_gib -- --ignored --nocapture`.
+#[test]
+#[ignore = "writes four 1 GiB files under target/ and prints timings; run by hand"]
+fn measure_remove_file_of_one_gib() {
+    const GIB: usize = 1 << 30;
+    let Some(root) = TestRoot::new("remove-file-1gib") else {
+        return;
+    };
+    let work = root.work("w");
+    let chunk = vec![0x5Au8; 1 << 20];
+    let write = |name: &str| {
+        let mut f = std::fs::File::create(work.join(name)).unwrap();
+        for _ in 0..GIB / chunk.len() {
+            std::io::Write::write_all(&mut f, &chunk).unwrap();
+        }
+        f.sync_all().unwrap();
+    };
+    let fs = WinFs::new();
+    let d = fs.open_dir_write(&work, &WriteCap::new()).unwrap();
+    let mut by_id = Vec::new();
+    for n in 0..3 {
+        let name = RelPath::parse(&format!("op-{n:04}.bin")).unwrap();
+        write(name.as_str());
+        let id = d.metadata(&name).unwrap().unwrap().file_id;
+        let t = Instant::now();
+        d.remove_file(&name, id).unwrap();
+        by_id.push(t.elapsed());
+        assert!(d.metadata(&name).unwrap().is_none());
+    }
+    let name = RelPath::parse("hash.bin").unwrap();
+    write(name.as_str());
+    let t = Instant::now();
+    let mut g = d.guard(&name).unwrap();
+    let h = g.sha256().unwrap();
+    g.delete(&h).unwrap();
+    let by_hash = t.elapsed();
+    println!("remove_file of 1 GiB: {by_id:?}; guard + sha256 + delete: {by_hash:?}");
+    for t in &by_id {
+        assert!(*t < Duration::from_millis(200), "remove_file took {t:?}");
+    }
+}
+
 /// The snapshot contract on real Windows: the work directory is opened as a manually added
 /// game folder through `policy::root` (a `TestRoot` folder stands in for Rerun's install
 /// folder), its handle is the snapshot root; the key lives in a private app hive.

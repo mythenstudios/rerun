@@ -2584,6 +2584,11 @@ impl DirWrite for NaiveDir {
         std::fs::remove_dir(&path).map_err(|_| naive_err(&path))
     }
 
+    fn remove_file(&self, name: &RelPath, _expected_id: u128) -> SysResult<()> {
+        let path = self.check(Some(name))?;
+        std::fs::remove_file(&path).map_err(|_| naive_err(&path))
+    }
+
     fn flush(&self) -> SysResult<()> {
         Ok(())
     }

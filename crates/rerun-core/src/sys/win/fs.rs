@@ -885,6 +885,10 @@ impl DirWrite for WinDir {
         seq::remove_dir(self, name, expected_id)
     }
 
+    fn remove_file(&self, name: &RelPath, expected_id: u128) -> SysResult<()> {
+        seq::remove_file(self, name, expected_id)
+    }
+
     fn flush(&self) -> SysResult<()> {
         seq::flush(self)
     }

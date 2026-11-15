@@ -144,6 +144,12 @@ pub(super) enum RelOpen {
     /// FILE_READ_ATTRIBUTES | SYNCHRONIZE`, shares read and write. A file is
     /// `STATUS_NOT_A_DIRECTORY`.
     DirDelete,
+    /// A file opened by name for `DirWrite::remove_file`, deleted only after its file ID was
+    /// compared on this handle (P5-6d): `FILE_OPEN`,
+    /// neither `FILE_DIRECTORY_FILE` nor `FILE_NON_DIRECTORY_FILE` (the entry itself, whatever
+    /// it is; the caller classifies it on the handle), `DELETE | FILE_READ_ATTRIBUTES |
+    /// SYNCHRONIZE` without data access, share read only like [`RelOpen::Guard`].
+    FileDelete,
 }
 
 /// Everything `NtCreateFile` gets for a [`RelOpen`].
@@ -210,6 +216,12 @@ impl RelOpen {
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 FILE_OPEN,
                 FILE_DIRECTORY_FILE | ITSELF,
+            ),
+            Self::FileDelete => plain(
+                DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ,
+                FILE_OPEN,
+                ITSELF,
             ),
         }
     }
@@ -752,7 +764,34 @@ mod tests {
         FILE_BASIC_INFORMATION, FILE_DISPOSITION_INFORMATION_EX, FILE_RENAME_INFORMATION,
     };
 
-    use super::rename_buffer;
+    use super::{RelOpen, rename_buffer};
+
+    /// `remove_file`'s open (P5-6d): delete and attributes only (no data access, so no content
+    /// is read and a scanner's data handle is not needed), share read only like the guard,
+    /// the entry itself (`FILE_OPEN_REPARSE_POINT`), only an existing name, never created.
+    #[test]
+    fn the_file_delete_open_asks_for_delete_without_data_and_never_follows_a_link() {
+        use windows_sys::Wdk::Storage::FileSystem::{
+            FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+            FILE_SYNCHRONOUS_IO_NONALERT,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, SYNCHRONIZE,
+        };
+        let s = RelOpen::FileDelete.spec();
+        assert_eq!(s.access, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE);
+        assert_eq!(s.share, FILE_SHARE_READ);
+        assert_eq!(s.disposition, FILE_OPEN);
+        assert_eq!(
+            s.options,
+            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT
+        );
+        assert_eq!(
+            s.options & (FILE_DIRECTORY_FILE | FILE_NON_DIRECTORY_FILE),
+            0
+        );
+        assert_eq!(s.attributes, 0);
+    }
 
     /// The documented x64 layouts (ntifs.h, wdm.h): `FILE_RENAME_INFORMATION` has `Flags` at
     /// 0, `RootDirectory` at 8, `FileNameLength` at 16, `FileName` at 20 (24 bytes);

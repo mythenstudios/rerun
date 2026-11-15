@@ -60,6 +60,7 @@ fn writes(c: &Prim) -> bool {
             | Prim::FlushFile
             | Prim::PosixDelete
             | Prim::OpenDirDelete
+            | Prim::OpenFileDelete
     )
 }
 

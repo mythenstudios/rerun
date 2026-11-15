@@ -266,6 +266,16 @@ impl PrimDir for FakeDir {
         Ok(self.fs.file(id))
     }
 
+    fn open_file_delete(&self, name: Seg<'_>) -> SysResult<FakeFile> {
+        let name = name.as_str();
+        let id = self.prim(Prim::OpenFileDelete, name, |st| {
+            let node = st.child(self.node, name)?;
+            let obj = st.obj_of(node);
+            FakeFs::open_rerun(st, obj, Access::DELETE, Share::R, name)
+        })?;
+        Ok(self.fs.file(id))
+    }
+
     fn rename(&self, f: &FakeFile, name: Seg<'_>) -> SysResult<()> {
         let name = name.as_str();
         self.prim(Prim::Rename, name, |st| {

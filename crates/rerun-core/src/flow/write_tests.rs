@@ -80,6 +80,7 @@ fn writes(c: &Prim) -> bool {
             | Prim::PosixDelete
             | Prim::OpenLock
             | Prim::OpenDirDelete
+            | Prim::OpenFileDelete
     )
 }
 

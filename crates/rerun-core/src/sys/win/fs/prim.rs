@@ -188,6 +188,18 @@ impl PrimDir for WinDir {
         Ok(WinFile::new(h))
     }
 
+    /// Opens the entry itself for `remove_file` and checks its long name (L1), like
+    /// `open_dir_delete`. Never the guard's data reopen: deleting a WOF or dedup file through
+    /// its reparse point removes the file, and no data is read.
+    fn open_file_delete(&self, name: Seg<'_>) -> SysResult<WinFile> {
+        let t = name.as_str();
+        let s = seg16(t, t)?;
+        let h =
+            nt::open_relative(self.h(), &s, RelOpen::FileDelete).map_err(|st| nt_error(st, t))?;
+        check_long_name(h.as_handle(), &s, t)?;
+        Ok(WinFile::new(h))
+    }
+
     /// `FileRenameInformationEx` on `f` with `RootDirectory` = this handle, flags 0. An error
     /// means nothing was renamed (the class acts completely or not at all).
     fn rename(&self, f: &WinFile, name: Seg<'_>) -> SysResult<()> {

@@ -1,6 +1,6 @@
 //! The write sequences of ADR 0017, written once (amendment A1, user decision D-4).
 //!
-//! `create_new`, `create_dir`, `remove_dir`, `flush` and `lock` (and, with the guard, replace,
+//! `create_new`, `create_dir`, `remove_dir`, `remove_file`, `flush` and `lock` (and, with the guard, replace,
 //! delete and `rename_to`) are generic over two small primitive traits: [`PrimDir`] (a
 //! directory handle) and [`PrimFile`] (a held file or directory handle). `sys::fake` and
 //! `sys::win` implement only the primitives; the order of the steps, the cleanup of
@@ -128,6 +128,11 @@ pub(crate) trait PrimDir: Send + Sync {
     /// Opens the directory `name` itself for deleting (`DELETE`, shares read and write);
     /// a file is `InvalidPath`.
     fn open_dir_delete(&self, name: Seg<'_>) -> SysResult<Self::File>;
+
+    /// Opens the entry `name` itself for deleting a file (`DELETE | FILE_READ_ATTRIBUTES |
+    /// SYNCHRONIZE`, no data access, share read only like the guard, never following a
+    /// reparse point); the sequence classifies it on the handle.
+    fn open_file_delete(&self, name: Seg<'_>) -> SysResult<Self::File>;
 
     /// Renames the held `f` (opened with `DELETE`) to `name` in this directory
     /// (`RootDirectory` = this handle, no replace). A collision is `Busy`.
@@ -304,6 +309,33 @@ pub(crate) fn remove_dir<D: PrimDir>(d: &D, name: &RelPath, expected_id: u128) -
         return Err(SysError::new(
             SysErrorKind::Mismatch,
             format!("{t}: not the expected directory"),
+        ));
+    }
+    f.posix_delete()
+}
+
+/// [`DirWrite::remove_file`](super::fs::DirWrite::remove_file): opens the entry itself for
+/// deleting, classifies it on that handle (a directory `InvalidPath`, a reparse point
+/// `ReparsePoint`, more than one link `Linked`), compares its file ID there (`Mismatch`) and
+/// POSIX-deletes it there. No content is read.
+pub(crate) fn remove_file<D: PrimDir>(d: &D, name: &RelPath, expected_id: u128) -> SysResult<()> {
+    let n = Seg::new(name)?;
+    let t = n.as_str();
+    writable(d, t)?;
+    let f = d.open_file_delete(n)?;
+    let st = f.state()?;
+    match st.kind {
+        EntryKind::File => {}
+        EntryKind::Reparse => return Err(SysError::new(SysErrorKind::ReparsePoint, t)),
+        EntryKind::Dir => return Err(SysError::new(SysErrorKind::InvalidPath, t)),
+    }
+    if st.links != 1 {
+        return Err(SysError::new(SysErrorKind::Linked, t));
+    }
+    if st.file_id != expected_id {
+        return Err(SysError::new(
+            SysErrorKind::Mismatch,
+            format!("{t}: not the expected file"),
         ));
     }
     f.posix_delete()

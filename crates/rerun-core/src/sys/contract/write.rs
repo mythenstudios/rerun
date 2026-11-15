@@ -120,6 +120,7 @@ pub fn fs_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> FsCont
     w12_replace(fs, fx, work)?;
     w13_planted_old(fs, fx, work)?;
     w14_delete(fs, fx, work)?;
+    w26_remove_file(fs, fx, work, &mut skips)?;
     w15_rename_to(fs, fx, work)?;
     w16_guard_holds(fs, fx, work)?;
     w17_guard_and_readers(fs, fx, work)?;
@@ -571,6 +572,7 @@ fn w5_one_segment(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResul
     )?;
     err_kind(d.create_dir(&two), ip, "W5 create_dir")?;
     err_kind(d.remove_dir(&rel(r"a\c")?, 0), ip, "W5 remove_dir")?;
+    err_kind(d.remove_file(&two, 0), ip, "W5 remove_file")?;
     err_kind(d.lock(&two), ip, "W5 lock")?;
     err_kind(d.guard(&two).map(|_| ()), ip, "W5 guard")?;
     read_is(&*d, r"a\b.txt", b"b", "W5 nothing changed")?;
@@ -719,6 +721,7 @@ fn w21_case_sensitive(
     )?;
     err_kind(d.create_dir(&n), un, "W21 create_dir")?;
     err_kind(d.remove_dir(&n, 0), un, "W21 remove_dir")?;
+    err_kind(d.remove_file(&n, 0), un, "W21 remove_file")?;
     err_kind(d.flush(), un, "W21 flush")?;
     err_kind(d.lock(&n), un, "W21 lock")?;
     err_kind(d.guard(&n).map(|_| ()), un, "W21 guard")?;
@@ -1122,6 +1125,137 @@ fn w14_delete(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> ContractResult {
     ok(g.delete(&sha(b"ro")), "W14 delete of a read-only file")?;
     absent(&*d, "ro.bin", "W14 the read-only file is gone")?;
     no_tmp(&*d, "W14")
+}
+
+/// W26 (P5-6d): `remove_file` deletes a file by its file ID, never reading it: another ID is
+/// `Mismatch`, a directory `InvalidPath`, a missing name `NotFound`, either name of a file
+/// with two links `Linked`, a restricted file `AccessDenied` (all unchanged); it deletes in
+/// another case spelling and a read-only file (R/H/S); another program reading and sharing
+/// delete does not block it and the name is free at once (a new file can take it while the
+/// old one is still held); a hold without share-delete, or with write access (the open shares
+/// read only, like the guard), is `Busy` until it closes; an attribute-only hold never blocks.
+fn w26_remove_file(
+    fs: &dyn Fs,
+    fx: &dyn FsFixture,
+    work: &Path,
+    skips: &mut Skipped,
+) -> ContractResult {
+    let d = case_dir(fs, fx, work, "w26")?;
+    let at = |n: &str| work.join("w26").join(n);
+    let id_of = |n: &str| -> Result<u128, String> {
+        Ok(ok(d.metadata(&rel(n)?), "W26 metadata")?
+            .ok_or_else(|| format!("contract violated: W26 {n} missing"))?
+            .file_id)
+    };
+    ok(fx.file(&at("t.bin"), b"t"), "fixture")?;
+    ok(fx.file(&at("o.bin"), b"o"), "fixture")?;
+    ok(fx.dir(&at("dir")), "fixture")?;
+    let t = rel("t.bin")?;
+    let (tid, oid, did) = (id_of("t.bin")?, id_of("o.bin")?, id_of("dir")?);
+    err_kind(
+        d.remove_file(&t, oid),
+        SysErrorKind::Mismatch,
+        "W26 remove_file with another file's ID",
+    )?;
+    err_kind(
+        d.remove_file(&rel("dir")?, did),
+        SysErrorKind::InvalidPath,
+        "W26 remove_file of a directory",
+    )?;
+    err_kind(
+        d.remove_file(&rel("missing.bin")?, tid),
+        SysErrorKind::NotFound,
+        "W26 remove_file of a missing name",
+    )?;
+    ok(fx.file(&at("a.bin"), b"a"), "fixture")?;
+    ok(fx.hardlink(&at("a.bin"), &at("b.bin")), "fixture hard link")?;
+    let aid = id_of("a.bin")?;
+    for n in ["a.bin", "b.bin"] {
+        err_kind(
+            d.remove_file(&rel(n)?, aid),
+            SysErrorKind::Linked,
+            &format!("W26 remove_file of {n} with two links"),
+        )?;
+    }
+    read_is(&*d, "t.bin", b"t", "W26 t unchanged")?;
+    read_is(&*d, "a.bin", b"a", "W26 a unchanged")?;
+    read_is(&*d, "b.bin", b"a", "W26 b unchanged")?;
+    ok(fx.remove(&at("b.bin")), "fixture remove second link")?;
+    ok(
+        d.remove_file(&rel("a.bin")?, aid),
+        "W26 remove_file once the second link is gone",
+    )?;
+    absent(&*d, "a.bin", "W26 a")?;
+
+    // Another program holds `t.bin`.
+    let attrs_only = ok(
+        fx.hold_open(&at("t.bin"), Access::ATTRS, Share::NONE),
+        "W26 attribute-only hold",
+    )?;
+    for (access, share, what) in [
+        (Access::READ, Share::RW, "a read without share-delete"),
+        (Access::WRITE, Share::RWD, "a write sharing delete"),
+    ] {
+        let hold = ok(fx.hold_open(&at("t.bin"), access, share), what)?;
+        err_kind(
+            d.remove_file(&t, tid),
+            SysErrorKind::Busy,
+            &format!("W26 remove_file while held by {what}"),
+        )?;
+        drop(hold);
+        read_is(&*d, "t.bin", b"t", "W26 t unchanged while held")?;
+    }
+    let scan = ok(
+        fx.hold_open(&at("t.bin"), Access::READ, Share::RWD),
+        "W26 a read sharing delete (a scanner)",
+    )?;
+    ok(
+        d.remove_file(&rel("T.BIN")?, tid),
+        "W26 remove_file in another case while a reader shares delete",
+    )?;
+    absent(&*d, "t.bin", "W26 the name is free at once")?;
+    ok(
+        d.create_new(
+            &t,
+            &mut &b"fresh"[..],
+            &new_file(1, Attrs::default(), b"fresh", 5),
+        ),
+        "W26 create_new of the freed name while the old file is still held",
+    )?;
+    drop(scan);
+    drop(attrs_only);
+    read_is(&*d, "t.bin", b"fresh", "W26 the new file")?;
+
+    let rhs = Attrs {
+        readonly: true,
+        hidden: true,
+        system: true,
+    };
+    ok(fx.set_attrs(&at("o.bin"), rhs), "fixture read-only")?;
+    ok(
+        d.remove_file(&rel("o.bin")?, oid),
+        "W26 remove_file of a read-only, hidden, system file",
+    )?;
+    absent(&*d, "o.bin", "W26 the read-only file is gone")?;
+
+    ok(fx.file(&at("r.bin"), b"r"), "fixture")?;
+    let rid = id_of("r.bin")?;
+    if ok(fx.restricted(&at("r.bin")), "fixture restricted")? {
+        err_kind(
+            d.remove_file(&rel("r.bin")?, rid),
+            SysErrorKind::AccessDenied,
+            "W26 remove_file of a restricted file",
+        )?;
+    } else {
+        skip(skips, "restricted");
+    }
+    let mut left = names(&*d, None, "W26 listing")?;
+    left.sort();
+    ensure(
+        left == ["dir", "r.bin", "t.bin"],
+        &format!("W26 exactly dir, r.bin and t.bin are left ({left:?})"),
+    )?;
+    no_tmp(&*d, "W26")
 }
 
 /// W15: `rename_to` moves the held file to a free name (same object); onto an existing name
@@ -1529,6 +1663,14 @@ pub fn fs_link_write_contract(fs: &dyn Fs, fx: &dyn FsFixture, work: &Path) -> F
             d.lock(&p).map(|_| ()),
             SysErrorKind::ReparsePoint,
             &format!("L2 lock of {link}"),
+        )?;
+        let lid = ok(d.metadata(&p), "L2 metadata")?
+            .ok_or_else(|| format!("contract violated: L2 {link} missing"))?
+            .file_id;
+        err_kind(
+            d.remove_file(&p, lid),
+            SysErrorKind::ReparsePoint,
+            &format!("L2 remove_file of {link} with its own file ID"),
         )?;
         ensure(
             ok(d.metadata(&p), "L1 metadata")?.is_some_and(|m| m.kind == EntryKind::Reparse),

@@ -3238,6 +3238,7 @@ fn f4_a_volume_without_posix_semantics_refuses_every_write() {
     );
     assert_eq!(kind(g.create_dir(&r("n"))), un);
     assert_eq!(kind(g.remove_dir(&r("d"), 0)), un);
+    assert_eq!(kind(g.remove_file(&r("t.bin"), 0)), un);
     assert_eq!(kind(g.flush()), un);
     assert_eq!(kind(g.lock(&r("l")).map(|_| ())), un);
     assert_eq!(listing(&sys, r"F:\G"), ["d", "t.bin"]);
@@ -3440,6 +3441,143 @@ fn f13_a_writable_data_mapping_refuses_the_guard() {
     drop(g.guard(&r("t.bin")).unwrap());
 }
 
+// ---------- remove_file (P5-6d) ----------
+
+/// `C:\G` with `t.bin`, a folder `d`, a junction `j`, a file symlink `s`, the two links
+/// `a.bin`/`b.bin` of one file, and the canary `C:\Out\c.txt` the links point to.
+fn rf_system() -> FakeSystem {
+    let sys = FakeSystem::builder()
+        .file(r"C:\G\t.bin", "old")
+        .file(r"C:\G\a.bin", "a")
+        .file(r"C:\Out\c.txt", "canary")
+        .dir(r"C:\G\d")
+        .build()
+        .unwrap();
+    let fx = sys.fake_fs();
+    fx.junction(&p(r"C:\G\j"), &p(r"C:\Out")).unwrap();
+    assert!(fx.file_symlink(&p(r"C:\G\s"), &p(r"C:\Out\c.txt")).unwrap());
+    fx.hardlink(&p(r"C:\G\a.bin"), &p(r"C:\G\b.bin")).unwrap();
+    sys
+}
+
+fn id_of(g: &dyn DirWrite, name: &str) -> u128 {
+    g.metadata(&r(name)).unwrap().unwrap().file_id
+}
+
+#[test]
+fn remove_file_deletes_by_file_id_through_primitives_without_reading() {
+    let sys = rf_system();
+    let g = open(&sys, r"C:\G");
+    let id = id_of(&*g, "t.bin");
+    let calls = record_calls(&sys);
+    g.remove_file(&r("T.BIN"), id).unwrap();
+    sys.fake_fs().clear_on_step();
+    // No `ReadAt`: the content is never read, whatever its size.
+    use Prim::{OpenFileDelete, PosixDelete, State, Support};
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [Support, OpenFileDelete, State, PosixDelete]
+    );
+    assert!(g.metadata(&r("t.bin")).unwrap().is_none());
+    // A missing name, once deleted or never there: `NotFound`.
+    assert_eq!(kind(g.remove_file(&r("t.bin"), id)), SysErrorKind::NotFound);
+    assert_eq!(kind(g.remove_file(&r("x.bin"), 0)), SysErrorKind::NotFound);
+}
+
+#[test]
+fn remove_file_refuses_another_id_a_folder_a_link_and_two_names() {
+    let sys = rf_system();
+    let g = open(&sys, r"C:\G");
+    let before = listing(&sys, r"C:\G");
+    let other = id_of(&*g, "d");
+    let id = id_of(&*g, "t.bin");
+    assert_eq!(
+        kind(g.remove_file(&r("t.bin"), other)),
+        SysErrorKind::Mismatch
+    );
+    assert_eq!(
+        kind(g.remove_file(&r("t.bin"), id + 1)),
+        SysErrorKind::Mismatch
+    );
+    assert_eq!(
+        kind(g.remove_file(&r("d"), other)),
+        SysErrorKind::InvalidPath
+    );
+    for link in ["j", "s"] {
+        let lid = id_of(&*g, link);
+        assert_eq!(
+            kind(g.remove_file(&r(link), lid)),
+            SysErrorKind::ReparsePoint,
+            "{link}"
+        );
+    }
+    for name in ["a.bin", "b.bin"] {
+        let aid = id_of(&*g, name);
+        assert_eq!(
+            kind(g.remove_file(&r(name), aid)),
+            SysErrorKind::Linked,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        kind(g.remove_file(&r(r"d\x.bin"), 0)),
+        SysErrorKind::InvalidPath
+    );
+    assert_eq!(listing(&sys, r"C:\G"), before);
+    assert_eq!(open(&sys, r"C:\Out").read(&r("c.txt")).unwrap(), b"canary");
+    assert_eq!(g.read(&r("t.bin")).unwrap(), b"old");
+    // Once the second name is gone, the first one goes by its ID.
+    sys.fake_fs().remove(&p(r"C:\G\b.bin")).unwrap();
+    let aid = id_of(&*g, "a.bin");
+    g.remove_file(&r("a.bin"), aid).unwrap();
+    assert!(g.metadata(&r("a.bin")).unwrap().is_none());
+}
+
+#[test]
+fn remove_file_deletes_a_read_only_file_and_one_held_sharing_delete() {
+    let sys = rf_system();
+    let g = open(&sys, r"C:\G");
+    let fx = sys.fake_fs();
+    let ro = Attrs {
+        readonly: true,
+        hidden: true,
+        system: true,
+    };
+    fx.set_attrs(&p(r"C:\G\t.bin"), ro).unwrap();
+    let id = id_of(&*g, "t.bin");
+    // Another program reading and sharing delete (a scanner): the name goes at once.
+    let scan = fx
+        .hold_open(&p(r"C:\G\t.bin"), Access::READ, Share::RWD)
+        .unwrap();
+    g.remove_file(&r("t.bin"), id).unwrap();
+    assert!(g.metadata(&r("t.bin")).unwrap().is_none());
+    drop(scan);
+    // Without share-delete: `Busy`, nothing changed; it goes once the hold is closed.
+    fx.put_file(&p(r"C:\G\u.bin"), b"u").unwrap();
+    let uid = id_of(&*g, "u.bin");
+    let hold = fx
+        .hold_open(&p(r"C:\G\u.bin"), Access::READ, Share::RW)
+        .unwrap();
+    assert_eq!(kind(g.remove_file(&r("u.bin"), uid)), SysErrorKind::Busy);
+    assert_eq!(g.read(&r("u.bin")).unwrap(), b"u");
+    drop(hold);
+    g.remove_file(&r("u.bin"), uid).unwrap();
+    assert!(g.metadata(&r("u.bin")).unwrap().is_none());
+}
+
+#[test]
+fn remove_file_refuses_a_restricted_file() {
+    let sys = rf_system();
+    let g = open(&sys, r"C:\G");
+    let id = id_of(&*g, "t.bin");
+    assert!(sys.fake_fs().restricted(&p(r"C:\G\t.bin")).unwrap());
+    assert_eq!(
+        kind(g.remove_file(&r("t.bin"), id)),
+        SysErrorKind::AccessDenied
+    );
+    assert!(listing(&sys, r"C:\G").contains(&"t.bin".to_owned()));
+}
+
 // ---------- Faults and crashes at the primitive layer ----------
 
 /// Name, content and R/H/S of every entry of a directory, sorted by name.
@@ -3472,14 +3610,16 @@ enum WriteOp {
     Delete,
     CreateDir,
     RemoveDir,
+    RemoveFile,
 }
 
-const WRITE_OPS: [WriteOp; 5] = [
+const WRITE_OPS: [WriteOp; 6] = [
     WriteOp::Replace,
     WriteOp::CreateNew,
     WriteOp::Delete,
     WriteOp::CreateDir,
     WriteOp::RemoveDir,
+    WriteOp::RemoveFile,
 ];
 
 fn op_system() -> FakeSystem {
@@ -3512,6 +3652,10 @@ fn run_op(g: &dyn DirWrite, op: WriteOp) -> crate::sys::SysResult<Option<TmpName
         WriteOp::RemoveDir => {
             let id = g.metadata(&r("d"))?.map_or(0, |m| m.file_id);
             g.remove_dir(&r("d"), id).map(|()| None)
+        }
+        WriteOp::RemoveFile => {
+            let id = g.metadata(&r("t.bin"))?.map_or(0, |m| m.file_id);
+            g.remove_file(&r("t.bin"), id).map(|()| None)
         }
     }
 }
@@ -3684,6 +3828,7 @@ fn recover_op(g: &dyn DirWrite, op: WriteOp, what: &str) -> (bool, Option<Phase>
         WriteOp::Delete => (g.metadata(&r("t.bin")).unwrap().is_none(), None),
         WriteOp::CreateDir => (g.metadata(&r("nd")).unwrap().is_some(), None),
         WriteOp::RemoveDir => (g.metadata(&r("d")).unwrap().is_none(), None),
+        WriteOp::RemoveFile => (g.metadata(&r("t.bin")).unwrap().is_none(), None),
     }
 }
 

@@ -623,6 +623,22 @@ pub trait DirWrite: Dir {
     /// (`Mismatch` otherwise, nothing changed). Not empty yields `NotEmpty`.
     fn remove_dir(&self, name: &RelPath, expected_id: u128) -> SysResult<()>;
 
+    /// Deletes the plain file `name` by handle if its file ID is `expected_id` (`Mismatch`
+    /// otherwise, nothing changed): the file ID, not a hash, identifies it, so a large file is
+    /// never read (P5-6d, purging Rerun's own journal backups). Mirrors [`Self::remove_dir`]:
+    /// `name` is opened relative to this handle for `DELETE` (sharing read only, like
+    /// [`Self::guard`]), never following a reparse point, then classified, compared and
+    /// POSIX-deleted on that same handle (also read-only), so the object checked is the object
+    /// deleted and the name is free when this returns. Refuses a directory (`InvalidPath`), a
+    /// reparse point (`ReparsePoint`, the link stays), a link count other than 1 (`Linked`,
+    /// like the guard: a hard link elsewhere is never deleted through this name), a missing
+    /// name (`NotFound`) and a file another program holds without share-delete (`Busy`).
+    ///
+    /// Hard links: a link added by another program between the check and the delete is not
+    /// seen; the delete then removes only `name`, the object and its other name stay (no data
+    /// reachable elsewhere is lost).
+    fn remove_file(&self, name: &RelPath, expected_id: u128) -> SysResult<()>;
+
     /// Flushes this directory (the renames into it), best effort (ADR 0019).
     fn flush(&self) -> SysResult<()>;
 
