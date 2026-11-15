@@ -56,8 +56,8 @@ use rerun_core::elevate::PromptState;
 use rerun_core::escape::Shown;
 use rerun_core::exec::{self, ExecError, RebindRefusal, Refusal};
 use rerun_core::flow::{
-    self, ActError, Env, FetchError, ForgetShown, Found, GameCache, GameView, Guarded, Heads,
-    IndexState, LibraryEvent, Lookup, NeedState, PackageNeed, Planned, Previewed, Progress,
+    self, ActError, ClearShown, Env, FetchError, ForgetShown, Found, GameCache, GameView, Guarded,
+    Heads, IndexState, LibraryEvent, Lookup, NeedState, PackageNeed, Planned, Previewed, Progress,
     RebindShown, RevertGate, RevertShown,
 };
 use rerun_core::hw::{self, GpuArchTable};
@@ -154,6 +154,14 @@ pub enum Job {
         /// The nonce of the shown preview.
         nonce: u64,
     },
+    /// The preview of clearing the history (P5-6d-1b): what goes and what stays. Reads only.
+    ClearPreview,
+    /// Clears the history the preview showed: only if `nonce` is the one of the clear dialog the
+    /// user confirmed (the rule of [`Job::Revert`]); the core removes exactly what was shown.
+    Clear {
+        /// The nonce of the shown preview.
+        nonce: u64,
+    },
     /// What a fix would download: answers the consent dialog. Reads only.
     DownloadAsk {
         /// The Steam app.
@@ -188,6 +196,8 @@ impl Job {
             Self::Rebind { .. } => "rebind".to_owned(),
             Self::ForgetPreview { .. } => "forget preview".to_owned(),
             Self::Forget { .. } => "forget".to_owned(),
+            Self::ClearPreview => "clear preview".to_owned(),
+            Self::Clear { .. } => "clear".to_owned(),
             Self::DownloadAsk { app_id, .. } => format!("download ask {app_id}"),
             Self::Download { .. } => "download".to_owned(),
         }
@@ -198,7 +208,11 @@ impl Job {
     pub fn writes(&self) -> bool {
         matches!(
             self,
-            Self::Apply { .. } | Self::Revert { .. } | Self::Rebind { .. } | Self::Forget { .. }
+            Self::Apply { .. }
+                | Self::Revert { .. }
+                | Self::Rebind { .. }
+                | Self::Forget { .. }
+                | Self::Clear { .. }
         )
     }
 
@@ -505,6 +519,9 @@ struct Pending {
     rebind: Option<(RebindShown, Option<u32>, u64)>,
     /// A forget preview, with the game its transaction is about.
     forget: Option<(ForgetShown, Option<u32>, u64)>,
+    /// A clear preview with its nonce (P5-6d-1b): the entries and launch results the dialog
+    /// listed, each with the hash it was read with.
+    clear: Option<(ClearShown, u64)>,
     /// The list the consent (or failure) dialog showed: a download is made only for it.
     consent: Option<Consent>,
 }
@@ -661,6 +678,8 @@ fn run_job(
         Job::Rebind { txn, nonce } => rebind(&g, txn, *nonce, lang, session, emit),
         Job::ForgetPreview { txn } => forget_preview(&g, txn, false, lang, session, emit),
         Job::Forget { txn, nonce } => forget(&g, txn, *nonce, lang, session, emit),
+        Job::ClearPreview => clear_preview(&g, false, lang, session, emit),
+        Job::Clear { nonce } => clear(&g, *nonce, lang, session, emit),
         Job::DownloadAsk { app_id, variant } => {
             download_ask(&g, *app_id, variant, lang, session, emit);
         }
@@ -933,7 +952,11 @@ fn apply(
             // Every check passed: the helper starts at the end of this apply (its batch is the
             // plan's last ops), and the thread blocks until the user answers Windows.
             waiting_for_uac(prompt.as_ref(), lang, emit);
-            vm::apply_result(flow::apply(g, p), lang)
+            let done = flow::apply(g, p);
+            if let Ok(a) = &done {
+                log_tidy(&a.tidied);
+            }
+            vm::applied_result(done, lang)
         }
     };
     let refresh_page = result.refresh;
@@ -1016,6 +1039,7 @@ fn finish_revert(
     session: &mut Session,
     emit: &mut dyn FnMut(Event),
 ) {
+    log_tidy(&o.tidied);
     // The head names what each change was (read only; the journal is as the undo left it).
     let ops = g
         .app()
@@ -1170,14 +1194,93 @@ fn forget(
         return;
     };
     match flow::forget(g, shown) {
-        Ok(()) => {
-            emit(Event::Result(vm::forget_result(lang)));
+        Ok(done) => {
+            log_tidy(&done.tidied);
+            emit(Event::Result(vm::forget_result(&done.tidied, lang)));
             refresh(g, app, lang, session, emit);
         }
         Err(ActError::Changed) => forget_preview(g, txn, true, lang, session, emit),
         Err(e) => {
             emit(Event::Result(vm::act_error(&e, lang)));
             refresh(g, app, lang, session, emit);
+        }
+    }
+}
+
+/// The history's upkeep after a write that ran into trouble: logged and never shown (the write it
+/// followed went through, P5-6d-1b).
+fn log_tidy(t: &flow::Tidy) {
+    match t {
+        Ok(_) => {}
+        Err(flow::TidyNote::Journal(e)) => crate::trace::log(|| {
+            format!(
+                "worker: history upkeep removed nothing (journal): {}",
+                vm::shown_error(e).as_str()
+            )
+        }),
+        Err(flow::TidyNote::Exec(e)) => crate::trace::log(|| {
+            format!(
+                "worker: history upkeep removed nothing (purge): {}",
+                vm::shown_error(e).as_str()
+            )
+        }),
+    }
+}
+
+/// The preview of clearing the history (P5-6d-1b, rule 5): the list of what goes and what stays.
+/// Reads only. `changed`: shown again because the history changed since the dialog the user
+/// confirmed.
+fn clear_preview(
+    g: &Guarded<'_>,
+    changed: bool,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    session.pending.clear = None;
+    match flow::clear_preview(g) {
+        Ok((p, shown)) => {
+            session.nonce += 1;
+            let nonce = session.nonce;
+            let dialog = vm::clear_vm(&p, &session.names, changed, nonce, lang);
+            // Nothing to remove: no token, so no confirm reaches the core (the dialog has none).
+            if !shown.is_empty() {
+                session.pending.clear = Some((shown, nonce));
+            }
+            emit(Event::Dialog(Box::new(dialog)));
+        }
+        Err(gate) => emit(Event::Result(vm::clear_gate(&gate, lang))),
+    }
+}
+
+/// Clears the history of the dialog the user confirmed (`nonce`). A confirm of any other dialog
+/// writes nothing: the current preview is shown again. The core removes exactly what was shown
+/// and says `Changed` when something else is there now (nothing written, the preview again).
+fn clear(
+    g: &Guarded<'_>,
+    nonce: u64,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    let ok = session
+        .pending
+        .clear
+        .as_ref()
+        .is_some_and(|(_, n)| *n == nonce);
+    let Some((shown, _)) = ok.then(|| session.pending.clear.take()).flatten() else {
+        clear_preview(g, true, lang, session, emit);
+        return;
+    };
+    match flow::clear(g, shown) {
+        Ok(report) => {
+            emit(Event::Result(vm::clear_done(&report, lang)));
+            emit(Event::History(Box::new(history_page(g, lang, session))));
+        }
+        Err(ActError::Changed) => clear_preview(g, true, lang, session, emit),
+        Err(e) => {
+            emit(Event::Result(vm::act_error(&e, lang)));
+            emit(Event::History(Box::new(history_page(g, lang, session))));
         }
     }
 }

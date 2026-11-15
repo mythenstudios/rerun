@@ -20,7 +20,7 @@ On Linux the principle has existed for a long time (protonfixes, Luxtorpeda). On
 
 1. Lightweight: portable exe, nothing in the background.
 2. Reversible: every change, at any time, even after a crash.
-3. Transparent: preview before every change, log afterwards.
+3. Transparent: preview before every change, log afterwards. One exception, for Rerun's own records only: after a write of its own, Rerun removes history entries older than the newest 100 undone or rolled back ones without a preview of each (P5-6d), because removing them changes no system state and takes no recovery away; the rule is shown on the history page and the number in the result. Anything that loses something (a forgotten entry's backups) is removed only after a preview of its own.
 4. Honest: evidence status per fix, trade-offs are stated, "no known fix" is a valid answer.
 5. Hardware-aware: fixes apply only if they match the user's GPU, CPU and OS.
 6. Trustworthy: only original sources, pinned versions, verified hashes.

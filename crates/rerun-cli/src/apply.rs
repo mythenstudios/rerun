@@ -94,11 +94,17 @@ fn run<W: Write, E: Write>(
     }
     confirm(host, yes, TxnMsg::AskApply { ops }, err)?;
     match flow::apply(&g, p) {
-        Ok(Outcome::Nothing) => {
+        Ok(flow::Applied {
+            outcome: Outcome::Nothing,
+            ..
+        }) => {
             let _ = out.line(&Message::Txn(TxnMsg::NothingToDo));
             Ok(Exit::Report)
         }
-        Ok(Outcome::Applied(txn)) => {
+        Ok(flow::Applied {
+            outcome: Outcome::Applied(txn),
+            tidied,
+        }) => {
             let mut done = vec![
                 Message::Txn(TxnMsg::Applied { txn }),
                 Message::Txn(TxnMsg::RevertWith { txn }),
@@ -112,6 +118,8 @@ fn run<W: Write, E: Write>(
                     ProfileMsg::PasteNotYet
                 }));
             }
+            // P5-6d-1b: the cap of the history, quiet, only when it removed something.
+            done.extend(crate::txn::tidied_line(&tidied));
             Ok(out
                 .lines(&done)
                 .and_then(|()| out.flush())

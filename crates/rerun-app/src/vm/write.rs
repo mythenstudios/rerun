@@ -23,9 +23,9 @@ use rerun_core::exec::{
     self, ApplyError, ExecError, HelperFailure, Outcome, RebindRefusal, Refusal, TxnLine, TxnStatus,
 };
 use rerun_core::flow::{
-    self, ActError, ForgetPreview, LaunchOption, LaunchView, OptionText, PlanRefusal, Planned,
-    ProfileFate, RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome, RevertPreview,
-    RevertWould, StoreRefusal,
+    self, ActError, Applied, ForgetPreview, LaunchOption, LaunchView, OptionText, PlanRefusal,
+    Planned, ProfileFate, RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome,
+    RevertPreview, RevertWould, StoreRefusal, Tidied, Tidy,
 };
 use rerun_core::hw::SacState;
 use rerun_core::journal::{Observed, TxnId};
@@ -751,9 +751,11 @@ pub struct ResultVm {
     pub notice: Notice,
     /// The page the job was about is read again (the game changed, or a write happened).
     pub refresh: bool,
+    /// One quiet line after the result: what Rerun's own upkeep removed (P5-6d-1b).
+    pub note: Option<String>,
 }
 
-fn result(tone: Tone, lang: Lang, title: Msg, body: Msg, refresh: bool) -> ResultVm {
+pub(super) fn result(tone: Tone, lang: Lang, title: Msg, body: Msg, refresh: bool) -> ResultVm {
     ResultVm {
         tone,
         notice: Notice {
@@ -762,10 +764,36 @@ fn result(tone: Tone, lang: Lang, title: Msg, body: Msg, refresh: bool) -> Resul
             details: Vec::new(),
         },
         refresh,
+        note: None,
     }
 }
 
-fn with_detail(mut r: ResultVm, detail: Shown<'static>) -> ResultVm {
+/// The quiet line after a write whose result is final: how many older history entries the cap
+/// removed (P5-6d-1b). Nothing for none; a failure of the cap is never shown (the worker logs
+/// it): the write it followed succeeded.
+pub fn tidy_line(t: &Tidy, lang: Lang) -> Option<String> {
+    match t {
+        Ok(Tidied { removed }) if *removed > 0 => Some(tx(lang, Msg::TidyLine { n: *removed })),
+        _ => None,
+    }
+}
+
+/// `r` with the quiet line of the cap after it.
+fn with_tidy(mut r: ResultVm, t: &Tidy, lang: Lang) -> ResultVm {
+    r.note = tidy_line(t, lang);
+    r
+}
+
+/// The result of a successful or refused apply, with the quiet line of the cap after an apply
+/// that went through.
+pub fn applied_result(r: Result<Applied, ApplyError>, lang: Lang) -> ResultVm {
+    match r {
+        Ok(a) => with_tidy(apply_result(Ok(a.outcome), lang), &a.tidied, lang),
+        Err(e) => apply_result(Err(e), lang),
+    }
+}
+
+pub(super) fn with_detail(mut r: ResultVm, detail: Shown<'static>) -> ResultVm {
     r.notice.details.push(DetailVm::of(detail));
     r
 }
@@ -1130,7 +1158,7 @@ pub fn revert_result(o: &RevertOutcome, ops: &[OpVm], lang: Lang) -> ResultVm {
         };
         let mut r = with_detail(r, shown_error(&*h.why));
         r.notice.details.push(txn_detail(&o.report.txn));
-        return r;
+        return with_tidy(r, &o.tidied, lang);
     }
     let (tone, a, b) = match o.end {
         RevertEnd::Closed => (Tone::Done, Msg::ResRevertedTitle, Msg::ResRevertedBody),
@@ -1145,17 +1173,21 @@ pub fn revert_result(o: &RevertOutcome, ops: &[OpVm], lang: Lang) -> ResultVm {
     r.notice
         .details
         .extend(super::problems::report_details(&o.report, ops, lang));
-    r
+    with_tidy(r, &o.tidied, lang)
 }
 
-/// A forget that went through.
-pub fn forget_result(lang: Lang) -> ResultVm {
-    result(
-        Tone::Done,
+/// A forget that went through, with the quiet line of the cap after it.
+pub fn forget_result(t: &Tidy, lang: Lang) -> ResultVm {
+    with_tidy(
+        result(
+            Tone::Done,
+            lang,
+            Msg::ResForgottenTitle,
+            Msg::ResForgottenBody,
+            true,
+        ),
+        t,
         lang,
-        Msg::ResForgottenTitle,
-        Msg::ResForgottenBody,
-        true,
     )
 }
 
@@ -1381,6 +1413,8 @@ pub enum DialogKind {
     Forget,
     /// "Bind this change to the new folder?" (P5-6c)
     Rebind,
+    /// "Clear the history?" (P5-6d-1b): about no single transaction.
+    Clear,
 }
 
 /// What becomes of the launch profile and the option the user set in Steam (X12).
@@ -1404,8 +1438,8 @@ pub struct DialogVm {
     /// Identifies this dialog: a confirm carries it, the worker writes only for the dialog it
     /// last showed.
     pub nonce: u64,
-    /// The transaction.
-    pub txn: TxnId,
+    /// The transaction (`None` for the clear dialog, which is about the whole history).
+    pub txn: Option<TxnId>,
     /// The question.
     pub title: String,
     /// Under the question.
@@ -1429,6 +1463,17 @@ pub struct DialogVm {
     /// A second button next to the confirm: "Check new folder" in an undo dialog whose game folder
     /// has changed (P5-6c). It only asks for the rebind preview; it writes nothing.
     pub secondary: Option<String>,
+    /// Lists of lines under a heading (the clear dialog, P5-6d-1b: what goes and what stays).
+    pub lists: Vec<ListVm>,
+}
+
+/// A heading and its lines: the plain lists of the clear dialog (rule 5: a list, not a count).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListVm {
+    /// The heading, with the number of lines.
+    pub heading: String,
+    /// The lines (already escaped where they carry untrusted text).
+    pub lines: Vec<String>,
 }
 
 fn fate_of(o: Option<Observed>, lang: Lang) -> (Badge, String) {
@@ -1560,7 +1605,7 @@ pub fn revert_vm(
     DialogVm {
         kind: DialogKind::Undo,
         nonce,
-        txn: p.status.id,
+        txn: Some(p.status.id),
         title: tx(lang, Msg::UndoTitle),
         intro: tx(lang, Msg::UndoIntro),
         changed: changed.then(|| tx(lang, Msg::ChangedNote)),
@@ -1575,6 +1620,7 @@ pub fn revert_vm(
         can_confirm: blocked.is_none(),
         blocked,
         secondary: rebind_may_help.then(|| tx(lang, Msg::RebindCheckBtn)),
+        lists: Vec::new(),
     }
 }
 
@@ -1591,7 +1637,7 @@ pub fn revert_refused_vm(
     DialogVm {
         kind: DialogKind::Undo,
         nonce,
-        txn,
+        txn: Some(txn),
         title: tx(lang, Msg::UndoTitle),
         intro: tx(lang, Msg::UndoFolderChanged),
         changed: changed.then(|| tx(lang, Msg::ChangedNote)),
@@ -1603,6 +1649,7 @@ pub fn revert_refused_vm(
         can_confirm: false,
         blocked: None,
         secondary: Some(tx(lang, Msg::RebindCheckBtn)),
+        lists: Vec::new(),
     }
 }
 
@@ -1693,7 +1740,7 @@ pub fn rebind_vm(
     DialogVm {
         kind: DialogKind::Rebind,
         nonce,
-        txn: st.id,
+        txn: Some(st.id),
         title: tx(lang, Msg::RebindTitle),
         intro: tx(lang, Msg::RebindIntro),
         changed: changed.then(|| tx(lang, Msg::ChangedNote)),
@@ -1708,6 +1755,7 @@ pub fn rebind_vm(
         can_confirm: blocked.is_none(),
         blocked,
         secondary: None,
+        lists: Vec::new(),
     }
 }
 
@@ -1758,7 +1806,7 @@ pub fn forget_vm(
     DialogVm {
         kind: DialogKind::Forget,
         nonce,
-        txn: p.status.id,
+        txn: Some(p.status.id),
         title: tx(lang, Msg::ForgetTitle),
         intro: tx(lang, Msg::ForgetIntro),
         changed: changed.then(|| tx(lang, Msg::ChangedNote)),
@@ -1773,5 +1821,6 @@ pub fn forget_vm(
         can_confirm: true,
         blocked: None,
         secondary: None,
+        lists: Vec::new(),
     }
 }

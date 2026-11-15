@@ -46,7 +46,7 @@ use clap::Parser;
 
 use rerun_core::escape;
 
-use crate::cli::{Cli, Command, Exit, IndexCommand, PackageCommand};
+use crate::cli::{Cli, Command, Exit, HistoryCommand, IndexCommand, PackageCommand};
 use crate::host::Host;
 use crate::messages::Message;
 use crate::out::Out;
@@ -184,6 +184,9 @@ fn run<W: io::Write, E: io::Write>(
         } => txn::revert(host, &txn, dry_run, yes, rebind, out, err),
         Command::Status { all } => txn::status(host.sys, all, out, err),
         Command::Forget { txn, yes } => txn::forget(host, &txn, yes, out, err),
+        Command::History {
+            command: HistoryCommand::Clear { dry_run, yes },
+        } => txn::history_clear(host, dry_run, yes, out, err),
         Command::Index {
             command: IndexCommand::Import { index, sig },
         } => index::import(host, &index, &sig, out, err),
@@ -208,6 +211,8 @@ fn install_dir() -> Result<PathBuf, String> {
 mod aside_tests;
 #[cfg(test)]
 mod flow_tests;
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod index_tests;
 #[cfg(test)]

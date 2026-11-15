@@ -16,11 +16,13 @@
 //! - **Foreign content** (a planted tail after `Closed`, an unknown entry) and **too many
 //!   entries** are refused as such.
 
+use crate::journal::InstanceTag;
 use crate::journal::{
     Closing, Damage, Journal, JournalError, Listed, Listing, Observed, PurgeStop, TxnId, TxnState,
     VerifyBackups,
 };
 use crate::plan::{Op, RootKind};
+use crate::policy::root::AppDir;
 use crate::sys::SysErrorKind;
 
 use super::{ExecCtx, ExecError, Refusal, decode_head, standard_user};
@@ -56,12 +58,23 @@ pub struct PurgeReport {
     pub gone: Vec<TxnId>,
     /// Asked for, and kept.
     pub refused: Vec<(TxnId, Keep)>,
-    /// Launch results deleted (P5-6d-1b; none yet).
+    /// Launch results deleted ("clear history" only, [`purge_results`]).
     pub results: usize,
 }
 
-/// The rules of this module for one listed transaction: `None` if it may be purged.
-fn keep(j: &Journal<'_>, l: &Listing, t: &Listed) -> Option<Keep> {
+/// The newest transaction that may rely on what an older one kept ([`unsettled_heir`]); a
+/// creator older than it keeps its `Kept` ops' objects.
+fn newest_heir(l: &Listing) -> Option<TxnId> {
+    l.txns
+        .iter()
+        .filter(|o| unsettled_heir(o))
+        .map(|o| o.id)
+        .max()
+}
+
+/// The rules of this module for one listed transaction: `None` if it may be purged. `heir`:
+/// [`newest_heir`] of the same listing.
+fn keep(j: &Journal<'_>, heir: Option<TxnId>, t: &Listed) -> Option<Keep> {
     let Ok(v) = &t.view else {
         return Some(Keep::Unreadable);
     };
@@ -86,7 +99,44 @@ fn keep(j: &Journal<'_>, l: &Listing, t: &Listed) -> Option<Keep> {
             .as_ref()
             .is_some_and(|r| r.observed == Observed::Kept)
     });
-    (kept && l.txns.iter().any(|o| o.id > t.id && unsettled_heir(o))).then_some(Keep::HandedOver)
+    (kept && heir.is_some_and(|h| h > t.id)).then_some(Keep::HandedOver)
+}
+
+/// One transaction as the purge rules see it now (read only, no lock): what a front end may
+/// offer to remove (P5-6d-1b). [`purge_seen`] decides again under the lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PurgeClass {
+    /// The transaction.
+    pub(crate) id: TxnId,
+    /// The hash of its head as listed (`None` without one, or unreadable).
+    pub(crate) head: Option<[u8; 32]>,
+    /// Its state (`None`: its folder cannot be read).
+    pub(crate) state: Option<TxnState>,
+    /// A forget marker covers it.
+    pub(crate) forgotten: bool,
+    /// Why it stays, or `None`: it may be purged now.
+    pub(crate) keep: Option<Keep>,
+}
+
+/// Every transaction of the journal with the rules of this module applied, oldest first. Reads
+/// only, takes no lock.
+///
+/// # Errors
+/// The journal cannot be listed.
+pub(crate) fn purge_classes(app: &AppDir<'_>) -> Result<Vec<PurgeClass>, JournalError> {
+    let j = Journal::new(app, InstanceTag::new());
+    let l = j.list()?;
+    let heir = newest_heir(&l);
+    Ok(l.txns
+        .iter()
+        .map(|t| PurgeClass {
+            id: t.id,
+            head: t.view.as_ref().ok().and_then(|v| v.head_sha256),
+            state: t.view.as_ref().ok().map(|v| v.state.clone()),
+            forgotten: t.forgotten,
+            keep: keep(&j, heir, t),
+        })
+        .collect())
 }
 
 /// A newer transaction that may rely on what an older one kept (B1, fail closed): not
@@ -131,10 +181,6 @@ fn holds_profile(j: &Journal<'_>, id: &TxnId) -> bool {
 
 /// How [`purge_seen`] treats an ID that is not removable (review S-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "flow::history uses both from P5-6d-1b on")
-)]
 pub(crate) enum PurgeMode {
     /// "Clear history": the user confirmed exactly these IDs. If any of them is not removable
     /// any more (a [`Keep`] applies now) or has another head, nothing is written and the
@@ -154,10 +200,6 @@ pub(crate) enum PurgeMode {
 /// effort) and purges. A file in use stops only its own transaction ([`Keep::InUse`]: its
 /// tombstone stays, a later run finishes it); an access error of one transaction reports it
 /// ([`Keep::Foreign`]) and the run goes on.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "flow::history calls it from P5-6d-1b on")
-)]
 pub(crate) fn purge_seen(
     cx: &ExecCtx<'_>,
     ids: &[(TxnId, Option<[u8; 32]>)],
@@ -167,15 +209,17 @@ pub(crate) fn purge_seen(
     let j = Journal::new(cx.app, cx.tag);
     let lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
+    let heir = newest_heir(&listing);
+    let by_id: std::collections::BTreeMap<TxnId, &Listed> =
+        listing.txns.iter().map(|t| (t.id, t)).collect();
     let mut report = PurgeReport::default();
     let mut todo = Vec::new();
-    let mut asked: Vec<TxnId> = Vec::new();
+    let mut asked = std::collections::BTreeSet::new();
     for (id, seen) in ids {
-        if asked.contains(id) {
+        if !asked.insert(*id) {
             continue;
         }
-        asked.push(*id);
-        let Some(t) = listing.txns.iter().find(|t| t.id == *id) else {
+        let Some(t) = by_id.get(id) else {
             report.gone.push(*id);
             continue;
         };
@@ -184,7 +228,7 @@ pub(crate) fn purge_seen(
         {
             return Err(Refusal::Changed { txn: *id }.into());
         }
-        match (keep(&j, &listing, t), mode) {
+        match (keep(&j, heir, t), mode) {
             (None, _) => todo.push((*id, *seen)),
             (Some(_), PurgeMode::Exact) => return Err(Refusal::Changed { txn: *id }.into()),
             (Some(k), PurgeMode::Lenient) => report.refused.push((*id, k)),

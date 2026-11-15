@@ -200,7 +200,10 @@ fn fw3_apply_applies_exactly_the_stored_bytes() {
         assert_eq!(again.hash(), h);
         assert_eq!(again.ops(), p.ops());
         assert_eq!(check(&g, &p).unwrap(), p.ops());
-        assert!(matches!(apply(&g, p), Ok(Outcome::Applied(_))));
+        assert!(matches!(
+            apply(&g, p).map(|a| a.outcome),
+            Ok(Outcome::Applied(_))
+        ));
     });
     assert_eq!(
         read(&sys, &game("d3d9.dll")).as_deref(),

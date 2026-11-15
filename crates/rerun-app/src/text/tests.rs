@@ -813,11 +813,45 @@ fn every() -> Vec<Msg> {
         HistHideGroup,
         HistShowOlder { n: 1 },
         HistShowOlder { n: 3 },
+        HistKeepNote { n: 100 },
+        HistStateEmpty,
+        ClearBtn,
+        ClearTitle,
+        ClearIntro,
+        ClearNothing,
+        ClearEntriesHeading { n: 2 },
+        ClearResultsHeading { n: 2 },
+        ClearStaysHeading { n: 2 },
+        ClearNumber { n: 12 },
+        ClearKeepNotSettled,
+        ClearKeepUnreadable,
+        ClearKeepHoldsProfile,
+        ClearKeepHandedOver,
+        ClearKeepForeign,
+        ClearKeepTooMany,
+        ClearKeepForgotten,
+        ClearKeepInUse,
+        ClearKeepOther,
+        ClearResultOptionSet,
+        ClearResultUnreadable,
+        ClearUnchanged,
+        ClearChanged,
+        ClearDoneTitle,
+        ClearDoneBody {
+            entries: 1,
+            results: 1,
+        },
+        ClearDoneBody {
+            entries: 3,
+            results: 2,
+        },
+        TidyLine { n: 1 },
+        TidyLine { n: 3 },
     ]
 }
 
 /// The number of messages: one more than the highest [`ordinal`].
-const COUNT: usize = 580;
+const COUNT: usize = 606;
 
 /// A message's position in the enum. The `match` is exhaustive: a new variant does not compile
 /// without an ordinal here, and [`every_ordinal_is_listed`] fails until [`every`] lists it.
@@ -1405,6 +1439,32 @@ fn ordinal(m: Msg) -> usize {
         HistShowGroup => 577,
         HistHideGroup => 578,
         HistShowOlder { .. } => 579,
+        HistKeepNote { .. } => 580,
+        HistStateEmpty => 581,
+        ClearBtn => 582,
+        ClearTitle => 583,
+        ClearIntro => 584,
+        ClearNothing => 585,
+        ClearEntriesHeading { .. } => 586,
+        ClearResultsHeading { .. } => 587,
+        ClearStaysHeading { .. } => 588,
+        ClearNumber { .. } => 589,
+        ClearKeepNotSettled => 590,
+        ClearKeepUnreadable => 591,
+        ClearKeepHoldsProfile => 592,
+        ClearKeepHandedOver => 593,
+        ClearKeepForeign => 594,
+        ClearKeepTooMany => 595,
+        ClearKeepForgotten => 596,
+        ClearKeepInUse => 597,
+        ClearKeepOther => 598,
+        ClearResultOptionSet => 599,
+        ClearResultUnreadable => 600,
+        ClearUnchanged => 601,
+        ClearChanged => 602,
+        ClearDoneTitle => 603,
+        ClearDoneBody { .. } => 604,
+        TidyLine { .. } => 605,
     }
 }
 
@@ -1440,7 +1500,7 @@ fn every_ordinal_is_listed() {
     let missing: Vec<usize> = (0..COUNT).filter(|i| !seen[*i]).collect();
     assert!(missing.is_empty(), "ordinals not in every(): {missing:?}");
     // COUNT is right: the last variant has the highest ordinal.
-    assert_eq!(ordinal(Msg::HistShowOlder { n: 0 }), COUNT - 1);
+    assert_eq!(ordinal(Msg::TidyLine { n: 0 }), COUNT - 1);
 }
 
 #[test]

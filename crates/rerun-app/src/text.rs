@@ -1427,6 +1427,82 @@ pub enum Msg {
         /// How many entries are not shown.
         n: usize,
     },
+    // ---- keeping the history short and clearing it (P5-6d-1b)
+    /// The history page: what Rerun keeps and when older entries go.
+    HistKeepNote {
+        /// How many undone or rolled back entries always stay.
+        n: usize,
+    },
+    /// An entry that changed nothing.
+    HistStateEmpty,
+    /// The history page: the button that opens the clear dialog.
+    ClearBtn,
+    /// The clear dialog: the title and its confirm button.
+    ClearTitle,
+    /// The clear dialog: what goes.
+    ClearIntro,
+    /// The clear dialog: nothing can be removed now.
+    ClearNothing,
+    /// The clear dialog: the heading of the entries that go.
+    ClearEntriesHeading {
+        /// How many.
+        n: usize,
+    },
+    /// The clear dialog: the heading of the launch results that go.
+    ClearResultsHeading {
+        /// How many.
+        n: usize,
+    },
+    /// The clear dialog: the heading of what stays.
+    ClearStaysHeading {
+        /// How many.
+        n: usize,
+    },
+    /// The clear dialog: the number of an entry.
+    ClearNumber {
+        /// The journal's sequence number.
+        n: u32,
+    },
+    /// The clear dialog: why an entry stays (not finished).
+    ClearKeepNotSettled,
+    /// The clear dialog: why an entry stays (its folder cannot be read).
+    ClearKeepUnreadable,
+    /// The clear dialog: why an entry stays (it holds a launch profile).
+    ClearKeepHoldsProfile,
+    /// The clear dialog: why an entry stays (a newer change may rely on what it handed over).
+    ClearKeepHandedOver,
+    /// The clear dialog: why an entry stays (its folder holds something that is not Rerun's).
+    ClearKeepForeign,
+    /// The clear dialog: why an entry stays (too many files).
+    ClearKeepTooMany,
+    /// The clear dialog: why an entry stays (closed without undoing, backups kept).
+    ClearKeepForgotten,
+    /// The clear dialog: why an entry stays (a file is in use).
+    ClearKeepInUse,
+    /// The clear dialog: why an entry stays (a reason a later version adds).
+    ClearKeepOther,
+    /// The clear dialog: why a launch result stays (the Steam option is still set).
+    ClearResultOptionSet,
+    /// The clear dialog: why a launch result stays (it cannot be read).
+    ClearResultUnreadable,
+    /// The clear dialog: what is not touched.
+    ClearUnchanged,
+    /// The clear dialog: the preview was shown again because the history changed.
+    ClearChanged,
+    /// After clearing: the title.
+    ClearDoneTitle,
+    /// After clearing: how many entries and launch results went.
+    ClearDoneBody {
+        /// Entries removed.
+        entries: usize,
+        /// Launch results removed.
+        results: usize,
+    },
+    /// After a write: how many older entries Rerun removed by itself.
+    TidyLine {
+        /// How many.
+        n: usize,
+    },
 }
 
 /// The text of `m` in `lang`.
@@ -2229,6 +2305,55 @@ fn en(m: Msg) -> Cow<'static, str> {
         HistShowOlder { n } => {
             return format!("Show older ({n} not shown)").into();
         }
+        HistKeepNote { n } => {
+            return format!("Rerun keeps the last {n} undone or rolled back entries; older ones are removed when you apply or undo something.").into();
+        }
+        HistStateEmpty => "Changed nothing",
+        ClearBtn => "Clear history\u{2026}",
+        ClearTitle => "Clear history",
+        ClearIntro => "These entries and launch results are removed from the history.",
+        ClearNothing => "There is nothing Rerun can remove from the history now.",
+        ClearEntriesHeading { n } => {
+            return format!("Entries removed ({n})").into();
+        }
+        ClearResultsHeading { n } => {
+            return format!("Launch results removed ({n})").into();
+        }
+        ClearStaysHeading { n } => {
+            return format!("Stays ({n})").into();
+        }
+        ClearNumber { n } => {
+            return format!("No. {n}").into();
+        }
+        ClearKeepNotSettled => "Not finished: undo it or close it first.",
+        ClearKeepUnreadable => "Its folder cannot be read.",
+        ClearKeepHoldsProfile => "It still holds a launch profile.",
+        ClearKeepHandedOver => "It handed over a file or folder that a newer change may rely on.",
+        ClearKeepForeign => "Its folder holds something Rerun did not write there.",
+        ClearKeepTooMany => "Its folder has too many files.",
+        ClearKeepForgotten => "Closed without undoing: its backups stay.",
+        ClearKeepInUse => "A file of it is in use; a later run removes it.",
+        ClearKeepOther => "Rerun keeps it for now.",
+        ClearResultOptionSet => "The Steam launch option still points at Rerun: remove it by hand first.",
+        ClearResultUnreadable => "It cannot be read.",
+        ClearUnchanged => "Game folders, the registry and the firewall stay unchanged.",
+        ClearChanged => "The history changed; look at it again.",
+        ClearDoneTitle => "History cleared",
+        ClearDoneBody { entries, results } => {
+            return format!(
+                "{} and {} removed.",
+                count(entries, "entry", "entries"),
+                count(results, "launch result", "launch results")
+            )
+            .into();
+        }
+        TidyLine { n } => {
+            return if n == 1 {
+                "1 older history entry removed".into()
+            } else {
+                format!("{n} older history entries removed").into()
+            };
+        }
     };
     Cow::Borrowed(s)
 }
@@ -3027,6 +3152,55 @@ fn de(m: Msg) -> Cow<'static, str> {
         HistHideGroup => "Ausblenden",
         HistShowOlder { n } => {
             return format!("Ältere zeigen ({n} nicht angezeigt)").into();
+        }
+        HistKeepNote { n } => {
+            return format!("Rerun behält die letzten {n} rückgängig gemachten oder zurückgerollten Einträge; ältere werden entfernt, wenn du etwas anwendest oder rückgängig machst.").into();
+        }
+        HistStateEmpty => "Nichts geändert",
+        ClearBtn => "Verlauf leeren\u{2026}",
+        ClearTitle => "Verlauf leeren",
+        ClearIntro => "Diese Einträge und Startergebnisse werden aus dem Verlauf entfernt.",
+        ClearNothing => "Rerun kann jetzt nichts aus dem Verlauf entfernen.",
+        ClearEntriesHeading { n } => {
+            return format!("Entfernte Einträge ({n})").into();
+        }
+        ClearResultsHeading { n } => {
+            return format!("Entfernte Startergebnisse ({n})").into();
+        }
+        ClearStaysHeading { n } => {
+            return format!("Bleibt ({n})").into();
+        }
+        ClearNumber { n } => {
+            return format!("Nr. {n}").into();
+        }
+        ClearKeepNotSettled => "Nicht abgeschlossen: Mache es zuerst rückgängig oder schliesse es ab.",
+        ClearKeepUnreadable => "Sein Ordner kann nicht gelesen werden.",
+        ClearKeepHoldsProfile => "Es hält noch ein Startprofil.",
+        ClearKeepHandedOver => "Es hat eine Datei oder einen Ordner übergeben, auf den sich eine neuere Änderung stützen kann.",
+        ClearKeepForeign => "Sein Ordner enthält etwas, das Rerun nicht dorthin geschrieben hat.",
+        ClearKeepTooMany => "Sein Ordner hat zu viele Dateien.",
+        ClearKeepForgotten => "Ohne Rückgängig abgeschlossen: Seine Sicherungen bleiben.",
+        ClearKeepInUse => "Eine Datei davon ist in Gebrauch; ein späterer Lauf entfernt sie.",
+        ClearKeepOther => "Rerun behält es vorerst.",
+        ClearResultOptionSet => "Die Steam-Startoption zeigt noch auf Rerun: Entferne sie zuerst von Hand.",
+        ClearResultUnreadable => "Es kann nicht gelesen werden.",
+        ClearUnchanged => "Spielordner, Registry und Firewall bleiben unverändert.",
+        ClearChanged => "Der Verlauf hat sich geändert; sieh ihn dir nochmals an.",
+        ClearDoneTitle => "Verlauf geleert",
+        ClearDoneBody { entries, results } => {
+            return format!(
+                "{} und {} entfernt.",
+                count(entries, "Eintrag", "Einträge"),
+                count(results, "Startergebnis", "Startergebnisse")
+            )
+            .into();
+        }
+        TidyLine { n } => {
+            return if n == 1 {
+                "1 älterer Verlaufseintrag entfernt".into()
+            } else {
+                format!("{n} ältere Verlaufseinträge entfernt").into()
+            };
         }
     };
     Cow::Borrowed(s)

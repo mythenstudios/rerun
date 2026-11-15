@@ -251,6 +251,16 @@ pub struct RevertOutcome {
     pub end: RevertEnd,
     /// The launch profile and what became of it (X12).
     pub launch_option: Option<LaunchOption>,
+    /// What the cap of the history removed afterwards, or why it removed nothing (P5-6d-1b;
+    /// never an error of the revert).
+    pub tidied: super::Tidy,
+}
+
+/// A successful [`forget`]: what the cap of the history removed afterwards (P5-6d-1b).
+#[derive(Debug)]
+pub struct Forgotten {
+    /// What the cap removed, or why it removed nothing (never an error of the forget).
+    pub tidied: super::Tidy,
 }
 
 /// Why a revert, a rebind or a forget did not go through.
@@ -667,15 +677,17 @@ pub fn revert(g: &Guarded<'_>, s: RevertShown) -> Result<RevertOutcome, ActError
         Look::Rebound(_) => false,
     };
     let report = exec::revert_seen(&cx, &t, &same)?;
-    Ok(outcome(s.profile, report))
+    Ok(outcome(g, s.profile, report))
 }
 
-/// The outcome of a revert: how it ended, and what became of the profile.
-fn outcome(profile: Option<ProfileSeen>, report: RevertReport) -> RevertOutcome {
+/// The outcome of a revert: how it ended, what became of the profile, and the cap of the
+/// history run after it (its lock released).
+fn outcome(g: &Guarded<'_>, profile: Option<ProfileSeen>, report: RevertReport) -> RevertOutcome {
     RevertOutcome {
         end: revert_end(&report),
         launch_option: fate_after_seen(profile, &report),
         report,
+        tidied: super::history::tidy(g),
     }
 }
 
@@ -721,7 +733,7 @@ pub fn rebind(g: &Guarded<'_>, s: RebindShown) -> Result<RevertOutcome, ActError
         Look::Rebound(v) => sha(v) == s.seen.fates,
     };
     let report = exec::revert_rebound_seen(&cx, &t, &s.to, &same)?;
-    Ok(outcome(s.profile, report))
+    Ok(outcome(g, s.profile, report))
 }
 
 // ---------- Forget ----------
@@ -771,7 +783,7 @@ pub fn forget_preview(
 
 /// Forgets the transaction of `s` ([`exec::forget`]), after comparing it and what is on disk
 /// under the lock with the preview: on any difference [`ActError::Changed`], nothing written.
-pub fn forget(g: &Guarded<'_>, s: ForgetShown) -> Result<(), ActError> {
+pub fn forget(g: &Guarded<'_>, s: ForgetShown) -> Result<Forgotten, ActError> {
     let app = g.app().ok_or(ActError::Changed)?;
     let cx = ctx(g, app);
     let t = s.txn;
@@ -779,7 +791,10 @@ pub fn forget(g: &Guarded<'_>, s: ForgetShown) -> Result<(), ActError> {
         Look::Early => seen_now(&cx, &t, true) == Some(s.seen),
         Look::Rebound(_) => false,
     };
-    exec::forget_seen(&cx, &t, &same).map_err(ActError::from)
+    exec::forget_seen(&cx, &t, &same).map_err(ActError::from)?;
+    Ok(Forgotten {
+        tidied: super::history::tidy(g),
+    })
 }
 
 #[cfg(test)]

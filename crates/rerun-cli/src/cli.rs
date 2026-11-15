@@ -94,6 +94,12 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// The history of transactions.
+    History {
+        /// What to do with it.
+        #[command(subcommand)]
+        command: HistoryCommand,
+    },
     /// The signed Topo index.
     Index {
         /// What to do with it.
@@ -105,6 +111,21 @@ pub enum Command {
         /// What to do with them.
         #[command(subcommand)]
         command: PackageCommand,
+    },
+}
+
+/// `rerun history` (P5-6d-1b).
+#[derive(Debug, Subcommand)]
+pub enum HistoryCommand {
+    /// Lists the entries and launch results that can be removed and those that stay, then
+    /// removes them. Changes no game folder, registry value or firewall rule.
+    Clear {
+        /// Show the list only, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask before removing (needed when not run from a console).
+        #[arg(long)]
+        yes: bool,
     },
 }
 

@@ -20,10 +20,12 @@ use rerun_core::hw::{GpuArch, SacState, SystemProfile};
 use rerun_core::journal::JournalError;
 use rerun_core::topo::{AntiCheatState, Refusal, Tri};
 
+mod clear;
 mod download;
 mod history;
 mod problems;
 mod write;
+pub use clear::*;
 pub use download::*;
 pub use history::*;
 pub use problems::*;

@@ -45,6 +45,7 @@ use crate::prim::GameRef;
 use crate::sys::{Http, System};
 
 mod game;
+mod history;
 mod launch;
 mod library;
 mod packages;
@@ -57,6 +58,10 @@ pub use game::{
     Fix, Found, GameCache, GameRefusal, GameView, IssueView, Lookup, MatchView, Matched,
     OwnedReport, Solved, VariantView, fixes, game, game_cached,
 };
+pub use history::{
+    ClearGate, ClearItem, ClearPreview, ClearShown, HISTORY_KEEP, ResultKeep, TIDY_PER_RUN, Tidied,
+    Tidy, TidyNote, clear, clear_preview,
+};
 pub use launch::{
     LaunchLine, LaunchNote, LaunchView, OptionText, launch_lines, launch_of, launch_view,
     option_text,
@@ -67,9 +72,9 @@ pub use packages::{
     redirect_hosts,
 };
 pub use revert::{
-    ActError, CleanupAsk, ForgetPreview, ForgetShown, LaunchOption, ProfileFate, RebindCue,
-    RebindShown, RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome, RevertPreview,
-    RevertShown, RevertWould, forget, forget_preview, holding, left_foreign, rebind,
+    ActError, CleanupAsk, ForgetPreview, ForgetShown, Forgotten, LaunchOption, ProfileFate,
+    RebindCue, RebindShown, RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome,
+    RevertPreview, RevertShown, RevertWould, forget, forget_preview, holding, left_foreign, rebind,
     rebind_may_help, rebind_preview, revert, revert_begun, revert_preview,
 };
 pub use status::{
@@ -77,8 +82,8 @@ pub use status::{
     profile_op, status, transaction,
 };
 pub use write::{
-    LoadRefusal, Picked, PlanRefusal, Planned, Previewed, StepsRefusal, StoreRefusal, apply, check,
-    helper, load_stored, plan, plan_steps, shown, store,
+    Applied, LoadRefusal, Picked, PlanRefusal, Planned, Previewed, StepsRefusal, StoreRefusal,
+    apply, check, helper, load_stored, plan, plan_steps, shown, store,
 };
 
 /// What a job runs against.

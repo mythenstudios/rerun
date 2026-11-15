@@ -358,6 +358,7 @@ fn notice(tone: Tone, lang: Lang, title: Msg, body: Msg) -> ResultVm {
             details: Vec::new(),
         },
         refresh: false,
+        note: None,
     }
 }
 

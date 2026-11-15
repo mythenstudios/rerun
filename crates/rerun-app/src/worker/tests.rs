@@ -1196,6 +1196,7 @@ fn aw_fx_set_aside_topos_on_the_row_and_the_game_page() {
     }
 }
 
+mod clear;
 mod download;
 mod helper;
 mod history;

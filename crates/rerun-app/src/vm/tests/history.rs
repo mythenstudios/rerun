@@ -679,3 +679,46 @@ fn vh1_a_journal_of_empty_transactions_shows_nothing() {
         Some("Nothing in the journal yet")
     );
 }
+
+/// VH3 the page says what Rerun keeps (the core's cap) and offers the clear button, unless there
+/// is no history to clear.
+#[test]
+fn vh3_the_page_says_what_rerun_keeps_and_offers_the_clear_button() {
+    let v = view(
+        vec![st(1, TxnLine::Closed(Closing::Reverted), false, &[])],
+        None,
+        Vec::new(),
+    );
+    let en = page(&v, Lang::En);
+    assert_eq!(
+        en.keep_note.as_deref(),
+        Some(
+            "Rerun keeps the last 100 undone or rolled back entries; older ones are removed when you apply or undo something."
+        )
+    );
+    assert_eq!(en.clear_label.as_deref(), Some("Clear history\u{2026}"));
+    let de = page(&v, Lang::De);
+    assert_eq!(
+        de.keep_note.as_deref(),
+        Some(
+            "Rerun behält die letzten 100 rückgängig gemachten oder zurückgerollten Einträge; ältere werden entfernt, wenn du etwas anwendest oder rückgängig machst."
+        )
+    );
+    assert_eq!(de.clear_label.as_deref(), Some("Verlauf leeren\u{2026}"));
+    // The number is the core's cap.
+    assert!(
+        en.keep_note
+            .unwrap()
+            .contains(&rerun_core::flow::HISTORY_KEEP.to_string())
+    );
+    // No history, or one that cannot be read: nothing to clear.
+    let none = page(&view(Vec::new(), None, Vec::new()), Lang::En);
+    assert!(none.keep_note.is_none() && none.clear_label.is_none());
+    let bad = history(
+        Some(Err(&rerun_core::journal::JournalError::Busy)),
+        &Names::new(),
+        0,
+        Lang::En,
+    );
+    assert!(bad.keep_note.is_none() && bad.clear_label.is_none());
+}

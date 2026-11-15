@@ -125,6 +125,7 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
             DialogKind::Undo => 0,
             DialogKind::Forget => 1,
             DialogKind::Rebind => 4,
+            DialogKind::Clear => 5,
         },
         title: s(&d.title),
         intro: s(&d.intro),
@@ -140,11 +141,21 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
         confirm: s(&d.confirm),
         can_confirm: d.can_confirm,
         blocked: d.blocked.as_deref().map(s).unwrap_or_default(),
-        no_confirm: false,
+        // A clear dialog with nothing to remove offers no confirm at all.
+        no_confirm: d.kind == DialogKind::Clear && !d.can_confirm,
         cancel_label: SharedString::new(),
         cancel_disabled: false,
         no_cancel: false,
         secondary: d.secondary.as_deref().map(s).unwrap_or_default(),
+        lists: model(
+            d.lists
+                .iter()
+                .map(|l| ListData {
+                    heading: s(&l.heading),
+                    lines: model(l.lines.iter().map(s).collect()),
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -195,6 +206,7 @@ fn banner(r: &ResultVm) -> BannerData {
         title: s(&r.notice.title),
         body: s(&r.notice.body),
         details: model(r.notice.details.iter().map(detail).collect()),
+        note: r.note.as_deref().map(s).unwrap_or_default(),
     }
 }
 
@@ -362,12 +374,37 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         if ui.global::<Modal>().get_working() || !ui.get_dialog().can_confirm {
             return;
         }
+        let job = match (kind, txn) {
+            (DialogKind::Undo, Some(txn)) => Job::Revert { txn, nonce },
+            (DialogKind::Forget, Some(txn)) => Job::Forget { txn, nonce },
+            (DialogKind::Rebind, Some(txn)) => Job::Rebind { txn, nonce },
+            (DialogKind::Clear, _) => Job::Clear { nonce },
+            // The other dialogs name a transaction.
+            _ => return,
+        };
         ui.global::<Modal>().set_working(true);
-        st.worker.send(match kind {
-            DialogKind::Undo => Job::Revert { txn, nonce },
-            DialogKind::Forget => Job::Forget { txn, nonce },
-            DialogKind::Rebind => Job::Rebind { txn, nonce },
-        });
+        st.worker.send(job);
+    });
+
+    // "Clear history...": only asks for the preview (reads, writes nothing); the dialog lists
+    // what goes (rule 5).
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_history_clear(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut st = st.borrow_mut();
+        if st.uac
+            || st.download.is_some()
+            || st.dialog.is_some()
+            || ui.global::<Modal>().get_working()
+        {
+            return;
+        }
+        st.opener = -1;
+        ui.global::<Modal>().set_return_to(-1);
+        st.worker.send(Job::ClearPreview);
     });
 
     // "Check new folder" of an undo dialog: only asks for the rebind preview (reads, writes
@@ -382,7 +419,7 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         if st.uac || st.download.is_some() || ui.global::<Modal>().get_working() {
             return;
         }
-        if let Some((DialogKind::Undo, txn, _)) = st.dialog {
+        if let Some((DialogKind::Undo, Some(txn), _)) = st.dialog {
             st.worker.send(Job::RebindPreview { txn });
         }
     });

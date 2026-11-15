@@ -56,8 +56,9 @@ pub(crate) enum AppSub {
     Plans,
     /// `packages` (ADR 0020, D11).
     Packages,
-    /// `launch`: the result files of `rerun-launch` (ADR 0022 amendment P3-2); read only
-    /// here, the shim writes them.
+    /// `launch`: the result files of `rerun-launch` (ADR 0022 amendment P3-2); the shim writes
+    /// them, Rerun only reads them and deletes one with exactly the bytes a "clear history"
+    /// preview read (`exec::purge_results`, P5-6d-1b).
     Launch,
     /// `index`: the accepted signed indexes and the pointer to the current one (ADR 0024);
     /// `index-test` in a build that trusts the published test key ([`index_folder`]).

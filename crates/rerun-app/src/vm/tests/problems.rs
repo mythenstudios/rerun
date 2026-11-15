@@ -263,6 +263,7 @@ fn outcome(rep: RevertReport, end: RevertEnd) -> RevertOutcome {
         report: rep,
         end,
         launch_option: None,
+        tidied: Ok(rerun_core::flow::Tidied::default()),
     }
 }
 

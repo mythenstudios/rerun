@@ -7,7 +7,9 @@
 use std::fmt;
 
 use rerun_core::escape::Shown;
-use rerun_core::exec::{InheritedOutcome, LeftWhy, ShareKind};
+use rerun_core::exec::launch_result::ProfileId;
+use rerun_core::exec::{InheritedOutcome, Keep, LeftWhy, ShareKind};
+use rerun_core::flow::ResultKeep;
 use rerun_core::journal::{Closing, Observed, TxnId};
 use rerun_core::plan::{IniOldShown, PlanHash, RegShown};
 use rerun_core::policy::ini::KeyState;
@@ -73,6 +75,26 @@ pub enum TxnText<'a> {
     Damaged(Shown<'a>),
     /// Its folder cannot be read (the error, escaped).
     Unreadable(Shown<'a>),
+}
+
+/// The game of a history entry.
+fn game(app: Option<u32>) -> String {
+    app.map_or_else(|| "no game".to_owned(), |a| format!("Steam app {a}"))
+}
+
+/// Why an entry stays in the history.
+fn keep_why(k: Keep) -> &'static str {
+    match k {
+        Keep::NotSettled => "not settled (open, applied or damaged)",
+        Keep::Unreadable => "its folder cannot be read",
+        Keep::HoldsProfile => "forgotten; it still holds a launch profile",
+        Keep::HandedOver => "it handed a file over to a later transaction that is not settled",
+        Keep::Foreign => "its folder holds something Rerun did not write",
+        Keep::TooManyEntries => "its folder has too many entries",
+        Keep::Forgotten => "forgotten (its backups stay)",
+        Keep::InUse => "a file of it is in use",
+        _ => "it cannot be removed now",
+    }
 }
 
 fn closing(c: Closing) -> &'static str {
@@ -726,6 +748,68 @@ pub enum TxnMsg<'a> {
         /// The transaction.
         txn: TxnId,
     },
+    // ---------- the history (P5-6d-1b) ----------
+    /// The cap of the history removed old entries after a write (quiet; only when some went).
+    Tidied {
+        /// Entries removed.
+        n: usize,
+        /// The cap.
+        keep: usize,
+    },
+    /// `history clear`: the heading of what goes.
+    ClearGoesHeader,
+    /// An entry that goes.
+    ClearGoes {
+        /// The transaction.
+        txn: TxnId,
+        /// The Steam app of its head.
+        app: Option<u32>,
+        /// Its state.
+        state: TxnText<'a>,
+    },
+    /// A launch result that goes.
+    ClearResultGoes {
+        /// The launch profile.
+        profile: ProfileId,
+    },
+    /// The heading of what stays.
+    ClearStaysHeader,
+    /// An entry that stays, and why.
+    ClearStays {
+        /// The transaction.
+        txn: TxnId,
+        /// The Steam app of its head.
+        app: Option<u32>,
+        /// Why.
+        why: Keep,
+    },
+    /// A launch result that stays, and why.
+    ClearResultStays {
+        /// The launch profile.
+        profile: ProfileId,
+        /// Why.
+        why: ResultKeep,
+    },
+    /// What clearing never touches.
+    ClearUnchanged,
+    /// Nothing can be removed.
+    ClearNothing,
+    /// The question.
+    AskClear {
+        /// Entries that go.
+        entries: usize,
+        /// Launch results that go.
+        results: usize,
+    },
+    /// Done.
+    Cleared {
+        /// Entries removed.
+        entries: usize,
+        /// Launch results removed.
+        results: usize,
+    },
+    /// Something changed since the list was shown; nothing removed.
+    ClearChanged,
     /// Forgotten before.
     AlreadyForgotten {
         /// The transaction.
@@ -1297,6 +1381,51 @@ impl fmt::Display for TxnMsg<'_> {
             ),
             Self::AskForget { txn } => write!(f, "Forget transaction {txn}? [y/N]"),
             Self::Forgot { txn } => write!(f, "transaction {txn} forgotten"),
+            Self::Tidied { n, keep } => write!(
+                f,
+                "{} removed (Rerun keeps the last {keep} undone or rolled back)",
+                Count(*n, "older history entry", "older history entries")
+            ),
+            Self::ClearGoesHeader => f.write_str("Removed from the history:"),
+            Self::ClearGoes { txn, app, state } => {
+                write!(f, "  {txn}  {}  {state}", game(*app))
+            }
+            Self::ClearResultGoes { profile } => {
+                write!(f, "  the last start of launch profile {profile}")
+            }
+            Self::ClearStaysHeader => f.write_str("Stays:"),
+            Self::ClearStays { txn, app, why } => {
+                write!(f, "  {txn}  {}  {}", game(*app), keep_why(*why))
+            }
+            Self::ClearResultStays { profile, why } => write!(
+                f,
+                "  the last start of launch profile {profile}: {}",
+                match why {
+                    ResultKeep::OptionStillSet => {
+                        "the Steam launch option still points at Rerun; remove it by hand"
+                    }
+                    ResultKeep::Unreadable => "it cannot be read",
+                }
+            ),
+            Self::ClearUnchanged => {
+                f.write_str("Game folders, the registry and the firewall stay unchanged.")
+            }
+            Self::ClearNothing => f.write_str("nothing to clear"),
+            Self::AskClear { entries, results } => write!(
+                f,
+                "Remove {} and {}? [y/N]",
+                Count(*entries, "history entry", "history entries"),
+                Count(*results, "launch result", "launch results")
+            ),
+            Self::Cleared { entries, results } => write!(
+                f,
+                "{} and {} removed",
+                Count(*entries, "history entry", "history entries"),
+                Count(*results, "launch result", "launch results")
+            ),
+            Self::ClearChanged => f.write_str(
+                "the history changed since it was shown; nothing was removed; run rerun history clear again",
+            ),
             Self::AlreadyForgotten { txn } => {
                 write!(f, "transaction {txn} is already forgotten")
             }

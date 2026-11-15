@@ -20,10 +20,10 @@ import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
 import { CardView, HistEntryView, LaunchRowView } from "card.slint";
 import { DialogView } from "dialog.slint";
-import { BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
+import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
 
 // What `ui` names through the generated code.
-export { BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, SysLineData, Theme, Str, Reveal, Modal }
+export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, SysLineData, Theme, Str, Reveal, Modal }
 
 component Toggle inherits Pressable {
     in-out property <bool> checked;
@@ -568,6 +568,9 @@ component BannerView inherits Rectangle {
 
         for d in root.b.details: DetailLine {
             d: d;
+        }
+        if root.b.note != "": Muted {
+            text: root.b.note;
         }
         HorizontalLayout {
             alignment: start;
@@ -1166,6 +1169,7 @@ component HistoryPage inherits VerticalLayout {
     in property <HistoryData> history;
     callback group-toggle(int);
     callback group-more(int);
+    callback clear();
     spacing: Theme.s4;
     PageTitle {
         text: Str.history-title;
@@ -1209,6 +1213,18 @@ component HistoryPage inherits VerticalLayout {
     }
     if root.history.empty-title == "": Muted {
         text: root.history.order;
+    }
+    if root.history.keep-note != "": Muted {
+        text: root.history.keep-note;
+    }
+    if root.history.clear-label != "": HorizontalLayout {
+        alignment: start;
+        Button {
+            text: root.history.clear-label;
+            activated => {
+                root.clear();
+            }
+        }
     }
     for g[gi] in root.history.groups: VerticalLayout {
         spacing: Theme.s3;
@@ -1522,6 +1538,7 @@ export component AppWindow inherits Window {
     callback attention-view();
     callback history-group-toggle(int);
     callback history-group-more(int);
+    callback history-clear();
     callback attention-dismiss();
     // Selecting, previewing, applying, undoing (P5-5a).
     in property <PreviewData> preview;
@@ -1780,6 +1797,9 @@ export component AppWindow inherits Window {
                                     }
                                     group-more(i) => {
                                         root.history-group-more(i);
+                                    }
+                                    clear => {
+                                        root.history-clear();
                                     }
                                 }
                                 if root.page == 3: SystemPage {

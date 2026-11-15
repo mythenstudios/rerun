@@ -32,8 +32,8 @@ mod generated {
 use generated::{
     AppWindow, AppliedData, BadgeData, BannerData, CardData, DetailData, DialogData, FactData,
     FixData, GameData, HistEntryData, HistGroupData, HistoryData, LaunchData, LaunchRowData,
-    LineData, Modal, NoticeData, OpData, OrphanData, OrphansData, PreviewData, ProblemData, Reveal,
-    RowData, SectionData, SolvedData, Str, SysLineData, Theme, WarnData,
+    LineData, ListData, Modal, NoticeData, OpData, OrphanData, OrphansData, PreviewData,
+    ProblemData, Reveal, RowData, SectionData, SolvedData, Str, SysLineData, Theme, WarnData,
 };
 
 use std::cell::RefCell;
@@ -92,8 +92,8 @@ struct State {
     /// The cards of the page that shows them (the game page or the applied page).
     game_cards: Vec<TxnCardVm>,
     applied_cards: Vec<TxnCardVm>,
-    /// The open undo or forget dialog.
-    dialog: Option<(DialogKind, TxnId, u64)>,
+    /// The open undo, forget, rebind or clear dialog.
+    dialog: Option<(DialogKind, Option<TxnId>, u64)>,
     /// The card button that opened it (2 * index, +1 for forget), or the checkbox of a fix
     /// (-2 - index): the focus returns there.
     opener: i32,
@@ -1012,6 +1012,8 @@ fn history_data(
         ),
         launch_note: h.launch_note.as_deref().map(s).unwrap_or_default(),
         launch_detail: h.launch_detail.as_ref().map(shown).unwrap_or_default(),
+        keep_note: h.keep_note.as_deref().map(s).unwrap_or_default(),
+        clear_label: h.clear_label.as_deref().map(s).unwrap_or_default(),
         backups_label: s(t(lang, Msg::HistoryBackupsIn)),
         may_remain_label: s(t(lang, Msg::HistoryMayRemain)),
         exact_label: s(t(lang, Msg::LaunchExact)),

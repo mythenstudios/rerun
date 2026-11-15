@@ -2,6 +2,7 @@
 //! it; the typed refusals come out calm, in both languages, with what to do and the core's
 //! text only as an escaped detail.
 
+mod clear;
 mod history;
 mod problems;
 mod rebind;

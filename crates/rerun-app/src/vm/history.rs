@@ -121,6 +121,10 @@ pub struct HistoryVm {
     pub launch_note: Option<String>,
     /// The core's text if the launch folder cannot be read (escaped).
     pub launch_detail: Option<Shown<'static>>,
+    /// What Rerun keeps and when older entries go (P5-6d-1b); none while there is no history.
+    pub keep_note: Option<String>,
+    /// The button that opens the clear dialog; none while there is no history.
+    pub clear_label: Option<String>,
 }
 
 /// The seconds since 1970-01-01 UTC as `YYYY-MM-DD hh:mm:ss UTC`.
@@ -162,7 +166,7 @@ pub fn ago(now: u64, then: u64, lang: Lang) -> String {
     tx(lang, m)
 }
 
-fn game_value(app_id: u32, names: &Names, lang: Lang) -> Value {
+pub(super) fn game_value(app_id: u32, names: &Names, lang: Lang) -> Value {
     match names.get(&app_id) {
         Some(n) if !n.as_str().is_empty() => Value::Shown(n.clone()),
         _ => Value::Text(tx(lang, Msg::UnnamedGame { app_id })),
@@ -375,6 +379,8 @@ pub fn history(
         launches: Vec::new(),
         launch_note: None,
         launch_detail: None,
+        keep_note: None,
+        clear_label: None,
     };
     let nothing = |vm: &mut HistoryVm| {
         vm.empty = Some((tx(lang, Msg::HistoryEmpty), tx(lang, Msg::HistoryEmptySub)));
@@ -443,6 +449,14 @@ pub fn history(
     }
     if vm.groups.is_empty() && vm.launches.is_empty() && vm.launch_title.is_none() {
         nothing(&mut vm);
+    } else {
+        vm.keep_note = Some(tx(
+            lang,
+            Msg::HistKeepNote {
+                n: flow::HISTORY_KEEP,
+            },
+        ));
+        vm.clear_label = Some(tx(lang, Msg::ClearBtn));
     }
     vm
 }

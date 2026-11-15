@@ -2,7 +2,7 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { Button, DetailLine, Muted, PageTitle } from "base.slint";
-import { DialogData, Str, Theme, Modal } from "base.slint";
+import { DialogData, ListData, Str, Theme, Modal } from "base.slint";
 import { OpItem, WarnLine } from "ops.slint";
 
 // The undo, forget and download dialogs: what the operation meets (or what would be downloaded),
@@ -76,6 +76,25 @@ export component DialogView inherits Rectangle {
 
                                 for op in root.d.ops: OpItem {
                                     op: op;
+                                }
+                                for l in root.d.lists: VerticalLayout {
+                                    spacing: Theme.s1;
+                                    accessible-role: groupbox;
+                                    accessible-label: l.heading;
+                                    Text {
+                                        text: l.heading;
+                                        color: Theme.strong;
+                                        font-size: Theme.fs-m;
+                                        font-weight: 600;
+                                        wrap: word-wrap;
+                                    }
+
+                                    for line in l.lines: Text {
+                                        text: line;
+                                        color: Theme.text;
+                                        font-size: Theme.fs-s;
+                                        wrap: word-wrap;
+                                    }
                                 }
                                 for n in root.d.notes: Text {
                                     text: n;

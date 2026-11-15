@@ -45,6 +45,7 @@ pub(super) fn download_data(d: &DownloadVm) -> DialogData {
         cancel_disabled: d.cancelling,
         no_cancel: false,
         secondary: SharedString::new(),
+        lists: ModelRc::default(),
     }
 }
 

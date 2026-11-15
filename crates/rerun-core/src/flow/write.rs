@@ -355,7 +355,7 @@ pub fn check(g: &Guarded<'_>, p: &Previewed) -> Result<usize, Refusal> {
 /// }
 /// # }
 /// ```
-pub fn apply(g: &Guarded<'_>, p: Previewed) -> Result<Outcome, ApplyError> {
+pub fn apply(g: &Guarded<'_>, p: Previewed) -> Result<Applied, ApplyError> {
     let app = g.app().ok_or_else(|| not_stored(&p))?;
     let cx = ExecCtx {
         sys: g.env().sys,
@@ -363,7 +363,23 @@ pub fn apply(g: &Guarded<'_>, p: Previewed) -> Result<Outcome, ApplyError> {
         app,
         tag: InstanceTag::new(),
     };
-    exec::apply(&cx, &p.hash())
+    let outcome = exec::apply(&cx, &p.hash())?;
+    // P5-6d-1b: the cap, once the result is final and the lock released; never an error.
+    let tidied = match outcome {
+        Outcome::Nothing => Ok(super::Tidied::default()),
+        Outcome::Applied(_) => super::history::tidy(g),
+    };
+    Ok(Applied { outcome, tidied })
+}
+
+/// A successful [`apply`]: its outcome, and what the cap of the history removed after it
+/// (P5-6d-1b; a failure of the cap leaves the apply a success).
+#[derive(Debug)]
+pub struct Applied {
+    /// What `exec` did.
+    pub outcome: Outcome,
+    /// What the cap removed afterwards, or why it removed nothing.
+    pub tidied: super::Tidy,
 }
 
 /// Whether a plan or revert that needs the elevated helper could start it now, and the UAC

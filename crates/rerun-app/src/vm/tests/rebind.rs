@@ -185,7 +185,7 @@ fn vb1_the_undo_dialog_of_a_changed_game_folder_offers_the_check_and_cannot_be_c
                 .contains(&t(lang, Msg::UndoFolderChangedBody).into_owned())
         );
         assert_eq!(d.changed.as_deref(), Some(&*t(lang, Msg::ChangedNote)));
-        assert_eq!((d.nonce, d.txn), (9, id()));
+        assert_eq!((d.nonce, d.txn), (9, Some(id())));
         // The core's reason is a detail.
         assert_eq!(d.details.len(), 1);
     }

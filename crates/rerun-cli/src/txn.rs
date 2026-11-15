@@ -69,15 +69,34 @@ fn op_text(s: OpState) -> OpText {
     }
 }
 
+/// The quiet line after a write when the cap of the history removed entries (P5-6d-1b): none
+/// for nothing removed, and none for a failure of the cap (it never fails the write).
+pub(crate) fn tidied_line(t: &flow::Tidy) -> Option<Message<'static>> {
+    match t {
+        Ok(flow::Tidied { removed }) if *removed > 0 => Some(m(TxnMsg::Tidied {
+            n: *removed,
+            keep: flow::HISTORY_KEEP,
+        })),
+        _ => None,
+    }
+}
+
 /// The state line of a transaction.
 fn txn_text(st: &TxnStatus) -> TxnText<'_> {
     if st.is_forgotten() {
         return TxnText::Closed(Closing::Forgotten);
     }
-    match &st.state {
+    if st.state == TxnLine::Applied && flow::revert_begun(st) {
+        return TxnText::Reverting;
+    }
+    line_text(&st.state)
+}
+
+/// The state words of a [`TxnLine`] (an entry that is not forgotten).
+fn line_text(l: &TxnLine) -> TxnText<'_> {
+    match l {
         TxnLine::Empty => TxnText::Empty,
         TxnLine::Open => TxnText::Open,
-        TxnLine::Applied if flow::revert_begun(st) => TxnText::Reverting,
         TxnLine::Applied => TxnText::Applied,
         TxnLine::CleanupPending => TxnText::CleanupPending,
         TxnLine::Closed(c) => TxnText::Closed(*c),
@@ -737,6 +756,7 @@ fn run_revert<W: Write, E: Write>(
     let mut lines = report_lines(st, &o.report, v);
     lines.push(m(last));
     lines.extend(x12(&install, o.launch_option, false));
+    lines.extend(tidied_line(&o.tidied));
     Ok(out
         .lines(&lines)
         .and_then(|()| out.flush())
@@ -886,6 +906,7 @@ fn rebind_run<W: Write, E: Write>(
     let mut lines = report_lines(st, &o.report, &p.verified);
     lines.push(m(last));
     lines.extend(x12(&host.install, o.launch_option, false));
+    lines.extend(tidied_line(&o.tidied));
     Ok(out
         .lines(&lines)
         .and_then(|()| out.flush())
@@ -977,8 +998,8 @@ fn run_forget<W: Write, E: Write>(
         .and_then(|()| out.flush())
         .map_err(|e| before_change(err, e))?;
     confirm(host, yes, TxnMsg::AskForget { txn }, err)?;
-    match flow::forget(&g, s) {
-        Ok(()) => {}
+    let forgotten = match flow::forget(&g, s) {
+        Ok(f) => f,
         // Nothing written (P5-2b: changed since the preview, or refused).
         Err(ActError::Changed) => return Err(refusal(&Refusal::Changed { txn }, txn, err)),
         Err(ActError::Exec(ExecError::Refused(r))) => return Err(refusal(&r, txn, err)),
@@ -988,9 +1009,124 @@ fn run_forget<W: Write, E: Write>(
             note(err, TxnMsg::MayHaveClosed { txn });
             return Err(Exit::Open);
         }
-    }
+    };
+    let mut done = vec![m(TxnMsg::Forgot { txn })];
+    done.extend(tidied_line(&forgotten.tidied));
     Ok(out
-        .line(&m(TxnMsg::Forgot { txn }))
+        .lines(&done)
+        .and_then(|()| out.flush())
+        .map_or_else(|e| after_change(err, e, Exit::Report), |()| Exit::Report))
+}
+
+/// `rerun history clear [--dry-run] [--yes]` (P5-6d-1b): the list of what goes and what stays
+/// (rule 5), the question, then `flow::clear` with exactly what was listed. Something changed
+/// since the list: nothing removed, exit 3 (refused).
+pub fn history_clear<W: Write, E: Write>(
+    host: &mut Host<'_>,
+    dry_run: bool,
+    yes: bool,
+    out: &mut Out<W>,
+    err: &mut Out<E>,
+) -> Exit {
+    match run_history_clear(host, dry_run, yes, out, err) {
+        Ok(e) | Err(e) => e,
+    }
+}
+
+fn run_history_clear<W: Write, E: Write>(
+    host: &mut Host<'_>,
+    dry_run: bool,
+    yes: bool,
+    out: &mut Out<W>,
+    err: &mut Out<E>,
+) -> Result<Exit, Exit> {
+    let install = host.install.clone();
+    let env = Env {
+        sys: host.sys,
+        http: host.http,
+        install: &install,
+    };
+    let g = flow::guard(env).map_err(|x| gate(err, x))?;
+    let (p, s) = match flow::clear_preview(&g) {
+        Ok(x) => x,
+        Err(flow::ClearGate::NoAppDir) => {
+            let _ = out.line(&m(TxnMsg::ClearNothing));
+            return Ok(Exit::Report);
+        }
+        Err(flow::ClearGate::Journal(e)) => {
+            return Err(fail(
+                err,
+                TxnMsg::JournalUnreadable { error: shown(&e) },
+                Exit::Fatal,
+            ));
+        }
+    };
+    let mut lines = Vec::new();
+    if !p.remove.is_empty() || !p.results.is_empty() {
+        lines.push(m(TxnMsg::ClearGoesHeader));
+        for i in &p.remove {
+            lines.push(m(TxnMsg::ClearGoes {
+                txn: i.txn,
+                app: i.app,
+                state: line_text(&i.line),
+            }));
+        }
+        for id in &p.results {
+            lines.push(m(TxnMsg::ClearResultGoes { profile: *id }));
+        }
+    }
+    if !p.stays.is_empty() || !p.results_stay.is_empty() {
+        lines.push(m(TxnMsg::ClearStaysHeader));
+        for (i, why) in &p.stays {
+            lines.push(m(TxnMsg::ClearStays {
+                txn: i.txn,
+                app: i.app,
+                why: *why,
+            }));
+        }
+        for (id, why) in &p.results_stay {
+            lines.push(m(TxnMsg::ClearResultStays {
+                profile: *id,
+                why: *why,
+            }));
+        }
+    }
+    if s.is_empty() {
+        lines.push(m(TxnMsg::ClearNothing));
+        return Ok(out
+            .lines(&lines)
+            .and_then(|()| out.flush())
+            .map_or_else(|e| before_change(err, e), |()| Exit::Report));
+    }
+    lines.push(m(TxnMsg::ClearUnchanged));
+    lines.push(Message::Blank);
+    out.lines(&lines)
+        .and_then(|()| out.flush())
+        .map_err(|e| before_change(err, e))?;
+    if dry_run {
+        return Ok(Exit::Report);
+    }
+    let q = TxnMsg::AskClear {
+        entries: p.remove.len(),
+        results: p.results.len(),
+    };
+    confirm(host, yes, q, err)?;
+    let r = match flow::clear(&g, s) {
+        Ok(r) => r,
+        Err(ActError::Changed) => return Err(fail(err, TxnMsg::ClearChanged, Exit::Refused)),
+        Err(ActError::Exec(ExecError::Refused(r))) => {
+            return Err(fail(err, TxnMsg::Error { error: shown(&r) }, Exit::Refused));
+        }
+        Err(ActError::Exec(e)) => {
+            note(err, TxnMsg::Error { error: shown(&e) });
+            return Err(exit_for_exec(&e));
+        }
+    };
+    Ok(out
+        .line(&m(TxnMsg::Cleared {
+            entries: r.removed.len() + r.gone.len(),
+            results: r.results,
+        }))
         .and_then(|()| out.flush())
         .map_or_else(|e| after_change(err, e, Exit::Report), |()| Exit::Report))
 }

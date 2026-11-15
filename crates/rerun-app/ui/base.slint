@@ -104,7 +104,13 @@ export struct CardData {
     can-forget: bool,
 }
 
-// kind: 0 undo, 1 forget, 2 download, 3 waiting for the UAC dialog (no button at all), 4 rebind.
+// A heading and its lines (the clear dialog lists what goes and what stays).
+export struct ListData {
+    heading: string,
+    lines: [string],
+}
+
+// kind: 0 undo, 1 forget, 2 download, 3 waiting for the UAC dialog (no button at all), 4 rebind, 5 clear.
 export struct DialogData {
     kind: int,
     title: string,
@@ -130,6 +136,8 @@ export struct DialogData {
     no-cancel: bool,
     // A second button ("Check new folder"): empty means none.
     secondary: string,
+    // Lists of lines under a heading (the clear dialog).
+    lists: [ListData],
 }
 
 // tone: 0 done, 1 calm, 2 attention.
@@ -139,6 +147,8 @@ export struct BannerData {
     title: string,
     body: string,
     details: [DetailData],
+    // One quiet line after the result (what the history upkeep removed).
+    note: string,
 }
 
 export struct FactData {
@@ -249,6 +259,8 @@ export struct HistoryData {
     launches: [LaunchRowData],
     launch-note: string,
     launch-detail: string,
+    keep-note: string,
+    clear-label: string,
     backups-label: string,
     may-remain-label: string,
     exact-label: string,
