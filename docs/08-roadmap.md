@@ -66,7 +66,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 
 ## Phase 5 – App
 - The app `rerun-app` (Slint, ADR 0026; over `rerun_core::flow`, ADR 0027; layout C, `docs/07-ui.md`): Library, game page, Applied, History, System, Settings, first launch. P5-3 done 2026-11-12, [DEV] check passed (docs/09, "App (rerun-app)"): the read-only skeleton (window with snap layouts, library with search and grouping, game page with problems and fixes grouped by variant ID, system page, the blocking page when elevated; software renderer always). P5-5a done 2026-11-12, [DEV] apply and undo from the app passed (docs/09): fix selection with the preselection of verified fixes, the preview before every apply (every change, warnings, the launch option to paste), apply, one card per transaction on Applied and the game page, undo and forget with their own previews, calm refusals, closing blocked while a write runs. P5-5b done 2026-11-12, [DEV] package download from the app passed (docs/09): a fix that needs a package asks first (consent with source, URL, host, SHA-256, licence), downloads with progress and cancel (a cancelled or failed download keeps nothing in the cache), then goes through the usual preview; fixes that need the helper stay locked until P5-5c
-- Primitive `launch_option` (writes the Steam launch option, Steam closed; moved from phase 3)
+- Steam launch option: copied by the user (default, Rerun never touches Steam's files). Writing it into Steam's `localconfig.vdf` (`launch_option`, ADR 0028) moved to phase 6 as an opt-in setting (user 2026-11-24)
 - i18n en/de
 - Code signing, portable build
 - Before A6: every anti-cheat marker without a vendor source (`EasyAntiCheat`, `EasyAntiCheat_EOS`, `GameGuard`, `XIGNCODE`, `EAAntiCheat.GameServiceLauncher.exe`; `docs/05-sources-policy.md`) has one, or a dump of a real machine; the third-party link for `start_protected_game.exe` is replaced by Epic's own documentation once found
@@ -76,6 +76,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 **Acceptance:** All flows from the mockup work against the real core.
 
 ## Phase 6 – Expansion
+- Opt-in primitive `launch_option` (ADR 0028, proposed): Rerun writes the Steam launch option itself, only when the user turns it on, with Steam closed; copying stays the default
 - `hold`, `ifeo`, `inproc` (`rerun-cpu.asi`, x86/x64), `shim_single`
 - GOG, Epic, Ubisoft Connect detection, and game folders added by hand (matched by executable hash)
 - Admin-only roots (retail installs under `Program Files`) through the helper, including replacing files there (`laa_patch`); needs a helper-owned backup store (moved from phase 4, user decision E1)
