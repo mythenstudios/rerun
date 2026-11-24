@@ -7,6 +7,11 @@
 //!   (`docs/07-ui.md`), so a window subclass answers it over Rerun's own maximise button and
 //!   turns the non-client mouse messages there into a hover state and a click.
 //! - The Windows display language picks the app's language (ADR 0027).
+//! - Windows' high contrast (P5-10c, ADR 0026 amendment P5-10): [`high_contrast`] reads whether
+//!   it is on (`SPI_GETHIGHCONTRAST`) and, if so, the five system colours the theme then uses
+//!   (`GetSysColor`). The subclass tells the window when Windows' colours or settings change
+//!   (`WM_SYSCOLORCHANGE`, `WM_SETTINGCHANGE`: [`Chrome::ColorsChanged`]), so switching high
+//!   contrast on or off follows at once, without a hook of its own.
 //! - An elevated start is told with a plain message box before any Slint object exists (`main`,
 //!   security review S1 of P5-3).
 //! - The owner of the UAC dialog (P5-5c, ADR 0023 amendment P5-5c): [`owner_of`] reads the
@@ -30,9 +35,11 @@
 
 #![allow(
     unsafe_code,
-    reason = "the window subclass, a message box and the display language (ADR 0026: ui::chrome \
-              is the one place)"
+    reason = "the window subclass, a message box, the display language and high contrast \
+              (ADR 0026: ui::chrome is the one place)"
 )]
+
+use crate::theme::SysColors;
 
 /// The caption geometry in logical pixels (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -61,6 +68,9 @@ pub enum Chrome {
     Hover(bool),
     /// The maximise button was clicked.
     ToggleMaximized,
+    /// Windows' colours or settings changed: high contrast may have been switched (the window
+    /// reads [`high_contrast`] again).
+    ColorsChanged,
 }
 
 /// Whether the client point `(x, y)` is over the maximise button of a client area `right`
@@ -81,7 +91,7 @@ pub fn hit_max_button(g: Geometry, state: WindowState, right: f64, x: f64, y: f6
 }
 
 #[cfg(windows)]
-pub use win::{install, message_box, owner_of, ui_language};
+pub use win::{high_contrast, install, message_box, owner_of, ui_language};
 
 #[cfg(all(windows, feature = "test-key"))]
 pub use win::process_age_ms;
@@ -90,6 +100,12 @@ pub use win::process_age_ms;
 /// The Windows display language; English elsewhere.
 pub fn ui_language() -> u16 {
     0x0409
+}
+
+#[cfg(not(windows))]
+/// No high contrast outside Windows.
+pub fn high_contrast() -> Option<SysColors> {
+    None
 }
 
 #[cfg(not(windows))]
@@ -120,7 +136,11 @@ mod win {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
-    use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+    use windows_sys::Win32::Graphics::Gdi::{
+        COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
+        GetSysColor, SYS_COLOR_INDEX, ScreenToClient,
+    };
+    use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -128,11 +148,13 @@ mod win {
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetClientRect, HTMAXBUTTON, IDC_HAND, LoadCursorW, MB_ICONWARNING, MB_OK, MessageBoxW,
-        SetCursor, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
-        WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SETCURSOR,
+        SPI_GETHIGHCONTRAST, SetCursor, SystemParametersInfoW, WM_NCDESTROY, WM_NCHITTEST,
+        WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+        WM_SETCURSOR, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE,
     };
 
-    use super::{Chrome, Geometry, WindowState, hit_max_button};
+    use super::{Chrome, Geometry, SysColors, WindowState, hit_max_button};
+    use crate::theme::Rgb;
 
     /// The subclass ID (one subclass per window).
     const SUBCLASS_ID: usize = 1;
@@ -159,6 +181,41 @@ mod win {
     pub fn ui_language() -> u16 {
         // SAFETY: no arguments, no pointers; returns a value.
         unsafe { GetUserDefaultUILanguage() }
+    }
+
+    /// Windows' high contrast: `None` while it is off (or cannot be read: the theme stays),
+    /// else the system colours the tokens take (`theme::tokens`).
+    pub fn high_contrast() -> Option<SysColors> {
+        let mut hc = HIGHCONTRASTW {
+            cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).unwrap_or(0),
+            dwFlags: 0,
+            lpszDefaultScheme: std::ptr::null_mut(),
+        };
+        // SAFETY: `hc` is a valid, writable HIGHCONTRASTW whose `cbSize` is its size, the size
+        // passed too; Windows fills it and sets `lpszDefaultScheme` to a buffer of its own, which
+        // is never read here; no profile update (`fWinIni` 0).
+        let ok = unsafe {
+            SystemParametersInfoW(SPI_GETHIGHCONTRAST, hc.cbSize, (&raw mut hc).cast(), 0)
+        };
+        if ok == 0 || hc.dwFlags & HCF_HIGHCONTRASTON == 0 {
+            return None;
+        }
+        Some(SysColors {
+            window: sys_color(COLOR_WINDOW),
+            window_text: sys_color(COLOR_WINDOWTEXT),
+            highlight: sys_color(COLOR_HIGHLIGHT),
+            highlight_text: sys_color(COLOR_HIGHLIGHTTEXT),
+            gray_text: sys_color(COLOR_GRAYTEXT),
+        })
+    }
+
+    /// One system colour (`0x00BBGGRR`).
+    fn sys_color(index: SYS_COLOR_INDEX) -> Rgb {
+        // SAFETY: no pointers; `index` is one of the documented `COLOR_*` constants; returns a
+        // value.
+        let bgr = unsafe { GetSysColor(index) };
+        let [r, g, b, _] = bgr.to_le_bytes();
+        Rgb(r, g, b)
     }
 
     /// Milliseconds since the operating system created this process (the [DEV] test-key app's
@@ -371,6 +428,9 @@ mod win {
                 return 0;
             }
             WM_NCLBUTTONUP => PRESSED.with(|p| p.set(false)),
+            // Windows' colours or settings changed (high contrast on or off among them): the
+            // window reads them again; the message goes on to the next procedure as well.
+            WM_SYSCOLORCHANGE | WM_SETTINGCHANGE => tell(Chrome::ColorsChanged),
             WM_NCDESTROY => {
                 // SAFETY: removes this very subclass from its window before the window goes.
                 unsafe { RemoveWindowSubclass(hwnd, Some(subclass), id) };

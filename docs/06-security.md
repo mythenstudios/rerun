@@ -46,7 +46,7 @@ The user's system (files outside the game folder, registry, firewall, autostart)
 
 - The GUI never runs elevated. Admin only in the helper, per apply, with a validated plan.
 - Network only to the Topo index and package hosts from `packages/`. No telemetry. (The curator tool `rerun-workbench`, never shipped, also asks PCGamingWiki: #28.)
-- `unsafe` minimal, commented, encapsulated in `sys::win`, `rerun-launch`, `rerun-cpu` and `rerun-app::ui::chrome` (the window subclass, ADR 0026).
+- `unsafe` minimal, commented, encapsulated in `sys::win`, `rerun-launch`, `rerun-cpu` and `rerun-app::ui::chrome` (the window subclass, and since P5-10c the read-only high-contrast query `SystemParametersInfoW(SPI_GETHIGHCONTRAST)` and `GetSysColor`, ADR 0026 and its amendment P5-10).
 - Dependencies checked with `cargo deny` (licenses, advisories, crates.io only, no OpenSSL) in CI.
 - **Policy boundary (ADR 0004):** `sys` executes, `policy` decides. Confinement (`policy::path::RelPath`, `policy::root`) and the registry allowlist (`policy::registry` from phase 2, ADR 0018) sit above `sys` and apply equally to the fake, the real system and the elevated helper.
 - **No system access bypassing `sys`:** `clippy.toml` blocks `std::fs` write operations and `std::process::Command::new` (`disallowed_methods = deny`). Exceptions only with `#[allow(…, reason = "…")]` in `sys::win` and `rerun-launch`.

@@ -8,7 +8,7 @@
 //! |--------------|----------------------------------|-------------|
 //! | `format`     | `1`                              | (required)  |
 //! | `language`   | `"windows"`, `"en"`, `"de"`      | `"windows"` |
-//! | `theme`      | `"mythen"`                       | `"mythen"`  |
+//! | `theme`      | `"mythen"`, `"nacht"`            | `"mythen"`  |
 //! | `library`    | `"list"`, `"compact"`            | `"list"`    |
 //! | `grouped`    | `true`, `false`                  | `true`      |
 //! | `intro_seen` | `true`, `false`                  | `false`     |

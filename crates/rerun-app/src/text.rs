@@ -1700,6 +1700,12 @@ pub enum Msg {
     DataNotCreated,
     /// The settings: where Rerun's folder is cannot be told.
     DataUnknown,
+    /// The settings: the second theme's name (P5-10c).
+    ThemeNacht,
+    /// The settings: what the two themes are.
+    SetThemeDesc,
+    /// The settings: Windows' high contrast is on and overrides the theme.
+    ThemeHighContrast,
 }
 
 /// The text of `m` in `lang`.
@@ -2686,6 +2692,9 @@ fn en(m: Msg) -> Cow<'static, str> {
         DataOpenBtn => "Open in Explorer",
         DataNotCreated => "Not created yet. Rerun creates it when it first stores something.",
         DataUnknown => "Rerun cannot tell where its folder is.",
+        ThemeNacht => "Night",
+        SetThemeDesc => "Both are dark. Mythen is black and white, Night uses the greys of Windows 11.",
+        ThemeHighContrast => "Windows high contrast is on, so Rerun uses its colours. The theme applies again once it is off.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 older history entry removed".into()
@@ -3656,6 +3665,9 @@ fn de(m: Msg) -> Cow<'static, str> {
         DataOpenBtn => "Im Explorer öffnen",
         DataNotCreated => "Noch nicht angelegt. Rerun legt ihn an, wenn es zum ersten Mal etwas speichert.",
         DataUnknown => "Rerun kann nicht feststellen, wo sein Ordner liegt.",
+        ThemeNacht => "Nacht",
+        SetThemeDesc => "Beide sind dunkel. Mythen ist schwarz-weiss, Nacht nutzt die Grautöne von Windows 11.",
+        ThemeHighContrast => "Der hohe Kontrast von Windows ist an, darum nutzt Rerun dessen Farben. Das Thema gilt wieder, sobald er aus ist.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 älterer Verlaufseintrag entfernt".into()

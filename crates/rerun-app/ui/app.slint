@@ -20,6 +20,7 @@ import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
 import { CardView, HistEntryView, LaunchRowView } from "card.slint";
 import { DialogView } from "dialog.slint";
+import { SettingsPage } from "settings.slint";
 import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, Theme, Str, Reveal, Modal } from "base.slint";
 
 // What `ui` names through the generated code.
@@ -51,7 +52,9 @@ component Toggle inherits Pressable {
                 width: Theme.s6 + Theme.s1;
                 height: Theme.s4 + Theme.s1;
                 border-radius: self.height / 2;
-                background: root.checked ? Theme.strong : Theme.line;
+                background: root.checked ? Theme.strong : (Theme.edge > 0px ? Theme.bg : Theme.line);
+                border-width: Theme.edge;
+                border-color: Theme.line;
                 Rectangle {
                     width: parent.height - 6px;
                     height: self.width;
@@ -91,6 +94,8 @@ component NavItem inherits Pressable {
     Rectangle {
         border-radius: Theme.radius-m;
         background: root.active ? Theme.raised2 : (root.hovered ? Theme.raised : transparent);
+        border-width: root.active ? Theme.edge * 2 : (root.hovered ? Theme.edge : 0px);
+        border-color: Theme.line;
     }
 
     HorizontalLayout {
@@ -148,13 +153,15 @@ component CaptionButton inherits Pressable {
     }
     Rectangle {
         background: (root.hovered || root.nc-hover) ? (root.danger ? Theme.danger : Theme.raised3) : transparent;
+        border-width: (root.hovered || root.nc-hover) && !root.danger ? Theme.edge : 0px;
+        border-color: Theme.line;
     }
 
     Text {
         text: root.glyph;
         font-family: Theme.font-icons;
         font-size: Theme.fs-xs - Theme.hair;
-        color: Theme.strong;
+        color: root.danger && (root.hovered || root.nc-hover) ? Theme.on-danger : Theme.strong;
         horizontal-alignment: center;
         vertical-alignment: center;
         accessible-role: none;
@@ -182,6 +189,8 @@ component RowItem inherits Pressable {
     }
     Rectangle {
         background: root.hovered ? Theme.raised2 : transparent;
+        border-width: root.hovered ? Theme.edge : 0px;
+        border-color: Theme.line;
     }
 
     if root.index > 0: Hairline {
@@ -258,58 +267,14 @@ component RowItem inherits Pressable {
     }
 }
 
-component Setting inherits Rectangle {
-    in property <string> title;
-    in property <string> desc;
-    in property <string> value;
-    in property <bool> first;
-    accessible-role: AccessibleRole.text;
-    accessible-label: root.title + ", " + root.value;
-    accessible-description: root.desc;
-    if !root.first: Hairline {
-        y: 0;
-        height: Theme.hair;
-    }
-    HorizontalLayout {
-        padding: Theme.s5;
-        spacing: Theme.s4;
-        VerticalLayout {
-            horizontal-stretch: 1;
-            spacing: Theme.s1;
-            Text {
-                text: root.title;
-                color: Theme.strong;
-                font-size: Theme.fs-l;
-                font-weight: 600;
-                wrap: word-wrap;
-                accessible-role: none;
-            }
-
-            if root.desc != "": Text {
-                text: root.desc;
-                color: Theme.muted;
-                font-size: Theme.fs-m;
-                wrap: word-wrap;
-                accessible-role: none;
-            }
-        }
-
-        Text {
-            text: root.value;
-            color: Theme.text;
-            font-size: Theme.fs-m;
-            vertical-alignment: center;
-            accessible-role: none;
-        }
-    }
-}
-
 // ---------------------------------------------------------------- pages
 
 component FirstRunCard inherits Rectangle {
     callback dismiss();
     background: Theme.raised;
     border-radius: Theme.radius-m;
+    border-width: Theme.edge;
+    border-color: Theme.line;
     accessible-role: groupbox;
     accessible-label: Str.first-run-title;
     Rectangle {
@@ -534,6 +499,8 @@ component BannerView inherits Rectangle {
     callback dismiss();
     background: Theme.raised;
     border-radius: Theme.radius-m;
+    border-width: Theme.edge;
+    border-color: Theme.line;
     accessible-role: groupbox;
     accessible-label: root.b.title;
     Rectangle {
@@ -598,6 +565,8 @@ component AttentionBand inherits Rectangle {
     callback dismiss();
     background: Theme.raised;
     border-radius: Theme.radius-m;
+    border-width: Theme.edge;
+    border-color: Theme.line;
     accessible-role: groupbox;
     accessible-label: root.title;
     accessible-description: root.body;
@@ -1441,306 +1410,6 @@ component SystemPage inherits VerticalLayout {
     }
 }
 
-// One package of the store: what it is, how big, who uses it, and the button that opens the
-// removal dialog (a package a change uses cannot be removed: the button is off and the reason
-// stands under it).
-component PackageRow inherits Card {
-    in property <StoreRowData> r;
-    in property <int> index;
-    callback remove();
-    accessible-role: groupbox;
-    accessible-label: root.r.title + " " + root.r.ident;
-    accessible-description: root.r.state.word;
-    VerticalLayout {
-        padding: Theme.s5;
-        spacing: Theme.s2;
-        HorizontalLayout {
-            spacing: Theme.s3;
-            Text {
-                horizontal-stretch: 1;
-                text: root.r.title;
-                color: Theme.strong;
-                font-size: Theme.fs-l;
-                font-weight: 600;
-                wrap: word-wrap;
-                vertical-alignment: center;
-            }
-
-            Badge {
-                data: root.r.state;
-                accessible-role: none;
-            }
-        }
-
-        Text {
-            text: root.r.ident;
-            color: Theme.muted;
-            font-family: Theme.font-mono;
-            font-size: Theme.fs-s;
-            wrap: word-wrap;
-        }
-
-        if root.r.note != "": Text {
-            text: root.r.note;
-            color: Theme.strong;
-            font-size: Theme.fs-m;
-            wrap: word-wrap;
-        }
-        Text {
-            text: root.r.facts;
-            color: Theme.text;
-            font-size: Theme.fs-m;
-            wrap: word-wrap;
-        }
-
-        for u in root.r.used: PartsLine {
-            p: u;
-            tone: Theme.muted;
-            size: Theme.fs-m;
-        }
-        if root.r.keep != "": Text {
-            text: root.r.keep;
-            color: Theme.strong;
-            font-size: Theme.fs-m;
-            wrap: word-wrap;
-        }
-        HorizontalLayout {
-            alignment: start;
-            padding-top: Theme.s2;
-            Button {
-                text: root.r.remove-label;
-                accessible-label: root.r.remove-label + ": " + root.r.title + " " + root.r.ident;
-                take-focus: Modal.return-to == -10000 - root.index;
-                enabled: root.r.can-remove && !Modal.open && !Modal.working;
-                activated => {
-                    root.remove();
-                }
-            }
-        }
-    }
-}
-
-// Settings > Packages: Rerun's package store, read each time the page opens.
-component PackagesGroup inherits VerticalLayout {
-    in property <StoreData> store;
-    callback remove(int);
-    callback remove-all();
-    spacing: Theme.s3;
-    GroupHeading {
-        text: Str.settings-packages;
-    }
-
-    Muted {
-        text: Str.settings-packages-intro;
-    }
-
-    if root.store.empty-title != "": Card {
-        accessible-role: AccessibleRole.text;
-        accessible-label: root.store.empty-title;
-        accessible-description: root.store.empty-sub;
-        VerticalLayout {
-            padding: Theme.s5;
-            spacing: Theme.s1;
-            Text {
-                text: root.store.empty-title;
-                color: Theme.strong;
-                font-size: Theme.fs-l;
-                font-weight: 600;
-                wrap: word-wrap;
-                accessible-role: none;
-            }
-
-            if root.store.empty-sub != "": Text {
-                text: root.store.empty-sub;
-                color: Theme.muted;
-                font-size: Theme.fs-m;
-                wrap: word-wrap;
-                accessible-role: none;
-            }
-            if root.store.detail != "": Text {
-                text: root.store.detail;
-                color: Theme.muted;
-                font-family: Theme.font-mono;
-                font-size: Theme.fs-s;
-                wrap: word-wrap;
-            }
-        }
-    }
-    if root.store.remove-all-label != "": HorizontalLayout {
-        alignment: start;
-        Button {
-            text: root.store.remove-all-label;
-            take-focus: Modal.return-to == -1001;
-            enabled: root.store.can-remove-all && !Modal.open && !Modal.working;
-            activated => {
-                root.remove-all();
-            }
-        }
-    }
-    for r[ri] in root.store.rows: PackageRow {
-        r: r;
-        index: ri;
-        remove => {
-            root.remove(ri);
-        }
-    }
-    for line in root.store.extra: Muted {
-        text: line;
-    }
-    if root.store.foreign-heading != "": VerticalLayout {
-        spacing: Theme.s1;
-        Muted {
-            text: root.store.foreign-heading;
-        }
-
-        for line in root.store.foreign: PartsLine {
-            p: line;
-            tone: Theme.muted;
-            mono: true;
-        }
-    }
-}
-
-// Settings > Data: where Rerun's folder is, and "Open in Explorer" only while it exists
-// (P5-10a; the folder is fixed, ADR 0027 U6 a).
-component DataGroup inherits VerticalLayout {
-    in property <DataFolderData> data;
-    callback open();
-    spacing: Theme.s3;
-    GroupHeading {
-        text: Str.settings-data;
-    }
-
-    Muted {
-        text: Str.data-intro;
-    }
-
-    Card {
-        VerticalLayout {
-            padding: Theme.s5;
-            spacing: Theme.s2;
-            if root.data.path != "": Text {
-                text: root.data.path;
-                color: Theme.strong;
-                font-family: Theme.font-mono;
-                font-size: Theme.fs-m;
-                wrap: word-wrap;
-            }
-            if root.data.note != "": Text {
-                text: root.data.note;
-                color: Theme.muted;
-                font-size: Theme.fs-m;
-                wrap: word-wrap;
-            }
-            if root.data.detail != "": Text {
-                text: root.data.detail;
-                color: Theme.muted;
-                font-family: Theme.font-mono;
-                font-size: Theme.fs-s;
-                wrap: word-wrap;
-            }
-            if root.data.exists: HorizontalLayout {
-                alignment: start;
-                padding-top: Theme.s2;
-                Button {
-                    text: Str.data-open;
-                    enabled: !Modal.open;
-                    activated => {
-                        root.open();
-                    }
-                }
-            }
-        }
-    }
-}
-
-component SettingsPage inherits VerticalLayout {
-    in property <StoreData> store;
-    in property <DataFolderData> data;
-    callback store-remove(int);
-    callback store-remove-all();
-    callback open-data-folder();
-    spacing: Theme.s4;
-    PageTitle {
-        text: Str.settings-title;
-    }
-
-    Muted {
-        text: Str.settings-intro;
-    }
-
-    GroupHeading {
-        text: Str.settings-safety;
-    }
-
-    Card {
-        VerticalLayout {
-            Setting {
-                first: true;
-                title: Str.set-preview;
-                desc: Str.set-preview-desc;
-                value: Str.always-on;
-            }
-
-            Setting {
-                title: Str.set-sources;
-                desc: Str.set-sources-desc;
-                value: Str.always-on;
-            }
-        }
-    }
-
-    PackagesGroup {
-        store: root.store;
-        remove(i) => {
-            root.store-remove(i);
-        }
-        remove-all => {
-            root.store-remove-all();
-        }
-    }
-
-    DataGroup {
-        data: root.data;
-        open => {
-            root.open-data-folder();
-        }
-    }
-
-    GroupHeading {
-        text: Str.settings-look;
-    }
-
-    Card {
-        VerticalLayout {
-            Setting {
-                first: true;
-                title: Str.set-theme;
-                value: Str.theme-name;
-            }
-
-            Setting {
-                title: Str.set-language;
-                value: Str.language-name;
-            }
-        }
-    }
-
-    GroupHeading {
-        text: Str.settings-about;
-    }
-
-    Card {
-        VerticalLayout {
-            Setting {
-                first: true;
-                title: Str.about-version;
-                desc: Str.about-licence;
-            }
-        }
-    }
-}
-
 component BlockedPage inherits Rectangle {
     in property <NoticeData> n;
     background: Theme.bg;
@@ -1851,6 +1520,10 @@ export component AppWindow inherits Window {
     callback query-edited(string);
     callback group-toggled(bool);
     callback first-run-dismissed();
+    // Settings > Appearance (P5-10c): 0 Mythen, 1 Nacht; Windows' high contrast wins.
+    in property <int> theme-choice;
+    in property <bool> high-contrast;
+    callback theme-chosen(int);
     callback rescan();
     callback poll();
 
@@ -2110,6 +1783,11 @@ export component AppWindow inherits Window {
                                 if root.page == 4: SettingsPage {
                                     store: root.store;
                                     data: root.data-folder;
+                                    theme-choice: root.theme-choice;
+                                    high-contrast: root.high-contrast;
+                                    theme-chosen(i) => {
+                                        root.theme-chosen(i);
+                                    }
                                     store-remove(i) => {
                                         root.store-remove(i);
                                     }

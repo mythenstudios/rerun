@@ -49,7 +49,7 @@ use slint::{CloseRequestResponse, Color, ComponentHandle, Model, ModelRc, Shared
 
 use crate::settings::{Memo, Settings};
 use crate::text::{Lang, Msg, t};
-use crate::theme::{self, Rgb, ThemeChoice, Tokens};
+use crate::theme::{self, Rgb, SysColors, ThemeChoice, Tokens};
 use crate::vm::{
     self, AppliedVm, AttentionVm, DetailVm, DialogKind, DialogVm, GameVm, HistoryVm, LaunchVm,
     Notice, OpVm, OrphansVm, PreviewVm, ResultVm, RowVm, Selection, StoreVm, SystemVm, Tone,
@@ -71,6 +71,8 @@ struct State {
     lang: Lang,
     /// The settings in force (P5-10b): a change is sent to the worker, which writes it.
     settings: Settings,
+    /// Windows' high contrast as last read (P5-10c): its colours win over the theme.
+    hc: Option<SysColors>,
     /// The library's rows, as streamed.
     rows: Vec<RowVm>,
     /// The game page last asked for.
@@ -202,14 +204,18 @@ where
         return ExitCode::FAILURE;
     };
     crate::trace::log(|| "ui: window object created (fonts registered)".to_owned());
-    let tokens = theme::tokens(ThemeChoice::default());
+    let current = settings.settings.clone();
+    // The theme and Windows' high contrast before the first frame (P5-10c).
+    let hc = chrome::high_contrast();
+    let tokens = theme::tokens(current.theme, hc.as_ref());
     set_theme(&ui, &tokens);
+    ui.set_theme_choice(theme_index(current.theme));
+    ui.set_high_contrast(hc.is_some());
     set_strings(&ui, lang);
     ui.set_status_index(tr(lang, Msg::StatusReading));
     if cfg!(feature = "test-key") {
         ui.set_status_build(tr(lang, Msg::TestKeyBuild));
     }
-    let current = settings.settings.clone();
     ui.set_group(current.grouped);
     ui.set_first_run(!current.intro_seen);
 
@@ -222,6 +228,7 @@ where
         worker,
         lang,
         settings: current,
+        hc,
         rows: Vec::new(),
         game: None,
         applied: None,
@@ -254,7 +261,7 @@ where
     #[cfg(feature = "test-key")]
     slint::invoke_from_event_loop(|| crate::trace::log(|| "ui: event loop, first turn".to_owned()))
         .ok();
-    install_chrome(&ui, &tokens, 0);
+    install_chrome(&ui, &state, &tokens, 0);
     hand_owner(&ui, &state, 0);
     if slint::run_event_loop().is_err() {
         return ExitCode::FAILURE;
@@ -288,8 +295,9 @@ fn hand_owner(ui: &AppWindow, state: &Rc<RefCell<State>>, tries: u32) {
 
 /// Installs the snap-layout subclass once the native window exists (it appears with the first
 /// turn of the event loop); a few tries, then the window stays without snap layouts.
-fn install_chrome(ui: &AppWindow, tokens: &Tokens, tries: u32) {
+fn install_chrome(ui: &AppWindow, st: &Rc<RefCell<State>>, tokens: &Tokens, tries: u32) {
     let weak = ui.as_weak();
+    let st = st.clone();
     let geometry = Geometry {
         title_h: tokens.title_h,
         caption_w: tokens.caption_w,
@@ -303,6 +311,7 @@ fn install_chrome(ui: &AppWindow, tokens: &Tokens, tries: u32) {
                 return;
             };
             let w = ui.as_weak();
+            let colours_st = st.clone();
             let on = Box::new(move |c: Chrome| {
                 if let Some(ui) = w.upgrade() {
                     match c {
@@ -310,6 +319,17 @@ fn install_chrome(ui: &AppWindow, tokens: &Tokens, tries: u32) {
                         Chrome::ToggleMaximized => {
                             let max = ui.window().is_maximized();
                             ui.window().set_maximized(!max);
+                        }
+                        // Read again from the event loop, never inside the window procedure
+                        // (the state may be borrowed by whatever made Windows send it).
+                        Chrome::ColorsChanged => {
+                            let w = ui.as_weak();
+                            let st = colours_st.clone();
+                            slint::Timer::single_shot(Duration::ZERO, move || {
+                                if let Some(ui) = w.upgrade() {
+                                    colours_changed(&ui, &mut st.borrow_mut());
+                                }
+                            });
                         }
                     }
                 }
@@ -326,10 +346,28 @@ fn install_chrome(ui: &AppWindow, tokens: &Tokens, tries: u32) {
                 },
             });
             if !chrome::install(ui.window(), geometry, state, on) && tries < 20 {
-                install_chrome(&ui, &tokens, tries + 1);
+                install_chrome(&ui, &st, &tokens, tries + 1);
             }
         },
     );
+}
+
+/// The theme's place in Settings > Appearance (0 Mythen, 1 Nacht).
+fn theme_index(t: ThemeChoice) -> i32 {
+    match t {
+        ThemeChoice::Mythen => 0,
+        ThemeChoice::Nacht => 1,
+    }
+}
+
+/// Windows' colours or settings changed: read high contrast again and redraw if it changed.
+fn colours_changed(ui: &AppWindow, st: &mut State) {
+    let hc = chrome::high_contrast();
+    if hc != st.hc {
+        st.hc = hc;
+        set_theme(ui, &theme::tokens(st.settings.theme, st.hc.as_ref()));
+        ui.set_high_contrast(st.hc.is_some());
+    }
 }
 
 fn set_theme(ui: &AppWindow, k: &Tokens) {
@@ -348,6 +386,8 @@ fn set_theme(ui: &AppWindow, k: &Tokens) {
     g.set_faint(color(k.faint));
     g.set_on_strong(color(k.on_strong));
     g.set_danger(color(k.danger));
+    g.set_on_danger(color(k.on_danger));
+    g.set_edge(k.edge);
     g.set_hair(1.0);
     g.set_radius_s(k.radius_s);
     g.set_radius_m(k.radius_m);
@@ -454,7 +494,9 @@ fn set_strings(ui: &AppWindow, lang: Lang) {
     g.set_settings_packages_intro(x(Msg::PkIntro));
     g.set_settings_look(x(Msg::SettingsLook));
     g.set_set_theme(x(Msg::SetTheme));
-    g.set_theme_name(x(Msg::ThemeMythen));
+    g.set_theme_names(model(vec![x(Msg::ThemeMythen), x(Msg::ThemeNacht)]));
+    g.set_set_theme_desc(x(Msg::SetThemeDesc));
+    g.set_theme_hc(x(Msg::ThemeHighContrast));
     g.set_set_language(x(Msg::SetLanguage));
     g.set_language_name(x(Msg::LanguageName));
     g.set_settings_data(x(Msg::SettingsData));
@@ -599,6 +641,24 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     let st = state.clone();
     ui.on_first_run_dismissed(move || {
         change_settings(&mut st.borrow_mut(), |s| s.intro_seen = true);
+    });
+
+    // Settings > Appearance: the theme applies at once (Windows' high contrast still wins).
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_theme_chosen(move |i| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let theme = if i == 1 {
+            ThemeChoice::Nacht
+        } else {
+            ThemeChoice::Mythen
+        };
+        let mut st = st.borrow_mut();
+        ui.set_theme_choice(theme_index(theme));
+        set_theme(&ui, &theme::tokens(theme, st.hc.as_ref()));
+        change_settings(&mut st, |s| s.theme = theme);
     });
 
     let weak = ui.as_weak();

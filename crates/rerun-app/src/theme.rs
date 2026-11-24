@@ -2,9 +2,12 @@
 //! values, framework-free. `ui` copies them into the one `.slint` global (`Theme`) at start; no
 //! colour literal lives in a `.slint` file outside that global (source rule).
 //!
-//! P5-3 ships the theme "Mythen" only (`docs/07-ui.md`): strictly monochrome, fills instead of
-//! borders, hairlines, the inverted primary button. Nacht and Kontrast follow with P5-10 (user
-//! decision U8 a); the enum stays so the settings and `ui` need no change then.
+//! Two themes, both dark (`docs/07-ui.md`, user decision E1 a of P5-10): "Mythen" (the default:
+//! strictly monochrome, fills instead of borders, hairlines, the inverted primary button) and
+//! "Nacht" (the neutral dark greys of Windows 11, no accent, no transparency). Windows' high
+//! contrast wins over both (P5-10c): [`tokens`] then takes every colour from the system colours
+//! `ui::chrome` read ([`SysColors`]) and draws the edges of controls, since fills alone may look
+//! alike there. There is no own contrast palette and no light theme.
 
 /// An sRGB colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,12 +50,30 @@ pub enum ThemeChoice {
     /// Black and white, fills instead of borders (the default).
     #[default]
     Mythen,
+    /// The neutral dark greys of Windows 11.
+    Nacht,
 }
 
 impl ThemeChoice {
     /// Every theme.
     #[cfg(test)]
-    pub const ALL: [Self; 1] = [Self::Mythen];
+    pub const ALL: [Self; 2] = [Self::Mythen, Self::Nacht];
+}
+
+/// Windows' system colours while high contrast is on (`GetSysColor`, read in `ui::chrome`): the
+/// only colours [`tokens`] uses then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SysColors {
+    /// `COLOR_WINDOW`: every surface.
+    pub window: Rgb,
+    /// `COLOR_WINDOWTEXT`: text, lines, the primary button's fill.
+    pub window_text: Rgb,
+    /// `COLOR_HIGHLIGHT`: the close button under the pointer.
+    pub highlight: Rgb,
+    /// `COLOR_HIGHLIGHTTEXT`: its glyph.
+    pub highlight_text: Rgb,
+    /// `COLOR_GRAYTEXT`: disabled text and the status bar.
+    pub gray_text: Rgb,
 }
 
 /// The values a theme fixes. Sizes are logical pixels.
@@ -86,6 +107,11 @@ pub struct Tokens {
     pub on_strong: Rgb,
     /// The close button under the pointer.
     pub danger: Rgb,
+    /// The glyph of the close button under the pointer.
+    pub on_danger: Rgb,
+    /// The width of the edge drawn around buttons, cards, badges and the selected navigation
+    /// entry: 0 in the themes (fills carry the shape), a hairline in high contrast.
+    pub edge: f32,
     /// Small radius (chips, inputs).
     pub radius_s: f32,
     /// Radius of cards and buttons.
@@ -116,10 +142,11 @@ pub struct Tokens {
     pub font_icons: &'static str,
 }
 
-/// The tokens of `t`. Text, display and mono fonts are embedded (`assets/fonts`, `ui` imports them);
-/// a glyph they lack falls back to a system font. The symbol and icon fonts are Windows'.
-pub fn tokens(t: ThemeChoice) -> Tokens {
-    match t {
+/// The tokens of `t`, or of Windows' high contrast when `hc` is given (it wins). Text, display
+/// and mono fonts are embedded (`assets/fonts`, `ui` imports them); a glyph they lack falls back
+/// to a system font. The symbol and icon fonts are Windows'.
+pub fn tokens(t: ThemeChoice, hc: Option<&SysColors>) -> Tokens {
+    let base = match t {
         ThemeChoice::Mythen => Tokens {
             bg: Rgb(0x0b, 0x0b, 0x0b),
             raised: Rgb(0x11, 0x11, 0x10),
@@ -135,21 +162,96 @@ pub fn tokens(t: ThemeChoice) -> Tokens {
             faint: Rgb(0x8a, 0x8a, 0x86),
             on_strong: Rgb(0x0b, 0x0b, 0x0b),
             danger: Rgb(0xc4, 0x2b, 0x1c),
-            radius_s: 2.0,
-            radius_m: 4.0,
-            space: [4.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0, 56.0],
-            font_size: [11.0, 12.0, 14.0, 16.0, 15.0, 30.0, 34.0],
-            row_h: 64.0,
-            title_h: 40.0,
-            caption_w: 46.0,
-            resize_border: 6.0,
-            nav_w: 264.0,
-            font_sans: "IBM Plex Sans",
-            font_display: "Archivo Expanded",
-            font_mono: "IBM Plex Mono",
-            font_symbol: "Segoe UI Symbol",
-            font_icons: "Segoe Fluent Icons",
+            on_danger: Rgb(0xf7, 0xf7, 0xf5),
+            edge: 0.0,
+            ..common()
         },
+        // Windows 11 dark: the window #202020, cards #2b2b2b, controls a step lighter; white
+        // text, grey secondary text; no accent (the primary button stays inverted, as in Mythen).
+        ThemeChoice::Nacht => Tokens {
+            bg: Rgb(0x20, 0x20, 0x20),
+            raised: Rgb(0x2b, 0x2b, 0x2b),
+            raised2: Rgb(0x32, 0x32, 0x32),
+            raised3: Rgb(0x37, 0x37, 0x37),
+            raised4: Rgb(0x3d, 0x3d, 0x3d),
+            line_soft: Rgb(0x30, 0x30, 0x30),
+            line: Rgb(0x45, 0x45, 0x45),
+            line_strong: Rgb(0x9a, 0x9a, 0x9a),
+            text: Rgb(0xe6, 0xe6, 0xe6),
+            strong: Rgb(0xff, 0xff, 0xff),
+            muted: Rgb(0xb8, 0xb8, 0xb8),
+            faint: Rgb(0xa0, 0xa0, 0xa0),
+            on_strong: Rgb(0x1c, 0x1c, 0x1c),
+            danger: Rgb(0xc4, 0x2b, 0x1c),
+            on_danger: Rgb(0xff, 0xff, 0xff),
+            edge: 0.0,
+            ..common()
+        },
+    };
+    match hc {
+        Some(c) => high_contrast(c, base),
+        None => base,
+    }
+}
+
+/// The sizes and fonts every theme shares (the colours are overwritten).
+fn common() -> Tokens {
+    let none = Rgb(0, 0, 0);
+    Tokens {
+        bg: none,
+        raised: none,
+        raised2: none,
+        raised3: none,
+        raised4: none,
+        line_soft: none,
+        line: none,
+        line_strong: none,
+        text: none,
+        strong: none,
+        muted: none,
+        faint: none,
+        on_strong: none,
+        danger: none,
+        on_danger: none,
+        edge: 0.0,
+        radius_s: 2.0,
+        radius_m: 4.0,
+        space: [4.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0, 56.0],
+        font_size: [11.0, 12.0, 14.0, 16.0, 15.0, 30.0, 34.0],
+        row_h: 64.0,
+        title_h: 40.0,
+        caption_w: 46.0,
+        resize_border: 6.0,
+        nav_w: 264.0,
+        font_sans: "IBM Plex Sans",
+        font_display: "Archivo Expanded",
+        font_mono: "IBM Plex Mono",
+        font_symbol: "Segoe UI Symbol",
+        font_icons: "Segoe Fluent Icons",
+    }
+}
+
+/// Windows' high contrast: every colour from the system colours, every surface the window's, so
+/// every text is the window text on the window (the pair Windows guarantees); shapes get an edge.
+fn high_contrast(c: &SysColors, base: Tokens) -> Tokens {
+    Tokens {
+        bg: c.window,
+        raised: c.window,
+        raised2: c.window,
+        raised3: c.window,
+        raised4: c.window,
+        line_soft: c.window,
+        line: c.window_text,
+        line_strong: c.window_text,
+        text: c.window_text,
+        strong: c.window_text,
+        muted: c.window_text,
+        faint: c.gray_text,
+        on_strong: c.window,
+        danger: c.highlight,
+        on_danger: c.highlight_text,
+        edge: 1.0,
+        ..base
     }
 }
 
@@ -181,10 +283,32 @@ pub fn text_pairs(t: &Tokens) -> Vec<(String, Rgb, Rgb)> {
     ));
     out.push((
         "window button glyph on danger".to_owned(),
-        t.strong,
+        t.on_danger,
         t.danger,
     ));
     out
+}
+
+/// Every colour of `t`, named for the test.
+#[cfg(test)]
+pub fn colours(t: &Tokens) -> Vec<(&'static str, Rgb)> {
+    vec![
+        ("bg", t.bg),
+        ("raised", t.raised),
+        ("raised2", t.raised2),
+        ("raised3", t.raised3),
+        ("raised4", t.raised4),
+        ("line-soft", t.line_soft),
+        ("line", t.line),
+        ("line-strong", t.line_strong),
+        ("text", t.text),
+        ("strong", t.strong),
+        ("muted", t.muted),
+        ("faint", t.faint),
+        ("on-strong", t.on_strong),
+        ("danger", t.danger),
+        ("on-danger", t.on_danger),
+    ]
 }
 
 #[cfg(test)]

@@ -6,7 +6,8 @@
 //! or without the fonts within 12 ms of each other. The bound is generous (the user's report of
 //! 1.6 s to the first window was never in this part): it catches a font registration or a
 //! fallback that starts to scan the system fonts or to shape everything again. The dialogs of
-//! the download (P5-5b) and the wait for the UAC dialog (P5-5c) are drawn too.
+//! the download (P5-5b) and the wait for the UAC dialog (P5-5c) are drawn too, and the settings
+//! page in each theme and in Windows' high contrast (P5-10c, TH3).
 
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -24,6 +25,7 @@ use super::{
     AppWindow, BadgeData, RowData, SectionData, ThemeChoice, model, set_strings, set_theme, theme,
 };
 use crate::text::Lang;
+use crate::theme::{Rgb, SysColors};
 use crate::vm::{Names, PackageState, consent, failed, progress, store, store_dialog, uac_wait};
 use rerun_core::catalog::model::Tier;
 use rerun_core::elevate::{PromptKind, PromptState};
@@ -75,7 +77,7 @@ fn the_window_draws_its_first_frames_fast() {
     slint::platform::set_platform(Box::new(Headless(window.clone()))).unwrap();
     let ui = AppWindow::new().unwrap();
     let created = start.elapsed();
-    set_theme(&ui, &theme::tokens(ThemeChoice::default()));
+    set_theme(&ui, &theme::tokens(ThemeChoice::default(), None));
     set_strings(&ui, Lang::En);
     window.set_size(slint::PhysicalSize::new(WIDTH, HEIGHT));
     ui.show().unwrap();
@@ -249,6 +251,32 @@ fn the_window_draws_its_first_frames_fast() {
     assert!(!files.show.is_empty() && !files.hide.is_empty());
     assert_eq!(files.lines.row_count(), 2, "the file and the archive");
     ui.set_dialog_open(false);
+    // TH3: the settings page in Nacht and in Windows' high contrast ("Night sky"): each draws
+    // another picture, and the theme choice is off while high contrast is on.
+    assert!(draw(), "the settings page again");
+    let mythen = picture();
+    assert_eq!(ui.get_theme_choice(), 0);
+    set_theme(&ui, &theme::tokens(ThemeChoice::Nacht, None));
+    ui.set_theme_choice(1);
+    assert!(draw(), "Nacht is drawn");
+    let nacht = picture();
+    assert_ne!(nacht, mythen, "Nacht looks other than Mythen");
+    let night_sky = SysColors {
+        window: Rgb(0, 0, 0),
+        window_text: Rgb(0xff, 0xff, 0xff),
+        highlight: Rgb(0x8e, 0xe3, 0xf0),
+        highlight_text: Rgb(0x26, 0x3b, 0x50),
+        gray_text: Rgb(0xa6, 0xa6, 0xa6),
+    };
+    set_theme(&ui, &theme::tokens(ThemeChoice::Nacht, Some(&night_sky)));
+    ui.set_high_contrast(true);
+    assert!(draw(), "high contrast is drawn");
+    let hc = picture();
+    assert_ne!(hc, nacht, "high contrast looks other than Nacht");
+    assert_ne!(hc, mythen, "high contrast looks other than Mythen");
+    set_theme(&ui, &theme::tokens(ThemeChoice::default(), None));
+    ui.set_high_contrast(false);
+    ui.set_theme_choice(0);
     ui.set_page(0);
     eprintln!(
         "headless start: window created {created:?}, first frame {first:?}, with 60 rows {with_rows:?}"
@@ -277,7 +305,11 @@ fn the_clear_button_takes_the_focus_back() {
 #[test]
 fn the_packages_buttons_take_the_focus_back() {
     use super::write::{CLEAR_OPENER, STORE_ALL_OPENER, STORE_ROW_OPENER};
-    let slint = include_str!("../../ui/app.slint");
+    let slint = [
+        include_str!("../../ui/app.slint"),
+        include_str!("../../ui/settings.slint"),
+    ]
+    .concat();
     let all = format!("take-focus: Modal.return-to == {STORE_ALL_OPENER};");
     assert_eq!(slint.matches(&all).count(), 1, "{all}");
     let row = format!("take-focus: Modal.return-to == {STORE_ROW_OPENER} - root.index;");

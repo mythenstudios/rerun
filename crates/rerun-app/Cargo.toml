@@ -50,12 +50,13 @@ serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# `ui::chrome` only (ADR 0026): the window subclass for the snap layouts and the Windows display
-# language.
+# `ui::chrome` only (ADR 0026): the window subclass for the snap layouts, the Windows display
+# language and high contrast (`Win32_UI_Accessibility`: `HIGHCONTRASTW`, P5-10c).
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Globalization",
   "Win32_Graphics_Gdi",
+  "Win32_UI_Accessibility",
   "Win32_UI_HiDpi",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",

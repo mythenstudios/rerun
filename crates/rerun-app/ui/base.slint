@@ -360,6 +360,10 @@ export global Theme {
     in property <color> faint;
     in property <color> on-strong;
     in property <color> danger;
+    in property <color> on-danger;
+    // The edge of buttons, cards, badges and the selected navigation entry: 0 in the themes,
+    // a hairline in Windows' high contrast (P5-10c).
+    in property <length> edge;
     in property <length> hair;
     in property <length> radius-s;
     in property <length> radius-m;
@@ -450,7 +454,9 @@ export global Str {
     in property <string> settings-packages-intro;
     in property <string> settings-look;
     in property <string> set-theme;
-    in property <string> theme-name;
+    in property <[string]> theme-names;
+    in property <string> set-theme-desc;
+    in property <string> theme-hc;
     in property <string> set-language;
     in property <string> language-name;
     in property <string> settings-data;
@@ -587,7 +593,7 @@ export component Badge inherits Rectangle {
     accessible-role: AccessibleRole.text;
     accessible-label: root.data.word;
     background: root.data.quiet ? Theme.raised2 : Theme.line-soft;
-    border-width: root.data.quiet ? Theme.hair : 0px;
+    border-width: root.data.quiet ? Theme.hair : Theme.edge;
     border-color: Theme.line-strong;
     border-radius: Theme.radius-s;
     HorizontalLayout {
@@ -632,6 +638,9 @@ export component Button inherits Pressable {
     Rectangle {
         border-radius: Theme.radius-m;
         background: !root.enabled ? Theme.raised2 : root.primary ? (root.hovered ? Theme.text : Theme.strong) : (root.hovered ? Theme.raised4 : Theme.raised3);
+        // High contrast: the edge carries the shape, twice as thick under the pointer.
+        border-width: root.hovered && root.enabled ? Theme.edge * 2 : Theme.edge;
+        border-color: root.enabled ? Theme.line : Theme.faint;
     }
 
     HorizontalLayout {
@@ -730,6 +739,8 @@ export component NoticeCard inherits Rectangle {
     in-out property <bool> open;
     background: Theme.raised;
     border-radius: Theme.radius-m;
+    border-width: Theme.edge;
+    border-color: Theme.line;
     accessible-role: groupbox;
     accessible-label: root.n.title;
     // The strong left rule of a callout.
@@ -782,5 +793,7 @@ export component NoticeCard inherits Rectangle {
 export component Card inherits Rectangle {
     background: Theme.raised;
     border-radius: Theme.radius-m;
+    border-width: Theme.edge;
+    border-color: Theme.line;
 }
 
