@@ -63,6 +63,9 @@ pub enum PackageKeep {
     UnknownUse(Vec<TxnId>),
     /// Its folder holds something Rerun does not remove.
     Store(StoreKeep),
+    /// It is only its archive, and a package that stays names that archive too: nothing of it
+    /// would go.
+    SharedArchive,
 }
 
 /// One package of the store.
@@ -80,6 +83,9 @@ pub struct StoredPackage {
     pub state: StoredState,
     /// Its files in the version folder.
     pub files: u32,
+    /// The paths of those files below the version folder, escaped, sorted (rule 5: what goes is
+    /// listed, not counted; empty for a package that stays because of what its folder holds).
+    pub paths: Vec<String>,
     /// Its files and archives, in bytes.
     pub bytes: u64,
     /// Its archives in the cache (their names, the SHA-256).
@@ -185,8 +191,8 @@ fn foreign_name(f: &store::Foreign) -> String {
 
 fn build(app: &AppDir<'_>) -> Result<Built, StoreGate> {
     let listing = store::list(app).map_err(StoreGate::Store)?;
-    let users = exec::package_users(app).map_err(StoreGate::Journal)?;
-    let status = exec::status_with(app, true).map_err(StoreGate::Journal)?;
+    // One reading of the journal: the users and their lines agree.
+    let (users, status) = exec::package_users_with_status(app).map_err(StoreGate::Journal)?;
     let catalog = match index_state(Some(app)) {
         IndexState::Current(c) => Some(c),
         IndexState::None | IndexState::Refused(_) => None,
@@ -269,6 +275,16 @@ fn build(app: &AppDir<'_>) -> Result<Built, StoreGate> {
             in_index: p.is_some(),
             state,
             files: v.files(),
+            paths: {
+                let mut v: Vec<String> = v
+                    .items
+                    .iter()
+                    .filter(|i| !i.dir)
+                    .map(|i| crate::escape::path(i.rel.as_str()).to_string())
+                    .collect();
+                v.sort();
+                v
+            },
             bytes: archives
                 .iter()
                 .map(|a| a.len)
@@ -301,6 +317,7 @@ fn build(app: &AppDir<'_>) -> Result<Built, StoreGate> {
             in_index: true,
             state: StoredState::ArchiveOnly,
             files: 0,
+            paths: Vec::new(),
             bytes: archives.iter().map(|a| a.len).fold(0, u64::saturating_add),
             archives: archives.iter().map(|a| a.name.clone()).collect(),
             used_by: used(id, &p.version),
@@ -313,7 +330,10 @@ fn build(app: &AppDir<'_>) -> Result<Built, StoreGate> {
         if c.temp {
             b.view.leftovers.0 += 1;
             b.view.leftovers.1 = b.view.leftovers.1.saturating_add(c.len);
-            b.leftovers.push(Shown::Archive(c.clone()));
+            b.leftovers.push(Shown::Archive {
+                entry: c.clone(),
+                owners: Vec::new(),
+            });
         } else if !b.archives.iter().flatten().any(|a| a == c) {
             b.view.loose_archives.push((c.name.clone(), c.len));
             b.loose.push(c.clone());
@@ -360,11 +380,30 @@ pub fn remove_preview(
         }
         Pick::Unused => (0..b.view.packages.len()).collect(),
     };
-    let going: Vec<usize> = asked
+    // Going: no reason to stay, and something of it goes (D2: a package that is only an archive
+    // another package that stays names would remove nothing). Dropping one can leave another
+    // with nothing, so this runs until it settles.
+    let mut going: Vec<usize> = asked
         .iter()
         .copied()
         .filter(|i| b.view.packages[*i].keep.is_none())
         .collect();
+    let goes = |a: &CacheEntry, going: &[usize]| {
+        b.archives
+            .iter()
+            .enumerate()
+            .all(|(k, of)| !of.contains(a) || going.contains(&k))
+    };
+    let mut shared = Vec::new();
+    loop {
+        let empty = going
+            .iter()
+            .copied()
+            .find(|i| b.dirs[*i].is_none() && !b.archives[*i].iter().any(|a| goes(a, &going)));
+        let Some(i) = empty else { break };
+        going.retain(|k| *k != i);
+        shared.push(i);
+    }
     let mut preview = RemovePreview {
         remove: Vec::new(),
         loose_archives: Vec::new(),
@@ -372,47 +411,65 @@ pub fn remove_preview(
         stays: asked
             .iter()
             .filter(|i| !going.contains(i))
-            .map(|i| b.view.packages[*i].clone())
+            .map(|i| {
+                let mut p = b.view.packages[*i].clone();
+                if shared.contains(i) {
+                    p.keep = Some(PackageKeep::SharedArchive);
+                }
+                p
+            })
             .collect(),
         bytes: 0,
     };
+    let owners = |a: &CacheEntry| -> Vec<(String, String)> {
+        b.archives
+            .iter()
+            .enumerate()
+            .filter(|(_, of)| of.contains(a))
+            .map(|(k, _)| {
+                let p = &b.view.packages[k];
+                (p.id.clone(), p.version.clone())
+            })
+            .collect()
+    };
     let mut items = Vec::new();
+    let mut taken: Vec<CacheEntry> = Vec::new();
     for i in &going {
         let mut p = b.view.packages[*i].clone();
         let dir = b.dirs[*i].clone();
         // An archive another package names goes only when that one goes too.
         let archives: Vec<CacheEntry> = b.archives[*i]
             .iter()
-            .filter(|a| {
-                b.archives
-                    .iter()
-                    .enumerate()
-                    .all(|(k, of)| k == *i || !of.contains(a) || going.contains(&k))
-            })
+            .filter(|a| goes(a, &going))
             .cloned()
             .collect();
         p.bytes = dir.as_ref().map_or(0, store::VersionDir::bytes);
+        preview.bytes = preview.bytes.saturating_add(p.bytes);
         if let Some(d) = dir {
             items.push(Shown::Package(d));
         }
         for a in &archives {
-            if !items.contains(&Shown::Archive(a.clone())) {
+            if !taken.contains(a) {
                 preview.bytes = preview.bytes.saturating_add(a.len);
-                items.push(Shown::Archive(a.clone()));
+                items.push(Shown::Archive {
+                    entry: a.clone(),
+                    owners: owners(a),
+                });
+                taken.push(a.clone());
             }
             p.bytes = p.bytes.saturating_add(a.len);
         }
         p.archives = archives.iter().map(|a| a.name.clone()).collect();
-        preview.bytes = preview
-            .bytes
-            .saturating_add(b.dirs[*i].as_ref().map_or(0, store::VersionDir::bytes));
         preview.remove.push(p);
     }
     if *pick == Pick::Unused {
         for a in &b.loose {
             preview.loose_archives.push((a.name.clone(), a.len));
             preview.bytes = preview.bytes.saturating_add(a.len);
-            items.push(Shown::Archive(a.clone()));
+            items.push(Shown::Archive {
+                entry: a.clone(),
+                owners: Vec::new(),
+            });
         }
         preview.leftovers = b.view.leftovers;
         preview.bytes = preview.bytes.saturating_add(b.view.leftovers.1);

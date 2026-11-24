@@ -1,4 +1,4 @@
-//! `exec::remove_packages` and `exec::package_users` against the fake (P5-8b-1):
+//! `exec::remove_packages` and `exec::package_users_with_status` against the fake (P5-8b-1):
 //! - PS2 who uses a package: every live state (open, applied, a cleanup pending, damaged with a
 //!   head, a `Hold`) keeps it; closed, empty and forgotten ones do not; an unreadable one keeps
 //!   every package (E3 a) but not an archive without a package.
@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use super::cleanup_tests::open_y;
 use super::rebind_tests::{GAME_E, LIB_E, REF, applied as rb_applied, content_diff, move_lib};
 use super::tests::{Env, N, NEW, OLD, X, base, finish, game, same, t1_spec};
-use super::{ExecError, Refusal, package_users, remove_packages};
+use super::{ExecError, Refusal, package_users_with_status, remove_packages};
 use crate::catalog;
 use crate::catalog::key::test_key;
 use crate::journal::{Closing, InstanceTag, Journal, TxnId, TxnState};
@@ -40,8 +40,9 @@ fn rm(env: &Env, shown: &[Shown]) -> Result<Removed, ExecError> {
 }
 
 fn users_of_pack(env: &Env) -> Vec<TxnId> {
-    package_users(&app(&env.sys))
+    package_users_with_status(&app(&env.sys))
         .unwrap()
+        .0
         .of("fix-pack", "1.0.2")
 }
 
@@ -163,7 +164,7 @@ fn ps2_an_unreadable_transaction_keeps_every_package_but_not_a_loose_archive() {
     let loose = format!(r"{CACHE}\{}", "ab".repeat(32));
     fx.put_file(Path::new(&loose), b"old archive").unwrap();
     assert_eq!(env.state(&t), None, "unreadable");
-    let u = package_users(&app(&env.sys)).unwrap();
+    let u = package_users_with_status(&app(&env.sys)).unwrap().0;
     assert_eq!(u.unreadable, [t]);
     let shown = shown_now(&env);
     let files = ls(&env.sys, VERSION);
@@ -174,11 +175,81 @@ fn ps2_an_unreadable_transaction_keeps_every_package_but_not_a_loose_archive() {
     assert_eq!(ls(&env.sys, VERSION), files);
     let archives: Vec<Shown> = shown
         .into_iter()
-        .filter(|s| matches!(s, Shown::Archive(_)))
+        .filter(|s| matches!(s, Shown::Archive { .. }))
         .collect();
     let r = rm(&env, &archives).unwrap();
     assert_eq!(r.archives, 1);
     assert_eq!(ls(&env.sys, CACHE), ["lock"]);
+}
+
+/// Review D4: a folder that reads but whose head does not decode keeps every package; a
+/// transaction on another version of the same package does not keep this one.
+#[test]
+fn ps2_an_undecodable_head_keeps_everything_and_another_version_keeps_only_itself() {
+    let env = Env::new(finish(base()));
+    let t = env.applied(&env.plan(&t1_spec()));
+    let head = format!(r"{}\head.json", env.txn_dir(&t));
+    let fx = env.sys.fake_fs();
+    fx.remove_abs(Path::new(&head)).unwrap();
+    fx.put_file(Path::new(&head), b"not a plan").unwrap();
+    assert!(env.state(&t).is_some(), "the folder reads");
+    let u = package_users_with_status(&app(&env.sys)).unwrap().0;
+    assert_eq!(u.unreadable, [t]);
+    assert!(u.by.is_empty());
+    assert!(matches!(
+        rm(&env, &shown_now(&env)),
+        Err(ExecError::Refused(Refusal::Blocked { txn })) if txn == t
+    ));
+
+    // `fix-pack` 0.9 applied: 1.0.2 stays free, 0.9 is kept.
+    let env = Env::new(finish(
+        base().file(format!(r"{PACKAGES}\fix-pack\0.9\new.dll"), N.to_vec()),
+    ));
+    let mut old = spec(vec![entry("new.dll", "new.dll", N)]);
+    old.version = "0.9".to_owned();
+    let t = env.applied(&env.plan(&old));
+    let u = package_users_with_status(&app(&env.sys)).unwrap().0;
+    assert_eq!(u.of("fix-pack", "0.9"), [t]);
+    assert!(u.of("fix-pack", "1.0.2").is_empty());
+    let shown = shown_now(&env);
+    let (newer, older): (Vec<Shown>, Vec<Shown>) = shown
+        .into_iter()
+        .partition(|s| matches!(s, Shown::Package(v) if v.version == "1.0.2"));
+    assert!(matches!(
+        rm(&env, &older),
+        Err(ExecError::Refused(Refusal::PackageInUse { txn, .. })) if txn == t
+    ));
+    let r = rm(&env, &newer).unwrap();
+    assert_eq!(r.packages, [("fix-pack".to_owned(), "1.0.2".to_owned())]);
+}
+
+/// Security review S3: an archive is checked against the users of the packages it belongs to (a
+/// package that was only its archive may have been unpacked and applied since the preview).
+#[test]
+fn ps5_an_archive_of_a_package_applied_after_the_preview_is_refused() {
+    let env = Env::new(finish(base()));
+    let archive = format!(r"{CACHE}\{}", "ab".repeat(32));
+    env.sys
+        .fake_fs()
+        .put_file(Path::new(&archive), b"the archive")
+        .unwrap();
+    let shown: Vec<Shown> = shown_now(&env)
+        .into_iter()
+        .filter_map(|s| match s {
+            Shown::Archive { entry, .. } => Some(Shown::Archive {
+                entry,
+                owners: vec![("fix-pack".to_owned(), "1.0.2".to_owned())],
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown.len(), 1);
+    let t = env.applied(&env.plan(&t1_spec()));
+    assert!(matches!(
+        rm(&env, &shown),
+        Err(ExecError::Refused(Refusal::PackageInUse { txn, .. })) if txn == t
+    ));
+    assert_eq!(ls(&env.sys, CACHE).len(), 1, "the archive stays");
 }
 
 #[test]
@@ -355,7 +426,7 @@ mod index {
         assert_eq!(
             outside_store(&app0, &snap(&env.sys, APP)),
             Vec::<String>::new(),
-            "journal, plans, index and the lock files unchanged"
+            "journal, plans and index unchanged (the store's lock files are checked above)"
         );
         same(&game0, &env.snap());
         // The planner refuses until the package is fetched again.

@@ -7,7 +7,9 @@
 //! - **[`list`] reads only** (no lock, nothing created): a missing `AppDir` sub folder lists
 //!   nothing. Every folder is listed with a bound ([`MAX_ENTRIES`] names, as the sweeps of the
 //!   download and the extraction), iteratively and at most [`MAX_DEPTH`] levels below a version
-//!   folder; nothing is hashed, only metadata is read.
+//!   folder, and the whole store with one budget ([`MAX_VERSIONS`] version folders,
+//!   [`MAX_STORE_ENTRIES`] names read; the rest is foreign, `TooMany`); a walk stops at the first
+//!   reason to keep its package whole. Nothing is hashed, only metadata is read.
 //! - **What is Rerun's** (user decision E1 a): every plain file and plain folder below a valid
 //!   `<id>\<version>` (an ID of the index's form, a version of its form). A version folder that
 //!   holds a reparse point (also a link itself), a file with more than one link, an entry with the
@@ -25,8 +27,10 @@
 //!   that listing (`DirWrite::remove_file`, `DirWrite::remove_dir`), never by a hash, so no
 //!   large file is read: files deepest first, then folders deepest first, the version folder, its
 //!   `<id>` folder if it is empty then, then the archives and leftovers. A deletion that fails (a
-//!   file a scanner holds: `Busy`) stops only that package; the rest goes on (best effort). The
-//!   two folders are flushed at the end (best effort).
+//!   file a scanner holds: `Busy`; a swapped entry: `Changed` or `Reparse`) stops only that
+//!   package, and its archives stay with it; the rest goes on (best effort). The two folders are
+//!   flushed at the end (best effort). The only thing a removal may create is a missing lock file
+//!   (`lock` creates it), also when it ends with `Changed`.
 //!
 //! Nothing here is journaled (ADR 0025 part 2): the planner and `exec` hash every package file
 //! again before they use it, so a package removed half way is only incomplete (the planner refuses
@@ -43,6 +47,13 @@ use crate::sys::{Dir, DirWrite, SysError, SysErrorKind, System};
 pub const MAX_ENTRIES: usize = 4096;
 /// Most folder levels below a version folder.
 pub const MAX_DEPTH: usize = 16;
+/// Most version folders of the whole store; the rest is listed as one foreign entry
+/// ([`StoreKeep::TooMany`]).
+pub const MAX_VERSIONS: usize = 4096;
+/// Most names one listing of the store reads in all (every folder of `packages` and `cache`
+/// together); past it the rest is one foreign entry ([`StoreKeep::TooMany`]), so a store
+/// planted full of names costs a bounded amount of work.
+pub const MAX_STORE_ENTRIES: usize = 65_536;
 
 /// The lock file of `packages` (`pkg::extract`).
 const PACKAGES_LOCK: &str = super::extract::LOCK;
@@ -60,12 +71,17 @@ pub enum StoreKeep {
     Linked,
     /// The read-only, hidden or system attribute, or an entry the user cannot open.
     Attributes,
-    /// More than [`MAX_ENTRIES`] entries, or deeper than [`MAX_DEPTH`].
+    /// More than [`MAX_ENTRIES`] entries, deeper than [`MAX_DEPTH`], or past the bounds of the
+    /// whole store ([`MAX_VERSIONS`], [`MAX_STORE_ENTRIES`]).
     TooMany,
     /// A name that is not of Rerun's form there.
     BadName,
-    /// In use, or changed while it was deleted; try again later.
+    /// In use (another program holds it without share-delete); try again later.
     Busy,
+    /// It changed while it was removed (another file ID, a new entry): show the store again.
+    Changed,
+    /// The file system does not allow the removal (a volume without POSIX delete, FAT/exFAT).
+    Unsupported,
 }
 
 /// A sub folder of `AppDir` that holds the store.
@@ -104,8 +120,6 @@ pub(crate) struct VersionDir {
     /// Every plain entry below it (an entry that makes it stay is not followed or listed; the
     /// walk stops at too many).
     pub(crate) items: Vec<Item>,
-    /// How many of its files have a Rerun temp name (an interrupted extraction).
-    pub(crate) temps: usize,
     /// Why it stays whole (`None`: it is Rerun's and may be removed).
     pub(crate) keep: Option<StoreKeep>,
 }
@@ -181,8 +195,15 @@ pub(crate) struct Listing {
 pub(crate) enum Shown {
     /// A version folder with everything below it.
     Package(VersionDir),
-    /// An archive or a temp file of `cache`.
-    Archive(CacheEntry),
+    /// An archive or a temp file of `cache`, with the packages (ID, version) it belongs to
+    /// (empty for an archive without a package and a temp file): `exec::remove_packages` checks
+    /// them against the users like a version folder, and it stays when one of them stopped.
+    Archive {
+        /// The entry.
+        entry: CacheEntry,
+        /// The packages it belongs to.
+        owners: Vec<(String, String)>,
+    },
     /// An empty `<id>` folder.
     EmptyId(EmptyId),
 }
@@ -190,7 +211,8 @@ pub(crate) enum Shown {
 /// What [`remove`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Removed {
-    /// The packages removed (ID, version).
+    /// The packages removed (ID, version): a version folder removed, or a package that was only
+    /// its archive. A front end takes the counts of what goes from the preview.
     pub packages: Vec<(String, String)>,
     /// The archives removed.
     pub archives: usize,
@@ -265,6 +287,10 @@ fn keep_of(e: &SysError) -> StoreKeep {
         SysErrorKind::AccessDenied => StoreKeep::Attributes,
         SysErrorKind::InvalidPath => StoreKeep::BadName,
         SysErrorKind::TooLarge => StoreKeep::TooMany,
+        // Another file ID, or a new entry in a folder: it is not what was listed.
+        SysErrorKind::Mismatch | SysErrorKind::NotEmpty => StoreKeep::Changed,
+        // Permanent: the volume cannot do it (FAT, exFAT, a case-sensitive folder).
+        SysErrorKind::Unsupported => StoreKeep::Unsupported,
         _ => StoreKeep::Busy,
     }
 }
@@ -283,8 +309,40 @@ fn foreign(out: &mut Listing, sub: StoreSub, name: &str, keep: StoreKeep) {
     });
 }
 
-/// The entries below the version folder `vrel` of `packages`, iteratively.
-fn walk(packages: &dyn Dir, vrel: &RelPath, v: &mut VersionDir) {
+/// What one listing of the store may still read (security review S1): names in all, version
+/// folders in all.
+struct Budget {
+    entries: usize,
+    versions: usize,
+}
+
+impl Budget {
+    fn new() -> Self {
+        Self {
+            entries: MAX_STORE_ENTRIES,
+            versions: MAX_VERSIONS,
+        }
+    }
+
+    /// Takes `n` names; `false` (and nothing taken) when they do not fit any more.
+    fn take(&mut self, n: usize) -> bool {
+        match self.entries.checked_sub(n) {
+            Some(rest) => {
+                self.entries = rest;
+                true
+            }
+            None => {
+                self.entries = 0;
+                false
+            }
+        }
+    }
+}
+
+/// The entries below the version folder `vrel` of `packages`, iteratively. Stops at the first
+/// reason to keep it whole (the package stays; nothing below is needed) and when the budget of
+/// the store is spent.
+fn walk(packages: &dyn Dir, vrel: &RelPath, v: &mut VersionDir, budget: &mut Budget) {
     let mut stack: Vec<(Option<RelPath>, usize)> = vec![(None, 0)];
     while let Some((sub, depth)) = stack.pop() {
         let at = match &sub {
@@ -292,35 +350,36 @@ fn walk(packages: &dyn Dir, vrel: &RelPath, v: &mut VersionDir) {
             Some(s) => RelPath::parse(&format!("{}\\{}", vrel.as_str(), s.as_str())),
         };
         let Ok(at) = at else {
-            v.keep.get_or_insert(StoreKeep::BadName);
-            continue;
+            v.keep = Some(StoreKeep::BadName);
+            return;
         };
         let entries = match packages.read_dir_limited(Some(&at), MAX_ENTRIES) {
             Ok(e) => e,
             // Gone since its parent was listed: nothing to keep or remove.
             Err(e) if e.kind == SysErrorKind::NotFound => continue,
             Err(e) => {
-                v.keep.get_or_insert(keep_of(&e));
-                continue;
+                v.keep = Some(keep_of(&e));
+                return;
             }
         };
+        if !budget.take(entries.len()) {
+            v.keep = Some(StoreKeep::TooMany);
+            return;
+        }
         for e in entries {
             let rel = match &sub {
                 None => RelPath::from_segment(&e.name),
                 Some(s) => s.child(&e.name),
             };
             let Ok(rel) = rel else {
-                v.keep.get_or_insert(StoreKeep::BadName);
-                continue;
+                v.keep = Some(StoreKeep::BadName);
+                return;
             };
             if let Some(k) = entry_keep(&e.meta) {
-                v.keep.get_or_insert(k);
-                continue;
+                v.keep = Some(k);
+                return;
             }
             let dir = e.meta.kind == EntryKind::Dir;
-            if !dir && TmpName::parse(&e.name).is_some() {
-                v.temps += 1;
-            }
             v.items.push(Item {
                 rel: rel.clone(),
                 file_id: e.meta.file_id,
@@ -343,12 +402,15 @@ fn walk(packages: &dyn Dir, vrel: &RelPath, v: &mut VersionDir) {
 }
 
 /// The `<id>\<version>` folders of `packages`.
-fn list_packages(packages: &dyn Dir, out: &mut Listing) {
+fn list_packages(packages: &dyn Dir, out: &mut Listing, budget: &mut Budget) {
     let sub = StoreSub::Packages;
     let entries = match packages.read_dir_limited(None, MAX_ENTRIES) {
         Ok(e) => e,
         Err(e) => return foreign(out, sub, "", keep_of(&e)),
     };
+    if !budget.take(entries.len()) {
+        return foreign(out, sub, "", StoreKeep::TooMany);
+    }
     for e in entries {
         if e.name.eq_ignore_ascii_case(PACKAGES_LOCK) {
             continue;
@@ -368,6 +430,10 @@ fn list_packages(packages: &dyn Dir, out: &mut Listing) {
             foreign(out, sub, &e.name, StoreKeep::BadName);
             continue;
         }
+        if budget.versions == 0 {
+            foreign(out, sub, &e.name, StoreKeep::TooMany);
+            continue;
+        }
         let versions = match packages.read_dir_limited(Some(&id_rel), MAX_ENTRIES) {
             Ok(v) => v,
             Err(x) if x.kind == SysErrorKind::NotFound => continue,
@@ -376,6 +442,10 @@ fn list_packages(packages: &dyn Dir, out: &mut Listing) {
                 continue;
             }
         };
+        if !budget.take(versions.len()) {
+            foreign(out, sub, &e.name, StoreKeep::TooMany);
+            continue;
+        }
         if versions.is_empty() {
             out.empty_ids.push(EmptyId {
                 id: e.name.clone(),
@@ -400,28 +470,35 @@ fn list_packages(packages: &dyn Dir, out: &mut Listing) {
                 foreign(out, sub, &shown, StoreKeep::BadName);
                 continue;
             }
+            if budget.versions == 0 {
+                foreign(out, sub, &shown, StoreKeep::TooMany);
+                continue;
+            }
+            budget.versions -= 1;
             let mut dir = VersionDir {
                 id: e.name.clone(),
                 version: v.name.clone(),
                 id_dir: e.meta.file_id,
                 dir: v.meta.file_id,
                 items: Vec::new(),
-                temps: 0,
                 keep: None,
             };
-            walk(packages, &vrel, &mut dir);
+            walk(packages, &vrel, &mut dir, budget);
             out.packages.push(dir);
         }
     }
 }
 
 /// The archives and temp files of `cache`.
-fn list_cache(cache: &dyn Dir, out: &mut Listing) {
+fn list_cache(cache: &dyn Dir, out: &mut Listing, budget: &mut Budget) {
     let sub = StoreSub::Cache;
     let entries = match cache.read_dir_limited(None, MAX_ENTRIES) {
         Ok(e) => e,
         Err(e) => return foreign(out, sub, "", keep_of(&e)),
     };
+    if !budget.take(entries.len()) {
+        return foreign(out, sub, "", StoreKeep::TooMany);
+    }
     for e in entries {
         if e.name.eq_ignore_ascii_case(CACHE_LOCK) {
             continue;
@@ -448,14 +525,16 @@ fn list_cache(cache: &dyn Dir, out: &mut Listing) {
     }
 }
 
-/// The listing of the two folders as these handles see them.
+/// The listing of the two folders as these handles see them, within one [`Budget`].
 fn listing(packages: Option<&dyn Dir>, cache: Option<&dyn Dir>) -> Listing {
     let mut out = Listing::default();
-    if let Some(p) = packages {
-        list_packages(p, &mut out);
-    }
+    let mut budget = Budget::new();
+    // The cache first: a full `packages` never hides an archive or a leftover.
     if let Some(c) = cache {
-        list_cache(c, &mut out);
+        list_cache(c, &mut out, &mut budget);
+    }
+    if let Some(p) = packages {
+        list_packages(p, &mut out, &mut budget);
     }
     out
 }
@@ -551,7 +630,7 @@ fn compare(
                         && n.items.iter().all(|i| v.items.contains(i))
                 }
             },
-            Shown::Archive(c) => match now
+            Shown::Archive { entry: c, .. } => match now
                 .cache
                 .iter()
                 .find(|n| n.name.eq_ignore_ascii_case(&c.name))
@@ -706,11 +785,22 @@ pub(crate) fn remove(
     }
     for s in shown {
         let r = match s {
-            Shown::Archive(c) => {
+            Shown::Archive { entry: c, owners } => {
                 let Some(dir) = cache.as_deref() else {
                     continue;
                 };
                 if !now.cache.iter().any(|n| n == c) {
+                    continue;
+                }
+                // One unit (E2 a, security review S3): an archive stays with its package when that
+                // stopped; the package's line in `stopped` covers both.
+                let owner_stopped = owners.iter().any(|(id, version)| {
+                    let name = format!("{id}@{version}");
+                    out.stopped
+                        .iter()
+                        .any(|(s, _)| s.eq_ignore_ascii_case(&name))
+                });
+                if owner_stopped {
                     continue;
                 }
                 let r = seg_of(&c.name).and_then(|n| gone_ok(dir.remove_file(&n, c.file_id)));
@@ -720,6 +810,15 @@ pub(crate) fn remove(
                         out.leftovers += 1;
                     } else {
                         out.archives += 1;
+                    }
+                    // A package that was only its archive is removed now too.
+                    for o in owners {
+                        let known = out.packages.iter().any(|(i, v)| {
+                            i.eq_ignore_ascii_case(&o.0) && v.eq_ignore_ascii_case(&o.1)
+                        });
+                        if !known {
+                            out.packages.push(o.clone());
+                        }
                     }
                 }
                 r.map_err(|e| (c.name.clone(), e))

@@ -359,7 +359,8 @@ fn the_packages_folder_only_on_the_package_side() {
     let mut files = Vec::new();
     rust_files(&src, &mut files);
     assert!(files.len() > 50, "{}", files.len());
-    let mut users = Vec::new();
+    // Per product file: the lines naming `AppSub::Packages` and those calling `open_package(`.
+    let mut users: Vec<(String, usize, usize)> = Vec::new();
     for f in &files {
         let rel = f
             .strip_prefix(&src)
@@ -369,26 +370,62 @@ fn the_packages_folder_only_on_the_package_side() {
         if is_test_source(&rel) {
             continue;
         }
-        if names_packages(&std::fs::read_to_string(f).unwrap_or_default()) > 0 {
-            users.push(rel);
+        let text = std::fs::read_to_string(f).unwrap_or_default();
+        let (packages, opens) = (names_packages(&text), calls_open_package(&text));
+        if packages + opens > 0 {
+            users.push((rel, packages, opens));
         }
     }
-    let bad: Vec<&String> = users
+    let bad: Vec<&(String, usize, usize)> = users
         .iter()
-        .filter(|r| !PACKAGES_ALLOWED.iter().any(|a| r.starts_with(a)))
+        .filter(|(r, _, _)| !PACKAGES_ALLOWED.iter().any(|a| r.starts_with(a)))
         .collect();
     assert!(bad.is_empty(), "{bad:#?}");
-    // The rule bites: today's readers are found, comments are skipped.
-    for want in [
-        "prim/file_install.rs",
-        "exec/file.rs",
-        "exec/roots.rs",
-        "pkg/extract.rs",
-    ] {
-        assert!(users.iter().any(|u| u == want), "{want}: {users:?}");
-    }
+    // Review D5: in `exec` the folder is opened at exactly one place per file (the checks before
+    // an apply, the apply's copy), and a package folder is opened (`open_package`) only by the
+    // planner and those two places; a new place in `exec/file.rs` (which also holds the revert)
+    // must be reviewed against the rule.
+    let of = |want: &str| {
+        users
+            .iter()
+            .find(|(r, _, _)| r == want)
+            .map(|(_, p, o)| (*p, *o))
+    };
+    assert_eq!(of("exec/file.rs"), Some((1, 1)), "{users:?}");
+    assert_eq!(of("exec/roots.rs"), Some((1, 1)), "{users:?}");
+    assert!(
+        of("prim/file_install.rs").is_some_and(|(p, o)| p >= 1 && o >= 1),
+        "{users:?}"
+    );
+    let mut openers: Vec<&str> = users
+        .iter()
+        .filter(|(_, _, o)| *o > 0)
+        .map(|(r, _, _)| r.as_str())
+        .collect();
+    openers.sort_unstable();
+    assert_eq!(
+        openers,
+        ["exec/file.rs", "exec/roots.rs", "prim/file_install.rs"],
+        "{users:?}"
+    );
+    assert!(of("pkg/extract.rs").is_some(), "{users:?}");
+    // The rule bites, and skips comments.
     assert_eq!(names_packages("let p = app.sub(AppSub::Packages)?;"), 1);
     assert_eq!(names_packages("// AppSub::Packages\nlet x = 1;"), 0);
+    assert_eq!(calls_open_package("let d = open_package(pk, id, v)?;"), 1);
+    assert_eq!(
+        calls_open_package("// open_package(x)\nfn open_package("),
+        0
+    );
     assert!(is_test_source("exec/packages_tests.rs") && is_test_source("sys/win/tests/app.rs"));
     assert!(!is_test_source("exec/revert.rs"));
+}
+
+/// The lines of `src` (comments and the definition skipped) that call `open_package(`.
+fn calls_open_package(src: &str) -> usize {
+    src.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .map(|l| l.split("//").next().unwrap_or(l))
+        .filter(|code| code.contains("open_package(") && !code.contains("fn open_package("))
+        .count()
 }

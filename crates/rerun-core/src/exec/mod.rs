@@ -108,7 +108,7 @@ pub mod launch_result {
 }
 pub use helper::{HelperFailure, helper_ready, reason_words};
 pub(crate) use launch::{launch_results_hashed, purge_results};
-pub(crate) use packages::{package_users, remove_packages};
+pub(crate) use packages::{package_users_with_status, remove_packages};
 pub use purge::{Keep, PurgeReport};
 pub(crate) use purge::{PurgeClass, PurgeMode, purge_classes, purge_seen};
 pub(crate) use rebind::revert_rebound_seen;
@@ -323,7 +323,8 @@ pub enum Refusal {
         txn: TxnId,
     },
     /// Rerun's packages folder is not what a removal's preview showed (P5-8b): nothing was
-    /// removed; show the preview again.
+    /// removed (a missing lock file of the store may have been created); show the preview
+    /// again.
     #[error("Rerun's packages folder changed since its preview; nothing was removed; look again")]
     StoreChanged,
     /// Another Rerun downloads or unpacks a package (`packages\.lock` or `cache\lock` is held).

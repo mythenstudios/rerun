@@ -11,7 +11,7 @@ use super::{
 use crate::exec::tests::{base, finish};
 use crate::policy::root::{AppDir, AppSub, Create};
 use crate::sys::contract::{Access, Share};
-use crate::sys::fake::{FakeSystem, Fault, Prim};
+use crate::sys::fake::{FakeFs, FakeSystem, Fault, Prim};
 use crate::sys::fs::{Attrs, tag};
 use crate::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
 use crate::sys::{Fs, System};
@@ -62,7 +62,10 @@ pub(crate) fn all_of(l: &Listing) -> Vec<Shown> {
         .cloned()
         .map(Shown::Package)
         .collect();
-    v.extend(l.cache.iter().cloned().map(Shown::Archive));
+    v.extend(l.cache.iter().cloned().map(|entry| Shown::Archive {
+        entry,
+        owners: Vec::new(),
+    }));
     v.extend(l.empty_ids.iter().cloned().map(Shown::EmptyId));
     v
 }
@@ -149,7 +152,6 @@ fn ps1_the_listing_reads_only_and_names_every_part() {
     rels.sort_unstable();
     assert_eq!(rels, ["d3d9.dll", "mods", r"mods\x.dll", "new.dll"]);
     assert_eq!(p.bytes(), 23 + 20 + 22);
-    assert_eq!(p.temps, 0);
     let names: Vec<(&str, bool, u64)> = l
         .cache
         .iter()
@@ -489,7 +491,8 @@ fn ps8_a_held_lock_is_busy_and_a_file_in_use_stops_only_its_package() {
     let fx = sys.fake_fs();
     fx.put_file(Path::new(&at(PACKAGES, r"other-pack\1.0\a.dll")), b"a")
         .unwrap();
-    let shown = all_of(&listed(&sys));
+    // The archive belongs to `fix-pack` (as `flow::store` shows it).
+    let shown = owned_by_fix(all_of(&listed(&sys)));
     let held = fx
         .hold_open_as(
             4242,
@@ -501,12 +504,177 @@ fn ps8_a_held_lock_is_busy_and_a_file_in_use_stops_only_its_package() {
     let r = rm(&sys, &shown).unwrap();
     assert_eq!(r.packages, [("other-pack".to_owned(), "1.0".to_owned())]);
     assert_eq!(r.stopped, [("fix-pack@1.0.2".to_owned(), StoreKeep::Busy)]);
-    assert_eq!(r.archives, 1);
+    assert_eq!(r.archives, 0, "the archive stays with its package (S3)");
+    assert!(ls(&sys, CACHE).contains(&ARCHIVE.to_owned()));
     drop(held);
     let l = listed(&sys);
     let r = rm(&sys, &all_of(&l)).unwrap();
     assert_eq!(r.packages.len(), 1, "{r:?}");
     assert_eq!(ls(&sys, PACKAGES), [".lock"]);
+}
+
+/// `shown` with [`ARCHIVE`] belonging to `fix-pack` 1.0.2.
+fn owned_by_fix(shown: Vec<Shown>) -> Vec<Shown> {
+    shown
+        .into_iter()
+        .map(|s| match s {
+            Shown::Archive { entry, .. } if entry.name == ARCHIVE => Shown::Archive {
+                entry,
+                owners: vec![("fix-pack".to_owned(), "1.0.2".to_owned())],
+            },
+            s => s,
+        })
+        .collect()
+}
+
+/// Security review S2: what is swapped between the comparison and the first deletion is never
+/// followed or deleted; only that package stops (with an honest reason), the others still go.
+#[test]
+fn a_swap_after_the_comparison_stops_only_its_package() {
+    type Swap = fn(&FakeFs);
+    let swaps: [(&str, Swap, StoreKeep); 3] = [
+        (
+            "a file swapped for a symlink to a file outside",
+            |fx| {
+                let p = at(VERSION, "d3d9.dll");
+                fx.remove_abs(Path::new(&p)).unwrap();
+                fx.put_link(Path::new(&p), tag::SYMLINK, r"D:\Elsewhere\d3d9.dll")
+                    .unwrap();
+            },
+            StoreKeep::Reparse,
+        ),
+        (
+            "a file with another file ID",
+            |fx| {
+                let p = at(VERSION, "new.dll");
+                fx.remove_abs(Path::new(&p)).unwrap();
+                fx.put_file(Path::new(&p), b"another").unwrap();
+            },
+            StoreKeep::Changed,
+        ),
+        (
+            "a folder swapped for a junction to a folder with the same names",
+            |fx| {
+                fx.swap_with_junction(Path::new(&at(VERSION, "mods")), r"D:\Elsewhere")
+                    .unwrap();
+            },
+            StoreKeep::Reparse,
+        ),
+    ];
+    for (what, swap, why) in swaps {
+        let sys = world();
+        let fx = sys.fake_fs();
+        fx.put_file(Path::new(r"D:\Elsewhere\x.dll"), b"keep x")
+            .unwrap();
+        fx.put_file(Path::new(r"D:\Elsewhere\d3d9.dll"), b"keep d3d9")
+            .unwrap();
+        fx.put_file(Path::new(&at(PACKAGES, r"zz-pack\1.0\a.dll")), b"a")
+            .unwrap();
+        let elsewhere = snap(&sys, r"D:\Elsewhere");
+        let shown = owned_by_fix(all_of(&listed(&sys)));
+        // Right before the first deletion: after the locks, the listing and the comparison.
+        let once = std::sync::atomic::AtomicBool::new(false);
+        fx.on_step(move |fx, ev| {
+            if ev.call == Some(Prim::OpenFileDelete)
+                && !once.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                swap(fx);
+            }
+        });
+        let r = rm(&sys, &shown);
+        fx.clear_on_step();
+        let r = r.unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(
+            r.stopped,
+            [("fix-pack@1.0.2".to_owned(), why)],
+            "{what}: {r:?}"
+        );
+        assert_eq!(
+            r.packages,
+            [("zz-pack".to_owned(), "1.0".to_owned())],
+            "{what}"
+        );
+        assert!(
+            elsewhere == snap(&sys, r"D:\Elsewhere"),
+            "{what}: outside unchanged"
+        );
+        assert!(ls(&sys, CACHE).contains(&ARCHIVE.to_owned()), "{what}");
+    }
+}
+
+/// Security review S6: a permanent failure has its own reason.
+#[test]
+fn every_failure_has_an_honest_reason() {
+    use crate::sys::{SysError, SysErrorKind};
+    let k = |kind| super::keep_of(&SysError::new(kind, "x"));
+    assert_eq!(k(SysErrorKind::Busy), StoreKeep::Busy);
+    assert_eq!(k(SysErrorKind::Mismatch), StoreKeep::Changed);
+    assert_eq!(k(SysErrorKind::NotEmpty), StoreKeep::Changed);
+    assert_eq!(k(SysErrorKind::Unsupported), StoreKeep::Unsupported);
+    assert_eq!(k(SysErrorKind::ReparsePoint), StoreKeep::Reparse);
+    assert_eq!(k(SysErrorKind::Linked), StoreKeep::Linked);
+}
+
+/// Security review S1: the whole store is bounded. Past [`super::MAX_VERSIONS`] version folders
+/// the rest is foreign (`TooMany`) and never removed; a walk stops at the first reason to keep
+/// (nothing below it is listed).
+#[test]
+fn the_listing_of_the_whole_store_is_bounded() {
+    let sys = world();
+    let fx = sys.fake_fs();
+    for i in 0..super::MAX_VERSIONS {
+        fx.put_file(
+            Path::new(&at(PACKAGES, &format!(r"many-pack\{i}\a.bin"))),
+            b"",
+        )
+        .unwrap();
+    }
+    let l = listed(&sys);
+    assert_eq!(l.packages.len(), super::MAX_VERSIONS);
+    assert!(
+        l.foreign
+            .iter()
+            .any(|f| f.keep == StoreKeep::TooMany && f.sub == StoreSub::Packages),
+        "{:?}",
+        l.foreign
+    );
+    let r = rm(&sys, &all_of(&l)).unwrap();
+    assert_eq!(r.packages.len(), super::MAX_VERSIONS);
+    assert_eq!(
+        ls(&sys, PACKAGES).len(),
+        2,
+        "the lock file and what was past the bound"
+    );
+
+    // The budget of names: past it a version folder stays (`TooMany`).
+    let sys = world();
+    let fx = sys.fake_fs();
+    for p in 0..17 {
+        for i in 0..4000 {
+            fx.put_file(
+                Path::new(&at(PACKAGES, &format!(r"big-pack-{p}\1.0\{i}.bin"))),
+                b"",
+            )
+            .unwrap();
+        }
+    }
+    let l = listed(&sys);
+    assert!(
+        l.packages
+            .iter()
+            .any(|p| p.keep == Some(StoreKeep::TooMany)),
+        "the store-wide budget bites"
+    );
+
+    // The walk stops at the first reason to keep.
+    let sys = world();
+    sys.fake_fs()
+        .put_link(Path::new(&at(VERSION, "a-link")), tag::SYMLINK, r"D:\x")
+        .unwrap();
+    let l = listed(&sys);
+    let p = &l.packages[0];
+    assert_eq!(p.keep, Some(StoreKeep::Reparse));
+    assert!(p.items.is_empty(), "{:?}", p.items);
 }
 
 /// The calls of a complete removal of everything in [`world`].

@@ -179,17 +179,28 @@ pub fn status(app: &AppDir<'_>) -> Result<Status, JournalError> {
 pub fn status_with(app: &AppDir<'_>, all_heads: bool) -> Result<Status, JournalError> {
     let j = Journal::new(app, InstanceTag::new());
     let listing = j.list()?;
+    Ok(status_listed(&j, app, &listing, all_heads))
+}
+
+/// [`status_with`] on a listing the caller holds (P5-8b: the users of the packages and their
+/// lines from one reading of the journal).
+pub(super) fn status_listed(
+    j: &Journal<'_>,
+    app: &AppDir<'_>,
+    listing: &crate::journal::Listing,
+    all_heads: bool,
+) -> Status {
     // Review follow-up (senior N-6): the other transactions read once for every line.
-    let others = super::share::read(&j, &listing, None, true);
+    let others = super::share::read(j, listing, None, true);
     let txns = listing
         .txns
         .iter()
-        .map(|l| one(&j, app, l, all_heads, &others))
+        .map(|l| one(j, app, l, all_heads, &others))
         .collect();
-    Ok(Status {
+    Status {
         txns,
         foreign_entries: listing.foreign,
-    })
+    }
 }
 
 /// One transaction, with its preview whenever its head can be read (`revert`, `forget`).

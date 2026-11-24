@@ -89,15 +89,21 @@ fn users_of(j: &Journal<'_>, l: &Listing) -> Users {
     out
 }
 
-/// Who uses which package now (module docs). Reads only and takes no lock; what a front end
-/// shows. [`remove_packages`] decides again under the lock.
+/// Who uses which package now (module docs), and the status of every transaction (live heads
+/// only), from one listing of the journal, so a front end's lines and its locks agree. Reads only
+/// and takes no lock; [`remove_packages`] decides again under the lock.
 ///
 /// # Errors
 /// The journal cannot be listed.
-pub(crate) fn package_users(app: &AppDir<'_>) -> Result<Users, JournalError> {
+pub(crate) fn package_users_with_status(
+    app: &AppDir<'_>,
+) -> Result<(Users, super::Status), JournalError> {
     let j = Journal::new(app, InstanceTag::new());
     let l = j.list()?;
-    Ok(users_of(&j, &l))
+    Ok((
+        users_of(&j, &l),
+        super::status::status_listed(&j, app, &l, false),
+    ))
 }
 
 /// Removes exactly `shown` (a preview's list) under `journal\lock` (module docs): a shown package
@@ -117,13 +123,20 @@ pub(crate) fn remove_packages(
     let _lock = j.lock().map_err(Refusal::from)?;
     let listing = j.list().map_err(Refusal::from)?;
     let users = users_of(&j, &listing);
-    for s in shown {
-        let store::Shown::Package(v) = s else {
-            continue;
-        };
-        if let Some(txn) = users.of(&v.id, &v.version).first() {
+    // A version folder, and the archive of a package (security review S3: a package that was
+    // only its archive may have been unpacked and applied since the preview).
+    let packages = shown.iter().flat_map(|s| match s {
+        store::Shown::Package(v) => vec![(v.id.as_str(), v.version.as_str())],
+        store::Shown::Archive { owners, .. } => owners
+            .iter()
+            .map(|(i, v)| (i.as_str(), v.as_str()))
+            .collect(),
+        store::Shown::EmptyId(_) => Vec::new(),
+    });
+    for (id, version) in packages {
+        if let Some(txn) = users.of(id, version).first() {
             return Err(Refusal::PackageInUse {
-                package: crate::escape::text(&format!("{}@{}", v.id, v.version)).into_owned(),
+                package: crate::escape::text(&format!("{id}@{version}")).into_owned(),
                 txn: *txn,
             }
             .into());
