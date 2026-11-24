@@ -12,6 +12,7 @@ mod index;
 mod launch;
 mod package;
 mod profile;
+mod store;
 mod topo;
 mod txn;
 
@@ -31,6 +32,7 @@ pub use package::{FetchedHow, PackageMsg, UnpackedHow};
 #[cfg(test)]
 pub(crate) use profile::size as size_text;
 pub use profile::{ProfileMsg, ranges};
+pub use store::{StaysWhy, StoreMsg};
 pub use topo::TopoMsg;
 pub use txn::{At, OpRef, OpText, StepText, TxnMsg, TxnText};
 
@@ -427,6 +429,8 @@ pub enum Message<'a> {
     Topo(TopoMsg<'a>),
     /// A line about a package download (P4-6).
     Package(PackageMsg<'a>),
+    /// A line about Rerun's package store (P5-8b-2).
+    Store(StoreMsg<'a>),
     /// A usage error, formatted by Rerun (security review N5): the user's own value only
     /// through `escape::text`, last on the line.
     Usage {
@@ -869,6 +873,7 @@ impl fmt::Display for Message<'_> {
             Self::Helper(m) => write!(f, "{m}"),
             Self::Topo(m) => write!(f, "{m}"),
             Self::Package(m) => write!(f, "{m}"),
+            Self::Store(m) => write!(f, "{m}"),
             Self::Usage { what, why, value } => {
                 write!(f, "rerun: {what}")?;
                 if let Some(why) = why {

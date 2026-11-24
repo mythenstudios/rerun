@@ -1,6 +1,7 @@
 //! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system` and `rerun scan`;
 //! phase 2 (P2-13): `rerun plan`, `apply`, `revert`, `status` and `forget`; phase 4 (P4-3):
-//! `rerun index import` and `rerun index show` (ADR 0024); P4-6: `rerun package fetch` (ADR 0025).
+//! `rerun index import` and `rerun index show` (ADR 0024); P4-6: `rerun package fetch` (ADR 0025);
+//! P5-8b-2: `rerun package list`, `remove` and `prune` (ADR 0025 amendment P5-8b).
 //!
 //! Order in `main`: `restrict_dll_search` first (ADR 0008), then clap parses (`--help`,
 //! `--version` and usage errors, a malformed plan hash or transaction included, end there,
@@ -34,6 +35,7 @@ mod package;
 mod plan;
 mod preview;
 mod scan;
+mod store;
 mod system;
 mod topo;
 mod txn;
@@ -196,6 +198,20 @@ fn run<W: io::Write, E: io::Write>(
         Command::Package {
             command: PackageCommand::Fetch { package: spec },
         } => package::fetch(host, &spec, out, err),
+        Command::Package {
+            command: PackageCommand::List,
+        } => store::list(host, out, err),
+        Command::Package {
+            command:
+                PackageCommand::Remove {
+                    package: spec,
+                    dry_run,
+                    yes,
+                },
+        } => store::remove(host, Some(&spec), dry_run, yes, out, err),
+        Command::Package {
+            command: PackageCommand::Prune { dry_run, yes },
+        } => store::remove(host, None, dry_run, yes, out, err),
     }
 }
 
@@ -219,6 +235,8 @@ mod index_tests;
 mod lm_tests;
 #[cfg(test)]
 mod package_tests;
+#[cfg(test)]
+mod store_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

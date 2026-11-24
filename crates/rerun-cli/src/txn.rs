@@ -93,7 +93,7 @@ fn txn_text(st: &TxnStatus) -> TxnText<'_> {
 }
 
 /// The state words of a [`TxnLine`] (an entry that is not forgotten).
-fn line_text(l: &TxnLine) -> TxnText<'_> {
+pub(crate) fn line_text(l: &TxnLine) -> TxnText<'_> {
     match l {
         TxnLine::Empty => TxnText::Empty,
         TxnLine::Open => TxnText::Open,

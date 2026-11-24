@@ -140,6 +140,32 @@ pub enum PackageCommand {
         #[arg(value_parser = package_spec)]
         package: PackageSpec,
     },
+    /// Lists Rerun's package store: each package with its version, size, files and archives,
+    /// and the transactions that use it.
+    List,
+    /// Removes one package and its archives from Rerun's store after listing every file; a
+    /// package a transaction uses stays. Changes no game folder, registry value or firewall rule.
+    Remove {
+        /// The package as <id>@<version>, as `rerun package list` shows it.
+        #[arg(value_parser = package_spec)]
+        package: PackageSpec,
+        /// Show the list only, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask before removing (needed when not run from a console).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Removes every package no transaction uses, archives without a package and leftovers of
+    /// interrupted runs, after listing them.
+    Prune {
+        /// Show the list only, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not ask before removing (needed when not run from a console).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// A package as `<id>@<version>`, checked before any system access.
