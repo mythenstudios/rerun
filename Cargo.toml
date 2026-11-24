@@ -3,7 +3,9 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+# The unsigned alpha (P5-13, user decision U9 a): 0.1.0-alpha.N, raised with each alpha build
+# that leaves the developer machine; 0.1.0 is the first release (A6).
+version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.99"
 authors = ["Mythen Studios"]

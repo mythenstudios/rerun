@@ -3942,7 +3942,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "rerun-app"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "raw-window-handle",
  "rerun-core",
@@ -3956,7 +3956,7 @@ dependencies = [
 
 [[package]]
 name = "rerun-cli"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "clap",
  "rerun-core",
@@ -3965,7 +3965,7 @@ dependencies = [
 
 [[package]]
 name = "rerun-core"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "ed25519-compact",
  "jsonschema",
@@ -3982,18 +3982,18 @@ dependencies = [
 
 [[package]]
 name = "rerun-cpu"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "rerun-helper"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "rerun-core",
 ]
 
 [[package]]
 name = "rerun-launch"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "rerun-core",
  "rerun-proto",
@@ -4002,14 +4002,14 @@ dependencies = [
 
 [[package]]
 name = "rerun-proto"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "rerun-workbench"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "clap",
  "ed25519-compact",
