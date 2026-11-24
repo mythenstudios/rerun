@@ -802,6 +802,7 @@ component GamePage inherits VerticalLayout {
                     color: Theme.text;
                     font-size: f.mono ? Theme.fs-s + Theme.hair : Theme.fs-m;
                     font-family: f.mono ? Theme.font-mono : Theme.font-sans;
+                    wrap: word-wrap;
                     accessible-role: none;
                 }
             }
@@ -934,6 +935,7 @@ component GamePage inherits VerticalLayout {
                         text: fx.kind;
                         color: Theme.muted;
                         font-size: Theme.fs-m;
+                        wrap: word-wrap;
                         vertical-alignment: center;
                         accessible-role: none;
                     }

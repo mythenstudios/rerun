@@ -28,9 +28,10 @@ export component PreviewPanel inherits VerticalLayout {
             text: Str.preview-intro;
         }
 
-        HorizontalLayout {
-            spacing: Theme.s6;
-            alignment: start;
+        // Stacked, not side by side: a long folder path and the 64-digit checksum would
+        // otherwise set a minimum width wider than the window.
+        VerticalLayout {
+            spacing: Theme.s3;
             VerticalLayout {
                 spacing: Theme.hair * 2;
                 accessible-role: AccessibleRole.text;
@@ -40,6 +41,7 @@ export component PreviewPanel inherits VerticalLayout {
                     color: Theme.strong;
                     font-size: Theme.fs-m;
                     font-weight: 600;
+                    wrap: word-wrap;
                     accessible-role: none;
                 }
             }
@@ -61,6 +63,7 @@ export component PreviewPanel inherits VerticalLayout {
                     color: Theme.text;
                     font-family: Theme.font-mono;
                     font-size: Theme.fs-s + Theme.hair;
+                    wrap: word-wrap;
                     accessible-role: none;
                 }
             }
@@ -81,6 +84,7 @@ export component PreviewPanel inherits VerticalLayout {
                     color: Theme.text;
                     font-family: Theme.font-mono;
                     font-size: Theme.fs-xs;
+                    wrap: word-wrap;
                     accessible-role: none;
                 }
             }
