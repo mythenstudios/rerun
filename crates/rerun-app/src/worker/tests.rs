@@ -1223,6 +1223,7 @@ mod clear;
 mod download;
 mod helper;
 mod history;
+mod language;
 mod open;
 mod problems;
 mod rebind;

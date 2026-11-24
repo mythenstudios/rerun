@@ -139,3 +139,31 @@ fn st5_st6_a_newer_format_or_an_unusable_place_is_the_defaults_for_the_session()
         assert_eq!(decode(&r), defaults(Writable::SessionOnly));
     }
 }
+
+#[test]
+fn the_language_and_the_view_have_their_places_in_the_lists() {
+    use crate::text::Lang;
+    for (i, c) in [LangChoice::Windows, LangChoice::En, LangChoice::De]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(c.index(), i32::try_from(i).unwrap());
+        assert_eq!(LangChoice::from_index(c.index()), c);
+    }
+    for (i, v) in [LibView::List, LibView::Compact].into_iter().enumerate() {
+        assert_eq!(v.index(), i32::try_from(i).unwrap());
+        assert_eq!(LibView::from_index(v.index()), v);
+    }
+    // A place that is not in the list: the defaults.
+    assert_eq!(LangChoice::from_index(-1), LangChoice::Windows);
+    assert_eq!(LangChoice::from_index(9), LangChoice::Windows);
+    assert_eq!(LibView::from_index(7), LibView::List);
+    // Windows follows Windows (German for a German locale, else English); a choice is a choice.
+    for windows in Lang::ALL {
+        assert_eq!(LangChoice::Windows.resolve(windows), windows);
+        assert_eq!(LangChoice::En.resolve(windows), Lang::En);
+        assert_eq!(LangChoice::De.resolve(windows), Lang::De);
+    }
+    assert_eq!(Settings::default().language, LangChoice::Windows);
+    assert_eq!(Settings::default().library, LibView::List);
+}

@@ -47,7 +47,7 @@ use rerun_core::escape::Shown;
 use rerun_core::sys::{PromptOwner, PromptOwnerSlot};
 use slint::{CloseRequestResponse, Color, ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
-use crate::settings::{Memo, Settings};
+use crate::settings::{LangChoice, LibView, Memo, Settings};
 use crate::text::{Lang, Msg, t};
 use crate::theme::{self, Rgb, SysColors, ThemeChoice, Tokens};
 use crate::vm::{
@@ -199,12 +199,13 @@ where
         return ExitCode::FAILURE;
     }
     crate::trace::log(|| "ui: backend selected".to_owned());
-    let lang = lang();
+    let current = settings.settings.clone();
+    // The chosen language, or Windows' (P5-10d).
+    let lang = current.language.resolve(lang());
     let Ok(ui) = AppWindow::new() else {
         return ExitCode::FAILURE;
     };
     crate::trace::log(|| "ui: window object created (fonts registered)".to_owned());
-    let current = settings.settings.clone();
     // The theme and Windows' high contrast before the first frame (P5-10c).
     let hc = chrome::high_contrast();
     let tokens = theme::tokens(current.theme, hc.as_ref());
@@ -217,6 +218,8 @@ where
         ui.set_status_build(tr(lang, Msg::TestKeyBuild));
     }
     ui.set_group(current.grouped);
+    ui.set_language_choice(current.language.index());
+    ui.set_view_choice(current.library.index());
     ui.set_first_run(!current.intro_seen);
 
     let Ok(worker) = Worker::start(lang, settings, make, Box::new(SlintWake(ui.as_weak()))) else {
@@ -461,7 +464,7 @@ fn set_strings(ui: &AppWindow, lang: Lang) {
     g.set_search_placeholder(x(Msg::SearchPlaceholder));
     g.set_group_by_status(x(Msg::GroupByStatus));
     g.set_view_label(x(Msg::ViewLabel));
-    g.set_view_list(x(Msg::ViewList));
+    g.set_view_names(model(vec![x(Msg::ViewList), x(Msg::ViewCompact)]));
     g.set_no_search_match(x(Msg::NoSearchMatch));
     g.set_rescan(x(Msg::Rescan));
     g.set_show_problems(x(Msg::ShowProblems));
@@ -503,7 +506,14 @@ fn set_strings(ui: &AppWindow, lang: Lang) {
     g.set_set_theme_desc(x(Msg::SetThemeDesc));
     g.set_theme_hc(x(Msg::ThemeHighContrast));
     g.set_set_language(x(Msg::SetLanguage));
-    g.set_language_name(x(Msg::LanguageName));
+    g.set_language_names(model(vec![
+        x(Msg::LangWindows),
+        x(Msg::LangEnglish),
+        x(Msg::LangGerman),
+    ]));
+    g.set_set_language_desc(x(Msg::SetLanguageDesc));
+    g.set_set_library_view(x(Msg::SetLibraryView));
+    g.set_set_library_view_desc(x(Msg::SetLibraryViewDesc));
     g.set_settings_data(x(Msg::SettingsData));
     g.set_data_intro(x(Msg::DataIntro));
     g.set_data_open(x(Msg::DataOpenBtn));
@@ -666,6 +676,35 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         change_settings(&mut st, |s| s.theme = theme);
     });
 
+    // The library view (the bar and Settings share it): applies at once.
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_view_chosen(move |i| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let view = LibView::from_index(i);
+        ui.set_view_choice(view.index());
+        change_settings(&mut st.borrow_mut(), |s| s.library = view);
+    });
+
+    // Settings > Appearance > Language: applies at once, without a restart (P5-10d).
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_language_chosen(move |i| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let choice = LangChoice::from_index(i);
+        ui.set_language_choice(choice.index());
+        let mut st = st.borrow_mut();
+        change_settings(&mut st, |s| s.language = choice);
+        let lang = choice.resolve(lang());
+        if lang != st.lang {
+            switch_language(&ui, &mut st, lang);
+        }
+    });
+
     let weak = ui.as_weak();
     let st = state.clone();
     ui.on_rescan(move || {
@@ -685,6 +724,44 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 
     write_callbacks(ui, state);
     open::open_callbacks(ui, state);
+}
+
+/// The jobs that read what the window shows again after a language change: the library (its rows
+/// and summary are made in the language, so the scan runs once more, with the usual reading
+/// line), the applied changes (and so the band) and what Settings shows.
+fn language_jobs() -> [Job; 4] {
+    [Job::Library, Job::Status, Job::Store, Job::DataFolder]
+}
+
+/// Speaks `lang` from now on: the fixed texts at once, and every page that holds text made in the
+/// old language is emptied and read again (the visited pages at their next visit).
+fn switch_language(ui: &AppWindow, st: &mut State, lang: Lang) {
+    st.lang = lang;
+    set_strings(ui, lang);
+    ui.set_status_index(tr(lang, Msg::StatusReading));
+    if cfg!(feature = "test-key") {
+        ui.set_status_build(tr(lang, Msg::TestKeyBuild));
+    }
+    st.applied = None;
+    st.history = None;
+    st.orphans = None;
+    st.store = None;
+    st.system = None;
+    st.attention = None;
+    ui.set_attention_shown(false);
+    ui.set_applied(AppliedData::default());
+    ui.set_history(HistoryData::default());
+    ui.set_orphans(OrphansData::default());
+    ui.set_store(StoreData::default());
+    ui.set_system_lines(model(Vec::new()));
+    st.rows.clear();
+    ui.set_library_reading(true);
+    ui.set_library_notices(model(Vec::new()));
+    show_rows(ui, st);
+    st.worker.set_lang(lang);
+    for job in language_jobs() {
+        st.worker.send(job);
+    }
 }
 
 /// Changes the settings in force and hands them to the worker, which writes them if they differ

@@ -500,8 +500,8 @@ pub enum Msg {
     ThemeMythen,
     /// A setting.
     SetLanguage,
-    /// Its value.
-    LanguageName,
+    /// The language choice that follows Windows (P5-10d).
+    LangWindows,
     /// A group.
     SettingsAbout,
     /// The version line.
@@ -1706,6 +1706,18 @@ pub enum Msg {
     SetThemeDesc,
     /// The settings: Windows' high contrast is on and overrides the theme.
     ThemeHighContrast,
+    /// The language choice: English (written in English in both languages).
+    LangEnglish,
+    /// The language choice: German (written in German in both languages).
+    LangGerman,
+    /// The settings: that the language applies at once.
+    SetLanguageDesc,
+    /// The library view: one short line per game.
+    ViewCompact,
+    /// The settings: the library view.
+    SetLibraryView,
+    /// The settings: what the two library views are.
+    SetLibraryViewDesc,
 }
 
 /// The text of `m` in `lang`.
@@ -2010,7 +2022,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         SetTheme => "Theme",
         ThemeMythen => "Mythen",
         SetLanguage => "Language",
-        LanguageName => "English (follows Windows)",
+        LangWindows => "Like Windows",
         SettingsAbout => "About Rerun",
         AboutVersion => "Rerun \u{00B7} by Mythen Studios",
         AboutLicence => {
@@ -2695,6 +2707,12 @@ fn en(m: Msg) -> Cow<'static, str> {
         ThemeNacht => "Night",
         SetThemeDesc => "Both are dark. Mythen is black and white, Night uses the greys of Windows 11.",
         ThemeHighContrast => "Windows high contrast is on, so Rerun uses its colours. The theme applies again once it is off.",
+        LangEnglish => "English",
+        LangGerman => "Deutsch",
+        SetLanguageDesc => "Applies at once. Rerun reads the games again so that the library speaks the new language, too.",
+        ViewCompact => "Compact",
+        SetLibraryView => "Library view",
+        SetLibraryViewDesc => "The list shows the graphics API and the executable of each game. Compact shows one short line per game.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 older history entry removed".into()
@@ -2983,7 +3001,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         SetTheme => "Thema",
         ThemeMythen => "Mythen",
         SetLanguage => "Sprache",
-        LanguageName => "Deutsch (wie Windows)",
+        LangWindows => "Wie Windows",
         SettingsAbout => "Über Rerun",
         AboutVersion => "Rerun \u{00B7} by Mythen Studios",
         AboutLicence => {
@@ -3668,6 +3686,12 @@ fn de(m: Msg) -> Cow<'static, str> {
         ThemeNacht => "Nacht",
         SetThemeDesc => "Beide sind dunkel. Mythen ist schwarz-weiss, Nacht nutzt die Grautöne von Windows 11.",
         ThemeHighContrast => "Der hohe Kontrast von Windows ist an, darum nutzt Rerun dessen Farben. Das Thema gilt wieder, sobald er aus ist.",
+        LangEnglish => "English",
+        LangGerman => "Deutsch",
+        SetLanguageDesc => "Gilt sofort. Rerun liest die Spiele noch einmal ein, damit auch die Bibliothek die neue Sprache spricht.",
+        ViewCompact => "Kompakt",
+        SetLibraryView => "Bibliotheksansicht",
+        SetLibraryViewDesc => "Die Liste zeigt je Spiel die Grafik-Schnittstelle und die Programmdatei. Kompakt zeigt eine kurze Zeile je Spiel.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 älterer Verlaufseintrag entfernt".into()

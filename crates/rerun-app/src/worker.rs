@@ -393,6 +393,8 @@ pub struct Worker {
     downloads: Arc<AtomicUsize>,
     /// The cancel flag of the download (shared with the session).
     cancel: Arc<AtomicBool>,
+    /// The language the next job speaks (P5-10d): the window changes it at once, without a restart.
+    german: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -419,6 +421,8 @@ impl Worker {
         let thread_writes = writes.clone();
         let thread_downloads = downloads.clone();
         let thread_cancel = cancel.clone();
+        let german = Arc::new(AtomicBool::new(lang == Lang::De));
+        let thread_german = german.clone();
         std::thread::Builder::new()
             .name("rerun-worker".to_owned())
             .spawn(move || {
@@ -441,7 +445,19 @@ impl Worker {
                 }
                 // A library job that stopped a running scan: it runs next.
                 let mut next: Option<Job> = None;
+                let mut spoken = lang;
                 while let Some(job) = next.take().or_else(|| job_rx.recv().ok()) {
+                    // The language of this job (P5-10d); what the session kept in the old one
+                    // (the system page) is read again.
+                    let lang = if thread_german.load(Ordering::SeqCst) {
+                        Lang::De
+                    } else {
+                        Lang::En
+                    };
+                    if lang != spoken {
+                        session.system = None;
+                        spoken = lang;
+                    }
                     match &world {
                         Ok(w) => {
                             let env = Env {
@@ -475,7 +491,14 @@ impl Worker {
             writes,
             downloads,
             cancel,
+            german,
         })
+    }
+
+    /// The language of every job queued from now on (P5-10d). The window sends the jobs that
+    /// read its pages again after it.
+    pub fn set_lang(&self, lang: Lang) {
+        self.german.store(lang == Lang::De, Ordering::SeqCst);
     }
 
     /// Hands the system the window that owns the UAC dialog; it is used from the next helper

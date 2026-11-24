@@ -15,7 +15,7 @@ import "../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf";
 import "../assets/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf";
 import "../assets/fonts/ibm-plex-mono/IBMPlexMono-Medium.ttf";
 
-import { Pressable, PageTitle, Badge, Button, PartsLine, Hairline, Muted, GroupHeading, DetailLine, NoticeCard, Card } from "base.slint";
+import { Pressable, PageTitle, Badge, Button, PartsLine, Hairline, Muted, GroupHeading, DetailLine, NoticeCard, Card, RadioChoice } from "base.slint";
 import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
 import { CardView, HistEntryView, LaunchRowView } from "card.slint";
@@ -172,9 +172,12 @@ component RowItem inherits Pressable {
     in property <RowData> item;
     in property <int> index;
     in property <int> count;
+    // The compact view (P5-10d): one short line, the name and the status; the details stay in
+    // the accessible description.
+    in property <bool> compact;
     radius: 0px;
     ring-inset: Theme.hair;
-    min-height: Theme.row-h;
+    min-height: root.compact ? Theme.s7 : Theme.row-h;
     accessible-role: list-item;
     // Untrusted text (the Steam name) is never joined with other text: the name is the label,
     // Rerun's own words are the description.
@@ -197,7 +200,40 @@ component RowItem inherits Pressable {
         y: 0;
         height: Theme.hair;
     }
-    HorizontalLayout {
+    if root.compact: HorizontalLayout {
+        padding-left: Theme.s5;
+        padding-right: Theme.s5;
+        padding-top: Theme.s2;
+        padding-bottom: Theme.s2;
+        spacing: Theme.s4;
+        Text {
+            horizontal-stretch: 1;
+            text: root.item.name;
+            color: Theme.strong;
+            font-size: Theme.fs-m;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Badge {
+                data: root.item.badge;
+                accessible-role: none;
+            }
+        }
+
+        Text {
+            text: "\u{203A}";
+            color: Theme.muted;
+            font-size: Theme.fs-l;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+    if !root.compact: HorizontalLayout {
         padding-left: Theme.s5;
         padding-right: Theme.s5;
         padding-top: Theme.s3;
@@ -344,6 +380,9 @@ component LibraryPage inherits VerticalLayout {
     in-out property <string> query;
     in-out property <bool> group;
     in-out property <bool> first-run;
+    // The library view: 0 list, 1 compact (P5-10d).
+    in property <int> view;
+    callback view-chosen(int);
     callback query-edited(string);
     callback group-toggled(bool);
     // "Got it" on the first-start card: remembered in the settings (P5-10b).
@@ -393,6 +432,31 @@ component LibraryPage inherits VerticalLayout {
 
         VerticalLayout {
             alignment: end;
+            spacing: Theme.s1;
+            Text {
+                text: Str.view-label;
+                color: Theme.muted;
+                font-size: Theme.fs-s;
+                accessible-role: none;
+            }
+
+            HorizontalLayout {
+                spacing: Theme.s4;
+                accessible-role: radio-group;
+                accessible-label: Str.view-label;
+                for name[i] in Str.view-names: RadioChoice {
+                    text: name;
+                    checked: i == root.view;
+                    enabled: !Modal.open;
+                    activated => {
+                        root.view-chosen(i);
+                    }
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: end;
             Toggle {
                 text: Str.group-by-status;
                 enabled: !Modal.open;
@@ -424,6 +488,7 @@ component LibraryPage inherits VerticalLayout {
                         item: r;
                         index: i;
                         count: s.rows.length;
+                        compact: root.view == 1;
                         activated => {
                             root.open-game(r.app-id);
                         }
@@ -1522,6 +1587,12 @@ export component AppWindow inherits Window {
     callback query-edited(string);
     callback group-toggled(bool);
     callback first-run-dismissed();
+    // The library view (0 list, 1 compact) and the language (0 like Windows, 1 English, 2
+    // German), P5-10d.
+    in property <int> view-choice;
+    in property <int> language-choice;
+    callback view-chosen(int);
+    callback language-chosen(int);
     // Settings > Appearance (P5-10c): 0 Mythen, 1 Nacht; Windows' high contrast wins.
     in property <int> theme-choice;
     in property <bool> high-contrast;
@@ -1714,6 +1785,10 @@ export component AppWindow inherits Window {
                                     query <=> root.query;
                                     group <=> root.group;
                                     first-run <=> root.first-run;
+                                    view: root.view-choice;
+                                    view-chosen(i) => {
+                                        root.view-chosen(i);
+                                    }
                                     query-edited(t) => {
                                         root.query-edited(t);
                                     }
@@ -1787,8 +1862,16 @@ export component AppWindow inherits Window {
                                     data: root.data-folder;
                                     theme-choice: root.theme-choice;
                                     high-contrast: root.high-contrast;
+                                    language-choice: root.language-choice;
+                                    view-choice: root.view-choice;
                                     theme-chosen(i) => {
                                         root.theme-chosen(i);
+                                    }
+                                    language-chosen(i) => {
+                                        root.language-chosen(i);
+                                    }
+                                    view-chosen(i) => {
+                                        root.view-chosen(i);
                                     }
                                     store-remove(i) => {
                                         root.store-remove(i);

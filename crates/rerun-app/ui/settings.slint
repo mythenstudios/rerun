@@ -2,7 +2,7 @@
 // about. Only `rerun-app::ui` and `build.rs` know this file (ADR 0026); `app.slint` places the
 // page. Every colour comes from `Theme`, every string from `Str` or a view model.
 
-import { Pressable, PageTitle, Badge, Button, PartsLine, Hairline, Muted, GroupHeading, Card, StoreData, StoreRowData, DataFolderData, Theme, Str, Modal } from "base.slint";
+import { PageTitle, Badge, Button, PartsLine, Hairline, Muted, GroupHeading, Card, RadioChoice, StoreData, StoreRowData, DataFolderData, Theme, Str, Modal } from "base.slint";
 
 component Setting inherits Rectangle {
     in property <string> title;
@@ -51,57 +51,22 @@ component Setting inherits Rectangle {
 }
 
 
-// One choice of a radio group: the ring and its dot, the name. A click or Space picks it; the
-// screen reader reads a radio button with its checked state.
-component RadioChoice inherits Pressable {
-    in property <string> text;
-    in property <bool> checked;
-    ring-inset: -3px;
-    accessible-role: radio-button;
-    accessible-checkable: true;
-    accessible-checked: root.checked;
-    accessible-label: root.text;
-    accessible-action-default => {
-        if (root.enabled) {
-            root.activated();
-        }
-    }
-    HorizontalLayout {
-        spacing: Theme.s2;
-        VerticalLayout {
-            alignment: center;
-            Rectangle {
-                width: Theme.s4;
-                height: Theme.s4;
-                border-radius: self.width / 2;
-                border-width: Theme.hair * 2;
-                border-color: root.enabled ? Theme.strong : Theme.faint;
-                Rectangle {
-                    visible: root.checked;
-                    width: parent.width / 2;
-                    height: self.width;
-                    border-radius: self.width / 2;
-                    background: root.enabled ? Theme.strong : Theme.faint;
-                }
-            }
-        }
-
-        Text {
-            text: root.text;
-            color: root.enabled ? Theme.text : Theme.faint;
-            font-size: Theme.fs-m;
-            vertical-alignment: center;
-            accessible-role: none;
-        }
-    }
-}
-
-// Settings > Appearance > Theme (P5-10c): Mythen or Nacht, applied at once. While Windows' high
-// contrast is on, its colours win: the choice is off and a sentence says why.
-component ThemeSetting inherits Rectangle {
+// One choice among a few, as a radio group, applied at once: the theme (P5-10c), the language
+// and the library view (P5-10d). `locked` (Windows' high contrast for the theme) turns the
+// choice off and says why in place of the description.
+component ChoiceSetting inherits Rectangle {
+    in property <string> title;
+    in property <string> desc;
+    in property <string> locked-note;
+    in property <[string]> names;
     in property <int> choice;
-    in property <bool> high-contrast;
+    in property <bool> locked;
+    in property <bool> first;
     callback chosen(int);
+    if !root.first: Hairline {
+        y: 0;
+        height: Theme.hair;
+    }
     HorizontalLayout {
         padding: Theme.s5;
         spacing: Theme.s4;
@@ -109,7 +74,7 @@ component ThemeSetting inherits Rectangle {
             horizontal-stretch: 1;
             spacing: Theme.s1;
             Text {
-                text: Str.set-theme;
+                text: root.title;
                 color: Theme.strong;
                 font-size: Theme.fs-l;
                 font-weight: 600;
@@ -118,7 +83,7 @@ component ThemeSetting inherits Rectangle {
             }
 
             Text {
-                text: root.high-contrast ? Str.theme-hc : Str.set-theme-desc;
+                text: root.locked ? root.locked-note : root.desc;
                 color: Theme.muted;
                 font-size: Theme.fs-m;
                 wrap: word-wrap;
@@ -128,13 +93,13 @@ component ThemeSetting inherits Rectangle {
         VerticalLayout {
             alignment: center;
             accessible-role: radio-group;
-            accessible-label: Str.set-theme;
-            accessible-description: root.high-contrast ? Str.theme-hc : "";
+            accessible-label: root.title;
+            accessible-description: root.locked ? root.locked-note : "";
             spacing: Theme.s2;
-            for name[i] in Str.theme-names: RadioChoice {
+            for name[i] in root.names: RadioChoice {
                 text: name;
                 checked: i == root.choice;
-                enabled: !root.high-contrast && !Modal.open;
+                enabled: !root.locked && !Modal.open;
                 activated => {
                     root.chosen(i);
                 }
@@ -362,10 +327,15 @@ export component SettingsPage inherits VerticalLayout {
     // The theme chosen (0 Mythen, 1 Nacht) and whether Windows' high contrast overrides it.
     in property <int> theme-choice;
     in property <bool> high-contrast;
+    // The language (0 like Windows, 1 English, 2 German) and the library view (0 list, 1 compact).
+    in property <int> language-choice;
+    in property <int> view-choice;
     callback store-remove(int);
     callback store-remove-all();
     callback open-data-folder();
     callback theme-chosen(int);
+    callback language-chosen(int);
+    callback view-chosen(int);
     spacing: Theme.s4;
     PageTitle {
         text: Str.settings-title;
@@ -419,17 +389,37 @@ export component SettingsPage inherits VerticalLayout {
 
     Card {
         VerticalLayout {
-            ThemeSetting {
+            ChoiceSetting {
+                first: true;
+                title: Str.set-theme;
+                desc: Str.set-theme-desc;
+                locked-note: Str.theme-hc;
+                names: Str.theme-names;
                 choice: root.theme-choice;
-                high-contrast: root.high-contrast;
+                locked: root.high-contrast;
                 chosen(i) => {
                     root.theme-chosen(i);
                 }
             }
 
-            Setting {
+            ChoiceSetting {
                 title: Str.set-language;
-                value: Str.language-name;
+                desc: Str.set-language-desc;
+                names: Str.language-names;
+                choice: root.language-choice;
+                chosen(i) => {
+                    root.language-chosen(i);
+                }
+            }
+
+            ChoiceSetting {
+                title: Str.set-library-view;
+                desc: Str.set-library-view-desc;
+                names: Str.view-names;
+                choice: root.view-choice;
+                chosen(i) => {
+                    root.view-chosen(i);
+                }
             }
         }
     }

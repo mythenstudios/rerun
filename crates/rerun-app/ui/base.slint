@@ -416,7 +416,7 @@ export global Str {
     in property <string> search-placeholder;
     in property <string> group-by-status;
     in property <string> view-label;
-    in property <string> view-list;
+    in property <[string]> view-names;
     in property <string> no-search-match;
     in property <string> rescan;
     in property <string> show-problems;
@@ -458,7 +458,10 @@ export global Str {
     in property <string> set-theme-desc;
     in property <string> theme-hc;
     in property <string> set-language;
-    in property <string> language-name;
+    in property <[string]> language-names;
+    in property <string> set-language-desc;
+    in property <string> set-library-view;
+    in property <string> set-library-view-desc;
     in property <string> settings-data;
     in property <string> data-intro;
     in property <string> data-open;
@@ -585,6 +588,51 @@ export component PageTitle inherits FocusScope {
         color: Theme.strong;
         wrap: word-wrap;
         accessible-role: none;
+    }
+}
+
+// One choice of a radio group: the ring and its dot, the name. A click or Space picks it; the
+// screen reader reads a radio button with its checked state.
+export component RadioChoice inherits Pressable {
+    in property <string> text;
+    in property <bool> checked;
+    ring-inset: -3px;
+    accessible-role: radio-button;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-label: root.text;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.activated();
+        }
+    }
+    HorizontalLayout {
+        spacing: Theme.s2;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Theme.s4;
+                height: Theme.s4;
+                border-radius: self.width / 2;
+                border-width: Theme.hair * 2;
+                border-color: root.enabled ? Theme.strong : Theme.faint;
+                Rectangle {
+                    visible: root.checked;
+                    width: parent.width / 2;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    background: root.enabled ? Theme.strong : Theme.faint;
+                }
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: root.enabled ? Theme.text : Theme.faint;
+            font-size: Theme.fs-m;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
     }
 }
 

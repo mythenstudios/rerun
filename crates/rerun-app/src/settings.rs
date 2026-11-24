@@ -15,7 +15,8 @@
 //!
 //! Only closed enums and booleans: never a path, a font or a URL, so nothing in the file can make
 //! the app or Slint read anything else (security review S1 of P5-3). A missing field is its
-//! default; the language and the library view are in the format already and are used from P5-10d.
+//! default. The language and the library view (P5-10d) apply at once; a language change is saved
+//! like any other.
 //!
 //! Reading ([`decode`]): anything wrong in a file of at most the bound (not JSON, not an object,
 //! an unknown field, a wrong type, UTF-16, `format` 0) means the defaults and is replaced by the
@@ -30,6 +31,7 @@
 use rerun_core::flow::{self, Guarded, Seen, SettingsError, SettingsRead};
 use serde::{Deserialize, Serialize};
 
+use crate::text::Lang;
 use crate::theme::ThemeChoice;
 
 /// The format this build reads and writes.
@@ -48,6 +50,36 @@ pub enum LangChoice {
     De,
 }
 
+impl LangChoice {
+    /// Its place in Settings > Appearance (0 like Windows, 1 English, 2 German).
+    pub fn index(self) -> i32 {
+        match self {
+            Self::Windows => 0,
+            Self::En => 1,
+            Self::De => 2,
+        }
+    }
+
+    /// The choice at a place of the list (an unknown place: the default).
+    pub fn from_index(i: i32) -> Self {
+        match i {
+            1 => Self::En,
+            2 => Self::De,
+            _ => Self::Windows,
+        }
+    }
+
+    /// The language to speak: the choice, or `windows` (Windows' display language) for
+    /// [`Self::Windows`].
+    pub fn resolve(self, windows: Lang) -> Lang {
+        match self {
+            Self::Windows => windows,
+            Self::En => Lang::En,
+            Self::De => Lang::De,
+        }
+    }
+}
+
 /// How the library lists the games.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -57,6 +89,21 @@ pub enum LibView {
     List,
     /// One short line per game.
     Compact,
+}
+
+impl LibView {
+    /// Its place in the library bar and in Settings (0 list, 1 compact).
+    pub fn index(self) -> i32 {
+        match self {
+            Self::List => 0,
+            Self::Compact => 1,
+        }
+    }
+
+    /// The view at a place of the list (an unknown place: the default).
+    pub fn from_index(i: i32) -> Self {
+        if i == 1 { Self::Compact } else { Self::List }
+    }
 }
 
 const fn yes() -> bool {

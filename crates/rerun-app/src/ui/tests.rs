@@ -22,7 +22,8 @@ use super::store_data;
 use super::write::dialog_data;
 use super::write::uac_data;
 use super::{
-    AppWindow, BadgeData, RowData, SectionData, ThemeChoice, model, set_strings, set_theme, theme,
+    AppWindow, BadgeData, RowData, SectionData, Str, ThemeChoice, model, set_strings, set_theme,
+    theme,
 };
 use crate::text::Lang;
 use crate::theme::{Rgb, SysColors};
@@ -278,6 +279,66 @@ fn the_window_draws_its_first_frames_fast() {
     ui.set_high_contrast(false);
     ui.set_theme_choice(0);
     ui.set_page(0);
+    // P5-10d: the compact view draws another picture than the list (the same rows), and a new
+    // language reaches the fixed texts at once.
+    assert!(draw(), "the library list is drawn");
+    let list = picture();
+    ui.set_view_choice(1);
+    assert!(draw(), "the compact library is drawn");
+    assert_ne!(picture(), list, "compact rows look other than the list");
+    ui.set_view_choice(0);
+    let texts = |ui: &AppWindow| -> Vec<String> {
+        let g = ui.global::<Str>();
+        let mut v: Vec<String> = [
+            g.get_library_title(),
+            g.get_search_label(),
+            g.get_group_by_status(),
+            g.get_view_label(),
+            g.get_settings_title(),
+            g.get_settings_look(),
+            g.get_set_theme(),
+            g.get_set_language(),
+            g.get_set_language_desc(),
+            g.get_set_library_view(),
+            g.get_set_library_view_desc(),
+            g.get_btn_apply(),
+            g.get_back(),
+            g.get_rescan(),
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        for m in [
+            g.get_nav(),
+            g.get_theme_names(),
+            g.get_view_names(),
+            g.get_language_names(),
+        ] {
+            v.extend(m.iter().map(|x| x.to_string()));
+        }
+        v
+    };
+    set_strings(&ui, Lang::En);
+    let en = texts(&ui);
+    set_strings(&ui, Lang::De);
+    let de = texts(&ui);
+    assert_eq!(en.len(), de.len());
+    // The names that are the same in both languages by design: the languages' own names, the
+    // name of the Windows nav page and of the first theme.
+    let same: Vec<&String> = en
+        .iter()
+        .zip(&de)
+        .filter(|(a, b)| a == b)
+        .map(|(a, _)| a)
+        .collect();
+    assert_eq!(same, ["System", "Mythen", "English", "Deutsch"]);
+    assert_eq!(ui.global::<Str>().get_language_names().row_count(), 3);
+    assert_eq!(ui.global::<Str>().get_view_names().row_count(), 2);
+    set_strings(&ui, Lang::En);
+    assert!(
+        super::language_jobs().contains(&crate::worker::Job::Library),
+        "a new language reads the library again"
+    );
     eprintln!(
         "headless start: window created {created:?}, first frame {first:?}, with 60 rows {with_rows:?}"
     );
