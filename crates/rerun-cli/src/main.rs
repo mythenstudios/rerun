@@ -1,7 +1,8 @@
 //! `rerun` – command-line interface (ADR 0016). Phase 1: `rerun system` and `rerun scan`;
 //! phase 2 (P2-13): `rerun plan`, `apply`, `revert`, `status` and `forget`; phase 4 (P4-3):
 //! `rerun index import` and `rerun index show` (ADR 0024); P4-6: `rerun package fetch` (ADR 0025);
-//! P5-8b-2: `rerun package list`, `remove` and `prune` (ADR 0025 amendment P5-8b).
+//! P5-8b-2: `rerun package list`, `remove` and `prune` (ADR 0025 amendment P5-8b); P5-13b:
+//! `rerun uninstall-check` (ADR 0030).
 //!
 //! Order in `main`: `restrict_dll_search` first (ADR 0008), then clap parses (`--help`,
 //! `--version` and usage errors, a malformed plan hash or transaction included, end there,
@@ -39,6 +40,7 @@ mod store;
 mod system;
 mod topo;
 mod txn;
+mod uninstall;
 
 use std::io;
 use std::path::PathBuf;
@@ -212,6 +214,7 @@ fn run<W: io::Write, E: io::Write>(
         Command::Package {
             command: PackageCommand::Prune { dry_run, yes },
         } => store::remove(host, None, dry_run, yes, out, err),
+        Command::UninstallCheck => uninstall::check(host, out, err),
     }
 }
 
@@ -241,3 +244,5 @@ mod store_tests;
 mod tests;
 #[cfg(test)]
 mod topo_tests;
+#[cfg(test)]
+mod uninstall_tests;

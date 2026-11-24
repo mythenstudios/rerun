@@ -48,6 +48,10 @@
 //! writes it only if it is still what the read saw (compare-and-swap), creating Rerun's folder
 //! only then.
 //!
+//! Uninstall (P5-13b, `flow/uninstall.rs`, ADR 0030): [`uninstall_check`] says, reading only,
+//! whether a transaction is still open (it blocks removing Rerun), which games Steam may still
+//! start through `rerun-launch.exe`, and Rerun's firewall rules no transaction owns.
+//!
 //! A [`Guarded`] is built per job, never kept for a session: Rerun's folder can appear or vanish
 //! between two jobs.
 
@@ -69,6 +73,7 @@ mod revert;
 mod settings;
 mod status;
 mod store;
+mod uninstall;
 mod write;
 
 pub(crate) use game::with_topo;
@@ -111,6 +116,7 @@ pub use store::{
     PackageKeep, Pick, RemovePreview, RemoveShown, StoreGate, StoreView, StoredPackage,
     StoredState, UsedBy, package_store, remove, remove_preview,
 };
+pub use uninstall::{LaunchLeft, UninstallVerdict, UninstallView, uninstall_check};
 pub use write::{
     Applied, LoadRefusal, Picked, PlanRefusal, Planned, Previewed, StepsRefusal, StoreRefusal,
     apply, check, helper, load_stored, plan, plan_steps, shown, store,

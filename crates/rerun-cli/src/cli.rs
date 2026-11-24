@@ -112,6 +112,10 @@ pub enum Command {
         #[command(subcommand)]
         command: PackageCommand,
     },
+    /// Whether Rerun can be removed: exit 0 when no change is open, 5 when transactions are
+    /// still open (listed). Also warns about games Steam may still start through
+    /// rerun-launch.exe. Reads only.
+    UninstallCheck,
 }
 
 /// `rerun history` (P5-6d-1b).

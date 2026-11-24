@@ -15,6 +15,7 @@ mod profile;
 mod store;
 mod topo;
 mod txn;
+mod uninstall;
 
 use std::fmt;
 use std::io;
@@ -35,6 +36,7 @@ pub use profile::{ProfileMsg, ranges};
 pub use store::{StaysWhy, StoreMsg};
 pub use topo::TopoMsg;
 pub use txn::{At, OpRef, OpText, StepText, TxnMsg, TxnText};
+pub use uninstall::UninstallMsg;
 
 /// The text of [`Message::TestKeyBuild`] (ADR 0024 amendment P4-13); `tests/support/mod.rs`
 /// and `scripts/dev-topo-roundtrip.ps1` hold copies, bound by tests.
@@ -431,6 +433,8 @@ pub enum Message<'a> {
     Package(PackageMsg<'a>),
     /// A line about Rerun's package store (P5-8b-2).
     Store(StoreMsg<'a>),
+    /// A line of `rerun uninstall-check` (P5-13b).
+    Uninstall(UninstallMsg<'a>),
     /// A usage error, formatted by Rerun (security review N5): the user's own value only
     /// through `escape::text`, last on the line.
     Usage {
@@ -874,6 +878,7 @@ impl fmt::Display for Message<'_> {
             Self::Topo(m) => write!(f, "{m}"),
             Self::Package(m) => write!(f, "{m}"),
             Self::Store(m) => write!(f, "{m}"),
+            Self::Uninstall(m) => write!(f, "{m}"),
             Self::Usage { what, why, value } => {
                 write!(f, "rerun: {what}")?;
                 if let Some(why) = why {
