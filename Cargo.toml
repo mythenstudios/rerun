@@ -99,3 +99,5 @@ codegen-units = 16
 inherits = "dev"
 opt-level = 2
 debug = "line-tables-only"
+# Test runs rebuild whole crates anyway; incremental state only grew target\ci by tens of GB.
+incremental = false
