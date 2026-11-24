@@ -2830,7 +2830,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         }
         BadgeTopo => "Topo",
         BadgeNoTopo => "Kein Topo",
-        BadgeNoIndex => "Keine Topo-Liste",
+        BadgeNoIndex => "Kein Topo-Index",
         BadgeUpdating => "Wird aktualisiert",
         BadgeNotInstalled => "Nicht installiert",
         BadgeNotRead => "Nicht gelesen",
@@ -2854,7 +2854,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         }
         ShowProblems => "Probleme zeigen",
         HideProblems => "Probleme ausblenden",
-        IndexNoneTitle => "Rerun hat noch keine Topo-Liste.",
+        IndexNoneTitle => "Rerun hat noch keinen Topo-Index.",
         IndexNoneBody => {
             "Ohne den signierten Topo-Index bietet Rerun keinen Fix an und ändert nichts. Die Spiele stehen trotzdem da."
         }
@@ -2870,7 +2870,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         GameEyebrow => "Spiel \u{00B7} Steam",
         GameReading => "Rerun liest den Spielordner ein.",
         UnnamedGame { app_id } => return format!("Steam-App {app_id}").into(),
-        HeroNoIndex => "Rerun hat noch keine Topo-Liste. Es bietet nichts an und ändert nichts.",
+        HeroNoIndex => "Rerun hat noch keinen Topo-Index. Es bietet nichts an und ändert nichts.",
         HeroNoTopo => {
             "Für dieses Spiel gibt es keinen Topo. Rerun bietet nichts an und ändert nichts."
         }
@@ -2989,7 +2989,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         SysGraphics => "Grafik",
         SysProcessor => "Prozessor",
         SysWindows => "Windows",
-        SysSac => "Smart App Control",
+        SysSac => "Intelligente App-Steuerung",
         SysSteam => "Steam",
         SysVram { mb } => return format!("{mb} MiB Grafikspeicher").into(),
         SysIntegrated => "integriert",
@@ -3121,13 +3121,13 @@ fn de(m: Msg) -> Cow<'static, str> {
         NoteGpuPref => "Grafikeinstellung: Nur die Einstellung dieses Programms ändert sich, auf Hohe Leistung. Die Einstellung gilt ab dem nächsten Start.",
         NoteUserData => "Dein Dokumente-Ordner: Der Ordner des Spiels dort liegt ausserhalb des Spielordners. Ein Cloud-Spielstand kann die Datei erneut schreiben.",
         WarningWord => "Warnung",
-        WarnSacOn => "Die intelligente App-Kontrolle ist an. Die App-Kontrolle kann die gepatchte Datei blockieren. Rückgängig stellt das Original wieder her.",
-        WarnSacEvaluation => "Die intelligente App-Kontrolle ist im Testmodus. Die App-Kontrolle blockiert jetzt nichts, aber Windows kann sie später einschalten und dann die gepatchte Datei blockieren. Rückgängig stellt das Original wieder her.",
-        WarnSacUnknown => "Rerun kann den Zustand der intelligenten App-Kontrolle nicht lesen. Die App-Kontrolle kann die gepatchte Datei blockieren. Rückgängig stellt das Original wieder her.",
-        WarnSteamPerUser => "Steam hat dieses Programm für dein Konto gebaut. Die intelligente App-Kontrolle kennt die gepatchte Kopie nicht und blockiert sie wahrscheinlich.",
+        WarnSacOn => "Die Intelligente App-Steuerung ist an und kann die gepatchte Datei blockieren. Rückgängig stellt das Original wieder her.",
+        WarnSacEvaluation => "Die Intelligente App-Steuerung ist im Testmodus und blockiert jetzt nichts, aber Windows kann sie später einschalten und dann die gepatchte Datei blockieren. Rückgängig stellt das Original wieder her.",
+        WarnSacUnknown => "Rerun kann den Zustand der Intelligenten App-Steuerung nicht lesen. Die App-Steuerung kann die gepatchte Datei blockieren. Rückgängig stellt das Original wieder her.",
+        WarnSteamPerUser => "Steam hat dieses Programm für dein Konto gebaut. Die Intelligente App-Steuerung kennt die gepatchte Kopie nicht und blockiert sie wahrscheinlich.",
         WarnSignedExe => "Das Programm hat eine digitale Signatur. Der Patch macht sie ungültig.",
         WarnWhenUnknown => "Rerun kann nicht sagen, ob ein gewähltes Problem deinen PC betrifft.",
-        WarnNeedsRetest => "Dieses Topo soll nochmals getestet werden.",
+        WarnNeedsRetest => "Dieser Topo soll neu geprüft werden.",
         WarnAntiCheat => "Eine Anti-Cheat-Regel erlaubt diesen Fix nur mit einem Hinweis.",
         WarnGpuSet => "Die Grafikeinstellung ist schon Hohe Leistung. Hier gibt es nichts zu ändern.",
         WarnRequiresGpu => "Ein Paket braucht einen Vulkan-Treiber für die Grafikkarte des Spiels. Rerun prüft das nicht.",
@@ -3262,7 +3262,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         DlSizeLater => "Wird beim Herunterladen angezeigt (der Index nennt keine Grösse)",
         DlChecked => "Wird nach dem Herunterladen geprüft: Rerun behält die Datei nur, wenn sie diesen SHA-256 hat",
         DlBtn => "Herunterladen",
-        DlBtnRetry => "Erneut versuchen",
+        DlBtnRetry => "Nochmals versuchen",
         DlBtnCancel => "Download abbrechen",
         DlCancelling => "Wird abgebrochen ...",
         DlStWaiting => "Wartet",

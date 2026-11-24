@@ -1839,3 +1839,68 @@ fn every_status_glyph_is_one_character() {
         assert_eq!(s.glyph().chars().count(), 1, "{s:?}");
     }
 }
+
+/// Messages whose German text is the English text on purpose: proper names, product terms,
+/// units and codes (the variant name, without parameters).
+const SAME_IN_GERMAN: &[&str] = &[
+    "AppName",
+    "ByMythen",
+    "NavSystem",
+    "SystemTitle",
+    "Detail",
+    "BadgeTopo",
+    "FactTopo",
+    "TopoRevision",
+    "FixesTitle",
+    "KindFix",
+    "SysWindows",
+    "SysSteam",
+    "SysBuild",
+    "SysBuildUbr",
+    "ThemeMythen",
+    "AboutVersion",
+    "SourceRepo",
+    "SourcePcgw",
+    "PatchByte",
+    "DlLblRelease",
+    "DlLblSha",
+    "ReportLabelText",
+    "LangEnglish",
+    "LangGerman",
+    "AboutCopyright",
+    "AboutBuild",
+    "AboutRepository",
+];
+
+#[test]
+fn german_differs_from_english_unless_listed() {
+    let mut same = std::collections::BTreeSet::new();
+    for m in every() {
+        if t(Lang::En, m) == t(Lang::De, m) {
+            let key = format!("{m:?}");
+            let name = key.split([' ', '{']).next().unwrap_or(&key).to_owned();
+            same.insert(name);
+        }
+    }
+    let listed: std::collections::BTreeSet<String> =
+        SAME_IN_GERMAN.iter().map(|s| (*s).to_owned()).collect();
+    assert_eq!(same, listed, "German equals English: list exactly these");
+}
+
+#[test]
+fn german_terms_are_consistent() {
+    // The glossary (docs/07-ui.md): a wrong or retired term must not come back.
+    let banned = [
+        "Topo-Liste",
+        "App-Kontrolle",
+        "Dieses Topo",
+        "das Topo",
+        "Erneut versuchen",
+    ];
+    for m in every() {
+        let s = t(Lang::De, m);
+        for b in banned {
+            assert!(!s.contains(b), "{m:?}: {s}");
+        }
+    }
+}
