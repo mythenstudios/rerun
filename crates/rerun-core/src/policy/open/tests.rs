@@ -73,7 +73,10 @@ fn ol1_everything_else_is_refused() {
         "https://-x.example.org/",
         "https://exa_mple.org/",
         "https://b\u{fc}cher.example/",
-        "https://xn--bcher-kva.example\u{2e}/",
+        "https://xn--bcher-kva.example/",
+        "https://xn--pple-43d.com/",
+        "https://www.xn--pple-43d.com/a",
+        "https://example.xn--p1ai/",
         "https://example.org?x=1",
         "https://example.org#x",
         "https://example.org\\x",
@@ -113,6 +116,13 @@ fn ol1_everything_else_is_refused() {
         assert!(OpenUrl::from_index(u).is_err(), "{u:?}");
     }
     assert_eq!(admit(&long_path), Err(OpenRefusal::TooLong));
+    // A host alone longer than the limit (labels of 63 letters).
+    let label = "a".repeat(63);
+    let long_host = format!("https://{}com", format!("{label}.").repeat(40));
+    assert!(super::super::url::host(&long_host["https://".len()..]));
+    assert!(long_host.len() > MAX_OPEN_URL);
+    assert_eq!(admit(&long_host), Err(OpenRefusal::TooLong));
+    assert_eq!(admit(&format!("{long_host}/")), Err(OpenRefusal::TooLong));
     // The limit counts the encoded bytes.
     let base = "https://example.org/";
     let fits = format!("{base}{}", "a".repeat(MAX_OPEN_URL - base.len()));

@@ -19,7 +19,7 @@ use crate::policy::open::{OpenFolder, OpenUrl};
 pub trait Shell: Send + Sync {
     /// The user's `https` handler opens `url`. Returns once it is started, never waits for it.
     fn open_url(&self, url: &OpenUrl) -> SysResult<()>;
-    /// Explorer shows `folder`. Never opens or runs a file.
+    /// Explorer shows `folder` (Rerun's own folder, the only one `policy::open` hands out).
     fn open_folder(&self, folder: &OpenFolder) -> SysResult<()>;
 }
 

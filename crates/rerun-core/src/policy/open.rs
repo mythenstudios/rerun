@@ -8,7 +8,9 @@
 //! - **The grammar** ([`admit`]), stricter than the index loader's `https_url` because the
 //!   string reaches `ShellExecuteExW` and from there a browser's command line: `https://`, a host
 //!   of [`super::url::host`] (lower-case labels and a letter TLD, so no port, no user
-//!   information, no IP literal, no IDN in Unicode form), then nothing or a part that starts
+//!   information, no IP literal, no IDN in Unicode form, and no label starting with `xn--`:
+//!   no IDN in Punycode form either, which PCGamingWiki, Steam and GitHub never need), then
+//!   nothing or a part that starts
 //!   with `/`, of printable ASCII without a space and without `" < > \ ^ `` ` `` { | }`; a `%`
 //!   only before two hex digits, at most one `#`. A character beyond ASCII is percent-encoded
 //!   (UTF-8) unless it is one `escape::path` would escape (a control, format, bidi or invisible
@@ -80,6 +82,10 @@ pub fn admit(u: &str) -> Result<String, OpenRefusal> {
     if !host(h) || !(rest.is_empty() || rest.starts_with('/')) {
         return Err(OpenRefusal::Form);
     }
+    // No Punycode label: an IDN can show one host and open a look-alike.
+    if h.split('.').any(|l| l.starts_with("xn--")) {
+        return Err(OpenRefusal::Form);
+    }
     let mut out = String::with_capacity(u.len());
     out.push_str("https://");
     out.push_str(h);
@@ -118,6 +124,10 @@ pub fn admit(u: &str) -> Result<String, OpenRefusal> {
         if out.len() > MAX_OPEN_URL {
             return Err(OpenRefusal::TooLong);
         }
+    }
+    // Also a URL of a host alone (the loop above runs over the part after the host only).
+    if out.len() > MAX_OPEN_URL {
+        return Err(OpenRefusal::TooLong);
     }
     Ok(out)
 }

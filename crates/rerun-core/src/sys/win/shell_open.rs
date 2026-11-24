@@ -10,9 +10,10 @@
 //!   `lpDirectory` null (nothing is passed as arguments, no working directory);
 //! - a link: `SEE_MASK_NOASYNC` only. Windows looks up the user's `https` handler; without one
 //!   it shows its own "choose an app" dialog, owned by the app's window;
-//! - a folder: also `SEE_MASK_CLASSNAME` with the class `Folder`, so the shell takes the path as
-//!   a folder and Explorer navigates to it, whatever the path's own type: a file at that place
-//!   would not be opened or run;
+//! - a folder: also `SEE_MASK_CLASSNAME` with the class `Folder`, so the shell uses the
+//!   `Folder` verb and Explorer navigates to the path (what Windows does when the path is no
+//!   folder is not measured: the path is Rerun's folder the guard opened, and swapping it for a
+//!   file or a junction in between needs the same user, so no boundary is crossed; accepted);
 //! - never `SEE_MASK_NOCLOSEPROCESS`: no process handle comes back, nothing is waited for or
 //!   kept; `SW_SHOWNORMAL`; the owner is the app's window (`PromptOwnerSlot`, as for the UAC
 //!   dialog), read when the call is made.
