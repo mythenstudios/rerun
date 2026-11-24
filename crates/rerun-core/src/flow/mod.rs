@@ -43,6 +43,11 @@
 //! from facts Rerun determines itself; [`data_folder`] says where Rerun's folder is and whether it
 //! exists; [`open_url`] and [`open_data_folder`] hand them to a [`crate::sys::Shell`].
 //!
+//! Settings (P5-10b, `flow/settings.rs`): [`read_settings`] reads the app's settings file
+//! `<AppDir>\app\settings.json` as opaque, bounded bytes and creates nothing; [`write_settings`]
+//! writes it only if it is still what the read saw (compare-and-swap), creating Rerun's folder
+//! only then.
+//!
 //! A [`Guarded`] is built per job, never kept for a session: Rerun's folder can appear or vanish
 //! between two jobs.
 
@@ -61,6 +66,7 @@ mod library;
 mod open;
 mod packages;
 mod revert;
+mod settings;
 mod status;
 mod store;
 mod write;
@@ -92,6 +98,10 @@ pub use revert::{
     RebindCue, RebindShown, RebindView, RevertAsk, RevertEnd, RevertGate, RevertOutcome,
     RevertPreview, RevertShown, RevertWould, forget, forget_preview, holding, left_foreign, rebind,
     rebind_may_help, rebind_preview, revert, revert_begun, revert_preview,
+};
+pub use settings::{
+    SETTINGS_FILE, SETTINGS_MAX, Seen, SettingsError, SettingsRead, Unusable, read_settings,
+    write_settings,
 };
 pub use status::{
     Heads, Holder, JournalView, StatusView, head, journal, orphans, profile_id_of, profile_of,

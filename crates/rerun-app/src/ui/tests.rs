@@ -21,7 +21,7 @@ use super::store_data;
 use super::write::dialog_data;
 use super::write::uac_data;
 use super::{
-    AppWindow, BadgeData, RowData, SectionData, ThemeId, model, set_strings, set_theme, theme,
+    AppWindow, BadgeData, RowData, SectionData, ThemeChoice, model, set_strings, set_theme, theme,
 };
 use crate::text::Lang;
 use crate::vm::{Names, PackageState, consent, failed, progress, store, store_dialog, uac_wait};
@@ -75,7 +75,7 @@ fn the_window_draws_its_first_frames_fast() {
     slint::platform::set_platform(Box::new(Headless(window.clone()))).unwrap();
     let ui = AppWindow::new().unwrap();
     let created = start.elapsed();
-    set_theme(&ui, &theme::tokens(ThemeId::default()));
+    set_theme(&ui, &theme::tokens(ThemeChoice::default()));
     set_strings(&ui, Lang::En);
     window.set_size(slint::PhysicalSize::new(WIDTH, HEIGHT));
     ui.show().unwrap();

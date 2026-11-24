@@ -47,8 +47,9 @@ use rerun_core::escape::Shown;
 use rerun_core::sys::{PromptOwner, PromptOwnerSlot};
 use slint::{CloseRequestResponse, Color, ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
+use crate::settings::{Memo, Settings};
 use crate::text::{Lang, Msg, t};
-use crate::theme::{self, Rgb, ThemeId, Tokens};
+use crate::theme::{self, Rgb, ThemeChoice, Tokens};
 use crate::vm::{
     self, AppliedVm, AttentionVm, DetailVm, DialogKind, DialogVm, GameVm, HistoryVm, LaunchVm,
     Notice, OpVm, OrphansVm, PreviewVm, ResultVm, RowVm, Selection, StoreVm, SystemVm, Tone,
@@ -68,6 +69,8 @@ use write::{
 struct State {
     worker: Worker,
     lang: Lang,
+    /// The settings in force (P5-10b): a change is sent to the worker, which writes it.
+    settings: Settings,
     /// The library's rows, as streamed.
     rows: Vec<RowVm>,
     /// The game page last asked for.
@@ -177,10 +180,10 @@ pub fn refuse_start(lang: Lang, elevated: bool) {
     chrome::message_box(&caption, &text);
 }
 
-/// Runs the window until it is closed. `make` builds the worker's world on its thread, with the
-/// slot the window fills with its handle once its native window exists: the owner of the UAC
-/// dialog (P5-5c).
-pub fn run<F>(make: F) -> ExitCode
+/// Runs the window until it is closed. `settings`: what `main` read before the window (P5-10b).
+/// `make` builds the worker's world on its thread, with the slot the window fills with its
+/// handle once its native window exists: the owner of the UAC dialog (P5-5c).
+pub fn run<F>(settings: Memo, make: F) -> ExitCode
 where
     F: FnOnce(PromptOwnerSlot) -> Result<World, Shown<'static>> + Send + 'static,
 {
@@ -199,15 +202,18 @@ where
         return ExitCode::FAILURE;
     };
     crate::trace::log(|| "ui: window object created (fonts registered)".to_owned());
-    let tokens = theme::tokens(ThemeId::default());
+    let tokens = theme::tokens(ThemeChoice::default());
     set_theme(&ui, &tokens);
     set_strings(&ui, lang);
     ui.set_status_index(tr(lang, Msg::StatusReading));
     if cfg!(feature = "test-key") {
         ui.set_status_build(tr(lang, Msg::TestKeyBuild));
     }
+    let current = settings.settings.clone();
+    ui.set_group(current.grouped);
+    ui.set_first_run(!current.intro_seen);
 
-    let Ok(worker) = Worker::start(lang, make, Box::new(SlintWake(ui.as_weak()))) else {
+    let Ok(worker) = Worker::start(lang, settings, make, Box::new(SlintWake(ui.as_weak()))) else {
         return ExitCode::FAILURE;
     };
     worker.send(Job::Library);
@@ -215,6 +221,7 @@ where
     let state = Rc::new(RefCell::new(State {
         worker,
         lang,
+        settings: current,
         rows: Vec::new(),
         game: None,
         applied: None,
@@ -581,10 +588,17 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 
     let weak = ui.as_weak();
     let st = state.clone();
-    ui.on_group_toggled(move |_| {
+    ui.on_group_toggled(move |grouped| {
         if let Some(ui) = weak.upgrade() {
-            show_rows(&ui, &st.borrow());
+            let mut st = st.borrow_mut();
+            show_rows(&ui, &st);
+            change_settings(&mut st, |s| s.grouped = grouped);
         }
+    });
+
+    let st = state.clone();
+    ui.on_first_run_dismissed(move || {
+        change_settings(&mut st.borrow_mut(), |s| s.intro_seen = true);
     });
 
     let weak = ui.as_weak();
@@ -606,6 +620,16 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 
     write_callbacks(ui, state);
     open::open_callbacks(ui, state);
+}
+
+/// Changes the settings in force and hands them to the worker, which writes them if they differ
+/// from what the file holds (P5-10b).
+fn change_settings(st: &mut State, f: impl FnOnce(&mut Settings)) {
+    let before = st.settings.clone();
+    f(&mut st.settings);
+    if st.settings != before {
+        st.worker.send(Job::SaveSettings(st.settings.clone()));
+    }
 }
 
 /// Takes every waiting event of the worker.

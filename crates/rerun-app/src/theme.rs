@@ -40,15 +40,16 @@ pub fn contrast(a: Rgb, b: Rgb) -> f64 {
     (hi + 0.05) / (lo + 0.05)
 }
 
-/// The themes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ThemeId {
+/// The themes, as the settings file names them (`settings`, P5-10b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
     /// Black and white, fills instead of borders (the default).
     #[default]
     Mythen,
 }
 
-impl ThemeId {
+impl ThemeChoice {
     /// Every theme.
     #[cfg(test)]
     pub const ALL: [Self; 1] = [Self::Mythen];
@@ -117,9 +118,9 @@ pub struct Tokens {
 
 /// The tokens of `t`. Text, display and mono fonts are embedded (`assets/fonts`, `ui` imports them);
 /// a glyph they lack falls back to a system font. The symbol and icon fonts are Windows'.
-pub fn tokens(t: ThemeId) -> Tokens {
+pub fn tokens(t: ThemeChoice) -> Tokens {
     match t {
-        ThemeId::Mythen => Tokens {
+        ThemeChoice::Mythen => Tokens {
             bg: Rgb(0x0b, 0x0b, 0x0b),
             raised: Rgb(0x11, 0x11, 0x10),
             raised2: Rgb(0x16, 0x16, 0x15),

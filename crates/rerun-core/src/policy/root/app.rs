@@ -18,7 +18,8 @@
 //!
 //! Below it, [`AppDir::sub`] and [`AppDir::sub_write`] open `journal`, `plans`,
 //! `packages`, `index` (ADR 0024; `index-test` in a build with the feature `test-key`,
-//! [`index_folder`]), `elevate` (ADR 0023) and `cache` (ADR 0025), and `launch` read side only,
+//! [`index_folder`]), `elevate` (ADR 0023), `cache` (ADR 0025) and `app` (the app's settings,
+//! ADR 0027 amendment P5-10), and `launch` read side only,
 //! the same way, one directory at a time;
 //! [`AppDir::profiles`] opens `profiles` as a [`ProfilesDir`], the root of a plan's launch
 //! profile ops (P3-3), and checks that its final path is exactly `<AppDir>\profiles`.
@@ -69,6 +70,9 @@ pub(crate) enum AppSub {
     /// `cache`: downloaded package archives by their SHA-256 (ADR 0025, P4-6), hashed again
     /// before every use.
     Cache,
+    /// `app`: the app's settings file `settings.json` (ADR 0027 amendment P5-10), written only
+    /// by `flow::settings` on a real change.
+    App,
 }
 
 /// Name of the launch profiles folder (ADR 0022 D2) below [`AppDir`]: deliberately no
@@ -99,6 +103,7 @@ impl AppSub {
             Self::Index => INDEX_FOLDER,
             Self::Elevate => "elevate",
             Self::Cache => "cache",
+            Self::App => "app",
         };
         match RelPath::from_segment(name) {
             Ok(p) => p,

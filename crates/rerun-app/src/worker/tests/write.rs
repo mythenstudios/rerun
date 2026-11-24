@@ -974,6 +974,7 @@ fn aw14_the_window_cannot_close_while_a_write_is_queued_or_runs() {
     };
     let worker = Worker::start(
         Lang::En,
+        crate::settings::Memo::default(),
         make,
         Box::new(Hold {
             gate: Mutex::new(gate),
@@ -1163,6 +1164,7 @@ fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
     // Game, Plan and PreviewShown pass; the wake of the Apply's result blocks, inside the job.
     let worker = Worker::start(
         Lang::En,
+        crate::settings::Memo::default(),
         make,
         Box::new(HoldAfter {
             free: std::sync::atomic::AtomicUsize::new(3),

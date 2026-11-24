@@ -2,7 +2,9 @@
 //! framework below its `ui` module (ADR 0026). P5-3: read-only (library, game page, system).
 //!
 //! Order in `main`: `restrict_dll_search` first (ADR 0008, H2: no later DLL load comes from the
-//! install folder, the current directory or `PATH`), then the window. The system layer is
+//! install folder, the current directory or `PATH`), then the elevation check, then the settings
+//! file through `flow::guard` (P5-10b: read before the window, so its first frame is right; read
+//! only, nothing created), then the window. The system layer is
 //! created on the worker thread (`worker`), which owns it for the session; every job passes
 //! `flow::guard` first, so an elevated process reads nothing and shows the blocking page
 //! (rule 6). Nothing runs in the background (rule 1): the worker lives as long as the window.
@@ -20,6 +22,7 @@ compile_error!(
      never with debug assertions off (a release build); ADR 0024 amendment P4-13"
 );
 
+mod settings;
 mod text;
 mod theme;
 mod trace;
@@ -34,6 +37,8 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     use std::sync::Arc;
 
+    use rerun_core::flow::Env;
+    use rerun_core::sys::NoHttp;
     use rerun_core::sys::win::{WinHttp, WinShell, WinSystem, restrict_dll_search};
 
     // First statement (ADR 0008, H2). Fail closed: without a console there is nobody to tell.
@@ -53,7 +58,7 @@ fn main() -> ExitCode {
     // stops here with a plain message box and never creates one. The worker's guard checks
     // again for every job.
     let lang = ui::lang();
-    match WinSystem::new() {
+    let settings = match WinSystem::new() {
         Err(_) => {
             ui::refuse_start(lang, false);
             return ExitCode::FAILURE;
@@ -63,13 +68,21 @@ fn main() -> ExitCode {
                 ui::refuse_start(lang, true);
                 return ExitCode::FAILURE;
             }
+            // The guard checks the elevation again; no download, so no HTTPS.
+            let install = install_dir();
+            settings::at_start(Env {
+                sys: &sys,
+                http: &NoHttp,
+                install: &install,
+            })
         }
-    }
+    };
+    crate::trace::log(|| "main: settings read".to_owned());
     // The window fills the slot with its handle once it exists: the UAC dialog of a helper start
     // belongs to the window (P5-5c), not to a console the app does not have.
     // The same slot owns Windows' dialogs of a link or the data folder (P5-10a): a missing
     // browser association asks in front of the window.
-    ui::run(|owner| {
+    ui::run(settings, |owner| {
         let shell = WinShell::new(owner.clone());
         let sys = WinSystem::new()
             .map_err(|e| vm::shown_error(&e))?

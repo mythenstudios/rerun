@@ -1,10 +1,10 @@
 //! Theme tokens (ADR 0027): every text/background pair of every theme reaches 4.5:1.
 
-use super::{Rgb, ThemeId, contrast, text_pairs, tokens};
+use super::{Rgb, ThemeChoice, contrast, text_pairs, tokens};
 
 #[test]
 fn every_text_pair_of_every_theme_reaches_4_5_to_1() {
-    for t in ThemeId::ALL {
+    for t in ThemeChoice::ALL {
         let tk = tokens(t);
         let pairs = text_pairs(&tk);
         assert!(pairs.len() > 18, "{t:?}");

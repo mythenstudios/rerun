@@ -20,6 +20,11 @@
 //! [`Job::OpenDataFolder`] are Settings > Data. All through the world's `Shell` (never in
 //! `flow::Env`), none a write job; [`Event::Opened`] or a calm result answers.
 //!
+//! Settings (P5-10b): [`Job::SaveSettings`] writes the settings the window now has, only if they
+//! differ from what the session read or last wrote (`settings::Memo`, which [`Worker::start`] is
+//! handed from `main`); a write job, so the window waits the few milliseconds before it closes.
+//! No event answers it: a failed write is silent and the settings hold for the session.
+//!
 //! Every job builds its own `Guarded` through `flow::guard` (elevation first, then the
 //! forbidden roots, then Rerun's folder opened if it exists, never created): an elevated process
 //! reads nothing, and the window shows the blocking page (rule 6). Reading and previewing
@@ -73,6 +78,7 @@ use rerun_core::plan::Pick;
 use rerun_core::sys::{Http, NoShell, PromptOwner, PromptOwnerSlot, Shell, System};
 use rerun_core::topo;
 
+use crate::settings::{Memo, Settings};
 use crate::text::{Lang, Msg, t};
 use crate::vm::{
     self, AppliedVm, BlockedVm, DataVm, DetailVm, DialogVm, DownloadVm, GameVm, HelperState,
@@ -216,6 +222,8 @@ pub enum Job {
     DataFolder,
     /// Shows Rerun's folder in Explorer, only if it exists.
     OpenDataFolder,
+    /// Writes the settings the window now has, if they changed (P5-10b).
+    SaveSettings(Settings),
 }
 
 impl Job {
@@ -249,6 +257,7 @@ impl Job {
             Self::ReportOpen { .. } => "report open".to_owned(),
             Self::DataFolder => "data folder".to_owned(),
             Self::OpenDataFolder => "open data folder".to_owned(),
+            Self::SaveSettings(_) => "save settings".to_owned(),
         }
     }
 
@@ -263,6 +272,7 @@ impl Job {
                 | Self::Forget { .. }
                 | Self::Clear { .. }
                 | Self::RemovePackages { .. }
+                | Self::SaveSettings(_)
         )
     }
 
@@ -388,7 +398,13 @@ impl Worker {
     /// Starts the thread. `make` builds the world on it (a `WinSystem` is created and used on
     /// one thread only) with the slot of the UAC dialog's owner, which the window fills later
     /// ([`Self::set_owner`]); if it fails, every job is answered with [`Event::Blocked`].
-    pub fn start<F>(lang: Lang, make: F, wake: Box<dyn Wake>) -> std::io::Result<Self>
+    /// `settings`: what `main` read before the window (what [`Job::SaveSettings`] compares with).
+    pub fn start<F>(
+        lang: Lang,
+        settings: Memo,
+        make: F,
+        wake: Box<dyn Wake>,
+    ) -> std::io::Result<Self>
     where
         F: FnOnce(PromptOwnerSlot) -> Result<World, Shown<'static>> + Send + 'static,
     {
@@ -416,6 +432,7 @@ impl Worker {
                     writes: thread_writes,
                     downloads: thread_downloads,
                     cancel: thread_cancel,
+                    settings,
                     ..Session::default()
                 };
                 if let Ok(w) = &world {
@@ -553,6 +570,8 @@ pub struct Session {
     /// The user's shell (the world's; none until the thread has its world, and in tests that
     /// set none).
     pub(crate) shell: ShellRef,
+    /// The settings file as read at the start or last written (P5-10b).
+    pub(crate) settings: Memo,
 }
 
 /// The shell a session opens links and Rerun's folder with.
@@ -812,6 +831,10 @@ fn run_job(
             ))));
         }
         Job::OpenDataFolder => opened(flow::open_data_folder(&g, &*session.shell.0), lang, emit),
+        Job::SaveSettings(new) => {
+            let saved = session.settings.save(&mut g, new);
+            crate::trace::log(|| format!("worker: settings {}", saved.word()));
+        }
     }
     preempted
 }

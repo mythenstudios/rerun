@@ -44,6 +44,10 @@ slint = { version = "=1.18.1", default-features = false, features = [
 # The window handle for the snap-layout subclass (`ui::chrome`, ADR 0026); the version Slint's
 # winit backend already pulls in, no new crate.
 raw-window-handle = "0.6.2"
+# The settings file (`settings`, P5-10b): its typed form and the canonical encoding. Already in
+# the dependency graph through rerun-core (same versions), no new crate.
+serde.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # `ui::chrome` only (ADR 0026): the window subclass for the snap layouts and the Windows display

@@ -380,6 +380,8 @@ component LibraryPage inherits VerticalLayout {
     in-out property <bool> first-run;
     callback query-edited(string);
     callback group-toggled(bool);
+    // "Got it" on the first-start card: remembered in the settings (P5-10b).
+    callback first-run-dismissed();
     callback open-game(int);
     callback rescan();
     spacing: Theme.s4;
@@ -390,6 +392,7 @@ component LibraryPage inherits VerticalLayout {
     if root.first-run: FirstRunCard {
         dismiss => {
             root.first-run = false;
+            root.first-run-dismissed();
         }
     }
     Muted {
@@ -1847,6 +1850,7 @@ export component AppWindow inherits Window {
     callback open-game(int);
     callback query-edited(string);
     callback group-toggled(bool);
+    callback first-run-dismissed();
     callback rescan();
     callback poll();
 
@@ -2040,6 +2044,9 @@ export component AppWindow inherits Window {
                                     }
                                     group-toggled(v) => {
                                         root.group-toggled(v);
+                                    }
+                                    first-run-dismissed => {
+                                        root.first-run-dismissed();
                                     }
                                     open-game(id) => {
                                         root.open-game(id);

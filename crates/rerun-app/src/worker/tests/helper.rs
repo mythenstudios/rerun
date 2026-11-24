@@ -819,7 +819,13 @@ fn apply_through_the_worker(owner: Option<PromptOwner>) -> Vec<rerun_core::sys::
         })
     };
     let woken = std::sync::Arc::new(AtomicUsize::new(0));
-    let worker = Worker::start(Lang::En, make, Box::new(Count(woken))).unwrap();
+    let worker = Worker::start(
+        Lang::En,
+        crate::settings::Memo::default(),
+        make,
+        Box::new(Count(woken)),
+    )
+    .unwrap();
     // The world does not wait for the window: it is built and answers before any owner.
     let world = rx.recv().unwrap();
     worker.send(Job::Game {
