@@ -62,12 +62,13 @@ Section 'stage binaries and scripts (C:\sandbox)'
 # target\sandbox\bin (the builds of the previous workflow steps are reused from the cache).
 & (Join-Path $PSScriptRoot 'sandbox-launch.ps1') -StageOnly
 $staged = Join-Path $repo 'target\sandbox\bin'
-foreach ($f in 'rerun-core-tests.exe', 'rerun.exe', 'rerun-launch.exe', 'vstore-stub.exe', 'laa-stub.exe') {
+foreach ($f in 'rerun-core-tests.exe', 'rerun.exe', 'rerun-launch.exe', 'vstore-stub.exe', 'laa-stub.exe', 'install.ps1', 'uninstall.ps1') {
     if (-not (Test-Path -LiteralPath (Join-Path $staged $f))) { throw "not staged: $f" }
 }
 New-Item -ItemType Directory -Force -Path "$sb\scripts", "$sb\bin", "$sb\out\nonelevated", "$sb\out\elevated", $game | Out-Null
 Copy-Item -Path (Join-Path $repo 'scripts\sandbox-*.ps1') -Destination "$sb\scripts" -Force
 Copy-Item -Path (Join-Path $staged '*.exe') -Destination "$sb\bin" -Force
+Copy-Item -Path (Join-Path $staged '*.ps1') -Destination "$sb\bin" -Force
 Set-Content -LiteralPath "$sb\ci-host.txt" -Value 'github-hosted-runner' -Encoding ASCII
 Get-ChildItem "$sb\scripts", "$sb\bin" | ForEach-Object { Write-Host ("{0,10} {1}" -f $_.Length, $_.FullName) }
 EndSection
@@ -173,6 +174,7 @@ function Show-File([string]$path, [int]$tail = 0) {
 Show-File "$out1\cli.log"
 Show-File "$out1\sandbox-test.log"
 Show-File "$out1\status.txt"
+Show-File "$out1\install.log"
 
 $r1 = $null
 if (Test-Path -LiteralPath "$out1\result.json") { $r1 = Get-Content -LiteralPath "$out1\result.json" -Raw | ConvertFrom-Json }
@@ -185,6 +187,8 @@ if (-not $r1) {
     if ($r1.error) { Fail "pass 1 error: $($r1.error)" }
     if ($r1.exit_code -ne 0 -or $r1.failed -ne 0) { Fail "pass 1: the sandbox tests failed (exit $($r1.exit_code), $($r1.failed) failed, $($r1.passed) passed; see sandbox-test.log)" }
     if ($r1.passed -lt 1) { Fail 'pass 1: no sandbox test ran' }
+    # P5-13: install.ps1 and uninstall.ps1 (sandbox-install.ps1, install.log).
+    if (-not $r1.install -or -not $r1.install.expected) { Fail "pass 1: the install and uninstall cases are not as expected (failed: $(if ($r1.install) { @($r1.install.failed) -join ', ' } else { 'not run' }); see install.log)" }
     if (-not $r1.cli -or -not $r1.cli.expected) { Fail 'pass 1: the CLI round trip is not as expected (see cli.log and cli.unchanged / cli.launch_method.failed above)' }
     if ($r1.cli -and $r1.cli.launch_method -and $r1.cli.launch_method.failed) { Fail "pass 1: launch_method checks failed: $($r1.cli.launch_method.failed -join ', ')" }
     if ($r1.cli -and $r1.cli.launch_watch -and $r1.cli.launch_watch.failed) { Fail "pass 1: launch_method watch checks failed: $($r1.cli.launch_watch.failed -join ', ')" }
@@ -307,6 +311,7 @@ Write-Host "pass 2 exit code $LASTEXITCODE"
 EndSection
 Show-File "$out2\cli.log"
 Show-File "$out2\status.txt"
+Show-File "$out2\install.log"
 $r2 = $null
 if (Test-Path -LiteralPath "$out2\result.json") { $r2 = Get-Content -LiteralPath "$out2\result.json" -Raw | ConvertFrom-Json }
 Section 'pass 2: result'
@@ -315,6 +320,7 @@ if (-not $r2) {
 } else {
     Write-Host ($r2 | ConvertTo-Json -Depth 6)
     if (-not $r2.elevated) { Fail 'pass 2 did not run elevated' }
+    if (-not $r2.install -or -not $r2.install.expected) { Fail 'pass 2: install.ps1 did not refuse the elevated run (I9; see install.log)' }
     if (-not $r2.cli -or -not $r2.cli.expected) { Fail 'pass 2: the elevated refusal of plan (exit 3, nothing changed) is not as expected (see cli.log)' }
 }
 EndSection

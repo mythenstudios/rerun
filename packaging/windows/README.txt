@@ -63,7 +63,8 @@ and keeps them for the next install). Then, in a normal PowerShell window:
 (for a portable copy: the uninstall.ps1 in its folder). It lists open changes and stops, or
 shows what it removes: the program files, the Start-menu shortcut and Rerun's data folder
 %LOCALAPPDATA%\Rerun with its size, then waits for one Enter. Add -KeepData to keep the data
-folder. It warns about games Steam may still start through rerun-launch.exe: remove their
+folder. All copies share that data folder: removing a portable copy keeps it while Rerun is
+also installed. Close every Rerun window first. It warns about games Steam may still start through rerun-launch.exe: remove their
 launch option in Steam (Properties > General > Launch options), Rerun never edits Steam's
 settings. It never touches Steam, a game folder, or anything outside these paths.
 

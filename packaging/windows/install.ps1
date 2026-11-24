@@ -26,9 +26,15 @@
 # What it writes: the program folder, the shortcut, and (by rerun.exe) the index in
 # %LOCALAPPDATA%\Rerun\index. No registry, no PATH, no service, no autostart, no Steam setting,
 # no game folder, nothing elevated.
+#
+# -Yes is for the Windows Sandbox suite only (scripts/sandbox-install.ps1): it skips the two
+# Enter prompts and does not start the app; it is refused unless RERUN_SANDBOX or
+# RERUN_CI_SANDBOX is 1. Never the default; the window title still names every step.
 
 [CmdletBinding()]
-param()
+param(
+    [switch]$Yes
+)
 
 $ErrorActionPreference = 'Stop'
 $script:Title = 'Rerun install'
@@ -36,6 +42,18 @@ $src = $PSScriptRoot
 # One segment of a payload file name (ADR 0030), as scripts\alpha-build.ps1 writes them.
 $nameRule = '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 $errorSacBlocked = 4551
+
+# A payload file name (ADR 0030): one segment of $nameRule, no trailing dot, no reserved DOS
+# device name (also with an extension).
+function Test-PayloadName([string]$n) {
+    if ($n -cnotmatch $nameRule -or $n.EndsWith('.')) { return $false }
+    return ($n.Split('.')[0] -notmatch '^(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$')
+}
+
+function Wait-Enter([string]$prompt) {
+    if ($Yes) { Write-Host "$prompt (-Yes: the sandbox suite goes on)"; return }
+    [void](Read-Host $prompt)
+}
 
 function Title([string]$text) {
     $Host.UI.RawUI.WindowTitle = "$script:Title - $text"
@@ -111,7 +129,7 @@ function Read-Manifest([string]$path) {
     if ("$($m.version)" -notmatch '^[0-9A-Za-z.+-]{1,64}$' -or "$($m.build)" -notmatch '^[0-9A-Za-z.-]{1,64}$') { Fail "version or build not readable: $path" }
     $seen = @{}
     foreach ($f in @($m.files)) {
-        if ("$($f.name)" -cnotmatch $nameRule) { Fail "not a payload file name in ${path}: $($f.name)" }
+        if (-not (Test-PayloadName "$($f.name)")) { Fail "not a payload file name in ${path}: $($f.name)" }
         if ("$($f.sha256)" -cnotmatch '^[0-9a-f]{64}$') { Fail "not a SHA-256 in ${path}: $($f.name)" }
         $k = "$($f.name)".ToLowerInvariant()
         if ($k -eq 'install.json' -or $k -eq 'payload.json' -or $seen.ContainsKey($k)) { Fail "a file name the manifest may not list: $($f.name)" }
@@ -126,6 +144,9 @@ $committed = $false
 try {
     # ---------- 1. checks ----------
     Title 'CHECKING (nothing is changed yet)'
+    if ($Yes -and $env:RERUN_SANDBOX -ne '1' -and $env:RERUN_CI_SANDBOX -ne '1') {
+        Fail '-Yes is for the Windows Sandbox suite only'
+    }
     $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         Fail 'start this script from a normal (not administrator) PowerShell: Rerun is installed for your account and never runs elevated'
@@ -220,7 +241,7 @@ try {
     Write-Host 'Nothing else: no administrator, no registry, no PATH, no service, no autostart, no Steam setting, no game folder.'
     Write-Host ''
     Title 'Enter = install, close the window = cancel'
-    [void](Read-Host 'Press Enter to install (close the window to cancel)')
+    Wait-Enter 'Press Enter to install (close the window to cancel)'
 
     # ---------- 3. install ----------
     Title 'INSTALLING'
@@ -286,6 +307,9 @@ try {
         $indexNote = if ($r.Code -eq 0) { "imported (seq $($m.index.seq))" } else { "not imported (rerun.exe exit $($r.Code), see above): the app shows why" }
     }
 
+    if ($Yes) {
+        Write-Host '-Yes (sandbox suite): Rerun is not started'
+    } else {
     Title 'STARTING Rerun'
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $appTarget
@@ -299,6 +323,7 @@ try {
             Fail 'Smart App Control blocked rerun-app.exe (os error 4551); nothing was bypassed'
         }
         Write-Host "note: Rerun could not be started now: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
     }
     $committed = $true
 
@@ -344,5 +369,5 @@ try {
     }
     $exitCode = 1
 }
-[void](Read-Host 'Press Enter to close')
+Wait-Enter 'Press Enter to close'
 exit $exitCode

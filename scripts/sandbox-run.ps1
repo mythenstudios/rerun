@@ -140,7 +140,20 @@ try {
 } catch {
     $err = "$_"
     Write-Host "run failed: $err"
-} finally {
+}
+# P5-13 (ADR 0030): the alpha's install.ps1 and uninstall.ps1, last (a full uninstall deletes
+# %LOCALAPPDATA%\Rerun; the earlier data folder is moved aside first). Elevated (pass 2) only the
+# refusal (I9). Results in install.log and result.json "install".
+$install = $null
+try {
+    Status 'install and uninstall cases (install.log)'
+    $install = &'C:\sandbox\scripts\sandbox-install.ps1' -Out $out -Elevated $elevated -Ci:$Ci
+} catch {
+    $install = [ordered]@{ error = "$_"; expected = $false }
+    Write-Host "install cases failed: $_"
+}
+# result.json is always written (every step above catches its own failure).
+& {
     $result = [ordered]@{
         exit_code = $code
         passed    = $passed
@@ -156,6 +169,7 @@ try {
         cli       = $cli
         ci        = [bool]$Ci
         cli_only  = [bool]$CliOnly
+        install   = $install
     }
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $out 'result.json') -Encoding UTF8
 }

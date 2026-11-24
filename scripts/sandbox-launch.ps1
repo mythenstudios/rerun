@@ -92,6 +92,12 @@ Copy-Item -LiteralPath $stubExe -Destination (Join-Path $bin 'vstore-stub.exe') 
 Write-Host "staged $stubExe -> $bin\vstore-stub.exe"
 Copy-Item -LiteralPath $laaExe -Destination (Join-Path $bin 'laa-stub.exe') -Force
 Write-Host "staged $laaExe -> $bin\laa-stub.exe"
+# The alpha's install and uninstall scripts for sandbox-install.ps1 (P5-13), as data next to the
+# binaries (the Sandbox maps scripts\ and bin\ only).
+foreach ($s in 'install.ps1', 'uninstall.ps1') {
+    Copy-Item -LiteralPath (Join-Path $repo "packaging\windows\$s") -Destination (Join-Path $bin $s) -Force
+    Write-Host "staged packaging\windows\$s -> $bin\$s"
+}
 if (Test-Path -LiteralPath (Join-Path $tools 'Procmon64.exe')) { Write-Host 'Procmon64.exe found: the probes will use it' }
 if ($StageOnly) { return }
 
