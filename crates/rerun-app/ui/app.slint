@@ -20,10 +20,10 @@ import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
 import { CardView, HistEntryView, LaunchRowView } from "card.slint";
 import { DialogView } from "dialog.slint";
-import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
+import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, StoreData, StoreRowData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
 
 // What `ui` names through the generated code.
-export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, SysLineData, Theme, Str, Reveal, Modal }
+export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, StoreData, StoreRowData, SysLineData, Theme, Str, Reveal, Modal }
 
 component Toggle inherits Pressable {
     in-out property <bool> checked;
@@ -1397,7 +1397,173 @@ component SystemPage inherits VerticalLayout {
     }
 }
 
+// One package of the store: what it is, how big, who uses it, and the button that opens the
+// removal dialog (a package a change uses cannot be removed: the button is off and the reason
+// stands under it).
+component PackageRow inherits Card {
+    in property <StoreRowData> r;
+    in property <int> index;
+    callback remove();
+    accessible-role: groupbox;
+    accessible-label: root.r.title + " " + root.r.ident;
+    accessible-description: root.r.state.word;
+    VerticalLayout {
+        padding: Theme.s5;
+        spacing: Theme.s2;
+        HorizontalLayout {
+            spacing: Theme.s3;
+            Text {
+                horizontal-stretch: 1;
+                text: root.r.title;
+                color: Theme.strong;
+                font-size: Theme.fs-l;
+                font-weight: 600;
+                wrap: word-wrap;
+                vertical-alignment: center;
+            }
+
+            Badge {
+                data: root.r.state;
+                accessible-role: none;
+            }
+        }
+
+        Text {
+            text: root.r.ident;
+            color: Theme.muted;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+
+        if root.r.note != "": Text {
+            text: root.r.note;
+            color: Theme.strong;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.r.facts;
+            color: Theme.text;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+
+        for u in root.r.used: Text {
+            text: u;
+            color: Theme.muted;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        if root.r.keep != "": Text {
+            text: root.r.keep;
+            color: Theme.strong;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: start;
+            padding-top: Theme.s2;
+            Button {
+                text: root.r.remove-label;
+                accessible-label: root.r.remove-label + ": " + root.r.title + " " + root.r.ident;
+                take-focus: Modal.return-to == -10000 - root.index;
+                enabled: root.r.can-remove && !Modal.open && !Modal.working;
+                activated => {
+                    root.remove();
+                }
+            }
+        }
+    }
+}
+
+// Settings > Packages: Rerun's package store, read each time the page opens.
+component PackagesGroup inherits VerticalLayout {
+    in property <StoreData> store;
+    callback remove(int);
+    callback remove-all();
+    spacing: Theme.s3;
+    GroupHeading {
+        text: Str.settings-packages;
+    }
+
+    Muted {
+        text: Str.settings-packages-intro;
+    }
+
+    if root.store.empty-title != "": Card {
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.store.empty-title;
+        accessible-description: root.store.empty-sub;
+        VerticalLayout {
+            padding: Theme.s5;
+            spacing: Theme.s1;
+            Text {
+                text: root.store.empty-title;
+                color: Theme.strong;
+                font-size: Theme.fs-l;
+                font-weight: 600;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+
+            if root.store.empty-sub != "": Text {
+                text: root.store.empty-sub;
+                color: Theme.muted;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+            if root.store.detail != "": Text {
+                text: root.store.detail;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+            }
+        }
+    }
+    if root.store.remove-all-label != "": HorizontalLayout {
+        alignment: start;
+        Button {
+            text: root.store.remove-all-label;
+            take-focus: Modal.return-to == -1001;
+            enabled: root.store.can-remove-all && !Modal.open && !Modal.working;
+            activated => {
+                root.remove-all();
+            }
+        }
+    }
+    for r[ri] in root.store.rows: PackageRow {
+        r: r;
+        index: ri;
+        remove => {
+            root.remove(ri);
+        }
+    }
+    for line in root.store.extra: Muted {
+        text: line;
+    }
+    if root.store.foreign-heading != "": VerticalLayout {
+        spacing: Theme.s1;
+        Muted {
+            text: root.store.foreign-heading;
+        }
+
+        for line in root.store.foreign: Text {
+            text: line;
+            color: Theme.muted;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+    }
+}
+
 component SettingsPage inherits VerticalLayout {
+    in property <StoreData> store;
+    callback store-remove(int);
+    callback store-remove-all();
     spacing: Theme.s4;
     PageTitle {
         text: Str.settings-title;
@@ -1425,6 +1591,16 @@ component SettingsPage inherits VerticalLayout {
                 desc: Str.set-sources-desc;
                 value: Str.always-on;
             }
+        }
+    }
+
+    PackagesGroup {
+        store: root.store;
+        remove(i) => {
+            root.store-remove(i);
+        }
+        remove-all => {
+            root.store-remove-all();
         }
     }
 
@@ -1535,6 +1711,7 @@ export component AppWindow inherits Window {
     in property <bool> system-loading: true;
     in property <[SysLineData]> system-lines;
     in property <OrphansData> orphans;
+    in property <StoreData> store;
     in property <bool> attention-shown;
     in property <string> attention-title;
     in property <string> attention-body;
@@ -1543,6 +1720,8 @@ export component AppWindow inherits Window {
     callback history-group-toggle(int);
     callback history-group-more(int);
     callback history-clear();
+    callback store-remove(int);
+    callback store-remove-all();
     callback attention-dismiss();
     // Selecting, previewing, applying, undoing (P5-5a).
     in property <PreviewData> preview;
@@ -1811,7 +1990,15 @@ export component AppWindow inherits Window {
                                     lines: root.system-lines;
                                     orphans: root.orphans;
                                 }
-                                if root.page == 4: SettingsPage { }
+                                if root.page == 4: SettingsPage {
+                                    store: root.store;
+                                    store-remove(i) => {
+                                        root.store-remove(i);
+                                    }
+                                    store-remove-all => {
+                                        root.store-remove-all();
+                                    }
+                                }
                             }
                         }
                     }

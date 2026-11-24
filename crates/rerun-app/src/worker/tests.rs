@@ -928,6 +928,7 @@ fn kinds(ev: &[Event]) -> Vec<&'static str> {
             Event::Download(_) => "download",
             Event::DownloadEnded(_) => "download-ended",
             Event::WaitingForUac(_) => "uac",
+            Event::Store(_) => "store",
         })
         .collect()
 }
@@ -1202,4 +1203,5 @@ mod helper;
 mod history;
 mod problems;
 mod rebind;
+mod store;
 mod write;

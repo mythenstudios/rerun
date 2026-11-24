@@ -77,7 +77,9 @@ export component DialogView inherits Rectangle {
                                 for op in root.d.ops: OpItem {
                                     op: op;
                                 }
-                                for l in root.d.lists: VerticalLayout {
+                                for l in root.d.lists: list := VerticalLayout {
+                                    // A list with a `show` label is folded until its button opens it.
+                                    in-out property <bool> open: false;
                                     spacing: Theme.s1;
                                     accessible-role: groupbox;
                                     accessible-label: l.heading;
@@ -89,11 +91,26 @@ export component DialogView inherits Rectangle {
                                         wrap: word-wrap;
                                     }
 
-                                    for line in l.lines: Text {
-                                        text: line;
-                                        color: Theme.text;
-                                        font-size: Theme.fs-s;
-                                        wrap: word-wrap;
+                                    if l.show != "": HorizontalLayout {
+                                        alignment: start;
+                                        Button {
+                                            in-dialog: true;
+                                            text: list.open ? l.hide : l.show;
+                                            accessible-label: (list.open ? l.hide : l.show) + ": " + l.heading;
+                                            activated => {
+                                                list.open = !list.open;
+                                            }
+                                        }
+                                    }
+                                    if l.show == "" || list.open: VerticalLayout {
+                                        spacing: Theme.s1;
+                                        for line in l.lines: Text {
+                                            text: line;
+                                            color: Theme.text;
+                                            font-family: l.show != "" ? Theme.font-mono : Theme.font-sans;
+                                            font-size: Theme.fs-s;
+                                            wrap: word-wrap;
+                                        }
                                     }
                                 }
                                 for n in root.d.notes: Text {

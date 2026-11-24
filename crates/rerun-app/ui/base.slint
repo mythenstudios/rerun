@@ -108,9 +108,13 @@ export struct CardData {
 export struct ListData {
     heading: string,
     lines: [string],
+    // The lines sit behind a button (the files of a package): its labels to show and to hide
+    // them. Empty `show` means the lines are always visible.
+    show: string,
+    hide: string,
 }
 
-// kind: 0 undo, 1 forget, 2 download, 3 waiting for the UAC dialog (no button at all), 4 rebind, 5 clear.
+// kind: 0 undo, 1 forget, 2 download, 3 waiting for the UAC dialog (no button at all), 4 rebind, 5 clear, 6 remove packages.
 export struct DialogData {
     kind: int,
     title: string,
@@ -282,6 +286,33 @@ export struct OrphansData {
     detail: string,
 }
 
+// One package of Settings > Packages. `ident` is "<id> <version>".
+export struct StoreRowData {
+    title: string,
+    ident: string,
+    note: string,
+    state: BadgeData,
+    facts: string,
+    used: [string],
+    keep: string,
+    remove-label: string,
+    can-remove: bool,
+}
+
+// The packages group of the settings. `empty-title` set: nothing to list (or the store cannot be
+// read: then `empty-sub` and `detail` say why).
+export struct StoreData {
+    rows: [StoreRowData],
+    extra: [string],
+    foreign-heading: string,
+    foreign: [string],
+    empty-title: string,
+    empty-sub: string,
+    detail: string,
+    remove-all-label: string,
+    can-remove-all: bool,
+}
+
 export struct SysLineData {
     label: string,
     values: [string],
@@ -390,6 +421,8 @@ export global Str {
     in property <string> set-sources;
     in property <string> set-sources-desc;
     in property <string> always-on;
+    in property <string> settings-packages;
+    in property <string> settings-packages-intro;
     in property <string> settings-look;
     in property <string> set-theme;
     in property <string> theme-name;

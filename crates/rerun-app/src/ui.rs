@@ -33,7 +33,8 @@ use generated::{
     AppWindow, AppliedData, BadgeData, BannerData, CardData, DetailData, DialogData, FactData,
     FixData, GameData, HistEntryData, HistGroupData, HistoryData, LaunchData, LaunchRowData,
     LineData, ListData, Modal, NoticeData, OpData, OrphanData, OrphansData, PreviewData,
-    ProblemData, Reveal, RowData, SectionData, SolvedData, Str, SysLineData, Theme, WarnData,
+    ProblemData, Reveal, RowData, SectionData, SolvedData, StoreData, StoreRowData, Str,
+    SysLineData, Theme, WarnData,
 };
 
 use std::cell::RefCell;
@@ -49,8 +50,8 @@ use crate::text::{Lang, Msg, t};
 use crate::theme::{self, Rgb, ThemeId, Tokens};
 use crate::vm::{
     self, AppliedVm, AttentionVm, DetailVm, DialogKind, DialogVm, GameVm, HistoryVm, LaunchVm,
-    Notice, OpVm, OrphansVm, PreviewVm, ResultVm, RowVm, Selection, SystemVm, Tone, TxnCardVm,
-    Value, WarnVm,
+    Notice, OpVm, OrphansVm, PreviewVm, ResultVm, RowVm, Selection, StoreVm, SystemVm, Tone,
+    TxnCardVm, Value, WarnVm,
 };
 use crate::worker::{Event, Job, Wake, Worker, World};
 use rerun_core::journal::TxnId;
@@ -77,6 +78,9 @@ struct State {
     /// What each history group shows this session (collapse state; never written anywhere).
     reveal: std::collections::HashMap<vm::HistGroup, vm::Reveal>,
     orphans: Option<OrphansVm>,
+    /// The packages group of the settings as last handed to the window; a row's button asks
+    /// for the package by its place in it.
+    store: Option<StoreVm>,
     /// The band's current content (P5-6b) and the changes the user dismissed it for this session.
     attention: Option<AttentionVm>,
     dismissed: Vec<TxnId>,
@@ -216,6 +220,7 @@ where
         history: None,
         reveal: std::collections::HashMap::new(),
         orphans: None,
+        store: None,
         attention: None,
         dismissed: Vec::new(),
         dismissed_unreadable: false,
@@ -437,6 +442,8 @@ fn set_strings(ui: &AppWindow, lang: Lang) {
     g.set_set_sources(x(Msg::SetSources));
     g.set_set_sources_desc(x(Msg::SetSourcesDesc));
     g.set_always_on(x(Msg::AlwaysOn));
+    g.set_settings_packages(x(Msg::PkHeading));
+    g.set_settings_packages_intro(x(Msg::PkIntro));
     g.set_settings_look(x(Msg::SettingsLook));
     g.set_set_theme(x(Msg::SetTheme));
     g.set_theme_name(x(Msg::ThemeMythen));
@@ -514,6 +521,8 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 // The firewall is read only when this page opens (COM), never at start.
                 st.worker.send(Job::Orphans);
             }
+            // Every visit reads the package store again (never kept).
+            4 => st.worker.send(Job::Store),
             _ => {}
         }
     });
@@ -722,6 +731,12 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                     show_history(ui, &st);
                 }
             }
+            Event::Store(v) => {
+                if st.store.as_ref() != Some(&*v) {
+                    ui.set_store(store_data(&v));
+                    st.store = Some(*v);
+                }
+            }
             Event::Orphans(o) => {
                 if st.orphans.as_ref() != Some(&*o) {
                     ui.set_orphans(orphans_data(&o));
@@ -883,6 +898,35 @@ fn set_attention(ui: &AppWindow, st: &mut State, att: Option<AttentionVm>) {
         _ => ui.set_attention_shown(false),
     }
     st.attention = att;
+}
+
+fn store_data(v: &StoreVm) -> StoreData {
+    StoreData {
+        rows: model(
+            v.rows
+                .iter()
+                .map(|r| StoreRowData {
+                    title: shown(&r.title),
+                    ident: shown(&r.ident),
+                    note: r.note.as_deref().map(s).unwrap_or_default(),
+                    state: badge(&r.state),
+                    facts: s(&r.facts),
+                    used: model(r.used.iter().map(s).collect()),
+                    keep: r.keep.as_deref().map(s).unwrap_or_default(),
+                    remove_label: s(&v.remove),
+                    can_remove: r.can_remove,
+                })
+                .collect(),
+        ),
+        extra: model(v.extra.iter().map(s).collect()),
+        foreign_heading: v.foreign_heading.as_deref().map(s).unwrap_or_default(),
+        foreign: model(v.foreign.iter().map(s).collect()),
+        empty_title: v.empty_title.as_deref().map(s).unwrap_or_default(),
+        empty_sub: v.empty_sub.as_deref().map(s).unwrap_or_default(),
+        detail: v.detail.as_ref().map(shown).unwrap_or_default(),
+        remove_all_label: v.remove_all.as_deref().map(s).unwrap_or_default(),
+        can_remove_all: v.can_remove_all,
+    }
 }
 
 fn orphans_data(o: &OrphansVm) -> OrphansData {

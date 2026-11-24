@@ -21,7 +21,7 @@ fn tx(lang: Lang, m: Msg) -> String {
 
 /// The word of an entry's state, as the history says it. A forgotten entry's line is the
 /// journal's (`Applied` with a marker), so the core's `forgotten` says it.
-fn state_word(line: &TxnLine, forgotten: bool) -> Msg {
+pub(super) fn state_word(line: &TxnLine, forgotten: bool) -> Msg {
     if forgotten {
         return Msg::HistStateForgotten;
     }
@@ -148,12 +148,14 @@ pub fn clear_vm(
     if !p.remove.is_empty() {
         lists.push(ListVm {
             heading: tx(lang, Msg::ClearEntriesHeading { n: p.remove.len() }),
+            fold: None,
             lines: entry_lines(p.remove.iter().map(|i| (i, None)), names, lang),
         });
     }
     if !p.results.is_empty() {
         lists.push(ListVm {
             heading: tx(lang, Msg::ClearResultsHeading { n: p.results.len() }),
+            fold: None,
             lines: p
                 .results
                 .iter()
@@ -171,6 +173,7 @@ pub fn clear_vm(
         );
         lists.push(ListVm {
             heading: tx(lang, Msg::ClearStaysHeading { n: stays }),
+            fold: None,
             lines,
         });
     }

@@ -17,15 +17,18 @@ use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferTyp
 use slint::platform::{Platform, WindowAdapter};
 
 use super::download::download_data;
+use super::store_data;
+use super::write::dialog_data;
 use super::write::uac_data;
 use super::{
     AppWindow, BadgeData, RowData, SectionData, ThemeId, model, set_strings, set_theme, theme,
 };
 use crate::text::Lang;
-use crate::vm::{PackageState, consent, failed, progress, uac_wait};
+use crate::vm::{Names, PackageState, consent, failed, progress, store, store_dialog, uac_wait};
 use rerun_core::catalog::model::Tier;
 use rerun_core::elevate::{PromptKind, PromptState};
 use rerun_core::flow::{DownloadNeed, FetchError, NeedState, PackageNeed};
+use rerun_core::flow::{RemovePreview, StoreView, StoredPackage, StoredState};
 
 struct Headless(Rc<MinimalSoftwareWindow>);
 
@@ -183,7 +186,70 @@ fn the_window_draws_its_first_frames_fast() {
         "credentials, not secure, the taskbar"
     );
     assert_ne!(picture(), failed_pic, "the wait looks other than a failure");
+    // The packages group of the settings and its removal dialog (P5-8b-3): a package row, the
+    // folded list of its files, and the open list.
     ui.set_dialog_open(false);
+    let pkg = StoredPackage {
+        id: "fix-pack".to_owned(),
+        version: "1.0".to_owned(),
+        name: Some("Fix pack".to_owned()),
+        in_index: true,
+        state: StoredState::Unpacked,
+        files: 1,
+        paths: vec!["fix.dll".to_owned()],
+        bytes: 1_500_000,
+        archives: vec!["ab".repeat(32)],
+        used_by: Vec::new(),
+        keep: None,
+    };
+    let view = StoreView {
+        packages: vec![pkg.clone()],
+        loose_archives: Vec::new(),
+        leftovers: (0, 0),
+        foreign: Vec::new(),
+    };
+    ui.set_page(4);
+    assert!(draw(), "the settings page is drawn");
+    let settings_before = picture();
+    ui.set_store(store_data(&store(&view, &Names::new(), Lang::De)));
+    assert!(draw(), "the packages group is drawn");
+    assert_eq!(ui.get_store().rows.row_count(), 1);
+    let row = ui.get_store().rows.row_data(0).unwrap();
+    assert_eq!(
+        (row.title.as_str(), row.remove_label.as_str()),
+        ("Fix pack", "Entfernen\u{2026}")
+    );
+    assert!(row.can_remove);
+    assert_ne!(
+        picture(),
+        settings_before,
+        "the packages change the settings page"
+    );
+    let preview = RemovePreview {
+        remove: vec![pkg],
+        loose_archives: Vec::new(),
+        leftovers: (0, 0),
+        stays: Vec::new(),
+        bytes: 1_500_000,
+    };
+    ui.set_dialog(dialog_data(&store_dialog(
+        &preview,
+        &Names::new(),
+        false,
+        1,
+        Lang::De,
+    )));
+    ui.set_dialog_open(true);
+    assert!(draw(), "the removal dialog is drawn");
+    let d = ui.get_dialog();
+    assert_eq!(d.kind, 6);
+    assert!(d.can_confirm && !d.no_confirm);
+    assert_eq!(d.lists.row_count(), 2, "the packages and the folded files");
+    let files = d.lists.row_data(1).unwrap();
+    assert!(!files.show.is_empty() && !files.hide.is_empty());
+    assert_eq!(files.lines.row_count(), 2, "the file and the archive");
+    ui.set_dialog_open(false);
+    ui.set_page(0);
     eprintln!(
         "headless start: window created {created:?}, first frame {first:?}, with 60 rows {with_rows:?}"
     );
@@ -203,4 +269,18 @@ fn the_clear_button_takes_the_focus_back() {
         super::write::CLEAR_OPENER
     );
     assert_eq!(slint.matches(&want).count(), 1, "{want}");
+}
+
+/// The window and the Rust side agree on where the focus goes back to after a removal dialog: the
+/// button that opened it takes it when `Modal.return-to` is what `st.opener` was, and no two
+/// openers share a value.
+#[test]
+fn the_packages_buttons_take_the_focus_back() {
+    use super::write::{CLEAR_OPENER, STORE_ALL_OPENER, STORE_ROW_OPENER};
+    let slint = include_str!("../../ui/app.slint");
+    let all = format!("take-focus: Modal.return-to == {STORE_ALL_OPENER};");
+    assert_eq!(slint.matches(&all).count(), 1, "{all}");
+    let row = format!("take-focus: Modal.return-to == {STORE_ROW_OPENER} - root.index;");
+    assert_eq!(slint.matches(&row).count(), 1, "{row}");
+    const { assert!(STORE_ALL_OPENER != CLEAR_OPENER && STORE_ROW_OPENER < STORE_ALL_OPENER) };
 }

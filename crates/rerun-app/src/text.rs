@@ -1508,6 +1508,159 @@ pub enum Msg {
         /// How many.
         n: usize,
     },
+
+    // ---- the package store in the settings (P5-8b-3)
+    /// The settings: the heading of the packages group.
+    PkHeading,
+    /// The settings: what the packages are and that undoing never needs them.
+    PkIntro,
+    /// The settings: Rerun holds no package.
+    PkEmpty,
+    /// A package the current index no longer lists: it cannot be downloaded again.
+    PkNotInIndex,
+    /// A package's size, files and archives on one line.
+    PkFacts {
+        /// Files and archives, in bytes.
+        bytes: u64,
+        /// Its files.
+        files: u32,
+        /// Its archives in the cache.
+        archives: usize,
+    },
+    /// A package's files are all there.
+    PkStateUnpacked,
+    /// A package lacks a file of the index.
+    PkStateIncomplete,
+    /// Only the download of a package is there.
+    PkStateArchiveOnly,
+    /// "Used by" in front of the game and the change that uses a package.
+    PkUsedBy,
+    /// No change uses the package.
+    PkNotUsed,
+    /// The button of a package row that opens the removal dialog.
+    PkRemoveBtn,
+    /// The button that removes every unused package.
+    PkRemoveAllBtn,
+    /// Why a package stays: a change that is not settled uses it.
+    PkKeepInUse,
+    /// Why a package stays: changes cannot be read, so any package may be in use.
+    PkKeepUnknownUse {
+        /// How many changes cannot be read.
+        n: usize,
+    },
+    /// Why a package stays: its folder holds a link.
+    PkKeepReparse,
+    /// Why a package stays: its folder holds a file with more than one hard link.
+    PkKeepLinked,
+    /// Why a package stays: a read-only, hidden or system entry, or one Rerun cannot open.
+    PkKeepAttributes,
+    /// Why a package stays: too many entries.
+    PkKeepTooMany,
+    /// Why a package stays: a name that is not Rerun's.
+    PkKeepBadName,
+    /// Why a package stays: a file is in use right now.
+    PkKeepBusy,
+    /// Why a package stays: it changed while it was removed.
+    PkKeepChanged,
+    /// Why a package stays: the drive cannot remove it.
+    PkKeepUnsupported,
+    /// Why a package stays: a reason a later version adds.
+    PkKeepOther,
+    /// Why a package stays: only its download is left, which a package that stays needs too.
+    PkKeepShared,
+    /// Downloads no package of the index names.
+    PkLoose {
+        /// How many.
+        n: usize,
+        /// Their bytes.
+        bytes: u64,
+    },
+    /// Leftovers of interrupted downloads.
+    PkLeftovers {
+        /// How many.
+        n: usize,
+        /// Their bytes.
+        bytes: u64,
+    },
+    /// The heading of the entries Rerun never touches.
+    PkForeignHeading {
+        /// How many.
+        n: usize,
+    },
+    /// The package store cannot be shown: the title.
+    PkUnreadableTitle,
+    /// The package store cannot be shown: what it means.
+    PkUnreadableBody,
+    /// The removal dialog: the title and its confirm button.
+    PkDlgTitle,
+    /// The removal dialog: what goes.
+    PkDlgIntro,
+    /// The removal dialog: nothing can be removed now.
+    PkDlgNothing,
+    /// The removal dialog: the heading of the packages that go.
+    PkDlgGoesHeading {
+        /// How many.
+        n: usize,
+    },
+    /// The removal dialog: the heading of the downloads without a package that go.
+    PkDlgLooseHeading {
+        /// How many.
+        n: usize,
+    },
+    /// The removal dialog: leftovers that go.
+    PkDlgLeftovers {
+        /// How many.
+        n: usize,
+        /// Their bytes.
+        bytes: u64,
+    },
+    /// The removal dialog: the button that shows the files of a package.
+    PkDlgFilesShow {
+        /// Files and archives.
+        n: usize,
+    },
+    /// The removal dialog: the button that hides them again.
+    PkDlgFilesHide,
+    /// The removal dialog: the bytes it frees.
+    PkDlgFreed {
+        /// The bytes.
+        bytes: u64,
+    },
+    /// The removal dialog: what is not touched.
+    PkDlgUnchanged,
+    /// The removal dialog: shown again because the store or the use of a package changed.
+    PkDlgChanged,
+    /// After a removal: the title.
+    PkDoneTitle,
+    /// After a removal: what went.
+    PkDoneBody {
+        /// Packages removed.
+        packages: usize,
+        /// Archives removed.
+        archives: usize,
+        /// Leftovers removed.
+        leftovers: usize,
+        /// Bytes freed.
+        bytes: u64,
+    },
+    /// After a removal: nothing went.
+    PkDoneNothing,
+    /// The package asked for is not in the store any more: the title.
+    PkGoneTitle,
+    /// The package asked for is not in the store any more: what happens.
+    PkGoneBody,
+    /// A removal refused: a change uses the package (title).
+    RefPkInUseTitle,
+    /// A removal refused: a change uses the package (body).
+    RefPkInUseBody,
+    /// A removal refused: the store changed since the list (title).
+    RefPkChangedTitle,
+    /// A removal refused: the store changed since the list (body).
+    RefPkChangedBody,
+    /// A removal refused: another Rerun downloads or unpacks (title).
+    RefPkBusyTitle,
+    /// A removal refused: another Rerun downloads or unpacks (body).
+    RefPkBusyBody,
 }
 
 /// The text of `m` in `lang`.
@@ -1540,6 +1693,26 @@ fn count(n: usize, one: &str, many: &str) -> String {
     } else {
         format!("{n} {many}")
     }
+}
+
+/// `parts` as "a, b and c".
+fn join_and(parts: &[String], and: &str) -> String {
+    match parts {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} {and} {last}", init.join(", ")),
+    }
+}
+
+/// What a removal came to as a sentence part (the empty counts left out).
+fn removed_parts(counts: [usize; 3], names: [(&str, &str); 3], and: &str) -> String {
+    let v: Vec<String> = counts
+        .into_iter()
+        .zip(names)
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, (one, many))| count(n, one, many))
+        .collect();
+    join_and(&v, and)
 }
 
 fn en(m: Msg) -> Cow<'static, str> {
@@ -2359,6 +2532,102 @@ fn en(m: Msg) -> Cow<'static, str> {
                 format!("{n} empty entries (changed nothing)").into()
             };
         }
+        PkHeading => "Packages",
+        PkIntro => "Rerun keeps the packages it downloaded for fixes. Undoing a fix never needs them. A package you remove is downloaded again when a fix needs it, if the index still lists it.",
+        PkEmpty => "Rerun holds no packages.",
+        PkNotInIndex => "Not in the index: it can't be downloaded again.",
+        PkFacts { bytes: b, files, archives } => {
+            return format!(
+                "{} \u{b7} {} \u{b7} {}",
+                bytes(b, false),
+                count(files as usize, "file", "files"),
+                count(archives, "archive", "archives")
+            )
+            .into();
+        }
+        PkStateUnpacked => "Unpacked",
+        PkStateIncomplete => "Incomplete",
+        PkStateArchiveOnly => "Download only",
+        PkUsedBy => "Used by",
+        PkNotUsed => "Not used",
+        PkRemoveBtn => "Remove\u{2026}",
+        PkRemoveAllBtn => "Remove all unused\u{2026}",
+        PkKeepInUse => "A change that is not undone or closed uses it: undo it first.",
+        PkKeepUnknownUse { n } => {
+            return if n == 1 {
+                "1 change cannot be read, so any package may be in use. Look at the history.".into()
+            } else {
+                format!("{n} changes cannot be read, so any package may be in use. Look at the history.").into()
+            };
+        }
+        PkKeepReparse => "Its folder holds a link (a junction or a symbolic link).",
+        PkKeepLinked => "Its folder holds a file with more than one hard link.",
+        PkKeepAttributes => "Its folder holds a read-only, hidden or system entry, or one Rerun cannot open.",
+        PkKeepTooMany => "Its folder holds too many entries.",
+        PkKeepBadName => "Its folder holds a name that is not Rerun's.",
+        PkKeepBusy => "A file is in use right now (a virus scanner, say): try again later.",
+        PkKeepChanged => "It changed while it was removed: look at the list again.",
+        PkKeepUnsupported => "The drive does not allow it to be removed (FAT or exFAT).",
+        PkKeepOther => "Rerun does not remove it.",
+        PkKeepShared => "Only its download is left, and a package that stays needs it too.",
+        PkLoose { n, bytes: b } => {
+            return if n == 1 {
+                format!("1 download without a package ({})", bytes(b, false)).into()
+            } else {
+                format!("{n} downloads without a package ({})", bytes(b, false)).into()
+            };
+        }
+        PkLeftovers { n, bytes: b } => {
+            return if n == 1 {
+                format!("1 leftover of an interrupted download ({})", bytes(b, false)).into()
+            } else {
+                format!("{n} leftovers of interrupted downloads ({})", bytes(b, false)).into()
+            };
+        }
+        PkForeignHeading { n } => {
+            return format!("Not Rerun's, never touched ({n})").into();
+        }
+        PkUnreadableTitle => "The packages cannot be shown",
+        PkUnreadableBody => "Rerun could not read its package folder or the history that says which packages are in use. Nothing was changed.",
+        PkDlgTitle => "Remove packages",
+        PkDlgIntro => "These packages are removed from Rerun's store.",
+        PkDlgNothing => "There is nothing Rerun can remove from the store now.",
+        PkDlgGoesHeading { n } => {
+            return format!("Packages removed ({n})").into();
+        }
+        PkDlgLooseHeading { n } => {
+            return format!("Downloads without a package removed ({n})").into();
+        }
+        PkDlgLeftovers { n, bytes: b } => {
+            return format!("Leftovers removed: {n} ({})", bytes(b, false)).into();
+        }
+        PkDlgFilesShow { n } => {
+            return format!("Show the files ({n})").into();
+        }
+        PkDlgFilesHide => "Hide the files",
+        PkDlgFreed { bytes: b } => {
+            return format!("This frees {}.", bytes(b, false)).into();
+        }
+        PkDlgUnchanged => "Game folders, the registry and the firewall stay unchanged. Undoing a fix never needs a package.",
+        PkDlgChanged => "The packages changed; look at them again.",
+        PkDoneTitle => "Packages removed",
+        PkDoneBody { packages, archives, leftovers, bytes: b } => {
+            let what = removed_parts(
+                [packages, archives, leftovers],
+                [("package", "packages"), ("archive", "archives"), ("leftover", "leftovers")],
+                "and",
+            );
+            return format!("{what} removed, {} freed.", bytes(b, false)).into();
+        }
+        PkDoneNothing => "Nothing was removed.",
+        PkGoneTitle => "The package is not in the store any more",
+        PkGoneBody => "The list is read again. Nothing was changed.",
+        RefPkInUseTitle => "A change still uses the package",
+        RefPkInUseBody => "Undo or close that change first. Nothing was removed.",
+        RefPkChangedTitle => "The packages changed",
+        RefPkChangedBody => "Look at the list again. Nothing was removed.",
+        RefPkBusyTitle => "Rerun is downloading or unpacking a package",
+        RefPkBusyBody => "Try again when it has finished. Nothing was removed.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 older history entry removed".into()
@@ -3214,6 +3483,102 @@ fn de(m: Msg) -> Cow<'static, str> {
                 format!("{n} leere Einträge (nichts geändert)").into()
             };
         }
+        PkHeading => "Pakete",
+        PkIntro => "Rerun behält die Pakete, die es für Fixes geladen hat. Rückgängigmachen braucht sie nie. Ein entferntes Paket wird wieder geladen, wenn ein Fix es braucht und der Index es noch führt.",
+        PkEmpty => "Rerun hat keine Pakete gespeichert.",
+        PkNotInIndex => "Nicht im Index: kann nicht erneut geladen werden.",
+        PkFacts { bytes: b, files, archives } => {
+            return format!(
+                "{} \u{b7} {} \u{b7} {}",
+                bytes(b, true),
+                count(files as usize, "Datei", "Dateien"),
+                count(archives, "Archiv", "Archive")
+            )
+            .into();
+        }
+        PkStateUnpacked => "Entpackt",
+        PkStateIncomplete => "Unvollständig",
+        PkStateArchiveOnly => "Nur Download",
+        PkUsedBy => "Gebraucht von",
+        PkNotUsed => "Nicht gebraucht",
+        PkRemoveBtn => "Entfernen\u{2026}",
+        PkRemoveAllBtn => "Alle ungenutzten entfernen\u{2026}",
+        PkKeepInUse => "Eine Änderung, die nicht rückgängig gemacht oder abgeschlossen ist, braucht es: Mache sie zuerst rückgängig.",
+        PkKeepUnknownUse { n } => {
+            return if n == 1 {
+                "1 Änderung kann nicht gelesen werden, darum könnte jedes Paket gebraucht sein. Sieh im Verlauf nach.".into()
+            } else {
+                format!("{n} Änderungen können nicht gelesen werden, darum könnte jedes Paket gebraucht sein. Sieh im Verlauf nach.").into()
+            };
+        }
+        PkKeepReparse => "Sein Ordner enthält einen Link (eine Junction oder einen symbolischen Link).",
+        PkKeepLinked => "Sein Ordner enthält eine Datei mit mehr als einem Hardlink.",
+        PkKeepAttributes => "Sein Ordner enthält einen schreibgeschützten, versteckten oder System-Eintrag oder einen, den Rerun nicht öffnen kann.",
+        PkKeepTooMany => "Sein Ordner enthält zu viele Einträge.",
+        PkKeepBadName => "Sein Ordner enthält einen Namen, der nicht von Rerun ist.",
+        PkKeepBusy => "Eine Datei ist gerade in Gebrauch (ein Virenscanner etwa): Versuche es später nochmals.",
+        PkKeepChanged => "Es hat sich beim Entfernen geändert: Sieh dir die Liste nochmals an.",
+        PkKeepUnsupported => "Das Laufwerk erlaubt das Entfernen nicht (FAT oder exFAT).",
+        PkKeepOther => "Rerun entfernt es nicht.",
+        PkKeepShared => "Nur sein Download ist noch da, und ein Paket, das bleibt, braucht ihn auch.",
+        PkLoose { n, bytes: b } => {
+            return if n == 1 {
+                format!("1 Download ohne Paket ({})", bytes(b, true)).into()
+            } else {
+                format!("{n} Downloads ohne Paket ({})", bytes(b, true)).into()
+            };
+        }
+        PkLeftovers { n, bytes: b } => {
+            return if n == 1 {
+                format!("1 Rest eines abgebrochenen Downloads ({})", bytes(b, true)).into()
+            } else {
+                format!("{n} Reste abgebrochener Downloads ({})", bytes(b, true)).into()
+            };
+        }
+        PkForeignHeading { n } => {
+            return format!("Nicht von Rerun, wird nie angefasst ({n})").into();
+        }
+        PkUnreadableTitle => "Die Pakete können nicht angezeigt werden",
+        PkUnreadableBody => "Rerun konnte seinen Paketordner oder den Verlauf, der sagt, welche Pakete gebraucht werden, nicht lesen. Es wurde nichts geändert.",
+        PkDlgTitle => "Pakete entfernen",
+        PkDlgIntro => "Diese Pakete werden aus dem Paketlager von Rerun entfernt.",
+        PkDlgNothing => "Rerun kann jetzt nichts aus dem Paketlager entfernen.",
+        PkDlgGoesHeading { n } => {
+            return format!("Entfernte Pakete ({n})").into();
+        }
+        PkDlgLooseHeading { n } => {
+            return format!("Entfernte Downloads ohne Paket ({n})").into();
+        }
+        PkDlgLeftovers { n, bytes: b } => {
+            return format!("Entfernte Reste: {n} ({})", bytes(b, true)).into();
+        }
+        PkDlgFilesShow { n } => {
+            return format!("Dateien anzeigen ({n})").into();
+        }
+        PkDlgFilesHide => "Dateien ausblenden",
+        PkDlgFreed { bytes: b } => {
+            return format!("Das gibt {} frei.", bytes(b, true)).into();
+        }
+        PkDlgUnchanged => "Spielordner, Registry und Firewall bleiben unverändert. Rückgängigmachen braucht nie ein Paket.",
+        PkDlgChanged => "Die Pakete haben sich geändert; sieh sie dir nochmals an.",
+        PkDoneTitle => "Pakete entfernt",
+        PkDoneBody { packages, archives, leftovers, bytes: b } => {
+            let what = removed_parts(
+                [packages, archives, leftovers],
+                [("Paket", "Pakete"), ("Archiv", "Archive"), ("Rest", "Reste")],
+                "und",
+            );
+            return format!("{what} entfernt, {} frei.", bytes(b, true)).into();
+        }
+        PkDoneNothing => "Es wurde nichts entfernt.",
+        PkGoneTitle => "Das Paket ist nicht mehr im Lager",
+        PkGoneBody => "Die Liste wird neu gelesen. Es wurde nichts geändert.",
+        RefPkInUseTitle => "Eine Änderung braucht das Paket noch",
+        RefPkInUseBody => "Mache diese Änderung zuerst rückgängig oder schliesse sie ab. Es wurde nichts entfernt.",
+        RefPkChangedTitle => "Die Pakete haben sich geändert",
+        RefPkChangedBody => "Sieh dir die Liste nochmals an. Es wurde nichts entfernt.",
+        RefPkBusyTitle => "Rerun lädt oder entpackt gerade ein Paket",
+        RefPkBusyBody => "Versuche es nochmals, wenn es fertig ist. Es wurde nichts entfernt.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 älterer Verlaufseintrag entfernt".into()

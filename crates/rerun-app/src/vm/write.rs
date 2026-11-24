@@ -847,6 +847,12 @@ pub fn refusal(r: &Refusal, lang: Lang) -> ResultVm {
         Refusal::HelperPlan(_) => calm(Tone::Calm, RefStaleTitle, RefStaleBody, true),
         Refusal::Rebind(x) => rebind_refusal(x, lang),
         Refusal::Forgotten { .. } => calm(Tone::Calm, RefNothingTitle, RefNothingBody, true),
+        // The package store (P5-8b): nothing was removed; the list is read again by the dialog.
+        Refusal::PackageInUse { .. } => {
+            calm(Tone::Attention, RefPkInUseTitle, RefPkInUseBody, false)
+        }
+        Refusal::StoreChanged => calm(Tone::Calm, RefPkChangedTitle, RefPkChangedBody, false),
+        Refusal::StoreBusy => calm(Tone::Calm, RefPkBusyTitle, RefPkBusyBody, false),
         _ => calm(
             Tone::Attention,
             RefUnexpectedTitle,
@@ -1415,6 +1421,8 @@ pub enum DialogKind {
     Rebind,
     /// "Clear the history?" (P5-6d-1b): about no single transaction.
     Clear,
+    /// "Remove packages?" (P5-8b-3): about the package store, no transaction.
+    Packages,
 }
 
 /// What becomes of the launch profile and the option the user set in Steam (X12).
@@ -1474,6 +1482,9 @@ pub struct ListVm {
     pub heading: String,
     /// The lines (already escaped where they carry untrusted text).
     pub lines: Vec<String>,
+    /// The lines sit behind a button (P5-8b-3: the files of a package): its labels to show and
+    /// to hide them. The lines are all there, only folded away until the user opens them.
+    pub fold: Option<(String, String)>,
 }
 
 fn fate_of(o: Option<Observed>, lang: Lang) -> (Badge, String) {

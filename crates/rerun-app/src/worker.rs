@@ -58,7 +58,7 @@ use rerun_core::exec::{self, ExecError, RebindRefusal, Refusal};
 use rerun_core::flow::{
     self, ActError, ClearShown, Env, FetchError, ForgetShown, Found, GameCache, GameView, Guarded,
     Heads, IndexState, LibraryEvent, Lookup, NeedState, PackageNeed, Planned, Previewed, Progress,
-    RebindShown, RevertGate, RevertShown,
+    RebindShown, RemoveShown, RevertGate, RevertShown,
 };
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::journal::TxnId;
@@ -70,7 +70,7 @@ use crate::text::{Lang, Msg, t};
 use crate::vm::{
     self, AppliedVm, BlockedVm, DetailVm, DialogVm, DownloadVm, GameVm, HelperState, HistoryVm,
     LibraryVm, Names, Notice, Offer, OrphansVm, PackageState, PreviewVm, ResultVm, RowVm, SteamVm,
-    SystemVm, TopoKnown, UacVm,
+    StoreVm, SystemVm, TopoKnown, UacVm,
 };
 
 /// A job for the worker.
@@ -162,6 +162,20 @@ pub enum Job {
         /// The nonce of the shown preview.
         nonce: u64,
     },
+    /// Rerun's package store for Settings > Packages (P5-8b-3). Reads only; never kept.
+    Store,
+    /// The preview of removing one package or every unused one: what goes with its files and
+    /// what stays. Reads only.
+    RemovePreview {
+        /// Which packages.
+        pick: flow::Pick,
+    },
+    /// Removes the packages the preview showed: only if `nonce` is the one of the removal dialog
+    /// the user confirmed (the rule of [`Job::Revert`]); the core removes exactly what was shown.
+    RemovePackages {
+        /// The nonce of the shown preview.
+        nonce: u64,
+    },
     /// What a fix would download: answers the consent dialog. Reads only.
     DownloadAsk {
         /// The Steam app.
@@ -198,6 +212,9 @@ impl Job {
             Self::Forget { .. } => "forget".to_owned(),
             Self::ClearPreview => "clear preview".to_owned(),
             Self::Clear { .. } => "clear".to_owned(),
+            Self::Store => "store".to_owned(),
+            Self::RemovePreview { .. } => "remove preview".to_owned(),
+            Self::RemovePackages { .. } => "remove packages".to_owned(),
             Self::DownloadAsk { app_id, .. } => format!("download ask {app_id}"),
             Self::Download { .. } => "download".to_owned(),
         }
@@ -213,6 +230,7 @@ impl Job {
                 | Self::Rebind { .. }
                 | Self::Forget { .. }
                 | Self::Clear { .. }
+                | Self::RemovePackages { .. }
         )
     }
 
@@ -252,6 +270,8 @@ pub enum Event {
     Applied(AppliedVm),
     /// The history page (P5-6a).
     History(Box<HistoryVm>),
+    /// The packages group of the settings (P5-8b-3).
+    Store(Box<StoreVm>),
     /// The system page.
     System(SystemVm),
     /// The orphaned firewall rules for the system page (P5-6b).
@@ -522,6 +542,12 @@ struct Pending {
     /// A clear preview with its nonce (P5-6d-1b): the entries and launch results the dialog
     /// listed, each with the hash it was read with.
     clear: Option<(ClearShown, u64)>,
+    /// A package removal preview with its nonce (P5-8b-3): the packages, archives and leftovers
+    /// the dialog listed, each with the file ID it was read with.
+    store: Option<(RemoveShown, u64)>,
+    /// Which packages the last removal preview was for: a dialog that changed is shown again
+    /// for the same ones.
+    store_pick: Option<flow::Pick>,
     /// The list the consent (or failure) dialog showed: a download is made only for it.
     consent: Option<Consent>,
 }
@@ -680,6 +706,12 @@ fn run_job(
         Job::Forget { txn, nonce } => forget(&g, txn, *nonce, lang, session, emit),
         Job::ClearPreview => clear_preview(&g, false, lang, session, emit),
         Job::Clear { nonce } => clear(&g, *nonce, lang, session, emit),
+        Job::Store => emit(Event::Store(Box::new(store_page(&g, lang, session)))),
+        Job::RemovePreview { pick } => {
+            session.pending.store_pick = Some(pick.clone());
+            remove_preview(&g, pick, false, lang, session, emit);
+        }
+        Job::RemovePackages { nonce } => remove_packages(&g, *nonce, lang, session, emit),
         Job::DownloadAsk { app_id, variant } => {
             download_ask(&g, *app_id, variant, lang, session, emit);
         }
@@ -1281,6 +1313,97 @@ fn clear(
         Err(e) => {
             emit(Event::Result(vm::act_error(&e, lang)));
             emit(Event::History(Box::new(history_page(g, lang, session))));
+        }
+    }
+}
+
+/// The packages group of the settings from the store as it is now (P5-8b-3; never kept).
+fn store_page(g: &Guarded<'_>, lang: Lang, session: &Session) -> StoreVm {
+    match flow::package_store(g) {
+        Ok(v) => vm::store(&v, &session.names, lang),
+        Err(gate) => vm::store_unavailable(&gate, lang),
+    }
+}
+
+/// The preview of removing packages (P5-8b-3, rule 5): what goes with every file, and what stays
+/// with its reason. Reads only. `changed`: shown again because the store, or the use of a
+/// package, changed since the dialog the user confirmed.
+fn remove_preview(
+    g: &Guarded<'_>,
+    pick: &flow::Pick,
+    changed: bool,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    session.pending.store = None;
+    match flow::remove_preview(g, pick) {
+        Ok((p, shown)) => {
+            session.nonce += 1;
+            let nonce = session.nonce;
+            let dialog = vm::store_dialog(&p, &session.names, changed, nonce, lang);
+            // Nothing to remove: no token, so no confirm reaches the core (the dialog has none).
+            if !shown.is_empty() {
+                session.pending.store = Some((shown, nonce));
+            }
+            emit(Event::Dialog(Box::new(dialog)));
+        }
+        Err(flow::StoreGate::NotFound) => {
+            // Gone since the list: say so and show the list as it is.
+            emit(Event::Result(vm::store_gate(
+                &flow::StoreGate::NotFound,
+                lang,
+            )));
+            emit(Event::Store(Box::new(store_page(g, lang, session))));
+        }
+        Err(gate) => emit(Event::Result(vm::store_gate(&gate, lang))),
+    }
+}
+
+/// Removes the packages of the dialog the user confirmed (`nonce`). A confirm of any other
+/// dialog writes nothing: the current preview is shown again. The core removes exactly what was
+/// shown and says `Changed` when the store or the use of a package is not what it showed
+/// (nothing removed, the preview again). After a removal the session forgets what it read of the
+/// games, so a fix card that needed a package offers the download again.
+fn remove_packages(
+    g: &Guarded<'_>,
+    nonce: u64,
+    lang: Lang,
+    session: &mut Session,
+    emit: &mut dyn FnMut(Event),
+) {
+    let ok = session
+        .pending
+        .store
+        .as_ref()
+        .is_some_and(|(_, n)| *n == nonce);
+    let Some((shown, _)) = ok.then(|| session.pending.store.take()).flatten() else {
+        let pick = session
+            .pending
+            .store_pick
+            .clone()
+            .unwrap_or(flow::Pick::Unused);
+        remove_preview(g, &pick, true, lang, session, emit);
+        return;
+    };
+    match flow::remove(g, shown) {
+        Ok(removed) => {
+            session.games.clear();
+            session.pages.clear();
+            emit(Event::Result(vm::store_done(&removed, lang)));
+            emit(Event::Store(Box::new(store_page(g, lang, session))));
+        }
+        Err(ActError::Changed) => {
+            let pick = session
+                .pending
+                .store_pick
+                .clone()
+                .unwrap_or(flow::Pick::Unused);
+            remove_preview(g, &pick, true, lang, session, emit);
+        }
+        Err(e) => {
+            emit(Event::Result(vm::act_error(&e, lang)));
+            emit(Event::Store(Box::new(store_page(g, lang, session))));
         }
     }
 }

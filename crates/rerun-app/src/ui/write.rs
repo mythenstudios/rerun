@@ -101,6 +101,11 @@ pub(super) fn preview_data(p: &PreviewVm, ready: bool) -> PreviewData {
 /// focus back (`take-focus: Modal.return-to == -1000` in `app.slint`).
 pub(super) const CLEAR_OPENER: i32 = -1000;
 
+/// `st.opener` of the dialog that "Remove all unused..." opens (`take-focus: Modal.return-to ==
+/// -1001` in `app.slint`); a package row's button is `STORE_ROW_OPENER - index`.
+pub(super) const STORE_ALL_OPENER: i32 = -1001;
+pub(super) const STORE_ROW_OPENER: i32 = -10000;
+
 pub(super) fn card(c: &TxnCardVm) -> CardData {
     CardData {
         id: s(&c.id),
@@ -130,6 +135,7 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
             DialogKind::Forget => 1,
             DialogKind::Rebind => 4,
             DialogKind::Clear => 5,
+            DialogKind::Packages => 6,
         },
         title: s(&d.title),
         intro: s(&d.intro),
@@ -146,7 +152,7 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
         can_confirm: d.can_confirm,
         blocked: d.blocked.as_deref().map(s).unwrap_or_default(),
         // A clear dialog with nothing to remove offers no confirm at all.
-        no_confirm: d.kind == DialogKind::Clear && !d.can_confirm,
+        no_confirm: matches!(d.kind, DialogKind::Clear | DialogKind::Packages) && !d.can_confirm,
         cancel_label: SharedString::new(),
         cancel_disabled: false,
         no_cancel: false,
@@ -157,6 +163,8 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
                 .map(|l| ListData {
                     heading: s(&l.heading),
                     lines: model(l.lines.iter().map(s).collect()),
+                    show: l.fold.as_ref().map(|f| s(&f.0)).unwrap_or_default(),
+                    hide: l.fold.as_ref().map(|f| s(&f.1)).unwrap_or_default(),
                 })
                 .collect(),
         ),
@@ -383,6 +391,7 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             (DialogKind::Forget, Some(txn)) => Job::Forget { txn, nonce },
             (DialogKind::Rebind, Some(txn)) => Job::Rebind { txn, nonce },
             (DialogKind::Clear, _) => Job::Clear { nonce },
+            (DialogKind::Packages, _) => Job::RemovePackages { nonce },
             // The other dialogs name a transaction.
             _ => return,
         };
@@ -410,6 +419,49 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         st.opener = CLEAR_OPENER;
         ui.global::<Modal>().set_return_to(-1);
         st.worker.send(Job::ClearPreview);
+    });
+
+    // "Remove..." of a package row and "Remove all unused...": only ask for the preview (read
+    // only); the dialog lists what goes with every file (rule 5).
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_store_remove(move |i| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut st = st.borrow_mut();
+        let Ok(i) = usize::try_from(i) else {
+            return;
+        };
+        let Some(row) = st.store.as_ref().and_then(|v| v.rows.get(i)) else {
+            return;
+        };
+        let pick = rerun_core::flow::Pick::Package {
+            id: row.id.clone(),
+            version: row.version.clone(),
+        };
+        if store_busy(&ui, &st) {
+            return;
+        }
+        st.opener = STORE_ROW_OPENER - i32::try_from(i).unwrap_or(0);
+        ui.global::<Modal>().set_return_to(-1);
+        st.worker.send(Job::RemovePreview { pick });
+    });
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_store_remove_all(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut st = st.borrow_mut();
+        if store_busy(&ui, &st) {
+            return;
+        }
+        st.opener = STORE_ALL_OPENER;
+        ui.global::<Modal>().set_return_to(-1);
+        st.worker.send(Job::RemovePreview {
+            pick: rerun_core::flow::Pick::Unused,
+        });
     });
 
     // "Check new folder" of an undo dialog: only asks for the rebind preview (reads, writes
@@ -513,6 +565,11 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             Some(ui) => close_window(&ui, &mut st.borrow_mut()),
             None => CloseRequestResponse::HideWindow,
         });
+}
+
+/// A dialog is open or a write runs: the packages buttons do nothing.
+fn store_busy(ui: &AppWindow, st: &State) -> bool {
+    st.uac || st.download.is_some() || st.dialog.is_some() || ui.global::<Modal>().get_working()
 }
 
 /// A card's "Undo" or "Close without undoing": the preview first (rule 5).

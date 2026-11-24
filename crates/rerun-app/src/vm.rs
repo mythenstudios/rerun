@@ -24,11 +24,13 @@ mod clear;
 mod download;
 mod history;
 mod problems;
+mod store;
 mod write;
 pub use clear::*;
 pub use download::*;
 pub use history::*;
 pub use problems::*;
+pub use store::*;
 pub use write::*;
 
 use crate::text::{Lang, Msg, Sym, t};

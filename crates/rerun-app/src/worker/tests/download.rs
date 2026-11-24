@@ -35,7 +35,7 @@ const STORE: &str =
 const DLL: &[u8] = b"the fix dll";
 const INI: &[u8] = b"[Fix]\r\nOn=1\r\n";
 
-fn upper(b: &[u8]) -> String {
+pub(super) fn upper(b: &[u8]) -> String {
     Sha256::digest(b)
         .iter()
         .map(|x| format!("{x:02X}"))
@@ -96,16 +96,16 @@ fn github(body: FakeReply) -> FakeHttp {
 }
 
 /// A world, scripted HTTPS, a session and a language: jobs run as the worker thread runs them.
-struct DRig {
-    sys: FakeSystem,
-    http: FakeHttp,
-    session: Session,
-    lang: Lang,
-    archive: Vec<u8>,
+pub(super) struct DRig {
+    pub(super) sys: FakeSystem,
+    pub(super) http: FakeHttp,
+    pub(super) session: Session,
+    pub(super) lang: Lang,
+    pub(super) archive: Vec<u8>,
 }
 
 impl DRig {
-    fn new(lang: Lang, body: impl FnOnce(&[u8]) -> FakeReply) -> Self {
+    pub(super) fn new(lang: Lang, body: impl FnOnce(&[u8]) -> FakeReply) -> Self {
         let archive = archive();
         let sys = steam_world("Invented P");
         import(&sys, &pkg_index(&archive, &sha256_of(&sys, "game.exe"), 1));
@@ -119,7 +119,7 @@ impl DRig {
         }
     }
 
-    fn run(&mut self, job: Job) -> Vec<Event> {
+    pub(super) fn run(&mut self, job: Job) -> Vec<Event> {
         let install = install();
         let env = Env {
             sys: &self.sys,
@@ -142,7 +142,7 @@ impl DRig {
         out
     }
 
-    fn page(&mut self) -> GameVm {
+    pub(super) fn page(&mut self) -> GameVm {
         match self
             .run(Job::Game {
                 app_id: 220,
@@ -156,7 +156,7 @@ impl DRig {
     }
 
     /// The click on the fix's checkbox: the consent dialog.
-    fn ask(&mut self) -> DownloadVm {
+    pub(super) fn ask(&mut self) -> DownloadVm {
         let ev = self.run(Job::DownloadAsk {
             app_id: 220,
             variant: "fix-pack".to_owned(),
@@ -168,7 +168,7 @@ impl DRig {
     }
 
     /// The game folder: what an undo must restore bit for bit.
-    fn snap(&self) -> Snapshot {
+    pub(super) fn snap(&self) -> Snapshot {
         let fr = ForbiddenRoots::resolve(&self.sys, Path::new(INSTALL)).unwrap();
         let g = GameDir::open_manual(&self.sys, &fr, Path::new(G)).unwrap();
         snapshot(
@@ -183,7 +183,7 @@ impl DRig {
 
     /// The names in Rerun's `cache` or `packages` folder (without lock files); `None`: the
     /// folder does not exist.
-    fn listed(&self, sub: &str) -> Option<Vec<String>> {
+    pub(super) fn listed(&self, sub: &str) -> Option<Vec<String>> {
         let a = AppDir::open(&self.sys, Create::Never).unwrap().unwrap();
         let dir = match a.dir().open_dir(&RelPath::parse(sub).unwrap()) {
             Ok(d) => d,
@@ -202,7 +202,7 @@ impl DRig {
     }
 }
 
-fn ended(ev: &[Event]) -> Option<DownloadOutcome> {
+pub(super) fn ended(ev: &[Event]) -> Option<DownloadOutcome> {
     ev.iter().find_map(|e| match e {
         Event::DownloadEnded(o) => Some(*o),
         _ => None,
@@ -690,7 +690,7 @@ fn ad5_the_worker_counts_a_download_and_a_cancel_ends_it() {
     panic!("the download never stopped counting");
 }
 
-fn game_in(ev: &[Event]) -> &GameVm {
+pub(super) fn game_in(ev: &[Event]) -> &GameVm {
     ev.iter()
         .find_map(|e| match e {
             Event::Game(g) => Some(g),
