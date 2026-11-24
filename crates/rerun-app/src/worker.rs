@@ -13,6 +13,13 @@
 //! effect at the next read, up to WinHTTP's 30 s receive timeout, and a cancelled or failed body
 //! leaves nothing in the cache.
 //!
+//! Opening (P5-10a): [`Job::OpenSource`] names a source of the fix card by reference, the core
+//! looks its URL up in the current signed index; [`Job::ReportAsk`] answers with the report
+//! dialog (exactly the issue's text) and keeps the report under the dialog's nonce,
+//! [`Job::ReportOpen`] opens exactly its URL once; [`Job::DataFolder`] and
+//! [`Job::OpenDataFolder`] are Settings > Data. All through the world's `Shell` (never in
+//! `flow::Env`), none a write job; [`Event::Opened`] or a calm result answers.
+//!
 //! Every job builds its own `Guarded` through `flow::guard` (elevation first, then the
 //! forbidden roots, then Rerun's folder opened if it exists, never created): an elevated process
 //! reads nothing, and the window shows the blocking page (rule 6). Reading and previewing
@@ -63,14 +70,14 @@ use rerun_core::flow::{
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::journal::TxnId;
 use rerun_core::plan::Pick;
-use rerun_core::sys::{Http, PromptOwner, PromptOwnerSlot, System};
+use rerun_core::sys::{Http, NoShell, PromptOwner, PromptOwnerSlot, Shell, System};
 use rerun_core::topo;
 
 use crate::text::{Lang, Msg, t};
 use crate::vm::{
-    self, AppliedVm, BlockedVm, DetailVm, DialogVm, DownloadVm, GameVm, HelperState, HistoryVm,
-    LibraryVm, Names, Notice, Offer, OrphansVm, PackageState, PreviewVm, ResultVm, RowVm, SteamVm,
-    StoreVm, SystemVm, TopoKnown, UacVm,
+    self, AppliedVm, BlockedVm, DataVm, DetailVm, DialogVm, DownloadVm, GameVm, HelperState,
+    HistoryVm, LibraryVm, Names, Notice, Offer, OrphansVm, PackageState, PreviewVm, ResultVm,
+    RowVm, SteamVm, StoreVm, SystemVm, TopoKnown, UacVm,
 };
 
 /// A job for the worker.
@@ -189,6 +196,26 @@ pub enum Job {
         /// The nonce of the dialog the user confirmed (`DownloadVm::nonce`).
         nonce: u64,
     },
+    /// Opens a source link of a fix in the browser (P5-10a): the core looks the URL up in the
+    /// current signed index by this reference; the window never hands over a URL.
+    OpenSource(flow::LinkRef),
+    /// "Report a problem": the dialog with exactly the text of the issue (reads only, opens
+    /// nothing); the worker keeps the report under the dialog's nonce.
+    ReportAsk {
+        /// The game the page is about.
+        app_id: u32,
+    },
+    /// Opens the issue of the report dialog whose nonce this is in the browser; another nonce
+    /// opens nothing.
+    ReportOpen {
+        /// The nonce of the shown dialog.
+        nonce: u64,
+    },
+    /// Where Rerun's folder is and whether it exists, for Settings > Data (reads only, creates
+    /// nothing).
+    DataFolder,
+    /// Shows Rerun's folder in Explorer, only if it exists.
+    OpenDataFolder,
 }
 
 impl Job {
@@ -217,6 +244,11 @@ impl Job {
             Self::RemovePackages { .. } => "remove packages".to_owned(),
             Self::DownloadAsk { app_id, .. } => format!("download ask {app_id}"),
             Self::Download { .. } => "download".to_owned(),
+            Self::OpenSource(_) => "open source".to_owned(),
+            Self::ReportAsk { app_id } => format!("report ask {app_id}"),
+            Self::ReportOpen { .. } => "report open".to_owned(),
+            Self::DataFolder => "data folder".to_owned(),
+            Self::OpenDataFolder => "open data folder".to_owned(),
         }
     }
 
@@ -308,6 +340,10 @@ pub enum Event {
     Download(Box<DownloadVm>),
     /// A [`Job::Download`] has ended (always the last event of it, after the fresh page).
     DownloadEnded(DownloadOutcome),
+    /// The shell took a link or Rerun's folder (P5-10a): a report dialog closes.
+    Opened,
+    /// Settings > Data: where Rerun's folder is (P5-10a).
+    DataFolder(Box<DataVm>),
     /// The next core call may start the elevated helper and Windows shows its UAC dialog: the
     /// worker blocks until the user answers it. Always followed by [`Event::Result`] (or, for an
     /// undo whose state changed meanwhile, [`Event::Dialog`]).
@@ -327,6 +363,9 @@ pub struct World {
     pub sys: Box<dyn System>,
     /// HTTPS (unused while the app is read-only; `flow::Env` carries it).
     pub http: Box<dyn Http>,
+    /// The user's shell: links and Rerun's folder (P5-10a). Outside `flow::Env`, which the
+    /// CLI shares; only the app has one.
+    pub shell: Arc<dyn Shell>,
     /// Rerun's install folder (the folder of `rerun-app.exe`), or why it is unknown.
     pub install: Result<PathBuf, String>,
 }
@@ -379,6 +418,9 @@ impl Worker {
                     cancel: thread_cancel,
                     ..Session::default()
                 };
+                if let Ok(w) = &world {
+                    session.shell = ShellRef(w.shell.clone());
+                }
                 // A library job that stopped a running scan: it runs next.
                 let mut next: Option<Job> = None;
                 while let Some(job) = next.take().or_else(|| job_rx.recv().ok()) {
@@ -508,6 +550,25 @@ pub struct Session {
     /// The time the pages say "ago" against, seconds since 1970-01-01 UTC: `None` reads the
     /// clock (tests set it).
     pub(crate) now: Option<u64>,
+    /// The user's shell (the world's; none until the thread has its world, and in tests that
+    /// set none).
+    pub(crate) shell: ShellRef,
+}
+
+/// The shell a session opens links and Rerun's folder with.
+#[derive(Clone)]
+pub struct ShellRef(pub Arc<dyn Shell>);
+
+impl Default for ShellRef {
+    fn default() -> Self {
+        Self(Arc::new(NoShell))
+    }
+}
+
+impl std::fmt::Debug for ShellRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ShellRef")
+    }
 }
 
 impl Session {
@@ -550,6 +611,8 @@ struct Pending {
     store_pick: Option<flow::Pick>,
     /// The list the consent (or failure) dialog showed: a download is made only for it.
     consent: Option<Consent>,
+    /// The report the report dialog showed, under its nonce: only its URL is opened.
+    report: Option<(u64, flow::Report)>,
 }
 
 /// What a download dialog showed, kept under its nonce (the consent is bound to this list).
@@ -716,8 +779,49 @@ fn run_job(
             download_ask(&g, *app_id, variant, lang, session, emit);
         }
         Job::Download { nonce } => download(&g, *nonce, lang, session, emit),
+        Job::OpenSource(r) => {
+            let r = flow::source_url(&g, r)
+                .map_err(flow::OpenError::Refused)
+                .and_then(|u| flow::open_url(&*session.shell.0, &u));
+            opened(r, lang, emit);
+        }
+        Job::ReportAsk { app_id } => match flow::report(&g, *app_id) {
+            Ok(report) => {
+                session.nonce += 1;
+                let nonce = session.nonce;
+                emit(Event::Dialog(Box::new(vm::report_dialog(
+                    &report, nonce, lang,
+                ))));
+                session.pending.report = Some((nonce, report));
+            }
+            Err(e) => opened(Err(flow::OpenError::Refused(e)), lang, emit),
+        },
+        Job::ReportOpen { nonce } => {
+            // Only the report of the dialog the user confirmed; the dialog closes either way.
+            match session.pending.report.take() {
+                Some((n, report)) if n == *nonce => {
+                    opened(flow::open_url(&*session.shell.0, report.url()), lang, emit);
+                }
+                _ => emit(Event::Result(vm::open_stale(lang))),
+            }
+        }
+        Job::DataFolder => {
+            emit(Event::DataFolder(Box::new(vm::data_folder(
+                &flow::data_folder(&g),
+                lang,
+            ))));
+        }
+        Job::OpenDataFolder => opened(flow::open_data_folder(&g, &*session.shell.0), lang, emit),
     }
     preempted
+}
+
+/// What an open came to: [`Event::Opened`], or a calm result that says nothing was opened.
+fn opened(r: Result<(), flow::OpenError>, lang: Lang, emit: &mut dyn FnMut(Event)) {
+    match r {
+        Ok(()) => emit(Event::Opened),
+        Err(e) => emit(Event::Result(vm::open_failed(&e, lang))),
+    }
 }
 
 /// A game's page: the lookup, and the transactions applied to it.

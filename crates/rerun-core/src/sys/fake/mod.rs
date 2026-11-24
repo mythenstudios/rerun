@@ -24,6 +24,7 @@ mod helper;
 mod http;
 mod known_folders;
 mod registry;
+mod shell;
 mod topology;
 
 use std::collections::BTreeMap;
@@ -45,6 +46,7 @@ pub use helper::{FakeHelperSystem, FakeHelperToken, TokenCall};
 pub use http::{FakeHttp, FakeReply, Trip};
 pub use known_folders::FakeKnownFolders;
 pub use registry::{FakeRegistry, MAX_LINK_HOPS, RegHook};
+pub use shell::{FakeShell, Opened};
 pub use topology::FakeTopology;
 
 use super::contract::{Access, FsFixture, Held, Share};

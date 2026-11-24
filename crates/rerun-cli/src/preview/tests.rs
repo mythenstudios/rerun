@@ -70,6 +70,7 @@ fn preview(root_path: &str, ops: Vec<PreviewOp>) -> Preview {
         patched: None,
         gpu_pref: None,
         user_data: None,
+        variants: Vec::new(),
     }
 }
 

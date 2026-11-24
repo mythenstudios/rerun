@@ -38,6 +38,11 @@
 //! with the reason, with a token ([`RemoveShown`]); [`remove`] removes exactly that under the
 //! locks and writes nothing when it differs ([`ActError::Changed`]).
 //!
+//! Opening (P5-10a, `flow/open.rs`): [`source_url`] looks a source link up in the current signed
+//! index by reference ([`LinkRef`]); [`report`] builds the prefilled issue of "report a problem"
+//! from facts Rerun determines itself; [`data_folder`] says where Rerun's folder is and whether it
+//! exists; [`open_url`] and [`open_data_folder`] hand them to a [`crate::sys::Shell`].
+//!
 //! A [`Guarded`] is built per job, never kept for a session: Rerun's folder can appear or vanish
 //! between two jobs.
 
@@ -53,6 +58,7 @@ mod game;
 mod history;
 mod launch;
 mod library;
+mod open;
 mod packages;
 mod revert;
 mod status;
@@ -73,6 +79,10 @@ pub use launch::{
     option_text,
 };
 pub use library::{LibraryCounts, LibraryEvent, LibraryFacts, RowScan, failed_games, library};
+pub use open::{
+    DataFolder, LinkRef, OpenError, Report, data_folder, open_data_folder, open_url, report,
+    source_url,
+};
 pub use packages::{
     DownloadNeed, FetchError, FetchKind, Fetched, NeedState, PackageNeed, Progress, fetch, need,
     redirect_hosts,

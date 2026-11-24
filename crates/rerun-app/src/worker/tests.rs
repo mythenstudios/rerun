@@ -755,6 +755,7 @@ fn aw8_the_worker_runs_jobs_in_order_and_wakes_for_each_event() {
     let woken = Arc::new(AtomicUsize::new(0));
     let make = |_| {
         Ok(World {
+            shell: std::sync::Arc::new(rerun_core::sys::NoShell),
             sys: Box::new(indexed("Invented AC")),
             http: Box::new(FakeHttp::default()),
             install: install(),
@@ -929,6 +930,8 @@ fn kinds(ev: &[Event]) -> Vec<&'static str> {
             Event::DownloadEnded(_) => "download-ended",
             Event::WaitingForUac(_) => "uac",
             Event::Store(_) => "store",
+            Event::Opened => "opened",
+            Event::DataFolder(_) => "data-folder",
         })
         .collect()
 }
@@ -1014,6 +1017,7 @@ fn aw10_a_click_during_a_scan_on_the_worker_thread_is_answered_before_the_summar
     let make = move |_| {
         gate.wait();
         Ok(World {
+            shell: std::sync::Arc::new(rerun_core::sys::NoShell),
             sys: Box::new(indexed("Invented AC")),
             http: Box::new(FakeHttp::default()),
             install: install(),
@@ -1201,6 +1205,7 @@ mod clear;
 mod download;
 mod helper;
 mod history;
+mod open;
 mod problems;
 mod rebind;
 mod store;

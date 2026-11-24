@@ -7,6 +7,7 @@
 
 mod chrome;
 mod download;
+mod open;
 #[cfg(test)]
 mod tests;
 mod write;
@@ -33,8 +34,8 @@ use generated::{
     AppWindow, AppliedData, BadgeData, BannerData, CardData, DetailData, DialogData, FactData,
     FixData, GameData, HistEntryData, HistGroupData, HistoryData, LaunchData, LaunchRowData,
     LineData, ListData, Modal, NoticeData, OpData, OrphanData, OrphansData, PartsData, PreviewData,
-    ProblemData, Reveal, RowData, SectionData, SolvedData, StoreData, StoreRowData, Str,
-    SysLineData, Theme, WarnData,
+    ProblemData, Reveal, RowData, SectionData, SolvedData, SourceData, StoreData, StoreRowData,
+    Str, SysLineData, Theme, WarnData,
 };
 
 use std::cell::RefCell;
@@ -449,6 +450,12 @@ fn set_strings(ui: &AppWindow, lang: Lang) {
     g.set_theme_name(x(Msg::ThemeMythen));
     g.set_set_language(x(Msg::SetLanguage));
     g.set_language_name(x(Msg::LanguageName));
+    g.set_settings_data(x(Msg::SettingsData));
+    g.set_data_intro(x(Msg::DataIntro));
+    g.set_data_open(x(Msg::DataOpenBtn));
+    g.set_source_open(x(Msg::SourceOpen));
+    g.set_open_in_browser(x(Msg::OpenInBrowser));
+    g.set_report_btn(x(Msg::ReportBtn));
     g.set_settings_about(x(Msg::SettingsAbout));
     g.set_about_version(s(format!(
         "{} {}",
@@ -521,8 +528,12 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 // The firewall is read only when this page opens (COM), never at start.
                 st.worker.send(Job::Orphans);
             }
-            // Every visit reads the package store again (never kept).
-            4 => st.worker.send(Job::Store),
+            // Every visit reads the package store and where Rerun's folder is again (never
+            // kept; the folder may appear meanwhile).
+            4 => {
+                st.worker.send(Job::Store);
+                st.worker.send(Job::DataFolder);
+            }
             _ => {}
         }
     });
@@ -594,6 +605,7 @@ fn callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 
     write_callbacks(ui, state);
+    open::open_callbacks(ui, state);
 }
 
 /// Takes every waiting event of the worker.
@@ -731,6 +743,13 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                     show_history(ui, &st);
                 }
             }
+            Event::Opened => {
+                // The browser or Explorer took it: a report dialog closes.
+                if matches!(st.dialog, Some((DialogKind::Report, _, _))) {
+                    close_dialog(ui, &mut st);
+                }
+            }
+            Event::DataFolder(d) => ui.set_data_folder(open::data_data(&d)),
             Event::Store(v) => {
                 if st.store.as_ref() != Some(&*v) {
                     ui.set_store(store_data(&v));
@@ -874,7 +893,16 @@ fn game(g: &GameVm, sel: &Selection) -> GameData {
                                 when: badge(&x.when),
                                 status: badge(&x.status),
                                 tradeoffs: model(x.tradeoffs.iter().map(shown).collect()),
-                                sources: model(x.sources.iter().map(shown).collect()),
+                                sources: model(
+                                    x.sources
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, src)| SourceData {
+                                            text: shown(src),
+                                            can_open: x.can_open.get(i).copied().unwrap_or(false),
+                                        })
+                                        .collect(),
+                                ),
                             })
                             .collect(),
                     ),

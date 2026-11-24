@@ -393,6 +393,10 @@ pub struct Preview {
     pub gpu_pref: Option<&'static str>,
     /// [`USER_DATA_NOTE`], once per plan with a user data root (P4-12).
     pub user_data: Option<&'static str>,
+    /// The variant IDs the plan's source picked (ID form, checked when the plan is decoded), in
+    /// its order; empty for a plan from a step file. Display only (the app's "report a problem",
+    /// P5-10a).
+    pub variants: Vec<String>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -861,6 +865,9 @@ pub fn preview(p: &Plan) -> Preview {
         patched,
         gpu_pref,
         user_data,
+        variants: p.source.as_ref().map_or_else(Vec::new, |s| {
+            s.picks.iter().map(|k| k.variant.clone()).collect()
+        }),
     }
 }
 

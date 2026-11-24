@@ -8,12 +8,15 @@
 //! - [`firewall`]: Rerun's own firewall rules: the one rule form and their observation (ADR 0023
 //!   §6, P4-5a).
 //! - [`ini`]: the bounded INI editor (ADR 0021): dialect, `edit` and `unedit`.
+//! - [`open`]: what Rerun may hand to the shell: https links of the signed index and Rerun's
+//!   own, and Rerun's own folder (ADR 0027 amendment P5-10a).
 //! - [`registry`]: the registry allowlist and the only way to the registry write side (ADR 0018).
 //! - [`url`]: the URL rules of the loader and the downloader: form, provenance, redirects
 //!   (docs/02, ADR 0024, ADR 0025).
 
 pub mod firewall;
 pub mod ini;
+pub mod open;
 pub mod registry;
 pub mod root;
 pub mod url;

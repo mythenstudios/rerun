@@ -16,16 +16,17 @@
 //!   `policy::registry`); the real known folders;
 //!   the real CPU topology (ADR 0010); the real graphics adapters (DXGI, ADR 0008
 //!   amendment); the real firewall rules (read side, COM, ADR 0008 amendment P4-5a); and
-//!   HTTPS GET through WinHTTP (`WinHttp`, ADR 0025). `unsafe` exists only in its modules `nt`,
-//!   `token`, `reg`, `shell`, `cpu`, `loader`, `dxgi`, `elevation`, `process`, `com`,
-//!   `firewall` and `http`.
+//!   HTTPS GET through WinHTTP (`WinHttp`, ADR 0025); the user's shell (`WinShell`, P5-10a).
+//!   `unsafe` exists only in its modules `nt`, `token`, `reg`, `shell`, `cpu`, `loader`, `dxgi`,
+//!   `elevation`, `process`, `com`, `firewall`, `http` and `shell_open`.
 //!
 //! - [`KnownFolders`] never reads environment variables (ADR 0007, ADR 0009).
 //!
 //! `sys::win::WinSystem` bundles the real parts into one [`System`]. [`HelperToken`] is the
 //! elevated helper's own token (ADR 0023, P4-2a) and [`HelperSystem`] its system (P4-2c); [`Firewall`] the firewall's read side (ADR 0023
 //! §8, P4-5a). [`Http`] (ADR 0025, P4-6) is HTTPS GET, deliberately outside [`System`]: the
-//! helper's system can never reach the network.
+//! helper's system can never reach the network. [`Shell`] (ADR 0027 amendment P5-10a) hands a
+//! link or Rerun's folder to the user's shell, outside [`System`] for the same reason.
 
 pub mod elevation;
 mod error;
@@ -36,6 +37,7 @@ pub mod helper;
 pub mod http;
 pub mod known_folders;
 pub mod registry;
+pub mod shell;
 pub mod topology;
 
 #[cfg(any(test, feature = "fake"))]
@@ -64,6 +66,7 @@ pub use helper::{
 pub use http::{Http, NoHttp, Response};
 pub use known_folders::{KnownFolder, KnownFolders};
 pub use registry::{Registry, RegistryWrite};
+pub use shell::{NoShell, Shell};
 pub use topology::Topology;
 
 /// Entry point for all system access.

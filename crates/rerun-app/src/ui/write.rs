@@ -145,6 +145,7 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
             DialogKind::Rebind => 4,
             DialogKind::Clear => 5,
             DialogKind::Packages => 6,
+            DialogKind::Report => 7,
         },
         title: s(&d.title),
         intro: s(&d.intro),
@@ -402,6 +403,8 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             (DialogKind::Rebind, Some(txn)) => Job::Rebind { txn, nonce },
             (DialogKind::Clear, _) => Job::Clear { nonce },
             (DialogKind::Packages, _) => Job::RemovePackages { nonce },
+            // Opens exactly the issue the dialog shows (P5-10a); writes nothing.
+            (DialogKind::Report, _) => Job::ReportOpen { nonce },
             // The other dialogs name a transaction.
             _ => return,
         };

@@ -23,12 +23,14 @@ use rerun_core::topo::{AntiCheatState, Refusal, Tri};
 mod clear;
 mod download;
 mod history;
+mod open;
 mod problems;
 mod store;
 mod write;
 pub use clear::*;
 pub use download::*;
 pub use history::*;
+pub use open::*;
 pub use problems::*;
 pub use store::*;
 pub use write::*;
@@ -581,6 +583,9 @@ pub struct SolvedVm {
     pub tradeoffs: Vec<Shown<'static>>,
     /// Where the fix comes from for this issue: type and link (escaped).
     pub sources: Vec<Shown<'static>>,
+    /// Per source: the core would open its link (`policy::open::openable`), so it gets an open
+    /// button (P5-10a). The click names the source by its position; the core looks it up again.
+    pub can_open: Vec<bool>,
 }
 
 /// One fix (one variant ID, ADR 0027 U2 a).
@@ -667,6 +672,8 @@ pub struct GameVm {
     pub applied: Vec<TxnCardVm>,
     /// The game's Topos this version sets aside, with why (behind a details expander).
     pub aside: Vec<DetailVm>,
+    /// The ID of the Topo that matched, which a source link names (P5-10a); `None` without one.
+    pub topo: Option<String>,
 }
 
 fn hero(sym: Sym, lang: Lang, m: Msg) -> HeroVm {
@@ -711,6 +718,7 @@ fn base(app_id: u32, title: Shown<'static>, hero: HeroVm, lang: Lang) -> GameVm 
         fixes: Vec::new(),
         applied: Vec::new(),
         aside: Vec::new(),
+        topo: None,
     }
 }
 
@@ -1010,6 +1018,7 @@ fn matched(
     }
     g.problems = problems;
     g.fixes = fixes;
+    g.topo = Some(topo.id.to_string());
     g
 }
 
@@ -1112,6 +1121,11 @@ fn fix(
                     .sources
                     .iter()
                     .map(|x| write::source_text(x.kind, &x.url, lang))
+                    .collect(),
+                can_open: s
+                    .sources
+                    .iter()
+                    .map(|x| rerun_core::policy::open::openable(&x.url))
                     .collect(),
             })
             .collect(),

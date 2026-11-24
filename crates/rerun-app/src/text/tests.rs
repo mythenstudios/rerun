@@ -923,11 +923,30 @@ fn every() -> Vec<Msg> {
         RefPkChangedBody,
         RefPkBusyTitle,
         RefPkBusyBody,
+        ReportBtn,
+        ReportTitle,
+        ReportIntro,
+        ReportWhere,
+        ReportLabelTitle,
+        ReportLabelText,
+        OpenInBrowser,
+        SourceOpen,
+        OpenFailedTitle,
+        OpenRefusedForm,
+        OpenNotInIndex,
+        OpenNoFolder,
+        OpenShellFailed,
+        OpenStale,
+        SettingsData,
+        DataIntro,
+        DataOpenBtn,
+        DataNotCreated,
+        DataUnknown,
     ]
 }
 
 /// The number of messages: one more than the highest [`ordinal`].
-const COUNT: usize = 658;
+const COUNT: usize = 677;
 
 /// A message's position in the enum. The `match` is exhaustive: a new variant does not compile
 /// without an ordinal here, and [`every_ordinal_is_listed`] fails until [`every`] lists it.
@@ -1593,6 +1612,25 @@ fn ordinal(m: Msg) -> usize {
         RefPkChangedBody => 655,
         RefPkBusyTitle => 656,
         RefPkBusyBody => 657,
+        ReportBtn => 658,
+        ReportTitle => 659,
+        ReportIntro => 660,
+        ReportWhere => 661,
+        ReportLabelTitle => 662,
+        ReportLabelText => 663,
+        OpenInBrowser => 664,
+        SourceOpen => 665,
+        OpenFailedTitle => 666,
+        OpenRefusedForm => 667,
+        OpenNotInIndex => 668,
+        OpenNoFolder => 669,
+        OpenShellFailed => 670,
+        OpenStale => 671,
+        SettingsData => 672,
+        DataIntro => 673,
+        DataOpenBtn => 674,
+        DataNotCreated => 675,
+        DataUnknown => 676,
     }
 }
 
@@ -1628,7 +1666,7 @@ fn every_ordinal_is_listed() {
     let missing: Vec<usize> = (0..COUNT).filter(|i| !seen[*i]).collect();
     assert!(missing.is_empty(), "ordinals not in every(): {missing:?}");
     // COUNT is right: the last variant has the highest ordinal.
-    assert_eq!(ordinal(Msg::RefPkBusyBody), COUNT - 1);
+    assert_eq!(ordinal(Msg::DataUnknown), COUNT - 1);
 }
 
 #[test]

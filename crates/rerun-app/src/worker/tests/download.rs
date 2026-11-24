@@ -622,6 +622,7 @@ fn ad5_the_worker_counts_a_download_and_a_cancel_ends_it() {
         let sys = steam_world("Invented P");
         import(&sys, &pkg_index(&archive, &sha256_of(&sys, "game.exe"), 1));
         Ok(World {
+            shell: std::sync::Arc::new(rerun_core::sys::NoShell),
             sys: Box::new(sys),
             http: Box::new(github(
                 FakeReply::ok(&archive)

@@ -16,7 +16,9 @@
 //!   `StyledText` and `@markdown`, and none of them is named in a `.slint` file; `StyledText` is
 //!   not named in Rust either;
 //! - the three window buttons stay the last elements of the title bar, minimise, maximise,
-//!   close (`ui::chrome` hit-tests the second from the right).
+//!   close (`ui::chrome` hit-tests the second from the right);
+//! - the real shell (`WinShell`, P5-10a) is named only in `main.rs`, which hands it to the
+//!   worker's world; everything else opens through `flow` with a reference.
 
 #![allow(
     clippy::disallowed_methods,
@@ -199,6 +201,12 @@ fn the_product_sources_keep_the_rules() {
             bad.push(format!("{}:{v}", f.display()));
         }
     }
+    // P5-10a: the real shell only in `main.rs`.
+    for f in files.iter().filter(|f| !f.ends_with("main.rs")) {
+        for n in names_win_shell(&std::fs::read_to_string(f).unwrap()) {
+            bad.push(format!("{}:{n}: WinShell outside main.rs", f.display()));
+        }
+    }
     let mut slint = Vec::new();
     sources(&root.join("ui"), "slint", &mut slint);
     assert!(!slint.is_empty());
@@ -208,6 +216,31 @@ fn the_product_sources_keep_the_rules() {
         }
     }
     assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// The line numbers of `src` (comments skipped) that name `WinShell`.
+fn names_win_shell(src: &str) -> Vec<usize> {
+    src.lines()
+        .enumerate()
+        .filter(|(_, l)| code(l).is_some_and(|c| has_word(c, "WinShell")))
+        .map(|(n, _)| n + 1)
+        .collect()
+}
+
+#[test]
+fn the_shell_rule_has_teeth() {
+    assert_eq!(names_win_shell("let s = WinShell::new(owner);"), [1]);
+    assert_eq!(
+        names_win_shell("use rerun_core::sys::win::{WinHttp, WinShell};"),
+        [1]
+    );
+    assert!(
+        names_win_shell(
+            "// WinShell only in main
+let s = WinShells;"
+        )
+        .is_empty()
+    );
 }
 
 /// The labels of the window buttons in the order they appear in `src`.

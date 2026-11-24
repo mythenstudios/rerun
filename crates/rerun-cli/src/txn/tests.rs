@@ -94,6 +94,7 @@ fn head() -> Preview {
         patched: None,
         gpu_pref: None,
         user_data: None,
+        variants: Vec::new(),
     }
 }
 

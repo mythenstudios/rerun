@@ -32,7 +32,9 @@ use std::process::ExitCode;
 
 #[cfg(windows)]
 fn main() -> ExitCode {
-    use rerun_core::sys::win::{WinHttp, WinSystem, restrict_dll_search};
+    use std::sync::Arc;
+
+    use rerun_core::sys::win::{WinHttp, WinShell, WinSystem, restrict_dll_search};
 
     // First statement (ADR 0008, H2). Fail closed: without a console there is nobody to tell.
     if restrict_dll_search().is_err() {
@@ -65,13 +67,17 @@ fn main() -> ExitCode {
     }
     // The window fills the slot with its handle once it exists: the UAC dialog of a helper start
     // belongs to the window (P5-5c), not to a console the app does not have.
+    // The same slot owns Windows' dialogs of a link or the data folder (P5-10a): a missing
+    // browser association asks in front of the window.
     ui::run(|owner| {
+        let shell = WinShell::new(owner.clone());
         let sys = WinSystem::new()
             .map_err(|e| vm::shown_error(&e))?
             .with_prompt_owner_slot(owner);
         Ok(worker::World {
             sys: Box::new(sys),
             http: Box::new(WinHttp::new()),
+            shell: Arc::new(shell),
             install: install_dir(),
         })
     })

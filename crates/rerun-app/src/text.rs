@@ -1661,6 +1661,45 @@ pub enum Msg {
     RefPkBusyTitle,
     /// A removal refused: another Rerun downloads or unpacks (body).
     RefPkBusyBody,
+    // ---- links, the report and the data folder (P5-10a)
+    /// The game page: the button that opens the report dialog.
+    ReportBtn,
+    /// The report dialog: the title.
+    ReportTitle,
+    /// The report dialog: what happens with the text.
+    ReportIntro,
+    /// The report dialog: where it goes and what it needs.
+    ReportWhere,
+    /// The report dialog: the label of the issue's title.
+    ReportLabelTitle,
+    /// The report dialog: the label of the issue's text.
+    ReportLabelText,
+    /// The confirm of the report dialog, and what a source link's button does.
+    OpenInBrowser,
+    /// The button next to a source link of a fix.
+    SourceOpen,
+    /// A link or the folder was not opened: the title.
+    OpenFailedTitle,
+    /// Not opened: the link is not of the form Rerun opens.
+    OpenRefusedForm,
+    /// Not opened: the current index no longer has the link.
+    OpenNotInIndex,
+    /// Not opened: Rerun's folder does not exist.
+    OpenNoFolder,
+    /// Not opened: Windows could not open it.
+    OpenShellFailed,
+    /// Not opened: the dialog was out of date.
+    OpenStale,
+    /// The settings: the heading of the data group.
+    SettingsData,
+    /// The settings: what Rerun's folder holds.
+    DataIntro,
+    /// The settings: the button that shows Rerun's folder in Explorer.
+    DataOpenBtn,
+    /// The settings: Rerun's folder does not exist yet.
+    DataNotCreated,
+    /// The settings: where Rerun's folder is cannot be told.
+    DataUnknown,
 }
 
 /// The text of `m` in `lang`.
@@ -2628,6 +2667,25 @@ fn en(m: Msg) -> Cow<'static, str> {
         RefPkChangedBody => "Look at the list again. Nothing was removed.",
         RefPkBusyTitle => "Rerun is downloading or unpacking a package",
         RefPkBusyBody => "Try again when it has finished. Nothing was removed.",
+        ReportBtn => "Report a problem\u{2026}",
+        ReportTitle => "Report a problem",
+        ReportIntro => "Rerun opens a new issue on GitHub in your browser, filled in with exactly this text. GitHub receives it as soon as the page opens. You can still change it there; nothing is submitted until you do.",
+        ReportWhere => "Destination: github.com/mythenstudios/rerun. You need a GitHub account to submit it. The text holds only facts Rerun determines itself: no game name, no path, no account.",
+        ReportLabelTitle => "Title",
+        ReportLabelText => "Text",
+        OpenInBrowser => "Open in browser",
+        SourceOpen => "Open",
+        OpenFailedTitle => "Nothing was opened",
+        OpenRefusedForm => "Rerun opens only plain https links, and this one is not.",
+        OpenNotInIndex => "The current index no longer has this link.",
+        OpenNoFolder => "Rerun's folder does not exist yet.",
+        OpenShellFailed => "Windows could not open it. The details say why.",
+        OpenStale => "The dialog was out of date. Open it again.",
+        SettingsData => "Data",
+        DataIntro => "Rerun keeps its index, the changes it made with their backups, and its downloads in this folder. It is fixed; Rerun only shows it here.",
+        DataOpenBtn => "Open in Explorer",
+        DataNotCreated => "Not created yet. Rerun creates it when it first stores something.",
+        DataUnknown => "Rerun cannot tell where its folder is.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 older history entry removed".into()
@@ -3579,6 +3637,25 @@ fn de(m: Msg) -> Cow<'static, str> {
         RefPkChangedBody => "Sieh dir die Liste nochmals an. Es wurde nichts entfernt.",
         RefPkBusyTitle => "Rerun lädt oder entpackt gerade ein Paket",
         RefPkBusyBody => "Versuche es nochmals, wenn es fertig ist. Es wurde nichts entfernt.",
+        ReportBtn => "Problem melden\u{2026}",
+        ReportTitle => "Problem melden",
+        ReportIntro => "Rerun öffnet auf GitHub in deinem Browser ein neues Issue, ausgefüllt mit genau diesem Text. GitHub erhält ihn, sobald die Seite offen ist. Du kannst ihn dort noch ändern; abgeschickt wird erst, wenn du es tust.",
+        ReportWhere => "Ziel: github.com/mythenstudios/rerun. Zum Abschicken brauchst du ein GitHub-Konto. Der Text enthält nur Fakten, die Rerun selbst bestimmt: keinen Spielnamen, keinen Pfad, kein Konto.",
+        ReportLabelTitle => "Titel",
+        ReportLabelText => "Text",
+        OpenInBrowser => "Im Browser öffnen",
+        SourceOpen => "Öffnen",
+        OpenFailedTitle => "Es wurde nichts geöffnet",
+        OpenRefusedForm => "Rerun öffnet nur einfache https-Links, und dieser ist keiner.",
+        OpenNotInIndex => "Der aktuelle Index hat diesen Link nicht mehr.",
+        OpenNoFolder => "Der Ordner von Rerun existiert noch nicht.",
+        OpenShellFailed => "Windows konnte es nicht öffnen. Die Details sagen, warum.",
+        OpenStale => "Der Dialog war veraltet. Öffne ihn nochmals.",
+        SettingsData => "Daten",
+        DataIntro => "Rerun hält den Index, seine Änderungen mit ihren Sicherungen und die Downloads in diesem Ordner. Er ist fest; Rerun zeigt ihn hier nur an.",
+        DataOpenBtn => "Im Explorer öffnen",
+        DataNotCreated => "Noch nicht angelegt. Rerun legt ihn an, wenn es zum ersten Mal etwas speichert.",
+        DataUnknown => "Rerun kann nicht feststellen, wo sein Ordner liegt.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 älterer Verlaufseintrag entfernt".into()

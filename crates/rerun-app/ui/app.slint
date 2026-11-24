@@ -20,10 +20,10 @@ import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
 import { CardView, HistEntryView, LaunchRowView } from "card.slint";
 import { DialogView } from "dialog.slint";
-import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
+import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, Theme, Str, Reveal, Modal } from "base.slint";
 
 // What `ui` names through the generated code.
-export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, Theme, Str, Reveal, Modal }
+export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, Theme, Str, Reveal, Modal }
 
 component Toggle inherits Pressable {
     in-out property <bool> checked;
@@ -652,6 +652,10 @@ component GamePage inherits VerticalLayout {
     callback apply(string);
     callback card-undo(int);
     callback card-forget(int);
+    // A source link of a fix: the fix, the issue it solves and the source, by position (P5-10a).
+    callback source-open(int, int, int);
+    // "Report a problem...": the dialog with the issue's text (P5-10a).
+    callback report();
     // The details of the set-aside Topos are shown.
     in-out property <bool> aside-open: false;
     spacing: Theme.s4;
@@ -1009,7 +1013,7 @@ component GamePage inherits VerticalLayout {
                     accessible-role: none;
                 }
 
-                for s in fx.solves: VerticalLayout {
+                for s[sj] in fx.solves: VerticalLayout {
                     spacing: Theme.s1;
                     HorizontalLayout {
                         spacing: Theme.s3;
@@ -1058,12 +1062,29 @@ component GamePage inherits VerticalLayout {
                         color: Theme.muted;
                         font-size: Theme.fs-s;
                     }
-                    for src in s.sources: Text {
-                        text: src;
-                        color: Theme.text;
-                        font-family: Theme.font-mono;
-                        font-size: Theme.fs-s;
-                        wrap: word-wrap;
+                    for src[si] in s.sources: HorizontalLayout {
+                        spacing: Theme.s3;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: src.text;
+                            color: Theme.text;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.fs-s;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+
+                        // The link is the untrusted part: it is the accessible label, Rerun's
+                        // words the description (docs/06, review S3).
+                        if src.can-open: Button {
+                            text: Str.source-open;
+                            accessible-label: src.text;
+                            accessible-description: Str.open-in-browser;
+                            enabled: !Modal.open;
+                            activated => {
+                                root.source-open(fi, sj, si);
+                            }
+                        }
                     }
                 }
             }
@@ -1092,6 +1113,26 @@ component GamePage inherits VerticalLayout {
             }
             forget => {
                 root.card-forget(ci);
+            }
+        }
+    }
+    // The page's footer: "Report a problem..." shows the issue's text first (P5-10a, E4 a).
+    if !root.loading: VerticalLayout {
+        padding-top: Theme.s5;
+        spacing: Theme.s4;
+        Hairline {
+            height: Theme.hair;
+        }
+
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                text: Str.report-btn;
+                take-focus: Modal.return-to == -1002;
+                enabled: !Modal.open && !Modal.working;
+                activated => {
+                    root.report();
+                }
             }
         }
     }
@@ -1557,10 +1598,65 @@ component PackagesGroup inherits VerticalLayout {
     }
 }
 
+// Settings > Data: where Rerun's folder is, and "Open in Explorer" only while it exists
+// (P5-10a; the folder is fixed, ADR 0027 U6 a).
+component DataGroup inherits VerticalLayout {
+    in property <DataFolderData> data;
+    callback open();
+    spacing: Theme.s3;
+    GroupHeading {
+        text: Str.settings-data;
+    }
+
+    Muted {
+        text: Str.data-intro;
+    }
+
+    Card {
+        VerticalLayout {
+            padding: Theme.s5;
+            spacing: Theme.s2;
+            if root.data.path != "": Text {
+                text: root.data.path;
+                color: Theme.strong;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+            }
+            if root.data.note != "": Text {
+                text: root.data.note;
+                color: Theme.muted;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+            }
+            if root.data.detail != "": Text {
+                text: root.data.detail;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+            }
+            if root.data.exists: HorizontalLayout {
+                alignment: start;
+                padding-top: Theme.s2;
+                Button {
+                    text: Str.data-open;
+                    enabled: !Modal.open;
+                    activated => {
+                        root.open();
+                    }
+                }
+            }
+        }
+    }
+}
+
 component SettingsPage inherits VerticalLayout {
     in property <StoreData> store;
+    in property <DataFolderData> data;
     callback store-remove(int);
     callback store-remove-all();
+    callback open-data-folder();
     spacing: Theme.s4;
     PageTitle {
         text: Str.settings-title;
@@ -1598,6 +1694,13 @@ component SettingsPage inherits VerticalLayout {
         }
         remove-all => {
             root.store-remove-all();
+        }
+    }
+
+    DataGroup {
+        data: root.data;
+        open => {
+            root.open-data-folder();
         }
     }
 
@@ -1709,6 +1812,7 @@ export component AppWindow inherits Window {
     in property <[SysLineData]> system-lines;
     in property <OrphansData> orphans;
     in property <StoreData> store;
+    in property <DataFolderData> data-folder;
     in property <bool> attention-shown;
     in property <string> attention-title;
     in property <string> attention-body;
@@ -1719,6 +1823,9 @@ export component AppWindow inherits Window {
     callback history-clear();
     callback store-remove(int);
     callback store-remove-all();
+    callback open-data-folder();
+    callback source-open(int, int, int);
+    callback report();
     callback attention-dismiss();
     // Selecting, previewing, applying, undoing (P5-5a).
     in property <PreviewData> preview;
@@ -1960,6 +2067,12 @@ export component AppWindow inherits Window {
                                     card-forget(i) => {
                                         root.card-forget(i);
                                     }
+                                    source-open(f, i, k) => {
+                                        root.source-open(f, i, k);
+                                    }
+                                    report => {
+                                        root.report();
+                                    }
                                 }
                                 if root.page == 1: AppliedPage {
                                     applied: root.applied;
@@ -1989,11 +2102,15 @@ export component AppWindow inherits Window {
                                 }
                                 if root.page == 4: SettingsPage {
                                     store: root.store;
+                                    data: root.data-folder;
                                     store-remove(i) => {
                                         root.store-remove(i);
                                     }
                                     store-remove-all => {
                                         root.store-remove-all();
+                                    }
+                                    open-data-folder => {
+                                        root.open-data-folder();
                                     }
                                 }
                             }

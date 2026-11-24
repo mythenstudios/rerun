@@ -1423,6 +1423,9 @@ pub enum DialogKind {
     Clear,
     /// "Remove packages?" (P5-8b-3): about the package store, no transaction.
     Packages,
+    /// "Report a problem" (P5-10a): the exact text of the issue before the browser opens; no
+    /// transaction, nothing is written.
+    Report,
 }
 
 /// What becomes of the launch profile and the option the user set in Steam (X12).

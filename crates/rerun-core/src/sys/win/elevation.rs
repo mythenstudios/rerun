@@ -1,8 +1,9 @@
 //! [`WinElevation`]: the CLI's one start of the elevated helper (ADR 0023 §2, §7; A4 S2, N3)
-//! and the token kind (§10). The only calls in `rerun-core` to `ShellExecuteExW` and
+//! and the token kind (§10). One of the two `ShellExecuteExW` call sites of `rerun-core` (the
+//! other is `shell_open`, the app's links and data folder, P5-10a), the only
 //! `QueryFullProcessImageNameW`, and one of its two `CoInitializeEx` sites (the other is
-//! `com::Apartment`, the firewall read; `clippy.toml`; `rerun-launch` has its own reviewed
-//! `ShellExecuteExW`).
+//! `com::Apartment`, the firewall read; `shell_open` initialises COM through this module's
+//! `Com`; `clippy.toml`; `rerun-launch` has its own reviewed `ShellExecuteExW`).
 //!
 //! The start:
 //! 1. `HKLM\SOFTWARE\Classes\exefile`, opened read-only in the native view through `reg`, is
@@ -131,16 +132,18 @@ pub(super) fn exefile_class() -> Result<OwnedKey, u32> {
     )
 }
 
-/// COM for the one `ShellExecuteExW` call: uninitialised on drop if initialisation succeeded.
-struct Com(bool);
+/// COM around one `ShellExecuteExW` call (apartment-threaded, `COINIT_DISABLE_OLE1DDE`, as the
+/// shell asks): uninitialised on drop if initialisation succeeded. Also `shell_open`'s.
+pub(super) struct Com(bool);
 
 impl Com {
-    fn init() -> Self {
+    pub(super) fn init() -> Self {
         let flags = (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).cast_unsigned();
         #[expect(
             clippy::disallowed_methods,
             reason = "rerun-core's first CoInitializeEx call site (com::Apartment is the \
-                      second), for the helper's ShellExecuteExW (ADR 0023 §2, ADR 0008, A4 N3)"
+                      second), around the ShellExecuteExW calls of the helper's start and of \
+                      shell_open (ADR 0023 §2, ADR 0008, A4 N3, P5-10a)"
         )]
         // SAFETY: the reserved pointer must be null; the flags are documented COINIT values.
         let hr = unsafe { CoInitializeEx(ptr::null(), flags) };
@@ -167,8 +170,8 @@ pub(super) enum NoProcess {
 }
 
 /// The window handle of the dialog's owner: `owner`, or the console window (null without a
-/// console) when there is none.
-fn owner_window(owner: Option<PromptOwner>) -> HWND {
+/// console) when there is none. Also `shell_open`'s.
+pub(super) fn owner_window(owner: Option<PromptOwner>) -> HWND {
     match owner {
         // A handle value, never dereferenced (module docs): no provenance is involved.
         Some(o) => ptr::without_provenance_mut(o.raw().cast_unsigned()),
@@ -213,8 +216,8 @@ pub(super) fn start(
     let com = Com::init();
     #[expect(
         clippy::disallowed_methods,
-        reason = "rerun-core's one ShellExecuteExW call site: the elevated helper's start \
-                  (ADR 0023 §2, §7)"
+        reason = "one of rerun-core's two ShellExecuteExW call sites: the elevated helper's \
+                  start (ADR 0023 §2, §7; the other is shell_open, P5-10a)"
     )]
     // SAFETY: `info` is a SHELLEXECUTEINFOW with a matching `cbSize`; `lpVerb`, `lpFile`,
     // `lpParameters` and `lpDirectory` point to NUL-terminated buffers owned by this function

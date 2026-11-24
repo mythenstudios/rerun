@@ -966,6 +966,7 @@ fn aw14_the_window_cannot_close_while_a_write_is_queued_or_runs() {
     let (release, gate) = mpsc::channel::<()>();
     let make = |_| {
         Ok(World {
+            shell: std::sync::Arc::new(rerun_core::sys::NoShell),
             sys: Box::new(write_world()),
             http: Box::new(FakeHttp::default()),
             install: install(),
@@ -1153,6 +1154,7 @@ fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
     let (release, gate) = mpsc::channel::<()>();
     let make = |_| {
         Ok(World {
+            shell: std::sync::Arc::new(rerun_core::sys::NoShell),
             sys: Box::new(write_world()),
             http: Box::new(FakeHttp::default()),
             install: install(),

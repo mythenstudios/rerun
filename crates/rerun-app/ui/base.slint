@@ -178,12 +178,27 @@ export struct ProblemData {
     quiet: bool,
 }
 
+// One source of a fix: its type and link (escaped), and whether the core would open the link
+// (P5-10a): only then an open button.
+export struct SourceData {
+    text: string,
+    can-open: bool,
+}
+
 export struct SolvedData {
     issue: string,
     when: BadgeData,
     status: BadgeData,
     tradeoffs: [string],
-    sources: [string],
+    sources: [SourceData],
+}
+
+// Settings > Data: Rerun's folder (P5-10a).
+export struct DataFolderData {
+    path: string,
+    exists: bool,
+    note: string,
+    detail: string,
 }
 
 export struct FixData {
@@ -438,6 +453,12 @@ export global Str {
     in property <string> theme-name;
     in property <string> set-language;
     in property <string> language-name;
+    in property <string> settings-data;
+    in property <string> data-intro;
+    in property <string> data-open;
+    in property <string> source-open;
+    in property <string> open-in-browser;
+    in property <string> report-btn;
     in property <string> settings-about;
     in property <string> about-version;
     in property <string> about-licence;

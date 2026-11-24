@@ -429,3 +429,76 @@ fn calls_open_package(src: &str) -> usize {
         .filter(|code| code.contains("open_package(") && !code.contains("fn open_package("))
         .count()
 }
+
+/// The `ShellExecuteExW` call sites of the workspace (workspace-relative, `/`-separated), each
+/// with exactly one call: the elevated helper's start, the app's links and data folder
+/// (P5-10a, ADR 0008 amendment P5-10a) and the shim's 740 fallback (ADR 0022). `clippy.toml`
+/// bans the function elsewhere; this rule also counts the calls inside the allowed files.
+const SHELL_EXECUTE_SITES: &[&str] = &[
+    "crates/rerun-core/src/sys/win/elevation.rs",
+    "crates/rerun-core/src/sys/win/shell_open.rs",
+    "crates/rerun-launch/src/win/launch.rs",
+];
+
+/// The code lines of `src` (comments skipped) that call `ShellExecute…(`.
+fn shell_executes(src: &str) -> usize {
+    src.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .map(|l| l.split("//").next().unwrap_or(l))
+        .filter(|code| {
+            [
+                "ShellExecuteExW(",
+                "ShellExecuteW(",
+                "ShellExecuteExA(",
+                "ShellExecuteA(",
+            ]
+            .iter()
+            .any(|f| code.contains(f))
+        })
+        .count()
+}
+
+#[test]
+fn shell_execute_only_at_its_three_call_sites() {
+    let root = workspace();
+    let mut files = Vec::new();
+    for r in ROOTS {
+        rust_files(&root.join(r), &mut files);
+    }
+    assert!(files.len() > 100, "{}", files.len());
+    let mut sites: Vec<(String, usize)> = files
+        .iter()
+        .map(|f| {
+            let rel = f
+                .strip_prefix(&root)
+                .unwrap_or(f)
+                .to_string_lossy()
+                .replace('\\', "/");
+            (
+                rel,
+                shell_executes(&std::fs::read_to_string(f).unwrap_or_default()),
+            )
+        })
+        .filter(|(rel, n)| *n > 0 && rel != SELF)
+        .collect();
+    sites.sort();
+    let want: Vec<(String, usize)> = SHELL_EXECUTE_SITES
+        .iter()
+        .map(|s| ((*s).to_owned(), 1))
+        .collect();
+    assert_eq!(sites, want);
+    // The rule bites, and skips comments.
+    assert_eq!(
+        shell_executes("let ok = unsafe { ShellExecuteExW(&mut info) };"),
+        1
+    );
+    assert_eq!(shell_executes("ShellExecuteW(h, v, f, p, d, 1)"), 1);
+    assert_eq!(
+        shell_executes("// ShellExecuteExW(&mut info)\nlet x = 1;"),
+        0
+    );
+    assert_eq!(
+        shell_executes("use windows_sys::Win32::UI::Shell::ShellExecuteExW;"),
+        0
+    );
+}

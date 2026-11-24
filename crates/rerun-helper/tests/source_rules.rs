@@ -3,7 +3,8 @@
 //! (`crates/rerun-core/src/elevate`, without its `tests.rs` files) never name `WinSystem` or
 //! `WinGpu` (the helper builds its own system without GPU, P4-2c), DXGI, the system profile
 //! (`hw::`), the journal, `exec`, `pkg`, the network (`WinHttp`, `http::`, ADR 0025), the Steam
-//! detection, `topo::when` or `flow` (ADR 0027); a module also as a whole word after
+//! detection, `topo::when`, `flow` (ADR 0027) or the user's shell (`Shell`, `shell_open`,
+//! `open_url`, `open_folder`, `policy::open`; ADR 0027 amendment P5-10a); a module also as a whole word after
 //! `rerun_core` or `crate::` (braces, an alias, a `use` over several lines). Comment lines are
 //! not code and are skipped; the scan has teeth.
 
@@ -32,6 +33,11 @@ const FORBIDDEN: &[&str] = &[
     "detect::steam",
     "topo::when",
     "flow::",
+    "Shell",
+    "shell_open",
+    "open_url",
+    "open_folder",
+    "open::",
 ];
 
 /// Modules of `rerun-core` the helper must not name, as a whole word after `rerun_core` or
@@ -44,6 +50,8 @@ const MODULES: &[(&str, &str)] = &[
     ("journal", "journal::"),
     ("pkg", "pkg::"),
     ("http", "http::"),
+    ("shell", "Shell"),
+    ("open", "open::"),
 ];
 
 /// The identifiers of `code` after its first `rerun_core` or `crate::` (every identifier of a
@@ -149,6 +157,9 @@ fn the_rule_has_teeth() {
         ("use rerun_core::{flow, sys::System};", "flow::"),
         ("use crate::{exec, policy};", "exec::"),
         ("load_system32(\"dxgi.dll\")", "dxgi"),
+        ("let s = WinShell::new(owner);", "Shell"),
+        ("use rerun_core::sys::shell;", "Shell"),
+        ("use rerun_core::policy::{open, root};", "open::"),
         (
             "let x = 1; // fine so far, but WinGpu here is a comment",
             "?",

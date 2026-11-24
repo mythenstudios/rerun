@@ -812,6 +812,7 @@ fn apply_through_the_worker(owner: Option<PromptOwner>) -> Vec<rerun_core::sys::
         let world = std::sync::Arc::new(world);
         tx.send(world.clone()).unwrap();
         Ok(World {
+            shell: std::sync::Arc::new(rerun_core::sys::NoShell),
             sys: Box::new(Shared(world)),
             http: Box::new(FakeHttp::default()),
             install: install(),
