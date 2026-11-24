@@ -18,6 +18,7 @@ rerun_/
 ├─ data/               Reference data (YAML): GPU architecture table `gpu-arch.yaml`
 ├─ schema/             JSON Schema for Topo, package, the signed index bundle and the GPU architecture table
 ├─ tests/fixtures/     CPU topologies, path parity cases, valid/invalid schema fixtures, the golden plan (P5-1)
+├─ packaging/windows/  install.ps1, uninstall.ps1 and README.txt of the alpha payload (ADR 0030); built by scripts/alpha-build.ps1 into dist\ (gitignored)
 └─ docs/
 ```
 

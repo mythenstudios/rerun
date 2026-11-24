@@ -13,6 +13,8 @@ Rerun detects your installed PC games and applies the compatibility fixes they n
 
 **Status:** early development, not ready for use. Detection, the reversible primitives with their journal, and launching with CPU rules work as a command-line tool (phases 1–3); topos and packages (phase 4) and the app (phase 5) are next. See [`docs/08-roadmap.md`](docs/08-roadmap.md).
 
+**Alpha:** an unsigned alpha can be built locally with `scripts/alpha-build.ps1` (ADR 0030). It installs per user without administrator rights to `%LOCALAPPDATA%\Programs\Rerun` with `install.ps1`, runs portable from its zip, and is removed with `uninstall.ps1` (refused while a change is open; removes the program, the Start-menu shortcut and Rerun's data folder unless `-KeepData`). Not code-signed yet, so Smart App Control may block it; see [`packaging/windows/README.txt`](packaging/windows/README.txt).
+
 Rerun by Mythen Studios.
 
 ## License

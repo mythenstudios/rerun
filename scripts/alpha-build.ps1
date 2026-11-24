@@ -32,7 +32,8 @@
 #     prints must be one of RELEASE_KEYS and seq at least elevate::HELPER_MIN_SEQ.
 #  5. The payload folder dist\rerun-<version>-<commit>[-dirty][-noindex]\: rerun-app.exe,
 #     rerun.exe, rerun-launch.exe (no rerun-helper.exe, no rerun-cpu.asi, no rerun-workbench),
-#     LICENSE, THIRD-PARTY-NOTICES.txt, README.txt, the signed index pair (-Key), payload.json
+#     LICENSE, THIRD-PARTY-NOTICES.txt, README.txt, install.ps1, uninstall.ps1 (from
+#     packaging\windows), the signed index pair (-Key), payload.json
 #     (every file with its size and SHA-256), then <folder>-portable.zip (the folder as it is)
 #     and SHA256SUMS.txt; both checked against payload.json byte for byte.
 #
@@ -57,6 +58,8 @@ $repoFiles = [ordered]@{
     'LICENSE'                 = (Join-Path $repo 'LICENSE')
     'THIRD-PARTY-NOTICES.txt' = (Join-Path $repo 'crates\rerun-app\assets\THIRD-PARTY-NOTICES.txt')
     'README.txt'              = (Join-Path $repo 'packaging\windows\README.txt')
+    'install.ps1'             = (Join-Path $repo 'packaging\windows\install.ps1')
+    'uninstall.ps1'           = (Join-Path $repo 'packaging\windows\uninstall.ps1')
 }
 $binaries = @(
     @{ Package = 'rerun-launch'; File = 'rerun-launch.exe'; Env = 'RERUN_RELEASE_LAUNCH_EXE' },
