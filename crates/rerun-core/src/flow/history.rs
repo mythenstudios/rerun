@@ -110,7 +110,7 @@ pub(crate) fn tidy(g: &Guarded<'_>) -> Tidy {
     }
 }
 
-fn ctx<'a>(g: &'a Guarded<'_>, app: &'a AppDir<'a>) -> ExecCtx<'a> {
+pub(super) fn ctx<'a>(g: &'a Guarded<'_>, app: &'a AppDir<'a>) -> ExecCtx<'a> {
     ExecCtx {
         sys: g.env().sys,
         fr: g.fr(),
@@ -180,7 +180,7 @@ pub enum ClearGate {
 }
 
 /// The Steam app of a transaction's head.
-fn app_of(st: &TxnStatus) -> Option<u32> {
+pub(super) fn app_of(st: &TxnStatus) -> Option<u32> {
     head(st)?
         .roots
         .iter()

@@ -59,7 +59,7 @@ pub const MAX_DOWNLOAD_TIME: Duration = Duration::from_secs(600);
 /// Most entries of `cache` listed when temp files are swept; a larger folder is not swept.
 const MAX_CACHE_ENTRIES: usize = 4096;
 /// The lock file of the cache.
-const LOCK: &str = "lock";
+pub(super) const LOCK: &str = "lock";
 
 /// One download of a package: an archive at a URL with its pinned SHA-256. Built only by
 /// [`downloads`] (from a package of the signed index, form and provenance checked).

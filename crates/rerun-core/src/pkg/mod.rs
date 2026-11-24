@@ -11,10 +11,14 @@
 //!   folders.
 //! - [`extract`]: only the files a package names, each with its pinned SHA-256, from the cached
 //!   archive (hashed again) into `<AppDir>\packages\<id>\<version>`; non-elevated only.
+//! - [`store`]: the store listed (version folders, archives, leftovers, foreign entries) and
+//!   exactly what a preview showed removed by file ID (P5-8b); whether a package is used is
+//!   `exec::remove_packages`'s rule.
 
 pub mod archive;
 pub mod download;
 pub mod extract;
+pub mod store;
 
 #[cfg(test)]
 pub(crate) mod extract_tests;

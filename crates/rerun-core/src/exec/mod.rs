@@ -87,6 +87,7 @@ mod file;
 mod helper;
 mod ini;
 mod launch;
+mod packages;
 mod purge;
 mod rebind;
 mod reg;
@@ -107,6 +108,7 @@ pub mod launch_result {
 }
 pub use helper::{HelperFailure, helper_ready, reason_words};
 pub(crate) use launch::{launch_results_hashed, purge_results};
+pub(crate) use packages::{package_users, remove_packages};
 pub use purge::{Keep, PurgeReport};
 pub(crate) use purge::{PurgeClass, PurgeMode, purge_classes, purge_seen};
 pub(crate) use rebind::revert_rebound_seen;
@@ -309,6 +311,24 @@ pub enum Refusal {
         /// The transaction.
         txn: TxnId,
     },
+    /// A package to remove is used by a transaction that is not settled (P5-8b): nothing was
+    /// removed.
+    #[error(
+        "package {package} is used by transaction {txn}; revert it first (nothing was removed)"
+    )]
+    PackageInUse {
+        /// The package as `<id>@<version>`.
+        package: Shown<'static>,
+        /// The first transaction that uses it.
+        txn: TxnId,
+    },
+    /// Rerun's packages folder is not what a removal's preview showed (P5-8b): nothing was
+    /// removed; show the preview again.
+    #[error("Rerun's packages folder changed since its preview; nothing was removed; look again")]
+    StoreChanged,
+    /// Another Rerun downloads or unpacks a package (`packages\.lock` or `cache\lock` is held).
+    #[error("another Rerun is downloading or unpacking a package; try again when it has finished")]
+    StoreBusy,
     /// A root cannot be reopened or is another folder now.
     #[error(transparent)]
     Root(Box<RootError>),
@@ -2739,6 +2759,8 @@ pub(crate) mod ini_tests;
 mod layer_crash_tests;
 #[cfg(test)]
 pub(crate) mod layer_tests;
+#[cfg(test)]
+mod packages_tests;
 #[cfg(test)]
 mod patch_tests;
 #[cfg(test)]

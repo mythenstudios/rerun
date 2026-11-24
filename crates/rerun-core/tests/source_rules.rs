@@ -323,3 +323,72 @@ fn a_window_handle_type_only_in_sys_win() {
     assert_eq!(window_handles("let h: HWND = x;"), 1);
     assert_eq!(window_handles("// HWND\nlet h = HWNDS;"), 0);
 }
+
+/// The source files (below `crates/rerun-core/src`, `/`-separated) that may open Rerun's
+/// packages folder (`AppSub::Packages`, P5-8b finding 1): the package side (`pkg`: download,
+/// extraction, the store), the planner (`prim/file_install.rs`) and the apply's checks and copy
+/// (`exec/file.rs`, `exec/roots.rs`). A revert, a rollback, a rebind, `forget` and `verify` read
+/// only the journal, so removing a package never takes a recovery away.
+const PACKAGES_ALLOWED: &[&str] = &[
+    "pkg/",
+    "prim/file_install.rs",
+    "exec/file.rs",
+    "exec/roots.rs",
+];
+
+/// Test code: `tests.rs`, `*_tests.rs` and everything below a `tests` folder.
+fn is_test_source(rel: &str) -> bool {
+    rel.ends_with("tests.rs") || rel.split('/').any(|s| s == "tests")
+}
+
+/// The lines of `src` (comments skipped) that name `AppSub::Packages`.
+fn names_packages(src: &str) -> usize {
+    src.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .map(|l| l.split("//").next().unwrap_or(l))
+        .filter(|code| code.contains("AppSub::Packages"))
+        .count()
+}
+
+/// P5-8b: removing a package never takes a recovery away, because only the package side, the
+/// planner and the apply open `packages\` (ADR 0025 amendment P5-8b). A new reader elsewhere
+/// (a revert that copies from a package, say) must be reviewed against that rule first.
+#[test]
+fn the_packages_folder_only_on_the_package_side() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    assert!(files.len() > 50, "{}", files.len());
+    let mut users = Vec::new();
+    for f in &files {
+        let rel = f
+            .strip_prefix(&src)
+            .unwrap_or(f)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_test_source(&rel) {
+            continue;
+        }
+        if names_packages(&std::fs::read_to_string(f).unwrap_or_default()) > 0 {
+            users.push(rel);
+        }
+    }
+    let bad: Vec<&String> = users
+        .iter()
+        .filter(|r| !PACKAGES_ALLOWED.iter().any(|a| r.starts_with(a)))
+        .collect();
+    assert!(bad.is_empty(), "{bad:#?}");
+    // The rule bites: today's readers are found, comments are skipped.
+    for want in [
+        "prim/file_install.rs",
+        "exec/file.rs",
+        "exec/roots.rs",
+        "pkg/extract.rs",
+    ] {
+        assert!(users.iter().any(|u| u == want), "{want}: {users:?}");
+    }
+    assert_eq!(names_packages("let p = app.sub(AppSub::Packages)?;"), 1);
+    assert_eq!(names_packages("// AppSub::Packages\nlet x = 1;"), 0);
+    assert!(is_test_source("exec/packages_tests.rs") && is_test_source("sys/win/tests/app.rs"));
+    assert!(!is_test_source("exec/revert.rs"));
+}

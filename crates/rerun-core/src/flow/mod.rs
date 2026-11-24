@@ -33,6 +33,11 @@
 //! consents to) and whether it is unpacked; [`fetch`] downloads, verifies and unpacks it with
 //! progress and cancellation, only for the list that was shown.
 //!
+//! The package store (P5-8b, `flow/store.rs`): [`package_store`] lists the packages and archives
+//! with who uses them; [`remove_preview`] lists what a removal ([`Pick`]) takes and what stays
+//! with the reason, with a token ([`RemoveShown`]); [`remove`] removes exactly that under the
+//! locks and writes nothing when it differs ([`ActError::Changed`]).
+//!
 //! A [`Guarded`] is built per job, never kept for a session: Rerun's folder can appear or vanish
 //! between two jobs.
 
@@ -51,6 +56,7 @@ mod library;
 mod packages;
 mod revert;
 mod status;
+mod store;
 mod write;
 
 pub(crate) use game::with_topo;
@@ -80,6 +86,10 @@ pub use revert::{
 pub use status::{
     Heads, Holder, JournalView, StatusView, head, journal, orphans, profile_id_of, profile_of,
     profile_op, status, transaction,
+};
+pub use store::{
+    PackageKeep, Pick, RemovePreview, RemoveShown, StoreGate, StoreView, StoredPackage,
+    StoredState, UsedBy, package_store, remove, remove_preview,
 };
 pub use write::{
     Applied, LoadRefusal, Picked, PlanRefusal, Planned, Previewed, StepsRefusal, StoreRefusal,

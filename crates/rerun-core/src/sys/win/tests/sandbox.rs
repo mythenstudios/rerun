@@ -1260,6 +1260,35 @@ fn sandbox_package_dxvk_and_asi_loader_round_trip() {
     assert_eq!(rep.closed, Some(Closing::Reverted), "{rep:?}");
     let after = w.snap(vec![]);
     assert!(before == after, "{:#?}", before.diff(&after));
+
+    // 3. P5-8b: "remove all unused" through the product path (real NTFS, Defender): every
+    // package and archive goes by file ID; only the lock files stay. Defender may hold a fresh
+    // DLL for a moment (`Busy`): the stopped ones go in a later run, as the result says.
+    let mut stopped = Vec::new();
+    for _ in 0..10 {
+        let r = w.with(|cx, _| {
+            let l = crate::pkg::store::list(cx.app).unwrap_or_else(|e| panic!("{e}"));
+            assert!(l.foreign.is_empty(), "{:?}", l.foreign);
+            let shown = crate::pkg::store::tests::all_of(&l);
+            crate::exec::remove_packages(cx, &shown).unwrap_or_else(|e| panic!("{e}"))
+        });
+        stopped = r.stopped;
+        if stopped.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    assert!(stopped.is_empty(), "{stopped:?}");
+    let names = |p: &std::path::Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(p)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(&packages), [".lock"]);
+    assert_eq!(names(&cache), ["lock"]);
     leftovers(&dxvk);
     leftovers(&asi);
     note("sandbox_package_dxvk_and_asi_loader_round_trip: passed, cache and packages removed");

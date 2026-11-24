@@ -45,7 +45,7 @@ use super::archive::{Archive, ArchiveError, Entry, EntryReader, Extraction, Form
 use super::download::{Download, FetchError, MAX_DOWNLOAD_BYTES, cache_name, downloads};
 
 /// The lock file of the packages folder (not a package ID: those never start with `.`).
-const LOCK: &str = ".lock";
+pub(super) const LOCK: &str = ".lock";
 /// Most entries of a folder listed when temp files are swept.
 const MAX_SWEEP_ENTRIES: usize = 4096;
 
