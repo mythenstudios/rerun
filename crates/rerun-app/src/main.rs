@@ -22,6 +22,7 @@ compile_error!(
      never with debug assertions off (a release build); ADR 0024 amendment P4-13"
 );
 
+mod notices;
 mod settings;
 mod text;
 mod theme;

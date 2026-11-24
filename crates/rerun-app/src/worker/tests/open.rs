@@ -10,10 +10,13 @@
 //!   the same one neither; elevated, the guard stops every open job before anything is read.
 //! - AO4 Settings > Data: no folder, "not created yet", no button, a click opens nothing and
 //!   creates nothing; with the folder, its path and Explorer gets exactly it.
+//! - AO6 Settings > About Rerun (P5-10e): "source code of this version" and "repository" open
+//!   exactly the core's `OwnLink` URLs, also without an index and without Rerun's folder.
 
 use std::sync::Arc;
 
 use rerun_core::flow::LinkRef;
+use rerun_core::policy::open::{OpenUrl, OwnLink};
 use rerun_core::sys::fake::{FakeShell, Opened};
 
 use super::write::{RERUN, Rig, result_of};
@@ -226,6 +229,7 @@ fn ao5_only_the_shown_report_is_opened() {
         Job::ReportOpen { nonce: 1 },
         Job::DataFolder,
         Job::OpenDataFolder,
+        Job::OpenOwn(OwnLink::SourceOfThisBuild),
         Job::OpenSource(LinkRef {
             app_id: 220,
             topo: "invented-ac".to_owned(),
@@ -334,4 +338,25 @@ fn ao4_settings_data_shows_the_folder_and_opens_only_an_existing_one() {
         "Windows could not open it. The details say why."
     );
     assert_eq!(r.notice.details.len(), 1);
+}
+
+#[test]
+fn ao6_about_links_open_exactly_rerun_s_own_urls() {
+    // No index and no Rerun folder: the links are compiled in and need neither.
+    let sys = steam_world("Invented AC");
+    let shell = Arc::new(FakeShell::new());
+    let mut session = session_with(&shell);
+    let links = [OwnLink::SourceOfThisBuild, OwnLink::Repository];
+    for l in links {
+        assert_eq!(
+            events_in(&sys, &mut session, &Job::OpenOwn(l)),
+            [Event::Opened]
+        );
+    }
+    let want: Vec<Opened> = links
+        .iter()
+        .map(|l| Opened::Url(OpenUrl::own(*l).as_str().to_owned()))
+        .collect();
+    assert_eq!(shell.taken(), want);
+    assert!(AppDir::open(&sys, Create::Never).unwrap().is_none());
 }

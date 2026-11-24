@@ -18,6 +18,7 @@ use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferTyp
 use slint::platform::{Platform, WindowAdapter};
 
 use super::download::download_data;
+use super::generated::LicenceData;
 use super::store_data;
 use super::write::dialog_data;
 use super::write::uac_data;
@@ -278,6 +279,28 @@ fn the_window_draws_its_first_frames_fast() {
     set_theme(&ui, &theme::tokens(ThemeChoice::default(), None));
     ui.set_high_contrast(false);
     ui.set_theme_choice(0);
+    // P5-10e: the third-party licences draw over the settings page, every entry of the embedded
+    // notices in their (virtualised) list.
+    assert!(draw(), "the settings page in Mythen again");
+    let settings = picture();
+    let (preamble, notices) = crate::notices::parse(crate::notices::TEXT);
+    ui.set_licences_intro(preamble.as_str().into());
+    ui.set_licences(model(
+        notices
+            .iter()
+            .map(|n| LicenceData {
+                heading: n.heading.as_str().into(),
+                text: n.text.as_str().into(),
+            })
+            .collect(),
+    ));
+    ui.set_licences_open(true);
+    let licences_start = Instant::now();
+    assert!(draw(), "the licences are drawn");
+    let licences = licences_start.elapsed();
+    assert_ne!(picture(), settings, "the licences change the picture");
+    assert_eq!(ui.get_licences().row_count(), notices.len());
+    ui.set_licences_open(false);
     ui.set_page(0);
     // P5-10d: the compact view draws another picture than the list (the same rows), and a new
     // language reaches the fixed texts at once.
@@ -340,7 +363,7 @@ fn the_window_draws_its_first_frames_fast() {
         "a new language reads the library again"
     );
     eprintln!(
-        "headless start: window created {created:?}, first frame {first:?}, with 60 rows {with_rows:?}"
+        "headless start: window created {created:?}, first frame {first:?}, with 60 rows {with_rows:?}, licences drawn in {licences:?}"
     );
     assert!(created < Duration::from_millis(500), "{created:?}");
     assert!(first < Duration::from_millis(750), "{first:?}");
@@ -376,4 +399,18 @@ fn the_packages_buttons_take_the_focus_back() {
     let row = format!("take-focus: Modal.return-to == {STORE_ROW_OPENER} - root.index;");
     assert_eq!(slint.matches(&row).count(), 1, "{row}");
     const { assert!(STORE_ALL_OPENER != CLEAR_OPENER && STORE_ROW_OPENER < STORE_ALL_OPENER) };
+}
+
+/// The window and the Rust side agree on where the focus goes back to when the third-party
+/// licences close (P5-10e): "Show licences" carries `LICENCES_OPENER`, which no other opener uses.
+#[test]
+fn the_licences_button_takes_the_focus_back() {
+    use super::open::{LICENCES_OPENER, REPORT_OPENER};
+    use super::write::{CLEAR_OPENER, STORE_ALL_OPENER};
+    let slint = include_str!("../../ui/settings.slint");
+    let want = format!("focus-id: {LICENCES_OPENER};");
+    assert_eq!(slint.matches(&want).count(), 1, "{want}");
+    for other in [REPORT_OPENER, CLEAR_OPENER, STORE_ALL_OPENER] {
+        assert_ne!(LICENCES_OPENER, other);
+    }
 }

@@ -1079,3 +1079,29 @@ fn vx1_a_set_aside_topo_is_named_and_its_reason_escaped() {
         assert!(g.notes.is_empty() && g.aside.is_empty());
     }
 }
+
+/// NT3 (P5-10e): About Rerun names the version, the build ID, the GPL with its "no warranty",
+/// and the links are the core's own (`OwnLink`), in both languages.
+#[test]
+fn about_shows_version_build_gpl_and_rerun_s_own_links() {
+    use rerun_core::policy::open::{OpenUrl, OwnLink};
+    for lang in Lang::ALL {
+        let a = super::about(lang);
+        assert!(a.version.starts_with("Rerun \u{00B7} by Mythen Studios"));
+        assert!(a.version.ends_with(env!("CARGO_PKG_VERSION")));
+        assert_eq!(a.build, rerun_core::BUILD_ID);
+        assert!(a.copyright.contains("Mythen Studios"));
+        assert!(a.licence.contains("GNU General Public License"));
+        assert!(a.licence.contains("GPL-3.0-only"));
+        assert!(a.licence.contains(match lang {
+            Lang::En => "no warranty",
+            Lang::De => "ohne jede Gewährleistung",
+        }));
+        assert_eq!(
+            a.source_url,
+            OpenUrl::own(OwnLink::SourceOfThisBuild).as_str()
+        );
+        assert_eq!(a.repo_url, OpenUrl::own(OwnLink::Repository).as_str());
+        assert_eq!(a.repo_url, "https://github.com/mythenstudios/rerun");
+    }
+}

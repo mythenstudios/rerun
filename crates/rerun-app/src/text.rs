@@ -1718,6 +1718,28 @@ pub enum Msg {
     SetLibraryView,
     /// The settings: what the two library views are.
     SetLibraryViewDesc,
+    /// About Rerun (P5-10e): the copyright line.
+    AboutCopyright,
+    /// About Rerun: the build ID's label.
+    AboutBuild,
+    /// About Rerun: the Topo index's label.
+    AboutIndex,
+    /// About Rerun: the licence's label.
+    AboutLicenceTitle,
+    /// About Rerun: the GPL notice (free software, GPL-3.0-only for the app, no warranty).
+    AboutGpl,
+    /// About Rerun: the link to the source code of this build.
+    AboutSource,
+    /// About Rerun: the link to the repository.
+    AboutRepository,
+    /// About Rerun: the third-party licences (also the dialog's title).
+    AboutLicences,
+    /// About Rerun: what the third-party licences are.
+    AboutLicencesDesc,
+    /// About Rerun: the button that shows them.
+    AboutLicencesShow,
+    /// The licences dialog: its close button.
+    LicencesClose,
 }
 
 /// The text of `m` in `lang`.
@@ -2713,6 +2735,17 @@ fn en(m: Msg) -> Cow<'static, str> {
         ViewCompact => "Compact",
         SetLibraryView => "Library view",
         SetLibraryViewDesc => "The list shows the graphics API and the executable of each game. Compact shows one short line per game.",
+        AboutCopyright => "Copyright \u{00A9} 2026 Mythen Studios",
+        AboutBuild => "Build",
+        AboutIndex => "Topo index",
+        AboutLicenceTitle => "Licence",
+        AboutGpl => "Rerun is free software: you may pass it on and change it under the GNU General Public License, version 3 or (at your choice) any later version. This app links Slint under GPL-3.0-only and is therefore under version 3 only. Rerun comes with no warranty, to the extent the law allows. The full licence text is the first entry of the third-party licences.",
+        AboutSource => "Source code of this version",
+        AboutRepository => "Repository",
+        AboutLicences => "Third-party licences",
+        AboutLicencesDesc => "Rerun builds on open-source crates and on the fonts Archivo and IBM Plex (SIL Open Font License 1.1). Here are their licence texts and copyright notices, generated from the crates this version is built from.",
+        AboutLicencesShow => "Show licences",
+        LicencesClose => "Close",
         TidyLine { n } => {
             return if n == 1 {
                 "1 older history entry removed".into()
@@ -3692,6 +3725,17 @@ fn de(m: Msg) -> Cow<'static, str> {
         ViewCompact => "Kompakt",
         SetLibraryView => "Bibliotheksansicht",
         SetLibraryViewDesc => "Die Liste zeigt je Spiel die Grafik-Schnittstelle und die Programmdatei. Kompakt zeigt eine kurze Zeile je Spiel.",
+        AboutCopyright => "Copyright \u{00A9} 2026 Mythen Studios",
+        AboutBuild => "Build",
+        AboutIndex => "Topo-Index",
+        AboutLicenceTitle => "Lizenz",
+        AboutGpl => "Rerun ist freie Software: Du darfst sie unter der GNU General Public License, Version 3 oder (nach deiner Wahl) jeder späteren Version, weitergeben und verändern. Diese App bindet Slint unter GPL-3.0-only ein und steht deshalb nur unter Version 3. Rerun kommt ohne jede Gewährleistung, soweit das Gesetz es zulässt. Der volle Lizenztext ist der erste Eintrag der Lizenzen von Drittanbietern.",
+        AboutSource => "Quellcode dieser Version",
+        AboutRepository => "Repository",
+        AboutLicences => "Lizenzen von Drittanbietern",
+        AboutLicencesDesc => "Rerun baut auf Open-Source-Crates und auf den Schriften Archivo und IBM Plex (SIL Open Font License 1.1) auf. Hier stehen deren Lizenztexte und Urheberrechtshinweise, erzeugt aus den Crates, aus denen diese Version gebaut ist.",
+        AboutLicencesShow => "Lizenzen anzeigen",
+        LicencesClose => "Schliessen",
         TidyLine { n } => {
             return if n == 1 {
                 "1 älterer Verlaufseintrag entfernt".into()

@@ -1,8 +1,8 @@
-// The undo, forget and download dialogs.
+// The undo, forget and download dialogs, and the third-party licences (P5-10e).
 
-import { ScrollView } from "std-widgets.slint";
+import { ListView, ScrollView } from "std-widgets.slint";
 import { Button, DetailLine, Muted, PageTitle, PartsLine } from "base.slint";
-import { DialogData, ListData, Str, Theme, Modal } from "base.slint";
+import { DialogData, LicenceData, ListData, Str, Theme, Modal } from "base.slint";
 import { OpItem, WarnLine } from "ops.slint";
 
 // The undo, forget and download dialogs: what the operation meets (or what would be downloaded),
@@ -204,3 +204,128 @@ export component DialogView inherits Rectangle {
     }
 }
 
+// The third-party licences (P5-10e): the entries of the embedded notices file in a virtualised
+// list, each the crates (or font, or Rerun) that ship a text, then the text in the monospace
+// face. Read only. Esc and "Close" close it; while it is open `Modal.open` is set (a focus
+// trap, as for the other dialogs) and the title takes the focus. The arrow keys, Page Up/Down,
+// Home and End scroll the list.
+export component LicencesView inherits Rectangle {
+    in property <string> intro;
+    in property <[LicenceData]> entries;
+    callback close();
+    background: Theme.bg.with-alpha(0.85);
+    // Keeps the mouse from reaching the page behind.
+    TouchArea { }
+
+    FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                root.close();
+                return accept;
+            }
+            if (e.text == Key.DownArrow) {
+                root.scroll(-Theme.s6);
+                return accept;
+            }
+            if (e.text == Key.UpArrow) {
+                root.scroll(Theme.s6);
+                return accept;
+            }
+            if (e.text == Key.PageDown) {
+                root.scroll(-list.visible-height * 0.9);
+                return accept;
+            }
+            if (e.text == Key.PageUp) {
+                root.scroll(list.visible-height * 0.9);
+                return accept;
+            }
+            if (e.text == Key.Home) {
+                list.content-y = 0;
+                return accept;
+            }
+            if (e.text == Key.End) {
+                list.content-y = min(0, list.visible-height - list.content-height);
+                return accept;
+            }
+            reject
+        }
+        VerticalLayout {
+            alignment: center;
+            padding: Theme.s6;
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: min(root.width - Theme.s8, Theme.s8 * 16);
+                    height: root.height - Theme.s8 * 2;
+                    background: Theme.raised;
+                    border-radius: Theme.radius-m;
+                    border-width: Theme.hair;
+                    border-color: Theme.line-strong;
+                    accessible-role: groupbox;
+                    accessible-label: Str.about-licences;
+                    VerticalLayout {
+                        padding: Theme.s6;
+                        spacing: Theme.s4;
+                        PageTitle {
+                            text: Str.about-licences;
+                            size: Theme.fs-l;
+                            family: Theme.font-sans;
+                        }
+
+                        Muted {
+                            text: root.intro;
+                        }
+
+                        list := ListView {
+                            vertical-stretch: 1;
+                            for e in root.entries: VerticalLayout {
+                                padding-top: Theme.s4;
+                                padding-bottom: Theme.s4;
+                                padding-right: Theme.s4;
+                                spacing: Theme.s2;
+                                accessible-role: groupbox;
+                                accessible-label: e.heading;
+                                Rectangle {
+                                    height: Theme.hair;
+                                    background: Theme.line-soft;
+                                }
+
+                                Text {
+                                    text: e.heading;
+                                    color: Theme.strong;
+                                    font-size: Theme.fs-m;
+                                    font-weight: 600;
+                                    wrap: word-wrap;
+                                }
+
+                                Text {
+                                    text: e.text;
+                                    color: Theme.text;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.fs-s;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            alignment: end;
+                            Button {
+                                in-dialog: true;
+                                primary: true;
+                                text: Str.licences-close;
+                                activated => {
+                                    root.close();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    function scroll(by: length) {
+        list.content-y = min(0, max(list.visible-height - list.content-height, list.content-y + by));
+    }
+}

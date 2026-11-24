@@ -201,6 +201,13 @@ export struct DataFolderData {
     detail: string,
 }
 
+// One entry of the third-party licences (P5-10e): who ships the text (crates with version and
+// licence, a font, Rerun) and the text.
+export struct LicenceData {
+    heading: string,
+    text: string,
+}
+
 export struct FixData {
     id: string,
     kind: string,
@@ -471,6 +478,21 @@ export global Str {
     in property <string> settings-about;
     in property <string> about-version;
     in property <string> about-licence;
+    // About Rerun (P5-10e): the values are Rerun's own (build ID, the core's link constants).
+    in property <string> about-copyright;
+    in property <string> about-build-title;
+    in property <string> about-build;
+    in property <string> about-index;
+    in property <string> about-licence-title;
+    in property <string> about-gpl;
+    in property <string> about-source;
+    in property <string> about-source-url;
+    in property <string> about-repository;
+    in property <string> about-repo-url;
+    in property <string> about-licences;
+    in property <string> about-licences-desc;
+    in property <string> about-licences-show;
+    in property <string> licences-close;
     // Selecting, previewing, applying and undoing (P5-5a).
     in property <string> fix-select;
     in property <string> fix-tradeoffs;

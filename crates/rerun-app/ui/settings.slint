@@ -1,5 +1,5 @@
 // Settings (docs/07-ui.md): safety, packages (P5-8b-3), data (P5-10a), appearance (P5-10c) and
-// about. Only `rerun-app::ui` and `build.rs` know this file (ADR 0026); `app.slint` places the
+// about (P5-10e). Only `rerun-app::ui` and `build.rs` know this file (ADR 0026); `app.slint` places the
 // page. Every colour comes from `Theme`, every string from `Str` or a view model.
 
 import { PageTitle, Badge, Button, PartsLine, Hairline, Muted, GroupHeading, Card, RadioChoice, StoreData, StoreRowData, DataFolderData, Theme, Str, Modal } from "base.slint";
@@ -50,6 +50,62 @@ component Setting inherits Rectangle {
     }
 }
 
+
+// A line of About Rerun (P5-10e): a title, a sentence, a value in the monospace face (an ID, a
+// URL; Rerun's own text) and a button for it. The URL stands as text next to its button.
+component InfoRow inherits Rectangle {
+    in property <string> title;
+    in property <string> desc;
+    in property <string> mono;
+    in property <string> button;
+    in property <string> button-label;
+    // The opener's number for `Modal.return-to` (the focus comes back when its dialog closes).
+    in property <int> focus-id: -9999;
+    in property <bool> first;
+    callback activated();
+    if !root.first: Hairline {
+        y: 0;
+        height: Theme.hair;
+    }
+    VerticalLayout {
+        padding: Theme.s5;
+        spacing: Theme.s1;
+        Text {
+            text: root.title;
+            color: Theme.strong;
+            font-size: Theme.fs-l;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+
+        if root.desc != "": Text {
+            text: root.desc;
+            color: Theme.muted;
+            font-size: Theme.fs-m;
+            wrap: word-wrap;
+        }
+        if root.mono != "": Text {
+            text: root.mono;
+            color: Theme.text;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-s;
+            wrap: word-wrap;
+        }
+        if root.button != "": HorizontalLayout {
+            alignment: start;
+            padding-top: Theme.s2;
+            Button {
+                text: root.button;
+                accessible-label: root.button-label;
+                take-focus: Modal.return-to == root.focus-id;
+                enabled: !Modal.open;
+                activated => {
+                    root.activated();
+                }
+            }
+        }
+    }
+}
 
 // One choice among a few, as a radio group, applied at once: the theme (P5-10c), the language
 // and the library view (P5-10d). `locked` (Windows' high contrast for the theme) turns the
@@ -330,12 +386,19 @@ export component SettingsPage inherits VerticalLayout {
     // The language (0 like Windows, 1 English, 2 German) and the library view (0 list, 1 compact).
     in property <int> language-choice;
     in property <int> view-choice;
+    // The Topo index as the status bar says it (About Rerun).
+    in property <string> index-status;
+    in property <string> index-signature;
     callback store-remove(int);
     callback store-remove-all();
     callback open-data-folder();
     callback theme-chosen(int);
     callback language-chosen(int);
     callback view-chosen(int);
+    // About Rerun (P5-10e): the core opens its own links; the licences open in a dialog.
+    callback open-source-code();
+    callback open-repository();
+    callback show-licences();
     spacing: Theme.s4;
     PageTitle {
         text: Str.settings-title;
@@ -430,10 +493,57 @@ export component SettingsPage inherits VerticalLayout {
 
     Card {
         VerticalLayout {
-            Setting {
+            InfoRow {
                 first: true;
                 title: Str.about-version;
-                desc: Str.about-licence;
+                desc: Str.about-copyright + "\n" + Str.about-licence;
+            }
+
+            InfoRow {
+                title: Str.about-build-title;
+                mono: Str.about-build;
+            }
+
+            InfoRow {
+                title: Str.about-index;
+                desc: root.index-signature;
+                mono: root.index-status;
+            }
+
+            InfoRow {
+                title: Str.about-licence-title;
+                desc: Str.about-gpl;
+            }
+
+            InfoRow {
+                title: Str.about-source;
+                mono: Str.about-source-url;
+                button: Str.open-in-browser;
+                button-label: Str.open-in-browser + ": " + Str.about-source;
+                activated => {
+                    root.open-source-code();
+                }
+            }
+
+            InfoRow {
+                title: Str.about-repository;
+                mono: Str.about-repo-url;
+                button: Str.open-in-browser;
+                button-label: Str.open-in-browser + ": " + Str.about-repository;
+                activated => {
+                    root.open-repository();
+                }
+            }
+
+            InfoRow {
+                title: Str.about-licences;
+                desc: Str.about-licences-desc;
+                button: Str.about-licences-show;
+                button-label: Str.about-licences-show;
+                focus-id: -1003;
+                activated => {
+                    root.show-licences();
+                }
             }
         }
     }

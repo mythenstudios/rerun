@@ -115,6 +115,9 @@ struct State {
     /// The window shows "waiting for Windows (UAC)": no button, Esc ignored, closed by the
     /// result (P5-5c).
     uac: bool,
+    /// The third-party licences are open (P5-10e; their entries are handed to the window once).
+    licences: bool,
+    licences_loaded: bool,
 }
 
 /// Wakes the event loop from the worker thread (ADR 0026: `invoke_from_event_loop`).
@@ -253,6 +256,8 @@ where
         download: None,
         close_after_download: false,
         uac: false,
+        licences: false,
+        licences_loaded: false,
     }));
     callbacks(&ui, &state);
 
@@ -521,12 +526,23 @@ fn set_strings(ui: &AppWindow, lang: Lang) {
     g.set_open_in_browser(x(Msg::OpenInBrowser));
     g.set_report_btn(x(Msg::ReportBtn));
     g.set_settings_about(x(Msg::SettingsAbout));
-    g.set_about_version(s(format!(
-        "{} {}",
-        t(lang, Msg::AboutVersion),
-        env!("CARGO_PKG_VERSION")
-    )));
+    let about = crate::vm::about(lang);
+    g.set_about_version(s(&about.version));
     g.set_about_licence(x(Msg::AboutLicence));
+    g.set_about_copyright(s(&about.copyright));
+    g.set_about_build_title(x(Msg::AboutBuild));
+    g.set_about_build(s(&about.build));
+    g.set_about_index(x(Msg::AboutIndex));
+    g.set_about_licence_title(x(Msg::AboutLicenceTitle));
+    g.set_about_gpl(s(&about.licence));
+    g.set_about_source(x(Msg::AboutSource));
+    g.set_about_source_url(s(&about.source_url));
+    g.set_about_repository(x(Msg::AboutRepository));
+    g.set_about_repo_url(s(&about.repo_url));
+    g.set_about_licences(x(Msg::AboutLicences));
+    g.set_about_licences_desc(x(Msg::AboutLicencesDesc));
+    g.set_about_licences_show(x(Msg::AboutLicencesShow));
+    g.set_licences_close(x(Msg::LicencesClose));
     g.set_fix_select(x(Msg::FixSelect));
     g.set_fix_tradeoffs(x(Msg::FixTradeoffs));
     g.set_fix_no_tradeoffs(x(Msg::FixNoTradeoffs));

@@ -81,7 +81,7 @@ GPUI drew well and falls back to WARP, but today it reaches crates.io only as a 
   - rows outside the visible part of the list are missing from UI Automation: the list's label carries the number of games, keyboard navigation scrolls the focused row into view so Narrator reads it, and P5-3 finds whether clipping or virtualisation hides them;
   - Windows' text size setting, high contrast and "show animations" are read for `theme::tokens` (ADR 0027); where that read lives (`ui::chrome` or a read-only `sys` call) is decided with P5-3.
 - **cargo-deny runs in CI only.** Smart App Control blocks the `cargo-deny` binary on the developer machine (os error 4551), so the licence check of the P5-3 commit is the CI job `deny`, before the push is considered done.
-- **Third-party notices.** How the licence list shown in the app is generated without a new dependency (P5-10).
+- **Third-party notices.** Closed with P5-10e (user decision E5 a): a test of `rerun-app` (`tests/notices.rs`) generates `crates/rerun-app/assets/THIRD-PARTY-NOTICES.txt` from `cargo tree` and `cargo metadata` of the running cargo with `serde_json`, no new crate; CI fails when the committed file is stale. The app embeds it and shows it under Settings > About Rerun (`docs/05-sources-policy.md`, `docs/07-ui.md`).
 
 ## Amendment P5-3 (2026-11-12): measured with the app
 

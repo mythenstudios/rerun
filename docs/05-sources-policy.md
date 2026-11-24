@@ -86,3 +86,36 @@ releases), each family with its `OFL.txt`. `FONTS.md` next to them records the s
 and SHA-256 of every file, and a test (`tests/fonts.rs`) fails when a file or a licence text
 differs or is missing. Never an executable, never a font from a mirror or a font site, never a
 modified font. A new font needs the same record and a decision of its own.
+
+## Third-party notices
+
+The licences of everything Rerun ships are collected in
+`crates/rerun-app/assets/THIRD-PARTY-NOTICES.txt` (P5-10e, user decision E5 a), embedded into
+`rerun-app.exe` and shown under Settings > About Rerun; the release (P5-13) puts it next to the
+binaries. It is generated, never written by hand: the test `crates/rerun-app/tests/notices.rs`
+lists every crate linked into a shipped binary, that is the normal dependencies of `rerun-app`,
+`rerun-cli`, `rerun-launch`, `rerun-helper` and `rerun-cpu`, each resolved alone as its release
+build is (`cargo tree -p <package> -e normal,no-proc-macro` for the Windows targets x86_64 and
+i686), so no build or dev dependency and no proc macro (none of them ends up in a binary).
+`cargo metadata` gives each crate's licence expression and package folder; the licence files
+there (`LICENSE*`, `LICENCE*`, `COPYING*`, `COPYRIGHT*`, `NOTICE*`, `UNLICENSE*`, the files of a
+`LICENSES` folder, the manifest's `license-file`) are copied with line ends, trailing spaces and
+control characters normalised. Each text is one entry under every crate that ships it (texts that
+differ only in white space count as one). Rerun's own `LICENSE` and the three fonts' `OFL.txt`
+come first.
+
+A crate whose package ships no licence file gets the **SPDX standard text** of every licence its
+expression names, with the authors its manifest lists (the standard text has no copyright line).
+The texts are `crates/rerun-app/assets/licences/<SPDX-ID>.txt`, taken verbatim from the SPDX
+License List 3.28.0 (`spdx/license-list-data`, as carried by the `spdx` crate 0.13.4): today
+`MIT`, `Apache-2.0` and `BSL-1.0` (for `accesskit*`, `lyon_*`, `taffy` and `clipboard-win`). A
+crate that names a licence without a text there fails the test, so a new one is added on purpose
+from the SPDX list, never written from memory.
+
+The check runs with `cargo test`: the generated text must equal the committed file
+(`RERUN_BLESS=1 cargo test -p rerun-app --test notices` writes it anew). Both cargo commands run
+through the cargo that runs the tests, `--locked`, and `--offline` outside GitHub Actions; where
+the nested cargo cannot list the crates (a build that needs a `--config` it does not inherit, a
+registry without the sources), the check is skipped with a message, except on GitHub Actions,
+where it is binding. A change of `Cargo.lock` that changes the linked crates therefore fails CI
+until the file is regenerated.

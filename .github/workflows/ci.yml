@@ -117,6 +117,9 @@ jobs:
           # The release rerun-app.exe built above, checked by crates/rerun-app/tests/hardening.rs.
           RERUN_RELEASE_APP_EXE: ${{ github.workspace }}/target/release/rerun-app.exe
         # --profile ci: dev with optimisation (Cargo.toml), debug assertions stay on (docs/09-testing.md).
+        # crates/rerun-app/tests/notices.rs is binding here (GITHUB_ACTIONS): it fails when
+        # crates/rerun-app/assets/THIRD-PARTY-NOTICES.txt no longer matches Cargo.lock
+        # (regenerate with RERUN_BLESS=1 cargo test -p rerun-app --test notices; P5-10e).
         run: cargo test --workspace --all-features --locked --profile ci
       - name: rerun-core fake and test-key features never in shipped binaries
         # ADR 0007: the in-memory fake and its TOCTOU hooks stay out of release builds.

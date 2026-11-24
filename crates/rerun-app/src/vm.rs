@@ -20,6 +20,7 @@ use rerun_core::hw::{GpuArch, SacState, SystemProfile};
 use rerun_core::journal::JournalError;
 use rerun_core::topo::{AntiCheatState, Refusal, Tri};
 
+mod about;
 mod clear;
 mod download;
 mod history;
@@ -27,6 +28,7 @@ mod open;
 mod problems;
 mod store;
 mod write;
+pub use about::*;
 pub use clear::*;
 pub use download::*;
 pub use history::*;

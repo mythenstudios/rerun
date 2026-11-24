@@ -17,7 +17,8 @@
 //! looks its URL up in the current signed index; [`Job::ReportAsk`] answers with the report
 //! dialog (exactly the issue's text) and keeps the report under the dialog's nonce,
 //! [`Job::ReportOpen`] opens exactly its URL once; [`Job::DataFolder`] and
-//! [`Job::OpenDataFolder`] are Settings > Data. All through the world's `Shell` (never in
+//! [`Job::OpenDataFolder`] are Settings > Data, [`Job::OpenOwn`] the links of Settings > About
+//! Rerun (P5-10e). All through the world's `Shell` (never in
 //! `flow::Env`), none a write job; [`Event::Opened`] or a calm result answers.
 //!
 //! Settings (P5-10b): [`Job::SaveSettings`] writes the settings the window now has, only if they
@@ -77,6 +78,7 @@ use rerun_core::flow::{
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::journal::TxnId;
 use rerun_core::plan::Pick;
+use rerun_core::policy::open::{OpenUrl, OwnLink};
 use rerun_core::sys::{Http, NoShell, PromptOwner, PromptOwnerSlot, Shell, System};
 use rerun_core::topo;
 
@@ -224,6 +226,9 @@ pub enum Job {
     DataFolder,
     /// Shows Rerun's folder in Explorer, only if it exists.
     OpenDataFolder,
+    /// Opens one of Rerun's own links in the browser (Settings > About Rerun, P5-10e): the
+    /// source code of this build or the repository. The URL is the core's constant.
+    OpenOwn(OwnLink),
     /// Writes the settings the window now has, if they changed (P5-10b).
     SaveSettings(Settings),
 }
@@ -259,6 +264,7 @@ impl Job {
             Self::ReportOpen { .. } => "report open".to_owned(),
             Self::DataFolder => "data folder".to_owned(),
             Self::OpenDataFolder => "open data folder".to_owned(),
+            Self::OpenOwn(_) => "open own link".to_owned(),
             Self::SaveSettings(_) => "save settings".to_owned(),
         }
     }
@@ -855,6 +861,11 @@ fn run_job(
             ))));
         }
         Job::OpenDataFolder => opened(flow::open_data_folder(&g, &*session.shell.0), lang, emit),
+        Job::OpenOwn(l) => opened(
+            flow::open_url(&*session.shell.0, &OpenUrl::own(*l)),
+            lang,
+            emit,
+        ),
         Job::SaveSettings(new) => {
             let saved = session.settings.save(&mut g, new);
             crate::trace::log(|| format!("worker: settings {}", saved.word()));

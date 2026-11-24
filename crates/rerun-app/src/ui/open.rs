@@ -2,21 +2,28 @@
 //! P5-10a). A click never hands a string to the worker: a source link is named by the fix, the
 //! issue and the source's position on the page the window shows, the report by its dialog's
 //! nonce, the folder by nothing at all. The core looks everything up again.
+//!
+//! Settings > About Rerun (P5-10e): its two links name the core's `OwnLink`; the third-party
+//! licences open in a dialog of the window's own (the embedded notices, nothing read).
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use rerun_core::flow::LinkRef;
+use rerun_core::policy::open::OwnLink;
 use slint::ComponentHandle;
 
-use super::generated::{AppWindow, DataFolderData, Modal};
-use super::{State, s, shown};
+use super::generated::{AppWindow, DataFolderData, LicenceData, Modal};
+use super::{State, model, s, shown};
 use crate::vm::DataVm;
 use crate::worker::Job;
 
 /// The focus target of "Report a problem..." when its dialog closes (`take-focus: Modal.return-to
 /// == -1002` in `app.slint`).
 pub(super) const REPORT_OPENER: i32 = -1002;
+
+/// The focus target of "Show licences" when its dialog closes (`focus-id` in `settings.slint`).
+pub(super) const LICENCES_OPENER: i32 = -1003;
 
 /// Settings > Data for the window.
 pub(super) fn data_data(d: &DataVm) -> DataFolderData {
@@ -30,7 +37,43 @@ pub(super) fn data_data(d: &DataVm) -> DataFolderData {
 
 /// Another dialog, a download or the wait for Windows holds the window.
 fn busy(ui: &AppWindow, st: &State) -> bool {
-    st.uac || st.download.is_some() || st.dialog.is_some() || ui.global::<Modal>().get_working()
+    st.uac
+        || st.licences
+        || st.download.is_some()
+        || st.dialog.is_some()
+        || ui.global::<Modal>().get_working()
+}
+
+/// Shows the third-party licences (the embedded notices; the entries are handed over once).
+fn show_licences(ui: &AppWindow, st: &mut State) {
+    if !st.licences_loaded {
+        let (preamble, notices) = crate::notices::parse(crate::notices::TEXT);
+        ui.set_licences_intro(s(preamble));
+        ui.set_licences(model(
+            notices
+                .iter()
+                .map(|n| LicenceData {
+                    heading: s(&n.heading),
+                    text: s(&n.text),
+                })
+                .collect(),
+        ));
+        st.licences_loaded = true;
+    }
+    st.licences = true;
+    ui.set_licences_open(true);
+    let m = ui.global::<Modal>();
+    m.set_return_to(-1);
+    m.set_open(true);
+}
+
+/// Closes them; "Show licences" takes the focus back.
+fn close_licences(ui: &AppWindow, st: &mut State) {
+    st.licences = false;
+    ui.set_licences_open(false);
+    let m = ui.global::<Modal>();
+    m.set_open(false);
+    m.set_return_to(LICENCES_OPENER);
 }
 
 /// The reference of source `si` of the issue `sj` of fix `fi` on the page the window shows.
@@ -50,6 +93,22 @@ fn link_of(st: &State, fi: i32, sj: i32, si: i32) -> Option<LinkRef> {
         variant: fix.key.clone(),
         source,
     })
+}
+
+/// A click on one of Rerun's own links: the worker opens the core's URL for `link`.
+fn open_own(ui: &AppWindow, state: &Rc<RefCell<State>>, link: OwnLink) -> impl Fn() + 'static {
+    let weak = ui.as_weak();
+    let st = state.clone();
+    move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let st = st.borrow();
+        if busy(&ui, &st) {
+            return;
+        }
+        st.worker.send(Job::OpenOwn(link));
+    }
 }
 
 pub(super) fn open_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
@@ -98,5 +157,32 @@ pub(super) fn open_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             return;
         }
         st.worker.send(Job::OpenDataFolder);
+    });
+    ui.on_open_source_code(open_own(ui, state, OwnLink::SourceOfThisBuild));
+    ui.on_open_repository(open_own(ui, state, OwnLink::Repository));
+
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_show_licences(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut st = st.borrow_mut();
+        if busy(&ui, &st) {
+            return;
+        }
+        show_licences(&ui, &mut st);
+    });
+
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_licences_close(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut st = st.borrow_mut();
+        if st.licences {
+            close_licences(&ui, &mut st);
+        }
     });
 }

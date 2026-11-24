@@ -19,12 +19,12 @@ import { Pressable, PageTitle, Badge, Button, PartsLine, Hairline, Muted, GroupH
 import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
 import { CardView, HistEntryView, LaunchRowView } from "card.slint";
-import { DialogView } from "dialog.slint";
+import { DialogView, LicencesView } from "dialog.slint";
 import { SettingsPage } from "settings.slint";
-import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, Theme, Str, Reveal, Modal } from "base.slint";
+import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, LicenceData, Theme, Str, Reveal, Modal } from "base.slint";
 
 // What `ui` names through the generated code.
-export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, Theme, Str, Reveal, Modal }
+export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, LicenceData, Theme, Str, Reveal, Modal }
 
 component Toggle inherits Pressable {
     in-out property <bool> checked;
@@ -1572,6 +1572,14 @@ export component AppWindow inherits Window {
     in property <BannerData> banner;
     in property <bool> dialog-open;
     in property <DialogData> dialog;
+    // The third-party licences (P5-10e), filled when they first open.
+    in property <bool> licences-open;
+    in property <string> licences-intro;
+    in property <[LicenceData]> licences;
+    callback open-source-code();
+    callback open-repository();
+    callback show-licences();
+    callback licences-close();
 
     callback fix-toggled(int);
     callback apply(string);
@@ -1864,6 +1872,17 @@ export component AppWindow inherits Window {
                                     high-contrast: root.high-contrast;
                                     language-choice: root.language-choice;
                                     view-choice: root.view-choice;
+                                    index-status: root.status-index;
+                                    index-signature: root.status-signature;
+                                    open-source-code => {
+                                        root.open-source-code();
+                                    }
+                                    open-repository => {
+                                        root.open-repository();
+                                    }
+                                    show-licences => {
+                                        root.show-licences();
+                                    }
                                     theme-chosen(i) => {
                                         root.theme-chosen(i);
                                     }
@@ -1893,6 +1912,15 @@ export component AppWindow inherits Window {
                 width: 100%;
                 height: 100%;
                 n: root.blocked-notice;
+            }
+            if root.licences-open && !root.blocked: LicencesView {
+                width: 100%;
+                height: 100%;
+                intro: root.licences-intro;
+                entries: root.licences;
+                close => {
+                    root.licences-close();
+                }
             }
             if root.dialog-open && !root.blocked: DialogView {
                 width: 100%;
