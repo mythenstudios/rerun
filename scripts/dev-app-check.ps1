@@ -329,7 +329,9 @@ try {
         "B: open Assassin's Creed: Director's Cut: all 3 issues of its Topo listed; EaglePatch once under Fixes, with both issues it solves",
         'C: hover the maximise button (snap flyout); double-click it; press it and drag away (no toggle)',
         'D: keyboard only: Tab through navigation, search field (reached?), switch, rows; Enter opens a game',
-        'E: speed: open a game at once after the start (while the list still fills), go back, open it again; switch Library, Applied, System, Library a few times: does anything wait?'
+        'E: speed: open a game at once after the start (while the list still fills), go back, open it again; switch Library, Applied, System, Library a few times: does anything wait?',
+        'J: History: are the entries, their times and the launch results readable? Look at the band and the System page too',
+        'K: History: open the dialog that clears it, read the list, press CANCEL (do not clear: it deletes the real history)'
     )
     if ($Game) {
         $steps += "F: APPLY TEST, only this game: $Game. Open it. The preselected fixes are ticked (verified, affect this PC); a fix that needs a download or the helper says so and cannot be ticked. Read the preview: every file, value, the launch profile, the warnings. Press Copy launch option and paste it into Notepad (it is only text). Press Apply once.",
@@ -584,6 +586,8 @@ $summary.Add("  B Assassin's Creed: Director's Cut: 3 issues listed; EaglePatch 
 $summary.Add('  C maximise button: snap flyout on hover; double-click toggles; press and drag away does not toggle')
 $summary.Add('  D keyboard only: navigation, search field reached, switch, rows, Enter opens a game')
 $summary.Add('  E speed: a game opened at once after the start, back, opened again; Library, Applied, System, Library a few times: did anything wait? (and where)')
+$summary.Add('  J History: entries, times, launch results readable; band and System page')
+$summary.Add('  K clear-history dialog: list readable, Cancel left the history as it was')
 if ($Game) {
     $summary.Add('  F the preselection (verified, affects this PC), the preview (every file, value, launch profile, warnings), Copy launch option pasted into Notepad, Apply once')
     $summary.Add('  G one card on the game page and under Applied; Esc and Tab in the undo dialog; what Undo said it would restore')
