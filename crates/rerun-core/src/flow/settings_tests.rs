@@ -2,14 +2,15 @@
 //! - ST1 no file: a read creates nothing (no Rerun folder before or after);
 //! - ST2 the first write creates `Rerun\app\settings.json` with exactly the bytes;
 //! - ST3 the same bytes again write nothing (the file keeps its ID);
-//! - ST4 a file over the bound is unusable but replaced by the next write; one too large to hash
-//!   is never written over; more than the bound to write is refused;
+//! - ST4 a file over the bound is unusable and never written over; exactly the bound is read;
+//!   more than the bound to write is refused;
 //! - ST6 a junction at `app`, a file symlink, a hard link or a folder in the file's place is
 //!   unusable, and a write is refused without writing anything outside;
-//! - ST7 compare-and-swap: a file changed or created since the read is `Changed`, nothing written;
+//! - ST7 compare-and-swap: a file changed, created or removed since the read is `Changed`, nothing
+//!   written; one that grew over the bound is `Changed` without being hashed;
 //! - ST8 a crash after any call of a create or a replace leaves the old or the new file, never a
-//!   torn one (between the two renames of a replace: none, the defaults); the next write goes
-//!   through;
+//!   torn one; only between the two renames of a replace there is none (the defaults), and then
+//!   exactly one file in `app` holds the old bytes, the `<tmp>.old`; the next write goes through;
 //! - ST9 elevated: the guard stops before anything is read.
 
 use std::path::{Path, PathBuf};
@@ -23,7 +24,7 @@ use crate::flow::{Env, Gate, Guarded, guard};
 use crate::path::RelPath;
 use crate::policy::root::{AppDir, Create};
 use crate::sys::System;
-use crate::sys::fake::{FakeHttp, FakeSystem, FakeSystemBuilder, Fault};
+use crate::sys::fake::{FakeHttp, FakeSystem, FakeSystemBuilder, Fault, Prim};
 
 const INSTALL: &str = r"C:\Users\Player\AppData\Local\Programs\Rerun";
 const RERUN: &str = r"C:\Users\Player\AppData\Local\Rerun";
@@ -142,25 +143,14 @@ fn st2_st3_the_first_write_creates_the_file_and_the_same_bytes_write_nothing() {
 }
 
 #[test]
-fn st4_an_oversized_file_is_unusable_and_replaced_by_the_next_write() {
+fn st4_an_oversized_file_is_unusable_and_never_written_over() {
     let big = vec![b' '; usize::try_from(SETTINGS_MAX).unwrap() + 1];
-    let sys = base().file(FILE, big.clone()).build().unwrap();
-    let r = read(&sys);
-    assert_eq!(
-        r,
-        SettingsRead::Unusable {
-            why: Unusable::TooLarge,
-            seen: hash(&big)
-        }
-    );
-    write(&sys, NEW, &r.seen()).unwrap();
-    assert_eq!(file_at(&sys, FILE).as_deref(), Some(NEW));
     // Exactly the bound is read.
     let edge = vec![b' '; usize::try_from(SETTINGS_MAX).unwrap()];
     let sys = base().file(FILE, edge.clone()).build().unwrap();
     assert!(matches!(read(&sys), SettingsRead::Bytes { bytes, .. } if bytes == edge));
-    // Too large to hash: never written over.
-    let huge = vec![b' '; (1 << 20) + 1];
+    // One byte more: unusable, never written over (whatever a write expects there).
+    let huge = big.clone();
     let sys = base().file(FILE, huge.clone()).build().unwrap();
     let r = read(&sys);
     assert_eq!(
@@ -174,6 +164,7 @@ fn st4_an_oversized_file_is_unusable_and_replaced_by_the_next_write() {
         write(&sys, NEW, &r.seen()),
         Err(SettingsError::Unwritable(_))
     ));
+    assert_eq!(write(&sys, NEW, &hash(&huge)), Err(SettingsError::Changed));
     assert_eq!(file_at(&sys, FILE), Some(huge));
     // More than the bound to write: refused, nothing created.
     let sys = base().build().unwrap();
@@ -287,6 +278,23 @@ fn st7_a_file_changed_since_the_read_is_not_overwritten() {
     sys.fake_fs().put_file(Path::new(FILE), theirs).unwrap();
     assert_eq!(write(&sys, NEW, &seen), Err(SettingsError::Changed));
     assert_eq!(file_at(&sys, FILE).as_deref(), Some(&theirs[..]));
+    // Grown over the bound since (a huge or sparse file): `Changed` without hashing it.
+    let sys = base().file(FILE, OLD.to_vec()).build().unwrap();
+    let seen = read(&sys).seen();
+    let huge = vec![b'x'; 2 << 20];
+    sys.fake_fs().put_file(Path::new(FILE), &huge).unwrap();
+    let fx = sys.fake_fs();
+    let r = with_guard(&sys, |g| {
+        fx.clear_faults();
+        fx.record_calls(true);
+        let r = write_settings(g, NEW, &seen);
+        fx.record_calls(false);
+        r
+    });
+    assert_eq!(r, Err(SettingsError::Changed));
+    let calls = fx.take_calls();
+    assert!(!calls.contains(&Prim::ReadAt), "hashed: {calls:?}");
+    assert_eq!(file_at(&sys, FILE), Some(huge));
     // Removed since: `Changed`, nothing created.
     let sys = base().file(FILE, OLD.to_vec()).build().unwrap();
     let seen = read(&sys).seen();
@@ -296,7 +304,7 @@ fn st7_a_file_changed_since_the_read_is_not_overwritten() {
 }
 
 /// Every call a write from `seen` makes, in order (with its occurrence).
-fn calls_of(make: &dyn Fn() -> FakeSystem, seen: &Seen) -> Vec<(crate::sys::fake::Prim, usize)> {
+fn calls_of(make: &dyn Fn() -> FakeSystem, seen: &Seen) -> Vec<(Prim, usize)> {
     let sys = make();
     let fx = sys.fake_fs();
     with_guard(&sys, |g| {
@@ -310,6 +318,20 @@ fn calls_of(make: &dyn Fn() -> FakeSystem, seen: &Seen) -> Vec<(crate::sys::fake
         .iter()
         .enumerate()
         .map(|(i, c)| (*c, calls[..=i].iter().filter(|x| *x == c).count()))
+        .collect()
+}
+
+/// Every plain file in `app` with its bytes.
+#[expect(clippy::disallowed_methods, reason = "test: look at a fixture folder")]
+fn in_app(sys: &FakeSystem) -> Vec<(String, Vec<u8>)> {
+    let dir = sys.fs().open_dir(Path::new(APP)).unwrap();
+    dir.read_dir(None)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| {
+            let b = dir.read(&seg(&e.name)).ok()?;
+            Some((e.name, b))
+        })
         .collect()
 }
 
@@ -328,7 +350,17 @@ fn st8_a_crash_after_any_call_leaves_the_old_or_the_new_file() {
     for (make, seen, before) in cases {
         let calls = calls_of(make, &seen);
         assert!(calls.len() > 5, "{calls:?}");
-        for (call, nth) in calls {
+        // The replace's two renames (step 6: the old file to `<tmp>.old`, step 7: the new one
+        // onto the name): only a crash from the first up to before the second leaves no file.
+        let renames: Vec<usize> = (0..calls.len())
+            .filter(|i| calls[*i].0 == Prim::Rename)
+            .collect();
+        let gap_at =
+            |i: usize| before.is_some() && renames.len() >= 2 && i >= renames[0] && i < renames[1];
+        if before.is_some() {
+            assert!(renames.len() >= 2, "{calls:?}");
+        }
+        for (i, (call, nth)) in calls.into_iter().enumerate() {
             let sys = make();
             let fx = sys.fake_fs();
             with_guard(&sys, |g| {
@@ -342,10 +374,20 @@ fn st8_a_crash_after_any_call_leaves_the_old_or_the_new_file() {
             }
             sys.restart();
             let now = file_at(&sys, FILE);
-            // Between the two renames of a replace the name is free: no file, so the next start
-            // takes the defaults (the old bytes stay in `<tmp>.old`). Never a torn file.
-            let gap = before.is_some() && now.is_none();
-            if now.as_deref() != before && now.as_deref() != Some(NEW) && !gap {
+            if gap_at(i) {
+                // Between the two renames the name is free: no file, so the next start takes
+                // the defaults; exactly one file holds the old bytes, the `<tmp>.old`.
+                let old: Vec<String> = in_app(&sys)
+                    .into_iter()
+                    .filter(|(_, b)| before == Some(b.as_slice()))
+                    .map(|(n, _)| n)
+                    .collect();
+                if now.is_some() || old.len() != 1 || !old[0].ends_with(".tmp.old") {
+                    bad.push(format!(
+                        "{call:?} #{nth} (gap): {now:?}, old bytes in {old:?}"
+                    ));
+                }
+            } else if now.as_deref() != before && now.as_deref() != Some(NEW) {
                 bad.push(format!("{call:?} #{nth}: {now:?}"));
             }
             // The next start reads it or the defaults, and the next write goes through.

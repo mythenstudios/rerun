@@ -17,10 +17,11 @@
 //! the app or Slint read anything else (security review S1 of P5-3). A missing field is its
 //! default; the language and the library view are in the format already and are used from P5-10d.
 //!
-//! Reading ([`decode`]): anything wrong (not JSON, not an object, an unknown field, a wrong type,
-//! UTF-16, too large, `format` 0) means the defaults and is replaced by the next change; a link or
-//! a folder in the file's place, or a `format` above 1 (a newer Rerun's file) means the defaults
-//! **for the session only**: that file is never written over ([`Writable::SessionOnly`]).
+//! Reading ([`decode`]): anything wrong in a file of at most the bound (not JSON, not an object,
+//! an unknown field, a wrong type, UTF-16, `format` 0) means the defaults and is replaced by the
+//! next change; a file over the bound, a link or a folder in the file's place, or a `format` above
+//! 1 of any size (a newer Rerun's file) means the defaults **for the session only**: that file is
+//! never written over ([`Writable::SessionOnly`]).
 //!
 //! Writing ([`Memo::save`]): only a real change against what was read or last written (the
 //! defaults without a file are no change), through `flow::write_settings` with the hash that was
@@ -103,8 +104,8 @@ impl Default for Settings {
 pub enum Writable {
     /// A change is written.
     Yes,
-    /// A change holds for the session only: a newer Rerun's file, or a link or a folder in its
-    /// place, is never written over.
+    /// A change holds for the session only: a newer Rerun's file, a file over the bound, or a
+    /// link or a folder in its place, is never written over.
     SessionOnly,
 }
 
@@ -112,26 +113,36 @@ pub enum Writable {
 pub fn decode(r: &SettingsRead) -> (Settings, Writable) {
     let bytes = match r {
         SettingsRead::Absent => return (Settings::default(), Writable::Yes),
-        // A plain file that is too large: replaced by the next change.
-        SettingsRead::Unusable {
-            seen: Seen::Hash(_),
-            ..
-        } => return (Settings::default(), Writable::Yes),
+        // Too large, a link, a folder: never written over.
         SettingsRead::Unusable { .. } => return (Settings::default(), Writable::SessionOnly),
         SettingsRead::Bytes { bytes, .. } => bytes,
     };
-    /// Only the format, every other field ignored: a newer format may have others.
+    /// Only the format, as any JSON number, every other field ignored: a newer format may have
+    /// others, and its number may be of any size.
     #[derive(Deserialize)]
     struct Probe {
-        format: u32,
+        format: serde_json::Number,
     }
-    match serde_json::from_slice::<Probe>(bytes) {
-        Ok(p) if p.format > FORMAT => (Settings::default(), Writable::SessionOnly),
-        Ok(p) if p.format == FORMAT => match serde_json::from_slice::<Settings>(bytes) {
-            Ok(s) => (s, Writable::Yes),
-            Err(_) => (Settings::default(), Writable::Yes),
-        },
-        _ => (Settings::default(), Writable::Yes),
+    let Ok(p) = serde_json::from_slice::<Probe>(bytes) else {
+        return (Settings::default(), Writable::Yes);
+    };
+    let newer = match p.format.as_u64() {
+        Some(n) => n > u64::from(FORMAT),
+        // Beyond `u64` (read as a float): a whole number above 1 is a newer format too.
+        None => p
+            .format
+            .as_f64()
+            .is_some_and(|f| f.is_finite() && f > 1.0 && f.fract() == 0.0),
+    };
+    if newer {
+        return (Settings::default(), Writable::SessionOnly);
+    }
+    if p.format.as_u64() != Some(u64::from(FORMAT)) {
+        return (Settings::default(), Writable::Yes);
+    }
+    match serde_json::from_slice::<Settings>(bytes) {
+        Ok(s) => (s, Writable::Yes),
+        Err(_) => (Settings::default(), Writable::Yes),
     }
 }
 

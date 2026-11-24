@@ -312,6 +312,8 @@ fn install_chrome(ui: &AppWindow, st: &Rc<RefCell<State>>, tokens: &Tokens, trie
             };
             let w = ui.as_weak();
             let colours_st = st.clone();
+            // One read for a burst of messages (Windows broadcasts `WM_SETTINGCHANGE` often).
+            let pending = Rc::new(std::cell::Cell::new(false));
             let on = Box::new(move |c: Chrome| {
                 if let Some(ui) = w.upgrade() {
                     match c {
@@ -322,15 +324,18 @@ fn install_chrome(ui: &AppWindow, st: &Rc<RefCell<State>>, tokens: &Tokens, trie
                         }
                         // Read again from the event loop, never inside the window procedure
                         // (the state may be borrowed by whatever made Windows send it).
-                        Chrome::ColorsChanged => {
+                        Chrome::ColorsChanged if !pending.replace(true) => {
                             let w = ui.as_weak();
                             let st = colours_st.clone();
+                            let pending = pending.clone();
                             slint::Timer::single_shot(Duration::ZERO, move || {
+                                pending.set(false);
                                 if let Some(ui) = w.upgrade() {
                                     colours_changed(&ui, &mut st.borrow_mut());
                                 }
                             });
                         }
+                        Chrome::ColorsChanged => {}
                     }
                 }
             });

@@ -104,12 +104,6 @@ fn st4_a_broken_file_is_the_defaults_and_may_be_replaced() {
         .flat_map(u16::to_le_bytes)
         .collect();
     assert_eq!(decode(&bytes(&utf16)), defaults(Writable::Yes));
-    // Too large but hashable: replaced by the next change.
-    let big = SettingsRead::Unusable {
-        why: Unusable::TooLarge,
-        seen: Seen::Hash([1; 32]),
-    };
-    assert_eq!(decode(&big), defaults(Writable::Yes));
     assert_eq!(decode(&SettingsRead::Absent), defaults(Writable::Yes));
 }
 
@@ -120,6 +114,10 @@ fn st5_st6_a_newer_format_or_an_unusable_place_is_the_defaults_for_the_session()
         &b"{\"format\":2}"[..],
         b"{\"format\":2,\"accent\":\"stein\",\"grouped\":false}",
         b"{\"format\":4294967295}",
+        b"{\"format\":4294967296}",
+        b"{\"format\":18446744073709551615}",
+        b"{\"format\":18446744073709551616}",
+        b"{\"format\":1e30}",
     ] {
         assert_eq!(
             decode(&bytes(b)),

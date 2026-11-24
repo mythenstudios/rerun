@@ -3,7 +3,8 @@
 //!   the defaults;
 //! - ST2 the first change creates `Rerun\app\settings.json` in its canonical form;
 //! - ST3 the same settings again write nothing (the file keeps its ID);
-//! - ST4 a broken file: the defaults, no event, and the next change replaces it;
+//! - ST4 a broken file: the defaults, no event, and the next change replaces it; a file over the
+//!   bound stays and the change holds for the session;
 //! - ST5 a newer format: the defaults, and the file stays byte for byte after changes;
 //! - ST7 another Rerun wrote meanwhile: read once more, the last writer wins;
 //! - ST9 elevated: nothing read at the start, nothing written;
@@ -139,12 +140,22 @@ fn st4_a_broken_file_is_replaced_by_the_next_change() {
     };
     assert!(save(&sys, &mut s, &new).is_empty());
     assert_eq!(file(&sys), Some(encode(&new)));
-    // Too large: the same.
+    // Too large: never written over, the change holds for the session.
     let big = vec![b' '; 5000];
-    let sys = bare().file(FILE, big).build().unwrap();
+    let sys = bare().file(FILE, big.clone()).build().unwrap();
     let mut s = session(&sys);
+    assert_eq!(s.settings.writable(), Writable::SessionOnly);
     save(&sys, &mut s, &new);
-    assert_eq!(file(&sys), Some(encode(&new)));
+    assert_eq!(s.settings.settings, new);
+    assert_eq!(file(&sys), Some(big));
+}
+
+/// A settings save never holds the window: it is crash-safe on its own (compare-and-swap), so it
+/// is not a write job that blocks closing.
+#[test]
+fn saving_the_settings_does_not_block_closing() {
+    assert!(!Job::SaveSettings(Settings::default()).writes());
+    assert!(!Job::SaveSettings(Settings::default()).downloads());
 }
 
 #[test]

@@ -6,11 +6,12 @@
 //! - [`read_settings`] never creates anything and never fails: no folder, no `app`, no file is
 //!   [`SettingsRead::Absent`]; a link, a hard link, a folder in its place, an `app` that is a
 //!   junction or a file over the bound is [`SettingsRead::Unusable`] (the app then uses the
-//!   defaults). What it read is remembered as a [`Seen`]: the SHA-256 of the bytes, `Absent`, or
-//!   `Unknown` (nothing may be written over it).
+//!   defaults and never writes over it). What it read is remembered as a [`Seen`]: the SHA-256 of
+//!   the bytes, `Absent`, or `Unknown` (nothing may be written over it).
 //! - [`write_settings`] is a compare-and-swap against that [`Seen`]: `Absent` creates the file
 //!   with `create_new` (temp file and rename without replace), a hash replaces it through a
-//!   [`FileGuard`](crate::sys::fs::FileGuard) only while it still has that hash; anything else is
+//!   [`FileGuard`](crate::sys::fs::FileGuard) only while it still has that hash (a file over
+//!   [`SETTINGS_MAX`] there now is another file and is never hashed); anything else is
 //!   [`SettingsError::Changed`] and nothing is written. Rerun's folder and `app` are created only
 //!   here, right before the first write (review S6 of P2-13: opening and closing the app never
 //!   creates them). A crash at any step leaves the old or the new file, never a torn one, except
@@ -20,8 +21,6 @@
 //!
 //! Both take a [`Guarded`], so an elevated process reads and writes nothing (rule 6).
 
-use std::io::Read;
-
 use sha2::{Digest, Sha256};
 
 use super::Guarded;
@@ -29,14 +28,10 @@ use crate::journal::InstanceTag;
 use crate::path::RelPath;
 use crate::policy::root::{AppDir, AppSub, Create, RootError};
 use crate::sys::fs::{Attrs, EntryKind, NewFile, TmpName};
-use crate::sys::{Dir, DirWrite, SysErrorKind};
+use crate::sys::{DirWrite, SysErrorKind};
 
 /// Most bytes of the settings file (ADR 0027 open point, closed with P5-10).
 pub const SETTINGS_MAX: u64 = 4096;
-
-/// Most bytes of an unusable, oversized file that are hashed so the next write can replace it;
-/// a larger one is never written over ([`Seen::Unknown`]).
-const REPLACE_MAX: u64 = 1 << 20;
 
 /// The file's name in `<AppDir>\app`.
 pub const SETTINGS_FILE: &str = "settings.json";
@@ -48,7 +43,7 @@ pub enum Seen {
     Absent,
     /// A plain file with this SHA-256.
     Hash([u8; 32]),
-    /// Something that is never written over (a link, a folder, a file too large to hash, an
+    /// Something that is never written over (a link, a folder, a file over the bound, an
     /// error): every write is refused.
     Unknown,
 }
@@ -85,8 +80,7 @@ pub enum SettingsRead {
     Unusable {
         /// Why.
         why: Unusable,
-        /// [`Seen::Hash`] if a later write may replace it (a plain file that is too large but
-        /// still hashable), else [`Seen::Unknown`].
+        /// Always [`Seen::Unknown`]: an unusable file is never written over.
         seen: Seen,
     },
 }
@@ -143,31 +137,10 @@ pub fn read_settings(g: &Guarded<'_>) -> SettingsRead {
             SettingsRead::Bytes { bytes, seen }
         }
         Err(e) if e.kind == SysErrorKind::NotFound => SettingsRead::Absent,
-        Err(e) if e.kind == SysErrorKind::TooLarge => SettingsRead::Unusable {
-            why: Unusable::TooLarge,
-            seen: hash_bounded(&*dir, &name).map_or(Seen::Unknown, Seen::Hash),
-        },
+        Err(e) if e.kind == SysErrorKind::TooLarge => unusable(Unusable::TooLarge),
         Err(e) if e.kind == SysErrorKind::ReparsePoint => unusable(Unusable::Link),
         Err(e) => unusable(Unusable::Io(e.kind)),
     }
-}
-
-/// The SHA-256 of `name` if it has at most [`REPLACE_MAX`] bytes.
-fn hash_bounded(dir: &dyn Dir, name: &RelPath) -> Option<[u8; 32]> {
-    let reader = dir.open_read(name).ok()?;
-    let mut h = Sha256::new();
-    let mut buf = [0u8; 8192];
-    let mut total = 0u64;
-    let mut r = reader.take(REPLACE_MAX + 1);
-    loop {
-        let n = r.read(&mut buf).ok()?;
-        if n == 0 {
-            break;
-        }
-        total += u64::try_from(n).ok()?;
-        h.update(&buf[..n]);
-    }
-    (total <= REPLACE_MAX).then(|| h.finalize().into())
 }
 
 /// Why the settings were not written. Nothing was written in every case.
@@ -259,6 +232,12 @@ fn replace(
         Err(e) if e.kind == SysErrorKind::NotFound => return Err(SettingsError::Changed),
         Err(e) => return Err(unwritable(e.kind)),
     };
+    // The expected hash is of a file of at most `SETTINGS_MAX` bytes: a larger one is another
+    // file, and it is never hashed (a huge or sparse file would keep the worker for minutes).
+    let len = guard.metadata().map_err(|e| unwritable(e.kind))?.len;
+    if len > SETTINGS_MAX {
+        return Err(SettingsError::Changed);
+    }
     let have = guard.sha256().map_err(|e| unwritable(e.kind))?;
     if have != *expected {
         return Err(SettingsError::Changed);

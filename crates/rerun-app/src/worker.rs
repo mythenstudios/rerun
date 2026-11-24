@@ -22,8 +22,10 @@
 //!
 //! Settings (P5-10b): [`Job::SaveSettings`] writes the settings the window now has, only if they
 //! differ from what the session read or last wrote (`settings::Memo`, which [`Worker::start`] is
-//! handed from `main`); a write job, so the window waits the few milliseconds before it closes.
-//! No event answers it: a failed write is silent and the settings hold for the session.
+//! handed from `main`). It is not a write job: it never holds the window's close (the file is
+//! written with a temp file and renames under compare-and-swap, so a process that ends in the
+//! middle leaves the old or the new file, or none, which is the defaults). No event answers it:
+//! a failed write is silent and the settings hold for the session.
 //!
 //! Every job builds its own `Guarded` through `flow::guard` (elevation first, then the
 //! forbidden roots, then Rerun's folder opened if it exists, never created): an elevated process
@@ -272,7 +274,6 @@ impl Job {
                 | Self::Forget { .. }
                 | Self::Clear { .. }
                 | Self::RemovePackages { .. }
-                | Self::SaveSettings(_)
         )
     }
 

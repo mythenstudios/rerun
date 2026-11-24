@@ -325,6 +325,7 @@ component FirstRunCard inherits Rectangle {
             alignment: start;
             Button {
                 text: Str.first-run-dismiss;
+                enabled: !Modal.open;
                 activated => {
                     root.dismiss();
                 }
@@ -394,6 +395,7 @@ component LibraryPage inherits VerticalLayout {
             alignment: end;
             Toggle {
                 text: Str.group-by-status;
+                enabled: !Modal.open;
                 checked <=> root.group;
                 toggled(v) => {
                     root.group-toggled(v);

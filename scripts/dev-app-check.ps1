@@ -18,6 +18,9 @@
 #    touched). If index-test already holds anything the script refuses (run
 #    scripts\dev-topo-roundtrip.ps1 -Cleanup first), so the end state is exactly the start state:
 #    no index-test (or the empty folder that was there).
+#  - <LocalAppData>\Rerun\app\settings.json: the app's own settings (P5-10b), written only when
+#    you change one (the grouping, "Got it", the theme). It is the user's and stays; the summary
+#    shows what was written. Anything else new in <LocalAppData>\Rerun\app fails the cleanup.
 # Nothing else: no registry, no firewall, no Steam, no game folder, no profile, no journal.
 #
 # It starts the test-key rerun-app.exe, shows the checklist in the window title one step after
@@ -94,6 +97,20 @@ function Is-Link([string]$path) {
 function Get-AppDirList {
     if (-not (Test-Path -LiteralPath $appDir)) { return @('<missing>') }
     return @(Get-ChildItem -LiteralPath $appDir -Force | Sort-Object Name | ForEach-Object { "$($_.Name)|$($_.PSIsContainer)" })
+}
+
+# The app's settings folder <AppDir>\app (P5-10b): its entries by name and kind, and the bytes of
+# settings.json ($null when there is none). Read only; links are listed, never followed.
+function Get-SettingsState {
+    $dir = Join-Path $appDir 'app'
+    if (-not (Test-Path -LiteralPath $dir)) { return @{ List = @(); Text = $null } }
+    $list = @(Get-ChildItem -LiteralPath $dir -Force | Sort-Object Name | ForEach-Object { "$($_.Name)|$($_.PSIsContainer)" })
+    $file = Join-Path $dir 'settings.json'
+    $text = $null
+    if ((Test-Path -LiteralPath $file -PathType Leaf) -and -not (Is-Link $file) -and (Get-Item -LiteralPath $file -Force).Length -le 4096) {
+        $text = ([IO.File]::ReadAllText($file)).Trim()
+    }
+    return @{ List = $list; Text = $text }
 }
 
 # Whether a folder holds no reparse point anywhere below it (a recursive delete must never
@@ -226,6 +243,7 @@ $cacheDir = Join-Path $appDir 'cache'
 $packagesDir = Join-Path $appDir 'packages'
 $dlBefore = $null          # cache and packages before the app ran (download test)
 $downloadCheck = 'not run'
+$settingsReport = 'settings: unchanged'
 $downloadReport = New-Object System.Collections.Generic.List[string]
 
 try {
@@ -245,6 +263,7 @@ try {
         $indexExisted = $true
     }
     $listBefore = Get-AppDirList
+    $settingsBefore = Get-SettingsState
     if ($Download -and -not $Game) { Fail '-Download needs -Game (the game whose fix is downloaded and applied)' }
     if ($KeepDownloads -and -not $Download) { Fail '-KeepDownloads only goes with -Download' }
     if ($Game) {
@@ -537,7 +556,16 @@ finally {
                 $a = @($a | Where-Object { $_ -notlike 'cache|*' -and $_ -notlike 'packages|*' })
                 $b = @($b | Where-Object { $_ -notlike 'cache|*' -and $_ -notlike 'packages|*' })
             }
+            # The app's settings folder is allowed to appear (P5-10b): it is compared on its own.
+            $a = @($a | Where-Object { $_ -ne 'app|True' })
+            $b = @($b | Where-Object { $_ -ne 'app|True' })
             if ((Compare-Object $a $b)) { $problems.Add("the top level of $appDir differs from before") }
+            $settingsAfter = Get-SettingsState
+            $newInApp = @($settingsAfter.List | Where-Object { $_ -ne 'settings.json|False' -and $settingsBefore.List -notcontains $_ })
+            if ($newInApp.Count -gt 0) { $problems.Add("$appDir\app holds something new besides settings.json: $($newInApp -join ', ')") }
+            if ($settingsAfter.Text -ne $settingsBefore.Text) {
+                $settingsReport = if ($null -eq $settingsAfter.Text) { 'settings file gone or unreadable' } else { "settings written: $($settingsAfter.Text)" }
+            }
         }
     } catch { $problems.Add("cleanup error: $($_.Exception.Message)") }
     if ($touched -or $tmp) {
@@ -574,6 +602,7 @@ if ($null -ne $firstWindowMs) {
     else { $summary.Add('measured: DLLs from outside System32/WinSxS/SysWOW64 -> FAIL'); foreach ($f in $foreignList) { $summary.Add("  $f") } }
 }
 $summary.Add("cleanup (index-test, temp folder): $cleanup")
+$summary.Add("app settings (<AppDir>\app\settings.json, kept): $settingsReport")
 if ($Game) { $summary.Add("apply test ($Game, the folder compared with its snapshot; Rerun's records removed): $applyCheck; files not hashed (unreadable): $script:notHashed") }
 if ($Download) {
     foreach ($l in $downloadReport) { $summary.Add("download test: $l") }
