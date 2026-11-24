@@ -1475,13 +1475,71 @@ pub struct DialogVm {
     pub lists: Vec<ListVm>,
 }
 
+/// One line of a list: Rerun's own words around untrusted text. The untrusted text (a game name
+/// from the Steam library, a package name, a path) is its own element in the window, never inside
+/// a sentence (docs/06: untrusted text in its own element).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextLine {
+    /// Rerun's text before the name.
+    pub before: String,
+    /// The untrusted text, escaped.
+    pub name: Option<Shown<'static>>,
+    /// Rerun's text after the name.
+    pub after: String,
+}
+
+impl TextLine {
+    /// A line of Rerun's own words.
+    pub fn text(s: impl Into<String>) -> Self {
+        Self {
+            before: s.into(),
+            name: None,
+            after: String::new(),
+        }
+    }
+
+    /// `before`, the untrusted `name`, `after`.
+    pub fn named(
+        before: impl Into<String>,
+        name: Shown<'static>,
+        after: impl Into<String>,
+    ) -> Self {
+        Self {
+            before: before.into(),
+            name: Some(name),
+            after: after.into(),
+        }
+    }
+
+    /// The line as one string (tests; the window draws the parts apart).
+    #[cfg(test)]
+    pub fn flat(&self) -> String {
+        let name = self.name.as_ref().map_or("", Shown::as_str);
+        format!("{}{name}{}", self.before, self.after)
+    }
+
+    /// `<prefix><game> . <rest>`: the game as the history names it. A name from the library is
+    /// its own part; an unnamed game ("Steam app N") is Rerun's own text; no game:
+    /// `<prefix><rest>`.
+    pub(super) fn with_game(prefix: &str, game: Option<Value>, rest: &str) -> Self {
+        match game {
+            Some(Value::Shown(n)) => Self::named(prefix, n, format!(" \u{b7} {rest}")),
+            Some(Value::Text(t)) => Self::text(format!("{prefix}{t} \u{b7} {rest}")),
+            None => Self::text(format!("{prefix}{rest}")),
+        }
+    }
+}
+
 /// A heading and its lines: the plain lists of the clear dialog (rule 5: a list, not a count).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListVm {
     /// The heading, with the number of lines.
     pub heading: String,
-    /// The lines (already escaped where they carry untrusted text).
-    pub lines: Vec<String>,
+    /// What the list is about, when that is untrusted text (the package whose files these are):
+    /// drawn next to the heading as its own element.
+    pub subject: Option<Shown<'static>>,
+    /// The lines (the untrusted text of each is its own part).
+    pub lines: Vec<TextLine>,
     /// The lines sit behind a button (P5-8b-3: the files of a package): its labels to show and
     /// to hide them. The lines are all there, only folded away until the user opens them.
     pub fold: Option<(String, String)>,

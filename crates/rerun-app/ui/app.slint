@@ -15,15 +15,15 @@ import "../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf";
 import "../assets/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf";
 import "../assets/fonts/ibm-plex-mono/IBMPlexMono-Medium.ttf";
 
-import { Pressable, PageTitle, Badge, Button, Hairline, Muted, GroupHeading, DetailLine, NoticeCard, Card } from "base.slint";
+import { Pressable, PageTitle, Badge, Button, PartsLine, Hairline, Muted, GroupHeading, DetailLine, NoticeCard, Card } from "base.slint";
 import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
 import { CardView, HistEntryView, LaunchRowView } from "card.slint";
 import { DialogView } from "dialog.slint";
-import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, StoreData, StoreRowData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
+import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, Theme, Str, Reveal, Modal } from "base.slint";
 
 // What `ui` names through the generated code.
-export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, StoreData, StoreRowData, SysLineData, Theme, Str, Reveal, Modal }
+export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, Theme, Str, Reveal, Modal }
 
 component Toggle inherits Pressable {
     in-out property <bool> checked;
@@ -1449,11 +1449,10 @@ component PackageRow inherits Card {
             wrap: word-wrap;
         }
 
-        for u in root.r.used: Text {
-            text: u;
-            color: Theme.muted;
-            font-size: Theme.fs-m;
-            wrap: word-wrap;
+        for u in root.r.used: PartsLine {
+            p: u;
+            tone: Theme.muted;
+            size: Theme.fs-m;
         }
         if root.r.keep != "": Text {
             text: root.r.keep;
@@ -1550,12 +1549,10 @@ component PackagesGroup inherits VerticalLayout {
             text: root.store.foreign-heading;
         }
 
-        for line in root.store.foreign: Text {
-            text: line;
-            color: Theme.muted;
-            font-family: Theme.font-mono;
-            font-size: Theme.fs-s;
-            wrap: word-wrap;
+        for line in root.store.foreign: PartsLine {
+            p: line;
+            tone: Theme.muted;
+            mono: true;
         }
     }
 }

@@ -106,6 +106,15 @@ pub(super) const CLEAR_OPENER: i32 = -1000;
 pub(super) const STORE_ALL_OPENER: i32 = -1001;
 pub(super) const STORE_ROW_OPENER: i32 = -10000;
 
+/// A line whose untrusted part is its own element.
+pub(super) fn parts(l: &vm::TextLine) -> PartsData {
+    PartsData {
+        before: s(&l.before),
+        name: l.name.as_ref().map(shown).unwrap_or_default(),
+        after: s(&l.after),
+    }
+}
+
 pub(super) fn card(c: &TxnCardVm) -> CardData {
     CardData {
         id: s(&c.id),
@@ -162,7 +171,8 @@ pub(super) fn dialog_data(d: &DialogVm) -> DialogData {
                 .iter()
                 .map(|l| ListData {
                     heading: s(&l.heading),
-                    lines: model(l.lines.iter().map(s).collect()),
+                    subject: l.subject.as_ref().map(shown).unwrap_or_default(),
+                    lines: model(l.lines.iter().map(parts).collect()),
                     show: l.fold.as_ref().map(|f| s(&f.0)).unwrap_or_default(),
                     hide: l.fold.as_ref().map(|f| s(&f.1)).unwrap_or_default(),
                 })

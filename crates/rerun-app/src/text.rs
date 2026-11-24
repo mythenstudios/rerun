@@ -2492,10 +2492,10 @@ fn en(m: Msg) -> Cow<'static, str> {
         ClearIntro => "These entries and launch results are removed from the history.",
         ClearNothing => "There is nothing Rerun can remove from the history now.",
         ClearEntriesHeading { n } => {
-            return format!("Entries removed ({n})").into();
+            return format!("Entries to be removed ({n})").into();
         }
         ClearResultsHeading { n } => {
-            return format!("Launch results removed ({n})").into();
+            return format!("Launch results to be removed ({n})").into();
         }
         ClearStaysHeading { n } => {
             return format!("Stays ({n})").into();
@@ -2593,13 +2593,13 @@ fn en(m: Msg) -> Cow<'static, str> {
         PkDlgIntro => "These packages are removed from Rerun's store.",
         PkDlgNothing => "There is nothing Rerun can remove from the store now.",
         PkDlgGoesHeading { n } => {
-            return format!("Packages removed ({n})").into();
+            return format!("Packages to be removed ({n})").into();
         }
         PkDlgLooseHeading { n } => {
-            return format!("Downloads without a package removed ({n})").into();
+            return format!("Downloads without a package to be removed ({n})").into();
         }
         PkDlgLeftovers { n, bytes: b } => {
-            return format!("Leftovers removed: {n} ({})", bytes(b, false)).into();
+            return format!("Leftovers to be removed: {n} ({})", bytes(b, false)).into();
         }
         PkDlgFilesShow { n } => {
             return format!("Show the files ({n})").into();
@@ -3443,10 +3443,10 @@ fn de(m: Msg) -> Cow<'static, str> {
         ClearIntro => "Diese Einträge und Startergebnisse werden aus dem Verlauf entfernt.",
         ClearNothing => "Rerun kann jetzt nichts aus dem Verlauf entfernen.",
         ClearEntriesHeading { n } => {
-            return format!("Entfernte Einträge ({n})").into();
+            return format!("Einträge, die entfernt werden ({n})").into();
         }
         ClearResultsHeading { n } => {
-            return format!("Entfernte Startergebnisse ({n})").into();
+            return format!("Startergebnisse, die entfernt werden ({n})").into();
         }
         ClearStaysHeading { n } => {
             return format!("Bleibt ({n})").into();
@@ -3544,13 +3544,13 @@ fn de(m: Msg) -> Cow<'static, str> {
         PkDlgIntro => "Diese Pakete werden aus dem Paketlager von Rerun entfernt.",
         PkDlgNothing => "Rerun kann jetzt nichts aus dem Paketlager entfernen.",
         PkDlgGoesHeading { n } => {
-            return format!("Entfernte Pakete ({n})").into();
+            return format!("Pakete, die entfernt werden ({n})").into();
         }
         PkDlgLooseHeading { n } => {
-            return format!("Entfernte Downloads ohne Paket ({n})").into();
+            return format!("Downloads ohne Paket, die entfernt werden ({n})").into();
         }
         PkDlgLeftovers { n, bytes: b } => {
-            return format!("Entfernte Reste: {n} ({})", bytes(b, true)).into();
+            return format!("Reste, die entfernt werden: {n} ({})", bytes(b, true)).into();
         }
         PkDlgFilesShow { n } => {
             return format!("Dateien anzeigen ({n})").into();

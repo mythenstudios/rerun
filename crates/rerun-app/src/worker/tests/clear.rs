@@ -85,12 +85,16 @@ fn history_of(ev: &[Event]) -> &vm::HistoryVm {
         .unwrap_or_else(|| panic!("no history in {ev:?}"))
 }
 
-fn lines<'a>(d: &'a vm::DialogVm, heading_starts: &str) -> &'a [String] {
-    &d.lists
+/// The lines of the list whose heading starts with `heading_starts`, each as one string.
+fn lines(d: &vm::DialogVm, heading_starts: &str) -> Vec<String> {
+    d.lists
         .iter()
         .find(|l| l.heading.starts_with(heading_starts))
         .unwrap_or_else(|| panic!("no list {heading_starts:?} in {:?}", d.lists))
         .lines
+        .iter()
+        .map(vm::TextLine::flat)
+        .collect()
 }
 
 #[test]
@@ -123,14 +127,14 @@ fn ah1_clear_removes_the_undone_entries_and_results_and_nothing_else() {
     assert_eq!(d.kind, DialogKind::Clear);
     assert!(d.can_confirm && d.txn.is_none());
     // Newest first, as the history lists them: game, number, state.
-    let goes = lines(d, "Entries removed (3)");
+    let goes = lines(d, "Entries to be removed (3)");
     let expect: Vec<String> = undone
         .iter()
         .rev()
         .map(|t| format!("Invented W \u{b7} No. {} \u{b7} Undone", t.seq()))
         .collect();
     assert_eq!(goes, expect.as_slice());
-    let results = lines(d, "Launch results removed (2)");
+    let results = lines(d, "Launch results to be removed (2)");
     assert_eq!(results.len(), 2);
     assert!(results.iter().any(|l| l == "Invented W"), "{results:?}");
     assert!(
@@ -295,7 +299,7 @@ fn ah4_a_history_that_changed_since_the_preview_is_shown_again() {
     assert!(rig.snap_app() == before, "nothing was written");
     // The new preview lists the one that can still go and keeps the other with its reason.
     assert_eq!(
-        lines(d, "Entries removed (1)"),
+        lines(d, "Entries to be removed (1)"),
         [format!("Invented W \u{b7} No. {} \u{b7} Undone", b.seq())]
     );
     assert!(

@@ -32,7 +32,7 @@ mod generated {
 use generated::{
     AppWindow, AppliedData, BadgeData, BannerData, CardData, DetailData, DialogData, FactData,
     FixData, GameData, HistEntryData, HistGroupData, HistoryData, LaunchData, LaunchRowData,
-    LineData, ListData, Modal, NoticeData, OpData, OrphanData, OrphansData, PreviewData,
+    LineData, ListData, Modal, NoticeData, OpData, OrphanData, OrphansData, PartsData, PreviewData,
     ProblemData, Reveal, RowData, SectionData, SolvedData, StoreData, StoreRowData, Str,
     SysLineData, Theme, WarnData,
 };
@@ -911,7 +911,7 @@ fn store_data(v: &StoreVm) -> StoreData {
                     note: r.note.as_deref().map(s).unwrap_or_default(),
                     state: badge(&r.state),
                     facts: s(&r.facts),
-                    used: model(r.used.iter().map(s).collect()),
+                    used: model(r.used.iter().map(write::parts).collect()),
                     keep: r.keep.as_deref().map(s).unwrap_or_default(),
                     remove_label: s(&v.remove),
                     can_remove: r.can_remove,
@@ -920,7 +920,7 @@ fn store_data(v: &StoreVm) -> StoreData {
         ),
         extra: model(v.extra.iter().map(s).collect()),
         foreign_heading: v.foreign_heading.as_deref().map(s).unwrap_or_default(),
-        foreign: model(v.foreign.iter().map(s).collect()),
+        foreign: model(v.foreign.iter().map(write::parts).collect()),
         empty_title: v.empty_title.as_deref().map(s).unwrap_or_default(),
         empty_sub: v.empty_sub.as_deref().map(s).unwrap_or_default(),
         detail: v.detail.as_ref().map(shown).unwrap_or_default(),

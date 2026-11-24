@@ -91,12 +91,16 @@ fn preview() -> ClearPreview {
     }
 }
 
-fn lines<'a>(d: &'a crate::vm::DialogVm, start: &str) -> &'a [String] {
-    &d.lists
+/// The lines of the list whose heading starts with `start`, each as one string.
+fn lines(d: &crate::vm::DialogVm, start: &str) -> Vec<String> {
+    d.lists
         .iter()
         .find(|l| l.heading.starts_with(start))
         .unwrap_or_else(|| panic!("no list {start:?} in {:?}", d.lists))
         .lines
+        .iter()
+        .map(crate::vm::TextLine::flat)
+        .collect()
 }
 
 #[test]
@@ -104,6 +108,21 @@ fn vh2_the_dialog_lists_what_goes_and_what_stays_with_its_reason() {
     let d = clear_vm(&preview(), &names(), false, 7, Lang::En);
     assert_eq!((d.kind, d.nonce, d.txn), (DialogKind::Clear, 7, None));
     assert!(d.can_confirm && d.changed.is_none() && d.blocked.is_none());
+    // The game's name comes from the Steam library: it is its own part of the line, never inside
+    // Rerun's sentence.
+    let goes = d
+        .lists
+        .iter()
+        .find(|l| l.heading.starts_with("Entries"))
+        .unwrap();
+    let named = goes.lines.iter().find(|l| l.name.is_some()).unwrap();
+    assert_eq!(named.name.as_ref().map(|n| n.as_str()), Some("Invented W"));
+    assert_eq!(named.before, "");
+    assert!(
+        named.after.starts_with(" \u{b7} No. 2"),
+        "{:?}",
+        named.after
+    );
     assert_eq!(d.title, "Clear history");
     assert_eq!(d.confirm, "Clear history");
     assert_eq!(
@@ -117,7 +136,7 @@ fn vh2_the_dialog_lists_what_goes_and_what_stays_with_its_reason() {
     // What goes: newest first, the game as the history names it (a name, "Steam app N", or
     // nothing when the head names none), the number, the state.
     assert_eq!(
-        lines(&d, "Entries removed (4)"),
+        lines(&d, "Entries to be removed (4)"),
         [
             "No. 5 \u{b7} Rolled back",
             "Invented W \u{b7} No. 2 \u{b7} Undone",
@@ -126,7 +145,7 @@ fn vh2_the_dialog_lists_what_goes_and_what_stays_with_its_reason() {
         ]
     );
     // Launch results by game, or by profile when no game has it.
-    let r = lines(&d, "Launch results removed (2)");
+    let r = lines(&d, "Launch results to be removed (2)");
     assert_eq!(r[0], "Invented W");
     assert_eq!(
         r[1],
@@ -163,8 +182,8 @@ fn vh2_the_dialog_lists_what_goes_and_what_stays_with_its_reason() {
     assert_eq!(
         heads,
         [
-            "Entries removed (4)",
-            "Launch results removed (2)",
+            "Entries to be removed (4)",
+            "Launch results to be removed (2)",
             "Stays (12)"
         ]
     );
@@ -218,7 +237,7 @@ fn vh2_every_keep_and_result_keep_has_its_own_words_in_both_languages() {
         ["Spielordner, Registry und Firewall bleiben unverändert."]
     );
     assert_eq!(
-        lines(&d, "Entfernte Einträge (4)"),
+        lines(&d, "Einträge, die entfernt werden (4)"),
         [
             "Nr. 5 \u{b7} Zurückgerollt",
             "Invented W \u{b7} Nr. 2 \u{b7} Rückgängig gemacht",

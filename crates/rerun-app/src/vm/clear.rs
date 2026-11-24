@@ -11,8 +11,8 @@ use rerun_core::journal::Closing;
 use rerun_core::plan::profile_id;
 
 use super::history::game_value;
-use super::write::{DialogKind, DialogVm, ListVm, ResultVm, Tone, result, with_detail};
-use super::{DetailVm, Names, shown_error};
+use super::write::{DialogKind, DialogVm, ListVm, ResultVm, TextLine, Tone, result, with_detail};
+use super::{DetailVm, Names, Value, shown_error};
 use crate::text::{Lang, Msg, t};
 
 fn tx(lang: Lang, m: Msg) -> String {
@@ -64,18 +64,18 @@ fn result_reason(k: ResultKeep) -> Msg {
 
 /// One entry as a line: the game (as the history names it, when the head names one), the number
 /// and the state; with the reason after it for an entry that stays.
-fn item_line(i: &ClearItem, keep: Option<Keep>, names: &Names, lang: Lang) -> String {
-    let mut parts = Vec::new();
-    if let Some(a) = i.app {
-        parts.push(game_value(a, names, lang).as_str().to_owned());
-    }
-    parts.push(tx(lang, Msg::ClearNumber { n: i.txn.seq() }));
-    parts.push(tx(lang, state_word(&i.line, i.forgotten)));
-    let line = parts.join(" \u{b7} ");
-    match keep {
-        Some(k) => format!("{line}. {}", tx(lang, keep_reason(k))),
-        None => line,
-    }
+fn item_line(i: &ClearItem, keep: Option<Keep>, names: &Names, lang: Lang) -> TextLine {
+    let rest = format!(
+        "{} \u{b7} {}",
+        tx(lang, Msg::ClearNumber { n: i.txn.seq() }),
+        tx(lang, state_word(&i.line, i.forgotten))
+    );
+    let rest = match keep {
+        Some(k) => format!("{rest}. {}", tx(lang, keep_reason(k))),
+        None => rest,
+    };
+    // The game's name is its own part: it comes from the Steam library.
+    TextLine::with_game("", i.app.map(|a| game_value(a, names, lang)), &rest)
 }
 
 /// The lines of a list of entries, newest first (the core lists oldest first). The entries that
@@ -85,7 +85,7 @@ fn entry_lines<'a>(
     items: impl DoubleEndedIterator<Item = (&'a ClearItem, Option<Keep>)>,
     names: &Names,
     lang: Lang,
-) -> Vec<String> {
+) -> Vec<TextLine> {
     let mut lines = Vec::new();
     let mut empty = 0;
     for (i, keep) in items.rev() {
@@ -96,7 +96,10 @@ fn entry_lines<'a>(
         }
     }
     if empty > 0 {
-        lines.push(tx(lang, Msg::ClearEmptySummary { n: empty }));
+        lines.push(TextLine::text(tx(
+            lang,
+            Msg::ClearEmptySummary { n: empty },
+        )));
     }
     lines
 }
@@ -109,14 +112,16 @@ fn result_line(
     known: &[(ProfileId, u32)],
     names: &Names,
     lang: Lang,
-) -> String {
-    let who = match known.iter().find(|(p, _)| *p == id) {
-        Some((_, a)) => game_value(*a, names, lang).as_str().to_owned(),
-        None => format!("{} {id}", tx(lang, Msg::LaunchProfileOf)),
-    };
-    match reason {
-        Some(r) => format!("{who}. {}", tx(lang, result_reason(r))),
-        None => who,
+) -> TextLine {
+    let after = reason
+        .map(|r| format!(". {}", tx(lang, result_reason(r))))
+        .unwrap_or_default();
+    match known.iter().find(|(p, _)| *p == id) {
+        Some((_, a)) => match game_value(*a, names, lang) {
+            Value::Shown(n) => TextLine::named("", n, after),
+            Value::Text(t) => TextLine::text(format!("{t}{after}")),
+        },
+        None => TextLine::text(format!("{} {id}{after}", tx(lang, Msg::LaunchProfileOf))),
     }
 }
 
@@ -149,6 +154,7 @@ pub fn clear_vm(
         lists.push(ListVm {
             heading: tx(lang, Msg::ClearEntriesHeading { n: p.remove.len() }),
             fold: None,
+            subject: None,
             lines: entry_lines(p.remove.iter().map(|i| (i, None)), names, lang),
         });
     }
@@ -156,6 +162,7 @@ pub fn clear_vm(
         lists.push(ListVm {
             heading: tx(lang, Msg::ClearResultsHeading { n: p.results.len() }),
             fold: None,
+            subject: None,
             lines: p
                 .results
                 .iter()
@@ -174,6 +181,7 @@ pub fn clear_vm(
         lists.push(ListVm {
             heading: tx(lang, Msg::ClearStaysHeading { n: stays }),
             fold: None,
+            subject: None,
             lines,
         });
     }

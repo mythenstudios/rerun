@@ -104,10 +104,20 @@ export struct CardData {
     can-forget: bool,
 }
 
-// A heading and its lines (the clear dialog lists what goes and what stays).
+// One line of a list: Rerun's words around untrusted text. `name` (a game from the Steam library,
+// a package, a path) is drawn in its own element, never inside a sentence.
+export struct PartsData {
+    before: string,
+    name: string,
+    after: string,
+}
+
+// A heading and its lines (the clear dialog lists what goes and what stays). `subject` is what
+// a folded list is about (the package whose files these are): untrusted, its own element.
 export struct ListData {
     heading: string,
-    lines: [string],
+    subject: string,
+    lines: [PartsData],
     // The lines sit behind a button (the files of a package): its labels to show and to hide
     // them. Empty `show` means the lines are always visible.
     show: string,
@@ -293,7 +303,7 @@ export struct StoreRowData {
     note: string,
     state: BadgeData,
     facts: string,
-    used: [string],
+    used: [PartsData],
     keep: string,
     remove-label: string,
     can-remove: bool,
@@ -305,7 +315,7 @@ export struct StoreData {
     rows: [StoreRowData],
     extra: [string],
     foreign-heading: string,
-    foreign: [string],
+    foreign: [PartsData],
     empty-title: string,
     empty-sub: string,
     detail: string,
@@ -615,6 +625,44 @@ export component Button inherits Pressable {
             horizontal-alignment: center;
             accessible-role: none;
         }
+    }
+}
+
+// A line of Rerun's words around untrusted text: the three parts are separate elements.
+export component PartsLine inherits HorizontalLayout {
+    in property <PartsData> p;
+    in property <brush> tone: Theme.text;
+    in property <length> size: Theme.fs-s;
+    // The untrusted part in the monospace face (paths).
+    in property <bool> mono: false;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.p.before + root.p.name + root.p.after;
+    if root.p.before != "": Text {
+        text: root.p.before;
+        color: root.tone;
+        font-size: root.size;
+        wrap: word-wrap;
+        accessible-role: none;
+    }
+    if root.p.name != "": Text {
+        text: root.p.name;
+        color: Theme.strong;
+        font-size: root.size;
+        font-family: root.mono ? Theme.font-mono : Theme.font-sans;
+        font-weight: 600;
+        wrap: word-wrap;
+        accessible-role: none;
+    }
+    if root.p.after != "": Text {
+        horizontal-stretch: 1;
+        text: root.p.after;
+        color: root.tone;
+        font-size: root.size;
+        wrap: word-wrap;
+        accessible-role: none;
+    }
+    if root.p.after == "": Rectangle {
+        horizontal-stretch: 1;
     }
 }
 

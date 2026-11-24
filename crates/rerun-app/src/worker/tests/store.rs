@@ -24,6 +24,11 @@ use crate::text::{Msg, t};
 use crate::vm::{DialogKind, DialogVm, Offer, ResultVm, Selection, StoreVm, Tone};
 use crate::worker::DownloadOutcome;
 
+/// Each line as one string.
+fn flat(lines: &[crate::vm::TextLine]) -> Vec<String> {
+    lines.iter().map(crate::vm::TextLine::flat).collect()
+}
+
 fn rig(lang: Lang) -> DRig {
     DRig::new(lang, |a| FakeReply::ok(a).chunked(16 * 1024))
 }
@@ -120,7 +125,7 @@ fn as1_a_confirm_of_the_shown_dialog_removes_exactly_that_package() {
         assert_eq!(row.title.as_str(), "Fix pack");
         assert_eq!(row.ident.as_str(), "fix-pack 1.0");
         assert!(row.can_remove && row.note.is_none());
-        assert_eq!(row.used, [w(Msg::PkNotUsed)]);
+        assert_eq!(flat(&row.used), [w(Msg::PkNotUsed)]);
         assert_eq!(page.remove_all, Some(w(Msg::PkRemoveAllBtn)));
 
         // The dialog (reads only): the package, every file and its archive.
@@ -128,23 +133,19 @@ fn as1_a_confirm_of_the_shown_dialog_removes_exactly_that_package() {
         let d = dialog(&ev);
         assert_eq!(d.kind, DialogKind::Packages);
         assert!(d.can_confirm && d.changed.is_none());
-        assert!(d.lists[0].lines[0].starts_with("Fix pack \u{b7} fix-pack 1.0"));
+        assert!(
+            d.lists[0].lines[0]
+                .flat()
+                .starts_with("Fix pack \u{b7} fix-pack 1.0")
+        );
         let files = &d.lists[1];
         assert!(files.fold.is_some());
+        let files_lines = flat(&files.lines);
+        assert!(files_lines.contains(&"packages\\fix-pack\\1.0\\bin\\fix.dll".to_owned()));
+        assert!(files_lines.contains(&"packages\\fix-pack\\1.0\\fix.ini".to_owned()));
         assert!(
-            files
-                .lines
-                .contains(&"packages\\fix-pack\\1.0\\bin\\fix.dll".to_owned())
-        );
-        assert!(
-            files
-                .lines
-                .contains(&"packages\\fix-pack\\1.0\\fix.ini".to_owned())
-        );
-        assert!(
-            files.lines.contains(&format!("cache\\{key}")),
-            "{:?}",
-            files.lines
+            files_lines.contains(&format!("cache\\{key}")),
+            "{files_lines:?}"
         );
         let nonce = d.nonce;
         assert_eq!(r.listed("packages"), Some(vec!["fix-pack".to_owned()]));
@@ -210,12 +211,13 @@ fn as2_a_package_a_change_uses_stays_until_the_change_is_undone() {
         assert!(!row.can_remove);
         assert_eq!(row.keep, Some(w(Msg::PkKeepInUse)));
         assert_eq!(row.used.len(), 1);
+        let used = flat(&row.used);
         assert!(
-            row.used[0].starts_with(&format!("{} Invented P", w(Msg::PkUsedBy)))
-                && row.used[0].contains(&w(Msg::ClearNumber { n: txn.seq() }))
-                && row.used[0].ends_with(&w(Msg::StateApplied)),
+            used[0].starts_with(&format!("{} Invented P", w(Msg::PkUsedBy)))
+                && used[0].contains(&w(Msg::ClearNumber { n: txn.seq() }))
+                && used[0].ends_with(&w(Msg::StateApplied)),
             "{:?}",
-            row.used
+            used
         );
 
         // The dialog for the one package, and the one for everything unused: no confirm.
@@ -225,7 +227,12 @@ fn as2_a_package_a_change_uses_stays_until_the_change_is_undone() {
             assert!(!d.can_confirm, "{p:?}");
             assert_eq!(d.intro, w(Msg::PkDlgNothing));
             assert_eq!(d.lists.len(), 1);
-            assert!(d.lists[0].lines.iter().any(|l| l.contains("Invented P")));
+            assert!(
+                d.lists[0]
+                    .lines
+                    .iter()
+                    .any(|l| l.name.as_ref().is_some_and(|n| n.as_str() == "Invented P"))
+            );
             // A confirm that arrives anyway removes nothing.
             let ev = r.run(Job::RemovePackages { nonce: d.nonce });
             assert!(!dialog(&ev).can_confirm);

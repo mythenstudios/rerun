@@ -1390,6 +1390,10 @@ fn remove_packages(
         Ok(removed) => {
             session.games.clear();
             session.pages.clear();
+            // A preview that names a package which may be gone is void: it is planned again, so
+            // an apply never goes through the stale path (the core checks the package anyway).
+            session.pending.plan = None;
+            session.pending.shown = None;
             emit(Event::Result(vm::store_done(&removed, lang)));
             emit(Event::Store(Box::new(store_page(g, lang, session))));
         }

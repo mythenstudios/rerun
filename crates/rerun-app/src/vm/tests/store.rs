@@ -19,9 +19,14 @@ use rerun_core::pkg::store::{Removed, StoreError, StoreKeep};
 
 use crate::text::{Lang, Msg, Sym, t};
 use crate::vm::{
-    DialogKind, Names, Tone, refusal, store, store_dialog, store_done, store_gate,
+    DialogKind, Names, TextLine, Tone, refusal, store, store_dialog, store_done, store_gate,
     store_unavailable,
 };
+
+/// Each line as one string.
+fn flat(lines: &[TextLine]) -> Vec<String> {
+    lines.iter().map(TextLine::flat).collect()
+}
 
 fn id(seq: u32) -> TxnId {
     format!("{seq:08}-0123456789abcdef").parse().unwrap()
@@ -100,15 +105,20 @@ fn vp1_the_page_lists_every_package_with_its_use_and_its_reason() {
             })
         );
         assert_eq!(r.state.word, w(Msg::PkStateUnpacked));
-        assert_eq!(r.used, [w(Msg::PkNotUsed)]);
+        assert_eq!(flat(&r.used), [w(Msg::PkNotUsed)]);
         assert!(r.can_remove && r.keep.is_none() && r.note.is_none());
 
         // Used by two changes: the game, the number and the state of each; the button is off.
         let r = &vm.rows[1];
         assert!(!r.can_remove);
         assert_eq!(r.keep.as_deref(), Some(&*w(Msg::PkKeepInUse)));
+        // The game's name from the library is its own part, never inside Rerun's sentence.
+        let named = &r.used[0];
+        assert_eq!(named.name.as_ref().map(|n| n.as_str()), Some("Invented W"));
+        assert_eq!(named.before, format!("{} ", w(Msg::PkUsedBy)));
+        assert!(!named.after.contains("Invented W"));
         assert_eq!(
-            r.used,
+            flat(&r.used),
             [
                 format!(
                     "{} Invented W \u{b7} {} \u{b7} {}",
@@ -145,9 +155,15 @@ fn vp1_the_page_lists_every_package_with_its_use_and_its_reason() {
         );
         assert_eq!(vm.foreign_heading, Some(w(Msg::PkForeignHeading { n: 1 })));
         assert_eq!(
-            vm.foreign,
+            flat(&vm.foreign),
             [format!("packages\\stray: {}", w(Msg::PkKeepBadName))]
         );
+        // The path is its own part.
+        assert_eq!(
+            vm.foreign[0].name.as_ref().map(|n| n.as_str()),
+            Some("packages\\stray")
+        );
+        assert_eq!(vm.foreign[0].after, format!(": {}", w(Msg::PkKeepBadName)));
         assert_eq!(vm.remove_all, Some(w(Msg::PkRemoveAllBtn)));
         assert!(vm.can_remove_all);
         assert_eq!(vm.remove, w(Msg::PkRemoveBtn));
@@ -210,27 +226,38 @@ fn vp2_the_dialog_lists_what_goes_with_its_files_and_what_stays_with_its_reason(
             headings,
             [
                 w(Msg::PkDlgGoesHeading { n: 2 }).as_str(),
-                "Fix pack 1.0",
-                "half-pack 1.0",
+                "",
+                "",
                 w(Msg::PkDlgLooseHeading { n: 1 }).as_str(),
                 w(Msg::ClearStaysHeading { n: 2 }).as_str(),
             ]
         );
+        // The files of a package are headed by the package: untrusted, its own element.
+        assert_eq!(
+            d.lists[2].subject.as_ref().map(|n| n.as_str()),
+            Some("half-pack 1.0")
+        );
         let goes = &d.lists[0];
         assert!(goes.fold.is_none());
         assert_eq!(goes.lines.len(), 2);
+        let goes_lines = flat(&goes.lines);
         assert!(
-            goes.lines[0].starts_with("Fix pack \u{b7} fix-pack 1.0 \u{b7} "),
+            goes_lines[0].starts_with("Fix pack \u{b7} fix-pack 1.0 \u{b7} "),
             "{:?}",
-            goes.lines[0]
+            goes_lines[0]
+        );
+        // The package's name is its own part.
+        assert_eq!(
+            goes.lines[0].name.as_ref().map(|n| n.as_str()),
+            Some("Fix pack \u{b7} fix-pack 1.0")
         );
         // A package the index does not list says it cannot be downloaded again.
         assert!(
-            goes.lines[1].ends_with(&w(Msg::PkNotInIndex)),
+            goes_lines[1].ends_with(&w(Msg::PkNotInIndex)),
             "{:?}",
-            goes.lines[1]
+            goes_lines[1]
         );
-        assert!(!goes.lines[0].contains(&w(Msg::PkNotInIndex)));
+        assert!(!goes_lines[0].contains(&w(Msg::PkNotInIndex)));
 
         // Every file and the archive, folded away behind a button.
         let files = &d.lists[1];
@@ -239,7 +266,12 @@ fn vp2_the_dialog_lists_what_goes_with_its_files_and_what_stays_with_its_reason(
             Some((w(Msg::PkDlgFilesShow { n: 3 }), w(Msg::PkDlgFilesHide)))
         );
         assert_eq!(
-            files.lines,
+            files.subject.as_ref().map(|n| n.as_str()),
+            Some("Fix pack 1.0")
+        );
+        assert!(files.heading.is_empty());
+        assert_eq!(
+            flat(&files.lines),
             [
                 "packages\\fix-pack\\1.0\\bin\\fix.dll".to_owned(),
                 "packages\\fix-pack\\1.0\\fix.ini".to_owned(),
@@ -248,14 +280,23 @@ fn vp2_the_dialog_lists_what_goes_with_its_files_and_what_stays_with_its_reason(
         );
         // A package that is only its files has no archive line.
         assert_eq!(d.lists[2].lines.len(), 2);
-        assert_eq!(d.lists[3].lines, [format!("cache\\{}", "cd".repeat(32))]);
+        assert_eq!(
+            flat(&d.lists[3].lines),
+            [format!("cache\\{}", "cd".repeat(32))]
+        );
 
         let stays = &d.lists[4];
-        assert_eq!(stays.lines.len(), 3, "{:?}", stays.lines);
-        assert!(stays.lines[0].starts_with("Busy pack \u{b7} busy-pack 2.0."));
-        assert!(stays.lines[0].ends_with(&w(Msg::PkKeepInUse)));
-        assert!(stays.lines[1].contains("Invented W"), "{:?}", stays.lines);
-        assert!(stays.lines[2].ends_with(&w(Msg::PkKeepShared)));
+        let stays_lines = flat(&stays.lines);
+        assert_eq!(stays_lines.len(), 3, "{stays_lines:?}");
+        assert!(stays_lines[0].starts_with("Busy pack \u{b7} busy-pack 2.0."));
+        assert!(stays_lines[0].ends_with(&w(Msg::PkKeepInUse)));
+        assert!(stays_lines[1].contains("Invented W"), "{stays_lines:?}");
+        assert_eq!(
+            stays.lines[1].name.as_ref().map(|n| n.as_str()),
+            Some("Invented W"),
+            "the game is its own part"
+        );
+        assert!(stays_lines[2].ends_with(&w(Msg::PkKeepShared)));
 
         assert_eq!(
             d.notes,
@@ -362,7 +403,7 @@ fn vp4_a_removal_says_how_much_went_and_what_stopped() {
                 bytes: 14_300_000
             })
         );
-        assert!(r.notice.details.is_empty() && !r.refresh);
+        assert!(r.notice.details.is_empty() && r.refresh);
 
         // A file a scanner holds stops its package: calm, with the name and the reason.
         let removed = Removed {

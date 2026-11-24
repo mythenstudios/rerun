@@ -11,7 +11,7 @@ use rerun_core::pkg::store::{Removed, StoreKeep};
 
 use super::clear::state_word;
 use super::history::game_value;
-use super::write::{DialogKind, DialogVm, ListVm, ResultVm, Tone, result, with_detail};
+use super::write::{DialogKind, DialogVm, ListVm, ResultVm, TextLine, Tone, result, with_detail};
 use super::{Badge, DetailVm, Names, shown_error};
 use crate::text::{Lang, Msg, Sym, t};
 
@@ -36,8 +36,9 @@ pub struct StoreRowVm {
     pub state: Badge,
     /// Size, files and archives.
     pub facts: String,
-    /// "Used by <game> . No. 12 . Applied" per change that uses it, or "Not used".
-    pub used: Vec<String>,
+    /// "Used by <game> . No. 12 . Applied" per change that uses it (the game is its own part), or
+    /// "Not used".
+    pub used: Vec<TextLine>,
     /// Why it stays (`None`: it can be removed).
     pub keep: Option<String>,
     /// The row's button works (nothing keeps the package).
@@ -53,8 +54,8 @@ pub struct StoreVm {
     pub extra: Vec<String>,
     /// The heading of the entries Rerun never touches (empty when there are none).
     pub foreign_heading: Option<String>,
-    /// Those entries, `<path>: <reason>` (escaped by the core).
-    pub foreign: Vec<String>,
+    /// Those entries: the path (escaped by the core) is its own part, then the reason.
+    pub foreign: Vec<TextLine>,
     /// Nothing in the store, or the store cannot be shown: the first sentence.
     pub empty_title: Option<String>,
     /// The second sentence.
@@ -96,14 +97,14 @@ fn keep_text(k: &PackageKeep, lang: Lang) -> String {
 }
 
 /// A change that uses a package: "Used by <game> . No. 12 . Applied".
-fn used_line(u: &rerun_core::flow::UsedBy, names: &Names, lang: Lang) -> String {
-    let mut parts = Vec::new();
-    if let Some(a) = u.app {
-        parts.push(game_value(a, names, lang).as_str().to_owned());
-    }
-    parts.push(tx(lang, Msg::ClearNumber { n: u.txn.seq() }));
-    parts.push(tx(lang, state_word(&u.line, false)));
-    format!("{} {}", tx(lang, Msg::PkUsedBy), parts.join(" \u{b7} "))
+fn used_line(u: &rerun_core::flow::UsedBy, indent: &str, names: &Names, lang: Lang) -> TextLine {
+    let rest = format!(
+        "{} \u{b7} {}",
+        tx(lang, Msg::ClearNumber { n: u.txn.seq() }),
+        tx(lang, state_word(&u.line, false))
+    );
+    let prefix = format!("{indent}{} ", tx(lang, Msg::PkUsedBy));
+    TextLine::with_game(&prefix, u.app.map(|a| game_value(a, names, lang)), &rest)
 }
 
 fn title_of(p: &StoredPackage) -> Shown<'static> {
@@ -145,11 +146,11 @@ fn row(p: &StoredPackage, names: &Names, lang: Lang) -> StoreRowVm {
         state: state_badge(p.state, lang),
         facts: facts_of(p, lang),
         used: if p.used_by.is_empty() {
-            vec![tx(lang, Msg::PkNotUsed)]
+            vec![TextLine::text(tx(lang, Msg::PkNotUsed))]
         } else {
             p.used_by
                 .iter()
-                .map(|u| used_line(u, names, lang))
+                .map(|u| used_line(u, "", names, lang))
                 .collect()
         },
         keep: p.keep.as_ref().map(|k| keep_text(k, lang)),
@@ -193,7 +194,13 @@ pub fn store(v: &StoreView, names: &Names, lang: Lang) -> StoreVm {
         foreign: v
             .foreign
             .iter()
-            .map(|(path, k)| format!("{path}: {}", tx(lang, store_keep(*k))))
+            .map(|(path, k)| {
+                TextLine::named(
+                    "",
+                    escape::text(path).into_owned(),
+                    format!(": {}", tx(lang, store_keep(*k))),
+                )
+            })
             .collect(),
         empty_title: empty.then(|| tx(lang, Msg::PkEmpty)),
         empty_sub: None,
@@ -234,31 +241,34 @@ pub fn store_unavailable(g: &StoreGate, lang: Lang) -> StoreVm {
 
 /// One package as a line of a dialog list: name, ID and version, size, and that it cannot be
 /// downloaded again.
-fn package_line(p: &StoredPackage, lang: Lang) -> String {
-    let mut line = format!(
-        "{} \u{b7} {} \u{b7} {}",
-        title_of(p).as_str(),
-        ident_of(p).as_str(),
-        facts_of(p, lang)
-    );
+fn package_line(p: &StoredPackage, lang: Lang) -> TextLine {
+    let mut after = format!(" \u{b7} {}", facts_of(p, lang));
     if !p.in_index {
-        line.push_str(". ");
-        line.push_str(&tx(lang, Msg::PkNotInIndex));
+        after.push_str(". ");
+        after.push_str(&tx(lang, Msg::PkNotInIndex));
     }
-    line
+    TextLine::named("", whole_name(p), after)
+}
+
+/// The package's name, ID and version as one untrusted part: "Fix pack . fix-pack 1.0".
+fn whole_name(p: &StoredPackage) -> Shown<'static> {
+    escape::text(&format!(
+        "{} \u{b7} {}",
+        title_of(p).as_str(),
+        ident_of(p).as_str()
+    ))
+    .into_owned()
 }
 
 /// The files of a package (and its archives), as paths below Rerun's folder.
-fn file_lines(p: &StoredPackage) -> Vec<String> {
-    let dir = escape::text(&format!("{}\\{}", p.id, p.version)).into_owned();
+fn file_lines(p: &StoredPackage) -> Vec<TextLine> {
+    // The pieces are escaped already (the core's paths) and escaping is idempotent: the whole
+    // path is one untrusted part.
+    let path = |s: String| TextLine::named("", escape::path(&s).into_owned(), "");
     p.paths
         .iter()
-        .map(|f| format!("packages\\{}\\{f}", dir.as_str()))
-        .chain(
-            p.archives
-                .iter()
-                .map(|a| format!("cache\\{}", escape::text(a).as_str())),
-        )
+        .map(|f| path(format!("packages\\{}\\{}\\{f}", p.id, p.version)))
+        .chain(p.archives.iter().map(|a| path(format!("cache\\{a}"))))
         .collect()
 }
 
@@ -279,6 +289,7 @@ pub fn store_dialog(
     if !p.remove.is_empty() {
         lists.push(ListVm {
             heading: tx(lang, Msg::PkDlgGoesHeading { n: p.remove.len() }),
+            subject: None,
             lines: p.remove.iter().map(|x| package_line(x, lang)).collect(),
             fold: None,
         });
@@ -289,7 +300,10 @@ pub fn store_dialog(
                 continue;
             }
             lists.push(ListVm {
-                heading: format!("{} {}", title_of(x).as_str(), x.version),
+                heading: String::new(),
+                subject: Some(
+                    escape::text(&format!("{} {}", title_of(x).as_str(), x.version)).into_owned(),
+                ),
                 fold: Some((
                     tx(lang, Msg::PkDlgFilesShow { n: files.len() }),
                     tx(lang, Msg::PkDlgFilesHide),
@@ -309,8 +323,11 @@ pub fn store_dialog(
             lines: p
                 .loose_archives
                 .iter()
-                .map(|(name, _)| format!("cache\\{}", escape::text(name).as_str()))
+                .map(|(name, _)| {
+                    TextLine::named("", escape::path(&format!("cache\\{name}")).into_owned(), "")
+                })
                 .collect(),
+            subject: None,
             fold: None,
         });
     }
@@ -322,19 +339,12 @@ pub fn store_dialog(
                 .as_ref()
                 .map(|k| keep_text(k, lang))
                 .unwrap_or_default();
-            lines.push(format!(
-                "{} \u{b7} {}. {why}",
-                title_of(x).as_str(),
-                ident_of(x).as_str()
-            ));
-            lines.extend(
-                x.used_by
-                    .iter()
-                    .map(|u| format!("    {}", used_line(u, names, lang))),
-            );
+            lines.push(TextLine::named("", whole_name(x), format!(". {why}")));
+            lines.extend(x.used_by.iter().map(|u| used_line(u, "    ", names, lang)));
         }
         lists.push(ListVm {
             heading: tx(lang, Msg::ClearStaysHeading { n: p.stays.len() }),
+            subject: None,
             lines,
             fold: None,
         });
@@ -406,7 +416,8 @@ fn unexpected(lang: Lang) -> ResultVm {
 }
 
 /// What a removal came to: how many packages, archives and leftovers went and how much room it
-/// gave back; under "Stays" each thing that stopped at delete time with its reason (a file a
+/// gave back (`refresh`: an open preview may name a package that went, so the window plans
+/// again); under "Stays" each thing that stopped at delete time with its reason (a file a
 /// scanner holds). The core checked everything again under the locks.
 pub fn store_done(r: &Removed, lang: Lang) -> ResultVm {
     let none = r.packages.is_empty() && r.archives == 0 && r.leftovers == 0;
@@ -416,7 +427,7 @@ pub fn store_done(r: &Removed, lang: Lang) -> ResultVm {
         Tone::Calm
     };
     let mut out = if none {
-        result(tone, lang, Msg::PkDoneTitle, Msg::PkDoneNothing, false)
+        result(tone, lang, Msg::PkDoneTitle, Msg::PkDoneNothing, true)
     } else {
         result(
             tone,
@@ -428,7 +439,7 @@ pub fn store_done(r: &Removed, lang: Lang) -> ResultVm {
                 leftovers: r.leftovers,
                 bytes: r.bytes,
             },
-            false,
+            true,
         )
     };
     if !r.stopped.is_empty() {
