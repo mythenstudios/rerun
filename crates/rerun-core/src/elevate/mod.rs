@@ -37,10 +37,13 @@ pub use serve::serve;
 pub const MAX_BATCH_OPS: usize = 8;
 
 /// The lowest `seq` of a signed index the helper accepts for an add (§5 step 2): the `seq` of
-/// the index shipped with this build (user decision E5). No index is shipped yet, so every
-/// signed index counts (1 is the first `seq`); it rises with the first shipped index, so an
-/// older signed index can no longer authorise a new rule.
-pub const HELPER_MIN_SEQ: u64 = 1;
+/// the index shipped with this build (user decision E5), so an older signed index can no longer
+/// authorise a new rule. Prepared with the release key (P5-13a, ADR 0023 §5 "As built"): no
+/// index is shipped yet, so the floor is 2026-11-25T00:00:00Z as Unix time, at or below the
+/// `seq` of every index the release key signs (`seq` = Unix time of the build, `alpha-build.ps1`
+/// checks `seq` >= this). Before A6 it becomes exactly the `seq` of the index shipped with the
+/// release (`docs/08-roadmap.md`, "Before A6").
+pub const HELPER_MIN_SEQ: u64 = 1_795_564_800;
 
 #[cfg(test)]
 mod tests;

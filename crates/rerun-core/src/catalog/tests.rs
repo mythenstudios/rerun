@@ -710,13 +710,17 @@ fn firewall_rule_is_released_only_by_a_trusted_signed_index() {
     // A foreign key: refused by the signature check against this build's keys.
     let foreign = test_key::sign_foreign(&bytes);
     assert!(super::verify(&bytes, &foreign, &trusted_keys()).is_err());
-    // The test key: trusted only by a test-key build; the release slots alone refuse it.
+    // The test key: trusted only by a test-key build; the release key alone refuses its
+    // signature (a set release slot, P5-13a: `Signature`, not `NoKeys`).
     let ours = test_key::sign(&bytes);
     assert_eq!(
         super::verify(&bytes, &ours, &trusted_keys()).is_ok(),
         cfg!(feature = "test-key")
     );
-    assert!(super::verify(&bytes, &ours, &release_keys()).is_err());
+    assert_eq!(
+        super::verify(&bytes, &ours, &release_keys()).unwrap_err(),
+        IndexError::Signature
+    );
     // Verified by a key the caller trusts, the index releases the step.
     let v = super::verify(&bytes, &ours, &[test_key::public()]).unwrap();
     super::Catalog::from_verified(&v).unwrap();

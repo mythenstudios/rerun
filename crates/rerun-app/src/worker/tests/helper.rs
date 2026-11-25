@@ -51,11 +51,14 @@ const HDIR: &str = r"C:\Program Files\Rerun";
 const HEXE: &str = r"C:\Program Files\Rerun\rerun-helper.exe";
 const INI: &str = "[Display]\r\nWidth=800\r\n";
 
-/// The Topo: `ini` edits `game.ini`, `block` blocks `game.exe` outbound (the helper).
+/// The Topo: `ini` edits `game.ini`, `block` blocks `game.exe` outbound (the helper). Its `seq`
+/// is the helper's floor (`HELPER_MIN_SEQ`): the in-process helper is `elevate::serve` with this
+/// build's own floor, which refuses an older index.
 fn helper_index(sha: &str) -> String {
     let ini = r#"{"ini_set":{"file":"game.ini","values":[{"section":"Display","key":"Width","value":"1920"}]}}"#;
+    let seq = rerun_core::elevate::HELPER_MIN_SEQ;
     format!(
-        r#"{{"format":1,"seq":9,"issued":"2026-11-12T12:00:00Z","topos":[{{"format":1,"id":"invented-h","title":"Invented H","status":"active","rev":1,
+        r#"{{"format":1,"seq":{seq},"issued":"2026-11-12T12:00:00Z","topos":[{{"format":1,"id":"invented-h","title":"Invented H","status":"active","rev":1,
 "match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d9"}}]}},
 "issues":[
  {{"id":"display","title":"Wrong resolution","variants":[{{"id":"ini","status":"verified","kind":"fix","steps":[{ini}]}}]}},

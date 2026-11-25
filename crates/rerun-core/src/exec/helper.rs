@@ -737,8 +737,8 @@ fn report(op: u16, observed: Observed) -> OpReport {
 
 #[cfg(test)]
 pub(crate) mod knob {
-    //! The keys an add's index is checked against in tests (the test key; release slots are
-    //! empty, ADR 0024).
+    //! The keys an add's index is checked against in tests (the test key; the release key
+    //! signs no test index, ADR 0024).
 
     use std::cell::RefCell;
 

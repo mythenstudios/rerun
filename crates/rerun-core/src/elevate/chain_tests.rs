@@ -565,9 +565,11 @@ fn r_every_step_passes_up_to_the_write() {
             2,
             "one enumeration before the batch and one after it"
         );
-        // A shipped helper (release slots empty, no test key) stops at the index.
+        // A shipped helper (the release key only, no test key) stops at an index the test key
+        // signed: the release set is not empty (P5-13a), the signature is simply not its key's.
         let mut shipped = Wire::new(&sys);
         shipped.keys.trusted = crate::catalog::key::release_keys();
+        assert!(!shipped.keys.trusted.is_empty());
         assert_eq!(run_on(&shipped, &at, &sha, 1), refused(Reason::Index));
     });
 }
