@@ -711,6 +711,64 @@ fn aw13_apply_then_undo_through_the_worker_is_bit_identical() {
     );
 }
 
+/// The applied card shows the Steam launch option again (the one the preview showed), in both
+/// languages; a card without a launch profile shows none, and an undone one is no card.
+#[test]
+fn aw13_the_applied_card_shows_the_steam_launch_option_again() {
+    for (lang, heading, copy, hint, by_hand) in [
+        (
+            Lang::En,
+            "Steam launch option",
+            "Copy launch option",
+            "(Properties, General)",
+            "After an undo, remove the option by hand.",
+        ),
+        (
+            Lang::De,
+            "Steam-Startoption",
+            "Startoption kopieren",
+            "(Eigenschaften, Allgemein)",
+            "Nach dem Rückgängigmachen entfernst du die Option von Hand.",
+        ),
+    ] {
+        let mut rig = Rig::new(lang);
+        let pv = rig.preview();
+        let shown = pv.launch.clone().expect("the preview has the option");
+        let ev = rig.run(Job::Apply {
+            hash: pv.hash.clone(),
+        });
+        let a = applied_of(&ev);
+        let l = a.cards[0].launch.as_ref().expect("the card has the option");
+        assert_eq!(l.option, shown.option, "the same option as the preview");
+        assert!(l.option.as_ref().unwrap().as_str().contains("--profile"));
+        assert_eq!((l.heading.as_str(), l.copy.as_str()), (heading, copy));
+        assert!(l.intro.contains(hint), "{}", l.intro);
+        assert_eq!(l.notes, [by_hand]);
+        assert!(l.lines.is_empty());
+        // The shim is missing in the fake install folder: the warning stays.
+        assert_eq!(l.problems, shown.problems);
+        assert_eq!(l.problems.len(), 1);
+        // The game page shows the same card.
+        assert_eq!(game_in(&ev).applied, a.cards);
+        // The page read later shows it, too.
+        let ev = rig.run(Job::Status);
+        assert!(applied_of(&ev).cards[0].launch.is_some());
+        // Undone: no card, so no option.
+        let txn = applied_of(&ev).cards[0].txn;
+        rig.run(Job::RevertPreview { txn });
+        let ev = rig.revert(txn);
+        assert!(applied_of(&ev).cards.is_empty());
+    }
+
+    // Without a launch profile (the INI fix alone) the card has no section.
+    let mut rig = Rig::new(Lang::En);
+    rig.page();
+    let pv = rig.preview_of(vec![pick("display", "ini")]);
+    assert!(pv.launch.is_none());
+    let ev = rig.run(Job::Apply { hash: pv.hash });
+    assert!(applied_of(&ev).cards[0].launch.is_none());
+}
+
 #[test]
 fn aw13_a_game_changed_since_the_preview_is_calm_and_applies_nothing() {
     let mut rig = Rig::new(Lang::En);

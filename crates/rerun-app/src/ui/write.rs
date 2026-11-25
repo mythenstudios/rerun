@@ -125,6 +125,8 @@ pub(super) fn card(c: &TxnCardVm) -> CardData {
         note: s(&c.note),
         can_undo: c.can_undo,
         can_forget: c.can_forget,
+        has_launch: c.launch.is_some(),
+        launch: c.launch.as_ref().map(launch).unwrap_or_default(),
     }
 }
 

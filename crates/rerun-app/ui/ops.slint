@@ -150,6 +150,9 @@ export component OpItem inherits Rectangle {
 export component LaunchBox inherits Rectangle {
     in property <LaunchData> l;
     in-out property <bool> copied;
+    // Whose option this is (the card's game): makes the copy button's name unique on a page with
+    // several cards.
+    in property <string> owner;
     background: Theme.raised2;
     border-radius: Theme.radius-s;
     accessible-role: groupbox;
@@ -185,6 +188,7 @@ export component LaunchBox inherits Rectangle {
 
                 Button {
                     text: root.copied ? root.l.copied : root.l.copy;
+                    accessible-label: root.l.copy + (root.owner != "" ? ": " + root.owner : "");
                     activated => {
                         option-field.select-all();
                         option-field.copy();

@@ -910,10 +910,10 @@ fn game_page_view(
         Err(e) => (vm::game_refused(app_id, name, &e, lang), None),
     };
     if let Some(Ok(j)) = g.app().map(|app| flow::journal(app, Heads::Open)) {
-        page.applied = vm::cards(&j.status, &session.names, lang)
-            .into_iter()
-            .filter(|c| c.app_id == Some(app_id))
-            .collect();
+        let mut cards = vm::cards(&j.status, &session.names, lang);
+        cards.retain(|c| c.app_id == Some(app_id));
+        add_launch(g, &mut cards, &j.status, lang);
+        page.applied = cards;
         // The last start of this game (P5-6a): a fact, and the notes that go with it.
         if let Ok(Some(r)) = &j.launch
             && let lines = flow::launch_lines(r, &j.holders)
@@ -926,6 +926,18 @@ fn game_page_view(
     }
     session.pages.insert(app_id, fix_key(&page));
     (page, view)
+}
+
+/// The Steam launch option on the cards that hold a launch profile: the core's launch view of the
+/// head, the same data the preview shows.
+fn add_launch(g: &Guarded<'_>, cards: &mut [vm::TxnCardVm], status: &exec::Status, lang: Lang) {
+    let env = g.env();
+    vm::add_launch(
+        cards,
+        status,
+        &|p| flow::launch_view(env.sys, env.install, p),
+        lang,
+    );
 }
 
 /// Whether a fix of the view needs the elevated helper.
@@ -956,7 +968,11 @@ fn applied_page(g: &Guarded<'_>, lang: Lang, session: &Session) -> AppliedVm {
             // The journal only (review of P5-3): the orphaned firewall rules are read by their
             // own job when the System page opens (`Job::Orphans`, P5-6b).
             let s = exec::status(app);
-            vm::applied(Some(s.as_ref()), &session.names, lang)
+            let mut a = vm::applied(Some(s.as_ref()), &session.names, lang);
+            if let Ok(status) = &s {
+                add_launch(g, &mut a.cards, status, lang);
+            }
+            a
         }
     }
 }

@@ -1302,6 +1302,41 @@ pub struct TxnCardVm {
     pub can_undo: bool,
     /// "Close without undoing" is offered.
     pub can_forget: bool,
+    /// The Steam launch option while the transaction holds a launch profile that applies (set
+    /// by [`add_launch`]; `None` for every other card).
+    pub launch: Option<LaunchVm>,
+}
+
+/// Gives the cards of applied transactions that hold a launch profile the Steam launch option
+/// again (it is shown before the apply, too). `view` is the core's `flow::launch_view` for the
+/// head of the transaction (option text, install folder, shim check); nothing is built here.
+/// An interrupted, half-undone, damaged or settled transaction gets none.
+pub fn add_launch(
+    cards: &mut [TxnCardVm],
+    status: &exec::Status,
+    view: &dyn Fn(&plan::Preview) -> Option<LaunchView>,
+    lang: Lang,
+) {
+    for c in cards {
+        let Some(st) = status.txns.iter().find(|s| s.id == c.txn) else {
+            continue;
+        };
+        if !matches!(st.state, TxnLine::Applied) || flow::revert_begun(st) {
+            continue;
+        }
+        c.launch = flow::head(st)
+            .and_then(view)
+            .map(|v| launch_card_vm(&v, lang));
+    }
+}
+
+/// The launch option as the card shows it: heading, option, the paste hint, that undo leaves the
+/// option to the user, and why it would not work.
+fn launch_card_vm(v: &LaunchView, lang: Lang) -> LaunchVm {
+    let mut l = launch_vm(v, lang);
+    l.lines.clear();
+    l.notes = vec![tx(lang, Msg::LaunchOptionByHand)];
+    l
 }
 
 pub(crate) fn head_ops(st: &TxnStatus, lang: Lang) -> Vec<OpVm> {
@@ -1396,6 +1431,7 @@ pub fn card(st: &TxnStatus, names: &Names, lang: Lang) -> Option<TxnCardVm> {
         ops,
         can_undo,
         can_forget: true,
+        launch: None,
     })
 }
 

@@ -18,6 +18,7 @@ use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferTyp
 use slint::platform::{Platform, WindowAdapter};
 
 use super::download::download_data;
+use super::generated::AppliedData;
 use super::generated::LicenceData;
 use super::store_data;
 use super::write::dialog_data;
@@ -26,9 +27,12 @@ use super::{
     AppWindow, BadgeData, RowData, SectionData, Str, ThemeChoice, model, set_strings, set_theme,
     theme,
 };
-use crate::text::Lang;
+use crate::text::{Lang, Sym};
 use crate::theme::{Rgb, SysColors};
-use crate::vm::{Names, PackageState, consent, failed, progress, store, store_dialog, uac_wait};
+use crate::vm::{
+    Badge, LaunchVm, Names, PackageState, TxnCardVm, Value, consent, failed, progress, store,
+    store_dialog, uac_wait,
+};
 use rerun_core::catalog::model::Tier;
 use rerun_core::elevate::{PromptKind, PromptState};
 use rerun_core::flow::{DownloadNeed, FetchError, NeedState, PackageNeed};
@@ -310,6 +314,56 @@ fn the_window_draws_its_first_frames_fast() {
     assert!(draw(), "the compact library is drawn");
     assert_ne!(picture(), list, "compact rows look other than the list");
     ui.set_view_choice(0);
+    // The applied card with the Steam launch option (and one without) draws another picture, and
+    // the copy button's accessible name carries the game.
+    ui.set_page(1);
+    let card = |launch: Option<LaunchVm>| TxnCardVm {
+        txn: "00000001-0123456789abcdef".parse().unwrap(),
+        id: "0001".to_owned(),
+        app_id: Some(220),
+        game: Some(Value::Text("Invented W".to_owned())),
+        state: Badge {
+            sym: Sym::Applied,
+            word: "Applied".to_owned(),
+            quiet: false,
+        },
+        problem: None,
+        ops: Vec::new(),
+        note: "This card holds 1 change.".to_owned(),
+        can_undo: true,
+        can_forget: true,
+        launch,
+    };
+    let option = LaunchVm {
+        heading: "Steam launch option".to_owned(),
+        lines: Vec::new(),
+        option: Some(
+            rerun_core::escape::path(r#""C:\Rerun\rerun-launch.exe" --profile ab -- %command%"#)
+                .into_owned(),
+        ),
+        intro: "Paste this (Properties, General):".to_owned(),
+        notes: vec!["After an undo, remove the option by hand.".to_owned()],
+        problems: Vec::new(),
+        copy: "Copy launch option".to_owned(),
+        copied: "Copied".to_owned(),
+    };
+    let applied_with = |c: TxnCardVm| AppliedData {
+        sym: "■".into(),
+        title: "Applied".into(),
+        sub: String::new().into(),
+        detail: String::new().into(),
+        cards: model(vec![super::write::card(&c)]),
+    };
+    ui.set_applied(applied_with(card(None)));
+    assert!(draw(), "the card without a launch option is drawn");
+    let plain = picture();
+    ui.set_applied(applied_with(card(Some(option))));
+    assert!(draw(), "the card with a launch option is drawn");
+    assert_ne!(picture(), plain, "the launch option changes the card");
+    let c = ui.get_applied().cards.row_data(0).unwrap();
+    assert!(c.has_launch && c.launch.copy == "Copy launch option");
+    assert!(c.launch.option.contains("--profile"));
+    ui.set_page(0);
     let texts = |ui: &AppWindow| -> Vec<String> {
         let g = ui.global::<Str>();
         let mut v: Vec<String> = [

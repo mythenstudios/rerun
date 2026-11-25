@@ -102,6 +102,9 @@ export struct CardData {
     note: string,
     can-undo: bool,
     can-forget: bool,
+    // The Steam launch option while the transaction holds a launch profile.
+    has-launch: bool,
+    launch: LaunchData,
 }
 
 // One line of a list: Rerun's words around untrusted text. `name` (a game from the Steam library,

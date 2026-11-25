@@ -2,7 +2,7 @@
 
 import { Badge, Button, Card, Muted } from "base.slint";
 import { CardData, HistEntryData, LaunchRowData, Str, Theme, Modal } from "base.slint";
-import { OpItem } from "ops.slint";
+import { LaunchBox, OpItem } from "ops.slint";
 
 // One transaction: everything in it, and what undo takes back together (user decision U1).
 export component CardView inherits Card {
@@ -63,6 +63,11 @@ export component CardView inherits Card {
         }
         Muted {
             text: root.c.note;
+        }
+
+        if root.c.has-launch: LaunchBox {
+            l: root.c.launch;
+            owner: root.c.game != "" ? root.c.game : root.c.id;
         }
 
         HorizontalLayout {
