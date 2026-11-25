@@ -246,9 +246,13 @@ try {
     # ---------- 3. install ----------
     Title 'INSTALLING'
     foreach ($p in @($lad, $programs, $dest)) { if (Is-Link $p) { Fail "refusing: $p is a reparse point" } }
+    # Whether this install created %LOCALAPPDATA%\Programs: recorded in install.json, so the
+    # uninstall removes it again only then (and only empty, no link).
+    $programsCreated = $false
     if (-not (Test-Path -LiteralPath $programs)) {
         New-Item -ItemType Directory -Path $programs | Out-Null
         $done.Add(@{ Kind = 'dir'; Path = $programs })
+        $programsCreated = $true
     }
     if (-not (Test-Path -LiteralPath $dest)) {
         New-Item -ItemType Directory -Path $dest | Out-Null
@@ -292,6 +296,7 @@ try {
         build    = "$($m.build)"
         files    = @($copy | ForEach-Object { [ordered]@{ name = "$($_.name)"; size = [int64]$_.size; sha256 = "$($_.sha256)" } })
         shortcut = $makeShortcut
+        programs_created = $programsCreated
     }
     $installJson = Join-Path $dest 'install.json'
     $done.Add(@{ Kind = 'record'; Path = $installJson })

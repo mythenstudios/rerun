@@ -244,7 +244,8 @@ try {
     $lad = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
     $startMenu = [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
     if (-not $lad -or -not [IO.Path]::IsPathRooted($lad)) { Fail 'the LocalAppData folder is unknown' }
-    $dest = Join-Path (Join-Path $lad 'Programs') 'Rerun'
+    $programs = Join-Path $lad 'Programs'
+    $dest = Join-Path $programs 'Rerun'
     $data = Join-Path $lad 'Rerun'
     $lnk = if ($startMenu) { Join-Path $startMenu 'Rerun.lnk' } else { $null }
     if (Same-Path $here ([IO.Path]::GetPathRoot($here))) { Fail "refusing to work in a drive root: $here" }
@@ -273,6 +274,8 @@ try {
     if (-not $keep -and (Is-Link $data)) { Fail "refusing: $data is a reparse point (a link or junction); remove it by hand or run with -KeepData. Nothing removed" }
     $m = Read-Manifest $manifestPath
     $files = @($m.files)
+    # Only an installed copy whose install created %LOCALAPPDATA%\Programs removes it again.
+    $programsGoes = $installed -and ($m.programs_created -eq $true)
     if (@($files | Where-Object { $_.name -eq 'uninstall.ps1' }).Count -ne 1) { Fail "$manifestPath does not list uninstall.ps1" }
     Assert-NotRunning 'Nothing removed'
 
@@ -346,6 +349,7 @@ try {
     Write-Host "  $(Split-Path $manifestPath -Leaf)"
     foreach ($s in $stays) { Write-Host "  stays: $s" -ForegroundColor Yellow }
     if ($stays.Count -eq 0) { Write-Host "  then the folder $here" } else { Write-Host "  the folder $here stays (not empty)" }
+    if ($programsGoes) { Write-Host "  then $programs, if it is empty then (the install created it)" }
     if ($lnkGoes) { Write-Host "Start-menu shortcut removed: $lnk" }
     elseif ($lnkNote) { Write-Host $lnkNote -ForegroundColor Yellow }
     if (-not $dataExists) {
@@ -411,6 +415,10 @@ try {
     }
     if ((List-Dir $here).Count -eq 0) {
         try { [IO.Directory]::Delete($here, $false); $removed.Add($here) } catch { $failed.Add("$here ($($_.Exception.Message))") }
+    }
+    # %LOCALAPPDATA%\Programs only if this install created it, it is empty and no link.
+    if ($programsGoes -and -not (Test-Path -LiteralPath $here) -and (Test-Path -LiteralPath $programs) -and -not (Is-Link $programs) -and (List-Dir $programs).Count -eq 0) {
+        try { [IO.Directory]::Delete($programs, $false); $removed.Add($programs) } catch { $failed.Add("$programs ($($_.Exception.Message))") }
     }
 
     Title $(if ($failed.Count -eq 0) { 'DONE' } else { 'DONE, but not everything could be removed' })

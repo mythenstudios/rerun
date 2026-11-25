@@ -113,10 +113,28 @@ function Shortcut-Target {
 
 $cases = New-Object System.Collections.Generic.List[object]
 $failed = New-Object System.Collections.Generic.List[string]
-function Case([string]$id, [bool]$ok, [string]$what) {
-    $cases.Add([ordered]@{ id = $id; ok = $ok; what = $what })
-    Log "CASE $id $(if ($ok) { 'ok' } else { 'FAILED' }): $what"
+# Each case collects its checks by name: a failed one is logged with what differs, and the case
+# line names every failed check.
+$script:checkFail = New-Object System.Collections.Generic.List[string]
+function Cond([string]$name, [bool]$ok) {
+    if (-not $ok) { $script:checkFail.Add($name); Log "   check failed: $name" }
+}
+# Two listings equal; otherwise the lines only before (-) and only after (+) are logged.
+function SameC([string]$name, $before, $after) {
+    $ok = Same $before $after
+    if (-not $ok) {
+        foreach ($l in @($before)) { if (@($after) -notcontains $l) { Log "   - $l" } }
+        foreach ($l in @($after)) { if (@($before) -notcontains $l) { Log "   + $l" } }
+    }
+    Cond $name $ok
+}
+function Case([string]$id, [string]$what) {
+    $ok = $script:checkFail.Count -eq 0
+    $detail = if ($ok) { $what } else { "$what (failed: $($script:checkFail -join ', '))" }
+    $cases.Add([ordered]@{ id = $id; ok = $ok; what = $detail })
+    Log "CASE $id $(if ($ok) { 'ok' } else { 'FAILED' }): $detail"
     if (-not $ok) { $failed.Add($id) }
+    $script:checkFail = New-Object System.Collections.Generic.List[string]
 }
 
 Set-Content -LiteralPath $log -Value "install/uninstall cases, account $env:USERNAME, elevated=$Elevated"
@@ -142,7 +160,10 @@ try {
     if ($Elevated) {
         # I9: elevated, nothing written.
         $code = Run-Script (Join-Path $payload 'install.ps1') @('-Yes')
-        Case 'I9' (($code -ne 0) -and -not (Test-Path -LiteralPath $dest) -and -not (Test-Path -LiteralPath $lnk)) 'install refused elevated, nothing written'
+        Cond 'install exit not 0' ($code -ne 0)
+        Cond 'no program folder' (-not (Test-Path -LiteralPath $dest))
+        Cond 'no shortcut' (-not (Test-Path -LiteralPath $lnk))
+        Case 'I9' 'install refused elevated, nothing written'
         return [ordered]@{ cases = $cases; failed = $failed; expected = ($failed.Count -eq 0) }
     }
 
@@ -152,6 +173,8 @@ try {
         Log "moved the data folder of the earlier passes aside: $aside"
     }
     $ladBefore = Get-Names $lad 'Rerun'
+    $programsExisted = Test-Path -LiteralPath $programs
+    Log "LocalAppData\Programs existed before the first install: $programsExisted"
     $programsBefore = Get-Names $programs 'Rerun'
     $startBefore = Get-Names $startMenu 'Rerun.lnk'
 
@@ -164,8 +187,15 @@ try {
     }
     $target = Shortcut-Target
     $v = Run-Rerun @('--version')
-    Case 'I1' (($code -eq 0) -and $filesOk -and (Test-Path -LiteralPath (Join-Path $dest 'install.json')) -and
-        -not (Test-Path -LiteralPath (Join-Path $dest 'install.ps1')) -and $target -and ($target -eq (Join-Path $dest 'rerun-app.exe')) -and ($v.Code -eq 0)) 'install: files, install.json, shortcut, rerun --version'
+    Cond 'install exit 0' ($code -eq 0)
+    Cond 'files with their SHA-256' $filesOk
+    Cond 'install.json' (Test-Path -LiteralPath (Join-Path $dest 'install.json'))
+    Cond 'no install.ps1 in the program folder' (-not (Test-Path -LiteralPath (Join-Path $dest 'install.ps1')))
+    Cond "shortcut target ($target)" ([bool]$target -and ($target -eq (Join-Path $dest 'rerun-app.exe')))
+    Cond 'rerun --version exit 0' ($v.Code -eq 0)
+    $rec = [IO.File]::ReadAllText((Join-Path $dest 'install.json')) | ConvertFrom-Json
+    Cond "install.json programs_created is $(-not $programsExisted)" ([bool]$rec.programs_created -eq (-not $programsExisted))
+    Case 'I1' 'install: files, install.json, shortcut, rerun --version'
 
     # ---- I3 open transaction ----
     Copy-Item -LiteralPath "$env:WINDIR\System32\cmd.exe" -Destination (Join-Path $game 'game.exe')
@@ -179,16 +209,27 @@ try {
     $txn = ([regex]::Match($a.Out, 'revert with: rerun revert (\S+)')).Groups[1].Value
     $destBefore = Get-Tree $dest; $dataBefore = Get-Tree $data
     $code = Run-Script (Join-Path $dest 'uninstall.ps1') @('-Yes')
-    Case 'I3' ($txn -and ($code -ne 0) -and ($script:LastText -match 'still open') -and (Same $destBefore (Get-Tree $dest)) -and (Same $dataBefore (Get-Tree $data)) -and (Shortcut-Target)) 'an open transaction stops the uninstall, nothing removed'
+    Cond 'a transaction applied' ([bool]$txn)
+    Cond 'uninstall exit not 0' ($code -ne 0)
+    Cond 'stopped because a change is open' ($script:LastText -match 'still open')
+    SameC 'program folder unchanged' $destBefore (Get-Tree $dest)
+    SameC 'data folder unchanged' $dataBefore (Get-Tree $data)
+    Cond 'shortcut still there' ([bool](Shortcut-Target))
+    Case 'I3' 'an open transaction stops the uninstall, nothing removed'
     $r = Run-Rerun @('revert', $txn, '--yes')
-    if ($r.Code -ne 0) { Case 'I3-revert' $false 'the revert after I3' }
+    if ($r.Code -ne 0) { Cond 'revert exit 0' $false; Case 'I3-revert' 'the revert after I3' }
 
     # ---- K: -KeepData, then install again ----
     $dataBefore = Get-Tree $data
     $code = Run-Script (Join-Path $dest 'uninstall.ps1') @('-Yes', '-KeepData')
-    Case 'K' (($code -eq 0) -and -not (Test-Path -LiteralPath $dest) -and -not (Test-Path -LiteralPath $lnk) -and (Same $dataBefore (Get-Tree $data))) 'uninstall -KeepData keeps the data folder identical'
+    Cond 'uninstall exit 0' ($code -eq 0)
+    Cond 'program folder gone' (-not (Test-Path -LiteralPath $dest))
+    Cond 'shortcut gone' (-not (Test-Path -LiteralPath $lnk))
+    Cond "LocalAppData\Programs exists as before ($programsExisted)" ((Test-Path -LiteralPath $programs) -eq $programsExisted)
+    SameC 'data folder identical' $dataBefore (Get-Tree $data)
+    Case 'K' 'uninstall -KeepData keeps the data folder identical'
     $code = Run-Script (Join-Path $payload 'install.ps1') @('-Yes')
-    if ($code -ne 0) { Case 'K-reinstall' $false 'install again after -KeepData' }
+    if ($code -ne 0) { Cond 'install exit 0' $false; Case 'K-reinstall' 'install again after -KeepData' }
 
     # ---- J1: a junction deep inside the data folder ----
     # In a folder Rerun does not use itself, so uninstall-check passes and the tree walk meets it.
@@ -197,7 +238,13 @@ try {
     cmd.exe /c mklink /J "$deep" "$outside" | Out-Null
     $destBefore = Get-Tree $dest; $dataBefore = Get-Tree $data
     $code = Run-Script (Join-Path $dest 'uninstall.ps1') @('-Yes')
-    Case 'J1' (($code -ne 0) -and ($script:LastText -match 'link or junction') -and (Same $outsideBefore (Get-Tree $outside)) -and (Same $destBefore (Get-Tree $dest)) -and (Same $dataBefore (Get-Tree $data)) -and (Shortcut-Target)) 'a junction inside the data folder stops the uninstall, nothing removed'
+    Cond 'uninstall exit not 0' ($code -ne 0)
+    Cond 'stopped because of the junction' ($script:LastText -match 'link or junction')
+    SameC 'junction target unchanged' $outsideBefore (Get-Tree $outside)
+    SameC 'program folder unchanged' $destBefore (Get-Tree $dest)
+    SameC 'data folder unchanged' $dataBefore (Get-Tree $data)
+    Cond 'shortcut still there' ([bool](Shortcut-Target))
+    Case 'J1' 'a junction inside the data folder stops the uninstall, nothing removed'
     cmd.exe /c rmdir "$deep" | Out-Null
 
     # ---- J2: a junction at %LOCALAPPDATA%\Rerun ----
@@ -206,15 +253,33 @@ try {
     cmd.exe /c mklink /J "$data" "$outside" | Out-Null
     $destBefore = Get-Tree $dest
     $code = Run-Script (Join-Path $dest 'uninstall.ps1') @('-Yes')
-    Case 'J2' (($code -ne 0) -and ($script:LastText -match 'reparse point') -and (Same $outsideBefore (Get-Tree $outside)) -and (Same $destBefore (Get-Tree $dest)) -and (Shortcut-Target)) 'a junction at the data folder stops the uninstall, nothing removed'
+    Cond 'uninstall exit not 0' ($code -ne 0)
+    Cond 'stopped because of the reparse point' ($script:LastText -match 'reparse point')
+    SameC 'junction target unchanged' $outsideBefore (Get-Tree $outside)
+    SameC 'program folder unchanged' $destBefore (Get-Tree $dest)
+    Cond 'shortcut still there' ([bool](Shortcut-Target))
+    Case 'J2' 'a junction at the data folder stops the uninstall, nothing removed'
     cmd.exe /c rmdir "$data" | Out-Null
     Rename-Item -LiteralPath $real -NewName (Split-Path $data -Leaf)
 
     # ---- I10: full uninstall ----
     $code = Run-Script (Join-Path $dest 'uninstall.ps1') @('-Yes')
-    Case 'I10' (($code -eq 0) -and -not (Test-Path -LiteralPath $dest) -and -not (Test-Path -LiteralPath $data) -and -not (Test-Path -LiteralPath $lnk) -and
-        (Same $ladBefore (Get-Names $lad 'Rerun')) -and (Same $programsBefore (Get-Names $programs 'Rerun')) -and
-        (Same $startBefore (Get-Names $startMenu 'Rerun.lnk')) -and (Same $outsideBefore (Get-Tree $outside))) 'full uninstall removes exactly the program folder, the shortcut and the data folder'
+    Cond 'uninstall exit 0' ($code -eq 0)
+    Cond 'program folder gone' (-not (Test-Path -LiteralPath $dest))
+    Cond 'data folder gone' (-not (Test-Path -LiteralPath $data))
+    Cond 'shortcut gone' (-not (Test-Path -LiteralPath $lnk))
+    # LocalAppData\Programs: removed again exactly when install.ps1 created it (empty, no link).
+    Cond "LocalAppData\Programs exists as before ($programsExisted)" ((Test-Path -LiteralPath $programs) -eq $programsExisted)
+    # Other programs may add top-level entries to LocalAppData meanwhile (logged); none may be gone.
+    $ladAfter = Get-Names $lad 'Rerun'
+    $gone = @($ladBefore | Where-Object { $ladAfter -notcontains $_ })
+    foreach ($g in $gone) { Log "   - $g" }
+    foreach ($n in @($ladAfter | Where-Object { $ladBefore -notcontains $_ })) { Log "   + $n (added meanwhile)" }
+    Cond 'no LocalAppData entry removed' ($gone.Count -eq 0)
+    SameC 'LocalAppData\Programs otherwise unchanged' $programsBefore (Get-Names $programs 'Rerun')
+    SameC 'Start menu otherwise unchanged' $startBefore (Get-Names $startMenu 'Rerun.lnk')
+    SameC 'junction target unchanged' $outsideBefore (Get-Tree $outside)
+    Case 'I10' 'full uninstall removes exactly the program folder, the shortcut and the data folder'
 } catch {
     Log "ERROR: $_"
     $failed.Add("error: $_")
