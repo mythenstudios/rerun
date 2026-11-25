@@ -193,6 +193,10 @@ if (-not $r1) {
     if ($r1.cli -and $r1.cli.launch_method -and $r1.cli.launch_method.failed) { Fail "pass 1: launch_method checks failed: $($r1.cli.launch_method.failed -join ', ')" }
     if ($r1.cli -and $r1.cli.launch_watch -and $r1.cli.launch_watch.failed) { Fail "pass 1: launch_method watch checks failed: $($r1.cli.launch_watch.failed -join ', ')" }
     if ($r1.cli -and $r1.cli.launch_watch -and $r1.cli.launch_watch.error) { Fail "pass 1: launch_method watch error: $($r1.cli.launch_watch.error)" }
+    # P5-OE (O-2a, SB-R1): the shim starts the profile's run with args, and falls back to Steam's command.
+    if (-not $r1.cli -or -not $r1.cli.launch_run -or $r1.cli.launch_run -is [string]) { Fail 'pass 1: SB-R1 did not run (no cli.launch_run in result.json)' }
+    if ($r1.cli.launch_run.failed) { Fail "pass 1: SB-R1 (run and args) checks failed: $($r1.cli.launch_run.failed -join ', ')" }
+    if ($r1.cli.launch_run.error) { Fail "pass 1: SB-R1 (run and args) error: $($r1.cli.launch_run.error)" }
 
     # P4-0: the UAC state of the runner (a measurement, printed so the log and docs/09 can quote it).
     if ($r1.uac) {

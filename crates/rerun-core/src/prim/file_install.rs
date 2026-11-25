@@ -22,7 +22,7 @@
 //! twice (folded) or an ancestor of another target; on the way to a target a file, a reparse
 //! point, a restricted or case-sensitive folder; a target that is a folder, a reparse point,
 //! restricted, a cloud placeholder (reading it would download it), hard-linked (managed by a
-//! mod manager, ADR 0017 D1) or over 2 GiB. The plan's bounds (128 ops, 8 KiB per op, 4 GiB
+//! mod manager, ADR 0017 D1) or over 2 GiB. The plan's bounds (128 ops, 12 KiB per op, 4 GiB
 //! of backups) are checked by `plan::Plan::encode`.
 
 use std::io::Read;

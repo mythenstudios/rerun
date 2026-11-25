@@ -199,6 +199,7 @@ pub(super) fn start<O: Os>(os: &O, cmd: &Command<'_>, w: &Watch) -> Done<O::Chil
                 child: None,
                 exit: EXIT_NOT_STARTED,
                 restore: None,
+                run: false,
             };
         }
     };
@@ -211,6 +212,7 @@ pub(super) fn start<O: Os>(os: &O, cmd: &Command<'_>, w: &Watch) -> Done<O::Chil
         child: Some(child),
         exit: 0,
         restore: found.restore,
+        run: false,
     }
 }
 

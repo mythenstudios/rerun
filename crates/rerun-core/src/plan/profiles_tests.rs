@@ -42,6 +42,8 @@ pub(crate) fn profile_bytes(start: &str, max: u16) -> Vec<u8> {
             mode: Mode::Hard,
             exclude_first: None,
         }),
+        run: None,
+        args: Vec::new(),
     })
     .unwrap()
 }
@@ -300,7 +302,7 @@ fn lm_p2_every_rule_of_the_fence_is_refused_with_its_rule_set() {
                 *path = r("323ad79fbc93ca3e73b0b152a5d44616.profile.txt");
             }
         }),
-        ("inline content larger than 2 KiB", |p| {
+        ("inline content larger than 4 KiB", |p| {
             set_content(p, inline(vec![b'a'; MAX_INLINE_BYTES + 1]));
         }),
         ("inline content with another hash", |p| {

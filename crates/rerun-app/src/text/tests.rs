@@ -687,6 +687,9 @@ fn every() -> Vec<Msg> {
             reason: SkipReason::ElevationRequired,
         },
         LaunchSkipWhy {
+            reason: SkipReason::RunFailed { code: 5 },
+        },
+        LaunchSkipWhy {
             reason: SkipReason::TargetNotFound,
         },
         LaunchSkipWhy {

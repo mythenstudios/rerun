@@ -1,53 +1,67 @@
-//! Launch profile, formats 1 and 2 (ADR 0022, amendment P4-13): what `rerun-launch` reads at a
-//! game start.
+//! Launch profile, formats 1, 2 and 3 (ADR 0022, amendments P4-13 and P5-OE): what
+//! `rerun-launch` reads at a game start.
 //!
 //! One grammar for the writer (`rerun-core`, from a plan) and the reader (`rerun-launch`,
 //! without serde, ADR 0006). The file is UTF-8 text of at most [`MAX_PROFILE_BYTES`], one
-//! `key=value` per line, every line ending in LF, the keys in a fixed order:
+//! `key=value` per line, every line ending in LF, the keys in a fixed order. Format 3, the one
+//! [`encode`] writes for every profile:
 //!
 //! ```text
-//! rerun-profile 1
+//! rerun-profile 3
 //! method=direct                       direct | watch
 //! start=C:\Games\Game\game.exe        the exe Steam starts (%command%), canonical
-//! target=C:\Games\Game\game.exe       the exe whose affinity is set; = start for direct
+//! target=C:\Games\Game\game_dx9.exe   the exe whose limit is set: run, else start (direct)
 //! bitness=x64                         x86 | x64 (x86 if a program of the chain is i386)
 //! priority=none                       none | normal | above_normal | high
 //! watch_timeout_s=120                 1..=120
-//! cpu=rule                            none | rule; with rule the six cpu.* lines follow
+//! cpu=rule                            none | rule; with rule the seven cpu.* lines follow
 //! cpu.prefer=performance              performance | any
 //! cpu.single_l3=true                  true | false
 //! cpu.prefer_l3=none                  none | largest
 //! cpu.smt=false                       true | false
 //! cpu.mode=hard                       hard | soft
 //! cpu.max_threads=8                   none | 1..=4096
+//! cpu.exclude_first=none              none | thread | core
+//! run=C:\Games\Game\game_dx9.exe      none | the exe the shim starts instead of start
+//! args=-dx9 +fullscreen=1             none | 1..=8 arguments joined by one space
 //! ```
 //!
-//! Format 2 is format 1 with `cpu=rule` required and one more line after `cpu.max_threads`:
+//! Format 1 (ADR 0022 D1) is format 3 without `cpu.exclude_first`, `run` and `args`; format 2
+//! (amendment P4-13) is format 1 with `cpu=rule` required and `cpu.exclude_first`
+//! (`thread`/`core`) after `cpu.max_threads`. The reader takes all three, so a revert can
+//! restore a profile an earlier build wrote; the writer emits format 3 only.
 //!
-//! ```text
-//! cpu.exclude_first=thread            thread | core
-//! ```
-//!
-//! Every format carries every key it knows, always. The format is chosen by content: the
-//! writer emits format 2 exactly when the rule has `exclude_first`, format 1 otherwise (so a
-//! profile without it stays byte-identical to what earlier builds wrote). The reader takes
-//! both.
+//! Format 3 rules beyond the key grammar (amendment P5-OE): `run` is a path like `start`,
+//! ending in `.exe`, not `start`, in **the same folder** as `start` (both byte for byte equal
+//! up to and including their last `\`), and requires `method=direct` and `target = run`.
+//! `args` holds 1 to [`MAX_ARGS`] [`LaunchArg`]s joined by one space, at most
+//! [`MAX_ARGS_BYTES`] bytes, and requires `method=direct`. Without `run`, `direct` still needs
+//! `target = start`.
 //!
 //! The reader is strict: no other key, no repeated key, no other order, no empty line, no CR,
 //! no control character, no leading zero, nothing after the last key. A profile decodes to
-//! exactly one [`LaunchProfile`] and encodes back to the same bytes. Errors name the line
-//! and the key, never the file's content (it is untrusted).
+//! exactly one [`LaunchProfile`]; a format-3 file encodes back to the same bytes. Errors name
+//! the line and the key, never the file's content (it is untrusted).
 
 use std::fmt;
 
 use crate::cpu::MAX_LOGICAL_CPUS;
 use crate::cpu::rule::{Bitness, CpuRule, ExcludeFirst, Mode, Prefer, PreferL3};
 
-/// The newest format this module reads and writes.
-pub const PROFILE_FORMAT: u32 = 2;
+/// The format [`encode`] writes, for every profile (ADR 0022 amendment P5-OE).
+pub const PROFILE_FORMAT: u32 = 3;
 
-/// Every format the reader accepts (1: ADR 0022 D1; 2: amendment P4-13).
-pub const PROFILE_FORMATS: [u32; 2] = [1, PROFILE_FORMAT];
+/// Every format the reader accepts (1: ADR 0022 D1; 2: amendment P4-13; 3: amendment P5-OE).
+pub const PROFILE_FORMATS: [u32; 3] = [1, 2, PROFILE_FORMAT];
+
+/// Most arguments of `args`.
+pub const MAX_ARGS: usize = 8;
+
+/// Most characters (= bytes, the pattern is ASCII) of one [`LaunchArg`].
+pub const MAX_ARG_CHARS: usize = 64;
+
+/// Most bytes of the `args` value (the arguments joined by one space).
+pub const MAX_ARGS_BYTES: usize = 512;
 
 /// Largest profile file in bytes.
 pub const MAX_PROFILE_BYTES: usize = 8 * 1024;
@@ -95,10 +109,52 @@ impl fmt::Display for ProfileId {
     }
 }
 
+/// One launch argument of `args` (ADR 0032 amendment P5-OE): `^[-+][A-Za-z0-9_.=+-]+$`, at
+/// most [`MAX_ARG_CHARS`] characters. No quote, space, `%`, `\`, `/` or anything else a command
+/// line or Steam would read twice: the shim appends it to the command line as it is. The one
+/// place of the pattern; the catalogue reuses it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LaunchArg(String);
+
+impl LaunchArg {
+    /// The argument if `s` matches the pattern.
+    pub fn parse(s: &str) -> Option<Self> {
+        let b = s.as_bytes();
+        let ok = b.len() >= 2
+            && b.len() <= MAX_ARG_CHARS
+            && matches!(b[0], b'-' | b'+')
+            && b[1..].iter().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'=' | b'+' | b'-')
+            });
+        ok.then(|| Self(s.to_owned()))
+    }
+
+    /// The argument.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for LaunchArg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The value of the `args` key: `none`, or the arguments joined by one space.
+pub fn args_value(args: &[LaunchArg]) -> String {
+    if args.is_empty() {
+        return "none".to_owned();
+    }
+    let parts: Vec<&str> = args.iter().map(LaunchArg::as_str).collect();
+    parts.join(" ")
+}
+
 /// How `rerun-launch` reaches the game (docs/04; `hold`, `ifeo` and `inproc` come later).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Method {
-    /// Start Steam's command in a Job Object with the limit.
+    /// Start Steam's command (or the profile's `run` in its place) in a Job Object with the
+    /// limit.
     Direct,
     /// Start Steam's command unchanged, find `target`, set the limit on it.
     Watch,
@@ -123,7 +179,8 @@ pub struct LaunchProfile {
     /// Canonical absolute path of the exe Steam passes (`%command%`), compared with Steam's
     /// first argument.
     pub start: String,
-    /// The exe whose limit is set and checked; equal to `start` for [`Method::Direct`].
+    /// The exe whose limit is set and checked; for [`Method::Direct`] equal to `run` if the
+    /// profile has one, else to `start`.
     pub target: String,
     /// `x86` if a process of the chain the rule reaches is i386 (`IMAGE_FILE_MACHINE_I386`):
     /// the planner reads `start` and the game's main executable (ADR 0022 D1, amendment P3-3).
@@ -136,6 +193,11 @@ pub struct LaunchProfile {
     pub watch_timeout_s: u16,
     /// CPU rule, if any.
     pub cpu: Option<CpuRule>,
+    /// The exe the shim starts instead of `start` when Steam's first argument is `start`
+    /// (format 3): canonical, `.exe`, in the folder of `start`, not `start`; `direct` only.
+    pub run: Option<String>,
+    /// Arguments the shim appends to the command line it starts (format 3); `direct` only.
+    pub args: Vec<LaunchArg>,
 }
 
 /// What is wrong with a profile file.
@@ -155,7 +217,7 @@ pub enum ProfileErrorKind {
     EmptyLine,
     /// The first line is not `rerun-profile <n>`.
     BadHeader,
-    /// `rerun-profile <n>` with `n` not in [`PROFILE_FORMATS`] (1 and 2).
+    /// `rerun-profile <n>` with `n` not in [`PROFILE_FORMATS`] (1, 2 and 3).
     UnsupportedFormat(u32),
     /// A line without `=`.
     MissingEquals,
@@ -180,8 +242,18 @@ pub enum ProfileErrorKind {
         /// The key.
         key: &'static str,
     },
-    /// `method=direct` with `target` other than `start`.
+    /// `method=direct` without `run`, and `target` other than `start`.
     TargetNotStart,
+    /// `run` with `target` other than `run`.
+    TargetNotRun,
+    /// `run` with `method=watch` (the shim starts `run` only for `direct`).
+    RunNeedsDirect,
+    /// `run` names `start` itself (also in another case).
+    RunIsStart,
+    /// `run` is not in the folder of `start` (byte for byte up to the last `\`).
+    RunNotInStartFolder,
+    /// `args` with `method=watch` (the shim appends them only for `direct`).
+    ArgsNeedDirect,
     /// [`encode`] only: the bytes would decode to another profile (never for a correct codec).
     NotCanonical,
 }
@@ -232,6 +304,11 @@ impl fmt::Display for ProfileError {
             K::TrailingLine => write!(f, "line after the last key"),
             K::BadValue { key } => write!(f, "invalid value of {key}"),
             K::TargetNotStart => write!(f, "method direct needs target equal to start"),
+            K::TargetNotRun => write!(f, "run needs target equal to run"),
+            K::RunNeedsDirect => write!(f, "run needs method direct"),
+            K::RunIsStart => write!(f, "run names the start program itself"),
+            K::RunNotInStartFolder => write!(f, "run is not in the folder of start"),
+            K::ArgsNeedDirect => write!(f, "args need method direct"),
             K::NotCanonical => write!(f, "does not read back as written"),
         }
     }
@@ -274,20 +351,57 @@ const KEYS_2: &[&str] = &[
     "cpu.exclude_first",
 ];
 
-/// The format [`encode`] writes for `p`: 2 exactly when the rule has `exclude_first`, else 1.
-pub(crate) fn format_of(p: &LaunchProfile) -> u32 {
-    if p.cpu.is_some_and(|r| r.exclude_first.is_some()) {
-        2
+/// The keys of format 3, in order: format 2 plus `run` and `args` (`cpu=none` allowed again,
+/// `cpu.exclude_first` with `none`).
+const KEYS_3: &[&str] = &[
+    "method",
+    "start",
+    "target",
+    "bitness",
+    "priority",
+    "watch_timeout_s",
+    "cpu",
+    "cpu.prefer",
+    "cpu.single_l3",
+    "cpu.prefer_l3",
+    "cpu.smt",
+    "cpu.mode",
+    "cpu.max_threads",
+    "cpu.exclude_first",
+    "run",
+    "args",
+];
+
+/// Encodes `p` as format 3 ([`PROFILE_FORMAT`], every profile). The bytes are checked by
+/// [`decode`]: what the writer emits, the reader takes (an invalid path, a timeout outside
+/// `1..=120`, `max_threads` 0, `direct` with the wrong `target`, a `run` outside the folder of
+/// `start` or an argument outside the pattern are errors here, never a file the shim would
+/// refuse).
+pub fn encode(p: &LaunchProfile) -> Result<Vec<u8>, ProfileError> {
+    encode_format(p, PROFILE_FORMAT)
+}
+
+/// Encodes `p` as `format` (1, 2 or 3) and checks the bytes with [`decode`]. Formats 1 and 2
+/// are written by tests only: a profile an earlier build wrote, to prove a revert restores it.
+pub(crate) fn encode_format(p: &LaunchProfile, format: u32) -> Result<Vec<u8>, ProfileError> {
+    let bytes = write(p, format).into_bytes();
+    let back = decode(&bytes)?;
+    if &back == p {
+        Ok(bytes)
     } else {
-        1
+        // Unreachable for a correct codec; never hand out bytes that read back differently.
+        Err(ProfileError {
+            line: 0,
+            kind: ProfileErrorKind::NotCanonical,
+        })
     }
 }
 
-/// Encodes `p`. The bytes are checked by [`decode`]: what the writer emits, the reader takes
-/// (an invalid path, a timeout outside `1..=120`, `max_threads` 0 or `direct` with
-/// `target != start` are errors here, never a file the shim would refuse).
-pub fn encode(p: &LaunchProfile) -> Result<Vec<u8>, ProfileError> {
-    let mut s = format!("{HEADER}{}\n", format_of(p));
+/// The text of `p` in `format`, unchecked: format 1 never writes `exclude_first`, `run` or
+/// `args`; format 2 writes `exclude_first` only for a rule that has it.
+fn write(p: &LaunchProfile, format: u32) -> String {
+    let v3 = format == PROFILE_FORMAT;
+    let mut s = format!("{HEADER}{format}\n");
     let mut kv = |k: &str, v: &str| {
         s.push_str(k);
         s.push('=');
@@ -343,22 +457,18 @@ pub fn encode(p: &LaunchProfile) -> Result<Vec<u8>, ProfileError> {
             );
             let max = r.max_threads.map(|n| n.to_string());
             kv("cpu.max_threads", max.as_deref().unwrap_or("none"));
-            if let Some(e) = r.exclude_first {
-                kv("cpu.exclude_first", e.name());
+            match r.exclude_first {
+                Some(e) if format >= 2 => kv("cpu.exclude_first", e.name()),
+                None if v3 => kv("cpu.exclude_first", "none"),
+                _ => {}
             }
         }
     }
-    let bytes = s.into_bytes();
-    let back = decode(&bytes)?;
-    if &back == p {
-        Ok(bytes)
-    } else {
-        // Unreachable for a correct codec; never hand out bytes that read back differently.
-        Err(ProfileError {
-            line: 0,
-            kind: ProfileErrorKind::NotCanonical,
-        })
+    if v3 {
+        kv("run", p.run.as_deref().unwrap_or("none"));
+        kv("args", &args_value(&p.args));
     }
+    s
 }
 
 fn bitness_str(b: Bitness) -> &'static str {
@@ -415,10 +525,15 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
         });
     }
     let v2 = format == 2;
+    let v3 = format == 3;
 
     let mut r = Reader {
         lines,
-        keys: if v2 { KEYS_2 } else { KEYS_1 },
+        keys: match format {
+            1 => KEYS_1,
+            2 => KEYS_2,
+            _ => KEYS_3,
+        },
         seen: Vec::new(),
         last_line: 1,
     };
@@ -446,7 +561,7 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
             .filter(|n| (1..=u64::from(MAX_WATCH_TIMEOUT_S)).contains(n))
             .and_then(|n| u16::try_from(n).ok())
     })?;
-    // Format 2 exists only for a rule with `exclude_first`: `cpu=none` has one form, format 1.
+    // Format 2 exists only for a rule with `exclude_first`: `cpu=none` is format 1 or 3.
     let has_rule = r.value("cpu", |v| match v {
         "none" if !v2 => Some(false),
         "rule" => Some(true),
@@ -479,12 +594,13 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
                 .and_then(|n| u16::try_from(n).ok())
                 .map(Some)
         })?;
-        let exclude_first = if v2 {
-            Some(r.value("cpu.exclude_first", |v| match v {
-                "thread" => Some(ExcludeFirst::Thread),
-                "core" => Some(ExcludeFirst::Core),
+        let exclude_first = if v2 || v3 {
+            r.value("cpu.exclude_first", |v| match v {
+                "none" if v3 => Some(None),
+                "thread" => Some(Some(ExcludeFirst::Thread)),
+                "core" => Some(Some(ExcludeFirst::Core)),
                 _ => None,
-            })?)
+            })?
         } else {
             None
         };
@@ -500,6 +616,16 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
     } else {
         None
     };
+    let (run_line, run, args_line, args) = if v3 {
+        let (run_line, run) = r.value_at("run", |v| match v {
+            "none" => Some(None),
+            _ => path(v).filter(|p| is_exe(p)).map(Some),
+        })?;
+        let (args_line, args) = r.value_at("args", parse_args)?;
+        (run_line, run, args_line, args)
+    } else {
+        (0, None, 0, Vec::new())
+    };
     if let Some((n, line)) = r.lines.next() {
         let kind = match line.split_once('=').map(|(k, _)| k) {
             Some(k) if r.seen.contains(&k) => ProfileErrorKind::DuplicateKey,
@@ -509,11 +635,23 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
         };
         return Err(ProfileError { line: n, kind });
     }
-    if method == Method::Direct && target != start {
-        return Err(ProfileError {
-            line: target_line,
-            kind: ProfileErrorKind::TargetNotStart,
-        });
+    let at = |line, kind| Err(ProfileError { line, kind });
+    match &run {
+        Some(_) if method != Method::Direct => {
+            return at(run_line, ProfileErrorKind::RunNeedsDirect);
+        }
+        Some(run) if same_name(run, &start) => return at(run_line, ProfileErrorKind::RunIsStart),
+        Some(run) if folder(run) != folder(&start) => {
+            return at(run_line, ProfileErrorKind::RunNotInStartFolder);
+        }
+        Some(run) if &target != run => return at(target_line, ProfileErrorKind::TargetNotRun),
+        None if method == Method::Direct && target != start => {
+            return at(target_line, ProfileErrorKind::TargetNotStart);
+        }
+        _ => {}
+    }
+    if !args.is_empty() && method != Method::Direct {
+        return at(args_line, ProfileErrorKind::ArgsNeedDirect);
     }
     Ok(LaunchProfile {
         method,
@@ -523,7 +661,39 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchProfile, ProfileError> {
         priority,
         watch_timeout_s,
         cpu,
+        run,
+        args,
     })
+}
+
+/// The value of `args`: `none`, or 1 to [`MAX_ARGS`] [`LaunchArg`]s joined by one space, at
+/// most [`MAX_ARGS_BYTES`] bytes.
+fn parse_args(v: &str) -> Option<Vec<LaunchArg>> {
+    if v == "none" {
+        return Some(Vec::new());
+    }
+    if v.len() > MAX_ARGS_BYTES {
+        return None;
+    }
+    let args: Vec<LaunchArg> = v.split(' ').map(LaunchArg::parse).collect::<Option<_>>()?;
+    (args.len() <= MAX_ARGS).then_some(args)
+}
+
+/// The path ends in `.exe`, ASCII case-insensitively.
+fn is_exe(p: &str) -> bool {
+    p.len() > 4 && p.is_char_boundary(p.len() - 4) && p[p.len() - 4..].eq_ignore_ascii_case(".exe")
+}
+
+/// The folder of a canonical path: everything up to and including its last `\` (there is one
+/// at index 2 at least).
+fn folder(p: &str) -> &str {
+    p.rfind('\\').map_or(p, |i| &p[..=i])
+}
+
+/// The same path in another case (simple Unicode case mapping both ways; the planner compares
+/// with the file system's own folding, this is the codec's fail-closed check).
+fn same_name(a: &str, b: &str) -> bool {
+    a == b || a.to_lowercase() == b.to_lowercase() || a.to_uppercase() == b.to_uppercase()
 }
 
 struct Reader<'a, I: Iterator<Item = (usize, &'a str)>> {
@@ -610,18 +780,23 @@ fn path(v: &str) -> Option<String> {
     if v.encode_utf16().count() > MAX_PATH_UNITS {
         return None;
     }
-    let ok = v[3..].split('\\').all(|c| {
-        !c.is_empty()
-            && c != "."
-            && c != ".."
-            && !c.starts_with(' ')
-            && !c.ends_with(' ')
-            && !c.ends_with('.')
-            && !c.contains(['<', '>', ':', '"', '/', '|', '?', '*'])
-            && !c.chars().any(is_format_or_separator)
-            && !is_device_name(c)
-    });
-    ok.then(|| v.to_owned())
+    v[3..].split('\\').all(component).then(|| v.to_owned())
+}
+
+/// One component of a canonical path (the rules of [`path`] for a single name; no `\`): not
+/// empty, `.` or `..`, not starting with a space or ending in a space or a dot, none of
+/// `< > : " / | ? *`, no format or separator character, not a reserved device name. Control
+/// characters are refused by both readers before any value is parsed.
+pub(crate) fn component(c: &str) -> bool {
+    !c.is_empty()
+        && c != "."
+        && c != ".."
+        && !c.starts_with(' ')
+        && !c.ends_with(' ')
+        && !c.ends_with('.')
+        && !c.contains(['<', '>', ':', '"', '/', '|', '?', '*', '\\'])
+        && !c.chars().any(is_format_or_separator)
+        && !is_device_name(c)
 }
 
 /// Unicode general categories Cf (format), Zl (line separator) and Zp (paragraph separator),

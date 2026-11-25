@@ -90,7 +90,10 @@ pub(crate) fn holders(app: &AppDir<'_>, s: &exec::Status) -> Vec<Holder> {
             id,
             txn: st.id,
             forgotten: st.is_forgotten(),
-            launcher: prof.launcher.then(|| prof.start.clone()),
+            // P5-OE: with `run` the shim started `run`, so the check covered it.
+            launcher: prof
+                .launcher
+                .then(|| prof.run.clone().unwrap_or_else(|| prof.start.clone())),
             watch: (prof.decoded.method == ProfileMethod::Watch).then(|| prof.target.clone()),
         };
         // The listing is in order: a later transaction replaces an earlier one.

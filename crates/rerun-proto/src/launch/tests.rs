@@ -26,6 +26,8 @@ fn ok() -> LaunchResult {
             check: Check::Ok,
         },
         method: None,
+        run: false,
+        steam_start: None,
     }
 }
 
@@ -62,6 +64,8 @@ fn skipped() -> LaunchResult {
             priority_restore: None,
         },
         method: None,
+        run: false,
+        steam_start: None,
     }
 }
 
@@ -232,6 +236,8 @@ fn every_outcome_round_trips() {
                 unix_s,
                 outcome: outcome.clone(),
                 method,
+                run: false,
+                steam_start: None,
             };
             let bytes = encode(&r).unwrap();
             assert!(bytes.len() <= MAX_RESULT_BYTES / 3, "{}", bytes.len());
@@ -243,6 +249,8 @@ fn every_outcome_round_trips() {
             unix_s: 7,
             outcome: outcome.clone(),
             method: Some(Method::Direct),
+            run: false,
+            steam_start: None,
         };
         let watch_only = matches!(
             &outcome,
@@ -591,6 +599,8 @@ fn watch_skipped(reason: SkipReason, priority_restore: Option<u32>) -> LaunchRes
             priority_restore,
         },
         method: None,
+        run: false,
+        steam_start: None,
     }
 }
 
@@ -802,4 +812,285 @@ fn a_priority_restore_line_is_strict() {
         err(eleven.as_bytes()),
         at(11, ResultErrorKind::TrailingLine)
     );
+}
+
+// ---------- P5-OE (O-2a): run=yes, run_failed, steam_start ----------
+
+const GOLDEN_RUN: &str = "rerun-result 1
+profile=0123456789abcdef0123456789abcdef
+time=1762600000
+rule=applied
+cpu=hard:8:32
+priority=none
+check=ok
+start=created
+rule_child=none
+method=direct
+run=yes
+";
+
+const GOLDEN_RUN_FAILED: &str = "rerun-result 1
+profile=0123456789abcdef0123456789abcdef
+time=0
+rule=skipped:run_failed:2
+cpu=none
+priority=none
+check=none
+start=created
+rule_child=none
+method=direct
+";
+
+const GOLDEN_STEAM_START: &str = "rerun-result 1
+profile=0123456789abcdef0123456789abcdef
+time=0
+rule=skipped:path_mismatch
+cpu=none
+priority=none
+check=none
+start=created
+rule_child=none
+method=direct
+steam_start=AssassinsCreed_Game.exe
+";
+
+fn direct_skipped(reason: SkipReason) -> LaunchResult {
+    LaunchResult {
+        method: Some(Method::Direct),
+        ..watch_skipped(reason, None)
+    }
+}
+
+#[test]
+fn the_run_lines_golden_and_round_trip() {
+    let applied = LaunchResult {
+        method: Some(Method::Direct),
+        run: true,
+        ..ok()
+    };
+    assert_eq!(encode(&applied).unwrap(), GOLDEN_RUN.as_bytes());
+    assert_eq!(decode(GOLDEN_RUN.as_bytes()).unwrap(), applied);
+    let failed = direct_skipped(SkipReason::RunFailed { code: 2 });
+    assert_eq!(encode(&failed).unwrap(), GOLDEN_RUN_FAILED.as_bytes());
+    assert_eq!(decode(GOLDEN_RUN_FAILED.as_bytes()).unwrap(), failed);
+    let mismatch = LaunchResult {
+        steam_start: Some("AssassinsCreed_Game.exe".to_owned()),
+        ..direct_skipped(SkipReason::PathMismatch)
+    };
+    assert_eq!(encode(&mismatch).unwrap(), GOLDEN_STEAM_START.as_bytes());
+    assert_eq!(decode(GOLDEN_STEAM_START.as_bytes()).unwrap(), mismatch);
+    // 740 with run: run=yes after the shell start.
+    let shell = LaunchResult {
+        run: true,
+        outcome: Outcome::Skipped {
+            reason: SkipReason::ElevationRequired,
+            start: Start::Shell,
+            ended: None,
+            priority_restore: None,
+        },
+        ..direct_skipped(SkipReason::ElevationRequired)
+    };
+    let text = String::from_utf8(encode(&shell).unwrap()).unwrap();
+    assert!(
+        text.ends_with("start=shell\nrule_child=none\nmethod=direct\nrun=yes\n"),
+        "{text}"
+    );
+    assert_eq!(decode(text.as_bytes()).unwrap(), shell);
+    // The reason's name and code form.
+    let r = SkipReason::RunFailed { code: 5 };
+    assert_eq!(r.to_string(), "run_failed:5");
+    assert_eq!(SkipReason::parse("run_failed", Some(5)), Some(r));
+    assert_eq!(SkipReason::parse("run_failed", None), None);
+    assert!(!r.watch_only());
+}
+
+#[test]
+fn the_run_lines_are_refused_where_no_shim_writes_them() {
+    let inconsistent = |r: &LaunchResult| {
+        assert_eq!(
+            encode(r).unwrap_err(),
+            at(0, ResultErrorKind::Inconsistent),
+            "{r:?}"
+        );
+    };
+    // run=yes: only direct, only applied or elevation_required.
+    for r in [
+        LaunchResult { run: true, ..ok() },
+        LaunchResult {
+            run: true,
+            method: Some(Method::Watch),
+            ..ok()
+        },
+        LaunchResult {
+            run: true,
+            ..direct_skipped(SkipReason::RunFailed { code: 2 })
+        },
+        LaunchResult {
+            run: true,
+            ..direct_skipped(SkipReason::JobFailed { code: 5 })
+        },
+        LaunchResult {
+            run: true,
+            ..direct_skipped(SkipReason::PathMismatch)
+        },
+        // run_failed only with direct.
+        watch_skipped(SkipReason::RunFailed { code: 2 }, None),
+        LaunchResult {
+            method: Some(Method::Watch),
+            ..watch_skipped(SkipReason::RunFailed { code: 2 }, None)
+        },
+        // steam_start only with path_mismatch and a valid name.
+        LaunchResult {
+            steam_start: Some("game.exe".to_owned()),
+            ..ok()
+        },
+        LaunchResult {
+            steam_start: Some("game.exe".to_owned()),
+            ..direct_skipped(SkipReason::ProfileInvalid)
+        },
+        LaunchResult {
+            steam_start: Some(r"bin\game.exe".to_owned()),
+            ..direct_skipped(SkipReason::PathMismatch)
+        },
+        LaunchResult {
+            steam_start: Some("nul.exe".to_owned()),
+            ..direct_skipped(SkipReason::PathMismatch)
+        },
+        LaunchResult {
+            steam_start: Some(String::new()),
+            ..direct_skipped(SkipReason::PathMismatch)
+        },
+        LaunchResult {
+            steam_start: Some("a".repeat(MAX_STEAM_START_UNITS + 1)),
+            ..direct_skipped(SkipReason::PathMismatch)
+        },
+    ] {
+        inconsistent(&r);
+    }
+    // The reader refuses the same files.
+    let applied_run = GOLDEN.to_owned() + "run=yes\n";
+    assert_eq!(
+        err(applied_run.as_bytes()),
+        at(0, ResultErrorKind::Inconsistent)
+    );
+    let failed_watch = GOLDEN_RUN_FAILED.replace("method=direct", "method=watch");
+    assert_eq!(
+        err(failed_watch.as_bytes()),
+        at(0, ResultErrorKind::Inconsistent)
+    );
+    let ok_with_name = GOLDEN.to_owned() + "method=direct\nsteam_start=game.exe\n";
+    assert_eq!(
+        err(ok_with_name.as_bytes()),
+        at(0, ResultErrorKind::Inconsistent)
+    );
+    // Values: only `yes`; a name by the component rules.
+    for v in ["no", "true", "Yes", ""] {
+        let text = GOLDEN_RUN.replace("run=yes", &format!("run={v}"));
+        assert_eq!(
+            err(text.as_bytes()),
+            at(11, ResultErrorKind::BadValue { key: "run" }),
+            "{v}"
+        );
+    }
+    for v in [
+        "",
+        r"C:\G\game.exe",
+        "a/b.exe",
+        "con",
+        "game.exe.",
+        " game.exe",
+        "g\u{202E}exe.txt",
+    ] {
+        let text = GOLDEN_STEAM_START.replace(
+            "steam_start=AssassinsCreed_Game.exe",
+            &format!("steam_start={v}"),
+        );
+        assert_eq!(
+            err(text.as_bytes()),
+            at(11, ResultErrorKind::BadValue { key: "steam_start" }),
+            "{v:?}"
+        );
+    }
+    // Order: method, run, steam_start, priority_restore; nothing twice.
+    let swapped = GOLDEN_RUN.replace("method=direct\nrun=yes\n", "run=yes\nmethod=direct\n");
+    assert_eq!(
+        err(swapped.as_bytes()),
+        at(11, ResultErrorKind::TrailingLine)
+    );
+    let twice = GOLDEN_RUN.to_owned() + "run=yes\n";
+    assert_eq!(err(twice.as_bytes()), at(12, ResultErrorKind::TrailingLine));
+}
+
+#[test]
+fn steam_start_names_are_file_names_only() {
+    for (argv0, name) in [
+        (
+            r"C:\Games\AC\AssassinsCreed_Game.exe",
+            Some("AssassinsCreed_Game.exe"),
+        ),
+        (r"C:\Program", Some("Program")),
+        (r"D:\Spiele\Ünïcödé 名前\game.exe", Some("game.exe")),
+        (r"C:\Games\AC\名前.exe", Some("名前.exe")),
+        (r"C:\Games\AC\", None),
+        (r"C:\Games\AC\nul", None),
+        (r"C:\Games\AC\a?.exe", None),
+        ("C:\\Games\\AC\\a\u{200B}.exe", None),
+        ("C:\\Games\\AC\\a\tb.exe", None),
+        ("C:\\Games\\AC\\a\u{85}b.exe", None),
+    ] {
+        assert_eq!(steam_start_name(argv0).as_deref(), name, "{argv0:?}");
+    }
+    // Up to 255 UTF-16 units; an astral character counts two.
+    let max = format!("{}.exe", "a".repeat(MAX_STEAM_START_UNITS - 4));
+    assert_eq!(steam_start_name(&max), Some(max.clone()));
+    let over = format!("{}😀.exe", "a".repeat(MAX_STEAM_START_UNITS - 5));
+    assert_eq!(steam_start_name(&over), None);
+    // The longest name of three-byte characters fits the file.
+    let wide = format!("{}.exe", "名".repeat(MAX_STEAM_START_UNITS - 4));
+    let r = LaunchResult {
+        steam_start: steam_start_name(&wide),
+        unix_s: u64::MAX,
+        ..direct_skipped(SkipReason::PathMismatch)
+    };
+    let bytes = encode(&r).unwrap();
+    assert!(bytes.len() <= MAX_RESULT_BYTES, "{}", bytes.len());
+    assert_eq!(decode(&bytes).unwrap(), r);
+}
+
+#[test]
+fn mutated_run_results_never_decode_to_something_else() {
+    let mut rng = Rng(0x0A51_0003_F00D_BEEF);
+    let mut accepted = 0;
+    for i in 0..20_000 {
+        let golden = match i % 3 {
+            0 => GOLDEN_RUN,
+            1 => GOLDEN_RUN_FAILED,
+            _ => GOLDEN_STEAM_START,
+        };
+        let mut b = golden.as_bytes().to_vec();
+        for _ in 0..=rng.below(3) {
+            match rng.below(3) {
+                0 => {
+                    let i = rng.below(b.len());
+                    b[i] = u8::try_from(rng.next() & 0xFF).unwrap();
+                }
+                1 => {
+                    let i = rng.below(b.len() + 1);
+                    b.insert(i, b"=:\n\r 0x\\"[rng.below(8)]);
+                }
+                _ => {
+                    let i = rng.below(b.len());
+                    b.remove(i);
+                    if b.is_empty() {
+                        b.push(b'\n');
+                    }
+                }
+            }
+        }
+        if let Ok(r) = decode(&b) {
+            assert_eq!(encode(&r).unwrap(), b);
+            accepted += 1;
+        }
+    }
+    assert!(accepted > 0, "no mutation decoded");
 }

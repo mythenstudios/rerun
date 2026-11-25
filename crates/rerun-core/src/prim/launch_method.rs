@@ -10,29 +10,37 @@
 //!   is not read), relative to the game folder, in the spelling stored on disk; a plain `.exe`
 //!   below plain folders, none case-sensitive. The profile names it absolutely, at most
 //!   [`MAX_EXE_PATH_UNITS`] UTF-16 units (F7).
+//! - **`run` and `args`** (ADR 0022 and ADR 0032 amendments P5-OE, profile format 3; `direct`
+//!   only): `run` is another plain `.exe` in **the same folder** as `start` (both in the spelling
+//!   stored on disk, so the folders are byte for byte equal; not `start` itself), which the shim
+//!   starts with the rule when Steam starts `start`; `args` are 1 to 8 arguments of the pattern
+//!   `rerun_proto::profile::LaunchArg` ([`LaunchArgText`]), at most 512 bytes, appended to the
+//!   command line the shim starts. A step needs at least one of `cpu`, `priority`, `run`,
+//!   `args`. Every profile is written as format 3.
 //! - **The target** (P3-4 P1, P4): `direct` sets the rule on what it starts, so `target` is
-//!   `start`. `watch` sets it on a new process of the main executable found after the start:
+//!   `run` if the step has one, else `start`. `watch` sets it on a new process of the main
+//!   executable found after the start:
 //!   `target` is `<game folder>\<main_exe>` in the spelling stored on disk (no field of its own:
 //!   one identity, the program apply and revert ask, D4), at most [`MAX_EXE_PATH_UNITS`] units.
-//! - **The launcher case** (F5, `direct` only, P3-4 P2): with `start` other than the main
-//!   executable (folded) only a hard CPU rule is allowed: a soft rule (default CPU Sets) and a
-//!   priority class reach only the started program, not the game it starts (ADR 0022 amendment
-//!   P3-3, sources there). `watch` sets both on the game itself; `start` equal to the main
+//! - **The launcher case** (F5, `direct` only, P3-4 P2): with the started program (`run`, else
+//!   `start`) other than the main executable (folded) only a hard CPU rule is allowed: a soft
+//!   rule (default CPU Sets) and a priority class reach only the started program, not the game
+//!   it starts (ADR 0022 amendment P3-3, sources there). `watch` sets both on the game itself; `start` equal to the main
 //!   executable is allowed there too (a stub that starts the game again; the preview says so).
 //! - **Bitness** (F6, condition A8; P3-4 P3): `x86` if a program of the chain the rule reaches is
-//!   i386, else `x64`: for `direct` `start` or the main executable, for `watch` the main
-//!   executable alone (`start` runs unchanged; it must still be a plain `.exe`, its image is not
-//!   read). A .NET "AnyCPU" image is i386 on disk and may run as x64: counted as x86,
+//!   i386, else `x64`: for `direct` `start` or the main executable, with `run` the image of
+//!   `run` alone (the shim never starts `start` under the rule then: a failed `run` falls back
+//!   to Steam's command without it), for `watch` the main executable alone (`start` runs
+//!   unchanged; it must still be a plain `.exe`, its image is not read). A .NET "AnyCPU" image is i386 on disk and may run as x64: counted as x86,
 //!   conservatively; the cost is only on a processor group of more than 32 logical processors
 //!   (ADR 0022 B6). ARM64, another machine or no PE image is refused. Read through the bounded
 //!   PE parser (ADR 0013).
 //! - **The rule** (F8): every field of `cpu` optional, at least one given; missing fields do not
 //!   restrict (`prefer: any`, `single_l3: false`, `prefer_l3` none, `smt: true`, no
-//!   `max_threads`, `mode: hard`, no `exclude_first`); `max_threads` 1 to 1024; a rule with
-//!   `exclude_first` is written as profile format 2, every other as format 1 (ADR 0022
-//!   amendment P4-13); `report_cores` refused (`inproc`,
-//!   phase 6); `method: auto` refused (the Topo engine chooses, phase 4). Neither `cpu` nor
-//!   `priority` is refused (F9), and so is a second `launch_method` step.
+//!   `max_threads`, `mode: hard`, no `exclude_first`); `max_threads` 1 to 1024; `report_cores`
+//!   refused (`inproc`, phase 6); `method: auto` refused (the Topo engine chooses, phase 4).
+//!   None of `cpu`, `priority`, `run` and `args` is refused (F9), and so is a second
+//!   `launch_method` step.
 //! - **`watch_timeout_s`** of every profile is [`WATCH_TIMEOUT_S`] (120, the format's largest
 //!   value; the search time of `watch`, unread by the shim for `direct`; review N3, P3-4 P5), so
 //!   equal rules give equal bytes, and `direct` and `watch` replace the same profile (one ID).
@@ -51,7 +59,8 @@ use rerun_proto::cpu::rule::{
     Bitness, CpuRule, ExcludeFirst, Mode, Prefer, PreferL3, SelectError, select,
 };
 use rerun_proto::profile::{
-    self as proto, LaunchProfile, MAX_WATCH_TIMEOUT_S, Method, Priority, ProfileId,
+    self as proto, LaunchArg, LaunchProfile, MAX_ARGS, MAX_ARGS_BYTES, MAX_WATCH_TIMEOUT_S, Method,
+    Priority, ProfileId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -98,6 +107,56 @@ pub struct LaunchMethodSpec {
     /// The priority class.
     #[serde(default)]
     pub priority: Option<PrioritySpec>,
+    /// The program the shim starts instead of `start` (profile format 3, `direct` only): a
+    /// plain `.exe` in the folder of `start`, relative to the game folder. Not written when not
+    /// given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RelPath>,
+    /// Arguments the shim appends to the command line it starts (profile format 3, `direct`
+    /// only). Not written when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<LaunchArgText>,
+}
+
+/// One launch argument of a step (the pattern of `rerun_proto::profile::LaunchArg`, the one
+/// place it lives), as text on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct LaunchArgText(LaunchArg);
+
+impl LaunchArgText {
+    /// The argument if `s` matches the pattern.
+    pub fn parse(s: &str) -> Option<Self> {
+        LaunchArg::parse(s).map(Self)
+    }
+
+    /// The argument.
+    pub fn arg(&self) -> &LaunchArg {
+        &self.0
+    }
+
+    /// The argument as text.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl TryFrom<String> for LaunchArgText {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::parse(&s).ok_or_else(|| {
+            "a launch argument starts with - or + followed by letters, digits and _ . = + -, at \
+             most 64 characters"
+                .to_owned()
+        })
+    }
+}
+
+impl From<LaunchArgText> for String {
+    fn from(a: LaunchArgText) -> Self {
+        a.0.as_str().to_owned()
+    }
 }
 
 /// `launch_method.method`.
@@ -372,8 +431,25 @@ pub(crate) fn plan_into(
             "method auto is chosen by the Topo engine (phase 4); name direct or watch",
         ));
     }
-    if spec.cpu.is_none() && spec.priority.is_none() {
-        return Err(refuse("neither cpu nor priority: nothing to apply"));
+    if spec.cpu.is_none() && spec.priority.is_none() && spec.run.is_none() && spec.args.is_empty() {
+        return Err(refuse(
+            "none of cpu, priority, run and args: nothing to apply",
+        ));
+    }
+    if (spec.run.is_some() || !spec.args.is_empty()) && spec.method != MethodSpec::Direct {
+        return Err(refuse(
+            "run and args need method direct (rerun-launch starts them in place of Steam's \
+             program; watch starts Steam's program unchanged)",
+        ));
+    }
+    let args: Vec<LaunchArg> = spec.args.iter().map(|a| a.arg().clone()).collect();
+    if args.len() > MAX_ARGS {
+        return Err(refuse(format!("more than {MAX_ARGS} args")));
+    }
+    if proto::args_value(&args).len() > MAX_ARGS_BYTES {
+        return Err(refuse(format!(
+            "the args are longer than {MAX_ARGS_BYTES} bytes together"
+        )));
     }
     let rule = spec.cpu.as_ref().map(CpuRuleSpec::rule).transpose()?;
     let game = ctx.game;
@@ -402,44 +478,80 @@ pub(crate) fn plan_into(
     };
     let start = stored_exe(game, &spec.start, "launch_method")?;
     let watch = spec.method == MethodSpec::Watch;
+    // P5-OE (S2): `run` is another exe in the folder of `start`, both as stored on disk.
+    let run = match &spec.run {
+        None => None,
+        Some(r) => {
+            let run = stored_exe(game, r, "launch_method run")?;
+            if fold(run.as_str()) == fold(start.as_str()) {
+                return Err(refuse(format!(
+                    "run {} is the program Steam starts; leave run out",
+                    shown(run.as_str())
+                )));
+            }
+            if folder_of(&run) != folder_of(&start) {
+                return Err(refuse(format!(
+                    "run {} is not in the folder of start {} (rerun-launch starts only a \
+                     program next to Steam's)",
+                    shown(run.as_str()),
+                    shown(start.as_str())
+                )));
+            }
+            Some(run)
+        }
+    };
+    // What the shim starts with the rule.
+    let started = run.as_ref().unwrap_or(&start);
+    let who = if run.is_some() {
+        "rerun-launch starts"
+    } else {
+        "Steam starts"
+    };
     // F5 (`direct` only, P3-4 P2): soft rules and priority classes reach only the started
     // program; `watch` sets them on the game.
-    if !watch && fold(start.as_str()) != fold(main.as_str()) {
+    if !watch && fold(started.as_str()) != fold(main.as_str()) {
         if rule.is_some_and(|r| r.mode == Mode::Soft) {
             return Err(refuse(format!(
-                "Steam starts {}, not the game {}: CPU Sets (mode soft) reach only the started \
+                "{who} {}, not the game {}: CPU Sets (mode soft) reach only the started \
                  program; use mode hard (the game inherits the job) or method watch",
-                shown(start.as_str()),
+                shown(started.as_str()),
                 shown(main.as_str())
             )));
         }
         if spec.priority.is_some() {
             return Err(refuse(format!(
-                "Steam starts {}, not the game {}: a priority class reaches only the started \
+                "{who} {}, not the game {}: a priority class reaches only the started \
                  program; method watch sets it on the game",
-                shown(start.as_str()),
+                shown(started.as_str()),
                 shown(main.as_str())
             )));
         }
     }
     // F6 (A8, P3-4 P3): x86 if a program of the chain the rule reaches is i386; with `watch`
-    // the rule reaches the main executable (and what it starts) only.
-    let main_bitness = bitness_of(game, main)?;
-    let bitness = if watch {
-        main_bitness
+    // the rule reaches the main executable (and what it starts) only; with `run` the rule
+    // reaches `run` (and what it starts) only (P5-OE).
+    let bitness = if let Some(run) = &run {
+        bitness_of(game, run)?
     } else {
-        match (bitness_of(game, &start)?, main_bitness) {
-            (Bitness::X64, Bitness::X64) => Bitness::X64,
-            _ => Bitness::X86,
+        let main_bitness = bitness_of(game, main)?;
+        if watch {
+            main_bitness
+        } else {
+            match (bitness_of(game, &start)?, main_bitness) {
+                (Bitness::X64, Bitness::X64) => Bitness::X64,
+                _ => Bitness::X86,
+            }
         }
     };
     let start_abs = format!(r"{}\{}", game.path(), start);
-    // P1: the target of `watch` is the main executable in the spelling stored on disk.
+    let run_abs = run.as_ref().map(|r| format!(r"{}\{}", game.path(), r));
+    // P1: the target of `watch` is the main executable in the spelling stored on disk; of
+    // `direct` the program the shim starts.
     let target_abs = if watch {
         let main = stored_exe(game, main, "launch_method main_exe")?;
         format!(r"{}\{}", game.path(), main)
     } else {
-        start_abs.clone()
+        run_abs.clone().unwrap_or_else(|| start_abs.clone())
     };
     // F7, P4: both paths as the shim compares them (no long paths yet).
     for (what, abs) in [("start", &start_abs), ("target", &target_abs)] {
@@ -462,10 +574,16 @@ pub(crate) fn plan_into(
         }),
         watch_timeout_s: WATCH_TIMEOUT_S,
         cpu: rule,
+        run: run_abs,
+        args,
     };
     let bytes = proto::encode(&profile).map_err(|e| refuse(format!("the profile: {e}")))?;
     if bytes.len() > MAX_INLINE_BYTES {
-        return Err(refuse("the profile is larger than 2 KiB"));
+        return Err(refuse(format!(
+            "the profile is larger than {} KiB (the paths of this game are too long for a \
+             launch profile)",
+            MAX_INLINE_BYTES >> 10
+        )));
     }
     let profiles = app_path(ctx)?
         .child("profiles")
@@ -475,6 +593,13 @@ pub(crate) fn plan_into(
         b.profile = Some((op, profiles));
     }
     Ok(())
+}
+
+/// The folder of a path relative to the game folder: everything up to and including its last
+/// `\`, empty for a file of the game folder itself.
+fn folder_of(p: &RelPath) -> &str {
+    let s = p.as_str();
+    s.rfind('\\').map_or("", |i| &s[..=i])
 }
 
 /// What a rule selects on this computer now (preview only, never in the plan).

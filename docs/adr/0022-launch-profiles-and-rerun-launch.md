@@ -1,6 +1,6 @@
 # ADR 0022 · Launch profiles and rerun-launch
 
-**Status:** accepted · 2026-11-08, amended the same day by the review of P3-1a (M1, M2, B-2, B-3), by P3-1b (the shim as built; B-2 without the group affinity attribute) and by P3-2 (post-launch check, result file); amended by P3-3 (2026-11-08, the `launch_method` planner), P3-4 (2026-11-09, the `watch` method) and P4-13 (2026-11-11, `exclude_first` and profile format 2) · extends ADR 0006, ADR 0008, ADR 0010 · phase 3, steps P3-1 (P3-1a: `rerun-proto`; P3-1b: the shim), P3-2, P3-3 and P3-4
+**Status:** accepted · 2026-11-08, amended the same day by the review of P3-1a (M1, M2, B-2, B-3), by P3-1b (the shim as built; B-2 without the group affinity attribute) and by P3-2 (post-launch check, result file); amended by P3-3 (2026-11-08, the `launch_method` planner), P3-4 (2026-11-09, the `watch` method) P4-13 (2026-11-11, `exclude_first` and profile format 2) and P5-OE (2026-11-25, slice O-2a: profile format 3, `run`, `args`, the result lines `run=yes` and `steam_start`) · extends ADR 0006, ADR 0008, ADR 0010 · phase 3, steps P3-1 (P3-1a: `rerun-proto`; P3-1b: the shim), P3-2, P3-3 and P3-4
 
 ## Context
 Phase 3 starts a Steam game through `rerun-launch.exe` with a CPU rule (`docs/04-launch-methods.md`, `docs/08-roadmap.md`). The shim depends on `windows-sys` and `rerun-proto` only (ADR 0006): everything it shares with `rerun-core` (the rule selection, the profile format) must live in `rerun-proto`, without serde. The selection has to run in the shim at every start, because CPU Set IDs are runtime values (ADR 0010). `docs/03-cpu-topology.md` left four points open: LP E-cores were "never for games" without a step that removes them, the group of step 1 was "group 0 (or the largest)", step 5 said "truncate to 32" for a 32-bit game, and the SMT example of the plan (4 cores × 2 threads) contradicted step 6 ("cores before SMT siblings"). For the shim itself the plan review (P3 plan, conditions B1–B4, B13; decisions D1–D3, D5) asked for decisions before P3-1b, among them two Win32 questions: how a hard mask reaches a group other than 0 (B4), and whether a 32-bit game is limited by a count or by indices (B6).
@@ -301,3 +301,56 @@ Plan P4-13 with the user decisions (E1 changed to a choice per Topo variant, E2 
 
 ## Amendment P5-6d (2026-11-15): launch results are deleted by "clear history"
 User decision E5 of P5-6d. "Clear history" (`flow::clear`, ADR 0027 amendment P5-6d-1b) deletes `<AppDir>\launch\<id>.result` through `exec::purge_results`, each bound to the SHA-256 of the bytes its preview read (`exec::launch_results_hashed`): `guard` and `delete(expected)` are a real comparison here, so a start the shim wrote since stays (a new start, no error). If Rerun holds the guard while the shim renames its temp file onto the result, the shim's rename fails and its temp file is deleted (`Temp::drop` marks it for deletion by handle; were that to fail, a `.tmp` that every reader ignores would remain): one result line is lost, never a start. A result file with more than one hard link is listed as unreadable and never deleted (P5-6d-1b review, security nit 3: the link count comes from the listing). Never deleted: the shim's temp files (they may belong to a running shim), the folder `launch`, other names, links, unreadable files, and results whose note is `LaunchNote::OptionStillSet` or `OptionStillSetForgotten` (they remind the user to remove the Steam launch option by hand; listed under "stays"). No journal lock (the shim takes none). The cap of the history never touches launch results. Test HP6 (`flow/history_tests.rs`).
+
+## Amendment P5-OE (2026-11-25): profile format 3, `run` and `args` (slice O-2a, as built)
+
+Plan `P5-OE`, slice O-2a, with ADR 0032 amendment P5-OE (game options; the decisions there hold, this records the profile, the shim and the result as built). Options, carry-over and the B1 stacking rule follow in O-2b; nothing in a Topo produces `run` or `args` before then (the Topo engine plans neither, a step file can).
+
+### Profile format 3 (`rerun_proto::profile`)
+- **Written for every profile** (the decision of amendment P4-13: no third content-chosen format). Keys in order: `method`, `start`, `target`, `bitness`, `priority`, `watch_timeout_s`, `cpu` (`none` allowed again), with `cpu=rule` the seven `cpu.*` keys (`cpu.exclude_first` now `none`/`thread`/`core`), then `run` (`none` or a path) and `args` (`none` or the arguments). `PROFILE_FORMAT` = 3, `PROFILE_FORMATS` = 1, 2, 3: the reader keeps formats 1 and 2, so a revert restores what an earlier build wrote; the first plan after the update replaces an older profile once (a `ReplaceFile` whose old state is the file's hash). `encode_format` (crate-internal) writes formats 1 and 2 for tests only.
+- **`run`:** the D1 path rules, ending in `.exe` (ASCII case-insensitive), not `start` (exact or in another Unicode case: `RunIsStart`), in **the same folder** as `start`: both byte for byte equal up to and including their last `\` (`RunNotInStartFolder`, S2). With `run`: `method=direct` (`RunNeedsDirect`) and `target = run` (`TargetNotRun`); without: `direct` keeps `target = start`.
+- **`args`:** 1 to `MAX_ARGS` (8) `LaunchArg`s joined by one space, at most `MAX_ARGS_BYTES` (512); `LaunchArg` is `^[-+][A-Za-z0-9_.=+-]+$`, at most 64 characters, the one place of the pattern (`rerun_core::prim::launch_method::LaunchArgText` wraps it for serde; the catalogue reuses it in O-1/O-2b). `args` need `direct` (`ArgsNeedDirect`), with or without `run`.
+- Example (Assassin's Creed, Steam starts the detector):
+  ```text
+  rerun-profile 3
+  method=direct
+  start=D:\Steam\steamapps\common\Assassin's Creed\AssassinsCreed_Game.exe
+  target=D:\Steam\steamapps\common\Assassin's Creed\AssassinsCreed_Dx9.exe
+  bitness=x86
+  priority=none
+  watch_timeout_s=120
+  cpu=rule
+  cpu.prefer=performance
+  cpu.single_l3=true
+  cpu.prefer_l3=none
+  cpu.smt=false
+  cpu.mode=hard
+  cpu.max_threads=8
+  cpu.exclude_first=none
+  run=D:\Steam\steamapps\common\Assassin's Creed\AssassinsCreed_Dx9.exe
+  args=-skipintro +fov=1.2
+  ```
+
+### The planner (`prim::launch_method`)
+- The step gains `run: Option<RelPath>` and `args: Vec<LaunchArgText>` (both left out of the step's JSON when not given, so existing steps keep their bytes). A step needs one of `cpu`, `priority`, `run`, `args`. `run` and `args` need `direct`; `run` is a plain `.exe` of the game folder in the stored spelling (`stored_exe`), not `start` (folded), in the folder of `start` (both stored, so the folders are equal byte for byte).
+- **F5 asks the started program:** soft rules and priority classes are refused when `run` (else `start`) is not the main executable; the message says "rerun-launch starts …" with `run`.
+- **Bitness with `run`:** the image of `run` alone (`start` is not read: the shim never starts `start` under the rule; a failed `run` falls back to Steam's command without any rule).
+- The fence (`plan::profile`, `Rules::Current`) is unchanged in kind: `target` (= `run`) and `start` below root 0, each at most `MAX_EXE_PATH_UNITS`; the codec guarantees `run = target`.
+
+### The shim (`rerun-launch`)
+- **The M2 exception, and nothing else:** when Steam's `argv[0]` equals `start` (the gate of the rule, unchanged) and the profile has `run`, the shim starts `run` with the rule: `lpApplicationName = run`, `lpCommandLine` = `"<run>"` followed by the raw tail after Steam's `argv[0]` (from right after its closing quote, or from the blank that ended it), byte for byte (`run::with_run`, pure). `args` are appended after one space, also without `run`, on the command line and on the parameters of the 740 fallback. No `lpCurrentDirectory` (the child keeps Steam's, the folder of `start` and so of `run`).
+- **Every fallback starts Steam's command unchanged, never `run`, never `args`:** no profile ID, a missing, unreadable or invalid profile (an old shim reading format 3: `profile_invalid`), `path_mismatch` (also when Steam starts `run` itself), an elevated shim (M1: no profile read at all), a topology, selection, job, read-back, CPU Sets or resume failure (the child, `run`, is ended first), and a `run` that cannot be started: any spawn failure other than 740 while `run` is the program (`CreateProcessW` or the job before it) records `rule=skipped:run_failed:<code>` and starts Steam's command. For Assassin's Creed every fallback starts the detector (DirectX 10); the preview says so (ADR 0032 amendment, O-2b).
+- **740 with `run`** goes to `ShellExecuteExW` with `lpFile = run` and the parameters (Steam's after `argv[0]`, plus `args`), without the rule; recorded as `elevation_required` with `run=yes`. (740 without `run` but with `args`: Steam's `argv[0]` and the parameters with `args`.)
+- The job, CPU Sets, priority and the post-launch check apply to the program started. Size: one string join and two keys; the release shim's size and the < 50 ms start budget are measured in the [DEV] row "`run` instead of Steam's entry" (docs/09).
+
+### Result file (format 1, additive)
+- Reason `run_failed:<code>` (only with `method=direct`, never with `run=yes`).
+- Optional line `run=yes` after `method=`: the program started was `run` (with `rule=applied`, or `skipped:elevation_required`; only with `method=direct`).
+- Optional line `steam_start=<name>` after it, for `path_mismatch` only (S5): the last component of Steam's `argv[0]` if it is a valid name by the profile path's component rules (no control, format or separator character, no reserved device name, at most `MAX_STEAM_START_UNITS` = 255 UTF-16 units), never the folder; otherwise the line is left out. The reader checks the name as it is (no `\`). Untrusted: the app offers it only as a candidate it can verify itself (ADR 0029, E-1b).
+- `MAX_RESULT_BYTES` 1 KiB → 2 KiB (a 255-unit name of three-byte characters plus the rest). An older reader sets a file with a new line or reason aside as unreadable (harmless).
+
+### Limits (S3, checked against ADR 0019)
+The journal never embeds an op: a record names the op by its index and is bounded by 64 KiB on its own (ADR 0019 amendment P2-7); the head is bounded by `MAX_PLAN_BYTES` (1 MiB), checked on its own, and no other record or file (the helper request has its own ops and 64 KiB) carries a plan op. So `plan::MAX_INLINE_BYTES` is raised from 2 KiB to 4 KiB and `plan::MAX_OP_BYTES` from 8 KiB to 12 KiB before the format freeze; `MAX_OPS` (128) and `MAX_PLAN_BYTES` stay, so a plan of 128 ops of 12 KiB is refused as a whole (as before, the per-op budget times the op count is not the plan budget). The largest format-3 profile the planner can write (`start` and `run` of 259 non-ASCII UTF-16 units, 512 bytes of `args`) is about 3 KiB and its op stays within 12 KiB (test LR3). The shim's read limit stays 8 KiB.
+
+### Tests
+[F] codec (format 3 goldens, every refusal, the largest profile, mutations), result codec (the new lines and reason, refusals, mutations), shim (`run::run_tests`: `with_run` quoting cases, `decide`, every fallback, 740, `steam_start`), planner LR1 to LR6 (with the round trips LR4 and LR5: format 1 → 3 → back bit for bit), CLI goldens updated (the profile bytes). [SB] SB-R1 (`Invoke-LaunchRun`). [DEV] AC1 Dx9 with `scripts/dev-launch-profile.ps1 -Run` (open).

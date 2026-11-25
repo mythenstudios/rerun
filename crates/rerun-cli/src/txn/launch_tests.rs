@@ -32,6 +32,8 @@ fn entry(b: u8, outcome: Outcome) -> LaunchEntry {
             unix_s: 1_762_600_000,
             outcome,
             method: None,
+            run: false,
+            steam_start: None,
         }),
     }
 }

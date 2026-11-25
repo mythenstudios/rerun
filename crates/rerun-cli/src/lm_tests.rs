@@ -165,7 +165,7 @@ root 1: {RERUN}\profiles
   Rerun's launch profiles: written by apply, read by rerun-launch at a game start
 op 0: create file in root 1: {ID}.profile
   content: the launch profile, carried by the plan (no package)
-  new: sha256 5546af7f07852e7c8d037c14250f85eb1ea713bba5d21d59409d83bafe6e649e, 297 bytes, attributes -
+  new: sha256 89de4e988b7ce26714a27930503311070c0c4435e5d677516844c5200eed3312, 339 bytes, attributes -
      launch profile {ID}: method direct, x86
      cpu max_threads 8, prefer any, single_l3 true, prefer_l3 none, smt false, mode hard
      start {G}\FFLauncher.exe
@@ -520,7 +520,7 @@ root 1: {RERUN}\profiles
   Rerun's launch profiles: written by apply, read by rerun-launch at a game start
 op 0: create file in root 1: {ID}.profile
   content: the launch profile, carried by the plan (no package)
-  new: sha256 0d75cf7589a9eb1ebcf92277e2537a63d5dd69f33a74cfc10356a7553d032f27, 290 bytes, attributes -
+  new: sha256 c2f4528fb9b76e3f0a3ef7b24a38718fb7ede6f6e9446165100805cbe3b9f4f3, 332 bytes, attributes -
      launch profile {ID}: method watch, x86
      cpu max_threads 8, prefer any, single_l3 true, prefer_l3 none, smt false, mode soft
      priority high

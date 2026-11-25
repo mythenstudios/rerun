@@ -3,8 +3,8 @@
 //! `rerun status` reads back.
 //!
 //! One grammar for the writer (`rerun-launch`, without serde, ADR 0006) and the reader
-//! (`rerun-core`, untrusted input). UTF-8 text of at most [`MAX_RESULT_BYTES`], nine to eleven
-//! lines in a fixed order, each `key=value` ending in LF, the first nine always present:
+//! (`rerun-core`, untrusted input). UTF-8 text of at most [`MAX_RESULT_BYTES`], nine to
+//! thirteen lines in a fixed order, each `key=value` ending in LF, the first nine always present:
 //!
 //! ```text
 //! rerun-result 1
@@ -17,6 +17,8 @@
 //! start=created                              created | shell | shell_no_process | not_exe | failed:<code>
 //! rule_child=none                            none | ended | failed:<code> | not_confirmed:<code>
 //! method=watch                                optional: direct | watch (below)
+//! run=yes                                     optional: the shim started the profile's `run`
+//! steam_start=AssassinsCreed_Game.exe         optional, `path_mismatch` only (below)
 //! priority_restore=failed:<code>              optional, last (below)
 //! ```
 //!
@@ -33,6 +35,16 @@
 //! after it failed (`skipped:job_failed:…`, `skipped:job_ineffective`,
 //! `skipped:read_back_failed:…` or `skipped:cpu_sets_failed:…`) and putting the class back
 //! failed too (P3-4 A4); absent otherwise, so a file of an earlier shim reads unchanged.
+//!
+//! Format 1, additive (ADR 0022 amendment P5-OE): the line `run=yes` says the program the shim
+//! started was the profile's `run`, not Steam's `argv[0]`: with `rule=applied`, or with
+//! `skipped:elevation_required` (`run` through `ShellExecuteExW`); always with `method=direct`.
+//! The reason `run_failed:<code>` says `run` could not be started, and Steam's own command was
+//! started instead, unchanged (never with `run=yes`). The line `steam_start=<name>` comes only
+//! with `path_mismatch`: the last component of Steam's `argv[0]` (the rules of a profile path's
+//! component, at most [`MAX_STEAM_START_UNITS`] UTF-16 units; never the folder), untrusted: a
+//! reader offers it only after checking it against what it knows of the game. A shim before
+//! P5-OE writes neither line.
 //! `<code>` is a Win32 error code (or an `HRESULT` as an unsigned number where Windows gave
 //! one) in canonical decimal. The reader is strict like the profile reader: no other key,
 //! order or spelling, no leading zero, no empty line, no CR, no control character; a file
@@ -48,8 +60,12 @@ use crate::profile::{Method, Priority, ProfileId};
 /// The format this module reads and writes.
 pub const RESULT_FORMAT: u32 = 1;
 
-/// Largest result file in bytes (a valid one has fewer than 300).
-pub const MAX_RESULT_BYTES: usize = 1024;
+/// Largest result file in bytes (a valid one has fewer than 300, plus a `steam_start` name of
+/// at most 1,020 bytes).
+pub const MAX_RESULT_BYTES: usize = 2048;
+
+/// Most UTF-16 units of the `steam_start` name (a file name component on NTFS).
+pub const MAX_STEAM_START_UNITS: usize = 255;
 
 const HEADER: &str = "rerun-result ";
 
@@ -65,6 +81,11 @@ pub struct LaunchResult {
     /// The method of the profile the shim decoded (`None`: no profile decoded, or a file of a
     /// shim before the `method=` line).
     pub method: Option<Method>,
+    /// The shim started the profile's `run` instead of Steam's `argv[0]` (`run=yes`).
+    pub run: bool,
+    /// `path_mismatch` only: the file name of Steam's `argv[0]` ([`steam_start_name`]),
+    /// untrusted.
+    pub steam_start: Option<String>,
 }
 
 /// What became of the profile's rule.
@@ -191,6 +212,12 @@ pub enum SkipReason {
     },
     /// `elevation_required`: error 740, started through `ShellExecuteExW` without a rule.
     ElevationRequired,
+    /// `run_failed:<code>`: the profile's `run` could not be started (`CreateProcessW`, or the
+    /// job around it, failed other than with 740); Steam's command was started unchanged.
+    RunFailed {
+        /// Win32 error code.
+        code: u32,
+    },
     /// `target_not_found` (`watch`): no new process of the target appeared before the timeout.
     TargetNotFound,
     /// `job_ineffective` (`watch`): the target joined the job, but right after it its process
@@ -339,6 +366,27 @@ const RESTORE_KEY: &str = "priority_restore";
 /// The optional key after `rule_child` (P3-4, senior-dev decision 1).
 const METHOD_KEY: &str = "method";
 
+/// The optional key after `method` (P5-OE).
+const RUN_KEY: &str = "run";
+
+/// The optional key after `run`, `path_mismatch` only (P5-OE, S5).
+const STEAM_START_KEY: &str = "steam_start";
+
+/// The `steam_start` name of Steam's `argv[0]`: its last component, if that is a valid file name
+/// (a profile path's component rules, no control character, at most
+/// [`MAX_STEAM_START_UNITS`] UTF-16 units); `None` otherwise, and then the line is left out.
+pub fn steam_start_name(argv0: &str) -> Option<String> {
+    file_name(argv0.rsplit('\\').next().unwrap_or(argv0))
+}
+
+/// `name` if it is a valid `steam_start` value as it is (never a `\`): the reader's check.
+fn file_name(name: &str) -> Option<String> {
+    let ok = crate::profile::component(name)
+        && !name.chars().any(char::is_control)
+        && name.encode_utf16().count() <= MAX_STEAM_START_UNITS;
+    ok.then(|| name.to_owned())
+}
+
 impl SkipReason {
     /// A reason only `rerun-launch watch` writes.
     pub fn watch_only(self) -> bool {
@@ -402,6 +450,7 @@ impl SkipReason {
             Self::CpuSetsFailed { .. } => "cpu_sets_failed",
             Self::ResumeFailed { .. } => "resume_failed",
             Self::ElevationRequired => "elevation_required",
+            Self::RunFailed { .. } => "run_failed",
             Self::TargetNotFound => "target_not_found",
             Self::TargetElevated => "target_elevated",
             Self::JobIneffective => "job_ineffective",
@@ -422,7 +471,8 @@ impl SkipReason {
             | Self::ResumeFailed { code }
             | Self::TargetDenied { code }
             | Self::SearchFailed { code }
-            | Self::PriorityFailed { code } => Some(code),
+            | Self::PriorityFailed { code }
+            | Self::RunFailed { code } => Some(code),
             _ => None,
         }
     }
@@ -460,6 +510,7 @@ impl SkipReason {
             "target_denied" => Self::TargetDenied { code },
             "search_failed" => Self::SearchFailed { code },
             "priority_failed" => Self::PriorityFailed { code },
+            "run_failed" => Self::RunFailed { code },
             _ => return None,
         })
     }
@@ -585,8 +636,26 @@ fn restore_line(r: &LaunchResult) -> Option<String> {
 
 /// The invariants a value must meet: `1 <= threads <= of <= 4096`; a reset names at least one
 /// thing and only things that were set; a failed priority restore only after a failed CPU step;
-/// `method=direct` never with a reason only `watch` writes or a priority restore.
+/// `method=direct` never with a reason only `watch` writes or a priority restore; `run=yes`
+/// only with `method=direct` and an applied rule or `elevation_required`; `run_failed` only
+/// with `method=direct`; `steam_start` only with `path_mismatch` and a valid name.
 fn valid(r: &LaunchResult) -> bool {
+    let direct = r.method == Some(Method::Direct);
+    let reason = match &r.outcome {
+        Outcome::Applied { .. } => None,
+        Outcome::Skipped { reason, .. } => Some(*reason),
+    };
+    if r.run && (!direct || !matches!(reason, None | Some(SkipReason::ElevationRequired))) {
+        return false;
+    }
+    if matches!(reason, Some(SkipReason::RunFailed { .. })) && !direct {
+        return false;
+    }
+    if let Some(name) = &r.steam_start
+        && (reason != Some(SkipReason::PathMismatch) || file_name(name).is_none())
+    {
+        return false;
+    }
     if r.method == Some(Method::Direct)
         && let Outcome::Skipped {
             reason,
@@ -654,6 +723,16 @@ pub fn encode(r: &LaunchResult) -> Result<Vec<u8>, ResultError> {
         s.push_str(METHOD_KEY);
         s.push('=');
         s.push_str(method_str(m));
+        s.push('\n');
+    }
+    if r.run {
+        s.push_str(RUN_KEY);
+        s.push_str("=yes\n");
+    }
+    if let Some(name) = &r.steam_start {
+        s.push_str(STEAM_START_KEY);
+        s.push('=');
+        s.push_str(name);
         s.push('\n');
     }
     if let Some(line) = restore_line(r) {
@@ -725,23 +804,14 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchResult, ResultError> {
                 kind: ResultErrorKind::UnexpectedKey { expected: key },
             })?;
     }
-    // The optional lines, in this order: `method=…`, then `priority_restore=…`; anything
-    // else, or more, is trailing.
+    // The optional lines, in this order: `method=…`, `run=…`, `steam_start=…`, then
+    // `priority_restore=…`; anything else, or more, is trailing.
     let mut restore_at = KEYS.len() + 1;
-    let method = match lines
-        .get(restore_at)
-        .and_then(|l| l.strip_prefix(METHOD_KEY).and_then(|r| r.strip_prefix('=')))
-    {
-        None => None,
-        Some(v) => {
-            let m = parse_method(v).ok_or(ResultError {
-                line: restore_at + 1,
-                kind: ResultErrorKind::BadValue { key: METHOD_KEY },
-            })?;
-            restore_at += 1;
-            Some(m)
-        }
-    };
+    let method = optional(&lines, &mut restore_at, METHOD_KEY, parse_method)?;
+    let run = optional(&lines, &mut restore_at, RUN_KEY, |v| {
+        (v == "yes").then_some(())
+    })?;
+    let steam_start = optional(&lines, &mut restore_at, STEAM_START_KEY, file_name)?;
     let restore = match lines.get(restore_at) {
         None => None,
         Some(l) => {
@@ -800,6 +870,8 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchResult, ResultError> {
         unix_s,
         outcome,
         method,
+        run: run.is_some(),
+        steam_start,
     };
     // Every value parsed; the combination must be one a writer emits: the same bytes back.
     // A restore line on an applied rule is lost above: compare its presence too.
@@ -810,6 +882,28 @@ pub fn decode(bytes: &[u8]) -> Result<LaunchResult, ResultError> {
         return Err(whole(ResultErrorKind::Inconsistent));
     }
     Ok(r)
+}
+
+/// The optional line `key=…` at index `*at` of `lines`, parsed; moves `*at` past it. Absent (or
+/// another key there): `None`. Present with a value `parse` refuses: `BadValue`.
+fn optional<T>(
+    lines: &[&str],
+    at: &mut usize,
+    key: &'static str,
+    parse: impl FnOnce(&str) -> Option<T>,
+) -> Result<Option<T>, ResultError> {
+    let Some(v) = lines
+        .get(*at)
+        .and_then(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix('=')))
+    else {
+        return Ok(None);
+    };
+    let parsed = parse(v).ok_or(ResultError {
+        line: *at + 1,
+        kind: ResultErrorKind::BadValue { key },
+    })?;
+    *at += 1;
+    Ok(Some(parsed))
 }
 
 /// A canonical decimal number: digits only, no sign, no leading zero (`0` alone is allowed),

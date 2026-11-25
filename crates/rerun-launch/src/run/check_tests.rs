@@ -496,9 +496,14 @@ fn exclude_first_from_a_format_2_profile() {
     let mut r = rule(Mode::Hard);
     r.exclude_first = Some(ExcludeFirst::Thread);
     let p = profile(Some(r), None);
-    let bytes = encode(&p).unwrap();
-    assert!(bytes.starts_with(b"rerun-profile 2\n"));
-    let os = fake(&p);
+    // The format-2 bytes an earlier build wrote (today's writer emits format 3).
+    let three = String::from_utf8(encode(&p).unwrap()).unwrap();
+    let two = three
+        .replacen("rerun-profile 3\n", "rerun-profile 2\n", 1)
+        .replacen("run=none\nargs=none\n", "", 1);
+    assert_eq!(rerun_proto::profile::decode(two.as_bytes()).unwrap(), p);
+    let mut os = fake(&p);
+    os.profile = Ok(two.clone().into_bytes());
     let _ = run(&os);
     let want = GroupAffinity {
         group: 0,
@@ -512,6 +517,7 @@ fn exclude_first_from_a_format_2_profile() {
     assert!(matches!(written_one(&os).outcome, Outcome::Applied { .. }));
     // One processor, CPU 0: nothing left after step 4b.
     let mut os = fake(&p);
+    os.profile = Ok(two.into_bytes());
     os.topology = Ok(CpuTopology {
         cpus: vec![LogicalCpu {
             cpu_set_id: 0x100,

@@ -151,6 +151,12 @@ pub fn op(o: &PreviewOp) -> Vec<Message<'_>> {
             out.push(Message::Profile(ProfileMsg::Start {
                 path: s.start.clone(),
             }));
+            if let Some(run) = &s.run {
+                out.push(Message::Profile(ProfileMsg::Run { path: run.clone() }));
+            }
+            if let Some(args) = &s.args {
+                out.push(Message::Profile(ProfileMsg::Args { args: args.clone() }));
+            }
             if s.decoded.method == Method::Watch {
                 out.push(Message::Profile(ProfileMsg::Target {
                     path: s.target.clone(),

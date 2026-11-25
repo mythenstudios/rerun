@@ -47,6 +47,16 @@ pub enum ProfileMsg<'a> {
         /// Its path.
         path: Shown<'a>,
     },
+    /// The program `rerun-launch` starts instead of `start` (profile format 3).
+    Run {
+        /// Its path.
+        path: Shown<'a>,
+    },
+    /// The arguments `rerun-launch` appends (profile format 3; the pattern of `LaunchArg`).
+    Args {
+        /// The arguments, joined by one space.
+        args: Shown<'a>,
+    },
     /// The profile's bytes are no profile of this version (a recorded head).
     Unreadable {
         /// Why (no content).
@@ -239,6 +249,12 @@ impl fmt::Display for ProfileMsg<'_> {
             Self::Priority { class } => write!(f, "     priority {class}"),
             Self::Start { path } => write!(f, "     start {path}"),
             Self::Target { path } => write!(f, "     target {path}"),
+            Self::Run { path } => write!(
+                f,
+                "     run {path} (rerun-launch starts it instead of start; if it cannot, Steam's \
+                 own program starts without the rule)"
+            ),
+            Self::Args { args } => write!(f, "     args {args}"),
             Self::Unreadable { why } => {
                 write!(f, "     not a launch profile of this version: {why}")
             }

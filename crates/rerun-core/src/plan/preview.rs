@@ -232,17 +232,22 @@ pub struct ProfileShown {
     pub method: &'static str,
     /// The program Steam must start for the rule to apply.
     pub start: Shown<'static>,
-    /// The program whose limit is set (`start` for `direct`).
+    /// The program whose limit is set (`direct`: `run` if the profile has one, else `start`).
     pub target: Shown<'static>,
+    /// The program `rerun-launch` starts instead of `start` (profile format 3), if any.
+    pub run: Option<Shown<'static>>,
+    /// The arguments `rerun-launch` appends to the command line it starts, joined by one space
+    /// (profile format 3; the pattern of `LaunchArg` needs no escaping), if any.
+    pub args: Option<Shown<'static>>,
     /// `x86` or `x64`.
     pub bitness: &'static str,
     /// The priority class, if the profile sets one.
     pub priority: Option<&'static str>,
     /// The CPU rule in the words of `docs/02-topo-format.md`, if the profile has one.
     pub cpu: Option<String>,
-    /// `direct` and `start` is not the main executable of root 0 (folded): a launcher; the check
-    /// covers it, not the game (ADR 0022 amendment P3-3). Never for `watch`, which sets the rule
-    /// on the game.
+    /// `direct` and the started program (`run`, else `start`) is not the main executable of
+    /// root 0 (folded): a launcher; the check covers it, not the game (ADR 0022 amendment
+    /// P3-3). Never for `watch`, which sets the rule on the game.
     pub launcher: bool,
     /// `watch` and `start` is `target` (folded): Steam starts the game's own program, so the
     /// search needs a second process of it (a stub that hands over, P3-4 P2).
@@ -447,10 +452,11 @@ fn profile_of(plan: &Plan, path: &crate::path::RelPath, bytes: &[u8]) -> Profile
         Ok(p) => p,
         Err(e) => return ProfilePreview::Unreadable(e.to_string()),
     };
+    let started = p.run.as_deref().unwrap_or(&p.start);
     let launcher = p.method == Method::Direct
         && plan.roots.first().is_some_and(|r| {
             r.main_exe.as_ref().is_some_and(|m| {
-                crate::fold::fold(&format!(r"{}\{m}", r.path)) != crate::fold::fold(&p.start)
+                crate::fold::fold(&format!(r"{}\{m}", r.path)) != crate::fold::fold(started)
             })
         });
     let stub =
@@ -467,6 +473,8 @@ fn profile_of(plan: &Plan, path: &crate::path::RelPath, bytes: &[u8]) -> Profile
         },
         start: escape::path(&p.start).into_owned(),
         target: escape::path(&p.target).into_owned(),
+        run: p.run.as_deref().map(|r| escape::path(r).into_owned()),
+        args: (!p.args.is_empty()).then(|| escape::text(&proto::args_value(&p.args)).into_owned()),
         bitness: match p.bitness {
             Bitness::X86 => "x86",
             Bitness::X64 => "x64",
@@ -947,8 +955,19 @@ impl fmt::Display for Preview {
                         writeln!(f, "     priority {x}")?;
                     }
                     writeln!(f, "     start {}", p.start)?;
+                    if let Some(run) = &p.run {
+                        writeln!(
+                            f,
+                            "     run {run} (rerun-launch starts it instead of start)"
+                        )?;
+                    }
+                    if let Some(args) = &p.args {
+                        writeln!(f, "     args {args}")?;
+                    }
                     // Review N4: the target after the start, as in the CLI (ADR 0016).
-                    if p.target != p.start || p.decoded.method == Method::Watch {
+                    if p.target != p.start && p.run.as_ref() != Some(&p.target)
+                        || p.decoded.method == Method::Watch
+                    {
                         writeln!(f, "     target {}", p.target)?;
                     }
                 }

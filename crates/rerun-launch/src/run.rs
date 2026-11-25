@@ -3,10 +3,20 @@
 //! for the command, pass its exit code on.
 //!
 //! - Fail closed for the rule, fail open for the start (D3): every problem on the way to the
-//!   rule ends in one start of Steam's command **unchanged** (no job, no limit, no priority).
-//! - `lpApplicationName` is always Steam's `argv[0]`, `lpCommandLine` always the raw tail (M2).
+//!   rule ends in one start of Steam's command **unchanged** (no job, no limit, no priority, no
+//!   `run`, no `args`).
+//! - `lpApplicationName` is Steam's `argv[0]`, `lpCommandLine` the raw tail (M2), with exactly
+//!   one exception (ADR 0022 amendment P5-OE): when `argv[0]` is the profile's `start` and the
+//!   profile has `run`, the shim starts `run` with the rule instead: `lpApplicationName` is
+//!   `run`, `lpCommandLine` is `"<run>"` followed by the raw tail after `argv[0]`, byte for
+//!   byte ([`with_run`]). The profile's `args` are appended to that command line after one
+//!   space. A `run` that cannot be started records `run_failed:<code>` and starts Steam's
+//!   command unchanged. Nothing else starts `run`: no profile, an invalid one, `path_mismatch`
+//!   (which records the file name of `argv[0]`, `steam_start`), an elevated shim and every
+//!   other D3 fallback start Steam's command exactly as before.
 //! - An elevated shim reads nothing, sets nothing and writes nothing (M1, B13).
-//! - Error 740 starts the command through `ShellExecuteExW`, without a rule (B2).
+//! - Error 740 starts the program the rule was for (Steam's `argv[0]`, or `run`, with `args`)
+//!   through `ShellExecuteExW`, without a rule (B2).
 //! - Post-launch check (P3-2, docs/04): with the rule applied, the shim waits up to
 //!   [`CHECK_DELAY_MS`] on the running child and then reads what Windows reports: the job's
 //!   group affinity and the process's affinity (hard), the default CPU Sets (soft), the
@@ -24,7 +34,8 @@ use std::borrow::Borrow;
 use rerun_proto::cpu::rule::{Mode, SelectError, select};
 use rerun_proto::launch::{self, AppliedCpu, Check, Ended, LaunchResult, Outcome, SkipReason};
 use rerun_proto::profile::{
-    LaunchProfile, MAX_PROFILE_BYTES, Method, Priority, ProfileError, ProfileId, decode,
+    LaunchArg, LaunchProfile, MAX_PROFILE_BYTES, Method, Priority, ProfileError, ProfileId,
+    args_value, decode,
 };
 
 use crate::cmdline::{self, Command, Usage};
@@ -79,6 +90,9 @@ pub(crate) enum Skip {
     Resume(u32),
     /// `CreateProcessW` reported 740 (`elevation_required`).
     ElevationRequired,
+    /// The profile's `run` could not be started (the job or `CreateProcessW` failed other than
+    /// with 740); Steam's command was started unchanged.
+    RunFailed(u32),
     /// `watch`: no new process of the target appeared before the timeout.
     TargetNotFound,
     /// `watch`: the target runs at a higher integrity level than the shim (M1).
@@ -127,6 +141,7 @@ impl Skip {
             Self::CpuSets(code) => SkipReason::CpuSetsFailed { code: *code },
             Self::Resume(code) => SkipReason::ResumeFailed { code: *code },
             Self::ElevationRequired => SkipReason::ElevationRequired,
+            Self::RunFailed(code) => SkipReason::RunFailed { code: *code },
             Self::TargetNotFound => SkipReason::TargetNotFound,
             Self::TargetElevated => SkipReason::TargetElevated,
             Self::TargetDenied(code) => SkipReason::TargetDenied { code: *code },
@@ -249,16 +264,72 @@ impl Report {
 }
 
 /// The plan for the start, decided before any process exists.
-enum Plan {
-    /// Start with these settings.
+pub(crate) enum Plan {
+    /// Start `launch` with these settings.
     Rule {
         limit: Option<(Limit, Applied)>,
         priority: Option<Priority>,
+        launch: OwnedCommand,
     },
     /// `watch`: start unchanged, then find the target and set the rule there.
     Watch(watch::Watch),
     /// Start unchanged.
     Unchanged(Skip),
+}
+
+/// What the shim starts with the rule (ADR 0022 amendment P5-OE): Steam's command, or the
+/// profile's `run` in its place, with the profile's `args` appended. Built by [`with_run`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnedCommand {
+    /// `lpApplicationName`: Steam's `argv[0]`, or `run`.
+    pub(crate) app: Vec<u16>,
+    /// `lpCommandLine`.
+    pub(crate) line: Vec<u16>,
+    /// `lpParameters` of the `ShellExecuteExW` fallback (B2).
+    pub(crate) parameters: Option<Vec<u16>>,
+    /// `app` is the profile's `run`.
+    pub(crate) run: bool,
+}
+
+/// The command the rule is for (pure): with `run`, `lpApplicationName` is `run` and the command
+/// line `"<run>"` followed by the raw tail after Steam's `argv[0]` (from right after its closing
+/// quote, or from the blank that ended it), byte for byte; without, Steam's command as it is.
+/// `args` (no quote, space or `%`, `rerun_proto::profile::LaunchArg`) follow after one space,
+/// on the command line and on the parameters of the 740 fallback.
+pub(crate) fn with_run(cmd: &Command<'_>, run: Option<&str>, args: &[LaunchArg]) -> OwnedCommand {
+    let (app, mut line) = match run {
+        Some(run) => {
+            let run: Vec<u16> = run.encode_utf16().collect();
+            let (_, rest) = cmdline::split_argv0(cmd.tail);
+            let mut line = Vec::with_capacity(run.len() + 2 + rest.len());
+            line.push(u16::from(b'"'));
+            line.extend_from_slice(&run);
+            line.push(u16::from(b'"'));
+            line.extend_from_slice(rest);
+            (run, line)
+        }
+        None => (cmd.app.to_vec(), cmd.tail.to_vec()),
+    };
+    let mut parameters = cmd.parameters.map(<[u16]>::to_vec);
+    if !args.is_empty() {
+        let args: Vec<u16> = args_value(args).encode_utf16().collect();
+        line.push(u16::from(b' '));
+        line.extend_from_slice(&args);
+        parameters = Some(match parameters {
+            Some(mut p) => {
+                p.push(u16::from(b' '));
+                p.extend_from_slice(&args);
+                p
+            }
+            None => args,
+        });
+    }
+    OwnedCommand {
+        app,
+        line,
+        parameters,
+        run: run.is_some(),
+    }
 }
 
 /// The CPU limit of a plan.
@@ -268,7 +339,6 @@ pub(crate) enum Limit {
 }
 
 /// Who may write the result file of this run.
-#[derive(Clone, Copy)]
 struct Ctx {
     /// The profile ID, if the token is one.
     id: Option<ProfileId>,
@@ -276,6 +346,8 @@ struct Ctx {
     elevated: bool,
     /// The profile's method, once the profile decoded (the result's `method=` line).
     method: Option<Method>,
+    /// `path_mismatch` only: the file name of Steam's `argv[0]` (S5), if it is a valid one.
+    steam_start: Option<String>,
 }
 
 /// What one run started and recorded, before the wait.
@@ -290,6 +362,8 @@ struct Done<C> {
     exit: u32,
     /// `watch`: putting the target's priority class back failed with this code (A4).
     restore: Option<u32>,
+    /// The started program is the profile's `run` (the result's `run=yes`).
+    run: bool,
 }
 
 /// The shim's whole run on `os`.
@@ -311,21 +385,33 @@ pub(crate) fn run<O: Os>(os: &O) -> Report {
             Err(skip) => (Plan::Unchanged(skip), None),
         }
     };
+    // S5: what Steam started instead, as a file name only (the folder never leaves the shim).
+    let steam_start = match &plan {
+        Plan::Unchanged(Skip::PathMismatch) => String::from_utf16(cmd.app)
+            .ok()
+            .and_then(|a| launch::steam_start_name(&a)),
+        _ => None,
+    };
     let ctx = Ctx {
         id,
         elevated,
         method,
+        steam_start,
     };
     let done = match plan {
         Plan::Unchanged(skip) => unchanged(os, &cmd, skip, None),
-        Plan::Rule { limit, priority } => with_rule(os, &cmd, limit, priority),
+        Plan::Rule {
+            limit,
+            priority,
+            launch,
+        } => with_rule(os, &cmd, &launch, limit, priority),
         Plan::Watch(w) => watch::start(os, &cmd, &w),
     };
-    finish(os, ctx, done)
+    finish(os, &ctx, done)
 }
 
 /// Records the run (B13: never when elevated), then waits for the child (B3).
-fn finish<O: Os>(os: &O, ctx: Ctx, done: Done<O::Child>) -> Report {
+fn finish<O: Os>(os: &O, ctx: &Ctx, done: Done<O::Child>) -> Report {
     let written = record(os, ctx, &done);
     let (start, exit) = match done.child {
         None => (done.start, done.exit),
@@ -347,7 +433,7 @@ fn finish<O: Os>(os: &O, ctx: Ctx, done: Done<O::Child>) -> Report {
 }
 
 /// Writes the result file of `done`, if this run may write one.
-fn record<O: Os, C>(os: &O, ctx: Ctx, done: &Done<C>) -> Written {
+fn record<O: Os, C>(os: &O, ctx: &Ctx, done: &Done<C>) -> Written {
     if ctx.elevated {
         return Written::No;
     }
@@ -382,6 +468,8 @@ fn record<O: Os, C>(os: &O, ctx: Ctx, done: &Done<C>) -> Written {
         unix_s: os.now_unix_s(),
         outcome,
         method: ctx.method,
+        run: done.run,
+        steam_start: ctx.steam_start.clone(),
     };
     let Ok(bytes) = launch::encode(&result) else {
         return Written::Failed(OsError::Encode);
@@ -404,8 +492,10 @@ fn profile<O: Os>(os: &O, id: Option<ProfileId>) -> Result<LaunchProfile, Skip> 
     decode(&bytes).map_err(|e| Skip::ProfileInvalid(Some(e)))
 }
 
-/// Checks the start path, reads the topology and selects the processors.
-fn decide<O: Os>(os: &O, cmd: &Command<'_>, profile: &LaunchProfile) -> Plan {
+/// Checks the start path, reads the topology and selects the processors. The gate of `run` is
+/// the gate of the rule: `argv[0]` equals `start` (ADR 0022 amendment P5-OE); a profile with
+/// `run` or `args` is `direct` (the codec refuses them with `watch`).
+pub(crate) fn decide<O: Os>(os: &O, cmd: &Command<'_>, profile: &LaunchProfile) -> Plan {
     if !os.same_path(cmd.app, &profile.start) {
         return Plan::Unchanged(Skip::PathMismatch);
     }
@@ -417,6 +507,7 @@ fn decide<O: Os>(os: &O, cmd: &Command<'_>, profile: &LaunchProfile) -> Plan {
         Method::Direct => Plan::Rule {
             limit,
             priority: profile.priority,
+            launch: with_run(cmd, profile.run.as_deref(), &profile.args),
         },
         Method::Watch => Plan::Watch(watch::Watch::new(profile, limit)),
     }
@@ -450,11 +541,12 @@ fn limit_of<O: Os>(os: &O, profile: &LaunchProfile) -> Result<Option<(Limit, App
     Ok(Some((limit, applied)))
 }
 
-/// Starts with the profile's settings and checks them; any failure before the resume ends in
-/// one unchanged start.
+/// Starts `launch` with the profile's settings and checks them; any failure before the resume
+/// ends in one unchanged start of Steam's command `cmd` (also when `launch` is `run`).
 fn with_rule<O: Os>(
     os: &O,
     cmd: &Command<'_>,
+    launch: &OwnedCommand,
     limit: Option<(Limit, Applied)>,
     priority: Option<Priority>,
 ) -> Done<O::Child> {
@@ -484,11 +576,21 @@ fn with_rule<O: Os>(
             Some(*a),
         ),
     };
-    let child = match os.spawn(cmd.app, cmd.tail, &spawn) {
+    let child = match os.spawn(&launch.app, &launch.line, &spawn) {
         Ok(c) => c,
         Err(ERROR_ELEVATION_REQUIRED) => {
-            return shell(os, cmd, Rule::Skipped(Skip::ElevationRequired), None);
+            let mut done = shell_with(
+                os,
+                &launch.app,
+                launch.parameters.as_deref(),
+                Rule::Skipped(Skip::ElevationRequired),
+                None,
+            );
+            done.run = launch.run;
+            return done;
         }
+        // A `run` that cannot be started: Steam's command, unchanged (no rule, no `args`).
+        Err(code) if launch.run => return unchanged(os, cmd, Skip::RunFailed(code), None),
         Err(code) => return unchanged(os, cmd, Skip::Spawn(code), None),
     };
     let prepared = match &limit {
@@ -519,6 +621,7 @@ fn with_rule<O: Os>(
         child: Some(child),
         exit: 0,
         restore: None,
+        run: launch.run,
     }
 }
 
@@ -620,6 +723,7 @@ fn unchanged<O: Os>(
             child: Some(child),
             exit: 0,
             restore: None,
+            run: false,
         },
         Err(ERROR_ELEVATION_REQUIRED) => shell(os, cmd, rule, terminated),
         Err(code) => Done {
@@ -630,6 +734,7 @@ fn unchanged<O: Os>(
             child: None,
             exit: EXIT_NOT_STARTED,
             restore: None,
+            run: false,
         },
     }
 }
@@ -641,8 +746,19 @@ fn shell<O: Os>(
     rule: Rule,
     terminated: Option<Terminated>,
 ) -> Done<O::Child> {
-    let (start, child, exit) = if cmdline::ends_with_exe(cmd.app) {
-        match os.shell_execute(cmd.app, cmd.parameters) {
+    shell_with(os, cmd.app, cmd.parameters, rule, terminated)
+}
+
+/// B2 for `file` with `parameters`: Steam's, or the command the rule was for (`run`, `args`).
+fn shell_with<O: Os>(
+    os: &O,
+    file: &[u16],
+    parameters: Option<&[u16]>,
+    rule: Rule,
+    terminated: Option<Terminated>,
+) -> Done<O::Child> {
+    let (start, child, exit) = if cmdline::ends_with_exe(file) {
+        match os.shell_execute(file, parameters) {
             Ok(Some(child)) => (Start::ShellExecuted, Some(child), 0),
             Ok(None) => (Start::ShellWithoutProcess, None, 0),
             Err(code) => (Start::Failed(code), None, EXIT_NOT_STARTED),
@@ -658,6 +774,7 @@ fn shell<O: Os>(
         child,
         exit,
         restore: None,
+        run: false,
     }
 }
 
@@ -665,6 +782,8 @@ pub(crate) mod watch;
 
 #[cfg(test)]
 mod check_tests;
+#[cfg(test)]
+mod run_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

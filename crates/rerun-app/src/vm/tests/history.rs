@@ -177,6 +177,8 @@ fn entry(file: ProfileId, outcome: Outcome, method: Option<ProfileMethod>) -> La
             unix_s: 1_762_600_000,
             outcome,
             method,
+            run: false,
+            steam_start: None,
         }),
     }
 }

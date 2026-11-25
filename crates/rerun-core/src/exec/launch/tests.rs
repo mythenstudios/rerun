@@ -28,6 +28,8 @@ fn ok(b: u8) -> LaunchResult {
             check: Check::Ok,
         },
         method: None,
+        run: false,
+        steam_start: None,
     }
 }
 
@@ -66,6 +68,8 @@ fn results_are_read_by_id_and_temps_skipped() {
             priority_restore: None,
         },
         method: None,
+        run: false,
+        steam_start: None,
     };
     let sys = base()
         .file(file_of(0xbb), encode(&ok(0xbb)).unwrap())
@@ -86,7 +90,7 @@ fn results_are_read_by_id_and_temps_skipped() {
 #[test]
 fn every_bad_file_is_one_unreadable_entry() {
     let mut big = encode(&ok(0x05)).unwrap();
-    big.resize(1025, b'x');
+    big.resize(rerun_proto::launch::MAX_RESULT_BYTES + 1, b'x');
     let sys = base()
         // Garbage, a result naming another profile, an oversize file.
         .file(file_of(0x02), b"rerun-result 1\n\x1b[31m\n".to_vec())
@@ -109,7 +113,7 @@ fn every_bad_file_is_one_unreadable_entry() {
     assert!(why[0].starts_with("launch result line 2: "), "{why:?}");
     assert!(!why[0].contains('\x1b'));
     assert_eq!(why[1], "it names another profile than its file name");
-    assert_eq!(why[2], "larger than 1024 bytes");
+    assert_eq!(why[2], "larger than 2048 bytes");
     assert_eq!(why[3], "a link (not followed)");
     assert_eq!(why[4], "a folder, not a file");
     assert_eq!(why[5], "access denied");

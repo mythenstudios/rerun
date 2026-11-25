@@ -1283,6 +1283,8 @@ pub fn plan(
                         start: lp.start.clone(),
                         cpu: Some(*cpu),
                         priority: topo.launch.as_ref().and_then(|l| l.priority),
+                        run: None,
+                        args: Vec::new(),
                     }));
                 }
                 TopoStep::RegistrySet(r) => steps.push(Step::RegistrySet(r.clone())),

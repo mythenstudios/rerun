@@ -99,6 +99,14 @@ pub enum LaunchMsg<'a> {
         /// `method=watch`, a reason only `watch` writes, or a priority restore line.
         watch: bool,
     },
+    /// `run=yes` (P5-OE): rerun-launch started the profile's `run` instead of Steam's program.
+    StartedRun,
+    /// `steam_start` (P5-OE, `path_mismatch`): the file name of the program Steam started,
+    /// untrusted (escaped).
+    SteamStarted {
+        /// The name.
+        name: Shown<'a>,
+    },
     /// `watch` (A4): the priority class set on the game could not be put back.
     PriorityNotRestored {
         /// Win32 error code.
@@ -195,6 +203,7 @@ fn why(reason: SkipReason, restore: Option<u32>, watch: bool) -> Option<String> 
         SkipReason::JobIneffective => format!("the game process joined the job but kept another limit (a job it was already in, e.g. a launcher's); the job stays without effect until the game exits{put_back}"),
         SkipReason::ReadBackFailed { code } if watch => format!("the game process joined a job with the selection, but it could not be read back (Win32 error {code}); the limit may apply until the game exits{put_back}"),
         SkipReason::MethodUnsupported => "written by an older rerun-launch without method watch".to_owned(),
+        SkipReason::RunFailed { code } => format!("the program the profile names instead of Steam's could not be started (Win32 error {code}); Steam's own program started without the rule"),
         _ => return None,
     })
 }
@@ -318,6 +327,13 @@ impl fmt::Display for LaunchMsg<'_> {
             Self::OptionStillSetForgotten { id } => write!(
                 f,
                 "    the launch option with --profile {id} was still set in Steam at that start; a forgotten transaction left a profile of this ID and it was missing then: remove the launch option"
+            ),
+            Self::StartedRun => f.write_str(
+                "    rerun-launch started the program the profile names (run) instead of the one Steam starts",
+            ),
+            Self::SteamStarted { name } => write!(
+                f,
+                "    Steam started {name}, not the program the profile names as its start"
             ),
             Self::PriorityNotRestored { code } => write!(
                 f,

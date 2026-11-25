@@ -125,7 +125,7 @@ pub(super) fn fence(plan: &Plan, rules: Rules) -> Result<(), PlanError> {
                 ));
             }
             if bytes.len() > MAX_INLINE_BYTES {
-                return Err(invalid(Some(k), "inline content larger than 2 KiB"));
+                return Err(invalid(Some(k), "inline content larger than 4 KiB"));
             }
             if <[u8; 32]>::from(Sha256::digest(bytes)) != *sha256 {
                 return Err(invalid(

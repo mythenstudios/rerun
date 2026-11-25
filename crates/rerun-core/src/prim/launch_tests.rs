@@ -111,6 +111,8 @@ fn spec(start: &str) -> LaunchMethodSpec {
             ..CpuRuleSpec::default()
         }),
         priority: None,
+        run: None,
+        args: Vec::new(),
     }
 }
 
@@ -184,7 +186,7 @@ fn lp1_a_launcher_entry_with_an_i386_game_or_launcher_is_x86() {
     };
     assert_eq!(
         std::str::from_utf8(bytes).unwrap(),
-        "rerun-profile 1\n\
+        "rerun-profile 3\n\
          method=direct\n\
          start=D:\\SteamLibrary\\steamapps\\common\\G\\FFLauncher.exe\n\
          target=D:\\SteamLibrary\\steamapps\\common\\G\\FFLauncher.exe\n\
@@ -197,7 +199,10 @@ fn lp1_a_launcher_entry_with_an_i386_game_or_launcher_is_x86() {
          cpu.prefer_l3=none\n\
          cpu.smt=false\n\
          cpu.mode=hard\n\
-         cpu.max_threads=8\n"
+         cpu.max_threads=8\n\
+         cpu.exclude_first=none\n\
+         run=none\n\
+         args=none\n"
     );
     assert_eq!(WATCH_TIMEOUT_S, 120);
     // Start = main executable: soft and priority allowed.
@@ -237,9 +242,9 @@ fn lp2_every_refusal_of_the_planner() {
             "report_cores",
         ),
         (
-            "neither cpu nor priority",
+            "none of cpu, priority, run, args",
             |s| s.cpu = None,
-            "neither cpu nor priority",
+            "none of cpu, priority, run and args",
         ),
         (
             "cpu {}",
@@ -675,6 +680,8 @@ fn profile(rule: CpuRuleSpec, bitness: Bitness) -> LaunchProfile {
         priority: None,
         watch_timeout_s: WATCH_TIMEOUT_S,
         cpu: Some(rule.rule().unwrap()),
+        run: None,
+        args: Vec::new(),
     }
 }
 
@@ -851,7 +858,7 @@ fn lw1_watch_targets_the_main_executable_with_soft_and_priority_allowed() {
     };
     assert_eq!(
         std::str::from_utf8(bytes).unwrap(),
-        "rerun-profile 1\n\
+        "rerun-profile 3\n\
          method=watch\n\
          start=D:\\SteamLibrary\\steamapps\\common\\G\\FFLauncher.exe\n\
          target=D:\\SteamLibrary\\steamapps\\common\\G\\game.exe\n\
@@ -864,7 +871,10 @@ fn lw1_watch_targets_the_main_executable_with_soft_and_priority_allowed() {
          cpu.prefer_l3=none\n\
          cpu.smt=false\n\
          cpu.mode=soft\n\
-         cpu.max_threads=8\n"
+         cpu.max_threads=8\n\
+         cpu.exclude_first=none\n\
+         run=none\n\
+         args=none\n"
     );
     // The same file as `direct` (P6): one profile per app.
     let Op::CreateFile { path, .. } = &p.ops[0] else {
@@ -1088,16 +1098,16 @@ fn spec_excl(e: ExcludeFirstSpec) -> LaunchMethodSpec {
 }
 
 #[test]
-fn lx1_exclude_first_writes_format_2_and_a_revert_restores_the_format_1_bytes() {
+fn lx1_exclude_first_is_written_as_format_3_and_a_revert_restores_the_first_profile() {
     let env = Env::new(lp_sys(&pe_x86(), &pe_x86()));
     env.sys.fake_fs().mkdir_all(Path::new(PROFILES)).unwrap();
     let before = snap_all(&env.sys);
-    // A format-1 profile first.
+    // A profile without exclude_first first.
     let t1 = env.applied(&stored(&env, &one(spec("FFLauncher.exe"))));
     let name = format!(r"{PROFILES}\{}", profile_file(profile_id(220)));
     let v1 = try_read_abs(&env.sys, &name).unwrap();
-    assert!(v1.starts_with(b"rerun-profile 1\n"));
-    // The same rule with `exclude_first: thread` replaces it with format 2.
+    assert!(v1.ends_with(b"cpu.exclude_first=none\nrun=none\nargs=none\n"));
+    // The same rule with `exclude_first: thread` replaces it.
     let p = plan_lm(
         &env.sys,
         &one(spec_excl(ExcludeFirstSpec::Thread)),
@@ -1125,8 +1135,8 @@ fn lx1_exclude_first_writes_format_2_and_a_revert_restores_the_format_1_bytes() 
     let t2 = env.applied(&store(&app(&env.sys), &p.encode().unwrap()).unwrap());
     assert_eq!(env.verify(&t2), [(0, Observed::After)]);
     let v2 = try_read_abs(&env.sys, &name).unwrap();
-    assert!(v2.starts_with(b"rerun-profile 2\n"));
-    assert!(v2.ends_with(b"cpu.max_threads=8\ncpu.exclude_first=thread\n"));
+    assert!(v2.starts_with(b"rerun-profile 3\n"));
+    assert!(v2.ends_with(b"cpu.max_threads=8\ncpu.exclude_first=thread\nrun=none\nargs=none\n"));
     // The same rule again: nothing to do.
     let p = plan_lm(
         &env.sys,
@@ -1135,7 +1145,7 @@ fn lx1_exclude_first_writes_format_2_and_a_revert_restores_the_format_1_bytes() 
     )
     .unwrap();
     assert!(p.ops.is_empty(), "{:?}", p.ops);
-    // Revert the format-2 profile: exactly the format-1 bytes, which the shim's reader takes.
+    // Revert the second profile: exactly the first one's bytes, which the shim's reader takes.
     assert_eq!(env.revert(&t2).unwrap().closed, Some(Closing::Reverted));
     let back = try_read_abs(&env.sys, &name).unwrap();
     assert_eq!(back, v1);
@@ -1149,11 +1159,11 @@ fn lx1_exclude_first_writes_format_2_and_a_revert_restores_the_format_1_bytes() 
         "{:#?}",
         before.diff(&snap_all(&env.sys))
     );
-    // A format-2 profile alone (`core`): apply → verify → revert → identical.
+    // A profile with `core` alone: apply → verify → revert → identical.
     let t = env.applied(&stored(&env, &one(spec_excl(ExcludeFirstSpec::Core))));
     assert_eq!(env.verify(&t), [(0, Observed::After)]);
     let bytes = try_read_abs(&env.sys, &name).unwrap();
-    assert!(bytes.ends_with(b"cpu.exclude_first=core\n"));
+    assert!(bytes.ends_with(b"cpu.exclude_first=core\nrun=none\nargs=none\n"));
     assert_eq!(env.revert(&t).unwrap().closed, Some(Closing::Reverted));
     assert!(
         before == snap_all(&env.sys),
@@ -1260,4 +1270,357 @@ fn lx3_exclude_first_on_this_machine() {
         "{:?}",
         v.selection
     );
+}
+
+// ---------- LR (P5-OE, O-2a): `run` and `args`, profile format 3 ----------
+
+/// `game.exe` (x64) as `run` of the launcher entry `FFLauncher.exe` (x86), with `args`.
+fn run_spec(run: &str, args: &[&str]) -> LaunchMethodSpec {
+    LaunchMethodSpec {
+        run: Some(rel(run)),
+        args: args
+            .iter()
+            .map(|a| super::LaunchArgText::parse(a).unwrap())
+            .collect(),
+        ..spec("FFLauncher.exe")
+    }
+}
+
+#[test]
+fn lr1_run_is_the_target_and_alone_decides_the_bitness() {
+    // An x86 launcher, an x64 game: with run the rule reaches only the game, so x64.
+    let sys = lp_sys(&pe_x64(), &pe_x86());
+    let p = plan_lm(
+        &sys,
+        &one(run_spec("GAME.exe", &["-skipintro"])),
+        "game.exe",
+    )
+    .unwrap();
+    let Some(ContentRef::Inline { bytes, .. }) = p.ops[0].content() else {
+        panic!("{:?}", p.ops[0])
+    };
+    assert_eq!(
+        std::str::from_utf8(bytes).unwrap(),
+        "rerun-profile 3\n\
+         method=direct\n\
+         start=D:\\SteamLibrary\\steamapps\\common\\G\\FFLauncher.exe\n\
+         target=D:\\SteamLibrary\\steamapps\\common\\G\\game.exe\n\
+         bitness=x64\n\
+         priority=none\n\
+         watch_timeout_s=120\n\
+         cpu=rule\n\
+         cpu.prefer=any\n\
+         cpu.single_l3=true\n\
+         cpu.prefer_l3=none\n\
+         cpu.smt=false\n\
+         cpu.mode=hard\n\
+         cpu.max_threads=8\n\
+         cpu.exclude_first=none\n\
+         run=D:\\SteamLibrary\\steamapps\\common\\G\\game.exe\n\
+         args=-skipintro\n"
+    );
+    // The start's image is not read with run (a start that is no PE image is fine).
+    let mut s = run_spec("game.exe", &[]);
+    s.start = rel("text.exe");
+    let pr = profile_of(&plan_lm(&sys, &one(s), "game.exe").unwrap());
+    assert_eq!(pr.bitness, Bitness::X64);
+    // run is the game: soft and priority reach it (F5 asks the started program).
+    let mut s = run_spec("game.exe", &[]);
+    s.priority = Some(PrioritySpec::High);
+    if let Some(c) = &mut s.cpu {
+        c.mode = Some(ModeSpec::Soft);
+    }
+    let pr = profile_of(&plan_lm(&sys, &one(s), "game.exe").unwrap());
+    assert_eq!(pr.priority, Some(rerun_proto::profile::Priority::High));
+    // The preview names run and args, and the launcher note follows the started program.
+    let (pv, shown) = shown_of(
+        &plan_lm(
+            &sys,
+            &one(run_spec("game.exe", &["-a", "+b=1"])),
+            "game.exe",
+        )
+        .unwrap(),
+    );
+    assert!(!shown.launcher);
+    let text = pv.to_string();
+    assert!(
+        text.contains(r"run D:\SteamLibrary\steamapps\common\G\game.exe (rerun-launch starts it"),
+        "{text}"
+    );
+    assert!(text.contains("args -a +b=1"), "{text}");
+    // run alone (no rule, no priority) is a profile too; so are args alone.
+    let mut s = run_spec("game.exe", &[]);
+    s.cpu = None;
+    let pr = profile_of(&plan_lm(&sys, &one(s), "game.exe").unwrap());
+    assert!(pr.cpu.is_none() && pr.run.is_some());
+    let mut s = run_spec("game.exe", &["-dx9"]);
+    s.cpu = None;
+    s.run = None;
+    let pr = profile_of(&plan_lm(&sys, &one(s), "game.exe").unwrap());
+    assert!(pr.cpu.is_none() && pr.run.is_none());
+    assert_eq!(proto::args_value(&pr.args), "-dx9");
+    assert_eq!(pr.target, pr.start);
+}
+
+#[test]
+fn lr2_every_refusal_of_run_and_args() {
+    let sys = lp_sys(&pe_x64(), &pe_x86());
+    put(&sys, &game(r"bin\sub.exe"), &pe_x64());
+    let e = |s: LaunchMethodSpec| {
+        plan_lm(&sys, &one(s), "game.exe")
+            .expect_err("refused")
+            .to_string()
+    };
+    let with = |f: fn(&mut LaunchMethodSpec)| {
+        let mut s = run_spec("game.exe", &["-dx9"]);
+        f(&mut s);
+        s
+    };
+    for (what, s, want) in [
+        (
+            "run with watch",
+            with(|s| {
+                s.method = MethodSpec::Watch;
+                s.args.clear();
+            }),
+            "run and args need method direct",
+        ),
+        (
+            "args with watch",
+            with(|s| {
+                s.method = MethodSpec::Watch;
+                s.run = None;
+            }),
+            "run and args need method direct",
+        ),
+        (
+            "run = start",
+            with(|s| s.run = Some(rel("FFLauncher.exe"))),
+            "is the program Steam starts",
+        ),
+        (
+            "run = start, other case",
+            with(|s| s.run = Some(rel("fflauncher.EXE"))),
+            "is the program Steam starts",
+        ),
+        (
+            "run in a sub-folder",
+            with(|s| s.run = Some(rel(r"bin\sub.exe"))),
+            "not in the folder of start",
+        ),
+        (
+            "run missing",
+            with(|s| s.run = Some(rel("nope.exe"))),
+            "missing",
+        ),
+        (
+            "run no .exe",
+            with(|s| s.run = Some(rel("readme.txt"))),
+            "not an .exe",
+        ),
+        (
+            "run a folder",
+            with(|s| s.run = Some(rel("dir.exe"))),
+            "not a plain file",
+        ),
+        (
+            "run ARM64",
+            with(|s| s.run = Some(rel("arm.exe"))),
+            "neither x86 nor x64",
+        ),
+        (
+            "run no PE",
+            with(|s| s.run = Some(rel("text.exe"))),
+            "no Windows executable",
+        ),
+        (
+            "nine args",
+            with(|s| {
+                s.args = (0..9)
+                    .map(|i| super::LaunchArgText::parse(&format!("-a{i}")).unwrap())
+                    .collect();
+            }),
+            "more than 8 args",
+        ),
+        (
+            "args over 512 bytes",
+            with(|s| {
+                let a = format!("-{}", "a".repeat(63));
+                s.args = vec![super::LaunchArgText::parse(&a).unwrap(); 8];
+            }),
+            "longer than 512 bytes",
+        ),
+    ] {
+        let got = e(s);
+        assert!(got.contains(want), "{what}: {got}");
+    }
+    // run other than the main executable: F5 for the started program.
+    put(&sys, &game("other.exe"), &pe_x64());
+    let mut s = run_spec("other.exe", &[]);
+    s.priority = Some(PrioritySpec::Normal);
+    let got = e(s);
+    assert!(
+        got.contains("rerun-launch starts other.exe, not the game game.exe"),
+        "{got}"
+    );
+    // A start in a sub-folder with run next to it is fine (the same folder).
+    put(&sys, &game(r"bin\launch.exe"), &pe_x86());
+    let mut s = run_spec(r"bin\sub.exe", &[]);
+    s.start = rel(r"bin\launch.exe");
+    let pr = profile_of(&plan_lm(&sys, &one(s), r"bin\sub.exe").unwrap());
+    assert!(pr.run.unwrap().ends_with(r"\G\bin\sub.exe"));
+    // Arguments outside the pattern never reach a step (the step file refuses them).
+    for bad in [
+        r#""dx9""#,
+        r#""-a b""#,
+        r#""-%x%""#,
+        r#""-\"x\"""#,
+        r#""""#,
+        "1",
+    ] {
+        let sf = format!(
+            r#"{{"format":1,"game":{{"steam":220}},"main_exe":"game.exe","steps":[{{"launch_method":{{"method":"direct","start":"FFLauncher.exe","run":"game.exe","args":[{bad}]}}}}]}}"#
+        );
+        assert!(super::StepFile::parse(sf.as_bytes()).is_err(), "{bad}");
+    }
+    let sf = r#"{"format":1,"game":{"steam":220},"main_exe":"game.exe","steps":[{"launch_method":{"method":"direct","start":"FFLauncher.exe","run":"game.exe","args":["-dx9","+x=1"]}}]}"#;
+    let f = super::StepFile::parse(sf.as_bytes()).unwrap();
+    assert!(
+        matches!(&f.steps[0], Step::LaunchMethod(s) if s.run.as_ref().map(|r| r.as_str()) == Some("game.exe") && s.args.len() == 2)
+    );
+    // A step without run and args keeps its bytes (both are left out when not given).
+    let json = serde_json::to_string(&spec("FFLauncher.exe")).unwrap();
+    assert!(!json.contains("run") && !json.contains("args"), "{json}");
+}
+
+#[test]
+fn lr3_the_largest_profile_is_planned_within_the_op_budget() {
+    // S3: start and run of 259 UTF-16 units of non-ASCII names, 512 bytes of args: above the
+    // old 2 KiB inline limit, within 4 KiB, and the op within MAX_OP_BYTES.
+    let sys = lp_sys(&pe_x86(), &pe_x86());
+    let prefix = game("").encode_utf16().count();
+    let name = |c: &str| {
+        let n = crate::plan::MAX_EXE_PATH_UNITS - prefix - c.len() - 4;
+        format!("{}{c}.exe", "名".repeat(n))
+    };
+    let (start, run) = (name("s"), name("r"));
+    assert_eq!(
+        game(&start).encode_utf16().count(),
+        crate::plan::MAX_EXE_PATH_UNITS
+    );
+    put(&sys, &game(&start), &pe_x86());
+    put(&sys, &game(&run), &pe_x86());
+    let mut args = vec![format!("-{}", "a".repeat(63)); 7];
+    args.push(format!("-{}", "b".repeat(56)));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut s = run_spec(&run, &args);
+    s.start = rel(&start);
+    let p = plan_lm(&sys, &one(s), &run).unwrap();
+    let Some(ContentRef::Inline { bytes, .. }) = p.ops[0].content() else {
+        panic!("{:?}", p.ops[0])
+    };
+    assert!(
+        bytes.len() > 2 << 10 && bytes.len() <= crate::plan::MAX_INLINE_BYTES,
+        "{}",
+        bytes.len()
+    );
+    let op = serde_json::to_vec(&p.ops[0]).unwrap().len();
+    assert!(op <= crate::plan::MAX_OP_BYTES, "{op}");
+    // Encoded and decoded as a whole plan.
+    let enc = p.encode().unwrap();
+    assert_eq!(crate::plan::decode(enc.bytes()).unwrap(), p);
+}
+
+#[test]
+fn lr4_a_profile_with_run_and_args_round_trips() {
+    let env = Env::new(lp_sys(&pe_x64(), &pe_x86()));
+    env.sys.fake_fs().mkdir_all(Path::new(PROFILES)).unwrap();
+    let before = snap_all(&env.sys);
+    let t = env.applied(&stored(&env, &one(run_spec("game.exe", &["-dx9"]))));
+    assert_eq!(env.verify(&t), [(0, Observed::After)]);
+    let name = format!(r"{PROFILES}\{}", profile_file(profile_id(220)));
+    let p = proto::decode(&try_read_abs(&env.sys, &name).unwrap()).unwrap();
+    assert!(p.run.is_some());
+    assert_eq!(env.revert(&t).unwrap().closed, Some(Closing::Reverted));
+    assert!(
+        before == snap_all(&env.sys),
+        "{:#?}",
+        before.diff(&snap_all(&env.sys))
+    );
+}
+
+#[test]
+fn lr5_a_format_1_profile_is_replaced_once_and_restored_bit_for_bit() {
+    // T1 as an earlier build wrote it: the same rule as format 1 bytes.
+    let env = Env::new(lp_sys(&pe_x86(), &pe_x86()));
+    env.sys.fake_fs().mkdir_all(Path::new(PROFILES)).unwrap();
+    let before = snap_all(&env.sys);
+    let mut p1 = plan_lm(&env.sys, &one(spec("FFLauncher.exe")), "game.exe").unwrap();
+    let Some(ContentRef::Inline { bytes, .. }) = p1.ops[0].content() else {
+        panic!("{:?}", p1.ops[0])
+    };
+    let three = String::from_utf8(bytes.clone()).unwrap();
+    let one_bytes = three
+        .replacen("rerun-profile 3\n", "rerun-profile 1\n", 1)
+        .replacen("cpu.exclude_first=none\nrun=none\nargs=none\n", "", 1)
+        .into_bytes();
+    assert_eq!(
+        proto::decode(&one_bytes).unwrap(),
+        proto::decode(bytes).unwrap()
+    );
+    let Op::CreateFile { content, .. } = &mut p1.ops[0] else {
+        panic!()
+    };
+    *content = ContentRef::Inline {
+        sha256: <sha2::Sha256 as sha2::Digest>::digest(&one_bytes).into(),
+        bytes: one_bytes.clone(),
+    };
+    let t1 = env.applied(&store(&app(&env.sys), &p1.encode().unwrap()).unwrap());
+    let name = format!(r"{PROFILES}\{}", profile_file(profile_id(220)));
+    assert_eq!(try_read_abs(&env.sys, &name), Some(one_bytes.clone()));
+    // The same rule planned today: format 3, one replace of the format-1 file.
+    let p2 = plan_lm(&env.sys, &one(spec("FFLauncher.exe")), "game.exe").unwrap();
+    assert!(
+        matches!(&p2.ops[0], Op::ReplaceFile { .. }),
+        "{:?}",
+        p2.ops[0]
+    );
+    let t2 = env.applied(&store(&app(&env.sys), &p2.encode().unwrap()).unwrap());
+    assert_eq!(try_read_abs(&env.sys, &name), Some(three.into_bytes()));
+    // Then nothing to do.
+    let p3 = plan_lm(&env.sys, &one(spec("FFLauncher.exe")), "game.exe").unwrap();
+    assert!(p3.ops.is_empty(), "{:?}", p3.ops);
+    // Revert: the format-1 bytes exactly, then nothing.
+    assert_eq!(env.revert(&t2).unwrap().closed, Some(Closing::Reverted));
+    assert_eq!(try_read_abs(&env.sys, &name), Some(one_bytes));
+    assert_eq!(env.revert(&t1).unwrap().closed, Some(Closing::Reverted));
+    assert!(
+        before == snap_all(&env.sys),
+        "{:#?}",
+        before.diff(&snap_all(&env.sys))
+    );
+}
+
+#[test]
+fn lr6_the_fence_refuses_a_run_outside_the_game_folder() {
+    let sys = lp_sys(&pe_x64(), &pe_x86());
+    let mut p = plan_lm(&sys, &one(run_spec("game.exe", &[])), "game.exe").unwrap();
+    let Some(ContentRef::Inline { bytes, .. }) = p.ops[0].content() else {
+        panic!("{:?}", p.ops[0])
+    };
+    // start, target and run moved together to another folder: a valid profile, not this game's.
+    let moved = String::from_utf8(bytes.clone())
+        .unwrap()
+        .replace(r"D:\SteamLibrary\steamapps\common\G\", r"D:\Elsewhere\")
+        .into_bytes();
+    assert!(proto::decode(&moved).is_ok());
+    let Op::CreateFile { content, .. } = &mut p.ops[0] else {
+        panic!()
+    };
+    *content = ContentRef::Inline {
+        sha256: <sha2::Sha256 as sha2::Digest>::digest(&moved).into(),
+        bytes: moved,
+    };
+    let e = p.encode().unwrap_err().to_string();
+    assert!(e.contains("not in the game folder"), "{e}");
 }

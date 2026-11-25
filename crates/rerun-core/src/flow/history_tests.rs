@@ -330,6 +330,8 @@ fn started(n: u32, outcome: Started, at: u64) -> Vec<u8> {
         unix_s: at,
         outcome,
         method: None,
+        run: false,
+        steam_start: None,
     })
     .unwrap()
 }

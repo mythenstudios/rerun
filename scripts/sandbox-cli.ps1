@@ -727,23 +727,162 @@ function Invoke-FirewallRead {
     $v
 }
 
+# ---- launch_method run and args (P5-OE, O-2a, SB-R1) ------------------------------------------
+# The same Steam layout and app 220 (so the same profile ID). Steam's entry is launcher.exe; the
+# profile (format 3) names game.exe as `run` and `-4` as `args` (both copies of cmd.exe; `-4`
+# is a valid ping option, so the appended argument reaches ping without breaking the command).
+# (a) A start the way Steam starts it (argv[0] = launcher.exe): the shim starts game.exe in its
+# job instead (the mask), with Steam's tail after argv[0] byte for byte and ` -4` appended (the
+# child's command line), and never launcher.exe; the result says `applied` and `run=yes`.
+# (b) Steam starting game.exe itself: `path_mismatch` with `steam_start=game.exe`, no rule.
+# (c) game.exe renamed away: the shim starts launcher.exe unchanged (Steam's command, without
+# `-4`, no job) and records `run_failed:2`. game.exe is put back before the revert, which must
+# leave the game folder and the profile files as before.
+$lrSteps = Join-Path $root 'steps-lr.json'
+$lrLauncher = Join-Path $lmGame 'launcher.exe'
+
+# Starts the shim with Steam's command `"<argv0>" <tail>`, waits up to 4 s for a process of
+# `$expect` (a path) and returns its mask bits, command line and parent, then the result file.
+function Invoke-ShimStart([string]$argv0, [string]$tail, [string]$expect) {
+    $result = Join-Path $rerunDir "launch\$lmId.result"
+    Remove-Item -LiteralPath $result -Force -ErrorAction SilentlyContinue
+    $shim = Start-Process -FilePath $launchExe -ArgumentList "--profile $lmId `"$argv0`" $tail" -PassThru
+    $o = [ordered]@{ found = $false; bits = -1; line = ''; parent_is_shim = $false; others = ''; result = '' }
+    $deadline = (Get-Date).AddSeconds(4)
+    do {
+        Start-Sleep -Milliseconds 250
+        $child = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $expect } | Select-Object -First 1
+    } while (-not $child -and (Get-Date) -lt $deadline)
+    if ($child) {
+        $o.found = $true
+        try { $o.bits = Get-Bits ([int64]$child.ProcessorAffinity) } catch { $o.bits = -2 }
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$($child.Id)" -ErrorAction SilentlyContinue
+        if ($cim) {
+            $o.line = [string]$cim.CommandLine
+            $o.parent_is_shim = $cim.ParentProcessId -eq $shim.Id
+        }
+    }
+    # Any other copy of the game folder running (launcher.exe while game.exe was expected, ...).
+    $o.others = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -and $_.Path.StartsWith("$lmGame\", [StringComparison]::OrdinalIgnoreCase) -and $_.Path -ne $expect
+    } | ForEach-Object { $_.Path }) -join ', '
+    $deadline = (Get-Date).AddSeconds(25)
+    while (-not (Test-Path -LiteralPath $result) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+    $o.result = if (Test-Path -LiteralPath $result) { [string](Get-Content -LiteralPath $result -Raw) } else { '' }
+    Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -eq 'ping' -or ($_.Path -and $_.Path.StartsWith("$lmGame\", [StringComparison]::OrdinalIgnoreCase))
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
+    if (-not $shim.WaitForExit(15000)) { Stop-Process -Id $shim.Id -Force -ErrorAction SilentlyContinue }
+    Add-Content -LiteralPath $log -Value ("start argv0={0}: found={1} bits={2} parent_is_shim={3} others=[{4}]`nline: {5}`nresult:`n{6}" -f `
+        $argv0, $o.found, $o.bits, $o.parent_is_shim, $o.others, $o.line, $o.result)
+    $o
+}
+
+function Invoke-LaunchRun {
+    $lr = [ordered]@{ checks = [ordered]@{}; expected = $false; error = '' }
+    $c = $lr.checks
+    $saved = Save-SteamKey
+    $moved = "$lmExe.away"
+    try {
+        New-SteamLayout
+        Copy-Item -LiteralPath "$env:WINDIR\System32\cmd.exe" -Destination $lrLauncher -Force
+        Write-Plain $lrSteps '{"format":1,"game":{"steam":220},"main_exe":"game.exe","steps":[{"launch_method":{"method":"direct","start":"launcher.exe","run":"game.exe","args":["-4"],"cpu":{"max_threads":1}}}]}'
+        Add-Content -LiteralPath $log -Value "`n=== launch_method run and args (P5-OE, SB-R1) ==="
+        $gameBefore = Get-Tree $lmRoot
+        $profilesBefore = Get-Profiles
+        $file = Join-Path $profiles "$lmId.profile"
+
+        $d = Invoke-Rerun plan $lrSteps --dry-run
+        $c.dry_run_exit = $d.Code
+        $c.preview_run = $d.Text.Contains("run $lmExe (rerun-launch starts it instead of start")
+        $c.preview_args = $d.Text -match '(?m)^\s+args -4\s*$'
+        $p = Invoke-Rerun plan $lrSteps
+        $c.plan_exit = $p.Code
+        $hm = [regex]::Match($p.Text, 'apply with: rerun apply ([0-9a-f]{64})')
+        if ($p.Code -ne 0 -or -not $hm.Success) { throw 'plan did not store a plan (see cli.log)' }
+        $a = Invoke-Rerun apply $hm.Groups[1].Value --yes
+        $c.apply_exit = $a.Code
+        $tm = [regex]::Match($a.Text, 'revert with: rerun revert ([0-9]{8}-[0-9a-f]{16})')
+        if ($a.Code -ne 0 -or -not $tm.Success) { throw 'apply did not report a transaction (see cli.log)' }
+        $txn = $tm.Groups[1].Value
+        $ptext = if (Test-Path -LiteralPath $file) { [IO.File]::ReadAllText($file) } else { '' }
+        $c.profile_format_3 = $ptext.StartsWith("rerun-profile 3`n") -and $ptext.Contains("`nrun=$lmExe`n") -and
+            $ptext.Contains("`ntarget=$lmExe`n") -and $ptext.EndsWith("`nargs=-4`n")
+
+        # (a) Steam's start: run in the job, the tail byte for byte, -4 appended.
+        $tail = '/d /q /c ping -n 12 127.0.0.1 >nul'
+        $s = Invoke-ShimStart $lrLauncher $tail $lmExe
+        $lr.started = $s
+        $c.run_started = $s.found -and $s.parent_is_shim
+        $c.launcher_not_started = $s.others -eq ''
+        $c.run_command_line = $s.line -eq "`"$lmExe`" $tail -4"
+        $cm = [regex]::Match($s.result, '(?m)^cpu=hard:(\d+):(\d+)\r?$')
+        $c.run_has_the_mask = $cm.Success -and ($s.bits -eq [int]$cm.Groups[1].Value)
+        $c.result_applied = $s.result -match '(?m)^rule=applied\r?$'
+        $c.result_run_yes = $s.result -match '(?m)^method=direct\r?\nrun=yes\r?$'
+
+        # (b) Steam starting run itself: no rule, the file name recorded.
+        $s = Invoke-ShimStart $lmExe $tail $lmExe
+        $c.mismatch_started = $s.found
+        $c.mismatch_command_line = $s.line -eq "`"$lmExe`" $tail"
+        $c.result_path_mismatch = $s.result -match '(?m)^rule=skipped:path_mismatch\r?$'
+        $c.result_steam_start = $s.result -match '(?m)^steam_start=game\.exe\r?$'
+        $c.mismatch_no_run_yes = $s.result -notmatch '(?m)^run='
+
+        # (c) run missing: Steam's command, unchanged, and run_failed.
+        Move-Item -LiteralPath $lmExe -Destination $moved -Force
+        $s = Invoke-ShimStart $lrLauncher $tail $lrLauncher
+        Move-Item -LiteralPath $moved -Destination $lmExe -Force
+        $c.fallback_started = $s.found -and $s.parent_is_shim
+        $c.fallback_command_line = $s.line -eq "`"$lrLauncher`" $tail"
+        $c.fallback_no_job = $s.bits -ne 1 -or ([Environment]::ProcessorCount -eq 1)
+        $c.result_run_failed = $s.result -match '(?m)^rule=skipped:run_failed:2\r?$'
+        $c.fallback_no_run_yes = $s.result -notmatch '(?m)^run='
+
+        $r = Invoke-Rerun revert $txn --yes
+        $c.revert_exit = $r.Code
+        $c.profile_removed = -not (Test-Path -LiteralPath $file)
+        $c.game_folder_as_before = (Get-Tree $lmRoot) -eq $gameBefore
+        $c.profile_files_as_before = (Get-Profiles) -eq $profilesBefore
+
+        $bad = @($c.GetEnumerator() | Where-Object {
+            if ($_.Key -like '*_exit') { $_.Value -ne 0 } else { $_.Value -ne $true }
+        } | ForEach-Object { $_.Key })
+        $lr.failed = $bad
+        $lr.expected = ($bad.Count -eq 0)
+    } catch {
+        $lr.error = "$_"
+        Add-Content -LiteralPath $log -Value "launch_method run failed: $_"
+    } finally {
+        if ((Test-Path -LiteralPath $moved) -and -not (Test-Path -LiteralPath $lmExe)) {
+            Move-Item -LiteralPath $moved -Destination $lmExe -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $lrLauncher -Force -ErrorAction SilentlyContinue
+        Restore-SteamKey $saved
+    }
+    $lr
+}
+
 $lm = $null
 $lw = $null
+$lr = $null
 $vs = $null
 $fw = $null
 if (-not $Elevated) {
     $lm = Invoke-LaunchMethod
     $lw = Invoke-LaunchWatch
+    $lr = Invoke-LaunchRun
     $vs = Invoke-VirtualStore
     $fw = Invoke-FirewallRead
 }
 [ordered]@{
     runs          = $runs
     unchanged     = $same
-    expected      = ($expected -and $same -and ($Elevated -or ($lm.expected -and $lw.expected)))
+    expected      = ($expected -and $same -and ($Elevated -or ($lm.expected -and $lw.expected -and $lr.expected)))
     elevated      = $Elevated
     launch_method = if ($lm) { $lm } else { 'skipped: elevated' }
     launch_watch  = if ($lw) { $lw } else { 'skipped: elevated' }
+    launch_run    = if ($lr) { $lr } else { 'skipped: elevated' }
     virtualstore  = if ($vs) { $vs } else { 'skipped: elevated' }
     firewall_read = if ($fw) { $fw } else { 'skipped: elevated' }
     note          = if ($Elevated) { 'elevated: the refusal (exit 3) of plan is the expected result' } else { '' }

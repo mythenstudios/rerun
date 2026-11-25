@@ -381,6 +381,8 @@ fn fl3_launch_lines_type_each_note() {
             unix_s: 1_762_600_000,
             outcome,
             method,
+            run: false,
+            steam_start: None,
         }),
     };
     let skipped = |reason, restore| Outcome::Skipped {

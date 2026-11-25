@@ -135,8 +135,11 @@ use crate::sys::registry::{MAX_VALUE_BYTES, RegKey, RegValue};
 pub const FORMAT: u32 = 1;
 /// Most ops of a plan (ADR 0019, condition S1).
 pub const MAX_OPS: usize = 128;
-/// Most bytes of one serialised op.
-pub const MAX_OP_BYTES: usize = 8 << 10;
+/// Most bytes of one serialised op (ADR 0019 budgets, raised from 8 KiB by ADR 0022 amendment
+/// P5-OE, S3: a [`MAX_INLINE_BYTES`] profile is 8 KiB of hex plus the op's JSON). The journal
+/// never embeds an op (a record names its index, at most 64 KiB); the head stays bounded by
+/// [`MAX_PLAN_BYTES`], so [`MAX_OPS`] ops of this size are refused as a whole plan.
+pub const MAX_OP_BYTES: usize = 12 << 10;
 /// Most bytes of a serialised plan (`head.json`).
 pub const MAX_PLAN_BYTES: usize = 1 << 20;
 /// Most roots of a plan.
@@ -145,9 +148,10 @@ pub const MAX_ROOTS: usize = 16;
 pub const MAX_FILE_LEN: u64 = 2 << 30;
 /// Most bytes of all backups of one plan (the journal's limit per transaction).
 pub const MAX_BACKUP_BYTES: u64 = 4 << 30;
-/// Most bytes of [`ContentRef::Inline`] (a launch profile with a start path of at most
-/// [`MAX_EXE_PATH_UNITS`] is about 1.8 KiB; as hex the op stays below [`MAX_OP_BYTES`]).
-pub const MAX_INLINE_BYTES: usize = 2 << 10;
+/// Most bytes of [`ContentRef::Inline`] (raised from 2 KiB by ADR 0022 amendment P5-OE, S3: a
+/// format-3 launch profile with `start`, `target` and `run` of [`MAX_EXE_PATH_UNITS`] non-ASCII
+/// units and 512 bytes of `args` is about 3 KiB; as hex the op stays below [`MAX_OP_BYTES`]).
+pub const MAX_INLINE_BYTES: usize = 4 << 10;
 /// The identity of the profiles root in every plan: none is checked (ADR 0020 amendment P3-3,
 /// F1), one fixed value so a plan's bytes are the same with and without `--dry-run`. No game
 /// root may carry it (a fake or a volume never hands out serial 0 with file ID 0).

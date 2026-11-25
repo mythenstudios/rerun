@@ -68,6 +68,8 @@ pub(super) fn profile(cpu: Option<CpuRule>, priority: Option<Priority>) -> Launc
         priority,
         watch_timeout_s: 120,
         cpu,
+        run: None,
+        args: Vec::new(),
     }
 }
 

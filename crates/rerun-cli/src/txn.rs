@@ -330,6 +330,17 @@ pub fn launch_lines<'a>(
                 }
             }
         }));
+        // P5-OE: what the shim started, or what Steam started instead of the profile's start.
+        if let Ok(res) = &e.result {
+            if res.run {
+                out.push(l(LaunchMsg::StartedRun));
+            }
+            if let Some(name) = &res.steam_start {
+                out.push(l(LaunchMsg::SteamStarted {
+                    name: rerun_core::escape::text(name).into_owned(),
+                }));
+            }
+        }
         // A4: the priority class could not be put back after a failed CPU step.
         if let Some(code) = e.restore_failed {
             out.push(l(LaunchMsg::PriorityNotRestored { code }));

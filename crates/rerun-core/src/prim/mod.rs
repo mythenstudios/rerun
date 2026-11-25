@@ -53,9 +53,9 @@ pub use gpu_preference::{AlreadySet, GpuPreferenceSpec};
 pub use ini_set::{IniSetSpec, IniSetValue};
 pub use laa_patch::{LaaFacts, LaaPatchSpec};
 pub use launch_method::{
-    CpuRuleSpec, ExcludeFirstSpec, LaunchMethodSpec, MachineView, MachineWhy, MethodSpec, ModeSpec,
-    PreferL3Spec, PreferSpec, PrioritySpec, SHIM, SelectionShown, on_this_machine,
-    steam_option_text,
+    CpuRuleSpec, ExcludeFirstSpec, LaunchArgText, LaunchMethodSpec, MachineView, MachineWhy,
+    MethodSpec, ModeSpec, PreferL3Spec, PreferSpec, PrioritySpec, SHIM, SelectionShown,
+    on_this_machine, steam_option_text,
 };
 pub use package::{GameBuild, PackageRefusal};
 pub use registry_set::{RegValueEntry, RegistrySetSpec};

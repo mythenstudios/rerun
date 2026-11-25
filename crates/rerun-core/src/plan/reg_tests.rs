@@ -317,7 +317,7 @@ fn p7_a_manipulated_slot_or_value_is_refused_on_decode() {
 }
 
 /// The worst case of one `SetValue` (the longest slot, a 1 KiB old value inline, a REG_SZ of
-/// 1,024 characters that each need escaping) fits the op budget of 8 KiB.
+/// 1,024 characters that each need escaping) fits the op budget (`MAX_OP_BYTES`).
 #[test]
 fn p8_the_worst_case_registry_op_fits_the_op_budget() {
     // `"` is allowed in segments, names and REG_SZ data and costs 2 bytes escaped (review nit 6).
