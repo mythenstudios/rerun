@@ -6,6 +6,8 @@
 //!   `HTMAXBUTTON` over its maximise button. Rerun's window is frameless with its own title bar
 //!   (`docs/07-ui.md`), so a window subclass answers it over Rerun's own maximise button and
 //!   turns the non-client mouse messages there into a hover state and a click.
+//! - The same subclass makes sure a window drag always ends ([`SizeMove`]): winit refuses every
+//!   move and resize after one that Windows never ran.
 //! - The Windows display language picks the app's language (ADR 0027).
 //! - Windows' high contrast (P5-10c, ADR 0026 amendment P5-10): [`high_contrast`] reads whether
 //!   it is on (`SPI_GETHIGHCONTRAST`) and, if so, the five system colours the theme then uses
@@ -90,6 +92,42 @@ pub fn hit_max_button(g: Geometry, state: WindowState, right: f64, x: f64, y: f6
         && x < right - caption
 }
 
+/// Whether a move or resize the window asked Windows for ended without Windows' size-move loop.
+///
+/// Slint's `WindowMoveArea` and resize border start a drag through winit (`drag_window`,
+/// `drag_resize_window`), which marks itself as dragging, posts `WM_NCLBUTTONDOWN` with the hit
+/// test of the drag and refuses every further drag until `WM_EXITSIZEMOVE` arrives (winit
+/// 0.30). Windows sends that only at the end of a size-move loop it entered
+/// (`WM_ENTERSIZEMOVE`). When it enters none, a resize on the edge of a maximised window being
+/// the known case, winit stays dragging for good: the window can no longer be moved or resized,
+/// only minimised and restored through the taskbar. The subclass watches every such button
+/// press: [`SizeMove::pressed`] before Windows handles it, [`SizeMove::entered`] on
+/// `WM_ENTERSIZEMOVE`, and when [`SizeMove::handled`] says no loop ran (`DefWindowProc` runs
+/// the loop before it returns), it tells winit the drag is over with a `WM_EXITSIZEMOVE` of its
+/// own.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SizeMove {
+    entered: bool,
+}
+
+impl SizeMove {
+    /// The left button went down on the non-client area (not on the maximise button).
+    pub fn pressed(&mut self) {
+        self.entered = false;
+    }
+
+    /// Windows entered its size-move loop.
+    pub fn entered(&mut self) {
+        self.entered = true;
+    }
+
+    /// Windows has handled the press: `true` if it ran no size-move loop, so no
+    /// `WM_EXITSIZEMOVE` came and one must be sent.
+    pub fn handled(&mut self) -> bool {
+        !std::mem::replace(&mut self.entered, false)
+    }
+}
+
 #[cfg(windows)]
 pub use win::{high_contrast, install, message_box, owner_of, ui_language};
 
@@ -148,12 +186,12 @@ mod win {
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetClientRect, HTMAXBUTTON, IDC_HAND, LoadCursorW, MB_ICONWARNING, MB_OK, MessageBoxW,
-        SPI_GETHIGHCONTRAST, SetCursor, SystemParametersInfoW, WM_NCDESTROY, WM_NCHITTEST,
-        WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
-        WM_SETCURSOR, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE,
+        SPI_GETHIGHCONTRAST, SetCursor, SystemParametersInfoW, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+        WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+        WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE,
     };
 
-    use super::{Chrome, Geometry, SysColors, WindowState, hit_max_button};
+    use super::{Chrome, Geometry, SizeMove, SysColors, WindowState, hit_max_button};
     use crate::theme::Rgb;
 
     /// The subclass ID (one subclass per window).
@@ -175,6 +213,8 @@ mod win {
         };
         /// The left button went down over the maximise button and has not come up or left it.
         static PRESSED: Cell<bool> = const { Cell::new(false) };
+        /// Whether Windows entered its size-move loop for the last drag (see [`SizeMove`]).
+        static SIZE_MOVE: Cell<SizeMove> = const { Cell::new(SizeMove { entered: false }) };
     }
 
     /// The Windows display language (`LANGID`) of the user.
@@ -428,6 +468,31 @@ mod win {
                 return 0;
             }
             WM_NCLBUTTONUP => PRESSED.with(|p| p.set(false)),
+            // The drag winit asked for (the window is frameless: every other non-client press
+            // is one): Windows runs its size-move loop inside the next procedure, or none.
+            WM_NCLBUTTONDOWN => {
+                SIZE_MOVE.with(|c| {
+                    let mut s = c.get();
+                    s.pressed();
+                    c.set(s);
+                });
+                // SAFETY: forwards the message with its original arguments to the next
+                // procedure.
+                let r = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                let mut s = SIZE_MOVE.with(Cell::get);
+                if s.handled() {
+                    // SAFETY: the message Windows sends at the end of a size-move loop, with
+                    // its own arguments (both 0), to the next procedure of this window.
+                    unsafe { DefSubclassProc(hwnd, WM_EXITSIZEMOVE, 0, 0) };
+                }
+                SIZE_MOVE.with(|c| c.set(s));
+                return r;
+            }
+            WM_ENTERSIZEMOVE => SIZE_MOVE.with(|c| {
+                let mut s = c.get();
+                s.entered();
+                c.set(s);
+            }),
             // Windows' colours or settings changed (high contrast on or off among them): the
             // window reads them again; the message goes on to the next procedure as well.
             WM_SYSCOLORCHANGE | WM_SETTINGCHANGE => tell(Chrome::ColorsChanged),
@@ -444,7 +509,29 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::{Geometry, WindowState, hit_max_button};
+    use super::{Geometry, SizeMove, WindowState, hit_max_button};
+
+    #[test]
+    fn a_drag_without_a_size_move_loop_is_ended() {
+        let mut s = SizeMove::default();
+        // A move or resize Windows ran: its own WM_EXITSIZEMOVE ended it.
+        s.pressed();
+        s.entered();
+        assert!(!s.handled());
+        // A resize on the edge of a maximised window: no loop, so one is sent.
+        s.pressed();
+        assert!(s.handled());
+        // A loop from before (a keyboard move through the system menu) does not count for the
+        // next press.
+        s.entered();
+        s.pressed();
+        assert!(s.handled());
+        // Handled once: the state is clean for the next press.
+        s.pressed();
+        s.entered();
+        assert!(!s.handled());
+        assert_eq!(s, SizeMove::default());
+    }
 
     const G: Geometry = Geometry {
         title_h: 40.0,

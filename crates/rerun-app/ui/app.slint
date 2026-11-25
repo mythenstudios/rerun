@@ -1509,7 +1509,11 @@ component BlockedPage inherits Rectangle {
 
 export component AppWindow inherits Window {
     no-frame: true;
-    resize-border-width: Theme.resize-border;
+    // No resize border while maximised: Windows never sizes a maximised window, so a press on
+    // its edge (the top of the screen above the title bar) started a resize that never ended
+    // and left the window unable to move or resize (`ui::chrome`, `SizeMove`). The edge drags
+    // the window like the rest of the title bar instead.
+    resize-border-width: root.maximized ? 0px : Theme.resize-border;
     preferred-width: 1200px;
     preferred-height: 800px;
     min-width: 860px;

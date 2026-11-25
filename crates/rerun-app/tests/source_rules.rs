@@ -290,6 +290,24 @@ fn the_caption_buttons_keep_their_order() {
     assert_eq!(caption_order(swapped), ["close", "minimize"]);
 }
 
+/// A maximised window has no resize border: Windows never sizes it, and a resize started there
+/// left winit dragging for good (`ui::chrome::SizeMove`).
+#[test]
+fn a_maximised_window_has_no_resize_border() {
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/app.slint"))
+        .unwrap();
+    let borders: Vec<&str> = src
+        .lines()
+        .filter_map(code)
+        .map(str::trim)
+        .filter(|l| l.starts_with("resize-border-width:"))
+        .collect();
+    assert_eq!(
+        borders,
+        ["resize-border-width: root.maximized ? 0px : Theme.resize-border;"]
+    );
+}
+
 #[test]
 fn the_rules_have_teeth() {
     let other = |s: &str| !violations(s, Place::Other).is_empty();
