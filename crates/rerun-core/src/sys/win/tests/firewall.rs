@@ -422,7 +422,7 @@ fn sb_firewall_write_contract() {
 /// `C:\Program Files\Rerun`; A4 S3): the real helper started through Rerun's own start
 /// (`WinElevation`, `runas`, no dialog on the runner) for (1) an add request of a Topo the
 /// test-key index does not name: `Refused(Topo)` (the helper trusts the test key; a release
-/// helper says `Refused(Index)`), and (2) a remove request for a rule of Rerun's form this test
+/// helper, or an index `seq` below `HELPER_MIN_SEQ`, says `Refused(Index)`), and (2) a remove request for a rule of Rerun's form this test
 /// added: `Done` with the op `Before`, the rule gone, through the helper's own COM write side
 /// with every privilege but `SeChangeNotifyPrivilege` dropped (ADR 0023 §3 step 2: "the firewall
 /// needs none", measured here). First (N5 of P4-2c on the real binary): the installed helper's
@@ -499,8 +499,12 @@ fn sb_test_key_helper_removes_a_rule() {
         judged
     };
 
-    // (1) The test-key index names no Topo.
-    let bytes = br#"{"format":1,"seq":1,"issued":"2026-11-10T12:00:00Z","topos":[],"packages":[]}"#;
+    // (1) The test-key index names no Topo; its `seq` is the helper's floor (`HELPER_MIN_SEQ`).
+    let text = format!(
+        r#"{{"format":1,"seq":{},"issued":"2026-11-10T12:00:00Z","topos":[],"packages":[]}}"#,
+        crate::elevate::HELPER_MIN_SEQ
+    );
+    let bytes = text.as_bytes();
     let isha: [u8; 32] = Sha256::digest(bytes).into();
     let hex = crate::wire::hex32::to_string(&isha);
     std::fs::write(base.join(format!(r"index\{hex}.json")), bytes).unwrap();
@@ -540,7 +544,8 @@ fn sb_test_key_helper_removes_a_rule() {
     assert_eq!(
         run(&add),
         Judged::Exit(HelperExit::refused(Reason::Topo)),
-        "Refused(Index) would be a helper without the test key"
+        "Refused(Index) would be a helper without the test key, or an index seq below \
+         HELPER_MIN_SEQ"
     );
 
     // (2) A rule of Rerun's form, added here, removed by the helper.

@@ -150,9 +150,11 @@ fn dev_helper_firewall_round_trip() {
         },
     };
     let app = AppDir::open(&sys, Create::IfMissing).unwrap().unwrap();
-    // The index, signed with the published test key, in Rerun's `index` folder of the test.
+    // The index, signed with the published test key, in Rerun's `index` folder of the test. Its
+    // `seq` is the helper's floor (`HELPER_MIN_SEQ`): a lower one is `Refused(Index)`.
     let index = format!(
-        r#"{{"format":1,"seq":1,"issued":"2026-11-10T12:00:00Z","topos":[{}],"packages":[]}}"#,
+        r#"{{"format":1,"seq":{},"issued":"2026-11-10T12:00:00Z","topos":[{}],"packages":[]}}"#,
+        crate::elevate::HELPER_MIN_SEQ,
         topo_json(&exe)
     );
     let isha: [u8; 32] = Sha256::digest(index.as_bytes()).into();

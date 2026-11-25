@@ -106,8 +106,8 @@ function Assert-NotElevated {
 }
 
 # Builds the helper and returns its path and SHA-256. Until P4-5b no helper changes anything.
-# Without -TestKey: the release helper (it trusts only the release key slots, which are empty, so
-# it refuses every add with Refused(Index)). With -TestKey: the [DEV] test-key helper (ADR 0023
+# Without -TestKey: the release helper (it trusts only the release key, P5-13a, which signs no
+# test index, so it refuses every add of these scripts with Refused(Index)). With -TestKey: the [DEV] test-key helper (ADR 0023
 # section 2, A4 S3), a debug build with the feature test-key that trusts the published index test
 # key; it must never stay installed, so its callers remove it in their `finally`.
 function Build-Helper([string]$repo, [switch]$TestKey) {

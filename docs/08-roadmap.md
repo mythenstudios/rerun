@@ -74,6 +74,7 @@ Every phase ends with green tests and updated docs. The next phase starts only w
 - Before A6: every anti-cheat marker without a vendor source (`EasyAntiCheat`, `EasyAntiCheat_EOS`, `GameGuard`, `XIGNCODE`, `EAAntiCheat.GameServiceLauncher.exe`; `docs/05-sources-policy.md`) has one, or a dump of a real machine; the third-party link for `start_protected_game.exe` is replaced by Epic's own documentation once found
 - Before A6: no release with an unsigned `rerun-helper.exe` (ADR 0023, audit A4 S12: before code signing its UAC prompt cannot be told apart from a malware prompt of the same name)
 - Before A6: `elevate::HELPER_MIN_SEQ` is the `seq` of the index shipped with the release (prepared with the release key in P5-13a: today `1_795_564_800` = 2026-11-25T00:00:00Z, a floor at or below every index the release key signs, not yet the shipped index's `seq`; ADR 0023 §5 step 2 and "As built", security review N1 of P4-2c)
+- Before A6: the release step that packages the helper requires the `seq` of the shipped index to equal `elevate::HELPER_MIN_SEQ` (a new trip-wire there: `helper_min_seq_rises_with_the_first_release_key` is green for good since P5-13a); a point of the A6 audit's focus (ADR 0023 §5 "As built")
 - Before A6: the index key file encrypted with a passphrase (workbench); today it is a plain hex seed protected only by its owner-only DACL (ADR 0024 amendment P5-13a)
 
 **Acceptance:** All flows from the mockup work against the real core.

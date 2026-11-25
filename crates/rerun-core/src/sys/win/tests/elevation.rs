@@ -413,7 +413,8 @@ fn the_helper_system_has_what_the_chain_needs_and_nothing_else() {
 /// names no Topo. Expected: the helper passes §3 (own image in `Program Files\Rerun`, instance
 /// lock, arguments), reads the request by identity with its hash and build ID, verifies the
 /// index under its trusted keys (the test key) and refuses the unknown Topo: `Refused(Topo)`.
-/// A release helper (empty key slots) would give `Refused(Index)`. Nothing is changed; the test
+/// A release helper (the release key only) or an index `seq` below `HELPER_MIN_SEQ` would give
+/// `Refused(Index)`. Nothing is changed; the test
 /// root is removed when the test ends.
 #[test]
 #[ignore = "[DEV] shows a real UAC prompt; run by scripts/dev-helper-chain.ps1"]
@@ -462,7 +463,12 @@ fn dev_helper_chain_with_the_test_key() {
             file_id: i.file_id,
         }
     };
-    let bytes = br#"{"format":1,"seq":1,"issued":"2026-11-09T12:00:00Z","topos":[],"packages":[]}"#;
+    // The index's `seq` is the helper's floor (`HELPER_MIN_SEQ`): a lower one is `Refused(Index)`.
+    let text = format!(
+        r#"{{"format":1,"seq":{},"issued":"2026-11-09T12:00:00Z","topos":[],"packages":[]}}"#,
+        crate::elevate::HELPER_MIN_SEQ
+    );
+    let bytes = text.as_bytes();
     let sha: [u8; 32] = Sha256::digest(bytes).into();
     let hex = crate::wire::hex32::to_string(&sha);
     root.fx()
@@ -512,7 +518,8 @@ fn dev_helper_chain_with_the_test_key() {
     let topo = Judged::Exit(HelperExit::refused(Reason::Topo));
     if judged == Judged::Exit(HelperExit::refused(Reason::Index)) {
         panic!(
-            "Refused(Index): the installed helper does not trust the test key (a release build?)"
+            "Refused(Index): the installed helper does not trust the test key (a release build?), \
+             or the index seq is below its HELPER_MIN_SEQ (a helper of another build?)"
         );
     }
     assert_eq!(judged, topo);

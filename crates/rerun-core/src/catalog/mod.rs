@@ -46,7 +46,8 @@ pub const INDEX_FORMAT: u32 = 1;
 /// Why an index is refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IndexError {
-    /// This build trusts no key yet (both release slots empty).
+    /// The trusted set is empty: no release key in the slots (and no test key), or every one
+    /// of them revoked.
     #[error("this build of Rerun trusts no index key yet: every index is refused")]
     NoKeys,
     /// More than [`MAX_INDEX_BYTES`].
