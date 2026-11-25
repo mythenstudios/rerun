@@ -14,7 +14,9 @@
 //! files keep their identity, in memory for the session only (P5-3b). Planning and applying
 //! never use it: they read the files fresh.
 
-use crate::catalog::model::{Issue, Kind, Source, TopoStep, Variant, VariantStatus};
+use crate::catalog::model::{
+    Issue, Kind, Source, TopoOption, TopoOptionValue, TopoStep, Variant, VariantStatus,
+};
 use crate::catalog::store::StoreError;
 use crate::catalog::{Aside, Catalog, Topo};
 use crate::exec::PatchedExe;
@@ -26,7 +28,7 @@ use crate::sys::fs::Metadata;
 use crate::topo::when::Tri;
 use crate::topo::{
     self, AntiCheatState, EngineError, ExeCheck, Facts, GameFacts, LaunchPlan, LaunchProblem,
-    Refusal, Report, Selection, StepKind,
+    Refusal, Report, Selection, StepKind, ValueRefusal,
 };
 
 use super::{GameOpen, Guarded, IndexState, PackageNeed, index_state, with_game};
@@ -311,6 +313,27 @@ pub struct IssueView {
     pub variants: Vec<VariantView>,
 }
 
+/// What the engine says about one option value, owned (ADR 0032).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueView {
+    /// The value.
+    pub value: TopoOptionValue,
+    /// Why it cannot be planned here (the first refused step).
+    pub refused: Option<ValueRefusal>,
+    /// Step kinds the anti-cheat rule warns about.
+    pub warned: Vec<StepKind>,
+}
+
+/// What the engine says about one option, owned (ADR 0032; its implicit `unchanged` is not
+/// listed). The value a live transaction set comes with the app's slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionView {
+    /// The option.
+    pub option: TopoOption,
+    /// Its values, in the Topo's order.
+    pub values: Vec<ValueView>,
+}
+
 /// The engine's report ([`topo::Report`]), owned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedReport {
@@ -322,6 +345,8 @@ pub struct OwnedReport {
     pub launch: Result<LaunchPlan, LaunchProblem>,
     /// The anti-cheat rule.
     pub anti_cheat: AntiCheatState,
+    /// Every option, in the Topo's order (ADR 0032).
+    pub options: Vec<OptionView>,
     /// Every issue, in the Topo's order.
     pub issues: Vec<IssueView>,
     /// GPU conditions are unknown where several adapters differ (P4-11).
@@ -335,6 +360,22 @@ impl From<Report<'_>> for OwnedReport {
             main_exe: r.main_exe,
             launch: r.launch,
             anti_cheat: r.anti_cheat,
+            options: r
+                .options
+                .into_iter()
+                .map(|o| OptionView {
+                    option: o.option.clone(),
+                    values: o
+                        .values
+                        .into_iter()
+                        .map(|v| ValueView {
+                            value: v.value.clone(),
+                            refused: v.refused,
+                            warned: v.warned,
+                        })
+                        .collect(),
+                })
+                .collect(),
             issues: r
                 .issues
                 .into_iter()

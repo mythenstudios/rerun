@@ -10,7 +10,9 @@
 //! - [`report`] (pure): per issue the `when` result ([`when::eval`]), per variant whether it
 //!   can be planned here and what the anti-cheat rule ([`policy`]) says. A report preselects
 //!   nothing.
-//! - [`plan`] (reads through the planners only): the picked variants, at most one per issue.
+//! - [`plan`] (reads through the planners only): the picked variants, at most one per issue,
+//!   and the chosen option values, at most one per option (ADR 0032; an `ini_set` value's steps
+//!   go to the planners like a variant's, `start` and `launch_args` come with slice O-2b).
 //!   `when = no` is refused, `unknown` is planned with a warning; the anti-cheat rule refuses or
 //!   warns per step kind. A `package` step (P4-7) becomes the `file_install` step of the
 //!   package's files for the main executable's architecture (read from its PE header) and the
@@ -22,7 +24,7 @@
 //!   `elevate::check_plan` (the helper's own derivation on the game folder as read, A4 S7). A `cpu` step becomes the one `launch_method` step: the Topo's method (`auto` is `direct` when the chain is exactly `[steam]`, else
 //!   `watch`, L10), its `launch.start`, and its `launch.priority`. The steps go to
 //!   [`prim::plan`] unchanged, so the plan has the bytes of a step file with the same steps,
-//!   plus [`Plan::source`] (the index's SHA-256, the Topo and the picks).
+//!   plus [`Plan::source`] (the index's SHA-256, the Topo, the picks and the choices).
 //!
 //! `appinfo.vdf` is not read (L9): `launch.start` comes only from the Topo. `when` is never
 //! authorisation; the plan's checks are those of the planners.
@@ -37,8 +39,8 @@ pub use when::Tri;
 
 use crate::catalog::Catalog;
 use crate::catalog::model::{
-    Api, Arch, Chain, Exe, GpuRequirement, Issue, Method, Package, Sha1, Status, Topo, TopoStep,
-    Variant, When,
+    Api, Arch, Chain, Exe, GpuRequirement, Issue, Method, OptionStep, Package, Sha1, Status, Topo,
+    TopoOption, TopoOptionValue, TopoStep, UNCHANGED, Variant, When,
 };
 use crate::detect::exe::anti_cheat;
 use crate::detect::exe::{
@@ -47,7 +49,7 @@ use crate::detect::exe::{
 use crate::detect::pe::{self, Machine, PeReadError};
 use crate::hw::{Fact, GpuArchTable, SacState, SystemProfile};
 use crate::path::RelPath;
-use crate::plan::{MAX_PICKS, Op, Pick, Plan, PlanError, PlanSource, RootIx};
+use crate::plan::{Choice, MAX_CHOICES, MAX_PICKS, Op, Pick, Plan, PlanError, PlanSource, RootIx};
 use crate::policy::root::GameDir;
 use crate::prim::{self, GameBuild, LaunchMethodSpec, MethodSpec, PackageRefusal, PlanCtx, Step};
 use crate::sys::SysErrorKind;
@@ -591,6 +593,58 @@ pub struct IssueReport<'t> {
     pub variants: Vec<VariantReport<'t>>,
 }
 
+/// Why an option value cannot be planned here (ADR 0032 amendment P5-OE).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueRefusal {
+    /// The anti-cheat rule refuses a step of this kind (`start` and `launch_args`).
+    AntiCheat(StepKind),
+    /// Its `start` names an executable that did not match here.
+    NotMatched,
+    /// `start` and `launch_args` are planned from slice O-2b on (the launch profile with `run`
+    /// and `args`).
+    NotYet,
+}
+
+impl fmt::Display for ValueRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AntiCheat(k) => write!(
+                f,
+                "refused: anti-cheat found, no {} for this game",
+                k.as_str()
+            ),
+            Self::NotMatched => f.write_str(
+                "refused: the executable it starts is not a build the Topo names in this game \
+                 folder",
+            ),
+            Self::NotYet => f.write_str(
+                "not yet: starting another executable or passing launch arguments comes with a \
+                 later version of Rerun",
+            ),
+        }
+    }
+}
+
+/// What the engine says about one option value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueReport<'t> {
+    /// The value.
+    pub value: &'t TopoOptionValue,
+    /// Why it cannot be planned here (the first refused step).
+    pub refused: Option<ValueRefusal>,
+    /// Step kinds the anti-cheat rule warns about.
+    pub warned: Vec<StepKind>,
+}
+
+/// What the engine says about one option (its implicit `unchanged` is not listed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionReport<'t> {
+    /// The option.
+    pub option: &'t TopoOption,
+    /// Its values.
+    pub values: Vec<ValueReport<'t>>,
+}
+
 /// The engine's report of one Topo for one game (preselects nothing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report<'t> {
@@ -602,6 +656,8 @@ pub struct Report<'t> {
     pub launch: Result<LaunchPlan, LaunchProblem>,
     /// The anti-cheat rule.
     pub anti_cheat: AntiCheatState,
+    /// Every option (ADR 0032), in the Topo's order.
+    pub options: Vec<OptionReport<'t>>,
     /// Every issue.
     pub issues: Vec<IssueReport<'t>>,
     /// The system has several hardware adapters and an issue has a GPU condition: the report
@@ -653,6 +709,81 @@ fn assess(
     (refused, warned)
 }
 
+/// The anti-cheat kind of an option step.
+fn option_step_kind(s: &OptionStep) -> StepKind {
+    match s {
+        OptionStep::Start(_) => StepKind::Start,
+        OptionStep::LaunchArgs(_) => StepKind::LaunchArgs,
+        OptionStep::IniSet(_) => StepKind::IniSet,
+    }
+}
+
+/// An option value by its steps (pure): the anti-cheat rule per step kind, a `start` whose
+/// executable did not match here, and `start`/`launch_args` not planned before slice O-2b. The
+/// first refused step names the refusal.
+fn assess_value(
+    topo: &Topo,
+    game: &GameFacts,
+    v: &TopoOptionValue,
+    ac: &AntiCheatState,
+) -> (Option<ValueRefusal>, Vec<StepKind>) {
+    let mut refused = None;
+    let mut warned = Vec::new();
+    for s in &v.steps {
+        let k = option_step_kind(s);
+        let r = if ac.enforced() {
+            anti_cheat_rule(k)
+        } else {
+            AcRule::None
+        };
+        let why = match (r, s) {
+            (AcRule::Refuse, _) => Some(ValueRefusal::AntiCheat(k)),
+            (_, OptionStep::Start(p)) => {
+                let matched = topo
+                    .matches
+                    .exes
+                    .iter()
+                    .zip(&game.exes)
+                    .any(|(e, c)| e.path.same_spelling(p) && c.state == ExeState::Match);
+                Some(if matched {
+                    ValueRefusal::NotYet
+                } else {
+                    ValueRefusal::NotMatched
+                })
+            }
+            (_, OptionStep::LaunchArgs(_)) => Some(ValueRefusal::NotYet),
+            (_, OptionStep::IniSet(_)) => None,
+        };
+        if refused.is_none() {
+            refused = why;
+        }
+        if r == AcRule::Warn && !warned.contains(&k) {
+            warned.push(k);
+        }
+    }
+    (refused, warned)
+}
+
+/// What the engine plans (ADR 0032 amendment P5-OE): the picked variants and the chosen option
+/// values, together at least one.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EngineSelection<'a> {
+    /// The variants, at most one per issue, 0 to [`MAX_PICKS`].
+    pub picks: &'a [Pick],
+    /// The option values, at most one per option, 0 to [`MAX_CHOICES`].
+    pub choices: &'a [Choice],
+}
+
+impl<'a> EngineSelection<'a> {
+    /// Picked variants only (no option value).
+    pub fn picks(picks: &'a [Pick]) -> Self {
+        Self {
+            picks,
+            choices: &[],
+        }
+    }
+}
+
 /// Why the engine refuses a Topo or a pick.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -671,8 +802,11 @@ pub enum EngineError {
     /// The Topo is retired.
     #[error("Topo {0} is retired and offers no fixes")]
     Retired(String),
-    /// No variant picked, or too many.
-    #[error("pick 1 to {MAX_PICKS} variants as <issue>/<variant>")]
+    /// Nothing picked or chosen, or too many.
+    #[error(
+        "pick at most {MAX_PICKS} variants as <issue>/<variant> and set at most {MAX_CHOICES} \
+         options as <option>=<value>, at least one of them"
+    )]
     Picks,
     /// No such issue.
     #[error("the Topo has no issue {0}")]
@@ -688,6 +822,36 @@ pub enum EngineError {
     /// Two variants of one issue.
     #[error("issue {0} is picked twice: one variant per issue")]
     TwoVariants(String),
+    /// No such option (ADR 0032).
+    #[error("the Topo has no option {0}")]
+    UnknownOption(String),
+    /// No such value of the option.
+    #[error("option {option} has no value {value}")]
+    UnknownValue {
+        /// The option.
+        option: String,
+        /// The value.
+        value: String,
+    },
+    /// Two values of one option.
+    #[error("option {0} is set twice: one value per option")]
+    TwoValues(String),
+    /// `unchanged` named as a value: it is the absence of a choice.
+    #[error(
+        "option {0}: unchanged is the default; leave the option out (to take a value back, \
+         revert the transaction that set it)"
+    )]
+    Unchanged(String),
+    /// The option value cannot be planned here.
+    #[error("{option}={value}: {why}")]
+    OptionRefused {
+        /// The option.
+        option: String,
+        /// The value.
+        value: String,
+        /// Why.
+        why: ValueRefusal,
+    },
     /// `when` is no on this system.
     #[error("issue {0} does not apply to this system (its conditions are not met)")]
     WhenNo(String),
@@ -756,18 +920,26 @@ pub enum EngineError {
     UserData,
 }
 
-/// A picked variant of `topo` sets a file in its user data folder (P4-12): the caller opens
-/// `topo.user_data` (`policy::root::UserDataDir`) for [`plan`] then, and only then (review N5:
-/// after the picks resolve; picks that do not resolve need nothing, `plan` refuses them, and an
-/// issue whose `when` is no on `profile` needs nothing either).
-pub fn needs_user_data(topo: &Topo, picks: &[Pick], profile: &SystemProfile) -> bool {
-    let Ok(resolved) = resolve_picks(topo, picks) else {
+/// A picked variant or a chosen option value of `topo` sets a file in its user data folder
+/// (P4-12): the caller opens `topo.user_data` (`policy::root::UserDataDir`) for [`plan`] then,
+/// and only then (review N5: after the selection resolves; a selection that does not resolve
+/// needs nothing, `plan` refuses it, and an issue whose `when` is no on `profile` needs nothing
+/// either).
+pub fn needs_user_data(topo: &Topo, sel: &EngineSelection<'_>, profile: &SystemProfile) -> bool {
+    let (Ok(resolved), Ok(chosen)) = (
+        resolve_picks_any(topo, sel.picks),
+        resolve_choices(topo, sel.choices),
+    ) else {
         return false;
     };
-    resolved.iter().any(|(issue, v)| {
+    let picks = resolved.iter().any(|(issue, v)| {
         when::eval(issue.when.as_ref(), profile) != Tri::No
             && v.steps.iter().any(|s| s.root() == prim::StepRoot::UserData)
-    })
+    });
+    picks
+        || chosen
+            .iter()
+            .any(|(_, v)| v.steps.iter().any(|s| s.root() == prim::StepRoot::UserData))
 }
 
 /// Every `gpu.arch` of the Topo is declared by `table` (none to check without a table).
@@ -797,6 +969,25 @@ pub fn report<'t>(topo: &'t Topo, facts: &Facts<'_>) -> Result<Report<'t>, Engin
     check_archs(topo, facts.table)?;
     let launch = resolve_launch(topo);
     let ac = anti_cheat_state(topo, &facts.game.anti_cheat);
+    let options = topo
+        .options
+        .iter()
+        .map(|option| OptionReport {
+            option,
+            values: option
+                .values
+                .iter()
+                .map(|value| {
+                    let (refused, warned) = assess_value(topo, facts.game, value, &ac);
+                    ValueReport {
+                        value,
+                        refused,
+                        warned,
+                    }
+                })
+                .collect(),
+        })
+        .collect();
     let issues = topo
         .issues
         .iter()
@@ -828,6 +1019,7 @@ pub fn report<'t>(topo: &'t Topo, facts: &Facts<'_>) -> Result<Report<'t>, Engin
         main_exe: facts.game.main_exe().cloned(),
         launch,
         anti_cheat: ac,
+        options,
         issues,
         several_gpus,
     })
@@ -844,6 +1036,15 @@ pub enum Warning {
     WhenUnknown {
         /// The issue.
         issue: String,
+    },
+    /// The anti-cheat rule warns about a step of an option value (ADR 0032).
+    OptionAntiCheat {
+        /// The option.
+        option: String,
+        /// The value.
+        value: String,
+        /// The step kind.
+        step: StepKind,
     },
     /// The anti-cheat rule warns about a step.
     AntiCheat {
@@ -906,7 +1107,7 @@ pub struct TopoPlan {
     pub steps: Vec<Step>,
     /// The launch, if a `cpu` step was planned.
     pub launch: Option<LaunchPlan>,
-    /// Warnings, in pick order.
+    /// Warnings, in pick order, then in choice order.
     pub warnings: Vec<Warning>,
 }
 
@@ -922,7 +1123,18 @@ pub fn resolve_picks<'t>(
     topo: &'t Topo,
     picks: &[Pick],
 ) -> Result<Vec<(&'t Issue, &'t Variant)>, EngineError> {
-    if picks.is_empty() || picks.len() > MAX_PICKS {
+    if picks.is_empty() {
+        return Err(EngineError::Picks);
+    }
+    resolve_picks_any(topo, picks)
+}
+
+/// [`resolve_picks`] that allows no pick (a plan of option values only).
+fn resolve_picks_any<'t>(
+    topo: &'t Topo,
+    picks: &[Pick],
+) -> Result<Vec<(&'t Issue, &'t Variant)>, EngineError> {
+    if picks.len() > MAX_PICKS {
         return Err(EngineError::Picks);
     }
     let mut out = Vec::with_capacity(picks.len());
@@ -948,14 +1160,54 @@ pub fn resolve_picks<'t>(
     Ok(out)
 }
 
-/// Plans the picked variants of `topo` (module docs). `index` is the SHA-256 of the signed
-/// index the Topo comes from; `ctx` is the planners' context without a main executable (the
-/// engine names the one that matched).
+/// The chosen option values of `topo` with their options, in choice order, by the engine's pure
+/// rules (ADR 0032): 0 to [`MAX_CHOICES`] choices, each option once, never `unchanged`, every
+/// option and value present.
+///
+/// # Errors
+/// [`EngineError::Picks`], [`EngineError::TwoValues`], [`EngineError::Unchanged`],
+/// [`EngineError::UnknownOption`], [`EngineError::UnknownValue`].
+pub fn resolve_choices<'t>(
+    topo: &'t Topo,
+    choices: &[Choice],
+) -> Result<Vec<(&'t TopoOption, &'t TopoOptionValue)>, EngineError> {
+    if choices.len() > MAX_CHOICES {
+        return Err(EngineError::Picks);
+    }
+    let mut out = Vec::with_capacity(choices.len());
+    for (i, c) in choices.iter().enumerate() {
+        if choices[..i].iter().any(|d| d.option == c.option) {
+            return Err(EngineError::TwoValues(c.option.clone()));
+        }
+        let option = topo
+            .options
+            .iter()
+            .find(|o| o.id.as_str() == c.option)
+            .ok_or_else(|| EngineError::UnknownOption(c.option.clone()))?;
+        if c.value == UNCHANGED {
+            return Err(EngineError::Unchanged(c.option.clone()));
+        }
+        let value = option
+            .values
+            .iter()
+            .find(|v| v.id.as_str() == c.value)
+            .ok_or_else(|| EngineError::UnknownValue {
+                option: c.option.clone(),
+                value: c.value.clone(),
+            })?;
+        out.push((option, value));
+    }
+    Ok(out)
+}
+
+/// Plans the picked variants and chosen option values of `topo` (module docs). `index` is the
+/// SHA-256 of the signed index the Topo comes from; `ctx` is the planners' context without a
+/// main executable (the engine names the one that matched).
 pub fn plan(
     index: &[u8; 32],
     topo: &Topo,
     facts: &Facts<'_>,
-    picks: &[Pick],
+    sel: &EngineSelection<'_>,
     ctx: &PlanCtx<'_>,
 ) -> Result<TopoPlan, EngineError> {
     check_archs(topo, facts.table)?;
@@ -965,7 +1217,12 @@ pub fn plan(
     let Some(main_exe) = facts.game.main_exe() else {
         return Err(EngineError::NoMatch(topo.id.to_string()));
     };
-    let resolved = resolve_picks(topo, picks)?;
+    let (picks, choices) = (sel.picks, sel.choices);
+    if picks.is_empty() && choices.is_empty() {
+        return Err(EngineError::Picks);
+    }
+    let resolved = resolve_picks_any(topo, picks)?;
+    let chosen = resolve_choices(topo, choices)?;
     let mut warnings = Vec::new();
     if topo.status == Status::NeedsRetest {
         warnings.push(Warning::NeedsRetest);
@@ -1069,6 +1326,33 @@ pub fn plan(
             }
         }
     }
+    // ADR 0032: the chosen option values after the picks. An `ini_set` value is a step like a
+    // variant's (the planner refuses a file set twice, by a fix and an option alike); `start`
+    // and `launch_args` come with slice O-2b.
+    for (c, (_, value)) in choices.iter().zip(chosen) {
+        let refused = |why| EngineError::OptionRefused {
+            option: c.option.clone(),
+            value: c.value.clone(),
+            why,
+        };
+        let (no, warned) = assess_value(topo, facts.game, value, &ac);
+        if let Some(why) = no {
+            return Err(refused(why));
+        }
+        warnings.extend(warned.into_iter().map(|step| Warning::OptionAntiCheat {
+            option: c.option.clone(),
+            value: c.value.clone(),
+            step,
+        }));
+        for s in &value.steps {
+            match s {
+                OptionStep::IniSet(x) => steps.push(Step::IniSet(x.clone())),
+                OptionStep::Start(_) | OptionStep::LaunchArgs(_) => {
+                    return Err(refused(ValueRefusal::NotYet));
+                }
+            }
+        }
+    }
     // A package's shared dependencies come with it in this plan; a file another transaction
     // installed with the same content becomes a `Hold` of this plan (P4-8, `prim::file_install`).
     for p in &planned_packages {
@@ -1160,6 +1444,7 @@ pub fn plan(
         topo: topo.id.to_string(),
         rev: topo.rev,
         picks: picks.to_vec(),
+        choices: choices.to_vec(),
     });
     // The bounds and the source's form, as when stored and applied.
     plan.encode()?;
@@ -1301,6 +1586,8 @@ fn slots_free(steps: &[Step], packages: &[&Package]) -> Result<(), EngineError> 
 mod gpu_tests;
 #[cfg(test)]
 mod laa_tests;
+#[cfg(test)]
+mod option_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

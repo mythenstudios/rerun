@@ -270,6 +270,10 @@ pub struct Topo {
         skip_serializing_if = "Option::is_none"
     )]
     pub user_data: Option<UserDataSpec>,
+    /// Game options with a choice (ADR 0032): 0 to 8, each with the implicit value
+    /// [`UNCHANGED`] as its default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<TopoOption>,
     /// The problems and their solutions.
     pub issues: Vec<Issue>,
     /// Hints.
@@ -700,6 +704,66 @@ impl TopoStep {
             | Self::FirewallRule(_)
             | Self::LaaPatch(_)
             | Self::GpuPreference(_) => crate::prim::StepRoot::Game,
+        }
+    }
+}
+
+/// The implicit value of every option (ADR 0032): the game as it is, no steps, no op. Never
+/// listed; reserved as a value ID.
+pub const UNCHANGED: &str = "unchanged";
+
+/// One option of `options` (ADR 0032): something the player chooses (the graphics API above
+/// all), not a problem. No `when`, no preselection; its default is [`UNCHANGED`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TopoOption {
+    /// Unique among the Topo's option and issue IDs.
+    pub id: Id,
+    /// What is chosen.
+    pub title: String,
+    /// Where the values come from, at least one.
+    pub sources: Vec<Source>,
+    /// The values, 1 to 8 (besides the implicit [`UNCHANGED`]).
+    pub values: Vec<TopoOptionValue>,
+}
+
+/// One value of a [`TopoOption`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TopoOptionValue {
+    /// Unique in the option, never [`UNCHANGED`].
+    pub id: Id,
+    /// What it is.
+    pub title: String,
+    /// How well it is tested (as a variant's).
+    pub status: VariantStatus,
+    /// The steps, 1 to 4.
+    pub steps: Vec<OptionStep>,
+}
+
+/// One step of an option value: exactly one key. Only these three kinds (ADR 0032): an option
+/// never brings a package, a patch, a registry value, a firewall rule or a CPU rule, so it never
+/// needs the elevated helper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OptionStep {
+    /// Start this executable of `match.exes` instead of Steam's launch entry (through the launch
+    /// profile). Draft only until reviewed ([`super::check::OPTION_LAUNCH_REVIEWED`]); planned
+    /// from slice O-2b.
+    Start(RelPath),
+    /// Fixed game arguments, appended by the launch profile. Draft only until reviewed
+    /// ([`super::check::OPTION_LAUNCH_REVIEWED`]); planned from slice O-2b.
+    LaunchArgs(Vec<String>),
+    /// `ini_set` (ADR 0021), as in a variant.
+    IniSet(IniSetSpec),
+}
+
+impl OptionStep {
+    /// The root the step's file lies in (P4-12), as [`TopoStep::root`].
+    pub fn root(&self) -> crate::prim::StepRoot {
+        match self {
+            Self::IniSet(i) => i.root,
+            Self::Start(_) | Self::LaunchArgs(_) => crate::prim::StepRoot::Game,
         }
     }
 }

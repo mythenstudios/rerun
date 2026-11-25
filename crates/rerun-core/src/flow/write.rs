@@ -2,7 +2,8 @@
 //! [`shown`] → [`store`] → [`check`] → [`apply`]; for a plan stored earlier (`rerun apply
 //! <hash>`) [`load_stored`] takes the place of the planning.
 //!
-//! - [`plan`] (a Topo and the picked variants) and [`plan_steps`] (a step file) read only: the
+//! - [`plan`] (a Topo and a [`Selection`] of variants and option values) and [`plan_steps`] (a
+//!   step file) read only: the
 //!   planners, the one encoding, and the preview and the VirtualStore lookup decoded from exactly
 //!   those bytes. Nothing is stored, nothing created.
 //! - [`Planned`] holds the bytes privately with the preview built from them; only [`shown`] turns
@@ -21,7 +22,7 @@ use crate::detect::exe::anti_cheat;
 use crate::exec::{self, ApplyError, ExecCtx, Outcome, Refusal};
 use crate::journal::InstanceTag;
 use crate::path::RootPath;
-use crate::plan::{self, Pick, PlanBytes, PlanError, PlanHash, Preview};
+use crate::plan::{self, Choice, Pick, PlanBytes, PlanError, PlanHash, Preview};
 use crate::policy::registry::RegPolicy;
 use crate::policy::root::{AppDir, Create, RootError, Shadow, UserDataDir, preview_with_shadows};
 use crate::prim::{self, PlanCtx, StepFile};
@@ -146,7 +147,28 @@ pub enum PlanRefusal {
     Plan(Box<PlanError>),
 }
 
-/// What the picks gave on the one Topo that matched.
+/// What the user selected on a game's page (ADR 0032 amendment P5-OE, ADR 0027): the picked
+/// variants and the chosen option values, at least one of them. An option left out keeps its
+/// implicit `unchanged`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// The variants, at most one per issue.
+    pub picks: Vec<Pick>,
+    /// The option values, at most one per option.
+    pub choices: Vec<Choice>,
+}
+
+impl Selection {
+    /// The selection as the engine takes it.
+    pub fn engine(&self) -> topo::EngineSelection<'_> {
+        topo::EngineSelection {
+            picks: &self.picks,
+            choices: &self.choices,
+        }
+    }
+}
+
+/// What the selection gave on the one Topo that matched.
 #[derive(Debug)]
 pub struct Picked {
     /// The Topo.
@@ -157,12 +179,12 @@ pub struct Picked {
     pub planned: Result<Planned, PlanRefusal>,
 }
 
-/// Plans the variants `picks` of the Topo of `app_id` (`rerun plan <app-id> --pick …`): the
-/// lookup of [`super::game`], then on the one Topo that matches the game's folder below
-/// `Documents` only if a picked step sets a file there (P4-12), the engine
+/// Plans the selection `sel` of the Topo of `app_id` (`rerun plan <app-id> --pick … --set …`):
+/// the lookup of [`super::game`], then on the one Topo that matches the game's folder below
+/// `Documents` only if a selected step sets a file there (P4-12), the engine
 /// ([`topo::plan`]), the encoding and the preview of the encoded bytes. Stores nothing,
 /// creates nothing.
-pub fn plan(g: &Guarded<'_>, app_id: u32, picks: &[Pick]) -> Result<Lookup<Picked>, GameRefusal> {
+pub fn plan(g: &Guarded<'_>, app_id: u32, sel: &Selection) -> Result<Lookup<Picked>, GameRefusal> {
     let sys = g.env().sys;
     with_topo(g, app_id, None, |m| {
         let t = m.topo;
@@ -170,7 +192,7 @@ pub fn plan(g: &Guarded<'_>, app_id: u32, picks: &[Pick]) -> Result<Lookup<Picke
         let planned = (|| {
             let facts = m.facts();
             let user_data = match &t.user_data {
-                Some(u) if topo::needs_user_data(t, picks, m.profile) => Some(
+                Some(u) if topo::needs_user_data(t, &sel.engine(), m.profile) => Some(
                     UserDataDir::open(sys, g.fr(), u.base(), u.sub())
                         .map_err(|e| PlanRefusal::UserData(Box::new(e)))?,
                 ),
@@ -185,7 +207,7 @@ pub fn plan(g: &Guarded<'_>, app_id: u32, picks: &[Pick]) -> Result<Lookup<Picke
                 app_path: m.app_path,
                 user_data: user_data.as_ref(),
             };
-            let tp = topo::plan(&index, t, &facts, picks, &ctx)
+            let tp = topo::plan(&index, t, &facts, &sel.engine(), &ctx)
                 .map_err(|e| PlanRefusal::Engine(Box::new(e)))?;
             let bytes = tp
                 .plan

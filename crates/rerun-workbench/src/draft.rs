@@ -276,6 +276,7 @@ fn intended(d: &Draft) -> Result<Topo, String> {
         launch: None,
         anti_cheat: None,
         user_data: None,
+        options: Vec::new(),
         issues: Vec::new(),
         tips: None,
         links: d.pcgw.clone().map(|p| Links { pcgw: Some(p) }),

@@ -123,6 +123,31 @@ pub enum TopoMsg<'a> {
     },
     /// How to plan.
     PickHint,
+    /// One game option (ADR 0032).
+    Option {
+        /// Its ID.
+        id: String,
+        /// Its title.
+        title: Shown<'a>,
+    },
+    /// One value of an option.
+    OptionValue {
+        /// `<option>=<value>`.
+        set: String,
+        /// `verified`, `reported`, `unverified`.
+        status: &'static str,
+        /// Its title.
+        title: Shown<'a>,
+        /// What the engine says (Rerun's text), if anything.
+        note: Option<String>,
+    },
+    /// How to set an option.
+    SetHint,
+    /// The option values a plan sets.
+    Choices {
+        /// `<option>=<value>`, comma-separated.
+        set: String,
+    },
     /// The plan's origin.
     Source {
         /// The Topo.
@@ -251,6 +276,26 @@ impl fmt::Display for TopoMsg<'_> {
                 "plan with --pick <issue>/<variant> (one per issue); a variant whose conditions \
                  are unknown here is planned only when picked",
             ),
+            Self::Option { id, title } => {
+                write!(f, "  option {id} (unchanged unless set): {title}")
+            }
+            Self::OptionValue {
+                set,
+                status,
+                title,
+                note,
+            } => {
+                write!(f, "    {set}: {status}")?;
+                if let Some(n) = note {
+                    write!(f, "; {n}")?;
+                }
+                write!(f, ": {title}")
+            }
+            Self::SetHint => f.write_str(
+                "set an option with --set <option>=<value> (one value per option); an option \
+                 left out stays as it is",
+            ),
+            Self::Choices { set } => write!(f, "options set: {set}"),
             Self::Source { id, rev, index } => {
                 write!(f, "from Topo {id} rev {rev} of the signed index {index}")
             }

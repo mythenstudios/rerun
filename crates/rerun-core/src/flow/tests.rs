@@ -158,6 +158,7 @@ fn report(when: [Tri; 2], per: &[(usize, usize, Option<Refusal>, Vec<StepKind>)]
         main_exe: None,
         launch: Err(LaunchProblem::NoMethod),
         anti_cheat: AntiCheatState::Clear,
+        options: vec![],
         issues,
         several_gpus: false,
     }

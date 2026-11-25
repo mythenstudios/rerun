@@ -1,0 +1,53 @@
+# Valid: game options (ADR 0032): a start per graphics API with an argument, INI values in the
+# game folder and the user data folder, an argument for the game Steam starts itself
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  steam_appid: 15100
+  exes:
+    - { path: "Game_Dx10.exe", sha256: "1111111111111111111111111111111111111111111111111111111111111111", api: d3d10 }
+    - { path: "Game_Dx9.exe", sha256: "2222222222222222222222222222222222222222222222222222222222222222", api: d3d9 }
+    - { path: "Game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+launch:
+  chain: [steam]
+  method: auto
+  start: "Game.exe"
+user_data:
+  documents: 'My Games\Fixture'
+options:
+  - id: graphics-api
+    title: "Graphics API"
+    sources: [ { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Fixture#API" } ]
+    values:
+      - id: dx9
+        title: "DirectX 9"
+        status: unverified
+        steps: [ { start: "Game_Dx9.exe" }, { launch_args: [ "-nologo", "+set=1" ] } ]
+      - id: dx10
+        title: "DirectX 10"
+        status: unverified
+        steps: [ { start: "Game_Dx10.exe" } ]
+  - id: frame-cap
+    title: "Frame rate cap"
+    sources: [ { type: steam-guide, url: "https://steamcommunity.com/sharedfiles/filedetails/?id=1" } ]
+    values:
+      - id: off
+        title: "Off"
+        status: reported
+        steps:
+          - ini_set: { file: 'cfg\Game.ini', values: [ { section: Engine, key: MaxFps, value: "0" } ] }
+          - ini_set: { root: user_data, file: settings.ini, values: [ { section: Display, key: VSync, value: "0" } ] }
+      - id: sixty
+        title: "60"
+        status: verified
+        steps:
+          - ini_set: { file: 'cfg\Game.ini', values: [ { section: Engine, key: MaxFps, value: "60" } ] }
+  - id: intro
+    title: "Intro videos"
+    sources: [ { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Fixture#Intro" } ]
+    values:
+      - { id: skip, title: "Skip", status: unverified, steps: [ { launch_args: [ "-skipintro" ] } ] }
+issues: []

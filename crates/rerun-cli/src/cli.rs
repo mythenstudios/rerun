@@ -10,7 +10,7 @@ use rerun_core::escape;
 
 use rerun_core::catalog::model::Id;
 use rerun_core::journal::TxnId;
-use rerun_core::plan::{Pick, PlanHash};
+use rerun_core::plan::{Choice, Pick, PlanHash};
 
 use crate::messages::Message;
 
@@ -39,14 +39,19 @@ pub enum Command {
         #[arg(long)]
         hashes: bool,
     },
-    /// Plans fixes from the signed index for a Steam app (or the steps of a step file) and shows
-    /// every change; stores the plan for apply. Without --pick, an app ID gives a report only.
+    /// Plans fixes and game options from the signed index for a Steam app (or the steps of a
+    /// step file) and shows every change; stores the plan for apply. Without --pick and --set, an
+    /// app ID gives a report only.
     Plan {
         /// A Steam app ID (digits only), or a step file (JSON, at most 1 MiB).
         target: PathBuf,
         /// A variant to plan, as <issue>/<variant>; repeat for several issues (app ID only).
         #[arg(long = "pick", value_parser = pick)]
         picks: Vec<Pick>,
+        /// A game option to set, as <option>=<value>; repeat for several options (app ID only).
+        /// An option left out stays unchanged.
+        #[arg(long = "set", value_parser = choice)]
+        choices: Vec<Choice>,
         /// Show the plan only; store nothing.
         #[arg(long)]
         dry_run: bool,
@@ -220,6 +225,25 @@ fn pick(s: &str) -> Result<Pick, String> {
         (Some(i), Some(v)) => Ok(Pick {
             issue: i.to_string(),
             variant: v.to_string(),
+        }),
+        _ => Err(bad()),
+    }
+}
+
+/// A choice `<option>=<value>` (ADR 0032): two IDs of the Topo form, checked before any system
+/// access; `unchanged` is the absence of `--set`, never a value.
+fn choice(s: &str) -> Result<Choice, String> {
+    let bad = || "not <option>=<value> (IDs of a-z, 0-9 and single hyphens)".to_owned();
+    let (option, value) = s.split_once('=').ok_or_else(bad)?;
+    match (Id::parse(option), Id::parse(value)) {
+        (Some(_), Some(v)) if v.as_str() == rerun_core::catalog::model::UNCHANGED => Err(
+            "unchanged is the default: leave out --set for this option (to take a value back, \
+             revert the transaction that set it)"
+                .to_owned(),
+        ),
+        (Some(o), Some(v)) => Ok(Choice {
+            option: o.to_string(),
+            value: v.to_string(),
         }),
         _ => Err(bad()),
     }

@@ -77,6 +77,7 @@ fn topo(name: &str, pkg: &str) -> Topo {
         tested_on: vec![],
         anti_cheat: None,
         user_data: None,
+        options: vec![],
         matches: Match {
             steam_appid: Some(440),
             exes: vec![Exe {
@@ -980,3 +981,6 @@ fn rule_and_format_errors_read_cleanly() {
 
 /// Forward compatibility (ADR 0024 amendment): FX1 to FX7 and the frozen bundle.
 mod fx;
+
+/// Game options (ADR 0032): OX1 to OX11.
+mod options;

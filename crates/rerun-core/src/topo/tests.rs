@@ -426,7 +426,13 @@ fn plan_with(
         game: &gf,
         packages: &[],
     };
-    plan(&INDEX, t, &facts, &picks(p), &ctx)
+    plan(
+        &INDEX,
+        t,
+        &facts,
+        &super::EngineSelection::picks(&picks(p)),
+        &ctx,
+    )
 }
 
 fn plan_on(sys: &FakeSystem, t: &Topo, p: &[&str]) -> Result<super::TopoPlan, EngineError> {
@@ -740,7 +746,10 @@ fn ta_the_rule_table_is_exactly_e4() {
             StepKind::LaunchWatch,
             StepKind::LaunchHold,
             StepKind::LaunchIfeo,
-            StepKind::LaunchInproc
+            StepKind::LaunchInproc,
+            // ADR 0032 amendment P5-OE (S1): an option's `start` and `launch_args`.
+            StepKind::Start,
+            StepKind::LaunchArgs
         ]
     );
     let warned: Vec<StepKind> = ANTI_CHEAT_RULES
@@ -1003,7 +1012,14 @@ fn tc_from_a_signed_index() {
         game: &gf,
         packages: &[],
     };
-    let p = plan(c.sha256(), found[0], &facts, &picks(&["cores/limit"]), &ctx).unwrap();
+    let p = plan(
+        c.sha256(),
+        found[0],
+        &facts,
+        &super::EngineSelection::picks(&picks(&["cores/limit"])),
+        &ctx,
+    )
+    .unwrap();
     assert_eq!(&p.plan.source.unwrap().index, c.sha256());
 }
 
@@ -1060,7 +1076,14 @@ fn fx1_a_known_topo_is_planned_next_to_a_future_one() {
         game: &gf,
         packages: &[],
     };
-    let p = plan(c.sha256(), found[0], &facts, &picks(&["cores/limit"]), &ctx).unwrap();
+    let p = plan(
+        c.sha256(),
+        found[0],
+        &facts,
+        &super::EngineSelection::picks(&picks(&["cores/limit"])),
+        &ctx,
+    )
+    .unwrap();
     assert_eq!(&p.plan.source.unwrap().index, c.sha256());
 }
 
@@ -1421,7 +1444,13 @@ fn plan_pkgs(
         game: &gf,
         packages,
     };
-    plan(&INDEX, t, &facts, &picks(p), &ctx)
+    plan(
+        &INDEX,
+        t,
+        &facts,
+        &super::EngineSelection::picks(&picks(p)),
+        &ctx,
+    )
 }
 
 fn sha_of(b: &[u8]) -> [u8; 32] {

@@ -10,6 +10,10 @@
 //! - C-TE6 `--pick` with a step file is a usage error; a pick of the wrong form too.
 //! - C-TE11 to C-TE13 the golden plans (P5-1): frozen bytes and hashes in `tests/fixtures/plan/`
 //!   (a launch profile and a compat layer; an `ini_set` on the user data folder; a package).
+//! - C-TE16 game options (ADR 0032, O-1): the report lists them with the `--set` hint; `--set`
+//!   plans an `ini_set` value alone or with a pick, the origin names it; apply and revert bring
+//!   the game folder back; refusals and the forms of `--set`.
+//! - C-TE17 the golden plan of an option value with a fix.
 
 use std::path::Path;
 
@@ -238,7 +242,7 @@ fn c_te6_usage() {
         Exit::Usage,
     );
     assert!(
-        r.stderr.contains("--pick needs a Steam app ID"),
+        r.stderr.contains("--pick and --set need a Steam app ID"),
         "{}",
         r.stderr
     );
@@ -929,5 +933,198 @@ fn import(sys: &FakeSystem, ix: &[u8]) {
         &["index", "import", INDEX, SIG],
         Answer::No,
         Exit::Report,
+    );
+}
+
+/// The C-TE16 world: a Topo with option `frame-cap` (two `ini_set` values on `settings.ini` of
+/// the game folder) and issue `display` (`compat_layer`).
+fn options_sys() -> FakeSystem {
+    let sys = lm_sys(false, &steps(8));
+    let sha = sha256_of(&sys, "game.exe");
+    let ix = format!(
+        r#"{{"format":1,"seq":1,"issued":"2026-11-25T12:00:00Z","topos":[{{"format":1,"id":"invented-game","title":"Invented Game","status":"active","rev":1,
+"match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d9"}}]}},
+"options":[
+ {{"id":"frame-cap","title":"Frame rate cap","sources":[{{"type":"pcgw","url":"https://www.pcgamingwiki.com/wiki/Invented#Cap"}}],"values":[
+   {{"id":"sixty","title":"60 FPS","status":"verified","steps":[{{"ini_set":{{"file":"settings.ini","values":[{{"section":"Engine","key":"MaxFps","value":"60"}}]}}}}]}},
+   {{"id":"off","title":"No cap","status":"unverified","steps":[{{"ini_set":{{"file":"settings.ini","values":[{{"section":"Engine","key":"MaxFps","value":"0"}}]}}}}]}}]}}
+],
+"issues":[
+ {{"id":"display","title":"Display","variants":[{{"id":"layer","status":"unverified","kind":"fix","steps":[{{"compat_layer":{{"exe":"game.exe","layers":["HIGHDPIAWARE"]}}}}]}}]}}
+]}}],"packages":[]}}"#
+    );
+    import(&sys, ix.as_bytes());
+    sys.fake_fs()
+        .put_file(
+            Path::new(&format!(r"{G}\settings.ini")),
+            b"[Engine]\r\nMaxFps=30\r\n",
+        )
+        .unwrap();
+    sys.fake_fs().sync_all();
+    sys
+}
+
+/// C-TE16 (ADR 0032, O-1): `--set` end to end.
+#[test]
+fn c_te16_game_options() {
+    let sys = options_sys();
+    let r = expect(&sys, &["plan", "220"], Answer::No, Exit::Report);
+    for line in [
+        "  option frame-cap (unchanged unless set): Frame rate cap\n",
+        "    frame-cap=sixty: verified: 60 FPS\n",
+        "    frame-cap=off: unverified: No cap\n",
+        "set an option with --set <option>=<value> (one value per option); an option left out \
+         stays as it is\n",
+    ] {
+        assert!(r.stdout.contains(line), "{line}\n{}", r.stdout);
+    }
+    // The C-TE2 world has no option: no hint.
+    let plain = expect(&self::sys(), &["plan", "220"], Answer::No, Exit::Report);
+    assert!(!plain.stdout.contains("--set"), "{}", plain.stdout);
+    // A dry run first: the origin and the options set, the preview, nothing stored.
+    let before = crate::tests::snap_dirs(&sys, &[G]);
+    let r = expect(
+        &sys,
+        &["plan", "220", "--set", "frame-cap=sixty", "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    assert!(
+        r.stdout.contains("\noptions set: frame-cap=sixty\n"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("settings.ini"), "{}", r.stdout);
+    assert_eq!(plans(&sys), 0, "a dry run stores nothing");
+    // Stored, checked, applied, reverted: the game folder as before.
+    let p = expect(
+        &sys,
+        &["plan", "220", "--set", "frame-cap=sixty"],
+        Answer::No,
+        Exit::Report,
+    );
+    let hash = crate::tests::hash_of(&p);
+    expect(
+        &sys,
+        &["apply", hash.as_str(), "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    let a = expect(
+        &sys,
+        &["apply", hash.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
+    let txn = crate::tests::txn_of(&a);
+    #[expect(clippy::disallowed_methods, reason = "test: look into the fake")]
+    let ini = {
+        use rerun_core::sys::Fs as _;
+        let d = sys.fake_fs().open_dir(Path::new(G)).unwrap();
+        d.read(&RelPath::parse("settings.ini").unwrap()).unwrap()
+    };
+    assert_eq!(ini, b"[Engine]\r\nMaxFps=60\r\n");
+    expect(
+        &sys,
+        &["revert", txn.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
+    crate::tests::same(&before, &crate::tests::snap_dirs(&sys, &[G]));
+    // With a pick in one plan.
+    let r = expect(
+        &sys,
+        &[
+            "plan",
+            "220",
+            "--pick",
+            "display/layer",
+            "--set",
+            "frame-cap=off",
+            "--dry-run",
+        ],
+        Answer::No,
+        Exit::Report,
+    );
+    assert!(
+        r.stdout.contains("\noptions set: frame-cap=off\n"),
+        "{}",
+        r.stdout
+    );
+    // Refused by the engine: exit 3 with the reason.
+    for (set, why) in [
+        ("frame-cap=thirty", "option frame-cap has no value thirty"),
+        ("fov=wide", "the Topo has no option fov"),
+    ] {
+        let r = expect(
+            &sys,
+            &["plan", "220", "--set", set],
+            Answer::No,
+            Exit::Refused,
+        );
+        assert!(r.stderr.contains(why), "{set}: {}", r.stderr);
+    }
+    let r = expect(
+        &sys,
+        &[
+            "plan",
+            "220",
+            "--set",
+            "frame-cap=sixty",
+            "--set",
+            "frame-cap=off",
+        ],
+        Answer::No,
+        Exit::Refused,
+    );
+    assert!(
+        r.stderr.contains("option frame-cap is set twice"),
+        "{}",
+        r.stderr
+    );
+    // The forms, before any system access; with a step file a usage error.
+    for bad in [
+        "frame-cap",
+        "Frame-cap=sixty",
+        "frame-cap=",
+        "frame-cap=unchanged",
+    ] {
+        assert!(
+            <crate::cli::Cli as clap::Parser>::try_parse_from([
+                "rerun", "plan", "220", "--set", bad
+            ])
+            .is_err(),
+            "{bad}"
+        );
+    }
+    let r = expect(
+        &sys,
+        &["plan", r"D:\Work\steps.json", "--set", "frame-cap=sixty"],
+        Answer::No,
+        Exit::Usage,
+    );
+    assert!(
+        r.stderr.contains("--pick and --set need a Steam app ID"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// C-TE17: the golden plan of an option value and a fix (ADR 0032, O-1): the source names the
+/// pick and the choice.
+#[test]
+fn c_te17_the_golden_plan_with_an_option() {
+    golden(
+        &options_sys(),
+        &FakeHttp::default(),
+        &[
+            "plan",
+            "220",
+            "--pick",
+            "display/layer",
+            "--set",
+            "frame-cap=sixty",
+        ],
+        "topo-220-option",
     );
 }

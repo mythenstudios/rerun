@@ -19,9 +19,9 @@ use std::collections::BTreeMap;
 use crate::catalog::model::{
     AntiCheatRelease, Api, Arch, ArchList, Asset, Chain, Check, Compare, Exe, Fallback,
     FirewallRuleSpec, GpuRequirement, Issue, Kind, LaaPatchStep, Launch, Links, Match, Method,
-    Note, OptionIni, OptionValue, Package, PackageFile, PackageOption, PackageSource, Platform,
-    Runtime, Source, SourceType, Status, SteamInput, Tier, Tips, Topo, TopoStep, Variant,
-    VariantStatus, Vendor, When,
+    Note, OptionIni, OptionStep, OptionValue, Package, PackageFile, PackageOption, PackageSource,
+    Platform, Runtime, Source, SourceType, Status, SteamInput, Tier, Tips, Topo, TopoOption,
+    TopoOptionValue, TopoStep, Variant, VariantStatus, Vendor, When,
 };
 use crate::detect::exe::AntiCheat;
 use crate::policy::firewall::Direction;
@@ -86,6 +86,7 @@ pub fn topo_floor(t: &Topo) -> Floor {
         launch,
         anti_cheat,
         user_data,
+        options,
         issues,
         tips,
         links,
@@ -96,6 +97,7 @@ pub fn topo_floor(t: &Topo) -> Floor {
         .max(opt(launch.as_ref(), launch_floor))
         .max(opt(anti_cheat.as_ref(), anti_cheat_release))
         .max(opt(user_data.as_ref(), user_data_floor))
+        .max(all(options, option_floor))
         .max(all(issues, issue))
         .max(opt(tips.as_ref(), tips_floor))
         .max(opt(links.as_ref(), links_floor))
@@ -245,6 +247,37 @@ fn source(s: &Source) -> Floor {
         | SourceType::SteamThread
         | SourceType::Pcgw
         | SourceType::Official => F1,
+    }
+}
+
+/// `options` (ADR 0032 amendment P5-OE): entry format 1, every part of it.
+fn option_floor(o: &TopoOption) -> Floor {
+    let TopoOption {
+        id: _,
+        title: _,
+        sources,
+        values,
+    } = o;
+    all(sources, source).max(all(values, option_value))
+}
+
+fn option_value(v: &TopoOptionValue) -> Floor {
+    let TopoOptionValue {
+        id: _,
+        title: _,
+        status,
+        steps,
+    } = v;
+    let s = match status {
+        VariantStatus::Verified | VariantStatus::Reported | VariantStatus::Unverified => F1,
+    };
+    s.max(all(steps, option_step))
+}
+
+fn option_step(s: &OptionStep) -> Floor {
+    match s {
+        OptionStep::Start(_) | OptionStep::LaunchArgs(_) => F1,
+        OptionStep::IniSet(i) => ini_set(i),
     }
 }
 

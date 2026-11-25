@@ -13,8 +13,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::model::{
-    ArchList, Compare, ENTRY_FORMAT, FirewallRuleSpec, Id, LaaPatchStep, Launch, Method, Package,
-    PackageOption, Source, SourceType, Status, TODO, Tier, Topo, TopoStep, When,
+    ArchList, Chain, Compare, ENTRY_FORMAT, FirewallRuleSpec, Id, LaaPatchStep, Launch, Method,
+    OptionStep, Package, PackageOption, Source, SourceType, Status, TODO, Tier, Topo, TopoOption,
+    TopoStep, UNCHANGED, When,
 };
 use crate::fold::fold;
 use crate::policy::ini::IniName;
@@ -49,6 +50,23 @@ pub const LAA_PATCH_REVIEWED: bool = true;
 /// only again (the signed index then holds none). Topos with it stay `unverified` until a test
 /// on a hybrid machine (R1).
 pub const GPU_PREFERENCE_REVIEWED: bool = true;
+
+/// Whether a Topo outside a draft may hold an option value with `start` or `launch_args` (ADR
+/// 0032 amendment P5-OE). `false` until the shim slice that starts `run` and appends `args` is
+/// reviewed (O-2a) and the engine plans them (O-2b): the signed index then holds none, and the
+/// engine refuses them as not yet planned. `ini_set` values are usable from the first slice.
+pub const OPTION_LAUNCH_REVIEWED: bool = false;
+
+/// Most options of a Topo (ADR 0032).
+pub const MAX_OPTIONS: usize = 8;
+/// Most values of one option, besides the implicit `unchanged`.
+pub const MAX_OPTION_VALUES: usize = 8;
+/// Most steps of one option value.
+pub const MAX_VALUE_STEPS: usize = 4;
+/// Most arguments of one `launch_args` step.
+pub const MAX_LAUNCH_ARGS: usize = 8;
+/// Most bytes of the arguments of one `launch_args` step, joined by one space.
+pub const MAX_LAUNCH_ARGS_BYTES: usize = 512;
 
 mod floor;
 pub use floor::{Floor, package_floor, topo_floor};
@@ -368,19 +386,13 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
         }
     }
     one_fix_per_id(t)?;
+    options(t)?;
     if let Some(tips) = &t.tips {
         for (i, o) in tips.launch_options.iter().enumerate() {
-            let b = o.as_bytes();
-            let ok = b.len() >= 2
-                && b.len() <= 64
-                && matches!(b[0], b'-' | b'+')
-                && b[1..].iter().all(|c| {
-                    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'=' | b'+' | b'-')
-                });
             ensure(
-                ok,
+                game_arg(o),
                 &format!("tips.launch_options[{i}]"),
-                "one game argument: - or + then A-Z a-z 0-9 _ . = + -, at most 64",
+                GAME_ARG_RULE,
             )?;
         }
         for (i, n) in tips.notes.iter().enumerate() {
@@ -402,6 +414,248 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
         )?;
     }
     status_rule(t, t.status, rules)
+}
+
+/// One game argument (`tips.launch_options`, an option's `launch_args`): `-` or `+`, then
+/// `A-Z a-z 0-9 _ . = + -`, 2 to 64 characters. No quote, space or `%`, so it never splits or
+/// expands on a command line. The pattern of `rerun_proto::profile::LaunchArg` of profile
+/// format 3 (ADR 0032 amendment P5-OE).
+pub fn game_arg(o: &str) -> bool {
+    let b = o.as_bytes();
+    b.len() >= 2
+        && b.len() <= 64
+        && matches!(b[0], b'-' | b'+')
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'=' | b'+' | b'-'))
+}
+
+const GAME_ARG_RULE: &str = "one game argument: - or + then A-Z a-z 0-9 _ . = + -, at most 64";
+
+/// The INI file of an `ini_set` as two steps compare it: its root and its folded path.
+type IniFile = (crate::prim::StepRoot, String);
+
+/// `options` (ADR 0032 and its amendment P5-OE): at most [`MAX_OPTIONS`]; option IDs unique and
+/// none an issue ID; per option a title, at least one source, 1 to [`MAX_OPTION_VALUES`] values
+/// with unique IDs, never `unchanged`; per value a title and 1 to [`MAX_VALUE_STEPS`] steps (at
+/// most one `start`, at most one `launch_args`, each INI file once); two values of one option
+/// never with the same steps; two options never set the same INI file.
+fn options(t: &Topo) -> R {
+    ensure(
+        t.options.len() <= MAX_OPTIONS,
+        "options",
+        "at most 8 options",
+    )?;
+    ensure(
+        unique(
+            t.options
+                .iter()
+                .map(|o| &o.id)
+                .chain(t.issues.iter().map(|i| &i.id)),
+        ),
+        "options",
+        "option IDs are unique and differ from every issue ID",
+    )?;
+    // The INI files of each earlier option.
+    let mut files: Vec<(IniFile, &Id)> = Vec::new();
+    for (i, o) in t.options.iter().enumerate() {
+        let at = format!("options[{i}]");
+        let mine = topo_option(t, o, &at)?;
+        for f in &mine {
+            if let Some((_, other)) = files.iter().find(|(g, _)| g == f) {
+                return Err(err(
+                    &at,
+                    format!(
+                        "option {} sets an INI file option {other} sets too: two options never \
+                         set the same file",
+                        o.id
+                    ),
+                ));
+            }
+        }
+        files.extend(mine.into_iter().map(|f| (f, &o.id)));
+    }
+    Ok(())
+}
+
+/// One option; returns the INI files its values set, each once.
+fn topo_option(t: &Topo, o: &TopoOption, at: &str) -> Result<Vec<IniFile>, RuleError> {
+    ensure(
+        chars_between(&o.title, 1, 200),
+        &format!("{at}.title"),
+        "1 to 200 characters",
+    )?;
+    ensure(
+        !o.sources.is_empty(),
+        &format!("{at}.sources"),
+        "at least one source",
+    )?;
+    for (k, s) in o.sources.iter().enumerate() {
+        source(s, &format!("{at}.sources[{k}]"))?;
+    }
+    ensure(
+        (1..=MAX_OPTION_VALUES).contains(&o.values.len()),
+        &format!("{at}.values"),
+        "1 to 8 values",
+    )?;
+    ensure(
+        unique(o.values.iter().map(|v| &v.id)),
+        &format!("{at}.values"),
+        "value IDs are unique",
+    )?;
+    let mut files: Vec<IniFile> = Vec::new();
+    for (j, v) in o.values.iter().enumerate() {
+        let at = format!("{at}.values[{j}]");
+        ensure(
+            v.id.as_str() != UNCHANGED,
+            &format!("{at}.id"),
+            "unchanged is the implicit default of every option and never listed",
+        )?;
+        ensure(
+            chars_between(&v.title, 1, 200),
+            &format!("{at}.title"),
+            "1 to 200 characters",
+        )?;
+        ensure(
+            (1..=MAX_VALUE_STEPS).contains(&v.steps.len()),
+            &format!("{at}.steps"),
+            "1 to 4 steps",
+        )?;
+        let starts = v
+            .steps
+            .iter()
+            .filter(|s| matches!(s, OptionStep::Start(_)))
+            .count();
+        let args = v
+            .steps
+            .iter()
+            .filter(|s| matches!(s, OptionStep::LaunchArgs(_)))
+            .count();
+        ensure(starts <= 1, &format!("{at}.steps"), "at most one start")?;
+        ensure(args <= 1, &format!("{at}.steps"), "at most one launch_args")?;
+        let mut own: Vec<IniFile> = Vec::new();
+        for (k, s) in v.steps.iter().enumerate() {
+            let at = format!("{at}.steps[{k}]");
+            match s {
+                OptionStep::Start(p) => option_start(t, p, &format!("{at}.start"))?,
+                OptionStep::LaunchArgs(a) => {
+                    option_launch_args(t, a, starts == 1, &format!("{at}.launch_args"))?;
+                }
+                OptionStep::IniSet(x) => {
+                    ini_set(x, &format!("{at}.ini_set"))?;
+                    ensure(
+                        x.root.is_game() || t.user_data.is_some(),
+                        &format!("{at}.ini_set.root"),
+                        "user_data needs the Topo's user_data folder",
+                    )?;
+                    let key = (x.root, fold(x.file.as_str()));
+                    ensure(
+                        !own.contains(&key),
+                        &format!("{at}.ini_set.file"),
+                        "one ini_set per file in a value",
+                    )?;
+                    own.push(key);
+                }
+            }
+        }
+        for key in own {
+            if !files.contains(&key) {
+                files.push(key);
+            }
+        }
+        if let Some(w) = o.values[..j].iter().find(|w| w.steps == v.steps) {
+            return Err(err(
+                &format!("{at}.steps"),
+                format!("the same steps as value {} of this option", w.id),
+            ));
+        }
+    }
+    Ok(files)
+}
+
+/// What `start` and `launch_args` need of the Topo (ADR 0032): a draft while not reviewed
+/// ([`OPTION_LAUNCH_REVIEWED`]); Steam's own start that the launch profile can take over: the
+/// chain exactly `[steam]`, a method that resolves to `direct` (`auto` or `direct`), and
+/// `launch.start` named (not `TODO`).
+fn option_launch(t: &Topo, at: &str) -> R {
+    ensure(
+        OPTION_LAUNCH_REVIEWED || t.status == Status::Draft,
+        at,
+        "draft only until start and launch_args of options are reviewed (ADR 0032)",
+    )?;
+    let ok = t.launch.as_ref().is_some_and(|l| {
+        l.chain == [Chain::Steam]
+            && matches!(l.method, Some(Method::Auto | Method::Direct))
+            && l.start.as_ref().is_some_and(|s| s.as_str() != TODO)
+    });
+    ensure(
+        ok,
+        at,
+        "needs launch.chain [steam], launch.method auto or direct and launch.start",
+    )
+}
+
+/// `start`: an `.exe` of `match.exes` in exactly its spelling, every entry of it with a
+/// `sha256` (the build that will run, ADR 0024), never `launch.start` itself.
+fn option_start(t: &Topo, p: &crate::path::RelPath, at: &str) -> R {
+    option_launch(t, at)?;
+    ensure(ends_with_ci(p.as_str(), ".exe"), at, "a .exe")?;
+    let mut entries = t
+        .matches
+        .exes
+        .iter()
+        .filter(|e| e.path.same_spelling(p))
+        .peekable();
+    ensure(
+        entries.peek().is_some(),
+        at,
+        "an executable of match.exes, in exactly its spelling",
+    )?;
+    ensure(
+        entries.all(|e| e.sha256.is_some()),
+        at,
+        "every match.exes entry of it needs a sha256 (the build that will run, ADR 0024)",
+    )?;
+    ensure(
+        t.launch
+            .as_ref()
+            .and_then(|l| l.start.as_ref())
+            .is_none_or(|s| s != p),
+        at,
+        "the same as launch.start (nothing to change)",
+    )
+}
+
+/// `launch_args`: 1 to [`MAX_LAUNCH_ARGS`] game arguments, at most [`MAX_LAUNCH_ARGS_BYTES`]
+/// joined; without a `start` in the same value only when `launch.start` names a `match.exes`
+/// entry (Steam starts the game itself; else the arguments would reach a launcher).
+fn option_launch_args(t: &Topo, a: &[String], has_start: bool, at: &str) -> R {
+    option_launch(t, at)?;
+    ensure(
+        (1..=MAX_LAUNCH_ARGS).contains(&a.len()),
+        at,
+        "1 to 8 arguments",
+    )?;
+    for (i, x) in a.iter().enumerate() {
+        ensure(game_arg(x), &format!("{at}[{i}]"), GAME_ARG_RULE)?;
+    }
+    let joined = a.iter().map(String::len).sum::<usize>() + a.len().saturating_sub(1);
+    ensure(
+        joined <= MAX_LAUNCH_ARGS_BYTES,
+        at,
+        "at most 512 bytes joined by one space",
+    )?;
+    let start_is_game = t
+        .launch
+        .as_ref()
+        .and_then(|l| l.start.as_ref())
+        .is_some_and(|s| t.matches.exes.iter().any(|e| e.path.same_spelling(s)));
+    ensure(
+        has_start || start_is_game,
+        at,
+        "without a start in the same value only when launch.start is an executable of \
+         match.exes (else the arguments reach a launcher)",
+    )
 }
 
 /// P5-4: one variant ID names one fix across the Topo's issues. Every copy of an ID has the

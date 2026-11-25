@@ -1,0 +1,18 @@
+# Invalid: at most four steps per value
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha256: "1111111111111111111111111111111111111111111111111111111111111111", api: d3d9 }
+    - { path: "game_dx9.exe", sha256: "2222222222222222222222222222222222222222222222222222222222222222", api: d3d9 }
+launch: { chain: [steam], method: auto, start: "game.exe" }
+options:
+  - id: api
+    title: "API"
+    sources: [ { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Fixture" } ]
+    values:
+      - { id: many, title: "Many", status: unverified, steps: [ { launch_args: [ "-a" ] }, { ini_set: { file: a.ini, values: [ { section: S, key: k, value: "1" } ] } }, { ini_set: { file: b.ini, values: [ { section: S, key: k, value: "1" } ] } }, { ini_set: { file: c.ini, values: [ { section: S, key: k, value: "1" } ] } }, { ini_set: { file: d.ini, values: [ { section: S, key: k, value: "1" } ] } } ] }
+issues: []

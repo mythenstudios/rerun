@@ -79,7 +79,7 @@ mod write;
 pub(crate) use game::with_topo;
 pub use game::{
     Fix, Found, GameCache, GameRefusal, GameView, IssueView, Lookup, MatchView, Matched,
-    OwnedReport, Solved, VariantView, fixes, game, game_cached,
+    OptionView, OwnedReport, Solved, ValueView, VariantView, fixes, game, game_cached,
 };
 pub use history::{
     ClearGate, ClearItem, ClearPreview, ClearShown, HISTORY_KEEP, ResultKeep, TIDY_PER_RUN, Tidied,
@@ -118,8 +118,8 @@ pub use store::{
 };
 pub use uninstall::{LaunchLeft, UninstallVerdict, UninstallView, uninstall_check};
 pub use write::{
-    Applied, LoadRefusal, Picked, PlanRefusal, Planned, Previewed, StepsRefusal, StoreRefusal,
-    apply, check, helper, load_stored, plan, plan_steps, shown, store,
+    Applied, LoadRefusal, Picked, PlanRefusal, Planned, Previewed, Selection, StepsRefusal,
+    StoreRefusal, apply, check, helper, load_stored, plan, plan_steps, shown, store,
 };
 
 /// What a job runs against.

@@ -1,5 +1,5 @@
-//! `rerun plan <app-id> [--pick <issue>/<variant>]… [--dry-run]` (P4-4): the Topo engine on the
-//! current signed index.
+//! `rerun plan <app-id> [--pick <issue>/<variant>]… [--set <option>=<value>]… [--dry-run]`
+//! (P4-4, ADR 0032): the Topo engine on the current signed index.
 //!
 //! Order: the elevated guard, the forbidden roots, Rerun's folder without creating it, the
 //! current index (`catalog::store::current`: signature and form checked again), the Topos that
@@ -12,10 +12,11 @@
 //! named with its reason and never planned; an app whose only Topos are set aside offers
 //! nothing, and a `--pick` for it is refused (exit 3).
 //!
-//! Without `--pick`: the report (issues, `when` here, variants and what the engine says);
-//! nothing is stored, nothing created. With `--pick`: the engine's plan, then the same preview
-//! and storage as a step file (`plan::show_and_store`), with the plan's origin and the
-//! warnings before the preview. `appinfo.vdf` is never read (L9).
+//! Without `--pick` and `--set`: the report (options and their values, issues, `when` here,
+//! variants and what the engine says); nothing is stored, nothing created. With `--pick` or
+//! `--set`: the engine's plan, then the same preview and storage as a step file
+//! (`plan::show_and_store`), with the plan's origin, the options it sets and the warnings before
+//! the preview. `appinfo.vdf` is never read (L9).
 //!
 //! The guards, the lookup, the report and the plan come from `rerun_core::flow` (`guard`,
 //! `game`, `plan`, ADR 0027 and its amendment P5-2a); this module renders them.
@@ -25,8 +26,7 @@ use std::io::Write;
 use rerun_core::catalog::model::{GpuRequirement, Kind, Status, VariantStatus};
 use rerun_core::catalog::{Aside, Topo};
 use rerun_core::escape;
-use rerun_core::flow::{self, Found, GameRefusal, Lookup, OwnedReport};
-use rerun_core::plan::Pick;
+use rerun_core::flow::{self, Found, GameRefusal, Lookup, OwnedReport, Selection};
 use rerun_core::prim::MethodSpec;
 use rerun_core::topo::{AntiCheatState, ExeState, GameFacts, Warning};
 
@@ -129,6 +129,28 @@ fn report_lines(r: &OwnedReport, g: &GameFacts) -> Vec<Message<'static>> {
     if r.several_gpus {
         m.push(Message::Topo(TopoMsg::SeveralGpus));
     }
+    for o in &r.options {
+        m.push(Message::Topo(TopoMsg::Option {
+            id: o.option.id.to_string(),
+            title: escape::text(&o.option.title).into_owned(),
+        }));
+        for v in &o.values {
+            let mut notes = Vec::new();
+            if let Some(why) = &v.refused {
+                notes.push(why.to_string());
+            }
+            if !v.warned.is_empty() {
+                let kinds: Vec<&str> = v.warned.iter().map(|k| k.as_str()).collect();
+                notes.push(format!("warning: anti-cheat found ({})", kinds.join(", ")));
+            }
+            m.push(Message::Topo(TopoMsg::OptionValue {
+                set: format!("{}={}", o.option.id, v.value.id),
+                status: variant_status(v.value.status),
+                title: escape::text(&v.value.title).into_owned(),
+                note: (!notes.is_empty()).then(|| notes.join("; ")),
+            }));
+        }
+    }
     for i in &r.issues {
         m.push(Message::Topo(TopoMsg::Issue {
             id: i.issue.id.to_string(),
@@ -149,11 +171,7 @@ fn report_lines(r: &OwnedReport, g: &GameFacts) -> Vec<Message<'static>> {
             }
             m.push(Message::Topo(TopoMsg::Variant {
                 pick: format!("{}/{}", i.issue.id, v.variant.id),
-                status: match v.variant.status {
-                    VariantStatus::Verified => "verified",
-                    VariantStatus::Reported => "reported",
-                    VariantStatus::Unverified => "unverified",
-                },
+                status: variant_status(v.variant.status),
                 kind: match v.variant.kind {
                     Kind::Fix => "fix",
                     Kind::Enhancement => "enhancement",
@@ -165,8 +183,24 @@ fn report_lines(r: &OwnedReport, g: &GameFacts) -> Vec<Message<'static>> {
     m
 }
 
+fn variant_status(s: VariantStatus) -> &'static str {
+    match s {
+        VariantStatus::Verified => "verified",
+        VariantStatus::Reported => "reported",
+        VariantStatus::Unverified => "unverified",
+    }
+}
+
 fn warning_text(w: &Warning) -> String {
     match w {
+        Warning::OptionAntiCheat {
+            option,
+            value,
+            step,
+        } => format!(
+            "warning: {option}={value}: anti-cheat found; {} is planned, at your own risk",
+            step.as_str()
+        ),
         Warning::NeedsRetest => "warning: this Topo is marked to be tested again".to_owned(),
         Warning::WhenUnknown { issue } => format!(
             "warning: issue {issue}: a condition could not be checked on this system; planned \
@@ -369,12 +403,12 @@ fn failed<W: Write, E: Write>(
 pub fn plan<W: Write, E: Write>(
     host: &Host<'_>,
     app_id: u32,
-    picks: &[Pick],
+    sel: &Selection,
     dry_run: bool,
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Exit {
-    match run(host, app_id, picks, dry_run, out, err) {
+    match run(host, app_id, sel, dry_run, out, err) {
         Ok(e) | Err(e) => e,
     }
 }
@@ -382,13 +416,13 @@ pub fn plan<W: Write, E: Write>(
 fn run<W: Write, E: Write>(
     host: &Host<'_>,
     app_id: u32,
-    picks: &[Pick],
+    sel: &Selection,
     dry_run: bool,
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
     let g = flow::guard(host.env()).map_err(|x| gate(err, x))?;
-    if picks.is_empty() {
+    if sel.picks.is_empty() && sel.choices.is_empty() {
         // The report: nothing is stored, nothing created.
         let v = flow::game(&g, app_id).map_err(|r| refusal(out, err, r))?;
         let (mut m, mv) = match one(v.lookup, app_id, Exit::Report, out, err) {
@@ -398,9 +432,12 @@ fn run<W: Write, E: Write>(
         m.extend(report_lines(&mv.report, &mv.read));
         m.push(Message::Blank);
         m.push(Message::Topo(TopoMsg::PickHint));
+        if !mv.report.options.is_empty() {
+            m.push(Message::Topo(TopoMsg::SetHint));
+        }
         return Ok(print(out, err, &m, Exit::Report));
     }
-    let lookup = flow::plan(&g, app_id, picks).map_err(|r| refusal(out, err, r))?;
+    let lookup = flow::plan(&g, app_id, sel).map_err(|r| refusal(out, err, r))?;
     let (lead, picked) = match one(lookup, app_id, Exit::Refused, out, err) {
         Ok(x) => x,
         Err(exit) => return Ok(exit),
@@ -416,6 +453,16 @@ fn run<W: Write, E: Write>(
                 rev: t.rev,
                 index: hex(&picked.index),
             }));
+            if !sel.choices.is_empty() {
+                let set: Vec<String> = sel
+                    .choices
+                    .iter()
+                    .map(|c| format!("{}={}", c.option, c.value))
+                    .collect();
+                before.push(Message::Topo(TopoMsg::Choices {
+                    set: set.join(", "),
+                }));
+            }
             before.extend(p.warnings().iter().map(|w| {
                 Message::Topo(TopoMsg::Warning {
                     text: warning_text(w),

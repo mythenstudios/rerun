@@ -523,6 +523,7 @@ fn sb_test_key_helper_removes_a_rule() {
                 index: isha,
                 topo: "sb-unknown-topo".to_owned(),
                 rev: 1,
+                choices: Vec::new(),
                 picks: vec![Pick {
                     issue: "net".to_owned(),
                     variant: "block".to_owned(),

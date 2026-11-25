@@ -175,12 +175,14 @@ pub struct Plan {
 
 /// Most variants a Topo plan names.
 pub const MAX_PICKS: usize = 32;
+/// Most option values a Topo plan names (ADR 0032): one per option, and a Topo has at most 8.
+pub const MAX_CHOICES: usize = 8;
 
 /// The origin of a plan built by the Topo engine (P4-4, ADR 0020 amendment P4-4): the SHA-256
 /// of the signed index it was planned from (kept under `<AppDir>index` by that name, so a
 /// revert finds it again, P4 condition R1; the elevated helper checks against it, L8) and
-/// the Topo with every variant picked. Display and binding only: nothing of it is trusted
-/// when read back beyond its form.
+/// the Topo with every variant picked and every option value chosen (ADR 0032 amendment P5-OE).
+/// Display and binding only: nothing of it is trusted when read back beyond its form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanSource {
@@ -191,8 +193,24 @@ pub struct PlanSource {
     pub topo: String,
     /// Its revision.
     pub rev: u32,
-    /// The variants picked, in the order given: one per issue.
+    /// The variants picked, in the order given: one per issue; 0 to [`MAX_PICKS`] (none for a
+    /// plan of option values only).
     pub picks: Vec<Pick>,
+    /// The option values chosen, in the order given: one per option, 0 to [`MAX_CHOICES`]
+    /// (ADR 0032 amendment P5-OE; `unchanged` is the absence). Omitted on the wire when empty,
+    /// so a plan without options has the bytes it had before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<Choice>,
+}
+
+/// One chosen value of a Topo option (ADR 0032).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Choice {
+    /// The option ID.
+    pub option: String,
+    /// The value ID (never `unchanged`).
+    pub value: String,
 }
 
 /// One picked variant of a Topo.
@@ -206,15 +224,36 @@ pub struct Pick {
 }
 
 impl PlanSource {
-    /// The form rules (encode and decode alike): IDs of the Topo form, `rev` from 1, 1 to
-    /// [`MAX_PICKS`] picks, each issue once.
+    /// The form rules (encode and decode alike): IDs of the Topo form, `rev` from 1, 0 to
+    /// [`MAX_PICKS`] picks, each issue once, 0 to [`MAX_CHOICES`] choices, each option once and
+    /// never `unchanged`, at least one pick or choice.
     pub(crate) fn check(&self) -> Result<(), PlanError> {
         let id = |s: &str| crate::catalog::model::Id::parse(s).is_some();
         if !id(&self.topo) || self.rev == 0 {
             return Err(invalid(None, "a source without a Topo ID and revision"));
         }
-        if self.picks.is_empty() || self.picks.len() > MAX_PICKS {
-            return Err(invalid(None, "a source names 1 to 32 variants"));
+        if self.picks.len() > MAX_PICKS {
+            return Err(invalid(None, "a source names at most 32 variants"));
+        }
+        if self.choices.len() > MAX_CHOICES {
+            return Err(invalid(None, "a source names at most 8 option values"));
+        }
+        if self.picks.is_empty() && self.choices.is_empty() {
+            return Err(invalid(None, "a source names a variant or an option value"));
+        }
+        for (i, c) in self.choices.iter().enumerate() {
+            if !id(&c.option) || !id(&c.value) {
+                return Err(invalid(None, "a choice that is no option and value ID"));
+            }
+            if c.value == crate::catalog::model::UNCHANGED {
+                return Err(invalid(
+                    None,
+                    "a choice of unchanged (the absence of a choice)",
+                ));
+            }
+            if self.choices[..i].iter().any(|d| d.option == c.option) {
+                return Err(invalid(None, "two values of one option"));
+            }
         }
         for (i, p) in self.picks.iter().enumerate() {
             if !id(&p.issue) || !id(&p.variant) {

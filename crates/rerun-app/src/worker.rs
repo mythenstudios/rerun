@@ -1051,7 +1051,12 @@ fn plan(
         emit(refused(vm::not_available(lang)));
         return;
     }
-    match flow::plan(g, app_id, picks) {
+    // The app offers no option value yet (the options' UI slice of ADR 0032).
+    let sel = flow::Selection {
+        picks: picks.to_vec(),
+        choices: Vec::new(),
+    };
+    match flow::plan(g, app_id, &sel) {
         Err(e) => emit(refused(vm::game_refusal(&e, lang))),
         Ok(Lookup::Read {
             found: Found::One(picked),

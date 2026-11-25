@@ -190,6 +190,7 @@ pub(crate) fn plan(sys: &FakeSystem, index: [u8; 32], k: Kind) -> PlanHash {
         index,
         topo: "invented-game".to_owned(),
         rev: 3,
+        choices: Vec::new(),
         picks: picks
             .iter()
             .map(|s| {

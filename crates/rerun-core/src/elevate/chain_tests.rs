@@ -186,6 +186,7 @@ fn add_request(sys: &FakeSystem, index: [u8; 32]) -> Request {
                 index,
                 topo: "invented-game".to_owned(),
                 rev: 3,
+                choices: Vec::new(),
                 picks: picks(&["net/block"]),
             },
             index_dir: dir_ref(sys, INDEX),

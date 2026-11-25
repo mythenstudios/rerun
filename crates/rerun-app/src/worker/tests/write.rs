@@ -1289,7 +1289,14 @@ fn aw16_a_plan_with_a_firewall_rule_needs_a_ready_helper() {
     let Ok(rerun_core::flow::Lookup::Read {
         found: rerun_core::flow::Found::One(picked),
         ..
-    }) = rerun_core::flow::plan(&g, 220, &picks)
+    }) = rerun_core::flow::plan(
+        &g,
+        220,
+        &rerun_core::flow::Selection {
+            picks,
+            choices: Vec::new(),
+        },
+    )
     else {
         panic!("no plan");
     };

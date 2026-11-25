@@ -139,10 +139,10 @@ fn plan_with(
             game: &gf,
             packages: &[],
         },
-        &[Pick {
+        &super::EngineSelection::picks(&[Pick {
             issue: "gpu".to_owned(),
             variant: "pref".to_owned(),
-        }],
+        }]),
         &ctx,
     )
 }

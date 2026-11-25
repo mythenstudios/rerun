@@ -8,7 +8,10 @@
 //! - **Refused:** anything that changes modules, the executable, how it is loaded or its
 //!   network (`package`, `laa_patch`, `firewall_rule`, `compat_layer`), and the launch methods
 //!   `watch` (it opens the protected game process to set the rule), `hold`, `ifeo` and `inproc`
-//!   (they open the process, sit in its start or run inside it).
+//!   (they open the process, sit in its start or run inside it); and the option steps `start`
+//!   and `launch_args` (ADR 0032 amendment P5-OE: another executable than Steam's launch entry
+//!   may skip the program that starts the anti-cheat system, and arguments change how a
+//!   protected game starts).
 //! - **Warned:** settings outside the game's code (the CPU rule of `direct`, which sets it on
 //!   the program Steam starts, `ini_set`, `registry_set`, `gpu_preference`).
 //! - **Nothing:** `steam_input` (a hint, Rerun changes nothing).
@@ -45,6 +48,11 @@ pub enum StepKind {
     GpuPreference,
     /// `steam_input`: a hint.
     SteamInput,
+    /// `start` of an option value (ADR 0032): another executable of the game than Steam's
+    /// launch entry, started by the launch profile.
+    Start,
+    /// `launch_args` of an option value (ADR 0032): game arguments the launch profile appends.
+    LaunchArgs,
 }
 
 impl StepKind {
@@ -64,6 +72,8 @@ impl StepKind {
             Self::RegistrySet => "registry_set",
             Self::GpuPreference => "gpu_preference",
             Self::SteamInput => "steam_input",
+            Self::Start => "start",
+            Self::LaunchArgs => "launch_args",
         }
     }
 }
@@ -80,7 +90,7 @@ pub enum AcRule {
 }
 
 /// The rule of every step kind (module docs).
-pub const ANTI_CHEAT_RULES: [(StepKind, AcRule); 13] = [
+pub const ANTI_CHEAT_RULES: [(StepKind, AcRule); 15] = [
     (StepKind::Package, AcRule::Refuse),
     (StepKind::LaaPatch, AcRule::Refuse),
     (StepKind::FirewallRule, AcRule::Refuse),
@@ -89,6 +99,8 @@ pub const ANTI_CHEAT_RULES: [(StepKind, AcRule); 13] = [
     (StepKind::LaunchHold, AcRule::Refuse),
     (StepKind::LaunchIfeo, AcRule::Refuse),
     (StepKind::LaunchInproc, AcRule::Refuse),
+    (StepKind::Start, AcRule::Refuse),
+    (StepKind::LaunchArgs, AcRule::Refuse),
     (StepKind::LaunchDirect, AcRule::Warn),
     (StepKind::IniSet, AcRule::Warn),
     (StepKind::RegistrySet, AcRule::Warn),
@@ -106,7 +118,9 @@ pub fn anti_cheat_rule(k: StepKind) -> AcRule {
         | StepKind::LaunchWatch
         | StepKind::LaunchHold
         | StepKind::LaunchIfeo
-        | StepKind::LaunchInproc => AcRule::Refuse,
+        | StepKind::LaunchInproc
+        | StepKind::Start
+        | StepKind::LaunchArgs => AcRule::Refuse,
         StepKind::LaunchDirect
         | StepKind::IniSet
         | StepKind::RegistrySet

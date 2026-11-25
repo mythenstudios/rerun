@@ -1,0 +1,18 @@
+# Invalid: an option value never holds a CPU rule
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha256: "1111111111111111111111111111111111111111111111111111111111111111", api: d3d9 }
+    - { path: "game_dx9.exe", sha256: "2222222222222222222222222222222222222222222222222222222222222222", api: d3d9 }
+launch: { chain: [steam], method: auto, start: "game.exe" }
+options:
+  - id: api
+    title: "API"
+    sources: [ { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Fixture" } ]
+    values:
+      - { id: few, title: "Few", status: unverified, steps: [ { cpu: { max_threads: 8 } } ] }
+issues: []

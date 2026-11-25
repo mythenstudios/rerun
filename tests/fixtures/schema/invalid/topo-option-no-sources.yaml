@@ -1,0 +1,16 @@
+# Invalid: an option without a source
+format: 1
+id: schema-fixture
+title: "Fixture"
+status: draft
+rev: 1
+match:
+  exes:
+    - { path: "game.exe", sha1: "0000000000000000000000000000000000000000", api: d3d9 }
+options:
+  - id: api
+    title: "API"
+    sources: []
+    values:
+      - { id: q, title: "Q", status: unverified, steps: [ { ini_set: { file: game.ini, values: [ { section: S, key: k, value: "1" } ] } } ] }
+issues: []

@@ -30,7 +30,7 @@
       }
     },
     {
-      "description": "An ini_set with root user_data needs the Topo's user_data (P4-12).",
+      "description": "An ini_set with root user_data needs the Topo's user_data (P4-12), in a variant and in an option value.",
       "if": {
         "not": {
           "required": [
@@ -64,6 +64,76 @@
                 }
               }
             }
+          },
+          "options": {
+            "items": {
+              "properties": {
+                "values": {
+                  "items": {
+                    "properties": {
+                      "steps": {
+                        "items": {
+                          "properties": {
+                            "ini_set": {
+                              "properties": {
+                                "root": {
+                                  "const": "game"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "start and launch_args of option values are draft only until reviewed (catalog::check::OPTION_LAUNCH_REVIEWED, ADR 0032 amendment P5-OE).",
+      "if": {
+        "required": [
+          "options"
+        ],
+        "properties": {
+          "options": {
+            "contains": {
+              "properties": {
+                "values": {
+                  "contains": {
+                    "properties": {
+                      "steps": {
+                        "contains": {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "start"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "launch_args"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "draft"
           }
         }
       }
@@ -110,6 +180,14 @@
     },
     "user_data": {
       "$ref": "#/$defs/userData"
+    },
+    "options": {
+      "description": "Game options with a choice (ADR 0032): 0 to 8, each with the implicit value unchanged (the default, never listed).",
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/option"
+      }
     },
     "issues": {
       "type": "array",
@@ -577,6 +655,120 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1024
+        }
+      }
+    },
+    "option": {
+      "description": "A game option (ADR 0032): a choice, not a problem. The loader also checks that option IDs are unique and differ from every issue ID, value IDs are unique in the option, two values never have the same steps, and two options never set the same INI file.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "sources",
+        "values"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/source"
+          }
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/optionValue"
+          }
+        }
+      }
+    },
+    "optionValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "status",
+        "steps"
+      ],
+      "properties": {
+        "id": {
+          "description": "unchanged is the implicit default of every option and reserved.",
+          "allOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "not": {
+                "const": "unchanged"
+              }
+            }
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "status": {
+          "enum": [
+            "verified",
+            "reported",
+            "unverified"
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/optionStep"
+          }
+        }
+      }
+    },
+    "optionStep": {
+      "description": "Exactly one of start, launch_args, ini_set (ADR 0032); at most one start and one launch_args per value (loader). start: an executable of match.exes in exactly its spelling, every entry of it with a sha256, not launch.start; start and launch_args need launch.chain [steam], launch.method auto or direct and launch.start; launch_args without a start in the same value only when launch.start is an executable of match.exes (loader). Planned from slice O-2b.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "start": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/relPath"
+            },
+            {
+              "pattern": "\\.[Ee][Xx][Ee]$"
+            }
+          ]
+        },
+        "launch_args": {
+          "description": "Game arguments the launch profile appends: no commands, no %, no quotes; at most 512 bytes joined by one space (loader).",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[-+][A-Za-z0-9_.=+-]+$"
+          }
+        },
+        "ini_set": {
+          "$ref": "#/$defs/iniSet"
         }
       }
     },

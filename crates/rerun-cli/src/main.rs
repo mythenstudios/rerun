@@ -151,9 +151,13 @@ fn run<W: io::Write, E: io::Write>(
         Command::Plan {
             target,
             picks,
+            choices,
             dry_run,
         } => match cli::app_id(&target) {
-            Some(app_id) => topo::plan(host, app_id, &picks, dry_run, out, err),
+            Some(app_id) => {
+                let sel = rerun_core::flow::Selection { picks, choices };
+                topo::plan(host, app_id, &sel, dry_run, out, err)
+            }
             // Digits only are always meant as an app ID (review follow-up 9).
             None if cli::digits_only(&target) => {
                 let _ = err.lines(&[
@@ -166,10 +170,10 @@ fn run<W: io::Write, E: io::Write>(
                 ]);
                 Exit::Usage
             }
-            None if !picks.is_empty() => {
+            None if !picks.is_empty() || !choices.is_empty() => {
                 let _ = err.lines(&[
                     Message::Usage {
-                        what: "--pick needs a Steam app ID, not a step file",
+                        what: "--pick and --set need a Steam app ID, not a step file",
                         why: None,
                         value: None,
                     },

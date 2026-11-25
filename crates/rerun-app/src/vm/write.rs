@@ -523,6 +523,9 @@ pub fn warning_vm(w: &Warning, lang: Lang) -> Option<WarnVm> {
         Warning::NeedsRetest => warn(lang, Msg::WarnNeedsRetest, None),
         Warning::WhenUnknown { issue } => warn(lang, Msg::WarnWhenUnknown, id(issue)),
         Warning::AntiCheat { variant, .. } => warn(lang, Msg::WarnAntiCheat, id(variant)),
+        Warning::OptionAntiCheat { option, value, .. } => {
+            warn(lang, Msg::WarnAntiCheat, id(&format!("{option}={value}")))
+        }
         Warning::SteamInput { issue } => warn(lang, Msg::WarnSteamInput, id(issue)),
         Warning::SmartAppControl { state } => {
             let m = match state {

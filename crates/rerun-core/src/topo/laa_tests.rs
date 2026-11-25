@@ -154,7 +154,7 @@ fn plan_picks(sys: &FakeSystem, t: &Topo, p: &[&str]) -> Result<super::TopoPlan,
             game: &gf,
             packages: &[],
         },
-        &picks,
+        &super::EngineSelection::picks(&picks),
         &ctx,
     )
 }
@@ -524,10 +524,10 @@ fn la8_a_live_patch_still_matches_its_build() {
                 game: &derived,
                 packages: &[],
             },
-            &[Pick {
+            &super::EngineSelection::picks(&[Pick {
                 issue: "memory".to_owned(),
                 variant: "laa".to_owned(),
-            }],
+            }]),
             &ctx,
         );
         refused(r, "has patched it already");
@@ -664,10 +664,10 @@ fn la9_smart_app_control_warns() {
             &INDEX,
             &t,
             &facts,
-            &[Pick {
+            &super::EngineSelection::picks(&[Pick {
                 issue: "memory".to_owned(),
                 variant: "laa".to_owned(),
-            }],
+            }]),
             &ctx,
         )
         .unwrap();

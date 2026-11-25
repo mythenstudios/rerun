@@ -199,6 +199,7 @@ fn dev_helper_firewall_round_trip() {
         index: isha,
         topo: "dev-firewall".to_owned(),
         rev: 1,
+        choices: Vec::new(),
         picks: vec![Pick {
             issue: "net".to_owned(),
             variant: "block".to_owned(),
