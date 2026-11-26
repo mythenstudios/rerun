@@ -14,12 +14,11 @@
 //!   plans an `ini_set` value alone or with a pick, the origin names it; apply and revert bring
 //!   the game folder back; refusals and the forms of `--set`.
 //! - C-TE17 the golden plan of an option value with a fix.
-//! - C-TE18 (ignored until `OPTION_LAUNCH_REVIEWED`) a `start` value over a live CPU rule (ADR
-//!   0032 amendment P5-OE, O-2b): the report
+//! - C-TE18 a `start` value over a live CPU rule (ADR 0032 amendment P5-OE, O-2b): the report
 //!   lists it; the preview names each part of the launch profile with its origin and what every
 //!   fallback of rerun-launch starts; the rule is undone only after the option; back to before.
-//! - C-TE19 a CPU fix alone: its profile part by part and the fallback line (the gate closed:
-//!   C-TE18 is ignored until it opens; the golden plan of a `start` value is the core's LO11).
+//! - C-TE19 a CPU fix alone: its profile part by part and the fallback line (the golden plan of a
+//!   `start` value is the core's LO11).
 
 use std::path::Path;
 
@@ -1169,7 +1168,6 @@ fn start_sys() -> FakeSystem {
 /// profile keeps the rule, starts `game_dx9.exe`, and the preview names each part's origin and
 /// what every fallback starts; undo newest first, back to the state before.
 #[test]
-#[ignore = "needs OPTION_LAUNCH_REVIEWED: the signed index holds no start value before the gate opens (its own commit un-ignores this)"]
 fn c_te18_a_start_value_over_a_live_rule() {
     let sys = start_sys();
     let r = expect(&sys, &["plan", "220"], Answer::No, Exit::Report);
@@ -1258,9 +1256,9 @@ fn c_te18_a_start_value_over_a_live_rule() {
     crate::tests::same(&before, &crate::tests::snap_dirs(&sys, &[G]));
 }
 
-/// C-TE19 (O-2b, gate closed): a CPU fix alone shows its launch profile part by part with its
-/// origin and what every fallback starts (no `run`, no arguments). The `start` value over a live
-/// rule is C-TE18 (ignored until the gate opens) and, in the core, `topo::launch_tests` with its
+/// C-TE19 (O-2b): a CPU fix alone shows its launch profile part by part with its origin and what
+/// every fallback starts (no `run`, no arguments). The `start` value over a live rule is C-TE18
+/// and, in the core, `topo::launch_tests` with its
 /// golden plan LO11.
 #[test]
 fn c_te19_the_parts_of_a_cpu_fix() {

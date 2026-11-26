@@ -319,20 +319,21 @@ fn ox8_the_argument_rules() {
 #[test]
 fn ox9_the_gate() {
     const _: () = assert!(
-        !OPTION_LAUNCH_REVIEWED,
-        "the gate opens in its own commit after the O-2b review and the [DEV] run"
+        OPTION_LAUNCH_REVIEWED,
+        "the gate is open since its own commit"
     );
-    let gated = "draft only until start and launch_args of options are reviewed";
+    // Outside a draft: loaded under both rule sets once the gate is open.
     let mut v = with_api(json!([value("dx9", json!([{ "start": "game_dx9.exe" }]))]));
     ok(&v);
     v["status"] = json!("active");
-    refused_at(&v, "options[1].values[0].steps[0].start", gated);
+    ok(&v);
+    check::topo(&parse(&v), Rules::Release).unwrap_or_else(|e| panic!("{e}"));
     let mut v = with_api(json!([value("q", json!([{ "launch_args": ["-q"] }]))]));
     v["launch"]["start"] = json!("game.exe");
     ok(&v);
     v["status"] = json!("needs-retest");
-    refused_at(&v, "options[1].values[0].steps[0].launch_args", gated);
-    // A release index holds no draft: none of them is ever released.
+    ok(&v);
+    // A release index still holds no draft.
     let v = with_api(json!([value("dx9", json!([{ "start": "game_dx9.exe" }]))]));
     assert!(check::topo(&parse(&v), Rules::Release).is_err());
 }

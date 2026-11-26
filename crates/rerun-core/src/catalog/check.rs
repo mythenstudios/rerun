@@ -52,11 +52,11 @@ pub const LAA_PATCH_REVIEWED: bool = true;
 pub const GPU_PREFERENCE_REVIEWED: bool = true;
 
 /// Whether a Topo outside a draft may hold an option value with `start` or `launch_args` (ADR
-/// 0032 amendment P5-OE). The engine plans them since O-2b; the gate opens in its own commit
-/// after the O-2b review findings and the [DEV] run of Assassin's Creed DX9 (as for
-/// `laa_patch` and `gpu_preference`). Until then the signed index holds none; a draft plans
-/// them. `ini_set` values are usable from the first slice.
-pub const OPTION_LAUNCH_REVIEWED: bool = false;
+/// 0032 amendment P5-OE). The engine plans them since O-2b; the gate opened in its own commit
+/// after the O-2b review findings (2026-11-26, the user tests the first such value, Assassin's
+/// Creed `graphics-api`, in the private alpha; its values stay `unverified` until then). A
+/// signed Topo may hold them. `ini_set` values were usable from the first slice.
+pub const OPTION_LAUNCH_REVIEWED: bool = true;
 
 /// Most options of a Topo (ADR 0032).
 pub const MAX_OPTIONS: usize = 8;

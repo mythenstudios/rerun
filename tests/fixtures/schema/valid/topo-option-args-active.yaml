@@ -1,4 +1,4 @@
-# Invalid: start outside a draft before it is reviewed
+# Valid: launch_args outside a draft (reviewed since the gate commit, OPTION_LAUNCH_REVIEWED)
 format: 1
 id: schema-fixture
 title: "Fixture"
@@ -14,5 +14,5 @@ options:
     title: "API"
     sources: [ { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Fixture" } ]
     values:
-      - { id: dx9, title: "DX9", status: unverified, steps: [ { start: "game_dx9.exe" } ] }
+      - { id: q, title: "Q", status: unverified, steps: [ { launch_args: [ "-q" ] } ] }
 issues: []
