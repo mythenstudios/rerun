@@ -245,6 +245,7 @@ $dlBefore = $null          # cache and packages before the app ran (download tes
 $downloadCheck = 'not run'
 $settingsReport = 'settings: unchanged'
 $downloadReport = New-Object System.Collections.Generic.List[string]
+$statusBefore = $null
 
 try {
     Title 'CHECKING the machine (nothing is changed yet)'
@@ -319,7 +320,12 @@ try {
     if ($r.Code -ne 0) { Fail "rerun status failed ($($r.Code))" }
     $counts = Status-Counts $r.Out
     if ($null -eq $counts) { Fail 'rerun status printed no transaction summary; nothing was changed' }
-    if ($counts.NotClosed -gt 0 -or $counts.Forgotten -gt 0 -or $r.Out -match '(?m)^transaction [0-9]{8}-[0-9a-f]{16}') { Fail "Rerun holds a transaction that is not closed or was forgotten ($($counts.NotClosed) not closed, $($counts.Forgotten) forgotten); the app would show it. Nothing was changed. See rerun status" }
+    $open = $counts.NotClosed -gt 0 -or $counts.Forgotten -gt 0 -or $r.Out -match '(?m)^transaction [0-9]{8}-[0-9a-f]{16}'
+    if ($open -and ($Game -or $Download)) { Fail "Rerun holds a transaction that is not closed or was forgotten ($($counts.NotClosed) not closed, $($counts.Forgotten) forgotten); the apply and download tests need none. Nothing was changed. See rerun status" }
+    # Without -Game the check only looks (P5-13 U8 a): open transactions of the installed alpha are
+    # shown by the app and must stay as they are; `rerun status` is compared after the app closed.
+    $statusBefore = if ($open) { $r.Out } else { $null }
+    if ($open) { Write-Host "note: $($counts.NotClosed) not closed, $($counts.Forgotten) forgotten transaction(s) of the alpha: shown by the app, never touched (do not undo or forget them in this check)" -ForegroundColor Yellow }
 
     # ---------- the test index ----------
     Title 'BUILDING the test index and importing it into index-test'
@@ -602,6 +608,11 @@ if ($null -ne $firstWindowMs) {
     else { $summary.Add('measured: DLLs from outside System32/WinSxS/SysWOW64 -> FAIL'); foreach ($f in $foreignList) { $summary.Add("  $f") } }
 }
 $summary.Add("cleanup (index-test, temp folder): $cleanup")
+if ($statusBefore) {
+    $after = Invoke-Exe $cli @('status')
+    if ($after.Code -eq 0 -and $after.Out -eq $statusBefore) { $summary.Add('open transactions of the alpha: unchanged -> PASS') }
+    else { $summary.Add('open transactions of the alpha: rerun status differs after the check -> FAIL (see rerun status)') }
+}
 $summary.Add("app settings (<AppDir>\app\settings.json, kept): $settingsReport")
 if ($Game) { $summary.Add("apply test ($Game, the folder compared with its snapshot; Rerun's records removed): $applyCheck; files not hashed (unreadable): $script:notHashed") }
 if ($Download) {
