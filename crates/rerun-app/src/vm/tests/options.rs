@@ -433,6 +433,7 @@ fn vo6_the_launch_profile_is_shown_part_by_part_with_its_origin() {
     };
     for lang in Lang::ALL {
         let parts = LaunchParts {
+            method: rerun_core::prim::MethodSpec::Direct,
             start: rel("FFLauncher.exe"),
             rule: Some(PartFrom::Fix(pick.clone())),
             run: Some((rel("game_dx9.exe"), PartFrom::Option(choice.clone()))),
@@ -484,6 +485,7 @@ fn vo6_the_launch_profile_is_shown_part_by_part_with_its_origin() {
     }
     // Only what the profile has: a rule alone says "without the rule", no program to start.
     let rule_only = LaunchParts {
+        method: rerun_core::prim::MethodSpec::Direct,
         start: rel("FFLauncher.exe"),
         rule: Some(PartFrom::Kept(txn(1))),
         run: None,

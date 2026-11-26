@@ -859,12 +859,40 @@ pub enum EngineError {
     ManualExe,
     /// The anti-cheat rule refuses a part of the user's own settings (ADR 0029).
     #[error(
-        "anti-cheat found: Rerun does not set {} of your own settings for this game",
-        step.as_str()
+        "anti-cheat found: Rerun does not set {} of your own settings for this game{}",
+        step.as_str(),
+        if *topo_method {
+            " (the method is the Topo's; with --method direct the rule goes on what Steam starts, at your own risk)"
+        } else {
+            ""
+        }
     )]
     ManualAntiCheat {
         /// The step kind.
         step: StepKind,
+        /// The method came from the Topo, not from the user (`watch` refused, `direct` would be
+        /// warned: senior-dev N4 of E-1a).
+        topo_method: bool,
+    },
+    /// The user's own settings name Steam's launch entry, but the Topo names it (`launch.start`;
+    /// review S1 of E-1a): only a Topo without one takes the user's.
+    #[error(
+        "this game's Topo names Steam's launch entry ({start}); your own --start is only for a \
+         Topo that names none"
+    )]
+    ManualStart {
+        /// The Topo's `launch.start` (escaped).
+        start: String,
+    },
+    /// The user's own `start` lies in a folder the anti-cheat scan does not cover: the game
+    /// folder itself or the folder of an executable the Topo names.
+    #[error(
+        "your own start {start} is not in the game folder or the folder of an executable the \
+         Topo names"
+    )]
+    ManualStartFolder {
+        /// The start (escaped).
+        start: String,
     },
     /// No such issue.
     #[error("the Topo has no issue {0}")]
@@ -1202,6 +1230,13 @@ pub enum Warning {
         /// The step kind.
         step: StepKind,
     },
+    /// The plan's rule part (method, CPU rule, priority) would replace the one of the live
+    /// launch profile, which transaction `txn` set (review S3 of E-1a): undoing the plan
+    /// brings it back.
+    ReplacesRule {
+        /// The transaction whose rule part is replaced.
+        txn: crate::journal::TxnId,
+    },
     /// The anti-cheat rule warns about a part the plan keeps from the live launch profile (S1).
     KeptAntiCheat {
         /// The transaction the part is kept from.
@@ -1299,6 +1334,8 @@ pub struct LaunchParts {
     pub start: RelPath,
     /// The rule part (`method`, CPU rule, priority), if any.
     pub rule: Option<PartFrom>,
+    /// The profile's method as resolved (security F5 of E-1a: the preview names it).
+    pub method: MethodSpec,
     /// `run`: the executable `rerun-launch` starts instead of `start`.
     pub run: Option<(RelPath, PartFrom)>,
     /// `args`.
@@ -1466,7 +1503,7 @@ pub fn plan(
     if topo.status == Status::NeedsRetest {
         warnings.push(Warning::NeedsRetest);
     }
-    let launch = resolve_launch(topo);
+    let mut launch = resolve_launch(topo);
     let ac = anti_cheat_state(topo, &facts.game.anti_cheat);
     // The chosen values: their refusals, and the `start` and `launch_args` parts (the `ini_set`
     // steps follow the picks' steps below).
@@ -1756,13 +1793,17 @@ pub fn plan(
                     variant: p.variant.clone(),
                 });
             }
-            let lp = launch.as_ref().map_err(|p| EngineError::Launch(*p))?;
+            let lp = manual_launch(topo, &launch, ml.start.as_ref(), facts.game)?;
             let method = ml.method.map_or(lp.method, crate::plan::ManualMethod::spec);
             let step = match method {
                 MethodSpec::Direct => StepKind::LaunchDirect,
                 _ => StepKind::LaunchWatch,
             };
-            manual_anti_cheat(&ac, step, &mut warnings)?;
+            manual_anti_cheat(&ac, step, ml.method.is_none(), &mut warnings)?;
+            if ml.start.is_some() {
+                // The user's start where the Topo names none: the profile is composed on it.
+                launch = Ok(lp.clone());
+            }
             planned_launch = Some(LaunchPlan {
                 method,
                 start: lp.start.clone(),
@@ -1778,7 +1819,7 @@ pub fn plan(
             });
         }
         if !m.layers.is_empty() {
-            manual_anti_cheat(&ac, StepKind::CompatLayer, &mut warnings)?;
+            manual_anti_cheat(&ac, StepKind::CompatLayer, false, &mut warnings)?;
             if let Some((_, p)) = pick_layers.iter().find(|(e, _)| *e == folded_main) {
                 return Err(EngineError::ManualAndLayerFix {
                     issue: p.issue.clone(),
@@ -1947,18 +1988,61 @@ pub fn plan(
 fn manual_anti_cheat(
     ac: &AntiCheatState,
     step: StepKind,
+    topo_method: bool,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), EngineError> {
     if !ac.enforced() {
         return Ok(());
     }
     match anti_cheat_rule(step) {
-        AcRule::Refuse => Err(EngineError::ManualAntiCheat { step }),
+        AcRule::Refuse => Err(EngineError::ManualAntiCheat { step, topo_method }),
         AcRule::Warn => {
             warnings.push(Warning::ManualAntiCheat { step });
             Ok(())
         }
         AcRule::None => Ok(()),
+    }
+}
+
+/// The launch of the user's own rule (review S1 of E-1a): the Topo's resolved launch, or, where
+/// the Topo names no method or no start, the user's `start` with the Topo's method if it names
+/// one (`direct` otherwise). A `start` the Topo names already is refused, and so is one outside
+/// the folders the anti-cheat scan covers (the game folder and those of `match.exes`).
+fn manual_launch(
+    topo: &Topo,
+    launch: &Result<LaunchPlan, LaunchProblem>,
+    start: Option<&RelPath>,
+    game: &GameFacts,
+) -> Result<LaunchPlan, EngineError> {
+    match (launch, start) {
+        (Ok(lp), None) => Ok(lp.clone()),
+        (Ok(lp), Some(_)) => Err(EngineError::ManualStart {
+            start: crate::escape::path(lp.start.as_str()).to_string(),
+        }),
+        (Err(LaunchProblem::NoMethod | LaunchProblem::NoStart), Some(s)) => {
+            let folder = s.parent().map(|p| crate::fold::fold(p.as_str()));
+            let scanned = folder.is_none()
+                || game
+                    .exes
+                    .iter()
+                    .any(|e| e.path.parent().map(|p| crate::fold::fold(p.as_str())) == folder);
+            if !scanned {
+                return Err(EngineError::ManualStartFolder {
+                    start: crate::escape::path(s.as_str()).to_string(),
+                });
+            }
+            let method = match topo.launch.as_ref().and_then(|l| l.method.map(|m| (m, l))) {
+                Some((Method::Auto, l)) if l.chain != [Chain::Steam] => MethodSpec::Watch,
+                Some((Method::Watch, _)) => MethodSpec::Watch,
+                _ => MethodSpec::Direct,
+            };
+            Ok(LaunchPlan {
+                method,
+                start: s.clone(),
+                auto: false,
+            })
+        }
+        (Err(p), _) => Err(EngineError::Launch(*p)),
     }
 }
 
@@ -2014,6 +2098,15 @@ fn compose_launch(
             .collect(),
         from: PartFrom::Kept(k.txn),
     });
+    // Review S3 of E-1a: a new rule part replaces the live one of another transaction.
+    if c.rule.is_some()
+        && let Some(Part {
+            from: PartFrom::Kept(txn),
+            ..
+        }) = &kept_rule
+    {
+        warnings.push(Warning::ReplacesRule { txn: *txn });
+    }
     let rule = c.rule.or(kept_rule);
     let run = c.run.or(c.kept_run);
     let args = c.args.or(kept_args);
@@ -2067,6 +2160,7 @@ fn compose_launch(
     let parts = LaunchParts {
         start: lp.start.clone(),
         rule: rule.map(|r| r.from),
+        method,
         run: run.and_then(|r| run_path.map(|p| (p, r.from))),
         args: args.map(|a| {
             (

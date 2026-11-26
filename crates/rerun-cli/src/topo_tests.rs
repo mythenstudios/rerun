@@ -1307,7 +1307,7 @@ fn c_te20_own_settings_by_flags() {
         Exit::Report,
     );
     for line in [
-        "\nyour own settings (Advanced, not checked by a Topo): the Topo's launch method, cpu \
+        "\nyour own settings (Advanced, not checked by a Topo): method direct (the Topo's), cpu \
          max_threads=8,smt=false, compatibility flags HIGHDPIAWARE\n",
         "\n  cpu rule and priority, from Advanced (your own setting, not checked)\n",
         "\nthe launch profile, part by part:\n",
@@ -1352,6 +1352,11 @@ fn c_te20_own_settings_by_flags() {
             &["--exe", "game.exe", "--cpu", "max_threads=4"][..],
             "only for a game without a matched Topo",
         ),
+        // Review S1: an own start only where the Topo names none.
+        (
+            &["--start", "game.exe", "--cpu", "max_threads=4"][..],
+            "this game's Topo names Steam's launch entry (FFLauncher.exe)",
+        ),
     ] {
         let r = expect(
             &sys,
@@ -1372,6 +1377,12 @@ fn c_te20_own_settings_by_flags() {
             &["--layer", "HIGHDPIAWARE", "--layer", "HIGHDPIAWARE"][..],
             "HIGHDPIAWARE is named twice",
         ),
+        // Review S2: a rule that restricts nothing.
+        (&["--cpu", "smt=true"][..], "restricts nothing"),
+        (
+            &["--start", "game.exe"][..],
+            "need a CPU rule or a priority",
+        ),
     ] {
         let r = expect(
             &sys,
@@ -1389,7 +1400,6 @@ fn c_te20_own_settings_by_flags() {
         &["--method", "auto"][..],
         &["--priority", "realtime"][..],
         &["--layer", "lower"][..],
-        &["--start", "game.exe"][..],
     ] {
         assert!(
             <crate::cli::Cli as clap::Parser>::try_parse_from(
@@ -1408,6 +1418,37 @@ fn c_te20_own_settings_by_flags() {
         Exit::Usage,
     );
     assert!(r.stderr.contains("need a Steam app ID"), "{}", r.stderr);
+    // Review S3: an own rule over a live CPU fix says that it would replace the fix's rule.
+    let p = expect(
+        &sys,
+        &["plan", "220", "--pick", "cores/limit"],
+        Answer::No,
+        Exit::Report,
+    );
+    let h = crate::tests::hash_of(&p);
+    let t = crate::tests::txn_of(&expect(
+        &sys,
+        &["apply", h.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    ));
+    let r = expect(
+        &sys,
+        &["plan", "220", "--cpu", "max_threads=4", "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    let line = format!(
+        "\nwarning: this plan's cpu rule and priority would replace those of transaction {t}; \
+         undoing this plan brings them back\n"
+    );
+    assert!(r.stdout.contains(&line), "{line}\n{}", r.stdout);
+    expect(
+        &sys,
+        &["revert", t.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
     // A game without a Topo: said, nothing planned (slice E-1b).
     let r = expect(
         &sys,
@@ -1420,5 +1461,5 @@ fn c_te20_own_settings_by_flags() {
         "{}",
         r.stdout
     );
-    assert_eq!(plans(&sys), 1, "only the plan applied above is stored");
+    assert_eq!(plans(&sys), 2, "only the plans applied above are stored");
 }

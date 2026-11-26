@@ -76,9 +76,9 @@ pub enum Command {
         /// The game's executable, for a game without a matched Topo (a later version).
         #[arg(long, value_parser = rel_arg)]
         exe: Option<RelPath>,
-        /// Steam's launch entry, for a game without a matched Topo (a later version; default:
-        /// --exe).
-        #[arg(long, requires = "exe", value_parser = rel_arg)]
+        /// Steam's launch entry for your own rule (the program Steam starts on Play), only where
+        /// the game's Topo names none.
+        #[arg(long, value_parser = rel_arg)]
         start: Option<RelPath>,
         /// Show the plan only; store nothing.
         #[arg(long)]
@@ -393,16 +393,17 @@ impl ManualFlags {
     /// `--layer` alone is a selection of flags only. Checked by `Manual::check` afterwards (the
     /// app's input is checked by the same function).
     pub fn manual(self) -> Option<Manual> {
-        let launch = (self.method.is_some() || self.cpu.is_some() || self.priority.is_some())
-            .then_some(ManualLaunch {
-                method: self.method,
-                cpu: self.cpu,
-                priority: self.priority,
-            });
-        let exe = self.exe.map(|main_exe| ManualExe {
-            start: self.start.unwrap_or_else(|| main_exe.clone()),
-            main_exe,
+        let launch = (self.method.is_some()
+            || self.start.is_some()
+            || self.cpu.is_some()
+            || self.priority.is_some())
+        .then_some(ManualLaunch {
+            method: self.method,
+            start: self.start,
+            cpu: self.cpu,
+            priority: self.priority,
         });
+        let exe = self.exe.map(|main_exe| ManualExe { main_exe });
         (launch.is_some() || !self.layers.is_empty() || exe.is_some()).then_some(Manual {
             launch,
             layers: self.layers,

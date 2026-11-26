@@ -1219,7 +1219,30 @@ pub(crate) fn decode_with(b: &[u8], lim: &Limits, rules: Rules) -> Result<Plan, 
         return Err(PlanError::NotOneForm);
     }
     check(&plan, b.len(), lim, rules)?;
+    // Security F2 of E-1a: a build without the step file applies only plans bound to a game by
+    // a Topo or by manual steps; a recorded head (revert) is never refused for it.
+    #[cfg(not(any(test, feature = "step-file")))]
+    if rules == Rules::Current {
+        release_form(&plan)?;
+    }
     Ok(plan)
+}
+
+/// The form a build without the step file requires of a plan it applies (security F2 of
+/// E-1a): a `source` or `manual`. A plan of neither comes only from a step file.
+#[cfg_attr(
+    all(feature = "step-file", not(test)),
+    expect(dead_code, reason = "checked only in a build without the step file")
+)]
+pub(crate) fn release_form(plan: &Plan) -> Result<(), PlanError> {
+    if plan.source.is_none() && plan.manual.is_none() {
+        return Err(invalid(
+            None,
+            "a plan without a Topo and without your own settings (a step file plan, which this \
+             build does not apply)",
+        ));
+    }
+    Ok(())
 }
 
 /// The registry ops `check` has seen so far.
@@ -1730,10 +1753,13 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
     // ADR 0029: the form of the manual steps (the allowlist only with the rules in force now).
     if let Some(m) = &plan.manual {
         m.check_with(rules).map_err(PlanError::Manual)?;
-        if m.exe.is_some() && plan.source.is_some() {
+        // Review S1 of E-1a: manual steps are bound to a game either by a Topo (`source`) or by
+        // their own main executable (`exe`, slice E-1b), never by both or neither. A recorded
+        // head keeps only the structure.
+        if rules == Rules::Current && m.exe.is_some() == plan.source.is_some() {
             return Err(invalid(
                 None,
-                "manual executables with a Topo (the Topo names the executables)",
+                "manual steps name their own main executable exactly when there is no Topo",
             ));
         }
     }

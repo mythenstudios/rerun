@@ -1829,6 +1829,8 @@ pub enum Msg {
     PvFromManual,
     /// A warning: an anti-cheat rule warns about a part of the user's own settings.
     WarnManualAntiCheat,
+    /// A warning: the plan's CPU rule and priority would replace those of a live change.
+    WarnReplacesRule,
 }
 
 /// The text of `m` in `lang`.
@@ -2879,6 +2881,7 @@ fn en(m: Msg) -> Cow<'static, str> {
         WarnKeptAntiCheat => "An anti-cheat rule allows keeping this part of the launch profile only with a warning.",
         PvFromManual => "Your own setting (Advanced), not checked",
         WarnManualAntiCheat => "An anti-cheat rule allows your own setting only with a warning.",
+        WarnReplacesRule => "This change would replace the CPU rule and priority of an earlier change; undoing this one brings them back.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 older history entry removed".into()
@@ -3913,6 +3916,7 @@ fn de(m: Msg) -> Cow<'static, str> {
         WarnKeptAntiCheat => "Eine Anti-Cheat-Regel erlaubt, diesen Teil des Startprofils zu behalten, nur mit einem Hinweis.",
         PvFromManual => "Deine eigene Einstellung (Erweitert), nicht geprüft",
         WarnManualAntiCheat => "Eine Anti-Cheat-Regel erlaubt deine eigene Einstellung nur mit einem Hinweis.",
+        WarnReplacesRule => "Diese Änderung würde die CPU-Regel und die Priorität einer früheren Änderung ersetzen; machst du sie rückgängig, gelten jene wieder.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 älterer Verlaufseintrag entfernt".into()

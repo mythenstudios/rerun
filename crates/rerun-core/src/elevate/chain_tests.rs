@@ -1468,3 +1468,38 @@ fn fx8_the_helper_acts_only_on_a_known_topo() {
     let (at, sha) = write(&sys, &add_request(&sys, idx));
     assert_added(&sys, run_on(&Wire::new(&sys), &at, &sha, 1));
 }
+
+/// Security F3 of E-1a: an add without a picked variant (option values or the user's own
+/// settings only) is refused by encode and decode alike; the helper derives rules only from
+/// picks.
+#[test]
+fn r_an_add_without_a_pick_is_refused() {
+    let sys = world();
+    let mut req = add_request(&sys, [1; 32]);
+    let good = encode(&req).unwrap();
+    decode(&good, crate::BUILD_ID).unwrap();
+    if let Body::Add { source, .. } = &mut req.body {
+        source.picks.clear();
+    }
+    assert!(matches!(encode(&req), Err(RequestError::Form(_))));
+    let mut v: serde_json::Value = serde_json::from_slice(&good).unwrap();
+    fn clear(v: &mut serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Object(m) => {
+                if let Some(p) = m.get_mut("picks") {
+                    *p = serde_json::json!([]);
+                    return true;
+                }
+                m.values_mut().any(clear)
+            }
+            serde_json::Value::Array(a) => a.iter_mut().any(clear),
+            _ => false,
+        }
+    }
+    assert!(clear(&mut v));
+    let bad = serde_json::to_vec(&v).unwrap();
+    assert!(matches!(
+        decode(&bad, crate::BUILD_ID),
+        Err(RequestError::Form(_))
+    ));
+}

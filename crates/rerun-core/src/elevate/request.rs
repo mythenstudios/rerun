@@ -358,6 +358,17 @@ fn check_ops(ops: impl ExactSizeIterator<Item = u16>) -> Result<(), RequestError
     Ok(())
 }
 
+/// The plan source of an add: its form, and at least one pick (security F3 of E-1a): the helper
+/// derives its rules only from picked variants, so a source of option values or of the user's
+/// own settings alone never reaches it.
+fn source_check(s: &PlanSource) -> Result<(), RequestError> {
+    s.check().map_err(|_| RequestError::Form("a plan source"))?;
+    if s.picks.is_empty() {
+        return Err(RequestError::Form("a plan source without a picked variant"));
+    }
+    Ok(())
+}
+
 /// The request file (module docs). The bytes are at most [`MAX_REQUEST_BYTES`].
 ///
 /// # Errors
@@ -372,9 +383,7 @@ pub fn encode(r: &Request) -> Result<Vec<u8>, RequestError> {
             ops,
         } => {
             check_ops(ops.iter().map(|o| o.op))?;
-            source
-                .check()
-                .map_err(|_| RequestError::Form("a plan source"))?;
+            source_check(source)?;
             WireBody::Add(WireAdd {
                 source: source.clone(),
                 index_dir: wire_dir(index_dir),
@@ -443,9 +452,7 @@ pub fn decode(b: &[u8], build: &str) -> Result<Request, RequestError> {
     let body = match w.body {
         WireBody::Add(a) => {
             check_ops(a.ops.iter().map(|o| o.op))?;
-            a.source
-                .check()
-                .map_err(|_| RequestError::Form("a plan source"))?;
+            source_check(&a.source)?;
             Body::Add {
                 source: a.source,
                 index_dir: dir_of(&a.index_dir)?,

@@ -13,21 +13,16 @@
 
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-
 use super::cleanup_tests::open_y;
 use super::rebind_tests::{GAME_E, LIB_E, REF, applied as rb_applied, content_diff, move_lib};
-use super::tests::{Env, N, NEW, OLD, X, base, finish, game, same, t1_spec};
+use super::tests::{Env, N, NEW, base, finish, same, t1_spec};
 use super::{ExecError, Refusal, package_users_with_status, remove_packages};
-use crate::catalog;
-use crate::catalog::key::test_key;
 use crate::journal::{Closing, InstanceTag, Journal, TxnId, TxnState};
-use crate::pkg::archive::testfx::{ZipEntry, zip};
-use crate::pkg::store::tests::{APP, CACHE, PACKAGES, all_of, ls, outside_store, snap};
+use crate::pkg::store::tests::{CACHE, PACKAGES, all_of, ls, snap};
 use crate::pkg::store::{Removed, Shown, list};
 use crate::plan::Op;
-use crate::prim::tests::{STEAM_LIB, app, builder, entry, plan_manual, spec};
-use crate::sys::fake::{FakeFs, FakeHttp, FakeReply, Fault, Prim};
+use crate::prim::tests::{STEAM_LIB, app, entry, spec};
+use crate::sys::fake::{FakeFs, Fault, Prim};
 
 const VERSION: &str = r"C:\Users\Player\AppData\Local\Rerun\packages\fix-pack\1.0.2";
 
@@ -339,7 +334,16 @@ fn ps4_a_revert_never_needs_the_package() {
 /// `flow::packages`' tests).
 #[cfg(feature = "test-key")]
 mod index {
+    use sha2::{Digest, Sha256};
+
+    use super::super::tests::{OLD, X, game};
     use super::*;
+    use crate::catalog;
+    use crate::catalog::key::test_key;
+    use crate::pkg::archive::testfx::{ZipEntry, zip};
+    use crate::pkg::store::tests::{APP, outside_store};
+    use crate::prim::tests::{builder, plan_manual};
+    use crate::sys::fake::{FakeHttp, FakeReply};
 
     const ASSET: &str = "https://github.com/owner/fix-pack/releases/download/v1.0.2/fix-pack.zip";
 

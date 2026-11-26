@@ -198,14 +198,19 @@ fn variant_status(s: VariantStatus) -> &'static str {
 
 /// The user's own settings in Rerun's words (ADR 0029): every value is of a closed set, every
 /// flag of the token form `[A-Z0-9_]`.
-fn manual_text(m: &Manual) -> String {
+fn manual_text(m: &Manual, resolved: Option<MethodSpec>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(l) = &m.launch {
-        parts.push(match l.method {
-            Some(ManualMethod::Direct) => "method direct".to_owned(),
-            Some(ManualMethod::Watch) => "method watch".to_owned(),
-            None => "the Topo's launch method".to_owned(),
+        // Security F5 of E-1a: the method as resolved, also when it is the Topo's.
+        parts.push(match (l.method, resolved) {
+            (Some(ManualMethod::Direct), _) => "method direct".to_owned(),
+            (Some(ManualMethod::Watch), _) => "method watch".to_owned(),
+            (None, Some(r)) => format!("method {} (the Topo's)", method(r)),
+            (None, None) => "the Topo's launch method".to_owned(),
         });
+        if let Some(s) = &l.start {
+            parts.push(format!("start {}", escape::path(s.as_str())));
+        }
         if let Some(c) = &l.cpu {
             parts.push(format!("cpu {}", cpu_text(c)));
         }
@@ -323,6 +328,10 @@ fn warning_text(w: &Warning) -> String {
             "warning: anti-cheat found; the launch profile keeps the {} part of transaction \
              {txn}, at your own risk",
             step.as_str()
+        ),
+        Warning::ReplacesRule { txn } => format!(
+            "warning: this plan's cpu rule and priority would replace those of transaction \
+             {txn}; undoing this plan brings them back"
         ),
         Warning::ManualAntiCheat { step } => format!(
             "warning: anti-cheat found; {} of your own settings is planned, at your own risk",
@@ -616,7 +625,7 @@ fn run<W: Write, E: Write>(
             }
             if let Some(m) = &sel.manual {
                 before.push(Message::Topo(TopoMsg::Manual {
-                    set: manual_text(m),
+                    set: manual_text(m, p.parts().map(|x| x.method)),
                 }));
             }
             before.extend(p.warnings().iter().map(|w| {
@@ -694,6 +703,7 @@ mod parts_tests {
         let t: TxnId = "00000007-0000000000000001".parse().unwrap();
         let rel = |s: &str| RelPath::parse(s).unwrap();
         let all = LaunchParts {
+            method: rerun_core::prim::MethodSpec::Direct,
             start: rel("FFLauncher.exe"),
             rule: Some(PartFrom::Kept(t)),
             run: Some((
