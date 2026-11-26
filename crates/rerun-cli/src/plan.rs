@@ -11,25 +11,26 @@
 //! flushed before anything is stored: a preview that did not arrive stores nothing (exit 3).
 //! `--dry-run` creates nothing at all. Planning and storing are `rerun_core::flow`'s (ADR 0027
 //! amendment P5-2a); this module renders and maps the refusals.
+//!
+//! Since ADR 0029 the step file is a test feature: [`plan`] is built only with the cargo feature
+//! `step-file` (and in this crate's tests), never in a release build. [`show_and_store`] and
+//! [`game_open`] serve every plan (`rerun plan <app-id>` too).
 
 use std::io::Write;
-use std::path::Path;
 
-use rerun_core::flow::{self, GameOpen, Guarded, Planned, StepsRefusal, StoreRefusal};
-use rerun_core::policy::root::read_input;
-use rerun_core::prim::{MAX_STEP_FILE, StepFile};
-use rerun_core::topo::StepKind;
+use rerun_core::flow::{self, GameOpen, Guarded, Planned, StoreRefusal};
 
 use crate::cli::Exit;
-use crate::host::{Host, after_change, before_change, fail, gate, shown};
-use crate::messages::{Message, TopoMsg, TxnMsg};
+use crate::host::{Host, after_change, before_change, fail, shown};
+use crate::messages::{Message, TxnMsg};
 use crate::out::Out;
 use crate::preview;
 
 /// Plans and prints (module docs).
+#[cfg(any(test, feature = "step-file"))]
 pub fn plan<W: Write, E: Write>(
     host: &Host<'_>,
-    steps: &Path,
+    steps: &std::path::Path,
     dry_run: bool,
     out: &mut Out<W>,
     err: &mut Out<E>,
@@ -39,15 +40,19 @@ pub fn plan<W: Write, E: Write>(
     }
 }
 
+#[cfg(any(test, feature = "step-file"))]
 fn run<W: Write, E: Write>(
     host: &Host<'_>,
-    steps: &Path,
+    steps: &std::path::Path,
     dry_run: bool,
     out: &mut Out<W>,
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
+    use rerun_core::flow::StepsRefusal;
+    use rerun_core::policy::root::read_input;
+    use rerun_core::prim::{MAX_STEP_FILE, StepFile};
     let sys = host.sys;
-    let g = flow::guard(host.env()).map_err(|x| gate(err, x))?;
+    let g = flow::guard(host.env()).map_err(|x| crate::host::gate(err, x))?;
     let file = std::path::absolute(steps)
         .map_err(|e| fail(err, TxnMsg::StepFile { error: shown(&e) }, Exit::Refused))?;
     let bytes = read_input(sys, &file, MAX_STEP_FILE)
@@ -62,11 +67,12 @@ fn run<W: Write, E: Write>(
 }
 
 /// The anti-cheat warnings of a step file, before its preview.
-fn warned_lines(warned: &[StepKind]) -> Vec<Message<'static>> {
+#[cfg(any(test, feature = "step-file"))]
+fn warned_lines(warned: &[rerun_core::topo::StepKind]) -> Vec<Message<'static>> {
     let mut m: Vec<Message<'static>> = warned
         .iter()
         .map(|k| {
-            Message::Topo(TopoMsg::Warning {
+            Message::Topo(crate::messages::TopoMsg::Warning {
                 text: format!(
                     "warning: anti-cheat found; {} is planned, at your own risk",
                     k.as_str()

@@ -117,6 +117,8 @@ Rerun keeps no model list; every row below is handled by the rules above. The ta
 
 Thread tiles grouped by topology: one row per L3 group or core type, SMT siblings as a pair, V-Cache CCD marked. Presets are generated from the detected system ("P-cores only" only on hybrid, "V-Cache CCD only" only on X3D with 2 CCDs).
 
+**Your own rule ("Advanced", ADR 0029):** the user sets a rule of the declarative fields themselves, in the app or with `rerun plan <app-id> --cpu <field>=<value>,…`: `max_threads` (1 to 1024), `smt`, `single_l3`, `prefer`, `prefer_l3`, `exclude_first`, `mode`, each optional, at least one; never `report_cores` and never a single logical processor or a thread number (the rule is selected again on every start, like a Topo's). The preview shows what the rule selects on this computer now (`prim::launch_method::on_this_machine`, never part of the plan), so the user sees the effect of `smt: false` or `prefer_l3: largest` before applying. Example (Tomb Raider: Underworld, app 8140, Steam starts `tru.exe` itself): `rerun plan 8140 --cpu max_threads=8,smt=false --priority above_normal --dry-run`.
+
 ## Test fixtures
 
 `tests/fixtures/cpu/` (see its `README.md`). A real machine is stored **raw**: `<cpu>.raw.json` (format 1) holds the bytes of both calls as hex, next to it `<cpu>.json` is the expected parsed `CpuTopology`; a test parses the raw file and compares. Machines without a dump are parsed-only fixtures (`CpuTopology` JSON, validated). Parser edge cases are byte records built in the `rerun-proto` tests.

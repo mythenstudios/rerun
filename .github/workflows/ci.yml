@@ -121,13 +121,14 @@ jobs:
         # crates/rerun-app/assets/THIRD-PARTY-NOTICES.txt no longer matches Cargo.lock
         # (regenerate with RERUN_BLESS=1 cargo test -p rerun-app --test notices; P5-10e).
         run: cargo test --workspace --all-features --locked --profile ci
-      - name: rerun-core fake and test-key features never in shipped binaries
+      - name: rerun-core fake, test-key and step-file features never in shipped binaries
         # ADR 0007: the in-memory fake and its TOCTOU hooks stay out of release builds.
         # ADR 0024: the published test key of the signed index is never trusted by a release build;
         # ADR 0023 §2 (audit A4 S3): the same for the elevated helper.
+        # ADR 0029: the step file (`rerun plan <steps.json>`) is a test feature.
         # Features do not depend on the profile; -e normal skips dev-dependencies.
         run: |
-          for f in fake test-key; do
+          for f in fake test-key step-file; do
             if ! cargo tree -p rerun-core --features "$f" -e features -i rerun-core --locked | grep -q "feature \"$f\""; then
               echo "::error::sanity check failed: the grep pattern no longer matches cargo tree output ($f)"
               exit 1
@@ -243,10 +244,12 @@ jobs:
         # The test-key helper (debug, feature test-key; ADR 0023 section 2, A4 S3) is for pass 4
         # of ci-sandbox.ps1 only: installed into Program Files\Rerun on this throwaway runner and
         # removed again. No RERUN_BUILD_ID here: the helper and the test binary share the dev
-        # build ID of the same sources (ADR 0023 section 2).
+        # build ID of the same sources (ADR 0023 section 2). rerun.exe with the test feature
+        # step-file (ADR 0029): the CLI round trips of sandbox-cli.ps1 and sandbox-install.ps1
+        # plan step files; this binary never ships (the release build above is without it).
         run: |
           cargo test -p rerun-core --lib --no-run --locked
-          cargo build -p rerun-cli --release --locked
+          cargo build -p rerun-cli --release --features step-file --locked
           cargo build -p rerun-launch --release --locked
           cargo build -p rerun-helper --features test-key --locked
       - name: sandbox suite (non-elevated as a new standard user, then elevated)

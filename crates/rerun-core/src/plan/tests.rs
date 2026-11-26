@@ -42,6 +42,7 @@ fn content(file: &str, data: &[u8]) -> ContentRef {
 /// A plan of every op kind over two roots.
 fn sample() -> Plan {
     Plan {
+        manual: None,
         format: 1,
         source: None,
         roots: vec![

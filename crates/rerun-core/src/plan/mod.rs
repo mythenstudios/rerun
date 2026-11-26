@@ -96,7 +96,14 @@
 //! the SHA-256 of the result. `patch_check` holds on encode and decode alike: only in a
 //! `ReplaceFile` on a game root, its `base` exactly the op's `old`. The op is otherwise a plain
 //! replace: backup, observation and revert are those of `ReplaceFile`.
+//!
+//! [`Plan::manual`] (ADR 0029, ADR 0020 amendment E-1a): the user's own settings as chosen, for
+//! display and the form only; [`Manual::check`] holds on encode and decode alike (the token
+//! allowlist only with [`Rules::Current`]); a source without picks and choices needs it, its
+//! `exe` never comes with a source, and a plan with it is bound to the main executable's hash
+//! and the other executables like a plan with a source.
 
+mod manual;
 mod preview;
 mod profile;
 mod store;
@@ -108,6 +115,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use manual::{Manual, ManualError, ManualExe, ManualLaunch, ManualMethod};
 pub use preview::{
     FIREWALL_NOTE, FirewallShown, GPU_PREF_ACTION, GPU_PREF_NOTE, HOLD_ACTION, HOLD_NOTE, INI_NOTE,
     IniOldShown, IniShown, LAYERS_NOTE, NOT_RESTORED, PATCH_ACTION, PATCH_NOTE, PROFILE_NOTE,
@@ -175,6 +183,13 @@ pub struct Plan {
     /// a plan of the same steps has the same bytes apart from this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<PlanSource>,
+    /// The user's own settings ("Advanced", ADR 0029): what was chosen, for display and for
+    /// the form, never an authorisation (the ops are the truth). Omitted on the wire when
+    /// absent, so every other plan keeps its bytes. With a `source` the plan is for a matched
+    /// Topo (its `picks` and `choices` may then both be empty); [`Manual::exe`] never comes
+    /// with a `source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual: Option<Manual>,
 }
 
 /// Most variants a Topo plan names.
@@ -241,7 +256,8 @@ pub struct Pick {
 impl PlanSource {
     /// The form rules (encode and decode alike): IDs of the Topo form, `rev` from 1, 0 to
     /// [`MAX_PICKS`] picks, each issue once, 0 to [`MAX_CHOICES`] choices, each option once and
-    /// never `unchanged`, at least one pick or choice.
+    /// never `unchanged`. At least one pick or choice unless the plan has manual steps
+    /// (ADR 0029; checked with the plan, `check`).
     pub(crate) fn check(&self) -> Result<(), PlanError> {
         let id = |s: &str| crate::catalog::model::Id::parse(s).is_some();
         if !id(&self.topo) || self.rev == 0 {
@@ -252,9 +268,6 @@ impl PlanSource {
         }
         if self.choices.len() > MAX_CHOICES {
             return Err(invalid(None, "a source names at most 8 option values"));
-        }
-        if self.picks.is_empty() && self.choices.is_empty() {
-            return Err(invalid(None, "a source names a variant or an option value"));
         }
         for (i, c) in self.choices.iter().enumerate() {
             if !id(&c.option) || !id(&c.value) {
@@ -1108,9 +1121,13 @@ pub enum PlanError {
         /// The rule.
         source: IniError,
     },
-    /// The step file of `rerun plan` (P2-13).
+    /// The step file of `rerun plan` (P2-13; a test feature since ADR 0029).
+    #[cfg(any(test, feature = "step-file"))]
     #[error(transparent)]
     StepFile(#[from] crate::prim::StepFileError),
+    /// The manual steps break a form rule (ADR 0029).
+    #[error(transparent)]
+    Manual(ManualError),
     /// A step the planner refuses (`file_install`, `registry_set`).
     #[error("{0}")]
     Step(String),
@@ -1703,7 +1720,25 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
     }
     if let Some(s) = &plan.source {
         s.check()?;
+        if s.picks.is_empty() && s.choices.is_empty() && plan.manual.is_none() {
+            return Err(invalid(
+                None,
+                "a source names a variant or an option value, or the plan has manual steps",
+            ));
+        }
     }
+    // ADR 0029: the form of the manual steps (the allowlist only with the rules in force now).
+    if let Some(m) = &plan.manual {
+        m.check_with(rules).map_err(PlanError::Manual)?;
+        if m.exe.is_some() && plan.source.is_some() {
+            return Err(invalid(
+                None,
+                "manual executables with a Topo (the Topo names the executables)",
+            ));
+        }
+    }
+    // P5-2a and ADR 0029: a plan bound to a game by a Topo or by manual steps.
+    let bound = plan.source.is_some() || plan.manual.is_some();
     // E2, review M1, E5 of P2-12: ops that need it (registry ops, INI ops) need at least one
     // game root and a main executable for every game root (P3-3: the profiles root has none).
     let mut games = plan.roots.iter().filter(|r| r.kind == RootKind::Game);
@@ -1725,11 +1760,7 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
                 "the hash of a main executable on a root without one",
             ));
         }
-        if rules == Rules::Current
-            && plan.source.is_some()
-            && r.kind == RootKind::Game
-            && r.main_sha256.is_none()
-        {
+        if rules == Rules::Current && bound && r.kind == RootKind::Game && r.main_sha256.is_none() {
             return Err(invalid(
                 None,
                 "a plan from a Topo without the hash of the game's main executable (made by an \
@@ -1759,11 +1790,7 @@ fn check(plan: &Plan, len: usize, lim: &Limits, rules: Rules) -> Result<(), Plan
                 }
             }
         }
-        if rules == Rules::Current
-            && plan.source.is_some()
-            && r.kind == RootKind::Game
-            && r.other_exes.is_none()
-        {
+        if rules == Rules::Current && bound && r.kind == RootKind::Game && r.other_exes.is_none() {
             return Err(invalid(
                 None,
                 "a plan from a Topo without the other executables of the game (made by an \

@@ -19,6 +19,9 @@
 //!   fallback of rerun-launch starts; the rule is undone only after the option; back to before.
 //! - C-TE19 a CPU fix alone: its profile part by part and the fallback line (the golden plan of a
 //!   `start` value is the core's LO11).
+//! - C-TE20 the user's own settings by flags (ADR 0029, E-1a): the preview with the origin "from
+//!   Advanced", apply and revert, the engine's refusals, the form before any system access, a
+//!   step file, a game without a Topo.
 
 use std::path::Path;
 
@@ -247,7 +250,8 @@ fn c_te6_usage() {
         Exit::Usage,
     );
     assert!(
-        r.stderr.contains("--pick and --set need a Steam app ID"),
+        r.stderr
+            .contains("--pick, --set and your own settings need a Steam app ID"),
         "{}",
         r.stderr
     );
@@ -1109,7 +1113,8 @@ fn c_te16_game_options() {
         Exit::Usage,
     );
     assert!(
-        r.stderr.contains("--pick and --set need a Steam app ID"),
+        r.stderr
+            .contains("--pick, --set and your own settings need a Steam app ID"),
         "{}",
         r.stderr
     );
@@ -1279,4 +1284,141 @@ fn c_te19_the_parts_of_a_cpu_fix() {
         assert!(r.stdout.contains(line), "{line}\n{}", r.stdout);
     }
     assert!(!r.stdout.contains("  run ("), "{}", r.stdout);
+}
+
+/// C-TE20 (ADR 0029, E-1a): the user's own settings by flags. The preview names them and the
+/// launch profile part by part with the origin "from Advanced"; apply and revert bring the game
+/// folder, the profiles and the flags back; every refusal is said before or by the engine.
+#[test]
+fn c_te20_own_settings_by_flags() {
+    let sys = sys();
+    let own = [
+        "plan",
+        "220",
+        "--cpu",
+        "max_threads=8,smt=false",
+        "--layer",
+        "HIGHDPIAWARE",
+    ];
+    let r = expect(
+        &sys,
+        &[&own[..], &["--dry-run"]].concat(),
+        Answer::No,
+        Exit::Report,
+    );
+    for line in [
+        "\nyour own settings (Advanced, not checked by a Topo): the Topo's launch method, cpu \
+         max_threads=8,smt=false, compatibility flags HIGHDPIAWARE\n",
+        "\n  cpu rule and priority, from Advanced (your own setting, not checked)\n",
+        "\nthe launch profile, part by part:\n",
+    ] {
+        assert!(r.stdout.contains(line), "{line}\n{}", r.stdout);
+    }
+    assert!(r.stdout.contains("HIGHDPIAWARE"), "{}", r.stdout);
+    assert_eq!(plans(&sys), 0, "a dry run stores nothing");
+    // Stored, applied, reverted: back to before (the rule alone: the fake's registry has no
+    // `AppCompatFlags` parent here; the flags' round trip is the core's M3 and M4).
+    let profiles = format!(r"{RERUN}\profiles");
+    let before = crate::tests::snap_dirs(&sys, &[G]);
+    let p = expect(&sys, &own[..4], Answer::No, Exit::Report);
+    let h = crate::tests::hash_of(&p);
+    let t = crate::tests::txn_of(&expect(
+        &sys,
+        &["apply", h.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    ));
+    let applied = crate::tests::snap_dirs(&sys, &[&profiles]);
+    expect(
+        &sys,
+        &["revert", t.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
+    crate::tests::same(&before, &crate::tests::snap_dirs(&sys, &[G]));
+    assert!(
+        crate::tests::snap_dirs(&sys, &[&profiles]) != applied,
+        "the profile is removed again"
+    );
+    // The engine refuses: a CPU fix with an own rule; a priority with a launcher as start (F5);
+    // own executables with a Topo.
+    for (args, why) in [
+        (
+            &["--pick", "cores/limit", "--cpu", "max_threads=4"][..],
+            "your own rule replaces the fix",
+        ),
+        (&["--priority", "high"][..], "launch_method"),
+        (
+            &["--exe", "game.exe", "--cpu", "max_threads=4"][..],
+            "only for a game without a matched Topo",
+        ),
+    ] {
+        let r = expect(
+            &sys,
+            &[&["plan", "220"][..], args, &["--dry-run"]].concat(),
+            Answer::No,
+            Exit::Refused,
+        );
+        assert!(r.stderr.contains(why), "{}: {}", args.join(" "), r.stderr);
+    }
+    // The form, before any system access (the check the app's input goes through too).
+    for (args, why) in [
+        (&["--method", "watch"][..], "need a CPU rule or a priority"),
+        (
+            &["--layer", "ZZ_NOT_LISTED"][..],
+            "not a compatibility flag Rerun sets",
+        ),
+        (
+            &["--layer", "HIGHDPIAWARE", "--layer", "HIGHDPIAWARE"][..],
+            "HIGHDPIAWARE is named twice",
+        ),
+    ] {
+        let r = expect(
+            &sys,
+            &[&["plan", "220"][..], args, &["--dry-run"]].concat(),
+            Answer::No,
+            Exit::Usage,
+        );
+        assert!(r.stderr.contains(why), "{}: {}", args.join(" "), r.stderr);
+    }
+    for bad in [
+        &["--cpu", "max_threads=0"][..],
+        &["--cpu", "max_threads=1025"][..],
+        &["--cpu", "report_cores=4"][..],
+        &["--cpu", "smt=true,smt=false"][..],
+        &["--method", "auto"][..],
+        &["--priority", "realtime"][..],
+        &["--layer", "lower"][..],
+        &["--start", "game.exe"][..],
+    ] {
+        assert!(
+            <crate::cli::Cli as clap::Parser>::try_parse_from(
+                [&["rerun", "plan", "220"][..], bad].concat()
+            )
+            .is_err(),
+            "{}",
+            bad.join(" ")
+        );
+    }
+    // Own settings with a step file: a usage error.
+    let r = expect(
+        &sys,
+        &["plan", r"D:\Work\steps.json", "--cpu", "max_threads=4"],
+        Answer::No,
+        Exit::Usage,
+    );
+    assert!(r.stderr.contains("need a Steam app ID"), "{}", r.stderr);
+    // A game without a Topo: said, nothing planned (slice E-1b).
+    let r = expect(
+        &sys,
+        &["plan", "221", "--cpu", "max_threads=4", "--dry-run"],
+        Answer::No,
+        Exit::Refused,
+    );
+    assert!(
+        r.stdout.contains("need a game with a matched Topo"),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(plans(&sys), 1, "only the plan applied above is stored");
 }

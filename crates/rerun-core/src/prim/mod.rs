@@ -22,8 +22,9 @@
 //!   `match.exes` as one `ReplaceFile` with a patch (`ContentRef::Patch`); only from a Topo.
 //! - [`gpu_preference`] (P4-11): Windows' graphics preference of an executable of the game
 //!   folder in `HKCU\…\DirectX\UserGpuPreferences` (only Rerun's pair of the value).
-//! - [`StepFile`]: the phase 2 step file `rerun plan <steps.json>` reads (P2-13); since the Topo
-//!   engine (P4-4) the local, unsigned input (L8), removed at the earliest before A6.
+//! - `StepFile`: the phase 2 step file `rerun plan <steps.json>` reads (P2-13); since the Topo
+//!   engine (P4-4) the local, unsigned input (L8), since ADR 0029 only with the cargo feature
+//!   `step-file` (tests and the Sandbox), never in a release build.
 //!
 //! A file of a step lies in the game folder, or (P4-12, [`StepRoot::UserData`]; v1 only
 //! `ini_set`) in the plan's user data folder below the user's `Documents`, which the step file
@@ -43,6 +44,8 @@ pub mod laa_patch;
 pub mod launch_method;
 pub mod package;
 pub mod registry_set;
+// ADR 0029: the step file is a test feature (`step-file`), never in a release build.
+#[cfg(any(test, feature = "step-file"))]
 mod step_file;
 
 use serde::{Deserialize, Serialize};
@@ -53,15 +56,14 @@ pub use gpu_preference::{AlreadySet, GpuPreferenceSpec};
 pub use ini_set::{IniSetSpec, IniSetValue};
 pub use laa_patch::{LaaFacts, LaaPatchSpec};
 pub use launch_method::{
-    CpuRuleSpec, ExcludeFirstSpec, LaunchArgText, LaunchMethodSpec, MachineView, MachineWhy,
-    MethodSpec, ModeSpec, PreferL3Spec, PreferSpec, PrioritySpec, SHIM, SelectionShown,
+    CpuRuleSpec, ExcludeFirstSpec, LaunchArgText, LaunchMethodSpec, MAX_THREADS, MachineView,
+    MachineWhy, MethodSpec, ModeSpec, PreferL3Spec, PreferSpec, PrioritySpec, SHIM, SelectionShown,
     on_this_machine, steam_option_text,
 };
 pub use package::{GameBuild, PackageRefusal};
 pub use registry_set::{RegValueEntry, RegistrySetSpec};
-pub use step_file::{
-    GameRef, MAX_STEP_FILE, ParseClass, STEP_FILE_FORMAT, StepFile, StepFileError,
-};
+#[cfg(any(test, feature = "step-file"))]
+pub use step_file::{MAX_STEP_FILE, ParseClass, STEP_FILE_FORMAT, StepFile, StepFileError};
 
 use crate::fold::fold;
 use crate::path::{RelPath, RootPath};
@@ -73,6 +75,16 @@ use crate::policy::root::{AppDir, GameDir, GameOrigin, UserBase, UserDataDir};
 use crate::sys::SysErrorKind;
 use crate::sys::fs::EntryKind;
 use crate::sys::registry::RegKey;
+
+/// Which game folder to open: an installed Steam app, or a folder the user names (a step file).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum GameRef {
+    /// The installed Steam app with this ID (found in exactly one library).
+    Steam(u32),
+    /// A folder the user names (opened like a manually added game folder).
+    Folder(RootPath),
+}
 
 /// One step: an object with exactly one key (ADR 0020, D7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,6 +377,7 @@ pub fn plan(steps: &[Step], ctx: &PlanCtx<'_>) -> Result<Plan, PlanError> {
     let plan = Plan {
         format: FORMAT,
         source: None,
+        manual: None,
         roots,
         ops,
     };

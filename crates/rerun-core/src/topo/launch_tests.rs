@@ -58,8 +58,8 @@ use crate::sys::fake::FakeSystem;
 use crate::sys::snapshot::{Scope, SnapRoot, Snapshot, snapshot};
 use rerun_proto::profile::{self as proto, LaunchProfile, Method};
 
-const APP: u32 = 220;
-const INDEX: [u8; 32] = [6; 32];
+pub(super) const APP: u32 = 220;
+pub(super) const INDEX: [u8; 32] = [6; 32];
 
 fn hex(b: &[u8]) -> String {
     Sha256::digest(b)
@@ -68,21 +68,21 @@ fn hex(b: &[u8]) -> String {
         .collect()
 }
 
-fn put(sys: &FakeSystem, rel: &str, data: &[u8]) {
+pub(super) fn put(sys: &FakeSystem, rel: &str, data: &[u8]) {
     let abs = format!(r"{STEAM_GAME}\{rel}");
     let _ = sys.fake_fs().remove_abs(Path::new(&abs));
     sys.fake_fs().put_file(Path::new(&abs), data).unwrap();
     sys.sync_all();
 }
 
-fn x86() -> Vec<u8> {
+pub(super) fn x86() -> Vec<u8> {
     PeBuilder::x86().build().bytes
 }
 
 /// Steam app 220 in `G` ([`rb_sys`]: a read-only, hidden `d3d9.dll`, `cfg\Game.ini`): x86
 /// `game.exe` and `game_dx9.exe` (one build, one architecture and API, so a package is not held
 /// by the bundle rule), the launcher `FFLauncher.exe`, and Rerun's `profiles` folder.
-fn game_sys() -> FakeSystem {
+pub(super) fn game_sys() -> FakeSystem {
     let sys = rb_sys();
     put(&sys, "game.exe", &x86());
     put(&sys, "game_dx9.exe", &x86());
@@ -97,7 +97,7 @@ fn game_sys() -> FakeSystem {
 /// `game_dx9.exe` and `-skipintro`); issues `cores` (a CPU rule), `wrapper` (a package),
 /// `display` (`compat_layer` on `game_dx9.exe`), `settings` (`ini_set`). Steam starts the
 /// launcher (`auto` resolves to `direct`).
-fn topo() -> Topo {
+pub(super) fn topo() -> Topo {
     let sha = hex(&x86());
     let j = format!(
         r#"{{"format":1,"id":"invented-game","title":"Invented Game","status":"draft","rev":3,
@@ -136,17 +136,17 @@ fn sel<T>(s: &[&str], sep: char, f: fn(String, String) -> T) -> Vec<T> {
         .collect()
 }
 
-fn choices(c: &[&str]) -> Vec<Choice> {
+pub(super) fn choices(c: &[&str]) -> Vec<Choice> {
     sel(c, '=', |option, value| Choice { option, value })
 }
 
-fn picks(p: &[&str]) -> Vec<Pick> {
+pub(super) fn picks(p: &[&str]) -> Vec<Pick> {
     sel(p, '/', |issue, variant| Pick { issue, variant })
 }
 
 /// Plans picks `p` and choices `c` of `t` on `sys` with the packages `pkgs`; the journal of
 /// Rerun's folder is read as the flow reads it.
-fn plan_with(
+pub(super) fn plan_with(
     sys: &FakeSystem,
     t: &Topo,
     pkgs: &[Package],
@@ -184,6 +184,7 @@ fn plan_with(
         t,
         &facts,
         &EngineSelection {
+            manual: None,
             picks: &p,
             choices: &c,
         },
@@ -197,7 +198,7 @@ fn plan_on(sys: &FakeSystem, t: &Topo, p: &[&str], c: &[&str]) -> Result<TopoPla
 }
 
 /// The wrapper package, cached and unpacked in Rerun's folder.
-fn pkgs(sys: &FakeSystem) -> Vec<Package> {
+pub(super) fn pkgs(sys: &FakeSystem) -> Vec<Package> {
     let archive = wrapper_zip();
     let pkg = wrapper(&archive);
     cache(sys, &archive);
@@ -205,12 +206,12 @@ fn pkgs(sys: &FakeSystem) -> Vec<Package> {
     vec![pkg]
 }
 
-fn stored(sys: &FakeSystem, tp: &TopoPlan) -> PlanHash {
+pub(super) fn stored(sys: &FakeSystem, tp: &TopoPlan) -> PlanHash {
     store(&app(sys), &tp.plan.encode().unwrap()).unwrap()
 }
 
 /// Plans, stores and applies.
-fn apply(env: &Env, t: &Topo, pkgs: &[Package], p: &[&str], c: &[&str]) -> TxnId {
+pub(super) fn apply(env: &Env, t: &Topo, pkgs: &[Package], p: &[&str], c: &[&str]) -> TxnId {
     let tp = plan_with(&env.sys, t, pkgs, p, c).unwrap_or_else(|e| panic!("{p:?} {c:?}: {e}"));
     let txn = env.applied(&stored(&env.sys, &tp));
     let v = env.verify(&txn);
@@ -218,7 +219,7 @@ fn apply(env: &Env, t: &Topo, pkgs: &[Package], p: &[&str], c: &[&str]) -> TxnId
     txn
 }
 
-fn snap(sys: &FakeSystem) -> Snapshot {
+pub(super) fn snap(sys: &FakeSystem) -> Snapshot {
     let fr = fr(sys);
     let g = GameDir::open_manual(sys, &fr, Path::new(STEAM_GAME)).unwrap();
     let a = app(sys);
@@ -235,12 +236,12 @@ fn snap(sys: &FakeSystem) -> Snapshot {
     .unwrap()
 }
 
-fn same(a: &Snapshot, b: &Snapshot) {
+pub(super) fn same(a: &Snapshot, b: &Snapshot) {
     assert!(a == b, "not identical: {:#?}", a.diff(b));
 }
 
 /// The profile a plan writes, decoded.
-fn profile_of(tp: &TopoPlan) -> LaunchProfile {
+pub(super) fn profile_of(tp: &TopoPlan) -> LaunchProfile {
     let bytes = tp
         .plan
         .ops
@@ -259,11 +260,11 @@ fn profile_abs(sys: &FakeSystem) -> String {
     format!(r"{p}\{}", profile_file(profile_id(APP)))
 }
 
-fn abs(r: &str) -> String {
+pub(super) fn abs(r: &str) -> String {
     format!(r"{STEAM_GAME}\{r}")
 }
 
-fn main_exe(tp: &TopoPlan) -> String {
+pub(super) fn main_exe(tp: &TopoPlan) -> String {
     let r = tp
         .plan
         .roots
@@ -273,14 +274,14 @@ fn main_exe(tp: &TopoPlan) -> String {
     r.main_exe.as_ref().unwrap().to_string()
 }
 
-fn later(r: Result<crate::exec::RevertReport, ExecError>, t: TxnId) {
+pub(super) fn later(r: Result<crate::exec::RevertReport, ExecError>, t: TxnId) {
     match r {
         Err(ExecError::Refused(Refusal::Later { txn })) if txn == t => {}
         other => panic!("not Later {{ {t} }}: {other:?}"),
     }
 }
 
-fn reverted(env: &Env, t: &TxnId) {
+pub(super) fn reverted(env: &Env, t: &TxnId) {
     assert_eq!(env.revert(t).unwrap().closed, Some(Closing::Reverted));
 }
 

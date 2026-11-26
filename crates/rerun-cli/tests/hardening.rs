@@ -137,3 +137,32 @@ fn only_the_test_build_names_the_test_index_folder() {
         "the release rerun.exe holds the test-key banner"
     );
 }
+
+/// A text only the step file's code of `rerun.exe` holds (`TxnMsg::StepFile`).
+const STEP_FILE_TEXT: &str = "cannot read the step file";
+
+/// ADR 0029: the step file (`rerun plan <steps.json>`) is a test feature. A build with the
+/// feature `step-file` (CI's `--all-features`, the Sandbox's `rerun.exe`) holds its code, any
+/// other none; the release binary must not (`RERUN_RELEASE_CLI_EXE`, as above).
+#[test]
+fn only_a_step_file_build_reads_step_files() {
+    let image = std::fs::read(env!("CARGO_BIN_EXE_rerun")).unwrap();
+    assert_eq!(
+        holds_text(&image, STEP_FILE_TEXT),
+        cfg!(feature = "step-file"),
+        "the step file's code is in a build with the feature step-file, and only there"
+    );
+    let Some(exe) = std::env::var_os("RERUN_RELEASE_CLI_EXE") else {
+        assert!(
+            !hardening::on_github_hosted_runner(),
+            "RERUN_RELEASE_CLI_EXE is not set on a GitHub-hosted runner (ci.yml)"
+        );
+        eprintln!("RERUN_RELEASE_CLI_EXE not set: release binary not checked");
+        return;
+    };
+    let image = std::fs::read(&exe).unwrap();
+    assert!(
+        !holds_text(&image, STEP_FILE_TEXT),
+        "the release rerun.exe holds the step file's code"
+    );
+}

@@ -1323,6 +1323,7 @@ fn aw16_a_plan_with_a_firewall_rule_needs_a_ready_helper() {
         &rerun_core::flow::Selection {
             picks,
             choices: Vec::new(),
+            manual: None,
         },
     )
     else {

@@ -1111,6 +1111,7 @@ fn plan(
     let sel = flow::Selection {
         picks: picks.to_vec(),
         choices: choices.to_vec(),
+        manual: None,
     };
     match flow::plan(g, app_id, &sel) {
         Err(e) => emit(refused(vm::game_refusal(&e, lang))),

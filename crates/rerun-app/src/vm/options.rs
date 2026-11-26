@@ -387,6 +387,7 @@ fn from_of(f: &PartFrom, lang: Lang) -> (String, Option<Shown<'static>>) {
             tx(lang, Msg::PvFromOption),
             Some(escape::text(&format!("{} = {}", c.option, c.value)).into_owned()),
         ),
+        PartFrom::Manual => (tx(lang, Msg::PvFromManual), None),
         PartFrom::Kept(txn) => (tx(lang, Msg::PvFromKept { n: txn.seq() }), None),
     }
 }

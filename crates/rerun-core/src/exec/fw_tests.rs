@@ -550,6 +550,7 @@ fn f1_a_rule_with_an_option_value_passes_recheck_and_helper() {
                 packages: &[],
             },
             &crate::topo::EngineSelection {
+                manual: None,
                 picks: &picks,
                 choices: &choices,
             },

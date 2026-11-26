@@ -12,11 +12,13 @@
 //! named with its reason and never planned; an app whose only Topos are set aside offers
 //! nothing, and a `--pick` for it is refused (exit 3).
 //!
-//! Without `--pick` and `--set`: the report (options and their values, issues, `when` here,
-//! variants and what the engine says); nothing is stored, nothing created. With `--pick` or
-//! `--set`: the engine's plan, then the same preview and storage as a step file
-//! (`plan::show_and_store`), with the plan's origin, the options it sets and the warnings before
-//! the preview. `appinfo.vdf` is never read (L9).
+//! Without `--pick`, `--set` and the user's own settings: the report (options and their values,
+//! issues, `when` here, variants and what the engine says); nothing is stored, nothing created.
+//! With `--pick`, `--set` or own settings (`--method`, `--cpu`, `--priority`, `--layer`, ADR
+//! 0029): the engine's plan, then the same preview and storage as every plan
+//! (`plan::show_and_store`), with the plan's origin, the options and own settings it sets, the
+//! warnings and the launch profile part by part before the preview. `appinfo.vdf` is never read
+//! (L9).
 //!
 //! The guards, the lookup, the report and the plan come from `rerun_core::flow` (`guard`,
 //! `game`, `plan`, ADR 0027 and its amendment P5-2a); this module renders them.
@@ -27,7 +29,10 @@ use rerun_core::catalog::model::{GpuRequirement, Kind, Status, VariantStatus};
 use rerun_core::catalog::{Aside, Topo};
 use rerun_core::escape;
 use rerun_core::flow::{self, Found, GameRefusal, Lookup, OwnedReport, Selection};
-use rerun_core::prim::MethodSpec;
+use rerun_core::plan::{Manual, ManualMethod};
+use rerun_core::prim::{
+    CpuRuleSpec, ExcludeFirstSpec, MethodSpec, ModeSpec, PreferL3Spec, PreferSpec, PrioritySpec,
+};
 use rerun_core::topo::{AntiCheatState, ExeState, GameFacts, LaunchParts, PartFrom, Warning};
 
 use crate::cli::Exit;
@@ -191,11 +196,88 @@ fn variant_status(s: VariantStatus) -> &'static str {
     }
 }
 
+/// The user's own settings in Rerun's words (ADR 0029): every value is of a closed set, every
+/// flag of the token form `[A-Z0-9_]`.
+fn manual_text(m: &Manual) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(l) = &m.launch {
+        parts.push(match l.method {
+            Some(ManualMethod::Direct) => "method direct".to_owned(),
+            Some(ManualMethod::Watch) => "method watch".to_owned(),
+            None => "the Topo's launch method".to_owned(),
+        });
+        if let Some(c) = &l.cpu {
+            parts.push(format!("cpu {}", cpu_text(c)));
+        }
+        if let Some(p) = l.priority {
+            parts.push(format!(
+                "priority {}",
+                match p {
+                    PrioritySpec::Normal => "normal",
+                    PrioritySpec::AboveNormal => "above_normal",
+                    PrioritySpec::High => "high",
+                }
+            ));
+        }
+    }
+    if !m.layers.is_empty() {
+        let t: Vec<&str> = m.layers.iter().map(|t| t.as_str()).collect();
+        parts.push(format!("compatibility flags {}", t.join(" ")));
+    }
+    parts.join(", ")
+}
+
+/// A CPU rule as `<field>=<value>` pairs, in the order of `--cpu`.
+fn cpu_text(c: &CpuRuleSpec) -> String {
+    let mut f: Vec<String> = Vec::new();
+    if let Some(n) = c.max_threads {
+        f.push(format!("max_threads={n}"));
+    }
+    if let Some(b) = c.smt {
+        f.push(format!("smt={b}"));
+    }
+    if let Some(b) = c.single_l3 {
+        f.push(format!("single_l3={b}"));
+    }
+    if let Some(p) = c.prefer {
+        f.push(
+            match p {
+                PreferSpec::Performance => "prefer=performance",
+                PreferSpec::Any => "prefer=any",
+            }
+            .to_owned(),
+        );
+    }
+    if let Some(PreferL3Spec::Largest) = c.prefer_l3 {
+        f.push("prefer_l3=largest".to_owned());
+    }
+    if let Some(e) = c.exclude_first {
+        f.push(
+            match e {
+                ExcludeFirstSpec::Thread => "exclude_first=thread",
+                ExcludeFirstSpec::Core => "exclude_first=core",
+            }
+            .to_owned(),
+        );
+    }
+    if let Some(m) = c.mode {
+        f.push(
+            match m {
+                ModeSpec::Hard => "mode=hard",
+                ModeSpec::Soft => "mode=soft",
+            }
+            .to_owned(),
+        );
+    }
+    f.join(",")
+}
+
 /// Where a part of the launch profile comes from, in Rerun's words.
 fn from_text(f: &PartFrom) -> String {
     match f {
         PartFrom::Fix(p) => format!("from fix {}/{}", p.issue, p.variant),
         PartFrom::Option(c) => format!("from option {}={}", c.option, c.value),
+        PartFrom::Manual => "from Advanced (your own setting, not checked)".to_owned(),
         PartFrom::Kept(t) => format!("kept from transaction {t} (undo that one after this one)"),
     }
 }
@@ -240,6 +322,10 @@ fn warning_text(w: &Warning) -> String {
         Warning::KeptAntiCheat { txn, step } => format!(
             "warning: anti-cheat found; the launch profile keeps the {} part of transaction \
              {txn}, at your own risk",
+            step.as_str()
+        ),
+        Warning::ManualAntiCheat { step } => format!(
+            "warning: anti-cheat found; {} of your own settings is planned, at your own risk",
             step.as_str()
         ),
         Warning::OptionAntiCheat {
@@ -471,7 +557,7 @@ fn run<W: Write, E: Write>(
     err: &mut Out<E>,
 ) -> Result<Exit, Exit> {
     let g = flow::guard(host.env()).map_err(|x| gate(err, x))?;
-    if sel.picks.is_empty() && sel.choices.is_empty() {
+    if sel.picks.is_empty() && sel.choices.is_empty() && sel.manual.is_none() {
         // The report: nothing is stored, nothing created.
         let v = flow::game(&g, app_id).map_err(|r| refusal(out, err, r))?;
         let (mut m, mv) = match one(v.lookup, app_id, Exit::Report, out, err) {
@@ -487,9 +573,25 @@ fn run<W: Write, E: Write>(
         return Ok(print(out, err, &m, Exit::Report));
     }
     let lookup = flow::plan(&g, app_id, sel).map_err(|r| refusal(out, err, r))?;
+    // ADR 0029: own settings for a game without a matched Topo come with slice E-1b.
+    let no_topo = matches!(
+        &lookup,
+        Lookup::NoTopo { .. }
+            | Lookup::Read {
+                found: Found::NoMatch(_),
+                ..
+            }
+    );
     let (lead, picked) = match one(lookup, app_id, Exit::Refused, out, err) {
         Ok(x) => x,
-        Err(exit) => return Ok(exit),
+        Err(exit) => {
+            if no_topo && sel.manual.is_some() {
+                let _ = out
+                    .line(&Message::Topo(TopoMsg::ManualNeedsTopo))
+                    .and_then(|()| out.flush());
+            }
+            return Ok(exit);
+        }
     };
     let t = &picked.topo;
     let mut before = vec![heading(t)];
@@ -510,6 +612,11 @@ fn run<W: Write, E: Write>(
                     .collect();
                 before.push(Message::Topo(TopoMsg::Choices {
                     set: set.join(", "),
+                }));
+            }
+            if let Some(m) = &sel.manual {
+                before.push(Message::Topo(TopoMsg::Manual {
+                    set: manual_text(m),
                 }));
             }
             before.extend(p.warnings().iter().map(|w| {

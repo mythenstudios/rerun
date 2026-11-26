@@ -63,6 +63,7 @@ fn patch_plan(env: &Env, edits: Vec<ByteEdit>, result: [u8; 32]) -> PlanHash {
         attrs: super::tests::RH,
     };
     let p = Plan {
+        manual: None,
         format: FORMAT,
         roots: vec![PlanRoot {
             kind: RootKind::Game,
@@ -258,6 +259,7 @@ fn pt6_a_held_file_is_not_patched() {
     let mut patched = N.to_vec();
     patched[0] ^= 0x20;
     let p = Plan {
+        manual: None,
         format: FORMAT,
         roots: vec![PlanRoot {
             kind: RootKind::Game,

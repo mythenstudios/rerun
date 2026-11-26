@@ -173,6 +173,7 @@ fn plan_on(sys: &FakeSystem, t: &Topo, p: &[&str], c: &[&str]) -> Result<TopoPla
         t,
         &facts,
         &EngineSelection {
+            manual: None,
             picks: &p,
             choices: &c,
         },
@@ -426,6 +427,7 @@ fn oe6_a_value_in_the_user_data_folder_needs_it() {
         needs_user_data(
             &t,
             &EngineSelection {
+                manual: None,
                 picks: &p,
                 choices: &c,
             },
@@ -471,8 +473,10 @@ fn oe7_the_source_form_with_choices() {
     })
     .unwrap();
     with(|s| s.picks = picks(&["a/b"])).unwrap();
-    // Neither, `unchanged`, a value twice, a bad ID, too many.
-    with(|s| s.choices.clear()).unwrap_err();
+    // Neither: the source's own form allows it (a plan of the user's own settings, ADR 0029);
+    // the plan refuses it without `manual` (`manual_tests::m1_the_plan_form`).
+    with(|s| s.choices.clear()).unwrap();
+    // `unchanged`, a value twice, a bad ID, too many.
     with(|s| s.choices = choices(&["api=unchanged"])).unwrap_err();
     with(|s| s.choices = choices(&["api=dx9", "api=dx10"])).unwrap_err();
     with(|s| s.choices = choices(&["API=dx9"])).unwrap_err();

@@ -81,6 +81,7 @@ fn ini_op(root: u16, path: &str) -> Op {
 /// A game root and the user data root `Documents\My Games\G`, an INI op on each.
 fn ud_plan() -> Plan {
     Plan {
+        manual: None,
         format: 1,
         source: None,
         roots: vec![game_root(), ud_root(UD, r"My Games\G", 9)],

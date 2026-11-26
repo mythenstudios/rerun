@@ -152,37 +152,25 @@ fn run<W: io::Write, E: io::Write>(
             target,
             picks,
             choices,
+            method,
+            cpu,
+            priority,
+            layers,
+            exe,
+            start,
             dry_run,
-        } => match cli::app_id(&target) {
-            Some(app_id) => {
-                let sel = rerun_core::flow::Selection { picks, choices };
-                topo::plan(host, app_id, &sel, dry_run, out, err)
+        } => {
+            let manual = cli::ManualFlags {
+                method,
+                cpu,
+                priority,
+                layers,
+                exe,
+                start,
             }
-            // Digits only are always meant as an app ID (review follow-up 9).
-            None if cli::digits_only(&target) => {
-                let _ = err.lines(&[
-                    Message::Usage {
-                        what: "not a Steam app ID (1 to 4294967295)",
-                        why: None,
-                        value: target.to_str().map(|s| escape::text(s).into_owned()),
-                    },
-                    Message::UsageHelp,
-                ]);
-                Exit::Usage
-            }
-            None if !picks.is_empty() || !choices.is_empty() => {
-                let _ = err.lines(&[
-                    Message::Usage {
-                        what: "--pick and --set need a Steam app ID, not a step file",
-                        why: None,
-                        value: None,
-                    },
-                    Message::UsageHelp,
-                ]);
-                Exit::Usage
-            }
-            None => plan::plan(host, &target, dry_run, out, err),
-        },
+            .manual();
+            plan_command(host, &target, picks, choices, manual, dry_run, out, err)
+        }
         Command::Apply { hash, dry_run, yes } => apply::apply(host, &hash, dry_run, yes, out, err),
         Command::Revert {
             txn,
@@ -219,6 +207,89 @@ fn run<W: io::Write, E: io::Write>(
             command: PackageCommand::Prune { dry_run, yes },
         } => store::remove(host, None, dry_run, yes, out, err),
         Command::UninstallCheck => uninstall::check(host, out, err),
+    }
+}
+
+/// `rerun plan`: an app ID with picks, choices and the user's own settings (ADR 0029), or in a
+/// build with the feature `step-file` a step file.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parsed flags of one command, passed on as they are"
+)]
+fn plan_command<W: io::Write, E: io::Write>(
+    host: &mut Host<'_>,
+    target: &std::path::Path,
+    picks: Vec<rerun_core::plan::Pick>,
+    choices: Vec<rerun_core::plan::Choice>,
+    manual: Option<rerun_core::plan::Manual>,
+    dry_run: bool,
+    out: &mut Out<W>,
+    err: &mut Out<E>,
+) -> Exit {
+    // ADR 0029: the user's own settings are checked before any system access, by the function
+    // the app's input goes through.
+    if let Some(m) = &manual
+        && let Err(e) = m.check()
+    {
+        let _ = err.lines(&[
+            Message::Usage {
+                what: "your own settings",
+                why: Some(escape::text(&e.to_string()).into_owned()),
+                value: None,
+            },
+            Message::UsageHelp,
+        ]);
+        return Exit::Usage;
+    }
+    match cli::app_id(target) {
+        Some(app_id) => {
+            let sel = rerun_core::flow::Selection {
+                picks,
+                choices,
+                manual,
+            };
+            topo::plan(host, app_id, &sel, dry_run, out, err)
+        }
+        // Digits only are always meant as an app ID (review follow-up 9).
+        None if cli::digits_only(target) => {
+            let _ = err.lines(&[
+                Message::Usage {
+                    what: "not a Steam app ID (1 to 4294967295)",
+                    why: None,
+                    value: target.to_str().map(|s| escape::text(s).into_owned()),
+                },
+                Message::UsageHelp,
+            ]);
+            Exit::Usage
+        }
+        None if !picks.is_empty() || !choices.is_empty() || manual.is_some() => {
+            let _ = err.lines(&[
+                Message::Usage {
+                    what: "--pick, --set and your own settings need a Steam app ID, not a step \
+                           file",
+                    why: None,
+                    value: None,
+                },
+                Message::UsageHelp,
+            ]);
+            Exit::Usage
+        }
+        #[cfg(any(test, feature = "step-file"))]
+        None => plan::plan(host, target, dry_run, out, err),
+        // ADR 0029: the step file is a test feature, never in a release build.
+        #[cfg(not(any(test, feature = "step-file")))]
+        None => {
+            let _ = err.lines(&[
+                Message::Usage {
+                    what: "not a Steam app ID; the step file is a test feature this build does \
+                           not have",
+                    why: None,
+                    value: None,
+                },
+                Message::UsageHelp,
+            ]);
+            Exit::Usage
+        }
     }
 }
 

@@ -18,18 +18,17 @@
 //!   what was shown. `exec` checks everything again under the journal lock.
 
 use crate::catalog::Topo;
-use crate::detect::exe::anti_cheat;
 use crate::exec::{self, ApplyError, ExecCtx, Outcome, Refusal};
 use crate::journal::InstanceTag;
 use crate::path::RootPath;
-use crate::plan::{self, Choice, Pick, PlanBytes, PlanError, PlanHash, Preview};
+use crate::plan::{self, Choice, Manual, Pick, PlanBytes, PlanError, PlanHash, Preview};
 use crate::policy::registry::RegPolicy;
 use crate::policy::root::{AppDir, Create, RootError, Shadow, UserDataDir, preview_with_shadows};
-use crate::prim::{self, PlanCtx, StepFile};
+use crate::prim::PlanCtx;
 use crate::sys::System;
-use crate::topo::{self, EngineError, LaunchParts, StepKind, Warning};
+use crate::topo::{self, EngineError, LaunchParts, Warning};
 
-use super::{GameOpen, GameRefusal, Guarded, Lookup, with_game, with_topo};
+use super::{GameRefusal, Guarded, Lookup, with_topo};
 
 /// A plan as encoded, with the preview decoded from exactly its bytes. Stores nothing. Only
 /// this module builds one ([`plan`], [`plan_steps`], [`load_stored`]).
@@ -158,15 +157,17 @@ pub enum PlanRefusal {
     Plan(Box<PlanError>),
 }
 
-/// What the user selected on a game's page (ADR 0032 amendment P5-OE, ADR 0027): the picked
-/// variants and the chosen option values, at least one of them. An option left out keeps its
-/// implicit `unchanged`.
+/// What the user selected on a game's page (ADR 0032 amendment P5-OE, ADR 0029, ADR 0027): the
+/// picked variants, the chosen option values and the user's own settings ("Advanced"), at
+/// least one of them. An option left out keeps its implicit `unchanged`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Selection {
     /// The variants, at most one per issue.
     pub picks: Vec<Pick>,
     /// The option values, at most one per option.
     pub choices: Vec<Choice>,
+    /// The user's own settings (checked by [`Manual::check`], again by the engine).
+    pub manual: Option<Manual>,
 }
 
 impl Selection {
@@ -175,6 +176,7 @@ impl Selection {
         topo::EngineSelection {
             picks: &self.picks,
             choices: &self.choices,
+            manual: self.manual.as_ref(),
         }
     }
 }
@@ -245,10 +247,11 @@ pub fn plan(g: &Guarded<'_>, app_id: u32, sel: &Selection) -> Result<Lookup<Pick
 }
 
 /// Why a step file was not planned.
+#[cfg(any(test, feature = "step-file"))]
 #[derive(Debug)]
 pub enum StepsRefusal {
     /// The game folder did not open.
-    Game(GameOpen),
+    Game(super::GameOpen),
     /// The anti-cheat rule, the user data folder or a planner refused.
     Plan(PlanError),
 }
@@ -257,11 +260,16 @@ pub enum StepsRefusal {
 /// names, the anti-cheat rule for every step (user decision E4 of P4-4: a step file has no Topo,
 /// so nothing is released as dead), the game's folder below `Documents` only if a step needs it
 /// (P4-12), the planners, the encoding and the preview of the encoded bytes. Also returns the
-/// step kinds the anti-cheat rule warns about. Stores nothing, creates nothing.
+/// step kinds the anti-cheat rule warns about. Stores nothing, creates nothing. A test feature
+/// since ADR 0029 (cargo feature `step-file`).
+#[cfg(any(test, feature = "step-file"))]
 pub fn plan_steps(
     g: &Guarded<'_>,
-    sf: &StepFile,
-) -> Result<(Planned, Vec<StepKind>), StepsRefusal> {
+    sf: &crate::prim::StepFile,
+) -> Result<(Planned, Vec<topo::StepKind>), StepsRefusal> {
+    use super::with_game;
+    use crate::detect::exe::anti_cheat;
+    use crate::prim;
     let sys = g.env().sys;
     // P3-3c: the path of Rerun's folder without creating it (a launch profile names its
     // profiles root by path); unknown only fails a `launch_method` step.

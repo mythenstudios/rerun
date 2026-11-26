@@ -20,6 +20,9 @@ path = "src/main.rs"
 # stderr before every command, and CI checks that `-e normal,build` of rerun-cli with the default
 # features does not enable rerun-core/test-key.
 test-key = ["rerun-core/test-key"]
+# `rerun plan <steps.json>` (ADR 0029): a test feature for the Sandbox and the CLI tests, never
+# shipped (CI and scripts/alpha-build.ps1 check `-e normal,build`).
+step-file = ["rerun-core/step-file"]
 
 [dependencies]
 rerun-core.workspace = true
@@ -29,7 +32,7 @@ clap.workspace = true
 # key of the signed index (ADR 0024). Never in the shipped build: CI checks that
 # `-e normal,build` of rerun-cli enables neither `fake` nor `test-key`.
 [dev-dependencies]
-rerun-core = { workspace = true, features = ["fake", "test-key"] }
+rerun-core = { workspace = true, features = ["fake", "test-key", "step-file"] }
 # The SHA-256 of a test archive (package_tests); the crate rerun-core already uses, no new crate.
 sha2.workspace = true
 

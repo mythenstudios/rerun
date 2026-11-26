@@ -10,7 +10,12 @@ use rerun_core::escape;
 
 use rerun_core::catalog::model::Id;
 use rerun_core::journal::TxnId;
-use rerun_core::plan::{Choice, Pick, PlanHash};
+use rerun_core::path::RelPath;
+use rerun_core::plan::{Choice, Manual, ManualExe, ManualLaunch, ManualMethod, Pick, PlanHash};
+use rerun_core::policy::registry::TokenName;
+use rerun_core::prim::{
+    CpuRuleSpec, ExcludeFirstSpec, MAX_THREADS, ModeSpec, PreferL3Spec, PreferSpec, PrioritySpec,
+};
 
 use crate::messages::Message;
 
@@ -39,11 +44,11 @@ pub enum Command {
         #[arg(long)]
         hashes: bool,
     },
-    /// Plans fixes and game options from the signed index for a Steam app (or the steps of a
-    /// step file) and shows every change; stores the plan for apply. Without --pick and --set, an
-    /// app ID gives a report only.
+    /// Plans fixes, game options and your own settings from the signed index for a Steam app
+    /// and shows every change; stores the plan for apply. Without --pick, --set and your own
+    /// settings, an app ID gives a report only.
     Plan {
-        /// A Steam app ID (digits only), or a step file (JSON, at most 1 MiB).
+        /// A Steam app ID (digits only); in a test build also a step file (JSON, at most 1 MiB).
         target: PathBuf,
         /// A variant to plan, as <issue>/<variant>; repeat for several issues (app ID only).
         #[arg(long = "pick", value_parser = pick)]
@@ -52,6 +57,29 @@ pub enum Command {
         /// An option left out stays unchanged.
         #[arg(long = "set", value_parser = choice)]
         choices: Vec<Choice>,
+        /// Your own launch method: direct or watch (default: the Topo's).
+        #[arg(long, value_parser = method_arg)]
+        method: Option<ManualMethod>,
+        /// Your own CPU rule as <field>=<value>,...: max_threads=1..1024, smt=true|false,
+        /// single_l3=true|false, prefer=performance|any, prefer_l3=largest,
+        /// exclude_first=thread|core, mode=hard|soft.
+        #[arg(long, value_parser = cpu_arg)]
+        cpu: Option<CpuRuleSpec>,
+        /// Your own priority: normal, above_normal or high.
+        #[arg(long, value_parser = priority_arg)]
+        priority: Option<PrioritySpec>,
+        /// A compatibility flag for the game's executable: DISABLEDXMAXIMIZEDWINDOWEDMODE
+        /// (disable fullscreen optimisations) or HIGHDPIAWARE (DPI scaling by the application);
+        /// repeat for both.
+        #[arg(long = "layer", value_parser = layer_arg)]
+        layers: Vec<TokenName>,
+        /// The game's executable, for a game without a matched Topo (a later version).
+        #[arg(long, value_parser = rel_arg)]
+        exe: Option<RelPath>,
+        /// Steam's launch entry, for a game without a matched Topo (a later version; default:
+        /// --exe).
+        #[arg(long, requires = "exe", value_parser = rel_arg)]
+        start: Option<RelPath>,
         /// Show the plan only; store nothing.
         #[arg(long)]
         dry_run: bool,
@@ -246,6 +274,140 @@ fn choice(s: &str) -> Result<Choice, String> {
             value: v.to_string(),
         }),
         _ => Err(bad()),
+    }
+}
+
+/// `--method`: `direct` or `watch` (ADR 0029: never `auto`, `hold`, `ifeo`, `inproc`).
+fn method_arg(s: &str) -> Result<ManualMethod, String> {
+    match s {
+        "direct" => Ok(ManualMethod::Direct),
+        "watch" => Ok(ManualMethod::Watch),
+        _ => Err("not a launch method (direct or watch)".to_owned()),
+    }
+}
+
+/// `--priority`: `normal`, `above_normal` or `high`.
+fn priority_arg(s: &str) -> Result<PrioritySpec, String> {
+    match s {
+        "normal" => Ok(PrioritySpec::Normal),
+        "above_normal" => Ok(PrioritySpec::AboveNormal),
+        "high" => Ok(PrioritySpec::High),
+        _ => Err("not a priority (normal, above_normal or high)".to_owned()),
+    }
+}
+
+/// `--cpu <field>=<value>,...`: the fields of a CPU rule (docs/02), each once; never
+/// `report_cores`. The rule as a whole is checked by `Manual::check`.
+pub(crate) fn cpu_arg(s: &str) -> Result<CpuRuleSpec, String> {
+    let bad = || {
+        "not <field>=<value>,... of max_threads, smt, single_l3, prefer, prefer_l3, \
+         exclude_first, mode"
+            .to_owned()
+    };
+    let flag = |v: &str| match v {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err("smt and single_l3 are true or false".to_owned()),
+    };
+    let mut r = CpuRuleSpec::default();
+    let mut seen: Vec<&str> = Vec::new();
+    for item in s.split(',') {
+        let (k, v) = item.split_once('=').ok_or_else(bad)?;
+        if seen.contains(&k) {
+            return Err("a field is named twice".to_owned());
+        }
+        match k {
+            "max_threads" => {
+                let n: u16 = v
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=MAX_THREADS).contains(n))
+                    .ok_or_else(|| "max_threads is 1 to 1024".to_owned())?;
+                r.max_threads = Some(n);
+            }
+            "smt" => r.smt = Some(flag(v)?),
+            "single_l3" => r.single_l3 = Some(flag(v)?),
+            "prefer" => {
+                r.prefer = Some(match v {
+                    "performance" => PreferSpec::Performance,
+                    "any" => PreferSpec::Any,
+                    _ => return Err("prefer is performance or any".to_owned()),
+                });
+            }
+            "prefer_l3" => {
+                r.prefer_l3 = Some(match v {
+                    "largest" => PreferL3Spec::Largest,
+                    _ => return Err("prefer_l3 is largest".to_owned()),
+                });
+            }
+            "exclude_first" => {
+                r.exclude_first = Some(match v {
+                    "thread" => ExcludeFirstSpec::Thread,
+                    "core" => ExcludeFirstSpec::Core,
+                    _ => return Err("exclude_first is thread or core".to_owned()),
+                });
+            }
+            "mode" => {
+                r.mode = Some(match v {
+                    "hard" => ModeSpec::Hard,
+                    "soft" => ModeSpec::Soft,
+                    _ => return Err("mode is hard or soft".to_owned()),
+                });
+            }
+            _ => return Err(bad()),
+        }
+        seen.push(k);
+    }
+    Ok(r)
+}
+
+/// `--layer`: a token of the form `[A-Z0-9_]` (the allowlist is `Manual::check`'s).
+fn layer_arg(s: &str) -> Result<TokenName, String> {
+    TokenName::parse(s).map_err(|_| "not a compatibility flag (A-Z, 0-9 and _)".to_owned())
+}
+
+/// `--exe`, `--start`: a path below the game folder.
+fn rel_arg(s: &str) -> Result<RelPath, String> {
+    RelPath::parse(s).map_err(|_| "not a path below the game folder".to_owned())
+}
+
+/// The flags of the user's own settings of `rerun plan` (ADR 0029).
+#[derive(Debug, Default)]
+pub struct ManualFlags {
+    /// `--method`.
+    pub method: Option<ManualMethod>,
+    /// `--cpu`.
+    pub cpu: Option<CpuRuleSpec>,
+    /// `--priority`.
+    pub priority: Option<PrioritySpec>,
+    /// `--layer`.
+    pub layers: Vec<TokenName>,
+    /// `--exe`.
+    pub exe: Option<RelPath>,
+    /// `--start`.
+    pub start: Option<RelPath>,
+}
+
+impl ManualFlags {
+    /// The user's own settings, `None` when no flag of them is given. No flag is mandatory:
+    /// `--layer` alone is a selection of flags only. Checked by `Manual::check` afterwards (the
+    /// app's input is checked by the same function).
+    pub fn manual(self) -> Option<Manual> {
+        let launch = (self.method.is_some() || self.cpu.is_some() || self.priority.is_some())
+            .then_some(ManualLaunch {
+                method: self.method,
+                cpu: self.cpu,
+                priority: self.priority,
+            });
+        let exe = self.exe.map(|main_exe| ManualExe {
+            start: self.start.unwrap_or_else(|| main_exe.clone()),
+            main_exe,
+        });
+        (launch.is_some() || !self.layers.is_empty() || exe.is_some()).then_some(Manual {
+            launch,
+            layers: self.layers,
+            exe,
+        })
     }
 }
 

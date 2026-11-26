@@ -49,7 +49,9 @@ use crate::detect::exe::{
 use crate::detect::pe::{self, Machine, PeReadError};
 use crate::hw::{Fact, GpuArchTable, SacState, SystemProfile};
 use crate::path::RelPath;
-use crate::plan::{Choice, MAX_CHOICES, MAX_PICKS, Op, Pick, Plan, PlanError, PlanSource, RootIx};
+use crate::plan::{
+    Choice, MAX_CHOICES, MAX_PICKS, Manual, Op, Pick, Plan, PlanError, PlanSource, RootIx,
+};
 use crate::policy::root::GameDir;
 use crate::prim::{
     self, GameBuild, LaunchArgText, LaunchMethodSpec, MethodSpec, PackageRefusal, PlanCtx, Step,
@@ -775,14 +777,16 @@ fn assess_value(
     (refused, warned)
 }
 
-/// What the engine plans (ADR 0032 amendment P5-OE): the picked variants and the chosen option
-/// values, together at least one.
+/// What the engine plans (ADR 0032 amendment P5-OE, ADR 0029): the picked variants, the chosen
+/// option values and the user's own settings, together at least one.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EngineSelection<'a> {
     /// The variants, at most one per issue, 0 to [`MAX_PICKS`].
     pub picks: &'a [Pick],
     /// The option values, at most one per option, 0 to [`MAX_CHOICES`].
     pub choices: &'a [Choice],
+    /// The user's own settings ("Advanced", ADR 0029).
+    pub manual: Option<&'a Manual>,
 }
 
 impl<'a> EngineSelection<'a> {
@@ -792,6 +796,7 @@ impl<'a> EngineSelection<'a> {
         Self {
             picks,
             choices: &[],
+            manual: None,
         }
     }
 }
@@ -814,12 +819,53 @@ pub enum EngineError {
     /// The Topo is retired.
     #[error("Topo {0} is retired and offers no fixes")]
     Retired(String),
-    /// Nothing picked or chosen, or too many.
+    /// Nothing picked, chosen or set, or too many.
     #[error(
         "pick at most {MAX_PICKS} variants as <issue>/<variant> and set at most {MAX_CHOICES} \
-         options as <option>=<value>, at least one of them"
+         options as <option>=<value>, at least one of them or your own settings"
     )]
     Picks,
+    /// A picked fix brings a CPU rule and the user's own settings set the rule part too (ADR
+    /// 0029: one launch profile per game).
+    #[error(
+        "fix {issue}/{variant} brings a CPU rule, and your own settings set the CPU rule and \
+         priority too; your own rule replaces the fix: pick one of them"
+    )]
+    ManualAndCpuFix {
+        /// The issue of the fix.
+        issue: String,
+        /// The variant.
+        variant: String,
+    },
+    /// A picked fix sets compatibility flags for the executable the user's own flags are for.
+    #[error(
+        "fix {issue}/{variant} sets compatibility flags for {exe}, and your own settings do \
+         too; pick one of them"
+    )]
+    ManualAndLayerFix {
+        /// The issue of the fix.
+        issue: String,
+        /// The variant.
+        variant: String,
+        /// The executable (escaped).
+        exe: String,
+    },
+    /// The user's own settings name executables, but the game has a matched Topo, which names
+    /// them (ADR 0029).
+    #[error(
+        "your own executables are only for a game without a matched Topo; this game's Topo \
+         names its executables"
+    )]
+    ManualExe,
+    /// The anti-cheat rule refuses a part of the user's own settings (ADR 0029).
+    #[error(
+        "anti-cheat found: Rerun does not set {} of your own settings for this game",
+        step.as_str()
+    )]
+    ManualAntiCheat {
+        /// The step kind.
+        step: StepKind,
+    },
     /// No such issue.
     #[error("the Topo has no issue {0}")]
     UnknownIssue(String),
@@ -1151,6 +1197,11 @@ pub enum Warning {
         /// The step kind.
         step: StepKind,
     },
+    /// The anti-cheat rule warns about a part of the user's own settings (ADR 0029).
+    ManualAntiCheat {
+        /// The step kind.
+        step: StepKind,
+    },
     /// The anti-cheat rule warns about a part the plan keeps from the live launch profile (S1).
     KeptAntiCheat {
         /// The transaction the part is kept from.
@@ -1233,6 +1284,8 @@ pub enum PartFrom {
     Fix(Pick),
     /// A chosen option value.
     Option(Choice),
+    /// The user's own settings ("Advanced", ADR 0029): not checked by anyone but the user.
+    Manual,
     /// Kept from the live profile of this transaction.
     Kept(crate::journal::TxnId),
 }
@@ -1275,6 +1328,7 @@ fn from_words(f: &PartFrom) -> String {
     match f {
         PartFrom::Fix(p) => format!("fix {}/{}", p.issue, p.variant),
         PartFrom::Option(c) => format!("option {}", choice_name(c)),
+        PartFrom::Manual => "your own settings".to_owned(),
         PartFrom::Kept(t) => format!("the launch profile of transaction {t}"),
     }
 }
@@ -1393,9 +1447,18 @@ pub fn plan(
     else {
         return Err(EngineError::NoMatch(topo.id.to_string()));
     };
-    let (picks, choices) = (sel.picks, sel.choices);
-    if picks.is_empty() && choices.is_empty() {
+    let (picks, choices, manual) = (sel.picks, sel.choices, sel.manual);
+    if picks.is_empty() && choices.is_empty() && manual.is_none() {
         return Err(EngineError::Picks);
+    }
+    // ADR 0029: the form of the user's own settings first (the same check as the CLI's and
+    // the app's input, and the plan format's); executables only without a matched Topo.
+    if let Some(m) = manual {
+        m.check()
+            .map_err(|e| EngineError::Plan(PlanError::Manual(e)))?;
+        if m.exe.is_some() {
+            return Err(EngineError::ManualExe);
+        }
     }
     let resolved = resolve_picks_any(topo, picks)?;
     let chosen = resolve_choices(topo, choices)?;
@@ -1532,6 +1595,9 @@ pub fn plan(
     let mut planned_packages: Vec<&Package> = Vec::new();
     // The INI files of the picked fixes (root, folded path), for the check of the choices.
     let mut pick_inis: Vec<((prim::StepRoot, String), &Pick)> = Vec::new();
+    // The executables the picked fixes set compatibility flags for (folded), for the check of
+    // the user's own flags.
+    let mut pick_layers: Vec<(String, &Pick)> = Vec::new();
     for (p, (issue, variant)) in picks.iter().zip(resolved) {
         match when::eval(issue.when.as_ref(), facts.profile) {
             Tri::No => return Err(EngineError::WhenNo(p.issue.clone())),
@@ -1597,7 +1663,10 @@ pub fn plan(
                     }));
                 }
                 TopoStep::RegistrySet(r) => steps.push(Step::RegistrySet(r.clone())),
-                TopoStep::CompatLayer(c) => steps.push(Step::CompatLayer(c.clone())),
+                TopoStep::CompatLayer(c) => {
+                    pick_layers.push((crate::fold::fold(c.exe.as_str()), p));
+                    steps.push(Step::CompatLayer(c.clone()));
+                }
                 TopoStep::IniSet(x) => {
                     pick_inis.push(((x.root, crate::fold::fold(x.file.as_str())), p));
                     steps.push(Step::IniSet(x.clone()));
@@ -1670,6 +1739,57 @@ pub fn plan(
                 }
                 OptionStep::Start(_) | OptionStep::LaunchArgs(_) => {}
             }
+        }
+    }
+    // ADR 0029: the user's own settings after the picks and the choices. The rule part
+    // replaces nothing a fix of this plan brings (refused, one profile per game); the flags go
+    // on the effective main executable. The anti-cheat rule applies as for a Topo step.
+    if let Some(m) = manual {
+        if let Some(ml) = &m.launch {
+            if let Some(Part {
+                from: PartFrom::Fix(p),
+                ..
+            }) = &new_rule
+            {
+                return Err(EngineError::ManualAndCpuFix {
+                    issue: p.issue.clone(),
+                    variant: p.variant.clone(),
+                });
+            }
+            let lp = launch.as_ref().map_err(|p| EngineError::Launch(*p))?;
+            let method = ml.method.map_or(lp.method, crate::plan::ManualMethod::spec);
+            let step = match method {
+                MethodSpec::Direct => StepKind::LaunchDirect,
+                _ => StepKind::LaunchWatch,
+            };
+            manual_anti_cheat(&ac, step, &mut warnings)?;
+            planned_launch = Some(LaunchPlan {
+                method,
+                start: lp.start.clone(),
+                auto: false,
+            });
+            new_rule = Some(Part {
+                value: RulePart {
+                    method,
+                    cpu: ml.cpu,
+                    priority: ml.priority,
+                },
+                from: PartFrom::Manual,
+            });
+        }
+        if !m.layers.is_empty() {
+            manual_anti_cheat(&ac, StepKind::CompatLayer, &mut warnings)?;
+            if let Some((_, p)) = pick_layers.iter().find(|(e, _)| *e == folded_main) {
+                return Err(EngineError::ManualAndLayerFix {
+                    issue: p.issue.clone(),
+                    variant: p.variant.clone(),
+                    exe: crate::escape::path(main_exe.as_str()).to_string(),
+                });
+            }
+            steps.push(Step::CompatLayer(prim::CompatLayerSpec {
+                exe: main_exe.clone(),
+                layers: m.layers.iter().map(|t| t.as_str().to_owned()).collect(),
+            }));
         }
     }
     // The transaction whose kept `run` chose the main executable (security F4).
@@ -1809,6 +1929,8 @@ pub fn plan(
             .filter(|_| crate::exec::profile_op_of(&plan).is_none())
             .map(|k| k.sha256),
     });
+    // ADR 0029: what the user chose themselves, as given (display and the form only).
+    plan.manual = manual.cloned();
     // The bounds and the source's form, as when stored and applied.
     plan.encode()?;
     Ok(TopoPlan {
@@ -1820,10 +1942,30 @@ pub fn plan(
     })
 }
 
+/// The anti-cheat rule on a part of the user's own settings: refused or warned as a Topo step
+/// of `step`'s kind (ADR 0029).
+fn manual_anti_cheat(
+    ac: &AntiCheatState,
+    step: StepKind,
+    warnings: &mut Vec<Warning>,
+) -> Result<(), EngineError> {
+    if !ac.enforced() {
+        return Ok(());
+    }
+    match anti_cheat_rule(step) {
+        AcRule::Refuse => Err(EngineError::ManualAntiCheat { step }),
+        AcRule::Warn => {
+            warnings.push(Warning::ManualAntiCheat { step });
+            Ok(())
+        }
+        AcRule::None => Ok(()),
+    }
+}
+
 /// The parts of the launch profile a plan has to compose: what the plan sets, and the live
 /// profile it keeps the rest from.
 struct Composing<'l> {
-    /// The rule part of a picked `cpu` step.
+    /// The rule part of a picked `cpu` step or of the user's own settings.
     rule: Option<Part<RulePart>>,
     /// `run` of a chosen `start` (the entry's index in [`GameFacts::exes`]).
     run: Option<Part<usize>>,
@@ -2069,6 +2211,8 @@ mod gpu_tests;
 mod laa_tests;
 #[cfg(test)]
 mod launch_tests;
+#[cfg(test)]
+mod manual_tests;
 #[cfg(test)]
 mod option_tests;
 #[cfg(test)]

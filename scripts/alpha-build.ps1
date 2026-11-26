@@ -30,8 +30,9 @@
 #  3. Hardening of exactly these binaries: the hardening tests of rerun-cli, rerun-launch and
 #     rerun-app with RERUN_RELEASE_*_EXE pointing at them (as in CI: /DEPENDENTLOADFLAG:0x800,
 #     the import lists, the asInvoker manifest, no index test key, no index-test folder or
-#     test-key banner), `cargo tree` shows neither rerun-core/fake nor rerun-core/test-key in
-#     rerun-cli and rerun-app, and `rerun.exe --version` names the version.
+#     test-key banner, no step-file code), `cargo tree` shows neither rerun-core/fake,
+#     rerun-core/test-key nor rerun-core/step-file (ADR 0029) in rerun-cli and rerun-app, and
+#     `rerun.exe --version` names the version.
 #  4. -Key only: rerun-workbench (built without the feature test-key) builds index.json from
 #     topos\ and packages\ with seq = the Unix time and signs it with the key; the key ID it
 #     prints must be one of RELEASE_KEYS and seq at least elevate::HELPER_MIN_SEQ.
@@ -379,7 +380,7 @@ try {
     Title 'CHECKING the hardening of exactly these binaries'
     foreach ($p in @('rerun-cli', 'rerun-app')) {
         $tree = Invoke-Cargo "cargo tree of $p" (@('tree', '-p', $p, '-e', 'normal,build,features', '-i', 'rerun-core', '--locked') + $cfg)
-        foreach ($f in @('fake', 'test-key')) {
+        foreach ($f in @('fake', 'test-key', 'step-file')) {
             if ($tree -match "feature `"$f`"") { Fail "$p enables rerun-core/$f" }
         }
     }
@@ -394,6 +395,8 @@ try {
     foreach ($b in $binaries) {
         $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($b.Path))
         if ($text.Contains('TEST-KEY BUILD') -or $text.Contains('index-test')) { Fail "$($b.File) holds a test-key marker" }
+        # ADR 0029: the step file is a test feature (the text of its error, see tests\hardening.rs).
+        if ($text.Contains('cannot read the step file')) { Fail "$($b.File) holds the step file's code" }
     }
     $cli = ($binaries | Where-Object { $_.File -eq 'rerun.exe' }).Path
     $r = Invoke-Exe $cli @('--version')

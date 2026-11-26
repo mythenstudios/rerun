@@ -1825,6 +1825,10 @@ pub enum Msg {
     },
     /// A warning: the plan keeps a part of the live launch profile that an anti-cheat rule warns about.
     WarnKeptAntiCheat,
+    /// Origin: the user's own settings ("Advanced", ADR 0029).
+    PvFromManual,
+    /// A warning: an anti-cheat rule warns about a part of the user's own settings.
+    WarnManualAntiCheat,
 }
 
 /// The text of `m` in `lang`.
@@ -2873,6 +2877,8 @@ fn en(m: Msg) -> Cow<'static, str> {
             return s.into();
         }
         WarnKeptAntiCheat => "An anti-cheat rule allows keeping this part of the launch profile only with a warning.",
+        PvFromManual => "Your own setting (Advanced), not checked",
+        WarnManualAntiCheat => "An anti-cheat rule allows your own setting only with a warning.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 older history entry removed".into()
@@ -3905,6 +3911,8 @@ fn de(m: Msg) -> Cow<'static, str> {
             return s.into();
         }
         WarnKeptAntiCheat => "Eine Anti-Cheat-Regel erlaubt, diesen Teil des Startprofils zu behalten, nur mit einem Hinweis.",
+        PvFromManual => "Deine eigene Einstellung (Erweitert), nicht geprüft",
+        WarnManualAntiCheat => "Eine Anti-Cheat-Regel erlaubt deine eigene Einstellung nur mit einem Hinweis.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 älterer Verlaufseintrag entfernt".into()

@@ -16,6 +16,11 @@ fake = []
 # tests in other crates. Never in a shipped build: CI checks that `-e normal,build` of
 # rerun-cli does not enable it, and the release binary test looks for the test key's bytes.
 test-key = []
+# The phase 2 step file (`prim::StepFile`, `flow::plan_steps`; ADR 0029): local, unsigned input
+# of every step kind, for tests and the Sandbox only. Never in a shipped build: CI and
+# scripts/alpha-build.ps1 check that `-e normal,build` of rerun-cli does not enable it, and the
+# hardening test looks for its text in the release rerun.exe.
+step-file = []
 
 [dependencies]
 # The signed index (ADR 0024): Ed25519 verification only, no default features.

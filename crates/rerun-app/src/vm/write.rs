@@ -566,6 +566,10 @@ pub fn warning_vm(w: &Warning, lang: Lang) -> Option<WarnVm> {
             Msg::WarnKeptAntiCheat,
             id(&tx(lang, Msg::ClearNumber { n: txn.seq() })),
         ),
+        // ADR 0029: a part of the user's own settings ("Advanced").
+        Warning::ManualAntiCheat { step } => {
+            warn(lang, Msg::WarnManualAntiCheat, id(step.as_str()))
+        }
         Warning::SteamInput { issue } => warn(lang, Msg::WarnSteamInput, id(issue)),
         Warning::SmartAppControl { state } => {
             let m = match state {

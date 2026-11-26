@@ -148,6 +148,13 @@ pub enum TopoMsg<'a> {
         /// `<option>=<value>`, comma-separated.
         set: String,
     },
+    /// The user's own settings a plan sets ("Advanced", ADR 0029).
+    Manual {
+        /// Rerun's words for each setting (fields and values of a closed set), comma-separated.
+        set: String,
+    },
+    /// Advanced for a game without a matched Topo comes later (ADR 0029, slice E-1b).
+    ManualNeedsTopo,
     /// The plan's origin.
     Source {
         /// The Topo.
@@ -320,6 +327,14 @@ impl fmt::Display for TopoMsg<'_> {
                  left out stays as it is",
             ),
             Self::Choices { set } => write!(f, "options set: {set}"),
+            Self::Manual { set } => write!(
+                f,
+                "your own settings (Advanced, not checked by a Topo): {set}"
+            ),
+            Self::ManualNeedsTopo => f.write_str(
+                "your own settings (--method, --cpu, --priority, --layer) need a game with a \
+                 matched Topo in this version; for a game without one they come later",
+            ),
             Self::Source { id, rev, index } => {
                 write!(f, "from Topo {id} rev {rev} of the signed index {index}")
             }

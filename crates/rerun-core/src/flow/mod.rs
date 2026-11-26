@@ -118,9 +118,12 @@ pub use store::{
 };
 pub use uninstall::{LaunchLeft, UninstallVerdict, UninstallView, uninstall_check};
 pub use write::{
-    Applied, LoadRefusal, Picked, PlanRefusal, Planned, Previewed, Selection, StepsRefusal,
-    StoreRefusal, apply, check, helper, load_stored, plan, plan_steps, shown, store,
+    Applied, LoadRefusal, Picked, PlanRefusal, Planned, Previewed, Selection, StoreRefusal, apply,
+    check, helper, load_stored, plan, shown, store,
 };
+// ADR 0029: the step file is a test feature (`step-file`), never in a release build.
+#[cfg(any(test, feature = "step-file"))]
+pub use write::{StepsRefusal, plan_steps};
 
 /// What a job runs against.
 #[derive(Clone, Copy)]

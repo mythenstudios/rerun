@@ -850,7 +850,8 @@ pub enum TxnMsg<'a> {
         /// The error.
         error: Shown<'a>,
     },
-    /// The step file cannot be read.
+    /// The step file cannot be read (a test feature since ADR 0029).
+    #[cfg(any(test, feature = "step-file"))]
     StepFile {
         /// The error.
         error: Shown<'a>,
@@ -1461,6 +1462,7 @@ impl fmt::Display for TxnMsg<'_> {
             Self::JournalUnreadable { error } => {
                 write!(f, "rerun: cannot read the journal: {error}")
             }
+            #[cfg(any(test, feature = "step-file"))]
             Self::StepFile { error } => write!(f, "rerun: cannot read the step file: {error}"),
             Self::PlanFailed { error } => write!(f, "rerun: cannot plan the steps: {error}"),
             Self::GameFolder { error } => {

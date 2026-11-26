@@ -669,6 +669,7 @@ mod b1_tests {
             other_exes: None,
         };
         let head = crate::plan::Plan {
+            manual: None,
             format: crate::plan::FORMAT,
             roots: vec![
                 root(RootKind::Game, r"D:\Lib\common\G", game),

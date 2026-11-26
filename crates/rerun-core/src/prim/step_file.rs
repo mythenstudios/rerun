@@ -1,7 +1,9 @@
 //! The phase 2 step file (ADR 0020, user decision D7; P2-13): the input of
-//! `rerun plan <steps.json>`. Since the Topo engine (P4-4) the local, unsigned input for tests,
-//! the Sandbox and experts (L8): its plans carry no `PlanSource`, so they never reach the
-//! elevated helper. Removed at the earliest before A6.
+//! `rerun plan <steps.json>`. Since the Topo engine (P4-4) the local, unsigned input for tests
+//! and the Sandbox (L8): its plans carry no `PlanSource`, so they never reach the elevated
+//! helper. Since ADR 0029 a test feature: compiled only with the cargo feature `step-file` (and
+//! in this crate's own tests), never in a release build; the user's own settings go through
+//! `plan::Manual` instead.
 //!
 //! `{"format":1,"game":{"steam":440},"main_exe":"bin\\game.exe","steps":[{"ini_set":{…}}]}`
 //! (or `"game":{"folder":"D:\\Games\\X"}` for a folder the user names). Untrusted input: at
@@ -19,8 +21,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Step, UserDataSpec};
-use crate::path::{RelPath, RootPath};
+use super::{GameRef, Step, UserDataSpec};
+use crate::path::RelPath;
 use crate::plan::PlanError;
 
 /// Most bytes of a step file.
@@ -44,16 +46,6 @@ pub struct StepFile {
     pub user_data: Option<UserDataSpec>,
     /// The steps, in order.
     pub steps: Vec<Step>,
-}
-
-/// Which game folder a step file names.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum GameRef {
-    /// The installed Steam app with this ID (found in exactly one library).
-    Steam(u32),
-    /// A folder the user names (opened like a manually added game folder).
-    Folder(RootPath),
 }
 
 /// Why a step file was refused.

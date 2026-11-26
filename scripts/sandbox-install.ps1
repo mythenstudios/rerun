@@ -4,7 +4,8 @@
 # only: no Enter prompts, the app is not started). Never on the host: it refuses anywhere but the
 # Sandbox account and the CI accounts, and uninstall.ps1 deletes the real %LOCALAPPDATA%\Rerun.
 #
-# The payload is built here from the staged binaries: rerun.exe and rerun-launch.exe as released,
+# The payload is built here from the staged binaries: rerun.exe (the Sandbox build, with the test
+# feature step-file for case I3, ADR 0029) and rerun-launch.exe as released,
 # vstore-stub.exe as a stand-in rerun-app.exe (never started), install.ps1 and uninstall.ps1 as in
 # packaging\windows, a payload.json without index. An existing %LOCALAPPDATA%\Rerun (from the
 # earlier passes) is renamed aside first.
