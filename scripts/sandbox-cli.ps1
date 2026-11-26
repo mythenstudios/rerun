@@ -815,7 +815,11 @@ function Invoke-LaunchRun {
         $lr.started = $s
         $c.run_started = $s.found -and $s.parent_is_shim
         $c.launcher_not_started = $s.others -eq ''
-        $c.run_command_line = $s.line -eq "`"$lmExe`" $tail -4"
+        # Start-Process ends the shim's own command line with a blank after the tail (seen in CI
+        # run 45840566606), which the shim keeps byte for byte; Steam's %command% has none. So the
+        # checks allow trailing blanks after the tail; the exact bytes are pinned by run_tests.rs.
+        $tailRe = [regex]::Escape($tail)
+        $c.run_command_line = $s.line -match ("^" + [regex]::Escape("`"$lmExe`"") + " $tailRe\s+-4$")
         $cm = [regex]::Match($s.result, '(?m)^cpu=hard:(\d+):(\d+)\r?$')
         $c.run_has_the_mask = $cm.Success -and ($s.bits -eq [int]$cm.Groups[1].Value)
         $c.result_applied = $s.result -match '(?m)^rule=applied\r?$'
@@ -824,7 +828,7 @@ function Invoke-LaunchRun {
         # (b) Steam starting run itself: no rule, the file name recorded.
         $s = Invoke-ShimStart $lmExe $tail $lmExe
         $c.mismatch_started = $s.found
-        $c.mismatch_command_line = $s.line -eq "`"$lmExe`" $tail"
+        $c.mismatch_command_line = $s.line -match ("^" + [regex]::Escape("`"$lmExe`"") + " $tailRe\s*$")
         $c.result_path_mismatch = $s.result -match '(?m)^rule=skipped:path_mismatch\r?$'
         $c.result_steam_start = $s.result -match '(?m)^steam_start=game\.exe\r?$'
         $c.mismatch_no_run_yes = $s.result -notmatch '(?m)^run='
@@ -834,7 +838,7 @@ function Invoke-LaunchRun {
         $s = Invoke-ShimStart $lrLauncher $tail $lrLauncher
         Move-Item -LiteralPath $moved -Destination $lmExe -Force
         $c.fallback_started = $s.found -and $s.parent_is_shim
-        $c.fallback_command_line = $s.line -eq "`"$lrLauncher`" $tail"
+        $c.fallback_command_line = $s.line -match ("^" + [regex]::Escape("`"$lrLauncher`"") + " $tailRe\s*$")
         $c.fallback_no_job = $s.bits -ne 1 -or ([Environment]::ProcessorCount -eq 1)
         $c.result_run_failed = $s.result -match '(?m)^rule=skipped:run_failed:2\r?$'
         $c.fallback_no_run_yes = $s.result -notmatch '(?m)^run='
