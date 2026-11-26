@@ -27,7 +27,7 @@ use crate::policy::registry::RegPolicy;
 use crate::policy::root::{AppDir, Create, RootError, Shadow, UserDataDir, preview_with_shadows};
 use crate::prim::{self, PlanCtx, StepFile};
 use crate::sys::System;
-use crate::topo::{self, EngineError, StepKind, Warning};
+use crate::topo::{self, EngineError, LaunchParts, StepKind, Warning};
 
 use super::{GameOpen, GameRefusal, Guarded, Lookup, with_game, with_topo};
 
@@ -44,6 +44,9 @@ pub struct Planned {
     shadows: Vec<Shadow>,
     /// The engine's warnings (a Topo plan; empty otherwise).
     warnings: Vec<Warning>,
+    /// Where each part of the launch profile comes from (a Topo plan that sets a part of it;
+    /// ADR 0032 amendment P5-OE).
+    parts: Option<LaunchParts>,
 }
 
 impl Planned {
@@ -72,6 +75,13 @@ impl Planned {
         &self.warnings
     }
 
+    /// Where each part of the launch profile comes from, if the plan is a Topo plan that sets
+    /// a part of it (ADR 0032 amendment P5-OE): a fix, an option value, or kept from a live
+    /// transaction. The preview shows it next to the profile.
+    pub fn parts(&self) -> Option<&LaunchParts> {
+        self.parts.as_ref()
+    }
+
     fn of(
         sys: &dyn System,
         bytes: PlanBytes,
@@ -86,6 +96,7 @@ impl Planned {
             preview,
             shadows,
             warnings,
+            parts: None,
         })
     }
 }
@@ -213,8 +224,10 @@ pub fn plan(g: &Guarded<'_>, app_id: u32, sel: &Selection) -> Result<Lookup<Pick
                 .plan
                 .encode()
                 .map_err(|e| PlanRefusal::Plan(Box::new(e)))?;
-            Planned::of(sys, bytes, m.app_path.cloned(), tp.warnings)
-                .map_err(|e| PlanRefusal::Plan(Box::new(e)))
+            let mut planned = Planned::of(sys, bytes, m.app_path.cloned(), tp.warnings)
+                .map_err(|e| PlanRefusal::Plan(Box::new(e)))?;
+            planned.parts = tp.parts;
+            Ok(planned)
         })();
         Picked {
             topo: t.clone(),

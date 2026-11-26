@@ -406,7 +406,7 @@ fn checked<'g>(
     // E-R6: LIFO with the objects at the head's roots, the folder bound before and the new one.
     let mut objects = b.objects(plan).map_err(|_| blocked())?;
     objects.extend(tg.overlay.objects(plan).map_err(|_| blocked())?);
-    stack::for_revert(j, listing, t, &objects, None)?;
+    stack::for_revert(j, listing, t, plan, &objects, None)?;
     let mismatch = |r: &Refusal| matches!(r, Refusal::Root(e) if matches!(**e, RootError::IdentityMismatch { .. }));
     let roots = roots::Roots::each(cx, &tg.overlay, stores).map_err(|r| {
         if mismatch(&r) {

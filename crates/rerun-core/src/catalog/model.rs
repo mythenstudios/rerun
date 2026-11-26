@@ -748,11 +748,11 @@ pub struct TopoOptionValue {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OptionStep {
     /// Start this executable of `match.exes` instead of Steam's launch entry (through the launch
-    /// profile). Draft only until reviewed ([`super::check::OPTION_LAUNCH_REVIEWED`]); planned
-    /// from slice O-2b.
+    /// profile: `run`, ADR 0032 amendment P5-OE). Planned since slice O-2b; outside a draft since
+    /// [`super::check::OPTION_LAUNCH_REVIEWED`].
     Start(RelPath),
-    /// Fixed game arguments, appended by the launch profile. Draft only until reviewed
-    /// ([`super::check::OPTION_LAUNCH_REVIEWED`]); planned from slice O-2b.
+    /// Fixed game arguments, appended by the launch profile (`args`). Planned since slice O-2b;
+    /// outside a draft since [`super::check::OPTION_LAUNCH_REVIEWED`].
     LaunchArgs(Vec<String>),
     /// `ini_set` (ADR 0021), as in a variant.
     IniSet(IniSetSpec),

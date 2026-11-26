@@ -142,6 +142,12 @@ impl LaunchArgText {
     }
 }
 
+impl From<LaunchArg> for LaunchArgText {
+    fn from(a: LaunchArg) -> Self {
+        Self(a)
+    }
+}
+
 impl TryFrom<String> for LaunchArgText {
     type Error = String;
 
@@ -256,6 +262,27 @@ pub enum PrioritySpec {
     High,
 }
 
+impl PrioritySpec {
+    /// The step of a priority class a profile holds (carry-over).
+    pub fn of_priority(p: Priority) -> Self {
+        match p {
+            Priority::Normal => Self::Normal,
+            Priority::AboveNormal => Self::AboveNormal,
+            Priority::High => Self::High,
+        }
+    }
+}
+
+impl MethodSpec {
+    /// The step of a method a profile holds (carry-over).
+    pub fn of_method(m: Method) -> Self {
+        match m {
+            Method::Direct => Self::Direct,
+            Method::Watch => Self::Watch,
+        }
+    }
+}
+
 fn refuse(what: impl Into<String>) -> PlanError {
     PlanError::Step(format!("launch_method: {}", what.into()))
 }
@@ -266,6 +293,30 @@ fn shown(s: &str) -> String {
 }
 
 impl CpuRuleSpec {
+    /// The step of a rule a profile holds (ADR 0032 amendment P5-OE, carry-over): every field
+    /// named, so [`Self::rule`] gives the same rule back and the profile the same bytes.
+    pub fn of_rule(r: &CpuRule) -> Self {
+        Self {
+            max_threads: r.max_threads,
+            prefer: Some(match r.prefer {
+                Prefer::Performance => PreferSpec::Performance,
+                Prefer::Any => PreferSpec::Any,
+            }),
+            single_l3: Some(r.single_l3),
+            prefer_l3: r.prefer_l3.map(|PreferL3::Largest| PreferL3Spec::Largest),
+            smt: Some(r.smt),
+            mode: Some(match r.mode {
+                Mode::Hard => ModeSpec::Hard,
+                Mode::Soft => ModeSpec::Soft,
+            }),
+            exclude_first: r.exclude_first.map(|e| match e {
+                ExcludeFirst::Thread => ExcludeFirstSpec::Thread,
+                ExcludeFirst::Core => ExcludeFirstSpec::Core,
+            }),
+            report_cores: None,
+        }
+    }
+
     /// The rule with the defaults of F8, or why it is refused.
     pub fn rule(&self) -> Result<CpuRule, PlanError> {
         if self.report_cores.is_some() {

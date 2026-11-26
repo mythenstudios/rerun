@@ -14,6 +14,10 @@
 //!   plans an `ini_set` value alone or with a pick, the origin names it; apply and revert bring
 //!   the game folder back; refusals and the forms of `--set`.
 //! - C-TE17 the golden plan of an option value with a fix.
+//! - C-TE18 a `start` value over a live CPU rule (ADR 0032 amendment P5-OE, O-2b): the report
+//!   lists it; the preview names each part of the launch profile with its origin and what every
+//!   fallback of rerun-launch starts; the rule is undone only after the option; back to before.
+//! - C-TE19 the golden plan of that `start` value (the kept rule and `run`).
 
 use std::path::Path;
 
@@ -1126,5 +1130,153 @@ fn c_te17_the_golden_plan_with_an_option() {
             "frame-cap=sixty",
         ],
         "topo-220-option",
+    );
+}
+
+/// The C-TE18 world (an AC1-like Topo, ADR 0032 amendment P5-OE): Steam starts the launcher
+/// `FFLauncher.exe`; option `graphics-api` with value `dx9` starts `game_dx9.exe` instead; issue
+/// `cores` brings a CPU rule.
+fn start_sys() -> FakeSystem {
+    let sys = lm_sys(false, &steps(8));
+    sys.fake_fs()
+        .put_file(
+            Path::new(&format!(r"{G}\game_dx9.exe")),
+            &crate::lm_tests::x86(),
+        )
+        .unwrap();
+    sys.fake_fs().sync_all();
+    let sha = sha256_of(&sys, "game.exe");
+    let dx9 = sha256_of(&sys, "game_dx9.exe");
+    let ix = format!(
+        r#"{{"format":1,"seq":1,"issued":"2026-11-26T12:00:00Z","topos":[{{"format":1,"id":"invented-creed","title":"Invented Creed","status":"active","rev":1,
+"match":{{"steam_appid":220,"exes":[{{"path":"game.exe","sha256":"{sha}","api":"d3d10"}},{{"path":"game_dx9.exe","sha256":"{dx9}","api":"d3d9"}}]}},
+"launch":{{"chain":["steam"],"method":"auto","start":"FFLauncher.exe"}},
+"options":[
+ {{"id":"graphics-api","title":"Graphics API","sources":[{{"type":"pcgw","url":"https://www.pcgamingwiki.com/wiki/Invented#API"}}],"values":[
+   {{"id":"dx9","title":"DirectX 9","status":"unverified","steps":[{{"start":"game_dx9.exe"}}]}}]}}
+],
+"issues":[
+ {{"id":"cores","title":"Too many cores","variants":[{{"id":"limit","status":"verified","kind":"fix","steps":[{{"cpu":{{"max_threads":8,"single_l3":true,"smt":false}}}}]}}]}}
+]}}],"packages":[]}}"#
+    );
+    import(&sys, ix.as_bytes());
+    sys
+}
+
+/// C-TE18 (ADR 0032 amendment P5-OE, O-2b): `--set graphics-api=dx9` over a live CPU rule: the
+/// profile keeps the rule, starts `game_dx9.exe`, and the preview names each part's origin and
+/// what every fallback starts; undo newest first, back to the state before.
+#[test]
+fn c_te18_a_start_value_over_a_live_rule() {
+    let sys = start_sys();
+    let r = expect(&sys, &["plan", "220"], Answer::No, Exit::Report);
+    assert!(
+        r.stdout
+            .contains("    graphics-api=dx9: unverified: DirectX 9\n"),
+        "{}",
+        r.stdout
+    );
+    let before = crate::tests::snap_dirs(&sys, &[G]);
+    let p = expect(
+        &sys,
+        &["plan", "220", "--pick", "cores/limit"],
+        Answer::No,
+        Exit::Report,
+    );
+    let h1 = crate::tests::hash_of(&p);
+    let t1 = crate::tests::txn_of(&expect(
+        &sys,
+        &["apply", h1.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    ));
+    let profiles = format!(r"{RERUN}\profiles");
+    let after_t1 = crate::tests::snap_dirs(&sys, &[G, &profiles]);
+    let r = expect(
+        &sys,
+        &["plan", "220", "--set", "graphics-api=dx9", "--dry-run"],
+        Answer::No,
+        Exit::Report,
+    );
+    for line in [
+        "\noptions set: graphics-api=dx9\n".to_owned(),
+        "\nthe launch profile, part by part:\n".to_owned(),
+        format!(
+            "\n  cpu rule and priority, kept from transaction {t1} (undo that one after this \
+             one)\n"
+        ),
+        "\n  run (rerun-launch starts it instead of Steam's program), from option \
+         graphics-api=dx9: game_dx9.exe\n"
+            .to_owned(),
+        "\n  whenever rerun-launch cannot use the profile (it is missing or invalid, Steam's \
+         path differs, Steam runs as administrator, or run cannot be started), it starts \
+         Steam's own command unchanged, without the rule: FFLauncher.exe\n"
+            .to_owned(),
+        format!(r"     run {G}\game_dx9.exe (rerun-launch starts it instead of start"),
+        "     cpu ".to_owned(),
+        "  main executable: game_dx9.exe\n".to_owned(),
+    ] {
+        assert!(r.stdout.contains(&line), "{line}\n{}", r.stdout);
+    }
+    let p = expect(
+        &sys,
+        &["plan", "220", "--set", "graphics-api=dx9"],
+        Answer::No,
+        Exit::Report,
+    );
+    let h2 = crate::tests::hash_of(&p);
+    let t2 = crate::tests::txn_of(&expect(
+        &sys,
+        &["apply", h2.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    ));
+    // Newest first: the rule cannot be undone under the option.
+    let r = expect(
+        &sys,
+        &["revert", t1.as_str(), "--yes"],
+        Answer::No,
+        Exit::Refused,
+    );
+    assert!(r.stderr.contains(&t2), "{}", r.stderr);
+    expect(
+        &sys,
+        &["revert", t2.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
+    crate::tests::same(&after_t1, &crate::tests::snap_dirs(&sys, &[G, &profiles]));
+    expect(
+        &sys,
+        &["revert", t1.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
+    crate::tests::same(&before, &crate::tests::snap_dirs(&sys, &[G]));
+}
+
+/// C-TE19: the golden plan of a `start` value over a live CPU rule (the profile with the kept
+/// rule and `run`, replacing the live one).
+#[test]
+fn c_te19_the_golden_plan_of_a_start_value() {
+    let sys = start_sys();
+    let p = expect(
+        &sys,
+        &["plan", "220", "--pick", "cores/limit"],
+        Answer::No,
+        Exit::Report,
+    );
+    let h = crate::tests::hash_of(&p);
+    expect(
+        &sys,
+        &["apply", h.as_str(), "--yes"],
+        Answer::No,
+        Exit::Report,
+    );
+    golden(
+        &sys,
+        &FakeHttp::default(),
+        &["plan", "220", "--set", "graphics-api=dx9"],
+        "topo-220-start",
     );
 }

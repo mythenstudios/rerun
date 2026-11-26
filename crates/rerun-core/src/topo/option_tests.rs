@@ -8,7 +8,7 @@
 //!   selected, too many choices.
 //! - OE3 one INI file set by a fix and an option: the engine refuses the plan, naming both and
 //!   the file (O-1 review S1).
-//! - OE4 `start` and `launch_args` are not planned before slice O-2b (not matched here: said so);
+//! - OE4 `start` and `launch_args` are planned (O-2b; an executable not matched here is said so);
 //!   with anti-cheat they are refused (also a value of `launch_args` alone, review N2), an
 //!   `ini_set` value is warned.
 //! - OE5 the report lists every option with what the engine says per value.
@@ -312,18 +312,23 @@ fn oe3_one_ini_file_from_a_fix_and_an_option_is_refused() {
 // ---------- OE4 ----------
 
 #[test]
-fn oe4_start_and_launch_args_wait_for_o2b_and_anti_cheat_refuses_them() {
+fn oe4_start_and_launch_args_plan_and_anti_cheat_refuses_them() {
     let sys = game_sys();
     let t = topo();
     let refused = |s: &FakeSystem, c: &str| match plan_on(s, &t, &[], &[c]) {
         Err(EngineError::OptionRefused { why, .. }) => why,
         other => panic!("{c}: {other:?}"),
     };
-    assert_eq!(refused(&sys, "api=dx9"), ValueRefusal::NotYet);
+    // Planned since O-2b (the launch profile with `run` and `args`, launch_tests.rs).
+    assert!(plan_on(&sys, &t, &[], &["api=dx9"]).is_ok());
+    assert!(plan_on(&sys, &t, &[], &["intro=skip"]).is_ok());
     assert_eq!(refused(&sys, "api=dx10"), ValueRefusal::NotMatched);
-    assert_eq!(refused(&sys, "intro=skip"), ValueRefusal::NotYet);
-    let e = plan_on(&sys, &t, &[], &["api=dx9"]).unwrap_err();
-    assert!(e.to_string().starts_with("api=dx9: not yet:"), "{e}");
+    let e = plan_on(&sys, &t, &[], &["api=dx10"]).unwrap_err();
+    assert!(
+        e.to_string()
+            .starts_with("api=dx10: refused: the executable"),
+        "{e}"
+    );
     // Anti-cheat: `start` and `launch_args` refused (S1), an `ini_set` value warned.
     sys.fake_fs()
         .mkdir_all(Path::new(&format!(r"{STEAM_GAME}\pb")))
@@ -396,9 +401,9 @@ fn oe5_the_report_lists_every_option() {
         [
             ("frame-cap=wide".to_owned(), None),
             ("frame-cap=quiet".to_owned(), None),
-            ("api=dx9".to_owned(), Some(ValueRefusal::NotYet)),
+            ("api=dx9".to_owned(), None),
             ("api=dx10".to_owned(), Some(ValueRefusal::NotMatched)),
-            ("intro=skip".to_owned(), Some(ValueRefusal::NotYet)),
+            ("intro=skip".to_owned(), None),
             ("user=ud".to_owned(), None),
         ]
     );

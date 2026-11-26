@@ -87,6 +87,7 @@ mod file;
 mod helper;
 mod ini;
 mod launch;
+mod live;
 mod packages;
 mod purge;
 mod rebind;
@@ -108,6 +109,8 @@ pub mod launch_result {
 }
 pub use helper::{HelperFailure, helper_ready, reason_words};
 pub(crate) use launch::{launch_results_hashed, purge_results};
+pub(crate) use live::below as path_below;
+pub use live::{LiveError, LiveExe, LiveProfile, LiveState, live_state};
 pub(crate) use packages::{package_users_with_status, remove_packages};
 pub use purge::{Keep, PurgeReport};
 pub(crate) use purge::{PurgeClass, PurgeMode, purge_classes, purge_seen};
@@ -116,6 +119,8 @@ pub use rebind::{
     CreatedDir, RebindFrom, RebindPreview, RebindRefusal, RebindTo, rebind_check, revert_rebound,
 };
 pub use stack::PatchedExe;
+#[cfg(test)]
+pub(crate) use stack::knob as stack_knob;
 pub use status::{
     OpState, OpStatus, OrphanRule, OrphansError, RebindLine, ShareKind, ShareLine, Status, TxnLine,
     TxnStatus, firewall_orphans, status, status_with, txn_status,
@@ -2212,7 +2217,7 @@ fn revert_roots<'g>(
         objs: &by_op,
         rebound,
     };
-    let keeps = stack::for_revert(j, listing, t, &objects, Some(&me))?;
+    let keeps = stack::for_revert(j, listing, t, plan, &objects, Some(&me))?;
     let roots = roots::Roots::each(cx, b, stores)?;
     let intended: Vec<u16> = ops.keys().copied().collect();
     roots::game_closed(plan, &roots, &intended)?;
@@ -2653,7 +2658,7 @@ fn verify_shares(
                 objs: &by_op,
                 rebound,
             };
-            stack::for_revert(j, &listing, t, &objects, Some(&me)).ok()
+            stack::for_revert(j, &listing, t, plan, &objects, Some(&me)).ok()
         })
         .unwrap_or_default();
     let inherit = if !matches!(v.state, TxnState::Closed(_))

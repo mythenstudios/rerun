@@ -162,6 +162,26 @@ pub enum TopoMsg<'a> {
         /// The text.
         text: String,
     },
+    /// The heading of the launch profile's parts (ADR 0032 amendment P5-OE).
+    ProfileParts,
+    /// One part of the launch profile and where it comes from (Rerun's words; a path last).
+    ProfilePart {
+        /// The part (`cpu rule`, `run`, `args <arguments>`; Rerun's text and arguments of the
+        /// `LaunchArg` pattern).
+        part: String,
+        /// Where it comes from (Rerun's text: a fix, an option value, a transaction; IDs of the
+        /// signed index).
+        from: String,
+        /// The executable of `run` (relative to the game folder).
+        path: Option<Shown<'a>>,
+    },
+    /// What every fallback of `rerun-launch` starts (ADR 0022 D3): Steam's own command.
+    ProfileFallback {
+        /// The profile has `run`.
+        run: bool,
+        /// Steam's launch entry (relative to the game folder).
+        start: Shown<'a>,
+    },
 }
 
 impl fmt::Display for TopoMsg<'_> {
@@ -300,6 +320,23 @@ impl fmt::Display for TopoMsg<'_> {
                 write!(f, "from Topo {id} rev {rev} of the signed index {index}")
             }
             Self::Warning { text } => write!(f, "{text}"),
+            Self::ProfileParts => f.write_str("the launch profile, part by part:"),
+            Self::ProfilePart { part, from, path } => match path {
+                Some(p) => write!(f, "  {part}, {from}: {p}"),
+                None => write!(f, "  {part}, {from}"),
+            },
+            Self::ProfileFallback { run: true, start } => write!(
+                f,
+                "  whenever rerun-launch cannot use the profile (it is missing or invalid, \
+                 Steam's path differs, Steam runs as administrator, or run cannot be started), \
+                 it starts Steam's own command unchanged, without the rule: {start}"
+            ),
+            Self::ProfileFallback { run: false, start } => write!(
+                f,
+                "  whenever rerun-launch cannot use the profile (it is missing or invalid, \
+                 Steam's path differs, Steam runs as administrator), it starts Steam's own \
+                 command unchanged, without the rule and without arguments: {start}"
+            ),
         }
     }
 }

@@ -28,7 +28,7 @@ use rerun_core::catalog::{Aside, Topo};
 use rerun_core::escape;
 use rerun_core::flow::{self, Found, GameRefusal, Lookup, OwnedReport, Selection};
 use rerun_core::prim::MethodSpec;
-use rerun_core::topo::{AntiCheatState, ExeState, GameFacts, Warning};
+use rerun_core::topo::{AntiCheatState, ExeState, GameFacts, LaunchParts, PartFrom, Warning};
 
 use crate::cli::Exit;
 use crate::host::{Host, fail, gate, shown};
@@ -191,8 +191,55 @@ fn variant_status(s: VariantStatus) -> &'static str {
     }
 }
 
+/// Where a part of the launch profile comes from, in Rerun's words.
+fn from_text(f: &PartFrom) -> String {
+    match f {
+        PartFrom::Fix(p) => format!("from fix {}/{}", p.issue, p.variant),
+        PartFrom::Option(c) => format!("from option {}={}", c.option, c.value),
+        PartFrom::Kept(t) => format!("kept from transaction {t} (undo that one after this one)"),
+    }
+}
+
+/// The parts of the launch profile a Topo plan writes, each with where it comes from, and what
+/// every fallback of `rerun-launch` starts (ADR 0032 amendment P5-OE, "Preview text").
+fn parts_lines(p: &LaunchParts) -> Vec<Message<'static>> {
+    let mut m = vec![Message::Topo(TopoMsg::ProfileParts)];
+    if let Some(f) = &p.rule {
+        m.push(Message::Topo(TopoMsg::ProfilePart {
+            part: "cpu rule and priority".to_owned(),
+            from: from_text(f),
+            path: None,
+        }));
+    }
+    if let Some((exe, f)) = &p.run {
+        m.push(Message::Topo(TopoMsg::ProfilePart {
+            part: "run (rerun-launch starts it instead of Steam's program)".to_owned(),
+            from: from_text(f),
+            path: Some(escape::path(exe.as_str()).into_owned()),
+        }));
+    }
+    if let Some((args, f)) = &p.args {
+        m.push(Message::Topo(TopoMsg::ProfilePart {
+            // The arguments hold only `- + _ . =`, letters and digits (`LaunchArg`).
+            part: format!("args {}", args.join(" ")),
+            from: from_text(f),
+            path: None,
+        }));
+    }
+    m.push(Message::Topo(TopoMsg::ProfileFallback {
+        run: p.run.is_some(),
+        start: escape::path(p.start.as_str()).into_owned(),
+    }));
+    m
+}
+
 fn warning_text(w: &Warning) -> String {
     match w {
+        Warning::KeptAntiCheat { txn, step } => format!(
+            "warning: anti-cheat found; the launch profile keeps the {} part of transaction \
+             {txn}, at your own risk",
+            step.as_str()
+        ),
         Warning::OptionAntiCheat {
             option,
             value,
@@ -468,6 +515,9 @@ fn run<W: Write, E: Write>(
                     text: warning_text(w),
                 })
             }));
+            if let Some(parts) = p.parts() {
+                before.extend(parts_lines(parts));
+            }
             before.push(Message::Blank);
             let mut all = lead;
             all.extend(before);

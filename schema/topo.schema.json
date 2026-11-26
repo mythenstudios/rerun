@@ -92,51 +92,6 @@
           }
         }
       }
-    },
-    {
-      "description": "start and launch_args of option values are draft only until reviewed (catalog::check::OPTION_LAUNCH_REVIEWED, ADR 0032 amendment P5-OE).",
-      "if": {
-        "required": [
-          "options"
-        ],
-        "properties": {
-          "options": {
-            "contains": {
-              "properties": {
-                "values": {
-                  "contains": {
-                    "properties": {
-                      "steps": {
-                        "contains": {
-                          "anyOf": [
-                            {
-                              "required": [
-                                "start"
-                              ]
-                            },
-                            {
-                              "required": [
-                                "launch_args"
-                              ]
-                            }
-                          ]
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "status": {
-            "const": "draft"
-          }
-        }
-      }
     }
   ],
   "properties": {

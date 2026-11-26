@@ -52,10 +52,11 @@ pub const LAA_PATCH_REVIEWED: bool = true;
 pub const GPU_PREFERENCE_REVIEWED: bool = true;
 
 /// Whether a Topo outside a draft may hold an option value with `start` or `launch_args` (ADR
-/// 0032 amendment P5-OE). `false` until the shim slice that starts `run` and appends `args` is
-/// reviewed (O-2a) and the engine plans them (O-2b): the signed index then holds none, and the
-/// engine refuses them as not yet planned. `ini_set` values are usable from the first slice.
-pub const OPTION_LAUNCH_REVIEWED: bool = false;
+/// 0032 amendment P5-OE). `false` until the shim slice that starts `run` and appends `args` was
+/// reviewed (O-2a) and the engine planned them (O-2b, with the carry-over of the live profile
+/// and the B1 stacking rule); open since O-2b, so a signed Topo may hold them. `ini_set` values
+/// were usable from the first slice.
+pub const OPTION_LAUNCH_REVIEWED: bool = true;
 
 /// Most options of a Topo (ADR 0032).
 pub const MAX_OPTIONS: usize = 8;
@@ -64,9 +65,9 @@ pub const MAX_OPTION_VALUES: usize = 8;
 /// Most steps of one option value.
 pub const MAX_VALUE_STEPS: usize = 4;
 /// Most arguments of one `launch_args` step.
-pub const MAX_LAUNCH_ARGS: usize = 8;
+pub const MAX_LAUNCH_ARGS: usize = rerun_proto::profile::MAX_ARGS;
 /// Most bytes of the arguments of one `launch_args` step, joined by one space.
-pub const MAX_LAUNCH_ARGS_BYTES: usize = 512;
+pub const MAX_LAUNCH_ARGS_BYTES: usize = rerun_proto::profile::MAX_ARGS_BYTES;
 
 mod floor;
 pub use floor::{Floor, package_floor, topo_floor};
@@ -418,16 +419,11 @@ pub fn topo(t: &Topo, rules: Rules) -> Result<(), RuleError> {
 
 /// One game argument (`tips.launch_options`, an option's `launch_args`): `-` or `+`, then
 /// `A-Z a-z 0-9 _ . = + -`, 2 to 64 characters. No quote, space or `%`, so it never splits or
-/// expands on a command line. The pattern of `rerun_proto::profile::LaunchArg` of profile
-/// format 3 (ADR 0032 amendment P5-OE).
+/// expands on a command line. The one place of the pattern is
+/// `rerun_proto::profile::LaunchArg` (profile format 3, ADR 0032 amendment P5-OE, O-2b); the
+/// catalogue asks it, so the loader and the profile never differ.
 pub fn game_arg(o: &str) -> bool {
-    let b = o.as_bytes();
-    b.len() >= 2
-        && b.len() <= 64
-        && matches!(b[0], b'-' | b'+')
-        && b[1..]
-            .iter()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'=' | b'+' | b'-'))
+    rerun_proto::profile::LaunchArg::parse(o).is_some()
 }
 
 const GAME_ARG_RULE: &str = "one game argument: - or + then A-Z a-z 0-9 _ . = + -, at most 64";

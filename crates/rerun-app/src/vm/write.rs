@@ -526,6 +526,8 @@ pub fn warning_vm(w: &Warning, lang: Lang) -> Option<WarnVm> {
         Warning::OptionAntiCheat { option, value, .. } => {
             warn(lang, Msg::WarnAntiCheat, id(&format!("{option}={value}")))
         }
+        // P5-OE (O-2b): a part kept from a live launch profile; the app's slice words it.
+        Warning::KeptAntiCheat { txn, .. } => warn(lang, Msg::WarnAntiCheat, id(&txn.to_string())),
         Warning::SteamInput { issue } => warn(lang, Msg::WarnSteamInput, id(issue)),
         Warning::SmartAppControl { state } => {
             let m = match state {

@@ -1391,7 +1391,7 @@ use crate::pkg::extract_tests::{assets_package, cache, file, package};
 use crate::prim::{FileEntry, FileInstallSpec, GameBuild, PackageRefusal, Step};
 
 /// The wrapper's archive: an x64 and an x86 build of `d3d9.dll`, a `d3d11.dll` and a config.
-fn wrapper_zip() -> Vec<u8> {
+pub(super) fn wrapper_zip() -> Vec<u8> {
     zip(&[
         ZipEntry::file("x64/d3d9.dll", b"wrapper d3d9 x64"),
         ZipEntry::file("x32/d3d9.dll", b"wrapper d3d9 x86"),
@@ -1408,7 +1408,7 @@ fn only(mut f: PackageFile, arch: Option<Arch>, api: Option<Api>) -> PackageFile
 }
 
 /// `invented-wrapper` with [`wrapper_zip`]: per architecture and API.
-fn wrapper(archive: &[u8]) -> Package {
+pub(super) fn wrapper(archive: &[u8]) -> Package {
     let mut p = package(
         "zip",
         archive,

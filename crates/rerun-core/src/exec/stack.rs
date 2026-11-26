@@ -268,11 +268,13 @@ pub(crate) fn slot_taken(j: &Journal<'_>, l: &Listing, mine: &Plan) -> Option<Sl
     None
 }
 
-/// Revert of `own`: no later transaction blocked, none active or open on an object of `mine`.
+/// Revert of `own` (its head `head`): no later transaction blocked, none active or open on an
+/// object of `mine`, and the B1 rule ([`b1`]).
 pub(super) fn for_revert(
     j: &Journal<'_>,
     l: &Listing,
     own: &TxnId,
+    head: &Plan,
     mine: &[Object],
     me: Option<&Me<'_>>,
 ) -> Result<Keeps, Refusal> {
@@ -308,7 +310,158 @@ pub(super) fn for_revert(
             Class::Ignore | Class::Cleanup(_) | Class::Damaged(_) => {}
         }
     }
+    b1(j, l, own, head)?;
     Ok(keeps)
+}
+
+/// The program a profile op of a head sets as `run` (B1).
+enum RunSet {
+    /// The profile's `run` (an absolute path).
+    Known(String),
+    /// The bytes are no profile this version reads: counted as a `run` of any executable (fail
+    /// closed).
+    Unknown,
+}
+
+/// The `run` the profile op of `head` sets or changes (B1): `None` when its profile has no
+/// `run`, or when it replaces exactly the bytes of an earlier transaction's profile with the
+/// same `run` (it keeps that `run`, so its revert does not take it away).
+fn run_set(j: &Journal<'_>, l: &Listing, own: &TxnId, head: &Plan) -> Option<RunSet> {
+    let (_, op, path) = super::live::profile_op(head)?;
+    let run = match super::live::inline_bytes(op).map(rerun_proto::profile::decode) {
+        Some(Ok(p)) => p.run?,
+        _ => return Some(RunSet::Unknown),
+    };
+    if let Op::ReplaceFile { old, .. } = op {
+        let kept = l.txns.iter().filter(|t| t.id < *own).any(|t| {
+            let Some(p) = head_of(j, t) else {
+                return false;
+            };
+            let Some((_, o, at)) = super::live::profile_op(&p) else {
+                return false;
+            };
+            let same_bytes = matches!(
+                o.content(),
+                Some(crate::plan::ContentRef::Inline { sha256, .. }) if *sha256 == old.sha256
+            );
+            at == path
+                && same_bytes
+                && super::live::inline_bytes(o)
+                    .and_then(|b| rerun_proto::profile::decode(b).ok())
+                    .is_some_and(|q| q.run.as_deref() == Some(run.as_str()))
+        });
+        if kept {
+            return None;
+        }
+    }
+    Some(RunSet::Known(run))
+}
+
+/// The head of a listed transaction, decoded with the recorded rules (`None`: not readable).
+fn head_of(j: &Journal<'_>, t: &Listed) -> Option<Plan> {
+    let full = j.load(&t.id, VerifyBackups::Length).ok()?;
+    super::decode_head(full.head.as_deref()?).ok()
+}
+
+/// B1 (ADR 0032 amendment P5-OE, plan review B1; ADR 0020 amendment O-2b): LIFO is per object,
+/// and a package or a compatibility flag planned for the executable a profile's `run` made the
+/// main one shares no object with the profile. So the revert of a transaction whose profile op
+/// sets or changes `run` ([`run_set`]) is `Later` while a later live transaction (not
+/// forgotten, not closed) of the same game root (by identity) has that executable as its
+/// `main_exe` (folded) and holds package files or `TokenList` ops that are not reverted. Bytes
+/// that are no profile count as a `run` of any executable (fail closed). Journal only: heads and
+/// records, nothing on disk.
+fn b1(j: &Journal<'_>, l: &Listing, own: &TxnId, head: &Plan) -> Result<(), Refusal> {
+    #[cfg(test)]
+    if knob::b1_off() {
+        return Ok(());
+    }
+    let Some(run) = run_set(j, l, own, head) else {
+        return Ok(());
+    };
+    let games = || {
+        head.roots
+            .iter()
+            .filter(|r| r.kind == crate::plan::RootKind::Game)
+    };
+    // Each game root of the head with the executable `run` names below it (`None`: any).
+    let mut roots: Vec<(crate::policy::root::RootId, Option<String>)> = games()
+        .filter_map(|r| match &run {
+            RunSet::Unknown => Some((r.id, None)),
+            RunSet::Known(abs) => {
+                super::live::below(&r.path.to_string(), abs).map(|x| (r.id, Some(x)))
+            }
+        })
+        .collect();
+    // A `run` below none of them (the fence keeps it in the game folder): fail closed, any.
+    if roots.is_empty() {
+        roots = games().map(|r| (r.id, None)).collect();
+    }
+    for t in l.txns.iter().filter(|t| t.id > *own && !t.forgotten) {
+        let Ok(v) = &t.view else { continue };
+        if matches!(v.state, TxnState::Closed(_) | TxnState::Empty) {
+            continue;
+        }
+        let Ok(full) = j.load(&t.id, VerifyBackups::Length) else {
+            continue;
+        };
+        if matches!(full.state, TxnState::Closed(_) | TxnState::Empty) {
+            continue;
+        }
+        let Some(p) = full
+            .head
+            .as_deref()
+            .and_then(|h| super::decode_head(h).ok())
+        else {
+            continue;
+        };
+        for (i, r) in p.roots.iter().enumerate() {
+            let Some(main) = &r.main_exe else { continue };
+            let main = crate::fold::fold(main.as_str());
+            let meets = r.kind == crate::plan::RootKind::Game
+                && roots
+                    .iter()
+                    .any(|(id, exe)| *id == r.id && exe.as_ref().is_none_or(|x| *x == main));
+            if !meets {
+                continue;
+            }
+            let holds = p.ops.iter().enumerate().any(|(k, op)| {
+                let on_root = match op.target() {
+                    Target::File { root, .. } => usize::from(root.0) == i,
+                    _ => true,
+                };
+                on_root
+                    && super::live::exe_bound(op)
+                    && full
+                        .ops
+                        .get(&super::op_ix(k))
+                        .is_none_or(|o| o.reverted.is_none())
+            });
+            if holds {
+                return Err(Refusal::Later { txn: t.id });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Test knobs of the B1 rule.
+#[cfg(test)]
+pub(crate) mod knob {
+    use std::cell::Cell;
+
+    thread_local! {
+        static B1_OFF: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// K-B1: the B1 rule off (the control that the round trip of B1 needs it).
+    pub(crate) fn b1(off: bool) {
+        B1_OFF.with(|c| c.set(off));
+    }
+
+    pub(super) fn b1_off() -> bool {
+        B1_OFF.with(Cell::get)
+    }
 }
 
 /// The reverting transaction as [`for_revert`] compares it with later ones (P4-8b); without it

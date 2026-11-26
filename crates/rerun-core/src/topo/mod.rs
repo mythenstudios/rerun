@@ -51,7 +51,9 @@ use crate::hw::{Fact, GpuArchTable, SacState, SystemProfile};
 use crate::path::RelPath;
 use crate::plan::{Choice, MAX_CHOICES, MAX_PICKS, Op, Pick, Plan, PlanError, PlanSource, RootIx};
 use crate::policy::root::GameDir;
-use crate::prim::{self, GameBuild, LaunchMethodSpec, MethodSpec, PackageRefusal, PlanCtx, Step};
+use crate::prim::{
+    self, GameBuild, LaunchArgText, LaunchMethodSpec, MethodSpec, PackageRefusal, PlanCtx, Step,
+};
 use crate::sys::SysErrorKind;
 
 /// The Topos of the index that name this Steam app, sorted by ID.
@@ -157,8 +159,13 @@ impl GameFacts {
     /// order: a plan records them, and D4 asks them too (ADR 0020 amendment "Other
     /// executables").
     pub fn other_exes(&self) -> Vec<RelPath> {
+        self.others_than(self.main_exe())
+    }
+
+    /// The executables that matched besides `main`, each path once, in the Topo's order (the
+    /// plan's `other_exes` with the effective main executable, ADR 0032 amendment P5-OE).
+    pub fn others_than(&self, main: Option<&RelPath>) -> Vec<RelPath> {
         let mut v: Vec<RelPath> = Vec::new();
-        let main = self.main_exe();
         for e in self.matched_exes() {
             if Some(&e.path) != main && !v.contains(&e.path) {
                 v.push(e.path.clone());
@@ -612,9 +619,6 @@ pub enum ValueRefusal {
     AntiCheat(StepKind),
     /// Its `start` names an executable that did not match here.
     NotMatched,
-    /// `start` and `launch_args` are planned from slice O-2b on (the launch profile with `run`
-    /// and `args`).
-    NotYet,
 }
 
 impl fmt::Display for ValueRefusal {
@@ -628,10 +632,6 @@ impl fmt::Display for ValueRefusal {
             Self::NotMatched => f.write_str(
                 "refused: the executable it starts is not a build the Topo names in this game \
                  folder",
-            ),
-            Self::NotYet => f.write_str(
-                "not yet: starting another executable or passing launch arguments comes with a \
-                 later version of Rerun",
             ),
         }
     }
@@ -730,9 +730,19 @@ fn option_step_kind(s: &OptionStep) -> StepKind {
     }
 }
 
-/// An option value by its steps (pure): the anti-cheat rule per step kind, a `start` whose
-/// executable did not match here, and `start`/`launch_args` not planned before slice O-2b. The
-/// first refused step names the refusal.
+/// The matched `match.exes` entry of exactly the spelling of `p` (a `start` value), as its index
+/// in [`GameFacts::exes`].
+fn matched_entry(topo: &Topo, game: &GameFacts, p: &RelPath) -> Option<usize> {
+    topo.matches
+        .exes
+        .iter()
+        .zip(&game.exes)
+        .position(|(e, c)| e.path.same_spelling(p) && c.state == ExeState::Match)
+}
+
+/// An option value by its steps (pure): the anti-cheat rule per step kind and a `start` whose
+/// executable did not match here. The first refused step names the refusal. The launch profile
+/// as a whole (carried parts, conflicts) is the plan's.
 fn assess_value(
     topo: &Topo,
     game: &GameFacts,
@@ -750,21 +760,10 @@ fn assess_value(
         };
         let why = match (r, s) {
             (AcRule::Refuse, _) => Some(ValueRefusal::AntiCheat(k)),
-            (_, OptionStep::Start(p)) => {
-                let matched = topo
-                    .matches
-                    .exes
-                    .iter()
-                    .zip(&game.exes)
-                    .any(|(e, c)| e.path.same_spelling(p) && c.state == ExeState::Match);
-                Some(if matched {
-                    ValueRefusal::NotYet
-                } else {
-                    ValueRefusal::NotMatched
-                })
-            }
-            (_, OptionStep::LaunchArgs(_)) => Some(ValueRefusal::NotYet),
-            (_, OptionStep::IniSet(_)) => None,
+            (_, OptionStep::Start(p)) => matched_entry(topo, game, p)
+                .is_none()
+                .then_some(ValueRefusal::NotMatched),
+            (_, OptionStep::LaunchArgs(_) | OptionStep::IniSet(_)) => None,
         };
         if refused.is_none() {
             refused = why;
@@ -899,6 +898,81 @@ pub enum EngineError {
     /// Two picked variants each bring a CPU rule (one launch profile per game).
     #[error("two picked variants bring a CPU rule; pick one of them")]
     TwoCpuRules,
+    /// Two chosen option values each start an executable (one launch profile per game).
+    #[error("options {first} and {second} both start an executable; choose one of them")]
+    TwoStarts {
+        /// The first value (`option=value`).
+        first: String,
+        /// The second.
+        second: String,
+    },
+    /// Two chosen option values each pass launch arguments (one launch profile per game).
+    #[error("options {first} and {second} both pass launch arguments; choose one of them")]
+    TwoArgs {
+        /// The first value (`option=value`).
+        first: String,
+        /// The second.
+        second: String,
+    },
+    /// The launch profile would start another executable or pass arguments with method `watch`
+    /// (both need `direct`): `run_from` and `watch_from` name where each part comes from.
+    #[error(
+        "{run_from} needs the launch method direct, and {watch_from} uses watch; undo or leave \
+         out one of them"
+    )]
+    RunNeedsDirect {
+        /// Where `run` or `args` come from.
+        run_from: String,
+        /// Where the `watch` rule comes from.
+        watch_from: String,
+    },
+    /// The Topo's launch cannot carry the launch profile of the chosen values.
+    #[error("the launch profile: {0}")]
+    Launch(LaunchProblem),
+    /// What is live for the game does not allow a plan (ADR 0032 amendment P5-OE, S6): the
+    /// journal, or the live launch profile.
+    #[error(transparent)]
+    Live(crate::exec::LiveError),
+    /// The live launch profile starts an executable that is not a build the Topo names in this
+    /// game folder now.
+    #[error(
+        "the launch profile of transaction {txn} starts {exe}, which is not a build the Topo \
+         names in this game folder; undo or forget {txn} first"
+    )]
+    RunNotMatched {
+        /// The transaction.
+        txn: crate::journal::TxnId,
+        /// The executable (escaped).
+        exe: String,
+    },
+    /// A part the plan would keep from the live launch profile is refused by the anti-cheat
+    /// rule (S1: every part checked as if new).
+    #[error(
+        "anti-cheat found: the launch profile of transaction {txn} has a {} part, which Rerun \
+         does not keep for this game; undo {txn} first",
+        step.as_str()
+    )]
+    KeptAntiCheat {
+        /// The transaction.
+        txn: crate::journal::TxnId,
+        /// The step kind of the part.
+        step: StepKind,
+    },
+    /// The executable this plan is for differs from the one a live transaction installed
+    /// package files or set compatibility flags for (user decision E4 b).
+    #[error(
+        "this plan is for {to}, and transaction {txn} installed files or set compatibility \
+         flags for {from}; undo {txn} first, then choose, then apply that fix again for the \
+         chosen executable"
+    )]
+    ExeSwitch {
+        /// The transaction.
+        txn: crate::journal::TxnId,
+        /// Its main executable (escaped).
+        from: String,
+        /// This plan's (escaped).
+        to: String,
+    },
     /// The planners refused.
     #[error(transparent)]
     Plan(#[from] PlanError),
@@ -1077,6 +1151,13 @@ pub enum Warning {
         /// The step kind.
         step: StepKind,
     },
+    /// The anti-cheat rule warns about a part the plan keeps from the live launch profile (S1).
+    KeptAntiCheat {
+        /// The transaction the part is kept from.
+        txn: crate::journal::TxnId,
+        /// The step kind of the part.
+        step: StepKind,
+    },
     /// The anti-cheat rule warns about a step.
     AntiCheat {
         /// The issue.
@@ -1138,8 +1219,64 @@ pub struct TopoPlan {
     pub steps: Vec<Step>,
     /// The launch, if a `cpu` step was planned.
     pub launch: Option<LaunchPlan>,
+    /// Where each part of the launch profile comes from, if the plan sets a part of it (ADR
+    /// 0032 amendment P5-OE: the preview names the origin of every part).
+    pub parts: Option<LaunchParts>,
     /// Warnings, in pick order, then in choice order.
     pub warnings: Vec<Warning>,
+}
+
+/// Where a part of the launch profile comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartFrom {
+    /// A picked fix.
+    Fix(Pick),
+    /// A chosen option value.
+    Option(Choice),
+    /// Kept from the live profile of this transaction.
+    Kept(crate::journal::TxnId),
+}
+
+/// The parts of the one launch profile a plan writes, each with where it comes from (ADR 0032
+/// amendment P5-OE, "Carry-over").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchParts {
+    /// Steam's launch entry (`launch.start`): what every fallback of `rerun-launch` starts
+    /// (ADR 0022 D3).
+    pub start: RelPath,
+    /// The rule part (`method`, CPU rule, priority), if any.
+    pub rule: Option<PartFrom>,
+    /// `run`: the executable `rerun-launch` starts instead of `start`.
+    pub run: Option<(RelPath, PartFrom)>,
+    /// `args`.
+    pub args: Option<(Vec<String>, PartFrom)>,
+}
+
+/// One part of the launch profile while it is composed.
+struct Part<T> {
+    value: T,
+    from: PartFrom,
+}
+
+/// The rule part: method, CPU rule, priority.
+struct RulePart {
+    method: MethodSpec,
+    cpu: Option<prim::CpuRuleSpec>,
+    priority: Option<prim::PrioritySpec>,
+}
+
+/// `option=value` of a choice.
+fn choice_name(c: &Choice) -> String {
+    format!("{}={}", c.option, c.value)
+}
+
+/// Words for where a part comes from (an engine error).
+fn from_words(f: &PartFrom) -> String {
+    match f {
+        PartFrom::Fix(p) => format!("fix {}/{}", p.issue, p.variant),
+        PartFrom::Option(c) => format!("option {}", choice_name(c)),
+        PartFrom::Kept(t) => format!("the launch profile of transaction {t}"),
+    }
 }
 
 /// The picked variants of `topo` with their issues, in pick order, by the engine's pure rules:
@@ -1245,7 +1382,12 @@ pub fn plan(
     if topo.status == Status::Retired {
         return Err(EngineError::Retired(topo.id.to_string()));
     }
-    let Some(main_exe) = facts.game.main_exe() else {
+    let Some(first) = facts
+        .game
+        .exes
+        .iter()
+        .position(|e| e.state == ExeState::Match)
+    else {
         return Err(EngineError::NoMatch(topo.id.to_string()));
     };
     let (picks, choices) = (sel.picks, sel.choices);
@@ -1260,8 +1402,135 @@ pub fn plan(
     }
     let launch = resolve_launch(topo);
     let ac = anti_cheat_state(topo, &facts.game.anti_cheat);
+    // ADR 0032 amendment P5-OE (S6): what the journal says is live for this game.
+    let live = match ctx.app {
+        Some(a) => {
+            crate::exec::live_state(a, ctx.steam_app, ctx.game.id()).map_err(EngineError::Live)?
+        }
+        None => crate::exec::LiveState::default(),
+    };
+    // The chosen values: their refusals, and the `start` and `launch_args` parts (the `ini_set`
+    // steps follow the picks' steps below).
+    let mut choice_warnings = Vec::new();
+    let mut new_run: Option<Part<usize>> = None;
+    let mut new_args: Option<Part<Vec<LaunchArgText>>> = None;
+    for (c, (_, value)) in choices.iter().zip(&chosen) {
+        let refused = |why| EngineError::OptionRefused {
+            option: c.option.clone(),
+            value: c.value.clone(),
+            why,
+        };
+        let (no, warned) = assess_value(topo, facts.game, value, &ac);
+        if let Some(why) = no {
+            return Err(refused(why));
+        }
+        choice_warnings.extend(warned.into_iter().map(|step| Warning::OptionAntiCheat {
+            option: c.option.clone(),
+            value: c.value.clone(),
+            step,
+        }));
+        for s in &value.steps {
+            match s {
+                OptionStep::Start(p) => {
+                    let ix = matched_entry(topo, facts.game, p)
+                        .ok_or_else(|| refused(ValueRefusal::NotMatched))?;
+                    if let Some(Part {
+                        from: PartFrom::Option(f),
+                        ..
+                    }) = &new_run
+                    {
+                        return Err(EngineError::TwoStarts {
+                            first: choice_name(f),
+                            second: choice_name(c),
+                        });
+                    }
+                    new_run = Some(Part {
+                        value: ix,
+                        from: PartFrom::Option(c.clone()),
+                    });
+                }
+                OptionStep::LaunchArgs(a) => {
+                    let args: Vec<LaunchArgText> = a
+                        .iter()
+                        .map(|x| LaunchArgText::parse(x))
+                        .collect::<Option<_>>()
+                        .ok_or_else(|| {
+                            PlanError::Step(format!(
+                                "launch_args of {}: not a launch argument",
+                                choice_name(c)
+                            ))
+                        })?;
+                    if let Some(Part {
+                        from: PartFrom::Option(f),
+                        ..
+                    }) = &new_args
+                    {
+                        return Err(EngineError::TwoArgs {
+                            first: choice_name(f),
+                            second: choice_name(c),
+                        });
+                    }
+                    new_args = Some(Part {
+                        value: args,
+                        from: PartFrom::Option(c.clone()),
+                    });
+                }
+                OptionStep::IniSet(_) => {}
+            }
+        }
+    }
+    // The live profile's `run`, when no value sets one: the executable it starts must be a
+    // matched build here (ADR 0032 amendment P5-OE, "The executable that runs").
+    let kept = live.profile.as_ref();
+    let kept_run = match (&new_run, kept) {
+        (None, Some(k)) => match &k.profile.run {
+            None => None,
+            Some(r) => {
+                let at = crate::exec::path_below(&ctx.game.path().to_string(), r);
+                let ix = at
+                    .and_then(|rel| {
+                        facts.game.exes.iter().position(|c| {
+                            c.state == ExeState::Match && crate::fold::fold(c.path.as_str()) == rel
+                        })
+                    })
+                    .ok_or_else(|| EngineError::RunNotMatched {
+                        txn: k.txn,
+                        exe: crate::escape::path(r).to_string(),
+                    })?;
+                Some(Part {
+                    value: ix,
+                    from: PartFrom::Kept(k.txn),
+                })
+            }
+        },
+        _ => None,
+    };
+    // The effective main executable: a chosen `start`, else the kept `run`, else the first
+    // match. It is the plan's `main_exe` and the build a package is planned for.
+    let main_ix = new_run
+        .as_ref()
+        .or(kept_run.as_ref())
+        .map_or(first, |r| r.value);
+    let main = &facts.game.exes[main_ix];
+    let main_exe = &main.path;
+    // E4 b: no switch while package files or compatibility flags are live for another
+    // executable of this game folder.
+    let folded_main = crate::fold::fold(main_exe.as_str());
+    if let Some(e) = live
+        .exes
+        .iter()
+        .find(|e| crate::fold::fold(e.main_exe.as_str()) != folded_main)
+    {
+        return Err(EngineError::ExeSwitch {
+            txn: e.txn,
+            from: crate::escape::path(e.main_exe.as_str()).to_string(),
+            to: crate::escape::path(main_exe.as_str()).to_string(),
+        });
+    }
     let mut steps = Vec::new();
     let mut planned_launch = None;
+    let mut new_rule: Option<Part<RulePart>> = None;
+    let mut launch_at: Option<usize> = None;
     let mut rules = false;
     let mut rule_exes: Vec<String> = Vec::new();
     let mut planned_packages: Vec<&Package> = Vec::new();
@@ -1291,7 +1560,7 @@ pub fn plan(
         for s in &variant.steps {
             match s {
                 TopoStep::Package(id) => {
-                    let (pkg, spec) = package_step(facts, id.as_str())?;
+                    let (pkg, spec) = package_step(facts, main, id.as_str())?;
                     if !planned_packages.iter().any(|q| q.id == pkg.id) {
                         planned_packages.push(pkg);
                         steps.push(Step::FileInstall(spec));
@@ -1311,6 +1580,17 @@ pub fn plan(
                         return Err(EngineError::TwoCpuRules);
                     }
                     planned_launch = Some(lp.clone());
+                    // The rule part of the one profile; the step is composed below (with `run`
+                    // and `args` of a value or the live profile) and keeps this place.
+                    new_rule = Some(Part {
+                        value: RulePart {
+                            method: lp.method,
+                            cpu: Some(*cpu),
+                            priority: topo.launch.as_ref().and_then(|l| l.priority),
+                        },
+                        from: PartFrom::Fix(p.clone()),
+                    });
+                    launch_at = Some(steps.len());
                     steps.push(Step::LaunchMethod(LaunchMethodSpec {
                         method: lp.method,
                         start: lp.start.clone(),
@@ -1364,24 +1644,12 @@ pub fn plan(
             }
         }
     }
+    warnings.extend(choice_warnings);
     // ADR 0032: the chosen option values after the picks. An `ini_set` value is a step like a
     // variant's; a file a picked fix sets too is refused here, naming both (O-1 review S1; the
-    // loader refuses two options on one file); `start` and `launch_args` come with slice O-2b.
-    for (c, (_, value)) in choices.iter().zip(chosen) {
-        let refused = |why| EngineError::OptionRefused {
-            option: c.option.clone(),
-            value: c.value.clone(),
-            why,
-        };
-        let (no, warned) = assess_value(topo, facts.game, value, &ac);
-        if let Some(why) = no {
-            return Err(refused(why));
-        }
-        warnings.extend(warned.into_iter().map(|step| Warning::OptionAntiCheat {
-            option: c.option.clone(),
-            value: c.value.clone(),
-            step,
-        }));
+    // loader refuses two options on one file); `start` and `launch_args` are parts of the launch
+    // profile, composed below.
+    for (c, (_, value)) in choices.iter().zip(&chosen) {
         for s in &value.steps {
             match s {
                 OptionStep::IniSet(x) => {
@@ -1404,12 +1672,30 @@ pub fn plan(
                     }
                     steps.push(Step::IniSet(x.clone()));
                 }
-                OptionStep::Start(_) | OptionStep::LaunchArgs(_) => {
-                    return Err(refused(ValueRefusal::NotYet));
-                }
+                OptionStep::Start(_) | OptionStep::LaunchArgs(_) => {}
             }
         }
     }
+    let parts = compose_launch(
+        &launch,
+        &ac,
+        Composing {
+            rule: new_rule,
+            run: new_run,
+            args: new_args,
+            kept,
+            kept_run,
+        },
+        facts.game,
+        &mut warnings,
+    )?;
+    if let Some((spec, _)) = &parts {
+        match launch_at {
+            Some(i) => steps[i] = Step::LaunchMethod(spec.clone()),
+            None => steps.push(Step::LaunchMethod(spec.clone())),
+        }
+    }
+    let parts = parts.map(|(_, p)| p);
     // A package's shared dependencies come with it in this plan; a file another transaction
     // installed with the same content becomes a `Hold` of this plan (P4-8, `prim::file_install`).
     for p in &planned_packages {
@@ -1463,13 +1749,13 @@ pub fn plan(
     };
     let mut plan = prim::plan(&steps, &ctx)?;
     // P5-2a (finding 12 of plan P5): the matched build, so an apply refuses a game Steam updated
-    // since the plan. The engine plans one game root, with the executable that matched.
-    let Some(main_sha256) = facts.game.main_sha256().copied() else {
+    // since the plan. The engine plans one game root, with the effective main executable.
+    let Some(main_sha256) = main.sha256 else {
         return Err(EngineError::NoMatch(topo.id.to_string()));
     };
     // The other matched executables (ADR 0020 amendment "Other executables"): D4 asks every
     // executable the launcher may start, not only the first match.
-    let others = facts.game.other_exes();
+    let others = facts.game.others_than(Some(main_exe));
     for r in &mut plan.roots {
         if r.kind == crate::plan::RootKind::Game {
             r.main_sha256 = Some(main_sha256);
@@ -1509,8 +1795,125 @@ pub fn plan(
         plan,
         steps,
         launch: planned_launch,
+        parts,
         warnings,
     })
+}
+
+/// The parts of the launch profile a plan has to compose: what the plan sets, and the live
+/// profile it keeps the rest from.
+struct Composing<'l> {
+    /// The rule part of a picked `cpu` step.
+    rule: Option<Part<RulePart>>,
+    /// `run` of a chosen `start` (the entry's index in [`GameFacts::exes`]).
+    run: Option<Part<usize>>,
+    /// `args` of a chosen `launch_args`.
+    args: Option<Part<Vec<LaunchArgText>>>,
+    /// The live profile (S6).
+    kept: Option<&'l crate::exec::LiveProfile>,
+    /// Its `run`, resolved to a matched entry (only when no value sets `run`).
+    kept_run: Option<Part<usize>>,
+}
+
+/// The one launch profile of a plan (ADR 0032 amendment P5-OE, "Carry-over"): `None` when the
+/// plan sets no part (the live profile stays as it is); else the `launch_method` step of every
+/// part, each set by this plan or kept from the live profile, with where each comes from. Every
+/// kept part is checked as if new (S1): the anti-cheat rule here, the planner's rules (F5, the
+/// folder of `run`, the bitness) on the whole step. `run` or `args` with `watch` is refused.
+fn compose_launch(
+    launch: &Result<LaunchPlan, LaunchProblem>,
+    ac: &AntiCheatState,
+    c: Composing<'_>,
+    game: &GameFacts,
+    warnings: &mut Vec<Warning>,
+) -> Result<Option<(LaunchMethodSpec, LaunchParts)>, EngineError> {
+    if c.rule.is_none() && c.run.is_none() && c.args.is_none() {
+        return Ok(None);
+    }
+    let lp = launch.as_ref().map_err(|p| EngineError::Launch(*p))?;
+    let kept_rule = c
+        .kept
+        .filter(|k| k.profile.cpu.is_some() || k.profile.priority.is_some())
+        .map(|k| Part {
+            value: RulePart {
+                method: MethodSpec::of_method(k.profile.method),
+                cpu: k.profile.cpu.as_ref().map(prim::CpuRuleSpec::of_rule),
+                priority: k.profile.priority.map(prim::PrioritySpec::of_priority),
+            },
+            from: PartFrom::Kept(k.txn),
+        });
+    let kept_args = c.kept.filter(|k| !k.profile.args.is_empty()).map(|k| Part {
+        value: k
+            .profile
+            .args
+            .iter()
+            .cloned()
+            .map(LaunchArgText::from)
+            .collect(),
+        from: PartFrom::Kept(k.txn),
+    });
+    let rule = c.rule.or(kept_rule);
+    let run = c.run.or(c.kept_run);
+    let args = c.args.or(kept_args);
+    // S1: a kept part is checked by the anti-cheat rule as if it were new.
+    if ac.enforced() {
+        let kept: [(Option<&PartFrom>, StepKind); 3] = [
+            (
+                rule.as_ref().map(|r| &r.from),
+                match rule.as_ref().map(|r| r.value.method) {
+                    Some(MethodSpec::Watch | MethodSpec::Auto) => StepKind::LaunchWatch,
+                    _ => StepKind::LaunchDirect,
+                },
+            ),
+            (run.as_ref().map(|r| &r.from), StepKind::Start),
+            (args.as_ref().map(|a| &a.from), StepKind::LaunchArgs),
+        ];
+        for (from, step) in kept {
+            let Some(PartFrom::Kept(txn)) = from else {
+                continue;
+            };
+            match anti_cheat_rule(step) {
+                AcRule::Refuse => return Err(EngineError::KeptAntiCheat { txn: *txn, step }),
+                AcRule::Warn => warnings.push(Warning::KeptAntiCheat { txn: *txn, step }),
+                AcRule::None => {}
+            }
+        }
+    }
+    let method = rule.as_ref().map_or(MethodSpec::Direct, |r| r.value.method);
+    if method != MethodSpec::Direct
+        && let (Some(r), Some(x)) = (
+            rule.as_ref(),
+            run.as_ref()
+                .map(|r| &r.from)
+                .or(args.as_ref().map(|a| &a.from)),
+        )
+    {
+        return Err(EngineError::RunNeedsDirect {
+            run_from: from_words(x),
+            watch_from: from_words(&r.from),
+        });
+    }
+    let run_path = run.as_ref().map(|r| game.exes[r.value].path.clone());
+    let spec = LaunchMethodSpec {
+        method,
+        start: lp.start.clone(),
+        cpu: rule.as_ref().and_then(|r| r.value.cpu),
+        priority: rule.as_ref().and_then(|r| r.value.priority),
+        run: run_path.clone(),
+        args: args.as_ref().map(|a| a.value.clone()).unwrap_or_default(),
+    };
+    let parts = LaunchParts {
+        start: lp.start.clone(),
+        rule: rule.map(|r| r.from),
+        run: run.and_then(|r| run_path.map(|p| (p, r.from))),
+        args: args.map(|a| {
+            (
+                a.value.iter().map(|x| x.as_str().to_owned()).collect(),
+                a.from,
+            )
+        }),
+    };
+    Ok(Some((spec, parts)))
 }
 
 /// A `laa_patch` step (P4-10): the executable is the `match.exes` entry in exactly the step's
@@ -1557,9 +1960,11 @@ fn laa_step(
     })
 }
 
-/// A `package` step: the package of the index and its `file_install` step for this game.
+/// A `package` step: the package of the index and its `file_install` step for this game, for
+/// the build of `main` (the effective main executable, ADR 0032 amendment P5-OE).
 fn package_step<'p>(
     facts: &Facts<'p>,
+    main: &ExeCheck,
     id: &str,
 ) -> Result<(&'p Package, prim::FileInstallSpec), EngineError> {
     let refused = |why: String| EngineError::Package {
@@ -1581,19 +1986,18 @@ fn package_step<'p>(
     if p.depends_on_arch() && facts.game.arches_differ() {
         return Err(EngineError::PackageArchOpen { id: id.to_owned() });
     }
-    let api = facts
-        .game
-        .main_api()
+    let api = main
+        .api
         .ok_or_else(|| refused("the main executable has no API (internal)".to_owned()))?;
     let build = GameBuild {
-        arch: facts.game.main_arch(),
+        arch: main.arch,
         api,
     };
     // P4-8: a package that names the builds it supports is planned only for one of them.
     if !p.supports_exe_sha1.is_empty()
-        && facts
-            .game
-            .main_sha1()
+        && main
+            .sha1
+            .as_ref()
             .is_none_or(|h| !p.supports_exe_sha1.contains(h))
     {
         return Err(refused(
@@ -1643,6 +2047,8 @@ fn slots_free(steps: &[Step], packages: &[&Package]) -> Result<(), EngineError> 
 mod gpu_tests;
 #[cfg(test)]
 mod laa_tests;
+#[cfg(test)]
+mod launch_tests;
 #[cfg(test)]
 mod option_tests;
 #[cfg(test)]

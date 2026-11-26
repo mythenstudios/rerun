@@ -354,3 +354,6 @@ The journal never embeds an op: a record names the op by its index and is bounde
 
 ### Tests
 [F] codec (format 3 goldens, every refusal, the largest profile, mutations), result codec (the new lines and reason, refusals, mutations), shim (`run::run_tests`: `with_run` quoting cases, `decide`, every fallback, 740, `steam_start`), planner LR1 to LR6 (with the round trips LR4 and LR5: format 1 → 3 → back bit for bit), CLI goldens updated (the profile bytes). [SB] SB-R1 (`Invoke-LaunchRun`). [DEV] AC1 Dx9 with `scripts/dev-launch-profile.ps1 -Run` (open).
+
+### O-2b (2026-11-26): options produce `run` and `args`
+Since slice O-2b the Topo engine writes `run` and `args` from option values (`start`, `launch_args`) into the one profile of the game, keeping the parts of the live profile a plan does not set (ADR 0032 amendment P5-OE, "Slice O-2b as built"). Nothing in the shim, the profile format or the result changes. The preview names each part's origin and says what every fallback starts (Steam's own command, `launch.start`).
