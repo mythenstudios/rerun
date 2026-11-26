@@ -33,9 +33,10 @@ mod generated {
 use generated::{
     AppWindow, AppliedData, BadgeData, BannerData, CardData, DetailData, DialogData, FactData,
     FixData, GameData, HistEntryData, HistGroupData, HistoryData, LaunchData, LaunchRowData,
-    LineData, ListData, Modal, NoticeData, OpData, OrphanData, OrphansData, PartsData, PreviewData,
-    ProblemData, Reveal, RowData, SectionData, SolvedData, SourceData, StoreData, StoreRowData,
-    Str, SysLineData, Theme, WarnData,
+    LineData, ListData, Modal, NoticeData, OpData, OptionChoiceData, OptionData, OptionsData,
+    OrphanData, OrphansData, PartsData, PreviewData, ProblemData, ProfilePartData,
+    ProfilePartsData, Reveal, RowData, SectionData, SolvedData, SourceData, StoreData,
+    StoreRowData, Str, SysLineData, Theme, WarnData,
 };
 
 use std::cell::RefCell;
@@ -1041,6 +1042,7 @@ fn game(g: &GameVm, sel: &Selection) -> GameData {
         ),
         notes: model(g.notes.iter().map(s).collect()),
         detail: g.detail.as_ref().map(shown).unwrap_or_default(),
+        options: write::options_data(g, sel),
         problems: model(
             g.problems
                 .iter()

@@ -496,6 +496,12 @@ pub struct MatchView {
     pub read: GameFacts,
     /// The fixes, grouped by variant ID.
     pub fixes: Vec<Fix>,
+    /// What the journal says is live for this game (ADR 0032 amendment P5-OE): the option
+    /// values live transactions chose and the executables they were planned for, or why no plan
+    /// of the game is possible now (the newest holder of the launch profile is interrupted,
+    /// changed or unreadable). Read without the lock, as the plan reads it; the apply checks
+    /// again.
+    pub live: Result<crate::exec::LiveState, crate::exec::LiveError>,
 }
 
 /// One game: what the Topo lookup found.
@@ -524,10 +530,15 @@ pub fn game_cached(
             let report = OwnedReport::from(r);
             let app = g.app();
             let fixes = fixes(&report, &|id| super::need(m.catalog, app, id));
+            let live = match app {
+                Some(a) => crate::exec::live_state(a, m.steam_app, m.game.id()),
+                None => Ok(crate::exec::LiveState::default()),
+            };
             Box::new(MatchView {
                 report,
                 read: m.read.clone(),
                 fixes,
+                live,
             })
         })
     })?;

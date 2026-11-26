@@ -275,7 +275,11 @@ impl Rig {
     /// Plans `picks` (the page read first) and hands the preview over.
     fn preview_of(&mut self, picks: Vec<Pick>) -> PreviewVm {
         self.page();
-        let ev = self.run(Job::Plan { app_id: 220, picks });
+        let ev = self.run(Job::Plan {
+            app_id: 220,
+            picks,
+            choices: Vec::new(),
+        });
         let pv = match ev.as_slice() {
             [Event::Preview { vm, .. }] => (**vm).clone(),
             other => panic!("{other:?}"),
@@ -585,6 +589,7 @@ fn ah5_without_a_safe_helper_or_elevation_windows_is_never_asked() {
         assert_eq!(block.note.as_deref(), Some(&*t(lang, Msg::FixNeedsHelper)));
         let ev = rig.run(Job::Plan {
             app_id: 220,
+            choices: Vec::new(),
             picks: vec![pick("net", "block")],
         });
         assert!(
@@ -845,6 +850,7 @@ fn apply_through_the_worker(owner: Option<PromptOwner>) -> Vec<rerun_core::sys::
     assert!(!worker.set_owner(None));
     worker.send(Job::Plan {
         app_id: 220,
+        choices: Vec::new(),
         picks: vec![pick("net", "block")],
     });
     let hash = wait_until(&worker, |e| match e {

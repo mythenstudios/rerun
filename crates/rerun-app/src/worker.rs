@@ -77,7 +77,7 @@ use rerun_core::flow::{
 };
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::journal::TxnId;
-use rerun_core::plan::Pick;
+use rerun_core::plan::{Choice, Pick};
 use rerun_core::policy::open::{OpenUrl, OwnLink};
 use rerun_core::sys::{Http, NoShell, PromptOwner, PromptOwnerSlot, Shell, System};
 use rerun_core::topo;
@@ -119,6 +119,9 @@ pub enum Job {
         app_id: u32,
         /// The fixes' picks, one per selected fix.
         picks: Vec<Pick>,
+        /// The option values chosen, one per option (ADR 0032); with the picks one selection, one
+        /// plan, one preview.
+        choices: Vec<Choice>,
     },
     /// The window rendered the preview with this plan hash: only now may it be applied
     /// (`flow::shown`, ADR 0027 rule 5).
@@ -583,7 +586,7 @@ pub struct Session {
     /// The fixes of the page last handed to the window, per game: a plan that finds the game
     /// read differently now hands the window the fresh page instead of a preview (ADR 0027
     /// amendment P5-5a).
-    pages: HashMap<u32, Vec<(String, Offer)>>,
+    pages: HashMap<u32, PageKey>,
     /// What the window was shown and may confirm (module docs).
     pending: Pending,
     /// The last dialog nonce handed out (a confirm must carry the one of the shown dialog).
@@ -792,7 +795,11 @@ fn run_job(
             session.system = Some(page.clone());
             emit(Event::System(page));
         }
-        Job::Plan { app_id, picks } => plan(&g, *app_id, picks, lang, session, emit),
+        Job::Plan {
+            app_id,
+            picks,
+            choices,
+        } => plan(&g, *app_id, picks, choices, lang, session, emit),
         Job::PreviewShown { hash } => {
             // The window handed the preview over to be drawn: only now is the plan the
             // user's to apply (rule 5, `flow::shown`).
@@ -953,11 +960,47 @@ fn needs_helper(v: &GameView) -> bool {
 
 /// What decides whether a page the window holds is still the page of the files: the fixes and
 /// whether each can be applied.
-fn fix_key(page: &GameVm) -> Vec<(String, Offer)> {
-    page.fixes
-        .iter()
-        .map(|f| (f.key.clone(), f.offer))
-        .collect()
+fn fix_key(page: &GameVm) -> PageKey {
+    PageKey {
+        fixes: page
+            .fixes
+            .iter()
+            .map(|f| (f.key.clone(), f.offer))
+            .collect(),
+        options: page
+            .options
+            .options
+            .iter()
+            .flat_map(|o| {
+                let live = o.live.as_ref().map(|l| l.value.clone());
+                o.choices.iter().map(move |c| OptionKey {
+                    option: o.key.clone(),
+                    value: c.key.clone(),
+                    enabled: c.enabled,
+                    live: live.as_deref() == Some(c.key.as_str()),
+                })
+            })
+            .collect(),
+        notice: page.options.notice.is_some(),
+    }
+}
+
+/// What decides whether a page the window holds is still the page of the files (module docs of
+/// [`fix_key`]): the fixes, and the choices of the options with whether each is offered and which
+/// one is live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PageKey {
+    fixes: Vec<(String, Offer)>,
+    options: Vec<OptionKey>,
+    notice: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OptionKey {
+    option: String,
+    value: String,
+    enabled: bool,
+    live: bool,
 }
 
 /// The applied page from the journal (never kept).
@@ -1018,13 +1061,14 @@ fn plan(
     g: &Guarded<'_>,
     app_id: u32,
     picks: &[Pick],
+    choices: &[Choice],
     lang: Lang,
     session: &mut Session,
     emit: &mut dyn FnMut(Event),
 ) {
     session.pending.plan = None;
     session.pending.shown = None;
-    if picks.is_empty() {
+    if picks.is_empty() && choices.is_empty() {
         emit(Event::PreviewNone { app_id });
         return;
     }
@@ -1051,10 +1095,22 @@ fn plan(
         emit(refused(vm::not_available(lang)));
         return;
     }
-    // The app offers no option value yet (the options' UI slice of ADR 0032).
+    // The same lock for the option values: only a value the page offers (not refused, not while
+    // the journal forbids a plan), never "Unchanged" (the absence of a choice).
+    if !choices.iter().all(|c| {
+        page.options.options.iter().any(|o| {
+            o.key == c.option
+                && o.choices
+                    .iter()
+                    .any(|v| v.key == c.value && !v.is_unchanged() && v.enabled)
+        })
+    }) {
+        emit(refused(vm::not_available(lang)));
+        return;
+    }
     let sel = flow::Selection {
         picks: picks.to_vec(),
-        choices: Vec::new(),
+        choices: choices.to_vec(),
     };
     match flow::plan(g, app_id, &sel) {
         Err(e) => emit(refused(vm::game_refusal(&e, lang))),

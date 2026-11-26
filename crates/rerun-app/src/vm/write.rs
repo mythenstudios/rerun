@@ -60,6 +60,8 @@ fn tx(lang: Lang, m: Msg) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Selection {
     ids: BTreeSet<String>,
+    /// The option values chosen next to the fixes: one selection, one preview (ADR 0032).
+    options: super::Choices,
 }
 
 impl Selection {
@@ -74,7 +76,10 @@ impl Selection {
                 ids.insert(f.key.clone());
             }
         }
-        Self { ids }
+        Self {
+            ids,
+            options: super::Choices::default(),
+        }
     }
 
     /// Whether the fix with variant ID `key` is selected.
@@ -85,6 +90,7 @@ impl Selection {
     /// Toggles fix `i` of `g`: a fix that cannot be applied here is left alone; selecting one
     /// deselects the fixes it is exclusive with.
     pub fn toggle(&mut self, g: &GameVm, i: usize) {
+        self.options.clear_hint();
         let Some(f) = g.fixes.get(i) else {
             return;
         };
@@ -105,6 +111,7 @@ impl Selection {
     /// Keeps what is still selectable on a new page of the same game (after a write or a
     /// refresh); drops the rest.
     pub fn keep(&mut self, g: &GameVm) {
+        self.options.keep(&g.options);
         self.ids.retain(|k| {
             g.fixes
                 .iter()
@@ -127,6 +134,33 @@ impl Selection {
                 variant: f.key.clone(),
             })
             .collect()
+    }
+
+    /// The option values to plan next to the picks (ADR 0032), in the page's order of options.
+    pub fn choices(&self, g: &GameVm) -> Vec<rerun_core::plan::Choice> {
+        self.options.to_plan(&g.options)
+    }
+
+    /// Per option of `g`, the index of the checked choice: the chosen value, else the live one,
+    /// else "Unchanged" (index 0).
+    pub fn checked(&self, g: &GameVm) -> Vec<usize> {
+        self.options.checked(&g.options)
+    }
+
+    /// The click on choice `choice` of option `option` (see [`super::Choices::choose`]): "Unchanged"
+    /// while a value is live plans nothing and asks the page to explain.
+    pub fn choose(&mut self, g: &GameVm, option: usize, choice: usize) {
+        self.options.choose(&g.options, option, choice);
+    }
+
+    /// The option whose "Unchanged" needs the explanation (the live value's undo).
+    pub fn hint(&self) -> Option<usize> {
+        self.options.hint()
+    }
+
+    /// Nothing is selected: no fix and no option value.
+    pub fn is_empty(&self, g: &GameVm) -> bool {
+        self.picks(g).is_empty() && self.options.is_empty()
     }
 }
 
@@ -524,10 +558,14 @@ pub fn warning_vm(w: &Warning, lang: Lang) -> Option<WarnVm> {
         Warning::WhenUnknown { issue } => warn(lang, Msg::WarnWhenUnknown, id(issue)),
         Warning::AntiCheat { variant, .. } => warn(lang, Msg::WarnAntiCheat, id(variant)),
         Warning::OptionAntiCheat { option, value, .. } => {
-            warn(lang, Msg::WarnAntiCheat, id(&format!("{option}={value}")))
+            warn(lang, Msg::OptWarned, id(&format!("{option} = {value}")))
         }
-        // P5-OE (O-2b): a part kept from a live launch profile; the app's slice words it.
-        Warning::KeptAntiCheat { txn, .. } => warn(lang, Msg::WarnAntiCheat, id(&txn.to_string())),
+        // P5-OE (O-2b): a part kept from a live launch profile (the change it comes from).
+        Warning::KeptAntiCheat { txn, .. } => warn(
+            lang,
+            Msg::WarnKeptAntiCheat,
+            id(&tx(lang, Msg::ClearNumber { n: txn.seq() })),
+        ),
         Warning::SteamInput { issue } => warn(lang, Msg::WarnSteamInput, id(issue)),
         Warning::SmartAppControl { state } => {
             let m = match state {
@@ -674,6 +712,9 @@ pub struct PreviewVm {
     pub warnings: Vec<WarnVm>,
     /// The notes of the plan.
     pub notes: Vec<String>,
+    /// The launch profile part by part with where each part comes from, and what every fallback
+    /// of the starter does (ADR 0032, ADR 0022 D3); only for a plan that sets a part of it.
+    pub parts: Option<super::PartsVm>,
     /// The launch option, if the plan writes a launch profile.
     pub launch: Option<LaunchVm>,
     /// "Administrator rights: not needed", or that Windows asks (P5-5c).
@@ -719,6 +760,7 @@ pub fn preview_vm(
         ops: pv.ops.iter().map(|o| op_vm(o, lang)).collect(),
         warnings: warnings_of(p, lang),
         notes: notes_of(pv, lang),
+        parts: p.parts().map(|x| super::parts_vm(x, lang)),
         launch: launch.map(|v| launch_vm(v, lang)),
         admin,
         admin_notes,

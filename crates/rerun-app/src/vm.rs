@@ -25,6 +25,7 @@ mod clear;
 mod download;
 mod history;
 mod open;
+mod options;
 mod problems;
 mod store;
 mod write;
@@ -33,6 +34,7 @@ pub use clear::*;
 pub use download::*;
 pub use history::*;
 pub use open::*;
+pub use options::*;
 pub use problems::*;
 pub use store::*;
 pub use write::*;
@@ -668,6 +670,9 @@ pub struct GameVm {
     pub detail: Option<Shown<'static>>,
     /// The problems, those that affect this PC first.
     pub problems: Vec<ProblemVm>,
+    /// The options, above the problems (ADR 0032): the choices, the live values, and the game-level
+    /// notice when the journal forbids every plan.
+    pub options: Box<OptionsVm>,
     /// The fixes, in the Topo's order of first appearance.
     pub fixes: Vec<FixVm>,
     /// What is applied to this game now, one card per transaction (P5-5a).
@@ -718,6 +723,7 @@ fn base(app_id: u32, title: Shown<'static>, hero: HeroVm, lang: Lang) -> GameVm 
         detail: None,
         problems: Vec::new(),
         fixes: Vec::new(),
+        options: Box::default(),
         applied: Vec::new(),
         aside: Vec::new(),
         topo: None,
@@ -1020,6 +1026,12 @@ fn matched(
     }
     g.problems = problems;
     g.fixes = fixes;
+    g.options = Box::new(options::options(
+        &r.options,
+        &m.live,
+        topo.id.as_str(),
+        lang,
+    ));
     g.topo = Some(topo.id.to_string());
     g
 }

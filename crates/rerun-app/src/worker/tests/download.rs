@@ -248,6 +248,7 @@ fn ad1_nothing_is_downloaded_without_the_consent_of_the_list_shown() {
         assert!(!sel.contains("fix-pack"), "ticking selects nothing");
         let ev = r.run(Job::Plan {
             app_id: 220,
+            choices: Vec::new(),
             picks: vec![Pick {
                 issue: "crash".to_owned(),
                 variant: "fix-pack".to_owned(),
@@ -320,6 +321,7 @@ fn ad1_nothing_is_downloaded_without_the_consent_of_the_list_shown() {
         assert!(sel.contains("fix-pack"));
         let ev = r.run(Job::Plan {
             app_id: 220,
+            choices: Vec::new(),
             picks: sel.picks(&page),
         });
         let pv = match ev.as_slice() {

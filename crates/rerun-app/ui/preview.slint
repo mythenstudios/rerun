@@ -1,6 +1,6 @@
 // The preview panel of the picked fixes (rule 5, docs/07-ui.md).
 
-import { Button, GroupHeading, Muted, NoticeCard } from "base.slint";
+import { Button, GroupHeading, Muted, NoticeCard, PartsLine } from "base.slint";
 import { PreviewData, Str, Theme, Modal } from "base.slint";
 import { OpItem, WarnLine, LaunchBox } from "ops.slint";
 
@@ -98,6 +98,70 @@ export component PreviewPanel inherits VerticalLayout {
         }
         for w in root.p.warnings: WarnLine {
             w: w;
+        }
+        // The launch profile part by part with where each part comes from, and what every fallback
+        // of the starter does (ADR 0032, ADR 0022 D3).
+        if root.p.has-parts: VerticalLayout {
+            spacing: Theme.s2;
+            accessible-role: groupbox;
+            accessible-label: root.p.profile-parts.heading;
+            Text {
+                text: root.p.profile-parts.heading;
+                color: Theme.strong;
+                font-size: Theme.fs-m;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+
+            for part in root.p.profile-parts.parts: VerticalLayout {
+                spacing: Theme.hair * 2;
+                accessible-role: AccessibleRole.text;
+                accessible-label: part.label;
+                accessible-value: part.detail;
+                accessible-description: part.from + (part.from-name != "" ? " " + part.from-name : "");
+                Text {
+                    text: part.label;
+                    color: Theme.text;
+                    font-size: Theme.fs-m;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+
+                if part.detail != "": Text {
+                    text: part.detail;
+                    color: Theme.strong;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-s + Theme.hair;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+                HorizontalLayout {
+                    spacing: Theme.s2;
+                    Text {
+                        text: part.from;
+                        color: Theme.muted;
+                        font-size: Theme.fs-s;
+                        wrap: word-wrap;
+                        accessible-role: none;
+                    }
+
+                    if part.from-name != "": Text {
+                        horizontal-stretch: 1;
+                        text: part.from-name;
+                        color: Theme.text;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.fs-s;
+                        wrap: word-wrap;
+                        accessible-role: none;
+                    }
+                }
+            }
+
+            PartsLine {
+                p: root.p.profile-parts.fallback;
+                tone: Theme.muted;
+                mono: true;
+            }
         }
         if root.p.has-launch: LaunchBox {
             l: root.p.launch;

@@ -1740,6 +1740,91 @@ pub enum Msg {
     AboutLicencesShow,
     /// The licences dialog: its close button.
     LicencesClose,
+    /// The game page: the heading of the options section.
+    OptionsTitle,
+    /// The game page: what the options section is.
+    OptionsIntro,
+    /// An option's first choice: the option is left as it is.
+    OptUnchanged,
+    /// What "Unchanged" means.
+    OptUnchangedDesc,
+    /// Before the value that is live ("Active: <value> (change No. 3)").
+    OptActive,
+    /// After the live value: the change that set it.
+    OptActiveChange {
+        /// The transaction's number.
+        n: u32,
+    },
+    /// "Unchanged" was chosen while a value is live: it means undoing that change.
+    OptUndoHint {
+        /// The transaction's number.
+        n: u32,
+    },
+    /// The button that opens the undo of that change.
+    OptUndoBtn {
+        /// The transaction's number.
+        n: u32,
+    },
+    /// A value that is not offered: anti-cheat.
+    OptNotOfferedAntiCheat,
+    /// A value that is not offered: the program it starts is not here.
+    OptNotOfferedNotMatched,
+    /// A value that is not offered: a change holds files for another program.
+    OptNotOfferedExeSwitch {
+        /// The transaction's number.
+        n: u32,
+    },
+    /// A value that is not offered while the launch profile problem is open.
+    OptNotOfferedLive,
+    /// A value the anti-cheat rule allows only with a warning.
+    OptWarned,
+    /// The game-level notice: nothing can be planned now.
+    OptLiveTitle,
+    /// Why: the journal cannot be read.
+    OptLiveJournal,
+    /// Why: the change that holds the launch profile is not complete.
+    OptLiveInterrupted {
+        /// The transaction's number.
+        n: u32,
+    },
+    /// Why: the launch profile is not one this version reads.
+    OptLiveUnreadable {
+        /// The transaction's number.
+        n: u32,
+    },
+    /// Why: the launch profile changed.
+    OptLiveChanged {
+        /// The transaction's number.
+        n: u32,
+    },
+    /// The preview: the heading of the launch profile's parts.
+    PvPartsHeading,
+    /// A part: the CPU rule and priority.
+    PvPartRule,
+    /// A part: the program started instead of Steam's own.
+    PvPartRun,
+    /// A part: the game arguments.
+    PvPartArgs,
+    /// Origin: a fix.
+    PvFromFix,
+    /// Origin: an option.
+    PvFromOption,
+    /// Origin: kept from a live change.
+    PvFromKept {
+        /// The transaction's number.
+        n: u32,
+    },
+    /// What every fallback of the starter does (ADR 0022 D3), from the parts the profile has.
+    PvFallback {
+        /// The profile has a program to start.
+        run: bool,
+        /// The profile has a CPU rule or priority.
+        rule: bool,
+        /// The profile has arguments.
+        args: bool,
+    },
+    /// A warning: the plan keeps a part of the live launch profile that an anti-cheat rule warns about.
+    WarnKeptAntiCheat,
 }
 
 /// The text of `m` in `lang`.
@@ -2747,6 +2832,47 @@ fn en(m: Msg) -> Cow<'static, str> {
         AboutLicencesDesc => "Rerun builds on open-source crates and on the fonts Archivo and IBM Plex (SIL Open Font License 1.1). Here are their licence texts and copyright notices, generated from the crates this version is built from.",
         AboutLicencesShow => "Show licences",
         LicencesClose => "Close",
+        OptionsTitle => "Options",
+        OptionsIntro => "Choose how the game starts. Nothing changes until you apply, and the preview below shows everything first.",
+        OptUnchanged => "Unchanged",
+        OptUnchangedDesc => "Rerun changes nothing for this option. Steam starts the game as before.",
+        OptActive => "Active:",
+        OptActiveChange { n } => return format!("(change No. {n})").into(),
+        OptUndoHint { n } => return format!("Unchanged would mean taking change No. {n} back. Rerun does not plan that for you: undo that change on its card, then this option is unchanged again.").into(),
+        OptUndoBtn { n } => return format!("Undo change No. {n}").into(),
+        OptNotOfferedAntiCheat => "Not offered: an anti-cheat rule forbids changing how this game starts.",
+        OptNotOfferedNotMatched => "Not offered: the game folder does not hold the program this value starts.",
+        OptNotOfferedExeSwitch { n } => return format!("Not offered while change No. {n} is applied: it installed files or settings for another program. Undo it first, then choose, then apply that fix again.").into(),
+        OptNotOfferedLive => "Not offered while the problem with the launch profile above is open.",
+        OptWarned => "An anti-cheat rule allows this value only with a warning.",
+        OptLiveTitle => "Rerun cannot plan changes for this game now",
+        OptLiveJournal => "Rerun's journal cannot be read, so it cannot tell what is applied to this game.",
+        OptLiveInterrupted { n } => return format!("Change No. {n} holds this game's launch profile but is not applied completely (interrupted, being undone or damaged). Undo it or close it without undoing first.").into(),
+        OptLiveUnreadable { n } => return format!("The launch profile that change No. {n} wrote is not one this version of Rerun reads. Undo it or close it without undoing first.").into(),
+        OptLiveChanged { n } => return format!("The launch profile changed since change No. {n} wrote it, or it cannot be read. Undo it or close it without undoing first.").into(),
+        PvPartsHeading => "The launch profile, part by part",
+        PvPartRule => "CPU rule and priority",
+        PvPartRun => "Starts this program instead of Steam's own",
+        PvPartArgs => "Game arguments",
+        PvFromFix => "From the fix",
+        PvFromOption => "From the option",
+        PvFromKept { n } => return format!("Kept from change No. {n}. To take it back, undo the new change first, then that one.").into(),
+        PvFallback { run, rule, args } => {
+            let mut s = String::from("If the Rerun starter cannot use the profile (it is missing or invalid, Steam's path differs, Steam runs as administrator");
+            if run {
+                s.push_str(", or the program cannot be started");
+            }
+            s.push_str("), it starts Steam's own command unchanged");
+            match (rule, args) {
+                (true, true) => s.push_str(", without the rule and the arguments"),
+                (true, false) => s.push_str(", without the rule"),
+                (false, true) => s.push_str(", without the arguments"),
+                (false, false) => {}
+            }
+            s.push(':');
+            return s.into();
+        }
+        WarnKeptAntiCheat => "An anti-cheat rule allows keeping this part of the launch profile only with a warning.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 older history entry removed".into()
@@ -3738,6 +3864,47 @@ fn de(m: Msg) -> Cow<'static, str> {
         AboutLicencesDesc => "Rerun baut auf Open-Source-Crates und auf den Schriften Archivo und IBM Plex (SIL Open Font License 1.1) auf. Hier stehen deren Lizenztexte und Urheberrechtshinweise, erzeugt aus den Crates, aus denen diese Version gebaut ist.",
         AboutLicencesShow => "Lizenzen anzeigen",
         LicencesClose => "Schliessen",
+        OptionsTitle => "Optionen",
+        OptionsIntro => "Wähle, wie das Spiel startet. Nichts ändert sich, bis du anwendest; die Vorschau unten zeigt vorher alles.",
+        OptUnchanged => "Unverändert",
+        OptUnchangedDesc => "Rerun ändert bei dieser Option nichts. Steam startet das Spiel wie bisher.",
+        OptActive => "Aktiv:",
+        OptActiveChange { n } => return format!("(Änderung Nr. {n})").into(),
+        OptUndoHint { n } => return format!("Unverändert würde heissen, die Änderung Nr. {n} zurückzunehmen. Das plant Rerun nicht für dich: Mach diese Änderung auf ihrer Karte rückgängig, dann ist diese Option wieder unverändert.").into(),
+        OptUndoBtn { n } => return format!("Änderung Nr. {n} rückgängig machen").into(),
+        OptNotOfferedAntiCheat => "Nicht angeboten: Eine Anti-Cheat-Regel verbietet es, den Start dieses Spiels zu ändern.",
+        OptNotOfferedNotMatched => "Nicht angeboten: Im Spielordner liegt das Programm nicht, das dieser Wert startet.",
+        OptNotOfferedExeSwitch { n } => return format!("Nicht angeboten, solange die Änderung Nr. {n} angewendet ist: Diese Änderung hat Dateien oder Einstellungen für ein anderes Programm angelegt. Mach sie zuerst rückgängig, wähle dann und wende den Fix danach nochmals an.").into(),
+        OptNotOfferedLive => "Nicht angeboten, solange das Problem mit dem Startprofil oben offen ist.",
+        OptWarned => "Eine Anti-Cheat-Regel erlaubt diesen Wert nur mit einem Hinweis.",
+        OptLiveTitle => "Rerun kann für dieses Spiel jetzt nichts planen",
+        OptLiveJournal => "Das Journal von Rerun kann nicht gelesen werden, deshalb weiss Rerun nicht, was auf dieses Spiel angewendet ist.",
+        OptLiveInterrupted { n } => return format!("Die Änderung Nr. {n} hält das Startprofil dieses Spiels, ist aber nicht vollständig angewendet (unterbrochen, wird rückgängig gemacht oder beschädigt). Mach sie rückgängig oder schliesse sie zuerst ohne Rückgängig ab.").into(),
+        OptLiveUnreadable { n } => return format!("Das Startprofil, das die Änderung Nr. {n} geschrieben hat, kann diese Version von Rerun nicht lesen. Mach sie rückgängig oder schliesse sie zuerst ohne Rückgängig ab.").into(),
+        OptLiveChanged { n } => return format!("Das Startprofil hat sich geändert, seit die Änderung Nr. {n} es geschrieben hat, oder es kann nicht gelesen werden. Mach sie rückgängig oder schliesse sie zuerst ohne Rückgängig ab.").into(),
+        PvPartsHeading => "Das Startprofil, Teil für Teil",
+        PvPartRule => "CPU-Regel und Priorität",
+        PvPartRun => "Startet dieses Programm statt dem von Steam",
+        PvPartArgs => "Spielargumente",
+        PvFromFix => "Vom Fix",
+        PvFromOption => "Von der Option",
+        PvFromKept { n } => return format!("Übernommen aus der Änderung Nr. {n}. Zum Zurücknehmen machst du zuerst die neue Änderung rückgängig, dann jene.").into(),
+        PvFallback { run, rule, args } => {
+            let mut s = String::from("Wenn der Rerun-Starter das Profil nicht verwenden kann (es fehlt oder ist ungültig, der Pfad von Steam weicht ab, Steam läuft als Administrator");
+            if run {
+                s.push_str(", oder das Programm lässt sich nicht starten");
+            }
+            s.push_str("), startet er den Steam-Befehl unverändert");
+            match (rule, args) {
+                (true, true) => s.push_str(", ohne die Regel und die Argumente"),
+                (true, false) => s.push_str(", ohne die Regel"),
+                (false, true) => s.push_str(", ohne die Argumente"),
+                (false, false) => {}
+            }
+            s.push(':');
+            return s.into();
+        }
+        WarnKeptAntiCheat => "Eine Anti-Cheat-Regel erlaubt, diesen Teil des Startprofils zu behalten, nur mit einem Hinweis.",
         TidyLine { n } => {
             return if n == 1 {
                 "1 älterer Verlaufseintrag entfernt".into()

@@ -965,11 +965,57 @@ fn every() -> Vec<Msg> {
         AboutLicencesDesc,
         AboutLicencesShow,
         LicencesClose,
+        OptionsTitle,
+        OptionsIntro,
+        OptUnchanged,
+        OptUnchangedDesc,
+        OptActive,
+        OptActiveChange { n: 12 },
+        OptUndoHint { n: 12 },
+        OptUndoBtn { n: 12 },
+        OptNotOfferedAntiCheat,
+        OptNotOfferedNotMatched,
+        OptNotOfferedExeSwitch { n: 12 },
+        OptNotOfferedLive,
+        OptWarned,
+        OptLiveTitle,
+        OptLiveJournal,
+        OptLiveInterrupted { n: 12 },
+        OptLiveUnreadable { n: 12 },
+        OptLiveChanged { n: 12 },
+        PvPartsHeading,
+        PvPartRule,
+        PvPartRun,
+        PvPartArgs,
+        PvFromFix,
+        PvFromOption,
+        PvFromKept { n: 12 },
+        PvFallback {
+            run: false,
+            rule: true,
+            args: false,
+        },
+        PvFallback {
+            run: true,
+            rule: true,
+            args: true,
+        },
+        PvFallback {
+            run: true,
+            rule: false,
+            args: true,
+        },
+        PvFallback {
+            run: false,
+            rule: false,
+            args: false,
+        },
+        WarnKeptAntiCheat,
     ]
 }
 
 /// The number of messages: one more than the highest [`ordinal`].
-const COUNT: usize = 697;
+const COUNT: usize = 724;
 
 /// A message's position in the enum. The `match` is exhaustive: a new variant does not compile
 /// without an ordinal here, and [`every_ordinal_is_listed`] fails until [`every`] lists it.
@@ -1674,6 +1720,33 @@ fn ordinal(m: Msg) -> usize {
         AboutLicencesDesc => 694,
         AboutLicencesShow => 695,
         LicencesClose => 696,
+        OptionsTitle => 697,
+        OptionsIntro => 698,
+        OptUnchanged => 699,
+        OptUnchangedDesc => 700,
+        OptActive => 701,
+        OptActiveChange { .. } => 702,
+        OptUndoHint { .. } => 703,
+        OptUndoBtn { .. } => 704,
+        OptNotOfferedAntiCheat => 705,
+        OptNotOfferedNotMatched => 706,
+        OptNotOfferedExeSwitch { .. } => 707,
+        OptNotOfferedLive => 708,
+        OptWarned => 709,
+        OptLiveTitle => 710,
+        OptLiveJournal => 711,
+        OptLiveInterrupted { .. } => 712,
+        OptLiveUnreadable { .. } => 713,
+        OptLiveChanged { .. } => 714,
+        PvPartsHeading => 715,
+        PvPartRule => 716,
+        PvPartRun => 717,
+        PvPartArgs => 718,
+        PvFromFix => 719,
+        PvFromOption => 720,
+        PvFromKept { .. } => 721,
+        PvFallback { .. } => 722,
+        WarnKeptAntiCheat => 723,
     }
 }
 
@@ -1709,7 +1782,7 @@ fn every_ordinal_is_listed() {
     let missing: Vec<usize> = (0..COUNT).filter(|i| !seen[*i]).collect();
     assert!(missing.is_empty(), "ordinals not in every(): {missing:?}");
     // COUNT is right: the last variant has the highest ordinal.
-    assert_eq!(ordinal(Msg::LicencesClose), COUNT - 1);
+    assert_eq!(ordinal(Msg::WarnKeptAntiCheat), COUNT - 1);
 }
 
 #[test]

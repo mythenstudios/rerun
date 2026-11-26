@@ -363,6 +363,118 @@ fn the_window_draws_its_first_frames_fast() {
     let c = ui.get_applied().cards.row_data(0).unwrap();
     assert!(c.has_launch && c.launch.copy == "Copy launch option");
     assert!(c.launch.option.contains("--profile"));
+    // The options section of the game page (ADR 0032): a live value, an off value, the
+    // explanation of "Unchanged", the notice of the journal's state, and the preview's launch
+    // profile part by part. Drawn, with the names of the radio buttons a screen reader reads.
+    {
+        use rerun_core::catalog::model::TopoOption;
+        use rerun_core::exec::{LiveChoice, LiveError, LiveState};
+        use rerun_core::flow::{OptionView, ValueView};
+        use rerun_core::journal::TxnId;
+        use rerun_core::topo::ValueRefusal;
+
+        use super::generated::{PartsData, PreviewData, ProfilePartData, ProfilePartsData};
+
+        let txn: TxnId = "00000003-0123456789abcdef".parse().unwrap();
+        let o: TopoOption = serde_json::from_str(
+            r#"{"id":"graphics-api","title":"Graphics API","sources":[{"type":"pcgw","url":"https://www.pcgamingwiki.com/wiki/Invented"}],
+"values":[{"id":"dx9","title":"DirectX 9","status":"verified","steps":[{"start":"dx9.exe"}]},
+{"id":"dx10","title":"DirectX 10","status":"unverified","steps":[{"start":"dx10.exe"}]}]}"#,
+        )
+        .unwrap();
+        let views = [OptionView {
+            option: o.clone(),
+            values: vec![
+                ValueView {
+                    value: o.values[0].clone(),
+                    refused: None,
+                    warned: Vec::new(),
+                },
+                ValueView {
+                    value: o.values[1].clone(),
+                    refused: Some(ValueRefusal::NotMatched),
+                    warned: Vec::new(),
+                },
+            ],
+        }];
+        let live = Ok(LiveState {
+            choices: vec![LiveChoice {
+                txn,
+                topo: "invented".to_owned(),
+                option: "graphics-api".to_owned(),
+                value: "dx9".to_owned(),
+            }],
+            ..LiveState::default()
+        });
+        let mut g = crate::vm::game_loading(220, None, None, Lang::En);
+        *g.options = crate::vm::options(&views, &live, "invented", Lang::En);
+        let mut sel = crate::vm::Selection::default();
+        ui.set_game(super::game(&g, &sel));
+        ui.set_game_loading(false);
+        ui.set_game_open(true);
+        ui.set_page(0);
+        assert!(draw(), "the game page with options is drawn");
+        let with_options = picture();
+        let data = ui.get_game().options;
+        assert_eq!(data.options.row_count(), 1);
+        let opt = data.options.row_data(0).unwrap();
+        let names: Vec<String> = opt.choices.iter().map(|c| c.name.to_string()).collect();
+        assert_eq!(
+            names,
+            [
+                "Graphics API: Unchanged",
+                "Graphics API: DirectX 9",
+                "Graphics API: DirectX 10"
+            ]
+        );
+        let on: Vec<bool> = opt.choices.iter().map(|c| c.checked).collect();
+        let off: Vec<bool> = opt.choices.iter().map(|c| c.offered).collect();
+        assert_eq!(
+            (on, off),
+            (vec![false, true, false], vec![true, true, false])
+        );
+        assert!(opt.has_live && opt.live.after.contains("No. 3"));
+        assert!(opt.hint.is_empty(), "no explanation before the click");
+        // "Unchanged" while the value is live: the explanation and the undo of that change.
+        sel.choose(&g, 0, 0);
+        ui.set_game(super::game(&g, &sel));
+        assert!(draw(), "the explanation is drawn");
+        assert_ne!(picture(), with_options, "the explanation changes the page");
+        let opt = ui.get_game().options.options.row_data(0).unwrap();
+        assert!(opt.hint.contains("No. 3") && opt.undo_card == -1);
+        // The notice of a journal state that forbids every plan.
+        *g.options = crate::vm::options(
+            &views,
+            &Err(LiveError::Changed { txn }),
+            "invented",
+            Lang::De,
+        );
+        ui.set_game(super::game(&g, &crate::vm::Selection::default()));
+        assert!(draw(), "the notice is drawn");
+        assert!(ui.get_game().options.has_notice);
+        // The preview: the launch profile part by part, with its origin and the fallback.
+        ui.set_preview(PreviewData {
+            state: 2,
+            has_parts: true,
+            profile_parts: ProfilePartsData {
+                heading: "The launch profile, part by part".into(),
+                parts: model(vec![ProfilePartData {
+                    label: "Starts this program instead of Steam's own".into(),
+                    detail: "game_dx9.exe".into(),
+                    from: "From the option".into(),
+                    from_name: "graphics-api = dx9".into(),
+                }]),
+                fallback: PartsData {
+                    before: "If the Rerun starter cannot use the profile: ".into(),
+                    name: "FFLauncher.exe".into(),
+                    after: "".into(),
+                },
+            },
+            ..PreviewData::default()
+        });
+        assert!(draw(), "the preview with the parts is drawn");
+        ui.set_game_open(false);
+    }
     ui.set_page(0);
     let texts = |ui: &AppWindow| -> Vec<String> {
         let g = ui.global::<Str>();

@@ -231,7 +231,11 @@ impl Rig {
     }
 
     pub(super) fn preview_of(&mut self, picks: Vec<Pick>) -> PreviewVm {
-        let ev = self.run(Job::Plan { app_id: 220, picks });
+        let ev = self.run(Job::Plan {
+            app_id: 220,
+            picks,
+            choices: Vec::new(),
+        });
         let pv = match ev.as_slice() {
             [Event::Preview { vm, .. }] => (**vm).clone(),
             other => panic!("{other:?}"),
@@ -276,7 +280,7 @@ pub(super) fn applied_of(ev: &[Event]) -> &vm::AppliedVm {
         .unwrap_or_else(|| panic!("no applied page in {ev:?}"))
 }
 
-fn game_in(ev: &[Event]) -> &GameVm {
+pub(super) fn game_in(ev: &[Event]) -> &GameVm {
     ev.iter()
         .find_map(|e| match e {
             Event::Game(g) => Some(g),
@@ -462,7 +466,11 @@ fn aw13_the_preview_lists_every_change_and_stores_nothing() {
     let app_before = rig.snap_app();
     let before = rig.snap();
     rig.sys.fake_fs().record_calls(true);
-    let ev = rig.run(Job::Plan { app_id: 220, picks });
+    let ev = rig.run(Job::Plan {
+        app_id: 220,
+        picks,
+        choices: Vec::new(),
+    });
     let calls = rig.sys.fake_fs().take_calls();
     assert!(!calls.is_empty());
     assert!(
@@ -560,6 +568,7 @@ fn aw13_the_preview_lists_every_change_and_stores_nothing() {
     let g = de.page();
     let pv = de.run(Job::Plan {
         app_id: 220,
+        choices: Vec::new(),
         picks: Selection::preselected(&g).picks(&g),
     });
     let [Event::Preview { vm, .. }] = pv.as_slice() else {
@@ -576,7 +585,11 @@ fn aw13_an_apply_needs_the_shown_preview_with_exactly_its_hash() {
     let page = rig.page();
     let picks = Selection::preselected(&page).picks(&page);
     let before = rig.snap();
-    let ev = rig.run(Job::Plan { app_id: 220, picks });
+    let ev = rig.run(Job::Plan {
+        app_id: 220,
+        picks,
+        choices: Vec::new(),
+    });
     let [Event::Preview { vm, .. }] = ev.as_slice() else {
         panic!("{ev:?}");
     };
@@ -963,7 +976,11 @@ fn aw14_a_plan_reads_the_executables_again() {
         "the second visit came from the session"
     );
     let picks = Selection::preselected(&page).picks(&page);
-    let ev = rig.run(Job::Plan { app_id: 220, picks });
+    let ev = rig.run(Job::Plan {
+        app_id: 220,
+        picks,
+        choices: Vec::new(),
+    });
     assert!(matches!(ev.as_slice(), [Event::Preview { .. }]), "{ev:?}");
     assert_eq!(
         rig.session.games.reads(),
@@ -985,7 +1002,11 @@ fn aw14_a_game_that_reads_differently_hands_the_page_back_instead_of_a_preview()
         .fake_fs()
         .put_file(Path::new(&format!(r"{G}\game.exe")), &exe)
         .unwrap();
-    let ev = rig.run(Job::Plan { app_id: 220, picks });
+    let ev = rig.run(Job::Plan {
+        app_id: 220,
+        picks,
+        choices: Vec::new(),
+    });
     assert!(
         !ev.iter().any(|e| matches!(e, Event::Preview { .. })),
         "{ev:?}"
@@ -1002,6 +1023,7 @@ fn aw14_a_game_that_reads_differently_hands_the_page_back_instead_of_a_preview()
     // Nothing selected: the panel is cleared and the worker forgets what it held.
     let ev = rig.run(Job::Plan {
         app_id: 220,
+        choices: Vec::new(),
         picks: Vec::new(),
     });
     assert_eq!(ev, [Event::PreviewNone { app_id: 220 }]);
@@ -1158,6 +1180,7 @@ fn aw15_a_fix_that_needs_the_helper_is_never_planned_whatever_is_sent() {
     let game = rig.snap();
     let ev = rig.run(Job::Plan {
         app_id: 220,
+        choices: Vec::new(),
         picks: vec![pick("net", "block")],
     });
     assert!(
@@ -1185,7 +1208,11 @@ fn aw15_after_a_rescan_the_first_plan_hands_the_page_back() {
     let page = rig.page();
     let picks = Selection::preselected(&page).picks(&page);
     rig.session.pages.clear();
-    let ev = rig.run(Job::Plan { app_id: 220, picks });
+    let ev = rig.run(Job::Plan {
+        app_id: 220,
+        picks,
+        choices: Vec::new(),
+    });
     assert!(matches!(ev.first(), Some(Event::Result(_))), "{ev:?}");
     assert!(matches!(ev.last(), Some(Event::Game(_))), "{ev:?}");
     assert!(!ev.iter().any(|e| matches!(e, Event::Preview { .. })));
@@ -1238,6 +1265,7 @@ fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
     let page = game_in(&ev).clone();
     worker.send(Job::Plan {
         app_id: 220,
+        choices: Vec::new(),
         picks: Selection::preselected(&page).picks(&page),
     });
     let hash = match &wait_for(&worker, 1)[0] {

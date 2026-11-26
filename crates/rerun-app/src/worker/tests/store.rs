@@ -84,6 +84,7 @@ fn apply_fix(r: &mut DRig) -> TxnId {
     sel.toggle(&page, 0);
     let ev = r.run(Job::Plan {
         app_id: 220,
+        choices: Vec::new(),
         picks: vec![Pick {
             issue: "crash".to_owned(),
             variant: "fix-pack".to_owned(),

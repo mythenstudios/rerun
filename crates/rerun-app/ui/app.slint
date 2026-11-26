@@ -18,13 +18,14 @@ import "../assets/fonts/ibm-plex-mono/IBMPlexMono-Medium.ttf";
 import { Pressable, PageTitle, Badge, Button, PartsLine, Hairline, Muted, GroupHeading, DetailLine, NoticeCard, Card, RadioChoice } from "base.slint";
 import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
+import { OptionsSection } from "options.slint";
 import { CardView, HistEntryView, LaunchRowView } from "card.slint";
 import { DialogView, LicencesView } from "dialog.slint";
 import { SettingsPage } from "settings.slint";
-import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, LicenceData, Theme, Str, Reveal, Modal } from "base.slint";
+import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, OptionsData, OptionData, OptionChoiceData, ProfilePartData, ProfilePartsData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, LicenceData, Theme, Str, Reveal, Modal } from "base.slint";
 
 // What `ui` names through the generated code.
-export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, LicenceData, Theme, Str, Reveal, Modal }
+export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, OptionsData, OptionData, OptionChoiceData, ProfilePartData, ProfilePartsData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, LicenceData, Theme, Str, Reveal, Modal }
 
 component Toggle inherits Pressable {
     in-out property <bool> checked;
@@ -688,6 +689,8 @@ component GamePage inherits VerticalLayout {
     in property <PreviewData> preview;
     callback back();
     callback fix-toggled(int);
+    // An option and a choice of it, by position (ADR 0032).
+    callback option-chosen(int, int);
     callback apply(string);
     callback card-undo(int);
     callback card-forget(int);
@@ -852,6 +855,17 @@ component GamePage inherits VerticalLayout {
         }
     }
 
+    // The options come first: how the game starts is the user's choice, the problems below are
+    // what Rerun found (E3 a).
+    if !root.loading && (root.game.options.options.length > 0 || root.game.options.has-notice): OptionsSection {
+        data: root.game.options;
+        chosen(oi, ci) => {
+            root.option-chosen(oi, ci);
+        }
+        undo(i) => {
+            root.card-undo(i);
+        }
+    }
     // The reading text holds the place of the problems and the fixes until they arrive.
     if root.loading: VerticalLayout {
         padding-top: Theme.s5;
@@ -1131,7 +1145,7 @@ component GamePage inherits VerticalLayout {
     }
 
     // The preview is mandatory before any apply (rule 5).
-    if !root.loading && root.game.fixes.length > 0: PreviewPanel {
+    if !root.loading && (root.game.fixes.length > 0 || root.game.options.options.length > 0): PreviewPanel {
         p: root.preview;
         apply(h) => {
             root.apply(h);
@@ -1586,6 +1600,8 @@ export component AppWindow inherits Window {
     callback licences-close();
 
     callback fix-toggled(int);
+    // An option and a choice of it, by position (ADR 0032).
+    callback option-chosen(int, int);
     callback apply(string);
     callback card-undo(int);
     callback card-forget(int);
@@ -1826,6 +1842,9 @@ export component AppWindow inherits Window {
                                     }
                                     fix-toggled(i) => {
                                         root.fix-toggled(i);
+                                    }
+                                    option-chosen(oi, ci) => {
+                                        root.option-chosen(oi, ci);
                                     }
                                     apply(h) => {
                                         root.apply(h);

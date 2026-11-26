@@ -1225,6 +1225,7 @@ mod helper;
 mod history;
 mod language;
 mod open;
+mod options;
 mod problems;
 mod rebind;
 mod settings;

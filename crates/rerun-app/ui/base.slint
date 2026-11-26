@@ -72,6 +72,28 @@ export struct LaunchData {
     copied: string,
 }
 
+// One line of a list: Rerun's words around untrusted text. `name` (a game from the Steam library,
+// a package, a path) is drawn in its own element, never inside a sentence.
+export struct PartsData {
+    before: string,
+    name: string,
+    after: string,
+}
+
+// One part of the launch profile in the preview with where it comes from (ADR 0032).
+export struct ProfilePartData {
+    label: string,
+    detail: string,
+    from: string,
+    from-name: string,
+}
+
+export struct ProfilePartsData {
+    heading: string,
+    parts: [ProfilePartData],
+    fallback: PartsData,
+}
+
 // state: 0 nothing selected, 1 planning, 2 shown, 3 refused.
 export struct PreviewData {
     state: int,
@@ -81,6 +103,8 @@ export struct PreviewData {
     ops: [OpData],
     warnings: [WarnData],
     notes: [string],
+    has-parts: bool,
+    profile-parts: ProfilePartsData,
     has-launch: bool,
     launch: LaunchData,
     admin: string,
@@ -105,14 +129,6 @@ export struct CardData {
     // The Steam launch option while the transaction holds a launch profile.
     has-launch: bool,
     launch: LaunchData,
-}
-
-// One line of a list: Rerun's words around untrusted text. `name` (a game from the Steam library,
-// a package, a path) is drawn in its own element, never inside a sentence.
-export struct PartsData {
-    before: string,
-    name: string,
-    after: string,
 }
 
 // A heading and its lines (the clear dialog lists what goes and what stays). `subject` is what
@@ -226,6 +242,45 @@ export struct FixData {
     exclusive: [string],
 }
 
+// One choice of an option: "Unchanged" or a value (ADR 0032). `name` is the accessible name,
+// "<option>: <value>".
+export struct OptionChoiceData {
+    name: string,
+    label: string,
+    status: BadgeData,
+    has-status: bool,
+    checked: bool,
+    offered: bool,
+}
+
+// One option. `undo-card` is the index of the card of the live change (-1: none to open).
+export struct OptionData {
+    title: string,
+    sources: [string],
+    list: bool,
+    choices: [OptionChoiceData],
+    notes: [PartsData],
+    has-live: bool,
+    live: PartsData,
+    hint: string,
+    undo-label: string,
+    undo-card: int,
+}
+
+// The options section above the problems, with the game-level notice of a journal state that
+// forbids every plan of the game.
+export struct OptionsData {
+    title: string,
+    intro: string,
+    has-notice: bool,
+    notice-title: string,
+    notice-body: string,
+    notice-detail: string,
+    notice-undo-label: string,
+    notice-undo-card: int,
+    options: [OptionData],
+}
+
 export struct GameData {
     app-id: int,
     title: string,
@@ -236,6 +291,7 @@ export struct GameData {
     notes: [string],
     detail: string,
     problems: [ProblemData],
+    options: OptionsData,
     fixes: [FixData],
     applied: [CardData],
     // The game's Topos this version sets aside: ID and why, behind a details expander.

@@ -52,6 +52,21 @@ pub struct LiveExe {
     pub exe: RelPath,
 }
 
+/// An option value a live transaction of the game set (its plan's `PlanSource::choices`), for
+/// the game page (the UI slice of ADR 0032): the newest live transaction that chose a value of
+/// the option, per option.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveChoice {
+    /// The transaction (applied completely, not forgotten, no op reverted).
+    pub txn: TxnId,
+    /// The Topo it was planned from.
+    pub topo: String,
+    /// The option ID.
+    pub option: String,
+    /// The value ID.
+    pub value: String,
+}
+
 /// What is live for one game.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveState {
@@ -59,6 +74,8 @@ pub struct LiveState {
     pub profile: Option<LiveProfile>,
     /// Executables of live transactions of the game folder with package files or flags.
     pub exes: Vec<LiveExe>,
+    /// The option values live transactions of the game folder chose, newest per option.
+    pub choices: Vec<LiveChoice>,
 }
 
 /// Why the live state does not allow a plan for the game.
@@ -173,11 +190,13 @@ pub(crate) struct Holder {
 struct Scan {
     holder: Option<Holder>,
     exes: Vec<LiveExe>,
+    choices: Vec<LiveChoice>,
 }
 
 fn scan(j: &Journal<'_>, l: &Listing, name: Option<&RelPath>, game: Option<RootId>) -> Scan {
     let mut holder: Option<Holder> = None;
     let mut exes = Vec::new();
+    let mut choices: Vec<LiveChoice> = Vec::new();
     for t in &l.txns {
         let Ok(v) = &t.view else { continue };
         if matches!(v.state, TxnState::Empty) {
@@ -212,6 +231,25 @@ fn scan(j: &Journal<'_>, l: &Listing, name: Option<&RelPath>, game: Option<RootI
         if forgotten || matches!(full.state, TxnState::Closed(_)) {
             continue;
         }
+        // The option values of a transaction that is applied completely; a later one that chose
+        // another value of the same option replaces the entry (the listing is in order).
+        if full.state == TxnState::Applied
+            && full.ops.values().all(|o| o.reverted.is_none())
+            && p.roots
+                .iter()
+                .any(|r| r.kind == RootKind::Game && r.id == game)
+            && let Some(src) = &p.source
+        {
+            for c in &src.choices {
+                choices.retain(|x| !(x.topo == src.topo && x.option == c.option));
+                choices.push(LiveChoice {
+                    txn: t.id,
+                    topo: src.topo.clone(),
+                    option: c.option.clone(),
+                    value: c.value.clone(),
+                });
+            }
+        }
         for (k, i, exe) in bound_exes(&p, false) {
             let reverted = full
                 .ops
@@ -223,7 +261,11 @@ fn scan(j: &Journal<'_>, l: &Listing, name: Option<&RelPath>, game: Option<RootI
             }
         }
     }
-    Scan { holder, exes }
+    Scan {
+        holder,
+        exes,
+        choices,
+    }
 }
 
 /// The profile a usable holder wrote, decoded, with its SHA-256 (`Unreadable` for content that
@@ -282,6 +324,7 @@ pub fn live_state(
     Ok(LiveState {
         profile,
         exes: s.exes,
+        choices: s.choices,
     })
 }
 

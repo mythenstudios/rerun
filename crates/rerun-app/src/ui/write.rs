@@ -57,6 +57,124 @@ fn launch(l: &LaunchVm) -> LaunchData {
     }
 }
 
+// ---------- options (ADR 0032) ----------
+
+/// The index of the card of change `txn` among the game's cards, if that change can be undone
+/// there (the undo button of an option or of the game's notice opens that card's undo).
+fn undo_card(g: &GameVm, txn: Option<TxnId>) -> i32 {
+    txn.and_then(|t| g.applied.iter().position(|c| c.txn == t && c.can_undo))
+        .and_then(|i| i32::try_from(i).ok())
+        .unwrap_or(-1)
+}
+
+fn parts_line(l: &vm::TextLine) -> PartsData {
+    parts(l)
+}
+
+/// The options section of `g` with the user's choices: which choice of each option is checked,
+/// and the explanation under an option whose "Unchanged" was chosen while a value is live.
+pub(super) fn options_data(g: &GameVm, sel: &Selection) -> OptionsData {
+    let checked = sel.checked(g);
+    let o = &g.options;
+    OptionsData {
+        title: s(&o.title),
+        intro: s(&o.intro),
+        has_notice: o.notice.is_some(),
+        notice_title: o.notice.as_ref().map(|n| s(&n.title)).unwrap_or_default(),
+        notice_body: o.notice.as_ref().map(|n| s(&n.body)).unwrap_or_default(),
+        notice_detail: o
+            .notice
+            .as_ref()
+            .and_then(|n| n.detail.as_ref())
+            .map(shown)
+            .unwrap_or_default(),
+        notice_undo_label: o
+            .notice
+            .as_ref()
+            .and_then(|n| n.undo_button.as_deref())
+            .map(s)
+            .unwrap_or_default(),
+        notice_undo_card: undo_card(g, o.notice.as_ref().and_then(|n| n.txn)),
+        options: model(
+            o.options
+                .iter()
+                .enumerate()
+                .map(|(oi, opt)| {
+                    let on = checked.get(oi).copied().unwrap_or(0);
+                    let hinted = sel.hint() == Some(oi);
+                    OptionData {
+                        title: shown(&opt.title),
+                        sources: model(opt.sources.iter().map(shown).collect()),
+                        list: opt.list,
+                        choices: model(
+                            opt.choices
+                                .iter()
+                                .enumerate()
+                                .map(|(ci, c)| OptionChoiceData {
+                                    name: s(&c.name),
+                                    label: shown(&c.label),
+                                    status: c.status.as_ref().map(badge).unwrap_or_default(),
+                                    has_status: c.status.is_some(),
+                                    checked: ci == on,
+                                    offered: c.enabled,
+                                })
+                                .collect(),
+                        ),
+                        notes: model(
+                            opt.choices
+                                .iter()
+                                .filter_map(|c| {
+                                    c.note.as_ref().map(|n| PartsData {
+                                        before: SharedString::new(),
+                                        name: shown(&c.label),
+                                        after: s(format!(": {n}")),
+                                    })
+                                })
+                                .collect(),
+                        ),
+                        has_live: opt.live.is_some(),
+                        live: opt
+                            .live
+                            .as_ref()
+                            .map(|l| parts_line(&l.line))
+                            .unwrap_or_default(),
+                        hint: opt
+                            .live
+                            .as_ref()
+                            .filter(|_| hinted)
+                            .map(|l| s(&l.undo_hint))
+                            .unwrap_or_default(),
+                        undo_label: opt
+                            .live
+                            .as_ref()
+                            .map(|l| s(&l.undo_button))
+                            .unwrap_or_default(),
+                        undo_card: undo_card(g, opt.live.as_ref().map(|l| l.txn)),
+                    }
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// The launch profile's parts of a preview, drawn.
+fn profile_parts(p: &vm::PartsVm) -> ProfilePartsData {
+    ProfilePartsData {
+        heading: s(&p.heading),
+        parts: model(
+            p.parts
+                .iter()
+                .map(|x| ProfilePartData {
+                    label: s(&x.label),
+                    detail: x.detail.as_ref().map(shown).unwrap_or_default(),
+                    from: s(&x.from),
+                    from_name: x.from_name.as_ref().map(shown).unwrap_or_default(),
+                })
+                .collect(),
+        ),
+        fallback: parts(&p.fallback),
+    }
+}
 /// The preview panel without a preview: `state` 0 nothing selected, 1 being made.
 pub(super) fn preview_none(state: i32) -> PreviewData {
     PreviewData {
@@ -85,6 +203,8 @@ pub(super) fn preview_data(p: &PreviewVm, ready: bool) -> PreviewData {
         ops: model(p.ops.iter().map(op).collect()),
         warnings: model(p.warnings.iter().map(warn).collect()),
         notes: model(p.notes.iter().map(s).collect()),
+        has_parts: p.parts.is_some(),
+        profile_parts: p.parts.as_ref().map(profile_parts).unwrap_or_default(),
         has_launch: p.launch.is_some(),
         launch: p.launch.as_ref().map(launch).unwrap_or_default(),
         admin: s(&p.admin),
@@ -250,6 +370,34 @@ pub(super) fn show_selection(ui: &AppWindow, st: &State) {
             rows.set_row_data(i, row);
         }
     }
+    show_options(ui, st);
+}
+
+/// Marks the checked choice of every option and the explanation under an option whose "Unchanged"
+/// was chosen while a value is live (updated in place, so the focused choice keeps the focus).
+pub(super) fn show_options(ui: &AppWindow, st: &State) {
+    let Some(page) = &st.page else {
+        return;
+    };
+    let data = options_data(page, &st.selection);
+    let rows = ui.get_game().options.options;
+    for (oi, new) in data.options.iter().enumerate() {
+        let Some(mut row) = rows.row_data(oi) else {
+            continue;
+        };
+        for (ci, c) in new.choices.iter().enumerate() {
+            if let Some(mut old) = row.choices.row_data(ci)
+                && old.checked != c.checked
+            {
+                old.checked = c.checked;
+                row.choices.set_row_data(ci, old);
+            }
+        }
+        if row.hint != new.hint {
+            row.hint = new.hint.clone();
+            rows.set_row_data(oi, row);
+        }
+    }
 }
 
 /// Asks the worker for the preview of the selection (or clears it when nothing is selected).
@@ -258,9 +406,15 @@ pub(super) fn plan_selection(ui: &AppWindow, st: &mut State) {
         return;
     };
     let picks = st.selection.picks(page);
+    let choices = st.selection.choices(page);
+    let nothing = st.selection.is_empty(page);
     st.preview_hash = None;
-    ui.set_preview(preview_none(i32::from(!picks.is_empty())));
-    st.worker.send(Job::Plan { app_id, picks });
+    ui.set_preview(preview_none(i32::from(!nothing)));
+    st.worker.send(Job::Plan {
+        app_id,
+        picks,
+        choices,
+    });
 }
 
 /// Shows an outcome calmly above the page.
@@ -340,6 +494,25 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             return;
         }
         st.selection.toggle(&page, i);
+        show_selection(&ui, &st);
+        plan_selection(&ui, &mut st);
+    });
+
+    // A choice of an option: the rules (which one is checked, "Unchanged" with a live value) are
+    // `vm::Choices`', the window only asks. The one selection is planned again.
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_option_chosen(move |oi, ci| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut st = st.borrow_mut();
+        let (Some(page), Ok(oi), Ok(ci)) =
+            (st.page.clone(), usize::try_from(oi), usize::try_from(ci))
+        else {
+            return;
+        };
+        st.selection.choose(&page, oi, ci);
         show_selection(&ui, &st);
         plan_selection(&ui, &mut st);
     });

@@ -1,0 +1,260 @@
+// The options section of the game page (ADR 0032, docs/07-ui.md "Options"): per option a row of
+// radio-style choices (a list from five values on), the first one always "Unchanged". Only
+// pictures of the view model: the rules (which choice is checked, what a click does) are
+// `vm::Choices`. Untrusted text (option and value titles, links) is drawn in its own element.
+
+import { Pressable, Badge, Button, Card, GroupHeading, Muted, PartsLine } from "base.slint";
+import { OptionsData, OptionData, OptionChoiceData, Theme, Str, Modal } from "base.slint";
+
+// One choice: the radio dot, the value and how well it is tested. A value that is not offered is
+// drawn quiet and cannot be chosen; its reason stands under the row.
+component ChoiceButton inherits Pressable {
+    in property <OptionChoiceData> c;
+    ring-inset: -3px;
+    horizontal-stretch: 1;
+    min-width: 0;
+    enabled: root.c.offered && (!Modal.open || root.in-dialog);
+    accessible-role: radio-button;
+    accessible-checkable: true;
+    accessible-checked: root.c.checked;
+    accessible-label: root.c.name;
+    accessible-description: root.c.has-status ? root.c.status.word : "";
+    accessible-action-default => {
+        if (root.enabled) {
+            root.activated();
+        }
+    }
+    Rectangle {
+        border-radius: Theme.radius-s;
+        background: root.c.checked ? Theme.raised4 : (root.hovered && root.enabled ? Theme.raised3 : Theme.raised2);
+        border-width: root.c.checked ? Theme.hair * 2 : Theme.hair;
+        border-color: root.c.checked ? Theme.strong : Theme.line;
+    }
+
+    HorizontalLayout {
+        padding: Theme.s3;
+        spacing: Theme.s2;
+        VerticalLayout {
+            alignment: start;
+            padding-top: Theme.hair * 2;
+            Rectangle {
+                width: Theme.s4;
+                height: Theme.s4;
+                border-radius: self.width / 2;
+                border-width: Theme.hair * 2;
+                border-color: root.enabled ? Theme.strong : Theme.faint;
+                Rectangle {
+                    visible: root.c.checked;
+                    width: parent.width / 2;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    background: root.enabled ? Theme.strong : Theme.faint;
+                }
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.s1;
+            Text {
+                text: root.c.label;
+                color: root.enabled ? Theme.strong : Theme.faint;
+                font-size: Theme.fs-m;
+                font-weight: root.c.checked ? 600 : 500;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+
+            if root.c.has-status: HorizontalLayout {
+                alignment: start;
+                Badge {
+                    data: root.c.status;
+                    accessible-role: none;
+                }
+            }
+        }
+    }
+}
+
+component OptionCard inherits Card {
+    in property <OptionData> o;
+    callback chosen(int);
+    callback undo(int);
+    accessible-role: groupbox;
+    accessible-label: root.o.title;
+    VerticalLayout {
+        padding: Theme.s5;
+        spacing: Theme.s3;
+        Text {
+            text: root.o.title;
+            color: Theme.strong;
+            font-size: Theme.fs-l;
+            font-weight: 600;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+
+        if root.o.has-live: PartsLine {
+            p: root.o.live;
+            size: Theme.fs-m;
+        }
+        if root.o.sources.length > 0: VerticalLayout {
+            spacing: Theme.hair * 2;
+            Text {
+                text: Str.fix-sources;
+                color: Theme.muted;
+                font-size: Theme.fs-s;
+            }
+
+            for src in root.o.sources: Text {
+                text: src;
+                color: Theme.text;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+            }
+        }
+        if !root.o.list: HorizontalLayout {
+            spacing: Theme.s2;
+            for c[ci] in root.o.choices: ChoiceButton {
+                c: c;
+                activated => {
+                    root.chosen(ci);
+                }
+            }
+        }
+        if root.o.list: VerticalLayout {
+            spacing: Theme.s2;
+            for c[ci] in root.o.choices: ChoiceButton {
+                c: c;
+                activated => {
+                    root.chosen(ci);
+                }
+            }
+        }
+        for n in root.o.notes: PartsLine {
+            p: n;
+            tone: Theme.muted;
+        }
+        // "Unchanged" while a value is live means undoing that change: said, never planned.
+        if root.o.hint != "": Rectangle {
+            background: Theme.raised2;
+            border-radius: Theme.radius-s;
+            accessible-role: AccessibleRole.text;
+            accessible-label: root.o.hint;
+            Rectangle {
+                x: 0;
+                width: Theme.hair * 2;
+                background: Theme.line-strong;
+            }
+
+            VerticalLayout {
+                padding: Theme.s3;
+                padding-left: Theme.s4;
+                spacing: Theme.s3;
+                Text {
+                    text: root.o.hint;
+                    color: Theme.text;
+                    font-size: Theme.fs-m;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+
+                if root.o.undo-card >= 0: HorizontalLayout {
+                    alignment: start;
+                    Button {
+                        text: root.o.undo-label;
+                        enabled: !Modal.open && !Modal.working;
+                        activated => {
+                            root.undo(root.o.undo-card);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component OptionsSection inherits VerticalLayout {
+    in property <OptionsData> data;
+    // The option and the choice, by position (the view model decides what the click means).
+    callback chosen(int, int);
+    // The undo of a change, by the index of its card.
+    callback undo(int);
+    spacing: Theme.s3;
+    padding-top: Theme.s5;
+    accessible-role: groupbox;
+    accessible-label: root.data.title;
+    GroupHeading {
+        text: root.data.title;
+    }
+
+    Muted {
+        text: root.data.intro;
+    }
+
+    // The journal's state forbids every plan of this game: a notice of the game, not only a
+    // failed preview.
+    if root.data.has-notice: Rectangle {
+        background: Theme.raised2;
+        border-radius: Theme.radius-s;
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.data.notice-title;
+        accessible-description: root.data.notice-body;
+        Rectangle {
+            x: 0;
+            width: Theme.hair * 2;
+            background: Theme.line-strong;
+        }
+
+        VerticalLayout {
+            padding: Theme.s4;
+            padding-left: Theme.s5;
+            spacing: Theme.s2;
+            Text {
+                text: root.data.notice-title;
+                color: Theme.strong;
+                font-size: Theme.fs-m;
+                font-weight: 600;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+
+            Text {
+                text: root.data.notice-body;
+                color: Theme.text;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+
+            if root.data.notice-detail != "": Text {
+                text: root.data.notice-detail;
+                color: Theme.muted;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-s;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+            if root.data.notice-undo-card >= 0: HorizontalLayout {
+                alignment: start;
+                Button {
+                    text: root.data.notice-undo-label;
+                    enabled: !Modal.open && !Modal.working;
+                    activated => {
+                        root.undo(root.data.notice-undo-card);
+                    }
+                }
+            }
+        }
+    }
+    for o[oi] in root.data.options: OptionCard {
+        o: o;
+        chosen(ci) => {
+            root.chosen(oi, ci);
+        }
+        undo(i) => {
+            root.undo(i);
+        }
+    }
+}

@@ -4,6 +4,7 @@
 
 mod clear;
 mod history;
+mod options;
 mod problems;
 mod rebind;
 mod store;
