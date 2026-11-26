@@ -402,6 +402,9 @@ pub struct Preview {
     /// its order; empty for a plan from a step file. Display only (the app's "report a problem",
     /// P5-10a).
     pub variants: Vec<String>,
+    /// The user's own settings the plan recorded ("Advanced", ADR 0029): display only, for the
+    /// app's cards and history; the ops are the truth.
+    pub manual: Option<super::Manual>,
 }
 
 /// `RHS` letters of the set attributes, `-` for none.
@@ -876,6 +879,7 @@ pub fn preview(p: &Plan) -> Preview {
         variants: p.source.as_ref().map_or_else(Vec::new, |s| {
             s.picks.iter().map(|k| k.variant.clone()).collect()
         }),
+        manual: p.manual.clone(),
     }
 }
 

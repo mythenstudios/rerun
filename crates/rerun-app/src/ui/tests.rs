@@ -333,6 +333,7 @@ fn the_window_draws_its_first_frames_fast() {
         can_undo: true,
         can_forget: true,
         launch,
+        own: None,
     };
     let option = LaunchVm {
         heading: "Steam launch option".to_owned(),
@@ -473,6 +474,137 @@ fn the_window_draws_its_first_frames_fast() {
             ..PreviewData::default()
         });
         assert!(draw(), "the preview with the parts is drawn");
+        // The Advanced section (ADR 0029): collapsed at first, with every control named when it
+        // is open; a live rule, the readout and a lock are drawn in both languages.
+        for lang in [Lang::En, Lang::De] {
+            use crate::vm::{AdvancedVm, Field, FixSel, Form, ReadoutVm};
+            use rerun_core::exec::LiveManual;
+            use rerun_core::flow::{AdvancedStart, AdvancedView, Bitness};
+            use rerun_core::plan::{Manual, ManualLaunch, ManualMethod};
+            use rerun_core::prim::CpuRuleSpec;
+            let en = lang == Lang::En;
+            let rule = Manual {
+                launch: Some(ManualLaunch {
+                    cpu: Some(CpuRuleSpec {
+                        max_threads: Some(8),
+                        ..CpuRuleSpec::default()
+                    }),
+                    ..ManualLaunch::default()
+                }),
+                ..Manual::default()
+            };
+            let game_exe = rerun_core::path::RelPath::parse("game.exe").unwrap();
+            let view = AdvancedView {
+                main_exe: Some(game_exe.clone()),
+                bitness: Bitness::X64,
+                start: AdvancedStart::Choose(vec![game_exe]),
+                default_method: ManualMethod::Direct,
+                anti_cheat: false,
+                kept_run: false,
+                rule_txn: None,
+                tokens: &["DISABLEDXMAXIMIZEDWINDOWEDMODE", "HIGHDPIAWARE"],
+                live: Some(LiveManual {
+                    txn,
+                    manual: rule,
+                    launch_txn: Some(txn),
+                    flags: Vec::new(),
+                }),
+                logical: Some(32),
+                steps: vec![1, 2, 4, 8, 16, 31],
+                hybrid: true,
+            };
+            let a = AdvancedVm {
+                view: Some(view),
+                lang,
+            };
+            let mut g = crate::vm::game_loading(220, None, None, lang);
+            *g.advanced = a.clone();
+            let mut sel = crate::vm::Selection::preselected(&g);
+            ui.set_advanced_open(false);
+            ui.set_game(super::game(&g, &sel));
+            assert!(draw(), "the collapsed section is drawn");
+            let closed = picture();
+            ui.set_advanced_open(true);
+            assert!(draw(), "the open section is drawn");
+            assert_ne!(picture(), closed, "opening it changes the page");
+            let d = ui.get_game().advanced;
+            assert!(d.available && !d.active.is_empty());
+            assert_eq!(d.name, if en { "Advanced" } else { "Erweitert" });
+            assert_eq!(
+                d.threads_label,
+                if en {
+                    "Maximum threads"
+                } else {
+                    "Maximale Threads"
+                }
+            );
+            assert_eq!(d.smt.label, "SMT");
+            assert_eq!(
+                d.l3.label,
+                if en {
+                    "One cache group"
+                } else {
+                    "Ein Cache-Bereich"
+                }
+            );
+            assert_eq!(
+                d.flags.row_data(0).unwrap().label,
+                if en {
+                    "Fullscreen optimisations off"
+                } else {
+                    "Vollbildoptimierung aus"
+                }
+            );
+            assert!(d.has_prefer && d.has_start);
+            assert_eq!(
+                d.priority.choices.row_data(3).unwrap().name,
+                if en {
+                    "Priority: High"
+                } else {
+                    "Priorität: Hoch"
+                }
+            );
+            // A click changes rows in place (the models stay, so the focus stays) and the answer
+            // of the worker fills the readout.
+            let rows_before = d.flags.row_count();
+            sel.edit(&g, Field::Flag(0));
+            let mut gd = ui.get_game();
+            let render = sel.advanced(&g);
+            gd.advanced = super::advanced::data(
+                &gd.advanced,
+                &render,
+                Some(&ReadoutVm {
+                    line: "8 of 32 logical processors: cache group 0 (L3, 32 MB), cores 0\u{2013}7, without SMT"
+                        .to_owned(),
+                    detail: None,
+                    note: Some("A 32-bit program sees only processors 0 to 31.".to_owned()),
+                }),
+                -1,
+            );
+            ui.set_game(gd);
+            assert!(draw(), "the clicked form is drawn");
+            let d = ui.get_game().advanced;
+            assert!(d.flags.row_data(0).unwrap().checked);
+            assert!(d.readout.contains("8 of 32") && !d.readout_note.is_empty());
+            assert_eq!(d.flags.row_count(), rows_before, "the rows are kept");
+            // A chosen CPU fix: the launch part is locked with its reason.
+            let mut f = Form::prefilled(&a);
+            f.edit(&a, &FixSel::default(), Field::Smt(false));
+            let locked = a.render(
+                &f,
+                &FixSel {
+                    cpu: Some("limit".to_owned()),
+                    layer: None,
+                },
+            );
+            let mut gd = ui.get_game();
+            gd.advanced = super::advanced::data(&gd.advanced, &locked, None, -1);
+            ui.set_game(gd);
+            assert!(draw(), "the locked section is drawn");
+            let d = ui.get_game().advanced;
+            assert!(d.has_launch_note && !d.smt.enabled && d.launch_note.name == "limit");
+            ui.set_advanced_open(false);
+        }
         ui.set_game_open(false);
     }
     ui.set_page(0);

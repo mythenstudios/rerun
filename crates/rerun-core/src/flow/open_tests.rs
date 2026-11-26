@@ -236,6 +236,7 @@ fn ol3_the_report_holds_only_rerun_s_own_facts() {
         "- Index: seq 9\n",
         "- Topos: invented-game rev 4 (active)\n",
         "- Open changes: none\n",
+        "- Own settings (Advanced): no\n",
         "- Graphics: AMD ",
         "- CPU: ",
         "- Last start: none recorded\n",
@@ -290,6 +291,7 @@ fn ol3_the_most_facts_still_fit_and_decode_exactly() {
             .collect(),
         cpu: "4096 logical, 2048 cores, 256 L3 groups".to_owned(),
         last_start: "rule not applied (topology_unavailable)".to_owned(),
+        own: true,
     };
     // Uncut, it would not fit.
     let full = body(u32::MAX, &f, [usize::MAX; 3]);
@@ -302,6 +304,11 @@ fn ol3_the_most_facts_still_fit_and_decode_exactly() {
     );
     assert_eq!(carried(r.url().as_str()), (r.title.clone(), r.body.clone()));
     assert!(r.body.contains(" more"), "{}", r.body);
+    assert!(
+        r.body.contains("- Own settings (Advanced): yes\n"),
+        "{}",
+        r.body
+    );
     assert!(plain(&r.body));
 }
 

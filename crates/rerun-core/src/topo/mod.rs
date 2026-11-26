@@ -2031,18 +2031,24 @@ fn manual_launch(
                     start: crate::escape::path(s.as_str()).to_string(),
                 });
             }
-            let method = match topo.launch.as_ref().and_then(|l| l.method.map(|m| (m, l))) {
-                Some((Method::Auto, l)) if l.chain != [Chain::Steam] => MethodSpec::Watch,
-                Some((Method::Watch, _)) => MethodSpec::Watch,
-                _ => MethodSpec::Direct,
-            };
             Ok(LaunchPlan {
-                method,
+                method: method_without_start(topo),
                 start: s.clone(),
                 auto: false,
             })
         }
         (Err(p), _) => Err(EngineError::Launch(*p)),
+    }
+}
+
+/// The method of a Topo that names no start (or no method), where the user's own `start` takes
+/// over: the Topo's `watch` (an `auto` with a chain longer than Steam's counts as one), else
+/// `direct`. The Advanced section shows it as the default method.
+pub fn method_without_start(topo: &Topo) -> MethodSpec {
+    match topo.launch.as_ref().and_then(|l| l.method.map(|m| (m, l))) {
+        Some((Method::Auto, l)) if l.chain != [Chain::Steam] => MethodSpec::Watch,
+        Some((Method::Watch, _)) => MethodSpec::Watch,
+        _ => MethodSpec::Direct,
     }
 }
 

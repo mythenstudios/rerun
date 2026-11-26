@@ -932,6 +932,7 @@ fn kinds(ev: &[Event]) -> Vec<&'static str> {
             Event::History(_) => "history",
             Event::System(_) => "system",
             Event::Orphans(_) => "orphans",
+            Event::Readout { .. } => "readout",
             Event::Preview { .. } => "preview",
             Event::PreviewNone { .. } => "preview-none",
             Event::PreviewRefused { .. } => "preview-refused",
@@ -1219,6 +1220,7 @@ fn aw_fx_set_aside_topos_on_the_row_and_the_game_page() {
     }
 }
 
+mod advanced;
 mod clear;
 mod download;
 mod helper;

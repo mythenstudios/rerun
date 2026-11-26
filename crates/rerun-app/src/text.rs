@@ -1831,6 +1831,201 @@ pub enum Msg {
     WarnManualAntiCheat,
     /// A warning: the plan's CPU rule and priority would replace those of a live change.
     WarnReplacesRule,
+    /// The game page: the accessible name of the Advanced section's button.
+    AdvName,
+    /// The game page: the visible heading of the Advanced section.
+    AdvTitle,
+    /// The game page: what the Advanced section is.
+    AdvIntro,
+    /// The Advanced section: own settings a live change applied.
+    AdvActive {
+        /// A value.
+        n: u32,
+    },
+    /// The Advanced section: the Topo's launch method has no own launch settings.
+    AdvUnavailable,
+    /// The Advanced section: the CPU rule's heading.
+    AdvCpuHeading,
+    /// The Advanced section: the maximum threads control.
+    AdvThreads,
+    /// The Advanced section: no thread limit.
+    AdvThreadsNone,
+    /// The Advanced section: a thread limit.
+    AdvThreadsValue {
+        /// A value.
+        n: u32,
+    },
+    /// The Advanced section: lowers the thread limit.
+    AdvThreadsLess,
+    /// The Advanced section: raises the thread limit.
+    AdvThreadsMore,
+    /// The Advanced section: the SMT switch.
+    AdvSmt,
+    /// The Advanced section: what the SMT switch does.
+    AdvSmtDesc,
+    /// The Advanced section: the one-cache-group switch.
+    AdvL3,
+    /// The Advanced section: what the one-cache-group switch does.
+    AdvL3Desc,
+    /// The Advanced section: which cores to prefer.
+    AdvPrefer,
+    /// The Advanced section: every core.
+    AdvPreferAny,
+    /// The Advanced section: the performance cores.
+    AdvPreferPerf,
+    /// The Advanced section: what to leave out first.
+    AdvExclude,
+    /// The Advanced section: leave nothing out.
+    AdvExcludeNone,
+    /// The Advanced section: leave out CPU 0.
+    AdvExcludeThread,
+    /// The Advanced section: leave out the core of CPU 0.
+    AdvExcludeCore,
+    /// The Advanced section: how the rule is held.
+    AdvMode,
+    /// The Advanced section: the hard mode.
+    AdvModeHard,
+    /// The Advanced section: the soft mode.
+    AdvModeSoft,
+    /// The Advanced section: the launch method.
+    AdvMethod,
+    /// The Advanced section: the method the Topo names.
+    AdvMethodTopo {
+        /// A value.
+        watch: bool,
+    },
+    /// The Advanced section: the method direct.
+    AdvMethodDirect,
+    /// The Advanced section: the method watch.
+    AdvMethodWatch,
+    /// The Advanced section: the priority class.
+    AdvPriority,
+    /// The Advanced section: no priority change.
+    AdvPrioNone,
+    /// The Advanced section: the normal priority.
+    AdvPrioNormal,
+    /// The Advanced section: the above-normal priority.
+    AdvPrioAbove,
+    /// The Advanced section: the high priority.
+    AdvPrioHigh,
+    /// The Advanced section: the compatibility flags.
+    AdvFlags,
+    /// The Advanced section: the fullscreen optimisations flag.
+    AdvFlagFso,
+    /// The Advanced section: the DPI scaling flag.
+    AdvFlagDpi,
+    /// The Advanced section: a flag a live change set.
+    AdvFlagActive {
+        /// A value.
+        n: u32,
+    },
+    /// The Advanced section: the program Steam starts.
+    AdvStart,
+    /// The Advanced section: why the program is asked.
+    AdvStartDesc,
+    /// The Advanced section: the readout's heading.
+    AdvReadTitle,
+    /// The readout: how many processors the rule selects.
+    AdvReadSel {
+        /// A value.
+        threads: u32,
+        /// A value.
+        of: u32,
+    },
+    /// The readout: the one cache group of the selection.
+    AdvReadCache {
+        /// A value.
+        n: u32,
+        /// A value.
+        level: u32,
+        /// A value.
+        mb: u64,
+    },
+    /// The readout: the label before the core numbers.
+    AdvReadCores {
+        /// A value.
+        one: bool,
+    },
+    /// The readout: whether both threads of a core are used.
+    AdvReadSmt {
+        /// A value.
+        on: bool,
+    },
+    /// The readout: the processor group of a PC with several.
+    AdvReadGroup {
+        /// A value.
+        n: u32,
+    },
+    /// The readout: a 32-bit program on a large processor group.
+    AdvReadCap,
+    /// The readout: no CPU limit is set.
+    AdvReadNoRule,
+    /// The readout: the rule selects nothing here.
+    AdvReadEmpty,
+    /// The readout: the processors cannot be read.
+    AdvReadTopology,
+    /// The readout: a fix's rule is chosen instead.
+    AdvReadLocked,
+    /// A lock: a chosen fix sets the CPU rule.
+    AdvLockCpuFix,
+    /// A lock: a chosen fix sets flags for the same program.
+    AdvLockLayerFix,
+    /// A lock: anti-cheat found.
+    AdvLockAntiCheat,
+    /// A lock: Steam starts a launcher, not the game.
+    AdvLockLauncher,
+    /// A lock: an option value starts another program.
+    AdvLockRun,
+    /// A problem of the form: a method alone.
+    AdvErrNoRule,
+    /// A problem of the form: the CPU rule limits nothing.
+    AdvErrNoRestriction,
+    /// A problem of the form: another one, with the core's text.
+    AdvErrOther,
+    /// A problem of the form: the start program is missing.
+    AdvNeedsStart,
+    /// A note: the own rule replaces the rule of a live change.
+    AdvReplaces {
+        /// A value.
+        n: u32,
+    },
+    /// A note: clearing the launch settings means undoing the live change.
+    AdvUndoHint {
+        /// A value.
+        n: u32,
+    },
+    /// A card and the report: the heading of the own settings.
+    AdvSumTitle,
+    /// A card: the thread limit.
+    AdvSumThreads {
+        /// A value.
+        n: u32,
+    },
+    /// A card: SMT is off.
+    AdvSumNoSmt,
+    /// A card: one cache group.
+    AdvSumL3,
+    /// A card: performance cores.
+    AdvSumPerf,
+    /// A card: what is left out.
+    AdvSumExclude {
+        /// A value.
+        core: bool,
+    },
+    /// A card: the soft mode.
+    AdvSumSoft,
+    /// A card: the launch method.
+    AdvSumMethod {
+        /// A value.
+        watch: bool,
+    },
+    /// A card: the label before the priority.
+    AdvSumPriority,
+    /// A card: the number of flags.
+    AdvSumFlags {
+        /// A value.
+        n: u32,
+    },
 }
 
 /// The text of `m` in `lang`.
@@ -2879,9 +3074,95 @@ fn en(m: Msg) -> Cow<'static, str> {
             return s.into();
         }
         WarnKeptAntiCheat => "An anti-cheat rule allows keeping this part of the launch profile only with a warning.",
-        PvFromManual => "Your own setting (Advanced), not checked",
+        PvFromManual => "From Advanced (your own setting, not checked)",
         WarnManualAntiCheat => "An anti-cheat rule allows your own setting only with a warning.",
-        WarnReplacesRule => "This change would replace the CPU rule and priority of an earlier change; undoing this one brings them back.",
+        WarnReplacesRule => "This change replaces the CPU rule and priority an earlier change set, a fix or your own settings; undoing this one brings them back.",
+        AdvName => "Advanced",
+        AdvTitle => "Advanced (your own settings, not checked)",
+        AdvIntro => "Set the CPU rule, the launch method, the priority and compatibility flags yourself. No Topo checked these settings. They go through the same preview as the fixes, and undoing the change takes them back.",
+        AdvActive { n } => return format!("Active: own rule (change No. {n})").into(),
+        AdvUnavailable => "This game's Topo uses a launch method for which Rerun offers no own CPU rule yet. Compatibility flags still work.",
+        AdvCpuHeading => "CPU rule",
+        AdvThreads => "Maximum threads",
+        AdvThreadsNone => "No limit",
+        AdvThreadsValue { n } => {
+            return if n == 1 { "1 thread".into() } else { format!("{n} threads").into() };
+        }
+        AdvThreadsLess => "Maximum threads: fewer",
+        AdvThreadsMore => "Maximum threads: more",
+        AdvSmt => "SMT",
+        AdvSmtDesc => "Use both threads of a core. Off: one thread per core.",
+        AdvL3 => "One cache group",
+        AdvL3Desc => "Keep the game on the processors that share one last-level cache.",
+        AdvPrefer => "Prefer",
+        AdvPreferAny => "Any core",
+        AdvPreferPerf => "Performance cores",
+        AdvExclude => "Leave out first",
+        AdvExcludeNone => "Nothing",
+        AdvExcludeThread => "CPU 0 (one thread)",
+        AdvExcludeCore => "Core 0 (all its threads)",
+        AdvMode => "Mode",
+        AdvModeHard => "Hard: the game cannot leave the processors",
+        AdvModeSoft => "Soft: Windows prefers these processors",
+        AdvMethod => "Launch method",
+        AdvMethodTopo { watch } => {
+            return if watch { "Like the Topo (watch)".into() } else { "Like the Topo (direct)".into() };
+        }
+        AdvMethodDirect => "Direct",
+        AdvMethodWatch => "Watch",
+        AdvPriority => "Priority",
+        AdvPrioNone => "Unchanged",
+        AdvPrioNormal => "Normal",
+        AdvPrioAbove => "Above normal",
+        AdvPrioHigh => "High",
+        AdvFlags => "Compatibility flags",
+        AdvFlagFso => "Fullscreen optimisations off",
+        AdvFlagDpi => "DPI scaling by the application",
+        AdvFlagActive { n } => return format!("Applied by change No. {n}. To remove it, undo that change.").into(),
+        AdvStart => "Program Steam starts",
+        AdvStartDesc => "This game's Topo names no start program. Choose the program Steam starts for your launch settings.",
+        AdvReadTitle => "On this PC",
+        AdvReadSel { threads, of } => return format!("{threads} of {of} logical processors").into(),
+        AdvReadCache { n, level, mb } => return format!("cache group {n} (L{level}, {mb} MB)").into(),
+        AdvReadCores { one } => {
+            return if one { "core".into() } else { "cores".into() };
+        }
+        AdvReadSmt { on } => {
+            return if on { "with SMT".into() } else { "without SMT".into() };
+        }
+        AdvReadGroup { n } => return format!("processor group {n}").into(),
+        AdvReadCap => "A 32-bit program sees only processors 0 to 31 of a processor group.",
+        AdvReadNoRule => "No CPU limit: the game uses every processor.",
+        AdvReadEmpty => "This rule selects no processor on this PC. The game would start unchanged.",
+        AdvReadTopology => "Rerun cannot read the processors of this PC now. The starter decides at every start.",
+        AdvReadLocked => "Your own rule is not part of the plan while a fix with a CPU rule is chosen.",
+        AdvLockCpuFix => "A fix sets the CPU rule. An own rule replaces the fix: choose one of them.",
+        AdvLockLayerFix => "A fix sets compatibility flags for the same program. Choose one of them.",
+        AdvLockAntiCheat => "Anti-cheat found: Rerun does not set this.",
+        AdvLockLauncher => "Steam starts a launcher, so this would reach only the launcher, not the game. Use the method watch.",
+        AdvLockRun => "An option value starts another program; the method watch does not work with it.",
+        AdvErrNoRule => "Set a CPU limit or a priority: the method alone changes nothing.",
+        AdvErrNoRestriction => "The CPU rule limits nothing yet. Set a thread limit, turn SMT off, choose one cache group, prefer performance cores or leave the first processor out.",
+        AdvErrOther => "Rerun cannot use these settings:",
+        AdvNeedsStart => "Choose the program Steam starts to set your own launch settings.",
+        AdvReplaces { n } => return format!("Change No. {n} already sets a CPU rule or priority for this game. Your own rule replaces it; undoing the new change brings it back.").into(),
+        AdvUndoHint { n } => return format!("Clearing the launch settings would mean taking change No. {n} back. Rerun does not plan that for you: undo that change on its card.").into(),
+        AdvSumTitle => "Your own settings (Advanced, not checked)",
+        AdvSumThreads { n } => return format!("up to {n} threads").into(),
+        AdvSumNoSmt => "SMT off",
+        AdvSumL3 => "one cache group",
+        AdvSumPerf => "performance cores",
+        AdvSumExclude { core } => {
+            return if core { "without core 0".into() } else { "without CPU 0".into() };
+        }
+        AdvSumSoft => "soft",
+        AdvSumMethod { watch } => {
+            return if watch { "method watch".into() } else { "method direct".into() };
+        }
+        AdvSumPriority => "priority",
+        AdvSumFlags { n } => {
+            return if n == 1 { "1 compatibility flag".into() } else { format!("{n} compatibility flags").into() };
+        }
         TidyLine { n } => {
             return if n == 1 {
                 "1 older history entry removed".into()
@@ -3914,9 +4195,95 @@ fn de(m: Msg) -> Cow<'static, str> {
             return s.into();
         }
         WarnKeptAntiCheat => "Eine Anti-Cheat-Regel erlaubt, diesen Teil des Startprofils zu behalten, nur mit einem Hinweis.",
-        PvFromManual => "Deine eigene Einstellung (Erweitert), nicht geprüft",
+        PvFromManual => "Aus Erweitert (deine eigene Einstellung, nicht geprüft)",
         WarnManualAntiCheat => "Eine Anti-Cheat-Regel erlaubt deine eigene Einstellung nur mit einem Hinweis.",
-        WarnReplacesRule => "Diese Änderung würde die CPU-Regel und die Priorität einer früheren Änderung ersetzen; machst du sie rückgängig, gelten jene wieder.",
+        WarnReplacesRule => "Diese Änderung ersetzt die CPU-Regel und die Priorität, die eine frühere Änderung gesetzt hat, ein Fix oder deine eigenen Einstellungen; machst du sie rückgängig, gelten jene wieder.",
+        AdvName => "Erweitert",
+        AdvTitle => "Erweitert (eigene Einstellungen, nicht geprüft)",
+        AdvIntro => "Lege die CPU-Regel, die Startmethode, die Priorität und die Kompatibilitätsflags selbst fest. Kein Topo hat diese Einstellungen geprüft. Diese Einstellungen laufen durch dieselbe Vorschau wie die Fixes, und das Rückgängigmachen der Änderung nimmt sie zurück.",
+        AdvActive { n } => return format!("Aktiv: eigene Regel (Änderung Nr. {n})").into(),
+        AdvUnavailable => "Der Topo dieses Spiels nutzt eine Startmethode, für die Rerun noch keine eigene CPU-Regel anbietet. Kompatibilitätsflags gehen weiterhin.",
+        AdvCpuHeading => "CPU-Regel",
+        AdvThreads => "Maximale Threads",
+        AdvThreadsNone => "Keine Begrenzung",
+        AdvThreadsValue { n } => {
+            return if n == 1 { "1 Thread".into() } else { format!("{n} Threads").into() };
+        }
+        AdvThreadsLess => "Maximale Threads: weniger",
+        AdvThreadsMore => "Maximale Threads: mehr",
+        AdvSmt => "SMT",
+        AdvSmtDesc => "Beide Threads eines Kerns nutzen. Aus: ein Thread pro Kern.",
+        AdvL3 => "Ein Cache-Bereich",
+        AdvL3Desc => "Das Spiel auf den Prozessoren halten, die sich einen Cache der letzten Ebene teilen.",
+        AdvPrefer => "Bevorzugen",
+        AdvPreferAny => "Beliebige Kerne",
+        AdvPreferPerf => "Leistungskerne",
+        AdvExclude => "Zuerst auslassen",
+        AdvExcludeNone => "Nichts",
+        AdvExcludeThread => "CPU 0 (ein Thread)",
+        AdvExcludeCore => "Kern 0 (alle seine Threads)",
+        AdvMode => "Modus",
+        AdvModeHard => "Hart: Das Spiel kann die Prozessoren nicht verlassen",
+        AdvModeSoft => "Weich: Windows bevorzugt diese Prozessoren",
+        AdvMethod => "Startmethode",
+        AdvMethodTopo { watch } => {
+            return if watch { "Wie der Topo (beobachten)".into() } else { "Wie der Topo (direkt)".into() };
+        }
+        AdvMethodDirect => "Direkt",
+        AdvMethodWatch => "Beobachten",
+        AdvPriority => "Priorität",
+        AdvPrioNone => "Unverändert",
+        AdvPrioNormal => "Normal",
+        AdvPrioAbove => "Über normal",
+        AdvPrioHigh => "Hoch",
+        AdvFlags => "Kompatibilitätsflags",
+        AdvFlagFso => "Vollbildoptimierung aus",
+        AdvFlagDpi => "DPI-Skalierung durch die Anwendung",
+        AdvFlagActive { n } => return format!("Angewendet mit der Änderung Nr. {n}. Zum Entfernen machst du diese Änderung rückgängig.").into(),
+        AdvStart => "Programm, das Steam startet",
+        AdvStartDesc => "Der Topo dieses Spiels nennt kein Startprogramm. Wähle das Programm, das Steam für deine Starteinstellungen startet.",
+        AdvReadTitle => "Auf diesem PC",
+        AdvReadSel { threads, of } => return format!("{threads} von {of} logischen Prozessoren").into(),
+        AdvReadCache { n, level, mb } => return format!("Cache-Gruppe {n} (L{level}, {mb} MB)").into(),
+        AdvReadCores { one } => {
+            return if one { "Kern".into() } else { "Kerne".into() };
+        }
+        AdvReadSmt { on } => {
+            return if on { "mit SMT".into() } else { "ohne SMT".into() };
+        }
+        AdvReadGroup { n } => return format!("Prozessorgruppe {n}").into(),
+        AdvReadCap => "Ein 32-Bit-Programm sieht nur die Prozessoren 0 bis 31 einer Prozessorgruppe.",
+        AdvReadNoRule => "Keine CPU-Begrenzung: Das Spiel nutzt alle Prozessoren.",
+        AdvReadEmpty => "Diese Regel wählt auf diesem PC keinen Prozessor aus. Das Spiel würde unverändert starten.",
+        AdvReadTopology => "Rerun kann die Prozessoren dieses PCs gerade nicht lesen. Der Starter entscheidet bei jedem Start.",
+        AdvReadLocked => "Deine eigene Regel gehört nicht zum Plan, solange ein Fix mit CPU-Regel gewählt ist.",
+        AdvLockCpuFix => "Ein Fix setzt die CPU-Regel. Eine eigene Regel ersetzt den Fix – wähle eines davon.",
+        AdvLockLayerFix => "Ein Fix setzt Kompatibilitätsflags für dasselbe Programm. Wähle eines davon.",
+        AdvLockAntiCheat => "Anti-Cheat gefunden: Rerun setzt das nicht.",
+        AdvLockLauncher => "Steam startet einen Launcher, das würde nur den Launcher treffen, nicht das Spiel. Nutze die Startmethode Beobachten.",
+        AdvLockRun => "Ein Optionswert startet ein anderes Programm; die Startmethode Beobachten geht damit nicht.",
+        AdvErrNoRule => "Lege eine CPU-Begrenzung oder eine Priorität fest: Die Startmethode allein ändert nichts.",
+        AdvErrNoRestriction => "Die CPU-Regel begrenzt noch nichts. Lege eine Thread-Grenze fest, schalte SMT aus, wähle einen Cache-Bereich, bevorzuge Leistungskerne oder lass den ersten Prozessor aus.",
+        AdvErrOther => "Rerun kann diese Einstellungen nicht verwenden:",
+        AdvNeedsStart => "Wähle das Programm, das Steam startet, um eigene Starteinstellungen festzulegen.",
+        AdvReplaces { n } => return format!("Die Änderung Nr. {n} setzt für dieses Spiel bereits eine CPU-Regel oder Priorität. Deine eigene Regel ersetzt sie; machst du die neue Änderung rückgängig, gilt jene wieder.").into(),
+        AdvUndoHint { n } => return format!("Die Starteinstellungen zu leeren würde heissen, die Änderung Nr. {n} zurückzunehmen. Das plant Rerun nicht für dich: Mach diese Änderung auf ihrer Karte rückgängig.").into(),
+        AdvSumTitle => "Deine eigenen Einstellungen (Erweitert, nicht geprüft)",
+        AdvSumThreads { n } => return format!("bis zu {n} Threads").into(),
+        AdvSumNoSmt => "SMT aus",
+        AdvSumL3 => "ein Cache-Bereich",
+        AdvSumPerf => "Leistungskerne",
+        AdvSumExclude { core } => {
+            return if core { "ohne Kern 0".into() } else { "ohne CPU 0".into() };
+        }
+        AdvSumSoft => "weich",
+        AdvSumMethod { watch } => {
+            return if watch { "Startmethode Beobachten".into() } else { "Startmethode Direkt".into() };
+        }
+        AdvSumPriority => "Priorität",
+        AdvSumFlags { n } => {
+            return if n == 1 { "1 Kompatibilitätsflag".into() } else { format!("{n} Kompatibilitätsflags").into() };
+        }
         TidyLine { n } => {
             return if n == 1 {
                 "1 älterer Verlaufseintrag entfernt".into()

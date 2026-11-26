@@ -2,6 +2,7 @@
 //! it; the typed refusals come out calm, in both languages, with what to do and the core's
 //! text only as an escaped detail.
 
+mod advanced;
 mod clear;
 mod history;
 mod options;
@@ -47,6 +48,8 @@ fn fix(packages: &[&str], needs_helper: bool, refused: bool) -> Fix {
             })
             .collect(),
         needs_helper,
+        sets_rule: false,
+        layer_exes: Vec::new(),
     }
 }
 

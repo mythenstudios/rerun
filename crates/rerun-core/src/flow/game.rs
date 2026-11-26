@@ -433,6 +433,12 @@ pub struct Fix {
     pub packages: Vec<PackageNeed>,
     /// A step needs Rerun's elevated helper (a firewall rule): per variant.
     pub needs_helper: bool,
+    /// A step is a CPU rule: it sets the rule part of the launch profile, which the user's own
+    /// launch settings set too (the Advanced section is exclusive with it, ADR 0029).
+    pub sets_rule: bool,
+    /// The executables a `compat_layer` step sets flags for (the user's own flags on the same
+    /// executable are refused, ADR 0029).
+    pub layer_exes: Vec<RelPath>,
 }
 
 /// The fixes of a report, grouped by variant ID in the order of first appearance. The loader
@@ -480,6 +486,20 @@ pub fn fixes(r: &OwnedReport, need: &dyn Fn(&str) -> PackageNeed) -> Vec<Fix> {
                         .steps
                         .iter()
                         .any(|s| matches!(s, TopoStep::FirewallRule(_))),
+                    sets_rule: v
+                        .variant
+                        .steps
+                        .iter()
+                        .any(|s| matches!(s, TopoStep::Cpu(_))),
+                    layer_exes: v
+                        .variant
+                        .steps
+                        .iter()
+                        .filter_map(|s| match s {
+                            TopoStep::CompatLayer(c) => Some(c.exe.clone()),
+                            _ => None,
+                        })
+                        .collect(),
                 }),
             }
         }
@@ -502,6 +522,9 @@ pub struct MatchView {
     /// changed or unreadable). Read without the lock, as the plan reads it; the apply checks
     /// again.
     pub live: Result<crate::exec::LiveState, crate::exec::LiveError>,
+    /// What the Advanced section shows (ADR 0029): the Topo's launch as it bears on the form,
+    /// the own settings that are live, and what is known of this PC's processor.
+    pub advanced: super::AdvancedView,
 }
 
 /// One game: what the Topo lookup found.
@@ -534,11 +557,14 @@ pub fn game_cached(
                 Some(a) => crate::exec::live_state(a, m.steam_app, m.game.id()),
                 None => Ok(crate::exec::LiveState::default()),
             };
+            let advanced =
+                super::advanced::advanced(&report, m.read, m.profile.cpu.as_ref().ok(), &live);
             Box::new(MatchView {
                 report,
                 read: m.read.clone(),
                 fixes,
                 live,
+                advanced,
             })
         })
     })?;

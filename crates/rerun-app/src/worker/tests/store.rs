@@ -83,6 +83,7 @@ fn apply_fix(r: &mut DRig) -> TxnId {
     let mut sel = Selection::default();
     sel.toggle(&page, 0);
     let ev = r.run(Job::Plan {
+        manual: None,
         app_id: 220,
         choices: Vec::new(),
         picks: vec![Pick {

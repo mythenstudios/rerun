@@ -63,6 +63,7 @@ use crate::policy::root::{AppDir, Create, ForbiddenRoots, GameDir, RootError};
 use crate::prim::GameRef;
 use crate::sys::{Http, System};
 
+mod advanced;
 mod game;
 mod history;
 mod launch;
@@ -76,6 +77,7 @@ mod store;
 mod uninstall;
 mod write;
 
+pub use advanced::{AdvancedStart, AdvancedView, Bitness, cpu_topology, rule_view, thread_steps};
 pub(crate) use game::with_topo;
 pub use game::{
     Fix, Found, GameCache, GameRefusal, GameView, IssueView, Lookup, MatchView, Matched,

@@ -702,15 +702,71 @@ pub enum MachineWhy {
     },
 }
 
+/// What the launcher case (F5) leaves open for the user's own launch settings (the Advanced
+/// section's locks, ADR 0029): pure, the planner decides the same again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchAllowed {
+    /// A soft CPU rule (CPU Sets of the started program).
+    pub soft: bool,
+    /// A priority class.
+    pub priority: bool,
+    /// The method `watch` (a `run` of a live profile needs `direct`).
+    pub watch: bool,
+}
+
+/// What `method` allows: with `direct` and a started program (`run`, else `start`) other than
+/// the main executable only a hard rule reaches the game (F5), `watch` and a started program
+/// that is the main executable reach it with everything; `run` (kept from a live profile)
+/// needs `direct`.
+pub fn allowed(
+    method: crate::plan::ManualMethod,
+    started_is_main: bool,
+    run: bool,
+) -> LaunchAllowed {
+    let reaches = method == crate::plan::ManualMethod::Watch || started_is_main;
+    LaunchAllowed {
+        soft: reaches,
+        priority: reaches,
+        watch: !run,
+    }
+}
+
 /// The rule of `p` on the topology `topo` (module docs).
 pub fn on_this_machine(topo: SysResult<CpuTopology>, p: &LaunchProfile) -> MachineView {
+    view(
+        topo.as_ref().map_err(ToString::to_string),
+        p.cpu.as_ref(),
+        p.bitness,
+    )
+}
+
+/// The rule `rule` of the user's own settings on the topology `topo` (the Advanced section's live
+/// readout, ADR 0029): the same selection as [`on_this_machine`] makes for the profile the rule
+/// would become, for a program of `bitness`. `Err` is the raw text of the reason the topology
+/// is unknown (escaped here). A rule that cannot be built (`max_threads` 0, `report_cores`)
+/// shows as no rule: the form's own check refuses it before any plan.
+pub fn rule_on_this_machine(
+    topo: Result<&CpuTopology, &str>,
+    rule: &CpuRuleSpec,
+    bitness: Bitness,
+) -> MachineView {
+    view(
+        topo.map_err(str::to_owned),
+        rule.rule().ok().as_ref(),
+        bitness,
+    )
+}
+
+fn view(
+    topo: Result<&CpuTopology, String>,
+    cpu: Option<&CpuRule>,
+    bitness: Bitness,
+) -> MachineView {
     let topo = match topo {
         Ok(t) => t,
         Err(e) => {
             return MachineView {
-                selection: Err(MachineWhy::Topology(
-                    crate::escape::text(&e.to_string()).to_string(),
-                )),
+                selection: Err(MachineWhy::Topology(crate::escape::text(&e).to_string())),
                 groups: 0,
                 x86_capped: false,
             };
@@ -720,14 +776,14 @@ pub fn on_this_machine(topo: SysResult<CpuTopology>, p: &LaunchProfile) -> Machi
     groups.sort_unstable();
     groups.dedup();
     let groups = u16::try_from(groups.len()).unwrap_or(u16::MAX);
-    let Some(rule) = &p.cpu else {
+    let Some(rule) = cpu else {
         return MachineView {
             selection: Err(MachineWhy::NoRule),
             groups,
             x86_capped: false,
         };
     };
-    let sel = match select(&topo, rule, p.bitness) {
+    let sel = match select(topo, rule, bitness) {
         Ok(s) => s,
         Err(SelectError::Empty { after }) => {
             return MachineView {
@@ -773,6 +829,6 @@ pub fn on_this_machine(topo: SysResult<CpuTopology>, p: &LaunchProfile) -> Machi
             mode: rule.mode,
         }),
         groups,
-        x86_capped: p.bitness == Bitness::X86 && in_group > 32,
+        x86_capped: bitness == Bitness::X86 && in_group > 32,
     }
 }

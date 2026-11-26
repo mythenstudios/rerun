@@ -19,13 +19,14 @@ import { Pressable, PageTitle, Badge, Button, PartsLine, Hairline, Muted, GroupH
 import { WarnLine, OpItem, LaunchBox } from "ops.slint";
 import { PreviewPanel } from "preview.slint";
 import { OptionsSection } from "options.slint";
+import { AdvancedSection } from "advanced.slint";
 import { CardView, HistEntryView, LaunchRowView } from "card.slint";
 import { DialogView, LicencesView } from "dialog.slint";
 import { SettingsPage } from "settings.slint";
-import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, OptionsData, OptionData, OptionChoiceData, ProfilePartData, ProfilePartsData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, LicenceData, Theme, Str, Reveal, Modal } from "base.slint";
+import { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, OptionsData, OptionData, OptionChoiceData, AdvancedData, AdvGroupData, AdvChoiceData, AdvSwitchData, ProfilePartData, ProfilePartsData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, LicenceData, Theme, Str, Reveal, Modal } from "base.slint";
 
 // What `ui` names through the generated code.
-export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, OptionsData, OptionData, OptionChoiceData, ProfilePartData, ProfilePartsData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, LicenceData, Theme, Str, Reveal, Modal }
+export { ListData, BadgeData, RowData, SectionData, DetailData, NoticeData, LineData, OpData, WarnData, LaunchData, PreviewData, CardData, DialogData, BannerData, FactData, ProblemData, SolvedData, FixData, GameData, OptionsData, OptionData, OptionChoiceData, AdvancedData, AdvGroupData, AdvChoiceData, AdvSwitchData, ProfilePartData, ProfilePartsData, AppliedData, HistoryData, HistEntryData, HistGroupData, LaunchRowData, OrphanData, OrphansData, PartsData, StoreData, StoreRowData, SysLineData, SourceData, DataFolderData, LicenceData, Theme, Str, Reveal, Modal }
 
 component Toggle inherits Pressable {
     in-out property <bool> checked;
@@ -687,10 +688,14 @@ component GamePage inherits VerticalLayout {
     in property <bool> loading;
     in property <GameData> game;
     in property <PreviewData> preview;
+    // The Advanced section is open (it stays so while the page is read again).
+    in-out property <bool> advanced-open: false;
     callback back();
     callback fix-toggled(int);
     // An option and a choice of it, by position (ADR 0032).
     callback option-chosen(int, int);
+    // A field of the Advanced section and its value (ADR 0029; `AdvancedData` lists the numbers).
+    callback advanced-edit(int, int);
     callback apply(string);
     callback card-undo(int);
     callback card-forget(int);
@@ -1144,8 +1149,19 @@ component GamePage inherits VerticalLayout {
         }
     }
 
+    // The user's own settings come last, below the fixes: collapsed, not checked by any Topo.
+    if !root.loading && root.game.advanced.available: AdvancedSection {
+        data: root.game.advanced;
+        open <=> root.advanced-open;
+        edit(f, v) => {
+            root.advanced-edit(f, v);
+        }
+        undo(i) => {
+            root.card-undo(i);
+        }
+    }
     // The preview is mandatory before any apply (rule 5).
-    if !root.loading && (root.game.fixes.length > 0 || root.game.options.options.length > 0): PreviewPanel {
+    if !root.loading && (root.game.fixes.length > 0 || root.game.options.options.length > 0 || root.game.advanced.available): PreviewPanel {
         p: root.preview;
         apply(h) => {
             root.apply(h);
@@ -1563,6 +1579,8 @@ export component AppWindow inherits Window {
     // Game page.
     in property <bool> game-loading;
     in property <GameData> game;
+    // The Advanced section of the game page is open.
+    in-out property <bool> advanced-open: false;
     // Applied and system.
     in property <AppliedData> applied;
     in property <bool> system-loading: true;
@@ -1602,6 +1620,7 @@ export component AppWindow inherits Window {
     callback fix-toggled(int);
     // An option and a choice of it, by position (ADR 0032).
     callback option-chosen(int, int);
+    callback advanced-edit(int, int);
     callback apply(string);
     callback card-undo(int);
     callback card-forget(int);
@@ -1849,6 +1868,7 @@ export component AppWindow inherits Window {
                                     loading: root.game-loading;
                                     game: root.game;
                                     preview: root.preview;
+                                    advanced-open <=> root.advanced-open;
                                     back => {
                                         root.navigate(0);
                                     }
@@ -1857,6 +1877,9 @@ export component AppWindow inherits Window {
                                     }
                                     option-chosen(oi, ci) => {
                                         root.option-chosen(oi, ci);
+                                    }
+                                    advanced-edit(f, v) => {
+                                        root.advanced-edit(f, v);
                                     }
                                     apply(h) => {
                                         root.apply(h);

@@ -4,6 +4,30 @@ import { Badge, Button, Card, Muted } from "base.slint";
 import { CardData, HistEntryData, LaunchRowData, Str, Theme, Modal } from "base.slint";
 import { LaunchBox, OpItem } from "ops.slint";
 
+// The user's own settings of a change ("Advanced"): a heading and a line per part, Rerun's words
+// and numbers only.
+component OwnLines inherits VerticalLayout {
+    in property <string> title;
+    in property <[string]> lines;
+    spacing: Theme.hair * 2;
+    accessible-role: groupbox;
+    accessible-label: root.title;
+    Text {
+        text: root.title;
+        color: Theme.muted;
+        font-size: Theme.fs-s;
+        wrap: word-wrap;
+        accessible-role: none;
+    }
+
+    for l in root.lines: Text {
+        text: l;
+        color: Theme.text;
+        font-size: Theme.fs-m;
+        wrap: word-wrap;
+    }
+}
+
 // One transaction: everything in it, and what undo takes back together (user decision U1).
 export component CardView inherits Card {
     in property <CardData> c;
@@ -57,6 +81,10 @@ export component CardView inherits Card {
             color: Theme.text;
             font-size: Theme.fs-m;
             wrap: word-wrap;
+        }
+        if root.c.own-title != "": OwnLines {
+            title: root.c.own-title;
+            lines: root.c.own-lines;
         }
         for op in root.c.ops: OpItem {
             op: op;
@@ -157,6 +185,10 @@ export component HistEntryView inherits Card {
             font-family: Theme.font-mono;
             font-size: Theme.fs-s;
             wrap: word-wrap;
+        }
+        if root.e.own-title != "": OwnLines {
+            title: root.e.own-title;
+            lines: root.e.own-lines;
         }
         if root.e.note != "": Text {
             text: root.e.note;

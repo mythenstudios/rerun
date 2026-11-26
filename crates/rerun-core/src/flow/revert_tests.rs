@@ -420,6 +420,7 @@ mod x12 {
             gpu_pref: None,
             user_data: None,
             variants: Vec::new(),
+            manual: None,
         }
     }
 

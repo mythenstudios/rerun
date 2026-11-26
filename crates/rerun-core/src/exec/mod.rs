@@ -111,7 +111,7 @@ pub use helper::{HelperFailure, helper_ready, reason_words};
 pub(crate) use launch::{launch_results_hashed, purge_results};
 pub(crate) use live::below as path_below;
 pub(crate) use live::profile_op as profile_op_of;
-pub use live::{LiveChoice, LiveError, LiveExe, LiveProfile, LiveState, live_state};
+pub use live::{LiveChoice, LiveError, LiveExe, LiveManual, LiveProfile, LiveState, live_state};
 pub(crate) use packages::{package_users_with_status, remove_packages};
 pub use purge::{Keep, PurgeReport};
 pub(crate) use purge::{PurgeClass, PurgeMode, purge_classes, purge_seen};

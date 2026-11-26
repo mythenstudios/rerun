@@ -21,6 +21,7 @@ use rerun_core::journal::JournalError;
 use rerun_core::topo::{AntiCheatState, Refusal, Tri};
 
 mod about;
+mod advanced;
 mod clear;
 mod download;
 mod history;
@@ -30,6 +31,7 @@ mod problems;
 mod store;
 mod write;
 pub use about::*;
+pub use advanced::*;
 pub use clear::*;
 pub use download::*;
 pub use history::*;
@@ -633,6 +635,11 @@ pub struct FixVm {
     /// A step needs the elevated helper: never preselected (an administrator change is the
     /// user's choice, P5-5c).
     pub(crate) needs_helper: bool,
+    /// A step is a CPU rule: the Advanced section's launch settings are exclusive with it.
+    pub(crate) sets_rule: bool,
+    /// The executables its `compat_layer` steps set flags for: the Advanced section's flags on the
+    /// same executable are exclusive with it.
+    pub(crate) layer_exes: Vec<rerun_core::path::RelPath>,
 }
 
 /// Whether the app can apply a fix on this page (P5-5a).
@@ -673,6 +680,8 @@ pub struct GameVm {
     /// The options, above the problems (ADR 0032): the choices, the live values, and the game-level
     /// notice when the journal forbids every plan.
     pub options: Box<OptionsVm>,
+    /// The Advanced section at the foot of the page (ADR 0029): the user's own settings.
+    pub advanced: Box<AdvancedVm>,
     /// The fixes, in the Topo's order of first appearance.
     pub fixes: Vec<FixVm>,
     /// What is applied to this game now, one card per transaction (P5-5a).
@@ -724,6 +733,7 @@ fn base(app_id: u32, title: Shown<'static>, hero: HeroVm, lang: Lang) -> GameVm 
         problems: Vec::new(),
         fixes: Vec::new(),
         options: Box::default(),
+        advanced: Box::new(AdvancedVm { view: None, lang }),
         applied: Vec::new(),
         aside: Vec::new(),
         topo: None,
@@ -1032,6 +1042,10 @@ fn matched(
         topo.id.as_str(),
         lang,
     ));
+    g.advanced = Box::new(AdvancedVm {
+        view: Some(m.advanced.clone()),
+        lang,
+    });
     g.topo = Some(topo.id.to_string());
     g
 }
@@ -1095,6 +1109,8 @@ fn fix(
         offer,
         note,
         needs_helper: f.needs_helper,
+        sets_rule: f.sets_rule,
+        layer_exes: f.layer_exes.clone(),
         preselect: false,
         preselect_note: None,
         conflicts: Vec::new(),

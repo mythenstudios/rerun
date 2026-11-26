@@ -1637,3 +1637,76 @@ fn lr6_the_fence_refuses_a_run_outside_the_game_folder() {
     let e = p.encode().unwrap_err().to_string();
     assert!(e.contains("not in the game folder"), "{e}");
 }
+
+/// LV2 (Advanced readout, ADR 0029) the rule of the user's own settings on this PC is the one the
+/// profile it would become selects; an unknown topology, a rule that cannot be built and the
+/// launcher case (`allowed`).
+#[test]
+fn lv2_the_readout_of_an_own_rule_and_the_launcher_case() {
+    use super::launch_method::{allowed, rule_on_this_machine};
+    use crate::plan::ManualMethod;
+    let rule = CpuRuleSpec {
+        max_threads: Some(8),
+        single_l3: Some(true),
+        smt: Some(false),
+        ..CpuRuleSpec::default()
+    };
+    let t = topo(RYZEN_5950X);
+    let own = rule_on_this_machine(Ok(&t), &rule, Bitness::X64);
+    let via_profile = on_this_machine(Ok(t.clone()), &profile(rule, Bitness::X64));
+    assert_eq!(own, via_profile);
+    assert_eq!(own.selection.unwrap().threads, 8);
+    // Another field changes the answer: all 16 threads of the first cache group, with SMT.
+    let smt = CpuRuleSpec {
+        single_l3: Some(true),
+        ..CpuRuleSpec::default()
+    };
+    let s = rule_on_this_machine(Ok(&t), &smt, Bitness::X64)
+        .selection
+        .unwrap();
+    assert_eq!((s.threads, s.of, s.cores.len()), (16, 32, 8));
+    // The topology is unknown: the reason, escaped.
+    match rule_on_this_machine(Err("no topology \x1b[31m"), &rule, Bitness::X64).selection {
+        Err(MachineWhy::Topology(why)) => assert!(!why.contains('\x1b'), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    // A rule that cannot be built shows as no rule (the form refuses it before any plan).
+    let zero = CpuRuleSpec {
+        max_threads: Some(0),
+        ..CpuRuleSpec::default()
+    };
+    assert_eq!(
+        rule_on_this_machine(Ok(&t), &zero, Bitness::X64).selection,
+        Err(MachineWhy::NoRule)
+    );
+    // F5: with `direct` and a launcher as the started program only a hard rule reaches the
+    // game; `watch` and a started program that is the main executable allow everything; a kept
+    // `run` forbids `watch`.
+    let d = |main, run| allowed(ManualMethod::Direct, main, run);
+    assert_eq!(
+        (
+            d(false, false).soft,
+            d(false, false).priority,
+            d(false, false).watch
+        ),
+        (false, false, true)
+    );
+    assert_eq!(
+        (
+            d(true, false).soft,
+            d(true, false).priority,
+            d(true, false).watch
+        ),
+        (true, true, true)
+    );
+    assert_eq!(
+        (
+            d(true, true).soft,
+            d(true, true).priority,
+            d(true, true).watch
+        ),
+        (true, true, false)
+    );
+    let w = allowed(ManualMethod::Watch, false, false);
+    assert_eq!((w.soft, w.priority, w.watch), (true, true, true));
+}

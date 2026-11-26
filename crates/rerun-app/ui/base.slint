@@ -129,6 +129,9 @@ export struct CardData {
     // The Steam launch option while the transaction holds a launch profile.
     has-launch: bool,
     launch: LaunchData,
+    // The user's own settings (Advanced) of this change: a heading and a line per part.
+    own-title: string,
+    own-lines: [string],
 }
 
 // A heading and its lines (the clear dialog lists what goes and what stays). `subject` is what
@@ -281,6 +284,77 @@ export struct OptionsData {
     options: [OptionData],
 }
 
+// The Advanced section (ADR 0029): groups of radio-style choices and switches, every one with
+// its accessible name. `note` says why a control cannot be set (a lock) or what to know.
+export struct AdvChoiceData {
+    name: string,
+    label: string,
+    checked: bool,
+    enabled: bool,
+}
+
+export struct AdvGroupData {
+    label: string,
+    choices: [AdvChoiceData],
+    has-note: bool,
+    note: PartsData,
+}
+
+export struct AdvSwitchData {
+    label: string,
+    desc: string,
+    checked: bool,
+    enabled: bool,
+    has-note: bool,
+    note: PartsData,
+}
+
+// What the window sends back, `edit(field, value)`: 0 thread limit down, 1 thread limit up,
+// 2 SMT (0/1), 3 one cache group (0/1), 4 prefer, 5 leave out first, 6 mode, 7 method,
+// 8 priority (the position of the choice), 9 a flag (its position), 10 the program Steam starts.
+export struct AdvancedData {
+    available: bool,
+    name: string,
+    title: string,
+    intro: string,
+    active: string,
+    unavailable: string,
+    cpu-heading: string,
+    has-launch-note: bool,
+    launch-note: PartsData,
+    threads-label: string,
+    threads-value: string,
+    threads-less: string,
+    threads-more: string,
+    threads-less-on: bool,
+    threads-more-on: bool,
+    smt: AdvSwitchData,
+    l3: AdvSwitchData,
+    has-prefer: bool,
+    prefer: AdvGroupData,
+    exclude: AdvGroupData,
+    mode: AdvGroupData,
+    method: AdvGroupData,
+    priority: AdvGroupData,
+    flags-label: string,
+    flags: [AdvSwitchData],
+    has-flags-note: bool,
+    flags-note: PartsData,
+    has-start: bool,
+    start: AdvGroupData,
+    start-desc: string,
+    has-problem: bool,
+    problem: PartsData,
+    replaces: string,
+    undo-hint: string,
+    undo-label: string,
+    undo-card: int,
+    read-title: string,
+    readout: string,
+    readout-detail: string,
+    readout-note: string,
+}
+
 export struct GameData {
     app-id: int,
     title: string,
@@ -292,6 +366,7 @@ export struct GameData {
     detail: string,
     problems: [ProblemData],
     options: OptionsData,
+    advanced: AdvancedData,
     fixes: [FixData],
     applied: [CardData],
     // The game's Topos this version sets aside: ID and why, behind a details expander.
@@ -317,6 +392,8 @@ export struct HistEntryData {
     backups: string,
     may-remain: [string],
     note: string,
+    own-title: string,
+    own-lines: [string],
 }
 
 export struct HistGroupData {

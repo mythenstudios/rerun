@@ -61,7 +61,7 @@ fn launch(l: &LaunchVm) -> LaunchData {
 
 /// The index of the card of change `txn` among the game's cards, if that change can be undone
 /// there (the undo button of an option or of the game's notice opens that card's undo).
-fn undo_card(g: &GameVm, txn: Option<TxnId>) -> i32 {
+pub(super) fn undo_card(g: &GameVm, txn: Option<TxnId>) -> i32 {
     txn.and_then(|t| g.applied.iter().position(|c| c.txn == t && c.can_undo))
         .and_then(|i| i32::try_from(i).ok())
         .unwrap_or(-1)
@@ -247,6 +247,8 @@ pub(super) fn card(c: &TxnCardVm) -> CardData {
         can_forget: c.can_forget,
         has_launch: c.launch.is_some(),
         launch: c.launch.as_ref().map(launch).unwrap_or_default(),
+        own_title: c.own.as_ref().map(|o| s(&o.title)).unwrap_or_default(),
+        own_lines: model(c.own.iter().flat_map(|o| o.lines.iter().map(s)).collect()),
     }
 }
 
@@ -407,6 +409,7 @@ pub(super) fn plan_selection(ui: &AppWindow, st: &mut State) {
     };
     let picks = st.selection.picks(page);
     let choices = st.selection.choices(page);
+    let manual = st.selection.manual(page);
     let nothing = st.selection.is_empty(page);
     st.preview_hash = None;
     ui.set_preview(preview_none(i32::from(!nothing)));
@@ -414,7 +417,10 @@ pub(super) fn plan_selection(ui: &AppWindow, st: &mut State) {
         app_id,
         picks,
         choices,
+        manual,
     });
+    // The Advanced section follows the selection (its locks, its form, its readout).
+    super::advanced::refresh(ui, st);
 }
 
 /// Shows an outcome calmly above the page.
@@ -515,6 +521,17 @@ pub(super) fn write_callbacks(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         st.selection.choose(&page, oi, ci);
         show_selection(&ui, &st);
         plan_selection(&ui, &mut st);
+    });
+
+    // A field of the Advanced section: the rules are `vm::Form`'s, the window only asks. The one
+    // selection is planned again.
+    let weak = ui.as_weak();
+    let st = state.clone();
+    ui.on_advanced_edit(move |field, value| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        super::advanced::edited(&ui, &mut st.borrow_mut(), field, value);
     });
 
     // "Apply" carries the plan hash of the preview it belongs to; the worker applies only the

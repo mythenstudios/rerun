@@ -58,6 +58,8 @@ pub struct HistEntryVm {
     pub may_remain: Vec<Shown<'static>>,
     /// A note (a forgotten entry that still holds a launch profile).
     pub note: Option<String>,
+    /// The user's own settings of the entry (Advanced), if it holds some.
+    pub own: Option<super::OwnVm>,
 }
 
 /// One group of the history.
@@ -219,6 +221,7 @@ fn entry(
             backups: None,
             may_remain: Vec::new(),
             note: None,
+            own: c.own,
         };
     }
     let (sym, word, quiet) = match group {
@@ -254,6 +257,7 @@ fn entry(
         backups,
         may_remain,
         note: holds.then(|| tx(lang, Msg::HolderForgotten)),
+        own: super::write::own_of(st, lang),
     }
 }
 

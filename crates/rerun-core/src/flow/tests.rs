@@ -505,3 +505,184 @@ fn fh1_a_rebind_is_not_suggested_without_a_changed_folder() {
     };
     assert!(!rebind_may_help(RebindCue::Halted(&st, &halt)));
 }
+
+/// What the engine read of an invented game: `game.exe` (x86) matched, `other\launcher.exe` too.
+fn facts(arch: crate::catalog::model::Arch) -> crate::topo::GameFacts {
+    use crate::detect::exe::AntiCheatScan;
+    use crate::path::RelPath;
+    use crate::topo::{ExeCheck, ExeState, GameFacts};
+    let exe = |p: &str, a| ExeCheck {
+        path: RelPath::parse(p).unwrap(),
+        state: ExeState::Match,
+        arch: Some(a),
+        api: None,
+        sha1: None,
+        patched_by: None,
+        sha256: Some([1; 32]),
+    };
+    GameFacts {
+        exes: vec![
+            exe("game.exe", arch),
+            exe(r"other\launcher.exe", crate::catalog::model::Arch::X64),
+        ],
+        anti_cheat: AntiCheatScan::default(),
+    }
+}
+
+const R5950X: &str = include_str!("../../../../tests/fixtures/cpu/ryzen9-5950x.json");
+const I9_14900K: &str = include_str!("../../../../tests/fixtures/cpu/i9-14900k.json");
+
+/// FF6 a fix says whether it sets the CPU rule and for which executables it sets flags: the
+/// Advanced section is exclusive with both (ADR 0029).
+#[test]
+fn ff6_a_fix_names_its_rule_and_its_flag_executables() {
+    let f = fixes(&report([Tri::Yes, Tri::Yes], &[]), &stub);
+    let (patch, limit) = (&f[0], &f[1]);
+    assert!(!patch.sets_rule && limit.sets_rule);
+    assert_eq!(
+        patch
+            .layer_exes
+            .iter()
+            .map(|e| e.as_str())
+            .collect::<Vec<_>>(),
+        ["game.exe"]
+    );
+    assert!(limit.layer_exes.is_empty());
+}
+
+/// FA1 the Advanced view: Steam's launch entry as the Topo names it, or the executables that
+/// matched where it names none, or why there is no own launch; the default method, the anti-cheat
+/// rule, the bitness, a kept `run`, the live own settings.
+#[test]
+fn fa1_the_advanced_view_follows_the_topo_launch() {
+    use super::advanced::{AdvancedStart, advanced};
+    use crate::catalog::model::Arch;
+    use crate::exec::{LiveManual, LiveProfile, LiveState};
+    use crate::path::RelPath;
+    use crate::plan::{Manual, ManualMethod};
+    use crate::prim::MethodSpec;
+    use crate::topo::LaunchPlan;
+    use rerun_proto::cpu::rule::Bitness;
+    let rel = |p: &str| RelPath::parse(p).unwrap();
+    let topology: crate::hw::CpuTopology = serde_json::from_str(R5950X).unwrap();
+    let live = Ok(LiveState::default());
+    let mut r = report([Tri::Yes, Tri::Yes], &[]);
+    r.main_exe = Some(rel("game.exe"));
+    // No method: the matched executables are the choices, the method is `direct`.
+    let v = advanced(&r, &facts(Arch::X86), Some(&topology), &live);
+    assert_eq!(
+        v.start,
+        AdvancedStart::Choose(vec![rel("game.exe"), rel(r"other\launcher.exe")])
+    );
+    assert_eq!(v.default_method, ManualMethod::Direct);
+    assert_eq!(
+        (v.bitness, v.anti_cheat, v.kept_run),
+        (Bitness::X86, false, false)
+    );
+    assert_eq!(v.tokens, ["DISABLEDXMAXIMIZEDWINDOWEDMODE", "HIGHDPIAWARE"]);
+    assert_eq!(v.logical, Some(32));
+    assert!(!v.hybrid && v.live.is_none());
+    // The start only counts as the main executable when it is (folded).
+    assert!(!v.started_is_main(None));
+    assert!(v.started_is_main(Some(&rel("GAME.EXE"))));
+    assert!(!v.started_is_main(Some(&rel(r"other\launcher.exe"))));
+    // The Topo names its launch: the start is its, the method too.
+    r.launch = Ok(LaunchPlan {
+        method: MethodSpec::Watch,
+        start: rel(r"other\launcher.exe"),
+        auto: false,
+    });
+    r.anti_cheat = AntiCheatState::Enforced {
+        systems: vec![],
+        unreadable: false,
+    };
+    let v = advanced(&r, &facts(Arch::X64), None, &live);
+    assert_eq!(v.start, AdvancedStart::Topo(rel(r"other\launcher.exe")));
+    assert_eq!(
+        (v.default_method, v.bitness, v.anti_cheat),
+        (ManualMethod::Watch, Bitness::X64, true)
+    );
+    assert!(!v.started_is_main(Some(&rel("game.exe"))));
+    // Without a topology: the usual small steps, no processor count.
+    assert_eq!(
+        (v.logical, v.steps.first(), v.hybrid),
+        (None, Some(&1), false)
+    );
+    // A later phase's method: no own launch settings.
+    r.launch = Err(LaunchProblem::NotYet("hold"));
+    let v = advanced(&r, &facts(Arch::X64), None, &live);
+    assert_eq!(
+        v.start,
+        AdvancedStart::Unavailable(LaunchProblem::NotYet("hold"))
+    );
+    // A live profile with a `run`, and live own settings of a transaction.
+    let txn: crate::journal::TxnId = "00000001-0000000000000001".parse().unwrap();
+    let profile = rerun_proto::profile::LaunchProfile {
+        method: rerun_proto::profile::Method::Direct,
+        start: r"C:\G\game.exe".to_owned(),
+        target: r"C:\G\run.exe".to_owned(),
+        bitness: Bitness::X64,
+        priority: None,
+        watch_timeout_s: 120,
+        cpu: None,
+        run: Some(r"C:\G\run.exe".to_owned()),
+        args: Vec::new(),
+    };
+    let manual = Manual {
+        layers: vec![crate::policy::registry::TokenName::parse("HIGHDPIAWARE").unwrap()],
+        ..Manual::default()
+    };
+    let state = LiveState {
+        profile: Some(LiveProfile {
+            txn,
+            profile,
+            sha256: [0; 32],
+        }),
+        manual: Some(LiveManual {
+            txn,
+            manual: manual.clone(),
+            launch_txn: None,
+            flags: vec![(manual.layers[0].clone(), txn)],
+        }),
+        ..LiveState::default()
+    };
+    let v = advanced(&r, &facts(Arch::X64), None, &Ok(state));
+    assert_eq!(
+        v.live.clone().map(|l| (l.txn, l.manual)),
+        Some((txn, manual))
+    );
+    // The kept `run` is the effective main executable; the journal's error offers nothing live.
+    assert!(v.kept_run && v.started_is_main(None));
+    // Only a profile with a rule or a priority counts as a rule to replace.
+    assert_eq!(v.rule_txn, None);
+    let v = advanced(
+        &r,
+        &facts(Arch::X64),
+        None,
+        &Err(crate::exec::LiveError::Journal("x".into())),
+    );
+    assert!(v.live.is_none() && !v.kept_run);
+    // A hybrid PC offers the performance class.
+    let hybrid: crate::hw::CpuTopology = serde_json::from_str(I9_14900K).unwrap();
+    assert!(advanced(&r, &facts(Arch::X64), Some(&hybrid), &live).hybrid);
+}
+
+/// FA2 the steps of a thread limit on this PC: the usual numbers below the logical processors,
+/// the core count and "all but one".
+#[test]
+fn fa2_the_thread_steps_fit_the_pc() {
+    use super::thread_steps;
+    // 5950X: 16 cores, 32 logical processors.
+    assert_eq!(
+        thread_steps(32, 16),
+        [1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 20, 24, 28, 31]
+    );
+    assert_eq!(thread_steps(8, 4), [1, 2, 3, 4, 6, 7]);
+    assert!(thread_steps(1, 1).is_empty());
+    for (l, c) in [(12, 6), (20, 14), (64, 32), (2, 1)] {
+        let s = thread_steps(l, c);
+        assert!(s.windows(2).all(|w| w[0] < w[1]), "{s:?}");
+        assert!(s.iter().all(|n| *n >= 1 && *n < l), "{s:?}");
+        assert!(l < 2 || s.contains(&(l - 1)), "{s:?}");
+    }
+}

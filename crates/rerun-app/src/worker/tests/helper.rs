@@ -276,6 +276,7 @@ impl Rig {
     fn preview_of(&mut self, picks: Vec<Pick>) -> PreviewVm {
         self.page();
         let ev = self.run(Job::Plan {
+            manual: None,
             app_id: 220,
             picks,
             choices: Vec::new(),
@@ -588,6 +589,7 @@ fn ah5_without_a_safe_helper_or_elevation_windows_is_never_asked() {
         assert_eq!(block.offer, Offer::NeedsHelper);
         assert_eq!(block.note.as_deref(), Some(&*t(lang, Msg::FixNeedsHelper)));
         let ev = rig.run(Job::Plan {
+            manual: None,
             app_id: 220,
             choices: Vec::new(),
             picks: vec![pick("net", "block")],
@@ -849,6 +851,7 @@ fn apply_through_the_worker(owner: Option<PromptOwner>) -> Vec<rerun_core::sys::
     }
     assert!(!worker.set_owner(None));
     worker.send(Job::Plan {
+        manual: None,
         app_id: 220,
         choices: Vec::new(),
         picks: vec![pick("net", "block")],

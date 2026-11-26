@@ -71,14 +71,16 @@ use rerun_core::elevate::PromptState;
 use rerun_core::escape::Shown;
 use rerun_core::exec::{self, ExecError, RebindRefusal, Refusal};
 use rerun_core::flow::{
-    self, ActError, ClearShown, Env, FetchError, ForgetShown, Found, GameCache, GameView, Guarded,
-    Heads, IndexState, LibraryEvent, Lookup, NeedState, PackageNeed, Planned, Previewed, Progress,
-    RebindShown, RemoveShown, RevertGate, RevertShown,
+    self, ActError, Bitness, ClearShown, Env, FetchError, ForgetShown, Found, GameCache, GameView,
+    Guarded, Heads, IndexState, LibraryEvent, Lookup, NeedState, PackageNeed, Planned, Previewed,
+    Progress, RebindShown, RemoveShown, RevertGate, RevertShown,
 };
+use rerun_core::hw::CpuTopology;
 use rerun_core::hw::{self, GpuArchTable};
 use rerun_core::journal::TxnId;
-use rerun_core::plan::{Choice, Pick};
+use rerun_core::plan::{Choice, Manual, Pick};
 use rerun_core::policy::open::{OpenUrl, OwnLink};
+use rerun_core::prim::CpuRuleSpec;
 use rerun_core::sys::{Http, NoShell, PromptOwner, PromptOwnerSlot, Shell, System};
 use rerun_core::topo;
 
@@ -86,8 +88,8 @@ use crate::settings::{Memo, Settings};
 use crate::text::{Lang, Msg, t};
 use crate::vm::{
     self, AppliedVm, BlockedVm, DataVm, DetailVm, DialogVm, DownloadVm, GameVm, HelperState,
-    HistoryVm, LibraryVm, Names, Notice, Offer, OrphansVm, PackageState, PreviewVm, ResultVm,
-    RowVm, SteamVm, StoreVm, SystemVm, TopoKnown, UacVm,
+    HistoryVm, LibraryVm, Names, Notice, Offer, OrphansVm, PackageState, PreviewVm, ReadoutVm,
+    ResultVm, RowVm, SteamVm, StoreVm, SystemVm, TopoKnown, UacVm,
 };
 
 /// A job for the worker.
@@ -122,6 +124,17 @@ pub enum Job {
         /// The option values chosen, one per option (ADR 0032); with the picks one selection, one
         /// plan, one preview.
         choices: Vec<Choice>,
+        /// The user's own settings of the Advanced section (ADR 0029), part of the same
+        /// selection, plan and preview.
+        manual: Option<Manual>,
+    },
+    /// What the user's own CPU rule selects on this PC, for the Advanced section's live readout
+    /// (reads the processor topology once per session, nothing else).
+    Readout {
+        /// The rule.
+        rule: CpuRuleSpec,
+        /// The bitness of the program it is for.
+        bitness: Bitness,
     },
     /// The window rendered the preview with this plan hash: only now may it be applied
     /// (`flow::shown`, ADR 0027 rule 5).
@@ -247,6 +260,7 @@ impl Job {
             Self::System => "system".to_owned(),
             Self::Orphans => "orphans".to_owned(),
             Self::Plan { app_id, .. } => format!("plan {app_id}"),
+            Self::Readout { .. } => "readout".to_owned(),
             Self::PreviewShown { .. } => "preview shown".to_owned(),
             Self::Apply { .. } => "apply".to_owned(),
             Self::RevertPreview { .. } => "undo preview".to_owned(),
@@ -334,6 +348,13 @@ pub enum Event {
         app_id: u32,
         /// The preview.
         vm: Box<PreviewVm>,
+    },
+    /// What a rule selects on this PC, in words ([`Job::Readout`]).
+    Readout {
+        /// The rule it answers for.
+        rule: CpuRuleSpec,
+        /// The sentence.
+        vm: Box<ReadoutVm>,
     },
     /// Nothing is picked: the preview is cleared.
     PreviewNone {
@@ -605,6 +626,9 @@ pub struct Session {
     pub(crate) shell: ShellRef,
     /// The settings file as read at the start or last written (P5-10b).
     pub(crate) settings: Memo,
+    /// The processor topology for the Advanced section's readout: read once, kept until a
+    /// rescan (memory only).
+    topology: Option<Result<CpuTopology, String>>,
 }
 
 /// The shell a session opens links and Rerun's folder with.
@@ -682,6 +706,7 @@ impl Session {
     fn rescan(&mut self) {
         self.games.clear();
         self.system = None;
+        self.topology = None;
         self.pages.clear();
     }
 }
@@ -799,7 +824,25 @@ fn run_job(
             app_id,
             picks,
             choices,
-        } => plan(&g, *app_id, picks, choices, lang, session, emit),
+            manual,
+        } => {
+            let sel = flow::Selection {
+                picks: picks.clone(),
+                choices: choices.clone(),
+                manual: manual.clone(),
+            };
+            plan(&g, *app_id, &sel, lang, session, emit);
+        }
+        Job::Readout { rule, bitness } => {
+            let topo = session
+                .topology
+                .get_or_insert_with(|| flow::cpu_topology(&g));
+            let view = flow::rule_view(topo, rule, *bitness);
+            emit(Event::Readout {
+                rule: *rule,
+                vm: Box::new(vm::readout(&view, lang)),
+            });
+        }
         Job::PreviewShown { hash } => {
             // The window handed the preview over to be drawn: only now is the plan the
             // user's to apply (rule 5, `flow::shown`).
@@ -982,6 +1025,7 @@ fn fix_key(page: &GameVm) -> PageKey {
             })
             .collect(),
         notice: page.options.notice.is_some(),
+        advanced: page.advanced.view.clone(),
     }
 }
 
@@ -993,6 +1037,9 @@ pub(crate) struct PageKey {
     fixes: Vec<(String, Offer)>,
     options: Vec<OptionKey>,
     notice: bool,
+    /// The Advanced section's view of the game (its live own settings, the anti-cheat rule, a
+    /// kept program): another one means the page the window holds is out of date.
+    advanced: Option<flow::AdvancedView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1060,15 +1107,15 @@ fn refresh(
 fn plan(
     g: &Guarded<'_>,
     app_id: u32,
-    picks: &[Pick],
-    choices: &[Choice],
+    sel: &flow::Selection,
     lang: Lang,
     session: &mut Session,
     emit: &mut dyn FnMut(Event),
 ) {
     session.pending.plan = None;
     session.pending.shown = None;
-    if picks.is_empty() && choices.is_empty() {
+    let (picks, choices, manual) = (&sel.picks, &sel.choices, sel.manual.as_ref());
+    if picks.is_empty() && choices.is_empty() && manual.is_none() {
         emit(Event::PreviewNone { app_id });
         return;
     }
@@ -1108,12 +1155,15 @@ fn plan(
         emit(refused(vm::not_available(lang)));
         return;
     }
-    let sel = flow::Selection {
-        picks: picks.to_vec(),
-        choices: choices.to_vec(),
-        manual: None,
-    };
-    match flow::plan(g, app_id, &sel) {
+    // The own settings: only what the section offers now (the locks of the page hold in the
+    // worker too), and a form the core's check accepts.
+    if let Some(m) = manual
+        && !vm::manual_offered(&page, picks, m)
+    {
+        emit(refused(vm::not_available(lang)));
+        return;
+    }
+    match flow::plan(g, app_id, sel) {
         Err(e) => emit(refused(vm::game_refusal(&e, lang))),
         Ok(Lookup::Read {
             found: Found::One(picked),

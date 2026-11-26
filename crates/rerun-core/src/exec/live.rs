@@ -22,10 +22,10 @@ use crate::fold::fold;
 use crate::journal::{Closing, InstanceTag, Journal, Listing, TxnId, TxnState, VerifyBackups};
 use crate::path::RelPath;
 use crate::plan::{
-    ContentRef, MAX_PROFILE_OLD_BYTES, Op, Plan, PlanOrigin, RootKind, Target, profile_file,
-    profile_id,
+    ContentRef, MAX_PROFILE_OLD_BYTES, Manual, Op, Plan, PlanOrigin, RootKind, Target,
+    profile_file, profile_id,
 };
-use crate::policy::registry::RegSlot;
+use crate::policy::registry::{RegSlot, TokenName};
 use crate::policy::root::{AppDir, RootId};
 use rerun_proto::profile::{self as proto, LaunchProfile};
 
@@ -67,6 +67,22 @@ pub struct LiveChoice {
     pub value: String,
 }
 
+/// The user's own settings ("Advanced", ADR 0029) the live transactions of the game applied, for
+/// the game page's form: what each part of the form shows, with the change that set it. The
+/// launch part is the newest live one (a later profile replaces an earlier one), flags add up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveManual {
+    /// The newest live transaction that recorded own settings.
+    pub txn: TxnId,
+    /// What is live of them, merged: the newest launch part, every flag once. As the plans
+    /// recorded it (display and form only: the ops are the truth).
+    pub manual: Manual,
+    /// The transaction that set the launch part (`None`: no launch part is live).
+    pub launch_txn: Option<TxnId>,
+    /// Each live flag with the transaction that set it (the newest, if one was set twice).
+    pub flags: Vec<(TokenName, TxnId)>,
+}
+
 /// What is live for one game.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveState {
@@ -76,6 +92,8 @@ pub struct LiveState {
     pub exes: Vec<LiveExe>,
     /// The option values live transactions of the game folder chose, newest per option.
     pub choices: Vec<LiveChoice>,
+    /// The user's own settings the newest live transaction of the game folder applied.
+    pub manual: Option<LiveManual>,
 }
 
 /// Why the live state does not allow a plan for the game.
@@ -191,12 +209,14 @@ struct Scan {
     holder: Option<Holder>,
     exes: Vec<LiveExe>,
     choices: Vec<LiveChoice>,
+    manual: Option<LiveManual>,
 }
 
 fn scan(j: &Journal<'_>, l: &Listing, name: Option<&RelPath>, game: Option<RootId>) -> Scan {
     let mut holder: Option<Holder> = None;
     let mut exes = Vec::new();
     let mut choices: Vec<LiveChoice> = Vec::new();
+    let mut manual: Option<LiveManual> = None;
     for t in &l.txns {
         let Ok(v) = &t.view else { continue };
         if matches!(v.state, TxnState::Empty) {
@@ -231,15 +251,33 @@ fn scan(j: &Journal<'_>, l: &Listing, name: Option<&RelPath>, game: Option<RootI
         if forgotten || matches!(full.state, TxnState::Closed(_)) {
             continue;
         }
-        // The option values of a transaction that is applied completely; a later one that chose
-        // another value of the same option replaces the entry (the listing is in order).
-        if full.state == TxnState::Applied
+        // The option values and the own settings of a transaction that is applied completely; a
+        // later one that chose another value of the same option (or set own settings again)
+        // replaces the entry (the listing is in order).
+        let here_live = full.state == TxnState::Applied
             && full.ops.values().all(|o| o.reverted.is_none())
             && p.roots
                 .iter()
-                .any(|r| r.kind == RootKind::Game && r.id == game)
-            && let Some(src) = &p.source
-        {
+                .any(|r| r.kind == RootKind::Game && r.id == game);
+        if here_live && let Some(m) = &p.manual {
+            let live = manual.get_or_insert_with(|| LiveManual {
+                txn: t.id,
+                manual: Manual::default(),
+                launch_txn: None,
+                flags: Vec::new(),
+            });
+            live.txn = t.id;
+            if m.launch.is_some() {
+                live.manual.launch.clone_from(&m.launch);
+                live.launch_txn = Some(t.id);
+            }
+            for l in &m.layers {
+                live.flags.retain(|(x, _)| x != l);
+                live.flags.push((l.clone(), t.id));
+            }
+            live.manual.layers = live.flags.iter().map(|(x, _)| x.clone()).collect();
+        }
+        if here_live && let Some(src) = &p.source {
             for c in &src.choices {
                 choices.retain(|x| !(x.topo == src.topo && x.option == c.option));
                 choices.push(LiveChoice {
@@ -265,6 +303,7 @@ fn scan(j: &Journal<'_>, l: &Listing, name: Option<&RelPath>, game: Option<RootI
         holder,
         exes,
         choices,
+        manual,
     }
 }
 
@@ -325,6 +364,7 @@ pub fn live_state(
         profile,
         exes: s.exes,
         choices: s.choices,
+        manual: s.manual,
     })
 }
 

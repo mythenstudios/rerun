@@ -5,6 +5,7 @@
 //! The renderer is Slint's software renderer, always (ADR 0026 open point, decided in P5-3):
 //! no GPU, no OpenGL driver in the process.
 
+mod advanced;
 mod chrome;
 mod download;
 mod open;
@@ -31,10 +32,10 @@ mod generated {
 }
 
 use generated::{
-    AppWindow, AppliedData, BadgeData, BannerData, CardData, DetailData, DialogData, FactData,
-    FixData, GameData, HistEntryData, HistGroupData, HistoryData, LaunchData, LaunchRowData,
-    LineData, ListData, Modal, NoticeData, OpData, OptionChoiceData, OptionData, OptionsData,
-    OrphanData, OrphansData, PartsData, PreviewData, ProblemData, ProfilePartData,
+    AdvancedData, AppWindow, AppliedData, BadgeData, BannerData, CardData, DetailData, DialogData,
+    FactData, FixData, GameData, HistEntryData, HistGroupData, HistoryData, LaunchData,
+    LaunchRowData, LineData, ListData, Modal, NoticeData, OpData, OptionChoiceData, OptionData,
+    OptionsData, OrphanData, OrphansData, PartsData, PreviewData, ProblemData, ProfilePartData,
     ProfilePartsData, Reveal, RowData, SectionData, SolvedData, SourceData, StoreData,
     StoreRowData, Str, SysLineData, Theme, WarnData,
 };
@@ -119,6 +120,10 @@ struct State {
     /// The third-party licences are open (P5-10e; their entries are handed to the window once).
     licences: bool,
     licences_loaded: bool,
+    /// What the rule of the Advanced section selects on this PC, as the worker last answered
+    /// (for that rule), and the rule it was last asked about.
+    readout: Option<(rerun_core::prim::CpuRuleSpec, vm::ReadoutVm)>,
+    readout_asked: Option<rerun_core::prim::CpuRuleSpec>,
 }
 
 /// Wakes the event loop from the worker thread (ADR 0026: `invoke_from_event_loop`).
@@ -259,6 +264,8 @@ where
         uac: false,
         licences: false,
         licences_loaded: false,
+        readout: None,
+        readout_asked: None,
     }));
     callbacks(&ui, &state);
 
@@ -840,6 +847,8 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                     // or a refresh) keep what is still selectable.
                     let first = st.page.is_none();
                     if first {
+                        st.readout = None;
+                        st.readout_asked = None;
                         st.selection = Selection::preselected(&g);
                     } else {
                         st.selection.keep(&g);
@@ -873,6 +882,7 @@ fn poll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                     ui.set_preview(p);
                 }
             }
+            Event::Readout { rule, vm } => advanced::answered(ui, &mut st, rule, *vm),
             Event::PreviewNone { app_id } => {
                 if st.game == Some(app_id) {
                     st.preview_hash = None;
@@ -1055,6 +1065,7 @@ fn game(g: &GameVm, sel: &Selection) -> GameData {
         notes: model(g.notes.iter().map(s).collect()),
         detail: g.detail.as_ref().map(shown).unwrap_or_default(),
         options: write::options_data(g, sel),
+        advanced: advanced::data(&AdvancedData::default(), &sel.advanced(g), None, -1),
         problems: model(
             g.problems
                 .iter()
@@ -1250,6 +1261,14 @@ fn history_data(
                                     backups: e.backups.as_ref().map(shown).unwrap_or_default(),
                                     may_remain: model(e.may_remain.iter().map(shown).collect()),
                                     note: e.note.as_deref().map(s).unwrap_or_default(),
+                                    own_title: e
+                                        .own
+                                        .as_ref()
+                                        .map(|o| s(&o.title))
+                                        .unwrap_or_default(),
+                                    own_lines: model(
+                                        e.own.iter().flat_map(|o| o.lines.iter().map(s)).collect(),
+                                    ),
                                 })
                                 .collect(),
                         ),

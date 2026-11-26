@@ -232,6 +232,7 @@ impl Rig {
 
     pub(super) fn preview_of(&mut self, picks: Vec<Pick>) -> PreviewVm {
         let ev = self.run(Job::Plan {
+            manual: None,
             app_id: 220,
             picks,
             choices: Vec::new(),
@@ -467,6 +468,7 @@ fn aw13_the_preview_lists_every_change_and_stores_nothing() {
     let before = rig.snap();
     rig.sys.fake_fs().record_calls(true);
     let ev = rig.run(Job::Plan {
+        manual: None,
         app_id: 220,
         picks,
         choices: Vec::new(),
@@ -567,6 +569,7 @@ fn aw13_the_preview_lists_every_change_and_stores_nothing() {
     let mut de = Rig::new(Lang::De);
     let g = de.page();
     let pv = de.run(Job::Plan {
+        manual: None,
         app_id: 220,
         choices: Vec::new(),
         picks: Selection::preselected(&g).picks(&g),
@@ -586,6 +589,7 @@ fn aw13_an_apply_needs_the_shown_preview_with_exactly_its_hash() {
     let picks = Selection::preselected(&page).picks(&page);
     let before = rig.snap();
     let ev = rig.run(Job::Plan {
+        manual: None,
         app_id: 220,
         picks,
         choices: Vec::new(),
@@ -977,6 +981,7 @@ fn aw14_a_plan_reads_the_executables_again() {
     );
     let picks = Selection::preselected(&page).picks(&page);
     let ev = rig.run(Job::Plan {
+        manual: None,
         app_id: 220,
         picks,
         choices: Vec::new(),
@@ -1003,6 +1008,7 @@ fn aw14_a_game_that_reads_differently_hands_the_page_back_instead_of_a_preview()
         .put_file(Path::new(&format!(r"{G}\game.exe")), &exe)
         .unwrap();
     let ev = rig.run(Job::Plan {
+        manual: None,
         app_id: 220,
         picks,
         choices: Vec::new(),
@@ -1022,6 +1028,7 @@ fn aw14_a_game_that_reads_differently_hands_the_page_back_instead_of_a_preview()
     );
     // Nothing selected: the panel is cleared and the worker forgets what it held.
     let ev = rig.run(Job::Plan {
+        manual: None,
         app_id: 220,
         choices: Vec::new(),
         picks: Vec::new(),
@@ -1179,6 +1186,7 @@ fn aw15_a_fix_that_needs_the_helper_is_never_planned_whatever_is_sent() {
     let app = rig.snap_app();
     let game = rig.snap();
     let ev = rig.run(Job::Plan {
+        manual: None,
         app_id: 220,
         choices: Vec::new(),
         picks: vec![pick("net", "block")],
@@ -1209,6 +1217,7 @@ fn aw15_after_a_rescan_the_first_plan_hands_the_page_back() {
     let picks = Selection::preselected(&page).picks(&page);
     rig.session.pages.clear();
     let ev = rig.run(Job::Plan {
+        manual: None,
         app_id: 220,
         picks,
         choices: Vec::new(),
@@ -1264,6 +1273,7 @@ fn aw14_the_window_cannot_close_while_an_apply_is_really_running() {
     let ev = wait_for(&worker, 1);
     let page = game_in(&ev).clone();
     worker.send(Job::Plan {
+        manual: None,
         app_id: 220,
         choices: Vec::new(),
         picks: Selection::preselected(&page).picks(&page),

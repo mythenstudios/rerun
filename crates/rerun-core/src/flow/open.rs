@@ -90,6 +90,9 @@ struct Facts {
     gpus: Vec<String>,
     cpu: String,
     last_start: String,
+    /// A change of this game holds the user's own settings ("Advanced", ADR 0029): a fact only,
+    /// never what they are.
+    own: bool,
 }
 
 /// `items` joined by `, `, at most `n` of them and "and K more" for the rest; `none` for none.
@@ -121,6 +124,7 @@ fn body(app_id: u32, f: &Facts, n: [usize; 3]) -> String {
          - Index: {index}\n\
          - Topos: {topos}\n\
          - Open changes: {variants}\n\
+         - Own settings (Advanced): {own}\n\
          - Graphics: {gpus}\n\
          - CPU: {cpu}\n\
          - Last start: {last}\n",
@@ -129,6 +133,7 @@ fn body(app_id: u32, f: &Facts, n: [usize; 3]) -> String {
         index = f.index,
         topos = listed(&f.topos, topos, "none"),
         variants = listed(&f.variants, variants, "none"),
+        own = if f.own { "yes" } else { "no" },
         gpus = listed(&f.gpus, gpus, "none found"),
         cpu = f.cpu,
         last = f.last_start,
@@ -225,6 +230,7 @@ fn facts(g: &Guarded<'_>, app_id: u32) -> Facts {
         ),
     };
     let mut variants: Vec<String> = Vec::new();
+    let mut own = false;
     let mut last_start = "none recorded".to_owned();
     if let Some(app) = g.app() {
         match journal(app, Heads::Open) {
@@ -237,6 +243,7 @@ fn facts(g: &Guarded<'_>, app_id: u32) -> Facts {
                         .iter()
                         .any(|r| r.steam.as_ref().is_some_and(|(a, _)| *a == app_id));
                     if ours {
+                        own |= p.manual.is_some();
                         for v in &p.variants {
                             if !variants.contains(v) {
                                 variants.push(v.clone());
@@ -271,6 +278,7 @@ fn facts(g: &Guarded<'_>, app_id: u32) -> Facts {
         gpus,
         cpu,
         last_start,
+        own,
     }
 }
 

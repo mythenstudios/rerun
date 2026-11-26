@@ -62,6 +62,9 @@ pub struct Selection {
     ids: BTreeSet<String>,
     /// The option values chosen next to the fixes: one selection, one preview (ADR 0032).
     options: super::Choices,
+    /// The Advanced section's form: the user's own settings (ADR 0029), one more part of the one
+    /// selection.
+    advanced: super::Form,
 }
 
 impl Selection {
@@ -79,6 +82,7 @@ impl Selection {
         Self {
             ids,
             options: super::Choices::default(),
+            advanced: super::Form::prefilled(&g.advanced),
         }
     }
 
@@ -112,6 +116,7 @@ impl Selection {
     /// refresh); drops the rest.
     pub fn keep(&mut self, g: &GameVm) {
         self.options.keep(&g.options);
+        self.advanced.keep(&g.advanced);
         self.ids.retain(|k| {
             g.fixes
                 .iter()
@@ -158,9 +163,53 @@ impl Selection {
         self.options.hint()
     }
 
-    /// Nothing is selected: no fix and no option value.
+    /// What the selected fixes mean for the Advanced section (its locks).
+    pub fn fix_sel(&self, g: &GameVm) -> super::FixSel {
+        let Some(v) = &g.advanced.view else {
+            return super::FixSel::default();
+        };
+        let chosen = || g.fixes.iter().filter(|f| self.ids.contains(&f.key));
+        super::FixSel {
+            cpu: chosen().find(|f| f.sets_rule).map(|f| f.key.clone()),
+            layer: chosen()
+                .find(|f| f.layer_exes.iter().any(|e| v.is_main(e)))
+                .map(|f| f.key.clone()),
+        }
+    }
+
+    /// The click on a field of the Advanced section (nothing for a locked or unknown one).
+    pub fn edit(&mut self, g: &GameVm, field: super::Field) {
+        self.options.clear_hint();
+        let fixes = self.fix_sel(g);
+        self.advanced.edit(&g.advanced, &fixes, field);
+    }
+
+    /// The Advanced section as it is drawn now.
+    pub fn advanced(&self, g: &GameVm) -> super::AdvancedRender {
+        g.advanced.render(&self.advanced, &self.fix_sel(g))
+    }
+
+    /// The own settings to plan next to the picks and the values (`None`: nothing to plan).
+    pub fn manual(&self, g: &GameVm) -> Option<rerun_core::plan::Manual> {
+        self.advanced.input(&g.advanced, &self.fix_sel(g)).manual
+    }
+
+    /// The rule the live readout asks the worker about, and the program's bitness.
+    pub fn readout_rule(
+        &self,
+        g: &GameVm,
+    ) -> Option<(rerun_core::prim::CpuRuleSpec, rerun_core::flow::Bitness)> {
+        self.advanced.readout_rule(&g.advanced, &self.fix_sel(g))
+    }
+
+    /// What the readout says without asking the worker (no rule, or a fix's rule instead).
+    pub fn readout_local(&self, g: &GameVm) -> Option<super::ReadoutVm> {
+        g.advanced.readout_local(&self.advanced, &self.fix_sel(g))
+    }
+
+    /// Nothing is selected: no fix, no option value and no own settings to plan.
     pub fn is_empty(&self, g: &GameVm) -> bool {
-        self.picks(g).is_empty() && self.options.is_empty()
+        self.picks(g).is_empty() && self.options.is_empty() && self.manual(g).is_none()
     }
 }
 
@@ -1365,6 +1414,8 @@ pub struct TxnCardVm {
     /// The Steam launch option while the transaction holds a launch profile that applies (set
     /// by [`add_launch`]; `None` for every other card).
     pub launch: Option<LaunchVm>,
+    /// What the user chose themselves in "Advanced", when this change holds own settings.
+    pub own: Option<super::OwnVm>,
 }
 
 /// Gives the cards of applied transactions that hold a launch profile the Steam launch option
@@ -1403,6 +1454,11 @@ pub(crate) fn head_ops(st: &TxnStatus, lang: Lang) -> Vec<OpVm> {
     flow::head(st)
         .map(|p| p.ops.iter().map(|o| op_vm(o, lang)).collect())
         .unwrap_or_default()
+}
+
+/// The own settings a transaction's head recorded.
+pub(crate) fn own_of(st: &TxnStatus, lang: Lang) -> Option<super::OwnVm> {
+    super::own_settings(flow::head(st).and_then(|p| p.manual.as_ref()), lang)
 }
 
 /// Whether a transaction's head writes a launch profile.
@@ -1492,6 +1548,7 @@ pub fn card(st: &TxnStatus, names: &Names, lang: Lang) -> Option<TxnCardVm> {
         can_undo,
         can_forget: true,
         launch: None,
+        own: own_of(st, lang),
     })
 }
 

@@ -1,0 +1,465 @@
+// The Advanced section of the game page (ADR 0029, docs/07-ui.md "Advanced"): the user's own CPU
+// rule, launch method, priority and compatibility flags, collapsed below the fixes. Only pictures
+// of the view model: which control is locked and why, what is checked and what the rule selects on
+// this PC are `vm::Form`, `vm::AdvancedVm` and the core. Every control has its accessible name;
+// untrusted text (a program of the game) is drawn in its own element.
+
+import { Pressable, Button, Card, Muted, PartsLine, RadioChoice } from "base.slint";
+import { AdvancedData, AdvGroupData, AdvSwitchData, Theme, Modal } from "base.slint";
+
+// The button that opens and closes the section: its name is "Advanced", the full heading its
+// description; the state is the expanded flag.
+component Disclosure inherits Pressable {
+    in property <string> title;
+    in property <string> name;
+    in property <bool> open;
+    ring-inset: -3px;
+    accessible-role: button;
+    accessible-label: root.name;
+    accessible-description: root.title;
+    accessible-expandable: true;
+    accessible-expanded: root.open;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.activated();
+        }
+    }
+    Rectangle {
+        border-radius: Theme.radius-m;
+        background: root.hovered && root.enabled ? Theme.raised3 : Theme.raised2;
+        border-width: Theme.edge;
+        border-color: Theme.line;
+    }
+
+    HorizontalLayout {
+        padding: Theme.s3;
+        padding-left: Theme.s4;
+        spacing: Theme.s3;
+        Text {
+            text: root.open ? "\u{2212}" : "+";
+            color: Theme.strong;
+            font-size: Theme.fs-l;
+            font-family: Theme.font-mono;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.title;
+            color: Theme.strong;
+            font-size: Theme.fs-m;
+            font-weight: 600;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+    }
+}
+
+// A switch the window controls: it shows what the view model says and only reports the click
+// (a locked one is off, with its reason under it).
+component Switch inherits Pressable {
+    in property <AdvSwitchData> s;
+    callback toggled(bool);
+    ring-inset: -3px;
+    enabled: root.s.enabled && !Modal.open;
+    accessible-role: switch;
+    accessible-checkable: true;
+    accessible-checked: root.s.checked;
+    accessible-label: root.s.label;
+    accessible-description: root.s.desc;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.activated();
+        }
+    }
+    activated => {
+        root.toggled(!root.s.checked);
+    }
+    HorizontalLayout {
+        spacing: Theme.s3;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Theme.s6 + Theme.s1;
+                height: Theme.s4 + Theme.s1;
+                border-radius: self.height / 2;
+                background: root.s.checked ? (root.enabled ? Theme.strong : Theme.faint) : (Theme.edge > 0px ? Theme.bg : Theme.line);
+                border-width: Theme.edge;
+                border-color: Theme.line;
+                Rectangle {
+                    width: parent.height - 6px;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    x: root.s.checked ? parent.width - self.width - 3px : 3px;
+                    y: 3px;
+                    background: root.s.checked ? Theme.bg : Theme.muted;
+                }
+            }
+        }
+
+        Text {
+            text: root.s.label;
+            color: root.enabled ? Theme.text : Theme.faint;
+            font-size: Theme.fs-m;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+    }
+}
+
+// A group of radio-style choices, a row (short words) or a list; a choice that cannot be chosen
+// is quiet, its reason stands under the group.
+component Group inherits VerticalLayout {
+    in property <AdvGroupData> g;
+    in property <bool> horizontal: false;
+    callback chosen(int);
+    spacing: Theme.s2;
+    accessible-role: radio-group;
+    accessible-label: root.g.label;
+    Text {
+        text: root.g.label;
+        color: Theme.muted;
+        font-size: Theme.fs-s;
+        accessible-role: none;
+    }
+
+    if root.horizontal: HorizontalLayout {
+        spacing: Theme.s5;
+        for c[ci] in root.g.choices: RadioChoice {
+            text: c.label;
+            accessible-label: c.name;
+            checked: c.checked;
+            enabled: c.enabled && !Modal.open;
+            activated => {
+                root.chosen(ci);
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+    if !root.horizontal: VerticalLayout {
+        spacing: Theme.s2;
+        for c[ci] in root.g.choices: RadioChoice {
+            text: c.label;
+            accessible-label: c.name;
+            checked: c.checked;
+            enabled: c.enabled && !Modal.open;
+            activated => {
+                root.chosen(ci);
+            }
+        }
+    }
+    if root.g.has-note: PartsLine {
+        p: root.g.note;
+        tone: Theme.muted;
+    }
+}
+
+component SubHeading inherits Text {
+    color: Theme.strong;
+    font-size: Theme.fs-m;
+    font-weight: 600;
+    accessible-role: none;
+}
+
+export component AdvancedSection inherits VerticalLayout {
+    in property <AdvancedData> data;
+    in-out property <bool> open: false;
+    // The field and the value (`AdvancedData`: the numbers the view model reads).
+    callback edit(int, int);
+    // The undo of a change, by the index of its card.
+    callback undo(int);
+    spacing: Theme.s3;
+    padding-top: Theme.s5;
+    accessible-role: groupbox;
+    accessible-label: root.data.name;
+
+    Disclosure {
+        title: root.data.title;
+        name: root.data.name;
+        open: root.open;
+        activated => {
+            root.open = !root.open;
+        }
+    }
+
+    // What is live shows when the section is closed too.
+    if root.data.active != "": Text {
+        text: root.data.active;
+        color: Theme.strong;
+        font-size: Theme.fs-m;
+        font-weight: 600;
+        wrap: word-wrap;
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.data.active;
+    }
+    if root.open: Card {
+        VerticalLayout {
+            padding: Theme.s5;
+            spacing: Theme.s4;
+            Muted {
+                text: root.data.intro;
+            }
+
+            if root.data.unavailable != "": Text {
+                text: root.data.unavailable;
+                color: Theme.text;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+                accessible-role: AccessibleRole.text;
+                accessible-label: root.data.unavailable;
+            }
+            SubHeading {
+                text: root.data.cpu-heading;
+            }
+
+            if root.data.has-launch-note: PartsLine {
+                p: root.data.launch-note;
+                tone: Theme.text;
+                size: Theme.fs-m;
+            }
+            if root.data.has-start: VerticalLayout {
+                spacing: Theme.s2;
+                Muted {
+                    text: root.data.start-desc;
+                }
+
+                Group {
+                    g: root.data.start;
+                    chosen(i) => {
+                        root.edit(10, i);
+                    }
+                }
+            }
+            // The thread limit: a value between two buttons, each named.
+            HorizontalLayout {
+                spacing: Theme.s3;
+                accessible-role: groupbox;
+                accessible-label: root.data.threads-label;
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: root.data.threads-label;
+                        color: Theme.text;
+                        font-size: Theme.fs-m;
+                        accessible-role: none;
+                    }
+                }
+
+                Button {
+                    text: "\u{2212}";
+                    accessible-label: root.data.threads-less;
+                    enabled: root.data.threads-less-on && !Modal.open;
+                    activated => {
+                        root.edit(0, 0);
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    min-width: Theme.s8 * 2;
+                    Text {
+                        text: root.data.threads-value;
+                        color: Theme.strong;
+                        font-size: Theme.fs-m;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        accessible-role: AccessibleRole.text;
+                        accessible-label: root.data.threads-label + ": " + root.data.threads-value;
+                    }
+                }
+
+                Button {
+                    text: "+";
+                    accessible-label: root.data.threads-more;
+                    enabled: root.data.threads-more-on && !Modal.open;
+                    activated => {
+                        root.edit(1, 0);
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            Switch {
+                s: root.data.smt;
+                toggled(on) => {
+                    root.edit(2, on ? 1 : 0);
+                }
+            }
+
+            Switch {
+                s: root.data.l3;
+                toggled(on) => {
+                    root.edit(3, on ? 1 : 0);
+                }
+            }
+
+            if root.data.has-prefer: Group {
+                g: root.data.prefer;
+                horizontal: true;
+                chosen(i) => {
+                    root.edit(4, i);
+                }
+            }
+            Group {
+                g: root.data.exclude;
+                chosen(i) => {
+                    root.edit(5, i);
+                }
+            }
+
+            Group {
+                g: root.data.mode;
+                chosen(i) => {
+                    root.edit(6, i);
+                }
+            }
+
+            // What the rule selects on this PC, asked of the core at every change.
+            Rectangle {
+                background: Theme.raised2;
+                border-radius: Theme.radius-s;
+                accessible-role: AccessibleRole.text;
+                accessible-label: root.data.read-title;
+                accessible-description: root.data.readout + root.data.readout-note;
+                Rectangle {
+                    x: 0;
+                    width: Theme.hair * 2;
+                    background: Theme.line-strong;
+                }
+
+                VerticalLayout {
+                    padding: Theme.s3;
+                    padding-left: Theme.s4;
+                    spacing: Theme.s1;
+                    Text {
+                        text: root.data.read-title;
+                        color: Theme.muted;
+                        font-size: Theme.fs-s;
+                        accessible-role: none;
+                    }
+
+                    Text {
+                        text: root.data.readout;
+                        color: Theme.strong;
+                        font-size: Theme.fs-m;
+                        wrap: word-wrap;
+                        accessible-role: none;
+                    }
+
+                    if root.data.readout-note != "": Text {
+                        text: root.data.readout-note;
+                        color: Theme.muted;
+                        font-size: Theme.fs-s;
+                        wrap: word-wrap;
+                        accessible-role: none;
+                    }
+                    if root.data.readout-detail != "": Text {
+                        text: root.data.readout-detail;
+                        color: Theme.muted;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.fs-s;
+                        wrap: word-wrap;
+                        accessible-role: none;
+                    }
+                }
+            }
+
+            Group {
+                g: root.data.method;
+                horizontal: true;
+                chosen(i) => {
+                    root.edit(7, i);
+                }
+            }
+
+            Group {
+                g: root.data.priority;
+                horizontal: true;
+                chosen(i) => {
+                    root.edit(8, i);
+                }
+            }
+
+            SubHeading {
+                text: root.data.flags-label;
+            }
+
+            for f[fi] in root.data.flags: VerticalLayout {
+                spacing: Theme.hair * 2;
+                Switch {
+                    s: f;
+                    toggled(on) => {
+                        root.edit(9, fi);
+                    }
+                }
+
+                if f.has-note: PartsLine {
+                    p: f.note;
+                    tone: Theme.muted;
+                }
+            }
+            if root.data.has-flags-note: PartsLine {
+                p: root.data.flags-note;
+                tone: Theme.muted;
+            }
+            if root.data.has-problem: PartsLine {
+                p: root.data.problem;
+                tone: Theme.text;
+                size: Theme.fs-m;
+            }
+            if root.data.replaces != "": Text {
+                text: root.data.replaces;
+                color: Theme.text;
+                font-size: Theme.fs-m;
+                wrap: word-wrap;
+                accessible-role: AccessibleRole.text;
+                accessible-label: root.data.replaces;
+            }
+            // Clearing the launch settings while some are live means undoing that change: said,
+            // never planned.
+            if root.data.undo-hint != "": Rectangle {
+                background: Theme.raised2;
+                border-radius: Theme.radius-s;
+                accessible-role: AccessibleRole.text;
+                accessible-label: root.data.undo-hint;
+                Rectangle {
+                    x: 0;
+                    width: Theme.hair * 2;
+                    background: Theme.line-strong;
+                }
+
+                VerticalLayout {
+                    padding: Theme.s3;
+                    padding-left: Theme.s4;
+                    spacing: Theme.s3;
+                    Text {
+                        text: root.data.undo-hint;
+                        color: Theme.text;
+                        font-size: Theme.fs-m;
+                        wrap: word-wrap;
+                        accessible-role: none;
+                    }
+
+                    if root.data.undo-card >= 0: HorizontalLayout {
+                        alignment: start;
+                        Button {
+                            text: root.data.undo-label;
+                            enabled: !Modal.open && !Modal.working;
+                            activated => {
+                                root.undo(root.data.undo-card);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

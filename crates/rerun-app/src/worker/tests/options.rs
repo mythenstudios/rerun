@@ -42,7 +42,7 @@ fn options_index(sha: &str, extra: &str, launch: &str, status: &str) -> String {
     )
 }
 
-fn world_with(index: impl Fn(&str) -> String) -> FakeSystem {
+pub(super) fn world_with(index: impl Fn(&str) -> String) -> FakeSystem {
     let sys = steam_world_gpu("Invented W", None);
     sys.fake_fs()
         .put_file(Path::new(&format!(r"{G}\video.ini")), VIDEO_INI.as_bytes())
@@ -67,7 +67,7 @@ fn world_with(index: impl Fn(&str) -> String) -> FakeSystem {
     sys
 }
 
-fn rig(lang: Lang, index: impl Fn(&str) -> String) -> Rig {
+pub(super) fn rig(lang: Lang, index: impl Fn(&str) -> String) -> Rig {
     Rig {
         sys: world_with(index),
         session: Session::default(),
@@ -105,6 +105,7 @@ fn ow1_a_chosen_value_is_planned_applied_shown_as_live_and_undone() {
         sel.choose(&page, 0, 1);
         assert_eq!(sel.checked(&page), [1]);
         let ev = rig.run(Job::Plan {
+            manual: None,
             app_id: 220,
             picks: sel.picks(&page),
             choices: sel.choices(&page),
@@ -183,6 +184,7 @@ fn ow2_a_choice_the_page_does_not_offer_plans_nothing() {
         choice("nothing", "windowed"),
     ] {
         let ev = rig.run(Job::Plan {
+            manual: None,
             app_id: 220,
             picks: Vec::new(),
             choices: vec![c],
@@ -194,6 +196,7 @@ fn ow2_a_choice_the_page_does_not_offer_plans_nothing() {
     }
     // Neither a pick nor a choice: the preview is cleared.
     let ev = rig.run(Job::Plan {
+        manual: None,
         app_id: 220,
         picks: Vec::new(),
         choices: Vec::new(),

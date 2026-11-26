@@ -95,6 +95,7 @@ fn head() -> Preview {
         gpu_pref: None,
         user_data: None,
         variants: Vec::new(),
+        manual: None,
     }
 }
 

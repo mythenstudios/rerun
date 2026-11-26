@@ -820,3 +820,55 @@ fn m7_a_topo_without_a_launch_block_takes_an_own_start() {
         other => panic!("{other:?}"),
     }
 }
+
+// ---------- M8 ----------
+
+/// What the journal says is live of the user's own settings (the game page's form, UI slice):
+/// the launch part of the newest live transaction that set one, every live flag with its
+/// transaction, merged; gone with the reverts.
+#[test]
+fn m8_the_live_state_names_the_own_settings() {
+    let env = Env::new(game_sys());
+    let t = own_topo();
+    let live = |sys: &FakeSystem| {
+        let fr = fr(sys);
+        let store = StoreDir::open(sys, &fr, Path::new(STEAM_LIB)).unwrap();
+        let g = store.game(&fr, "G").unwrap();
+        crate::exec::live_state(&app(sys), Some(APP), g.id())
+            .unwrap()
+            .manual
+    };
+    assert_eq!(live(&env.sys), None);
+    let first = apply_m(&env, &t, &[], &rule());
+    let got = live(&env.sys).expect("live");
+    assert_eq!((got.txn, got.launch_txn), (first, Some(first)));
+    assert_eq!((&got.manual, got.flags.is_empty()), (&rule(), true));
+    // Flags alone add to it: the newest transaction, the launch part still the first one's.
+    let second = apply_m(&env, &t, &[], &flags(&["ZZ_FLAG_A"]));
+    let got = live(&env.sys).expect("live");
+    assert_eq!((got.txn, got.launch_txn), (second, Some(first)));
+    assert_eq!(got.manual.launch, rule().launch);
+    assert_eq!(got.manual.layers, [tok("ZZ_FLAG_A")]);
+    assert_eq!(got.flags, [(tok("ZZ_FLAG_A"), second)]);
+    // A newer launch part replaces the older one.
+    let third = apply_m(
+        &env,
+        &t,
+        &[],
+        &rule_with(|l| l.priority = Some(PrioritySpec::High)),
+    );
+    let got = live(&env.sys).expect("live");
+    assert_eq!((got.txn, got.launch_txn), (third, Some(third)));
+    assert_eq!(
+        got.manual.launch.unwrap().priority,
+        Some(PrioritySpec::High)
+    );
+    assert_eq!(got.flags, [(tok("ZZ_FLAG_A"), second)]);
+    reverted(&env, &third);
+    reverted(&env, &second);
+    let got = live(&env.sys).expect("live");
+    assert_eq!((got.txn, got.launch_txn), (first, Some(first)));
+    assert_eq!(&got.manual, &rule());
+    reverted(&env, &first);
+    assert_eq!(live(&env.sys), None);
+}
