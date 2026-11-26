@@ -1691,31 +1691,35 @@ export component AppWindow inherits Window {
                     }
 
                     // The three window buttons stay the last elements of the title bar, in this
-                    // order: `ui::chrome` hit-tests the second from the right as the maximise
-                    // button (source rule `the_caption_buttons_keep_their_order`).
-                    CaptionButton {
-                        glyph: "\u{E921}";
-                        label: Str.minimize;
-                        activated => {
-                            root.minimized = true;
+                    // order and side by side without spacing, like Windows' own: `ui::chrome`
+                    // hit-tests the second `Theme.caption-w` from the right as the maximise button
+                    // (source rule `the_caption_buttons_keep_their_order`).
+                    HorizontalLayout {
+                        spacing: 0px;
+                        CaptionButton {
+                            glyph: "\u{E921}";
+                            label: Str.minimize;
+                            activated => {
+                                root.minimized = true;
+                            }
                         }
-                    }
 
-                    CaptionButton {
-                        glyph: root.maximized ? "\u{E923}" : "\u{E922}";
-                        label: root.maximized ? Str.restore : Str.maximize;
-                        nc-hover: root.max-nc-hover;
-                        activated => {
-                            root.maximized = !root.maximized;
+                        CaptionButton {
+                            glyph: root.maximized ? "\u{E923}" : "\u{E922}";
+                            label: root.maximized ? Str.restore : Str.maximize;
+                            nc-hover: root.max-nc-hover;
+                            activated => {
+                                root.maximized = !root.maximized;
+                            }
                         }
-                    }
 
-                    CaptionButton {
-                        glyph: "\u{E8BB}";
-                        label: Str.close;
-                        danger: true;
-                        activated => {
-                            root.request-close();
+                        CaptionButton {
+                            glyph: "\u{E8BB}";
+                            label: Str.close;
+                            danger: true;
+                            activated => {
+                                root.request-close();
+                            }
                         }
                     }
                 }

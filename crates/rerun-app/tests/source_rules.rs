@@ -285,6 +285,25 @@ fn the_caption_buttons_keep_their_order() {
         .filter(|l| l.ends_with('{') && *l != "activated => {")
         .collect();
     assert!(elements.is_empty(), "{elements:?}");
+    // Side by side without spacing: the hit test takes the maximise button as the second
+    // `caption-w` from the right edge (the title bar's own spacing once moved it).
+    let before = &src[..src.find("label: Str.minimize;").unwrap()];
+    let opened: Vec<&str> = before
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("//"))
+        .take(4)
+        .collect();
+    assert_eq!(
+        opened,
+        [
+            "glyph: \"\\u{E921}\";",
+            "CaptionButton {",
+            "spacing: 0px;",
+            "HorizontalLayout {"
+        ]
+    );
     // Teeth: a swapped order is found.
     let swapped = "CaptionButton {\nlabel: Str.close;\n}\nCaptionButton {\nlabel: Str.minimize;\n}";
     assert_eq!(caption_order(swapped), ["close", "minimize"]);
