@@ -1561,7 +1561,7 @@ fn lr4_a_profile_with_run_and_args_round_trips() {
 }
 
 #[test]
-fn lr5_a_format_1_profile_is_replaced_once_and_restored_bit_for_bit() {
+fn lr5_a_format_1_profile_with_the_same_rule_stays_and_is_restored_bit_for_bit() {
     // T1 as an earlier build wrote it: the same rule as format 1 bytes.
     let env = Env::new(lp_sys(&pe_x86(), &pe_x86()));
     env.sys.fake_fs().mkdir_all(Path::new(PROFILES)).unwrap();
@@ -1589,18 +1589,24 @@ fn lr5_a_format_1_profile_is_replaced_once_and_restored_bit_for_bit() {
     let t1 = env.applied(&store(&app(&env.sys), &p1.encode().unwrap()).unwrap());
     let name = format!(r"{PROFILES}\{}", profile_file(profile_id(220)));
     assert_eq!(try_read_abs(&env.sys, &name), Some(one_bytes.clone()));
-    // The same rule planned today: format 3, one replace of the format-1 file.
+    // The same rule planned today: the format-1 file says the same, so it stays (nothing to
+    // do; the shim reads formats 1 to 3 alike).
     let p2 = plan_lm(&env.sys, &one(spec("FFLauncher.exe")), "game.exe").unwrap();
+    assert!(p2.ops.is_empty(), "{:?}", p2.ops);
+    // Another rule replaces it with format 3, and the revert restores the format-1 bytes.
+    let mut other = spec("FFLauncher.exe");
+    if let Some(c) = &mut other.cpu {
+        c.max_threads = Some(6);
+    }
+    let p3 = plan_lm(&env.sys, &one(other), "game.exe").unwrap();
     assert!(
-        matches!(&p2.ops[0], Op::ReplaceFile { .. }),
+        matches!(&p3.ops[0], Op::ReplaceFile { .. }),
         "{:?}",
-        p2.ops[0]
+        p3.ops[0]
     );
-    let t2 = env.applied(&store(&app(&env.sys), &p2.encode().unwrap()).unwrap());
-    assert_eq!(try_read_abs(&env.sys, &name), Some(three.into_bytes()));
-    // Then nothing to do.
-    let p3 = plan_lm(&env.sys, &one(spec("FFLauncher.exe")), "game.exe").unwrap();
-    assert!(p3.ops.is_empty(), "{:?}", p3.ops);
+    let t2 = env.applied(&store(&app(&env.sys), &p3.encode().unwrap()).unwrap());
+    let now = try_read_abs(&env.sys, &name).unwrap();
+    assert!(now.starts_with(b"rerun-profile 3\n"));
     // Revert: the format-1 bytes exactly, then nothing.
     assert_eq!(env.revert(&t2).unwrap().closed, Some(Closing::Reverted));
     assert_eq!(try_read_abs(&env.sys, &name), Some(one_bytes));
@@ -1609,6 +1615,41 @@ fn lr5_a_format_1_profile_is_replaced_once_and_restored_bit_for_bit() {
         before == snap_all(&env.sys),
         "{:#?}",
         before.diff(&snap_all(&env.sys))
+    );
+}
+
+/// Review S2: a format-2 file (a rule with `exclude_first`, as an earlier build wrote it) that
+/// decodes to the profile a plan writes stays; one that says something else is replaced.
+#[test]
+fn lr5b_a_format_2_profile_with_the_same_rule_stays() {
+    let env = Env::new(lp_sys(&pe_x86(), &pe_x86()));
+    env.sys.fake_fs().mkdir_all(Path::new(PROFILES)).unwrap();
+    let excl = || one(spec_excl(ExcludeFirstSpec::Thread));
+    let p = plan_lm(&env.sys, &excl(), "game.exe").unwrap();
+    let Some(ContentRef::Inline { bytes, .. }) = p.ops[0].content() else {
+        panic!("{:?}", p.ops[0])
+    };
+    let three = String::from_utf8(bytes.clone()).unwrap();
+    assert!(three.contains("cpu.exclude_first=thread\n"), "{three}");
+    let two = three
+        .replacen("rerun-profile 3\n", "rerun-profile 2\n", 1)
+        .replacen("run=none\nargs=none\n", "", 1)
+        .into_bytes();
+    assert_eq!(proto::decode(&two).unwrap(), proto::decode(bytes).unwrap());
+    let name = format!(r"{PROFILES}\{}", profile_file(profile_id(220)));
+    put(&env.sys, &name, &two);
+    let same = plan_lm(&env.sys, &excl(), "game.exe").unwrap();
+    assert!(same.ops.is_empty(), "{:?}", same.ops);
+    let other = plan_lm(
+        &env.sys,
+        &one(spec_excl(ExcludeFirstSpec::Core)),
+        "game.exe",
+    )
+    .unwrap();
+    assert!(
+        matches!(&other.ops[0], Op::ReplaceFile { .. }),
+        "{:?}",
+        other.ops[0]
     );
 }
 

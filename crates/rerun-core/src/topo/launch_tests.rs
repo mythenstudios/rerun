@@ -943,3 +943,121 @@ fn lo15_an_interrupted_holder_refuses() {
         "no failure left the holder interrupted: {calls:?}"
     );
 }
+
+// ---------- LO16 a live profile of an older format that says the same ----------
+
+/// T1 (the CPU fix of [`topo`]) as an earlier build wrote it: the profile file in format 1
+/// (header swapped, the format 3 lines dropped), applied from a stored plan. Returns the
+/// transaction and the format-1 bytes.
+fn apply_format_1_rule(env: &Env, t: &Topo) -> (TxnId, Vec<u8>) {
+    let mut tp = plan_on(&env.sys, t, &["cores/limit"], &[]).unwrap();
+    let Some(Op::CreateFile { content, .. }) = tp.plan.ops.iter_mut().find(|o| {
+        matches!(o.content(), Some(ContentRef::Inline { bytes, .. })
+            if bytes.starts_with(b"rerun-profile 3\n"))
+    }) else {
+        panic!("no profile op: {:?}", tp.plan.ops);
+    };
+    let Some(ContentRef::Inline { bytes, .. }) = Some(&*content) else {
+        unreachable!()
+    };
+    let three = String::from_utf8(bytes.clone()).unwrap();
+    let one = three
+        .replacen("rerun-profile 3\n", "rerun-profile 1\n", 1)
+        .replacen("cpu.exclude_first=none\nrun=none\nargs=none\n", "", 1)
+        .into_bytes();
+    assert_ne!(one, three.as_bytes());
+    assert_eq!(
+        proto::decode(&one).unwrap(),
+        proto::decode(three.as_bytes()).unwrap()
+    );
+    *content = ContentRef::Inline {
+        sha256: Sha256::digest(&one).into(),
+        bytes: one.clone(),
+    };
+    let txn = env.applied(&stored(&env.sys, &tp));
+    let v = env.verify(&txn);
+    assert!(v.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+    assert_eq!(
+        crate::exec::tests::read_abs(&env.sys, &profile_abs(&env.sys)),
+        one
+    );
+    (txn, one)
+}
+
+fn has_profile_op(tp: &TopoPlan) -> bool {
+    tp.plan.ops.iter().any(|o| {
+        matches!(o.content(), Some(ContentRef::Inline { bytes, .. })
+            if bytes.starts_with(b"rerun-profile "))
+    })
+}
+
+#[test]
+fn lo16_a_live_format_1_profile_with_the_same_rule_is_kept_as_it_is() {
+    let env = Env::new(game_sys());
+    let t = topo();
+    let before = snap(&env.sys);
+    let (t1, one) = apply_format_1_rule(&env, &t);
+    let with_t1 = snap(&env.sys);
+    // The same rule again (picked, then kept) plus an ini value: no profile op.
+    for picks in [&["cores/limit", "settings/ini"][..], &["settings/ini"][..]] {
+        let tp = plan_on(&env.sys, &t, picks, &[]).unwrap_or_else(|e| panic!("{picks:?}: {e}"));
+        assert!(!has_profile_op(&tp), "{picks:?}: {:?}", tp.plan.ops);
+        assert_eq!(
+            tp.plan.source.as_ref().unwrap().kept_profile,
+            Some(Sha256::digest(&one).into()),
+            "{picks:?}"
+        );
+    }
+    let tp = plan_on(&env.sys, &t, &["cores/limit", "settings/ini"], &[]).unwrap();
+    assert!(!tp.plan.ops.is_empty());
+    let t2 = env.applied(&stored(&env.sys, &tp));
+    assert_eq!(
+        crate::exec::tests::read_abs(&env.sys, &profile_abs(&env.sys)),
+        one
+    );
+    reverted(&env, &t2);
+    assert_eq!(
+        crate::exec::tests::read_abs(&env.sys, &profile_abs(&env.sys)),
+        one
+    );
+    same(&with_t1, &snap(&env.sys));
+    reverted(&env, &t1);
+    same(&before, &snap(&env.sys));
+}
+
+#[test]
+fn lo16_a_forgotten_format_1_profile_is_no_source_and_stays() {
+    let env = Env::new(game_sys());
+    let t = topo();
+    let (t1, one) = apply_format_1_rule(&env, &t);
+    env.forget(&t1).unwrap();
+    let tp = plan_on(&env.sys, &t, &["cores/limit", "settings/ini"], &[]).unwrap();
+    assert_eq!(tp.plan.source.as_ref().unwrap().kept_profile, None);
+    assert!(!has_profile_op(&tp), "{:?}", tp.plan.ops);
+    let with_t1 = snap(&env.sys);
+    let t2 = env.applied(&stored(&env.sys, &tp));
+    reverted(&env, &t2);
+    assert_eq!(
+        crate::exec::tests::read_abs(&env.sys, &profile_abs(&env.sys)),
+        one
+    );
+    same(&with_t1, &snap(&env.sys));
+}
+
+#[test]
+fn lo16_replaces_rule_is_said_only_for_a_different_rule() {
+    let env = Env::new(game_sys());
+    let t = topo();
+    let t1 = apply(&env, &t, &[], &["cores/limit"], &[]);
+    let replaces = |tp: &TopoPlan| tp.warnings.contains(&Warning::ReplacesRule { txn: t1 });
+    // The same rule: nothing is replaced.
+    let tp = plan_on(&env.sys, &t, &["cores/limit", "settings/ini"], &[]).unwrap();
+    assert!(!replaces(&tp), "{:?}", tp.warnings);
+    // Another rule (6 threads instead of 8): replaced, said.
+    let mut v = serde_json::to_value(&t).unwrap();
+    v["issues"][0]["variants"][0]["steps"][0]["cpu"]["max_threads"] = serde_json::json!(6);
+    let other: Topo = serde_json::from_value(v).unwrap();
+    check::topo(&other, Rules::Source).unwrap_or_else(|e| panic!("{e}"));
+    let tp = plan_on(&env.sys, &other, &["cores/limit"], &[]).unwrap();
+    assert!(replaces(&tp), "{:?}", tp.warnings);
+}

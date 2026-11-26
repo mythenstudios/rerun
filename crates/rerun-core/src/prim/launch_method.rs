@@ -47,8 +47,9 @@
 //!   equal rules give equal bytes, and `direct` and `watch` replace the same profile (one ID).
 //! - **The profile file**: [`plan::profile_id`] of the Steam app (E1 a) below the profiles root
 //!   (path from [`PlanCtx::app`] or [`PlanCtx::app_path`]); missing → `CreateFile`; the same bytes
-//!   → nothing to do; another plain file of at most 8 KiB with one link → `ReplaceFile` (a rest
-//!   after `forget`; the revert restores it); a folder, a link, a reparse point or anything
+//!   → nothing to do, and so is a file that decodes to the same profile (in practice an older
+//!   format an earlier build wrote; the shim reads formats 1 to 3 alike); another plain file of at most 8 KiB
+//!   with one link → `ReplaceFile` (a rest after `forget`; the revert restores it); a folder, a link, a reparse point or anything
 //!   larger is refused (Rerun leaves what is not its own).
 //!
 //! [`on_this_machine`] is the preview's view of the rule on this computer: it reads only the
@@ -407,9 +408,14 @@ fn app_path(ctx: &PlanCtx<'_>) -> Result<RootPath, PlanError> {
     }
 }
 
-/// The op that puts `bytes` at `name` below the profiles root, or `None` if it holds them
-/// already (module docs).
-fn profile_op(ctx: &PlanCtx<'_>, name: &RelPath, bytes: Vec<u8>) -> Result<Option<Op>, PlanError> {
+/// The op that puts `bytes` (the encoding of `profile`) at `name` below the profiles root, or
+/// `None` if the file there holds them already or decodes to `profile` (module docs).
+fn profile_op(
+    ctx: &PlanCtx<'_>,
+    name: &RelPath,
+    bytes: Vec<u8>,
+    profile: &LaunchProfile,
+) -> Result<Option<Op>, PlanError> {
     let sha: [u8; 32] = Sha256::digest(&bytes).into();
     let content = ContentRef::Inline { bytes, sha256: sha };
     let create = |content| {
@@ -451,6 +457,11 @@ fn profile_op(ctx: &PlanCtx<'_>, name: &RelPath, bytes: Vec<u8>) -> Result<Optio
     }
     let old_sha: [u8; 32] = Sha256::digest(&old).into();
     if old_sha == sha {
+        return Ok(None);
+    }
+    // Other bytes that decode to the same profile (in practice an older format an earlier build
+    // wrote): the shim reads it alike, so it stays (no replace only for a format change).
+    if proto::decode(&old).is_ok_and(|was| was == *profile) {
         return Ok(None);
     }
     Ok(Some(Op::ReplaceFile {
@@ -643,7 +654,7 @@ pub(crate) fn plan_into(
         .child("profiles")
         .map_err(|e| refuse(e.to_string()))?;
     let name = plan::profile_file(plan::profile_id(app_id));
-    if let Some(op) = profile_op(ctx, &name, bytes)? {
+    if let Some(op) = profile_op(ctx, &name, bytes, &profile)? {
         b.profile = Some((op, profiles));
     }
     Ok(())

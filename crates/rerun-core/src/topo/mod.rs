@@ -1355,6 +1355,19 @@ struct RulePart {
     priority: Option<prim::PrioritySpec>,
 }
 
+impl RulePart {
+    /// Whether `other` writes the same rule into the profile: the method, the priority and the
+    /// CPU rule as the planner builds it (a spec that does not build is never the same).
+    fn same_as(&self, other: &Self) -> bool {
+        let cpu = match (&self.cpu, &other.cpu) {
+            (None, None) => true,
+            (Some(a), Some(b)) => matches!((a.rule(), b.rule()), (Ok(x), Ok(y)) if x == y),
+            _ => false,
+        };
+        self.method == other.method && self.priority == other.priority && cpu
+    }
+}
+
 /// `option=value` of a choice.
 fn choice_name(c: &Choice) -> String {
     format!("{}={}", c.option, c.value)
@@ -2104,12 +2117,14 @@ fn compose_launch(
             .collect(),
         from: PartFrom::Kept(k.txn),
     });
-    // Review S3 of E-1a: a new rule part replaces the live one of another transaction.
-    if c.rule.is_some()
+    // Review S3 of E-1a: a new rule part replaces the live one of another transaction (not when
+    // it says the same: the profile then stays as it is, the planner plans no op for it).
+    if let Some(new) = &c.rule
         && let Some(Part {
+            value: live,
             from: PartFrom::Kept(txn),
-            ..
         }) = &kept_rule
+        && !new.value.same_as(live)
     {
         warnings.push(Warning::ReplacesRule { txn: *txn });
     }
