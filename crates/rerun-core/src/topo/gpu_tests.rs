@@ -144,6 +144,7 @@ fn plan_with(
             variant: "pref".to_owned(),
         }]),
         &ctx,
+        &crate::exec::LiveState::default(),
     )
 }
 

@@ -110,6 +110,7 @@ pub mod launch_result {
 pub use helper::{HelperFailure, helper_ready, reason_words};
 pub(crate) use launch::{launch_results_hashed, purge_results};
 pub(crate) use live::below as path_below;
+pub(crate) use live::profile_op as profile_op_of;
 pub use live::{LiveError, LiveExe, LiveProfile, LiveState, live_state};
 pub(crate) use packages::{package_users_with_status, remove_packages};
 pub use purge::{Keep, PurgeReport};
@@ -245,6 +246,24 @@ pub enum Refusal {
         /// The bound.
         limit: usize,
     },
+    /// A live transaction of the game installed package files or set compatibility flags for
+    /// another executable than this plan is for (ADR 0032 amendment P5-OE, E4 b; checked again
+    /// under the lock, security F1 of the O-2b review).
+    #[error(
+        "transaction {txn} installed files or set compatibility flags for another executable of \
+         this game than this plan is for; undo {txn} first, then plan again"
+    )]
+    ExeSwitch {
+        /// The transaction.
+        txn: TxnId,
+    },
+    /// The launch profile the plan relied on (its kept `run` names the plan's main executable)
+    /// is no longer the live one: undone, replaced or forgotten since the plan (security F1).
+    #[error(
+        "the launch profile of this game changed since the plan was made (a change was applied, \
+         undone or forgotten); plan again"
+    )]
+    ProfileChanged,
     /// A DLL of a package of the plan lies where a live transaction has a DLL of another
     /// package (P4-8): one DLL of a name per folder is loaded, and Rerun does not chainload.
     #[error(
@@ -1698,6 +1717,9 @@ fn preflight<'g>(
             package: s.package,
         });
     }
+    // P5-OE (E4 b, security F1): no switch of the executable while packages or flags are live
+    // for another one, and the launch profile the plan relied on is still the live one.
+    live::exe_switch(j, listing, plan)?;
     let roots = roots::Roots::all(cx, plan, &Bindings::head(plan), stores, run)?;
     let all: Vec<u16> = (0..plan.ops.len()).map(op_ix).collect();
     roots::main_exe_present(plan, &roots)?;

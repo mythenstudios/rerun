@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 
 use super::tests::{wrapper, wrapper_zip};
 use super::{
-    EngineError, EngineSelection, Facts, PartFrom, StepKind, TopoPlan, ValueRefusal, plan,
+    EngineError, EngineSelection, Facts, PartFrom, StepKind, TopoPlan, ValueRefusal, Warning, plan,
     read_game,
 };
 use crate::catalog::check::{self, Rules};
@@ -100,7 +100,7 @@ fn game_sys() -> FakeSystem {
 fn topo() -> Topo {
     let sha = hex(&x86());
     let j = format!(
-        r#"{{"format":1,"id":"invented-game","title":"Invented Game","status":"active","rev":3,
+        r#"{{"format":1,"id":"invented-game","title":"Invented Game","status":"draft","rev":3,
 "match":{{"steam_appid":{APP},"exes":[
   {{"path":"game.exe","sha256":"{sha}","api":"d3d9"}},
   {{"path":"game_dx9.exe","sha256":"{sha}","api":"d3d9"}}]}},
@@ -123,8 +123,7 @@ fn topo() -> Topo {
 ]}}"#
     );
     let t: Topo = serde_json::from_str(&j).unwrap_or_else(|e| panic!("{e}: {j}"));
-    // Release rules: the gate is open since O-2b (`OPTION_LAUNCH_REVIEWED`).
-    check::topo(&t, Rules::Release).unwrap_or_else(|e| panic!("{e}"));
+    check::topo(&t, Rules::Source).unwrap_or_else(|e| panic!("{e}"));
     t
 }
 
@@ -179,6 +178,7 @@ fn plan_with(
         packages: pkgs,
     };
     let (p, c) = (picks(p), choices(c));
+    let live = crate::exec::live_state(&a, Some(APP), g.id()).map_err(EngineError::Live)?;
     plan(
         &INDEX,
         t,
@@ -188,6 +188,7 @@ fn plan_with(
             choices: &c,
         },
         &ctx,
+        &live,
     )
 }
 
@@ -334,12 +335,15 @@ fn lo2_a_stack_of_a_rule_an_option_and_a_package() {
     let t = topo();
     let pk = pkgs(&env.sys);
     let before = snap(&env.sys);
-    let t1 = apply(&env, &t, &pk, &["cores/limit"], &[]);
+    let tp1 = plan_with(&env.sys, &t, &pk, &["cores/limit"], &[]).unwrap();
+    let p1 = profile_of(&tp1);
+    let t1 = env.applied(&stored(&env.sys, &tp1));
     let after_t1 = snap(&env.sys);
-    // T2 DX9: the rule of T1 is kept, `run` is the option's.
+    // T2 DX9: the rule of T1 is kept exactly (senior-dev S2), `run` is the option's.
     let tp = plan_with(&env.sys, &t, &pk, &[], &["api=dx9"]).unwrap();
     let p = profile_of(&tp);
     assert_eq!(p.cpu.and_then(|r| r.max_threads), Some(8));
+    assert_eq!((p.cpu, p.priority), (p1.cpu, p1.priority));
     assert_eq!(p.run.as_deref(), Some(abs("game_dx9.exe").as_str()));
     let parts = tp.parts.clone().unwrap();
     assert_eq!(parts.rule, Some(PartFrom::Kept(t1)));
@@ -576,6 +580,17 @@ fn lo8_anti_cheat_refuses_a_kept_run_and_args() {
         }
         other => panic!("{other:?}"),
     }
+    // F4: a plan without a profile part is still for the kept `run`'s executable: warned.
+    let tp = plan_on(&env.sys, &t, &["settings/ini"], &[]).unwrap();
+    assert!(tp.parts.is_none());
+    assert!(
+        tp.warnings.contains(&Warning::KeptAntiCheat {
+            txn: t1,
+            step: StepKind::Start
+        }),
+        "{:?}",
+        tp.warnings
+    );
     // A new value is refused by its own step, as before.
     assert!(matches!(
         plan_on(&env.sys, &t, &[], &["api=dx9"]),
@@ -690,4 +705,240 @@ fn lo10_a_profile_reverted_between_plan_and_apply_refuses_the_apply() {
         "the old state of the profile changed"
     );
     same(&before, &snap(&env.sys));
+}
+
+/// A draft Topo where Steam starts the game itself (`launch.start` is `game.exe`): options
+/// `skip` (`-skipintro`) and `fov` (`+fov=1`), each `launch_args` alone; the issues of [`topo`].
+fn args_topo() -> Topo {
+    let mut v = serde_json::to_value(topo()).unwrap();
+    v["launch"]["start"] = serde_json::json!("game.exe");
+    let opt = |id: &str, arg: &str| {
+        serde_json::json!({ "id": id, "title": id,
+            "sources": [{ "type": "pcgw", "url": "https://www.pcgamingwiki.com/wiki/Invented#Args" }],
+            "values": [{ "id": "on", "title": "On", "status": "unverified",
+                "steps": [{ "launch_args": [arg] }] }] })
+    };
+    v["options"] = serde_json::json!([opt("skip", "-skipintro"), opt("fov", "+fov=1")]);
+    let t: Topo = serde_json::from_value(v).unwrap();
+    check::topo(&t, Rules::Source).unwrap_or_else(|e| panic!("{e}"));
+    t
+}
+
+/// A step file's `direct` rule without `run` (max 4 threads), stored.
+fn step_rule(env: &Env) -> PlanHash {
+    let fr = fr(&env.sys);
+    let store_dir = StoreDir::open(&env.sys, &fr, Path::new(STEAM_LIB)).unwrap();
+    let g = store_dir.game(&fr, "G").unwrap();
+    let a = app(&env.sys);
+    let main = rel("game.exe");
+    let p = crate::prim::plan(
+        &[Step::LaunchMethod(LaunchMethodSpec {
+            method: MethodSpec::Direct,
+            start: rel("FFLauncher.exe"),
+            cpu: Some(CpuRuleSpec {
+                max_threads: Some(4),
+                ..CpuRuleSpec::default()
+            }),
+            priority: None,
+            run: None,
+            args: Vec::new(),
+        })],
+        &PlanCtx {
+            game: &g,
+            app: Some(&a),
+            steam_app: Some(APP),
+            main_exe: Some(&main),
+            reg: RegPolicy.reader(&env.sys),
+            app_path: None,
+            user_data: None,
+        },
+    )
+    .unwrap();
+    store(&a, &p.encode().unwrap()).unwrap()
+}
+
+fn refused(r: Result<crate::exec::Outcome, crate::exec::ApplyError>) -> Refusal {
+    match r {
+        Err(crate::exec::ApplyError::Refused(x)) => x,
+        other => panic!("{other:?}"),
+    }
+}
+
+// ---------- LO10b (security F1 of the O-2b review) ----------
+
+#[test]
+fn lo10b_the_apply_checks_the_switch_and_the_kept_profile_under_the_lock() {
+    let t = topo();
+    // (a) A plan for DX9, then a package for the first match applied: E4 b under the lock.
+    let env = Env::new(game_sys());
+    let pk = pkgs(&env.sys);
+    let h = stored(
+        &env.sys,
+        &plan_with(&env.sys, &t, &pk, &[], &["api=dx9"]).unwrap(),
+    );
+    let t1 = apply(&env, &t, &pk, &["wrapper/pkg"], &[]);
+    assert!(matches!(refused(env.apply(&h)), Refusal::ExeSwitch { txn } if txn == t1));
+    // (b) A package planned for the first match, then DX9 applied: its `run` names another
+    // executable than the plan's.
+    let env = Env::new(game_sys());
+    let pk = pkgs(&env.sys);
+    let h = stored(
+        &env.sys,
+        &plan_with(&env.sys, &t, &pk, &["wrapper/pkg"], &[]).unwrap(),
+    );
+    apply(&env, &t, &pk, &[], &["api=dx9"]);
+    assert!(matches!(refused(env.apply(&h)), Refusal::ProfileChanged));
+    // (c) A package planned for DX9 over a live DX9 that is undone before the apply: the plan
+    // names the profile it relied on.
+    let env = Env::new(game_sys());
+    let pk = pkgs(&env.sys);
+    let t1 = apply(&env, &t, &pk, &[], &["api=dx9"]);
+    let tp = plan_with(&env.sys, &t, &pk, &["wrapper/pkg"], &[]).unwrap();
+    assert!(tp.plan.source.as_ref().unwrap().kept_profile.is_some());
+    let h = stored(&env.sys, &tp);
+    reverted(&env, &t1);
+    let before = snap(&env.sys);
+    assert!(matches!(refused(env.apply(&h)), Refusal::ProfileChanged));
+    same(&before, &snap(&env.sys));
+}
+
+// ---------- LO11 the golden plan ----------
+
+/// LO11: the plan of a `start` value over a live CPU rule, frozen (`tests/fixtures/plan`): the
+/// kept rule and `run` in one profile replacing the rule's.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test: the golden plan is a fixture of the repository, not a game file"
+)]
+fn lo11_the_golden_plan_of_a_start_value_over_a_rule() {
+    let env = Env::new(game_sys());
+    let t = topo();
+    apply(&env, &t, &[], &["cores/limit"], &[]);
+    let tp = plan_on(&env.sys, &t, &[], &["api=dx9"]).unwrap();
+    let bytes = tp.plan.encode().unwrap();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/plan");
+    let golden = std::fs::read(dir.join("topo-220-start.json")).unwrap_or_default();
+    if bytes.bytes() != golden.as_slice() {
+        let out = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/plan-topo-220-start.golden.json");
+        std::fs::write(&out, bytes.bytes()).unwrap();
+        panic!(
+            "the plan differs from tests/fixtures/plan/topo-220-start.json (hash {}); the new \
+             bytes are in {}",
+            bytes.hash(),
+            out.display()
+        );
+    }
+    let want = std::fs::read_to_string(dir.join("topo-220-start.sha256")).unwrap();
+    assert_eq!(bytes.hash().to_string(), want.trim());
+}
+
+// ---------- LO12 to LO15 (review S2, F2, F3) ----------
+
+#[test]
+fn lo12_kept_args_and_two_args_values() {
+    let env = Env::new(game_sys());
+    let t = topo();
+    let t1 = apply(&env, &t, &[], &[], &["intro=skip"]);
+    let tp = plan_on(&env.sys, &t, &["cores/limit"], &[]).unwrap();
+    let parts = tp.parts.clone().unwrap();
+    assert_eq!(
+        parts.args,
+        Some((vec!["-skipintro".to_owned()], PartFrom::Kept(t1)))
+    );
+    assert_eq!(parts.run.map(|(_, f)| f), Some(PartFrom::Kept(t1)));
+    let args: Vec<String> = profile_of(&tp)
+        .args
+        .iter()
+        .map(|a| a.as_str().to_owned())
+        .collect();
+    assert_eq!(args, ["-skipintro"]);
+    // Two values that pass arguments.
+    let a = args_topo();
+    assert!(matches!(
+        plan_on(&env.sys, &a, &[], &["skip=on", "fov=on"]),
+        Err(EngineError::TwoArgs { first, second }) if first == "skip=on" && second == "fov=on"
+    ));
+}
+
+#[test]
+fn lo13_anti_cheat_refuses_kept_args_alone() {
+    let env = Env::new(game_sys());
+    let a = args_topo();
+    let t1 = apply(&env, &a, &[], &[], &["skip=on"]);
+    env.sys
+        .fake_fs()
+        .mkdir_all(Path::new(&format!(r"{STEAM_GAME}\pb")))
+        .unwrap();
+    env.sys.sync_all();
+    match plan_on(&env.sys, &a, &["cores/limit"], &[]) {
+        Err(EngineError::KeptAntiCheat { txn, step }) => {
+            assert_eq!((txn, step), (t1, StepKind::LaunchArgs));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// F2: a revert that brings a `run` back (a step file's profile without `run` over DX9) is held
+/// by a later package for any executable of the game.
+#[test]
+fn lo14_b1_holds_a_revert_that_brings_a_run_back() {
+    let env = Env::new(game_sys());
+    let t = topo();
+    let pk = pkgs(&env.sys);
+    let before = snap(&env.sys);
+    let t1 = apply(&env, &t, &pk, &[], &["api=dx9"]);
+    let t2 = env.applied(&step_rule(&env));
+    // T3 a package for the first match (no `run` is live now).
+    let t3 = apply(&env, &t, &pk, &["wrapper/pkg"], &[]);
+    later(env.revert(&t2), t3);
+    reverted(&env, &t3);
+    reverted(&env, &t2);
+    reverted(&env, &t1);
+    same(&before, &snap(&env.sys));
+}
+
+/// F3: the newest holder interrupted (its revert failed after it began) refuses the plan. Every
+/// call of the revert is failed once, on a fresh world each: at least one failure leaves the
+/// transaction begun and not reverted, and every such state refuses as `Interrupted`.
+#[test]
+fn lo15_an_interrupted_holder_refuses() {
+    let world = || {
+        let env = Env::new(game_sys());
+        let t1 = apply(&env, &topo(), &[], &[], &["api=dx9"]);
+        (env, t1)
+    };
+    let (env, t1) = world();
+    let fx = env.sys.fake_fs();
+    let r = env.revert_armed(&t1, |f| f.record_calls(true));
+    fx.record_calls(false);
+    assert!(r.is_ok(), "{r:?}");
+    let calls = fx.take_calls();
+    let mut seen = 0;
+    for (k, call) in calls.iter().enumerate() {
+        let nth = calls[..k].iter().filter(|c| *c == call).count();
+        let (env, t1) = world();
+        let r = env.revert_armed(&t1, |f| {
+            f.fail_at(*call, nth, crate::sys::SysErrorKind::AccessDenied);
+        });
+        env.sys.fake_fs().clear_faults();
+        if r.is_ok() {
+            continue;
+        }
+        match plan_on(&env.sys, &topo(), &["cores/limit"], &[]) {
+            Err(EngineError::Live(crate::exec::LiveError::Interrupted { txn })) => {
+                assert_eq!(txn, t1);
+                seen += 1;
+            }
+            // Failed before the revert began (or after the op was reverted): the profile is
+            // still live and kept, or gone.
+            Ok(_) => {}
+            Err(e) => panic!("{call:?} #{nth}: {e}"),
+        }
+    }
+    assert!(
+        seen > 0,
+        "no failure left the holder interrupted: {calls:?}"
+    );
 }

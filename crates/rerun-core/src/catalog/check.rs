@@ -52,11 +52,11 @@ pub const LAA_PATCH_REVIEWED: bool = true;
 pub const GPU_PREFERENCE_REVIEWED: bool = true;
 
 /// Whether a Topo outside a draft may hold an option value with `start` or `launch_args` (ADR
-/// 0032 amendment P5-OE). `false` until the shim slice that starts `run` and appends `args` was
-/// reviewed (O-2a) and the engine planned them (O-2b, with the carry-over of the live profile
-/// and the B1 stacking rule); open since O-2b, so a signed Topo may hold them. `ini_set` values
-/// were usable from the first slice.
-pub const OPTION_LAUNCH_REVIEWED: bool = true;
+/// 0032 amendment P5-OE). The engine plans them since O-2b; the gate opens in its own commit
+/// after the O-2b review findings and the [DEV] run of Assassin's Creed DX9 (as for
+/// `laa_patch` and `gpu_preference`). Until then the signed index holds none; a draft plans
+/// them. `ini_set` values are usable from the first slice.
+pub const OPTION_LAUNCH_REVIEWED: bool = false;
 
 /// Most options of a Topo (ADR 0032).
 pub const MAX_OPTIONS: usize = 8;
@@ -563,6 +563,28 @@ fn topo_option(t: &Topo, o: &TopoOption, at: &str) -> Result<Vec<IniFile>, RuleE
             return Err(err(
                 &format!("{at}.steps"),
                 format!("the same steps as value {} of this option", w.id),
+            ));
+        }
+    }
+    // O-2b review S1: one value of an option replaces another's launch parts, never leaves one
+    // behind: if a value starts an executable (passes arguments), every value of the option does.
+    for (kind, has) in [
+        (
+            "start",
+            (|s: &OptionStep| matches!(s, OptionStep::Start(_))) as fn(&OptionStep) -> bool,
+        ),
+        ("launch_args", |s| matches!(s, OptionStep::LaunchArgs(_))),
+    ] {
+        let with = o.values.iter().filter(|v| v.steps.iter().any(has)).count();
+        if with > 0
+            && let Some(j) = o.values.iter().position(|v| !v.steps.iter().any(has))
+        {
+            return Err(err(
+                &format!("{at}.values[{j}].steps"),
+                format!(
+                    "another value of this option has {kind}: every value of it needs {kind}, \
+                     so choosing one replaces the other's"
+                ),
             ));
         }
     }

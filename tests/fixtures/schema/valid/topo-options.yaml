@@ -29,7 +29,7 @@ options:
       - id: dx10
         title: "DirectX 10"
         status: unverified
-        steps: [ { start: "Game_Dx10.exe" } ]
+        steps: [ { start: "Game_Dx10.exe" }, { launch_args: [ "-nologo" ] } ]
   - id: frame-cap
     title: "Frame rate cap"
     sources: [ { type: steam-guide, url: "https://steamcommunity.com/sharedfiles/filedetails/?id=1" } ]

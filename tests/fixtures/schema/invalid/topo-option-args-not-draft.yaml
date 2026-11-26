@@ -1,4 +1,4 @@
-# Valid: launch_args outside a draft (reviewed since O-2b, OPTION_LAUNCH_REVIEWED)
+# Invalid: launch_args outside a draft before they are reviewed
 format: 1
 id: schema-fixture
 title: "Fixture"

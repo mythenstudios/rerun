@@ -177,6 +177,7 @@ fn plan_on(sys: &FakeSystem, t: &Topo, p: &[&str], c: &[&str]) -> Result<TopoPla
             choices: &c,
         },
         &ctx,
+        &crate::exec::LiveState::default(),
     )
 }
 
@@ -455,6 +456,7 @@ fn oe7_the_source_form_with_choices() {
         rev: 1,
         picks: Vec::new(),
         choices: choices(&["api=dx9"]),
+        kept_profile: None,
     };
     base.check().unwrap();
     let with = |f: fn(&mut PlanSource)| {

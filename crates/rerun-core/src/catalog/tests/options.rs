@@ -18,6 +18,7 @@
 //! - OX10 per value at most one `start`, one `launch_args`, 1 to 4 steps; at most 8 options.
 //! - OX11 an `ini_set` in the user data folder needs the Topo's `user_data`.
 //! - OX12 `start` lies in the folder of `launch.start` (folded; review S3).
+//! - OX13 `start` (`launch_args`) in every value of an option or in none (O-2b review S1).
 
 use serde_json::{Value, json};
 
@@ -317,19 +318,21 @@ fn ox8_the_argument_rules() {
 
 #[test]
 fn ox9_the_gate() {
-    const _: () = assert!(OPTION_LAUNCH_REVIEWED, "the gate is open since O-2b");
-    // Outside a draft: loaded under both rule sets once the gate is open (O-2b).
+    const _: () = assert!(
+        !OPTION_LAUNCH_REVIEWED,
+        "the gate opens in its own commit after the O-2b review and the [DEV] run"
+    );
+    let gated = "draft only until start and launch_args of options are reviewed";
     let mut v = with_api(json!([value("dx9", json!([{ "start": "game_dx9.exe" }]))]));
     ok(&v);
     v["status"] = json!("active");
-    ok(&v);
-    check::topo(&parse(&v), Rules::Release).unwrap_or_else(|e| panic!("{e}"));
+    refused_at(&v, "options[1].values[0].steps[0].start", gated);
     let mut v = with_api(json!([value("q", json!([{ "launch_args": ["-q"] }]))]));
     v["launch"]["start"] = json!("game.exe");
     ok(&v);
     v["status"] = json!("needs-retest");
-    ok(&v);
-    // A release index still holds no draft.
+    refused_at(&v, "options[1].values[0].steps[0].launch_args", gated);
+    // A release index holds no draft: none of them is ever released.
     let v = with_api(json!([value("dx9", json!([{ "start": "game_dx9.exe" }]))]));
     assert!(check::topo(&parse(&v), Rules::Release).is_err());
 }
@@ -434,4 +437,40 @@ fn ox12_start_lies_in_the_folder_of_launch_start() {
         at,
         want,
     );
+}
+
+/// O-2b review S1: if a value of an option starts an executable (passes arguments), every value
+/// of it does, so a value switch always replaces both parts of the launch profile.
+#[test]
+fn ox13_launch_parts_in_every_value_of_an_option_or_none() {
+    let both = |a: Value, b: Value| with_api(json!([value("a", a), value("b", b)]));
+    // Every value starts an executable, one also passes arguments: loads.
+    let mut v = both(
+        json!([{ "start": "game_dx9.exe" }]),
+        json!([{ "start": "game.exe" }]),
+    );
+    v["launch"]["start"] = json!("launcher.exe");
+    ok(&v);
+    // One value with `start`, the other with an `ini_set` only.
+    refused_at(
+        &both(
+            json!([{ "start": "game_dx9.exe" }]),
+            json!([ini("game.ini", "1")]),
+        ),
+        "options[1].values[1].steps",
+        "every value of it needs start",
+    );
+    // The same for `launch_args` (with `start` in both).
+    refused_at(
+        &both(
+            json!([{ "start": "game_dx9.exe" }, { "launch_args": ["-a"] }]),
+            json!([{ "start": "game.exe" }]),
+        ),
+        "options[1].values[1].steps",
+        "every value of it needs launch_args",
+    );
+    ok(&both(
+        json!([{ "start": "game_dx9.exe" }, { "launch_args": ["-a"] }]),
+        json!([{ "start": "game.exe" }, { "launch_args": ["-b"] }]),
+    ));
 }

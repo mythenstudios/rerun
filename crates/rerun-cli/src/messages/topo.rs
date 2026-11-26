@@ -179,6 +179,10 @@ pub enum TopoMsg<'a> {
     ProfileFallback {
         /// The profile has `run`.
         run: bool,
+        /// The profile has a CPU rule or a priority class.
+        rule: bool,
+        /// The profile has `args`.
+        args: bool,
         /// Steam's launch entry (relative to the game folder).
         start: Shown<'a>,
     },
@@ -325,18 +329,29 @@ impl fmt::Display for TopoMsg<'_> {
                 Some(p) => write!(f, "  {part}, {from}: {p}"),
                 None => write!(f, "  {part}, {from}"),
             },
-            Self::ProfileFallback { run: true, start } => write!(
-                f,
-                "  whenever rerun-launch cannot use the profile (it is missing or invalid, \
-                 Steam's path differs, Steam runs as administrator, or run cannot be started), \
-                 it starts Steam's own command unchanged, without the rule: {start}"
-            ),
-            Self::ProfileFallback { run: false, start } => write!(
-                f,
-                "  whenever rerun-launch cannot use the profile (it is missing or invalid, \
-                 Steam's path differs, Steam runs as administrator), it starts Steam's own \
-                 command unchanged, without the rule and without arguments: {start}"
-            ),
+            Self::ProfileFallback {
+                run,
+                rule,
+                args,
+                start,
+            } => {
+                // O-2b review N1: said from the parts the profile has.
+                let without: Vec<&str> = [(*rule, "the rule"), (*args, "the arguments")]
+                    .into_iter()
+                    .filter_map(|(on, w)| on.then_some(w))
+                    .collect();
+                write!(
+                    f,
+                    "  whenever rerun-launch cannot use the profile (it is missing or invalid, \
+                     Steam's path differs, Steam runs as administrator{}), it starts Steam's \
+                     own command unchanged",
+                    if *run { ", or run cannot be started" } else { "" }
+                )?;
+                if !without.is_empty() {
+                    write!(f, ", without {}", without.join(" and "))?;
+                }
+                write!(f, ": {start}")
+            }
         }
     }
 }

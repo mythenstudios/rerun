@@ -156,6 +156,7 @@ fn plan_picks(sys: &FakeSystem, t: &Topo, p: &[&str]) -> Result<super::TopoPlan,
         },
         &super::EngineSelection::picks(&picks),
         &ctx,
+        &crate::exec::LiveState::default(),
     )
 }
 
@@ -529,6 +530,7 @@ fn la8_a_live_patch_still_matches_its_build() {
                 variant: "laa".to_owned(),
             }]),
             &ctx,
+            &crate::exec::LiveState::default(),
         );
         refused(r, "has patched it already");
     }
@@ -669,6 +671,7 @@ fn la9_smart_app_control_warns() {
                 variant: "laa".to_owned(),
             }]),
             &ctx,
+            &crate::exec::LiveState::default(),
         )
         .unwrap();
         patch_of(&tp);

@@ -26,6 +26,7 @@ use super::bind::Bindings;
 use super::share::{self, Keeps, Relier};
 use crate::escape::Shown;
 use crate::journal::{Journal, Listed, Listing, TxnId, TxnState, VerifyBackups};
+use crate::path::RelPath;
 use crate::plan::{Object, Op, Plan, Target, overlap};
 
 /// The objects of a head, each with whether its op is a `Hold` (P4-8).
@@ -314,47 +315,75 @@ pub(super) fn for_revert(
     Ok(keeps)
 }
 
-/// The program a profile op of a head sets as `run` (B1).
-enum RunSet {
-    /// The profile's `run` (an absolute path).
+/// The executables a revert of a profile op may take a `run` away from (B1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunSet {
+    /// The `run` of the reverted profile (an absolute path): reverting it takes `run` away.
     Known(String),
-    /// The bytes are no profile this version reads: counted as a `run` of any executable (fail
-    /// closed).
+    /// Not known, or the revert brings back another `run` (security F2 of the O-2b review):
+    /// counted as a `run` of any executable of the head's game roots (fail closed).
     Unknown,
 }
 
-/// The `run` the profile op of `head` sets or changes (B1): `None` when its profile has no
-/// `run`, or when it replaces exactly the bytes of an earlier transaction's profile with the
-/// same `run` (it keeps that `run`, so its revert does not take it away).
-fn run_set(j: &Journal<'_>, l: &Listing, own: &TxnId, head: &Plan) -> Option<RunSet> {
-    let (_, op, path) = super::live::profile_op(head)?;
-    let run = match super::live::inline_bytes(op).map(rerun_proto::profile::decode) {
-        Some(Ok(p)) => p.run?,
-        _ => return Some(RunSet::Unknown),
-    };
-    if let Op::ReplaceFile { old, .. } = op {
-        let kept = l.txns.iter().filter(|t| t.id < *own).any(|t| {
-            let Some(p) = head_of(j, t) else {
-                return false;
-            };
-            let Some((_, o, at)) = super::live::profile_op(&p) else {
-                return false;
-            };
-            let same_bytes = matches!(
-                o.content(),
-                Some(crate::plan::ContentRef::Inline { sha256, .. }) if *sha256 == old.sha256
-            );
-            at == path
-                && same_bytes
-                && super::live::inline_bytes(o)
-                    .and_then(|b| rerun_proto::profile::decode(b).ok())
-                    .is_some_and(|q| q.run.as_deref() == Some(run.as_str()))
-        });
-        if kept {
-            return None;
+/// A profile's `run` as far as it is known: `Ok(run)` from bytes that decode, `Err(())` when
+/// they do not (or are not there).
+pub(crate) type KnownRun = Result<Option<String>, ()>;
+
+/// What a revert of a profile op does to `run` (B1, pure): `new` is the `run` of the reverted
+/// profile, `old` the one the revert brings back (`Ok(None)` for a created profile; `Err` when
+/// the old bytes are no earlier transaction's profile). `None` when nothing changes: no `run`
+/// on either side, or the same one. A `run` taken away is [`RunSet::Known`]; a `run` brought
+/// back or swapped, and anything not known, is [`RunSet::Unknown`] (F2).
+pub(crate) fn run_change(new: KnownRun, old: KnownRun) -> Option<RunSet> {
+    match (new, old) {
+        (Ok(n), Ok(o)) if n == o => None,
+        (Ok(Some(n)), Ok(None)) => Some(RunSet::Known(n)),
+        _ => Some(RunSet::Unknown),
+    }
+}
+
+/// The `run` of the profile an earlier transaction (before `own`) wrote with exactly the SHA-256
+/// `sha` at `path` (the old state of a `ReplaceFile`): `Err` when none did.
+fn old_run(j: &Journal<'_>, l: &Listing, own: &TxnId, path: &RelPath, sha: &[u8; 32]) -> KnownRun {
+    for t in l.txns.iter().filter(|t| t.id < *own).rev() {
+        let Some(p) = head_of(j, t) else { continue };
+        let Some((_, o, at)) = super::live::profile_op(&p) else {
+            continue;
+        };
+        let same = matches!(
+            o.content(),
+            Some(crate::plan::ContentRef::Inline { sha256, .. }) if sha256 == sha
+        );
+        if at == path && same {
+            return super::live::inline_bytes(o)
+                .and_then(|b| rerun_proto::profile::decode(b).ok())
+                .map(|q| q.run)
+                .ok_or(());
         }
     }
-    Some(RunSet::Known(run))
+    Err(())
+}
+
+/// What the revert of `own`'s profile op does to `run` (B1): `None` without a profile op, when
+/// that op is reverted already (F6), or when `run` stays as it is.
+fn run_set(j: &Journal<'_>, l: &Listing, own: &TxnId, head: &Plan) -> Option<RunSet> {
+    let (k, op, path) = super::live::profile_op(head)?;
+    let done = j
+        .load(own, VerifyBackups::Length)
+        .ok()
+        .and_then(|v| v.ops.get(&super::op_ix(k)).map(|o| o.reverted.is_some()));
+    if done == Some(true) {
+        return None;
+    }
+    let new: KnownRun = super::live::inline_bytes(op)
+        .and_then(|b| rerun_proto::profile::decode(b).ok())
+        .map(|p| p.run)
+        .ok_or(());
+    let old: KnownRun = match op {
+        Op::ReplaceFile { old, .. } => old_run(j, l, own, path, &old.sha256),
+        _ => Ok(None),
+    };
+    run_change(new, old)
 }
 
 /// The head of a listed transaction, decoded with the recorded rules (`None`: not readable).
@@ -363,14 +392,40 @@ fn head_of(j: &Journal<'_>, t: &Listed) -> Option<Plan> {
     super::decode_head(full.head.as_deref()?).ok()
 }
 
+/// The game roots of `head` a revert taking `run` away concerns, each with the executable below
+/// it (`None`: any executable): for [`RunSet::Known`] the roots whose path the `run` lies below;
+/// for [`RunSet::Unknown`], or a `run` below none of them (the fence keeps it in the game folder;
+/// a forged head), every game root with any executable (fail closed). Pure.
+pub(crate) fn b1_roots(
+    head: &Plan,
+    run: &RunSet,
+) -> Vec<(crate::policy::root::RootId, Option<String>)> {
+    let games = || {
+        head.roots
+            .iter()
+            .filter(|r| r.kind == crate::plan::RootKind::Game)
+    };
+    let roots: Vec<_> = match run {
+        RunSet::Unknown => Vec::new(),
+        RunSet::Known(abs) => games()
+            .filter_map(|r| super::live::below(&r.path.to_string(), abs).map(|x| (r.id, Some(x))))
+            .collect(),
+    };
+    if roots.is_empty() {
+        games().map(|r| (r.id, None)).collect()
+    } else {
+        roots
+    }
+}
+
 /// B1 (ADR 0032 amendment P5-OE, plan review B1; ADR 0020 amendment O-2b): LIFO is per object,
 /// and a package or a compatibility flag planned for the executable a profile's `run` made the
 /// main one shares no object with the profile. So the revert of a transaction whose profile op
-/// sets or changes `run` ([`run_set`]) is `Later` while a later live transaction (not
-/// forgotten, not closed) of the same game root (by identity) has that executable as its
-/// `main_exe` (folded) and holds package files or `TokenList` ops that are not reverted. Bytes
-/// that are no profile count as a `run` of any executable (fail closed). Journal only: heads and
-/// records, nothing on disk.
+/// changes `run` ([`run_set`]) is `Later` while a later live transaction (not forgotten, not
+/// closed) of the same game root (by identity) holds package files or `TokenList` ops that are
+/// not reverted, bound to that executable (folded; for package files the root's `main_exe`,
+/// for flags the slot's executable, F5). A `run` not known or brought back counts as any
+/// executable (fail closed, F2). Journal only: heads and records, nothing on disk.
 fn b1(j: &Journal<'_>, l: &Listing, own: &TxnId, head: &Plan) -> Result<(), Refusal> {
     #[cfg(test)]
     if knob::b1_off() {
@@ -379,24 +434,7 @@ fn b1(j: &Journal<'_>, l: &Listing, own: &TxnId, head: &Plan) -> Result<(), Refu
     let Some(run) = run_set(j, l, own, head) else {
         return Ok(());
     };
-    let games = || {
-        head.roots
-            .iter()
-            .filter(|r| r.kind == crate::plan::RootKind::Game)
-    };
-    // Each game root of the head with the executable `run` names below it (`None`: any).
-    let mut roots: Vec<(crate::policy::root::RootId, Option<String>)> = games()
-        .filter_map(|r| match &run {
-            RunSet::Unknown => Some((r.id, None)),
-            RunSet::Known(abs) => {
-                super::live::below(&r.path.to_string(), abs).map(|x| (r.id, Some(x)))
-            }
-        })
-        .collect();
-    // A `run` below none of them (the fence keeps it in the game folder): fail closed, any.
-    if roots.is_empty() {
-        roots = games().map(|r| (r.id, None)).collect();
-    }
+    let roots = b1_roots(head, &run);
     for t in l.txns.iter().filter(|t| t.id > *own && !t.forgotten) {
         let Ok(v) = &t.view else { continue };
         if matches!(v.state, TxnState::Closed(_) | TxnState::Empty) {
@@ -415,29 +453,17 @@ fn b1(j: &Journal<'_>, l: &Listing, own: &TxnId, head: &Plan) -> Result<(), Refu
         else {
             continue;
         };
-        for (i, r) in p.roots.iter().enumerate() {
-            let Some(main) = &r.main_exe else { continue };
-            let main = crate::fold::fold(main.as_str());
-            let meets = r.kind == crate::plan::RootKind::Game
-                && roots
-                    .iter()
-                    .any(|(id, exe)| *id == r.id && exe.as_ref().is_none_or(|x| *x == main));
-            if !meets {
-                continue;
-            }
-            let holds = p.ops.iter().enumerate().any(|(k, op)| {
-                let on_root = match op.target() {
-                    Target::File { root, .. } => usize::from(root.0) == i,
-                    _ => true,
-                };
-                on_root
-                    && super::live::exe_bound(op)
-                    && full
-                        .ops
-                        .get(&super::op_ix(k))
-                        .is_none_or(|o| o.reverted.is_none())
-            });
-            if holds {
+        for (k, i, exe) in super::live::bound_exes(&p, true) {
+            let Some(r) = p.roots.get(i) else { continue };
+            let exe = crate::fold::fold(exe.as_str());
+            let meets = roots
+                .iter()
+                .any(|(id, x)| *id == r.id && x.as_ref().is_none_or(|x| *x == exe));
+            let reverted = full
+                .ops
+                .get(&super::op_ix(k))
+                .is_some_and(|o| o.reverted.is_some());
+            if meets && !reverted {
                 return Err(Refusal::Later { txn: t.id });
             }
         }
@@ -594,4 +620,76 @@ pub(crate) fn patched(
         }
     }
     out
+}
+
+/// B1's pure parts (security F2, F3 of the O-2b review).
+#[cfg(test)]
+mod b1_tests {
+    use super::{RunSet, b1_roots, run_change};
+    use crate::plan::{PROFILES_ROOT_ID, PlanOrigin, PlanRoot, RootKind};
+    use crate::policy::root::RootId;
+
+    const DX9: &str = r"D:\Lib\common\G\game_dx9.exe";
+
+    #[test]
+    fn a_revert_changes_run_or_not() {
+        let s = |x: &str| Some(x.to_owned());
+        // Nothing changes: no `run`, or the same one (a CPU fix over DX9).
+        assert_eq!(run_change(Ok(None), Ok(None)), None);
+        assert_eq!(run_change(Ok(s(DX9)), Ok(s(DX9))), None);
+        // `run` taken away: that executable.
+        assert_eq!(
+            run_change(Ok(s(DX9)), Ok(None)),
+            Some(RunSet::Known(DX9.to_owned()))
+        );
+        // F2: `run` brought back or swapped, and anything not known: any executable.
+        assert_eq!(run_change(Ok(None), Ok(s(DX9))), Some(RunSet::Unknown));
+        assert_eq!(
+            run_change(Ok(s(DX9)), Ok(s(r"D:\Lib\common\G\game.exe"))),
+            Some(RunSet::Unknown)
+        );
+        assert_eq!(run_change(Err(()), Ok(None)), Some(RunSet::Unknown));
+        assert_eq!(run_change(Ok(None), Err(())), Some(RunSet::Unknown));
+        assert_eq!(run_change(Ok(s(DX9)), Err(())), Some(RunSet::Unknown));
+    }
+
+    #[test]
+    fn the_roots_a_revert_concerns() {
+        let game = RootId {
+            volume_serial: 7,
+            file_id: 1,
+        };
+        let root = |kind, path: &str, id| PlanRoot {
+            kind,
+            path: crate::path::RootPath::new(path).unwrap(),
+            id,
+            origin: PlanOrigin::Manual,
+            main_exe: None,
+            main_sha256: None,
+            other_exes: None,
+        };
+        let head = crate::plan::Plan {
+            format: crate::plan::FORMAT,
+            roots: vec![
+                root(RootKind::Game, r"D:\Lib\common\G", game),
+                root(
+                    RootKind::Profiles,
+                    r"C:\Users\P\AppData\Local\Rerun\profiles",
+                    PROFILES_ROOT_ID,
+                ),
+            ],
+            ops: Vec::new(),
+            source: None,
+        };
+        assert_eq!(
+            b1_roots(&head, &RunSet::Known(DX9.to_owned())),
+            [(game, Some(crate::fold::fold("game_dx9.exe")))]
+        );
+        // Unknown, and a `run` below none of the game roots (a forged head): any executable.
+        assert_eq!(b1_roots(&head, &RunSet::Unknown), [(game, None)]);
+        assert_eq!(
+            b1_roots(&head, &RunSet::Known(r"E:\Other\x.exe".to_owned())),
+            [(game, None)]
+        );
+    }
 }

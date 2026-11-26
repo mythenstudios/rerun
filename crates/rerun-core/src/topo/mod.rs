@@ -962,8 +962,8 @@ pub enum EngineError {
     /// package files or set compatibility flags for (user decision E4 b).
     #[error(
         "this plan is for {to}, and transaction {txn} installed files or set compatibility \
-         flags for {from}; undo {txn} first, then choose, then apply that fix again for the \
-         chosen executable"
+         flags while planned for {from}; undo {txn} first, then choose, then apply that fix \
+         again for the chosen executable"
     )]
     ExeSwitch {
         /// The transaction.
@@ -1370,13 +1370,16 @@ pub fn resolve_choices<'t>(
 
 /// Plans the picked variants and chosen option values of `topo` (module docs). `index` is the
 /// SHA-256 of the signed index the Topo comes from; `ctx` is the planners' context without a
-/// main executable (the engine names the one that matched).
+/// main executable (the engine names the one that matched). `live` is what the journal says is live
+/// for this game (`exec::live_state`, ADR 0032 amendment P5-OE, S6), read by the caller: the
+/// engine reads no journal (senior-dev S4 of the O-2b review).
 pub fn plan(
     index: &[u8; 32],
     topo: &Topo,
     facts: &Facts<'_>,
     sel: &EngineSelection<'_>,
     ctx: &PlanCtx<'_>,
+    live: &crate::exec::LiveState,
 ) -> Result<TopoPlan, EngineError> {
     check_archs(topo, facts.table)?;
     if topo.status == Status::Retired {
@@ -1402,13 +1405,6 @@ pub fn plan(
     }
     let launch = resolve_launch(topo);
     let ac = anti_cheat_state(topo, &facts.game.anti_cheat);
-    // ADR 0032 amendment P5-OE (S6): what the journal says is live for this game.
-    let live = match ctx.app {
-        Some(a) => {
-            crate::exec::live_state(a, ctx.steam_app, ctx.game.id()).map_err(EngineError::Live)?
-        }
-        None => crate::exec::LiveState::default(),
-    };
     // The chosen values: their refusals, and the `start` and `launch_args` parts (the `ini_set`
     // steps follow the picks' steps below).
     let mut choice_warnings = Vec::new();
@@ -1519,11 +1515,11 @@ pub fn plan(
     if let Some(e) = live
         .exes
         .iter()
-        .find(|e| crate::fold::fold(e.main_exe.as_str()) != folded_main)
+        .find(|e| crate::fold::fold(e.exe.as_str()) != folded_main)
     {
         return Err(EngineError::ExeSwitch {
             txn: e.txn,
-            from: crate::escape::path(e.main_exe.as_str()).to_string(),
+            from: crate::escape::path(e.exe.as_str()).to_string(),
             to: crate::escape::path(main_exe.as_str()).to_string(),
         });
     }
@@ -1676,6 +1672,11 @@ pub fn plan(
             }
         }
     }
+    // The transaction whose kept `run` chose the main executable (security F4).
+    let main_kept = kept_run.as_ref().and_then(|r| match r.from {
+        PartFrom::Kept(t) => Some(t),
+        _ => None,
+    });
     let parts = compose_launch(
         &launch,
         &ac,
@@ -1696,6 +1697,17 @@ pub fn plan(
         }
     }
     let parts = parts.map(|(_, p)| p);
+    // F4: a plan without a profile part is still for the executable a kept `run` starts; with
+    // anti-cheat that is said (the part itself is not written, so not refused).
+    if parts.is_none()
+        && ac.enforced()
+        && let Some(txn) = main_kept
+    {
+        warnings.push(Warning::KeptAntiCheat {
+            txn,
+            step: StepKind::Start,
+        });
+    }
     // A package's shared dependencies come with it in this plan; a file another transaction
     // installed with the same content becomes a `Hold` of this plan (P4-8, `prim::file_install`).
     for p in &planned_packages {
@@ -1788,6 +1800,14 @@ pub fn plan(
         rev: topo.rev,
         picks: picks.to_vec(),
         choices: choices.to_vec(),
+        // Security F1 of the O-2b review: a plan that writes no profile but relied on the live
+        // one (its kept `run` may have chosen the main executable) names it; the apply refuses
+        // when it is no longer the live one.
+        kept_profile: live
+            .profile
+            .as_ref()
+            .filter(|_| crate::exec::profile_op_of(&plan).is_none())
+            .map(|k| k.sha256),
     });
     // The bounds and the source's form, as when stored and applied.
     plan.encode()?;

@@ -205,6 +205,17 @@ pub struct PlanSource {
     /// so a plan without options has the bytes it had before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<Choice>,
+    /// The SHA-256 of the live launch profile the plan relied on without writing a profile of
+    /// its own (ADR 0032 amendment P5-OE, slice O-2b, security F1 of its review): a kept `run`
+    /// chose the plan's main executable. The apply refuses when the newest holder of the
+    /// profile no longer holds exactly these bytes (`Refusal::ProfileChanged`). Omitted on the
+    /// wire when absent, so every other plan keeps its bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::hex32_opt"
+    )]
+    pub kept_profile: Option<[u8; 32]>,
 }
 
 /// One chosen value of a Topo option (ADR 0032).

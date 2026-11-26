@@ -228,6 +228,8 @@ fn parts_lines(p: &LaunchParts) -> Vec<Message<'static>> {
     }
     m.push(Message::Topo(TopoMsg::ProfileFallback {
         run: p.run.is_some(),
+        rule: p.rule.is_some(),
+        args: p.args.is_some(),
         start: escape::path(p.start.as_str()).into_owned(),
     }));
     m
@@ -562,5 +564,76 @@ mod warning_tests {
         assert!(t.contains(r"pc\mafia2.exe carries a Valve header"), "{t}");
         assert!(t.contains("likely to block it sooner or later"), "{t}");
         assert!(t.contains("restores the original file bit for bit"), "{t}");
+    }
+}
+
+#[cfg(test)]
+mod parts_tests {
+    use rerun_core::journal::TxnId;
+    use rerun_core::path::RelPath;
+    use rerun_core::plan::{Choice, Pick};
+    use rerun_core::topo::{LaunchParts, PartFrom};
+
+    use super::parts_lines;
+
+    fn lines(p: &LaunchParts) -> Vec<String> {
+        parts_lines(p).iter().map(ToString::to_string).collect()
+    }
+
+    /// ADR 0032 amendment P5-OE (O-2b, review N1): each part with its origin, the path last;
+    /// the fallback line says only what the profile has.
+    #[test]
+    fn the_parts_and_the_fallback_follow_the_profile() {
+        let t: TxnId = "00000007-0000000000000001".parse().unwrap();
+        let rel = |s: &str| RelPath::parse(s).unwrap();
+        let all = LaunchParts {
+            start: rel("FFLauncher.exe"),
+            rule: Some(PartFrom::Kept(t)),
+            run: Some((
+                rel("game_dx9.exe"),
+                PartFrom::Option(Choice {
+                    option: "graphics-api".into(),
+                    value: "dx9".into(),
+                }),
+            )),
+            args: Some((
+                vec!["-skipintro".into(), "+fov=1.2".into()],
+                PartFrom::Fix(Pick {
+                    issue: "intro".into(),
+                    variant: "skip".into(),
+                }),
+            )),
+        };
+        assert_eq!(
+            lines(&all),
+            [
+                "the launch profile, part by part:".to_owned(),
+                format!(
+                    "  cpu rule and priority, kept from transaction {t} (undo that one after \
+                     this one)"
+                ),
+                "  run (rerun-launch starts it instead of Steam's program), from option \
+                 graphics-api=dx9: game_dx9.exe"
+                    .to_owned(),
+                "  args -skipintro +fov=1.2, from fix intro/skip".to_owned(),
+                "  whenever rerun-launch cannot use the profile (it is missing or invalid, \
+                 Steam's path differs, Steam runs as administrator, or run cannot be started), \
+                 it starts Steam's own command unchanged, without the rule and the arguments: \
+                 FFLauncher.exe"
+                    .to_owned(),
+            ]
+        );
+        // Only `run`: nothing to be without.
+        let run_only = LaunchParts {
+            rule: None,
+            args: None,
+            ..all
+        };
+        assert_eq!(
+            lines(&run_only).last().unwrap(),
+            "  whenever rerun-launch cannot use the profile (it is missing or invalid, Steam's \
+             path differs, Steam runs as administrator, or run cannot be started), it starts \
+             Steam's own command unchanged: FFLauncher.exe"
+        );
     }
 }

@@ -488,6 +488,7 @@ fn dev_helper_chain_with_the_test_key() {
                 topo: "dev-unknown-topo".to_owned(),
                 rev: 1,
                 choices: Vec::new(),
+                kept_profile: None,
                 picks: vec![Pick {
                     issue: "net".to_owned(),
                     variant: "block".to_owned(),

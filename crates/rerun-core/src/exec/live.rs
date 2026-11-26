@@ -1,8 +1,9 @@
 //! What the journal says is live for one game (ADR 0032 amendment P5-OE, slice O-2b): the launch
-//! profile a plan carries parts of (S6), and the main executables of live transactions with
-//! package files or compatibility flags (user decision E4 b). Read only, without the lock, like
-//! the plan's slot check: the apply checks again under the lock (stacking, the old state of the
-//! profile's `ReplaceFile`).
+//! profile a plan carries parts of (S6), and the executables live transactions installed package
+//! files or set compatibility flags for (user decision E4 b). [`live_state`] reads without the
+//! lock, as the plan's slot check does; the apply checks again under the lock
+//! ([`exe_switch`]: E4 b and the profile the plan relied on; the old state of the profile's
+//! `ReplaceFile`).
 //!
 //! **The source of the carried profile (S6):** the newest transaction whose head holds a profile
 //! op for the game's profile ID that is done and not reverted, forgotten ones included (the
@@ -16,13 +17,15 @@
 
 use sha2::{Digest, Sha256};
 
-use super::decode_head;
+use super::{Refusal, decode_head};
 use crate::fold::fold;
-use crate::journal::{Closing, InstanceTag, Journal, TxnId, TxnState, VerifyBackups};
+use crate::journal::{Closing, InstanceTag, Journal, Listing, TxnId, TxnState, VerifyBackups};
 use crate::path::RelPath;
 use crate::plan::{
-    ContentRef, MAX_PROFILE_OLD_BYTES, Op, Plan, RootKind, Target, profile_file, profile_id,
+    ContentRef, MAX_PROFILE_OLD_BYTES, Op, Plan, PlanOrigin, RootKind, Target, profile_file,
+    profile_id,
 };
+use crate::policy::registry::RegSlot;
 use crate::policy::root::{AppDir, RootId};
 use rerun_proto::profile::{self as proto, LaunchProfile};
 
@@ -37,14 +40,16 @@ pub struct LiveProfile {
     pub sha256: [u8; 32],
 }
 
-/// A live transaction of the game with package files or compatibility flags, and the main
-/// executable it was planned for (E4 b, B1).
+/// The main executable a live transaction of the game was planned for when it installed package
+/// files or set compatibility flags (E4 b): its game root's `main_exe` (for flags too, which
+/// may name another executable; security F5 of the O-2b review: the wording says "while
+/// planned for").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveExe {
     /// The transaction.
     pub txn: TxnId,
-    /// Its game root's main executable.
-    pub main_exe: RelPath,
+    /// The root's `main_exe`, relative to the game folder.
+    pub exe: RelPath,
 }
 
 /// What is live for one game.
@@ -52,7 +57,7 @@ pub struct LiveExe {
 pub struct LiveState {
     /// The profile to carry parts of (`None`: nothing live, or the newest holder is forgotten).
     pub profile: Option<LiveProfile>,
-    /// Live transactions of the game folder with package files or compatibility flags.
+    /// Executables of live transactions of the game folder with package files or flags.
     pub exes: Vec<LiveExe>,
 }
 
@@ -110,18 +115,126 @@ pub(crate) fn inline_bytes(op: &Op) -> Option<&[u8]> {
     }
 }
 
-/// The op holds package files or compatibility flags (E4 b, B1): a file op with package content,
-/// or a `TokenList`.
-pub(crate) fn exe_bound(op: &Op) -> bool {
-    op.package_file().is_some() || matches!(op, Op::TokenList { .. })
+/// The ops of `p` that hold package files or compatibility flags (E4 b, B1), each with its op
+/// index, its game root and the executable it is bound to: a file op with package content (a
+/// `Hold` too) to its root's `main_exe` (the build it was planned for); a `TokenList` with
+/// `by_slot` to the executable of its `CompatLayers` slot (B1: the flags on the executable a
+/// `run` starts, security F5), else to its root's `main_exe` (E4 b: the executable the plan was
+/// for; a flag on a launcher must not hold every later plan of the game).
+pub(crate) fn bound_exes(p: &Plan, by_slot: bool) -> Vec<(usize, usize, RelPath)> {
+    let mut out = Vec::new();
+    for (k, op) in p.ops.iter().enumerate() {
+        let at = match (op, op.target()) {
+            (
+                Op::TokenList {
+                    slot: RegSlot::CompatLayers { root, exe },
+                    ..
+                },
+                _,
+            ) if by_slot => Some((usize::from(root.0), exe.clone())),
+            (Op::TokenList { slot, .. }, _) => crate::plan::slot_root(slot).and_then(|root| {
+                let i = usize::from(root.0);
+                p.roots
+                    .get(i)
+                    .and_then(|r| r.main_exe.clone())
+                    .map(|m| (i, m))
+            }),
+            (_, Target::File { root, .. }) if op.package_file().is_some() => {
+                let i = usize::from(root.0);
+                p.roots
+                    .get(i)
+                    .and_then(|r| r.main_exe.clone())
+                    .map(|m| (i, m))
+            }
+            _ => None,
+        };
+        if let Some((i, exe)) = at
+            && p.roots.get(i).is_some_and(|r| r.kind == RootKind::Game)
+        {
+            out.push((k, i, exe));
+        }
+    }
+    out
 }
 
-/// The holder seen last in the listing.
-struct Holder {
-    txn: TxnId,
+/// The newest holder of a profile seen in a listing.
+pub(crate) struct Holder {
+    /// The transaction.
+    pub(crate) txn: TxnId,
+    /// It is forgotten.
     forgotten: bool,
+    /// Applied completely, no revert begun, no rebind.
     usable: bool,
+    /// Its profile op's inline bytes.
     bytes: Option<Vec<u8>>,
+}
+
+/// What one pass over the listing found for profile `name` and game root `game`.
+struct Scan {
+    holder: Option<Holder>,
+    exes: Vec<LiveExe>,
+}
+
+fn scan(j: &Journal<'_>, l: &Listing, name: Option<&RelPath>, game: Option<RootId>) -> Scan {
+    let mut holder: Option<Holder> = None;
+    let mut exes = Vec::new();
+    for t in &l.txns {
+        let Ok(v) = &t.view else { continue };
+        if matches!(v.state, TxnState::Empty) {
+            continue;
+        }
+        let Ok(full) = j.load(&t.id, VerifyBackups::Length) else {
+            continue;
+        };
+        let Some(p) = full.head.as_deref().and_then(|h| decode_head(h).ok()) else {
+            continue;
+        };
+        let forgotten = t.forgotten || full.state == TxnState::Closed(Closing::Forgotten);
+        if let (Some(name), Some((k, op, path))) = (name, profile_op(&p))
+            && path == name
+            && full
+                .ops
+                .get(&super::op_ix(k))
+                .is_some_and(|o| o.done.is_some() && o.reverted.is_none())
+        {
+            let usable = !forgotten
+                && full.state == TxnState::Applied
+                && full.rebinds.is_empty()
+                && full.ops.values().all(|o| o.reverts.is_empty());
+            holder = Some(Holder {
+                txn: t.id,
+                forgotten,
+                usable,
+                bytes: inline_bytes(op).map(<[u8]>::to_vec),
+            });
+        }
+        let Some(game) = game else { continue };
+        if forgotten || matches!(full.state, TxnState::Closed(_)) {
+            continue;
+        }
+        for (k, i, exe) in bound_exes(&p, false) {
+            let reverted = full
+                .ops
+                .get(&super::op_ix(k))
+                .is_some_and(|o| o.reverted.is_some());
+            let here = p.roots.get(i).is_some_and(|r| r.id == game);
+            if here && !reverted && !exes.iter().any(|e: &LiveExe| e.txn == t.id && e.exe == exe) {
+                exes.push(LiveExe { txn: t.id, exe });
+            }
+        }
+    }
+    Scan { holder, exes }
+}
+
+/// The profile a usable holder wrote, decoded, with its SHA-256 (`Unreadable` for content that
+/// is not inline or not a profile of this version).
+pub(crate) fn source_of(
+    txn: TxnId,
+    bytes: Option<&[u8]>,
+) -> Result<(LaunchProfile, [u8; 32]), LiveError> {
+    let bytes = bytes.ok_or(LiveError::Unreadable { txn })?;
+    let profile = proto::decode(bytes).map_err(|_| LiveError::Unreadable { txn })?;
+    Ok((profile, Sha256::digest(bytes).into()))
 }
 
 /// What is live for the Steam app `app_id` (its profile; `None`: no profile looked for) in the
@@ -140,77 +253,14 @@ pub fn live_state(
         .list()
         .map_err(|e| LiveError::Journal(crate::escape::text(&e.to_string()).to_string()))?;
     let name = app_id.map(|id| profile_file(profile_id(id)));
-    let mut holder: Option<Holder> = None;
-    let mut exes = Vec::new();
-    for t in &l.txns {
-        let Ok(v) = &t.view else { continue };
-        if matches!(v.state, TxnState::Empty) {
-            continue;
-        }
-        let Ok(full) = j.load(&t.id, VerifyBackups::Length) else {
-            continue;
-        };
-        let Some(p) = full.head.as_deref().and_then(|h| decode_head(h).ok()) else {
-            continue;
-        };
-        let forgotten = t.forgotten || full.state == TxnState::Closed(Closing::Forgotten);
-        let not_reverted = |k: usize| {
-            full.ops
-                .get(&super::op_ix(k))
-                .is_none_or(|o| o.reverted.is_none())
-        };
-        if let (Some(name), Some((k, op, path))) = (&name, profile_op(&p))
-            && path == name
-            && full
-                .ops
-                .get(&super::op_ix(k))
-                .is_some_and(|o| o.done.is_some() && o.reverted.is_none())
-        {
-            let usable = !forgotten
-                && full.state == TxnState::Applied
-                && full.rebinds.is_empty()
-                && full.ops.values().all(|o| o.reverts.is_empty());
-            holder = Some(Holder {
-                txn: t.id,
-                forgotten,
-                usable,
-                bytes: inline_bytes(op).map(<[u8]>::to_vec),
-            });
-        }
-        if forgotten || matches!(full.state, TxnState::Closed(_)) {
-            continue;
-        }
-        for (i, r) in p.roots.iter().enumerate() {
-            let (RootKind::Game, Some(main)) = (r.kind, &r.main_exe) else {
-                continue;
-            };
-            if r.id != game {
-                continue;
-            }
-            let holds = p.ops.iter().enumerate().any(|(k, op)| {
-                let on_root = match op.target() {
-                    Target::File { root, .. } => usize::from(root.0) == i,
-                    _ => true,
-                };
-                on_root && exe_bound(op) && not_reverted(k)
-            });
-            if holds {
-                exes.push(LiveExe {
-                    txn: t.id,
-                    main_exe: main.clone(),
-                });
-            }
-        }
-    }
-    let profile = match holder {
+    let s = scan(&j, &l, name.as_ref(), Some(game));
+    let profile = match s.holder {
         None => None,
         Some(h) if h.forgotten => None,
         Some(h) if !h.usable => return Err(LiveError::Interrupted { txn: h.txn }),
         Some(h) => {
             let txn = h.txn;
-            let bytes = h.bytes.ok_or(LiveError::Unreadable { txn })?;
-            let profile = proto::decode(&bytes).map_err(|_| LiveError::Unreadable { txn })?;
-            let sha256: [u8; 32] = Sha256::digest(&bytes).into();
+            let (profile, sha256) = source_of(txn, h.bytes.as_deref())?;
             let file = name
                 .as_ref()
                 .and_then(|n| {
@@ -229,7 +279,60 @@ pub fn live_state(
             })
         }
     };
-    Ok(LiveState { profile, exes })
+    Ok(LiveState {
+        profile,
+        exes: s.exes,
+    })
+}
+
+/// E4 b and the kept profile under the journal lock (security F1 of the O-2b review), from the
+/// listing and the heads only, after stacking:
+/// 1. a live transaction (not forgotten, not closed) of a game root of `plan` (identity) with
+///    package files or flags for another executable than the root's `main_exe` (folded):
+///    [`Refusal::ExeSwitch`];
+/// 2. a plan that names the live profile it relied on (`PlanSource::kept_profile`): the newest
+///    holder of the game's profile must be applied completely and hold exactly those bytes,
+///    else [`Refusal::ProfileChanged`] (the profile was undone, replaced or forgotten between
+///    plan and apply: the plan's main executable may no longer be the one that starts);
+/// 3. a plan with package files or flags and without a profile op of its own that names no
+///    kept profile: a usable newest holder with a `run` must start the root's `main_exe`, else
+///    [`Refusal::ProfileChanged`].
+pub(crate) fn exe_switch(j: &Journal<'_>, l: &Listing, plan: &Plan) -> Result<(), Refusal> {
+    for r in plan.roots.iter().filter(|r| r.kind == RootKind::Game) {
+        let Some(main) = &r.main_exe else { continue };
+        let app_id = match &r.origin {
+            PlanOrigin::Steam { app_id, .. } => Some(*app_id),
+            _ => None,
+        };
+        let name = app_id.map(|id| profile_file(profile_id(id)));
+        let s = scan(j, l, name.as_ref(), Some(r.id));
+        if let Some(e) = s
+            .exes
+            .iter()
+            .find(|e| fold(e.exe.as_str()) != fold(main.as_str()))
+        {
+            return Err(Refusal::ExeSwitch { txn: e.txn });
+        }
+        let kept = plan.source.as_ref().and_then(|s| s.kept_profile);
+        let usable = s.holder.as_ref().filter(|h| h.usable);
+        let held = usable.and_then(|h| source_of(h.txn, h.bytes.as_deref()).ok());
+        if let Some(sha) = kept {
+            if held.as_ref().is_none_or(|(_, x)| *x != sha) {
+                return Err(Refusal::ProfileChanged);
+            }
+            continue;
+        }
+        let bound = !bound_exes(plan, false).is_empty();
+        if bound
+            && profile_op(plan).is_none()
+            && let Some((p, _)) = &held
+            && let Some(run) = &p.run
+            && below(&r.path.to_string(), run).is_none_or(|x| x != fold(main.as_str()))
+        {
+            return Err(Refusal::ProfileChanged);
+        }
+    }
+    Ok(())
 }
 
 /// The executable below game root `root` (its canonical path) that `abs` names, folded: `abs`
@@ -237,4 +340,25 @@ pub fn live_state(
 pub(crate) fn below(root: &str, abs: &str) -> Option<String> {
     let rest = abs.strip_prefix(root)?.strip_prefix('\\')?;
     RelPath::parse(rest).ok().map(|r| fold(r.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LiveError, source_of};
+
+    /// F3 of the O-2b review: a holder's content that is no inline profile, or bytes that are
+    /// no profile of this version, is `Unreadable` (the fence of `plan::decode` refuses such a
+    /// head first; this is the step behind it).
+    #[test]
+    fn a_holder_without_a_readable_profile_is_unreadable() {
+        let t: crate::journal::TxnId = "00000003-0000000000000001".parse().unwrap();
+        assert_eq!(
+            source_of(t, None).unwrap_err(),
+            LiveError::Unreadable { txn: t }
+        );
+        assert_eq!(
+            source_of(t, Some(b"rerun-profile 9\n")).unwrap_err(),
+            LiveError::Unreadable { txn: t }
+        );
+    }
 }

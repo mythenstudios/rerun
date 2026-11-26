@@ -818,7 +818,8 @@ pub fn refusal(r: &Refusal, lang: Lang) -> ResultVm {
         Refusal::Interrupted { .. }
         | Refusal::Later { .. }
         | Refusal::Held { .. }
-        | Refusal::HeldChange { .. } => calm(Tone::Attention, RefOrderTitle, RefOrderBody, false),
+        | Refusal::HeldChange { .. }
+        | Refusal::ExeSwitch { .. } => calm(Tone::Attention, RefOrderTitle, RefOrderBody, false),
         Refusal::SlotTaken { .. } => calm(Tone::Attention, RefSlotTitle, RefSlotBody, false),
         Refusal::CleanupPending { .. } => {
             calm(Tone::Attention, RefCleanupTitle, RefCleanupBody, false)
@@ -831,7 +832,8 @@ pub fn refusal(r: &Refusal, lang: Lang) -> ResultVm {
         Refusal::GameChanged(_)
         | Refusal::Mismatch { .. }
         | Refusal::MainExe(_)
-        | Refusal::Changed { .. } => calm(Tone::Calm, RefStaleTitle, RefStaleBody, true),
+        | Refusal::Changed { .. }
+        | Refusal::ProfileChanged => calm(Tone::Calm, RefStaleTitle, RefStaleBody, true),
         Refusal::NeedsHelper => calm(Tone::Attention, RefAdminTitle, RefAdminBody, false),
         // The helper (P5-5c), each before any prompt: not installed safely, no elevation here,
         // a helper of an earlier run still busy. Rules that no longer match the signed Topo
@@ -872,7 +874,8 @@ pub fn refusal(r: &Refusal, lang: Lang) -> ResultVm {
         | Refusal::HeldChange { txn: x }
         | Refusal::Blocked { txn: x }
         | Refusal::SlotTaken { txn: x, .. }
-        | Refusal::CleanupPending { txn: x } => out.notice.details.push(txn(x)),
+        | Refusal::CleanupPending { txn: x }
+        | Refusal::ExeSwitch { txn: x } => out.notice.details.push(txn(x)),
         _ => out.notice.details.push(DetailVm::of(shown_error(r))),
     }
     out

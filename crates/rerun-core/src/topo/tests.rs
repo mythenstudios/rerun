@@ -432,6 +432,7 @@ fn plan_with(
         &facts,
         &super::EngineSelection::picks(&picks(p)),
         &ctx,
+        &crate::exec::LiveState::default(),
     )
 }
 
@@ -1018,6 +1019,7 @@ fn tc_from_a_signed_index() {
         &facts,
         &super::EngineSelection::picks(&picks(&["cores/limit"])),
         &ctx,
+        &crate::exec::LiveState::default(),
     )
     .unwrap();
     assert_eq!(&p.plan.source.unwrap().index, c.sha256());
@@ -1082,6 +1084,7 @@ fn fx1_a_known_topo_is_planned_next_to_a_future_one() {
         &facts,
         &super::EngineSelection::picks(&picks(&["cores/limit"])),
         &ctx,
+        &crate::exec::LiveState::default(),
     )
     .unwrap();
     assert_eq!(&p.plan.source.unwrap().index, c.sha256());
@@ -1472,6 +1475,7 @@ fn plan_pkgs(
         &facts,
         &super::EngineSelection::picks(&picks(p)),
         &ctx,
+        &crate::exec::LiveState::default(),
     )
 }
 

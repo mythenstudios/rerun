@@ -202,6 +202,13 @@ pub fn plan(g: &Guarded<'_>, app_id: u32, sel: &Selection) -> Result<Lookup<Pick
         let index = *m.catalog.sha256();
         let planned = (|| {
             let facts = m.facts();
+            // ADR 0032 amendment P5-OE (S6): what the journal says is live for this game, read
+            // once here (the engine reads no journal; the apply checks again under the lock).
+            let live = match g.app() {
+                Some(a) => exec::live_state(a, m.steam_app, m.game.id())
+                    .map_err(|e| PlanRefusal::Engine(Box::new(EngineError::Live(e))))?,
+                None => exec::LiveState::default(),
+            };
             let user_data = match &t.user_data {
                 Some(u) if topo::needs_user_data(t, &sel.engine(), m.profile) => Some(
                     UserDataDir::open(sys, g.fr(), u.base(), u.sub())
@@ -218,7 +225,7 @@ pub fn plan(g: &Guarded<'_>, app_id: u32, sel: &Selection) -> Result<Lookup<Pick
                 app_path: m.app_path,
                 user_data: user_data.as_ref(),
             };
-            let tp = topo::plan(&index, t, &facts, &sel.engine(), &ctx)
+            let tp = topo::plan(&index, t, &facts, &sel.engine(), &ctx, &live)
                 .map_err(|e| PlanRefusal::Engine(Box::new(e)))?;
             let bytes = tp
                 .plan

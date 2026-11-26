@@ -195,6 +195,7 @@ pub(crate) fn plan(sys: &FakeSystem, index: [u8; 32], k: Kind) -> PlanHash {
         topo: "invented-game".to_owned(),
         rev: 3,
         choices: Vec::new(),
+        kept_profile: None,
         picks: picks
             .iter()
             .map(|s| {
@@ -561,6 +562,7 @@ fn f1_a_rule_with_an_option_value_passes_recheck_and_helper() {
                 app_path: None,
                 user_data: None,
             },
+            &crate::exec::LiveState::default(),
         )
         .unwrap_or_else(|e| panic!("{e}"));
         assert!(

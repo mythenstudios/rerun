@@ -200,6 +200,7 @@ fn dev_helper_firewall_round_trip() {
         topo: "dev-firewall".to_owned(),
         rev: 1,
         choices: Vec::new(),
+        kept_profile: None,
         picks: vec![Pick {
             issue: "net".to_owned(),
             variant: "block".to_owned(),

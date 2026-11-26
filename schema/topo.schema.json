@@ -92,6 +92,51 @@
           }
         }
       }
+    },
+    {
+      "description": "start and launch_args of option values are draft only until reviewed (catalog::check::OPTION_LAUNCH_REVIEWED, ADR 0032 amendment P5-OE).",
+      "if": {
+        "required": [
+          "options"
+        ],
+        "properties": {
+          "options": {
+            "contains": {
+              "properties": {
+                "values": {
+                  "contains": {
+                    "properties": {
+                      "steps": {
+                        "contains": {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "start"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "launch_args"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "draft"
+          }
+        }
+      }
     }
   ],
   "properties": {
@@ -614,7 +659,7 @@
       }
     },
     "option": {
-      "description": "A game option (ADR 0032): a choice, not a problem. The loader also checks that option IDs are unique and differ from every issue ID, value IDs are unique in the option, two values never have the same steps, and two options never set the same INI file.",
+      "description": "A game option (ADR 0032): a choice, not a problem. The loader also checks that option IDs are unique and differ from every issue ID, value IDs are unique in the option, two values never have the same steps, two options never set the same INI file, and that `start` (`launch_args`) is in every value of an option or in none (O-2b review S1).",
       "type": "object",
       "additionalProperties": false,
       "required": [

@@ -122,6 +122,7 @@ fn plan_with(
         },
         &super::EngineSelection::picks(&picks()),
         &ctx,
+        &crate::exec::LiveState::default(),
     )
 }
 

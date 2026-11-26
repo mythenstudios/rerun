@@ -524,6 +524,7 @@ fn sb_test_key_helper_removes_a_rule() {
                 topo: "sb-unknown-topo".to_owned(),
                 rev: 1,
                 choices: Vec::new(),
+                kept_profile: None,
                 picks: vec![Pick {
                     issue: "net".to_owned(),
                     variant: "block".to_owned(),

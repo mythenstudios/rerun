@@ -1,4 +1,4 @@
-# Valid: start outside a draft (reviewed since O-2b, OPTION_LAUNCH_REVIEWED)
+# Invalid: start outside a draft before it is reviewed
 format: 1
 id: schema-fixture
 title: "Fixture"
