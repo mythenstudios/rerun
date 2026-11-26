@@ -8,7 +8,9 @@ import { Pressable, Button, Card, Muted, PartsLine, RadioChoice } from "base.sli
 import { AdvancedData, AdvGroupData, AdvSwitchData, Theme, Modal } from "base.slint";
 
 // The button that opens and closes the section: its name is "Advanced", the full heading its
-// description; the state is the expanded flag.
+// description; the state is the expanded flag. An expandable node offers UI Automation the
+// ExpandCollapse pattern instead of Invoke, so "expand" needs its own handler; Slint 1.18 has no
+// collapse action, closing goes by Enter/Space or a click.
 component Disclosure inherits Pressable {
     in property <string> title;
     in property <string> name;
@@ -21,6 +23,11 @@ component Disclosure inherits Pressable {
     accessible-expanded: root.open;
     accessible-action-default => {
         if (root.enabled) {
+            root.activated();
+        }
+    }
+    accessible-action-expand => {
+        if (root.enabled && !root.open) {
             root.activated();
         }
     }
