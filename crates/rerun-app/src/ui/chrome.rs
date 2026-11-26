@@ -8,6 +8,8 @@
 //!   turns the non-client mouse messages there into a hover state and a click.
 //! - The same subclass makes sure a window drag always ends ([`SizeMove`]): winit refuses every
 //!   move and resize after one that Windows never ran.
+//! - It also repairs the window once it has left the maximised state ([`Unmaximize`]): a drag
+//!   out of full screen left a strip at the top that no one painted.
 //! - The Windows display language picks the app's language (ADR 0027).
 //! - Windows' high contrast (P5-10c, ADR 0026 amendment P5-10): [`high_contrast`] reads whether
 //!   it is on (`SPI_GETHIGHCONTRAST`) and, if so, the five system colours the theme then uses
@@ -73,6 +75,9 @@ pub enum Chrome {
     /// Windows' colours or settings changed: high contrast may have been switched (the window
     /// reads [`high_contrast`] again).
     ColorsChanged,
+    /// The window left the maximised state: calculate its frame again ([`refresh_frame`]) and
+    /// paint all of it (see [`Unmaximize`]).
+    Repaint,
 }
 
 /// Whether the client point `(x, y)` is over the maximise button of a client area `right`
@@ -128,8 +133,53 @@ impl SizeMove {
     }
 }
 
+/// When the window must be repaired after leaving the maximised state.
+///
+/// A maximised window's frame lies outside the screen: winit gives it the monitor's work area
+/// as its client area (`WM_NCCALCSIZE`), the rest of the window rectangle is a frame no one
+/// paints. A drag out of full screen restores the window inside Windows' size-move loop, and
+/// that state could survive it: a strip above the title bar kept what was there before (an old
+/// frame of the window, or nothing, so the desktop showed through) until the next size change,
+/// and a hover on a window button painted just that button's rectangle into it. Slint's
+/// software renderer only paints what changed in Slint, never what Windows asks for again.
+///
+/// So once the window has left the maximised state, the subclass has the frame calculated again
+/// and the whole window painted ([`Chrome::Repaint`]): at once, or inside a size-move loop only
+/// once the loop ended, so Windows' loop is not disturbed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Unmaximize {
+    zoomed: bool,
+    moving: bool,
+    pending: bool,
+}
+
+impl Unmaximize {
+    /// The window's position or size changed; `zoomed`: it is maximised now. `true`: repair it
+    /// now.
+    pub fn changed(&mut self, zoomed: bool) -> bool {
+        let left = std::mem::replace(&mut self.zoomed, zoomed) && !zoomed;
+        if left && self.moving {
+            self.pending = true;
+            return false;
+        }
+        left
+    }
+
+    /// Windows entered its size-move loop.
+    pub fn entered(&mut self) {
+        self.moving = true;
+    }
+
+    /// Windows' size-move loop ended: `true` if the window left the maximised state in it, so
+    /// repair it now.
+    pub fn exited(&mut self) -> bool {
+        self.moving = false;
+        std::mem::take(&mut self.pending)
+    }
+}
+
 #[cfg(windows)]
-pub use win::{high_contrast, install, message_box, owner_of, ui_language};
+pub use win::{high_contrast, install, message_box, owner_of, refresh_frame, ui_language};
 
 #[cfg(all(windows, feature = "test-key"))]
 pub use win::process_age_ms;
@@ -158,6 +208,10 @@ pub fn install(
 }
 
 #[cfg(not(windows))]
+/// No frame outside Windows.
+pub fn refresh_frame(_window: &slint::Window) {}
+
+#[cfg(not(windows))]
 /// No message box outside Windows.
 pub fn message_box(_title: &str, _text: &str) {}
 
@@ -176,7 +230,8 @@ mod win {
     use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
     use windows_sys::Win32::Graphics::Gdi::{
         COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
-        GetSysColor, SYS_COLOR_INDEX, ScreenToClient,
+        GetSysColor, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RedrawWindow,
+        SYS_COLOR_INDEX, ScreenToClient,
     };
     use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
@@ -185,13 +240,15 @@ mod win {
     };
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetClientRect, HTMAXBUTTON, IDC_HAND, LoadCursorW, MB_ICONWARNING, MB_OK, MessageBoxW,
-        SPI_GETHIGHCONTRAST, SetCursor, SystemParametersInfoW, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
-        WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
-        WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE,
+        GetClientRect, HTMAXBUTTON, IDC_HAND, IsZoomed, LoadCursorW, MB_ICONWARNING, MB_OK,
+        MessageBoxW, SPI_GETHIGHCONTRAST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SetCursor, SetWindowPos, SystemParametersInfoW, WM_ENTERSIZEMOVE,
+        WM_EXITSIZEMOVE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
+        WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SETCURSOR, WM_SETTINGCHANGE,
+        WM_SYSCOLORCHANGE, WM_WINDOWPOSCHANGED,
     };
 
-    use super::{Chrome, Geometry, SizeMove, SysColors, WindowState, hit_max_button};
+    use super::{Chrome, Geometry, SizeMove, SysColors, Unmaximize, WindowState, hit_max_button};
     use crate::theme::Rgb;
 
     /// The subclass ID (one subclass per window).
@@ -215,6 +272,10 @@ mod win {
         static PRESSED: Cell<bool> = const { Cell::new(false) };
         /// Whether Windows entered its size-move loop for the last drag (see [`SizeMove`]).
         static SIZE_MOVE: Cell<SizeMove> = const { Cell::new(SizeMove { entered: false }) };
+        /// Whether the window left the maximised state and must be repaired ([`Unmaximize`]).
+        static UNMAXIMIZE: Cell<Unmaximize> = const {
+            Cell::new(Unmaximize { zoomed: false, moving: false, pending: false })
+        };
     }
 
     /// The Windows display language (`LANGID`) of the user.
@@ -346,6 +407,48 @@ mod win {
         // just now); `subclass` is a function that lives for the whole process.
         let ok = unsafe { SetWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID, 0) };
         ok != 0
+    }
+
+    /// Has Windows calculate `window`'s frame again (`WM_NCCALCSIZE`, now that the window is no
+    /// longer maximised) and marks all of it, frame included, for painting ([`Unmaximize`]).
+    /// Called from the event loop, never inside the window procedure.
+    pub fn refresh_frame(window: &slint::Window) {
+        let Some(hwnd) = hwnd_of(window) else {
+            return;
+        };
+        // SAFETY: `hwnd` is the live top-level window of this thread (read just now); no
+        // insert-after window (ignored with SWP_NOZORDER); position and size are kept
+        // (SWP_NOMOVE, SWP_NOSIZE), only the frame is calculated again.
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        };
+        // SAFETY: as above; no update rectangle and no region (both null): the whole window.
+        unsafe {
+            RedrawWindow(
+                hwnd,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                RDW_INVALIDATE | RDW_FRAME | RDW_ERASE | RDW_ALLCHILDREN,
+            )
+        };
+    }
+
+    /// Updates [`UNMAXIMIZE`] with `f` and returns its answer.
+    fn unmaximize(f: impl FnOnce(&mut Unmaximize) -> bool) -> bool {
+        UNMAXIMIZE.with(|c| {
+            let mut u = c.get();
+            let r = f(&mut u);
+            c.set(u);
+            r
+        })
     }
 
     fn tell(c: Chrome) {
@@ -488,11 +591,26 @@ mod win {
                 SIZE_MOVE.with(|c| c.set(s));
                 return r;
             }
-            WM_ENTERSIZEMOVE => SIZE_MOVE.with(|c| {
-                let mut s = c.get();
-                s.entered();
-                c.set(s);
-            }),
+            WM_ENTERSIZEMOVE => {
+                SIZE_MOVE.with(|c| {
+                    let mut s = c.get();
+                    s.entered();
+                    c.set(s);
+                });
+                unmaximize(|u| {
+                    u.entered();
+                    false
+                });
+            }
+            // The repair is only asked for here; the window runs it from the event loop.
+            WM_EXITSIZEMOVE if unmaximize(Unmaximize::exited) => tell(Chrome::Repaint),
+            WM_WINDOWPOSCHANGED => {
+                // SAFETY: `hwnd` is the window this procedure belongs to; returns a value.
+                let zoomed = unsafe { IsZoomed(hwnd) } != 0;
+                if unmaximize(|u| u.changed(zoomed)) {
+                    tell(Chrome::Repaint);
+                }
+            }
             // Windows' colours or settings changed (high contrast on or off among them): the
             // window reads them again; the message goes on to the next procedure as well.
             WM_SYSCOLORCHANGE | WM_SETTINGCHANGE => tell(Chrome::ColorsChanged),
@@ -509,7 +627,38 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::{Geometry, SizeMove, WindowState, hit_max_button};
+    use super::{Geometry, SizeMove, Unmaximize, WindowState, hit_max_button};
+
+    #[test]
+    fn leaving_the_maximised_state_repairs_the_window() {
+        let mut u = Unmaximize::default();
+        // Restored at start, a move: nothing to repair.
+        assert!(!u.changed(false));
+        // Maximised and restored through the button (no size-move loop): at once.
+        assert!(!u.changed(true));
+        assert!(u.changed(false));
+        assert!(!u.changed(false));
+        // A drag out of full screen: only once the size-move loop ended, and only once.
+        assert!(!u.changed(true));
+        u.entered();
+        assert!(!u.changed(false));
+        assert!(!u.changed(false));
+        assert!(u.exited());
+        assert!(!u.exited());
+        // A plain move of a restored window: nothing.
+        u.entered();
+        assert!(!u.changed(false));
+        assert!(!u.exited());
+        // Out of full screen and snapped back to the top within one drag: repaired anyway
+        // (harmless while maximised).
+        assert!(!u.changed(true));
+        u.entered();
+        assert!(!u.changed(false));
+        assert!(!u.changed(true));
+        assert!(u.exited());
+        // Maximising is never a repair.
+        assert!(!u.changed(true));
+    }
 
     #[test]
     fn a_drag_without_a_size_move_loop_is_ended() {

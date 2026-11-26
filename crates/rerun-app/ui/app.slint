@@ -1641,6 +1641,14 @@ export component AppWindow inherits Window {
         scroller.content-y = 0;
     }
 
+    // Paints the whole window again when `repaint` flips (`ui::chrome::Unmaximize`): the
+    // software renderer only paints what changed, and this rectangle covers the window. Both
+    // colours are fully transparent, so nothing shows.
+    in property <bool> repaint;
+    Rectangle {
+        background: root.repaint ? Theme.bg.with-alpha(0) : transparent;
+    }
+
     VerticalLayout {
         // ---------- title bar
         Rectangle {

@@ -345,6 +345,18 @@ fn install_chrome(ui: &AppWindow, st: &Rc<RefCell<State>>, tokens: &Tokens, trie
                             });
                         }
                         Chrome::ColorsChanged => {}
+                        // From the event loop, never inside the window procedure: the frame
+                        // calculated again, then the whole window painted (`Unmaximize`).
+                        Chrome::Repaint => {
+                            let w = ui.as_weak();
+                            slint::Timer::single_shot(Duration::ZERO, move || {
+                                if let Some(ui) = w.upgrade() {
+                                    chrome::refresh_frame(ui.window());
+                                    ui.set_repaint(!ui.get_repaint());
+                                    ui.window().request_redraw();
+                                }
+                            });
+                        }
                     }
                 }
             });

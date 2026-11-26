@@ -528,6 +528,28 @@ fn the_window_draws_its_first_frames_fast() {
         super::language_jobs().contains(&crate::worker::Job::Library),
         "a new language reads the library again"
     );
+    // `repaint` paints the whole window (`chrome::Unmaximize`), with the renderer reusing its
+    // buffer as on Windows, where only what changed is painted otherwise.
+    let painted = || {
+        let mut size = None;
+        window.draw_if_needed(|r| {
+            r.set_repaint_buffer_type(RepaintBufferType::ReusedBuffer);
+            let region = r.render(&mut buf.borrow_mut(), WIDTH as usize);
+            size = Some(region.bounding_box_size());
+        });
+        size.map(|s| (s.width, s.height))
+    };
+    painted();
+    // Teeth: a hover on the maximise button paints only that button.
+    ui.set_max_nc_hover(true);
+    let hover = painted().unwrap();
+    assert!(hover.0 < WIDTH / 10 && hover.1 < HEIGHT / 10, "{hover:?}");
+    ui.set_max_nc_hover(false);
+    painted();
+    ui.set_repaint(!ui.get_repaint());
+    assert_eq!(painted(), Some((WIDTH, HEIGHT)));
+    ui.set_repaint(!ui.get_repaint());
+    assert_eq!(painted(), Some((WIDTH, HEIGHT)));
     eprintln!(
         "headless start: window created {created:?}, first frame {first:?}, with 60 rows {with_rows:?}, licences drawn in {licences:?}"
     );
