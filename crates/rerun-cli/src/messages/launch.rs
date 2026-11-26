@@ -203,7 +203,7 @@ fn why(reason: SkipReason, restore: Option<u32>, watch: bool) -> Option<String> 
         SkipReason::JobIneffective => format!("the game process joined the job but kept another limit (a job it was already in, e.g. a launcher's); the job stays without effect until the game exits{put_back}"),
         SkipReason::ReadBackFailed { code } if watch => format!("the game process joined a job with the selection, but it could not be read back (Win32 error {code}); the limit may apply until the game exits{put_back}"),
         SkipReason::MethodUnsupported => "written by an older rerun-launch without method watch".to_owned(),
-        SkipReason::RunFailed { code } => format!("the program the profile names instead of Steam's could not be started (Win32 error {code}); Steam's own program started without the rule"),
+        SkipReason::RunFailed { code } => format!("the program the profile names instead of Steam's could not be started or its job could not be set up (Win32 error {code}); Steam's own program started without the rule"),
         _ => return None,
     })
 }

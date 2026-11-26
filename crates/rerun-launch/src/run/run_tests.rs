@@ -135,6 +135,23 @@ fn with_run_appends_args_after_one_space() {
 }
 
 #[test]
+fn args_after_a_rest_with_an_open_quote_land_inside_it() {
+    // Review A-3, a known limit (ADR 0022 amendment P5-OE): the shim appends `args` to Steam's
+    // rest byte for byte and never repairs it; after an unclosed quote the game reads the
+    // arguments as part of that quoted argument. Steam writes such a tail only from a user's own
+    // launch options.
+    let line = w(&line_with(ID, &format!(r#""{GAME}" -name "a b"#)));
+    let c = with_run(&parse(&line), Some(RUN), &args(&["-dx9"]));
+    assert_eq!(st(&c.line), format!(r#""{RUN}" -name "a b -dx9"#));
+    assert_eq!(
+        c.parameters.as_deref().map(st).as_deref(),
+        Some(r#"-name "a b -dx9"#)
+    );
+    let c = with_run(&parse(&line), None, &args(&["-dx9"]));
+    assert_eq!(st(&c.line), format!(r#""{GAME}" -name "a b -dx9"#));
+}
+
+#[test]
 fn with_run_without_run_or_args_is_steams_command() {
     let line = w(&line_with(ID, &tail()));
     let cmd = parse(&line);
@@ -328,6 +345,28 @@ fn elevation_required_starts_run_through_the_shell_without_the_rule() {
         res.outcome,
         Outcome::Skipped {
             start: result::Start::Shell,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_declined_elevation_of_run_records_no_run() {
+    // Review A-2: the UAC prompt declined (1223) starts nothing, so no `run=yes`.
+    let p = run_profile(&[]);
+    let mut os = fake(&p);
+    os.shell = Err(1223);
+    os.spawns
+        .borrow_mut()
+        .push_back(Err(ERROR_ELEVATION_REQUIRED));
+    run(&os);
+    let res = written_one(&os);
+    assert_eq!(reason(&res), Some(SkipReason::ElevationRequired));
+    assert!(!res.run);
+    assert!(matches!(
+        res.outcome,
+        Outcome::Skipped {
+            start: result::Start::Failed { code: 1223 },
             ..
         }
     ));

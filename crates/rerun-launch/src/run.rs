@@ -586,7 +586,13 @@ fn with_rule<O: Os>(
                 Rule::Skipped(Skip::ElevationRequired),
                 None,
             );
-            done.run = launch.run;
+            // `run=yes` only when the shell started `run` (review A-2): a declined prompt
+            // (1223) or another failure started nothing.
+            done.run = launch.run
+                && matches!(
+                    done.start,
+                    Start::ShellExecuted | Start::ShellWithoutProcess
+                );
             return done;
         }
         // A `run` that cannot be started: Steam's command, unchanged (no rule, no `args`).

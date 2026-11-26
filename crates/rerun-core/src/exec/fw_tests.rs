@@ -80,7 +80,8 @@ fn hex_upper(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect()
 }
 
-/// An invented Topo: `net/block` blocks `game.exe`, `other/also` blocks `tool.exe`.
+/// An invented Topo: `net/block` blocks `game.exe`, `other/also` blocks `tool.exe`; option
+/// `cap` sets `game.ini` (ADR 0032; the helper ignores choices).
 fn topo_json() -> String {
     let game = hex_upper(&Sha256::digest(game_exe()));
     let tool = hex_upper(&Sha256::digest(tool_exe()));
@@ -88,6 +89,9 @@ fn topo_json() -> String {
         r#"{{"format":1,"id":"invented-game","title":"Invented","status":"active","rev":3,
 "match":{{"exes":[{{"path":"game.exe","sha256":"{game}","api":"d3d9"}},
 {{"path":"tool.exe","sha256":"{tool}","api":"d3d9"}}]}},
+"options":[
+ {{"id":"cap","title":"Frame rate cap","sources":[{{"type":"pcgw","url":"https://www.pcgamingwiki.com/wiki/Invented#Cap"}}],"values":[
+   {{"id":"sixty","title":"60","status":"verified","steps":[{{"ini_set":{{"file":"game.ini","values":[{{"section":"Video","key":"Cap","value":"60"}}]}}}}]}}]}}],
 "issues":[
  {{"id":"net","title":"Online check","variants":[
    {{"id":"block","status":"verified","kind":"fix","steps":[{{"firewall_rule":{{"exe":"game.exe","direction":"out"}}}}]}}]}},
@@ -502,6 +506,86 @@ fn helper_cause(e: &ApplyError) -> Option<&HelperFailure> {
 }
 
 // ---------- F1 ----------
+
+/// O-1 review N5: a firewall pick and an `ini_set` choice in one plan by the engine. The CLI's
+/// recheck before `begin` and the helper's `validate_add` derive the rules from the picks alone
+/// and ignore the choice, as intended (ADR 0023 §5: an option value never produces a helper
+/// op); the round trip is identical.
+#[test]
+fn f1_a_rule_with_an_option_value_passes_recheck_and_helper() {
+    seams(|| {
+        let fw = Fw::new();
+        let ini = format!(r"{GAME}\game.ini");
+        fw.sys
+            .fake_fs()
+            .put_file(Path::new(&ini), b"[Video]\r\nCap=0\r\n")
+            .unwrap();
+        fw.sys.sync_all();
+        let before = fw.snap();
+        let topo: crate::catalog::model::Topo = serde_json::from_str(&topo_json()).unwrap();
+        let fr = fr(&fw.sys);
+        let g = GameDir::open_manual(&fw.sys, &fr, Path::new(GAME)).unwrap();
+        let app = app(&fw.sys);
+        let facts = crate::topo::read_game(&g, &topo);
+        let prof = crate::hw::read(
+            &FakeSystem::builder().build().unwrap(),
+            Some(crate::hw::GpuArchTable::builtin().unwrap()),
+        );
+        let picks = [Pick {
+            issue: "net".to_owned(),
+            variant: "block".to_owned(),
+        }];
+        let choices = [crate::plan::Choice {
+            option: "cap".to_owned(),
+            value: "sixty".to_owned(),
+        }];
+        let tp = crate::topo::plan(
+            &fw.index,
+            &topo,
+            &crate::topo::Facts {
+                profile: &prof,
+                table: Some(crate::hw::GpuArchTable::builtin().unwrap()),
+                game: &facts,
+                packages: &[],
+            },
+            &crate::topo::EngineSelection {
+                picks: &picks,
+                choices: &choices,
+            },
+            &PlanCtx {
+                game: &g,
+                app: Some(&app),
+                steam_app: None,
+                main_exe: None,
+                reg: crate::policy::registry::RegPolicy.reader(&fw.sys),
+                app_path: None,
+                user_data: None,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            matches!(
+                tp.plan.ops.as_slice(),
+                [Op::IniValue { .. }, Op::FirewallRule { .. }]
+            ),
+            "{:?}",
+            tp.plan.ops
+        );
+        assert_eq!(tp.plan.source.as_ref().unwrap().choices, choices);
+        let h = store(&app, &tp.plan.encode().unwrap()).unwrap();
+        let (r, runs) = fw.apply(&h, Vec::new());
+        let t = applied(&r);
+        assert_eq!(runs, 1, "one prompt for the apply");
+        assert_eq!(fw_scope(&fw.sys).len(), 1);
+        let v = fw.verify(&t);
+        assert!(v.iter().all(|(_, o)| *o == Observed::After), "{v:?}");
+        let (r, runs) = fw.revert(&t, Vec::new());
+        let r = r.unwrap();
+        assert_eq!(r.closed, Some(Closing::Reverted), "{r:?}");
+        assert_eq!(runs, 1, "one prompt for the revert");
+        assert_eq!(fw.snap(), before);
+    });
+}
 
 #[test]
 fn f1_round_trip_with_one_helper_run_per_direction() {

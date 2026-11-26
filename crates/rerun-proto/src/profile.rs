@@ -383,7 +383,7 @@ pub fn encode(p: &LaunchProfile) -> Result<Vec<u8>, ProfileError> {
 
 /// Encodes `p` as `format` (1, 2 or 3) and checks the bytes with [`decode`]. Formats 1 and 2
 /// are written by tests only: a profile an earlier build wrote, to prove a revert restores it.
-pub(crate) fn encode_format(p: &LaunchProfile, format: u32) -> Result<Vec<u8>, ProfileError> {
+fn encode_format(p: &LaunchProfile, format: u32) -> Result<Vec<u8>, ProfileError> {
     let bytes = write(p, format).into_bytes();
     let back = decode(&bytes)?;
     if &back == p {
@@ -690,8 +690,10 @@ fn folder(p: &str) -> &str {
     p.rfind('\\').map_or(p, |i| &p[..=i])
 }
 
-/// The same path in another case (simple Unicode case mapping both ways; the planner compares
-/// with the file system's own folding, this is the codec's fail-closed check).
+/// The same path in another case (Rust's full Unicode case mapping, `to_lowercase` and
+/// `to_uppercase`, both ways; the planner compares with the file system's own folding, which
+/// may differ: this is the codec's fail-closed check, and a name it calls the same is refused
+/// even where NTFS would tell them apart).
 fn same_name(a: &str, b: &str) -> bool {
     a == b || a.to_lowercase() == b.to_lowercase() || a.to_uppercase() == b.to_uppercase()
 }

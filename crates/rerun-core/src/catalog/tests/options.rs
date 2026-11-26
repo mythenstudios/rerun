@@ -17,6 +17,7 @@
 //! - OX9 the gate: `start` and `launch_args` draft only until reviewed; `ini_set` values not.
 //! - OX10 per value at most one `start`, one `launch_args`, 1 to 4 steps; at most 8 options.
 //! - OX11 an `ini_set` in the user data folder needs the Topo's `user_data`.
+//! - OX12 `start` lies in the folder of `launch.start` (folded; review S3).
 
 use serde_json::{Value, json};
 
@@ -402,5 +403,34 @@ fn ox11_an_ini_value_in_the_user_data_folder_needs_user_data() {
         &v,
         "options[0].values[1].steps[0].ini_set.file",
         "a .ini file",
+    );
+}
+
+#[test]
+fn ox12_start_lies_in_the_folder_of_launch_start() {
+    let with_start = |launch_start: &str, start: &str| {
+        let mut v = with_api(json!([value("dx9", json!([{ "start": start }]))]));
+        v["match"]["exes"][1]["path"] = json!(start);
+        v["launch"]["start"] = json!(launch_start);
+        v
+    };
+    // The same folder, also in another case.
+    ok(&with_start(r"bin\launcher.exe", r"bin\game_dx9.exe"));
+    ok(&with_start(r"Bin\launcher.exe", r"bin\game_dx9.exe"));
+    ok(&with_start("launcher.exe", "game_dx9.exe"));
+    let at = "options[1].values[0].steps[0].start";
+    let want = "in the folder of launch.start";
+    // Below, above and beside the folder of launch.start.
+    refused_at(&with_start("launcher.exe", r"bin\game_dx9.exe"), at, want);
+    refused_at(&with_start(r"bin\launcher.exe", "game_dx9.exe"), at, want);
+    refused_at(
+        &with_start(r"bin\launcher.exe", r"bin64\game_dx9.exe"),
+        at,
+        want,
+    );
+    refused_at(
+        &with_start(r"bin\launcher.exe", r"bin\x\game_dx9.exe"),
+        at,
+        want,
     );
 }

@@ -61,7 +61,8 @@ use crate::profile::{Method, Priority, ProfileId};
 pub const RESULT_FORMAT: u32 = 1;
 
 /// Largest result file in bytes (a valid one has fewer than 300, plus a `steam_start` name of
-/// at most 1,020 bytes).
+/// at most 765 bytes: 255 UTF-16 units of at most three UTF-8 bytes each, since a character of
+/// four bytes takes two units).
 pub const MAX_RESULT_BYTES: usize = 2048;
 
 /// Most UTF-16 units of the `steam_start` name (a file name component on NTFS).

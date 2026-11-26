@@ -11,7 +11,8 @@
 //!   (they open the process, sit in its start or run inside it); and the option steps `start`
 //!   and `launch_args` (ADR 0032 amendment P5-OE: another executable than Steam's launch entry
 //!   may skip the program that starts the anti-cheat system, and arguments change how a
-//!   protected game starts).
+//!   protected game starts); the same kinds stand for `run` and `args` of a step file's
+//!   `launch_method` (O-2a review A-S1).
 //! - **Warned:** settings outside the game's code (the CPU rule of `direct`, which sets it on
 //!   the program Steam starts, `ini_set`, `registry_set`, `gpu_preference`).
 //! - **Nothing:** `steam_input` (a hint, Rerun changes nothing).

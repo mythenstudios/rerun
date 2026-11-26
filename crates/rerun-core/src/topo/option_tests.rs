@@ -6,9 +6,11 @@
 //!   identical; the same with a fix in one plan.
 //! - OE2 the selection: unknown option or value, `unchanged`, two values of one option, nothing
 //!   selected, too many choices.
-//! - OE3 one INI file set by a fix and an option: the planner refuses the plan.
+//! - OE3 one INI file set by a fix and an option: the engine refuses the plan, naming both and
+//!   the file (O-1 review S1).
 //! - OE4 `start` and `launch_args` are not planned before slice O-2b (not matched here: said so);
-//!   with anti-cheat they are refused, an `ini_set` value is warned.
+//!   with anti-cheat they are refused (also a value of `launch_args` alone, review N2), an
+//!   `ini_set` value is warned.
 //! - OE5 the report lists every option with what the engine says per value.
 //! - OE6 `needs_user_data` for a chosen value in the user data folder.
 //! - OE7 the form of `PlanSource` with choices; a plan without choices has the bytes it had.
@@ -289,8 +291,19 @@ fn oe3_one_ini_file_from_a_fix_and_an_option_is_refused() {
     let sys = game_sys();
     let t = topo();
     let e = plan_on(&sys, &t, &["settings/ini"], &["frame-cap=wide"]).unwrap_err();
-    assert!(matches!(e, EngineError::Plan(_)), "{e:?}");
-    assert!(e.to_string().contains("ini_set"), "{e}");
+    assert!(
+        matches!(
+            &e,
+            EngineError::IniFixAndOption { option, value, issue, variant, file }
+                if option == "frame-cap" && value == "wide" && issue == "settings"
+                    && variant == "ini" && file == r"cfg\Game.ini"
+        ),
+        "{e:?}"
+    );
+    assert_eq!(
+        e.to_string(),
+        r"option frame-cap=wide and fix settings/ini both set cfg\Game.ini; plan them one after the other"
+    );
     // Each on its own plans.
     assert!(plan_on(&sys, &t, &["settings/ini"], &[]).is_ok());
     assert!(plan_on(&sys, &t, &[], &["frame-cap=wide"]).is_ok());
@@ -324,6 +337,19 @@ fn oe4_start_and_launch_args_wait_for_o2b_and_anti_cheat_refuses_them() {
         refused(&sys, "intro=skip"),
         ValueRefusal::AntiCheat(StepKind::Start)
     );
+    // Review N2: a value of `launch_args` alone (Steam starts the game itself) is refused by its
+    // own kind.
+    let mut v = serde_json::to_value(&t).unwrap();
+    v["launch"]["start"] = serde_json::json!("game.exe");
+    v["options"][2]["values"][0]["steps"] = serde_json::json!([{ "launch_args": ["-skipintro"] }]);
+    let args_only: Topo = serde_json::from_value(v).unwrap();
+    check::topo(&args_only, Rules::Source).unwrap_or_else(|e| panic!("{e}"));
+    match plan_on(&sys, &args_only, &[], &["intro=skip"]) {
+        Err(EngineError::OptionRefused { why, .. }) => {
+            assert_eq!(why, ValueRefusal::AntiCheat(StepKind::LaunchArgs));
+        }
+        other => panic!("{other:?}"),
+    }
     let tp = plan_on(&sys, &t, &[], &["frame-cap=wide"]).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(
         tp.warnings,

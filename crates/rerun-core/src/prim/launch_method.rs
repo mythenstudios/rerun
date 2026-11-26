@@ -28,9 +28,10 @@
 //!   it starts (ADR 0022 amendment P3-3, sources there). `watch` sets both on the game itself; `start` equal to the main
 //!   executable is allowed there too (a stub that starts the game again; the preview says so).
 //! - **Bitness** (F6, condition A8; P3-4 P3): `x86` if a program of the chain the rule reaches is
-//!   i386, else `x64`: for `direct` `start` or the main executable, with `run` the image of
-//!   `run` alone (the shim never starts `start` under the rule then: a failed `run` falls back
-//!   to Steam's command without it), for `watch` the main executable alone (`start` runs
+//!   i386, else `x64`: for `direct` `start` or the main executable, with `run` `run` or the
+//!   main executable (`start` drops out: the shim never starts `start` under the rule then, a
+//!   failed `run` falls back to Steam's command without it; `run` may still start the main
+//!   executable), for `watch` the main executable alone (`start` runs
 //!   unchanged; it must still be a plain `.exe`, its image is not read). A .NET "AnyCPU" image is i386 on disk and may run as x64: counted as x86,
 //!   conservatively; the cost is only on a processor group of more than 32 logical processors
 //!   (ADR 0022 B6). ARM64, another machine or no PE image is refused. Read through the bounded
@@ -529,18 +530,20 @@ pub(crate) fn plan_into(
     }
     // F6 (A8, P3-4 P3): x86 if a program of the chain the rule reaches is i386; with `watch`
     // the rule reaches the main executable (and what it starts) only; with `run` the rule
-    // reaches `run` (and what it starts) only (P5-OE).
-    let bitness = if let Some(run) = &run {
-        bitness_of(game, run)?
-    } else {
+    // reaches `run` and what it starts, which may be the main executable (P5-OE review A-S2):
+    // only `start` drops out.
+    let bitness = {
         let main_bitness = bitness_of(game, main)?;
-        if watch {
-            main_bitness
+        let first = if watch {
+            None
+        } else if let Some(run) = &run {
+            Some(bitness_of(game, run)?)
         } else {
-            match (bitness_of(game, &start)?, main_bitness) {
-                (Bitness::X64, Bitness::X64) => Bitness::X64,
-                _ => Bitness::X86,
-            }
+            Some(bitness_of(game, &start)?)
+        };
+        match (first, main_bitness) {
+            (None | Some(Bitness::X64), Bitness::X64) => Bitness::X64,
+            _ => Bitness::X86,
         }
     };
     let start_abs = format!(r"{}\{}", game.path(), start);

@@ -492,6 +492,19 @@ pub fn step_file_dirs(steps: &[Step], main_exe: &RelPath) -> Vec<RelPath> {
     dirs
 }
 
+/// The anti-cheat kinds of a step of a step file: its own kind, and for a `launch_method` step
+/// also [`StepKind::Start`] with `run` and [`StepKind::LaunchArgs`] with `args` (O-2a review
+/// A-S1: they are refused whatever produced them, as for an option value).
+fn prim_step_kinds(s: &Step) -> impl Iterator<Item = StepKind> {
+    let (run, args) = match s {
+        Step::LaunchMethod(l) => (l.run.is_some(), !l.args.is_empty()),
+        _ => (false, false),
+    };
+    std::iter::once(prim_step_kind(s))
+        .chain(run.then_some(StepKind::Start))
+        .chain(args.then_some(StepKind::LaunchArgs))
+}
+
 /// The anti-cheat rule on the steps of a step file: nothing when `scan` is clear; else the
 /// first refused kind as `Err`, or the warned kinds (each once, in step order). A step file
 /// has no Topo, so nothing is released as dead.
@@ -500,8 +513,7 @@ pub fn anti_cheat_steps(steps: &[Step], scan: &AntiCheatScan) -> Result<Vec<Step
     if scan.is_clear() {
         return Ok(warned);
     }
-    for s in steps {
-        let k = prim_step_kind(s);
+    for k in steps.iter().flat_map(prim_step_kinds) {
         match anti_cheat_rule(k) {
             AcRule::Refuse => return Err(Refusal::AntiCheat(k)),
             AcRule::Warn if !warned.contains(&k) => warned.push(k),
@@ -776,7 +788,8 @@ pub struct EngineSelection<'a> {
 
 impl<'a> EngineSelection<'a> {
     /// Picked variants only (no option value).
-    pub fn picks(picks: &'a [Pick]) -> Self {
+    #[cfg(test)]
+    pub(crate) fn picks(picks: &'a [Pick]) -> Self {
         Self {
             picks,
             choices: &[],
@@ -864,6 +877,24 @@ pub enum EngineError {
         variant: String,
         /// Why.
         why: Refusal,
+    },
+    /// A chosen option value and a picked fix set the same INI file (O-1 review S1): one
+    /// transaction per file.
+    #[error(
+        "option {option}={value} and fix {issue}/{variant} both set {file}; plan them one \
+         after the other"
+    )]
+    IniFixAndOption {
+        /// The option.
+        option: String,
+        /// The value.
+        value: String,
+        /// The issue of the fix.
+        issue: String,
+        /// The variant of the fix.
+        variant: String,
+        /// The file (escaped), with its folder when it is the user data folder.
+        file: String,
     },
     /// Two picked variants each bring a CPU rule (one launch profile per game).
     #[error("two picked variants bring a CPU rule; pick one of them")]
@@ -1234,6 +1265,8 @@ pub fn plan(
     let mut rules = false;
     let mut rule_exes: Vec<String> = Vec::new();
     let mut planned_packages: Vec<&Package> = Vec::new();
+    // The INI files of the picked fixes (root, folded path), for the check of the choices.
+    let mut pick_inis: Vec<((prim::StepRoot, String), &Pick)> = Vec::new();
     for (p, (issue, variant)) in picks.iter().zip(resolved) {
         match when::eval(issue.when.as_ref(), facts.profile) {
             Tri::No => return Err(EngineError::WhenNo(p.issue.clone())),
@@ -1289,7 +1322,10 @@ pub fn plan(
                 }
                 TopoStep::RegistrySet(r) => steps.push(Step::RegistrySet(r.clone())),
                 TopoStep::CompatLayer(c) => steps.push(Step::CompatLayer(c.clone())),
-                TopoStep::IniSet(x) => steps.push(Step::IniSet(x.clone())),
+                TopoStep::IniSet(x) => {
+                    pick_inis.push(((x.root, crate::fold::fold(x.file.as_str())), p));
+                    steps.push(Step::IniSet(x.clone()));
+                }
                 // Two picks for one executable: the planner refuses the second step.
                 TopoStep::GpuPreference(g) => steps.push(Step::GpuPreference(g.clone())),
                 TopoStep::LaaPatch(l) => {
@@ -1329,8 +1365,8 @@ pub fn plan(
         }
     }
     // ADR 0032: the chosen option values after the picks. An `ini_set` value is a step like a
-    // variant's (the planner refuses a file set twice, by a fix and an option alike); `start`
-    // and `launch_args` come with slice O-2b.
+    // variant's; a file a picked fix sets too is refused here, naming both (O-1 review S1; the
+    // loader refuses two options on one file); `start` and `launch_args` come with slice O-2b.
     for (c, (_, value)) in choices.iter().zip(chosen) {
         let refused = |why| EngineError::OptionRefused {
             option: c.option.clone(),
@@ -1348,7 +1384,26 @@ pub fn plan(
         }));
         for s in &value.steps {
             match s {
-                OptionStep::IniSet(x) => steps.push(Step::IniSet(x.clone())),
+                OptionStep::IniSet(x) => {
+                    let key = (x.root, crate::fold::fold(x.file.as_str()));
+                    if let Some((_, p)) = pick_inis.iter().find(|(k, _)| *k == key) {
+                        let file = crate::escape::path(x.file.as_str())
+                            .into_owned()
+                            .to_string();
+                        return Err(EngineError::IniFixAndOption {
+                            option: c.option.clone(),
+                            value: c.value.clone(),
+                            issue: p.issue.clone(),
+                            variant: p.variant.clone(),
+                            file: if x.root.is_game() {
+                                file
+                            } else {
+                                format!("{file} in the user data folder")
+                            },
+                        });
+                    }
+                    steps.push(Step::IniSet(x.clone()));
+                }
                 OptionStep::Start(_) | OptionStep::LaunchArgs(_) => {
                     return Err(refused(ValueRefusal::NotYet));
                 }

@@ -596,7 +596,9 @@ fn option_launch(t: &Topo, at: &str) -> R {
 }
 
 /// `start`: an `.exe` of `match.exes` in exactly its spelling, every entry of it with a
-/// `sha256` (the build that will run, ADR 0024), never `launch.start` itself.
+/// `sha256` (the build that will run, ADR 0024), never `launch.start` itself, and in the folder
+/// of `launch.start` (O-1 review S3: profile format 3 starts `run` only from the folder of
+/// `start`, ADR 0022 amendment P5-OE).
 fn option_start(t: &Topo, p: &crate::path::RelPath, at: &str) -> R {
     option_launch(t, at)?;
     ensure(ends_with_ci(p.as_str(), ".exe"), at, "a .exe")?;
@@ -623,6 +625,14 @@ fn option_start(t: &Topo, p: &crate::path::RelPath, at: &str) -> R {
             .is_none_or(|s| s != p),
         at,
         "the same as launch.start (nothing to change)",
+    )?;
+    ensure(
+        t.launch
+            .as_ref()
+            .and_then(|l| l.start.as_ref())
+            .is_none_or(|s| s.parent() == p.parent()),
+        at,
+        "in the folder of launch.start (rerun-launch starts it only from there)",
     )
 }
 

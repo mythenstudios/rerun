@@ -1296,6 +1296,28 @@ fn rf_step_files_get_the_same_rule() {
         anti_cheat_steps(&layer.steps, &f.anti_cheat),
         Err(Refusal::AntiCheat(StepKind::CompatLayer))
     );
+    // O-2a review A-S1: a `direct` profile with `run` or `args` is refused, not warned (as an
+    // option value's `start` and `launch_args`); without a marker it passes.
+    let run = StepFile::parse(
+        br#"{"format":1,"game":{"steam":220},"main_exe":"game.exe","steps":[
+ {"launch_method":{"method":"direct","start":"FFLauncher.exe","run":"game.exe"}}]}"#,
+    )
+    .unwrap();
+    let args = StepFile::parse(
+        br#"{"format":1,"game":{"steam":220},"main_exe":"game.exe","steps":[
+ {"launch_method":{"method":"direct","start":"game.exe","cpu":{"max_threads":8},"args":["-dx9"]}}]}"#,
+    )
+    .unwrap();
+    assert_eq!(anti_cheat_steps(&run.steps, &clear), Ok(vec![]));
+    assert_eq!(anti_cheat_steps(&args.steps, &clear), Ok(vec![]));
+    assert_eq!(
+        anti_cheat_steps(&run.steps, &f.anti_cheat),
+        Err(Refusal::AntiCheat(StepKind::Start))
+    );
+    assert_eq!(
+        anti_cheat_steps(&args.steps, &f.anti_cheat),
+        Err(Refusal::AntiCheat(StepKind::LaunchArgs))
+    );
 }
 
 // ---------- TF: firewall rules (P4-2d) ----------

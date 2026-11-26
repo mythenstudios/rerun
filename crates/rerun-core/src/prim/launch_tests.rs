@@ -1287,7 +1287,7 @@ fn run_spec(run: &str, args: &[&str]) -> LaunchMethodSpec {
 }
 
 #[test]
-fn lr1_run_is_the_target_and_alone_decides_the_bitness() {
+fn lr1_run_is_the_target_and_decides_the_bitness_with_the_main_exe() {
     // An x86 launcher, an x64 game: with run the rule reaches only the game, so x64.
     let sys = lp_sys(&pe_x64(), &pe_x86());
     let p = plan_lm(
@@ -1324,6 +1324,17 @@ fn lr1_run_is_the_target_and_alone_decides_the_bitness() {
     s.start = rel("text.exe");
     let pr = profile_of(&plan_lm(&sys, &one(s), "game.exe").unwrap());
     assert_eq!(pr.bitness, Bitness::X64);
+    // Review A-S2: run is not the main executable and may start it, so an i386 main executable
+    // makes the profile x86 although run is x64 (only start drops out).
+    let mixed = lp_sys(&pe_x86(), &pe_x86());
+    put(&mixed, &game("alt.exe"), &pe_x64());
+    let pr = profile_of(&plan_lm(&mixed, &one(run_spec("alt.exe", &[])), "game.exe").unwrap());
+    assert_eq!(pr.bitness, Bitness::X86);
+    // An i386 run with an x64 main executable is x86 too.
+    let mixed = lp_sys(&pe_x64(), &pe_x64());
+    put(&mixed, &game("alt.exe"), &pe_x86());
+    let pr = profile_of(&plan_lm(&mixed, &one(run_spec("alt.exe", &[])), "game.exe").unwrap());
+    assert_eq!(pr.bitness, Bitness::X86);
     // run is the game: soft and priority reach it (F5 asks the started program).
     let mut s = run_spec("game.exe", &[]);
     s.priority = Some(PrioritySpec::High);
@@ -1609,6 +1620,8 @@ fn lr6_the_fence_refuses_a_run_outside_the_game_folder() {
         panic!("{:?}", p.ops[0])
     };
     // start, target and run moved together to another folder: a valid profile, not this game's.
+    // The fence checks start and target only; run is covered by construction (the codec refuses
+    // a profile whose run is not its target, so run cannot leave alone).
     let moved = String::from_utf8(bytes.clone())
         .unwrap()
         .replace(r"D:\SteamLibrary\steamapps\common\G\", r"D:\Elsewhere\")
