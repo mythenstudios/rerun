@@ -27,6 +27,35 @@ launch:
   start: "AssassinsCreed_Game.exe"
   fallback: inproc
 
+# Game option graphics-api (ADR 0032, P5-OE O-3), READY BUT NOT ENABLED. Its values carry `start`, which the loader
+# accepts only in a draft until catalog::check::OPTION_LAUNCH_REVIEWED opens (closed today): an active Topo with it
+# is refused, and a draft never reaches the signed index. The gate commit un-comments this block (check the status
+# label then: both values stay unverified until the dev PC test passes, docs/09 "run instead of Steam's entry").
+# Both exes sit next to launch.start and have a sha256 in match.exes (the loader needs both). Facts behind it:
+# Steam starts AssassinsCreed_Game.exe, a Direct3D detector that picks the Dx10 or Dx9 build (PCGW, availability
+# note); the game has no in-game switch; DX10.1 was removed by patch 1.02 (PCGW, API); the known per-exe
+# differences are small (TweakGuides: DX10 slightly better shadows/bloom/multisampling, DX9 about as fast); a Steam
+# thread reports the overlay's browser stays black with the Dx10 exe and works when the Dx9 exe is started
+# (the launch option path of Dx9.exe). EaglePatchAC1 lists both exes as supported (its README; one line is
+# "[DX10 only]"), so the option fits next to the eaglepatch variants. Recommendation: none; Dx10 stays Steam's
+# default (the "unchanged" value), Dx9 is offered for the overlay and for users who prefer it.
+#
+# options:
+#   - id: graphics-api
+#     title: "Graphics API"
+#     sources:
+#       - { type: pcgw, url: "https://www.pcgamingwiki.com/wiki/Assassin%27s_Creed#API" }
+#       - { type: steam-thread, url: "https://steamcommunity.com/app/15100/discussions/0/3086634196678063390" }
+#     values:
+#       - id: dx9
+#         title: "DirectX 9"
+#         status: unverified      # until the dev PC test (docs/09, P5-OE O-3)
+#         steps: [{ start: "AssassinsCreed_Dx9.exe" }]
+#       - id: dx10
+#         title: "DirectX 10"
+#         status: unverified
+#         steps: [{ start: "AssassinsCreed_Dx10.exe" }]
+
 issues:
   # steam-input variant (steam_input: enable) waits: no source yet, and a variant needs one.
   - id: controller
